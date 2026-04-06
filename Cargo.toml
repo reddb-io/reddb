@@ -1,0 +1,19 @@
+[package]
+name = "reddb"
+version = "0.1.0"
+edition = "2021"
+authors = ["RedBlue Team"]
+description = "RedDB storage engine extracted as standalone crate"
+
+[dependencies]
+aes-gcm = "0.10"
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+
+[features]
+default = []
+query-vector = []
+query-graph = []
+query-fulltext = []
+encryption = []
