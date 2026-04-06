@@ -28,6 +28,7 @@ use crate::physical::{
     ExportDescriptor, PhysicalAnalyticsJob, PhysicalGraphProjection, PhysicalIndexState,
     PhysicalMetadataFile,
 };
+use crate::storage::engine::PhysicalFileHeader;
 use crate::storage::schema::Value;
 
 /// RedDB - Unified Database with Best-in-Class DevX
@@ -46,6 +47,28 @@ pub struct RedDB {
     options: RedDBOptions,
     /// Whether the current persistence backend is page-based.
     paged_mode: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct NativeHeaderMismatch {
+    pub field: &'static str,
+    pub native: String,
+    pub expected: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct NativeHeaderInspection {
+    pub native: PhysicalFileHeader,
+    pub expected: PhysicalFileHeader,
+    pub consistent: bool,
+    pub mismatches: Vec<NativeHeaderMismatch>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeHeaderRepairPolicy {
+    InSync,
+    RepairNativeFromMetadata,
+    NativeAheadOfMetadata,
 }
 
 impl RedDB {
@@ -158,6 +181,54 @@ impl RedDB {
         self.store.stats()
     }
 
+    /// Project the expected native file header from the current persisted physical metadata.
+    pub fn expected_native_header(&self) -> Option<PhysicalFileHeader> {
+        self.physical_metadata()
+            .map(|metadata| Self::native_header_from_metadata(&metadata))
+    }
+
+    /// Compare the page-0 native header against the persisted physical metadata.
+    pub fn inspect_native_header(&self) -> Option<NativeHeaderInspection> {
+        let native = self.store.physical_file_header()?;
+        let metadata = self.physical_metadata()?;
+        Some(Self::inspect_native_header_against_metadata(native, &metadata))
+    }
+
+    /// Read native collection roots persisted in the paged file, when available.
+    pub fn native_collection_roots(&self) -> Option<BTreeMap<String, u64>> {
+        let header = self.store.physical_file_header()?;
+        self.store
+            .read_native_collection_roots(header.collection_roots_page)
+            .ok()
+    }
+
+    /// Decide how to reconcile page-0 native state against persisted physical metadata.
+    pub fn native_header_repair_policy(&self) -> Option<NativeHeaderRepairPolicy> {
+        let inspection = self.inspect_native_header()?;
+        Some(Self::repair_policy_for_inspection(&inspection))
+    }
+
+    /// Repair the native header from persisted physical metadata when it is safe to do so.
+    pub fn repair_native_header_from_metadata(
+        &self,
+    ) -> Result<NativeHeaderRepairPolicy, Box<dyn std::error::Error>> {
+        if !self.paged_mode || self.options.read_only {
+            return Ok(NativeHeaderRepairPolicy::InSync);
+        }
+
+        let Some(inspection) = self.inspect_native_header() else {
+            return Ok(NativeHeaderRepairPolicy::InSync);
+        };
+        let policy = Self::repair_policy_for_inspection(&inspection);
+
+        if policy == NativeHeaderRepairPolicy::RepairNativeFromMetadata {
+            self.store.update_physical_file_header(inspection.expected)?;
+            self.store.persist()?;
+        }
+
+        Ok(policy)
+    }
+
     /// Provide a compact catalog snapshot for management/runtime layers.
     pub fn catalog_snapshot(&self) -> CatalogSnapshot {
         let mut stats_by_collection = std::collections::BTreeMap::new();
@@ -217,10 +288,121 @@ impl RedDB {
             self.options.export_retention.to_string(),
         );
         if let Some(path) = self.path() {
+            if let Some(native) = self.store.physical_file_header() {
+                report = report.with_diagnostic(
+                    "native_header.sequence",
+                    native.sequence.to_string(),
+                );
+                report = report.with_diagnostic(
+                    "native_header.format_version",
+                    native.format_version.to_string(),
+                );
+                report = report.with_diagnostic(
+                    "native_header.manifest_root",
+                    native.manifest_root.to_string(),
+                );
+                report = report.with_diagnostic(
+                    "native_header.manifest_oldest_root",
+                    native.manifest_oldest_root.to_string(),
+                );
+                report = report.with_diagnostic(
+                    "native_header.free_set_root",
+                    native.free_set_root.to_string(),
+                );
+                report = report.with_diagnostic(
+                    "native_header.collection_roots_page",
+                    native.collection_roots_page.to_string(),
+                );
+                report = report.with_diagnostic(
+                    "native_header.collection_roots_checksum",
+                    native.collection_roots_checksum.to_string(),
+                );
+                report = report.with_diagnostic(
+                    "native_header.collection_root_count",
+                    native.collection_root_count.to_string(),
+                );
+                report = report.with_diagnostic(
+                    "native_header.snapshot_count",
+                    native.snapshot_count.to_string(),
+                );
+                report = report.with_diagnostic(
+                    "native_header.index_count",
+                    native.index_count.to_string(),
+                );
+                report = report.with_diagnostic(
+                    "native_header.catalog_collection_count",
+                    native.catalog_collection_count.to_string(),
+                );
+                report = report.with_diagnostic(
+                    "native_header.catalog_total_entities",
+                    native.catalog_total_entities.to_string(),
+                );
+                report = report.with_diagnostic(
+                    "native_header.export_count",
+                    native.export_count.to_string(),
+                );
+                report = report.with_diagnostic(
+                    "native_header.graph_projection_count",
+                    native.graph_projection_count.to_string(),
+                );
+                report = report.with_diagnostic(
+                    "native_header.analytics_job_count",
+                    native.analytics_job_count.to_string(),
+                );
+                report = report.with_diagnostic(
+                    "native_header.manifest_event_count",
+                    native.manifest_event_count.to_string(),
+                );
+                if let Some(native_roots) = self.native_collection_roots() {
+                    report = report.with_diagnostic(
+                        "native_collection_roots.entries",
+                        native_roots.len().to_string(),
+                    );
+                    if native_roots != metadata.superblock.collection_roots {
+                        report.issue(
+                            "native_collection_roots",
+                            "native collection roots diverge from physical metadata",
+                        );
+                    }
+                }
+            }
             let metadata_path = PhysicalMetadataFile::metadata_path_for(path);
+            let metadata_binary_path = PhysicalMetadataFile::metadata_binary_path_for(path);
             report = report.with_diagnostic("metadata.path", metadata_path.display().to_string());
+            report = report.with_diagnostic(
+                "metadata.binary_path",
+                metadata_binary_path.display().to_string(),
+            );
             report = report.with_diagnostic("metadata.exists", metadata_path.exists().to_string());
-            if let Ok(metadata) = PhysicalMetadataFile::load_from_path(&metadata_path) {
+            report = report.with_diagnostic(
+                "metadata.binary_exists",
+                metadata_binary_path.exists().to_string(),
+            );
+            if let Ok((metadata, source)) =
+                PhysicalMetadataFile::load_for_data_path_with_source(path)
+            {
+                let journal_count = PhysicalMetadataFile::journal_paths_for_data_path(path)
+                    .map(|paths| paths.len())
+                    .unwrap_or(0);
+                report = report.with_diagnostic("metadata.loaded_from", source.as_str());
+                report = report.with_diagnostic(
+                    "metadata.journal_entries",
+                    journal_count.to_string(),
+                );
+                report = report.with_diagnostic(
+                    "metadata.last_loaded_from",
+                    metadata
+                        .last_loaded_from
+                        .clone()
+                        .unwrap_or_else(|| "unknown".to_string()),
+                );
+                report = report.with_diagnostic(
+                    "metadata.last_healed_at_unix_ms",
+                    metadata
+                        .last_healed_at_unix_ms
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "null".to_string()),
+                );
                 report = report.with_diagnostic(
                     "metadata.sequence",
                     metadata.superblock.sequence.to_string(),
@@ -237,6 +419,58 @@ impl RedDB {
                     "metadata.exports",
                     metadata.exports.len().to_string(),
                 );
+                if let Some(native) = self.store.physical_file_header() {
+                    let inspection = Self::inspect_native_header_against_metadata(native, &metadata);
+                    report = report.with_diagnostic(
+                        "native_header.matches_metadata",
+                        inspection.consistent.to_string(),
+                    );
+                    let policy = Self::repair_policy_for_inspection(&inspection);
+                    report = report.with_diagnostic(
+                        "native_header.repair_policy",
+                        match policy {
+                            NativeHeaderRepairPolicy::InSync => "in_sync",
+                            NativeHeaderRepairPolicy::RepairNativeFromMetadata => {
+                                "repair_native_from_metadata"
+                            }
+                            NativeHeaderRepairPolicy::NativeAheadOfMetadata => {
+                                "native_ahead_of_metadata"
+                            }
+                        },
+                    );
+                    if !inspection.consistent {
+                        match policy {
+                            NativeHeaderRepairPolicy::RepairNativeFromMetadata => {
+                                report.issue(
+                                    "native_header",
+                                    format!(
+                                        "native header diverges from physical metadata on {} field(s); repairable from metadata",
+                                        inspection.mismatches.len()
+                                    ),
+                                );
+                            }
+                            NativeHeaderRepairPolicy::NativeAheadOfMetadata => {
+                                report.issue(
+                                    "native_header",
+                                    format!(
+                                        "native header diverges from physical metadata on {} field(s); native header appears ahead of metadata",
+                                        inspection.mismatches.len()
+                                    ),
+                                );
+                            }
+                            NativeHeaderRepairPolicy::InSync => {}
+                        }
+                        for mismatch in inspection.mismatches {
+                            report = report.with_diagnostic(
+                                format!("native_header.mismatch.{}", mismatch.field),
+                                format!(
+                                    "native={} expected={}",
+                                    mismatch.native, mismatch.expected
+                                ),
+                            );
+                        }
+                    }
+                }
                 report = report.with_diagnostic(
                     "metadata.collection_roots",
                     metadata.superblock.collection_roots.len().to_string(),
@@ -429,6 +663,8 @@ impl RedDB {
         let mut metadata = PhysicalMetadataFile::load_for_data_path(path)?;
         let export_data_path = PhysicalMetadataFile::export_data_path_for(path, &name);
         let export_metadata_path = PhysicalMetadataFile::metadata_path_for(&export_data_path);
+        let export_metadata_binary_path =
+            PhysicalMetadataFile::metadata_binary_path_for(&export_data_path);
 
         fs::copy(path, &export_data_path)?;
 
@@ -450,6 +686,7 @@ impl RedDB {
         metadata.exports.push(descriptor.clone());
         self.prune_export_registry(&mut metadata.exports);
         metadata.save_for_data_path(path)?;
+        metadata.save_to_binary_path(&export_metadata_binary_path)?;
         metadata.save_to_path(&export_metadata_path)?;
 
         Ok(descriptor)
@@ -626,10 +863,12 @@ impl RedDB {
         if self.options.mode == StorageMode::Persistent && !self.options.read_only {
             if let Some(path) = self.path() {
                 let metadata_path = PhysicalMetadataFile::metadata_path_for(path);
-                if !metadata_path.exists() {
+                let metadata_binary_path = PhysicalMetadataFile::metadata_binary_path_for(path);
+                if !metadata_path.exists() && !metadata_binary_path.exists() {
                     self.persist_metadata()?;
                 }
             }
+            let _ = self.repair_native_header_from_metadata();
         }
         Ok(self)
     }
@@ -653,6 +892,7 @@ impl RedDB {
             previous.as_ref(),
         );
         metadata.save_for_data_path(path)?;
+        self.persist_native_physical_header(&metadata)?;
         Ok(())
     }
 
@@ -688,7 +928,184 @@ impl RedDB {
 
         let result = mutator(&mut metadata);
         metadata.save_for_data_path(path)?;
+        self.persist_native_physical_header(&metadata)?;
         Ok(result)
+    }
+
+    fn persist_native_physical_header(
+        &self,
+        metadata: &PhysicalMetadataFile,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.paged_mode {
+            return Ok(());
+        }
+
+        let existing_page = self
+            .store
+            .physical_file_header()
+            .map(|header| header.collection_roots_page)
+            .filter(|page| *page != 0);
+        let (collection_roots_page, collection_roots_checksum) = self
+            .store
+            .write_native_collection_roots(
+                &metadata.superblock.collection_roots,
+                existing_page,
+            )?;
+        let mut header = Self::native_header_from_metadata(metadata);
+        header.collection_roots_page = collection_roots_page;
+        header.collection_roots_checksum = collection_roots_checksum;
+        self.store.update_physical_file_header(header)?;
+        self.store.persist()?;
+        Ok(())
+    }
+
+    fn native_header_from_metadata(metadata: &PhysicalMetadataFile) -> PhysicalFileHeader {
+        PhysicalFileHeader {
+            format_version: metadata.superblock.format_version,
+            sequence: metadata.superblock.sequence,
+            manifest_oldest_root: metadata.superblock.manifest.oldest.index,
+            manifest_root: metadata.superblock.manifest.newest.index,
+            free_set_root: metadata.superblock.free_set.index,
+            collection_roots_page: 0,
+            collection_roots_checksum: 0,
+            collection_root_count: metadata.superblock.collection_roots.len() as u32,
+            snapshot_count: metadata.snapshots.len() as u32,
+            index_count: metadata.indexes.len() as u32,
+            catalog_collection_count: metadata.catalog.total_collections as u32,
+            catalog_total_entities: metadata.catalog.total_entities as u64,
+            export_count: metadata.exports.len() as u32,
+            graph_projection_count: metadata.graph_projections.len() as u32,
+            analytics_job_count: metadata.analytics_jobs.len() as u32,
+            manifest_event_count: metadata.manifest_events.len() as u32,
+        }
+    }
+
+    fn inspect_native_header_against_metadata(
+        native: PhysicalFileHeader,
+        metadata: &PhysicalMetadataFile,
+    ) -> NativeHeaderInspection {
+        let expected = Self::native_header_from_metadata(metadata);
+        let mut mismatches = Vec::new();
+
+        if native.format_version != expected.format_version {
+            mismatches.push(NativeHeaderMismatch {
+                field: "format_version",
+                native: native.format_version.to_string(),
+                expected: expected.format_version.to_string(),
+            });
+        }
+        if native.sequence != expected.sequence {
+            mismatches.push(NativeHeaderMismatch {
+                field: "sequence",
+                native: native.sequence.to_string(),
+                expected: expected.sequence.to_string(),
+            });
+        }
+        if native.manifest_oldest_root != expected.manifest_oldest_root {
+            mismatches.push(NativeHeaderMismatch {
+                field: "manifest_oldest_root",
+                native: native.manifest_oldest_root.to_string(),
+                expected: expected.manifest_oldest_root.to_string(),
+            });
+        }
+        if native.manifest_root != expected.manifest_root {
+            mismatches.push(NativeHeaderMismatch {
+                field: "manifest_root",
+                native: native.manifest_root.to_string(),
+                expected: expected.manifest_root.to_string(),
+            });
+        }
+        if native.free_set_root != expected.free_set_root {
+            mismatches.push(NativeHeaderMismatch {
+                field: "free_set_root",
+                native: native.free_set_root.to_string(),
+                expected: expected.free_set_root.to_string(),
+            });
+        }
+        if native.collection_root_count != expected.collection_root_count {
+            mismatches.push(NativeHeaderMismatch {
+                field: "collection_root_count",
+                native: native.collection_root_count.to_string(),
+                expected: expected.collection_root_count.to_string(),
+            });
+        }
+        if native.snapshot_count != expected.snapshot_count {
+            mismatches.push(NativeHeaderMismatch {
+                field: "snapshot_count",
+                native: native.snapshot_count.to_string(),
+                expected: expected.snapshot_count.to_string(),
+            });
+        }
+        if native.index_count != expected.index_count {
+            mismatches.push(NativeHeaderMismatch {
+                field: "index_count",
+                native: native.index_count.to_string(),
+                expected: expected.index_count.to_string(),
+            });
+        }
+        if native.catalog_collection_count != expected.catalog_collection_count {
+            mismatches.push(NativeHeaderMismatch {
+                field: "catalog_collection_count",
+                native: native.catalog_collection_count.to_string(),
+                expected: expected.catalog_collection_count.to_string(),
+            });
+        }
+        if native.catalog_total_entities != expected.catalog_total_entities {
+            mismatches.push(NativeHeaderMismatch {
+                field: "catalog_total_entities",
+                native: native.catalog_total_entities.to_string(),
+                expected: expected.catalog_total_entities.to_string(),
+            });
+        }
+        if native.export_count != expected.export_count {
+            mismatches.push(NativeHeaderMismatch {
+                field: "export_count",
+                native: native.export_count.to_string(),
+                expected: expected.export_count.to_string(),
+            });
+        }
+        if native.graph_projection_count != expected.graph_projection_count {
+            mismatches.push(NativeHeaderMismatch {
+                field: "graph_projection_count",
+                native: native.graph_projection_count.to_string(),
+                expected: expected.graph_projection_count.to_string(),
+            });
+        }
+        if native.analytics_job_count != expected.analytics_job_count {
+            mismatches.push(NativeHeaderMismatch {
+                field: "analytics_job_count",
+                native: native.analytics_job_count.to_string(),
+                expected: expected.analytics_job_count.to_string(),
+            });
+        }
+        if native.manifest_event_count != expected.manifest_event_count {
+            mismatches.push(NativeHeaderMismatch {
+                field: "manifest_event_count",
+                native: native.manifest_event_count.to_string(),
+                expected: expected.manifest_event_count.to_string(),
+            });
+        }
+
+        NativeHeaderInspection {
+            native,
+            expected,
+            consistent: mismatches.is_empty(),
+            mismatches,
+        }
+    }
+
+    fn repair_policy_for_inspection(
+        inspection: &NativeHeaderInspection,
+    ) -> NativeHeaderRepairPolicy {
+        if inspection.consistent {
+            return NativeHeaderRepairPolicy::InSync;
+        }
+
+        if inspection.expected.sequence >= inspection.native.sequence {
+            NativeHeaderRepairPolicy::RepairNativeFromMetadata
+        } else {
+            NativeHeaderRepairPolicy::NativeAheadOfMetadata
+        }
     }
 
     fn prune_export_registry(
@@ -708,6 +1125,9 @@ impl RedDB {
         for export in removed {
             let _ = fs::remove_file(&export.data_path);
             let _ = fs::remove_file(&export.metadata_path);
+            let binary_path =
+                PhysicalMetadataFile::metadata_binary_path_for(std::path::Path::new(&export.data_path));
+            let _ = fs::remove_file(binary_path);
         }
     }
 

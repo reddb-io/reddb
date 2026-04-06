@@ -11,14 +11,33 @@ use crate::api::{
     REDDB_FORMAT_VERSION,
 };
 use crate::index::IndexKind;
-use crate::json::parse_json;
+use crate::json::{from_slice, parse_json, to_vec};
 use crate::serde_json::{Map, Value as JsonValue};
 
 pub const DEFAULT_GRID_BLOCK_SIZE: usize = 512 * 1024;
 pub const DEFAULT_PAGE_SIZE: usize = 4096;
 pub const DEFAULT_SUPERBLOCK_COPIES: u8 = 4;
 pub const PHYSICAL_METADATA_PROTOCOL_VERSION: &str = "reddb-physical-v1";
+pub const PHYSICAL_METADATA_BINARY_EXTENSION: &str = "meta.rdbx";
 pub const DEFAULT_MANIFEST_EVENT_HISTORY: usize = 256;
+pub const DEFAULT_METADATA_JOURNAL_RETENTION: usize = 32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhysicalMetadataSource {
+    Binary,
+    BinaryJournal,
+    Json,
+}
+
+impl PhysicalMetadataSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Binary => "binary",
+            Self::BinaryJournal => "binary_journal",
+            Self::Json => "json",
+        }
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct BlockReference {
     pub index: u64,
@@ -199,6 +218,8 @@ pub struct PhysicalAnalyticsJob {
 pub struct PhysicalMetadataFile {
     pub protocol_version: String,
     pub generated_at_unix_ms: u128,
+    pub last_loaded_from: Option<String>,
+    pub last_healed_at_unix_ms: Option<u128>,
     pub manifest: SchemaManifest,
     pub catalog: CatalogSnapshot,
     pub manifest_events: Vec<ManifestEvent>,
@@ -266,6 +287,8 @@ impl PhysicalMetadataFile {
         Self {
             protocol_version: PHYSICAL_METADATA_PROTOCOL_VERSION.to_string(),
             generated_at_unix_ms: now,
+            last_loaded_from: previous.and_then(|previous| previous.last_loaded_from.clone()),
+            last_healed_at_unix_ms: previous.and_then(|previous| previous.last_healed_at_unix_ms),
             manifest,
             catalog,
             manifest_events,
@@ -294,6 +317,32 @@ impl PhysicalMetadataFile {
         }
     }
 
+    pub fn metadata_binary_path_for(data_path: &Path) -> PathBuf {
+        let file_name = data_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "reddb.rdb".to_string());
+        let meta_file = format!("{file_name}.{PHYSICAL_METADATA_BINARY_EXTENSION}");
+        match data_path.parent() {
+            Some(parent) => parent.join(meta_file),
+            None => PathBuf::from(meta_file),
+        }
+    }
+
+    pub fn metadata_journal_path_for(data_path: &Path, sequence: u64) -> PathBuf {
+        let file_name = data_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "reddb.rdb".to_string());
+        let meta_file = format!(
+            "{file_name}.{PHYSICAL_METADATA_BINARY_EXTENSION}.seq-{sequence:020}"
+        );
+        match data_path.parent() {
+            Some(parent) => parent.join(meta_file),
+            None => PathBuf::from(meta_file),
+        }
+    }
+
     pub fn export_data_path_for(data_path: &Path, name: &str) -> PathBuf {
         let file_name = data_path
             .file_name()
@@ -308,13 +357,52 @@ impl PhysicalMetadataFile {
     }
 
     pub fn load_for_data_path(data_path: &Path) -> io::Result<Self> {
-        Self::load_from_path(&Self::metadata_path_for(data_path))
+        Self::load_for_data_path_with_source(data_path).map(|(metadata, _)| metadata)
+    }
+
+    pub fn load_for_data_path_with_source(
+        data_path: &Path,
+    ) -> io::Result<(Self, PhysicalMetadataSource)> {
+        let binary_path = Self::metadata_binary_path_for(data_path);
+        if binary_path.exists() {
+            match Self::load_from_binary_path(&binary_path) {
+                Ok(metadata) => {
+                    return Ok((metadata, PhysicalMetadataSource::Binary));
+                }
+                Err(_) => {
+                    let mut journal_paths = Self::journal_paths_for_data_path(data_path)?;
+                    journal_paths.reverse();
+                    for journal_path in journal_paths {
+                        if let Ok(metadata) = Self::load_from_binary_path(&journal_path) {
+                            let healed = metadata.mark_recovery(PhysicalMetadataSource::BinaryJournal);
+                            let _ = healed.heal_primary_metadata_for_data_path(data_path);
+                            return Ok((healed, PhysicalMetadataSource::BinaryJournal));
+                        }
+                    }
+                }
+            }
+        }
+        Self::load_from_path(&Self::metadata_path_for(data_path)).map(|metadata| {
+            let healed = metadata.mark_recovery(PhysicalMetadataSource::Json);
+            let _ = healed.heal_primary_metadata_for_data_path(data_path);
+            (healed, PhysicalMetadataSource::Json)
+        })
     }
 
     pub fn save_for_data_path(&self, data_path: &Path) -> io::Result<PathBuf> {
-        let path = Self::metadata_path_for(data_path);
-        self.save_to_path(&path)?;
-        Ok(path)
+        let binary_path = Self::metadata_binary_path_for(data_path);
+        if binary_path.exists() {
+            let sequence = Self::load_from_binary_path(&binary_path)
+                .map(|metadata| metadata.superblock.sequence)
+                .unwrap_or(self.superblock.sequence);
+            let journal_path = Self::metadata_journal_path_for(data_path, sequence);
+            let _ = fs::copy(&binary_path, journal_path);
+        }
+        self.save_to_binary_path(&binary_path)?;
+        self.prune_journal_for_data_path(data_path)?;
+        let json_path = Self::metadata_path_for(data_path);
+        self.save_to_path(&json_path)?;
+        Ok(binary_path)
     }
 
     pub fn load_from_path(path: &Path) -> io::Result<Self> {
@@ -334,6 +422,79 @@ impl PhysicalMetadataFile {
         fs::write(path, text)
     }
 
+    pub fn load_from_binary_path(path: &Path) -> io::Result<Self> {
+        let bytes = fs::read(path)?;
+        let json = from_slice::<JsonValue>(&bytes).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid physical metadata binary: {err}"),
+            )
+        })?;
+        Self::from_json_value(&json)
+    }
+
+    pub fn save_to_binary_path(&self, path: &Path) -> io::Result<()> {
+        let bytes = to_vec(&self.to_json_value()).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("failed to encode physical metadata binary: {err}"),
+            )
+        })?;
+        fs::write(path, bytes)
+    }
+
+    pub fn journal_paths_for_data_path(data_path: &Path) -> io::Result<Vec<PathBuf>> {
+        let Some(parent) = data_path.parent() else {
+            return Ok(Vec::new());
+        };
+        let file_name = data_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "reddb.rdb".to_string());
+        let prefix = format!("{file_name}.{PHYSICAL_METADATA_BINARY_EXTENSION}.seq-");
+
+        let mut paths = Vec::new();
+        for entry in fs::read_dir(parent)? {
+            let entry = entry?;
+            let path = entry.path();
+            let Some(name) = path.file_name().map(|name| name.to_string_lossy()) else {
+                continue;
+            };
+            if name.starts_with(&prefix) {
+                paths.push(path);
+            }
+        }
+        paths.sort();
+        Ok(paths)
+    }
+
+    pub fn prune_journal_for_data_path(&self, data_path: &Path) -> io::Result<()> {
+        let mut paths = Self::journal_paths_for_data_path(data_path)?;
+        if paths.len() <= DEFAULT_METADATA_JOURNAL_RETENTION {
+            return Ok(());
+        }
+        let delete_count = paths.len() - DEFAULT_METADATA_JOURNAL_RETENTION;
+        for path in paths.drain(0..delete_count) {
+            let _ = fs::remove_file(path);
+        }
+        Ok(())
+    }
+
+    pub fn heal_primary_metadata_for_data_path(&self, data_path: &Path) -> io::Result<()> {
+        let binary_path = Self::metadata_binary_path_for(data_path);
+        self.save_to_binary_path(&binary_path)?;
+        let json_path = Self::metadata_path_for(data_path);
+        self.save_to_path(&json_path)?;
+        Ok(())
+    }
+
+    pub fn mark_recovery(&self, source: PhysicalMetadataSource) -> Self {
+        let mut metadata = self.clone();
+        metadata.last_loaded_from = Some(source.as_str().to_string());
+        metadata.last_healed_at_unix_ms = Some(unix_ms_now());
+        metadata
+    }
+
     pub fn to_json_value(&self) -> JsonValue {
         let mut root = Map::new();
         root.insert(
@@ -343,6 +504,19 @@ impl PhysicalMetadataFile {
         root.insert(
             "generated_at_unix_ms".to_string(),
             json_u128(self.generated_at_unix_ms),
+        );
+        root.insert(
+            "last_loaded_from".to_string(),
+            self.last_loaded_from
+                .clone()
+                .map(JsonValue::String)
+                .unwrap_or(JsonValue::Null),
+        );
+        root.insert(
+            "last_healed_at_unix_ms".to_string(),
+            self.last_healed_at_unix_ms
+                .map(json_u128)
+                .unwrap_or(JsonValue::Null),
         );
         root.insert("manifest".to_string(), manifest_to_json(&self.manifest));
         root.insert("catalog".to_string(), catalog_to_json(&self.catalog));
@@ -399,6 +573,14 @@ impl PhysicalMetadataFile {
         Ok(Self {
             protocol_version: json_string_required(object, "protocol_version")?,
             generated_at_unix_ms: json_u128_required(object, "generated_at_unix_ms")?,
+            last_loaded_from: object
+                .get("last_loaded_from")
+                .and_then(JsonValue::as_str)
+                .map(|value| value.to_string()),
+            last_healed_at_unix_ms: object
+                .get("last_healed_at_unix_ms")
+                .map(json_u128_value)
+                .transpose()?,
             manifest: manifest_from_json(json_required(object, "manifest")?)?,
             catalog: catalog_from_json(json_required(object, "catalog")?)?,
             manifest_events: object

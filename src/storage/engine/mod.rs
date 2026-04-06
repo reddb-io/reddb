@@ -66,7 +66,7 @@ pub use graph_store::{GraphEdgeType, GraphNodeType, GraphStore, StoredEdge, Stor
 pub use graph_table_index::{GraphTableIndex, GraphTableIndexStats, RowKey};
 pub use page::{Page, PageHeader, PageType, HEADER_SIZE, PAGE_SIZE};
 pub use page_cache::PageCache;
-pub use pager::{Pager, PagerConfig};
+pub use pager::{Pager, PagerConfig, PhysicalFileHeader};
 
 // Graph algorithms
 pub use algorithms::{

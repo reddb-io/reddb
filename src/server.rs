@@ -143,6 +143,16 @@ impl RedDBServer {
                 Some(metadata) => json_response(200, metadata.to_json_value()),
                 None => json_error(404, "physical metadata is not available"),
             },
+            ("GET", "/physical/native-header") => match self.runtime.native_header() {
+                Ok(header) => json_response(200, native_header_to_json(header)),
+                Err(err) => json_error(404, err.to_string()),
+            },
+            ("GET", "/physical/native-header/repair-policy") => {
+                match self.runtime.native_header_repair_policy() {
+                    Ok(policy) => json_response(200, repair_policy_to_json(&policy)),
+                    Err(err) => json_error(404, err.to_string()),
+                }
+            }
             ("GET", "/manifest") => match self.runtime.manifest_events_filtered(
                 query.get("collection").map(String::as_str),
                 query.get("kind").map(String::as_str),
@@ -197,6 +207,12 @@ impl RedDBServer {
                 Ok(snapshot) => json_response(200, snapshot_descriptor_to_json(&snapshot)),
                 Err(err) => json_error(500, err.to_string()),
             },
+            ("POST", "/physical/native-header/repair") => {
+                match self.runtime.repair_native_header_from_metadata() {
+                    Ok(policy) => json_response(200, repair_policy_to_json(&policy)),
+                    Err(err) => json_error(500, err.to_string()),
+                }
+            }
             ("POST", "/export") => self.handle_export(body),
             ("POST", "/indexes/rebuild") => self.handle_rebuild_indexes(body, None),
             ("POST", "/retention/apply") => match self.runtime.apply_retention_policy() {
@@ -2966,6 +2982,81 @@ fn graph_projections_to_json(projections: &[crate::PhysicalGraphProjection]) -> 
 
 fn analytics_jobs_to_json(jobs: &[crate::PhysicalAnalyticsJob]) -> JsonValue {
     JsonValue::Array(jobs.iter().map(analytics_job_to_json).collect())
+}
+
+fn native_header_to_json(header: crate::storage::engine::PhysicalFileHeader) -> JsonValue {
+    let mut object = Map::new();
+    object.insert(
+        "format_version".to_string(),
+        JsonValue::Number(header.format_version as f64),
+    );
+    object.insert(
+        "sequence".to_string(),
+        JsonValue::String(header.sequence.to_string()),
+    );
+    object.insert(
+        "manifest_oldest_root".to_string(),
+        JsonValue::String(header.manifest_oldest_root.to_string()),
+    );
+    object.insert(
+        "manifest_root".to_string(),
+        JsonValue::String(header.manifest_root.to_string()),
+    );
+    object.insert(
+        "free_set_root".to_string(),
+        JsonValue::String(header.free_set_root.to_string()),
+    );
+    object.insert(
+        "collection_roots_page".to_string(),
+        JsonValue::Number(header.collection_roots_page as f64),
+    );
+    object.insert(
+        "collection_roots_checksum".to_string(),
+        JsonValue::String(header.collection_roots_checksum.to_string()),
+    );
+    object.insert(
+        "collection_root_count".to_string(),
+        JsonValue::Number(header.collection_root_count as f64),
+    );
+    object.insert(
+        "snapshot_count".to_string(),
+        JsonValue::Number(header.snapshot_count as f64),
+    );
+    object.insert(
+        "index_count".to_string(),
+        JsonValue::Number(header.index_count as f64),
+    );
+    object.insert(
+        "catalog_collection_count".to_string(),
+        JsonValue::Number(header.catalog_collection_count as f64),
+    );
+    object.insert(
+        "catalog_total_entities".to_string(),
+        JsonValue::String(header.catalog_total_entities.to_string()),
+    );
+    object.insert(
+        "export_count".to_string(),
+        JsonValue::Number(header.export_count as f64),
+    );
+    object.insert(
+        "graph_projection_count".to_string(),
+        JsonValue::Number(header.graph_projection_count as f64),
+    );
+    object.insert(
+        "analytics_job_count".to_string(),
+        JsonValue::Number(header.analytics_job_count as f64),
+    );
+    object.insert(
+        "manifest_event_count".to_string(),
+        JsonValue::Number(header.manifest_event_count as f64),
+    );
+    JsonValue::Object(object)
+}
+
+fn repair_policy_to_json(policy: &str) -> JsonValue {
+    let mut object = Map::new();
+    object.insert("policy".to_string(), JsonValue::String(policy.to_string()));
+    JsonValue::Object(object)
 }
 
 fn exports_to_json(exports: &[crate::ExportDescriptor]) -> JsonValue {

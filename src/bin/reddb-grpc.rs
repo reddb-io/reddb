@@ -23,6 +23,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let db_options = config.to_db_options();
     let grpc_options = GrpcServerOptions {
         bind_addr: config.bind_addr.clone(),
+        auth_token: config.auth_token.clone(),
+        write_token: config.write_token.clone(),
     };
 
     let server = RedDBGrpcServer::from_database_options(db_options, grpc_options)?;
@@ -35,6 +37,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 struct CliConfig {
     path: Option<PathBuf>,
     bind_addr: String,
+    auth_token: Option<String>,
+    write_token: Option<String>,
     create_if_missing: bool,
     read_only: bool,
     help: bool,
@@ -45,6 +49,8 @@ impl Default for CliConfig {
         Self {
             path: None,
             bind_addr: "127.0.0.1:50051".to_string(),
+            auth_token: None,
+            write_token: None,
             create_if_missing: true,
             read_only: false,
             help: false,
@@ -65,6 +71,10 @@ impl CliConfig {
                 "--help" | "-h" => config.help = true,
                 "--path" => config.path = Some(PathBuf::from(next_arg(&mut args, "--path")?)),
                 "--bind" => config.bind_addr = next_arg(&mut args, "--bind")?,
+                "--auth-token" => config.auth_token = Some(next_arg(&mut args, "--auth-token")?),
+                "--write-token" => {
+                    config.write_token = Some(next_arg(&mut args, "--write-token")?)
+                }
                 "--read-only" => config.read_only = true,
                 "--no-create-if-missing" => config.create_if_missing = false,
                 unexpected => return Err(format!("unknown argument: {unexpected}").into()),
@@ -109,6 +119,8 @@ USAGE:
 OPTIONS:
   --path <file>              persistent database path; omit for in-memory mode
   --bind <addr>              bind address for the gRPC server (default: 127.0.0.1:50051)
+  --auth-token <token>       require token for read RPCs
+  --write-token <token>      require token for write RPCs
   --read-only                open the database in read-only mode
   --no-create-if-missing     do not create the database file automatically
   -h, --help                 show this help

@@ -18,7 +18,7 @@ use crate::storage::engine::{
     CycleDetector, DegreeCentrality, EigenvectorCentrality, GraphEdgeType, GraphNodeType,
     GraphStore, HITS, IvfConfig, IvfIndex, IvfStats, LabelPropagation, Louvain, MetadataEntry,
     MetadataFilter as VectorMetadataFilter, MetadataValue as VectorMetadataValue, PageRank,
-    PersonalizedPageRank, StoredNode,
+    PersonalizedPageRank, PhysicalFileHeader, StoredNode,
     StronglyConnectedComponents, WeaklyConnectedComponents,
 };
 use crate::storage::query::ast::{
@@ -718,6 +718,50 @@ impl RedDBRuntime {
             .physical_metadata()
             .ok_or_else(|| RedDBError::NotFound("physical metadata".to_string()))?;
         Ok(metadata.exports)
+    }
+
+    pub fn native_header(&self) -> RedDBResult<PhysicalFileHeader> {
+        self.inner
+            .db
+            .store()
+            .physical_file_header()
+            .ok_or_else(|| RedDBError::NotFound("native physical header".to_string()))
+    }
+
+    pub fn native_header_repair_policy(&self) -> RedDBResult<String> {
+        let policy = self
+            .inner
+            .db
+            .native_header_repair_policy()
+            .ok_or_else(|| RedDBError::NotFound("native physical header repair policy".to_string()))?;
+        Ok(match policy {
+            crate::storage::NativeHeaderRepairPolicy::InSync => "in_sync",
+            crate::storage::NativeHeaderRepairPolicy::RepairNativeFromMetadata => {
+                "repair_native_from_metadata"
+            }
+            crate::storage::NativeHeaderRepairPolicy::NativeAheadOfMetadata => {
+                "native_ahead_of_metadata"
+            }
+        }
+        .to_string())
+    }
+
+    pub fn repair_native_header_from_metadata(&self) -> RedDBResult<String> {
+        let policy = self
+            .inner
+            .db
+            .repair_native_header_from_metadata()
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        Ok(match policy {
+            crate::storage::NativeHeaderRepairPolicy::InSync => "in_sync",
+            crate::storage::NativeHeaderRepairPolicy::RepairNativeFromMetadata => {
+                "repair_native_from_metadata"
+            }
+            crate::storage::NativeHeaderRepairPolicy::NativeAheadOfMetadata => {
+                "native_ahead_of_metadata"
+            }
+        }
+        .to_string())
     }
 
     pub fn manifest_events(&self) -> RedDBResult<Vec<ManifestEvent>> {

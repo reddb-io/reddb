@@ -18,7 +18,7 @@
 //! 1. **File Mode** (`save_to_file`/`load_from_file`): Simple binary dump
 //! 2. **Paged Mode** (`open`/`persist`): Full page-based storage with B-tree indices
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -32,7 +32,7 @@ use super::manager::{ManagerConfig, ManagerStats, SegmentManager};
 use super::metadata::{Metadata, MetadataFilter, MetadataValue};
 use super::segment::SegmentError;
 use crate::storage::engine::pager::PagerError;
-use crate::storage::engine::{BTree, BTreeError, Pager, PagerConfig};
+use crate::storage::engine::{BTree, BTreeError, Pager, PagerConfig, PhysicalFileHeader};
 use crate::storage::primitives::encoding::{read_varu32, read_varu64, write_varu32, write_varu64};
 use crate::storage::schema::types::Value;
 
@@ -40,6 +40,7 @@ const STORE_MAGIC: &[u8; 4] = b"RDST";
 const STORE_VERSION_V1: u32 = 1;
 const STORE_VERSION_V2: u32 = 2;
 const METADATA_MAGIC: &[u8; 4] = b"RDM2";
+const NATIVE_COLLECTION_ROOTS_MAGIC: &[u8; 4] = b"RDRT";
 
 // ============================================================================
 // Configuration
@@ -1479,6 +1480,127 @@ impl UnifiedStore {
     /// Get the database file path (if using paged mode)
     pub fn db_path(&self) -> Option<&Path> {
         self.db_path.as_deref()
+    }
+
+    /// Update the minimal physical header mirrored into page 0 for paged databases.
+    pub fn update_physical_file_header(
+        &self,
+        physical: PhysicalFileHeader,
+    ) -> Result<(), StoreError> {
+        let Some(pager) = &self.pager else {
+            return Ok(());
+        };
+        pager
+            .update_physical_header(physical)
+            .map_err(|err| StoreError::Serialization(err.to_string()))
+    }
+
+    /// Read the minimal physical header mirrored into page 0 for paged databases.
+    pub fn physical_file_header(&self) -> Option<PhysicalFileHeader> {
+        self.pager.as_ref().map(|pager| pager.physical_header())
+    }
+
+    /// Persist native collection roots into a dedicated page in the paged file.
+    pub fn write_native_collection_roots(
+        &self,
+        roots: &BTreeMap<String, u64>,
+        existing_page: Option<u32>,
+    ) -> Result<(u32, u64), StoreError> {
+        let Some(pager) = &self.pager else {
+            return Ok((0, 0));
+        };
+
+        let page_id = match existing_page.filter(|page| *page != 0) {
+            Some(page) => page,
+            None => pager
+                .allocate_page(crate::storage::engine::PageType::NativeMeta)
+                .map_err(|err| StoreError::Serialization(err.to_string()))?
+                .page_id(),
+        };
+
+        let mut data = Vec::with_capacity(1024);
+        data.extend_from_slice(NATIVE_COLLECTION_ROOTS_MAGIC);
+        data.extend_from_slice(&(roots.len() as u32).to_le_bytes());
+        for (collection, root) in roots {
+            data.extend_from_slice(&(collection.len() as u32).to_le_bytes());
+            data.extend_from_slice(collection.as_bytes());
+            data.extend_from_slice(&root.to_le_bytes());
+        }
+
+        let checksum = crate::storage::engine::crc32(&data) as u64;
+        let mut page = crate::storage::engine::Page::new(
+            crate::storage::engine::PageType::NativeMeta,
+            page_id,
+        );
+        let bytes = page.as_bytes_mut();
+        let content_start = crate::storage::engine::HEADER_SIZE;
+        let copy_len = data.len().min(bytes.len() - content_start);
+        bytes[content_start..content_start + copy_len].copy_from_slice(&data[..copy_len]);
+        pager
+            .write_page(page_id, page)
+            .map_err(|err| StoreError::Serialization(err.to_string()))?;
+        Ok((page_id, checksum))
+    }
+
+    /// Read native collection roots from a dedicated page in the paged file.
+    pub fn read_native_collection_roots(
+        &self,
+        page_id: u32,
+    ) -> Result<BTreeMap<String, u64>, StoreError> {
+        let Some(pager) = &self.pager else {
+            return Ok(BTreeMap::new());
+        };
+        if page_id == 0 {
+            return Ok(BTreeMap::new());
+        }
+
+        let page = pager
+            .read_page(page_id)
+            .map_err(|err| StoreError::Serialization(err.to_string()))?;
+        let bytes = page.as_bytes();
+        let content = &bytes[crate::storage::engine::HEADER_SIZE..];
+        if content.len() < 8 || &content[0..4] != NATIVE_COLLECTION_ROOTS_MAGIC {
+            return Err(StoreError::Serialization(
+                "invalid native collection roots page".to_string(),
+            ));
+        }
+
+        let count = u32::from_le_bytes([content[4], content[5], content[6], content[7]]) as usize;
+        let mut pos = 8usize;
+        let mut roots = BTreeMap::new();
+
+        for _ in 0..count {
+            if pos + 4 > content.len() {
+                break;
+            }
+            let name_len = u32::from_le_bytes([
+                content[pos],
+                content[pos + 1],
+                content[pos + 2],
+                content[pos + 3],
+            ]) as usize;
+            pos += 4;
+            if pos + name_len + 8 > content.len() {
+                break;
+            }
+            let name = String::from_utf8(content[pos..pos + name_len].to_vec())
+                .map_err(|err| StoreError::Serialization(err.to_string()))?;
+            pos += name_len;
+            let root = u64::from_le_bytes([
+                content[pos],
+                content[pos + 1],
+                content[pos + 2],
+                content[pos + 3],
+                content[pos + 4],
+                content[pos + 5],
+                content[pos + 6],
+                content[pos + 7],
+            ]);
+            pos += 8;
+            roots.insert(name, root);
+        }
+
+        Ok(roots)
     }
 
     /// Create a new collection

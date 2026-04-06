@@ -7,8 +7,51 @@ service RedDb {
   rpc Ready(Empty) returns (HealthReply);
   rpc Stats(Empty) returns (StatsReply);
   rpc Collections(Empty) returns (CollectionsReply);
+  rpc PhysicalMetadata(Empty) returns (PayloadReply);
+  rpc NativeHeader(Empty) returns (PayloadReply);
+  rpc NativeHeaderRepairPolicy(Empty) returns (PayloadReply);
+  rpc RepairNativeHeader(Empty) returns (OperationReply);
+  rpc Manifest(ManifestRequest) returns (PayloadReply);
+  rpc Roots(Empty) returns (PayloadReply);
+  rpc Snapshots(Empty) returns (PayloadReply);
+  rpc Exports(Empty) returns (PayloadReply);
+  rpc Indexes(CollectionRequest) returns (PayloadReply);
+  rpc SetIndexEnabled(IndexToggleRequest) returns (PayloadReply);
+  rpc WarmupIndex(IndexNameRequest) returns (PayloadReply);
+  rpc RebuildIndexes(CollectionRequest) returns (PayloadReply);
+  rpc GraphProjections(Empty) returns (PayloadReply);
+  rpc SaveGraphProjection(GraphProjectionUpsertRequest) returns (PayloadReply);
+  rpc AnalyticsJobs(Empty) returns (PayloadReply);
   rpc Scan(ScanRequest) returns (ScanReply);
   rpc Query(QueryRequest) returns (QueryReply);
+  rpc TextSearch(JsonPayloadRequest) returns (PayloadReply);
+  rpc HybridSearch(JsonPayloadRequest) returns (PayloadReply);
+  rpc Similar(JsonCreateRequest) returns (PayloadReply);
+  rpc IvfSearch(JsonCreateRequest) returns (PayloadReply);
+  rpc GraphNeighborhood(JsonPayloadRequest) returns (PayloadReply);
+  rpc GraphTraverse(JsonPayloadRequest) returns (PayloadReply);
+  rpc GraphShortestPath(JsonPayloadRequest) returns (PayloadReply);
+  rpc GraphComponents(JsonPayloadRequest) returns (PayloadReply);
+  rpc GraphCentrality(JsonPayloadRequest) returns (PayloadReply);
+  rpc GraphCommunity(JsonPayloadRequest) returns (PayloadReply);
+  rpc GraphClustering(JsonPayloadRequest) returns (PayloadReply);
+  rpc GraphPersonalizedPagerank(JsonPayloadRequest) returns (PayloadReply);
+  rpc GraphHits(JsonPayloadRequest) returns (PayloadReply);
+  rpc GraphCycles(JsonPayloadRequest) returns (PayloadReply);
+  rpc GraphTopologicalSort(JsonPayloadRequest) returns (PayloadReply);
+  rpc CreateRow(JsonCreateRequest) returns (EntityReply);
+  rpc CreateNode(JsonCreateRequest) returns (EntityReply);
+  rpc CreateEdge(JsonCreateRequest) returns (EntityReply);
+  rpc CreateVector(JsonCreateRequest) returns (EntityReply);
+  rpc BulkCreateRows(JsonBulkCreateRequest) returns (BulkEntityReply);
+  rpc BulkCreateNodes(JsonBulkCreateRequest) returns (BulkEntityReply);
+  rpc BulkCreateEdges(JsonBulkCreateRequest) returns (BulkEntityReply);
+  rpc BulkCreateVectors(JsonBulkCreateRequest) returns (BulkEntityReply);
+  rpc PatchEntity(UpdateEntityRequest) returns (EntityReply);
+  rpc CreateSnapshot(Empty) returns (PayloadReply);
+  rpc CreateExport(ExportRequest) returns (PayloadReply);
+  rpc ApplyRetention(Empty) returns (OperationReply);
+  rpc DeleteEntity(DeleteEntityRequest) returns (OperationReply);
   rpc Checkpoint(Empty) returns (OperationReply);
 }
 
@@ -36,6 +79,25 @@ message CollectionsReply {
   repeated string collections = 1;
 }
 
+message CollectionRequest {
+  string collection = 1;
+}
+
+message IndexNameRequest {
+  string name = 1;
+}
+
+message IndexToggleRequest {
+  string name = 1;
+  bool enabled = 2;
+}
+
+message ManifestRequest {
+  string collection = 1;
+  string kind = 2;
+  optional uint64 since_snapshot = 3;
+}
+
 message ScanRequest {
   string collection = 1;
   uint64 offset = 2;
@@ -60,6 +122,43 @@ message QueryRequest {
   string query = 1;
 }
 
+message JsonPayloadRequest {
+  string payload_json = 1;
+}
+
+message JsonCreateRequest {
+  string collection = 1;
+  string payload_json = 2;
+}
+
+message JsonBulkCreateRequest {
+  string collection = 1;
+  repeated string payload_json = 2;
+}
+
+message UpdateEntityRequest {
+  string collection = 1;
+  uint64 id = 2;
+  string payload_json = 3;
+}
+
+message DeleteEntityRequest {
+  string collection = 1;
+  uint64 id = 2;
+}
+
+message ExportRequest {
+  string name = 1;
+}
+
+message GraphProjectionUpsertRequest {
+  string name = 1;
+  string source = 2;
+  repeated string node_labels = 3;
+  repeated string node_types = 4;
+  repeated string edge_labels = 5;
+}
+
 message QueryReply {
   bool ok = 1;
   string mode = 2;
@@ -68,6 +167,23 @@ message QueryReply {
   repeated string columns = 5;
   uint64 record_count = 6;
   string result_json = 7;
+}
+
+message EntityReply {
+  bool ok = 1;
+  uint64 id = 2;
+  string entity_json = 3;
+}
+
+message BulkEntityReply {
+  bool ok = 1;
+  uint64 count = 2;
+  repeated EntityReply items = 3;
+}
+
+message PayloadReply {
+  bool ok = 1;
+  string payload = 2;
 }
 
 message OperationReply {

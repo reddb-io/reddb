@@ -134,6 +134,31 @@ pub struct DatabaseHeader {
     pub schema_version: u32,
     /// Last checkpoint LSN
     pub checkpoint_lsn: u64,
+    /// Physical layout header mirrored into page 0
+    pub physical: PhysicalFileHeader,
+}
+
+/// Minimal physical state published into page 0 for paged databases.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PhysicalFileHeader {
+    pub format_version: u32,
+    pub sequence: u64,
+    pub manifest_oldest_root: u64,
+    pub manifest_root: u64,
+    pub free_set_root: u64,
+    pub manifest_page: u32,
+    pub manifest_checksum: u64,
+    pub collection_roots_page: u32,
+    pub collection_roots_checksum: u64,
+    pub collection_root_count: u32,
+    pub snapshot_count: u32,
+    pub index_count: u32,
+    pub catalog_collection_count: u32,
+    pub catalog_total_entities: u64,
+    pub export_count: u32,
+    pub graph_projection_count: u32,
+    pub analytics_job_count: u32,
+    pub manifest_event_count: u32,
 }
 
 impl Default for DatabaseHeader {
@@ -145,6 +170,7 @@ impl Default for DatabaseHeader {
             freelist_head: 0,
             schema_version: 0,
             checkpoint_lsn: 0,
+            physical: PhysicalFileHeader::default(),
         }
     }
 }
@@ -307,6 +333,142 @@ impl Pager {
             data[HEADER_SIZE + 30],
             data[HEADER_SIZE + 31],
         ]);
+        let physical_format_version = u32::from_le_bytes([
+            data[HEADER_SIZE + 32],
+            data[HEADER_SIZE + 33],
+            data[HEADER_SIZE + 34],
+            data[HEADER_SIZE + 35],
+        ]);
+        let physical_sequence = u64::from_le_bytes([
+            data[HEADER_SIZE + 36],
+            data[HEADER_SIZE + 37],
+            data[HEADER_SIZE + 38],
+            data[HEADER_SIZE + 39],
+            data[HEADER_SIZE + 40],
+            data[HEADER_SIZE + 41],
+            data[HEADER_SIZE + 42],
+            data[HEADER_SIZE + 43],
+        ]);
+        let manifest_root = u64::from_le_bytes([
+            data[HEADER_SIZE + 44],
+            data[HEADER_SIZE + 45],
+            data[HEADER_SIZE + 46],
+            data[HEADER_SIZE + 47],
+            data[HEADER_SIZE + 48],
+            data[HEADER_SIZE + 49],
+            data[HEADER_SIZE + 50],
+            data[HEADER_SIZE + 51],
+        ]);
+        let manifest_oldest_root = u64::from_le_bytes([
+            data[HEADER_SIZE + 52],
+            data[HEADER_SIZE + 53],
+            data[HEADER_SIZE + 54],
+            data[HEADER_SIZE + 55],
+            data[HEADER_SIZE + 56],
+            data[HEADER_SIZE + 57],
+            data[HEADER_SIZE + 58],
+            data[HEADER_SIZE + 59],
+        ]);
+        let free_set_root = u64::from_le_bytes([
+            data[HEADER_SIZE + 60],
+            data[HEADER_SIZE + 61],
+            data[HEADER_SIZE + 62],
+            data[HEADER_SIZE + 63],
+            data[HEADER_SIZE + 64],
+            data[HEADER_SIZE + 65],
+            data[HEADER_SIZE + 66],
+            data[HEADER_SIZE + 67],
+        ]);
+        let manifest_page = u32::from_le_bytes([
+            data[HEADER_SIZE + 68],
+            data[HEADER_SIZE + 69],
+            data[HEADER_SIZE + 70],
+            data[HEADER_SIZE + 71],
+        ]);
+        let manifest_checksum = u64::from_le_bytes([
+            data[HEADER_SIZE + 72],
+            data[HEADER_SIZE + 73],
+            data[HEADER_SIZE + 74],
+            data[HEADER_SIZE + 75],
+            data[HEADER_SIZE + 76],
+            data[HEADER_SIZE + 77],
+            data[HEADER_SIZE + 78],
+            data[HEADER_SIZE + 79],
+        ]);
+        let collection_roots_page = u32::from_le_bytes([
+            data[HEADER_SIZE + 80],
+            data[HEADER_SIZE + 81],
+            data[HEADER_SIZE + 82],
+            data[HEADER_SIZE + 83],
+        ]);
+        let collection_roots_checksum = u64::from_le_bytes([
+            data[HEADER_SIZE + 84],
+            data[HEADER_SIZE + 85],
+            data[HEADER_SIZE + 86],
+            data[HEADER_SIZE + 87],
+            data[HEADER_SIZE + 88],
+            data[HEADER_SIZE + 89],
+            data[HEADER_SIZE + 90],
+            data[HEADER_SIZE + 91],
+        ]);
+        let collection_root_count = u32::from_le_bytes([
+            data[HEADER_SIZE + 92],
+            data[HEADER_SIZE + 93],
+            data[HEADER_SIZE + 94],
+            data[HEADER_SIZE + 95],
+        ]);
+        let snapshot_count = u32::from_le_bytes([
+            data[HEADER_SIZE + 96],
+            data[HEADER_SIZE + 97],
+            data[HEADER_SIZE + 98],
+            data[HEADER_SIZE + 99],
+        ]);
+        let index_count = u32::from_le_bytes([
+            data[HEADER_SIZE + 100],
+            data[HEADER_SIZE + 101],
+            data[HEADER_SIZE + 102],
+            data[HEADER_SIZE + 103],
+        ]);
+        let catalog_collection_count = u32::from_le_bytes([
+            data[HEADER_SIZE + 104],
+            data[HEADER_SIZE + 105],
+            data[HEADER_SIZE + 106],
+            data[HEADER_SIZE + 107],
+        ]);
+        let catalog_total_entities = u64::from_le_bytes([
+            data[HEADER_SIZE + 108],
+            data[HEADER_SIZE + 109],
+            data[HEADER_SIZE + 110],
+            data[HEADER_SIZE + 111],
+            data[HEADER_SIZE + 112],
+            data[HEADER_SIZE + 113],
+            data[HEADER_SIZE + 114],
+            data[HEADER_SIZE + 115],
+        ]);
+        let export_count = u32::from_le_bytes([
+            data[HEADER_SIZE + 116],
+            data[HEADER_SIZE + 117],
+            data[HEADER_SIZE + 118],
+            data[HEADER_SIZE + 119],
+        ]);
+        let graph_projection_count = u32::from_le_bytes([
+            data[HEADER_SIZE + 120],
+            data[HEADER_SIZE + 121],
+            data[HEADER_SIZE + 122],
+            data[HEADER_SIZE + 123],
+        ]);
+        let analytics_job_count = u32::from_le_bytes([
+            data[HEADER_SIZE + 124],
+            data[HEADER_SIZE + 125],
+            data[HEADER_SIZE + 126],
+            data[HEADER_SIZE + 127],
+        ]);
+        let manifest_event_count = u32::from_le_bytes([
+            data[HEADER_SIZE + 128],
+            data[HEADER_SIZE + 129],
+            data[HEADER_SIZE + 130],
+            data[HEADER_SIZE + 131],
+        ]);
 
         // Update header
         {
@@ -317,6 +479,26 @@ impl Pager {
             header.freelist_head = freelist_head;
             header.schema_version = schema_version;
             header.checkpoint_lsn = checkpoint_lsn;
+            header.physical = PhysicalFileHeader {
+                format_version: physical_format_version,
+                sequence: physical_sequence,
+                manifest_oldest_root,
+                manifest_root,
+                free_set_root,
+                manifest_page,
+                manifest_checksum,
+                collection_roots_page,
+                collection_roots_checksum,
+                collection_root_count,
+                snapshot_count,
+                index_count,
+                catalog_collection_count,
+                catalog_total_entities,
+                export_count,
+                graph_projection_count,
+                analytics_job_count,
+                manifest_event_count,
+            };
         }
 
         // Initialize freelist
@@ -372,6 +554,42 @@ impl Pager {
             .copy_from_slice(&header.schema_version.to_le_bytes());
         data[HEADER_SIZE + 24..HEADER_SIZE + 32]
             .copy_from_slice(&header.checkpoint_lsn.to_le_bytes());
+        data[HEADER_SIZE + 32..HEADER_SIZE + 36]
+            .copy_from_slice(&header.physical.format_version.to_le_bytes());
+        data[HEADER_SIZE + 36..HEADER_SIZE + 44]
+            .copy_from_slice(&header.physical.sequence.to_le_bytes());
+        data[HEADER_SIZE + 44..HEADER_SIZE + 52]
+            .copy_from_slice(&header.physical.manifest_root.to_le_bytes());
+        data[HEADER_SIZE + 52..HEADER_SIZE + 60]
+            .copy_from_slice(&header.physical.manifest_oldest_root.to_le_bytes());
+        data[HEADER_SIZE + 60..HEADER_SIZE + 68]
+            .copy_from_slice(&header.physical.free_set_root.to_le_bytes());
+        data[HEADER_SIZE + 68..HEADER_SIZE + 72]
+            .copy_from_slice(&header.physical.manifest_page.to_le_bytes());
+        data[HEADER_SIZE + 72..HEADER_SIZE + 80]
+            .copy_from_slice(&header.physical.manifest_checksum.to_le_bytes());
+        data[HEADER_SIZE + 80..HEADER_SIZE + 84]
+            .copy_from_slice(&header.physical.collection_roots_page.to_le_bytes());
+        data[HEADER_SIZE + 84..HEADER_SIZE + 92]
+            .copy_from_slice(&header.physical.collection_roots_checksum.to_le_bytes());
+        data[HEADER_SIZE + 92..HEADER_SIZE + 96]
+            .copy_from_slice(&header.physical.collection_root_count.to_le_bytes());
+        data[HEADER_SIZE + 96..HEADER_SIZE + 100]
+            .copy_from_slice(&header.physical.snapshot_count.to_le_bytes());
+        data[HEADER_SIZE + 100..HEADER_SIZE + 104]
+            .copy_from_slice(&header.physical.index_count.to_le_bytes());
+        data[HEADER_SIZE + 104..HEADER_SIZE + 108]
+            .copy_from_slice(&header.physical.catalog_collection_count.to_le_bytes());
+        data[HEADER_SIZE + 108..HEADER_SIZE + 116]
+            .copy_from_slice(&header.physical.catalog_total_entities.to_le_bytes());
+        data[HEADER_SIZE + 116..HEADER_SIZE + 120]
+            .copy_from_slice(&header.physical.export_count.to_le_bytes());
+        data[HEADER_SIZE + 120..HEADER_SIZE + 124]
+            .copy_from_slice(&header.physical.graph_projection_count.to_le_bytes());
+        data[HEADER_SIZE + 124..HEADER_SIZE + 128]
+            .copy_from_slice(&header.physical.analytics_job_count.to_le_bytes());
+        data[HEADER_SIZE + 128..HEADER_SIZE + 132]
+            .copy_from_slice(&header.physical.manifest_event_count.to_le_bytes());
 
         page.update_checksum();
 
@@ -575,6 +793,24 @@ impl Pager {
     /// Get database header
     pub fn header(&self) -> DatabaseHeader {
         self.header.read().unwrap().clone()
+    }
+
+    pub fn physical_header(&self) -> PhysicalFileHeader {
+        self.header.read().unwrap().physical
+    }
+
+    pub fn update_physical_header(
+        &self,
+        physical: PhysicalFileHeader,
+    ) -> Result<(), PagerError> {
+        if self.config.read_only {
+            return Err(PagerError::ReadOnly);
+        }
+
+        let mut header = self.header.write().unwrap();
+        header.physical = physical;
+        *self.header_dirty.lock().unwrap() = true;
+        Ok(())
     }
 
     /// Get page count

@@ -74,6 +74,8 @@ pub enum PageType {
     GraphAdjacency = 9,
     /// Graph metadata page (statistics, index roots)
     GraphMeta = 10,
+    /// Native physical metadata page (engine-published auxiliary state)
+    NativeMeta = 11,
 }
 
 impl PageType {
@@ -91,6 +93,7 @@ impl PageType {
             8 => Some(Self::GraphEdge),
             9 => Some(Self::GraphAdjacency),
             10 => Some(Self::GraphMeta),
+            11 => Some(Self::NativeMeta),
             _ => None,
         }
     }

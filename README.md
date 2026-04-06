@@ -25,6 +25,8 @@
   <img src="https://img.shields.io/badge/model-embedded--first-0f766e?style=flat" alt="embedded">
   &nbsp;
   <img src="https://img.shields.io/badge/runtime-HTTP%20API-2563eb?style=flat" alt="http">
+  &nbsp;
+  <img src="https://img.shields.io/badge/runtime-gRPC%20API-0f766e?style=flat" alt="grpc">
 </p>
 
 <p align="center">
@@ -142,9 +144,9 @@ No extra services. No separate graph store. No separate vector engine.
 
 ### Server
 
-Run `reddb` as an HTTP server.
+Run `reddb` as an HTTP server or as a gRPC server.
 
-#### 1. Start the server
+#### 1. Start the HTTP server
 
 ```bash
 reddb --path ./data/reddb.rdb --bind 127.0.0.1:8080
@@ -203,6 +205,35 @@ curl -X POST http://127.0.0.1:8080/query \
   -d '{
     "query": "FROM hosts h WHERE h.os = '\''linux'\'' ORDER BY h.ip LIMIT 10"
   }'
+```
+
+#### 6. Start the gRPC server
+
+```bash
+reddb-grpc --path ./data/reddb.rdb --bind 127.0.0.1:50051
+```
+
+#### 7. Query over gRPC
+
+```bash
+grpcurl \
+  -plaintext \
+  -d '{"query":"FROM hosts h WHERE h.os = \"linux\" LIMIT 5"}' \
+  127.0.0.1:50051 \
+  reddb.v1.RedDb/Query
+```
+
+#### 8. Create a row over gRPC
+
+```bash
+grpcurl \
+  -plaintext \
+  -d '{
+    "collection": "hosts",
+    "payloadJson": "{\"fields\":{\"ip\":\"10.0.0.3\",\"os\":\"linux\"}}"
+  }' \
+  127.0.0.1:50051 \
+  reddb.v1.RedDb/CreateRow
 ```
 
 ---
@@ -346,6 +377,7 @@ Use `reddb` directly as a Rust crate inside your process, or run it as a server.
 
 - embedded runtime with connection pool
 - HTTP server surface
+- gRPC server surface
 - collection scans
 - table query execution in `/query`
 - join execution in `/query`
@@ -392,6 +424,33 @@ Use `reddb` directly as a Rust crate inside your process, or run it as a server.
 - `GET /indexes`
 - `GET /graph/projections`
 - `GET /graph/jobs`
+- `POST /collections/{name}/rows`
+- `POST /collections/{name}/nodes`
+- `POST /collections/{name}/edges`
+- `POST /collections/{name}/vectors`
+- `POST /collections/{name}/bulk/rows`
+- `POST /collections/{name}/bulk/nodes`
+- `POST /collections/{name}/bulk/edges`
+- `POST /collections/{name}/bulk/vectors`
+- `PATCH /collections/{name}/entities/{id}`
+- `DELETE /collections/{name}/entities/{id}`
+- gRPC `Health`
+- gRPC `Ready`
+- gRPC `Stats`
+- gRPC `Collections`
+- gRPC `Scan`
+- gRPC `Query`
+- gRPC `CreateRow`
+- gRPC `CreateNode`
+- gRPC `CreateEdge`
+- gRPC `CreateVector`
+- gRPC `BulkCreateRows`
+- gRPC `BulkCreateNodes`
+- gRPC `BulkCreateEdges`
+- gRPC `BulkCreateVectors`
+- gRPC `PatchEntity`
+- gRPC `DeleteEntity`
+- gRPC `Checkpoint`
 
 ---
 
@@ -403,8 +462,8 @@ Use `reddb` directly as a Rust crate inside your process, or run it as a server.
 | Query | table, join, graph, path, vector and hybrid execution |
 | Search | text, similarity, IVF, hybrid |
 | Graph | traversals, pathfinding, centrality, communities, clustering, cycles |
-| Operations | health, stats, manifest, roots, snapshots, exports, retention |
-| Runtime | embedded runtime, connection pool, HTTP server |
+| Operations | health, stats, manifest, roots, snapshots, exports, retention, CRUD, bulk ingest |
+| Runtime | embedded runtime, connection pool, HTTP server, gRPC server |
 
 ---
 
@@ -437,6 +496,7 @@ Use `reddb` directly as a Rust crate inside your process, or run it as a server.
 4. **Operational surface**
    - embedded runtime
    - HTTP API
+   - gRPC API
    - health
    - stats
    - maintenance
@@ -462,7 +522,6 @@ What still needs to harden:
 - final physical publication model
 - persistent binary index formats
 - stronger SQL/table planner and executor depth
-- gRPC surface
 - replication and log shipping
 
 ---
