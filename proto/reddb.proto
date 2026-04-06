@@ -1,0 +1,76 @@
+syntax = "proto3";
+
+package reddb.v1;
+
+service RedDb {
+  rpc Health(Empty) returns (HealthReply);
+  rpc Ready(Empty) returns (HealthReply);
+  rpc Stats(Empty) returns (StatsReply);
+  rpc Collections(Empty) returns (CollectionsReply);
+  rpc Scan(ScanRequest) returns (ScanReply);
+  rpc Query(QueryRequest) returns (QueryReply);
+  rpc Checkpoint(Empty) returns (OperationReply);
+}
+
+message Empty {}
+
+message HealthReply {
+  bool healthy = 1;
+  string state = 2;
+  uint64 checked_at_unix_ms = 3;
+}
+
+message StatsReply {
+  uint64 collection_count = 1;
+  uint64 total_entities = 2;
+  uint64 total_memory_bytes = 3;
+  uint64 cross_ref_count = 4;
+  uint64 active_connections = 5;
+  uint64 idle_connections = 6;
+  uint64 total_checkouts = 7;
+  bool paged_mode = 8;
+  uint64 started_at_unix_ms = 9;
+}
+
+message CollectionsReply {
+  repeated string collections = 1;
+}
+
+message ScanRequest {
+  string collection = 1;
+  uint64 offset = 2;
+  uint64 limit = 3;
+}
+
+message ScanEntity {
+  uint64 id = 1;
+  string kind = 2;
+  string collection = 3;
+  string json = 4;
+}
+
+message ScanReply {
+  string collection = 1;
+  uint64 total = 2;
+  optional uint64 next_offset = 3;
+  repeated ScanEntity items = 4;
+}
+
+message QueryRequest {
+  string query = 1;
+}
+
+message QueryReply {
+  bool ok = 1;
+  string mode = 2;
+  string statement = 3;
+  string engine = 4;
+  repeated string columns = 5;
+  uint64 record_count = 6;
+  string result_json = 7;
+}
+
+message OperationReply {
+  bool ok = 1;
+  string message = 2;
+}

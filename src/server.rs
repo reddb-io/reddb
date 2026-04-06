@@ -6,9 +6,10 @@ use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::api::{RedDBOptions, RedDBResult};
 use crate::catalog::{CatalogModelSnapshot, CollectionDescriptor, CollectionModel, SchemaMode};
 use crate::health::{HealthProvider, HealthReport, HealthState};
-use crate::json::{parse_json, Map, Value as JsonValue};
+use crate::json::{parse_json, to_vec as json_to_vec, Map, Value as JsonValue};
 use crate::runtime::{
     RedDBRuntime, RuntimeFilter, RuntimeFilterValue, RuntimeGraphCentralityAlgorithm,
     RuntimeGraphCentralityResult, RuntimeGraphClusteringResult, RuntimeGraphCommunityAlgorithm,
@@ -21,10 +22,12 @@ use crate::runtime::{
     ScanCursor, ScanPage,
 };
 use crate::storage::unified::dsl::{MatchComponents, QueryResult as DslQueryResult};
+use crate::storage::unified::devx::refs::{NodeRef, TableRef, VectorRef};
+use crate::storage::unified::MetadataValue;
 use crate::storage::query::modes::QueryMode;
 use crate::storage::query::unified::{GraphPath, MatchedEdge, MatchedNode, QueryStats, UnifiedRecord, UnifiedResult, VectorSearchResult};
 use crate::storage::schema::Value;
-use crate::storage::{CrossRef, EntityData, EntityKind, SimilarResult, UnifiedEntity};
+use crate::storage::{CrossRef, EntityData, EntityId, EntityKind, SimilarResult, UnifiedEntity};
 
 #[derive(Debug, Clone)]
 pub struct ServerOptions {
@@ -33,6 +36,8 @@ pub struct ServerOptions {
     pub read_timeout_ms: u64,
     pub write_timeout_ms: u64,
     pub max_scan_limit: usize,
+    pub auth_token: Option<String>,
+    pub write_token: Option<String>,
 }
 
 impl Default for ServerOptions {
@@ -43,6 +48,8 @@ impl Default for ServerOptions {
             read_timeout_ms: 5_000,
             write_timeout_ms: 5_000,
             max_scan_limit: 1_000,
+            auth_token: None,
+            write_token: None,
         }
     }
 }
@@ -56,6 +63,14 @@ pub struct RedDBServer {
 impl RedDBServer {
     pub fn new(runtime: RedDBRuntime) -> Self {
         Self::with_options(runtime, ServerOptions::default())
+    }
+
+    pub fn from_database_options(
+        db_options: RedDBOptions,
+        server_options: ServerOptions,
+    ) -> RedDBResult<Self> {
+        let runtime = RedDBRuntime::with_options(db_options)?;
+        Ok(Self::with_options(runtime, server_options))
     }
 
     pub fn with_options(runtime: RedDBRuntime, options: ServerOptions) -> Self {
@@ -104,8 +119,13 @@ impl RedDBServer {
             method,
             path,
             query,
+            headers,
             body,
         } = request;
+
+        if !self.is_authorized(&method, &path, &headers) {
+            return json_error(401, "unauthorized");
+        }
 
         match (method.as_str(), path.as_str()) {
             ("GET", "/health") => {
@@ -219,6 +239,30 @@ impl RedDBServer {
                     }
                 }
                 if method == "POST" {
+                    if let Some(collection) = collection_from_action_path(&path, "bulk/rows") {
+                        return self.handle_bulk_create(collection, body, Self::handle_create_row);
+                    }
+                    if let Some(collection) = collection_from_action_path(&path, "bulk/nodes") {
+                        return self.handle_bulk_create(collection, body, Self::handle_create_node);
+                    }
+                    if let Some(collection) = collection_from_action_path(&path, "bulk/edges") {
+                        return self.handle_bulk_create(collection, body, Self::handle_create_edge);
+                    }
+                    if let Some(collection) = collection_from_action_path(&path, "bulk/vectors") {
+                        return self.handle_bulk_create(collection, body, Self::handle_create_vector);
+                    }
+                    if let Some(collection) = collection_from_action_path(&path, "rows") {
+                        return self.handle_create_row(collection, body);
+                    }
+                    if let Some(collection) = collection_from_action_path(&path, "nodes") {
+                        return self.handle_create_node(collection, body);
+                    }
+                    if let Some(collection) = collection_from_action_path(&path, "edges") {
+                        return self.handle_create_edge(collection, body);
+                    }
+                    if let Some(collection) = collection_from_action_path(&path, "vectors") {
+                        return self.handle_create_vector(collection, body);
+                    }
                     if let Some(name) = index_named_action_path(&path, "enable") {
                         return match self.runtime.set_index_enabled(&name, true) {
                             Ok(index) => json_response(200, physical_index_state_to_json(&index)),
@@ -247,6 +291,16 @@ impl RedDBServer {
                         return self.handle_rebuild_indexes(body, Some(collection));
                     }
                 }
+                if method == "PATCH" {
+                    if let Some((collection, id)) = collection_entity_path(&path) {
+                        return self.handle_patch_entity(collection, id, body);
+                    }
+                }
+                if method == "DELETE" {
+                    if let Some((collection, id)) = collection_entity_path(&path) {
+                        return self.handle_delete_entity(collection, id);
+                    }
+                }
                 json_error(404, format!("route not found: {} {}", method, path))
             }
         }
@@ -262,6 +316,31 @@ impl RedDBServer {
                 json_graph_projection(payload),
             )
             .map_err(|err| json_error(400, err.to_string()))
+    }
+
+    fn is_authorized(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &BTreeMap<String, String>,
+    ) -> bool {
+        if matches!((method, path), ("GET", "/health") | ("GET", "/ready")) {
+            return true;
+        }
+
+        let token = authorization_bearer_token(headers);
+        let is_write = !matches!(method, "GET" | "HEAD");
+
+        if is_write {
+            if let Some(expected) = self.options.write_token.as_deref() {
+                return token == Some(expected);
+            }
+        }
+
+        match self.options.auth_token.as_deref() {
+            Some(expected) => token == Some(expected),
+            None => !is_write || self.options.write_token.is_none() || token.is_some(),
+        }
     }
 
     fn handle_scan(&self, collection: &str, query: &BTreeMap<String, String>) -> HttpResponse {
@@ -282,6 +361,450 @@ impl RedDBServer {
         {
             Ok(page) => json_response(200, scan_page_to_json(&page)),
             Err(err) => json_error(404, err.to_string()),
+        }
+    }
+
+    fn handle_create_row(&self, collection: &str, body: Vec<u8>) -> HttpResponse {
+        let payload = match parse_json_body_allow_empty(&body) {
+            Ok(payload) => payload,
+            Err(response) => return response,
+        };
+        let Some(fields) = payload.get("fields").and_then(JsonValue::as_object) else {
+            return json_error(400, "JSON body must contain an object field named 'fields'");
+        };
+
+        let mut owned_fields = Vec::new();
+        for (key, value) in fields {
+            let value = match json_to_storage_value(value) {
+                Ok(value) => value,
+                Err(response) => return response,
+            };
+            owned_fields.push((key.clone(), value));
+        }
+
+        let columns: Vec<(&str, Value)> = owned_fields
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.clone()))
+            .collect();
+
+        let db = self.runtime.db();
+        let mut builder = db.row(collection, columns);
+
+        if let Some(metadata) = payload.get("metadata").and_then(JsonValue::as_object) {
+            for (key, value) in metadata {
+                let value = match json_to_metadata_value(value) {
+                    Ok(value) => value,
+                    Err(response) => return response,
+                };
+                builder = builder.metadata(key.clone(), value);
+            }
+        }
+
+        if let Some(links) = payload.get("links").and_then(JsonValue::as_object) {
+            if let Some(nodes) = links.get("nodes").and_then(JsonValue::as_array) {
+                for node in nodes {
+                    let (target_collection, id) = match json_collection_entity_ref(node, "node") {
+                        Ok(result) => result,
+                        Err(response) => return response,
+                    };
+                    builder =
+                        builder.link_to_node(NodeRef::new(target_collection, EntityId::new(id)));
+                }
+            }
+            if let Some(vectors) = links.get("vectors").and_then(JsonValue::as_array) {
+                for vector in vectors {
+                    let (target_collection, id) =
+                        match json_collection_entity_ref(vector, "vector") {
+                            Ok(result) => result,
+                            Err(response) => return response,
+                        };
+                    builder = builder
+                        .link_to_vector(VectorRef::new(target_collection, EntityId::new(id)));
+                }
+            }
+        }
+
+        match builder.save() {
+            Ok(id) => json_response(200, created_entity_to_json(&db, id)),
+            Err(err) => json_error(400, err.to_string()),
+        }
+    }
+
+    fn handle_create_node(&self, collection: &str, body: Vec<u8>) -> HttpResponse {
+        let payload = match parse_json_body_allow_empty(&body) {
+            Ok(payload) => payload,
+            Err(response) => return response,
+        };
+        let Some(label) = payload.get("label").and_then(JsonValue::as_str) else {
+            return json_error(400, "JSON body must contain a string field named 'label'");
+        };
+
+        let db = self.runtime.db();
+        let mut builder = db.node(collection, label);
+
+        if let Some(node_type) = payload.get("node_type").and_then(JsonValue::as_str) {
+            builder = builder.node_type(node_type.to_string());
+        }
+
+        if let Some(properties) = payload.get("properties").and_then(JsonValue::as_object) {
+            for (key, value) in properties {
+                let value = match json_to_storage_value(value) {
+                    Ok(value) => value,
+                    Err(response) => return response,
+                };
+                builder = builder.property(key.clone(), value);
+            }
+        }
+
+        if let Some(metadata) = payload.get("metadata").and_then(JsonValue::as_object) {
+            for (key, value) in metadata {
+                let value = match json_to_metadata_value(value) {
+                    Ok(value) => value,
+                    Err(response) => return response,
+                };
+                builder = builder.metadata(key.clone(), value);
+            }
+        }
+
+        if let Some(embeddings) = payload.get("embeddings").and_then(JsonValue::as_array) {
+            for embedding in embeddings {
+                let Some(object) = embedding.as_object() else {
+                    return json_error(400, "node embeddings must be objects");
+                };
+                let Some(name) = object.get("name").and_then(JsonValue::as_str) else {
+                    return json_error(400, "node embedding objects require 'name'");
+                };
+                let vector = match json_vector_from_value(object.get("vector"), "vector") {
+                    Ok(vector) => vector,
+                    Err(response) => return response,
+                };
+                if let Some(model) = object.get("model").and_then(JsonValue::as_str) {
+                    builder = builder.embedding_with_model(
+                        name.to_string(),
+                        vector,
+                        model.to_string(),
+                    );
+                } else {
+                    builder = builder.embedding(name.to_string(), vector);
+                }
+            }
+        }
+
+        if let Some(links) = payload.get("links").and_then(JsonValue::as_object) {
+            if let Some(tables) = links.get("tables").and_then(JsonValue::as_array) {
+                for table in tables {
+                    let Some(object) = table.as_object() else {
+                        return json_error(400, "table links must be objects");
+                    };
+                    let Some(key) = object.get("key").and_then(JsonValue::as_str) else {
+                        return json_error(400, "table links require 'key'");
+                    };
+                    let Some(table_name) = object.get("table").and_then(JsonValue::as_str) else {
+                        return json_error(400, "table links require 'table'");
+                    };
+                    let Some(row_id) = object.get("row_id").and_then(JsonValue::as_i64) else {
+                        return json_error(400, "table links require numeric 'row_id'");
+                    };
+                    builder = builder
+                        .link_to_table(key.to_string(), TableRef::new(table_name, row_id as u64));
+                }
+            }
+            if let Some(nodes) = links.get("nodes").and_then(JsonValue::as_array) {
+                for node in nodes {
+                    let Some(object) = node.as_object() else {
+                        return json_error(400, "node links must be objects");
+                    };
+                    let Some(target) = object.get("id").and_then(JsonValue::as_i64) else {
+                        return json_error(400, "node links require numeric 'id'");
+                    };
+                    let edge_label = object
+                        .get("edge_label")
+                        .and_then(JsonValue::as_str)
+                        .unwrap_or("RELATED_TO");
+                    let weight = object.get("weight").and_then(JsonValue::as_f64).unwrap_or(1.0);
+                    builder = builder.link_to_weighted(
+                        EntityId::new(target as u64),
+                        edge_label.to_string(),
+                        weight as f32,
+                    );
+                }
+            }
+        }
+
+        match builder.save() {
+            Ok(id) => json_response(200, created_entity_to_json(&db, id)),
+            Err(err) => json_error(400, err.to_string()),
+        }
+    }
+
+    fn handle_create_edge(&self, collection: &str, body: Vec<u8>) -> HttpResponse {
+        let payload = match parse_json_body_allow_empty(&body) {
+            Ok(payload) => payload,
+            Err(response) => return response,
+        };
+        let Some(label) = payload.get("label").and_then(JsonValue::as_str) else {
+            return json_error(400, "JSON body must contain a string field named 'label'");
+        };
+        let Some(from) = payload.get("from").and_then(JsonValue::as_i64) else {
+            return json_error(400, "JSON body must contain numeric field 'from'");
+        };
+        let Some(to) = payload.get("to").and_then(JsonValue::as_i64) else {
+            return json_error(400, "JSON body must contain numeric field 'to'");
+        };
+
+        let db = self.runtime.db();
+        let mut builder = db
+            .edge(collection, label)
+            .from(EntityId::new(from as u64))
+            .to(EntityId::new(to as u64));
+
+        if let Some(weight) = payload.get("weight").and_then(JsonValue::as_f64) {
+            builder = builder.weight(weight as f32);
+        }
+
+        if let Some(properties) = payload.get("properties").and_then(JsonValue::as_object) {
+            for (key, value) in properties {
+                let value = match json_to_storage_value(value) {
+                    Ok(value) => value,
+                    Err(response) => return response,
+                };
+                builder = builder.property(key.clone(), value);
+            }
+        }
+
+        if let Some(metadata) = payload.get("metadata").and_then(JsonValue::as_object) {
+            for (key, value) in metadata {
+                let value = match json_to_metadata_value(value) {
+                    Ok(value) => value,
+                    Err(response) => return response,
+                };
+                builder = builder.metadata(key.clone(), value);
+            }
+        }
+
+        match builder.save() {
+            Ok(id) => json_response(200, created_entity_to_json(&db, id)),
+            Err(err) => json_error(400, err.to_string()),
+        }
+    }
+
+    fn handle_bulk_create(
+        &self,
+        collection: &str,
+        body: Vec<u8>,
+        handler: fn(&Self, &str, Vec<u8>) -> HttpResponse,
+    ) -> HttpResponse {
+        let payload = match parse_json_body_allow_empty(&body) {
+            Ok(payload) => payload,
+            Err(response) => return response,
+        };
+        let Some(items) = payload.get("items").and_then(JsonValue::as_array) else {
+            return json_error(400, "JSON body must contain an array field named 'items'");
+        };
+        if items.is_empty() {
+            return json_error(400, "field 'items' cannot be empty");
+        }
+
+        let mut results = Vec::with_capacity(items.len());
+        for (index, item) in items.iter().enumerate() {
+            let item_body = match json_to_vec(item) {
+                Ok(body) => body,
+                Err(err) => {
+                    return json_error(
+                        400,
+                        format!("failed to encode bulk item at index {index}: {err}"),
+                    )
+                }
+            };
+            let response = handler(self, collection, item_body);
+            if response.status >= 400 {
+                let message = String::from_utf8_lossy(&response.body);
+                return json_error(
+                    response.status,
+                    format!("bulk item {index} failed: {message}"),
+                );
+            }
+
+            let parsed = match std::str::from_utf8(&response.body) {
+                Ok(text) => parse_json(text).ok().map(JsonValue::from).unwrap_or(JsonValue::Null),
+                Err(_) => JsonValue::Null,
+            };
+            results.push(parsed);
+        }
+
+        let mut object = Map::new();
+        object.insert("ok".to_string(), JsonValue::Bool(true));
+        object.insert("count".to_string(), JsonValue::Number(results.len() as f64));
+        object.insert("items".to_string(), JsonValue::Array(results));
+        json_response(200, JsonValue::Object(object))
+    }
+
+    fn handle_create_vector(&self, collection: &str, body: Vec<u8>) -> HttpResponse {
+        let payload = match parse_json_body_allow_empty(&body) {
+            Ok(payload) => payload,
+            Err(response) => return response,
+        };
+        let dense = match json_vector_from_value(payload.get("dense"), "dense") {
+            Ok(vector) => vector,
+            Err(response) => return response,
+        };
+
+        let db = self.runtime.db();
+        let mut builder = db.vector(collection).dense(dense);
+
+        if let Some(content) = payload.get("content").and_then(JsonValue::as_str) {
+            builder = builder.content(content.to_string());
+        }
+
+        if let Some(metadata) = payload.get("metadata").and_then(JsonValue::as_object) {
+            for (key, value) in metadata {
+                let value = match json_to_metadata_value(value) {
+                    Ok(value) => value,
+                    Err(response) => return response,
+                };
+                builder = builder.metadata(key.clone(), value);
+            }
+        }
+
+        if let Some(link) = payload.get("link").and_then(JsonValue::as_object) {
+            if let Some(row) = link.get("row") {
+                let Some(object) = row.as_object() else {
+                    return json_error(400, "vector row link must be an object");
+                };
+                let Some(table) = object.get("table").and_then(JsonValue::as_str) else {
+                    return json_error(400, "vector row link requires 'table'");
+                };
+                let Some(row_id) = object.get("row_id").and_then(JsonValue::as_i64) else {
+                    return json_error(400, "vector row link requires numeric 'row_id'");
+                };
+                builder = builder.link_to_table(TableRef::new(table, row_id as u64));
+            }
+            if let Some(node) = link.get("node") {
+                let (target_collection, id) = match json_collection_entity_ref(node, "node") {
+                    Ok(result) => result,
+                    Err(response) => return response,
+                };
+                builder = builder.link_to_node(NodeRef::new(target_collection, EntityId::new(id)));
+            }
+        }
+
+        match builder.save() {
+            Ok(id) => json_response(200, created_entity_to_json(&db, id)),
+            Err(err) => json_error(400, err.to_string()),
+        }
+    }
+
+    fn handle_patch_entity(&self, collection: &str, id: u64, body: Vec<u8>) -> HttpResponse {
+        let payload = match parse_json_body_allow_empty(&body) {
+            Ok(payload) => payload,
+            Err(response) => return response,
+        };
+
+        let db = self.runtime.db();
+        let store = db.store();
+        let Some(manager) = store.get_collection(collection) else {
+            return json_error(404, format!("collection not found: {collection}"));
+        };
+        let entity_id = EntityId::new(id);
+        let Some(mut entity) = manager.get(entity_id) else {
+            return json_error(404, format!("entity not found: {id}"));
+        };
+
+        if let Some(fields) = payload.get("fields").and_then(JsonValue::as_object) {
+            match &mut entity.data {
+                EntityData::Row(row) => {
+                    let named = row.named.get_or_insert_with(Default::default);
+                    for (key, value) in fields {
+                        let value = match json_to_storage_value(value) {
+                            Ok(value) => value,
+                            Err(response) => return response,
+                        };
+                        named.insert(key.clone(), value);
+                    }
+                }
+                EntityData::Node(node) => {
+                    for (key, value) in fields {
+                        let value = match json_to_storage_value(value) {
+                            Ok(value) => value,
+                            Err(response) => return response,
+                        };
+                        node.properties.insert(key.clone(), value);
+                    }
+                }
+                EntityData::Edge(edge) => {
+                    for (key, value) in fields {
+                        let value = match json_to_storage_value(value) {
+                            Ok(value) => value,
+                            Err(response) => return response,
+                        };
+                        edge.properties.insert(key.clone(), value);
+                    }
+                }
+                EntityData::Vector(vector) => {
+                    if let Some(content) = fields.get("content").and_then(JsonValue::as_str) {
+                        vector.content = Some(content.to_string());
+                    }
+                    if let Some(dense) = fields.get("dense") {
+                        let dense = match json_vector_from_value(Some(dense), "dense") {
+                            Ok(vector) => vector,
+                            Err(response) => return response,
+                        };
+                        vector.dense = dense;
+                    }
+                }
+            }
+        }
+
+        if let Some(metadata) = payload.get("metadata").and_then(JsonValue::as_object) {
+            let mut merged = store
+                .get_metadata(collection, entity_id)
+                .unwrap_or_else(crate::storage::unified::Metadata::new);
+            for (key, value) in metadata {
+                let value = match json_to_metadata_value(value) {
+                    Ok(value) => value,
+                    Err(response) => return response,
+                };
+                merged.set(key.clone(), value);
+            }
+            if let Err(err) = store.set_metadata(collection, entity_id, merged) {
+                return json_error(400, err.to_string());
+            }
+        }
+
+        if let Some(weight) = payload.get("weight").and_then(JsonValue::as_f64) {
+            if let EntityData::Edge(edge) = &mut entity.data {
+                edge.weight = weight as f32;
+            }
+        }
+
+        entity.updated_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        match manager.update(entity) {
+            Ok(()) => json_response(200, created_entity_to_json(&db, entity_id)),
+            Err(err) => json_error(400, err.to_string()),
+        }
+    }
+
+    fn handle_delete_entity(&self, collection: &str, id: u64) -> HttpResponse {
+        let db = self.runtime.db();
+        let deleted = db
+            .store()
+            .delete(collection, EntityId::new(id))
+            .map_err(|err| err.to_string());
+
+        match deleted {
+            Ok(true) => {
+                let mut object = Map::new();
+                object.insert("ok".to_string(), JsonValue::Bool(true));
+                object.insert("deleted".to_string(), JsonValue::Bool(true));
+                object.insert("id".to_string(), JsonValue::Number(id as f64));
+                json_response(200, JsonValue::Object(object))
+            }
+            Ok(false) => json_error(404, format!("entity not found: {id}")),
+            Err(err) => json_error(400, err),
         }
     }
 
@@ -860,6 +1383,7 @@ struct HttpRequest {
     method: String,
     path: String,
     query: BTreeMap<String, String>,
+    headers: BTreeMap<String, String>,
     body: Vec<u8>,
 }
 
@@ -938,6 +1462,7 @@ impl HttpRequest {
             method,
             path,
             query,
+            headers,
             body,
         })
     }
@@ -1008,6 +1533,20 @@ fn collection_from_action_path<'a>(path: &'a str, action: &str) -> Option<&'a st
         None
     } else {
         Some(collection)
+    }
+}
+
+fn collection_entity_path(path: &str) -> Option<(&str, u64)> {
+    let prefix = "/collections/";
+    let suffix = "/entities/";
+    let trimmed = path.strip_prefix(prefix)?;
+    let (collection, id) = trimmed.split_once(suffix)?;
+    let collection = collection.trim_matches('/');
+    let id = id.trim_matches('/').parse::<u64>().ok()?;
+    if collection.is_empty() {
+        None
+    } else {
+        Some((collection, id))
     }
 }
 
@@ -1111,6 +1650,30 @@ fn json_vector_field(payload: &JsonValue, field: &str) -> Result<Vec<f32>, HttpR
     Ok(vector)
 }
 
+fn json_vector_from_value(
+    value: Option<&JsonValue>,
+    field: &str,
+) -> Result<Vec<f32>, HttpResponse> {
+    let Some(JsonValue::Array(values)) = value else {
+        return Err(json_error(
+            400,
+            format!("JSON body must contain an array field named '{field}'"),
+        ));
+    };
+    if values.is_empty() {
+        return Err(json_error(400, format!("field '{field}' cannot be empty")));
+    }
+
+    let mut vector = Vec::with_capacity(values.len());
+    for value in values {
+        let number = value.as_f64().ok_or_else(|| {
+            json_error(400, format!("field '{field}' must contain only numbers"))
+        })?;
+        vector.push(number as f32);
+    }
+    Ok(vector)
+}
+
 fn optional_json_vector_field(
     payload: &JsonValue,
     field: &str,
@@ -1144,6 +1707,86 @@ fn json_f32_field(payload: &JsonValue, field: &str) -> Option<f32> {
 
 fn json_bool_field(payload: &JsonValue, field: &str) -> Option<bool> {
     payload.get(field).and_then(JsonValue::as_bool)
+}
+
+fn authorization_bearer_token<'a>(headers: &'a BTreeMap<String, String>) -> Option<&'a str> {
+    headers.get("authorization")?.strip_prefix("Bearer ")
+}
+
+fn json_collection_entity_ref(
+    value: &JsonValue,
+    kind: &str,
+) -> Result<(String, u64), HttpResponse> {
+    let Some(object) = value.as_object() else {
+        return Err(json_error(400, format!("{kind} link must be an object")));
+    };
+    let Some(collection) = object.get("collection").and_then(JsonValue::as_str) else {
+        return Err(json_error(400, format!("{kind} link requires 'collection'")));
+    };
+    let Some(id) = object.get("id").and_then(JsonValue::as_i64) else {
+        return Err(json_error(400, format!("{kind} link requires numeric 'id'")));
+    };
+    Ok((collection.to_string(), id as u64))
+}
+
+fn json_to_storage_value(value: &JsonValue) -> Result<Value, HttpResponse> {
+    match value {
+        JsonValue::Null => Ok(Value::Null),
+        JsonValue::Bool(value) => Ok(Value::Boolean(*value)),
+        JsonValue::Number(value) => {
+            if value.fract().abs() < f64::EPSILON {
+                Ok(Value::Integer(*value as i64))
+            } else {
+                Ok(Value::Float(*value))
+            }
+        }
+        JsonValue::String(value) => Ok(Value::Text(value.clone())),
+        JsonValue::Array(_) | JsonValue::Object(_) => json_to_vec(value)
+            .map(Value::Json)
+            .map_err(|err| json_error(400, format!("failed to serialize JSON value: {err}"))),
+    }
+}
+
+fn json_to_metadata_value(value: &JsonValue) -> Result<MetadataValue, HttpResponse> {
+    match value {
+        JsonValue::Null => Ok(MetadataValue::Null),
+        JsonValue::Bool(value) => Ok(MetadataValue::Bool(*value)),
+        JsonValue::Number(value) => {
+            if value.fract().abs() < f64::EPSILON {
+                Ok(MetadataValue::Int(*value as i64))
+            } else {
+                Ok(MetadataValue::Float(*value))
+            }
+        }
+        JsonValue::String(value) => Ok(MetadataValue::String(value.clone())),
+        JsonValue::Array(values) => {
+            let mut items = Vec::with_capacity(values.len());
+            for value in values {
+                items.push(json_to_metadata_value(value)?);
+            }
+            Ok(MetadataValue::Array(items))
+        }
+        JsonValue::Object(map) => {
+            let mut object = std::collections::HashMap::new();
+            for (key, value) in map {
+                object.insert(key.clone(), json_to_metadata_value(value)?);
+            }
+            Ok(MetadataValue::Object(object))
+        }
+    }
+}
+
+fn created_entity_to_json(db: &crate::storage::RedDB, id: EntityId) -> JsonValue {
+    let mut object = Map::new();
+    object.insert("ok".to_string(), JsonValue::Bool(true));
+    object.insert("id".to_string(), JsonValue::Number(id.raw() as f64));
+    object.insert(
+        "entity".to_string(),
+        db.get(id)
+            .map(|entity| entity_to_json(&entity))
+            .unwrap_or(JsonValue::Null),
+    );
+    JsonValue::Object(object)
 }
 
 fn json_string_list_field(payload: &JsonValue, field: &str) -> Option<Vec<String>> {

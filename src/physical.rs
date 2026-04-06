@@ -1,4 +1,4 @@
-//! Physical storage design primitives inspired by TigerBeetle's layout.
+//! Physical storage design primitives for RedDB's deterministic on-disk layout.
 
 use std::collections::BTreeMap;
 use std::fs;
