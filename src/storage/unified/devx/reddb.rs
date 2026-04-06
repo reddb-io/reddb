@@ -21,15 +21,26 @@ use super::query::QueryBuilder;
 use super::refs::{NodeRef, TableRef, VectorRef};
 use super::types::{LinkedEntity, SimilarResult};
 use crate::api::{Capability, CatalogSnapshot, CollectionStats, RedDBOptions, StorageMode};
-use crate::catalog::{snapshot_store, CatalogModelSnapshot, CollectionDescriptor, CollectionModel};
+use crate::catalog::{
+    consistency_report, snapshot_store_with_declarations, CatalogConsistencyReport,
+    CatalogDeclarations, CatalogModelSnapshot,
+    CollectionDescriptor, CollectionModel,
+};
 use crate::health::{storage_file_health, HealthReport};
 use crate::index::{IndexCatalog, IndexConfig as RuntimeIndexConfig, IndexKind};
 use crate::physical::{
     ExportDescriptor, PhysicalAnalyticsJob, PhysicalGraphProjection, PhysicalIndexState,
     PhysicalMetadataFile,
 };
-use crate::storage::engine::PhysicalFileHeader;
+use crate::storage::engine::{HnswIndex, IvfConfig, IvfIndex, IvfStats, PhysicalFileHeader};
 use crate::storage::schema::Value;
+use crate::storage::unified::store::{
+    NativeCatalogCollectionSummary, NativeCatalogSummary, NativeExportSummary,
+    NativeManifestSummary, NativeMetadataStateSummary, NativePhysicalState,
+    NativeRecoverySummary, NativeRegistryIndexSummary, NativeRegistryJobSummary,
+    NativeRegistryProjectionSummary, NativeRegistrySummary, NativeSnapshotSummary,
+    NativeVectorArtifactPageSummary, NativeVectorArtifactSummary,
+};
 
 /// RedDB - Unified Database with Best-in-Class DevX
 ///
@@ -69,6 +80,50 @@ pub enum NativeHeaderRepairPolicy {
     InSync,
     RepairNativeFromMetadata,
     NativeAheadOfMetadata,
+}
+
+#[derive(Debug, Clone)]
+pub struct PhysicalAuthorityStatus {
+    pub preference: String,
+    pub sidecar_available: bool,
+    pub native_state_available: bool,
+    pub native_bootstrap_ready: bool,
+    pub native_registry_complete: Option<bool>,
+    pub native_recovery_complete: Option<bool>,
+    pub native_catalog_complete: Option<bool>,
+    pub sidecar_loaded_from: Option<String>,
+    pub native_header_repair_policy: Option<String>,
+    pub metadata_sequence: Option<u64>,
+    pub native_sequence: Option<u64>,
+    pub native_metadata_last_loaded_from: Option<String>,
+    pub native_metadata_generated_at_unix_ms: Option<u128>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NativeVectorArtifactInspection {
+    pub collection: String,
+    pub artifact_kind: String,
+    pub root_page: u32,
+    pub page_count: u32,
+    pub byte_len: u64,
+    pub checksum: u64,
+    pub node_count: u64,
+    pub dimension: u32,
+    pub max_layer: u32,
+    pub total_connections: u64,
+    pub avg_connections: f64,
+    pub entry_point: Option<u64>,
+    pub ivf_n_lists: Option<u32>,
+    pub ivf_non_empty_lists: Option<u32>,
+    pub ivf_trained: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NativeVectorArtifactBatchInspection {
+    pub inspected_count: usize,
+    pub valid_count: usize,
+    pub artifacts: Vec<NativeVectorArtifactInspection>,
+    pub failures: Vec<(String, String, String)>,
 }
 
 impl RedDB {
@@ -202,6 +257,286 @@ impl RedDB {
             .ok()
     }
 
+    /// Read native manifest summary persisted in the paged file, when available.
+    pub fn native_manifest_summary(&self) -> Option<NativeManifestSummary> {
+        let header = self.store.physical_file_header()?;
+        self.store.read_native_manifest_summary(header.manifest_page).ok()
+    }
+
+    /// Read native operational registry summary persisted in the paged file, when available.
+    pub fn native_registry_summary(&self) -> Option<NativeRegistrySummary> {
+        let header = self.store.physical_file_header()?;
+        self.store.read_native_registry_summary(header.registry_page).ok()
+    }
+
+    /// Read native snapshot/export summary persisted in the paged file, when available.
+    pub fn native_recovery_summary(&self) -> Option<NativeRecoverySummary> {
+        let header = self.store.physical_file_header()?;
+        self.store.read_native_recovery_summary(header.recovery_page).ok()
+    }
+
+    /// Read native catalog summary persisted in the paged file, when available.
+    pub fn native_catalog_summary(&self) -> Option<NativeCatalogSummary> {
+        let header = self.store.physical_file_header()?;
+        self.store.read_native_catalog_summary(header.catalog_page).ok()
+    }
+
+    /// Read native metadata status persisted in the paged file, when available.
+    pub fn native_metadata_state_summary(&self) -> Option<NativeMetadataStateSummary> {
+        let header = self.store.physical_file_header()?;
+        self.store
+            .read_native_metadata_state_summary(header.metadata_state_page)
+            .ok()
+    }
+
+    /// Read the consolidated native physical publication state from the paged file.
+    pub fn native_physical_state(&self) -> Option<NativePhysicalState> {
+        self.store.read_native_physical_state().ok()
+    }
+
+    /// Read native vector artifact pages persisted in the paged file, when available.
+    pub fn native_vector_artifact_pages(&self) -> Option<Vec<NativeVectorArtifactPageSummary>> {
+        let header = self.store.physical_file_header()?;
+        self.store
+            .read_native_vector_artifact_store(header.vector_artifact_page)
+            .ok()
+    }
+
+    pub fn inspect_native_vector_artifact(
+        &self,
+        collection: &str,
+        artifact_kind: Option<&str>,
+    ) -> Result<NativeVectorArtifactInspection, String> {
+        let header = self
+            .store
+            .physical_file_header()
+            .ok_or_else(|| "native physical header is not available".to_string())?;
+        if header.vector_artifact_page == 0 {
+            return Err("native vector artifact store is not available".to_string());
+        }
+        let artifact_kind = artifact_kind.unwrap_or("hnsw");
+        let (summary, bytes) = self
+            .store
+            .read_native_vector_artifact_blob(
+                header.vector_artifact_page,
+                collection,
+                Some(artifact_kind),
+            )
+            .map_err(|err| err.to_string())?
+            .ok_or_else(|| {
+                format!(
+                    "native vector artifact not found for collection '{collection}' and kind '{artifact_kind}'"
+                )
+            })?;
+        match artifact_kind {
+            "hnsw" => {
+                let index = HnswIndex::from_bytes(&bytes)?;
+                let stats = index.stats();
+                Ok(NativeVectorArtifactInspection {
+                    collection: summary.collection,
+                    artifact_kind: summary.artifact_kind,
+                    root_page: summary.root_page,
+                    page_count: summary.page_count,
+                    byte_len: summary.byte_len,
+                    checksum: summary.checksum,
+                    node_count: stats.node_count as u64,
+                    dimension: stats.dimension as u32,
+                    max_layer: stats.max_layer as u32,
+                    total_connections: stats.total_connections as u64,
+                    avg_connections: stats.avg_connections,
+                    entry_point: stats.entry_point,
+                    ivf_n_lists: None,
+                    ivf_non_empty_lists: None,
+                    ivf_trained: None,
+                })
+            }
+            "ivf" => {
+                let index = IvfIndex::from_bytes(&bytes)?;
+                let stats: IvfStats = index.stats();
+                Ok(NativeVectorArtifactInspection {
+                    collection: summary.collection,
+                    artifact_kind: summary.artifact_kind,
+                    root_page: summary.root_page,
+                    page_count: summary.page_count,
+                    byte_len: summary.byte_len,
+                    checksum: summary.checksum,
+                    node_count: stats.total_vectors as u64,
+                    dimension: stats.dimension as u32,
+                    max_layer: 0,
+                    total_connections: 0,
+                    avg_connections: 0.0,
+                    entry_point: None,
+                    ivf_n_lists: Some(stats.n_lists as u32),
+                    ivf_non_empty_lists: Some(stats.non_empty_lists as u32),
+                    ivf_trained: Some(stats.trained),
+                })
+            }
+            other => Err(format!("unsupported native vector artifact kind '{other}'")),
+        }
+    }
+
+    pub fn warmup_native_vector_artifact(
+        &self,
+        collection: &str,
+        artifact_kind: Option<&str>,
+    ) -> Result<NativeVectorArtifactInspection, String> {
+        self.inspect_native_vector_artifact(collection, artifact_kind)
+    }
+
+    pub fn inspect_native_vector_artifacts(
+        &self,
+    ) -> Result<NativeVectorArtifactBatchInspection, String> {
+        let summaries = self
+            .native_vector_artifact_pages()
+            .ok_or_else(|| "native vector artifact store is not available".to_string())?;
+        let mut artifacts = Vec::new();
+        let mut failures = Vec::new();
+        for summary in summaries {
+            match self.inspect_native_vector_artifact(
+                &summary.collection,
+                Some(&summary.artifact_kind),
+            ) {
+                Ok(artifact) => artifacts.push(artifact),
+                Err(err) => failures.push((
+                    summary.collection,
+                    summary.artifact_kind,
+                    err,
+                )),
+            }
+        }
+        Ok(NativeVectorArtifactBatchInspection {
+            inspected_count: artifacts.len() + failures.len(),
+            valid_count: artifacts.len(),
+            artifacts,
+            failures,
+        })
+    }
+
+    pub fn warmup_native_vector_artifacts(
+        &self,
+    ) -> Result<NativeVectorArtifactBatchInspection, String> {
+        self.inspect_native_vector_artifacts()
+    }
+
+    /// Inspect which physical source is currently authoritative for operational recovery.
+    pub fn physical_authority_status(&self) -> PhysicalAuthorityStatus {
+        if self.options.mode != StorageMode::Persistent {
+            return PhysicalAuthorityStatus {
+                preference: "not_persistent".to_string(),
+                sidecar_available: false,
+                native_state_available: false,
+                native_bootstrap_ready: false,
+                native_registry_complete: None,
+                native_recovery_complete: None,
+                native_catalog_complete: None,
+                sidecar_loaded_from: None,
+                native_header_repair_policy: None,
+                metadata_sequence: None,
+                native_sequence: None,
+                native_metadata_last_loaded_from: None,
+                native_metadata_generated_at_unix_ms: None,
+            };
+        }
+
+        let native_state = self.native_physical_state();
+        let native_header_repair_policy = self.native_header_repair_policy().map(|policy| {
+            match policy {
+                NativeHeaderRepairPolicy::InSync => "in_sync",
+                NativeHeaderRepairPolicy::RepairNativeFromMetadata => {
+                    "repair_native_from_metadata"
+                }
+                NativeHeaderRepairPolicy::NativeAheadOfMetadata => "native_ahead_of_metadata",
+            }
+            .to_string()
+        });
+
+        let Some(path) = self.path() else {
+            return PhysicalAuthorityStatus {
+                preference: "path_unavailable".to_string(),
+                sidecar_available: false,
+                native_state_available: native_state.is_some(),
+                native_bootstrap_ready: native_state
+                    .as_ref()
+                    .map(Self::native_state_is_bootstrap_complete)
+                    .unwrap_or(false),
+                native_registry_complete: native_state
+                    .as_ref()
+                    .and_then(|state| state.registry.as_ref())
+                    .map(|registry| {
+                        registry.collections_complete
+                            && registry.indexes_complete
+                            && registry.graph_projections_complete
+                            && registry.analytics_jobs_complete
+                            && registry.vector_artifacts_complete
+                    }),
+                native_recovery_complete: native_state
+                    .as_ref()
+                    .and_then(|state| state.recovery.as_ref())
+                    .map(|recovery| recovery.snapshots_complete && recovery.exports_complete),
+                native_catalog_complete: native_state
+                    .as_ref()
+                    .and_then(|state| state.catalog.as_ref())
+                    .map(|catalog| catalog.collections_complete),
+                sidecar_loaded_from: None,
+                native_header_repair_policy,
+                metadata_sequence: None,
+                native_sequence: native_state.as_ref().map(|state| state.header.sequence),
+                native_metadata_last_loaded_from: native_state
+                    .as_ref()
+                    .and_then(|state| state.metadata_state.as_ref())
+                    .and_then(|summary| summary.last_loaded_from.clone()),
+                native_metadata_generated_at_unix_ms: native_state
+                    .as_ref()
+                    .and_then(|state| state.metadata_state.as_ref())
+                    .map(|summary| summary.generated_at_unix_ms),
+            };
+        };
+
+        let sidecar = PhysicalMetadataFile::load_for_data_path_with_source(path).ok();
+        PhysicalAuthorityStatus {
+            preference: self
+                .physical_metadata_preference()
+                .unwrap_or("unknown")
+                .to_string(),
+            sidecar_available: sidecar.is_some(),
+            native_state_available: native_state.is_some(),
+            native_bootstrap_ready: native_state
+                .as_ref()
+                .map(Self::native_state_is_bootstrap_complete)
+                .unwrap_or(false),
+            native_registry_complete: native_state
+                .as_ref()
+                .and_then(|state| state.registry.as_ref())
+                .map(|registry| {
+                    registry.collections_complete
+                        && registry.indexes_complete
+                        && registry.graph_projections_complete
+                        && registry.analytics_jobs_complete
+                        && registry.vector_artifacts_complete
+                }),
+            native_recovery_complete: native_state
+                .as_ref()
+                .and_then(|state| state.recovery.as_ref())
+                .map(|recovery| recovery.snapshots_complete && recovery.exports_complete),
+            native_catalog_complete: native_state
+                .as_ref()
+                .and_then(|state| state.catalog.as_ref())
+                .map(|catalog| catalog.collections_complete),
+            sidecar_loaded_from: sidecar.as_ref().map(|(_, source)| source.as_str().to_string()),
+            native_header_repair_policy,
+            metadata_sequence: sidecar.as_ref().map(|(metadata, _)| metadata.superblock.sequence),
+            native_sequence: native_state.as_ref().map(|state| state.header.sequence),
+            native_metadata_last_loaded_from: native_state
+                .as_ref()
+                .and_then(|state| state.metadata_state.as_ref())
+                .and_then(|summary| summary.last_loaded_from.clone()),
+            native_metadata_generated_at_unix_ms: native_state
+                .as_ref()
+                .and_then(|state| state.metadata_state.as_ref())
+                .map(|summary| summary.generated_at_unix_ms),
+        }
+    }
+
     /// Decide how to reconcile page-0 native state against persisted physical metadata.
     pub fn native_header_repair_policy(&self) -> Option<NativeHeaderRepairPolicy> {
         let inspection = self.inspect_native_header()?;
@@ -227,6 +562,20 @@ impl RedDB {
         }
 
         Ok(policy)
+    }
+
+    /// Republish the full native physical publication state from the current physical metadata view.
+    pub fn repair_native_physical_state_from_metadata(
+        &self,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        if self.options.mode != StorageMode::Persistent || !self.paged_mode || self.options.read_only
+        {
+            return Ok(false);
+        }
+
+        let metadata = self.load_or_bootstrap_physical_metadata(true)?;
+        self.persist_native_physical_header(&metadata)?;
+        Ok(true)
     }
 
     /// Provide a compact catalog snapshot for management/runtime layers.
@@ -268,7 +617,21 @@ impl RedDB {
     /// Full logical catalog snapshot including inferred collection models and indices.
     pub fn catalog_model_snapshot(&self) -> CatalogModelSnapshot {
         let catalog = self.runtime_index_catalog();
-        snapshot_store("reddb", self.store.as_ref(), Some(&catalog))
+        let declarations = self.physical_metadata().map(|metadata| CatalogDeclarations {
+            indexes: metadata.indexes,
+            graph_projections: metadata.graph_projections,
+            analytics_jobs: metadata.analytics_jobs,
+        });
+        snapshot_store_with_declarations(
+            "reddb",
+            self.store.as_ref(),
+            Some(&catalog),
+            declarations.as_ref(),
+        )
+    }
+
+    pub fn catalog_consistency_report(&self) -> CatalogConsistencyReport {
+        consistency_report(&self.catalog_model_snapshot())
     }
 
     /// Health report for the current database handle.
@@ -279,6 +642,87 @@ impl RedDB {
         };
         report = report.with_diagnostic("collections", self.collections().len().to_string());
         report = report.with_diagnostic("entities", self.stats().total_entities.to_string());
+        let catalog_consistency = self.catalog_consistency_report();
+        report = report.with_diagnostic(
+            "catalog.declared_indexes",
+            catalog_consistency.declared_index_count.to_string(),
+        );
+        report = report.with_diagnostic(
+            "catalog.operational_indexes",
+            catalog_consistency.operational_index_count.to_string(),
+        );
+        report = report.with_diagnostic(
+            "catalog.declared_graph_projections",
+            catalog_consistency.declared_graph_projection_count.to_string(),
+        );
+        report = report.with_diagnostic(
+            "catalog.operational_graph_projections",
+            catalog_consistency.operational_graph_projection_count.to_string(),
+        );
+        report = report.with_diagnostic(
+            "catalog.declared_analytics_jobs",
+            catalog_consistency.declared_analytics_job_count.to_string(),
+        );
+        report = report.with_diagnostic(
+            "catalog.operational_analytics_jobs",
+            catalog_consistency.operational_analytics_job_count.to_string(),
+        );
+        report = report.with_diagnostic(
+            "catalog.missing_operational_indexes",
+            catalog_consistency.missing_operational_indexes.len().to_string(),
+        );
+        report = report.with_diagnostic(
+            "catalog.undeclared_operational_indexes",
+            catalog_consistency.undeclared_operational_indexes.len().to_string(),
+        );
+        report = report.with_diagnostic(
+            "catalog.missing_operational_graph_projections",
+            catalog_consistency
+                .missing_operational_graph_projections
+                .len()
+                .to_string(),
+        );
+        report = report.with_diagnostic(
+            "catalog.undeclared_operational_graph_projections",
+            catalog_consistency
+                .undeclared_operational_graph_projections
+                .len()
+                .to_string(),
+        );
+        report = report.with_diagnostic(
+            "catalog.missing_operational_analytics_jobs",
+            catalog_consistency
+                .missing_operational_analytics_jobs
+                .len()
+                .to_string(),
+        );
+        report = report.with_diagnostic(
+            "catalog.undeclared_operational_analytics_jobs",
+            catalog_consistency
+                .undeclared_operational_analytics_jobs
+                .len()
+                .to_string(),
+        );
+        if !catalog_consistency.missing_operational_indexes.is_empty()
+            || !catalog_consistency.undeclared_operational_indexes.is_empty()
+            || !catalog_consistency
+                .missing_operational_graph_projections
+                .is_empty()
+            || !catalog_consistency
+                .undeclared_operational_graph_projections
+                .is_empty()
+            || !catalog_consistency
+                .missing_operational_analytics_jobs
+                .is_empty()
+            || !catalog_consistency
+                .undeclared_operational_analytics_jobs
+                .is_empty()
+        {
+            report.issue(
+                "catalog_consistency",
+                "declared and operational catalog state are diverging",
+            );
+        }
         report = report.with_diagnostic(
             "retention.snapshots",
             self.options.snapshot_retention.to_string(),
@@ -288,7 +732,9 @@ impl RedDB {
             self.options.export_retention.to_string(),
         );
         if let Some(path) = self.path() {
-            if let Some(native) = self.store.physical_file_header() {
+            let metadata_for_native = self.physical_metadata();
+            if let Some(native_state) = self.native_physical_state() {
+                let native = native_state.header;
                 report = report.with_diagnostic(
                     "native_header.sequence",
                     native.sequence.to_string(),
@@ -308,6 +754,14 @@ impl RedDB {
                 report = report.with_diagnostic(
                     "native_header.free_set_root",
                     native.free_set_root.to_string(),
+                );
+                report = report.with_diagnostic(
+                    "native_header.manifest_page",
+                    native.manifest_page.to_string(),
+                );
+                report = report.with_diagnostic(
+                    "native_header.manifest_checksum",
+                    native.manifest_checksum.to_string(),
                 );
                 report = report.with_diagnostic(
                     "native_header.collection_roots_page",
@@ -353,18 +807,330 @@ impl RedDB {
                     "native_header.manifest_event_count",
                     native.manifest_event_count.to_string(),
                 );
-                if let Some(native_roots) = self.native_collection_roots() {
+                report = report.with_diagnostic(
+                    "native_header.registry_page",
+                    native.registry_page.to_string(),
+                );
+                report = report.with_diagnostic(
+                    "native_header.registry_checksum",
+                    native.registry_checksum.to_string(),
+                );
+                report = report.with_diagnostic(
+                    "native_header.recovery_page",
+                    native.recovery_page.to_string(),
+                );
+                report = report.with_diagnostic(
+                    "native_header.recovery_checksum",
+                    native.recovery_checksum.to_string(),
+                );
+                report = report.with_diagnostic(
+                    "native_header.catalog_page",
+                    native.catalog_page.to_string(),
+                );
+                report = report.with_diagnostic(
+                    "native_header.catalog_checksum",
+                    native.catalog_checksum.to_string(),
+                );
+                report = report.with_diagnostic(
+                    "native_header.metadata_state_page",
+                    native.metadata_state_page.to_string(),
+                );
+                report = report.with_diagnostic(
+                    "native_header.metadata_state_checksum",
+                    native.metadata_state_checksum.to_string(),
+                );
+                report = report.with_diagnostic(
+                    "native_header.vector_artifact_page",
+                    native.vector_artifact_page.to_string(),
+                );
+                report = report.with_diagnostic(
+                    "native_header.vector_artifact_checksum",
+                    native.vector_artifact_checksum.to_string(),
+                );
+                report = report.with_diagnostic(
+                    "native_collection_roots.entries",
+                    native_state.collection_roots.len().to_string(),
+                );
+                if let Some(vector_artifact_pages) = native_state.vector_artifact_pages.as_ref() {
                     report = report.with_diagnostic(
-                        "native_collection_roots.entries",
-                        native_roots.len().to_string(),
+                        "native_vector_artifacts.page_count",
+                        vector_artifact_pages.len().to_string(),
                     );
-                    if native_roots != metadata.superblock.collection_roots {
+                    match self.inspect_native_vector_artifacts() {
+                        Ok(batch) => {
+                            report = report.with_diagnostic(
+                                "native_vector_artifacts.inspected_count",
+                                batch.inspected_count.to_string(),
+                            );
+                            report = report.with_diagnostic(
+                                "native_vector_artifacts.valid_count",
+                                batch.valid_count.to_string(),
+                            );
+                            report = report.with_diagnostic(
+                                "native_vector_artifacts.failure_count",
+                                batch.failures.len().to_string(),
+                            );
+                            if !batch.failures.is_empty() {
+                                report.issue(
+                                    "native_vector_artifacts",
+                                    "one or more native vector artifacts could not be deserialized",
+                                );
+                            }
+                        }
+                        Err(err) => report.issue("native_vector_artifacts", err),
+                    }
+                }
+                if let Some(metadata) = metadata_for_native.as_ref() {
+                    if native_state.collection_roots != metadata.superblock.collection_roots {
                         report.issue(
                             "native_collection_roots",
                             "native collection roots diverge from physical metadata",
                         );
                     }
                 }
+                if let Some(native_registry) = native_state.registry.as_ref() {
+                    report = report.with_diagnostic(
+                        "native_registry.collection_count",
+                        native_registry.collection_count.to_string(),
+                    );
+                    report = report.with_diagnostic(
+                        "native_registry.index_count",
+                        native_registry.index_count.to_string(),
+                    );
+                    report = report.with_diagnostic(
+                        "native_registry.graph_projection_count",
+                        native_registry.graph_projection_count.to_string(),
+                    );
+                    report = report.with_diagnostic(
+                        "native_registry.analytics_job_count",
+                        native_registry.analytics_job_count.to_string(),
+                    );
+                    report = report.with_diagnostic(
+                        "native_registry.vector_artifact_count",
+                        native_registry.vector_artifact_count.to_string(),
+                    );
+                    report = report.with_diagnostic(
+                        "native_registry.collection_sample_count",
+                        native_registry.collection_names.len().to_string(),
+                    );
+                    report = report.with_diagnostic(
+                        "native_registry.collections_complete",
+                        native_registry.collections_complete.to_string(),
+                    );
+                    report = report.with_diagnostic(
+                        "native_registry.omitted_collection_count",
+                        native_registry.omitted_collection_count.to_string(),
+                    );
+                    report = report.with_diagnostic(
+                        "native_registry.index_sample_count",
+                        native_registry.indexes.len().to_string(),
+                    );
+                    report = report.with_diagnostic(
+                        "native_registry.indexes_complete",
+                        native_registry.indexes_complete.to_string(),
+                    );
+                    report = report.with_diagnostic(
+                        "native_registry.omitted_index_count",
+                        native_registry.omitted_index_count.to_string(),
+                    );
+                    report = report.with_diagnostic(
+                        "native_registry.graph_projection_sample_count",
+                        native_registry.graph_projections.len().to_string(),
+                    );
+                    report = report.with_diagnostic(
+                        "native_registry.graph_projections_complete",
+                        native_registry.graph_projections_complete.to_string(),
+                    );
+                    report = report.with_diagnostic(
+                        "native_registry.omitted_graph_projection_count",
+                        native_registry.omitted_graph_projection_count.to_string(),
+                    );
+                    report = report.with_diagnostic(
+                        "native_registry.analytics_job_sample_count",
+                        native_registry.analytics_jobs.len().to_string(),
+                    );
+                    report = report.with_diagnostic(
+                        "native_registry.analytics_jobs_complete",
+                        native_registry.analytics_jobs_complete.to_string(),
+                    );
+                    report = report.with_diagnostic(
+                        "native_registry.vector_artifacts_complete",
+                        native_registry.vector_artifacts_complete.to_string(),
+                    );
+                    report = report.with_diagnostic(
+                        "native_registry.omitted_analytics_job_count",
+                        native_registry.omitted_analytics_job_count.to_string(),
+                    );
+                    report = report.with_diagnostic(
+                        "native_registry.omitted_vector_artifact_count",
+                        native_registry.omitted_vector_artifact_count.to_string(),
+                    );
+
+                    if let Some(metadata) = metadata_for_native.as_ref() {
+                        let expected_registry = self.native_registry_summary_from_metadata(metadata);
+                        if native_registry != expected_registry {
+                            report.issue(
+                                "native_registry",
+                                "native registry summary diverges from physical metadata",
+                            );
+                        }
+                    }
+                }
+                if let Some(native_catalog) = native_state.catalog.as_ref() {
+                    report = report.with_diagnostic(
+                        "native_catalog.collection_count",
+                        native_catalog.collection_count.to_string(),
+                    );
+                    report = report.with_diagnostic(
+                        "native_catalog.total_entities",
+                        native_catalog.total_entities.to_string(),
+                    );
+                    report = report.with_diagnostic(
+                        "native_catalog.collection_sample_count",
+                        native_catalog.collections.len().to_string(),
+                    );
+                    report = report.with_diagnostic(
+                        "native_catalog.collections_complete",
+                        native_catalog.collections_complete.to_string(),
+                    );
+                    report = report.with_diagnostic(
+                        "native_catalog.omitted_collection_count",
+                        native_catalog.omitted_collection_count.to_string(),
+                    );
+                    if let Some(metadata) = metadata_for_native.as_ref() {
+                        let expected_catalog = Self::native_catalog_summary_from_metadata(metadata);
+                        if native_catalog != expected_catalog {
+                            report.issue(
+                                "native_catalog",
+                                "native catalog summary diverges from physical metadata",
+                            );
+                        }
+                    }
+                }
+                if let Some(metadata_state) = native_state.metadata_state.as_ref() {
+                    report = report.with_diagnostic(
+                        "native_metadata_state.protocol_version",
+                        metadata_state.protocol_version.clone(),
+                    );
+                    report = report.with_diagnostic(
+                        "native_metadata_state.generated_at_unix_ms",
+                        metadata_state.generated_at_unix_ms.to_string(),
+                    );
+                    report = report.with_diagnostic(
+                        "native_metadata_state.last_loaded_from",
+                        metadata_state
+                            .last_loaded_from
+                            .clone()
+                            .unwrap_or_else(|| "null".to_string()),
+                    );
+                    report = report.with_diagnostic(
+                        "native_metadata_state.last_healed_at_unix_ms",
+                        metadata_state
+                            .last_healed_at_unix_ms
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "null".to_string()),
+                    );
+                    if let Some(metadata) = metadata_for_native.as_ref() {
+                        let expected_metadata_state =
+                            Self::native_metadata_state_summary_from_metadata(metadata);
+                        if metadata_state != &expected_metadata_state {
+                            report.issue(
+                                "native_metadata_state",
+                                "native metadata state summary diverges from physical metadata",
+                            );
+                        }
+                    }
+                }
+                report = report.with_diagnostic(
+                    "native_bootstrap.ready",
+                    Self::native_state_is_bootstrap_complete(&native_state).to_string(),
+                );
+                if !Self::native_state_is_bootstrap_complete(&native_state)
+                    && metadata_for_native.is_none()
+                {
+                    report.issue(
+                        "native_bootstrap",
+                        "native physical publication is partial and cannot rebuild physical metadata without a sidecar",
+                    );
+                }
+                if let Some(native_recovery) = native_state.recovery.as_ref() {
+                    report = report.with_diagnostic(
+                        "native_recovery.snapshot_count",
+                        native_recovery.snapshot_count.to_string(),
+                    );
+                    report = report.with_diagnostic(
+                        "native_recovery.export_count",
+                        native_recovery.export_count.to_string(),
+                    );
+                    report = report.with_diagnostic(
+                        "native_recovery.snapshot_sample_count",
+                        native_recovery.snapshots.len().to_string(),
+                    );
+                    report = report.with_diagnostic(
+                        "native_recovery.snapshots_complete",
+                        native_recovery.snapshots_complete.to_string(),
+                    );
+                    report = report.with_diagnostic(
+                        "native_recovery.omitted_snapshot_count",
+                        native_recovery.omitted_snapshot_count.to_string(),
+                    );
+                    report = report.with_diagnostic(
+                        "native_recovery.export_sample_count",
+                        native_recovery.exports.len().to_string(),
+                    );
+                    report = report.with_diagnostic(
+                        "native_recovery.exports_complete",
+                        native_recovery.exports_complete.to_string(),
+                    );
+                    report = report.with_diagnostic(
+                        "native_recovery.omitted_export_count",
+                        native_recovery.omitted_export_count.to_string(),
+                    );
+                    if let Some(metadata) = metadata_for_native.as_ref() {
+                        let expected_recovery = Self::native_recovery_summary_from_metadata(metadata);
+                        if native_recovery != expected_recovery {
+                            report.issue(
+                                "native_recovery",
+                                "native recovery summary diverges from physical metadata",
+                            );
+                        }
+                    }
+                }
+                if let Some(native_manifest) = native_state.manifest.as_ref() {
+                    report = report.with_diagnostic(
+                        "native_manifest.sequence",
+                        native_manifest.sequence.to_string(),
+                    );
+                    report = report.with_diagnostic(
+                        "native_manifest.event_count",
+                        native_manifest.event_count.to_string(),
+                    );
+                    report = report.with_diagnostic(
+                        "native_manifest.events_complete",
+                        native_manifest.events_complete.to_string(),
+                    );
+                    report = report.with_diagnostic(
+                        "native_manifest.omitted_event_count",
+                        native_manifest.omitted_event_count.to_string(),
+                    );
+                    report = report.with_diagnostic(
+                        "native_manifest.sample_count",
+                        native_manifest.recent_events.len().to_string(),
+                    );
+                    if let Some(metadata) = metadata_for_native.as_ref() {
+                        if native_manifest.event_count != metadata.manifest_events.len() as u32 {
+                            report.issue(
+                                "native_manifest",
+                                "native manifest summary diverges from physical metadata",
+                            );
+                        }
+                    }
+                }
+            } else if self.store.physical_file_header().is_some() {
+                report.issue(
+                    "native_state",
+                    "native physical state is not fully readable from the paged file",
+                );
             }
             let metadata_path = PhysicalMetadataFile::metadata_path_for(path);
             let metadata_binary_path = PhysicalMetadataFile::metadata_binary_path_for(path);
@@ -378,6 +1144,9 @@ impl RedDB {
                 "metadata.binary_exists",
                 metadata_binary_path.exists().to_string(),
             );
+            if let Some(preference) = self.physical_metadata_preference() {
+                report = report.with_diagnostic("metadata.preference", preference);
+            }
             if let Ok((metadata, source)) =
                 PhysicalMetadataFile::load_for_data_path_with_source(path)
             {
@@ -508,39 +1277,92 @@ impl RedDB {
             .map(|path| PhysicalMetadataFile::metadata_path_for(path))
     }
 
-    /// Load the last persisted physical metadata sidecar, if present.
+    /// Load the current physical metadata view, bootstrapping from native state when needed.
     pub fn physical_metadata(&self) -> Option<PhysicalMetadataFile> {
-        self.path()
-            .and_then(|path| PhysicalMetadataFile::load_for_data_path(path).ok())
+        self.load_or_bootstrap_physical_metadata(!self.options.read_only)
+            .ok()
     }
 
     /// Physical index registry derived for the current database state.
     pub fn physical_indexes(&self) -> Vec<PhysicalIndexState> {
-        self.physical_metadata()
+        let indexes = self
+            .physical_metadata()
             .map(|metadata| metadata.indexes)
             .filter(|indexes| !indexes.is_empty())
-            .unwrap_or_else(|| self.physical_index_state())
+            .or_else(|| {
+                self.native_physical_state()
+                    .map(|state| self.physical_index_state_from_native_state(&state, None))
+            })
+            .unwrap_or_else(|| self.physical_index_state());
+        self.reconcile_index_states_with_native_artifacts(indexes)
     }
 
-    /// List registered named exports from the physical metadata sidecar.
+    /// List registered named exports from the current physical metadata view.
     pub fn exports(&self) -> Vec<ExportDescriptor> {
         self.physical_metadata()
             .map(|metadata| metadata.exports)
+            .or_else(|| self.native_physical_state().map(|state| self.exports_from_native_state(&state)))
             .unwrap_or_default()
     }
 
-    /// List persisted named graph projections from the physical metadata sidecar.
+    /// List recorded snapshots from the current physical metadata view.
+    pub fn snapshots(&self) -> Vec<crate::physical::SnapshotDescriptor> {
+        self.physical_metadata()
+            .map(|metadata| metadata.snapshots)
+            .or_else(|| self.native_physical_state().map(|state| self.snapshots_from_native_state(&state)))
+            .unwrap_or_default()
+    }
+
+    /// List persisted named graph projections from the current physical metadata view.
     pub fn graph_projections(&self) -> Vec<PhysicalGraphProjection> {
         self.physical_metadata()
             .map(|metadata| metadata.graph_projections)
+            .or_else(|| {
+                self.native_physical_state()
+                    .map(|state| self.graph_projections_from_native_state(&state))
+            })
             .unwrap_or_default()
     }
 
-    /// List persisted analytics job metadata from the physical metadata sidecar.
+    /// List graph projections declared in the catalog view.
+    pub fn declared_graph_projections(&self) -> Vec<PhysicalGraphProjection> {
+        self.catalog_model_snapshot().declared_graph_projections
+    }
+
+    /// List graph projections currently observed in the operational view.
+    pub fn operational_graph_projections(&self) -> Vec<PhysicalGraphProjection> {
+        self.catalog_model_snapshot().operational_graph_projections
+    }
+
+    /// List persisted analytics job metadata from the current physical metadata view.
     pub fn analytics_jobs(&self) -> Vec<PhysicalAnalyticsJob> {
         self.physical_metadata()
             .map(|metadata| metadata.analytics_jobs)
+            .or_else(|| {
+                self.native_physical_state()
+                    .map(|state| self.analytics_jobs_from_native_state(&state))
+            })
             .unwrap_or_default()
+    }
+
+    /// List analytics jobs declared in the catalog view.
+    pub fn declared_analytics_jobs(&self) -> Vec<PhysicalAnalyticsJob> {
+        self.catalog_model_snapshot().declared_analytics_jobs
+    }
+
+    /// List analytics jobs currently observed in the operational view.
+    pub fn operational_analytics_jobs(&self) -> Vec<PhysicalAnalyticsJob> {
+        self.catalog_model_snapshot().operational_analytics_jobs
+    }
+
+    /// List indexes declared in the catalog view.
+    pub fn declared_indexes(&self) -> Vec<PhysicalIndexState> {
+        self.catalog_model_snapshot().declared_indexes
+    }
+
+    /// List indexes currently observed in the operational view.
+    pub fn operational_indexes(&self) -> Vec<PhysicalIndexState> {
+        self.catalog_model_snapshot().operational_indexes
     }
 
     /// Upsert a named graph projection in the persisted physical metadata.
@@ -605,6 +1427,14 @@ impl RedDB {
             Some(projection) => format!("{kind}::{projection}"),
             None => format!("{kind}::global"),
         };
+        if let Some(projection_name) = projection.as_deref() {
+            if !self.graph_projection_is_declared(projection_name) {
+                return Err(format!(
+                    "graph projection '{projection_name}' is not declared in physical metadata"
+                )
+                .into());
+            }
+        }
 
         self.update_physical_metadata(|metadata| {
             let now = SystemTime::now()
@@ -660,7 +1490,7 @@ impl RedDB {
 
         self.flush()?;
 
-        let mut metadata = PhysicalMetadataFile::load_for_data_path(path)?;
+        let mut metadata = self.load_or_bootstrap_physical_metadata(true)?;
         let export_data_path = PhysicalMetadataFile::export_data_path_for(path, &name);
         let export_metadata_path = PhysicalMetadataFile::metadata_path_for(&export_data_path);
         let export_metadata_binary_path =
@@ -698,6 +1528,9 @@ impl RedDB {
         name: &str,
         enabled: bool,
     ) -> Result<Option<PhysicalIndexState>, Box<dyn std::error::Error>> {
+        if !self.index_is_declared(name) {
+            return Err(format!("index '{name}' is not declared in physical metadata").into());
+        }
         self.update_physical_metadata(|metadata| {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -717,12 +1550,32 @@ impl RedDB {
         &self,
         name: &str,
     ) -> Result<Option<PhysicalIndexState>, Box<dyn std::error::Error>> {
+        if !self.index_is_declared(name) {
+            return Err(format!("index '{name}' is not declared in physical metadata").into());
+        }
+        let warmed_artifact = self
+            .physical_indexes()
+            .into_iter()
+            .find(|index| index.name == name)
+            .map(|mut index| {
+                self.warmup_native_vector_artifact_for_index(&index)?;
+                self.apply_runtime_native_artifact_to_index_state(&mut index)?;
+                Ok::<_, String>(index)
+            })
+            .transpose()
+            .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
+
         self.update_physical_metadata(|metadata| {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis();
             if let Some(index) = metadata.indexes.iter_mut().find(|index| index.name == name) {
+                if let Some(warmed) = warmed_artifact.as_ref() {
+                    index.entries = warmed.entries;
+                    index.estimated_memory_bytes = warmed.estimated_memory_bytes;
+                    index.backend = warmed.backend.clone();
+                }
                 index.last_refresh_ms = Some(now);
                 return Some(index.clone());
             }
@@ -735,7 +1588,7 @@ impl RedDB {
         &self,
         collection: Option<&str>,
     ) -> Result<Vec<PhysicalIndexState>, Box<dyn std::error::Error>> {
-        let fresh = self.physical_index_state();
+        let fresh = self.reconcile_index_states_with_native_artifacts(self.physical_index_state());
         self.update_physical_metadata(|metadata| {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -743,23 +1596,35 @@ impl RedDB {
                 .as_millis();
 
             let mut affected = Vec::new();
-            for fresh_index in fresh {
+            let declared = metadata.indexes.clone();
+            for declared_index in declared {
                 let matches_collection = collection.map_or(true, |collection_name| {
-                    fresh_index.collection.as_deref() == Some(collection_name)
+                    declared_index.collection.as_deref() == Some(collection_name)
                 });
                 if !matches_collection {
                     continue;
                 }
 
-                let enabled = metadata
-                    .indexes
+                let mut rebuilt = fresh
                     .iter()
-                    .find(|index| index.name == fresh_index.name)
-                    .map(|index| index.enabled)
-                    .unwrap_or(true);
-
-                let mut rebuilt = fresh_index.clone();
-                rebuilt.enabled = enabled;
+                    .find(|index| index.name == declared_index.name)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        let mut index = declared_index.clone();
+                        index.build_state = "declared-unbuilt".to_string();
+                        index
+                    });
+                rebuilt.enabled = declared_index.enabled;
+                rebuilt.artifact_kind = rebuilt
+                    .artifact_kind
+                    .or_else(|| declared_index.artifact_kind.clone());
+                rebuilt.artifact_root_page =
+                    rebuilt.artifact_root_page.or(declared_index.artifact_root_page);
+                rebuilt.artifact_checksum =
+                    rebuilt.artifact_checksum.or(declared_index.artifact_checksum);
+                if rebuilt.build_state == "catalog-derived" {
+                    rebuilt.build_state = declared_index.build_state.clone();
+                }
                 rebuilt.last_refresh_ms = Some(now);
 
                 if let Some(existing) = metadata
@@ -788,9 +1653,8 @@ impl RedDB {
             return Ok(());
         };
 
-        let mut metadata = match PhysicalMetadataFile::load_for_data_path(path) {
-            Ok(metadata) => metadata,
-            Err(_) => return Ok(()),
+        let Ok(mut metadata) = self.load_or_bootstrap_physical_metadata(true) else {
+            return Ok(());
         };
 
         self.prune_export_registry(&mut metadata.exports);
@@ -861,12 +1725,8 @@ impl RedDB {
         self,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         if self.options.mode == StorageMode::Persistent && !self.options.read_only {
-            if let Some(path) = self.path() {
-                let metadata_path = PhysicalMetadataFile::metadata_path_for(path);
-                let metadata_binary_path = PhysicalMetadataFile::metadata_binary_path_for(path);
-                if !metadata_path.exists() && !metadata_binary_path.exists() {
-                    self.persist_metadata()?;
-                }
+            if self.load_or_bootstrap_physical_metadata(true).is_err() {
+                self.persist_metadata()?;
             }
             let _ = self.repair_native_header_from_metadata();
         }
@@ -881,9 +1741,12 @@ impl RedDB {
             return Ok(());
         };
 
-        let previous = PhysicalMetadataFile::load_for_data_path(path).ok();
+        let previous = self.load_or_bootstrap_physical_metadata(false).ok();
         let collection_roots = self.physical_collection_roots();
-        let indexes = self.physical_index_state();
+        let indexes = self
+            .native_physical_state()
+            .map(|state| self.physical_index_state_from_native_state(&state, previous.as_ref()))
+            .unwrap_or_else(|| self.physical_index_state());
         let metadata = PhysicalMetadataFile::from_state(
             self.options.clone(),
             self.catalog_snapshot(),
@@ -894,6 +1757,693 @@ impl RedDB {
         metadata.save_for_data_path(path)?;
         self.persist_native_physical_header(&metadata)?;
         Ok(())
+    }
+
+    fn bootstrap_metadata_from_native_state(
+        &self,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        if self.options.mode != StorageMode::Persistent || self.options.read_only {
+            return Ok(false);
+        }
+        let Some(path) = self.path() else {
+            return Ok(false);
+        };
+        let Some(native_state) = self.native_physical_state() else {
+            return Ok(false);
+        };
+        if !Self::native_state_is_bootstrap_complete(&native_state) {
+            return Ok(false);
+        }
+
+        let previous = PhysicalMetadataFile::load_for_data_path(path).ok();
+        let metadata = self.metadata_from_native_state(&native_state, previous.as_ref());
+        metadata.save_for_data_path(path)?;
+        self.persist_native_physical_header(&metadata)?;
+        Ok(true)
+    }
+
+    /// Rebuild the external physical metadata view from the native state published in the
+    /// paged database file.
+    pub fn rebuild_physical_metadata_from_native_state(
+        &self,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        self.bootstrap_metadata_from_native_state()
+    }
+
+    fn native_state_is_bootstrap_complete(native_state: &NativePhysicalState) -> bool {
+        let registry_complete = native_state.registry.as_ref().map(|registry| {
+            registry.collections_complete
+                && registry.indexes_complete
+                && registry.graph_projections_complete
+                && registry.analytics_jobs_complete
+                && registry.vector_artifacts_complete
+        });
+        let recovery_complete = native_state
+            .recovery
+            .as_ref()
+            .map(|recovery| recovery.snapshots_complete && recovery.exports_complete);
+        let catalog_complete = native_state
+            .catalog
+            .as_ref()
+            .map(|catalog| catalog.collections_complete);
+
+        registry_complete == Some(true)
+            && recovery_complete == Some(true)
+            && catalog_complete == Some(true)
+    }
+
+    fn load_or_bootstrap_physical_metadata(
+        &self,
+        persist_bootstrapped: bool,
+    ) -> Result<PhysicalMetadataFile, Box<dyn std::error::Error>> {
+        if self.options.mode != StorageMode::Persistent {
+            return Err("physical metadata requires persistent mode".into());
+        }
+        let Some(path) = self.path() else {
+            return Err("database path is not available".into());
+        };
+        let native_state = self.native_physical_state();
+
+        match PhysicalMetadataFile::load_for_data_path(path) {
+            Ok(metadata) => {
+                if let Some(native_state) = native_state.as_ref() {
+                    let inspection =
+                        Self::inspect_native_header_against_metadata(native_state.header, &metadata);
+                    if Self::repair_policy_for_inspection(&inspection)
+                        == NativeHeaderRepairPolicy::NativeAheadOfMetadata
+                    {
+                        let bootstrapped =
+                            self.metadata_from_native_state(native_state, Some(&metadata));
+                        if persist_bootstrapped && !self.options.read_only {
+                            bootstrapped.save_for_data_path(path)?;
+                            self.persist_native_physical_header(&bootstrapped)?;
+                        }
+                        return Ok(bootstrapped);
+                    }
+                }
+                Ok(metadata)
+            }
+            Err(err) => {
+                let Some(native_state) = native_state else {
+                    return Err(err.into());
+                };
+                if !Self::native_state_is_bootstrap_complete(&native_state) {
+                    return Err(err.into());
+                }
+                let metadata = self.metadata_from_native_state(&native_state, None);
+                if persist_bootstrapped && !self.options.read_only {
+                    metadata.save_for_data_path(path)?;
+                    self.persist_native_physical_header(&metadata)?;
+                }
+                Ok(metadata)
+            }
+        }
+    }
+
+    fn physical_metadata_preference(&self) -> Option<&'static str> {
+        let path = self.path()?;
+        let native_state = self.native_physical_state();
+        let metadata = PhysicalMetadataFile::load_for_data_path(path).ok();
+
+        match (metadata, native_state) {
+            (Some(metadata), Some(native_state)) => {
+                let inspection =
+                    Self::inspect_native_header_against_metadata(native_state.header, &metadata);
+                match Self::repair_policy_for_inspection(&inspection) {
+                    NativeHeaderRepairPolicy::InSync => Some("sidecar_current"),
+                    NativeHeaderRepairPolicy::RepairNativeFromMetadata => Some("sidecar_current"),
+                    NativeHeaderRepairPolicy::NativeAheadOfMetadata => Some("native_ahead"),
+                }
+            }
+            (Some(_), None) => Some("sidecar_only"),
+            (None, Some(_)) => Some("sidecar_missing_native_available"),
+            (None, None) => Some("sidecar_missing_no_native"),
+        }
+    }
+
+    fn metadata_from_native_state(
+        &self,
+        native_state: &NativePhysicalState,
+        previous: Option<&PhysicalMetadataFile>,
+    ) -> PhysicalMetadataFile {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let catalog = self.catalog_snapshot();
+        let catalog_name = catalog.name.clone();
+        let catalog_total_entities = catalog.total_entities;
+        let catalog_total_collections = catalog.total_collections;
+        let indexes = self.physical_index_state();
+
+        let mut manifest = crate::api::SchemaManifest::now(
+            self.options.clone(),
+            catalog.total_collections,
+        );
+        manifest.updated_at_unix_ms = now;
+
+        let manifest_events = native_state
+            .manifest
+            .as_ref()
+            .map(|summary| {
+                summary
+                    .recent_events
+                    .iter()
+                    .map(|event| crate::physical::ManifestEvent {
+                        collection: event.collection.clone(),
+                        object_key: event.object_key.clone(),
+                        kind: match event.kind.as_str() {
+                            "insert" => crate::physical::ManifestEventKind::Insert,
+                            "update" => crate::physical::ManifestEventKind::Update,
+                            "remove" => crate::physical::ManifestEventKind::Remove,
+                            _ => crate::physical::ManifestEventKind::Checkpoint,
+                        },
+                        block: crate::physical::BlockReference {
+                            index: event.block_index,
+                            checksum: event.block_checksum,
+                        },
+                        snapshot_min: event.snapshot_min,
+                        snapshot_max: event.snapshot_max,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let graph_projections = native_state
+            .registry
+            .as_ref()
+            .and_then(|registry| {
+                registry.graph_projections_complete.then(|| {
+                    registry
+                        .graph_projections
+                        .iter()
+                        .map(|projection| crate::physical::PhysicalGraphProjection {
+                            name: projection.name.clone(),
+                            created_at_unix_ms: projection.created_at_unix_ms,
+                            updated_at_unix_ms: projection.updated_at_unix_ms,
+                            source: projection.source.clone(),
+                            node_labels: projection.node_labels.clone(),
+                            node_types: projection.node_types.clone(),
+                            edge_labels: projection.edge_labels.clone(),
+                            last_materialized_sequence: projection.last_materialized_sequence,
+                        })
+                        .collect()
+                })
+            })
+            .or_else(|| previous.map(|metadata| metadata.graph_projections.clone()))
+            .unwrap_or_default();
+
+        let analytics_jobs = native_state
+            .registry
+            .as_ref()
+            .and_then(|registry| {
+                registry.analytics_jobs_complete.then(|| {
+                    registry
+                        .analytics_jobs
+                        .iter()
+                        .map(|job| crate::physical::PhysicalAnalyticsJob {
+                            id: job.id.clone(),
+                            kind: job.kind.clone(),
+                            state: job.state.clone(),
+                            projection: job.projection.clone(),
+                            created_at_unix_ms: job.created_at_unix_ms,
+                            updated_at_unix_ms: job.updated_at_unix_ms,
+                            last_run_sequence: job.last_run_sequence,
+                            metadata: job.metadata.clone(),
+                        })
+                        .collect()
+                })
+            })
+            .or_else(|| previous.map(|metadata| metadata.analytics_jobs.clone()))
+            .unwrap_or_default();
+
+        let exports = native_state
+            .recovery
+            .as_ref()
+            .and_then(|recovery| {
+                recovery.exports_complete.then(|| {
+                    recovery
+                        .exports
+                        .iter()
+                        .map(|export| crate::physical::ExportDescriptor {
+                            name: export.name.clone(),
+                            created_at_unix_ms: export.created_at_unix_ms,
+                            snapshot_id: export.snapshot_id,
+                            superblock_sequence: export.superblock_sequence,
+                            data_path: self
+                                .path()
+                                .map(|path| {
+                                    crate::physical::PhysicalMetadataFile::export_data_path_for(
+                                        path,
+                                        &export.name,
+                                    )
+                                    .display()
+                                    .to_string()
+                                })
+                                .unwrap_or_default(),
+                            metadata_path: self
+                                .path()
+                                .map(|path| {
+                                    let export_data_path =
+                                        crate::physical::PhysicalMetadataFile::export_data_path_for(
+                                            path,
+                                            &export.name,
+                                        );
+                                    crate::physical::PhysicalMetadataFile::metadata_path_for(
+                                        &export_data_path,
+                                    )
+                                    .display()
+                                    .to_string()
+                                })
+                                .unwrap_or_default(),
+                            collection_count: export.collection_count as usize,
+                            total_entities: export.total_entities as usize,
+                        })
+                        .collect()
+                })
+            })
+            .or_else(|| previous.map(|metadata| metadata.exports.clone()))
+            .unwrap_or_default();
+
+        let snapshots = native_state
+            .recovery
+            .as_ref()
+            .and_then(|recovery| {
+                recovery.snapshots_complete.then(|| {
+                    recovery
+                        .snapshots
+                        .iter()
+                        .map(|snapshot| crate::physical::SnapshotDescriptor {
+                            snapshot_id: snapshot.snapshot_id,
+                            created_at_unix_ms: snapshot.created_at_unix_ms,
+                            superblock_sequence: snapshot.superblock_sequence,
+                            collection_count: snapshot.collection_count as usize,
+                            total_entities: snapshot.total_entities as usize,
+                        })
+                        .collect()
+                })
+            })
+            .or_else(|| previous.map(|metadata| metadata.snapshots.clone()))
+            .unwrap_or_else(|| {
+                vec![crate::physical::SnapshotDescriptor {
+                    snapshot_id: native_state.header.sequence,
+                    created_at_unix_ms: now,
+                    superblock_sequence: native_state.header.sequence,
+                    collection_count: catalog_total_collections,
+                    total_entities: catalog_total_entities,
+                }]
+            });
+
+        let catalog_stats = native_state
+            .catalog
+            .as_ref()
+            .and_then(|native_catalog| {
+                native_catalog.collections_complete.then(|| {
+                    native_catalog
+                        .collections
+                        .iter()
+                        .map(|collection| {
+                            (
+                                collection.name.clone(),
+                                crate::api::CollectionStats {
+                                    entities: collection.entities as usize,
+                                    cross_refs: collection.cross_refs as usize,
+                                    segments: collection.segments as usize,
+                                },
+                            )
+                        })
+                        .collect::<BTreeMap<_, _>>()
+                })
+            })
+            .or_else(|| previous.map(|metadata| metadata.catalog.stats_by_collection.clone()))
+            .unwrap_or_else(|| catalog.stats_by_collection.clone());
+
+        PhysicalMetadataFile {
+            protocol_version: crate::physical::PHYSICAL_METADATA_PROTOCOL_VERSION.to_string(),
+            generated_at_unix_ms: now,
+            last_loaded_from: Some("native_bootstrap".to_string()),
+            last_healed_at_unix_ms: Some(now),
+            manifest,
+            catalog: crate::api::CatalogSnapshot {
+                name: catalog_name,
+                total_entities: native_state
+                    .catalog
+                    .as_ref()
+                    .map(|summary| summary.total_entities as usize)
+                    .unwrap_or(catalog_total_entities),
+                total_collections: native_state
+                    .catalog
+                    .as_ref()
+                    .map(|summary| summary.collection_count as usize)
+                    .unwrap_or(catalog_total_collections),
+                stats_by_collection: catalog_stats,
+                updated_at: SystemTime::now(),
+            },
+            manifest_events,
+            indexes,
+            graph_projections,
+            analytics_jobs,
+            exports,
+            superblock: crate::physical::SuperblockHeader {
+                format_version: native_state.header.format_version,
+                sequence: native_state.header.sequence,
+                copies: crate::physical::DEFAULT_SUPERBLOCK_COPIES,
+                manifest: crate::physical::ManifestPointers {
+                    oldest: crate::physical::BlockReference {
+                        index: native_state.header.manifest_oldest_root,
+                        checksum: 0,
+                    },
+                    newest: crate::physical::BlockReference {
+                        index: native_state.header.manifest_root,
+                        checksum: 0,
+                    },
+                },
+                free_set: crate::physical::BlockReference {
+                    index: native_state.header.free_set_root,
+                    checksum: 0,
+                },
+                collection_roots: native_state.collection_roots.clone(),
+            },
+            snapshots,
+        }
+    }
+
+    fn reconcile_index_states_with_native_artifacts(
+        &self,
+        mut indexes: Vec<PhysicalIndexState>,
+    ) -> Vec<PhysicalIndexState> {
+        let native_artifacts = self
+            .native_physical_state()
+            .and_then(|state| state.registry)
+            .map(|registry| registry.vector_artifacts)
+            .unwrap_or_default();
+        for index in &mut indexes {
+            let Some(collection) = index.collection.as_deref() else {
+                continue;
+            };
+            let Some(artifact_kind) = Self::native_artifact_kind_for_index(index.kind) else {
+                continue;
+            };
+            let Some(artifact) = native_artifacts.iter().find(|artifact| {
+                artifact.collection == collection && artifact.artifact_kind == artifact_kind
+            }) else {
+                index.build_state = "metadata-only".to_string();
+                continue;
+            };
+            index.entries = artifact.vector_count as usize;
+            index.estimated_memory_bytes = artifact.serialized_bytes;
+            index.backend = format!("{}+native-artifact", index_backend_name(index.kind));
+            index.artifact_kind = Some(artifact.artifact_kind.clone());
+            index.artifact_checksum = Some(artifact.checksum);
+            index.build_state = "artifact-published".to_string();
+            if let Some(pages) = self.native_vector_artifact_pages() {
+                index.artifact_root_page = pages
+                    .into_iter()
+                    .find(|page| {
+                        page.collection == artifact.collection
+                            && page.artifact_kind == artifact.artifact_kind
+                    })
+                    .map(|page| page.root_page);
+            }
+        }
+        indexes
+    }
+
+    fn warmup_native_vector_artifact_for_index(
+        &self,
+        index: &PhysicalIndexState,
+    ) -> Result<(), String> {
+        let Some(collection) = index.collection.as_deref() else {
+            return Ok(());
+        };
+        let Some(artifact_kind) = Self::native_artifact_kind_for_index(index.kind) else {
+            return Ok(());
+        };
+        self.warmup_native_vector_artifact(collection, Some(artifact_kind))?;
+        Ok(())
+    }
+
+    fn apply_runtime_native_artifact_to_index_state(
+        &self,
+        index: &mut PhysicalIndexState,
+    ) -> Result<(), String> {
+        let Some(collection) = index.collection.as_deref() else {
+            return Ok(());
+        };
+        let Some(artifact_kind) = Self::native_artifact_kind_for_index(index.kind) else {
+            return Ok(());
+        };
+        let artifact = self.inspect_native_vector_artifact(collection, Some(artifact_kind))?;
+        index.entries = artifact.node_count as usize;
+        index.estimated_memory_bytes = artifact.byte_len;
+        index.backend = format!("{}+native-artifact", index_backend_name(index.kind));
+        index.artifact_kind = Some(artifact.artifact_kind.clone());
+        index.artifact_checksum = Some(artifact.checksum);
+        index.build_state = "ready".to_string();
+        index.artifact_root_page = self
+            .native_vector_artifact_pages()
+            .and_then(|pages| {
+                pages.into_iter().find(|page| {
+                    page.collection == artifact.collection
+                        && page.artifact_kind == artifact.artifact_kind
+                })
+            })
+            .map(|page| page.root_page);
+        Ok(())
+    }
+
+    fn physical_index_state_from_native_state(
+        &self,
+        native_state: &NativePhysicalState,
+        previous: Option<&PhysicalMetadataFile>,
+    ) -> Vec<PhysicalIndexState> {
+        let mut fresh = self.physical_index_state();
+        let Some(registry) = native_state.registry.as_ref() else {
+            if let Some(previous) = previous {
+                for index in &previous.indexes {
+                    if !fresh.iter().any(|candidate| candidate.name == index.name) {
+                        fresh.push(index.clone());
+                    }
+                }
+            }
+            return fresh;
+        };
+
+        for index in &mut fresh {
+            if let Some(native) = registry.indexes.iter().find(|candidate| candidate.name == index.name)
+            {
+                index.enabled = native.enabled;
+                index.last_refresh_ms = native.last_refresh_ms;
+                index.backend = native.backend.clone();
+                index.entries = native.entries as usize;
+                index.estimated_memory_bytes = native.estimated_memory_bytes;
+                if index.artifact_kind.is_none() {
+                    index.artifact_kind = Self::native_artifact_kind_for_index(index.kind)
+                        .map(|value| value.to_string());
+                }
+                if index.build_state == "catalog-derived" {
+                    index.build_state = "registry-loaded".to_string();
+                }
+            }
+        }
+
+        for native in &registry.indexes {
+            if fresh.iter().any(|index| index.name == native.name) {
+                continue;
+            }
+            let Some(kind) = Self::index_kind_from_str(&native.kind) else {
+                continue;
+            };
+            fresh.push(PhysicalIndexState {
+                name: native.name.clone(),
+                kind,
+                collection: native.collection.clone(),
+                enabled: native.enabled,
+                entries: native.entries as usize,
+                estimated_memory_bytes: native.estimated_memory_bytes,
+                last_refresh_ms: native.last_refresh_ms,
+                backend: native.backend.clone(),
+                artifact_kind: Self::native_artifact_kind_for_index(kind)
+                    .map(|value| value.to_string()),
+                artifact_root_page: None,
+                artifact_checksum: None,
+                build_state: "registry-loaded".to_string(),
+            });
+        }
+
+        if !registry.indexes_complete {
+            if let Some(previous) = previous {
+                for index in &previous.indexes {
+                    if !fresh.iter().any(|candidate| candidate.name == index.name) {
+                        fresh.push(index.clone());
+                    }
+                }
+            }
+        }
+
+        fresh
+    }
+
+    fn graph_projections_from_native_state(
+        &self,
+        native_state: &NativePhysicalState,
+    ) -> Vec<PhysicalGraphProjection> {
+        native_state
+            .registry
+            .as_ref()
+            .map(|registry| {
+                registry
+                    .graph_projections
+                    .iter()
+                    .map(|projection| PhysicalGraphProjection {
+                        name: projection.name.clone(),
+                        created_at_unix_ms: projection.created_at_unix_ms,
+                        updated_at_unix_ms: projection.updated_at_unix_ms,
+                        source: projection.source.clone(),
+                        node_labels: projection.node_labels.clone(),
+                        node_types: projection.node_types.clone(),
+                        edge_labels: projection.edge_labels.clone(),
+                        last_materialized_sequence: projection.last_materialized_sequence,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn analytics_jobs_from_native_state(
+        &self,
+        native_state: &NativePhysicalState,
+    ) -> Vec<PhysicalAnalyticsJob> {
+        native_state
+            .registry
+            .as_ref()
+            .map(|registry| {
+                registry
+                    .analytics_jobs
+                    .iter()
+                    .map(|job| PhysicalAnalyticsJob {
+                        id: job.id.clone(),
+                        kind: job.kind.clone(),
+                        state: job.state.clone(),
+                        projection: job.projection.clone(),
+                        created_at_unix_ms: job.created_at_unix_ms,
+                        updated_at_unix_ms: job.updated_at_unix_ms,
+                        last_run_sequence: job.last_run_sequence,
+                        metadata: job.metadata.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn exports_from_native_state(
+        &self,
+        native_state: &NativePhysicalState,
+    ) -> Vec<ExportDescriptor> {
+        native_state
+            .recovery
+            .as_ref()
+            .map(|recovery| {
+                recovery
+                    .exports
+                    .iter()
+                    .map(|export| ExportDescriptor {
+                        name: export.name.clone(),
+                        created_at_unix_ms: export.created_at_unix_ms,
+                        snapshot_id: export.snapshot_id,
+                        superblock_sequence: export.superblock_sequence,
+                        data_path: self
+                            .path()
+                            .map(|path| {
+                                crate::physical::PhysicalMetadataFile::export_data_path_for(
+                                    path,
+                                    &export.name,
+                                )
+                                .display()
+                                .to_string()
+                            })
+                            .unwrap_or_default(),
+                        metadata_path: self
+                            .path()
+                            .map(|path| {
+                                let export_data_path =
+                                    crate::physical::PhysicalMetadataFile::export_data_path_for(
+                                        path,
+                                        &export.name,
+                                    );
+                                crate::physical::PhysicalMetadataFile::metadata_path_for(
+                                    &export_data_path,
+                                )
+                                .display()
+                                .to_string()
+                            })
+                            .unwrap_or_default(),
+                        collection_count: export.collection_count as usize,
+                        total_entities: export.total_entities as usize,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn snapshots_from_native_state(
+        &self,
+        native_state: &NativePhysicalState,
+    ) -> Vec<crate::physical::SnapshotDescriptor> {
+        native_state
+            .recovery
+            .as_ref()
+            .map(|recovery| {
+                recovery
+                    .snapshots
+                    .iter()
+                    .map(|snapshot| crate::physical::SnapshotDescriptor {
+                        snapshot_id: snapshot.snapshot_id,
+                        created_at_unix_ms: snapshot.created_at_unix_ms,
+                        superblock_sequence: snapshot.superblock_sequence,
+                        collection_count: snapshot.collection_count as usize,
+                        total_entities: snapshot.total_entities as usize,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn index_kind_from_str(value: &str) -> Option<crate::index::IndexKind> {
+        match value {
+            "btree" => Some(crate::index::IndexKind::BTree),
+            "vector.hnsw" => Some(crate::index::IndexKind::VectorHnsw),
+            "vector.inverted" => Some(crate::index::IndexKind::VectorInverted),
+            "graph.adjacency" => Some(crate::index::IndexKind::GraphAdjacency),
+            "text.fulltext" => Some(crate::index::IndexKind::FullText),
+            "search.hybrid" => Some(crate::index::IndexKind::HybridSearch),
+            _ => None,
+        }
+    }
+
+    fn native_artifact_kind_for_index(kind: IndexKind) -> Option<&'static str> {
+        match kind {
+            IndexKind::VectorHnsw => Some("hnsw"),
+            IndexKind::VectorInverted => Some("ivf"),
+            _ => None,
+        }
+    }
+
+    fn index_is_declared(&self, name: &str) -> bool {
+        self.physical_metadata()
+            .map(|metadata| metadata.indexes.iter().any(|index| index.name == name))
+            .unwrap_or(false)
+    }
+
+    fn graph_projection_is_declared(&self, name: &str) -> bool {
+        self.physical_metadata()
+            .map(|metadata| {
+                metadata
+                    .graph_projections
+                    .iter()
+                    .any(|projection| projection.name == name)
+            })
+            .unwrap_or(false)
     }
 
     fn update_physical_metadata<T, F>(
@@ -913,13 +2463,7 @@ impl RedDB {
             return Err("database path is not available".into());
         };
 
-        let mut metadata = match PhysicalMetadataFile::load_for_data_path(path) {
-            Ok(metadata) => metadata,
-            Err(_) => {
-                self.persist_metadata()?;
-                PhysicalMetadataFile::load_for_data_path(path)?
-            }
-        };
+        let mut metadata = self.load_or_bootstrap_physical_metadata(true)?;
 
         if metadata.indexes.is_empty() {
             metadata.indexes = self.physical_index_state();
@@ -945,15 +2489,98 @@ impl RedDB {
             .physical_file_header()
             .map(|header| header.collection_roots_page)
             .filter(|page| *page != 0);
+        let existing_registry_page = self
+            .store
+            .physical_file_header()
+            .map(|header| header.registry_page)
+            .filter(|page| *page != 0);
+        let existing_recovery_page = self
+            .store
+            .physical_file_header()
+            .map(|header| header.recovery_page)
+            .filter(|page| *page != 0);
+        let existing_catalog_page = self
+            .store
+            .physical_file_header()
+            .map(|header| header.catalog_page)
+            .filter(|page| *page != 0);
+        let existing_metadata_state_page = self
+            .store
+            .physical_file_header()
+            .map(|header| header.metadata_state_page)
+            .filter(|page| *page != 0);
+        let existing_vector_artifact_page = self
+            .store
+            .physical_file_header()
+            .map(|header| header.vector_artifact_page)
+            .filter(|page| *page != 0);
+        let existing_manifest_page = self
+            .store
+            .physical_file_header()
+            .map(|header| header.manifest_page)
+            .filter(|page| *page != 0);
+        let (manifest_page, manifest_checksum) = self.store.write_native_manifest_summary(
+            metadata.superblock.sequence,
+            &metadata.manifest_events,
+            existing_manifest_page,
+        )?;
         let (collection_roots_page, collection_roots_checksum) = self
             .store
             .write_native_collection_roots(
                 &metadata.superblock.collection_roots,
                 existing_page,
             )?;
+        let registry_summary = self.native_registry_summary_from_metadata(metadata);
+        let (registry_page, registry_checksum) = self
+            .store
+            .write_native_registry_summary(&registry_summary, existing_registry_page)?;
+        let recovery_summary = Self::native_recovery_summary_from_metadata(metadata);
+        let (recovery_page, recovery_checksum) = self
+            .store
+            .write_native_recovery_summary(&recovery_summary, existing_recovery_page)?;
+        let catalog_summary = Self::native_catalog_summary_from_metadata(metadata);
+        let (catalog_page, catalog_checksum) = self
+            .store
+            .write_native_catalog_summary(&catalog_summary, existing_catalog_page)?;
+        let metadata_state_summary = Self::native_metadata_state_summary_from_metadata(metadata);
+        let (metadata_state_page, metadata_state_checksum) = self
+            .store
+            .write_native_metadata_state_summary(
+                &metadata_state_summary,
+                existing_metadata_state_page,
+            )?;
+        let vector_artifact_records = self.native_vector_artifact_records();
+        let vector_artifact_payloads = vector_artifact_records
+            .iter()
+            .map(|(summary, bytes)| {
+                (
+                    summary.collection.clone(),
+                    summary.artifact_kind.clone(),
+                    bytes.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let (vector_artifact_page, vector_artifact_checksum, _vector_artifact_pages) = self
+            .store
+            .write_native_vector_artifact_store(
+                &vector_artifact_payloads,
+                existing_vector_artifact_page,
+            )?;
         let mut header = Self::native_header_from_metadata(metadata);
+        header.manifest_page = manifest_page;
+        header.manifest_checksum = manifest_checksum;
         header.collection_roots_page = collection_roots_page;
         header.collection_roots_checksum = collection_roots_checksum;
+        header.registry_page = registry_page;
+        header.registry_checksum = registry_checksum;
+        header.recovery_page = recovery_page;
+        header.recovery_checksum = recovery_checksum;
+        header.catalog_page = catalog_page;
+        header.catalog_checksum = catalog_checksum;
+        header.metadata_state_page = metadata_state_page;
+        header.metadata_state_checksum = metadata_state_checksum;
+        header.vector_artifact_page = vector_artifact_page;
+        header.vector_artifact_checksum = vector_artifact_checksum;
         self.store.update_physical_file_header(header)?;
         self.store.persist()?;
         Ok(())
@@ -966,6 +2593,8 @@ impl RedDB {
             manifest_oldest_root: metadata.superblock.manifest.oldest.index,
             manifest_root: metadata.superblock.manifest.newest.index,
             free_set_root: metadata.superblock.free_set.index,
+            manifest_page: 0,
+            manifest_checksum: 0,
             collection_roots_page: 0,
             collection_roots_checksum: 0,
             collection_root_count: metadata.superblock.collection_roots.len() as u32,
@@ -977,6 +2606,283 @@ impl RedDB {
             graph_projection_count: metadata.graph_projections.len() as u32,
             analytics_job_count: metadata.analytics_jobs.len() as u32,
             manifest_event_count: metadata.manifest_events.len() as u32,
+            registry_page: 0,
+            registry_checksum: 0,
+            recovery_page: 0,
+            recovery_checksum: 0,
+            catalog_page: 0,
+            catalog_checksum: 0,
+            metadata_state_page: 0,
+            metadata_state_checksum: 0,
+            vector_artifact_page: 0,
+            vector_artifact_checksum: 0,
+        }
+    }
+
+    fn native_registry_summary_from_metadata(
+        &self,
+        metadata: &PhysicalMetadataFile,
+    ) -> NativeRegistrySummary {
+        const SAMPLE_LIMIT: usize = 16;
+
+        let collection_names = metadata
+            .catalog
+            .stats_by_collection
+            .keys()
+            .take(SAMPLE_LIMIT)
+            .cloned()
+            .collect();
+        let indexes = metadata
+            .indexes
+            .iter()
+            .take(SAMPLE_LIMIT)
+            .map(|index| NativeRegistryIndexSummary {
+                name: index.name.clone(),
+                kind: index.kind.as_str().to_string(),
+                collection: index.collection.clone(),
+                enabled: index.enabled,
+                entries: index.entries as u64,
+                estimated_memory_bytes: index.estimated_memory_bytes,
+                last_refresh_ms: index.last_refresh_ms,
+                backend: index.backend.clone(),
+            })
+            .collect();
+        let graph_projections = metadata
+            .graph_projections
+            .iter()
+            .take(SAMPLE_LIMIT)
+            .map(|projection| NativeRegistryProjectionSummary {
+                name: projection.name.clone(),
+                source: projection.source.clone(),
+                created_at_unix_ms: projection.created_at_unix_ms,
+                updated_at_unix_ms: projection.updated_at_unix_ms,
+                node_labels: projection.node_labels.clone(),
+                node_types: projection.node_types.clone(),
+                edge_labels: projection.edge_labels.clone(),
+                last_materialized_sequence: projection.last_materialized_sequence,
+            })
+            .collect();
+        let analytics_jobs = metadata
+            .analytics_jobs
+            .iter()
+            .take(SAMPLE_LIMIT)
+            .map(|job| NativeRegistryJobSummary {
+                id: job.id.clone(),
+                kind: job.kind.clone(),
+                projection: job.projection.clone(),
+                state: job.state.clone(),
+                created_at_unix_ms: job.created_at_unix_ms,
+                updated_at_unix_ms: job.updated_at_unix_ms,
+                last_run_sequence: job.last_run_sequence,
+                metadata: job.metadata.clone(),
+            })
+            .collect();
+        let vector_artifacts = self
+            .native_vector_artifact_records()
+            .into_iter()
+            .map(|(summary, _)| summary)
+            .take(SAMPLE_LIMIT)
+            .collect::<Vec<_>>();
+        let vector_artifact_count = self.native_vector_artifact_collection_count() as u32;
+
+        NativeRegistrySummary {
+            collection_count: metadata.catalog.total_collections as u32,
+            index_count: metadata.indexes.len() as u32,
+            graph_projection_count: metadata.graph_projections.len() as u32,
+            analytics_job_count: metadata.analytics_jobs.len() as u32,
+            vector_artifact_count,
+            collections_complete: metadata.catalog.stats_by_collection.len() <= SAMPLE_LIMIT,
+            indexes_complete: metadata.indexes.len() <= SAMPLE_LIMIT,
+            graph_projections_complete: metadata.graph_projections.len() <= SAMPLE_LIMIT,
+            analytics_jobs_complete: metadata.analytics_jobs.len() <= SAMPLE_LIMIT,
+            vector_artifacts_complete: vector_artifact_count as usize <= SAMPLE_LIMIT,
+            omitted_collection_count: metadata
+                .catalog
+                .stats_by_collection
+                .len()
+                .saturating_sub(collection_names.len()) as u32,
+            omitted_index_count: metadata.indexes.len().saturating_sub(indexes.len()) as u32,
+            omitted_graph_projection_count: metadata
+                .graph_projections
+                .len()
+                .saturating_sub(graph_projections.len()) as u32,
+            omitted_analytics_job_count: metadata
+                .analytics_jobs
+                .len()
+                .saturating_sub(analytics_jobs.len()) as u32,
+            omitted_vector_artifact_count: vector_artifact_count
+                .saturating_sub(vector_artifacts.len() as u32),
+            collection_names,
+            indexes,
+            graph_projections,
+            analytics_jobs,
+            vector_artifacts,
+        }
+    }
+
+    fn native_vector_artifact_collection_count(&self) -> usize {
+        self.native_vector_artifact_records().len()
+    }
+
+    fn native_vector_artifact_records(&self) -> Vec<(NativeVectorArtifactSummary, Vec<u8>)> {
+        let mut artifacts = Vec::new();
+        for collection in self.store.list_collections() {
+            let Some(manager) = self.store.get_collection(&collection) else {
+                continue;
+            };
+            let entities = manager.query_all(|_| true);
+            let mut vectors = Vec::new();
+            for entity in entities {
+                if let EntityData::Vector(vector) = entity.data {
+                    if !vector.dense.is_empty() {
+                        vectors.push((entity.id, vector.dense));
+                    }
+                }
+            }
+            if vectors.is_empty() {
+                continue;
+            }
+
+            let dimension = vectors[0].1.len();
+            let mut hnsw = HnswIndex::with_dimension(dimension);
+            for (id, vector) in vectors.into_iter().filter(|(_, vector)| vector.len() == dimension) {
+                hnsw.insert_with_id(id, vector);
+            }
+            let stats = hnsw.stats();
+            let bytes = hnsw.to_bytes();
+            let summary = NativeVectorArtifactSummary {
+                collection: collection.clone(),
+                artifact_kind: "hnsw".to_string(),
+                vector_count: stats.node_count as u64,
+                dimension: stats.dimension as u32,
+                max_layer: stats.max_layer as u32,
+                serialized_bytes: bytes.len() as u64,
+                checksum: crate::storage::engine::crc32(&bytes) as u64,
+            };
+            artifacts.push((summary, bytes));
+
+            let n_lists = ((stats.node_count as f64).sqrt().ceil() as usize).max(1);
+            let mut ivf = IvfIndex::new(IvfConfig::new(dimension, n_lists));
+            let training = manager
+                .query_all(|_| true)
+                .into_iter()
+                .filter_map(|entity| match entity.data {
+                    EntityData::Vector(vector) if vector.dense.len() == dimension => Some(vector.dense),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            ivf.train(&training);
+            let items = manager
+                .query_all(|_| true)
+                .into_iter()
+                .filter_map(|entity| match entity.data {
+                    EntityData::Vector(vector) if vector.dense.len() == dimension => {
+                        Some((entity.id, vector.dense))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            ivf.add_batch_with_ids(items);
+            let ivf_stats = ivf.stats();
+            let ivf_bytes = ivf.to_bytes();
+            let ivf_summary = NativeVectorArtifactSummary {
+                collection,
+                artifact_kind: "ivf".to_string(),
+                vector_count: ivf_stats.total_vectors as u64,
+                dimension: ivf_stats.dimension as u32,
+                max_layer: ivf_stats.n_lists as u32,
+                serialized_bytes: ivf_bytes.len() as u64,
+                checksum: crate::storage::engine::crc32(&ivf_bytes) as u64,
+            };
+            artifacts.push((ivf_summary, ivf_bytes));
+        }
+        artifacts
+    }
+
+    fn native_recovery_summary_from_metadata(
+        metadata: &PhysicalMetadataFile,
+    ) -> NativeRecoverySummary {
+        const SAMPLE_LIMIT: usize = 16;
+
+        let snapshots = metadata
+            .snapshots
+            .iter()
+            .rev()
+            .take(SAMPLE_LIMIT)
+                    .map(|snapshot| NativeSnapshotSummary {
+                        snapshot_id: snapshot.snapshot_id,
+                        created_at_unix_ms: snapshot.created_at_unix_ms,
+                        superblock_sequence: snapshot.superblock_sequence,
+                        collection_count: snapshot.collection_count as u32,
+                        total_entities: snapshot.total_entities as u64,
+            })
+            .collect();
+        let exports = metadata
+            .exports
+            .iter()
+            .rev()
+            .take(SAMPLE_LIMIT)
+                    .map(|export| NativeExportSummary {
+                        name: export.name.clone(),
+                        created_at_unix_ms: export.created_at_unix_ms,
+                        snapshot_id: export.snapshot_id,
+                        superblock_sequence: export.superblock_sequence,
+                        collection_count: export.collection_count as u32,
+                total_entities: export.total_entities as u64,
+            })
+            .collect();
+
+        NativeRecoverySummary {
+            snapshot_count: metadata.snapshots.len() as u32,
+            export_count: metadata.exports.len() as u32,
+            snapshots_complete: metadata.snapshots.len() <= SAMPLE_LIMIT,
+            exports_complete: metadata.exports.len() <= SAMPLE_LIMIT,
+            omitted_snapshot_count: metadata.snapshots.len().saturating_sub(snapshots.len()) as u32,
+            omitted_export_count: metadata.exports.len().saturating_sub(exports.len()) as u32,
+            snapshots,
+            exports,
+        }
+    }
+
+    fn native_catalog_summary_from_metadata(
+        metadata: &PhysicalMetadataFile,
+    ) -> NativeCatalogSummary {
+        const SAMPLE_LIMIT: usize = 32;
+
+        let collections = metadata
+            .catalog
+            .stats_by_collection
+            .iter()
+            .take(SAMPLE_LIMIT)
+            .map(|(name, stats)| NativeCatalogCollectionSummary {
+                name: name.clone(),
+                entities: stats.entities as u64,
+                cross_refs: stats.cross_refs as u64,
+                segments: stats.segments as u32,
+            })
+            .collect();
+
+        NativeCatalogSummary {
+            collection_count: metadata.catalog.total_collections as u32,
+            total_entities: metadata.catalog.total_entities as u64,
+            collections_complete: metadata.catalog.stats_by_collection.len() <= SAMPLE_LIMIT,
+            omitted_collection_count: metadata
+                .catalog
+                .stats_by_collection
+                .len()
+                .saturating_sub(collections.len()) as u32,
+            collections,
+        }
+    }
+
+    fn native_metadata_state_summary_from_metadata(
+        metadata: &PhysicalMetadataFile,
+    ) -> NativeMetadataStateSummary {
+        NativeMetadataStateSummary {
+            protocol_version: metadata.protocol_version.clone(),
+            generated_at_unix_ms: metadata.generated_at_unix_ms,
+            last_loaded_from: metadata.last_loaded_from.clone(),
+            last_healed_at_unix_ms: metadata.last_healed_at_unix_ms,
         }
     }
 
@@ -1167,6 +3073,10 @@ impl RedDB {
                     estimated_memory_bytes: estimate_index_memory(entries, kind),
                     last_refresh_ms: metric.and_then(|metric| metric.last_refresh_ms),
                     backend: index_backend_name(kind).to_string(),
+                    artifact_kind: None,
+                    artifact_root_page: None,
+                    artifact_checksum: None,
+                    build_state: "catalog-derived".to_string(),
                 });
             }
         }

@@ -1,7 +1,7 @@
-# reddb
+# RedDB
 
 <p align="center">
-  <img width="180" src="https://img.icons8.com/fluency/240/database.png" alt="reddb">
+  <img width="180" src="https://img.icons8.com/fluency/240/database.png" alt="RedDB">
 </p>
 
 <p align="center">
@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <strong>reddb</strong> is a multi-structure database engine for applications that need
+  <strong>RedDB</strong> is a multi-structure database engine for applications that need
   structured rows, raw payloads, linked entities, semantic retrieval, graph analytics,
   operational metadata and exports without splitting data across multiple systems.
 </p>
@@ -41,7 +41,7 @@
 
 ## Save anything
 
-`reddb` is built for systems that do not fit into a single shape.
+`RedDB` is built for systems that do not fit into a single shape.
 
 <table>
 <tr>
@@ -94,7 +94,7 @@ What this means in practice:
 
 ### Embedded
 
-Use `reddb` directly inside your Rust process.
+Use `RedDB` directly inside your Rust process.
 
 #### 1. Create a database handle
 
@@ -144,7 +144,7 @@ No extra services. No separate graph store. No separate vector engine.
 
 ### Server
 
-Run `reddb` as an HTTP server or as a gRPC server.
+Run `RedDB` as an HTTP server or as a gRPC server.
 
 #### 1. Start the HTTP server
 
@@ -240,7 +240,7 @@ grpcurl \
 
 ## A real multi-structure flow
 
-This is the shape `reddb` is built for:
+This is the shape `RedDB` is built for:
 
 | Need | Store it as |
 | --- | --- |
@@ -266,9 +266,9 @@ without changing databases halfway through the system design.
 
 ---
 
-## What is `reddb`?
+## What is `RedDB`?
 
-`reddb` is a standalone Rust database engine for multi-structure workloads.
+`RedDB` is a standalone Rust database engine for multi-structure workloads.
 
 It is not trying to be “just SQL”, “just document”, or “just vector”.
 It is a **multi-structure database core** with one persistence layer and one operational surface for:
@@ -279,7 +279,7 @@ It is a **multi-structure database core** with one persistence layer and one ope
 - dense vector search, IVF and hybrid retrieval
 - physical metadata, manifests, snapshots and exports
 
-`reddb` is designed to feel like one coherent system:
+`RedDB` is designed to feel like one coherent system:
 
 - one engine
 - one runtime
@@ -288,7 +288,7 @@ It is a **multi-structure database core** with one persistence layer and one ope
 
 ---
 
-## Why `reddb`
+## Why `RedDB`
 
 Most storage stacks get awkward the moment your application needs more than one structure.
 
@@ -300,7 +300,7 @@ Then hybrid search.
 Then operational metadata.
 Then exports, scans, health and online maintenance.
 
-`reddb` is built so all of that belongs to the same system from day one.
+`RedDB` is built so all of that belongs to the same system from day one.
 
 - rows, docs, graph and vectors live in one engine
 - one transaction boundary can touch multiple structures
@@ -322,7 +322,7 @@ All of these are first-class.
 
 ### Embedded-first, server-capable
 
-Use `reddb` directly as a Rust crate inside your process, or run it as a server.
+Use `RedDB` directly as a Rust crate inside your process, or run it as a server.
 
 - low-latency local access
 - no mandatory network hop
@@ -456,7 +456,7 @@ Use `reddb` directly as a Rust crate inside your process, or run it as a server.
 
 ## Feature matrix
 
-| Area | What `reddb` already exposes |
+| Area | What `RedDB` already exposes |
 | --- | --- |
 | Storage | rows, graph entities, vectors, paged persistence, metadata sidecar |
 | Query | table, join, graph, path, vector and hybrid execution |
@@ -469,7 +469,7 @@ Use `reddb` directly as a Rust crate inside your process, or run it as a server.
 
 ## Architecture direction
 
-`reddb` is being shaped as a layered database engine:
+`RedDB` is being shaped as a layered database engine:
 
 1. **Physical layer**
    - durable file layout
@@ -528,7 +528,7 @@ What still needs to harden:
 
 ## Philosophy
 
-`reddb` is built around one principle:
+`RedDB` is built around one principle:
 
 - one storage engine
 - one runtime

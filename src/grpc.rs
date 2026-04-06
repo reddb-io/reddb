@@ -127,6 +127,16 @@ impl RedDb for GrpcRuntime {
         }))
     }
 
+    async fn catalog_consistency(
+        &self,
+        request: Request<Empty>,
+    ) -> Result<Response<PayloadReply>, Status> {
+        self.authorize_read(request.metadata())?;
+        Ok(Response::new(json_payload_reply(
+            catalog_consistency_json(&self.runtime.catalog_consistency_report()),
+        )))
+    }
+
     async fn physical_metadata(
         &self,
         request: Request<Empty>,
@@ -147,6 +157,140 @@ impl RedDb for GrpcRuntime {
         self.authorize_read(request.metadata())?;
         let header = self.runtime.native_header().map_err(to_status)?;
         Ok(Response::new(json_payload_reply(native_header_json(header))))
+    }
+
+    async fn native_collection_roots(
+        &self,
+        request: Request<Empty>,
+    ) -> Result<Response<PayloadReply>, Status> {
+        self.authorize_read(request.metadata())?;
+        let roots = self.runtime.native_collection_roots().map_err(to_status)?;
+        Ok(Response::new(json_payload_reply(collection_roots_json(&roots))))
+    }
+
+    async fn native_manifest_summary(
+        &self,
+        request: Request<Empty>,
+    ) -> Result<Response<PayloadReply>, Status> {
+        self.authorize_read(request.metadata())?;
+        let summary = self.runtime.native_manifest_summary().map_err(to_status)?;
+        Ok(Response::new(json_payload_reply(native_manifest_summary_json(
+            &summary,
+        ))))
+    }
+
+    async fn native_registry_summary(
+        &self,
+        request: Request<Empty>,
+    ) -> Result<Response<PayloadReply>, Status> {
+        self.authorize_read(request.metadata())?;
+        let summary = self.runtime.native_registry_summary().map_err(to_status)?;
+        Ok(Response::new(json_payload_reply(native_registry_summary_json(
+            &summary,
+        ))))
+    }
+
+    async fn native_recovery_summary(
+        &self,
+        request: Request<Empty>,
+    ) -> Result<Response<PayloadReply>, Status> {
+        self.authorize_read(request.metadata())?;
+        let summary = self.runtime.native_recovery_summary().map_err(to_status)?;
+        Ok(Response::new(json_payload_reply(native_recovery_summary_json(
+            &summary,
+        ))))
+    }
+
+    async fn native_catalog_summary(
+        &self,
+        request: Request<Empty>,
+    ) -> Result<Response<PayloadReply>, Status> {
+        self.authorize_read(request.metadata())?;
+        let summary = self.runtime.native_catalog_summary().map_err(to_status)?;
+        Ok(Response::new(json_payload_reply(native_catalog_summary_json(
+            &summary,
+        ))))
+    }
+
+    async fn native_metadata_state_summary(
+        &self,
+        request: Request<Empty>,
+    ) -> Result<Response<PayloadReply>, Status> {
+        self.authorize_read(request.metadata())?;
+        let summary = self
+            .runtime
+            .native_metadata_state_summary()
+            .map_err(to_status)?;
+        Ok(Response::new(json_payload_reply(
+            native_metadata_state_summary_json(&summary),
+        )))
+    }
+
+    async fn physical_authority(
+        &self,
+        request: Request<Empty>,
+    ) -> Result<Response<PayloadReply>, Status> {
+        self.authorize_read(request.metadata())?;
+        Ok(Response::new(json_payload_reply(
+            physical_authority_status_json(&self.runtime.physical_authority_status()),
+        )))
+    }
+
+    async fn native_physical_state(
+        &self,
+        request: Request<Empty>,
+    ) -> Result<Response<PayloadReply>, Status> {
+        self.authorize_read(request.metadata())?;
+        let state = self.runtime.native_physical_state().map_err(to_status)?;
+        Ok(Response::new(json_payload_reply(native_physical_state_json(
+            &state,
+        ))))
+    }
+
+    async fn native_vector_artifacts(
+        &self,
+        request: Request<Empty>,
+    ) -> Result<Response<PayloadReply>, Status> {
+        self.authorize_read(request.metadata())?;
+        let summaries = self
+            .runtime
+            .native_vector_artifact_pages()
+            .map_err(to_status)?;
+        Ok(Response::new(json_payload_reply(
+            native_vector_artifact_pages_json(&summaries),
+        )))
+    }
+
+    async fn inspect_native_vector_artifacts(
+        &self,
+        request: Request<Empty>,
+    ) -> Result<Response<PayloadReply>, Status> {
+        self.authorize_read(request.metadata())?;
+        let batch = self
+            .runtime
+            .inspect_native_vector_artifacts()
+            .map_err(to_status)?;
+        Ok(Response::new(json_payload_reply(
+            native_vector_artifact_batch_json(&batch),
+        )))
+    }
+
+    async fn inspect_native_vector_artifact(
+        &self,
+        request: Request<CollectionRequest>,
+    ) -> Result<Response<PayloadReply>, Status> {
+        self.authorize_read(request.metadata())?;
+        let request = request.into_inner();
+        let artifact = self
+            .runtime
+            .inspect_native_vector_artifact(
+                &request.collection,
+                none_if_empty(&request.artifact_kind),
+            )
+            .map_err(to_status)?;
+        Ok(Response::new(json_payload_reply(
+            native_vector_artifact_inspection_json(&artifact),
+        )))
     }
 
     async fn native_header_repair_policy(
@@ -170,6 +314,76 @@ impl RedDb for GrpcRuntime {
         Ok(Response::new(OperationReply {
             ok: true,
             message: format!("native header repair policy applied: {policy}"),
+        }))
+    }
+
+    async fn warmup_native_vector_artifact(
+        &self,
+        request: Request<CollectionRequest>,
+    ) -> Result<Response<PayloadReply>, Status> {
+        self.authorize_write(request.metadata())?;
+        let request = request.into_inner();
+        let artifact = self
+            .runtime
+            .warmup_native_vector_artifact(
+                &request.collection,
+                none_if_empty(&request.artifact_kind),
+            )
+            .map_err(to_status)?;
+        Ok(Response::new(json_payload_reply(
+            native_vector_artifact_inspection_json(&artifact),
+        )))
+    }
+
+    async fn warmup_native_vector_artifacts(
+        &self,
+        request: Request<Empty>,
+    ) -> Result<Response<PayloadReply>, Status> {
+        self.authorize_write(request.metadata())?;
+        let batch = self
+            .runtime
+            .warmup_native_vector_artifacts()
+            .map_err(to_status)?;
+        Ok(Response::new(json_payload_reply(
+            native_vector_artifact_batch_json(&batch),
+        )))
+    }
+
+    async fn repair_native_physical_state(
+        &self,
+        request: Request<Empty>,
+    ) -> Result<Response<OperationReply>, Status> {
+        self.authorize_write(request.metadata())?;
+        let repaired = self
+            .runtime
+            .repair_native_physical_state_from_metadata()
+            .map_err(to_status)?;
+        Ok(Response::new(OperationReply {
+            ok: repaired,
+            message: if repaired {
+                "native physical state republished from physical metadata".to_string()
+            } else {
+                "native physical state repair is not available in this mode".to_string()
+            },
+        }))
+    }
+
+    async fn rebuild_physical_metadata(
+        &self,
+        request: Request<Empty>,
+    ) -> Result<Response<OperationReply>, Status> {
+        self.authorize_write(request.metadata())?;
+        let rebuilt = self
+            .runtime
+            .rebuild_physical_metadata_from_native_state()
+            .map_err(to_status)?;
+        Ok(Response::new(OperationReply {
+            ok: rebuilt,
+            message: if rebuilt {
+                "physical metadata rebuilt from native state".to_string()
+            } else {
+                "native state is not available for metadata rebuild".to_string()
+            },
         }))
     }
 
@@ -221,6 +435,32 @@ impl RedDb for GrpcRuntime {
     }
 
     async fn indexes(
+        &self,
+        request: Request<CollectionRequest>,
+    ) -> Result<Response<PayloadReply>, Status> {
+        self.authorize_read(request.metadata())?;
+        let request = request.into_inner();
+        let indexes = match none_if_empty(&request.collection) {
+            Some(collection) => self.runtime.indexes_for_collection(collection),
+            None => self.runtime.indexes(),
+        };
+        Ok(Response::new(json_payload_reply(indexes_json(&indexes))))
+    }
+
+    async fn declared_indexes(
+        &self,
+        request: Request<CollectionRequest>,
+    ) -> Result<Response<PayloadReply>, Status> {
+        self.authorize_read(request.metadata())?;
+        let request = request.into_inner();
+        let indexes = match none_if_empty(&request.collection) {
+            Some(collection) => self.runtime.declared_indexes_for_collection(collection),
+            None => self.runtime.declared_indexes(),
+        };
+        Ok(Response::new(json_payload_reply(indexes_json(&indexes))))
+    }
+
+    async fn operational_indexes(
         &self,
         request: Request<CollectionRequest>,
     ) -> Result<Response<PayloadReply>, Status> {
@@ -289,6 +529,23 @@ impl RedDb for GrpcRuntime {
         ))))
     }
 
+    async fn declared_graph_projections(
+        &self,
+        request: Request<Empty>,
+    ) -> Result<Response<PayloadReply>, Status> {
+        self.graph_projections(request).await
+    }
+
+    async fn operational_graph_projections(
+        &self,
+        request: Request<Empty>,
+    ) -> Result<Response<PayloadReply>, Status> {
+        self.authorize_read(request.metadata())?;
+        Ok(Response::new(json_payload_reply(graph_projections_json(
+            &self.runtime.operational_graph_projections(),
+        ))))
+    }
+
     async fn save_graph_projection(
         &self,
         request: Request<GraphProjectionUpsertRequest>,
@@ -331,6 +588,23 @@ impl RedDb for GrpcRuntime {
         self.authorize_read(request.metadata())?;
         let jobs = self.runtime.analytics_jobs().map_err(to_status)?;
         Ok(Response::new(json_payload_reply(analytics_jobs_json(&jobs))))
+    }
+
+    async fn declared_analytics_jobs(
+        &self,
+        request: Request<Empty>,
+    ) -> Result<Response<PayloadReply>, Status> {
+        self.analytics_jobs(request).await
+    }
+
+    async fn operational_analytics_jobs(
+        &self,
+        request: Request<Empty>,
+    ) -> Result<Response<PayloadReply>, Status> {
+        self.authorize_read(request.metadata())?;
+        Ok(Response::new(json_payload_reply(analytics_jobs_json(
+            &self.runtime.operational_analytics_jobs(),
+        ))))
     }
 
     async fn scan(&self, request: Request<ScanRequest>) -> Result<Response<ScanReply>, Status> {
@@ -1872,6 +2146,31 @@ fn index_json(index: &crate::PhysicalIndexState) -> JsonValue {
         "backend".to_string(),
         JsonValue::String(index.backend.clone()),
     );
+    object.insert(
+        "artifact_kind".to_string(),
+        match &index.artifact_kind {
+            Some(value) => JsonValue::String(value.clone()),
+            None => JsonValue::Null,
+        },
+    );
+    object.insert(
+        "artifact_root_page".to_string(),
+        match index.artifact_root_page {
+            Some(value) => JsonValue::Number(value as f64),
+            None => JsonValue::Null,
+        },
+    );
+    object.insert(
+        "artifact_checksum".to_string(),
+        match index.artifact_checksum {
+            Some(value) => JsonValue::String(value.to_string()),
+            None => JsonValue::Null,
+        },
+    );
+    object.insert(
+        "build_state".to_string(),
+        JsonValue::String(index.build_state.clone()),
+    );
     JsonValue::Object(object)
 }
 
@@ -1964,6 +2263,14 @@ fn native_header_json(header: crate::storage::engine::PhysicalFileHeader) -> Jso
         JsonValue::String(header.free_set_root.to_string()),
     );
     object.insert(
+        "manifest_page".to_string(),
+        JsonValue::Number(header.manifest_page as f64),
+    );
+    object.insert(
+        "manifest_checksum".to_string(),
+        JsonValue::String(header.manifest_checksum.to_string()),
+    );
+    object.insert(
         "collection_roots_page".to_string(),
         JsonValue::Number(header.collection_roots_page as f64),
     );
@@ -2007,12 +2314,969 @@ fn native_header_json(header: crate::storage::engine::PhysicalFileHeader) -> Jso
         "manifest_event_count".to_string(),
         JsonValue::Number(header.manifest_event_count as f64),
     );
+    object.insert(
+        "registry_page".to_string(),
+        JsonValue::Number(header.registry_page as f64),
+    );
+    object.insert(
+        "registry_checksum".to_string(),
+        JsonValue::String(header.registry_checksum.to_string()),
+    );
+    object.insert(
+        "recovery_page".to_string(),
+        JsonValue::Number(header.recovery_page as f64),
+    );
+    object.insert(
+        "recovery_checksum".to_string(),
+        JsonValue::String(header.recovery_checksum.to_string()),
+    );
+    object.insert(
+        "catalog_page".to_string(),
+        JsonValue::Number(header.catalog_page as f64),
+    );
+    object.insert(
+        "catalog_checksum".to_string(),
+        JsonValue::String(header.catalog_checksum.to_string()),
+    );
+    object.insert(
+        "metadata_state_page".to_string(),
+        JsonValue::Number(header.metadata_state_page as f64),
+    );
+    object.insert(
+        "metadata_state_checksum".to_string(),
+        JsonValue::String(header.metadata_state_checksum.to_string()),
+    );
+    object.insert(
+        "vector_artifact_page".to_string(),
+        JsonValue::Number(header.vector_artifact_page as f64),
+    );
+    object.insert(
+        "vector_artifact_checksum".to_string(),
+        JsonValue::String(header.vector_artifact_checksum.to_string()),
+    );
     JsonValue::Object(object)
 }
 
 fn repair_policy_json(policy: &str) -> JsonValue {
     let mut object = Map::new();
     object.insert("policy".to_string(), JsonValue::String(policy.to_string()));
+    JsonValue::Object(object)
+}
+
+fn native_manifest_summary_json(
+    summary: &crate::storage::unified::store::NativeManifestSummary,
+) -> JsonValue {
+    let mut object = Map::new();
+    object.insert(
+        "sequence".to_string(),
+        JsonValue::String(summary.sequence.to_string()),
+    );
+    object.insert(
+        "event_count".to_string(),
+        JsonValue::Number(summary.event_count as f64),
+    );
+    object.insert(
+        "events_complete".to_string(),
+        JsonValue::Bool(summary.events_complete),
+    );
+    object.insert(
+        "omitted_event_count".to_string(),
+        JsonValue::Number(summary.omitted_event_count as f64),
+    );
+    object.insert(
+        "recent_events".to_string(),
+        JsonValue::Array(
+            summary
+                .recent_events
+                .iter()
+                .map(|event| {
+                    let mut item = Map::new();
+                    item.insert(
+                        "collection".to_string(),
+                        JsonValue::String(event.collection.clone()),
+                    );
+                    item.insert(
+                        "object_key".to_string(),
+                        JsonValue::String(event.object_key.clone()),
+                    );
+                    item.insert("kind".to_string(), JsonValue::String(event.kind.clone()));
+                    item.insert(
+                        "block_index".to_string(),
+                        JsonValue::String(event.block_index.to_string()),
+                    );
+                    item.insert(
+                        "block_checksum".to_string(),
+                        JsonValue::String(event.block_checksum.to_string()),
+                    );
+                    item.insert(
+                        "snapshot_min".to_string(),
+                        JsonValue::String(event.snapshot_min.to_string()),
+                    );
+                    item.insert(
+                        "snapshot_max".to_string(),
+                        match event.snapshot_max {
+                            Some(value) => JsonValue::String(value.to_string()),
+                            None => JsonValue::Null,
+                        },
+                    );
+                    JsonValue::Object(item)
+                })
+                .collect(),
+        ),
+    );
+    JsonValue::Object(object)
+}
+
+fn native_registry_summary_json(
+    summary: &crate::storage::unified::store::NativeRegistrySummary,
+) -> JsonValue {
+    let mut object = Map::new();
+    object.insert(
+        "collection_count".to_string(),
+        JsonValue::Number(summary.collection_count as f64),
+    );
+    object.insert(
+        "index_count".to_string(),
+        JsonValue::Number(summary.index_count as f64),
+    );
+    object.insert(
+        "graph_projection_count".to_string(),
+        JsonValue::Number(summary.graph_projection_count as f64),
+    );
+    object.insert(
+        "analytics_job_count".to_string(),
+        JsonValue::Number(summary.analytics_job_count as f64),
+    );
+    object.insert(
+        "vector_artifact_count".to_string(),
+        JsonValue::Number(summary.vector_artifact_count as f64),
+    );
+    object.insert(
+        "collections_complete".to_string(),
+        JsonValue::Bool(summary.collections_complete),
+    );
+    object.insert(
+        "indexes_complete".to_string(),
+        JsonValue::Bool(summary.indexes_complete),
+    );
+    object.insert(
+        "graph_projections_complete".to_string(),
+        JsonValue::Bool(summary.graph_projections_complete),
+    );
+    object.insert(
+        "analytics_jobs_complete".to_string(),
+        JsonValue::Bool(summary.analytics_jobs_complete),
+    );
+    object.insert(
+        "vector_artifacts_complete".to_string(),
+        JsonValue::Bool(summary.vector_artifacts_complete),
+    );
+    object.insert(
+        "omitted_collection_count".to_string(),
+        JsonValue::Number(summary.omitted_collection_count as f64),
+    );
+    object.insert(
+        "omitted_index_count".to_string(),
+        JsonValue::Number(summary.omitted_index_count as f64),
+    );
+    object.insert(
+        "omitted_graph_projection_count".to_string(),
+        JsonValue::Number(summary.omitted_graph_projection_count as f64),
+    );
+    object.insert(
+        "omitted_analytics_job_count".to_string(),
+        JsonValue::Number(summary.omitted_analytics_job_count as f64),
+    );
+    object.insert(
+        "omitted_vector_artifact_count".to_string(),
+        JsonValue::Number(summary.omitted_vector_artifact_count as f64),
+    );
+    object.insert(
+        "collection_names".to_string(),
+        JsonValue::Array(
+            summary
+                .collection_names
+                .iter()
+                .cloned()
+                .map(JsonValue::String)
+                .collect(),
+        ),
+    );
+    object.insert(
+        "indexes".to_string(),
+        JsonValue::Array(
+            summary
+                .indexes
+                .iter()
+                .map(|index| {
+                    let mut item = Map::new();
+                    item.insert("name".to_string(), JsonValue::String(index.name.clone()));
+                    item.insert("kind".to_string(), JsonValue::String(index.kind.clone()));
+                    item.insert(
+                        "collection".to_string(),
+                        match &index.collection {
+                            Some(collection) => JsonValue::String(collection.clone()),
+                            None => JsonValue::Null,
+                        },
+                    );
+                    item.insert("enabled".to_string(), JsonValue::Bool(index.enabled));
+                    item.insert(
+                        "entries".to_string(),
+                        JsonValue::String(index.entries.to_string()),
+                    );
+                    item.insert(
+                        "estimated_memory_bytes".to_string(),
+                        JsonValue::String(index.estimated_memory_bytes.to_string()),
+                    );
+                    item.insert(
+                        "last_refresh_ms".to_string(),
+                        match index.last_refresh_ms {
+                            Some(value) => JsonValue::String(value.to_string()),
+                            None => JsonValue::Null,
+                        },
+                    );
+                    item.insert(
+                        "backend".to_string(),
+                        JsonValue::String(index.backend.clone()),
+                    );
+                    JsonValue::Object(item)
+                })
+                .collect(),
+        ),
+    );
+    object.insert(
+        "graph_projections".to_string(),
+        JsonValue::Array(
+            summary
+                .graph_projections
+                .iter()
+                .map(|projection| {
+                    let mut item = Map::new();
+                    item.insert(
+                        "name".to_string(),
+                        JsonValue::String(projection.name.clone()),
+                    );
+                    item.insert(
+                        "source".to_string(),
+                        JsonValue::String(projection.source.clone()),
+                    );
+                    item.insert(
+                        "created_at_unix_ms".to_string(),
+                        JsonValue::String(projection.created_at_unix_ms.to_string()),
+                    );
+                    item.insert(
+                        "updated_at_unix_ms".to_string(),
+                        JsonValue::String(projection.updated_at_unix_ms.to_string()),
+                    );
+                    item.insert(
+                        "node_labels".to_string(),
+                        JsonValue::Array(
+                            projection
+                                .node_labels
+                                .iter()
+                                .cloned()
+                                .map(JsonValue::String)
+                                .collect(),
+                        ),
+                    );
+                    item.insert(
+                        "node_types".to_string(),
+                        JsonValue::Array(
+                            projection
+                                .node_types
+                                .iter()
+                                .cloned()
+                                .map(JsonValue::String)
+                                .collect(),
+                        ),
+                    );
+                    item.insert(
+                        "edge_labels".to_string(),
+                        JsonValue::Array(
+                            projection
+                                .edge_labels
+                                .iter()
+                                .cloned()
+                                .map(JsonValue::String)
+                                .collect(),
+                        ),
+                    );
+                    item.insert(
+                        "last_materialized_sequence".to_string(),
+                        match projection.last_materialized_sequence {
+                            Some(value) => JsonValue::String(value.to_string()),
+                            None => JsonValue::Null,
+                        },
+                    );
+                    JsonValue::Object(item)
+                })
+                .collect(),
+        ),
+    );
+    object.insert(
+        "analytics_jobs".to_string(),
+        JsonValue::Array(
+            summary
+                .analytics_jobs
+                .iter()
+                .map(|job| {
+                    let mut item = Map::new();
+                    item.insert("id".to_string(), JsonValue::String(job.id.clone()));
+                    item.insert("kind".to_string(), JsonValue::String(job.kind.clone()));
+                    item.insert(
+                        "projection".to_string(),
+                        match &job.projection {
+                            Some(projection) => JsonValue::String(projection.clone()),
+                            None => JsonValue::Null,
+                        },
+                    );
+                    item.insert("state".to_string(), JsonValue::String(job.state.clone()));
+                    item.insert(
+                        "created_at_unix_ms".to_string(),
+                        JsonValue::String(job.created_at_unix_ms.to_string()),
+                    );
+                    item.insert(
+                        "updated_at_unix_ms".to_string(),
+                        JsonValue::String(job.updated_at_unix_ms.to_string()),
+                    );
+                    item.insert(
+                        "last_run_sequence".to_string(),
+                        match job.last_run_sequence {
+                            Some(value) => JsonValue::String(value.to_string()),
+                            None => JsonValue::Null,
+                        },
+                    );
+                    item.insert(
+                        "metadata".to_string(),
+                        JsonValue::Object(
+                            job.metadata
+                                .iter()
+                                .map(|(key, value)| {
+                                    (key.clone(), JsonValue::String(value.clone()))
+                                })
+                                .collect(),
+                        ),
+                    );
+                    JsonValue::Object(item)
+                })
+                .collect(),
+        ),
+    );
+    object.insert(
+        "vector_artifacts".to_string(),
+        JsonValue::Array(
+            summary
+                .vector_artifacts
+                .iter()
+                .map(|artifact| {
+                    let mut item = Map::new();
+                    item.insert(
+                        "collection".to_string(),
+                        JsonValue::String(artifact.collection.clone()),
+                    );
+                    item.insert(
+                        "artifact_kind".to_string(),
+                        JsonValue::String(artifact.artifact_kind.clone()),
+                    );
+                    item.insert(
+                        "vector_count".to_string(),
+                        JsonValue::String(artifact.vector_count.to_string()),
+                    );
+                    item.insert(
+                        "dimension".to_string(),
+                        JsonValue::Number(artifact.dimension as f64),
+                    );
+                    item.insert(
+                        "max_layer".to_string(),
+                        JsonValue::Number(artifact.max_layer as f64),
+                    );
+                    item.insert(
+                        "serialized_bytes".to_string(),
+                        JsonValue::String(artifact.serialized_bytes.to_string()),
+                    );
+                    item.insert(
+                        "checksum".to_string(),
+                        JsonValue::String(artifact.checksum.to_string()),
+                    );
+                    JsonValue::Object(item)
+                })
+                .collect(),
+        ),
+    );
+    JsonValue::Object(object)
+}
+
+fn native_vector_artifact_pages_json(
+    summaries: &[crate::storage::unified::store::NativeVectorArtifactPageSummary],
+) -> JsonValue {
+    JsonValue::Array(
+        summaries
+            .iter()
+            .map(|summary| {
+                let mut item = Map::new();
+                item.insert(
+                    "collection".to_string(),
+                    JsonValue::String(summary.collection.clone()),
+                );
+                item.insert(
+                    "artifact_kind".to_string(),
+                    JsonValue::String(summary.artifact_kind.clone()),
+                );
+                item.insert(
+                    "root_page".to_string(),
+                    JsonValue::Number(summary.root_page as f64),
+                );
+                item.insert(
+                    "page_count".to_string(),
+                    JsonValue::Number(summary.page_count as f64),
+                );
+                item.insert(
+                    "byte_len".to_string(),
+                    JsonValue::String(summary.byte_len.to_string()),
+                );
+                item.insert(
+                    "checksum".to_string(),
+                    JsonValue::String(summary.checksum.to_string()),
+                );
+                JsonValue::Object(item)
+            })
+            .collect(),
+    )
+}
+
+fn native_vector_artifact_inspection_json(
+    artifact: &crate::storage::unified::devx::NativeVectorArtifactInspection,
+) -> JsonValue {
+    let mut object = Map::new();
+    object.insert(
+        "collection".to_string(),
+        JsonValue::String(artifact.collection.clone()),
+    );
+    object.insert(
+        "artifact_kind".to_string(),
+        JsonValue::String(artifact.artifact_kind.clone()),
+    );
+    object.insert(
+        "root_page".to_string(),
+        JsonValue::Number(artifact.root_page as f64),
+    );
+    object.insert(
+        "page_count".to_string(),
+        JsonValue::Number(artifact.page_count as f64),
+    );
+    object.insert(
+        "byte_len".to_string(),
+        JsonValue::String(artifact.byte_len.to_string()),
+    );
+    object.insert(
+        "checksum".to_string(),
+        JsonValue::String(artifact.checksum.to_string()),
+    );
+    object.insert(
+        "node_count".to_string(),
+        JsonValue::String(artifact.node_count.to_string()),
+    );
+    object.insert(
+        "dimension".to_string(),
+        JsonValue::Number(artifact.dimension as f64),
+    );
+    object.insert(
+        "max_layer".to_string(),
+        JsonValue::Number(artifact.max_layer as f64),
+    );
+    object.insert(
+        "total_connections".to_string(),
+        JsonValue::String(artifact.total_connections.to_string()),
+    );
+    object.insert(
+        "avg_connections".to_string(),
+        JsonValue::Number(artifact.avg_connections),
+    );
+    object.insert(
+        "entry_point".to_string(),
+        match artifact.entry_point {
+            Some(value) => JsonValue::String(value.to_string()),
+            None => JsonValue::Null,
+        },
+    );
+    object.insert(
+        "ivf_n_lists".to_string(),
+        match artifact.ivf_n_lists {
+            Some(value) => JsonValue::Number(value as f64),
+            None => JsonValue::Null,
+        },
+    );
+    object.insert(
+        "ivf_non_empty_lists".to_string(),
+        match artifact.ivf_non_empty_lists {
+            Some(value) => JsonValue::Number(value as f64),
+            None => JsonValue::Null,
+        },
+    );
+    object.insert(
+        "ivf_trained".to_string(),
+        match artifact.ivf_trained {
+            Some(value) => JsonValue::Bool(value),
+            None => JsonValue::Null,
+        },
+    );
+    JsonValue::Object(object)
+}
+
+fn native_vector_artifact_batch_json(
+    batch: &crate::storage::unified::devx::NativeVectorArtifactBatchInspection,
+) -> JsonValue {
+    let mut object = Map::new();
+    object.insert(
+        "inspected_count".to_string(),
+        JsonValue::Number(batch.inspected_count as f64),
+    );
+    object.insert(
+        "valid_count".to_string(),
+        JsonValue::Number(batch.valid_count as f64),
+    );
+    object.insert(
+        "failure_count".to_string(),
+        JsonValue::Number(batch.failures.len() as f64),
+    );
+    object.insert(
+        "artifacts".to_string(),
+        JsonValue::Array(
+            batch
+                .artifacts
+                .iter()
+                .map(native_vector_artifact_inspection_json)
+                .collect(),
+        ),
+    );
+    object.insert(
+        "failures".to_string(),
+        JsonValue::Array(
+            batch
+                .failures
+                .iter()
+                .map(|(collection, artifact_kind, error)| {
+                    let mut item = Map::new();
+                    item.insert("collection".to_string(), JsonValue::String(collection.clone()));
+                    item.insert(
+                        "artifact_kind".to_string(),
+                        JsonValue::String(artifact_kind.clone()),
+                    );
+                    item.insert("error".to_string(), JsonValue::String(error.clone()));
+                    JsonValue::Object(item)
+                })
+                .collect(),
+        ),
+    );
+    JsonValue::Object(object)
+}
+
+fn native_recovery_summary_json(
+    summary: &crate::storage::unified::store::NativeRecoverySummary,
+) -> JsonValue {
+    let mut object = Map::new();
+    object.insert(
+        "snapshot_count".to_string(),
+        JsonValue::Number(summary.snapshot_count as f64),
+    );
+    object.insert(
+        "export_count".to_string(),
+        JsonValue::Number(summary.export_count as f64),
+    );
+    object.insert(
+        "snapshots_complete".to_string(),
+        JsonValue::Bool(summary.snapshots_complete),
+    );
+    object.insert(
+        "exports_complete".to_string(),
+        JsonValue::Bool(summary.exports_complete),
+    );
+    object.insert(
+        "omitted_snapshot_count".to_string(),
+        JsonValue::Number(summary.omitted_snapshot_count as f64),
+    );
+    object.insert(
+        "omitted_export_count".to_string(),
+        JsonValue::Number(summary.omitted_export_count as f64),
+    );
+    object.insert(
+        "snapshots".to_string(),
+        JsonValue::Array(
+            summary
+                .snapshots
+                .iter()
+                .map(|snapshot| {
+                    let mut item = Map::new();
+                    item.insert(
+                        "snapshot_id".to_string(),
+                        JsonValue::String(snapshot.snapshot_id.to_string()),
+                    );
+                    item.insert(
+                        "created_at_unix_ms".to_string(),
+                        JsonValue::String(snapshot.created_at_unix_ms.to_string()),
+                    );
+                    item.insert(
+                        "superblock_sequence".to_string(),
+                        JsonValue::String(snapshot.superblock_sequence.to_string()),
+                    );
+                    item.insert(
+                        "collection_count".to_string(),
+                        JsonValue::Number(snapshot.collection_count as f64),
+                    );
+                    item.insert(
+                        "total_entities".to_string(),
+                        JsonValue::String(snapshot.total_entities.to_string()),
+                    );
+                    JsonValue::Object(item)
+                })
+                .collect(),
+        ),
+    );
+    object.insert(
+        "exports".to_string(),
+        JsonValue::Array(
+            summary
+                .exports
+                .iter()
+                .map(|export| {
+                    let mut item = Map::new();
+                    item.insert("name".to_string(), JsonValue::String(export.name.clone()));
+                    item.insert(
+                        "created_at_unix_ms".to_string(),
+                        JsonValue::String(export.created_at_unix_ms.to_string()),
+                    );
+                    item.insert(
+                        "snapshot_id".to_string(),
+                        match export.snapshot_id {
+                            Some(value) => JsonValue::String(value.to_string()),
+                            None => JsonValue::Null,
+                        },
+                    );
+                    item.insert(
+                        "superblock_sequence".to_string(),
+                        JsonValue::String(export.superblock_sequence.to_string()),
+                    );
+                    item.insert(
+                        "collection_count".to_string(),
+                        JsonValue::Number(export.collection_count as f64),
+                    );
+                    item.insert(
+                        "total_entities".to_string(),
+                        JsonValue::String(export.total_entities.to_string()),
+                    );
+                    JsonValue::Object(item)
+                })
+                .collect(),
+        ),
+    );
+    JsonValue::Object(object)
+}
+
+fn native_catalog_summary_json(
+    summary: &crate::storage::unified::store::NativeCatalogSummary,
+) -> JsonValue {
+    let mut object = Map::new();
+    object.insert(
+        "collection_count".to_string(),
+        JsonValue::Number(summary.collection_count as f64),
+    );
+    object.insert(
+        "total_entities".to_string(),
+        JsonValue::String(summary.total_entities.to_string()),
+    );
+    object.insert(
+        "collections_complete".to_string(),
+        JsonValue::Bool(summary.collections_complete),
+    );
+    object.insert(
+        "omitted_collection_count".to_string(),
+        JsonValue::Number(summary.omitted_collection_count as f64),
+    );
+    object.insert(
+        "collections".to_string(),
+        JsonValue::Array(
+            summary
+                .collections
+                .iter()
+                .map(|collection| {
+                    let mut item = Map::new();
+                    item.insert("name".to_string(), JsonValue::String(collection.name.clone()));
+                    item.insert(
+                        "entities".to_string(),
+                        JsonValue::String(collection.entities.to_string()),
+                    );
+                    item.insert(
+                        "cross_refs".to_string(),
+                        JsonValue::String(collection.cross_refs.to_string()),
+                    );
+                    item.insert(
+                        "segments".to_string(),
+                        JsonValue::Number(collection.segments as f64),
+                    );
+                    JsonValue::Object(item)
+                })
+                .collect(),
+        ),
+    );
+    JsonValue::Object(object)
+}
+
+fn catalog_consistency_json(
+    report: &crate::catalog::CatalogConsistencyReport,
+) -> JsonValue {
+    let mut object = Map::new();
+    object.insert(
+        "declared_index_count".to_string(),
+        JsonValue::Number(report.declared_index_count as f64),
+    );
+    object.insert(
+        "operational_index_count".to_string(),
+        JsonValue::Number(report.operational_index_count as f64),
+    );
+    object.insert(
+        "declared_graph_projection_count".to_string(),
+        JsonValue::Number(report.declared_graph_projection_count as f64),
+    );
+    object.insert(
+        "operational_graph_projection_count".to_string(),
+        JsonValue::Number(report.operational_graph_projection_count as f64),
+    );
+    object.insert(
+        "declared_analytics_job_count".to_string(),
+        JsonValue::Number(report.declared_analytics_job_count as f64),
+    );
+    object.insert(
+        "operational_analytics_job_count".to_string(),
+        JsonValue::Number(report.operational_analytics_job_count as f64),
+    );
+    let string_array = |values: &[String]| {
+        JsonValue::Array(values.iter().cloned().map(JsonValue::String).collect())
+    };
+    object.insert(
+        "missing_operational_indexes".to_string(),
+        string_array(&report.missing_operational_indexes),
+    );
+    object.insert(
+        "undeclared_operational_indexes".to_string(),
+        string_array(&report.undeclared_operational_indexes),
+    );
+    object.insert(
+        "missing_operational_graph_projections".to_string(),
+        string_array(&report.missing_operational_graph_projections),
+    );
+    object.insert(
+        "undeclared_operational_graph_projections".to_string(),
+        string_array(&report.undeclared_operational_graph_projections),
+    );
+    object.insert(
+        "missing_operational_analytics_jobs".to_string(),
+        string_array(&report.missing_operational_analytics_jobs),
+    );
+    object.insert(
+        "undeclared_operational_analytics_jobs".to_string(),
+        string_array(&report.undeclared_operational_analytics_jobs),
+    );
+    JsonValue::Object(object)
+}
+
+fn native_physical_state_json(
+    state: &crate::storage::unified::store::NativePhysicalState,
+) -> JsonValue {
+    let mut object = Map::new();
+    object.insert("header".to_string(), native_header_json(state.header));
+    object.insert(
+        "collection_roots".to_string(),
+        collection_roots_json(&state.collection_roots),
+    );
+    object.insert(
+        "manifest".to_string(),
+        match &state.manifest {
+            Some(summary) => native_manifest_summary_json(summary),
+            None => JsonValue::Null,
+        },
+    );
+    object.insert(
+        "registry".to_string(),
+        match &state.registry {
+            Some(summary) => native_registry_summary_json(summary),
+            None => JsonValue::Null,
+        },
+    );
+    object.insert(
+        "recovery".to_string(),
+        match &state.recovery {
+            Some(summary) => native_recovery_summary_json(summary),
+            None => JsonValue::Null,
+        },
+    );
+    object.insert(
+        "catalog".to_string(),
+        match &state.catalog {
+            Some(summary) => native_catalog_summary_json(summary),
+            None => JsonValue::Null,
+        },
+    );
+    object.insert(
+        "metadata_state".to_string(),
+        match &state.metadata_state {
+            Some(summary) => native_metadata_state_summary_json(summary),
+            None => JsonValue::Null,
+        },
+    );
+    object.insert(
+        "vector_artifact_pages".to_string(),
+        match &state.vector_artifact_pages {
+            Some(summaries) => JsonValue::Array(
+                summaries
+                    .iter()
+                    .map(|summary| {
+                        let mut item = Map::new();
+                        item.insert(
+                            "collection".to_string(),
+                            JsonValue::String(summary.collection.clone()),
+                        );
+                        item.insert(
+                            "artifact_kind".to_string(),
+                            JsonValue::String(summary.artifact_kind.clone()),
+                        );
+                        item.insert(
+                            "root_page".to_string(),
+                            JsonValue::Number(summary.root_page as f64),
+                        );
+                        item.insert(
+                            "page_count".to_string(),
+                            JsonValue::Number(summary.page_count as f64),
+                        );
+                        item.insert(
+                            "byte_len".to_string(),
+                            JsonValue::String(summary.byte_len.to_string()),
+                        );
+                        item.insert(
+                            "checksum".to_string(),
+                            JsonValue::String(summary.checksum.to_string()),
+                        );
+                        JsonValue::Object(item)
+                    })
+                    .collect(),
+            ),
+            None => JsonValue::Null,
+        },
+    );
+    JsonValue::Object(object)
+}
+
+fn native_metadata_state_summary_json(
+    summary: &crate::storage::unified::store::NativeMetadataStateSummary,
+) -> JsonValue {
+    let mut object = Map::new();
+    object.insert(
+        "protocol_version".to_string(),
+        JsonValue::String(summary.protocol_version.clone()),
+    );
+    object.insert(
+        "generated_at_unix_ms".to_string(),
+        JsonValue::String(summary.generated_at_unix_ms.to_string()),
+    );
+    object.insert(
+        "last_loaded_from".to_string(),
+        match &summary.last_loaded_from {
+            Some(value) => JsonValue::String(value.clone()),
+            None => JsonValue::Null,
+        },
+    );
+    object.insert(
+        "last_healed_at_unix_ms".to_string(),
+        match summary.last_healed_at_unix_ms {
+            Some(value) => JsonValue::String(value.to_string()),
+            None => JsonValue::Null,
+        },
+    );
+    JsonValue::Object(object)
+}
+
+fn physical_authority_status_json(
+    status: &crate::storage::unified::devx::PhysicalAuthorityStatus,
+) -> JsonValue {
+    let mut object = Map::new();
+    object.insert(
+        "preference".to_string(),
+        JsonValue::String(status.preference.clone()),
+    );
+    object.insert(
+        "sidecar_available".to_string(),
+        JsonValue::Bool(status.sidecar_available),
+    );
+    object.insert(
+        "native_state_available".to_string(),
+        JsonValue::Bool(status.native_state_available),
+    );
+    object.insert(
+        "native_bootstrap_ready".to_string(),
+        JsonValue::Bool(status.native_bootstrap_ready),
+    );
+    object.insert(
+        "native_registry_complete".to_string(),
+        match status.native_registry_complete {
+            Some(value) => JsonValue::Bool(value),
+            None => JsonValue::Null,
+        },
+    );
+    object.insert(
+        "native_recovery_complete".to_string(),
+        match status.native_recovery_complete {
+            Some(value) => JsonValue::Bool(value),
+            None => JsonValue::Null,
+        },
+    );
+    object.insert(
+        "native_catalog_complete".to_string(),
+        match status.native_catalog_complete {
+            Some(value) => JsonValue::Bool(value),
+            None => JsonValue::Null,
+        },
+    );
+    object.insert(
+        "sidecar_loaded_from".to_string(),
+        match &status.sidecar_loaded_from {
+            Some(value) => JsonValue::String(value.clone()),
+            None => JsonValue::Null,
+        },
+    );
+    object.insert(
+        "native_header_repair_policy".to_string(),
+        match &status.native_header_repair_policy {
+            Some(value) => JsonValue::String(value.clone()),
+            None => JsonValue::Null,
+        },
+    );
+    object.insert(
+        "metadata_sequence".to_string(),
+        match status.metadata_sequence {
+            Some(value) => JsonValue::String(value.to_string()),
+            None => JsonValue::Null,
+        },
+    );
+    object.insert(
+        "native_sequence".to_string(),
+        match status.native_sequence {
+            Some(value) => JsonValue::String(value.to_string()),
+            None => JsonValue::Null,
+        },
+    );
+    object.insert(
+        "native_metadata_last_loaded_from".to_string(),
+        match &status.native_metadata_last_loaded_from {
+            Some(value) => JsonValue::String(value.clone()),
+            None => JsonValue::Null,
+        },
+    );
+    object.insert(
+        "native_metadata_generated_at_unix_ms".to_string(),
+        match status.native_metadata_generated_at_unix_ms {
+            Some(value) => JsonValue::String(value.to_string()),
+            None => JsonValue::Null,
+        },
+    );
     JsonValue::Object(object)
 }
 

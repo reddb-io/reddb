@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::api::{RedDBError, RedDBOptions, RedDBResult};
-use crate::catalog::{snapshot_store, CatalogModelSnapshot};
+use crate::catalog::CatalogModelSnapshot;
 use crate::health::{HealthProvider, HealthReport};
 use crate::index::IndexCatalog;
 use crate::physical::{
@@ -39,6 +39,10 @@ use crate::storage::{
     UnifiedStore,
 };
 use crate::storage::unified::{Metadata, MetadataValue as UnifiedMetadataValue, RefTarget};
+use crate::storage::unified::store::{
+    NativeCatalogSummary, NativeManifestSummary, NativePhysicalState, NativeRecoverySummary,
+    NativeRegistrySummary,
+};
 
 #[derive(Debug, Clone)]
 pub struct ConnectionPoolConfig {
@@ -437,8 +441,11 @@ impl RedDBRuntime {
     }
 
     pub fn catalog(&self) -> CatalogModelSnapshot {
-        let store = self.inner.db.store();
-        snapshot_store("reddb", store.as_ref(), Some(&self.inner.indices))
+        self.inner.db.catalog_model_snapshot()
+    }
+
+    pub fn catalog_consistency_report(&self) -> crate::catalog::CatalogConsistencyReport {
+        self.inner.db.catalog_consistency_report()
     }
 
     pub fn stats(&self) -> RuntimeStats {
@@ -689,35 +696,25 @@ impl RedDBRuntime {
     }
 
     pub fn snapshots(&self) -> RedDBResult<Vec<SnapshotDescriptor>> {
-        let metadata = self
-            .inner
-            .db
-            .physical_metadata()
-            .ok_or_else(|| RedDBError::NotFound("physical metadata".to_string()))?;
-        Ok(metadata.snapshots)
+        let snapshots = self.inner.db.snapshots();
+        if snapshots.is_empty() {
+            return Err(RedDBError::NotFound("physical metadata".to_string()));
+        }
+        Ok(snapshots)
     }
 
     pub fn create_snapshot(&self) -> RedDBResult<SnapshotDescriptor> {
         self.checkpoint()?;
-        let metadata = self
-            .inner
+        self.inner
             .db
-            .physical_metadata()
-            .ok_or_else(|| RedDBError::NotFound("physical metadata".to_string()))?;
-        metadata
-            .snapshots
+            .snapshots()
             .last()
             .cloned()
             .ok_or_else(|| RedDBError::Internal("snapshot metadata was not recorded".to_string()))
     }
 
     pub fn exports(&self) -> RedDBResult<Vec<ExportDescriptor>> {
-        let metadata = self
-            .inner
-            .db
-            .physical_metadata()
-            .ok_or_else(|| RedDBError::NotFound("physical metadata".to_string()))?;
-        Ok(metadata.exports)
+        Ok(self.inner.db.exports())
     }
 
     pub fn native_header(&self) -> RedDBResult<PhysicalFileHeader> {
@@ -726,6 +723,123 @@ impl RedDBRuntime {
             .store()
             .physical_file_header()
             .ok_or_else(|| RedDBError::NotFound("native physical header".to_string()))
+    }
+
+    pub fn native_collection_roots(
+        &self,
+    ) -> RedDBResult<std::collections::BTreeMap<String, u64>> {
+        self.inner
+            .db
+            .native_collection_roots()
+            .ok_or_else(|| RedDBError::NotFound("native collection roots".to_string()))
+    }
+
+    pub fn native_manifest_summary(&self) -> RedDBResult<NativeManifestSummary> {
+        self.inner
+            .db
+            .native_manifest_summary()
+            .ok_or_else(|| RedDBError::NotFound("native manifest summary".to_string()))
+    }
+
+    pub fn native_registry_summary(&self) -> RedDBResult<NativeRegistrySummary> {
+        self.inner
+            .db
+            .native_registry_summary()
+            .ok_or_else(|| RedDBError::NotFound("native registry summary".to_string()))
+    }
+
+    pub fn native_recovery_summary(&self) -> RedDBResult<NativeRecoverySummary> {
+        self.inner
+            .db
+            .native_recovery_summary()
+            .ok_or_else(|| RedDBError::NotFound("native recovery summary".to_string()))
+    }
+
+    pub fn native_catalog_summary(&self) -> RedDBResult<NativeCatalogSummary> {
+        self.inner
+            .db
+            .native_catalog_summary()
+            .ok_or_else(|| RedDBError::NotFound("native catalog summary".to_string()))
+    }
+
+    pub fn native_physical_state(&self) -> RedDBResult<NativePhysicalState> {
+        self.inner
+            .db
+            .native_physical_state()
+            .ok_or_else(|| RedDBError::NotFound("native physical state".to_string()))
+    }
+
+    pub fn native_vector_artifact_pages(
+        &self,
+    ) -> RedDBResult<Vec<crate::storage::unified::store::NativeVectorArtifactPageSummary>> {
+        self.inner
+            .db
+            .native_vector_artifact_pages()
+            .ok_or_else(|| RedDBError::NotFound("native vector artifact pages".to_string()))
+    }
+
+    pub fn inspect_native_vector_artifact(
+        &self,
+        collection: &str,
+        artifact_kind: Option<&str>,
+    ) -> RedDBResult<crate::storage::unified::devx::NativeVectorArtifactInspection> {
+        self.inner
+            .db
+            .inspect_native_vector_artifact(collection, artifact_kind)
+            .map_err(|err| {
+                if err.contains("not found") || err.contains("not available") {
+                    RedDBError::NotFound(err)
+                } else {
+                    RedDBError::Internal(err)
+                }
+            })
+    }
+
+    pub fn warmup_native_vector_artifact(
+        &self,
+        collection: &str,
+        artifact_kind: Option<&str>,
+    ) -> RedDBResult<crate::storage::unified::devx::NativeVectorArtifactInspection> {
+        self.inner
+            .db
+            .warmup_native_vector_artifact(collection, artifact_kind)
+            .map_err(|err| {
+                if err.contains("not found") || err.contains("not available") {
+                    RedDBError::NotFound(err)
+                } else {
+                    RedDBError::Internal(err)
+                }
+            })
+    }
+
+    pub fn inspect_native_vector_artifacts(
+        &self,
+    ) -> RedDBResult<crate::storage::unified::devx::NativeVectorArtifactBatchInspection> {
+        self.inner
+            .db
+            .inspect_native_vector_artifacts()
+            .map_err(|err| {
+                if err.contains("not available") {
+                    RedDBError::NotFound(err)
+                } else {
+                    RedDBError::Internal(err)
+                }
+            })
+    }
+
+    pub fn warmup_native_vector_artifacts(
+        &self,
+    ) -> RedDBResult<crate::storage::unified::devx::NativeVectorArtifactBatchInspection> {
+        self.inner
+            .db
+            .warmup_native_vector_artifacts()
+            .map_err(|err| {
+                if err.contains("not available") {
+                    RedDBError::NotFound(err)
+                } else {
+                    RedDBError::Internal(err)
+                }
+            })
     }
 
     pub fn native_header_repair_policy(&self) -> RedDBResult<String> {
@@ -764,13 +878,62 @@ impl RedDBRuntime {
         .to_string())
     }
 
-    pub fn manifest_events(&self) -> RedDBResult<Vec<ManifestEvent>> {
-        let metadata = self
-            .inner
+    pub fn rebuild_physical_metadata_from_native_state(&self) -> RedDBResult<bool> {
+        self.inner
             .db
-            .physical_metadata()
-            .ok_or_else(|| RedDBError::NotFound("physical metadata".to_string()))?;
-        Ok(metadata.manifest_events)
+            .rebuild_physical_metadata_from_native_state()
+            .map_err(|err| RedDBError::Internal(err.to_string()))
+    }
+
+    pub fn repair_native_physical_state_from_metadata(&self) -> RedDBResult<bool> {
+        self.inner
+            .db
+            .repair_native_physical_state_from_metadata()
+            .map_err(|err| RedDBError::Internal(err.to_string()))
+    }
+
+    pub fn native_metadata_state_summary(
+        &self,
+    ) -> RedDBResult<crate::storage::unified::store::NativeMetadataStateSummary> {
+        self.inner
+            .db
+            .native_metadata_state_summary()
+            .ok_or_else(|| RedDBError::NotFound("native metadata state".to_string()))
+    }
+
+    pub fn physical_authority_status(
+        &self,
+    ) -> crate::storage::unified::devx::PhysicalAuthorityStatus {
+        self.inner.db.physical_authority_status()
+    }
+
+    pub fn manifest_events(&self) -> RedDBResult<Vec<ManifestEvent>> {
+        if let Some(metadata) = self.inner.db.physical_metadata() {
+            return Ok(metadata.manifest_events);
+        }
+        if let Some(summary) = self.inner.db.native_manifest_summary() {
+            return Ok(summary
+                .recent_events
+                .into_iter()
+                .map(|event| ManifestEvent {
+                    collection: event.collection,
+                    object_key: event.object_key,
+                    kind: match event.kind.as_str() {
+                        "insert" => crate::physical::ManifestEventKind::Insert,
+                        "update" => crate::physical::ManifestEventKind::Update,
+                        "remove" => crate::physical::ManifestEventKind::Remove,
+                        _ => crate::physical::ManifestEventKind::Checkpoint,
+                    },
+                    block: crate::physical::BlockReference {
+                        index: event.block_index,
+                        checksum: event.block_checksum,
+                    },
+                    snapshot_min: event.snapshot_min,
+                    snapshot_max: event.snapshot_max,
+                })
+                .collect());
+        }
+        Err(RedDBError::NotFound("physical metadata".to_string()))
     }
 
     pub fn manifest_events_filtered(
@@ -801,12 +964,13 @@ impl RedDBRuntime {
     }
 
     pub fn collection_roots(&self) -> RedDBResult<std::collections::BTreeMap<String, u64>> {
-        let metadata = self
-            .inner
-            .db
-            .physical_metadata()
-            .ok_or_else(|| RedDBError::NotFound("physical metadata".to_string()))?;
-        Ok(metadata.superblock.collection_roots)
+        if let Some(metadata) = self.inner.db.physical_metadata() {
+            return Ok(metadata.superblock.collection_roots);
+        }
+        if let Some(state) = self.inner.db.native_physical_state() {
+            return Ok(state.collection_roots);
+        }
+        Err(RedDBError::NotFound("physical metadata".to_string()))
     }
 
     pub fn create_export(&self, name: impl Into<String>) -> RedDBResult<ExportDescriptor> {
@@ -817,14 +981,16 @@ impl RedDBRuntime {
     }
 
     pub fn graph_projections(&self) -> RedDBResult<Vec<PhysicalGraphProjection>> {
-        Ok(self.inner.db.graph_projections())
+        Ok(self.inner.db.declared_graph_projections())
+    }
+
+    pub fn operational_graph_projections(&self) -> Vec<PhysicalGraphProjection> {
+        self.inner.db.operational_graph_projections()
     }
 
     pub fn graph_projection_named(&self, name: &str) -> RedDBResult<RuntimeGraphProjection> {
         let projection = self
-            .inner
-            .db
-            .graph_projections()
+            .graph_projections()?
             .into_iter()
             .find(|projection| projection.name == name)
             .ok_or_else(|| RedDBError::NotFound(name.to_string()))?;
@@ -854,7 +1020,11 @@ impl RedDBRuntime {
     }
 
     pub fn analytics_jobs(&self) -> RedDBResult<Vec<PhysicalAnalyticsJob>> {
-        Ok(self.inner.db.analytics_jobs())
+        Ok(self.inner.db.declared_analytics_jobs())
+    }
+
+    pub fn operational_analytics_jobs(&self) -> Vec<PhysicalAnalyticsJob> {
+        self.inner.db.operational_analytics_jobs()
     }
 
     pub fn record_analytics_job(
@@ -889,13 +1059,26 @@ impl RedDBRuntime {
     }
 
     pub fn indexes(&self) -> Vec<crate::PhysicalIndexState> {
-        self.inner.db.physical_indexes()
+        self.inner.db.operational_indexes()
+    }
+
+    pub fn declared_indexes(&self) -> Vec<crate::PhysicalIndexState> {
+        self.inner.db.declared_indexes()
+    }
+
+    pub fn declared_indexes_for_collection(&self, collection: &str) -> Vec<crate::PhysicalIndexState> {
+        self.inner
+            .db
+            .declared_indexes()
+            .into_iter()
+            .filter(|index| index.collection.as_deref() == Some(collection))
+            .collect()
     }
 
     pub fn indexes_for_collection(&self, collection: &str) -> Vec<crate::PhysicalIndexState> {
         self.inner
             .db
-            .physical_indexes()
+            .operational_indexes()
             .into_iter()
             .filter(|index| index.collection.as_deref() == Some(collection))
             .collect()

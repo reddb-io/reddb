@@ -7,10 +7,32 @@ service RedDb {
   rpc Ready(Empty) returns (HealthReply);
   rpc Stats(Empty) returns (StatsReply);
   rpc Collections(Empty) returns (CollectionsReply);
+  rpc CatalogConsistency(Empty) returns (PayloadReply);
+  rpc DeclaredIndexes(CollectionRequest) returns (PayloadReply);
+  rpc OperationalIndexes(CollectionRequest) returns (PayloadReply);
+  rpc DeclaredGraphProjections(Empty) returns (PayloadReply);
+  rpc OperationalGraphProjections(Empty) returns (PayloadReply);
+  rpc DeclaredAnalyticsJobs(Empty) returns (PayloadReply);
+  rpc OperationalAnalyticsJobs(Empty) returns (PayloadReply);
   rpc PhysicalMetadata(Empty) returns (PayloadReply);
   rpc NativeHeader(Empty) returns (PayloadReply);
+  rpc NativeCollectionRoots(Empty) returns (PayloadReply);
+  rpc NativeManifestSummary(Empty) returns (PayloadReply);
+  rpc NativeRegistrySummary(Empty) returns (PayloadReply);
+  rpc NativeRecoverySummary(Empty) returns (PayloadReply);
+  rpc NativeCatalogSummary(Empty) returns (PayloadReply);
+  rpc NativeMetadataStateSummary(Empty) returns (PayloadReply);
+  rpc PhysicalAuthority(Empty) returns (PayloadReply);
+  rpc NativePhysicalState(Empty) returns (PayloadReply);
+  rpc NativeVectorArtifacts(Empty) returns (PayloadReply);
+  rpc InspectNativeVectorArtifacts(Empty) returns (PayloadReply);
+  rpc InspectNativeVectorArtifact(CollectionRequest) returns (PayloadReply);
   rpc NativeHeaderRepairPolicy(Empty) returns (PayloadReply);
   rpc RepairNativeHeader(Empty) returns (OperationReply);
+  rpc WarmupNativeVectorArtifacts(Empty) returns (PayloadReply);
+  rpc WarmupNativeVectorArtifact(CollectionRequest) returns (PayloadReply);
+  rpc RepairNativePhysicalState(Empty) returns (OperationReply);
+  rpc RebuildPhysicalMetadata(Empty) returns (OperationReply);
   rpc Manifest(ManifestRequest) returns (PayloadReply);
   rpc Roots(Empty) returns (PayloadReply);
   rpc Snapshots(Empty) returns (PayloadReply);
@@ -81,6 +103,7 @@ message CollectionsReply {
 
 message CollectionRequest {
   string collection = 1;
+  string artifact_kind = 2;
 }
 
 message IndexNameRequest {
