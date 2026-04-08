@@ -72,10 +72,16 @@ pub struct ScoredMatch {
 pub struct MatchComponents {
     /// Vector similarity score
     pub vector_similarity: Option<f32>,
+    /// Text relevance score
+    pub text_relevance: Option<f32>,
     /// Graph pattern match score
     pub graph_match: Option<f32>,
+    /// Structured/table match score
+    pub structured_match: Option<f32>,
     /// Metadata filter match
     pub filter_match: bool,
     /// Cross-reference hop count
     pub hop_distance: Option<u32>,
+    /// Final combined score returned to the user
+    pub final_score: Option<f32>,
 }

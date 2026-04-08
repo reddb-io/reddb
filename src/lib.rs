@@ -1,3 +1,4 @@
+pub mod application;
 pub mod config;
 pub mod crypto;
 pub mod api;
@@ -9,6 +10,7 @@ pub mod index;
 pub mod json;
 pub mod modules;
 pub mod physical;
+pub(crate) mod presentation;
 pub mod runtime;
 pub mod server;
 pub mod serde_json;
@@ -16,6 +18,11 @@ pub mod storage;
 pub mod utils;
 
 pub mod prelude {
+    pub use crate::application::{
+        AdminUseCases, CatalogUseCases, EntityUseCases, GraphUseCases, NativeUseCases,
+        QueryUseCases, RuntimeAdminPort, RuntimeCatalogPort, RuntimeEntityPort,
+        RuntimeGraphPort, RuntimeNativePort, RuntimeQueryPort,
+    };
     pub use crate::api::{
         CatalogService, CatalogSnapshot, Capability, CapabilitySet, CollectionStats, DataOps,
         QueryPlanner, RedDBError, RedDBOptions, RedDBResult, DEFAULT_EXPORT_RETENTION,
@@ -57,6 +64,11 @@ pub mod prelude {
     pub use crate::server::{RedDBServer, ServerOptions};
 }
 
+pub use crate::application::{
+    AdminUseCases, CatalogUseCases, EntityUseCases, GraphUseCases, NativeUseCases,
+    QueryUseCases, RuntimeAdminPort, RuntimeCatalogPort, RuntimeEntityPort,
+    RuntimeGraphPort, RuntimeNativePort, RuntimeQueryPort,
+};
 pub use crate::api::{
     CatalogService, CatalogSnapshot, Capability, CapabilitySet, CollectionStats, DataOps,
     QueryPlanner, RedDBError, RedDBOptions, RedDBResult, DEFAULT_EXPORT_RETENTION,

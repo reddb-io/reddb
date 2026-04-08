@@ -128,3 +128,13 @@ pub use unified::{
     ExecutionError, GraphPath, MatchedEdge, MatchedNode, QueryStats, UnifiedExecutor,
     UnifiedRecord, UnifiedResult,
 };
+
+/// Returns true when the table source should be interpreted as the universal entity
+/// space (table, document, graph, vector mixed mode).
+pub fn is_universal_entity_source(table: &str) -> bool {
+    table.eq_ignore_ascii_case("any")
+        || table.eq_ignore_ascii_case("_any")
+        || table.eq_ignore_ascii_case("all")
+        || table.eq_ignore_ascii_case("entity")
+        || table == "*"
+}

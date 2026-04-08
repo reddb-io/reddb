@@ -92,56 +92,6 @@ What this means in practice:
 
 ## Quick start
 
-### Embedded
-
-Use `RedDB` directly inside your Rust process.
-
-#### 1. Create a database handle
-
-```rust
-use reddb::{RedDB, Value};
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db = RedDB::new();
-
-    let host_id = db
-        .row(
-            "hosts",
-            vec![
-                ("ip", Value::Text("10.0.0.1".into())),
-                ("os", Value::Text("linux".into())),
-                ("critical", Value::Boolean(true)),
-            ],
-        )
-        .save()?;
-
-    let node_id = db
-        .node("graph", "Host")
-        .node_type("host")
-        .property("ip", "10.0.0.1")
-        .save()?;
-
-    let vector_id = db
-        .vector("embeddings")
-        .dense(vec![0.12, 0.91, 0.44])
-        .content("host 10.0.0.1 running ssh")
-        .save()?;
-
-    println!("host={host_id} node={node_id} vector={vector_id}");
-    Ok(())
-}
-```
-
-#### 2. What happened
-
-In a few lines, the same database stored:
-
-- a table row
-- a graph node
-- a vector embedding
-
-No extra services. No separate graph store. No separate vector engine.
-
 ### Server
 
 Run `RedDB` as an HTTP server or as a gRPC server.
@@ -235,6 +185,56 @@ grpcurl \
   127.0.0.1:50051 \
   reddb.v1.RedDb/CreateRow
 ```
+
+### Embedded
+
+Use `RedDB` directly inside your Rust process.
+
+#### 1. Create a database handle
+
+```rust
+use reddb::{RedDB, Value};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let db = RedDB::new();
+
+    let host_id = db
+        .row(
+            "hosts",
+            vec![
+                ("ip", Value::Text("10.0.0.1".into())),
+                ("os", Value::Text("linux".into())),
+                ("critical", Value::Boolean(true)),
+            ],
+        )
+        .save()?;
+
+    let node_id = db
+        .node("graph", "Host")
+        .node_type("host")
+        .property("ip", "10.0.0.1")
+        .save()?;
+
+    let vector_id = db
+        .vector("embeddings")
+        .dense(vec![0.12, 0.91, 0.44])
+        .content("host 10.0.0.1 running ssh")
+        .save()?;
+
+    println!("host={host_id} node={node_id} vector={vector_id}");
+    Ok(())
+}
+```
+
+#### 2. What happened
+
+In a few lines, the same database stored:
+
+- a table row
+- a graph node
+- a vector embedding
+
+No extra services. No separate graph store. No separate vector engine.
 
 ---
 

@@ -7,13 +7,27 @@ service RedDb {
   rpc Ready(Empty) returns (HealthReply);
   rpc Stats(Empty) returns (StatsReply);
   rpc Collections(Empty) returns (CollectionsReply);
+  rpc CatalogReadiness(Empty) returns (PayloadReply);
+  rpc DeploymentProfiles(DeploymentProfileRequest) returns (PayloadReply);
+  rpc CollectionReadiness(Empty) returns (PayloadReply);
+  rpc CollectionAttention(Empty) returns (PayloadReply);
+  rpc CatalogAttentionSummary(Empty) returns (PayloadReply);
   rpc CatalogConsistency(Empty) returns (PayloadReply);
+  rpc ServerlessAttach(JsonPayloadRequest) returns (PayloadReply);
+  rpc ServerlessWarmup(JsonPayloadRequest) returns (PayloadReply);
+  rpc ServerlessReclaim(JsonPayloadRequest) returns (PayloadReply);
   rpc DeclaredIndexes(CollectionRequest) returns (PayloadReply);
   rpc OperationalIndexes(CollectionRequest) returns (PayloadReply);
+  rpc IndexStatuses(Empty) returns (PayloadReply);
+  rpc IndexAttention(Empty) returns (PayloadReply);
   rpc DeclaredGraphProjections(Empty) returns (PayloadReply);
   rpc OperationalGraphProjections(Empty) returns (PayloadReply);
+  rpc GraphProjectionStatuses(Empty) returns (PayloadReply);
+  rpc GraphProjectionAttention(Empty) returns (PayloadReply);
   rpc DeclaredAnalyticsJobs(Empty) returns (PayloadReply);
   rpc OperationalAnalyticsJobs(Empty) returns (PayloadReply);
+  rpc AnalyticsJobStatuses(Empty) returns (PayloadReply);
+  rpc AnalyticsJobAttention(Empty) returns (PayloadReply);
   rpc PhysicalMetadata(Empty) returns (PayloadReply);
   rpc NativeHeader(Empty) returns (PayloadReply);
   rpc NativeCollectionRoots(Empty) returns (PayloadReply);
@@ -39,12 +53,27 @@ service RedDb {
   rpc Exports(Empty) returns (PayloadReply);
   rpc Indexes(CollectionRequest) returns (PayloadReply);
   rpc SetIndexEnabled(IndexToggleRequest) returns (PayloadReply);
+  rpc MarkIndexBuilding(IndexNameRequest) returns (PayloadReply);
+  rpc MarkIndexReady(IndexNameRequest) returns (PayloadReply);
+  rpc FailIndex(IndexNameRequest) returns (PayloadReply);
+  rpc MarkIndexStale(IndexNameRequest) returns (PayloadReply);
   rpc WarmupIndex(IndexNameRequest) returns (PayloadReply);
   rpc RebuildIndexes(CollectionRequest) returns (PayloadReply);
   rpc GraphProjections(Empty) returns (PayloadReply);
   rpc SaveGraphProjection(GraphProjectionUpsertRequest) returns (PayloadReply);
+  rpc SaveAnalyticsJob(JsonPayloadRequest) returns (PayloadReply);
+  rpc QueueAnalyticsJob(JsonPayloadRequest) returns (PayloadReply);
+  rpc StartAnalyticsJob(JsonPayloadRequest) returns (PayloadReply);
+  rpc CompleteAnalyticsJob(JsonPayloadRequest) returns (PayloadReply);
+  rpc MarkAnalyticsJobStale(JsonPayloadRequest) returns (PayloadReply);
+  rpc FailAnalyticsJob(JsonPayloadRequest) returns (PayloadReply);
+  rpc MaterializeGraphProjection(IndexNameRequest) returns (PayloadReply);
+  rpc MarkGraphProjectionMaterializing(IndexNameRequest) returns (PayloadReply);
+  rpc MarkGraphProjectionStale(IndexNameRequest) returns (PayloadReply);
+  rpc FailGraphProjection(IndexNameRequest) returns (PayloadReply);
   rpc AnalyticsJobs(Empty) returns (PayloadReply);
   rpc Scan(ScanRequest) returns (ScanReply);
+  rpc ExplainQuery(QueryRequest) returns (PayloadReply);
   rpc Query(QueryRequest) returns (QueryReply);
   rpc TextSearch(JsonPayloadRequest) returns (PayloadReply);
   rpc HybridSearch(JsonPayloadRequest) returns (PayloadReply);
@@ -78,6 +107,10 @@ service RedDb {
 }
 
 message Empty {}
+
+message DeploymentProfileRequest {
+  string profile = 1;
+}
 
 message HealthReply {
   bool healthy = 1;
@@ -143,6 +176,8 @@ message ScanReply {
 
 message QueryRequest {
   string query = 1;
+  repeated string entity_types = 2;
+  repeated string capabilities = 3;
 }
 
 message JsonPayloadRequest {

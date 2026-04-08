@@ -31,6 +31,28 @@ fn test_parse_select_star() {
 }
 
 #[test]
+fn test_parse_select_star_from_asterisk_defaults_to_any() {
+    let query = parse("SELECT * FROM *").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "*");
+    } else {
+        panic!("Expected TableQuery");
+    }
+}
+
+#[test]
+fn test_parse_select_without_from_defaults_to_any() {
+    let query = parse("SELECT *").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "any");
+        assert_eq!(tq.columns.len(), 0);
+        assert!(tq.alias.is_none());
+    } else {
+        panic!("Expected TableQuery");
+    }
+}
+
+#[test]
 fn test_parse_select_with_alias() {
     let query = parse("SELECT h.ip FROM hosts h").unwrap();
     if let QueryExpr::Table(tq) = query {
@@ -46,6 +68,77 @@ fn test_parse_select_with_where() {
     let query = parse("SELECT ip FROM hosts WHERE os = 'Linux'").unwrap();
     if let QueryExpr::Table(tq) = query {
         assert!(tq.filter.is_some());
+    } else {
+        panic!("Expected TableQuery");
+    }
+}
+
+#[test]
+fn test_parse_select_any_with_where() {
+    let query = parse("SELECT * FROM ANY WHERE _entity_type = 'graph_node'").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "ANY");
+        assert!(tq.filter.is_some());
+    } else {
+        panic!("Expected TableQuery");
+    }
+}
+
+#[test]
+fn test_parse_select_alt_any_with_where() {
+    let query = parse("SELECT * FROM _any WHERE _entity_type = 'vector'").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "_any");
+        assert!(tq.alias.is_none());
+        assert!(tq.filter.is_some());
+    } else {
+        panic!("Expected TableQuery");
+    }
+}
+
+#[test]
+fn test_parse_select_all_with_where() {
+    let query = parse("SELECT * FROM all WHERE _entity_type = 'vector'").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "all");
+        assert!(tq.alias.is_none());
+        assert!(tq.filter.is_some());
+    } else {
+        panic!("Expected TableQuery");
+    }
+}
+
+#[test]
+fn test_parse_select_any_with_capabilities_in() {
+    let query = parse("SELECT * FROM ANY WHERE _capabilities IN ('vector', 'graph_node', 'document')").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        match tq.filter {
+            Some(Filter::In { .. }) => {}
+            _ => panic!("Expected IN filter"),
+        }
+    } else {
+        panic!("Expected TableQuery");
+    }
+}
+
+#[test]
+fn test_parse_select_entity_with_where() {
+    let query = parse("SELECT * FROM ENTITY WHERE _entity_type = 'document'").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "ENTITY");
+        assert!(tq.alias.is_none());
+        assert!(tq.filter.is_some());
+    } else {
+        panic!("Expected TableQuery");
+    }
+}
+
+#[test]
+fn test_parse_select_entity_lowercase_without_from_alias() {
+    let query = parse("SELECT * FROM entity e").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "entity");
+        assert!(tq.alias.is_none());
     } else {
         panic!("Expected TableQuery");
     }

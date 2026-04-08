@@ -4,6 +4,7 @@ use super::super::ast::{OrderByClause, Projection, QueryExpr, TableQuery};
 use super::super::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
+use crate::storage::query::is_universal_entity_source as is_universal_query_source;
 
 impl<'a> Parser<'a> {
     /// Parse SELECT ... FROM ... query
@@ -13,11 +14,22 @@ impl<'a> Parser<'a> {
         // Parse column list
         let columns = self.parse_projection_list()?;
 
-        self.expect(Token::From)?;
+        // Parse optional table source. If omitted, default to `ANY` so the query
+        // can return mixed entities (table, document, graph, and vector) by default.
+        let table = if self.consume(&Token::From)? {
+            if self.consume(&Token::Star)? {
+                "*".to_string()
+            } else {
+                self.expect_ident()?
+            }
+        } else {
+            "any".to_string()
+        };
 
-        // Parse table name and optional alias
-        let table = self.expect_ident()?;
-        let alias = if self.check(&Token::Ident("".into())) && !self.is_clause_keyword() {
+        // Parse optional alias (only when a FROM clause exists).
+        let alias = if is_universal_table_source(&table) {
+            None
+        } else if self.check(&Token::Ident("".into())) && !self.is_clause_keyword() {
             Some(self.expect_ident()?)
         } else if self.consume(&Token::As)? {
             Some(self.expect_ident()?)
@@ -40,7 +52,13 @@ impl<'a> Parser<'a> {
 
         Ok(QueryExpr::Table(query))
     }
+}
 
+fn is_universal_table_source(table: &str) -> bool {
+    is_universal_query_source(table)
+}
+
+impl<'a> Parser<'a> {
     /// Check if current identifier is a clause keyword
     pub fn is_clause_keyword(&self) -> bool {
         matches!(

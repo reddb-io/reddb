@@ -53,6 +53,7 @@ pub fn execute_vector_query(
                         score: similarity,
                         components: MatchComponents {
                             vector_similarity: Some(similarity),
+                            final_score: Some(similarity),
                             ..Default::default()
                         },
                         path: None,
@@ -151,6 +152,7 @@ pub fn execute_graph_query(
                 components: MatchComponents {
                     graph_match: Some(1.0),
                     vector_similarity: query.ranking_vector.as_ref().map(|_| score),
+                    final_score: Some(score),
                     ..Default::default()
                 },
                 path: None,
@@ -195,7 +197,9 @@ pub fn execute_table_query(
                     entity,
                     score: 1.0,
                     components: MatchComponents {
+                        structured_match: Some(1.0),
                         filter_match: true,
+                        final_score: Some(1.0),
                         ..Default::default()
                     },
                     path: None,
@@ -235,7 +239,11 @@ pub fn execute_scan_query(
                 matches.push(ScoredMatch {
                     entity,
                     score: 1.0,
-                    components: Default::default(),
+                    components: MatchComponents {
+                        structured_match: Some(1.0),
+                        final_score: Some(1.0),
+                        ..Default::default()
+                    },
                     path: None,
                 });
             }
@@ -279,7 +287,9 @@ pub fn execute_ref_query(
                         entity: entity.clone(),
                         score,
                         components: MatchComponents {
+                            structured_match: Some(score),
                             hop_distance: Some(depth),
+                            final_score: Some(score),
                             ..Default::default()
                         },
                         path: None,
@@ -341,7 +351,11 @@ pub fn execute_text_query(
                     matches.push(ScoredMatch {
                         entity,
                         score,
-                        components: Default::default(),
+                        components: MatchComponents {
+                            text_relevance: Some(score),
+                            final_score: Some(score),
+                            ..Default::default()
+                        },
                         path: None,
                     });
                 }
@@ -408,9 +422,19 @@ pub fn execute_hybrid_query(
             if let Some(manager) = store.get_collection(col_name) {
                 let entities = manager.query_all(|_| true);
                 for entity in entities {
-                    let matches = match (&entity.kind, &pattern.node_label) {
-                        (EntityKind::GraphNode { label, .. }, Some(l)) => label == l,
-                        (_, None) => true,
+                    let matches = match (&entity.kind, &pattern.node_label, &pattern.node_type) {
+                        (
+                            EntityKind::GraphNode {
+                                label,
+                                node_type,
+                                ..
+                            },
+                            label_filter,
+                            type_filter,
+                        ) => {
+                            label_filter.as_ref().is_none_or(|l| label == l)
+                                && type_filter.as_ref().is_none_or(|t| node_type == t)
+                        }
                         _ => false,
                     };
 
@@ -435,6 +459,8 @@ pub fn execute_hybrid_query(
         .map(|(_, (entity, score, components))| {
             let mut comps = components;
             comps.filter_match = true;
+            comps.structured_match = Some(1.0);
+            comps.final_score = Some(score);
             ScoredMatch {
                 entity,
                 score,
@@ -770,12 +796,18 @@ pub fn execute_three_way_join(
                     } else {
                         None
                     },
+                    structured_match: if m.table_score > 0.0 {
+                        Some(m.table_score)
+                    } else {
+                        None
+                    },
                     filter_match: true,
                     hop_distance: if m.path.is_empty() {
                         None
                     } else {
                         Some(m.path.len() as u32)
                     },
+                    final_score: Some(score),
                 },
                 path: if m.path.is_empty() {
                     None

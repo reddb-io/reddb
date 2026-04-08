@@ -55,7 +55,7 @@ pub use builders::{
     VectorQueryBuilder,
 };
 pub use filters::{Filter, FilterAcceptor, FilterOp, FilterValue, WhereClause};
-pub use helpers::cosine_similarity;
+pub use helpers::{apply_filters, cosine_similarity};
 pub use types::{MatchComponents, QueryResult, ScoredMatch};
 
 use super::entity::{EntityId, RefType};

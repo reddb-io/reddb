@@ -13,6 +13,7 @@ pub enum IndexKind {
     VectorInverted,
     GraphAdjacency,
     FullText,
+    DocumentPathValue,
     HybridSearch,
 }
 
@@ -24,6 +25,7 @@ impl IndexKind {
             Self::VectorInverted => "vector.inverted",
             Self::GraphAdjacency => "graph.adjacency",
             Self::FullText => "text.fulltext",
+            Self::DocumentPathValue => "document.pathvalue",
             Self::HybridSearch => "search.hybrid",
         }
     }
