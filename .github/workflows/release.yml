@@ -129,7 +129,7 @@ jobs:
           echo "Cargo.toml: $(grep '^version' Cargo.toml)"
           echo "package.json: $(grep '\"version\"' package.json)"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.91.0
         with:
           targets: ${{ matrix.target }}
       - uses: arduino/setup-protoc@v3
@@ -259,7 +259,7 @@ jobs:
       needs.plan.outputs.release_channel == 'stable'
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.91.0
       - uses: arduino/setup-protoc@v3
         with:
           version: '28.x'
