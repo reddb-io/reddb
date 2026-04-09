@@ -67,7 +67,7 @@ impl SessionFile {
             .map_err(|e| format!("Failed to create session file: {}", e))?;
 
         let header = format!(
-            "# redblue session\n\
+            "# reddb session\n\
              created_at = {}\n\
              target = {}\n\
              identifier = {}\n\

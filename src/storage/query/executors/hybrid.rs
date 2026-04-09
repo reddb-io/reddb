@@ -120,7 +120,7 @@ impl HybridExecutor {
         }
 
         // 4. Score and rerank structured results
-        let mut scored: Vec<(UnifiedRecord, f32)> = structured_result
+        let mut scored: Vec<(String, UnifiedRecord, f32)> = structured_result
             .records
             .into_iter()
             .enumerate()
@@ -133,18 +133,23 @@ impl HybridExecutor {
 
                 // Combined score
                 let combined = (1.0 - weight) * struct_score + weight * vector_score;
-                (record, combined)
+                (self.record_to_key(&record), record, combined)
             })
             .collect();
 
-        // Sort by combined score (descending)
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Sort by combined score (descending), then deterministic key
+        scored.sort_by(|a, b| {
+            match b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal) {
+                std::cmp::Ordering::Equal => a.0.cmp(&b.0),
+                ordering => ordering,
+            }
+        });
 
         // Build result
         let mut result = UnifiedResult::with_columns(structured_result.columns);
         result.stats = structured_result.stats;
 
-        for (mut record, score) in scored {
+        for (_key, mut record, score) in scored {
             record
                 .values
                 .insert("_hybrid_score".to_string(), Value::Float(score as f64));
@@ -295,7 +300,12 @@ impl HybridExecutor {
             .collect();
 
         // Sort by RRF score (descending)
-        rrf_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        rrf_scores.sort_by(|a, b| {
+            match b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal) {
+                std::cmp::Ordering::Equal => a.0.cmp(&b.0),
+                ordering => ordering,
+            }
+        });
 
         // 4. Build result from scored records
         let mut record_map: HashMap<String, UnifiedRecord> = HashMap::new();
@@ -399,11 +409,15 @@ impl HybridExecutor {
         }
 
         // 3. Sort by combined score
-        let mut sorted: Vec<_> = scored_records.into_iter().collect();
+        let mut sorted: Vec<(String, UnifiedRecord, f32)> = scored_records
+            .into_iter()
+            .map(|(key, (record, score))| (key, record, score))
+            .collect();
         sorted.sort_by(|a, b| {
-            b.1 .1
-                .partial_cmp(&a.1 .1)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            match b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal) {
+                std::cmp::Ordering::Equal => a.0.cmp(&b.0),
+                ordering => ordering,
+            }
         });
 
         // 4. Build result
@@ -417,7 +431,7 @@ impl HybridExecutor {
         let mut result = UnifiedResult::with_columns(columns);
         result.stats = QueryStats::merge(&structured_result.stats, &vector_result.stats);
 
-        for (_, (mut record, score)) in sorted {
+        for (_key, mut record, score) in sorted {
             record
                 .values
                 .insert("_union_score".to_string(), Value::Float(score as f64));
@@ -582,19 +596,25 @@ impl InMemoryHybridExecutor {
         vector_result: UnifiedResult,
         weight: f32,
     ) -> Result<UnifiedResult, ExecutionError> {
-        let mut scored: Vec<(UnifiedRecord, f32)> = Vec::new();
+        let mut scored: Vec<(String, UnifiedRecord, f32)> = Vec::new();
 
         for (rank, record) in structured.into_iter().enumerate() {
             let struct_score = 1.0 / (rank as f32 + 1.0);
             let vector_score = self.get_vector_score(&record, &vector_result);
             let combined = (1.0 - weight) * struct_score + weight * vector_score;
-            scored.push((record, combined));
+            let key = self.record_to_key_in_memory(&record);
+            scored.push((key, record, combined));
         }
 
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|a, b| {
+            match b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal) {
+                std::cmp::Ordering::Equal => a.0.cmp(&b.0),
+                ordering => ordering,
+            }
+        });
 
         let mut result = UnifiedResult::with_columns(vec!["id".to_string()]);
-        for (mut record, score) in scored {
+        for (_key, mut record, score) in scored {
             record
                 .values
                 .insert("_hybrid_score".to_string(), Value::Float(score as f64));
@@ -649,7 +669,7 @@ impl InMemoryHybridExecutor {
             .collect();
 
         // Calculate RRF scores for vector results
-        let mut scored: Vec<(UnifiedRecord, f64)> = Vec::new();
+        let mut scored: Vec<(String, UnifiedRecord, f64)> = Vec::new();
 
         for (rank, record) in vector_result.records.into_iter().enumerate() {
             let vector_contrib = 1.0 / (k_f64 + (rank + 1) as f64);
@@ -662,14 +682,20 @@ impl InMemoryHybridExecutor {
                 .unwrap_or(0.0);
 
             let rrf_score = struct_contrib + vector_contrib;
-            scored.push((record, rrf_score));
+            let key = self.record_to_key_in_memory(&record);
+            scored.push((key, record, rrf_score));
         }
 
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|a, b| {
+            match b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal) {
+                std::cmp::Ordering::Equal => a.0.cmp(&b.0),
+                ordering => ordering,
+            }
+        });
 
         let mut result =
             UnifiedResult::with_columns(vec!["id".to_string(), "distance".to_string()]);
-        for (mut record, score) in scored {
+        for (_key, mut record, score) in scored {
             record
                 .values
                 .insert("_rrf_score".to_string(), Value::Float(score));
@@ -690,6 +716,16 @@ impl InMemoryHybridExecutor {
             }
         }
         0.0
+    }
+
+    fn record_to_key_in_memory(&self, record: &UnifiedRecord) -> String {
+        if let Some(Value::Integer(id)) = record.values.get("id") {
+            return format!("row:{}", id);
+        }
+        if let Some(first_vsr) = record.vector_results.first() {
+            return format!("vec:{}:{}", first_vsr.collection, first_vsr.id);
+        }
+        format!("hash:{:?}", record.values)
     }
 }
 
@@ -732,6 +768,7 @@ mod tests {
         executor.add_vector("hosts", 3, vec![0.99, 0.0], Some(3)); // Closest to query
 
         let query = VectorQuery {
+            alias: None,
             collection: "hosts".to_string(),
             query_vector: VectorSource::Literal(vec![1.0, 0.0]),
             k: 3,
@@ -776,6 +813,7 @@ mod tests {
         executor.add_vector("hosts", 4, vec![0.9, 0.0], Some(4));
 
         let query = VectorQuery {
+            alias: None,
             collection: "hosts".to_string(),
             query_vector: VectorSource::Literal(vec![1.0, 0.0]),
             k: 10,
@@ -818,6 +856,7 @@ mod tests {
         }
 
         let query = VectorQuery {
+            alias: None,
             collection: "hosts".to_string(),
             query_vector: VectorSource::Literal(vec![1.0, 0.0]),
             k: 4,

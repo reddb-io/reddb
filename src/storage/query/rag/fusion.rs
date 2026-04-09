@@ -184,7 +184,12 @@ impl ContextFusion {
 
         // Assign ranks
         for (source, mut items) in by_source {
-            items.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            items.sort_by(|a, b| {
+                b.1
+                    .partial_cmp(&a.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
+            });
             for (rank, (idx, _)) in items.iter().enumerate() {
                 let key = format!("chunk_{}", idx);
                 if source.starts_with("vector") {

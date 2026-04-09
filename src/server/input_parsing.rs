@@ -1,6 +1,6 @@
 use super::*;
 
-fn json_vector_field(payload: &JsonValue, field: &str) -> Result<Vec<f32>, HttpResponse> {
+pub(crate) fn json_vector_field(payload: &JsonValue, field: &str) -> Result<Vec<f32>, HttpResponse> {
     let values = payload
         .get(field)
         .and_then(JsonValue::as_array)
@@ -24,7 +24,7 @@ fn json_vector_field(payload: &JsonValue, field: &str) -> Result<Vec<f32>, HttpR
     Ok(vector)
 }
 
-fn json_vector_from_value(
+pub(crate) fn json_vector_from_value(
     value: Option<&JsonValue>,
     field: &str,
 ) -> Result<Vec<f32>, HttpResponse> {
@@ -48,7 +48,7 @@ fn json_vector_from_value(
     Ok(vector)
 }
 
-fn optional_json_vector_field(
+pub(crate) fn optional_json_vector_field(
     payload: &JsonValue,
     field: &str,
 ) -> Result<Option<Vec<f32>>, HttpResponse> {
@@ -58,11 +58,11 @@ fn optional_json_vector_field(
     }
 }
 
-fn authorization_bearer_token<'a>(headers: &'a BTreeMap<String, String>) -> Option<&'a str> {
+pub(crate) fn authorization_bearer_token<'a>(headers: &'a BTreeMap<String, String>) -> Option<&'a str> {
     headers.get("authorization")?.strip_prefix("Bearer ")
 }
 
-fn json_collection_entity_ref(
+pub(crate) fn json_collection_entity_ref(
     value: &JsonValue,
     kind: &str,
 ) -> Result<(String, u64), HttpResponse> {
@@ -84,12 +84,12 @@ fn json_collection_entity_ref(
     Ok((collection.to_string(), id as u64))
 }
 
-fn json_to_storage_value(value: &JsonValue) -> Result<Value, HttpResponse> {
+pub(crate) fn json_to_storage_value(value: &JsonValue) -> Result<Value, HttpResponse> {
     crate::application::entity::json_to_storage_value(value)
         .map_err(|err| json_error(400, err.to_string()))
 }
 
-fn json_to_metadata_value(value: &JsonValue) -> Result<MetadataValue, HttpResponse> {
+pub(crate) fn json_to_metadata_value(value: &JsonValue) -> Result<MetadataValue, HttpResponse> {
     crate::application::entity::json_to_metadata_value(value)
         .map_err(|err| json_error(400, err.to_string()))
 }

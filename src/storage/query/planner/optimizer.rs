@@ -219,11 +219,27 @@ impl JoinReorderingPass {
         // For hash join, smaller table should be build side (left)
         if left_size > right_size && query.join_type == JoinType::Inner {
             // Swap left and right
+            let JoinQuery {
+                left,
+                right,
+                join_type,
+                on,
+                filter,
+                order_by,
+                limit,
+                offset,
+                return_,
+            } = query;
             QueryExpr::Join(JoinQuery {
-                left: query.right,
-                right: query.left,
-                join_type: query.join_type,
-                on: swap_condition(query.on),
+                left: right,
+                right: left,
+                join_type,
+                on: swap_condition(on),
+                filter,
+                order_by,
+                limit,
+                offset,
+                return_,
             })
         } else {
             QueryExpr::Join(query)
@@ -395,6 +411,11 @@ mod tests {
                     column: "id".to_string(),
                 },
             },
+            filter: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            return_: Vec::new(),
         });
 
         let (optimized, passes) = optimizer.optimize(join);

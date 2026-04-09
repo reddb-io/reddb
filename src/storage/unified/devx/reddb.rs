@@ -2,11 +2,12 @@
 //!
 //! Unified Database with best-in-class developer experience for Tables, Graphs, and Vectors.
 
+use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{collections::{BTreeMap, BTreeSet}, fmt::Debug};
 
@@ -14,7 +15,7 @@ use super::super::{
     EntityData, EntityId, EntityKind, StoreStats, UnifiedStore, UnifiedStoreConfig, UnifiedEntity,
 };
 use super::batch::BatchBuilder;
-use super::builders::{EdgeBuilder, NodeBuilder, RowBuilder, VectorBuilder};
+use super::builders::{DocumentBuilder, EdgeBuilder, KvBuilder, NodeBuilder, RowBuilder, VectorBuilder};
 use super::helpers::cosine_similarity;
 use super::preprocessors::{IndexConfig, Preprocessor};
 use super::query::QueryBuilder;
@@ -59,6 +60,17 @@ pub struct RedDB {
     options: RedDBOptions,
     /// Whether the current persistence backend is page-based.
     paged_mode: bool,
+    /// Per-collection HNSW vector index cache for fast approximate nearest neighbor search.
+    /// Lazily built on first vector similarity query per collection.
+    vector_indexes: RwLock<HashMap<String, CachedVectorIndex>>,
+}
+
+/// A cached HNSW index together with the entity count at build time.
+/// When the live entity count diverges the cache is considered stale and
+/// is rebuilt on the next query.
+pub(crate) struct CachedVectorIndex {
+    pub index: Arc<RwLock<HnswIndex>>,
+    pub entity_count: usize,
 }
 
 #[derive(Debug, Clone)]

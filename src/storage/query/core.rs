@@ -1,9 +1,10 @@
 use std::fmt;
 
 pub use crate::storage::engine::distance::DistanceMetric;
-use crate::storage::engine::graph_store::{GraphEdgeType, GraphNodeType};
+pub use crate::storage::engine::graph_store::{GraphEdgeType, GraphNodeType};
 pub use crate::storage::engine::vector_metadata::MetadataFilter;
 use crate::storage::schema::Value;
+use super::builders::{TableQueryBuilder, GraphQueryBuilder, PathQueryBuilder};
 
 /// Root query expression
 #[derive(Debug, Clone)]
@@ -84,6 +85,8 @@ impl TableQuery {
 /// Graph query: MATCH pattern WHERE filter RETURN projection
 #[derive(Debug, Clone)]
 pub struct GraphQuery {
+    /// Optional outer alias when used as a join source
+    pub alias: Option<String>,
     /// Graph pattern to match
     pub pattern: GraphPattern,
     /// Filter condition
@@ -96,10 +99,17 @@ impl GraphQuery {
     /// Create a new graph query
     pub fn new(pattern: GraphPattern) -> Self {
         Self {
+            alias: None,
             pattern,
             filter: None,
             return_: Vec::new(),
         }
+    }
+
+    /// Set outer alias
+    pub fn alias(mut self, alias: &str) -> Self {
+        self.alias = Some(alias.to_string());
+        self
     }
 }
 
@@ -262,6 +272,16 @@ pub struct JoinQuery {
     pub join_type: JoinType,
     /// Join condition
     pub on: JoinCondition,
+    /// Post-join filter condition
+    pub filter: Option<Filter>,
+    /// Post-join ordering
+    pub order_by: Vec<OrderByClause>,
+    /// Post-join limit
+    pub limit: Option<u64>,
+    /// Post-join offset
+    pub offset: Option<u64>,
+    /// Post-join projection
+    pub return_: Vec<Projection>,
 }
 
 impl JoinQuery {
@@ -272,6 +292,11 @@ impl JoinQuery {
             right: Box::new(right),
             join_type: JoinType::Inner,
             on,
+            filter: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            return_: Vec::new(),
         }
     }
 
@@ -365,6 +390,8 @@ impl FieldRef {
 /// Path query: find paths between nodes
 #[derive(Debug, Clone)]
 pub struct PathQuery {
+    /// Optional outer alias when used as a join source
+    pub alias: Option<String>,
     /// Source node selector
     pub from: NodeSelector,
     /// Target node selector
@@ -383,6 +410,7 @@ impl PathQuery {
     /// Create a new path query
     pub fn new(from: NodeSelector, to: NodeSelector) -> Self {
         Self {
+            alias: None,
             from,
             to,
             via: Vec::new(),
@@ -390,6 +418,18 @@ impl PathQuery {
             filter: None,
             return_: Vec::new(),
         }
+    }
+
+    /// Set outer alias
+    pub fn alias(mut self, alias: &str) -> Self {
+        self.alias = Some(alias.to_string());
+        self
+    }
+
+    /// Add an edge type constraint to traverse
+    pub fn via(mut self, edge_type: GraphEdgeType) -> Self {
+        self.via.push(edge_type);
+        self
     }
 }
 
@@ -444,6 +484,8 @@ impl NodeSelector {
 /// ```
 #[derive(Debug, Clone)]
 pub struct VectorQuery {
+    /// Optional outer alias when used as a join source
+    pub alias: Option<String>,
     /// Collection name to search
     pub collection: String,
     /// Query vector (or reference to get vector from)
@@ -466,6 +508,7 @@ impl VectorQuery {
     /// Create a new vector query
     pub fn new(collection: &str, query: VectorSource) -> Self {
         Self {
+            alias: None,
             collection: collection.to_string(),
             query_vector: query,
             k: 10,
@@ -498,6 +541,12 @@ impl VectorQuery {
     /// Set similarity threshold
     pub fn min_similarity(mut self, threshold: f32) -> Self {
         self.threshold = Some(threshold);
+        self
+    }
+
+    /// Set outer alias
+    pub fn alias(mut self, alias: &str) -> Self {
+        self.alias = Some(alias.to_string());
         self
     }
 }
@@ -550,6 +599,8 @@ impl VectorSource {
 /// ```
 #[derive(Debug, Clone)]
 pub struct HybridQuery {
+    /// Optional outer alias when used as a join source
+    pub alias: Option<String>,
     /// Structured query part (table/graph)
     pub structured: Box<QueryExpr>,
     /// Vector search part
@@ -564,6 +615,7 @@ impl HybridQuery {
     /// Create a new hybrid query
     pub fn new(structured: QueryExpr, vector: VectorQuery) -> Self {
         Self {
+            alias: None,
             structured: Box::new(structured),
             vector,
             fusion: FusionStrategy::Rerank { weight: 0.5 },
@@ -580,6 +632,12 @@ impl HybridQuery {
     /// Set result limit
     pub fn limit(mut self, limit: usize) -> Self {
         self.limit = Some(limit);
+        self
+    }
+
+    /// Set outer alias
+    pub fn alias(mut self, alias: &str) -> Self {
+        self.alias = Some(alias.to_string());
         self
     }
 }

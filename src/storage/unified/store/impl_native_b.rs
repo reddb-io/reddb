@@ -890,5 +890,4 @@ impl UnifiedStore {
         })
     }
 
-    /// Read the consolidated native physical publication state directly from the paged file.
 }

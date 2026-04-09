@@ -356,7 +356,7 @@ impl GraphStore {
         let mut buf = Vec::new();
 
         // Header: magic(4) + version(4) + node_count(8) + edge_count(8) + node_pages(4) + edge_pages(4)
-        buf.extend_from_slice(b"RBGR"); // RedBlue GRaph
+        buf.extend_from_slice(b"RBGR"); // RedDB GRaph
         buf.extend_from_slice(&1u32.to_le_bytes()); // version
         buf.extend_from_slice(&self.node_count.load(Ordering::Relaxed).to_le_bytes());
         buf.extend_from_slice(&self.edge_count.load(Ordering::Relaxed).to_le_bytes());

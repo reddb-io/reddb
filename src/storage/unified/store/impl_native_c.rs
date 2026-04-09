@@ -308,5 +308,4 @@ impl UnifiedStore {
         Ok(Some((summary, bytes)))
     }
 
-    /// Create a new collection
 }

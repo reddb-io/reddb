@@ -40,6 +40,16 @@ use crate::storage::unified::dsl::{MatchComponents, QueryResult as DslQueryResul
 use crate::storage::unified::{MetadataValue, RefTarget, SparseVector};
 use crate::storage::{CrossRef, EntityData, EntityId, EntityKind, SimilarResult, UnifiedEntity};
 
+fn analytics_job_json(job: &crate::PhysicalAnalyticsJob) -> JsonValue {
+    crate::presentation::admin_json::analytics_job_json(job)
+}
+
+fn graph_projection_json(
+    projection: &crate::PhysicalGraphProjection,
+) -> JsonValue {
+    crate::presentation::admin_json::graph_projection_json(projection)
+}
+
 mod handlers_entity;
 mod handlers_graph;
 mod handlers_ops;

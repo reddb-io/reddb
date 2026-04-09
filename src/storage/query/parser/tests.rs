@@ -4,8 +4,8 @@ use super::*;
 use crate::storage::engine::graph_store::{GraphEdgeType, GraphNodeType};
 use crate::storage::engine::vector_metadata::MetadataValue;
 use crate::storage::query::ast::{
-    DistanceMetric, EdgeDirection, Filter, FusionStrategy, JoinType, MetadataFilter, Projection,
-    TableQuery, VectorSource,
+    DistanceMetric, EdgeDirection, FieldRef, Filter, FusionStrategy, JoinType, MetadataFilter,
+    Projection, TableQuery, VectorSource,
 };
 
 #[test]
@@ -53,11 +53,39 @@ fn test_parse_select_without_from_defaults_to_any() {
 }
 
 #[test]
+fn test_parse_select_without_from_with_trailing_identifier_errors() {
+    let err = parse("SELECT * docs").unwrap_err();
+    assert!(matches!(err.to_string(), s if s.contains("Unexpected token after query")));
+}
+
+#[test]
 fn test_parse_select_with_alias() {
     let query = parse("SELECT h.ip FROM hosts h").unwrap();
     if let QueryExpr::Table(tq) = query {
         assert_eq!(tq.table, "hosts");
         assert_eq!(tq.alias, Some("h".to_string()));
+    } else {
+        panic!("Expected TableQuery");
+    }
+}
+
+#[test]
+fn test_parse_select_any_with_alias() {
+    let query = parse("SELECT * FROM ANY u").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "ANY");
+        assert_eq!(tq.alias, Some("u".to_string()));
+    } else {
+        panic!("Expected TableQuery");
+    }
+}
+
+#[test]
+fn test_parse_select_entity_with_alias() {
+    let query = parse("SELECT * FROM entity e").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "entity");
+        assert_eq!(tq.alias, Some("e".to_string()));
     } else {
         panic!("Expected TableQuery");
     }
@@ -79,6 +107,55 @@ fn test_parse_select_any_with_where() {
     if let QueryExpr::Table(tq) = query {
         assert_eq!(tq.table, "ANY");
         assert!(tq.filter.is_some());
+    } else {
+        panic!("Expected TableQuery");
+    }
+}
+
+#[test]
+fn test_parse_select_any_with_alias_where_order_limit() {
+    let query = parse("SELECT u._entity_type FROM ANY u WHERE u._entity_type = 'vector' ORDER BY u._score DESC LIMIT 10").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "ANY");
+        assert_eq!(tq.alias.as_deref(), Some("u"));
+        assert!(tq.filter.is_some());
+        assert_eq!(tq.order_by.len(), 1);
+        assert_eq!(tq.order_by[0].ascending, false);
+        assert_eq!(tq.limit, Some(10));
+    } else {
+        panic!("Expected TableQuery");
+    }
+}
+
+#[test]
+fn test_parse_select_any_document_path_projection() {
+    let query = parse("SELECT payload.name FROM ANY").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "ANY");
+        match &tq.columns[0] {
+            Projection::Field(FieldRef::TableColumn { table, column }, _) => {
+                assert_eq!(table, "payload");
+                assert_eq!(column, "name");
+            }
+            other => panic!("Expected field projection, got {other:?}"),
+        }
+    } else {
+        panic!("Expected TableQuery");
+    }
+}
+
+#[test]
+fn test_parse_select_any_nested_document_path_projection() {
+    let query = parse("SELECT payload.owner.name FROM ANY").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "ANY");
+        match &tq.columns[0] {
+            Projection::Field(FieldRef::TableColumn { table, column }, _) => {
+                assert_eq!(table, "payload");
+                assert_eq!(column, "owner.name");
+            }
+            other => panic!("Expected field projection, got {other:?}"),
+        }
     } else {
         panic!("Expected TableQuery");
     }
@@ -109,6 +186,18 @@ fn test_parse_select_all_with_where() {
 }
 
 #[test]
+fn test_parse_select_ALL_keyword_with_where() {
+    let query = parse("SELECT * FROM ALL WHERE _entity_type = 'vector'").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "all");
+        assert!(tq.alias.is_none());
+        assert!(tq.filter.is_some());
+    } else {
+        panic!("Expected TableQuery");
+    }
+}
+
+#[test]
 fn test_parse_select_any_with_capabilities_in() {
     let query = parse("SELECT * FROM ANY WHERE _capabilities IN ('vector', 'graph_node', 'document')").unwrap();
     if let QueryExpr::Table(tq) = query {
@@ -116,6 +205,28 @@ fn test_parse_select_any_with_capabilities_in() {
             Some(Filter::In { .. }) => {}
             _ => panic!("Expected IN filter"),
         }
+    } else {
+        panic!("Expected TableQuery");
+    }
+}
+
+#[test]
+fn test_parse_select_universal_with_where() {
+    let query = parse("SELECT * FROM UNIVERSAL WHERE _entity_type = 'vector'").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "UNIVERSAL");
+        assert!(tq.filter.is_some());
+    } else {
+        panic!("Expected TableQuery");
+    }
+}
+
+#[test]
+fn test_parse_select_mixed_with_where() {
+    let query = parse("SELECT * FROM mixed WHERE _entity_type = 'document'").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "mixed");
+        assert!(tq.filter.is_some());
     } else {
         panic!("Expected TableQuery");
     }
@@ -138,7 +249,25 @@ fn test_parse_select_entity_lowercase_without_from_alias() {
     let query = parse("SELECT * FROM entity e").unwrap();
     if let QueryExpr::Table(tq) = query {
         assert_eq!(tq.table, "entity");
-        assert!(tq.alias.is_none());
+        assert_eq!(tq.alias.as_deref(), Some("e"));
+    } else {
+        panic!("Expected TableQuery");
+    }
+}
+
+#[test]
+fn test_parse_select_table_alias_nested_document_path_projection() {
+    let query = parse("SELECT d.payload.owner.name FROM docs AS d").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "docs");
+        assert_eq!(tq.alias.as_deref(), Some("d"));
+        match &tq.columns[0] {
+            Projection::Field(FieldRef::TableColumn { table, column }, _) => {
+                assert_eq!(table, "d");
+                assert_eq!(column, "payload.owner.name");
+            }
+            other => panic!("Expected field projection, got {other:?}"),
+        }
     } else {
         panic!("Expected TableQuery");
     }
@@ -274,10 +403,66 @@ fn test_parse_path_query() {
 #[test]
 fn test_parse_join_query() {
     let query =
-        parse("FROM hosts h JOIN GRAPH (n:Host)-[:AFFECTED_BY]->(v) ON h.ip = n.id").unwrap();
+        parse("FROM hosts h JOIN GRAPH (n:Host)-[:AFFECTED_BY]->(v) AS g ON h.ip = n.id").unwrap();
     if let QueryExpr::Join(jq) = query {
         assert!(matches!(*jq.left, QueryExpr::Table(_)));
+        match jq.right.as_ref() {
+            QueryExpr::Graph(gq) => assert_eq!(gq.alias.as_deref(), Some("g")),
+            _ => panic!("Expected GraphQuery"),
+        }
+    } else {
+        panic!("Expected JoinQuery");
+    }
+}
+
+#[test]
+fn test_parse_join_with_universal_left_alias() {
+    let query = parse("FROM ANY a JOIN GRAPH (n:Host)-[:AFFECTED_BY]->(v) ON a._entity_id = n.id").unwrap();
+    if let QueryExpr::Join(jq) = query {
+        match &*jq.left {
+            QueryExpr::Table(tq) => assert_eq!(tq.alias.as_deref(), Some("a")),
+            _ => panic!("Expected left table"),
+        }
         assert!(matches!(*jq.right, QueryExpr::Graph(_)));
+    } else {
+        panic!("Expected JoinQuery");
+    }
+}
+
+#[test]
+fn test_parse_join_with_universal_right_alias() {
+    let query = parse(
+        "FROM hosts h JOIN ANY a ON h.id = a._entity_id RETURN h.id, a._score",
+    )
+    .unwrap();
+    if let QueryExpr::Join(jq) = query {
+        match &*jq.right {
+            QueryExpr::Table(tq) => {
+                assert_eq!(tq.table, "ANY");
+                assert_eq!(tq.alias.as_deref(), Some("a"));
+            }
+            _ => panic!("Expected right table"),
+        }
+    } else {
+        panic!("Expected JoinQuery");
+    }
+}
+
+#[test]
+fn test_parse_join_with_ALL_keyword() {
+    let query = parse(
+        "FROM docs d JOIN ALL a ON d.id = a._entity_id WHERE a._entity_type = 'vector' LIMIT 2",
+    )
+    .unwrap();
+    if let QueryExpr::Join(jq) = query {
+        match &*jq.right {
+            QueryExpr::Table(tq) => {
+                assert_eq!(tq.table, "all");
+                assert_eq!(tq.alias.as_deref(), Some("a"));
+            }
+            _ => panic!("Expected right table"),
+        }
+        assert!(jq.filter.is_some());
     } else {
         panic!("Expected JoinQuery");
     }
@@ -288,6 +473,110 @@ fn test_parse_left_join() {
     let query = parse("FROM hosts h LEFT JOIN GRAPH (n:Host) ON h.ip = n.id").unwrap();
     if let QueryExpr::Join(jq) = query {
         assert_eq!(jq.join_type, JoinType::LeftOuter);
+    } else {
+        panic!("Expected JoinQuery");
+    }
+}
+
+#[test]
+fn test_parse_join_vector_query() {
+    let query = parse(
+        "FROM docs d JOIN VECTOR SEARCH embeddings SIMILAR TO [0.1, 0.2] LIMIT 5 AS sim ON d.id = sim.entity_id RETURN d.id, sim.score",
+    )
+    .unwrap();
+    if let QueryExpr::Join(jq) = query {
+        assert!(matches!(*jq.left, QueryExpr::Table(_)));
+        match jq.right.as_ref() {
+            QueryExpr::Vector(vq) => assert_eq!(vq.alias.as_deref(), Some("sim")),
+            _ => panic!("Expected VectorQuery"),
+        }
+        assert_eq!(jq.limit, None);
+        assert_eq!(jq.return_.len(), 2);
+    } else {
+        panic!("Expected JoinQuery");
+    }
+}
+
+#[test]
+fn test_parse_join_vector_query_with_implicit_alias() {
+    let query = parse(
+        "FROM docs d JOIN VECTOR SEARCH embeddings SIMILAR TO [0.1, 0.2] LIMIT 5 sim ON d.id = sim.entity_id RETURN d.id, sim.score",
+    )
+    .unwrap();
+    if let QueryExpr::Join(jq) = query {
+        match jq.right.as_ref() {
+            QueryExpr::Vector(vq) => assert_eq!(vq.alias.as_deref(), Some("sim")),
+            _ => panic!("Expected VectorQuery"),
+        }
+    } else {
+        panic!("Expected JoinQuery");
+    }
+}
+
+#[test]
+fn test_parse_join_path_query() {
+    let query = parse(
+        "FROM hosts h JOIN PATH FROM host('host:a') TO host('host:b') LIMIT 4 AS p ON h.id = p.entity_id WHERE h.status = 'active' RETURN h.id, p.entity_id",
+    )
+    .unwrap();
+    if let QueryExpr::Join(jq) = query {
+        assert!(matches!(*jq.left, QueryExpr::Table(_)));
+        match jq.right.as_ref() {
+            QueryExpr::Path(pq) => assert_eq!(pq.alias.as_deref(), Some("p")),
+            _ => panic!("Expected PathQuery"),
+        }
+        assert!(jq.filter.is_some());
+        assert_eq!(jq.return_.len(), 2);
+    } else {
+        panic!("Expected JoinQuery");
+    }
+}
+
+#[test]
+fn test_parse_join_path_query_with_implicit_alias() {
+    let query = parse(
+        "FROM hosts h JOIN PATH FROM host('host:a') TO host('host:b') LIMIT 4 p ON h.id = p.entity_id RETURN h.id, p.entity_id",
+    )
+    .unwrap();
+    if let QueryExpr::Join(jq) = query {
+        match jq.right.as_ref() {
+            QueryExpr::Path(pq) => assert_eq!(pq.alias.as_deref(), Some("p")),
+            _ => panic!("Expected PathQuery"),
+        }
+    } else {
+        panic!("Expected JoinQuery");
+    }
+}
+
+#[test]
+fn test_parse_join_hybrid_query() {
+    let query = parse(
+        "FROM docs d JOIN HYBRID SELECT * FROM hosts VECTOR SEARCH embeddings SIMILAR TO [0.1, 0.2] FUSION RERANK AS hy ON d.id = hy.entity_id RETURN d.id, hy.score",
+    )
+    .unwrap();
+    if let QueryExpr::Join(jq) = query {
+        assert!(matches!(*jq.left, QueryExpr::Table(_)));
+        match jq.right.as_ref() {
+            QueryExpr::Hybrid(hq) => assert_eq!(hq.alias.as_deref(), Some("hy")),
+            _ => panic!("Expected HybridQuery"),
+        }
+        assert_eq!(jq.return_.len(), 2);
+    } else {
+        panic!("Expected JoinQuery");
+    }
+}
+
+#[test]
+fn test_parse_join_hybrid_query_with_implicit_alias() {
+    let query = parse(
+        "FROM docs d JOIN HYBRID SELECT * FROM hosts VECTOR SEARCH embeddings SIMILAR TO [0.1, 0.2] FUSION RERANK h ON d.id = h.entity_id RETURN d.id, h.score",
+    )
+    .unwrap();
+    if let QueryExpr::Join(jq) = query {
+        match jq.right.as_ref() {
+            QueryExpr::Hybrid(hq) => assert_eq!(hq.alias.as_deref(), Some("h")),
+            _ => panic!("Expected HybridQuery"),
+        }
     } else {
         panic!("Expected JoinQuery");
     }

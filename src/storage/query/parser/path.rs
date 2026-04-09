@@ -43,6 +43,7 @@ impl<'a> Parser<'a> {
         };
 
         Ok(QueryExpr::Path(PathQuery {
+            alias: None,
             from,
             to,
             via,

@@ -71,6 +71,8 @@ pub enum BTreeError {
     Corrupted(String),
     /// Pager error
     Pager(String),
+    /// Internal lock was poisoned by a panicked thread
+    LockPoisoned(String),
 }
 
 impl std::fmt::Display for BTreeError {
@@ -88,6 +90,7 @@ impl std::fmt::Display for BTreeError {
             ),
             Self::Corrupted(msg) => write!(f, "B-tree corrupted: {}", msg),
             Self::Pager(msg) => write!(f, "Pager error: {}", msg),
+            Self::LockPoisoned(msg) => write!(f, "Lock poisoned: {}", msg),
         }
     }
 }
@@ -493,7 +496,9 @@ fn write_interior_entries(page: &mut Page, keys: &[Vec<u8>], children: &[u32]) -
         write_interior_cell(page, i, key, children[i])?;
     }
     page.set_cell_count(keys.len() as u16);
-    page.set_right_child(*children.last().unwrap());
+    page.set_right_child(*children.last().ok_or_else(|| {
+        BTreeError::Corrupted("write_interior_entries: children empty with non-empty keys".into())
+    })?);
     Ok(())
 }
 

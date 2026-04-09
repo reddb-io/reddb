@@ -14,7 +14,7 @@
 //! # Quick Start
 //!
 //! ```ignore
-//! use redblue::storage::RedDB;
+//! use reddb::storage::RedDB;
 //!
 //! let db = RedDB::new();
 //!
@@ -50,12 +50,12 @@ mod helpers;
 mod preprocessors;
 mod query;
 mod reddb;
-mod refs;
+pub(crate) mod refs;
 mod types;
 
 // Re-export all public types
 pub use batch::{BatchBuilder, BatchResult};
-pub use builders::{EdgeBuilder, NodeBuilder, RowBuilder, VectorBuilder};
+pub use builders::{DocumentBuilder, EdgeBuilder, KvBuilder, NodeBuilder, RowBuilder, VectorBuilder};
 pub use error::DevXError;
 pub use helpers::cosine_similarity;
 pub use preprocessors::{
@@ -65,7 +65,10 @@ pub use preprocessors::{
 pub use query::{
     ExpandedEntity, MetadataFilter, PropertyFilter, QueryBuilder, QueryResult, QueryResultItem,
 };
-pub use reddb::RedDB;
+pub use reddb::{
+    NativeHeaderRepairPolicy, NativeVectorArtifactBatchInspection,
+    NativeVectorArtifactInspection, PhysicalAuthorityStatus, RedDB,
+};
 pub use refs::{AnyRef, NodeRef, TableRef, VectorRef};
 pub use types::{LinkedEntity, SimilarResult};
 

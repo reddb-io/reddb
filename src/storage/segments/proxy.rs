@@ -671,7 +671,7 @@ mod tests {
             http_version: "HTTP/1.1".to_string(),
             host: format!("example{}.com", conn_id),
             headers: vec![
-                ("User-Agent".to_string(), "redblue/1.0".to_string()),
+                ("User-Agent".to_string(), "reddb/1.0".to_string()),
                 ("Accept".to_string(), "*/*".to_string()),
             ],
             body: Vec::new(),

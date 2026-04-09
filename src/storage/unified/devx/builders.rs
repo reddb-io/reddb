@@ -1,6 +1,6 @@
 //! Fluent Builders for Entity Creation
 //!
-//! NodeBuilder, EdgeBuilder, VectorBuilder, RowBuilder for fluent entity creation.
+//! NodeBuilder, EdgeBuilder, VectorBuilder, RowBuilder, DocumentBuilder for fluent entity creation.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -11,6 +11,7 @@ use super::super::{
 };
 use super::error::DevXError;
 use super::refs::{NodeRef, TableRef, VectorRef};
+use crate::json::{to_vec as json_to_vec, Value as JsonValue};
 use crate::storage::schema::Value;
 
 // ============================================================================
@@ -568,5 +569,195 @@ impl RowBuilder {
         }
 
         Ok(id)
+    }
+}
+
+// ============================================================================
+// KV Builder
+// ============================================================================
+
+/// Fluent builder for key-value pairs
+///
+/// Stores KV pairs as table rows with named fields `key` (Text) and `value`.
+pub struct KvBuilder {
+    store: Arc<UnifiedStore>,
+    collection: String,
+    key: String,
+    value: Value,
+    metadata: HashMap<String, MetadataValue>,
+}
+
+impl KvBuilder {
+    pub(crate) fn new(
+        store: Arc<UnifiedStore>,
+        collection: impl Into<String>,
+        key: impl Into<String>,
+        value: Value,
+    ) -> Self {
+        Self {
+            store,
+            collection: collection.into(),
+            key: key.into(),
+            value,
+            metadata: HashMap::new(),
+        }
+    }
+
+    /// Add metadata
+    pub fn metadata(mut self, key: impl Into<String>, value: impl Into<MetadataValue>) -> Self {
+        self.metadata.insert(key.into(), value.into());
+        self
+    }
+
+    /// Save the key-value pair as a table row with named fields `key` and `value`
+    pub fn save(self) -> Result<EntityId, DevXError> {
+        let columns = vec![
+            ("key", Value::Text(self.key)),
+            ("value", self.value),
+        ];
+        let mut builder = RowBuilder::new(self.store, &self.collection, columns);
+        for (k, v) in self.metadata {
+            builder = builder.metadata(k, v);
+        }
+        builder.save()
+    }
+}
+
+// ============================================================================
+// Document Builder
+// ============================================================================
+
+/// Fluent builder for documents stored as enriched table rows.
+///
+/// Documents are stored as `TableRow` entities with:
+/// - A `body` named field containing the full JSON serialized as `Value::Json`
+/// - Flattened top-level keys from the body as additional named fields for filtering
+///
+/// # Example
+/// ```ignore
+/// let doc = db.doc("articles")
+///     .field("title", "First Post")
+///     .field("views", 42)
+///     .metadata("source", "web")
+///     .save()?;
+/// ```
+pub struct DocumentBuilder {
+    store: Arc<UnifiedStore>,
+    collection: String,
+    body: HashMap<String, JsonValue>,
+    metadata: HashMap<String, MetadataValue>,
+    links: Vec<(EntityId, String, RefType)>,
+}
+
+impl DocumentBuilder {
+    pub(crate) fn new(store: Arc<UnifiedStore>, collection: impl Into<String>) -> Self {
+        Self {
+            store,
+            collection: collection.into(),
+            body: HashMap::new(),
+            metadata: HashMap::new(),
+            links: Vec::new(),
+        }
+    }
+
+    /// Set a document field
+    pub fn field(mut self, key: impl Into<String>, value: impl Into<JsonValue>) -> Self {
+        self.body.insert(key.into(), value.into());
+        self
+    }
+
+    /// Add metadata
+    pub fn metadata(mut self, key: impl Into<String>, value: impl Into<MetadataValue>) -> Self {
+        self.metadata.insert(key.into(), value.into());
+        self
+    }
+
+    /// Link to a graph node
+    pub fn link_to_node(mut self, node_ref: NodeRef) -> Self {
+        self.links
+            .push((node_ref.node_id, node_ref.collection, RefType::RowToNode));
+        self
+    }
+
+    /// Link to a vector
+    pub fn link_to_vector(mut self, vector_ref: VectorRef) -> Self {
+        self.links.push((
+            vector_ref.vector_id,
+            vector_ref.collection,
+            RefType::RowToVector,
+        ));
+        self
+    }
+
+    /// Save the document and return its ID
+    pub fn save(self) -> Result<EntityId, DevXError> {
+        let id = self.store.next_entity_id();
+
+        let kind = EntityKind::TableRow {
+            table: self.collection.clone(),
+            row_id: id.0,
+        };
+
+        // Build the full JSON body object
+        let body_object = JsonValue::Object(self.body.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+        let body_bytes = json_to_vec(&body_object)
+            .map_err(|e| DevXError::Storage(format!("failed to serialize document body: {e}")))?;
+
+        // Build named fields: "body" (full JSON) + flattened top-level keys
+        let mut named = HashMap::new();
+        named.insert("body".to_string(), Value::Json(body_bytes));
+
+        for (key, value) in &self.body {
+            let storage_value = json_value_to_storage_value(value);
+            named.insert(key.clone(), storage_value);
+        }
+
+        let mut row_data = RowData::new(Vec::new());
+        row_data.named = Some(named);
+
+        let mut entity = UnifiedEntity::new(id, kind, EntityData::Row(row_data));
+
+        // Add cross-refs
+        for (target, target_collection, ref_type) in self.links {
+            entity.add_cross_ref(CrossRef::new(id, target, target_collection, ref_type));
+        }
+
+        let id = self
+            .store
+            .insert_auto(&self.collection, entity)
+            .map_err(|e| DevXError::Storage(format!("{:?}", e)))?;
+
+        // Store metadata
+        if !self.metadata.is_empty() {
+            let _ = self.store.set_metadata(
+                &self.collection,
+                id,
+                Metadata::with_fields(self.metadata),
+            );
+        }
+
+        Ok(id)
+    }
+}
+
+/// Convert a JSON value to a storage value for flattened document fields.
+fn json_value_to_storage_value(value: &JsonValue) -> Value {
+    match value {
+        JsonValue::Null => Value::Null,
+        JsonValue::Bool(b) => Value::Boolean(*b),
+        JsonValue::Number(n) => {
+            if n.fract().abs() < f64::EPSILON {
+                Value::Integer(*n as i64)
+            } else {
+                Value::Float(*n)
+            }
+        }
+        JsonValue::String(s) => Value::Text(s.clone()),
+        JsonValue::Array(_) | JsonValue::Object(_) => {
+            match json_to_vec(value) {
+                Ok(bytes) => Value::Json(bytes),
+                Err(_) => Value::Null,
+            }
+        }
     }
 }

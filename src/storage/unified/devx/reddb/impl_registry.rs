@@ -194,16 +194,17 @@ impl RedDB {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis();
-            if let Some(projection) = metadata
+            let idx = metadata
                 .graph_projections
-                .iter_mut()
-                .find(|projection| projection.name == name)
-            {
-                projection.updated_at_unix_ms = now;
-                projection.state = "materialized".to_string();
-                projection.last_materialized_sequence = Some(metadata.superblock.sequence);
+                .iter()
+                .position(|projection| projection.name == name);
+            if let Some(idx) = idx {
+                metadata.graph_projections[idx].updated_at_unix_ms = now;
+                metadata.graph_projections[idx].state = "materialized".to_string();
+                metadata.graph_projections[idx].last_materialized_sequence = Some(metadata.superblock.sequence);
+                let result = metadata.graph_projections[idx].clone();
                 Self::rearm_projection_dependent_jobs_declared(metadata, name, now);
-                return Some(projection.clone());
+                return Some(result);
             }
             None
         })
@@ -219,16 +220,17 @@ impl RedDB {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis();
-            if let Some(projection) = metadata
+            let idx = metadata
                 .graph_projections
-                .iter_mut()
-                .find(|projection| projection.name == name)
-            {
-                projection.updated_at_unix_ms = now;
-                projection.state = "materializing".to_string();
-                projection.last_materialized_sequence = None;
+                .iter()
+                .position(|projection| projection.name == name);
+            if let Some(idx) = idx {
+                metadata.graph_projections[idx].updated_at_unix_ms = now;
+                metadata.graph_projections[idx].state = "materializing".to_string();
+                metadata.graph_projections[idx].last_materialized_sequence = None;
+                let result = metadata.graph_projections[idx].clone();
                 Self::mark_projection_dependent_jobs_stale(metadata, name, now);
-                return Some(projection.clone());
+                return Some(result);
             }
             None
         })
@@ -244,16 +246,17 @@ impl RedDB {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis();
-            if let Some(projection) = metadata
+            let idx = metadata
                 .graph_projections
-                .iter_mut()
-                .find(|projection| projection.name == name)
-            {
-                projection.updated_at_unix_ms = now;
-                projection.state = "failed".to_string();
-                projection.last_materialized_sequence = None;
+                .iter()
+                .position(|projection| projection.name == name);
+            if let Some(idx) = idx {
+                metadata.graph_projections[idx].updated_at_unix_ms = now;
+                metadata.graph_projections[idx].state = "failed".to_string();
+                metadata.graph_projections[idx].last_materialized_sequence = None;
+                let result = metadata.graph_projections[idx].clone();
                 Self::mark_projection_dependent_jobs_stale(metadata, name, now);
-                return Some(projection.clone());
+                return Some(result);
             }
             None
         })
@@ -269,15 +272,16 @@ impl RedDB {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis();
-            if let Some(projection) = metadata
+            let idx = metadata
                 .graph_projections
-                .iter_mut()
-                .find(|projection| projection.name == name)
-            {
-                projection.updated_at_unix_ms = now;
-                projection.state = "stale".to_string();
+                .iter()
+                .position(|projection| projection.name == name);
+            if let Some(idx) = idx {
+                metadata.graph_projections[idx].updated_at_unix_ms = now;
+                metadata.graph_projections[idx].state = "stale".to_string();
+                let result = metadata.graph_projections[idx].clone();
                 Self::mark_projection_dependent_jobs_stale(metadata, name, now);
-                return Some(projection.clone());
+                return Some(result);
             }
             None
         })
@@ -947,5 +951,4 @@ impl RedDB {
         "declared-unbuilt".to_string()
     }
 
-    /// Apply snapshot/export retention policy to physical metadata and export files.
 }

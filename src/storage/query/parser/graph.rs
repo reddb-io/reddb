@@ -26,6 +26,7 @@ impl<'a> Parser<'a> {
         let return_ = self.parse_return_list()?;
 
         Ok(QueryExpr::Graph(GraphQuery {
+            alias: None,
             pattern,
             filter,
             return_,

@@ -161,6 +161,7 @@ impl FlatIndex {
             a.distance
                 .partial_cmp(&b.distance)
                 .unwrap_or(Ordering::Equal)
+                .then_with(|| a.id.cmp(&b.id))
         });
 
         results
@@ -189,6 +190,7 @@ impl FlatIndex {
             a.distance
                 .partial_cmp(&b.distance)
                 .unwrap_or(Ordering::Equal)
+                .then_with(|| a.id.cmp(&b.id))
         });
 
         results

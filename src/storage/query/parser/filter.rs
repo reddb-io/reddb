@@ -140,20 +140,21 @@ impl<'a> Parser<'a> {
 
     /// Parse field reference (table.column or just column)
     pub fn parse_field_ref(&mut self) -> Result<FieldRef, ParseError> {
-        let first = self.expect_ident()?;
+        let mut segments = vec![self.expect_ident()?];
+        while self.consume(&Token::Dot)? {
+            segments.push(self.expect_ident()?);
+        }
 
-        if self.consume(&Token::Dot)? {
-            let second = self.expect_ident()?;
-            Ok(FieldRef::TableColumn {
-                table: first,
-                column: second,
-            })
-        } else {
-            // Just column name, table will be inferred
-            Ok(FieldRef::TableColumn {
+        match segments.len() {
+            0 => unreachable!("field reference must have at least one segment"),
+            1 => Ok(FieldRef::TableColumn {
                 table: String::new(),
-                column: first,
-            })
+                column: segments.pop().unwrap(),
+            }),
+            _ => Ok(FieldRef::TableColumn {
+                table: segments.remove(0),
+                column: segments.join("."),
+            }),
         }
     }
 }

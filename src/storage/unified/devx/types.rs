@@ -9,6 +9,7 @@ use super::super::{EntityId, RefType, UnifiedEntity};
 pub struct SimilarResult {
     pub entity_id: EntityId,
     pub score: f32,
+    pub distance: f32,
     pub entity: UnifiedEntity,
 }
 

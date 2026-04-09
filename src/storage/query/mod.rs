@@ -16,7 +16,7 @@
 //! The query engine supports multiple query languages with automatic mode detection:
 //!
 //! ```ignore
-//! use redblue::storage::query::modes::{parse_multi, detect_mode, QueryMode};
+//! use reddb::storage::query::modes::{parse_multi, detect_mode, QueryMode};
 //!
 //! // Gremlin
 //! let gremlin = parse_multi("g.V().hasLabel('host').out('connects')").unwrap();
@@ -31,7 +31,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use redblue::storage::query::{Query, Filter, OrderBy, Direction};
+//! use reddb::storage::query::{Query, Filter, OrderBy, Direction};
 //!
 //! let query = Query::select("users")
 //!     .filter(Filter::eq("status", "active"))
@@ -136,5 +136,7 @@ pub fn is_universal_entity_source(table: &str) -> bool {
         || table.eq_ignore_ascii_case("_any")
         || table.eq_ignore_ascii_case("all")
         || table.eq_ignore_ascii_case("entity")
+        || table.eq_ignore_ascii_case("universal")
+        || table.eq_ignore_ascii_case("mixed")
         || table == "*"
 }

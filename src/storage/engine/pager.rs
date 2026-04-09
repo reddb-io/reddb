@@ -58,6 +58,8 @@ pub enum PagerError {
     PageNotFound(u32),
     /// Database is locked
     Locked,
+    /// A Mutex or RwLock was poisoned (another thread panicked while holding it)
+    LockPoisoned,
 }
 
 impl std::fmt::Display for PagerError {
@@ -69,6 +71,7 @@ impl std::fmt::Display for PagerError {
             Self::ReadOnly => write!(f, "Database is read-only"),
             Self::PageNotFound(id) => write!(f, "Page {} not found", id),
             Self::Locked => write!(f, "Database is locked"),
+            Self::LockPoisoned => write!(f, "Internal lock poisoned (concurrent thread panicked)"),
         }
     }
 }
@@ -240,7 +243,7 @@ mod tests {
 
         {
             let pager = Pager::open_default(&path).unwrap();
-            assert_eq!(pager.page_count(), 1); // Just header
+            assert_eq!(pager.page_count().unwrap(), 1); // Just header
         }
 
         cleanup(&path);
@@ -265,7 +268,7 @@ mod tests {
         // Reopen and verify
         {
             let pager = Pager::open_default(&path).unwrap();
-            assert_eq!(pager.page_count(), 2); // Header + 1 data page
+            assert_eq!(pager.page_count().unwrap(), 2); // Header + 1 data page
         }
 
         cleanup(&path);

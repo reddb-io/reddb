@@ -19,7 +19,7 @@ impl BTree {
 
     /// Get the root page ID
     pub fn root_page_id(&self) -> u32 {
-        *self.root_page_id.read().unwrap()
+        *self.root_page_id.read().expect("btree root_page_id RwLock poisoned")
     }
 
     /// Check if tree is empty
@@ -69,7 +69,9 @@ impl BTree {
             page.update_checksum();
             let new_root = page.page_id();
             self.pager.write_page(new_root, page)?;
-            *self.root_page_id.write().unwrap() = new_root;
+            *self.root_page_id.write().map_err(|e| {
+                BTreeError::LockPoisoned(format!("insert: root_page_id write lock: {e}"))
+            })? = new_root;
             return Ok(());
         }
 
@@ -124,7 +126,9 @@ impl BTree {
                 // Handle empty root
                 if page.cell_count() == 0 && page.page_id() == root_id {
                     self.pager.free_page(root_id)?;
-                    *self.root_page_id.write().unwrap() = 0;
+                    *self.root_page_id.write().map_err(|e| {
+                        BTreeError::LockPoisoned(format!("delete: root_page_id write lock: {e}"))
+                    })? = 0;
                 } else {
                     self.rebalance_leaf(leaf_id, path)?;
                 }
@@ -242,7 +246,7 @@ impl BTree {
     }
 
     /// Find the leftmost leaf page
-    fn find_first_leaf(&self, page_id: u32) -> BTreeResult<u32> {
+    pub(crate) fn find_first_leaf(&self, page_id: u32) -> BTreeResult<u32> {
         let mut current_id = page_id;
 
         loop {
@@ -336,12 +340,16 @@ impl BTree {
             new_root.update_checksum();
             let new_root_id = new_root.page_id();
             self.pager.write_page(new_root_id, new_root)?;
-            *self.root_page_id.write().unwrap() = new_root_id;
+            *self.root_page_id.write().map_err(|e| {
+                BTreeError::LockPoisoned(format!("insert_into_parent: root_page_id write lock: {e}"))
+            })? = new_root_id;
             return Ok(());
         }
 
-        // Insert into parent
-        let parent_id = path.pop().unwrap();
+        // Insert into parent — path is non-empty (checked above)
+        let parent_id = path.pop().ok_or_else(|| {
+            BTreeError::Corrupted("insert_into_parent: path unexpectedly empty".into())
+        })?;
         let mut parent = self.pager.read_page(parent_id)?;
 
         // Can we fit?
@@ -430,7 +438,9 @@ impl BTree {
         let mut leaf_entries = read_leaf_entries(&leaf)?;
         let min_bytes = leaf_min_bytes();
 
-        let parent_id = *path.last().unwrap();
+        let parent_id = *path.last().ok_or_else(|| {
+            BTreeError::Corrupted("rebalance_leaf: path unexpectedly empty".into())
+        })?;
         let mut parent = self.pager.read_page(parent_id)?;
         let (mut parent_keys, mut parent_children) = read_interior_keys_children(&parent)?;
 
@@ -610,7 +620,11 @@ impl BTree {
             if node_keys.is_empty() {
                 let next_root = node_children.first().copied().unwrap_or(0);
                 self.pager.free_page(node_id)?;
-                *self.root_page_id.write().unwrap() = next_root;
+                *self.root_page_id.write().map_err(|e| {
+                    BTreeError::LockPoisoned(format!(
+                        "rebalance_interior: root_page_id write lock: {e}"
+                    ))
+                })? = next_root;
             }
             return Ok(());
         }
@@ -640,8 +654,12 @@ impl BTree {
                 let borrow_size = interior_key_size(&borrow_key);
                 if interior_entries_size(&left_keys).saturating_sub(borrow_size) >= min_bytes {
                     let parent_key = parent_keys[child_index - 1].clone();
-                    let borrowed_key = left_keys.pop().unwrap();
-                    let borrowed_child = left_children.pop().unwrap();
+                    let borrowed_key = left_keys.pop().ok_or_else(|| {
+                        BTreeError::Corrupted("rebalance_interior: left_keys empty after check".into())
+                    })?;
+                    let borrowed_child = left_children.pop().ok_or_else(|| {
+                        BTreeError::Corrupted("rebalance_interior: left_children empty".into())
+                    })?;
 
                     node_keys.insert(0, parent_key);
                     node_children.insert(0, borrowed_child);

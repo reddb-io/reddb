@@ -1,7 +1,12 @@
 use super::*;
+use std::sync::Arc;
+use crate::storage::engine::{
+    GraphEdgeType, GraphNodeType, GraphStore, GraphTableIndex, StoredNode,
+};
+use crate::storage::query::ast::*;
+use crate::storage::schema::Value;
 
-
-    fn create_test_graph() -> Arc<GraphStore> {
+fn create_test_graph() -> Arc<GraphStore> {
         let graph = GraphStore::new();
 
         // Add some test nodes
@@ -278,6 +283,7 @@ use super::*;
 
         // Empty pattern should return empty result
         let query = QueryExpr::Graph(GraphQuery {
+            alias: None,
             pattern: GraphPattern {
                 nodes: vec![],
                 edges: vec![],
@@ -362,10 +368,14 @@ use super::*;
                 left_field: FieldRef::node_prop("h", "id"),
                 right_field: FieldRef::node_prop("s", "id"),
             },
+            filter: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            return_: Vec::new(),
         });
 
         let result = executor.execute(&join).unwrap();
         // No matches because host ids != service ids
         assert!(result.is_empty());
     }
-}

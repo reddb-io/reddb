@@ -35,6 +35,10 @@ pub(super) fn scan_runtime_table_records(db: &RedDB, query: &TableQuery) -> RedD
                 Some(table_alias),
             )
         });
+    } else if is_universal_entity_source(table_name) {
+        records.sort_by(|left, right| {
+            runtime_record_identity_key(left).cmp(&runtime_record_identity_key(right))
+        });
     }
 
     let offset = query.offset.unwrap_or(0) as usize;
@@ -125,6 +129,7 @@ pub(super) fn runtime_any_record_from_entity(entity: UnifiedEntity) -> Option<Un
     let (entity_type, capabilities, mut record) = match (kind, entity.data) {
         (EntityKind::TableRow { row_id, .. }, EntityData::Row(row)) => {
             let capabilities = runtime_row_capabilities(&row);
+            let entity_type = runtime_row_entity_type(&row);
             let mut record = UnifiedRecord::new();
             record.set("row_id", Value::UnsignedInteger(row_id));
             if let Some(named) = row.named {
@@ -136,14 +141,14 @@ pub(super) fn runtime_any_record_from_entity(entity: UnifiedEntity) -> Option<Un
                     record.set(&format!("c{index}"), value);
                 }
             }
-            ("table", capabilities, record)
+            (entity_type, capabilities, record)
         }
         (
             EntityKind::GraphNode { label, node_type },
             EntityData::Node(node),
         ) => {
             let mut record = UnifiedRecord::new();
-            record.set("id", Value::NodeRef(node.id.clone()));
+            record.set("id", Value::UnsignedInteger(entity_id));
             record.set("label", Value::Text(label));
             record.set("node_type", Value::Text(node_type));
             for (key, value) in node.properties {
@@ -213,16 +218,47 @@ pub(super) fn runtime_record_capability_list<const N: usize>(values: [&str; N]) 
 
 pub(super) fn runtime_row_capabilities(row: &crate::storage::RowData) -> BTreeSet<String> {
     let mut capabilities = runtime_record_capability_list(["table", "structured"]);
-    let is_document_like = row
-        .named
-        .as_ref()
-        .map(|named| named.values().any(runtime_documentish_value))
-        .unwrap_or(false)
-        || row.columns.iter().any(runtime_documentish_value);
-    if is_document_like {
+    if runtime_row_is_kv(row) {
+        capabilities.insert("kv".to_string());
+    }
+    if runtime_row_has_document_capability(row) {
         capabilities.insert("document".to_string());
     }
     capabilities
+}
+
+pub(super) fn runtime_row_entity_type(row: &crate::storage::RowData) -> &'static str {
+    if runtime_row_is_kv(row) {
+        return "kv";
+    }
+
+    if runtime_row_has_document_capability(row) {
+        "document"
+    } else {
+        "table"
+    }
+}
+
+fn runtime_row_is_kv(row: &crate::storage::RowData) -> bool {
+    let Some(named) = row.named.as_ref() else {
+        return false;
+    };
+
+    if named.len() == 2 {
+        named.contains_key("key") && named.contains_key("value")
+    } else if named.len() == 1 {
+        named.contains_key("key") || named.contains_key("value")
+    } else {
+        false
+    }
+}
+
+pub(super) fn runtime_row_has_document_capability(row: &crate::storage::RowData) -> bool {
+    row.named
+        .as_ref()
+        .map(|named| named.values().any(runtime_documentish_value))
+        .unwrap_or(false)
+        || row.columns.iter().any(runtime_documentish_value)
 }
 
 pub(super) fn runtime_documentish_value(value: &Value) -> bool {
@@ -272,11 +308,33 @@ pub(super) fn runtime_filter_dsl_result(
         });
         type_ok && capability_ok
     });
+
+    normalize_runtime_dsl_result_scores(result);
+}
+
+pub(super) fn normalize_runtime_dsl_result_scores(result: &mut DslQueryResult) {
+    for item in &mut result.matches {
+        if let Some(final_score) = item.components.final_score.filter(|score| score.is_finite()) {
+            item.score = final_score;
+        } else {
+            item.components.final_score = Some(item.score);
+        }
+    }
+
+    result.matches.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| left.entity.id.raw().cmp(&right.entity.id.raw()))
+    });
 }
 
 pub(super) fn runtime_entity_type_and_capabilities(entity: &UnifiedEntity) -> (&'static str, BTreeSet<String>) {
     match (&entity.kind, &entity.data) {
-        (EntityKind::TableRow { .. }, EntityData::Row(row)) => ("table", runtime_row_capabilities(row)),
+        (EntityKind::TableRow { .. }, EntityData::Row(row)) => {
+            (runtime_row_entity_type(row), runtime_row_capabilities(row))
+        }
         (EntityKind::GraphNode { .. }, EntityData::Node(_)) => (
             "graph_node",
             runtime_record_capability_list(["graph", "graph_node"]),
@@ -322,9 +380,17 @@ pub(super) fn resolve_runtime_vector_source(db: &RedDB, source: &VectorSource) -
 
 pub(super) fn runtime_vector_record_from_match(item: SimilarResult) -> UnifiedRecord {
     let mut record = UnifiedRecord::new();
+    let (entity_type, capabilities) = runtime_entity_type_and_capabilities(&item.entity);
     record.set("entity_id", Value::UnsignedInteger(item.entity_id.raw()));
     record.set("_entity_id", Value::UnsignedInteger(item.entity_id.raw()));
     record.set("score", Value::Float(item.score as f64));
+    record.set("_score", Value::Float(item.score as f64));
+    record.set("final_score", Value::Float(item.score as f64));
+    record.set("distance", Value::Float(item.distance as f64));
+    record.set("_distance", Value::Float(item.distance as f64));
+    record.set("vector_distance", Value::Float(item.distance as f64));
+    record.set("vector_score", Value::Float(item.score as f64));
+    record.set("vector_similarity", Value::Float(item.score as f64));
     record.set(
         "collection",
         Value::Text(item.entity.kind.collection().to_string()),
@@ -337,6 +403,10 @@ pub(super) fn runtime_vector_record_from_match(item: SimilarResult) -> UnifiedRe
         "_kind",
         Value::Text(item.entity.kind.storage_type().to_string()),
     );
+    record.set("_created_at", Value::UnsignedInteger(item.entity.created_at));
+    record.set("_updated_at", Value::UnsignedInteger(item.entity.updated_at));
+    record.set("_sequence_id", Value::UnsignedInteger(item.entity.sequence_id));
+    set_runtime_entity_metadata(&mut record, entity_type, capabilities);
     apply_runtime_identity_hints(&mut record, &item.entity);
 
     match item.entity.data {
@@ -397,7 +467,7 @@ pub(super) fn hybrid_candidate_keys(
     }
 }
 
-pub(super) fn runtime_record_identity_key(record: &UnifiedRecord) -> Option<String> {
+pub(super) fn runtime_record_identity_key(record: &UnifiedRecord) -> String {
     for key in [
         "_source_row",
         "_source_node",
@@ -406,26 +476,29 @@ pub(super) fn runtime_record_identity_key(record: &UnifiedRecord) -> Option<Stri
         "_linked_identity",
     ] {
         if let Some(value) = record.values.get(key) {
-            return Some(format!("link:{}", runtime_identity_fragment(value)?));
+            if let Some(fragment) = runtime_identity_fragment(value) {
+                return format!("link:{fragment}");
+            }
         }
     }
 
     if let Some(value) = record.values.get("entity_id").or_else(|| record.values.get("_entity_id")) {
-        return Some(format!("entity:{}", runtime_identity_fragment(value)?));
+        if let Some(fragment) = runtime_identity_fragment(value) {
+            return format!("entity:{fragment}");
+        }
     }
 
     if let (Some(collection), Some(row_id)) = (
         record.values.get("_collection").and_then(runtime_value_text),
         record.values.get("row_id").or_else(|| record.values.get("id")),
     ) {
-        return Some(format!(
-            "row:{collection}:{}",
-            runtime_identity_fragment(row_id)?
-        ));
+        if let Some(fragment) = runtime_identity_fragment(row_id) {
+            return format!("row:{collection}:{fragment}");
+        }
     }
 
     if let Some((alias, node)) = record.nodes.iter().next() {
-        return Some(format!("node:{alias}:{}", node.id));
+        return format!("node:{alias}:{}", node.id);
     }
 
     if let Some(value) = record
@@ -433,18 +506,106 @@ pub(super) fn runtime_record_identity_key(record: &UnifiedRecord) -> Option<Stri
         .iter()
         .find_map(|(key, value)| key.ends_with(".id").then_some(value))
     {
-        return Some(format!("ref:{}", runtime_identity_fragment(value)?));
+        if let Some(fragment) = runtime_identity_fragment(value) {
+            return format!("ref:{fragment}");
+        }
     }
 
     if let Some(value) = record.values.get("id") {
-        return Some(format!("id:{}", runtime_identity_fragment(value)?));
+        if let Some(fragment) = runtime_identity_fragment(value) {
+            return format!("id:{fragment}");
+        }
     }
 
-    record
-        .paths
-        .first()
-        .and_then(|path| path.nodes.first())
-        .map(|node| format!("path:{node}"))
+    if let Some(node) = record.paths.first().and_then(|path| path.nodes.first()) {
+        return format!("path:{node}");
+    }
+
+    format!("fingerprint:{:016x}", runtime_record_identity_fingerprint(record))
+}
+
+fn runtime_record_identity_fingerprint(record: &UnifiedRecord) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    let mix = |hash: &mut u64, bytes: &[u8]| {
+        for &byte in bytes {
+            *hash ^= u64::from(byte);
+            *hash = hash.wrapping_mul(0x100000001b3);
+        }
+    };
+
+    let mut value_keys: Vec<_> = record.values.iter().collect();
+    value_keys.sort_by(|left, right| left.0.cmp(right.0));
+    for (key, value) in value_keys {
+        mix(&mut hash, key.as_bytes());
+        mix(&mut hash, b"\x00");
+        let bytes = value.to_bytes();
+        mix(&mut hash, &bytes);
+        mix(&mut hash, b"|");
+    }
+
+    let mut nodes: Vec<_> = record.nodes.iter().collect();
+    nodes.sort_by(|left, right| left.0.cmp(right.0));
+    for (alias, node) in nodes {
+        mix(&mut hash, alias.as_bytes());
+        mix(&mut hash, b"\x1f");
+        mix(&mut hash, node.id.as_bytes());
+        mix(&mut hash, node.label.as_bytes());
+        mix(&mut hash, format!("{:?}", node.node_type).as_bytes());
+        mix(&mut hash, b"|");
+    }
+
+    let mut edges: Vec<_> = record.edges.iter().collect();
+    edges.sort_by(|left, right| left.0.cmp(right.0));
+    for (alias, edge) in edges {
+        mix(&mut hash, alias.as_bytes());
+        mix(&mut hash, b"\x1f");
+        mix(&mut hash, edge.from.as_bytes());
+        mix(&mut hash, b"->");
+        mix(&mut hash, edge.to.as_bytes());
+        mix(&mut hash, format!("{:?}", edge.edge_type).as_bytes());
+        mix(&mut hash, b"::");
+        mix(&mut hash, format!("{:.8}", edge.weight).as_bytes());
+        mix(&mut hash, b"|");
+    }
+
+    let mut paths: Vec<_> = record.paths.iter().collect();
+    paths.sort_by(|left, right| {
+        let left_node = left.nodes.first().map(|node| node.as_str()).unwrap_or("");
+        let right_node = right.nodes.first().map(|node| node.as_str()).unwrap_or("");
+        left_node.cmp(right_node)
+    });
+    for path in paths {
+        for node in &path.nodes {
+            mix(&mut hash, node.as_bytes());
+            mix(&mut hash, b",");
+        }
+        mix(&mut hash, b"|");
+        for edge in &path.edges {
+            mix(&mut hash, edge.from.as_bytes());
+            mix(&mut hash, b"->");
+            mix(&mut hash, edge.to.as_bytes());
+            mix(&mut hash, b"::");
+            mix(&mut hash, format!("{:?}", edge.edge_type).as_bytes());
+            mix(&mut hash, b":");
+            mix(&mut hash, format!("{:.8}", edge.weight).as_bytes());
+            mix(&mut hash, b",");
+        }
+        mix(&mut hash, b"|");
+    }
+
+    let mut vector_results: Vec<_> = record.vector_results.iter().collect();
+    vector_results.sort_by(|left, right| {
+        (left.collection.as_str(), left.id).cmp(&(right.collection.as_str(), right.id))
+    });
+    for result in vector_results {
+        mix(&mut hash, result.collection.as_bytes());
+        mix(&mut hash, b"#");
+        mix(&mut hash, result.id.to_string().as_bytes());
+        mix(&mut hash, b"::");
+        mix(&mut hash, format!("{:.8}", result.distance).as_bytes());
+    }
+
+    hash
 }
 
 pub(super) fn runtime_identity_fragment(value: &Value) -> Option<String> {
@@ -617,7 +778,19 @@ pub(super) fn runtime_entity_vector_similarity(entity: &UnifiedEntity, query: &[
 }
 
 pub(super) fn runtime_structured_score(record: &UnifiedRecord, rank: Option<usize>) -> f64 {
-    if let Some(value) = record.values.get("score").or_else(|| record.values.get("hybrid_score")) {
+    if let Some(value) = record
+        .values
+        .get("_score")
+        .or_else(|| record.values.get("final_score"))
+        .or_else(|| record.values.get("score"))
+        .or_else(|| record.values.get("hybrid_score"))
+        .or_else(|| record.values.get("graph_score"))
+        .or_else(|| record.values.get("table_score"))
+        .or_else(|| record.values.get("graph_match"))
+        .or_else(|| record.values.get("vector_similarity"))
+        .or_else(|| record.values.get("structured_match"))
+        .or_else(|| record.values.get("text_relevance"))
+    {
         if let Some(number) = runtime_value_number(value) {
             return number;
         }
@@ -629,7 +802,12 @@ pub(super) fn runtime_structured_score(record: &UnifiedRecord, rank: Option<usiz
 pub(super) fn runtime_vector_score(record: &UnifiedRecord) -> f64 {
     record
         .values
-        .get("score")
+        .get("_score")
+        .or_else(|| record.values.get("final_score"))
+        .or_else(|| record.values.get("score"))
+        .or_else(|| record.values.get("vector_similarity"))
+        .or_else(|| record.values.get("graph_score"))
+        .or_else(|| record.values.get("table_score"))
         .and_then(runtime_value_number)
         .unwrap_or(0.0)
 }
@@ -682,6 +860,8 @@ pub(super) fn merge_join_records(
             &left_query.columns,
             Some(left_table_name),
             Some(left_table_alias),
+            false,
+            false,
         );
     }
 
@@ -788,4 +968,3 @@ pub(super) fn canonical_join_strategy(
         )),
     }
 }
-

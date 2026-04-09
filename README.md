@@ -5,70 +5,69 @@
 </p>
 
 <p align="center">
-  <strong>Save tables, docs, binaries, graphs, vectors and embeddings in one database</strong><br>
-  <em>one engine • one runtime • one operational surface • every important data shape</em>
+  <strong>One engine for all your data shapes: rows, docs, graphs and vectors</strong><br>
+  <em>single runtime • one API surface • embedded-first • server and serverless profiles</em>
 </p>
 
 <p align="center">
-  <strong>RedDB</strong> is a multi-structure database engine for applications that need
-  structured rows, raw payloads, linked entities, semantic retrieval, graph analytics,
-  operational metadata and exports without splitting data across multiple systems.
+  <strong>RedDB</strong> is a multi-structure database for systems that need stateful tables,
+  document payloads, linked entities, semantic retrieval and graph analytics in one place,
+  without operational split-brain.
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/crate-reddb-c0392b?style=flat" alt="crate">
+  <img src="https://img.shields.io/badge/runtime-embedded--first-0f766e?style=flat" alt="embedded-first">
+  &nbsp;
+  <img src="https://img.shields.io/badge/profiles-embedded%20%7C%20server%20%7C%20serverless-7c3aed?style=flat" alt="profiles">
+  &nbsp;
+  <img src="https://img.shields.io/badge/shape-multi--model-b7410e?style=flat&logo=rust" alt="multi-model">
+  &nbsp;
+  <img src="https://img.shields.io/badge/queries-ANY%20/ SELECT%20SEARCH-dc2626?style=flat" alt="queries">
+  &nbsp;
+  <img src="https://img.shields.io/badge/interfaces-HTTP%20%2B%20gRPC-2563eb?style=flat" alt="interfaces">
   &nbsp;
   <img src="https://img.shields.io/badge/version-0.1.0-111111?style=flat" alt="version">
-  &nbsp;
-  <img src="https://img.shields.io/badge/language-Rust-b7410e?style=flat&logo=rust" alt="rust">
-  &nbsp;
-  <img src="https://img.shields.io/badge/model-embedded--first-0f766e?style=flat" alt="embedded">
-  &nbsp;
-  <img src="https://img.shields.io/badge/runtime-HTTP%20API-2563eb?style=flat" alt="http">
-  &nbsp;
-  <img src="https://img.shields.io/badge/runtime-gRPC%20API-0f766e?style=flat" alt="grpc">
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/data%20models-tables%20%C2%B7%20docs%20%C2%B7%20graphs%20%C2%B7%20vectors-dc2626?style=flat" alt="models">
+  <img src="https://img.shields.io/badge/core%20flows-queries%20%2F%20writes%20%2F%20recovery-0ea5e9?style=flat" alt="core flows">
   &nbsp;
-  <img src="https://img.shields.io/badge/search-vector%20%C2%B7%20hybrid%20%C2%B7%20text-7c3aed?style=flat" alt="search">
+  <img src="https://img.shields.io/badge/artifacts-native%20indexes%20%2F%20state-eab308?style=flat" alt="artifacts">
   &nbsp;
-  <img src="https://img.shields.io/badge/graph-paths%20%C2%B7%20centrality%20%C2%B7%20communities-0891b2?style=flat" alt="graph">
+  <img src="https://img.shields.io/badge/operations-manifests%20%2F%20snapshots%20%2F%20exports-f59e0b?style=flat" alt="operations">
 </p>
 
 ---
 
-## Save anything
+## Save multiple shapes without moving data
 
-`RedDB` is built for systems that do not fit into a single shape.
+`RedDB` is for systems that don’t fit in one model.
 
 <table>
 <tr>
 <td width="33%">
-<strong>Structured</strong><br><br>
+<strong>Operational tables</strong><br><br>
 
 - rows
 - tables
-- typed values
-- scans
-- filters
-- joins
+- typed values and constraints
+- point/range scans
+- predicates and joins
+- explicit delete/update flows
 
 </td>
 <td width="33%">
-<strong>Semi-structured</strong><br><br>
+<strong>Payload-first entities</strong><br><br>
 
-- documents
-- JSON-like payloads
+- documents / JSON payloads
 - metadata
 - binary blobs
-- exports
-- snapshots
+- key-value fields
+- snapshots and exports
 
 </td>
 <td width="33%">
-<strong>Connected + semantic</strong><br><br>
+<strong>Connected + semantic retrieval</strong><br><br>
 
 - graph nodes
 - graph edges
@@ -76,6 +75,7 @@
 - vectors
 - embeddings
 - hybrid search
+- ANN index-backed search readiness
 
 </td>
 </tr>
@@ -83,10 +83,10 @@
 
 What this means in practice:
 
-- store application state, content, relationships and retrieval data together
-- move from simple rows to graph analytics without changing databases
-- keep local embedded access and still expose a proper server runtime
-- persist operational state, manifests, roots, snapshots and exports in the same system
+- store operational state, documents, relationships, and embeddings in one catalog
+- evolve from row-driven models to graph and vector workflows without migration hell
+- run the same data model in embedded and server/runtime modes
+- keep manifests, native state, snapshots, and exports in the same control plane
 
 ---
 
@@ -147,13 +147,13 @@ curl -X POST http://127.0.0.1:8080/collections/embeddings/vectors \
   }'
 ```
 
-#### 5. Run a query
+#### 5. Run a universal query
 
 ```bash
 curl -X POST http://127.0.0.1:8080/query \
   -H 'content-type: application/json' \
   -d '{
-    "query": "FROM hosts h WHERE h.os = '\''linux'\'' ORDER BY h.ip LIMIT 10"
+    "query": "FROM ANY WHERE _entity_type IN ('table', 'graph_node', 'vector') ORDER BY _score DESC LIMIT 10"
   }'
 ```
 
@@ -561,6 +561,79 @@ Current feature flags:
 
 ---
 
+## Artifact Lifecycle
+
+Every index and artifact in RedDB follows a canonical lifecycle:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Declared
+    Declared --> Building : rebuild / warmup
+    Building --> Ready : materialization complete
+    Building --> Failed : build error
+    Ready --> Stale : underlying data changed
+    Ready --> Disabled : operator disables
+    Stale --> RequiresRebuild : TTL exceeded
+    Failed --> RequiresRebuild : operator requests rebuild
+    RequiresRebuild --> Building : rebuild triggered
+    Disabled --> Ready : operator re-enables (if materialized)
+    Disabled --> Declared : operator re-enables (if not materialized)
+
+    state "Queryable" as q {
+        Ready
+    }
+
+    note right of Ready : Only state that serves reads
+    note right of Failed : Needs manual intervention
+```
+
+States: `declared` | `building` | `ready` | `disabled` | `stale` | `failed` | `requires_rebuild`
+
+- **Ready** is the only state that serves query reads.
+- **can_rebuild()**: `declared`, `stale`, `failed`, `requires_rebuild`.
+- **needs_attention()**: `failed`, `stale`, `requires_rebuild`.
+
+---
+
+## Query Execution Flow
+
+```mermaid
+flowchart TD
+    A[Query Input] --> B{Detect Mode}
+    B -->|SQL| C[Parser]
+    B -->|Gremlin| C
+    B -->|SPARQL| C
+    B -->|Natural| C
+    C --> D[Query AST]
+    D --> E[Planner / Optimizer]
+    E --> F{Source Type}
+    F -->|FROM table| G[Table Scan / Index Seek]
+    F -->|FROM any / universal| H[Entity Scan - all collections]
+    F -->|MATCH graph| I[Graph Pattern Match]
+    F -->|JOIN| J[Nested Loop Join]
+    G --> K[Filter + Sort + Paginate]
+    H --> K
+    I --> K
+    J --> K
+    K --> L[Universal Envelope]
+    L --> M[Response: _entity_id, _collection, _kind, _entity_type, _capabilities, _score]
+```
+
+---
+
+## v1 Beta Limitations
+
+| Feature | Status | Notes |
+|---|---|---|
+| Multi-region replication | Not supported | Planned for v2 |
+| Automatic sharding | Not supported | Single-node only |
+| Advanced RBAC | Not supported | Token-based auth only |
+| Cross-entity transactions | Not supported | Per-collection atomicity |
+| Distributed query planner | Not supported | Local cost-based planner |
+| ACID guarantees | WAL-based | Best-effort durability |
+
+---
+
 ## License
 
-This repo is currently in active design and extraction mode. Add the final project license before publishing the crate.
+MIT License. See [LICENSE](LICENSE) for details.

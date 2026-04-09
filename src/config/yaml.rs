@@ -1,12 +1,12 @@
 // YAML config parser - ZERO external dependencies!
-// Implements minimal YAML parser for .redblue.yaml
+// Implements minimal YAML parser for .reddb.yaml
 
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::sync::OnceLock;
 
-/// Parsed configuration from .redblue.yaml
+/// Parsed configuration from .reddb.yaml
 #[derive(Debug, Clone, Default)] // Derive Default for easier initialization
 pub struct YamlConfig {
     // --- Global/Core Settings ---
@@ -82,13 +82,13 @@ impl YamlConfig {
 
     /// Try to load from current directory
     pub fn load_from_cwd() -> Option<Self> {
-        // Try .redblue.yaml first
-        if let Ok(config) = Self::load(".redblue.yaml") {
+        // Try .reddb.yaml first
+        if let Ok(config) = Self::load(".reddb.yaml") {
             return Some(config);
         }
 
-        // Try .redblue.yml
-        if let Ok(config) = Self::load(".redblue.yml") {
+        // Try .reddb.yml
+        if let Ok(config) = Self::load(".reddb.yml") {
             return Some(config);
         }
 
@@ -374,7 +374,7 @@ mod tests {
     #[test]
     fn test_parse_simple() {
         let yaml = r###"#
-# RedBlue config
+# RedDB config
 verbose: true
 output_format: json
 threads: 20

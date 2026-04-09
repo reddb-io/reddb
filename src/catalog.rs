@@ -124,6 +124,7 @@ pub struct CatalogIndexStatus {
     pub operational: bool,
     pub enabled: bool,
     pub build_state: Option<String>,
+    pub artifact_state: crate::physical::ArtifactState,
     pub lifecycle_state: String,
     pub in_sync: bool,
     pub queryable: bool,
@@ -764,6 +765,10 @@ fn index_statuses(declarations: Option<&CatalogDeclarations>) -> Vec<CatalogInde
                 + usize::from(declared_present != operational_present)
                 + usize::from(!queryable);
 
+            let artifact_state = crate::physical::ArtifactState::from_build_state(
+                build_state.as_deref().unwrap_or("declared-unbuilt"),
+                enabled,
+            );
             CatalogIndexStatus {
                 name,
                 collection,
@@ -772,6 +777,7 @@ fn index_statuses(declarations: Option<&CatalogDeclarations>) -> Vec<CatalogInde
                 operational: operational_present,
                 enabled,
                 build_state,
+                artifact_state,
                 lifecycle_state,
                 in_sync: declared_present == operational_present,
                 queryable,

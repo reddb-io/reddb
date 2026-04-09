@@ -217,12 +217,12 @@ pub(crate) fn index_status_json(status: &CatalogIndexStatus) -> JsonValue {
             .unwrap_or(JsonValue::Null),
     );
     object.insert("kind".to_string(), JsonValue::String(status.kind.clone()));
-    object.insert("declared".to_string(), JsonValue::Boolean(status.declared));
+    object.insert("declared".to_string(), JsonValue::Bool(status.declared));
     object.insert(
         "operational".to_string(),
-        JsonValue::Boolean(status.operational),
+        JsonValue::Bool(status.operational),
     );
-    object.insert("enabled".to_string(), JsonValue::Boolean(status.enabled));
+    object.insert("enabled".to_string(), JsonValue::Bool(status.enabled));
     object.insert(
         "build_state".to_string(),
         status
@@ -232,12 +232,16 @@ pub(crate) fn index_status_json(status: &CatalogIndexStatus) -> JsonValue {
             .unwrap_or(JsonValue::Null),
     );
     object.insert(
+        "artifact_state".to_string(),
+        JsonValue::String(status.artifact_state.as_str().to_string()),
+    );
+    object.insert(
         "queryable".to_string(),
-        JsonValue::Boolean(status.queryable),
+        JsonValue::Bool(status.queryable),
     );
     object.insert(
         "requires_rebuild".to_string(),
-        JsonValue::Boolean(status.requires_rebuild),
+        JsonValue::Bool(status.requires_rebuild),
     );
     object.insert(
         "attention_score".to_string(),
@@ -254,7 +258,7 @@ pub(crate) fn index_status_json(status: &CatalogIndexStatus) -> JsonValue {
                 .collect(),
         ),
     );
-    object.insert("in_sync".to_string(), JsonValue::Boolean(status.in_sync));
+    object.insert("in_sync".to_string(), JsonValue::Bool(status.in_sync));
     JsonValue::Object(object)
 }
 
@@ -287,19 +291,19 @@ pub(crate) fn graph_projection_status_json(status: &CatalogGraphProjectionStatus
         "lifecycle_state".to_string(),
         JsonValue::String(status.lifecycle_state.clone()),
     );
-    object.insert("declared".to_string(), JsonValue::Boolean(status.declared));
+    object.insert("declared".to_string(), JsonValue::Bool(status.declared));
     object.insert(
         "operational".to_string(),
-        JsonValue::Boolean(status.operational),
+        JsonValue::Bool(status.operational),
     );
-    object.insert("in_sync".to_string(), JsonValue::Boolean(status.in_sync));
+    object.insert("in_sync".to_string(), JsonValue::Bool(status.in_sync));
     object.insert(
         "queryable".to_string(),
-        JsonValue::Boolean(status.queryable),
+        JsonValue::Bool(status.queryable),
     );
     object.insert(
         "requires_rematerialization".to_string(),
-        JsonValue::Boolean(status.requires_rematerialization),
+        JsonValue::Bool(status.requires_rematerialization),
     );
     object.insert(
         "last_materialized_sequence".to_string(),
@@ -322,11 +326,11 @@ pub(crate) fn graph_projection_status_json(status: &CatalogGraphProjectionStatus
     );
     object.insert(
         "dependent_jobs_in_sync".to_string(),
-        JsonValue::Boolean(status.dependent_jobs_in_sync),
+        JsonValue::Bool(status.dependent_jobs_in_sync),
     );
     object.insert(
         "rerun_required".to_string(),
-        JsonValue::Boolean(status.rerun_required),
+        JsonValue::Bool(status.rerun_required),
     );
     object.insert(
         "attention_score".to_string(),
@@ -381,12 +385,12 @@ pub(crate) fn analytics_job_status_json(status: &CatalogAnalyticsJobStatus) -> J
         "lifecycle_state".to_string(),
         JsonValue::String(status.lifecycle_state.clone()),
     );
-    object.insert("declared".to_string(), JsonValue::Boolean(status.declared));
+    object.insert("declared".to_string(), JsonValue::Bool(status.declared));
     object.insert(
         "operational".to_string(),
-        JsonValue::Boolean(status.operational),
+        JsonValue::Bool(status.operational),
     );
-    object.insert("in_sync".to_string(), JsonValue::Boolean(status.in_sync));
+    object.insert("in_sync".to_string(), JsonValue::Bool(status.in_sync));
     object.insert(
         "last_run_sequence".to_string(),
         status
@@ -398,14 +402,14 @@ pub(crate) fn analytics_job_status_json(status: &CatalogAnalyticsJobStatus) -> J
         "projection_declared".to_string(),
         status
             .projection_declared
-            .map(JsonValue::Boolean)
+            .map(JsonValue::Bool)
             .unwrap_or(JsonValue::Null),
     );
     object.insert(
         "projection_operational".to_string(),
         status
             .projection_operational
-            .map(JsonValue::Boolean)
+            .map(JsonValue::Bool)
             .unwrap_or(JsonValue::Null),
     );
     object.insert(
@@ -420,16 +424,16 @@ pub(crate) fn analytics_job_status_json(status: &CatalogAnalyticsJobStatus) -> J
         "dependency_in_sync".to_string(),
         status
             .dependency_in_sync
-            .map(JsonValue::Boolean)
+            .map(JsonValue::Bool)
             .unwrap_or(JsonValue::Null),
     );
     object.insert(
         "executable".to_string(),
-        JsonValue::Boolean(status.executable),
+        JsonValue::Bool(status.executable),
     );
     object.insert(
         "requires_rerun".to_string(),
-        JsonValue::Boolean(status.requires_rerun),
+        JsonValue::Bool(status.requires_rerun),
     );
     object.insert(
         "attention_score".to_string(),
@@ -535,11 +539,11 @@ pub(crate) fn collection_readiness_json(descriptor: &CollectionDescriptor) -> Js
     );
     object.insert(
         "resources_in_sync".to_string(),
-        JsonValue::Boolean(descriptor.resources_in_sync),
+        JsonValue::Bool(descriptor.resources_in_sync),
     );
     object.insert(
         "attention_required".to_string(),
-        JsonValue::Boolean(descriptor.attention_required),
+        JsonValue::Bool(descriptor.attention_required),
     );
     object.insert(
         "attention_score".to_string(),
@@ -582,7 +586,7 @@ pub(crate) fn collection_readiness_json(descriptor: &CollectionDescriptor) -> Js
     );
     object.insert(
         "indexes_in_sync".to_string(),
-        JsonValue::Boolean(descriptor.indexes_in_sync),
+        JsonValue::Bool(descriptor.indexes_in_sync),
     );
     JsonValue::Object(object)
 }
@@ -666,7 +670,7 @@ pub(crate) fn collection_descriptor_json(descriptor: &CollectionDescriptor) -> J
     );
     object.insert(
         "indexes_in_sync".to_string(),
-        JsonValue::Boolean(descriptor.indexes_in_sync),
+        JsonValue::Bool(descriptor.indexes_in_sync),
     );
     object.insert(
         "missing_operational_indices".to_string(),
@@ -716,11 +720,11 @@ pub(crate) fn collection_descriptor_json(descriptor: &CollectionDescriptor) -> J
     );
     object.insert(
         "resources_in_sync".to_string(),
-        JsonValue::Boolean(descriptor.resources_in_sync),
+        JsonValue::Bool(descriptor.resources_in_sync),
     );
     object.insert(
         "attention_required".to_string(),
-        JsonValue::Boolean(descriptor.attention_required),
+        JsonValue::Bool(descriptor.attention_required),
     );
     JsonValue::Object(object)
 }

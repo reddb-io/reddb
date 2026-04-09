@@ -263,7 +263,9 @@ impl VectorSegment {
             .collect();
 
         // Sort by distance and take top k
-        results.sort_by(|a, b| cmp_distance(a.distance, b.distance));
+        results.sort_by(|a, b| {
+            cmp_distance(a.distance, b.distance).then_with(|| a.id.cmp(&b.id))
+        });
         results.truncate(k);
 
         results
@@ -490,7 +492,9 @@ impl VectorCollection {
         }
 
         // Sort and take top k
-        all_results.sort_by(|a, b| cmp_distance(a.distance, b.distance));
+        all_results.sort_by(|a, b| {
+            cmp_distance(a.distance, b.distance).then_with(|| a.id.cmp(&b.id))
+        });
         all_results.truncate(k);
 
         all_results

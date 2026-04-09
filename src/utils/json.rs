@@ -498,7 +498,7 @@ mod tests {
 
     #[test]
     fn parse_simple_object() {
-        let json = r#"{"name":"redblue","active":true,"count":3}"#;
+        let json = r#"{"name":"reddb","active":true,"count":3}"#;
         let value = parse_json(json).unwrap();
         let obj = value.as_object().unwrap();
         assert_eq!(obj.len(), 3);

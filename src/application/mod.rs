@@ -15,9 +15,10 @@ pub(crate) mod serverless_payload;
 pub use admin::{AdminUseCases, ServerlessAnalyticsWarmupTarget, ServerlessWarmupPlan};
 pub use catalog::CatalogUseCases;
 pub use entity::{
-    CreateEdgeInput, CreateEntityOutput, CreateNodeEmbeddingInput, CreateNodeGraphLinkInput,
-    CreateNodeInput, CreateNodeTableLinkInput, CreateRowInput, CreateVectorInput,
-    DeleteEntityInput, DeleteEntityOutput, EntityUseCases,
+    CreateDocumentInput, CreateEdgeInput, CreateEntityOutput, CreateKvInput,
+    CreateNodeEmbeddingInput, CreateNodeGraphLinkInput, CreateNodeInput, CreateNodeTableLinkInput,
+    CreateRowInput, CreateVectorInput, DeleteEntityInput, DeleteEntityOutput, EntityUseCases,
+    PatchEntityInput, PatchEntityOperation, PatchEntityOperationType,
 };
 pub use graph::{
     GraphCentralityInput, GraphClusteringInput, GraphCommunitiesInput, GraphComponentsInput,

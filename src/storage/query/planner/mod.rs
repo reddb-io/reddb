@@ -22,6 +22,6 @@ pub use cost::{CardinalityEstimate, CostEstimator, PlanCost};
 pub use optimizer::{OptimizationPass, QueryOptimizer};
 pub use rewriter::{QueryRewriter, RewriteContext, RewriteRule};
 pub use types::{
-    build_canonical_plan, CacheStats, CanonicalLogicalNode, CanonicalLogicalPlan,
-    CanonicalPlanner, QueryPlan, QueryPlanner,
+    build_canonical_plan, AccessPathDecision, CacheStats, CanonicalLogicalNode,
+    CanonicalLogicalPlan, CanonicalPlanner, QueryPlan, QueryPlanner,
 };

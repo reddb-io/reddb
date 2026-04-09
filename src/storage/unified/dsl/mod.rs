@@ -13,7 +13,7 @@
 //! # Examples
 //!
 //! ```ignore
-//! use redblue::storage::dsl::*;
+//! use reddb::storage::dsl::*;
 //!
 //! // Vector similarity + metadata filter
 //! let results = Q::similar_to(&embedding, 10)
@@ -38,6 +38,7 @@
 //! ```
 
 mod builders;
+mod cross_modal;
 mod execution;
 mod filters;
 mod helpers;
@@ -50,9 +51,9 @@ mod tests;
 pub use builders::TextSearchBuilder;
 pub use builders::{
     CrossModalWeights, GraphPatternDsl, GraphQueryBuilder, GraphStartPoint, HybridQueryBuilder,
-    JoinPhase, JoinStep, NodePatternDsl, QueryWeights, RefQueryBuilder, ScanQueryBuilder,
-    SortOrder, TableQueryBuilder, ThreeWayJoinBuilder, TraversalDirection, TraversalStep,
-    VectorQueryBuilder,
+    JoinPhase, JoinStep, KvQueryBuilder, NodePatternDsl, QueryWeights, RefQueryBuilder,
+    ScanQueryBuilder, SortOrder, TableQueryBuilder, ThreeWayJoinBuilder, TraversalDirection,
+    TraversalStep, VectorQueryBuilder,
 };
 pub use filters::{Filter, FilterAcceptor, FilterOp, FilterValue, WhereClause};
 pub use helpers::{apply_filters, cosine_similarity};
@@ -122,6 +123,43 @@ impl Q {
     /// Text search across all indexed content
     pub fn text_search(query: impl Into<String>) -> TextSearchBuilder {
         TextSearchBuilder::new(query)
+    }
+
+    /// Query documents in a collection
+    ///
+    /// Documents are stored as enriched table rows, so this is a convenience
+    /// alias that delegates to `TableQueryBuilder`. The flattened top-level
+    /// document fields support path-based filtering through the table query DSL.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let results = Q::document("articles")
+    ///     .where_("title").equals("Hello World")
+    ///     .limit(10)
+    ///     .execute(&store)?;
+    /// ```
+    pub fn document(collection: impl Into<String>) -> TableQueryBuilder {
+        TableQueryBuilder::new(collection)
+    }
+
+    /// Key-Value operations on a collection
+    ///
+    /// # Examples
+    /// ```ignore
+    /// // Get a value
+    /// let result = Q::kv("config").get("theme").execute(&store)?;
+    ///
+    /// // Set a value (upsert)
+    /// let result = Q::kv("config").set("theme", Value::Text("dark".into())).execute(&store)?;
+    ///
+    /// // Delete a key
+    /// let result = Q::kv("config").delete("theme").execute(&store)?;
+    ///
+    /// // List all KV pairs
+    /// let result = Q::kv("config").list().execute(&store)?;
+    /// ```
+    pub fn kv(collection: impl Into<String>) -> KvQueryBuilder {
+        KvQueryBuilder::new(collection)
     }
 
     /// Hybrid query combining multiple modes

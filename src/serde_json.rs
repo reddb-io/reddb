@@ -43,6 +43,13 @@ impl Value {
         }
     }
 
+    pub fn as_u64(&self) -> Option<u64> {
+        match self {
+            Value::Number(n) if *n >= 0.0 => Some(*n as u64),
+            _ => None,
+        }
+    }
+
     pub fn as_bool(&self) -> Option<bool> {
         match self {
             Value::Bool(b) => Some(*b),

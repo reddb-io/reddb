@@ -1,3 +1,5 @@
+#![allow(dead_code, unused_imports, unused_variables)]
+
 pub mod application;
 pub mod config;
 pub mod crypto;
@@ -40,10 +42,10 @@ pub mod prelude {
         IndexStats,
     };
     pub use crate::physical::{
-        BlockReference, CompactionPolicy, GridLayout, ManifestEvent, ManifestEventKind,
-        ExportDescriptor, ManifestPointers, PhysicalAnalyticsJob, PhysicalGraphProjection,
-        PhysicalIndexState, PhysicalLayout, PhysicalMetadataFile, SnapshotDescriptor,
-        SuperblockHeader, WalPolicy, DEFAULT_MANIFEST_EVENT_HISTORY,
+        ArtifactState, BlockReference, CompactionPolicy, GridLayout, ManifestEvent,
+        ManifestEventKind, ExportDescriptor, ManifestPointers, PhysicalAnalyticsJob,
+        PhysicalGraphProjection, PhysicalIndexState, PhysicalLayout, PhysicalMetadataFile,
+        SnapshotDescriptor, SuperblockHeader, WalPolicy, DEFAULT_MANIFEST_EVENT_HISTORY,
         PHYSICAL_METADATA_PROTOCOL_VERSION,
     };
     pub use crate::runtime::{
@@ -86,10 +88,10 @@ pub use crate::index::{
     IndexStats,
 };
 pub use crate::physical::{
-    BlockReference, CompactionPolicy, GridLayout, ManifestEvent, ManifestEventKind,
-    ExportDescriptor, ManifestPointers, PhysicalAnalyticsJob, PhysicalGraphProjection,
-    PhysicalIndexState, PhysicalLayout, PhysicalMetadataFile, SnapshotDescriptor,
-    SuperblockHeader, WalPolicy, DEFAULT_MANIFEST_EVENT_HISTORY,
+    ArtifactState, BlockReference, CompactionPolicy, GridLayout, ManifestEvent,
+    ManifestEventKind, ExportDescriptor, ManifestPointers, PhysicalAnalyticsJob,
+    PhysicalGraphProjection, PhysicalIndexState, PhysicalLayout, PhysicalMetadataFile,
+    SnapshotDescriptor, SuperblockHeader, WalPolicy, DEFAULT_MANIFEST_EVENT_HISTORY,
     PHYSICAL_METADATA_PROTOCOL_VERSION,
 };
 pub use crate::runtime::{

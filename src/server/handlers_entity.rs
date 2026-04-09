@@ -1,7 +1,7 @@
 use super::*;
 
 impl RedDBServer {
-    fn handle_scan(&self, collection: &str, query: &BTreeMap<String, String>) -> HttpResponse {
+    pub(crate) fn handle_scan(&self, collection: &str, query: &BTreeMap<String, String>) -> HttpResponse {
         let offset = query
             .get("offset")
             .and_then(|value| value.parse::<usize>().ok())
@@ -25,7 +25,7 @@ impl RedDBServer {
         }
     }
 
-    fn handle_create_row(&self, collection: &str, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_create_row(&self, collection: &str, body: Vec<u8>) -> HttpResponse {
         let payload = match parse_json_body_allow_empty(&body) {
             Ok(payload) => payload,
             Err(response) => return response,
@@ -48,7 +48,7 @@ impl RedDBServer {
         }
     }
 
-    fn handle_create_node(&self, collection: &str, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_create_node(&self, collection: &str, body: Vec<u8>) -> HttpResponse {
         let payload = match parse_json_body_allow_empty(&body) {
             Ok(payload) => payload,
             Err(response) => return response,
@@ -71,7 +71,7 @@ impl RedDBServer {
         }
     }
 
-    fn handle_create_edge(&self, collection: &str, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_create_edge(&self, collection: &str, body: Vec<u8>) -> HttpResponse {
         let payload = match parse_json_body_allow_empty(&body) {
             Ok(payload) => payload,
             Err(response) => return response,
@@ -94,7 +94,7 @@ impl RedDBServer {
         }
     }
 
-    fn handle_bulk_create(
+    pub(crate) fn handle_bulk_create(
         &self,
         collection: &str,
         body: Vec<u8>,
@@ -148,7 +148,7 @@ impl RedDBServer {
         json_response(200, JsonValue::Object(object))
     }
 
-    fn handle_create_vector(&self, collection: &str, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_create_vector(&self, collection: &str, body: Vec<u8>) -> HttpResponse {
         let payload = match parse_json_body_allow_empty(&body) {
             Ok(payload) => payload,
             Err(response) => return response,
@@ -171,7 +171,7 @@ impl RedDBServer {
         }
     }
 
-    fn handle_patch_entity(&self, collection: &str, id: u64, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_patch_entity(&self, collection: &str, id: u64, body: Vec<u8>) -> HttpResponse {
         let payload = match parse_json_body_allow_empty(&body) {
             Ok(payload) => payload,
             Err(response) => return response,
@@ -210,7 +210,7 @@ impl RedDBServer {
         }
     }
 
-    fn handle_delete_entity(&self, collection: &str, id: u64) -> HttpResponse {
+    pub(crate) fn handle_delete_entity(&self, collection: &str, id: u64) -> HttpResponse {
         match self.entity_use_cases().delete(DeleteEntityInput {
             collection: collection.to_string(),
             id: EntityId::new(id),

@@ -1,4 +1,4 @@
-/// Configuration management for redblue
+/// Configuration management for reddb
 pub mod presets;
 pub mod yaml;
 
@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::{Once, OnceLock};
 
 #[derive(Debug, Clone)]
-pub struct RedBlueConfig {
+pub struct RedDBConfig {
     // Global settings
     pub verbose: bool,
     pub no_color: bool,
@@ -68,24 +68,24 @@ pub struct DatabaseConfig {
 }
 
 static INIT: Once = Once::new();
-static GLOBAL_CONFIG: OnceLock<RedBlueConfig> = OnceLock::new();
+static GLOBAL_CONFIG: OnceLock<RedDBConfig> = OnceLock::new();
 
-pub fn init() -> &'static RedBlueConfig {
-    GLOBAL_CONFIG.get_or_init(RedBlueConfig::load)
+pub fn init() -> &'static RedDBConfig {
+    GLOBAL_CONFIG.get_or_init(RedDBConfig::load)
 }
 
 /// Access the global configuration, loading defaults if necessary.
-pub fn get() -> &'static RedBlueConfig {
+pub fn get() -> &'static RedDBConfig {
     init()
 }
 
-impl Default for RedBlueConfig {
+impl Default for RedDBConfig {
     fn default() -> Self {
         Self::from_yaml_config(YamlConfig::default())
     }
 }
 
-impl RedBlueConfig {
+impl RedDBConfig {
     fn from_yaml_config(cfg: YamlConfig) -> Self {
         Self {
             verbose: cfg.verbose.unwrap_or(false),
@@ -111,7 +111,7 @@ impl RedBlueConfig {
             web: WebConfig {
                 user_agent: cfg
                     .web_user_agent
-                    .unwrap_or_else(|| "RedBlue/1.0".to_string()),
+                    .unwrap_or_else(|| "RedDB/1.0".to_string()),
                 follow_redirects: cfg.web_follow_redirects.unwrap_or(true),
                 max_redirects: cfg.web_max_redirects.unwrap_or(5),
                 verify_ssl: cfg.web_verify_ssl.unwrap_or(true),
@@ -148,13 +148,13 @@ impl RedBlueConfig {
         use std::fs;
         use std::path::Path;
 
-        let path = ".redblue.yaml";
+        let path = ".reddb.yaml";
 
         if Path::new(path).exists() {
             return Err("Config file already exists.".to_string());
         }
 
-        let content = r#"# RedBlue Configuration File
+        let content = r#"# RedDB Configuration File
 verbose: false
 no_color: false
 output_format: human
@@ -168,7 +168,7 @@ network:
   dns_timeout_ms: 3000
 
 web:
-  user_agent: "RedBlue/1.0"
+  user_agent: "RedDB/1.0"
   follow_redirects: true
   verify_ssl: true
 "#;

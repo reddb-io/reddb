@@ -36,7 +36,7 @@ use crate::storage::query::planner::{
 use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
 use crate::storage::query::is_universal_entity_source as is_universal_query_source;
 use crate::storage::schema::Value;
-use crate::storage::engine::pathfinding::{BFS, Dijkstra};
+use crate::storage::engine::pathfinding::{BFS, DFS, Dijkstra};
 use crate::storage::unified::dsl::{
     cosine_similarity,
     Filter as DslFilter, FilterOp as DslFilterOp, FilterValue as DslFilterValue,
@@ -105,6 +105,7 @@ pub struct RuntimeQueryExplain {
     pub query: String,
     pub mode: QueryMode,
     pub statement: &'static str,
+    pub is_universal: bool,
     pub plan_cost: crate::storage::query::planner::PlanCost,
     pub estimated_rows: f64,
     pub estimated_selectivity: f64,
@@ -363,7 +364,7 @@ mod record_search;
 mod join_filter;
 mod graph_dsl;
 
-use self::graph_dsl::*;
+pub use self::graph_dsl::*;
 use self::join_filter::*;
 use self::query_exec::*;
 use self::record_search::*;

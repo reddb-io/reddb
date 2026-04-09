@@ -191,6 +191,7 @@ fn append_compact_entity_fields(object: &mut Map<String, JsonValue>, data: &Enti
 
 fn entity_type(entity: &UnifiedEntity) -> &'static str {
     match (&entity.kind, &entity.data) {
+        (EntityKind::TableRow { .. }, EntityData::Row(row)) if row_is_kv(row) => "kv",
         (EntityKind::TableRow { .. }, EntityData::Row(_)) => "table",
         (EntityKind::GraphNode { .. }, EntityData::Node(_)) => "graph_node",
         (EntityKind::GraphEdge { .. }, EntityData::Edge(_)) => "graph_edge",
@@ -203,6 +204,9 @@ fn entity_capabilities(entity: &UnifiedEntity) -> Vec<String> {
     let capabilities: BTreeSet<String> = match (&entity.kind, &entity.data) {
         (EntityKind::TableRow { .. }, EntityData::Row(row)) => {
             let mut values = BTreeSet::from(["table".to_string(), "structured".to_string()]);
+            if row_is_kv(row) {
+                values.insert("kv".to_string());
+            }
             let is_document_like = row
                 .named
                 .as_ref()
@@ -232,6 +236,20 @@ fn entity_capabilities(entity: &UnifiedEntity) -> Vec<String> {
 
 fn documentish_value(value: &Value) -> bool {
     matches!(value, Value::Json(_) | Value::Blob(_))
+}
+
+fn row_is_kv(row: &crate::storage::RowData) -> bool {
+    let Some(named) = row.named.as_ref() else {
+        return false;
+    };
+
+    if named.len() == 2 {
+        named.contains_key("key") && named.contains_key("value")
+    } else if named.len() == 1 {
+        named.contains_key("key") || named.contains_key("value")
+    } else {
+        false
+    }
 }
 
 fn entity_kind_json(kind: &EntityKind) -> JsonValue {

@@ -322,7 +322,12 @@ impl InMemoryVectorExecutor {
                     .into_iter()
                     .map(|r| (r.id, r.distance))
                     .collect();
-                results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+                results.sort_by(|a, b| {
+                    match a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal) {
+                        std::cmp::Ordering::Equal => a.0.cmp(&b.0),
+                        ordering => ordering,
+                    }
+                });
                 results
             } else {
                 // Brute force search
@@ -421,7 +426,12 @@ impl InMemoryVectorExecutor {
             })
             .collect();
 
-        results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            match a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal) {
+                std::cmp::Ordering::Equal => a.0.cmp(&b.0),
+                ordering => ordering,
+            }
+        });
         results.truncate(k);
         results
     }
@@ -522,6 +532,7 @@ mod tests {
         executor.add_vector("test", 4, vec![0.9, 0.1, 0.0], None);
 
         let query = VectorQuery {
+            alias: None,
             collection: "test".to_string(),
             query_vector: VectorSource::Literal(vec![1.0, 0.0, 0.0]),
             k: 2,
@@ -565,6 +576,7 @@ mod tests {
 
         // Search with filter: type = 'cve' AND severity >= 7
         let query = VectorQuery {
+            alias: None,
             collection: "vulns".to_string(),
             query_vector: VectorSource::Literal(vec![1.0, 0.0]),
             k: 10,
@@ -593,6 +605,7 @@ mod tests {
         executor.add_vector("test", 2, vec![0.0, 1.0], None); // Far from query
 
         let query = VectorQuery {
+            alias: None,
             collection: "test".to_string(),
             query_vector: VectorSource::Literal(vec![1.0, 0.0]),
             k: 10,
@@ -616,6 +629,7 @@ mod tests {
         executor.add_vector("test", 1, vec![1.0, 2.0, 3.0], None);
 
         let query = VectorQuery {
+            alias: None,
             collection: "test".to_string(),
             query_vector: VectorSource::Literal(vec![1.0, 2.0, 3.0]),
             k: 1,

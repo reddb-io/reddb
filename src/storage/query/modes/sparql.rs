@@ -873,6 +873,7 @@ impl SparqlQuery {
         };
 
         QueryExpr::Graph(GraphQuery {
+            alias: None,
             pattern: GraphPattern { nodes, edges },
             filter: combined_filter,
             return_: projections,

@@ -29,6 +29,10 @@ pub(crate) fn query_explain_json(
         "statement".to_string(),
         JsonValue::String(result.statement.to_string()),
     );
+    object.insert(
+        "is_universal".to_string(),
+        JsonValue::Bool(result.is_universal),
+    );
 
     let mut cost = Map::new();
     cost.insert("cpu".to_string(), JsonValue::Number(result.plan_cost.cpu));

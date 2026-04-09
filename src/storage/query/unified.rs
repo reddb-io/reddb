@@ -15,7 +15,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use redblue::storage::query::{parse, UnifiedExecutor, UnifiedResult};
+//! use reddb::storage::query::{parse, UnifiedExecutor, UnifiedResult};
 //!
 //! let query = parse("FROM hosts h JOIN GRAPH (h)-[:HAS_SERVICE]->(s) RETURN h.ip, s.port")?;
 //! let executor = UnifiedExecutor::new(table_store, graph_store, index);

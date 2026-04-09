@@ -26,7 +26,8 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use super::entity::{
-    CrossRef, EmbeddingSlot, EntityData, EntityId, EntityKind, RefType, UnifiedEntity,
+    CrossRef, EdgeData, EmbeddingSlot, EntityData, EntityId, EntityKind, NodeData, RefType,
+    RowData, UnifiedEntity, VectorData,
 };
 use super::manager::{ManagerConfig, ManagerStats, SegmentManager};
 use super::metadata::{Metadata, MetadataFilter, MetadataValue};
@@ -292,6 +293,8 @@ pub enum StoreError {
     Io(std::io::Error),
     /// Serialization error
     Serialization(String),
+    /// Internal error (lock poisoning, invariant violation)
+    Internal(String),
 }
 
 impl std::fmt::Display for StoreError {
@@ -304,6 +307,7 @@ impl std::fmt::Display for StoreError {
             Self::Segment(e) => write!(f, "Segment error: {:?}", e),
             Self::Io(e) => write!(f, "I/O error: {}", e),
             Self::Serialization(msg) => write!(f, "Serialization error: {}", msg),
+            Self::Internal(msg) => write!(f, "Internal error: {}", msg),
         }
     }
 }
@@ -379,7 +383,7 @@ impl StoreStats {
 /// # Example
 ///
 /// ```ignore
-/// use redblue::storage::{Entity, Store};
+/// use reddb::storage::{Entity, Store};
 ///
 /// let store = Store::new();
 ///

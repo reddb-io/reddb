@@ -70,7 +70,12 @@ impl UnifiedStore {
         };
 
         // Get page count
-        let page_count = pager.page_count();
+        let page_count = pager.page_count().map_err(|e| {
+            StoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("failed to read page count: {}", e),
+            ))
+        })?;
         if page_count <= 1 {
             // Empty database (only header page)
             return Ok(());
@@ -153,7 +158,7 @@ impl UnifiedStore {
                                             let _ = m.insert(entity.clone());
                                             self.register_entity_id(id);
                                             if self.config.auto_index_refs {
-                                                self.index_cross_refs(&entity, &name);
+                                                self.index_cross_refs(&entity, &name)?;
                                             }
                                         }
                                     }
@@ -161,7 +166,14 @@ impl UnifiedStore {
                             }
 
                             // Store the B-tree for future lookups
-                            self.btree_indices.write().unwrap().insert(name, btree);
+                            self.btree_indices
+                                .write()
+                                .map_err(|_| {
+                                    StoreError::Internal(
+                                        "btree_indices lock poisoned".into(),
+                                    )
+                                })?
+                                .insert(name, btree);
                         }
                     } else {
                         pos += name_len + 4;
@@ -228,7 +240,9 @@ impl UnifiedStore {
 
                         self.cross_refs
                             .write()
-                            .unwrap()
+                            .map_err(|_| {
+                                StoreError::Internal("cross_refs lock poisoned".into())
+                            })?
                             .entry(source_id)
                             .or_default()
                             .push((target_id, ref_type, target_collection.clone()));
@@ -260,14 +274,14 @@ impl UnifiedStore {
     }
 
     /// Deserialize an entity from binary bytes
-    fn deserialize_entity(data: &[u8], format_version: u32) -> Result<UnifiedEntity, StoreError> {
+    pub(crate) fn deserialize_entity(data: &[u8], format_version: u32) -> Result<UnifiedEntity, StoreError> {
         let mut pos = 0;
         Self::read_entity_binary(data, &mut pos, format_version)
             .map_err(|e| StoreError::Serialization(e.to_string()))
     }
 
     /// Serialize an entity to binary bytes
-    fn serialize_entity(entity: &UnifiedEntity, format_version: u32) -> Vec<u8> {
+    pub(crate) fn serialize_entity(entity: &UnifiedEntity, format_version: u32) -> Vec<u8> {
         let mut buf = Vec::new();
         Self::write_entity_binary(&mut buf, entity, format_version);
         buf
@@ -322,8 +336,14 @@ impl UnifiedStore {
             }
         }
 
-        let collections = self.collections.read().unwrap();
-        let mut btree_indices = self.btree_indices.write().unwrap();
+        let collections = self
+            .collections
+            .read()
+            .map_err(|_| StoreError::Internal("collections lock poisoned".into()))?;
+        let mut btree_indices = self
+            .btree_indices
+            .write()
+            .map_err(|_| StoreError::Internal("btree_indices lock poisoned".into()))?;
 
         // Collect collection names and their B-tree root pages
         let mut collection_roots: Vec<(String, u32)> = Vec::new();
@@ -382,7 +402,10 @@ impl UnifiedStore {
         }
 
         // Write cross-reference metadata
-        let cross_refs = self.cross_refs.read().unwrap();
+        let cross_refs = self
+            .cross_refs
+            .read()
+            .map_err(|_| StoreError::Internal("cross_refs lock poisoned".into()))?;
         let total_refs: usize = cross_refs.values().map(|v| v.len()).sum();
         meta_data.extend_from_slice(&(total_refs as u32).to_le_bytes());
         for (source_id, refs) in cross_refs.iter() {
@@ -435,5 +458,4 @@ impl UnifiedStore {
         self.db_path.as_deref()
     }
 
-    /// Update the minimal physical header mirrored into page 0 for paged databases.
 }

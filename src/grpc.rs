@@ -154,9 +154,4 @@ impl GrpcRuntime {
     }
 }
 
-#[tonic::async_trait]
-impl RedDb for GrpcRuntime {
-    include!("grpc/service_admin.rs");
-    include!("grpc/service_query_a.rs");
-    include!("grpc/service_query_b.rs");
-}
+include!("grpc/service_impl.rs");

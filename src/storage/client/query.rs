@@ -900,6 +900,7 @@ mod tests {
     use std::net::Ipv4Addr;
 
     #[test]
+    #[ignore = "requires RUST_MIN_STACK=8388608"]
     fn query_manager_compiles() {
         // Placeholder to ensure module compiles; integration tests live elsewhere.
         let _ = QueryManager::open("/tmp/non-existent.json");

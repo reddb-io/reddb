@@ -290,7 +290,7 @@ fn parse_required_u64_json(
     parse_u64_value(value, field)
 }
 
-fn parse_required_u64_field(object: &Map, field: &str, context: &str) -> RedDBResult<u64> {
+fn parse_required_u64_field(object: &Map<String, JsonValue>, field: &str, context: &str) -> RedDBResult<u64> {
     let value = object
         .get(field)
         .ok_or_else(|| RedDBError::Query(format!("{context} requires '{field}'")))?;

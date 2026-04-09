@@ -622,7 +622,8 @@ pub(super) fn compare_runtime_order(
         }
     }
 
-    Ordering::Equal
+    runtime_record_identity_key(left)
+        .cmp(&runtime_record_identity_key(right))
 }
 
 pub(super) fn compare_runtime_optional_values(
@@ -679,9 +680,9 @@ pub(super) fn resolve_runtime_field(
                 }
 
                 let matches_context =
-                    Some(table.as_str()) == table_name || Some(table.as_str()) == table_alias;
+                    runtime_table_context_matches(table.as_str(), table_name, table_alias);
                 if !matches_context {
-                    return None;
+                    return resolve_runtime_document_path(record, &format!("{table}.{column}"));
                 }
             }
 
@@ -726,6 +727,23 @@ pub(super) fn resolve_runtime_field(
             .map(|node| Value::NodeRef(node.id.clone()))
             .or_else(|| record.values.get(&format!("{alias}.id")).cloned()),
     }
+}
+
+pub(super) fn runtime_table_context_matches(
+    field_table: &str,
+    table_name: Option<&str>,
+    table_alias: Option<&str>,
+) -> bool {
+    if Some(field_table) == table_name || Some(field_table) == table_alias {
+        return true;
+    }
+
+    if !is_universal_entity_source(field_table) {
+        return false;
+    }
+
+    table_name.is_some_and(is_universal_entity_source)
+        || table_alias.is_some_and(is_universal_entity_source)
 }
 
 pub(super) fn resolve_runtime_document_path(record: &UnifiedRecord, path: &str) -> Option<Value> {
@@ -924,6 +942,18 @@ pub(super) fn evaluate_metadata_field_compare(
         return None;
     };
     if !column.eq_ignore_ascii_case("_capabilities") {
+        if column.eq_ignore_ascii_case("_entity_type") {
+            let candidate = runtime_value_text(candidate)
+                .map(|item| item.to_ascii_lowercase())?;
+            let value = runtime_value_text(value)
+                .map(|item| item.to_ascii_lowercase())?;
+            return Some(match op {
+                CompareOp::Eq => candidate == value,
+                CompareOp::Ne => candidate != value,
+                _ => false,
+            });
+        }
+
         return None;
     }
 
@@ -952,7 +982,23 @@ pub(super) fn evaluate_metadata_field_in(
         return None;
     };
     if !column.eq_ignore_ascii_case("_capabilities") {
-        return None;
+        if !column.eq_ignore_ascii_case("_entity_type") {
+            return None;
+        }
+
+        let candidate = runtime_value_text(candidate)
+            .map(|item| item.to_ascii_lowercase())?;
+
+        for value in values {
+            let Some(value) = runtime_value_text(value) else {
+                continue;
+            };
+            if value.to_ascii_lowercase() == candidate {
+                return Some(true);
+            }
+        }
+
+        return Some(false);
     }
 
     let capabilities = runtime_value_text(candidate)?
@@ -1007,3 +1053,86 @@ pub(super) fn query_expr_name(expr: &QueryExpr) -> &'static str {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_evaluate_metadata_field_compare_entity_type_is_case_insensitive() {
+        let field = FieldRef::TableColumn {
+            table: "any".to_string(),
+            column: "_entity_type".to_string(),
+        };
+
+        assert_eq!(
+            evaluate_metadata_field_compare(
+                &field,
+                &Value::Text("table".to_string()),
+                CompareOp::Eq,
+                &Value::Text("TABLE".to_string()),
+            ),
+            Some(true)
+        );
+
+        assert_eq!(
+            evaluate_metadata_field_compare(
+                &field,
+                &Value::Text("graph_node".to_string()),
+                CompareOp::Ne,
+                &Value::Text("GRAPH_NODE".to_string()),
+            ),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn test_evaluate_metadata_field_in_entity_type_is_case_insensitive() {
+        let field = FieldRef::TableColumn {
+            table: "any".to_string(),
+            column: "_entity_type".to_string(),
+        };
+
+        assert_eq!(
+            evaluate_metadata_field_in(
+                &field,
+                &Value::Text("vector".to_string()),
+                &[
+                    Value::Text("TABLE".to_string()),
+                    Value::Text("vector".to_string()),
+                    Value::Text("graph_node".to_string()),
+                ],
+            ),
+            Some(true)
+        );
+
+        assert_eq!(
+            evaluate_metadata_field_in(
+                &field,
+                &Value::Text("document".to_string()),
+                &[
+                    Value::Text("TABLE".to_string()),
+                    Value::Text("GRAPH_NODE".to_string()),
+                ],
+            ),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn test_evaluate_metadata_field_compare_entity_type_unsupported_op_is_false() {
+        let field = FieldRef::TableColumn {
+            table: "any".to_string(),
+            column: "_entity_type".to_string(),
+        };
+
+        assert_eq!(
+            evaluate_metadata_field_compare(
+                &field,
+                &Value::Text("vector".to_string()),
+                CompareOp::Gt,
+                &Value::Text("vector".to_string()),
+            ),
+            Some(false)
+        );
+    }
+}

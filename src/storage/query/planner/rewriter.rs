@@ -213,6 +213,9 @@ impl RewriteRule for SimplifyFiltersRule {
             QueryExpr::Join(mut jq) => {
                 let left = self.apply(*jq.left, ctx);
                 let right = self.apply(*jq.right, ctx);
+                if let Some(filter) = jq.filter.take() {
+                    jq.filter = Some(simplify_filter(filter, ctx));
+                }
                 jq.left = Box::new(left);
                 jq.right = Box::new(right);
                 QueryExpr::Join(jq)

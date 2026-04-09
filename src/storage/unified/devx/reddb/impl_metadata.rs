@@ -77,7 +77,78 @@ impl RedDB {
         RowBuilder::new(self.store.clone(), table, columns)
     }
 
-    fn with_initialized_metadata(
+    /// Start building a document
+    ///
+    /// Documents are stored as enriched table rows with a full JSON body
+    /// field and flattened top-level keys for filtering.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let doc = db.doc("articles")
+    ///     .field("title", "Hello World")
+    ///     .field("views", 42)
+    ///     .metadata("source", "web")
+    ///     .save()?;
+    /// ```
+    pub fn doc(&self, collection: impl Into<String>) -> DocumentBuilder {
+        DocumentBuilder::new(self.store.clone(), collection)
+    }
+
+    /// Start building a key-value pair
+    ///
+    /// KV pairs are stored as table rows with named fields `key` and `value`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let id = db.kv("config", "theme", Value::Text("dark".into()))
+    ///     .metadata("updated_by", "admin")
+    ///     .save()?;
+    /// ```
+    pub fn kv(
+        &self,
+        collection: impl Into<String>,
+        key: impl Into<String>,
+        value: Value,
+    ) -> KvBuilder {
+        KvBuilder::new(self.store.clone(), collection, key, value)
+    }
+
+    /// Get a key-value pair by key, returning the value and entity id
+    ///
+    /// Scans the collection for an entity whose named field `key` matches.
+    pub fn get_kv(&self, collection: &str, key: &str) -> Option<(Value, EntityId)> {
+        let manager = self.store.get_collection(collection)?;
+        let entities = manager.query_all(|_| true);
+        for entity in entities {
+            if let EntityData::Row(ref row) = entity.data {
+                if let Some(ref named) = row.named {
+                    if let Some(Value::Text(ref k)) = named.get("key") {
+                        if k == key {
+                            let value = named
+                                .get("value")
+                                .cloned()
+                                .unwrap_or(Value::Null);
+                            return Some((value, entity.id));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Delete a key-value pair by key, returning whether it was found and removed
+    pub fn delete_kv(&self, collection: &str, key: &str) -> Result<bool, super::super::error::DevXError> {
+        let Some((_, id)) = self.get_kv(collection, key) else {
+            return Ok(false);
+        };
+        self.store
+            .delete(collection, id)
+            .map_err(|err| super::super::error::DevXError::Storage(format!("{err:?}")))?;
+        Ok(true)
+    }
+
+    pub(crate) fn with_initialized_metadata(
         self,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         if self.options.mode == StorageMode::Persistent && !self.options.read_only {
@@ -89,7 +160,7 @@ impl RedDB {
         Ok(self)
     }
 
-    fn persist_metadata(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub(crate) fn persist_metadata(&self) -> Result<(), Box<dyn std::error::Error>> {
         if self.options.mode != StorageMode::Persistent || self.options.read_only {
             return Ok(());
         }
@@ -146,7 +217,7 @@ impl RedDB {
         self.bootstrap_metadata_from_native_state()
     }
 
-    fn native_state_is_bootstrap_complete(native_state: &NativePhysicalState) -> bool {
+    pub(crate) fn native_state_is_bootstrap_complete(native_state: &NativePhysicalState) -> bool {
         let registry_complete = native_state.registry.as_ref().map(|registry| {
             registry.collections_complete
                 && registry.indexes_complete
@@ -168,7 +239,7 @@ impl RedDB {
             && catalog_complete == Some(true)
     }
 
-    fn load_or_bootstrap_physical_metadata(
+    pub(crate) fn load_or_bootstrap_physical_metadata(
         &self,
         persist_bootstrapped: bool,
     ) -> Result<PhysicalMetadataFile, Box<dyn std::error::Error>> {
@@ -216,7 +287,7 @@ impl RedDB {
         }
     }
 
-    fn physical_metadata_preference(&self) -> Option<&'static str> {
+    pub(crate) fn physical_metadata_preference(&self) -> Option<&'static str> {
         let path = self.path()?;
         let native_state = self.native_physical_state();
         let metadata = PhysicalMetadataFile::load_for_data_path(path).ok();
@@ -485,7 +556,7 @@ impl RedDB {
         }
     }
 
-    fn reconcile_index_states_with_native_artifacts(
+    pub(crate) fn reconcile_index_states_with_native_artifacts(
         &self,
         mut indexes: Vec<PhysicalIndexState>,
     ) -> Vec<PhysicalIndexState> {
@@ -526,7 +597,7 @@ impl RedDB {
         indexes
     }
 
-    fn warmup_native_vector_artifact_for_index(
+    pub(crate) fn warmup_native_vector_artifact_for_index(
         &self,
         index: &PhysicalIndexState,
     ) -> Result<(), String> {
@@ -540,7 +611,7 @@ impl RedDB {
         Ok(())
     }
 
-    fn apply_runtime_native_artifact_to_index_state(
+    pub(crate) fn apply_runtime_native_artifact_to_index_state(
         &self,
         index: &mut PhysicalIndexState,
     ) -> Result<(), String> {
@@ -572,7 +643,7 @@ impl RedDB {
         Ok(())
     }
 
-    fn physical_index_state_from_native_state(
+    pub(crate) fn physical_index_state_from_native_state(
         &self,
         native_state: &NativePhysicalState,
         previous: Option<&PhysicalMetadataFile>,
@@ -644,7 +715,7 @@ impl RedDB {
         fresh
     }
 
-    fn graph_projections_from_native_state(
+    pub(crate) fn graph_projections_from_native_state(
         &self,
         native_state: &NativePhysicalState,
     ) -> Vec<PhysicalGraphProjection> {
@@ -671,7 +742,7 @@ impl RedDB {
             .unwrap_or_default()
     }
 
-    fn analytics_jobs_from_native_state(
+    pub(crate) fn analytics_jobs_from_native_state(
         &self,
         native_state: &NativePhysicalState,
     ) -> Vec<PhysicalAnalyticsJob> {
@@ -697,7 +768,7 @@ impl RedDB {
             .unwrap_or_default()
     }
 
-    fn exports_from_native_state(
+    pub(crate) fn exports_from_native_state(
         &self,
         native_state: &NativePhysicalState,
     ) -> Vec<ExportDescriptor> {
@@ -747,7 +818,7 @@ impl RedDB {
             .unwrap_or_default()
     }
 
-    fn snapshots_from_native_state(
+    pub(crate) fn snapshots_from_native_state(
         &self,
         native_state: &NativePhysicalState,
     ) -> Vec<crate::physical::SnapshotDescriptor> {
@@ -783,7 +854,7 @@ impl RedDB {
         }
     }
 
-    fn native_artifact_kind_for_index(kind: IndexKind) -> Option<&'static str> {
+    pub(crate) fn native_artifact_kind_for_index(kind: IndexKind) -> Option<&'static str> {
         match kind {
             IndexKind::VectorHnsw => Some("hnsw"),
             IndexKind::VectorInverted => Some("ivf"),
@@ -800,7 +871,7 @@ impl RedDB {
             .unwrap_or(false)
     }
 
-    fn graph_projection_is_declared(&self, name: &str) -> bool {
+    pub(crate) fn graph_projection_is_declared(&self, name: &str) -> bool {
         self.physical_metadata()
             .map(|metadata| {
                 metadata
@@ -811,20 +882,20 @@ impl RedDB {
             .unwrap_or(false)
     }
 
-    fn graph_projection_is_operational(&self, name: &str) -> bool {
+    pub(crate) fn graph_projection_is_operational(&self, name: &str) -> bool {
         self.operational_graph_projections()
             .into_iter()
             .any(|projection| projection.name == name && projection.state == "materialized")
     }
 
-    fn analytics_job_id(kind: &str, projection: Option<&str>) -> String {
+    pub(crate) fn analytics_job_id(kind: &str, projection: Option<&str>) -> String {
         match projection {
             Some(projection) => format!("{kind}::{projection}"),
             None => format!("{kind}::global"),
         }
     }
 
-    fn update_physical_metadata<T, F>(
+    pub(crate) fn update_physical_metadata<T, F>(
         &self,
         mutator: F,
     ) -> Result<T, Box<dyn std::error::Error>>
@@ -854,7 +925,7 @@ impl RedDB {
         Ok(result)
     }
 
-    fn persist_native_physical_header(
+    pub(crate) fn persist_native_physical_header(
         &self,
         metadata: &PhysicalMetadataFile,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -964,7 +1035,7 @@ impl RedDB {
         Ok(())
     }
 
-    fn native_header_from_metadata(metadata: &PhysicalMetadataFile) -> PhysicalFileHeader {
+    pub(crate) fn native_header_from_metadata(metadata: &PhysicalMetadataFile) -> PhysicalFileHeader {
         PhysicalFileHeader {
             format_version: metadata.superblock.format_version,
             sequence: metadata.superblock.sequence,

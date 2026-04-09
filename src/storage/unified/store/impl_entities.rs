@@ -3,7 +3,10 @@ use super::*;
 impl UnifiedStore {
     pub fn create_collection(&self, name: impl Into<String>) -> Result<(), StoreError> {
         let name = name.into();
-        let mut collections = self.collections.write().unwrap();
+        let mut collections = self
+            .collections
+            .write()
+            .map_err(|_| StoreError::Internal("collections lock poisoned".into()))?;
 
         if collections.contains_key(&name) {
             return Err(StoreError::CollectionExists(name));
@@ -18,7 +21,7 @@ impl UnifiedStore {
     /// Get or create a collection
     pub fn get_or_create_collection(&self, name: impl Into<String>) -> Arc<SegmentManager> {
         let name = name.into();
-        let mut collections = self.collections.write().unwrap();
+        let mut collections = self.collections.write().unwrap_or_else(|e| e.into_inner());
 
         if let Some(manager) = collections.get(&name) {
             return Arc::clone(manager);
@@ -34,17 +37,29 @@ impl UnifiedStore {
 
     /// Get a collection
     pub fn get_collection(&self, name: &str) -> Option<Arc<SegmentManager>> {
-        self.collections.read().unwrap().get(name).map(Arc::clone)
+        self.collections
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(name)
+            .map(Arc::clone)
     }
 
     /// List all collections
     pub fn list_collections(&self) -> Vec<String> {
-        self.collections.read().unwrap().keys().cloned().collect()
+        self.collections
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .cloned()
+            .collect()
     }
 
     /// Drop a collection
     pub fn drop_collection(&self, name: &str) -> Result<(), StoreError> {
-        let mut collections = self.collections.write().unwrap();
+        let mut collections = self
+            .collections
+            .write()
+            .map_err(|_| StoreError::Internal("collections lock poisoned".into()))?;
 
         if collections.remove(name).is_none() {
             return Err(StoreError::CollectionNotFound(name.to_string()));
@@ -71,7 +86,10 @@ impl UnifiedStore {
         // Also insert into B-tree index if pager is active
         if let Some(pager) = &self.pager {
             if let Some(entity) = manager.get(id) {
-                let mut btree_indices = self.btree_indices.write().unwrap();
+                let mut btree_indices = self
+                    .btree_indices
+                    .write()
+                    .map_err(|_| StoreError::Internal("btree_indices lock poisoned".into()))?;
                 let btree = btree_indices
                     .entry(collection.to_string())
                     .or_insert_with(|| BTree::new(Arc::clone(pager)));
@@ -86,7 +104,7 @@ impl UnifiedStore {
         // Index cross-references if enabled
         if self.config.auto_index_refs {
             if let Some(entity) = manager.get(id) {
-                self.index_cross_refs(&entity, collection);
+                self.index_cross_refs(&entity, collection)?;
             }
         }
 
@@ -112,7 +130,10 @@ impl UnifiedStore {
         // Also insert into B-tree index if pager is active
         if let Some(pager) = &self.pager {
             if let Some(entity) = manager.get(id) {
-                let mut btree_indices = self.btree_indices.write().unwrap();
+                let mut btree_indices = self
+                    .btree_indices
+                    .write()
+                    .map_err(|_| StoreError::Internal("btree_indices lock poisoned".into()))?;
                 let btree = btree_indices
                     .entry(collection.to_string())
                     .or_insert_with(|| BTree::new(Arc::clone(pager)));
@@ -125,7 +146,7 @@ impl UnifiedStore {
 
         if self.config.auto_index_refs {
             if let Some(entity) = manager.get(id) {
-                self.index_cross_refs(&entity, collection);
+                self.index_cross_refs(&entity, collection)?;
             }
         }
 
@@ -139,7 +160,7 @@ impl UnifiedStore {
     pub fn get(&self, collection: &str, id: EntityId) -> Option<UnifiedEntity> {
         // Try B-tree index first for O(log n) lookup
         if self.pager.is_some() {
-            let btree_indices = self.btree_indices.read().unwrap();
+            let btree_indices = self.btree_indices.read().unwrap_or_else(|e| e.into_inner());
             if let Some(btree) = btree_indices.get(collection) {
                 let key = id.raw().to_le_bytes();
                 if let Ok(Some(value)) = btree.get(&key) {
@@ -156,7 +177,7 @@ impl UnifiedStore {
 
     /// Get an entity from any collection
     pub fn get_any(&self, id: EntityId) -> Option<(String, UnifiedEntity)> {
-        let collections = self.collections.read().unwrap();
+        let collections = self.collections.read().unwrap_or_else(|e| e.into_inner());
         for (name, manager) in collections.iter() {
             if let Some(entity) = manager.get(id) {
                 return Some((name.clone(), entity));
@@ -173,7 +194,10 @@ impl UnifiedStore {
 
         // Remove from B-tree index if active
         if self.pager.is_some() {
-            let btree_indices = self.btree_indices.read().unwrap();
+            let btree_indices = self
+                .btree_indices
+                .read()
+                .map_err(|_| StoreError::Internal("btree_indices lock poisoned".into()))?;
             if let Some(btree) = btree_indices.get(collection) {
                 let key = id.raw().to_le_bytes();
                 let _ = btree.delete(&key);
@@ -181,7 +205,7 @@ impl UnifiedStore {
         }
 
         // Remove cross-references
-        self.unindex_cross_refs(id);
+        self.unindex_cross_refs(id)?;
 
         Ok(manager.delete(id)?)
     }
@@ -237,7 +261,7 @@ impl UnifiedStore {
         let current_refs = self
             .cross_refs
             .read()
-            .unwrap()
+            .map_err(|_| StoreError::Internal("cross_refs lock poisoned".into()))?
             .get(&source_id)
             .map_or(0, |v| v.len());
 
@@ -246,7 +270,10 @@ impl UnifiedStore {
         }
 
         {
-            let mut forward = self.cross_refs.write().unwrap();
+            let mut forward = self
+                .cross_refs
+                .write()
+                .map_err(|_| StoreError::Internal("cross_refs lock poisoned".into()))?;
             let refs = forward.entry(source_id).or_default();
             if !refs.iter().any(|(id, kind, coll)| {
                 *id == target_id && *kind == ref_type && coll == target_collection
@@ -256,7 +283,10 @@ impl UnifiedStore {
         }
 
         {
-            let mut reverse = self.reverse_refs.write().unwrap();
+            let mut reverse = self
+                .reverse_refs
+                .write()
+                .map_err(|_| StoreError::Internal("reverse_refs lock poisoned".into()))?;
             let refs = reverse.entry(target_id).or_default();
             if !refs.iter().any(|(id, kind, coll)| {
                 *id == source_id && *kind == ref_type && coll == source_collection
@@ -290,7 +320,7 @@ impl UnifiedStore {
     pub fn get_refs_from(&self, id: EntityId) -> Vec<(EntityId, RefType, String)> {
         self.cross_refs
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(&id)
             .cloned()
             .unwrap_or_default()
@@ -300,7 +330,7 @@ impl UnifiedStore {
     pub fn get_refs_to(&self, id: EntityId) -> Vec<(EntityId, RefType, String)> {
         self.reverse_refs
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(&id)
             .cloned()
             .unwrap_or_default()
@@ -365,13 +395,20 @@ impl UnifiedStore {
     }
 
     /// Index cross-references from an entity
-    fn index_cross_refs(&self, entity: &UnifiedEntity, collection: &str) {
+    pub(crate) fn index_cross_refs(
+        &self,
+        entity: &UnifiedEntity,
+        collection: &str,
+    ) -> Result<(), StoreError> {
         for cross_ref in &entity.cross_refs {
             if cross_ref.target_collection.is_empty() {
                 continue;
             }
             {
-                let mut forward = self.cross_refs.write().unwrap();
+                let mut forward = self
+                    .cross_refs
+                    .write()
+                    .map_err(|_| StoreError::Internal("cross_refs lock poisoned".into()))?;
                 let refs = forward.entry(cross_ref.source).or_default();
                 if !refs.iter().any(|(id, kind, coll)| {
                     *id == cross_ref.target
@@ -387,7 +424,10 @@ impl UnifiedStore {
             }
 
             {
-                let mut reverse = self.reverse_refs.write().unwrap();
+                let mut reverse = self
+                    .reverse_refs
+                    .write()
+                    .map_err(|_| StoreError::Internal("reverse_refs lock poisoned".into()))?;
                 let refs = reverse.entry(cross_ref.target).or_default();
                 if !refs.iter().any(|(id, kind, coll)| {
                     *id == cross_ref.source && *kind == cross_ref.ref_type && coll == collection
@@ -396,19 +436,29 @@ impl UnifiedStore {
                 }
             }
         }
+
+        Ok(())
     }
 
     /// Remove cross-references for an entity
-    fn unindex_cross_refs(&self, id: EntityId) {
+    fn unindex_cross_refs(&self, id: EntityId) -> Result<(), StoreError> {
         // Remove forward refs
-        self.cross_refs.write().unwrap().remove(&id);
+        self.cross_refs
+            .write()
+            .map_err(|_| StoreError::Internal("cross_refs lock poisoned".into()))?
+            .remove(&id);
 
         // Remove from reverse refs (scan all)
-        let mut reverse = self.reverse_refs.write().unwrap();
+        let mut reverse = self
+            .reverse_refs
+            .write()
+            .map_err(|_| StoreError::Internal("reverse_refs lock poisoned".into()))?;
         for refs in reverse.values_mut() {
             refs.retain(|(source, _, _)| *source != id);
         }
         reverse.remove(&id);
+
+        Ok(())
     }
 
     /// Query across all collections with a filter
@@ -417,7 +467,7 @@ impl UnifiedStore {
         F: Fn(&UnifiedEntity) -> bool + Clone,
     {
         let mut results = Vec::new();
-        let collections = self.collections.read().unwrap();
+        let collections = self.collections.read().unwrap_or_else(|e| e.into_inner());
 
         for (name, manager) in collections.iter() {
             for entity in manager.query_all(filter.clone()) {
@@ -434,7 +484,7 @@ impl UnifiedStore {
         filters: &[(String, MetadataFilter)],
     ) -> Vec<(String, EntityId)> {
         let mut results = Vec::new();
-        let collections = self.collections.read().unwrap();
+        let collections = self.collections.read().unwrap_or_else(|e| e.into_inner());
 
         for (name, manager) in collections.iter() {
             for id in manager.filter_metadata(filters) {
@@ -447,7 +497,7 @@ impl UnifiedStore {
 
     /// Get statistics
     pub fn stats(&self) -> StoreStats {
-        let collections = self.collections.read().unwrap();
+        let collections = self.collections.read().unwrap_or_else(|e| e.into_inner());
 
         let mut stats = StoreStats {
             collection_count: collections.len(),
@@ -466,11 +516,13 @@ impl UnifiedStore {
 
     /// Run maintenance on all collections
     pub fn run_maintenance(&self) -> Result<(), StoreError> {
-        let collections = self.collections.read().unwrap();
+        let collections = self
+            .collections
+            .read()
+            .map_err(|_| StoreError::Internal("collections lock poisoned".into()))?;
         for manager in collections.values() {
             manager.run_maintenance()?;
         }
         Ok(())
     }
-}
 }

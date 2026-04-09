@@ -390,12 +390,20 @@ pub fn batch_distances(
     // Partial sort for top-k (more efficient than full sort)
     if top_k < results.len() {
         results.select_nth_unstable_by(top_k, |a, b| {
-            a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+            a.1
+                .partial_cmp(&b.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
         });
         results.truncate(top_k);
     }
 
-    results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        a.1
+            .partial_cmp(&b.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
     results
 }
 

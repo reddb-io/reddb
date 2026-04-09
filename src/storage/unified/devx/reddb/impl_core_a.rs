@@ -9,6 +9,7 @@ impl RedDB {
             path: None,
             options: RedDBOptions::in_memory(),
             paged_mode: false,
+            vector_indexes: RwLock::new(HashMap::new()),
         }
     }
 
@@ -55,8 +56,9 @@ impl RedDB {
             path,
             options: options.clone(),
             paged_mode,
+            vector_indexes: RwLock::new(HashMap::new()),
         }
-        .with_initialized_metadata())
+        .with_initialized_metadata()?)
     }
 
     /// Create with custom store
@@ -68,6 +70,7 @@ impl RedDB {
             path: None,
             options: RedDBOptions::in_memory(),
             paged_mode: false,
+            vector_indexes: RwLock::new(HashMap::new()),
         }
     }
 
@@ -705,5 +708,4 @@ impl RedDB {
         (query_allowed, write_allowed, repair_allowed)
     }
 
-    /// Health report for the current database handle.
 }

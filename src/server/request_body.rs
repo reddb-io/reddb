@@ -1,10 +1,10 @@
 use super::*;
 
-fn extract_query(body: &[u8]) -> Result<String, HttpResponse> {
+pub(crate) fn extract_query(body: &[u8]) -> Result<String, HttpResponse> {
     extract_query_request(body).map(|request| request.query)
 }
 
-fn extract_query_request(body: &[u8]) -> Result<ParsedQueryRequest, HttpResponse> {
+pub(crate) fn extract_query_request(body: &[u8]) -> Result<ParsedQueryRequest, HttpResponse> {
     let text =
         std::str::from_utf8(body).map_err(|_| json_error(400, "request body must be UTF-8"))?;
     let trimmed = text.trim();
@@ -43,7 +43,7 @@ fn extract_query_request(body: &[u8]) -> Result<ParsedQueryRequest, HttpResponse
     })
 }
 
-fn parse_json_body(body: &[u8]) -> Result<JsonValue, HttpResponse> {
+pub(crate) fn parse_json_body(body: &[u8]) -> Result<JsonValue, HttpResponse> {
     let text =
         std::str::from_utf8(body).map_err(|_| json_error(400, "request body must be UTF-8"))?;
     let parsed =
@@ -51,7 +51,7 @@ fn parse_json_body(body: &[u8]) -> Result<JsonValue, HttpResponse> {
     Ok(JsonValue::from(parsed))
 }
 
-fn parse_json_body_allow_empty(body: &[u8]) -> Result<JsonValue, HttpResponse> {
+pub(crate) fn parse_json_body_allow_empty(body: &[u8]) -> Result<JsonValue, HttpResponse> {
     if body.is_empty() {
         return Ok(JsonValue::Object(Map::new()));
     }

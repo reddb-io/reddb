@@ -200,7 +200,7 @@ impl IvfIndex {
             let max_idx = distances
                 .iter()
                 .enumerate()
-                .max_by(|(_, a), (_, b)| cmp_f32(**a, **b))
+                .max_by(|(la, a), (lb, b)| cmp_f32(**a, **b).then_with(|| la.cmp(lb)))
                 .map(|(i, _)| i)
                 .unwrap_or(0);
 
@@ -271,7 +271,9 @@ impl IvfIndex {
             .iter()
             .enumerate()
             .map(|(i, c)| (i, l2_squared_simd(vector, c)))
-            .min_by(|(_, a), (_, b)| cmp_f32(*a, *b))
+            .min_by(|(li, la), (ri, rb)| {
+                cmp_f32(*la, *rb).then_with(|| li.cmp(ri))
+            })
             .map(|(i, _)| i)
             .unwrap_or(0)
     }
@@ -285,7 +287,9 @@ impl IvfIndex {
             .map(|(i, list)| (i, l2_squared_simd(vector, &list.centroid)))
             .collect();
 
-        distances.sort_by(|(_, a), (_, b)| cmp_f32(*a, *b));
+        distances.sort_by(|(li, la), (ri, lb)| {
+            cmp_f32(*la, *lb).then_with(|| li.cmp(ri))
+        });
         distances.into_iter().take(k).map(|(i, _)| i).collect()
     }
 
@@ -376,7 +380,9 @@ impl IvfIndex {
         }
 
         // Sort and return top k
-        candidates.sort_by(|a, b| cmp_f32(a.distance, b.distance));
+        candidates.sort_by(|a, b| {
+            cmp_f32(a.distance, b.distance).then_with(|| a.id.cmp(&b.id))
+        });
         candidates.truncate(k);
         candidates
     }

@@ -45,7 +45,7 @@ struct HeapEntry {
 
 impl PartialEq for HeapEntry {
     fn eq(&self, other: &Self) -> bool {
-        self.distance == other.distance
+        self.distance == other.distance && self.id == other.id
     }
 }
 
@@ -64,6 +64,7 @@ impl Ord for HeapEntry {
             .distance
             .partial_cmp(&self.distance)
             .unwrap_or(Ordering::Equal)
+            .then_with(|| self.id.cmp(&other.id))
     }
 }
 
@@ -319,7 +320,12 @@ impl IvfIndex {
             .map(|(i, c)| (i, self.compute_distance(vector.as_slice(), c.as_slice())))
             .collect();
 
-        distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
+        distances.sort_by(|a, b| {
+            a.1
+                .partial_cmp(&b.1)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
 
         distances
             .into_iter()
@@ -374,6 +380,7 @@ impl IvfIndex {
             a.distance
                 .partial_cmp(&b.distance)
                 .unwrap_or(Ordering::Equal)
+                .then_with(|| a.id.cmp(&b.id))
         });
 
         results

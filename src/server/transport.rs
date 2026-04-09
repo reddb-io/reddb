@@ -1,6 +1,6 @@
 use super::*;
 
-fn status_text(status: u16) -> &'static str {
+pub(crate) fn status_text(status: u16) -> &'static str {
     match status {
         200 => "OK",
         400 => "Bad Request",
@@ -12,16 +12,16 @@ fn status_text(status: u16) -> &'static str {
     }
 }
 
-struct HttpRequest {
-    method: String,
-    path: String,
-    query: BTreeMap<String, String>,
-    headers: BTreeMap<String, String>,
-    body: Vec<u8>,
+pub(crate) struct HttpRequest {
+    pub(crate) method: String,
+    pub(crate) path: String,
+    pub(crate) query: BTreeMap<String, String>,
+    pub(crate) headers: BTreeMap<String, String>,
+    pub(crate) body: Vec<u8>,
 }
 
 impl HttpRequest {
-    fn read_from(stream: &mut TcpStream, max_body_bytes: usize) -> io::Result<Self> {
+    pub(crate) fn read_from(stream: &mut TcpStream, max_body_bytes: usize) -> io::Result<Self> {
         let mut buffer = Vec::with_capacity(4096);
         let mut chunk = [0_u8; 2048];
         let header_end = loop {
@@ -44,26 +44,30 @@ impl HttpRequest {
             }
         };
 
-        let head = String::from_utf8_lossy(&buffer[..header_end]);
-        let mut lines = head.lines();
-        let request_line = lines
-            .next()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing request line"))?;
-        let mut request_parts = request_line.split_whitespace();
-        let method = request_parts
-            .next()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing method"))?
-            .to_string();
-        let target = request_parts
-            .next()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing path"))?;
+        let (method, target, headers) = {
+            let head = String::from_utf8_lossy(&buffer[..header_end]);
+            let mut lines = head.lines();
+            let request_line = lines
+                .next()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing request line"))?;
+            let mut request_parts = request_line.split_whitespace();
+            let method = request_parts
+                .next()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing method"))?
+                .to_string();
+            let target = request_parts
+                .next()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing path"))?
+                .to_string();
 
-        let mut headers = BTreeMap::new();
-        for line in lines {
-            if let Some((name, value)) = line.split_once(':') {
-                headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+            let mut headers = BTreeMap::new();
+            for line in lines {
+                if let Some((name, value)) = line.split_once(':') {
+                    headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+                }
             }
-        }
+            (method, target, headers)
+        };
 
         let content_length = headers
             .get("content-length")
@@ -89,7 +93,7 @@ impl HttpRequest {
         }
 
         let body = buffer[header_end + 4..total_needed].to_vec();
-        let (path, query) = split_target(target);
+        let (path, query) = split_target(&target);
 
         Ok(Self {
             method,
@@ -101,14 +105,14 @@ impl HttpRequest {
     }
 }
 
-struct HttpResponse {
-    status: u16,
-    body: Vec<u8>,
-    content_type: &'static str,
+pub(crate) struct HttpResponse {
+    pub(crate) status: u16,
+    pub(crate) body: Vec<u8>,
+    pub(crate) content_type: &'static str,
 }
 
 impl HttpResponse {
-    fn to_http_bytes(&self) -> Vec<u8> {
+    pub(crate) fn to_http_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
         let header = format!(
             "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -123,35 +127,35 @@ impl HttpResponse {
     }
 }
 
-fn json_ok(message: impl Into<String>) -> HttpResponse {
+pub(crate) fn json_ok(message: impl Into<String>) -> HttpResponse {
     let mut object = Map::new();
     object.insert("ok".to_string(), JsonValue::Bool(true));
     object.insert("message".to_string(), JsonValue::String(message.into()));
     json_response(200, JsonValue::Object(object))
 }
 
-fn json_error(status: u16, message: impl Into<String>) -> HttpResponse {
+pub(crate) fn json_error(status: u16, message: impl Into<String>) -> HttpResponse {
     let mut object = Map::new();
     object.insert("ok".to_string(), JsonValue::Bool(false));
     object.insert("error".to_string(), JsonValue::String(message.into()));
     json_response(status, JsonValue::Object(object))
 }
 
-fn json_response(status: u16, value: JsonValue) -> HttpResponse {
+pub(crate) fn json_response(status: u16, value: JsonValue) -> HttpResponse {
     HttpResponse {
         status,
         body: value.to_string_compact().into_bytes(),
         content_type: "application/json",
     }
 }
-fn split_target(target: &str) -> (String, BTreeMap<String, String>) {
+pub(crate) fn split_target(target: &str) -> (String, BTreeMap<String, String>) {
     match target.split_once('?') {
         Some((path, raw_query)) => (path.to_string(), parse_query_string(raw_query)),
         None => (target.to_string(), BTreeMap::new()),
     }
 }
 
-fn parse_query_string(input: &str) -> BTreeMap<String, String> {
+pub(crate) fn parse_query_string(input: &str) -> BTreeMap<String, String> {
     let mut params = BTreeMap::new();
     for pair in input.split('&') {
         if pair.is_empty() {
@@ -163,6 +167,6 @@ fn parse_query_string(input: &str) -> BTreeMap<String, String> {
     params
 }
 
-fn find_header_end(buffer: &[u8]) -> Option<usize> {
+pub(crate) fn find_header_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
 }

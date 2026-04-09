@@ -620,7 +620,7 @@ impl RedDB {
 
                     if let Some(metadata) = metadata_for_native.as_ref() {
                         let expected_registry = self.native_registry_summary_from_metadata(metadata);
-                        if native_registry != expected_registry {
+                        if *native_registry != expected_registry {
                             report.issue(
                                 "native_registry",
                                 "native registry summary diverges from physical metadata",
@@ -651,7 +651,7 @@ impl RedDB {
                     );
                     if let Some(metadata) = metadata_for_native.as_ref() {
                         let expected_catalog = Self::native_catalog_summary_from_metadata(metadata);
-                        if native_catalog != expected_catalog {
+                        if *native_catalog != expected_catalog {
                             report.issue(
                                 "native_catalog",
                                 "native catalog summary diverges from physical metadata",
@@ -740,7 +740,7 @@ impl RedDB {
                     );
                     if let Some(metadata) = metadata_for_native.as_ref() {
                         let expected_recovery = Self::native_recovery_summary_from_metadata(metadata);
-                        if native_recovery != expected_recovery {
+                        if *native_recovery != expected_recovery {
                             report.issue(
                                 "native_recovery",
                                 "native recovery summary diverges from physical metadata",
@@ -915,5 +915,4 @@ impl RedDB {
         report.with_diagnostic("paged_mode", self.paged_mode.to_string())
     }
 
-    /// Run background maintenance for all active collections.
 }

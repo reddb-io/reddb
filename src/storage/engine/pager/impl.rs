@@ -70,6 +70,31 @@ impl Pager {
         Ok(())
     }
 
+    /// Acquire a write lock on the header RwLock, mapping poison errors.
+    fn header_write(&self) -> Result<std::sync::RwLockWriteGuard<'_, DatabaseHeader>, PagerError> {
+        self.header.write().map_err(|_| PagerError::LockPoisoned)
+    }
+
+    /// Acquire a read lock on the header RwLock, mapping poison errors.
+    fn header_read(&self) -> Result<std::sync::RwLockReadGuard<'_, DatabaseHeader>, PagerError> {
+        self.header.read().map_err(|_| PagerError::LockPoisoned)
+    }
+
+    /// Acquire a write lock on the freelist RwLock, mapping poison errors.
+    fn freelist_write(&self) -> Result<std::sync::RwLockWriteGuard<'_, FreeList>, PagerError> {
+        self.freelist.write().map_err(|_| PagerError::LockPoisoned)
+    }
+
+    /// Acquire a lock on the file Mutex, mapping poison errors.
+    fn file_lock(&self) -> Result<std::sync::MutexGuard<'_, File>, PagerError> {
+        self.file.lock().map_err(|_| PagerError::LockPoisoned)
+    }
+
+    /// Acquire a lock on the header_dirty Mutex, mapping poison errors.
+    fn header_dirty_lock(&self) -> Result<std::sync::MutexGuard<'_, bool>, PagerError> {
+        self.header_dirty.lock().map_err(|_| PagerError::LockPoisoned)
+    }
+
     /// Load database header from page 0
     fn load_header(&self) -> Result<(), PagerError> {
         // Read page 0
@@ -357,7 +382,7 @@ impl Pager {
 
         // Update header
         {
-            let mut header = self.header.write().unwrap();
+            let mut header = self.header_write()?;
             header.version = version;
             header.page_size = page_size;
             header.page_count = page_count;
@@ -398,7 +423,7 @@ impl Pager {
 
         // Initialize freelist
         {
-            let mut freelist = self.freelist.write().unwrap();
+            let mut freelist = self.freelist_write()?;
             *freelist = FreeList::from_header(freelist_head, 0);
         }
 
@@ -414,7 +439,7 @@ impl Pager {
             return Err(PagerError::ReadOnly);
         }
 
-        let header = self.header.read().unwrap();
+        let header = self.header_read()?;
 
         // Read existing page 0 to preserve any additional data (e.g., encryption header)
         // First check cache, then fall back to disk
@@ -422,7 +447,7 @@ impl Pager {
             cached
         } else {
             // Try to read from disk if file is large enough
-            let file = self.file.lock().unwrap();
+            let file = self.file_lock()?;
             let len = file.metadata().map(|m| m.len()).unwrap_or(0);
             drop(file);
 
@@ -509,14 +534,14 @@ impl Pager {
         page.update_checksum();
 
         self.write_page_raw(0, &page)?;
-        *self.header_dirty.lock().unwrap() = false;
+        *self.header_dirty_lock()? = false;
 
         Ok(())
     }
 
     /// Read a page from disk (bypassing cache)
     fn read_page_raw(&self, page_id: u32) -> Result<Page, PagerError> {
-        let mut file = self.file.lock().unwrap();
+        let mut file = self.file_lock()?;
         let offset = (page_id as u64) * (PAGE_SIZE as u64);
 
         file.seek(SeekFrom::Start(offset))?;
@@ -540,7 +565,7 @@ impl Pager {
             return Err(PagerError::ReadOnly);
         }
 
-        let mut file = self.file.lock().unwrap();
+        let mut file = self.file_lock()?;
         let offset = (page_id as u64) * (PAGE_SIZE as u64);
 
         file.seek(SeekFrom::Start(offset))?;
@@ -580,7 +605,7 @@ impl Pager {
         }
 
         // Cache miss - read from disk (skip checksum verification)
-        let mut file = self.file.lock().unwrap();
+        let mut file = self.file_lock()?;
         let offset = (page_id as u64) * (PAGE_SIZE as u64);
 
         file.seek(SeekFrom::Start(offset))?;
@@ -641,7 +666,7 @@ impl Pager {
 
         // Try to get from freelist first
         let page_id = {
-            let mut freelist = self.freelist.write().unwrap();
+            let mut freelist = self.freelist_write()?;
             if let Some(id) = freelist.allocate() {
                 id
             } else if freelist.trunk_head() != 0 {
@@ -655,7 +680,7 @@ impl Pager {
                     other => other,
                 })?;
 
-                let mut freelist = self.freelist.write().unwrap();
+                let mut freelist = self.freelist_write()?;
                 freelist
                     .load_from_trunk(&trunk)
                     .map_err(|e| PagerError::InvalidDatabase(format!("Freelist: {}", e)))?;
@@ -663,17 +688,17 @@ impl Pager {
                     PagerError::InvalidDatabase("Freelist empty after trunk load".to_string())
                 })?;
 
-                let mut header = self.header.write().unwrap();
+                let mut header = self.header_write()?;
                 header.freelist_head = freelist.trunk_head();
-                *self.header_dirty.lock().unwrap() = true;
+                *self.header_dirty_lock()? = true;
 
                 id
             } else {
                 // No free pages, extend file
-                let mut header = self.header.write().unwrap();
+                let mut header = self.header_write()?;
                 let id = header.page_count;
                 header.page_count += 1;
-                *self.header_dirty.lock().unwrap() = true;
+                *self.header_dirty_lock()? = true;
                 id
             }
         };
@@ -697,21 +722,21 @@ impl Pager {
         self.cache.remove(page_id);
 
         // Add to freelist
-        let mut freelist = self.freelist.write().unwrap();
+        let mut freelist = self.freelist_write()?;
         freelist.free(page_id);
 
-        *self.header_dirty.lock().unwrap() = true;
+        *self.header_dirty_lock()? = true;
 
         Ok(())
     }
 
     /// Get database header
-    pub fn header(&self) -> DatabaseHeader {
-        self.header.read().unwrap().clone()
+    pub fn header(&self) -> Result<DatabaseHeader, PagerError> {
+        Ok(self.header_read()?.clone())
     }
 
-    pub fn physical_header(&self) -> PhysicalFileHeader {
-        self.header.read().unwrap().physical
+    pub fn physical_header(&self) -> Result<PhysicalFileHeader, PagerError> {
+        Ok(self.header_read()?.physical)
     }
 
     pub fn update_physical_header(
@@ -722,15 +747,15 @@ impl Pager {
             return Err(PagerError::ReadOnly);
         }
 
-        let mut header = self.header.write().unwrap();
+        let mut header = self.header_write()?;
         header.physical = physical;
-        *self.header_dirty.lock().unwrap() = true;
+        *self.header_dirty_lock()? = true;
         Ok(())
     }
 
     /// Get page count
-    pub fn page_count(&self) -> u32 {
-        self.header.read().unwrap().page_count
+    pub fn page_count(&self) -> Result<u32, PagerError> {
+        Ok(self.header_read()?.page_count)
     }
 
     /// Flush all dirty pages to disk
@@ -741,16 +766,16 @@ impl Pager {
 
         // Persist freelist to trunk pages when dirty
         let trunks = {
-            let mut freelist = self.freelist.write().unwrap();
+            let mut freelist = self.freelist_write()?;
             if freelist.is_dirty() {
-                let mut header = self.header.write().unwrap();
+                let mut header = self.header_write()?;
                 let trunks = freelist.flush_to_trunks(0, || {
                     let id = header.page_count;
                     header.page_count += 1;
                     id
                 });
                 header.freelist_head = freelist.trunk_head();
-                *self.header_dirty.lock().unwrap() = true;
+                *self.header_dirty_lock()? = true;
                 freelist.mark_clean();
                 trunks
             } else {
@@ -771,7 +796,7 @@ impl Pager {
         }
 
         // Write header if dirty
-        if *self.header_dirty.lock().unwrap() {
+        if *self.header_dirty_lock()? {
             self.write_header()?;
         }
 
@@ -782,14 +807,14 @@ impl Pager {
     pub fn sync(&self) -> Result<(), PagerError> {
         self.flush()?;
 
-        let file = self.file.lock().unwrap();
+        let file = self.file_lock()?;
         file.sync_all()?;
 
         Ok(())
     }
 
     /// Get cache statistics
-    pub fn cache_stats(&self) -> super::page_cache::CacheStats {
+    pub fn cache_stats(&self) -> crate::storage::engine::page_cache::CacheStats {
         self.cache.stats()
     }
 
@@ -805,7 +830,7 @@ impl Pager {
 
     /// Get file size in bytes
     pub fn file_size(&self) -> Result<u64, PagerError> {
-        let file = self.file.lock().unwrap();
+        let file = self.file_lock()?;
         Ok(file.metadata()?.len())
     }
 }

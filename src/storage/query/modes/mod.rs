@@ -10,7 +10,7 @@
 //!
 //! # Example
 //! ```ignore
-//! use redblue::storage::query::modes::{detect_mode, QueryMode, parse_multi};
+//! use reddb::storage::query::modes::{detect_mode, QueryMode, parse_multi};
 //!
 //! let query = "g.V().has('name', 'alice').out('knows')";
 //! let mode = detect_mode(query);

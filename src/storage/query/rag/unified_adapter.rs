@@ -181,6 +181,7 @@ impl UnifiedStoreAdapter {
             b.score
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.entity.id.cmp(&b.entity.id))
         });
         result.entities.truncate(k);
 
@@ -328,6 +329,7 @@ impl UnifiedStoreAdapter {
             b.score
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.entity.id.cmp(&b.entity.id))
         });
 
         // Apply limit

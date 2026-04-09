@@ -10,7 +10,7 @@
 //! # Usage
 //!
 //! ```rust,ignore
-//! use redblue::storage::engine::Database;
+//! use reddb::storage::engine::Database;
 //!
 //! // Open or create a database
 //! let db = Database::open("mydata.rdb")?;
@@ -343,7 +343,7 @@ impl Database {
 
     /// Get page count
     pub fn page_count(&self) -> u32 {
-        self.pager.page_count()
+        self.pager.page_count().unwrap_or(0)
     }
 
     /// Get database file size

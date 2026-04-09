@@ -77,6 +77,23 @@ pub struct CreateVectorInput {
 }
 
 #[derive(Debug, Clone)]
+pub struct CreateDocumentInput {
+    pub collection: String,
+    pub body: JsonValue,
+    pub metadata: Vec<(String, MetadataValue)>,
+    pub node_links: Vec<NodeRef>,
+    pub vector_links: Vec<VectorRef>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateKvInput {
+    pub collection: String,
+    pub key: String,
+    pub value: Value,
+    pub metadata: Vec<(String, MetadataValue)>,
+}
+
+#[derive(Debug, Clone)]
 pub struct DeleteEntityInput {
     pub collection: String,
     pub id: EntityId,
@@ -133,6 +150,22 @@ impl<'a, P: RuntimeEntityPort + ?Sized> EntityUseCases<'a, P> {
 
     pub fn create_vector(&self, input: CreateVectorInput) -> RedDBResult<CreateEntityOutput> {
         self.runtime.create_vector(input)
+    }
+
+    pub fn create_document(&self, input: CreateDocumentInput) -> RedDBResult<CreateEntityOutput> {
+        self.runtime.create_document(input)
+    }
+
+    pub fn create_kv(&self, input: CreateKvInput) -> RedDBResult<CreateEntityOutput> {
+        self.runtime.create_kv(input)
+    }
+
+    pub fn get_kv(&self, collection: &str, key: &str) -> RedDBResult<Option<(Value, EntityId)>> {
+        self.runtime.get_kv(collection, key)
+    }
+
+    pub fn delete_kv(&self, collection: &str, key: &str) -> RedDBResult<bool> {
+        self.runtime.delete_kv(collection, key)
     }
 
     pub fn patch(&self, input: PatchEntityInput) -> RedDBResult<CreateEntityOutput> {
@@ -512,7 +545,7 @@ fn metadata_value_to_json(value: &MetadataValue) -> JsonValue {
             );
             object.insert(
                 "values".to_string(),
-                JsonValue::Array(values.iter().map(metadata_value_to_json).collect()),
+                JsonValue::Array(values.iter().map(|r| metadata_value_to_json(&MetadataValue::Reference(r.clone()))).collect()),
             );
             JsonValue::Object(object)
         }
@@ -618,7 +651,7 @@ fn metadata_value_from_json(value: &JsonValue) -> RedDBResult<MetadataValue> {
     }
 }
 
-fn parse_metadata_reference(object: &Map) -> RedDBResult<RefTarget> {
+fn parse_metadata_reference(object: &Map<String, JsonValue>) -> RedDBResult<RefTarget> {
     let kind = object
         .get("kind")
         .and_then(JsonValue::as_str)

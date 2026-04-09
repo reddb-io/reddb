@@ -1,7 +1,7 @@
 use super::*;
 
 impl RedDBServer {
-    fn handle_query(&self, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_query(&self, body: Vec<u8>) -> HttpResponse {
         let request = match extract_query_request(&body) {
             Ok(request) => request,
             Err(response) => return response,
@@ -25,7 +25,7 @@ impl RedDBServer {
         }
     }
 
-    fn handle_query_explain(&self, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_query_explain(&self, body: Vec<u8>) -> HttpResponse {
         let query = match extract_query(&body) {
             Ok(query) => query,
             Err(response) => return response,
@@ -57,7 +57,7 @@ impl RedDBServer {
         }
     }
 
-    fn handle_similar(&self, collection: &str, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_similar(&self, collection: &str, body: Vec<u8>) -> HttpResponse {
         let payload = match parse_json_body(&body) {
             Ok(payload) => payload,
             Err(response) => return response,
@@ -88,7 +88,7 @@ impl RedDBServer {
         }
     }
 
-    fn handle_ivf_search(&self, collection: &str, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_ivf_search(&self, collection: &str, body: Vec<u8>) -> HttpResponse {
         let payload = match parse_json_body(&body) {
             Ok(payload) => payload,
             Err(response) => return response,
@@ -113,7 +113,7 @@ impl RedDBServer {
         }
     }
 
-    fn handle_hybrid_search(&self, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_hybrid_search(&self, body: Vec<u8>) -> HttpResponse {
         let payload = match parse_json_body(&body) {
             Ok(payload) => payload,
             Err(response) => return response,
@@ -148,7 +148,7 @@ impl RedDBServer {
         }
     }
 
-    fn handle_universal_search(&self, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_universal_search(&self, body: Vec<u8>) -> HttpResponse {
         let payload = match parse_json_body(&body) {
             Ok(payload) => payload,
             Err(response) => return response,
@@ -183,7 +183,7 @@ impl RedDBServer {
         }
     }
 
-    fn handle_text_search(&self, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_text_search(&self, body: Vec<u8>) -> HttpResponse {
         let payload = match parse_json_body(&body) {
             Ok(payload) => payload,
             Err(response) => return response,

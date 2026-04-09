@@ -1,4 +1,4 @@
-// redblue persistent storage core
+// reddb persistent storage core
 //
 // This module exposes the unified RedDB storage engine for tables, documents,
 // graphs, and vectors with a single API surface.
@@ -163,7 +163,10 @@ pub use unified::{
     // PRIMARY INTERFACE - Use these for all new code
     // =========================================================================
 
+    NativeHeaderRepairPolicy,
+    SimilarResult,
     // Store - THE primary storage interface
+    UnifiedStore,
     UnifiedStore as Store,
     VectorData,
     // Query builders (for advanced use)

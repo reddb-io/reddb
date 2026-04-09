@@ -676,7 +676,11 @@ impl InMemoryRetriever {
                 })
                 .collect();
 
-            distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            distances.sort_by(|a, b| {
+                a.1.partial_cmp(&b.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
+            });
 
             for (id, dist, content) in distances.into_iter().take(k) {
                 let chunk = ContextChunk::from_vector(content, collection, dist, id);

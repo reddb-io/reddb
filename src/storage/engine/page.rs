@@ -522,7 +522,8 @@ mod tests {
         assert_eq!(PageType::from_u8(1), Some(PageType::BTreeLeaf));
         assert_eq!(PageType::from_u8(2), Some(PageType::BTreeInterior));
         assert_eq!(PageType::from_u8(10), Some(PageType::GraphMeta));
-        assert_eq!(PageType::from_u8(11), None);
+        assert_eq!(PageType::from_u8(11), Some(PageType::NativeMeta));
+        assert_eq!(PageType::from_u8(12), None);
         assert_eq!(PageType::from_u8(255), None);
     }
 

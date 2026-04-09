@@ -326,12 +326,14 @@ impl TieredIndex {
 
     /// Helper: convert MB to bytes
     #[inline]
+    #[allow(non_snake_case)]
     pub const fn MB(mb: usize) -> usize {
         mb * 1024 * 1024
     }
 
     /// Helper: convert GB to bytes
     #[inline]
+    #[allow(non_snake_case)]
     pub const fn GB(gb: usize) -> usize {
         gb * 1024 * 1024 * 1024
     }
@@ -572,6 +574,7 @@ impl TieredIndex {
                     a.distance
                         .partial_cmp(&b.distance)
                         .unwrap_or(Ordering::Equal)
+                        .then_with(|| a.id.cmp(&b.id))
                 });
             }
         }

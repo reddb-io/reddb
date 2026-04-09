@@ -528,7 +528,7 @@ impl PlaybookDefinitionSegment {
             ],
             created_at: now,
             updated_at: now,
-            author: "redblue".to_string(),
+            author: "reddb".to_string(),
             version: "1.0.0".to_string(),
             tags: vec!["web".to_string(), "owasp".to_string(), "pentest".to_string()],
         });
@@ -635,7 +635,7 @@ impl PlaybookDefinitionSegment {
             ],
             created_at: now,
             updated_at: now,
-            author: "redblue".to_string(),
+            author: "reddb".to_string(),
             version: "1.0.0".to_string(),
             tags: vec!["network".to_string(), "infrastructure".to_string(), "pentest".to_string()],
         });
@@ -743,7 +743,7 @@ impl PlaybookDefinitionSegment {
             ],
             created_at: now,
             updated_at: now,
-            author: "redblue".to_string(),
+            author: "reddb".to_string(),
             version: "1.0.0".to_string(),
             tags: vec!["recon".to_string(), "osint".to_string(), "passive".to_string()],
         });

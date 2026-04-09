@@ -325,6 +325,16 @@ impl From<crate::storage::StoreError> for RedDBError {
     }
 }
 
+impl From<crate::storage::unified::devx::DevXError> for RedDBError {
+    fn from(err: crate::storage::unified::devx::DevXError) -> Self {
+        match err {
+            crate::storage::unified::devx::DevXError::Validation(msg) => Self::InvalidConfig(msg),
+            crate::storage::unified::devx::DevXError::Storage(msg) => Self::Engine(msg),
+            crate::storage::unified::devx::DevXError::NotFound(msg) => Self::NotFound(msg),
+        }
+    }
+}
+
 pub trait CatalogService {
     fn list_collections(&self) -> Vec<String>;
     fn collection_stats(&self, collection: &str) -> Option<CollectionStats>;

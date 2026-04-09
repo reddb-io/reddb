@@ -39,7 +39,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use redblue::storage::engine::algorithms::{PageRank, ConnectedComponents};
+//! use reddb::storage::engine::algorithms::{PageRank, ConnectedComponents};
 //!
 //! let pr = PageRank::new(&graph).run();
 //! let components = ConnectedComponents::new(&graph).find();

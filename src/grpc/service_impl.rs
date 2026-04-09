@@ -1,3 +1,5 @@
+#[tonic::async_trait]
+impl RedDb for GrpcRuntime {
 async fn health(&self, _request: Request<Empty>) -> Result<Response<HealthReply>, Status> {
     let report = self.native_use_cases().health();
     Ok(Response::new(HealthReply {
@@ -520,7 +522,6 @@ async fn serverless_reclaim(
     object.insert("ok".to_string(), JsonValue::Bool(failures.is_empty()));
     Ok(Response::new(json_payload_reply(JsonValue::Object(object))))
 }
-
 async fn catalog_consistency(
     &self,
     request: Request<Empty>,
@@ -1045,7 +1046,6 @@ async fn rebuild_indexes(
         crate::presentation::admin_json::indexes_json(&indexes),
     )))
 }
-
 async fn graph_projections(
     &self,
     request: Request<Empty>,
@@ -1304,4 +1304,680 @@ async fn mark_analytics_job_stale(
         .mark_analytics_job_stale(input.kind, input.projection, input.metadata)
         .map_err(to_status)?;
     Ok(Response::new(json_payload_reply(analytics_job_json(&job))))
+}
+async fn analytics_jobs(&self, request: Request<Empty>) -> Result<Response<PayloadReply>, Status> {
+    self.authorize_read(request.metadata())?;
+    let jobs = self.catalog_use_cases().analytics_jobs().map_err(to_status)?;
+    Ok(Response::new(json_payload_reply(
+        crate::presentation::admin_json::analytics_jobs_json(&jobs),
+    )))
+}
+
+async fn declared_analytics_jobs(
+    &self,
+    request: Request<Empty>,
+) -> Result<Response<PayloadReply>, Status> {
+    self.analytics_jobs(request).await
+}
+
+async fn operational_analytics_jobs(
+    &self,
+    request: Request<Empty>,
+) -> Result<Response<PayloadReply>, Status> {
+    self.authorize_read(request.metadata())?;
+    Ok(Response::new(json_payload_reply(
+        crate::presentation::admin_json::analytics_jobs_json(
+            &self.catalog_use_cases().operational_analytics_jobs(),
+        ),
+    )))
+}
+
+async fn analytics_job_statuses(
+    &self,
+    request: Request<Empty>,
+) -> Result<Response<PayloadReply>, Status> {
+    self.authorize_read(request.metadata())?;
+    Ok(Response::new(json_payload_reply(
+        crate::presentation::catalog_json::catalog_analytics_job_statuses_json(
+            &self.catalog_use_cases().analytics_job_statuses(),
+        ),
+    )))
+}
+
+async fn analytics_job_attention(
+    &self,
+    request: Request<Empty>,
+) -> Result<Response<PayloadReply>, Status> {
+    self.authorize_read(request.metadata())?;
+    Ok(Response::new(json_payload_reply(
+        crate::presentation::catalog_json::catalog_analytics_job_attention_json(
+            &self.catalog_use_cases().analytics_job_attention(),
+        ),
+    )))
+}
+
+async fn scan(&self, request: Request<ScanRequest>) -> Result<Response<ScanReply>, Status> {
+    self.authorize_read(request.metadata())?;
+    let request = request.into_inner();
+    let page = self
+        .query_use_cases()
+        .scan(crate::application::ScanCollectionInput {
+            collection: request.collection,
+            offset: request.offset as usize,
+            limit: request.limit.max(1) as usize,
+        })
+        .map_err(to_status)?;
+    Ok(Response::new(scan_reply(page)))
+}
+
+async fn query(&self, request: Request<QueryRequest>) -> Result<Response<QueryReply>, Status> {
+    self.authorize_read(request.metadata())?;
+    let request = request.into_inner();
+    let (entity_types, capabilities) = grpc_parse_query_filters(&request)?;
+    let result = self
+        .query_use_cases()
+        .execute(ExecuteQueryInput {
+            query: request.query,
+        })
+        .map_err(to_status)?;
+    Ok(Response::new(query_reply(
+        result,
+        &entity_types,
+        &capabilities,
+    )))
+}
+
+async fn explain_query(
+    &self,
+    request: Request<QueryRequest>,
+) -> Result<Response<PayloadReply>, Status> {
+    self.authorize_read(request.metadata())?;
+    let result = self
+        .query_use_cases()
+        .explain(ExplainQueryInput {
+            query: request.into_inner().query,
+        })
+        .map_err(to_status)?;
+    let universal_mode =
+        crate::presentation::query_plan_json::logical_plan_uses_universal_mode(
+            &result.logical_plan.root,
+        );
+    Ok(Response::new(json_payload_reply(
+        crate::presentation::query_plan_json::query_explain_json(
+            &result,
+            &format!("{:?}", result.mode).to_lowercase(),
+            None,
+            false,
+            universal_mode,
+        ),
+    )))
+}
+
+async fn text_search(
+    &self,
+    request: Request<JsonPayloadRequest>,
+) -> Result<Response<PayloadReply>, Status> {
+    self.authorize_read(request.metadata())?;
+    let payload = parse_json_payload(&request.into_inner().payload_json)?;
+    let input = crate::application::query_payload::parse_text_search_input(&payload)
+        .map_err(to_status)?;
+    let selection = crate::presentation::query_view::search_selection_json(
+        &input.entity_types,
+        &input.capabilities,
+    );
+
+    let result = self
+        .query_use_cases()
+        .search_text(input)
+        .map_err(to_status)?;
+    Ok(Response::new(json_payload_reply(
+        crate::presentation::query_json::dsl_query_result_json(&result, selection, |item| {
+            crate::presentation::query_json::scored_match_json(
+                item,
+                crate::presentation::entity_json::entity_json,
+            )
+        }),
+    )))
+}
+
+async fn hybrid_search(
+    &self,
+    request: Request<JsonPayloadRequest>,
+) -> Result<Response<PayloadReply>, Status> {
+    self.authorize_read(request.metadata())?;
+    let payload = parse_json_payload(&request.into_inner().payload_json)?;
+    let input = crate::application::query_payload::parse_hybrid_search_input(
+        &payload,
+        "hybrid search",
+    )
+    .map_err(to_status)?;
+    let selection = crate::presentation::query_view::search_selection_json(
+        &input.entity_types,
+        &input.capabilities,
+    );
+    let result = self
+        .query_use_cases()
+        .search_hybrid(input)
+        .map_err(to_status)?;
+    Ok(Response::new(json_payload_reply(
+        crate::presentation::query_json::dsl_query_result_json(&result, selection, |item| {
+            crate::presentation::query_json::scored_match_json(
+                item,
+                crate::presentation::entity_json::entity_json,
+            )
+        }),
+    )))
+}
+
+async fn similar(
+    &self,
+    request: Request<JsonCreateRequest>,
+) -> Result<Response<PayloadReply>, Status> {
+    self.authorize_read(request.metadata())?;
+    let request = request.into_inner();
+    let payload = parse_json_payload(&request.payload_json)?;
+    let input =
+        crate::application::query_payload::parse_similar_search_input(request.collection, &payload)
+            .map_err(to_status)?;
+    let response_collection = input.collection.clone();
+    let k = input.k;
+    let min_score = input.min_score;
+    let result = self
+        .query_use_cases()
+        .search_similar(input)
+        .map_err(to_status)?;
+    Ok(Response::new(json_payload_reply(
+        crate::presentation::query_json::similar_results_json(
+            &response_collection,
+            k,
+            min_score,
+            &result,
+            crate::presentation::entity_json::entity_json,
+        ),
+    )))
+}
+
+async fn ivf_search(
+    &self,
+    request: Request<JsonCreateRequest>,
+) -> Result<Response<PayloadReply>, Status> {
+    self.authorize_read(request.metadata())?;
+    let request = request.into_inner();
+    let payload = parse_json_payload(&request.payload_json)?;
+    let input =
+        crate::application::query_payload::parse_ivf_search_input(request.collection, &payload)
+            .map_err(to_status)?;
+    let result = self
+        .query_use_cases()
+        .search_ivf(input)
+        .map_err(to_status)?;
+    Ok(Response::new(json_payload_reply(
+        crate::presentation::query_json::runtime_ivf_json(
+            &result,
+            crate::presentation::entity_json::entity_json,
+        ),
+    )))
+}
+
+async fn graph_neighborhood(
+    &self,
+    request: Request<JsonPayloadRequest>,
+) -> Result<Response<PayloadReply>, Status> {
+    self.authorize_read(request.metadata())?;
+    let payload = parse_json_payload(&request.into_inner().payload_json)?;
+    let projection = resolve_projection_payload(self, &payload)?;
+    let input = crate::application::graph_payload::parse_graph_neighborhood_input(
+        &payload,
+        projection,
+    )
+    .map_err(to_status)?;
+    let result = self
+        .graph_use_cases()
+        .neighborhood(input)
+        .map_err(to_status)?;
+    Ok(Response::new(json_payload_reply(
+        crate::presentation::graph_json::graph_neighborhood_json(&result),
+    )))
+}
+
+async fn graph_traverse(
+    &self,
+    request: Request<JsonPayloadRequest>,
+) -> Result<Response<PayloadReply>, Status> {
+    self.authorize_read(request.metadata())?;
+    let payload = parse_json_payload(&request.into_inner().payload_json)?;
+    let projection = resolve_projection_payload(self, &payload)?;
+    let input =
+        crate::application::graph_payload::parse_graph_traversal_input(&payload, projection)
+            .map_err(to_status)?;
+    let result = self
+        .graph_use_cases()
+        .traverse(input)
+        .map_err(to_status)?;
+    Ok(Response::new(json_payload_reply(
+        crate::presentation::graph_json::graph_traversal_json(&result),
+    )))
+}
+
+async fn graph_shortest_path(
+    &self,
+    request: Request<JsonPayloadRequest>,
+) -> Result<Response<PayloadReply>, Status> {
+    self.authorize_read(request.metadata())?;
+    let payload = parse_json_payload(&request.into_inner().payload_json)?;
+    let projection = resolve_projection_payload(self, &payload)?;
+    let input =
+        crate::application::graph_payload::parse_graph_shortest_path_input(&payload, projection)
+            .map_err(to_status)?;
+    let result = self
+        .graph_use_cases()
+        .shortest_path(input)
+        .map_err(to_status)?;
+    Ok(Response::new(json_payload_reply(
+        crate::presentation::graph_json::graph_path_result_json(&result),
+    )))
+}
+
+async fn graph_components(
+    &self,
+    request: Request<JsonPayloadRequest>,
+) -> Result<Response<PayloadReply>, Status> {
+    self.authorize_read(request.metadata())?;
+    let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
+    let projection_name = json_string_field(&payload, "projection_name");
+    let projection = resolve_projection_payload(self, &payload)?;
+    let input = crate::application::graph_payload::parse_graph_components_input(&payload, projection);
+    let metadata = crate::application::graph_payload::graph_components_metadata(&input);
+    self.start_graph_analytics_job(
+        "graph.components",
+        projection_name.clone(),
+        metadata.clone(),
+    )?;
+    let result = match self.graph_use_cases().components(input) {
+        Ok(result) => result,
+        Err(err) => {
+            let _ = self.fail_graph_analytics_job(
+                "graph.components",
+                projection_name.clone(),
+                metadata.clone(),
+            );
+            return Err(to_status(err));
+        }
+    };
+    self.complete_graph_analytics_job("graph.components", projection_name, metadata)?;
+    Ok(Response::new(json_payload_reply(
+        crate::presentation::graph_json::graph_components_json(&result),
+    )))
+}
+
+async fn graph_centrality(
+    &self,
+    request: Request<JsonPayloadRequest>,
+) -> Result<Response<PayloadReply>, Status> {
+    self.authorize_read(request.metadata())?;
+    let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
+    let projection_name = json_string_field(&payload, "projection_name");
+    let projection = resolve_projection_payload(self, &payload)?;
+    let input = crate::application::graph_payload::parse_graph_centrality_input(&payload, projection);
+    let kind = crate::application::graph_payload::graph_centrality_kind(input.algorithm);
+    let metadata = crate::application::graph_payload::graph_centrality_metadata(&input);
+    self.start_graph_analytics_job(&kind, projection_name.clone(), metadata.clone())?;
+    let result = match self.graph_use_cases().centrality(input) {
+        Ok(result) => result,
+        Err(err) => {
+            let _ = self.fail_graph_analytics_job(&kind, projection_name.clone(), metadata.clone());
+            return Err(to_status(err));
+        }
+    };
+    self.complete_graph_analytics_job(&kind, projection_name, metadata)?;
+    Ok(Response::new(json_payload_reply(
+        crate::presentation::graph_json::graph_centrality_json(&result),
+    )))
+}
+
+async fn graph_community(
+    &self,
+    request: Request<JsonPayloadRequest>,
+) -> Result<Response<PayloadReply>, Status> {
+    self.authorize_read(request.metadata())?;
+    let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
+    let projection_name = json_string_field(&payload, "projection_name");
+    let projection = resolve_projection_payload(self, &payload)?;
+    let input =
+        crate::application::graph_payload::parse_graph_communities_input(&payload, projection);
+    let kind = crate::application::graph_payload::graph_communities_kind(input.algorithm);
+    let metadata = crate::application::graph_payload::graph_communities_metadata(&input);
+    self.start_graph_analytics_job(&kind, projection_name.clone(), metadata.clone())?;
+    let result = match self.graph_use_cases().communities(input) {
+        Ok(result) => result,
+        Err(err) => {
+            let _ = self.fail_graph_analytics_job(&kind, projection_name.clone(), metadata.clone());
+            return Err(to_status(err));
+        }
+    };
+    self.complete_graph_analytics_job(&kind, projection_name, metadata)?;
+    Ok(Response::new(json_payload_reply(
+        crate::presentation::graph_json::graph_community_json(&result),
+    )))
+}
+async fn graph_clustering(
+    &self,
+    request: Request<JsonPayloadRequest>,
+) -> Result<Response<PayloadReply>, Status> {
+    self.authorize_read(request.metadata())?;
+    let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
+    let projection_name = json_string_field(&payload, "projection_name");
+    let projection = resolve_projection_payload(self, &payload)?;
+    let input =
+        crate::application::graph_payload::parse_graph_clustering_input(&payload, projection);
+    let metadata = crate::application::graph_payload::graph_clustering_metadata(&input);
+    self.start_graph_analytics_job(
+        "graph.clustering",
+        projection_name.clone(),
+        metadata.clone(),
+    )?;
+    let result = match self.graph_use_cases().clustering(input) {
+        Ok(result) => result,
+        Err(err) => {
+            let _ = self.fail_graph_analytics_job(
+                "graph.clustering",
+                projection_name.clone(),
+                metadata.clone(),
+            );
+            return Err(to_status(err));
+        }
+    };
+    self.complete_graph_analytics_job("graph.clustering", projection_name, metadata)?;
+    Ok(Response::new(json_payload_reply(
+        crate::presentation::graph_json::graph_clustering_json(&result),
+    )))
+}
+
+async fn graph_personalized_pagerank(
+    &self,
+    request: Request<JsonPayloadRequest>,
+) -> Result<Response<PayloadReply>, Status> {
+    self.authorize_read(request.metadata())?;
+    let payload = parse_json_payload(&request.into_inner().payload_json)?;
+    let projection_name = json_string_field(&payload, "projection_name");
+    let projection = resolve_projection_payload(self, &payload)?;
+    let input = crate::application::graph_payload::parse_graph_personalized_pagerank_input(
+        &payload,
+        projection,
+    )
+    .map_err(to_status)?;
+    let metadata =
+        crate::application::graph_payload::graph_personalized_pagerank_metadata(&input);
+    self.start_graph_analytics_job(
+        "graph.pagerank.personalized",
+        projection_name.clone(),
+        metadata.clone(),
+    )?;
+    let result = match self
+        .graph_use_cases()
+        .personalized_pagerank(input)
+    {
+        Ok(result) => result,
+        Err(err) => {
+            let _ = self.fail_graph_analytics_job(
+                "graph.pagerank.personalized",
+                projection_name.clone(),
+                metadata.clone(),
+            );
+            return Err(to_status(err));
+        }
+    };
+    self.complete_graph_analytics_job("graph.pagerank.personalized", projection_name, metadata)?;
+    Ok(Response::new(json_payload_reply(
+        crate::presentation::graph_json::graph_centrality_json(&result),
+    )))
+}
+
+async fn graph_hits(
+    &self,
+    request: Request<JsonPayloadRequest>,
+) -> Result<Response<PayloadReply>, Status> {
+    self.authorize_read(request.metadata())?;
+    let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
+    let projection_name = json_string_field(&payload, "projection_name");
+    let projection = resolve_projection_payload(self, &payload)?;
+    let input = crate::application::graph_payload::parse_graph_hits_input(&payload, projection);
+    let metadata = crate::application::graph_payload::graph_hits_metadata(&input);
+    self.start_graph_analytics_job("graph.hits", projection_name.clone(), metadata.clone())?;
+    let result = match self.graph_use_cases().hits(input) {
+        Ok(result) => result,
+        Err(err) => {
+            let _ = self.fail_graph_analytics_job(
+                "graph.hits",
+                projection_name.clone(),
+                metadata.clone(),
+            );
+            return Err(to_status(err));
+        }
+    };
+    self.complete_graph_analytics_job("graph.hits", projection_name, metadata)?;
+    Ok(Response::new(json_payload_reply(
+        crate::presentation::graph_json::graph_hits_json(&result),
+    )))
+}
+
+async fn graph_cycles(
+    &self,
+    request: Request<JsonPayloadRequest>,
+) -> Result<Response<PayloadReply>, Status> {
+    self.authorize_read(request.metadata())?;
+    let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
+    let projection_name = json_string_field(&payload, "projection_name");
+    let projection = resolve_projection_payload(self, &payload)?;
+    let input = crate::application::graph_payload::parse_graph_cycles_input(&payload, projection);
+    let metadata = crate::application::graph_payload::graph_cycles_metadata(&input);
+    self.start_graph_analytics_job("graph.cycles", projection_name.clone(), metadata.clone())?;
+    let result = match self.graph_use_cases().cycles(input) {
+        Ok(result) => result,
+        Err(err) => {
+            let _ = self.fail_graph_analytics_job(
+                "graph.cycles",
+                projection_name.clone(),
+                metadata.clone(),
+            );
+            return Err(to_status(err));
+        }
+    };
+    self.complete_graph_analytics_job("graph.cycles", projection_name, metadata)?;
+    Ok(Response::new(json_payload_reply(
+        crate::presentation::graph_json::graph_cycles_json(&result),
+    )))
+}
+
+async fn graph_topological_sort(
+    &self,
+    request: Request<JsonPayloadRequest>,
+) -> Result<Response<PayloadReply>, Status> {
+    self.authorize_read(request.metadata())?;
+    let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
+    let projection_name = json_string_field(&payload, "projection_name");
+    let projection = resolve_projection_payload(self, &payload)?;
+    let input = crate::application::graph_payload::parse_graph_topological_sort_input(projection);
+    let metadata = BTreeMap::new();
+    self.start_graph_analytics_job(
+        "graph.topological_sort",
+        projection_name.clone(),
+        metadata.clone(),
+    )?;
+    let result = match self
+        .graph_use_cases()
+        .topological_sort(input)
+    {
+        Ok(result) => result,
+        Err(err) => {
+            let _ = self.fail_graph_analytics_job(
+                "graph.topological_sort",
+                projection_name.clone(),
+                metadata.clone(),
+            );
+            return Err(to_status(err));
+        }
+    };
+    self.complete_graph_analytics_job("graph.topological_sort", projection_name, metadata)?;
+    Ok(Response::new(json_payload_reply(
+        crate::presentation::graph_json::graph_topological_sort_json(&result),
+    )))
+}
+
+async fn create_row(
+    &self,
+    request: Request<JsonCreateRequest>,
+) -> Result<Response<EntityReply>, Status> {
+    self.authorize_write(request.metadata())?;
+    let request = request.into_inner();
+    Ok(Response::new(create_row_reply(self, request)?))
+}
+
+async fn create_node(
+    &self,
+    request: Request<JsonCreateRequest>,
+) -> Result<Response<EntityReply>, Status> {
+    self.authorize_write(request.metadata())?;
+    let request = request.into_inner();
+    Ok(Response::new(create_node_reply(self, request)?))
+}
+
+async fn create_edge(
+    &self,
+    request: Request<JsonCreateRequest>,
+) -> Result<Response<EntityReply>, Status> {
+    self.authorize_write(request.metadata())?;
+    let request = request.into_inner();
+    Ok(Response::new(create_edge_reply(self, request)?))
+}
+
+async fn create_vector(
+    &self,
+    request: Request<JsonCreateRequest>,
+) -> Result<Response<EntityReply>, Status> {
+    self.authorize_write(request.metadata())?;
+    let request = request.into_inner();
+    Ok(Response::new(create_vector_reply(self, request)?))
+}
+
+async fn bulk_create_rows(
+    &self,
+    request: Request<JsonBulkCreateRequest>,
+) -> Result<Response<BulkEntityReply>, Status> {
+    self.authorize_write(request.metadata())?;
+    let request = request.into_inner();
+    Ok(Response::new(bulk_create_reply(self, request, create_row_reply)?))
+}
+
+async fn bulk_create_nodes(
+    &self,
+    request: Request<JsonBulkCreateRequest>,
+) -> Result<Response<BulkEntityReply>, Status> {
+    self.authorize_write(request.metadata())?;
+    let request = request.into_inner();
+    Ok(Response::new(bulk_create_reply(self, request, create_node_reply)?))
+}
+
+async fn bulk_create_edges(
+    &self,
+    request: Request<JsonBulkCreateRequest>,
+) -> Result<Response<BulkEntityReply>, Status> {
+    self.authorize_write(request.metadata())?;
+    let request = request.into_inner();
+    Ok(Response::new(bulk_create_reply(self, request, create_edge_reply)?))
+}
+
+async fn bulk_create_vectors(
+    &self,
+    request: Request<JsonBulkCreateRequest>,
+) -> Result<Response<BulkEntityReply>, Status> {
+    self.authorize_write(request.metadata())?;
+    let request = request.into_inner();
+    Ok(Response::new(bulk_create_reply(self, request, create_vector_reply)?))
+}
+
+async fn patch_entity(
+    &self,
+    request: Request<UpdateEntityRequest>,
+) -> Result<Response<EntityReply>, Status> {
+    self.authorize_write(request.metadata())?;
+    let request = request.into_inner();
+    Ok(Response::new(patch_entity_reply(self, request)?))
+}
+
+async fn create_snapshot(&self, request: Request<Empty>) -> Result<Response<PayloadReply>, Status> {
+    self.authorize_write(request.metadata())?;
+    let snapshot = self.native_use_cases().create_snapshot().map_err(to_status)?;
+    Ok(Response::new(PayloadReply {
+        ok: true,
+        payload: format!("{snapshot:?}"),
+    }))
+}
+
+async fn create_export(
+    &self,
+    request: Request<ExportRequest>,
+) -> Result<Response<PayloadReply>, Status> {
+    self.authorize_write(request.metadata())?;
+    let request = request.into_inner();
+    if request.name.trim().is_empty() {
+        return Err(Status::invalid_argument("export name cannot be empty"));
+    }
+    let export = self
+        .native_use_cases()
+        .create_export(request.name)
+        .map_err(to_status)?;
+    Ok(Response::new(PayloadReply {
+        ok: true,
+        payload: format!("{export:?}"),
+    }))
+}
+
+async fn apply_retention(
+    &self,
+    request: Request<Empty>,
+) -> Result<Response<OperationReply>, Status> {
+    self.authorize_write(request.metadata())?;
+    self.native_use_cases()
+        .apply_retention_policy()
+        .map_err(to_status)?;
+    Ok(Response::new(OperationReply {
+        ok: true,
+        message: "retention policy applied".to_string(),
+    }))
+}
+
+async fn delete_entity(
+    &self,
+    request: Request<DeleteEntityRequest>,
+) -> Result<Response<OperationReply>, Status> {
+    self.authorize_write(request.metadata())?;
+    let request = request.into_inner();
+    let output = self
+        .entity_use_cases()
+        .delete(DeleteEntityInput {
+            collection: request.collection,
+            id: EntityId::new(request.id),
+        })
+        .map_err(entity_error_to_status)?;
+    if !output.deleted {
+        return Err(Status::not_found(format!(
+            "entity not found: {}",
+            request.id
+        )));
+    }
+    Ok(Response::new(OperationReply {
+        ok: true,
+        message: format!("entity {} deleted", request.id),
+    }))
+}
+
+async fn checkpoint(&self, _request: Request<Empty>) -> Result<Response<OperationReply>, Status> {
+    self.authorize_write(_request.metadata())?;
+    self.native_use_cases().checkpoint().map_err(to_status)?;
+    Ok(Response::new(OperationReply {
+        ok: true,
+        message: "checkpoint completed".to_string(),
+    }))
+}
 }

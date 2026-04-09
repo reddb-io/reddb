@@ -56,11 +56,11 @@ pub struct CanonicalLogicalNode {
 }
 
 #[derive(Debug, Clone)]
-struct AccessPathDecision {
-    path: &'static str,
-    index_hint: Option<String>,
-    reason: String,
-    warning: Option<String>,
+pub struct AccessPathDecision {
+    pub path: &'static str,
+    pub index_hint: Option<String>,
+    pub reason: String,
+    pub warning: Option<String>,
 }
 
 /// Query planner that combines rewriting, caching, and cost estimation

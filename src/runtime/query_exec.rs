@@ -70,7 +70,7 @@ pub(super) fn execute_runtime_canonical_table_node(
             }
             Ok(records)
         }
-        "sort" | "entity_sort" => {
+        "sort" | "entity_sort" | "document_sort" => {
             let mut records = execute_runtime_canonical_table_child(db, node, context)?;
             if !context.query.order_by.is_empty() {
                 records.sort_by(|left, right| {
@@ -82,6 +82,8 @@ pub(super) fn execute_runtime_canonical_table_node(
                         Some(context.table_alias),
                     )
                 });
+            } else if node.operator == "entity_sort" {
+                records.sort_by(compare_runtime_ranked_records);
             }
             Ok(records)
         }
@@ -101,11 +103,7 @@ pub(super) fn execute_runtime_canonical_table_node(
         "entity_search" => execute_runtime_canonical_table_child(db, node, context),
         "entity_topk" => {
             let mut records = execute_runtime_canonical_table_child(db, node, context)?;
-            records.sort_by(|left, right| {
-                runtime_record_rank_score(right)
-                    .partial_cmp(&runtime_record_rank_score(left))
-                    .unwrap_or(Ordering::Equal)
-            });
+            records.sort_by(compare_runtime_ranked_records);
             let limit = node
                 .details
                 .get("k")
@@ -181,11 +179,17 @@ pub(super) fn evaluate_runtime_document_filter(
 
 pub(super) fn runtime_record_rank_score(record: &UnifiedRecord) -> f64 {
     [
+        "_score",
         "hybrid_score",
         "final_score",
-        "_score",
+        "score",
+        "graph_score",
+        "table_score",
+        "graph_match",
         "vector_score",
+        "vector_similarity",
         "structured_score",
+        "structured_match",
         "text_relevance",
     ]
     .into_iter()
@@ -193,9 +197,22 @@ pub(super) fn runtime_record_rank_score(record: &UnifiedRecord) -> f64 {
     .unwrap_or(0.0)
 }
 
+pub(super) fn compare_runtime_ranked_records(
+    left: &UnifiedRecord,
+    right: &UnifiedRecord,
+) -> Ordering {
+    runtime_record_rank_score(right)
+        .partial_cmp(&runtime_record_rank_score(left))
+        .unwrap_or(Ordering::Equal)
+        .then_with(|| {
+            runtime_record_identity_key(left)
+                .cmp(&runtime_record_identity_key(right))
+        })
+}
+
 pub(super) fn execute_runtime_join_query(db: &RedDB, query: &JoinQuery) -> RedDBResult<UnifiedResult> {
     let records = execute_runtime_canonical_join_query(db, query)?;
-    let columns = collect_visible_columns(&records);
+    let columns = projected_columns(&records, &query.return_);
 
     Ok(UnifiedResult {
         columns,
@@ -217,13 +234,98 @@ pub(super) fn execute_runtime_canonical_join_node(
     node: &crate::storage::query::planner::CanonicalLogicalNode,
     query: &JoinQuery,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
-    if node.operator != "join" {
-        return Err(RedDBError::Query(format!(
-            "expected canonical join operator, got {}",
-            node.operator
-        )));
-    }
+    let (left_table_name, left_table_alias, right_table_name, right_table_alias) =
+        runtime_join_table_context(query);
 
+    match node.operator.as_str() {
+        "filter" => {
+            let mut records = execute_runtime_canonical_join_child(db, node, query)?;
+            if let Some(filter) = query.filter.as_ref() {
+                records.retain(|record| {
+                    evaluate_runtime_join_filter(
+                        record,
+                        filter,
+                        left_table_name,
+                        left_table_alias,
+                        right_table_name,
+                        right_table_alias,
+                    )
+                });
+            }
+            Ok(records)
+        }
+        "sort" | "document_sort" | "entity_sort" => {
+            let mut records = execute_runtime_canonical_join_child(db, node, query)?;
+            if !query.order_by.is_empty() {
+                records.sort_by(|left, right| {
+                    compare_runtime_join_order(
+                        left,
+                        right,
+                        &query.order_by,
+                        left_table_name,
+                        left_table_alias,
+                        right_table_name,
+                        right_table_alias,
+                    )
+                });
+            } else if node.operator == "entity_sort" {
+                records.sort_by(compare_runtime_ranked_records);
+            }
+            Ok(records)
+        }
+        "offset" => {
+            let records = execute_runtime_canonical_join_child(db, node, query)?;
+            let offset = query.offset.unwrap_or(0) as usize;
+            Ok(records.into_iter().skip(offset).collect())
+        }
+        "limit" => {
+            let records = execute_runtime_canonical_join_child(db, node, query)?;
+            let limit = query.limit.map(|value| value as usize);
+            Ok(match limit {
+                Some(limit) => records.into_iter().take(limit).collect(),
+                None => records,
+            })
+        }
+        "projection" => {
+            let records = execute_runtime_canonical_join_child(db, node, query)?;
+            Ok(records
+                .iter()
+                .map(|record| {
+                    project_runtime_join_record(
+                        record,
+                        &query.return_,
+                        left_table_name,
+                        left_table_alias,
+                        right_table_name,
+                        right_table_alias,
+                    )
+                })
+                .collect())
+        }
+        "join" => execute_runtime_canonical_join_base(
+            db,
+            node,
+            query,
+            left_table_name,
+            left_table_alias,
+            right_table_name,
+            right_table_alias,
+        ),
+        other => Err(RedDBError::Query(format!(
+            "unsupported canonical join operator {other}"
+        ))),
+    }
+}
+
+pub(super) fn execute_runtime_canonical_join_base(
+    db: &RedDB,
+    node: &crate::storage::query::planner::CanonicalLogicalNode,
+    query: &JoinQuery,
+    left_table_name: Option<&str>,
+    left_table_alias: Option<&str>,
+    right_table_name: Option<&str>,
+    right_table_alias: Option<&str>,
+) -> RedDBResult<Vec<UnifiedRecord>> {
     if node.children.len() != 2 {
         return Err(RedDBError::Query(
             "canonical join operator must contain exactly two child plans".to_string(),
@@ -244,36 +346,19 @@ pub(super) fn execute_runtime_canonical_join_node(
         }
     };
 
-    let left_table_name = left_query.table.as_str();
-    let left_table_alias = left_query.alias.as_deref().unwrap_or(left_table_name);
-    let left_records = execute_runtime_canonical_expr_node(db, &node.children[0], query.left.as_ref())?;
+    let left_records =
+        execute_runtime_canonical_expr_node(db, &node.children[0], query.left.as_ref())?;
 
-    let (right_records, right_table_name, right_table_alias) = match query.right.as_ref() {
-        QueryExpr::Graph(_) | QueryExpr::Path(_) => (
-            execute_runtime_canonical_expr_node(db, &node.children[1], query.right.as_ref())?,
-            None,
-            None,
-        ),
-        QueryExpr::Table(table) => (
-            execute_runtime_canonical_expr_node(db, &node.children[1], query.right.as_ref())?,
-            Some(table.table.as_str()),
-            Some(table.alias.as_deref().unwrap_or(table.table.as_str())),
-        ),
-        other => {
-            return Err(RedDBError::Query(format!(
-                "runtime joins do not yet support right-side {} expressions",
-                query_expr_name(other)
-            )))
-        }
-    };
+    let right_records =
+        execute_runtime_canonical_expr_node(db, &node.children[1], query.right.as_ref())?;
 
     match join_strategy {
         CanonicalJoinStrategy::IndexedNestedLoop => {
             execute_runtime_indexed_join(
                 left_query,
                 &left_records,
-                Some(left_table_name),
-                Some(left_table_alias),
+                left_table_name,
+                left_table_alias,
                 &left_join_field,
                 &right_records,
                 right_table_name,
@@ -285,8 +370,8 @@ pub(super) fn execute_runtime_canonical_join_node(
         CanonicalJoinStrategy::NestedLoop => execute_runtime_full_scan_join(
             left_query,
             &left_records,
-            Some(left_table_name),
-            Some(left_table_alias),
+            left_table_name,
+            left_table_alias,
             &left_join_field,
             &right_records,
             right_table_name,
@@ -297,8 +382,8 @@ pub(super) fn execute_runtime_canonical_join_node(
         CanonicalJoinStrategy::GraphLookupJoin => execute_runtime_graph_lookup_join(
             left_query,
             &left_records,
-            Some(left_table_name),
-            Some(left_table_alias),
+            left_table_name,
+            left_table_alias,
             &left_join_field,
             &right_records,
             right_table_name,
@@ -307,6 +392,369 @@ pub(super) fn execute_runtime_canonical_join_node(
             join_type,
         ),
     }
+}
+
+pub(super) fn execute_runtime_canonical_join_child(
+    db: &RedDB,
+    node: &crate::storage::query::planner::CanonicalLogicalNode,
+    query: &JoinQuery,
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    let child = node.children.first().ok_or_else(|| {
+        RedDBError::Query(format!(
+            "canonical join operator {} is missing its child plan",
+            node.operator
+        ))
+    })?;
+    execute_runtime_canonical_join_node(db, child, query)
+}
+
+pub(super) fn runtime_join_table_context(
+    query: &JoinQuery,
+) -> (
+    Option<&str>,
+    Option<&str>,
+    Option<&str>,
+    Option<&str>,
+) {
+    let (left_table_name, left_table_alias) = match query.left.as_ref() {
+        QueryExpr::Table(table) => (
+            Some(table.table.as_str()),
+            Some(table.alias.as_deref().unwrap_or(table.table.as_str())),
+        ),
+        _ => (None, None),
+    };
+    let (right_table_name, right_table_alias) = match query.right.as_ref() {
+        QueryExpr::Table(table) => (
+            Some(table.table.as_str()),
+            Some(table.alias.as_deref().unwrap_or(table.table.as_str())),
+        ),
+        QueryExpr::Graph(graph) => (Some("graph"), graph.alias.as_deref().or(Some("graph"))),
+        QueryExpr::Path(path) => (Some("path"), path.alias.as_deref().or(Some("path"))),
+        QueryExpr::Vector(vector) => {
+            (Some("vector"), vector.alias.as_deref().or(Some("vector")))
+        }
+        QueryExpr::Hybrid(hybrid) => {
+            (Some("hybrid"), hybrid.alias.as_deref().or(Some("hybrid")))
+        }
+        QueryExpr::Join(_) => (Some("join"), Some("join")),
+    };
+
+    (
+        left_table_name,
+        left_table_alias,
+        right_table_name,
+        right_table_alias,
+    )
+}
+
+pub(super) fn resolve_runtime_join_field(
+    record: &UnifiedRecord,
+    field: &FieldRef,
+    left_table_name: Option<&str>,
+    left_table_alias: Option<&str>,
+    right_table_name: Option<&str>,
+    right_table_alias: Option<&str>,
+) -> Option<Value> {
+    match field {
+        FieldRef::TableColumn { table, column } if !table.is_empty() => {
+            if let Some(value) = record.values.get(&format!("{table}.{column}")) {
+                return Some(value.clone());
+            }
+
+            let matches_left =
+                runtime_table_context_matches(table.as_str(), left_table_name, left_table_alias);
+            let matches_right =
+                runtime_table_context_matches(table.as_str(), right_table_name, right_table_alias);
+            if !(matches_left || matches_right) {
+                return None;
+            }
+
+            record
+                .values
+                .get(column)
+                .cloned()
+                .or_else(|| resolve_runtime_document_path(record, column))
+        }
+        _ => resolve_runtime_field(record, field, None, None),
+    }
+}
+
+pub(super) fn project_runtime_join_record(
+    source: &UnifiedRecord,
+    projections: &[Projection],
+    left_table_name: Option<&str>,
+    left_table_alias: Option<&str>,
+    right_table_name: Option<&str>,
+    right_table_alias: Option<&str>,
+) -> UnifiedRecord {
+    let select_all =
+        projections.is_empty() || projections.iter().any(|item| matches!(item, Projection::All));
+    let mut record = UnifiedRecord::new();
+    record.nodes = source.nodes.clone();
+    record.edges = source.edges.clone();
+    record.paths = source.paths.clone();
+    record.vector_results = source.vector_results.clone();
+
+    if select_all {
+        for key in visible_value_keys(source) {
+            if let Some(value) = source.values.get(&key) {
+                record.values.insert(key, value.clone());
+            }
+        }
+    }
+
+    for projection in projections {
+        if matches!(projection, Projection::All) {
+            continue;
+        }
+
+        let label = projection_name(projection);
+        let value = match projection {
+            Projection::Column(column) | Projection::Alias(column, _) => source
+                .values
+                .get(column)
+                .cloned()
+                .or_else(|| resolve_runtime_document_path(source, column)),
+            Projection::Field(field, _) => resolve_runtime_join_field(
+                source,
+                field,
+                left_table_name,
+                left_table_alias,
+                right_table_name,
+                right_table_alias,
+            ),
+            Projection::Expression(filter, _) => Some(Value::Boolean(
+                evaluate_runtime_join_filter(
+                    source,
+                    filter,
+                    left_table_name,
+                    left_table_alias,
+                    right_table_name,
+                    right_table_alias,
+                ),
+            )),
+            Projection::Function(_, _) => Some(Value::Null),
+            Projection::All => None,
+        };
+
+        record.values.insert(label, value.unwrap_or(Value::Null));
+    }
+
+    record
+}
+
+pub(super) fn evaluate_runtime_join_filter(
+    record: &UnifiedRecord,
+    filter: &Filter,
+    left_table_name: Option<&str>,
+    left_table_alias: Option<&str>,
+    right_table_name: Option<&str>,
+    right_table_alias: Option<&str>,
+) -> bool {
+    match filter {
+        Filter::Compare { field, op, value } => resolve_runtime_join_field(
+            record,
+            field,
+            left_table_name,
+            left_table_alias,
+            right_table_name,
+            right_table_alias,
+        )
+        .as_ref()
+        .and_then(|candidate| evaluate_metadata_field_compare(field, candidate, *op, value))
+        .or_else(|| {
+            resolve_runtime_join_field(
+                record,
+                field,
+                left_table_name,
+                left_table_alias,
+                right_table_name,
+                right_table_alias,
+            )
+            .as_ref()
+            .map(|candidate| compare_runtime_values(candidate, value, *op))
+        })
+        .unwrap_or(false),
+        Filter::And(left, right) => {
+            evaluate_runtime_join_filter(
+                record,
+                left,
+                left_table_name,
+                left_table_alias,
+                right_table_name,
+                right_table_alias,
+            ) && evaluate_runtime_join_filter(
+                record,
+                right,
+                left_table_name,
+                left_table_alias,
+                right_table_name,
+                right_table_alias,
+            )
+        }
+        Filter::Or(left, right) => {
+            evaluate_runtime_join_filter(
+                record,
+                left,
+                left_table_name,
+                left_table_alias,
+                right_table_name,
+                right_table_alias,
+            ) || evaluate_runtime_join_filter(
+                record,
+                right,
+                left_table_name,
+                left_table_alias,
+                right_table_name,
+                right_table_alias,
+            )
+        }
+        Filter::Not(inner) => !evaluate_runtime_join_filter(
+            record,
+            inner,
+            left_table_name,
+            left_table_alias,
+            right_table_name,
+            right_table_alias,
+        ),
+        Filter::IsNull(field) => resolve_runtime_join_field(
+            record,
+            field,
+            left_table_name,
+            left_table_alias,
+            right_table_name,
+            right_table_alias,
+        )
+        .map(|value| value == Value::Null)
+        .unwrap_or(true),
+        Filter::IsNotNull(field) => resolve_runtime_join_field(
+            record,
+            field,
+            left_table_name,
+            left_table_alias,
+            right_table_name,
+            right_table_alias,
+        )
+        .map(|value| value != Value::Null)
+        .unwrap_or(false),
+        Filter::In { field, values } => resolve_runtime_join_field(
+            record,
+            field,
+            left_table_name,
+            left_table_alias,
+            right_table_name,
+            right_table_alias,
+        )
+        .as_ref()
+        .map_or(false, |candidate| {
+            evaluate_metadata_field_in(field, candidate, values).unwrap_or_else(|| {
+                values
+                    .iter()
+                    .any(|value| compare_runtime_values(candidate, value, CompareOp::Eq))
+            })
+        }),
+        Filter::Between { field, low, high } => resolve_runtime_join_field(
+            record,
+            field,
+            left_table_name,
+            left_table_alias,
+            right_table_name,
+            right_table_alias,
+        )
+        .as_ref()
+        .is_some_and(|candidate| {
+            compare_runtime_values(candidate, low, CompareOp::Ge)
+                && compare_runtime_values(candidate, high, CompareOp::Le)
+        }),
+        Filter::Like { field, pattern } => resolve_runtime_join_field(
+            record,
+            field,
+            left_table_name,
+            left_table_alias,
+            right_table_name,
+            right_table_alias,
+        )
+        .as_ref()
+        .and_then(runtime_value_text)
+        .is_some_and(|value| like_matches(&value, pattern)),
+        Filter::StartsWith { field, prefix } => resolve_runtime_join_field(
+            record,
+            field,
+            left_table_name,
+            left_table_alias,
+            right_table_name,
+            right_table_alias,
+        )
+        .as_ref()
+        .and_then(runtime_value_text)
+        .is_some_and(|value| value.starts_with(prefix)),
+        Filter::EndsWith { field, suffix } => resolve_runtime_join_field(
+            record,
+            field,
+            left_table_name,
+            left_table_alias,
+            right_table_name,
+            right_table_alias,
+        )
+        .as_ref()
+        .and_then(runtime_value_text)
+        .is_some_and(|value| value.ends_with(suffix)),
+        Filter::Contains { field, substring } => resolve_runtime_join_field(
+            record,
+            field,
+            left_table_name,
+            left_table_alias,
+            right_table_name,
+            right_table_alias,
+        )
+        .as_ref()
+        .and_then(runtime_value_text)
+        .is_some_and(|value| value.contains(substring)),
+    }
+}
+
+pub(super) fn compare_runtime_join_order(
+    left: &UnifiedRecord,
+    right: &UnifiedRecord,
+    clauses: &[OrderByClause],
+    left_table_name: Option<&str>,
+    left_table_alias: Option<&str>,
+    right_table_name: Option<&str>,
+    right_table_alias: Option<&str>,
+) -> Ordering {
+    for clause in clauses {
+        let left_value = resolve_runtime_join_field(
+            left,
+            &clause.field,
+            left_table_name,
+            left_table_alias,
+            right_table_name,
+            right_table_alias,
+        );
+        let right_value = resolve_runtime_join_field(
+            right,
+            &clause.field,
+            left_table_name,
+            left_table_alias,
+            right_table_name,
+            right_table_alias,
+        );
+        let ordering = compare_runtime_optional_values(
+            left_value.as_ref(),
+            right_value.as_ref(),
+            clause.nulls_first,
+        );
+        if ordering != Ordering::Equal {
+            return if clause.ascending {
+                ordering
+            } else {
+                ordering.reverse()
+            };
+        }
+    }
+
+    runtime_record_identity_key(left)
+        .cmp(&runtime_record_identity_key(right))
 }
 
 pub(super) fn execute_runtime_canonical_expr_node(
@@ -331,6 +779,8 @@ pub(super) fn execute_runtime_canonical_expr_node(
                 .map_err(|err| RedDBError::Query(err.to_string()))?;
             Ok(result.records)
         }
+        QueryExpr::Vector(vector) => Ok(execute_runtime_vector_query(db, vector)?.records),
+        QueryExpr::Hybrid(hybrid) => Ok(execute_runtime_hybrid_query(db, hybrid)?.records),
         other => Err(RedDBError::Query(format!(
             "canonical join execution does not yet support {} child expressions",
             query_expr_name(other)
@@ -339,29 +789,75 @@ pub(super) fn execute_runtime_canonical_expr_node(
 }
 
 pub(super) fn execute_runtime_vector_query(db: &RedDB, query: &VectorQuery) -> RedDBResult<UnifiedResult> {
-    let vector = resolve_runtime_vector_source(db, &query.query_vector)?;
-    let min_score = query.threshold.unwrap_or(f32::MIN);
-    let matches = runtime_vector_matches(db, query, &vector)?
-        .into_iter()
-        .filter(|item| item.score >= min_score)
-        .collect::<Vec<_>>();
-
-    let records = matches
-        .into_iter()
-        .map(runtime_vector_record_from_match)
-        .collect();
+    let plan = CanonicalPlanner::new(db).build(&QueryExpr::Vector(query.clone()));
+    let records = execute_runtime_canonical_vector_node(db, &plan.root, query)?;
 
     Ok(UnifiedResult {
-        columns: vec![
-            "entity_id".to_string(),
-            "score".to_string(),
-            "collection".to_string(),
-            "content".to_string(),
-            "dimension".to_string(),
-        ],
+        columns: collect_visible_columns(&records),
         records,
         stats: Default::default(),
     })
+}
+
+pub(super) fn execute_runtime_canonical_vector_node(
+    db: &RedDB,
+    node: &crate::storage::query::planner::CanonicalLogicalNode,
+    query: &VectorQuery,
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    match node.operator.as_str() {
+        "vector_ann_hnsw" | "vector_ann_ivf" | "vector_exact_scan" => {
+            let vector = resolve_runtime_vector_source(db, &query.query_vector)?;
+            let matches = runtime_vector_matches(db, query, &vector)?;
+            Ok(matches
+                .into_iter()
+                .map(runtime_vector_record_from_match)
+                .collect())
+        }
+        "metadata_filter" => {
+            let mut records = execute_runtime_canonical_vector_child(db, node, query)?;
+            if let Some(filter) = query.filter.as_ref() {
+                records.retain(|record| {
+                    runtime_vector_record_matches_filter(
+                        db,
+                        &query.collection,
+                        record,
+                        filter,
+                    )
+                });
+            }
+            Ok(records)
+        }
+        "similarity_threshold" => {
+            let mut records = execute_runtime_canonical_vector_child(db, node, query)?;
+            if let Some(threshold) = query.threshold {
+                records.retain(|record| runtime_record_rank_score(record) >= threshold as f64);
+            }
+            Ok(records)
+        }
+        "topk" => {
+            let mut records = execute_runtime_canonical_vector_child(db, node, query)?;
+            records.sort_by(compare_runtime_ranked_records);
+            Ok(records.into_iter().take(query.k.max(1)).collect())
+        }
+        "projection" => execute_runtime_canonical_vector_child(db, node, query),
+        other => Err(RedDBError::Query(format!(
+            "unsupported canonical vector operator {other}"
+        ))),
+    }
+}
+
+pub(super) fn execute_runtime_canonical_vector_child(
+    db: &RedDB,
+    node: &crate::storage::query::planner::CanonicalLogicalNode,
+    query: &VectorQuery,
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    let child = node.children.first().ok_or_else(|| {
+        RedDBError::Query(format!(
+            "canonical vector operator {} is missing its child plan",
+            node.operator
+        ))
+    })?;
+    execute_runtime_canonical_vector_node(db, child, query)
 }
 
 pub(super) fn runtime_vector_matches(
@@ -369,25 +865,32 @@ pub(super) fn runtime_vector_matches(
     query: &VectorQuery,
     vector: &[f32],
 ) -> RedDBResult<Vec<SimilarResult>> {
-    if query.filter.is_none() {
-        return Ok(db.similar(&query.collection, vector, query.k.max(1)));
-    }
-
     let manager = db
         .store()
         .get_collection(&query.collection)
         .ok_or_else(|| RedDBError::NotFound(query.collection.clone()))?;
-    let filter = query.filter.as_ref().unwrap();
+
+    if query.filter.is_none() {
+        let mut results = db.similar(&query.collection, vector, manager.count().max(1));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| a.entity_id.raw().cmp(&b.entity_id.raw()))
+        });
+        return Ok(results);
+    }
 
     let mut results: Vec<SimilarResult> = manager
         .query_all(|_| true)
         .into_iter()
-        .filter(|entity| runtime_vector_entity_matches_filter(db, &query.collection, entity, filter))
         .filter_map(|entity| {
             let score = runtime_entity_vector_similarity(&entity, vector);
+            let distance = (1.0 - score).max(0.0);
             (score > 0.0).then_some(SimilarResult {
                 entity_id: entity.id,
                 score,
+                distance,
                 entity,
             })
         })
@@ -397,31 +900,123 @@ pub(super) fn runtime_vector_matches(
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(Ordering::Equal)
+            .then_with(|| a.entity_id.raw().cmp(&b.entity_id.raw()))
     });
-    results.truncate(query.k.max(1));
     Ok(results)
 }
 
+pub(super) fn runtime_vector_record_matches_filter(
+    db: &RedDB,
+    collection: &str,
+    record: &UnifiedRecord,
+    filter: &VectorMetadataFilter,
+) -> bool {
+    let entity_id = record
+        .values
+        .get("entity_id")
+        .or_else(|| record.values.get("_entity_id"))
+        .and_then(|value| match value {
+            Value::UnsignedInteger(value) => Some(EntityId::new(*value)),
+            Value::Integer(value) if *value >= 0 => Some(EntityId::new(*value as u64)),
+            _ => None,
+        });
+
+    let Some(entity_id) = entity_id else {
+        return false;
+    };
+
+    let metadata = db
+        .store()
+        .get_metadata(collection, entity_id)
+        .unwrap_or_else(Metadata::new);
+    let entry = runtime_metadata_entry(&metadata);
+    filter.matches(&entry)
+}
+
 pub(super) fn execute_runtime_hybrid_query(db: &RedDB, query: &HybridQuery) -> RedDBResult<UnifiedResult> {
-    let structured = execute_runtime_expr(db, query.structured.as_ref())?;
-    let vector = execute_runtime_vector_query(db, &query.vector)?;
+    let plan = CanonicalPlanner::new(db).build(&QueryExpr::Hybrid(query.clone()));
+    let mut records = execute_runtime_canonical_hybrid_node(db, &plan.root, query)?;
+    if let Some(limit) = query.limit {
+        records.truncate(limit);
+    }
+
+    Ok(UnifiedResult {
+        columns: collect_visible_columns(&records),
+        records,
+        stats: Default::default(),
+    })
+}
+
+pub(super) fn execute_runtime_canonical_hybrid_node(
+    db: &RedDB,
+    node: &crate::storage::query::planner::CanonicalLogicalNode,
+    query: &HybridQuery,
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    match node.operator.as_str() {
+        "entity_search" => execute_runtime_canonical_hybrid_child(db, node, query),
+        "entity_topk" => {
+            let mut records = execute_runtime_canonical_hybrid_child(db, node, query)?;
+            records.sort_by(compare_runtime_ranked_records);
+            let limit = node
+                .details
+                .get("k")
+                .and_then(|value| value.parse::<usize>().ok())
+                .or(query.limit);
+            Ok(match limit {
+                Some(limit) => records.into_iter().take(limit).collect(),
+                None => records,
+            })
+        }
+        "hybrid_fusion" => execute_runtime_canonical_hybrid_fusion(db, node, query),
+        other => Err(RedDBError::Query(format!(
+            "unsupported canonical hybrid operator {other}"
+        ))),
+    }
+}
+
+pub(super) fn execute_runtime_canonical_hybrid_child(
+    db: &RedDB,
+    node: &crate::storage::query::planner::CanonicalLogicalNode,
+    query: &HybridQuery,
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    let child = node.children.first().ok_or_else(|| {
+        RedDBError::Query(format!(
+            "canonical hybrid operator {} is missing its child plan",
+            node.operator
+        ))
+    })?;
+    execute_runtime_canonical_hybrid_node(db, child, query)
+}
+
+pub(super) fn execute_runtime_canonical_hybrid_fusion(
+    db: &RedDB,
+    node: &crate::storage::query::planner::CanonicalLogicalNode,
+    query: &HybridQuery,
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    if node.children.len() != 2 {
+        return Err(RedDBError::Query(
+            "canonical hybrid_fusion operator must contain exactly two child plans".to_string(),
+        ));
+    }
+
+    let structured = execute_runtime_canonical_expr_node(db, &node.children[0], query.structured.as_ref())?;
+    let vector_expr = QueryExpr::Vector(query.vector.clone());
+    let vector = execute_runtime_canonical_expr_node(db, &node.children[1], &vector_expr)?;
 
     let mut structured_map = HashMap::new();
     let mut structured_rank = HashMap::new();
-    for (index, record) in structured.records.iter().cloned().enumerate() {
-        if let Some(key) = runtime_record_identity_key(&record) {
-            structured_rank.insert(key.clone(), index);
-            structured_map.insert(key, record);
-        }
+    for (index, record) in structured.iter().cloned().enumerate() {
+        let key = runtime_record_identity_key(&record);
+        structured_rank.insert(key.clone(), index);
+        structured_map.insert(key, record);
     }
 
     let mut vector_map = HashMap::new();
     let mut vector_rank = HashMap::new();
-    for (index, record) in vector.records.iter().cloned().enumerate() {
-        if let Some(key) = runtime_record_identity_key(&record) {
-            vector_rank.insert(key.clone(), index);
-            vector_map.insert(key, record);
-        }
+    for (index, record) in vector.iter().cloned().enumerate() {
+        let key = runtime_record_identity_key(&record);
+        vector_rank.insert(key.clone(), index);
+        vector_map.insert(key, record);
     }
 
     let ordered_keys = hybrid_candidate_keys(
@@ -441,7 +1036,7 @@ pub(super) fn execute_runtime_hybrid_query(db: &RedDB, query: &HybridQuery) -> R
             .map_or(0.0, |record| runtime_structured_score(record, s_rank));
         let v_score = vector_record
             .as_ref()
-            .map_or(0.0, runtime_vector_score);
+            .map_or(0.0, |r| runtime_vector_score(r));
 
         let score = match &query.fusion {
             FusionStrategy::Rerank { weight } => {
@@ -479,6 +1074,9 @@ pub(super) fn execute_runtime_hybrid_query(db: &RedDB, query: &HybridQuery) -> R
         };
 
         let mut record = merge_hybrid_records(structured_record, vector_record);
+        record.set("score", Value::Float(score));
+        record.set("_score", Value::Float(score));
+        record.set("final_score", Value::Float(score));
         record.set("hybrid_score", Value::Float(score));
         record.set(
             "structured_score",
@@ -490,6 +1088,14 @@ pub(super) fn execute_runtime_hybrid_query(db: &RedDB, query: &HybridQuery) -> R
         );
         record.set(
             "vector_score",
+            if vector_record.is_some() {
+                Value::Float(v_score)
+            } else {
+                Value::Null
+            },
+        );
+        record.set(
+            "vector_similarity",
             if vector_record.is_some() {
                 Value::Float(v_score)
             } else {
@@ -511,22 +1117,9 @@ pub(super) fn execute_runtime_hybrid_query(db: &RedDB, query: &HybridQuery) -> R
         scored_records.push((score, record));
     }
 
-    scored_records.sort_by(|left, right| {
-        right
-            .0
-            .partial_cmp(&left.0)
-            .unwrap_or(Ordering::Equal)
-    });
-
-    let mut records: Vec<UnifiedRecord> = scored_records.into_iter().map(|(_, record)| record).collect();
-    if let Some(limit) = query.limit {
-        records.truncate(limit);
-    }
-
-    Ok(UnifiedResult {
-        columns: collect_visible_columns(&records),
-        records,
-        stats: Default::default(),
-    })
+    scored_records.sort_by(|left, right| compare_runtime_ranked_records(&left.1, &right.1));
+    Ok(scored_records
+        .into_iter()
+        .map(|(_, record)| record)
+        .collect())
 }
-

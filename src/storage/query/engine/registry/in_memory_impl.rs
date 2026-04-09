@@ -145,7 +145,7 @@ impl InMemoryEngine {
         let mut bindings = Vec::new();
 
         for row in &table.rows {
-            let mut builder = super::binding::BindingBuilder::new();
+            let mut builder = crate::storage::query::engine::binding::BindingBuilder::new();
             for (i, var) in table.vars.iter().enumerate() {
                 if let Some(Some(value)) = row.get(i) {
                     builder = builder.add(var.clone(), value.clone());
@@ -300,7 +300,7 @@ impl InMemoryEngine {
     }
 
     /// Execute an Op recursively
-    fn execute_op(&self, op: &Op) -> Box<dyn BindingIterator> {
+    pub(crate) fn execute_op(&self, op: &Op) -> Box<dyn BindingIterator> {
         match op {
             Op::BGP(bgp) => self.execute_bgp(bgp),
             Op::Triple(triple) => self.execute_triple(triple),

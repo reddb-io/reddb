@@ -1,7 +1,7 @@
 use super::*;
 
 impl RedDBServer {
-    fn handle_export(&self, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_export(&self, body: Vec<u8>) -> HttpResponse {
         let payload = match parse_json_body(&body) {
             Ok(payload) => payload,
             Err(response) => return response,
@@ -23,7 +23,7 @@ impl RedDBServer {
         }
     }
 
-    fn handle_serverless_attach(&self, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_serverless_attach(&self, body: Vec<u8>) -> HttpResponse {
         let payload = match parse_json_body_allow_empty(&body) {
             Ok(payload) => payload,
             Err(response) => return response,
@@ -68,7 +68,7 @@ impl RedDBServer {
         }
     }
 
-    fn handle_serverless_warmup(&self, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_serverless_warmup(&self, body: Vec<u8>) -> HttpResponse {
         let payload = match parse_json_body_allow_empty(&body) {
             Ok(payload) => payload,
             Err(response) => return response,
@@ -322,7 +322,7 @@ impl RedDBServer {
                     "native_artifacts".to_string(),
                     native_artifacts.unwrap_or_else(|| JsonValue::Null),
                 );
-                JsonValue::Object(object)
+                object
             }),
         );
         object.insert(
@@ -347,7 +347,7 @@ impl RedDBServer {
         }
     }
 
-    fn handle_serverless_reclaim(&self, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_serverless_reclaim(&self, body: Vec<u8>) -> HttpResponse {
         let payload = match parse_json_body_allow_empty(&body) {
             Ok(payload) => payload,
             Err(response) => return response,
@@ -500,7 +500,7 @@ impl RedDBServer {
                         JsonValue::Number(failures.len() as f64),
                     );
                 }
-                JsonValue::Object(object)
+                object
             }),
         );
         object.insert(
@@ -517,7 +517,7 @@ impl RedDBServer {
         json_response(200, JsonValue::Object(object))
     }
 
-    fn handle_rebuild_indexes(&self, body: Vec<u8>, path_collection: Option<&str>) -> HttpResponse {
+    pub(crate) fn handle_rebuild_indexes(&self, body: Vec<u8>, path_collection: Option<&str>) -> HttpResponse {
         let body_collection = if body.iter().any(|byte| !byte.is_ascii_whitespace()) {
             match parse_json_body(&body) {
                 Ok(payload) => payload

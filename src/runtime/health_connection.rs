@@ -2,7 +2,7 @@ use super::*;
 
 impl HealthProvider for RedDBRuntime {
     fn health(&self) -> HealthReport {
-        let pool = self.inner.pool.lock().unwrap();
+        let pool = self.inner.pool.lock().expect("health: connection pool lock poisoned");
         let mut report = self.inner.db.health();
         let (readiness_for_query, readiness_for_write, readiness_for_repair) =
             self.inner.db.readiness_flags_from_health(&report);
@@ -56,7 +56,7 @@ impl RuntimeConnection {
 
 impl Drop for RuntimeConnection {
     fn drop(&mut self) {
-        let mut pool = self.inner.pool.lock().unwrap();
+        let mut pool = self.inner.pool.lock().expect("drop RuntimeConnection: connection pool lock poisoned");
         pool.active = pool.active.saturating_sub(1);
         if pool.idle.len() < self.inner.pool_config.max_idle {
             pool.idle.push(self.id);

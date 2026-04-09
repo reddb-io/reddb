@@ -24,7 +24,7 @@ impl SecureKey {
         Self::new(&key_data)
     }
 
-    /// Derive a key from an environment variable (e.g., REDBLUE_DB_KEY)
+    /// Derive a key from an environment variable (e.g., REDDB_KEY)
     /// The env var can contain a hex string or a raw passphrase.
     /// If it's a 64-char hex string, it's treated as the raw key (32 bytes).
     /// Otherwise, it's treated as a passphrase and KDF is applied (requires salt).

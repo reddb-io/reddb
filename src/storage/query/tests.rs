@@ -1,5 +1,5 @@
 use super::*;
-
+use crate::storage::schema::Value;
 
 #[cfg(test)]
 mod tests {
@@ -80,11 +80,141 @@ mod tests {
                     FieldRef::node_prop("n", "label"),
                 ),
             )
+            .filter(Filter::compare(
+                FieldRef::column("h", "severity"),
+                CompareOp::Gt,
+                Value::Integer(5),
+            ))
+            .order_by(OrderByClause {
+                field: FieldRef::column("h", "ip"),
+                ascending: true,
+                nulls_first: false,
+            })
+            .limit(25)
+            .return_field(FieldRef::column("h", "ip"))
             .build();
 
         if let QueryExpr::Join(jq) = query {
             assert!(matches!(*jq.left, QueryExpr::Table(_)));
             assert!(matches!(*jq.right, QueryExpr::Graph(_)));
+            assert!(jq.filter.is_some());
+            assert_eq!(jq.order_by.len(), 1);
+            assert_eq!(jq.limit, Some(25));
+            assert_eq!(jq.return_.len(), 1);
+        } else {
+            panic!("Expected JoinQuery");
+        }
+    }
+
+    #[test]
+    fn test_table_join_query_builder() {
+        let query = QueryExpr::table("hosts")
+            .alias("h")
+            .join_table(
+                "services",
+                JoinCondition::new(
+                    FieldRef::column("h", "id"),
+                    FieldRef::column("services", "host_id"),
+                ),
+            )
+            .return_field(FieldRef::column("h", "id"))
+            .build();
+
+        if let QueryExpr::Join(jq) = query {
+            assert!(matches!(*jq.left, QueryExpr::Table(_)));
+            assert!(matches!(*jq.right, QueryExpr::Table(_)));
+            assert_eq!(jq.return_.len(), 1);
+        } else {
+            panic!("Expected JoinQuery");
+        }
+    }
+
+    #[test]
+    fn test_vector_join_query_builder() {
+        let vector = VectorQuery::new("embeddings", VectorSource::Literal(vec![0.1, 0.2]));
+        let query = QueryExpr::table("docs")
+            .alias("d")
+            .join_vector(
+                vector,
+                JoinCondition::new(
+                    FieldRef::column("d", "id"),
+                    FieldRef::column("", "entity_id"),
+                ),
+            )
+            .right_alias("sim")
+            .return_field(FieldRef::column("d", "id"))
+            .build();
+
+        if let QueryExpr::Join(jq) = query {
+            assert!(matches!(*jq.left, QueryExpr::Table(_)));
+            match jq.right.as_ref() {
+                QueryExpr::Vector(vq) => assert_eq!(vq.alias.as_deref(), Some("sim")),
+                _ => panic!("Expected VectorQuery"),
+            }
+            assert_eq!(jq.return_.len(), 1);
+        } else {
+            panic!("Expected JoinQuery");
+        }
+    }
+
+    #[test]
+    fn test_path_join_query_builder() {
+        let path = PathQuery::new(
+            NodeSelector::by_id("host:a"),
+            NodeSelector::by_id("host:b"),
+        )
+        .via(GraphEdgeType::ConnectsTo);
+        let query = QueryExpr::table("hosts")
+            .alias("h")
+            .join_path(
+                path,
+                JoinCondition::new(
+                    FieldRef::column("h", "id"),
+                    FieldRef::column("path", "entity_id"),
+                ),
+            )
+            .right_alias("p")
+            .return_field(FieldRef::column("h", "id"))
+            .build();
+
+        if let QueryExpr::Join(jq) = query {
+            assert!(matches!(*jq.left, QueryExpr::Table(_)));
+            match jq.right.as_ref() {
+                QueryExpr::Path(pq) => assert_eq!(pq.alias.as_deref(), Some("p")),
+                _ => panic!("Expected PathQuery"),
+            }
+            assert_eq!(jq.return_.len(), 1);
+        } else {
+            panic!("Expected JoinQuery");
+        }
+    }
+
+    #[test]
+    fn test_hybrid_join_query_builder() {
+        let hybrid = HybridQuery::new(
+            QueryExpr::table("hosts").build(),
+            VectorQuery::new("embeddings", VectorSource::Literal(vec![0.1, 0.2])),
+        );
+        let query = QueryExpr::table("docs")
+            .alias("d")
+            .join_hybrid(
+                hybrid,
+                JoinCondition::new(
+                    FieldRef::column("d", "id"),
+                    FieldRef::column("", "entity_id"),
+                ),
+            )
+            .right_alias("hy")
+            .return_field(FieldRef::column("d", "id"))
+            .build();
+
+        if let QueryExpr::Join(jq) = query {
+            assert!(matches!(*jq.left, QueryExpr::Table(_)));
+            match jq.right.as_ref() {
+                QueryExpr::Hybrid(hq) => assert_eq!(hq.alias.as_deref(), Some("hy")),
+                _ => panic!("Expected HybridQuery"),
+            }
+            assert_eq!(jq.return_.len(), 1);
         } else {
             panic!("Expected JoinQuery");
         }

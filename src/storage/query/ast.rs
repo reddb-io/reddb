@@ -30,11 +30,14 @@
 //! RETURN path
 //! ```
 
+#[path = "builders.rs"]
 mod builders;
+#[path = "core.rs"]
 mod core;
 
 pub use builders::*;
 pub use core::*;
 
 #[cfg(test)]
+#[path = "tests.rs"]
 mod tests;

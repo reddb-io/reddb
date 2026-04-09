@@ -1,20 +1,20 @@
 use super::*;
 
 impl RedDB {
-    fn native_registry_summary_from_metadata(
+    pub(crate) fn native_registry_summary_from_metadata(
         &self,
         metadata: &PhysicalMetadataFile,
     ) -> NativeRegistrySummary {
         const SAMPLE_LIMIT: usize = 16;
 
-        let collection_names = metadata
+        let collection_names: Vec<_> = metadata
             .catalog
             .stats_by_collection
             .keys()
             .take(SAMPLE_LIMIT)
             .cloned()
             .collect();
-        let indexes = metadata
+        let indexes: Vec<_> = metadata
             .indexes
             .iter()
             .take(SAMPLE_LIMIT)
@@ -29,7 +29,7 @@ impl RedDB {
                 backend: index.backend.clone(),
             })
             .collect();
-        let graph_projections = metadata
+        let graph_projections: Vec<_> = metadata
             .graph_projections
             .iter()
             .take(SAMPLE_LIMIT)
@@ -58,7 +58,7 @@ impl RedDB {
                 last_run_sequence: job.last_run_sequence,
                 metadata: job.metadata.clone(),
             })
-            .collect();
+            .collect::<Vec<_>>();
         let vector_artifacts = self
             .native_vector_artifact_records()
             .into_iter()
@@ -106,7 +106,7 @@ impl RedDB {
         self.native_vector_artifact_records().len()
     }
 
-    fn native_vector_artifact_records(&self) -> Vec<(NativeVectorArtifactSummary, Vec<u8>)> {
+    pub(crate) fn native_vector_artifact_records(&self) -> Vec<(NativeVectorArtifactSummary, Vec<u8>)> {
         let mut artifacts = Vec::new();
         for collection in self.store.list_collections() {
             let Some(manager) = self.store.get_collection(&collection) else {
@@ -152,7 +152,7 @@ impl RedDB {
                 let dimension = vectors[0].1.len();
                 let mut hnsw = HnswIndex::with_dimension(dimension);
                 for (id, vector) in vectors.into_iter().filter(|(_, vector)| vector.len() == dimension) {
-                    hnsw.insert_with_id(id, vector);
+                    hnsw.insert_with_id(id.raw(), vector);
                 }
                 let stats = hnsw.stats();
                 let bytes = hnsw.to_bytes();
@@ -183,7 +183,7 @@ impl RedDB {
                     .into_iter()
                     .filter_map(|entity| match entity.data {
                         EntityData::Vector(vector) if vector.dense.len() == dimension => {
-                            Some((entity.id, vector.dense))
+                            Some((entity.id.raw(), vector.dense))
                         }
                         _ => None,
                     })
@@ -277,7 +277,7 @@ impl RedDB {
         data
     }
 
-    fn inspect_native_graph_adjacency_artifact(bytes: &[u8]) -> Result<(u64, u64, u32), String> {
+    pub(crate) fn inspect_native_graph_adjacency_artifact(bytes: &[u8]) -> Result<(u64, u64, u32), String> {
         if bytes.len() < 8 || &bytes[0..4] != b"RDGA" {
             return Err("invalid graph adjacency artifact".to_string());
         }
@@ -344,7 +344,7 @@ impl RedDB {
         data
     }
 
-    fn inspect_native_fulltext_artifact(bytes: &[u8]) -> Result<(u64, u64, u64), String> {
+    pub(crate) fn inspect_native_fulltext_artifact(bytes: &[u8]) -> Result<(u64, u64, u64), String> {
         if bytes.len() < 12 || &bytes[0..4] != b"RDFT" {
             return Err("invalid fulltext artifact".to_string());
         }
@@ -411,7 +411,7 @@ impl RedDB {
         data
     }
 
-    fn inspect_native_document_pathvalue_artifact(
+    pub(crate) fn inspect_native_document_pathvalue_artifact(
         bytes: &[u8],
     ) -> Result<(u64, u64, u64, u64), String> {
         if bytes.len() < 12 || &bytes[0..4] != b"RDDP" {
@@ -645,12 +645,12 @@ impl RedDB {
         Ok(value)
     }
 
-    fn native_recovery_summary_from_metadata(
+    pub(crate) fn native_recovery_summary_from_metadata(
         metadata: &PhysicalMetadataFile,
     ) -> NativeRecoverySummary {
         const SAMPLE_LIMIT: usize = 16;
 
-        let snapshots = metadata
+        let snapshots: Vec<_> = metadata
             .snapshots
             .iter()
             .rev()
@@ -663,7 +663,7 @@ impl RedDB {
                         total_entities: snapshot.total_entities as u64,
             })
             .collect();
-        let exports = metadata
+        let exports: Vec<_> = metadata
             .exports
             .iter()
             .rev()
@@ -690,12 +690,12 @@ impl RedDB {
         }
     }
 
-    fn native_catalog_summary_from_metadata(
+    pub(crate) fn native_catalog_summary_from_metadata(
         metadata: &PhysicalMetadataFile,
     ) -> NativeCatalogSummary {
         const SAMPLE_LIMIT: usize = 32;
 
-        let collections = metadata
+        let collections: Vec<_> = metadata
             .catalog
             .stats_by_collection
             .iter()
@@ -721,7 +721,7 @@ impl RedDB {
         }
     }
 
-    fn native_metadata_state_summary_from_metadata(
+    pub(crate) fn native_metadata_state_summary_from_metadata(
         metadata: &PhysicalMetadataFile,
     ) -> NativeMetadataStateSummary {
         NativeMetadataStateSummary {
@@ -732,7 +732,7 @@ impl RedDB {
         }
     }
 
-    fn inspect_native_header_against_metadata(
+    pub(crate) fn inspect_native_header_against_metadata(
         native: PhysicalFileHeader,
         metadata: &PhysicalMetadataFile,
     ) -> NativeHeaderInspection {
@@ -846,7 +846,7 @@ impl RedDB {
         }
     }
 
-    fn repair_policy_for_inspection(
+    pub(crate) fn repair_policy_for_inspection(
         inspection: &NativeHeaderInspection,
     ) -> NativeHeaderRepairPolicy {
         if inspection.consistent {
@@ -860,7 +860,7 @@ impl RedDB {
         }
     }
 
-    fn prune_export_registry(
+    pub(crate) fn prune_export_registry(
         &self,
         exports: &mut Vec<ExportDescriptor>,
     ) {
@@ -883,7 +883,7 @@ impl RedDB {
         }
     }
 
-    fn runtime_index_catalog(&self) -> IndexCatalog {
+    pub(crate) fn runtime_index_catalog(&self) -> IndexCatalog {
         let mut catalog = IndexCatalog::register_default_vector_graph(
             self.options.has_capability(Capability::Table),
             self.options.has_capability(Capability::Graph),
@@ -899,7 +899,7 @@ impl RedDB {
         catalog
     }
 
-    fn physical_index_state(&self) -> Vec<PhysicalIndexState> {
+    pub(crate) fn physical_index_state(&self) -> Vec<PhysicalIndexState> {
         let snapshot = self.catalog_model_snapshot();
         let mut metrics_by_name = std::collections::BTreeMap::new();
         for metric in &snapshot.indices {
@@ -934,7 +934,7 @@ impl RedDB {
         states
     }
 
-    fn physical_collection_roots(&self) -> BTreeMap<String, u64> {
+    pub(crate) fn physical_collection_roots(&self) -> BTreeMap<String, u64> {
         let mut roots = BTreeMap::new();
 
         for name in self.store.list_collections() {
@@ -1001,8 +1001,33 @@ impl RedDB {
         QueryBuilder::new(self.store.clone())
     }
 
-    /// Quick vector similarity search
+    /// Quick vector similarity search.
+    ///
+    /// For collections with >= 100 vectors a lazily-built HNSW index is used
+    /// for fast approximate nearest-neighbor lookup.  Smaller collections fall
+    /// back to an exact brute-force scan so that the overhead of building an
+    /// index is avoided when it would not pay off.
     pub fn similar(&self, collection: &str, vector: &[f32], k: usize) -> Vec<SimilarResult> {
+        if self.store.get_collection(collection).is_none() {
+            return Vec::new();
+        }
+
+        // Try the HNSW fast path for collections with enough vectors.
+        if let Some(index) = self.get_or_build_hnsw_index(collection, vector.len()) {
+            let hnsw = index.read().unwrap_or_else(|e| e.into_inner());
+            let results = hnsw.search(vector, k);
+            let mapped = self.hnsw_results_to_similar(collection, &results);
+            if !mapped.is_empty() {
+                return mapped;
+            }
+        }
+
+        // Fallback: brute-force scan (small / mixed-type collections).
+        self.similar_brute_force(collection, vector, k)
+    }
+
+    /// Brute-force cosine similarity scan (exact results, O(n)).
+    fn similar_brute_force(&self, collection: &str, vector: &[f32], k: usize) -> Vec<SimilarResult> {
         let manager = match self.store.get_collection(collection) {
             Some(m) => m,
             None => return Vec::new(),
@@ -1012,21 +1037,21 @@ impl RedDB {
         let mut results: Vec<SimilarResult> = entities
             .iter()
             .filter_map(|e| {
-                // Check if entity has matching vector data or embeddings
                 let score = match &e.data {
                     EntityData::Vector(v) => cosine_similarity(vector, &v.dense),
                     _ => {
-                        // Check embeddings
                         e.embeddings
                             .iter()
                             .map(|emb| cosine_similarity(vector, &emb.vector))
                             .fold(0.0f32, f32::max)
                     }
                 };
+                let distance = (1.0 - score).max(0.0);
                 if score > 0.0 {
                     Some(SimilarResult {
                         entity_id: e.id,
                         score,
+                        distance,
                         entity: e.clone(),
                     })
                 } else {
@@ -1042,6 +1067,119 @@ impl RedDB {
         });
         results.truncate(k);
         results
+    }
+
+    /// Return (or lazily build) a per-collection HNSW index.
+    ///
+    /// Returns `None` when the collection has fewer than 100 dense vectors
+    /// (the brute-force path is cheaper for tiny collections) or when there
+    /// is a dimension mismatch with the query vector.
+    ///
+    /// The cached index is automatically invalidated when the live entity
+    /// count in the collection changes, so inserts and deletes are picked up
+    /// transparently without requiring explicit invalidation calls.
+    fn get_or_build_hnsw_index(
+        &self,
+        collection: &str,
+        query_dim: usize,
+    ) -> Option<Arc<RwLock<HnswIndex>>> {
+        let manager = self.store.get_collection(collection)?;
+        let live_count = manager.count();
+
+        // Fast path: check if a fresh index already exists.
+        {
+            let indexes = self.vector_indexes.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(cached) = indexes.get(collection) {
+                if cached.entity_count == live_count {
+                    return Some(Arc::clone(&cached.index));
+                }
+            }
+        }
+
+        // Either no cached index exists or it is stale -- (re)build it.
+        let entities = manager.query_all(|_| true);
+
+        let vectors: Vec<(u64, Vec<f32>)> = entities
+            .iter()
+            .filter_map(|e| match &e.data {
+                EntityData::Vector(v) if !v.dense.is_empty() && v.dense.len() == query_dim => {
+                    Some((e.id.raw(), v.dense.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+
+        // Only build the HNSW index when there are enough vectors to justify it.
+        const MIN_VECTORS_FOR_HNSW: usize = 100;
+        if vectors.len() < MIN_VECTORS_FOR_HNSW {
+            return None;
+        }
+
+        // Build the HNSW index with cosine distance (matching the brute-force path).
+        let config = crate::storage::engine::HnswConfig::with_m(16)
+            .with_metric(crate::storage::engine::DistanceMetric::Cosine)
+            .with_ef_construction(100)
+            .with_ef_search(50);
+        let mut hnsw = HnswIndex::new(query_dim, config);
+
+        for (id, vec) in &vectors {
+            hnsw.insert_with_id(*id, vec.clone());
+        }
+
+        let index = Arc::new(RwLock::new(hnsw));
+
+        // Store in the cache (double-check pattern to avoid duplicate builds).
+        let mut indexes = self.vector_indexes.write().unwrap_or_else(|e| e.into_inner());
+        // Re-check under write lock: another thread may have built in the meantime.
+        if let Some(cached) = indexes.get(collection) {
+            if cached.entity_count == live_count {
+                return Some(Arc::clone(&cached.index));
+            }
+        }
+        indexes.insert(
+            collection.to_string(),
+            CachedVectorIndex {
+                index: Arc::clone(&index),
+                entity_count: live_count,
+            },
+        );
+        Some(index)
+    }
+
+    /// Convert HNSW `DistanceResult`s back to the DevX `SimilarResult` type.
+    fn hnsw_results_to_similar(
+        &self,
+        collection: &str,
+        results: &[crate::storage::engine::DistanceResult],
+    ) -> Vec<SimilarResult> {
+        results
+            .iter()
+            .filter_map(|dr| {
+                let entity_id = EntityId::new(dr.id);
+                let entity = self.store.get(collection, entity_id)?;
+                // Cosine distance = 1 - similarity.
+                let score = (1.0 - dr.distance).max(0.0);
+                if score > 0.0 {
+                    Some(SimilarResult {
+                        entity_id,
+                        score,
+                        distance: dr.distance,
+                        entity,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Invalidate the cached HNSW index for a collection.
+    ///
+    /// Called after vector inserts / deletes so the next search lazily rebuilds
+    /// a fresh index that includes the new data.
+    pub(crate) fn invalidate_vector_index(&self, collection: &str) {
+        let mut indexes = self.vector_indexes.write().unwrap_or_else(|e| e.into_inner());
+        indexes.remove(collection);
     }
 
     /// Get entity by ID from any collection
@@ -1123,11 +1261,10 @@ impl RedDB {
         self.store.clone()
     }
 
-    fn is_binary_dump(path: &Path) -> Result<bool, std::io::Error> {
+    pub(crate) fn is_binary_dump(path: &Path) -> Result<bool, std::io::Error> {
         let mut file = File::open(path)?;
         let mut magic = [0u8; 4];
         let read = file.read(&mut magic)?;
         Ok(read == 4 && &magic == b"RDST")
     }
-}
 }

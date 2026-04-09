@@ -73,6 +73,7 @@ impl<'a> Parser<'a> {
         }
 
         Ok(QueryExpr::Vector(VectorQuery {
+            alias: None,
             collection,
             query_vector,
             k,

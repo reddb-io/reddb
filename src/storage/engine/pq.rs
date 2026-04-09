@@ -157,7 +157,7 @@ impl Codebook {
             .iter()
             .enumerate()
             .map(|(i, c)| (i, l2_squared_simd(subvector, c)))
-            .min_by(|(_, a), (_, b)| cmp_f32(*a, *b))
+            .min_by(|(li, la), (ri, lb)| cmp_f32(*la, *lb).then_with(|| li.cmp(ri)))
             .map(|(i, _)| i)
             .unwrap_or(0)
     }
@@ -381,7 +381,7 @@ impl PQIndex {
 
         let mut results: Vec<(usize, f32)> = distances.into_iter().enumerate().collect();
 
-        results.sort_by(|(_, a), (_, b)| cmp_f32(*a, *b));
+        results.sort_by(|(li, la), (ri, lb)| cmp_f32(*la, *lb).then_with(|| li.cmp(ri)));
         results.truncate(k);
 
         results
@@ -410,7 +410,7 @@ impl PQIndex {
             })
             .collect();
 
-        reranked.sort_by(|(_, a), (_, b)| cmp_f32(*a, *b));
+        reranked.sort_by(|(li, la), (ri, lb)| cmp_f32(*la, *lb).then_with(|| li.cmp(ri)));
         reranked.truncate(k);
         reranked
     }

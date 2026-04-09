@@ -1,6 +1,6 @@
 use super::*;
 
-fn scan_reply(page: ScanPage) -> ScanReply {
+pub(crate) fn scan_reply(page: ScanPage) -> ScanReply {
     ScanReply {
         collection: page.collection,
         total: page.total as u64,
@@ -9,7 +9,7 @@ fn scan_reply(page: ScanPage) -> ScanReply {
     }
 }
 
-fn scan_entity(entity: UnifiedEntity) -> ScanEntity {
+pub(crate) fn scan_entity(entity: UnifiedEntity) -> ScanEntity {
     ScanEntity {
         id: entity.id.raw(),
         kind: entity.kind.storage_type().to_string(),
@@ -18,7 +18,7 @@ fn scan_entity(entity: UnifiedEntity) -> ScanEntity {
     }
 }
 
-fn query_reply(
+pub(crate) fn query_reply(
     result: RuntimeQueryResult,
     entity_types: &Option<Vec<String>>,
     capabilities: &Option<Vec<String>>,
@@ -44,7 +44,7 @@ fn query_reply(
     }
 }
 
-fn unified_result_json_string_with_records(
+pub(crate) fn unified_result_json_string_with_records(
     result: &crate::storage::query::unified::UnifiedResult,
     records: &[crate::storage::query::unified::UnifiedRecord],
     entity_types: &Option<Vec<String>>,
@@ -60,7 +60,7 @@ fn unified_result_json_string_with_records(
     .unwrap_or_else(|_| "{}".to_string())
 }
 
-fn grpc_parse_query_filters(
+pub(crate) fn grpc_parse_query_filters(
     request: &QueryRequest,
 ) -> Result<(Option<Vec<String>>, Option<Vec<String>>), Status> {
     crate::application::query_payload::normalize_search_selection(

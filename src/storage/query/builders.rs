@@ -1,4 +1,5 @@
 use super::*;
+use crate::storage::engine::GraphEdgeType;
 
 pub struct TableQueryBuilder {
     query: TableQuery,
@@ -66,9 +67,74 @@ impl TableQueryBuilder {
     pub fn join_graph(self, pattern: GraphPattern, on: JoinCondition) -> JoinQueryBuilder {
         JoinQueryBuilder {
             left: QueryExpr::Table(self.query),
-            pattern,
+            right: QueryExpr::Graph(GraphQuery::new(pattern)),
             on,
             join_type: JoinType::Inner,
+            filter: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            return_: Vec::new(),
+        }
+    }
+
+    /// Join with another table source
+    pub fn join_table(self, table: &str, on: JoinCondition) -> JoinQueryBuilder {
+        JoinQueryBuilder {
+            left: QueryExpr::Table(self.query),
+            right: QueryExpr::Table(TableQuery::new(table)),
+            on,
+            join_type: JoinType::Inner,
+            filter: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            return_: Vec::new(),
+        }
+    }
+
+    /// Join with a vector query
+    pub fn join_vector(self, query: VectorQuery, on: JoinCondition) -> JoinQueryBuilder {
+        JoinQueryBuilder {
+            left: QueryExpr::Table(self.query),
+            right: QueryExpr::Vector(query),
+            on,
+            join_type: JoinType::Inner,
+            filter: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            return_: Vec::new(),
+        }
+    }
+
+    /// Join with a path query
+    pub fn join_path(self, query: PathQuery, on: JoinCondition) -> JoinQueryBuilder {
+        JoinQueryBuilder {
+            left: QueryExpr::Table(self.query),
+            right: QueryExpr::Path(query),
+            on,
+            join_type: JoinType::Inner,
+            filter: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            return_: Vec::new(),
+        }
+    }
+
+    /// Join with a hybrid query
+    pub fn join_hybrid(self, query: HybridQuery, on: JoinCondition) -> JoinQueryBuilder {
+        JoinQueryBuilder {
+            left: QueryExpr::Table(self.query),
+            right: QueryExpr::Hybrid(query),
+            on,
+            join_type: JoinType::Inner,
+            filter: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            return_: Vec::new(),
         }
     }
 
@@ -112,6 +178,12 @@ impl GraphQueryBuilder {
         self
     }
 
+    /// Set outer alias
+    pub fn alias(mut self, alias: &str) -> Self {
+        self.query.alias = Some(alias.to_string());
+        self
+    }
+
     /// Add return projection
     pub fn return_field(mut self, field: FieldRef) -> Self {
         self.query.return_.push(Projection::from_field(field));
@@ -133,9 +205,14 @@ impl Default for GraphQueryBuilder {
 /// Builder for join queries
 pub struct JoinQueryBuilder {
     left: QueryExpr,
-    pattern: GraphPattern,
+    right: QueryExpr,
     on: JoinCondition,
     join_type: JoinType,
+    filter: Option<Filter>,
+    order_by: Vec<OrderByClause>,
+    limit: Option<u64>,
+    offset: Option<u64>,
+    return_: Vec<Projection>,
 }
 
 impl JoinQueryBuilder {
@@ -145,14 +222,72 @@ impl JoinQueryBuilder {
         self
     }
 
+    /// Set alias for the right-hand source
+    pub fn right_alias(mut self, alias: &str) -> Self {
+        let alias = alias.to_string();
+        match &mut self.right {
+            QueryExpr::Table(table) => table.alias = Some(alias.clone()),
+            QueryExpr::Graph(graph) => graph.alias = Some(alias.clone()),
+            QueryExpr::Path(path) => path.alias = Some(alias.clone()),
+            QueryExpr::Vector(vector) => vector.alias = Some(alias.clone()),
+            QueryExpr::Hybrid(hybrid) => hybrid.alias = Some(alias.clone()),
+            QueryExpr::Join(_) => {}
+        }
+        self
+    }
+
+    /// Add post-join filter
+    pub fn filter(mut self, f: Filter) -> Self {
+        self.filter = Some(match self.filter.take() {
+            Some(existing) => existing.and(f),
+            None => f,
+        });
+        self
+    }
+
+    /// Add post-join ordering
+    pub fn order_by(mut self, clause: OrderByClause) -> Self {
+        self.order_by.push(clause);
+        self
+    }
+
+    /// Set post-join limit
+    pub fn limit(mut self, n: u64) -> Self {
+        self.limit = Some(n);
+        self
+    }
+
+    /// Set post-join offset
+    pub fn offset(mut self, n: u64) -> Self {
+        self.offset = Some(n);
+        self
+    }
+
+    /// Add post-join projected field
+    pub fn return_field(mut self, field: FieldRef) -> Self {
+        self.return_.push(Projection::from_field(field));
+        self
+    }
+
+    /// Add post-join projected column
+    pub fn select(mut self, column: &str) -> Self {
+        self.return_
+            .push(Projection::from_field(FieldRef::column("", column)));
+        self
+    }
+
     /// Build the query expression
     pub fn build(self) -> QueryExpr {
-        let right = QueryExpr::Graph(GraphQuery::new(self.pattern));
         QueryExpr::Join(JoinQuery {
             left: Box::new(self.left),
-            right: Box::new(right),
+            right: Box::new(self.right),
             join_type: self.join_type,
             on: self.on,
+            filter: self.filter,
+            order_by: self.order_by,
+            limit: self.limit,
+            offset: self.offset,
+            return_: self.return_,
         })
     }
 }
@@ -185,6 +320,12 @@ impl PathQueryBuilder {
     /// Add filter
     pub fn filter(mut self, f: Filter) -> Self {
         self.query.filter = Some(f);
+        self
+    }
+
+    /// Set outer alias
+    pub fn alias(mut self, alias: &str) -> Self {
+        self.query.alias = Some(alias.to_string());
         self
     }
 
@@ -370,3 +511,4 @@ impl Default for CteQueryBuilder {
     fn default() -> Self {
         Self::new()
     }
+}

@@ -3,7 +3,8 @@ name = "reddb"
 version = "0.1.0"
 edition = "2021"
 authors = ["RedBlue Team"]
-description = "RedDB storage engine extracted as standalone crate"
+description = "Unified multi-model database: tables, documents, graphs, vectors, and key-value in one engine"
+license = "MIT"
 
 [dependencies]
 aes-gcm = "0.10"
@@ -21,5 +22,16 @@ query-graph = []
 query-fulltext = []
 encryption = []
 
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
 [build-dependencies]
 tonic-build = "0.12"
+
+[[bench]]
+name = "bench_embedded"
+harness = false
+
+[[bench]]
+name = "bench_profiles"
+harness = false

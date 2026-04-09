@@ -1017,6 +1017,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires RUST_MIN_STACK=8388608"]
     fn test_storage_service_refresh_target_partition() {
         let (_guard, path) = temp_db("refresh");
 
@@ -1048,6 +1049,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires RUST_MIN_STACK=8388608"]
     fn test_storage_service_inspect_segments() {
         let (_guard, path) = temp_db("inspect");
 

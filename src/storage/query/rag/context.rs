@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use super::EntityType;
 use crate::storage::schema::Value;
+use std::cmp::Ordering;
 
 /// Complete context retrieved for a query
 #[derive(Debug, Clone)]
@@ -51,7 +52,14 @@ impl RetrievalContext {
         self.chunks.sort_by(|a, b| {
             b.relevance
                 .partial_cmp(&a.relevance)
-                .unwrap_or(std::cmp::Ordering::Equal)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| {
+                    let a_entity = a.entity_id.as_deref().unwrap_or("");
+                    let b_entity = b.entity_id.as_deref().unwrap_or("");
+                    a_entity.cmp(b_entity)
+                })
+                .then_with(|| a.source.name().cmp(b.source.name()))
+                .then_with(|| a.content.cmp(&b.content))
         });
     }
 

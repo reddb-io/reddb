@@ -1,6 +1,6 @@
 use super::*;
 
-fn resolve_projection_payload(
+pub(crate) fn resolve_projection_payload(
     runtime: &GrpcRuntime,
     payload: &JsonValue,
 ) -> Result<Option<RuntimeGraphProjection>, Status> {

@@ -1,15 +1,15 @@
 use super::*;
 
 impl GrpcRuntime {
-    fn authorize_read(&self, metadata: &MetadataMap) -> Result<(), Status> {
+    pub(crate) fn authorize_read(&self, metadata: &MetadataMap) -> Result<(), Status> {
         self.authorize(metadata, false)
     }
 
-    fn authorize_write(&self, metadata: &MetadataMap) -> Result<(), Status> {
+    pub(crate) fn authorize_write(&self, metadata: &MetadataMap) -> Result<(), Status> {
         self.authorize(metadata, true)
     }
 
-    fn authorize(&self, metadata: &MetadataMap, is_write: bool) -> Result<(), Status> {
+    pub(crate) fn authorize(&self, metadata: &MetadataMap, is_write: bool) -> Result<(), Status> {
         let token = grpc_token(metadata);
 
         if is_write {
@@ -30,7 +30,7 @@ impl GrpcRuntime {
         }
     }
 
-    fn start_graph_analytics_job(
+    pub(crate) fn start_graph_analytics_job(
         &self,
         kind: impl Into<String>,
         projection: Option<String>,
@@ -42,10 +42,11 @@ impl GrpcRuntime {
             .map_err(to_status)?;
         self.admin_use_cases()
             .start_analytics_job(kind, projection, metadata)
+            .map(|_| ())
             .map_err(to_status)
     }
 
-    fn complete_graph_analytics_job(
+    pub(crate) fn complete_graph_analytics_job(
         &self,
         kind: impl Into<String>,
         projection: Option<String>,
@@ -53,10 +54,11 @@ impl GrpcRuntime {
     ) -> Result<(), Status> {
         self.admin_use_cases()
             .complete_analytics_job(kind, projection, metadata)
+            .map(|_| ())
             .map_err(to_status)
     }
 
-    fn fail_graph_analytics_job(
+    pub(crate) fn fail_graph_analytics_job(
         &self,
         kind: impl Into<String>,
         projection: Option<String>,
@@ -64,15 +66,16 @@ impl GrpcRuntime {
     ) -> Result<(), Status> {
         self.admin_use_cases()
             .fail_analytics_job(kind, projection, metadata)
+            .map(|_| ())
             .map_err(to_status)
     }
 }
 
-fn to_status(err: crate::api::RedDBError) -> Status {
+pub(crate) fn to_status(err: crate::api::RedDBError) -> Status {
     Status::internal(err.to_string())
 }
 
-fn grpc_token<'a>(metadata: &'a MetadataMap) -> Option<&'a str> {
+pub(crate) fn grpc_token<'a>(metadata: &'a MetadataMap) -> Option<&'a str> {
     if let Some(value) = metadata.get("authorization") {
         let value = value.to_str().ok()?;
         if let Some(token) = value.strip_prefix("Bearer ") {
@@ -83,7 +86,7 @@ fn grpc_token<'a>(metadata: &'a MetadataMap) -> Option<&'a str> {
     metadata.get("x-reddb-token")?.to_str().ok()
 }
 
-fn none_if_empty(value: &str) -> Option<&str> {
+pub(crate) fn none_if_empty(value: &str) -> Option<&str> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         None
@@ -92,14 +95,14 @@ fn none_if_empty(value: &str) -> Option<&str> {
     }
 }
 
-fn json_payload_reply(value: JsonValue) -> PayloadReply {
+pub(crate) fn json_payload_reply(value: JsonValue) -> PayloadReply {
     PayloadReply {
         ok: true,
         payload: json_to_string(&value).unwrap_or_else(|_| "{}".to_string()),
     }
 }
 
-fn parse_json_payload_allow_empty(payload_json: &str) -> Result<JsonValue, Status> {
+pub(crate) fn parse_json_payload_allow_empty(payload_json: &str) -> Result<JsonValue, Status> {
     if payload_json.trim().is_empty() {
         return Ok(JsonValue::Object(Map::new()));
     }
@@ -107,7 +110,7 @@ fn parse_json_payload_allow_empty(payload_json: &str) -> Result<JsonValue, Statu
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GrpcServerlessWarmupScope {
+pub(crate) enum GrpcServerlessWarmupScope {
     Indexes,
     GraphProjections,
     AnalyticsJobs,
@@ -115,30 +118,30 @@ enum GrpcServerlessWarmupScope {
 }
 
 #[derive(Debug, Default)]
-struct GrpcServerlessAnalyticsWarmupTarget {
-    kind: String,
-    projection: Option<String>,
+pub(crate) struct GrpcServerlessAnalyticsWarmupTarget {
+    pub(crate) kind: String,
+    pub(crate) projection: Option<String>,
 }
 
 #[derive(Debug, Default)]
-struct GrpcServerlessWarmupPlan {
-    indexes: Vec<String>,
-    graph_projections: Vec<String>,
-    analytics_jobs: Vec<GrpcServerlessAnalyticsWarmupTarget>,
-    includes_native_artifacts: bool,
+pub(crate) struct GrpcServerlessWarmupPlan {
+    pub(crate) indexes: Vec<String>,
+    pub(crate) graph_projections: Vec<String>,
+    pub(crate) analytics_jobs: Vec<GrpcServerlessAnalyticsWarmupTarget>,
+    pub(crate) includes_native_artifacts: bool,
 }
 
-fn grpc_parse_serverless_readiness_requirements(
+pub(crate) fn grpc_parse_serverless_readiness_requirements(
     payload: &JsonValue,
 ) -> Result<Vec<String>, String> {
     crate::application::serverless_payload::parse_serverless_readiness_requirements(payload)
 }
 
-fn grpc_parse_serverless_reclaim_operations(payload: &JsonValue) -> Result<Vec<String>, String> {
+pub(crate) fn grpc_parse_serverless_reclaim_operations(payload: &JsonValue) -> Result<Vec<String>, String> {
     crate::application::serverless_payload::parse_serverless_reclaim_operations(payload)
 }
 
-fn grpc_parse_serverless_warmup_scopes(
+pub(crate) fn grpc_parse_serverless_warmup_scopes(
     payload: &JsonValue,
 ) -> Result<Vec<GrpcServerlessWarmupScope>, String> {
     crate::application::serverless_payload::parse_serverless_warmup_scopes(payload).map(
@@ -164,7 +167,7 @@ fn grpc_parse_serverless_warmup_scopes(
     )
 }
 
-fn grpc_serverless_readiness_summary_to_json(
+pub(crate) fn grpc_serverless_readiness_summary_to_json(
     query_ready: bool,
     write_ready: bool,
     repair_ready: bool,
@@ -183,13 +186,13 @@ fn grpc_serverless_readiness_summary_to_json(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GrpcDeploymentProfile {
+pub(crate) enum GrpcDeploymentProfile {
     Embedded,
     Server,
     Serverless,
 }
 
-fn grpc_deployment_profile_from_token(value: &str) -> Option<GrpcDeploymentProfile> {
+pub(crate) fn grpc_deployment_profile_from_token(value: &str) -> Option<GrpcDeploymentProfile> {
     crate::application::serverless_payload::deployment_profile_from_token(value).map(
         |profile| match profile {
             crate::application::serverless_payload::DeploymentProfileToken::Embedded => {

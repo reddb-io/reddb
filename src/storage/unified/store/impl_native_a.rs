@@ -15,7 +15,7 @@ impl UnifiedStore {
 
     /// Read the minimal physical header mirrored into page 0 for paged databases.
     pub fn physical_file_header(&self) -> Option<PhysicalFileHeader> {
-        self.pager.as_ref().map(|pager| pager.physical_header())
+        self.pager.as_ref().and_then(|pager| pager.physical_header().ok())
     }
 
     /// Persist native collection roots into a dedicated page in the paged file.
@@ -457,5 +457,4 @@ impl UnifiedStore {
         Ok((page_id, checksum))
     }
 
-    /// Read a compact native operational registry summary from a dedicated page.
 }

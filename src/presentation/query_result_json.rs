@@ -327,14 +327,40 @@ fn graph_path_json(path: &GraphPath) -> JsonValue {
 }
 
 fn vector_search_result_json(result: &VectorSearchResult) -> JsonValue {
+    let score = 1.0 / (1.0 + result.distance);
     let mut object = Map::new();
     object.insert("id".to_string(), JsonValue::Number(result.id as f64));
+    object.insert("entity_id".to_string(), JsonValue::Number(result.id as f64));
+    object.insert("_entity_id".to_string(), JsonValue::Number(result.id as f64));
     object.insert(
         "collection".to_string(),
         JsonValue::String(result.collection.clone()),
     );
     object.insert(
+        "_collection".to_string(),
+        JsonValue::String(result.collection.clone()),
+    );
+    object.insert("_kind".to_string(), JsonValue::String("vector".to_string()));
+    object.insert("_entity_type".to_string(), JsonValue::String("vector".to_string()));
+    object.insert(
+        "_capabilities".to_string(),
+        JsonValue::String("vector,similarity,embedding".to_string()),
+    );
+    object.insert("_score".to_string(), JsonValue::Number(score as f64));
+    object.insert(
+        "final_score".to_string(),
+        JsonValue::Number(score as f64),
+    );
+    object.insert(
         "distance".to_string(),
+        JsonValue::Number(result.distance as f64),
+    );
+    object.insert(
+        "_distance".to_string(),
+        JsonValue::Number(result.distance as f64),
+    );
+    object.insert(
+        "vector_distance".to_string(),
         JsonValue::Number(result.distance as f64),
     );
     object.insert(

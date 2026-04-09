@@ -1,7 +1,7 @@
 use super::*;
 
 impl RedDBServer {
-    fn handle_graph_neighborhood(&self, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_graph_neighborhood(&self, body: Vec<u8>) -> HttpResponse {
         let payload = match parse_json_body(&body) {
             Ok(payload) => payload,
             Err(response) => return response,
@@ -26,7 +26,7 @@ impl RedDBServer {
         }
     }
 
-    fn handle_graph_traverse(&self, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_graph_traverse(&self, body: Vec<u8>) -> HttpResponse {
         let payload = match parse_json_body(&body) {
             Ok(payload) => payload,
             Err(response) => return response,
@@ -51,7 +51,7 @@ impl RedDBServer {
         }
     }
 
-    fn handle_graph_shortest_path(&self, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_graph_shortest_path(&self, body: Vec<u8>) -> HttpResponse {
         let payload = match parse_json_body(&body) {
             Ok(payload) => payload,
             Err(response) => return response,
@@ -76,7 +76,7 @@ impl RedDBServer {
         }
     }
 
-    fn handle_graph_components(&self, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_graph_components(&self, body: Vec<u8>) -> HttpResponse {
         let payload = match parse_json_body_allow_empty(&body) {
             Ok(payload) => payload,
             Err(response) => return response,
@@ -118,7 +118,7 @@ impl RedDBServer {
         }
     }
 
-    fn handle_graph_centrality(&self, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_graph_centrality(&self, body: Vec<u8>) -> HttpResponse {
         let payload = match parse_json_body_allow_empty(&body) {
             Ok(payload) => payload,
             Err(response) => return response,
@@ -156,7 +156,7 @@ impl RedDBServer {
         }
     }
 
-    fn handle_graph_community(&self, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_graph_community(&self, body: Vec<u8>) -> HttpResponse {
         let payload = match parse_json_body_allow_empty(&body) {
             Ok(payload) => payload,
             Err(response) => return response,
@@ -192,7 +192,7 @@ impl RedDBServer {
         }
     }
 
-    fn handle_graph_clustering(&self, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_graph_clustering(&self, body: Vec<u8>) -> HttpResponse {
         let payload = match parse_json_body_allow_empty(&body) {
             Ok(payload) => payload,
             Err(response) => return response,
@@ -235,7 +235,7 @@ impl RedDBServer {
         }
     }
 
-    fn handle_graph_personalized_pagerank(&self, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_graph_personalized_pagerank(&self, body: Vec<u8>) -> HttpResponse {
         let payload = match parse_json_body(&body) {
             Ok(payload) => payload,
             Err(response) => return response,
@@ -287,7 +287,7 @@ impl RedDBServer {
         }
     }
 
-    fn handle_graph_hits(&self, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_graph_hits(&self, body: Vec<u8>) -> HttpResponse {
         let payload = match parse_json_body_allow_empty(&body) {
             Ok(payload) => payload,
             Err(response) => return response,
@@ -329,7 +329,7 @@ impl RedDBServer {
         }
     }
 
-    fn handle_graph_cycles(&self, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_graph_cycles(&self, body: Vec<u8>) -> HttpResponse {
         let payload = match parse_json_body_allow_empty(&body) {
             Ok(payload) => payload,
             Err(response) => return response,
@@ -371,7 +371,7 @@ impl RedDBServer {
         }
     }
 
-    fn handle_graph_topological_sort(&self, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_graph_topological_sort(&self, body: Vec<u8>) -> HttpResponse {
         let payload = match parse_json_body_allow_empty(&body) {
             Ok(payload) => payload,
             Err(response) => return response,
@@ -416,7 +416,7 @@ impl RedDBServer {
         }
     }
 
-    fn handle_graph_projection_upsert(&self, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_graph_projection_upsert(&self, body: Vec<u8>) -> HttpResponse {
         let payload = match parse_json_body(&body) {
             Ok(payload) => payload,
             Err(response) => return response,
@@ -450,7 +450,7 @@ impl RedDBServer {
         }
     }
 
-    fn materialize_graph_projection_transition(&self, name: &str) -> HttpResponse {
+    pub(crate) fn materialize_graph_projection_transition(&self, name: &str) -> HttpResponse {
         if let Err(err) = self.admin_use_cases().mark_graph_projection_materializing(name) {
             return json_error(400, err.to_string());
         }
@@ -467,42 +467,42 @@ impl RedDBServer {
         }
     }
 
-    fn handle_analytics_job_upsert(&self, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_analytics_job_upsert(&self, body: Vec<u8>) -> HttpResponse {
         self.handle_analytics_job_transition(body, |kind, projection, metadata| {
             self.admin_use_cases()
                 .save_analytics_job(kind, projection, metadata)
         })
     }
 
-    fn handle_analytics_job_start(&self, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_analytics_job_start(&self, body: Vec<u8>) -> HttpResponse {
         self.handle_analytics_job_transition(body, |kind, projection, metadata| {
             self.admin_use_cases()
                 .start_analytics_job(kind, projection, metadata)
         })
     }
 
-    fn handle_analytics_job_queue(&self, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_analytics_job_queue(&self, body: Vec<u8>) -> HttpResponse {
         self.handle_analytics_job_transition(body, |kind, projection, metadata| {
             self.admin_use_cases()
                 .queue_analytics_job(kind, projection, metadata)
         })
     }
 
-    fn handle_analytics_job_fail(&self, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_analytics_job_fail(&self, body: Vec<u8>) -> HttpResponse {
         self.handle_analytics_job_transition(body, |kind, projection, metadata| {
             self.admin_use_cases()
                 .fail_analytics_job(kind, projection, metadata)
         })
     }
 
-    fn handle_analytics_job_stale(&self, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_analytics_job_stale(&self, body: Vec<u8>) -> HttpResponse {
         self.handle_analytics_job_transition(body, |kind, projection, metadata| {
             self.admin_use_cases()
                 .mark_analytics_job_stale(kind, projection, metadata)
         })
     }
 
-    fn handle_analytics_job_complete(&self, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_analytics_job_complete(&self, body: Vec<u8>) -> HttpResponse {
         self.handle_analytics_job_transition(body, |kind, projection, metadata| {
             self.admin_use_cases()
                 .complete_analytics_job(kind, projection, metadata)
@@ -534,7 +534,7 @@ impl RedDBServer {
         }
     }
 
-    fn start_graph_analytics_job(
+    pub(crate) fn start_graph_analytics_job(
         &self,
         kind: &str,
         projection: Option<&str>,
@@ -554,7 +554,7 @@ impl RedDBServer {
             .map_err(|err| json_error(409, err.to_string()))
     }
 
-    fn complete_graph_analytics_job(
+    pub(crate) fn complete_graph_analytics_job(
         &self,
         kind: &str,
         projection: Option<&str>,
@@ -566,7 +566,7 @@ impl RedDBServer {
             .map_err(|err| json_error(409, err.to_string()))
     }
 
-    fn fail_graph_analytics_job(
+    pub(crate) fn fail_graph_analytics_job(
         &self,
         kind: &str,
         projection: Option<&str>,

@@ -41,7 +41,9 @@ impl RedDBRuntime {
     }
 
     pub fn acquire(&self) -> RedDBResult<RuntimeConnection> {
-        let mut pool = self.inner.pool.lock().unwrap();
+        let mut pool = self.inner.pool.lock().map_err(|e| {
+            RedDBError::Internal(format!("connection pool lock poisoned: {e}"))
+        })?;
         if pool.active >= self.inner.pool_config.max_connections {
             return Err(RedDBError::Internal(
                 "connection pool exhausted".to_string(),
@@ -140,7 +142,7 @@ impl RedDBRuntime {
     }
 
     pub fn stats(&self) -> RuntimeStats {
-        let pool = self.inner.pool.lock().unwrap();
+        let pool = self.inner.pool.lock().expect("stats: connection pool lock poisoned");
         RuntimeStats {
             active_connections: pool.active,
             idle_connections: pool.idle.len(),

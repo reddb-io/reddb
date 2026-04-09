@@ -115,6 +115,7 @@ impl IntegratedIndexManager {
             b.similarity
                 .partial_cmp(&a.similarity)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.entity_id.cmp(&b.entity_id))
         });
         results.truncate(k);
         results

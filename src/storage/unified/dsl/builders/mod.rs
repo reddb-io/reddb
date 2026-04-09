@@ -5,6 +5,7 @@
 mod crossmodal;
 mod graph;
 mod hybrid;
+mod kv;
 mod refs;
 mod table;
 mod text;
@@ -17,6 +18,7 @@ pub use graph::{
     GraphQueryBuilder, GraphStartPoint, NodePatternDsl, TraversalDirection, TraversalStep,
 };
 pub use hybrid::{GraphPatternDsl, HybridQueryBuilder, QueryWeights};
+pub use kv::KvQueryBuilder;
 pub use refs::RefQueryBuilder;
 pub use table::{ScanQueryBuilder, SortOrder, TableQueryBuilder};
 pub use text::TextSearchBuilder;

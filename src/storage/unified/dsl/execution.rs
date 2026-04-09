@@ -2,23 +2,60 @@
 //!
 //! Execution logic for all query types.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::storage::engine::{DistanceMetric, HnswConfig, HnswIndex};
 use crate::storage::query::unified::ExecutionError;
 
-use super::super::entity::{EntityData, EntityId, EntityKind, UnifiedEntity};
+use super::super::entity::{EntityData, EntityId, EntityKind, RefType, UnifiedEntity};
 use super::super::store::UnifiedStore;
 use super::builders::{
     CrossModalMatch, GraphQueryBuilder, GraphStartPoint, HybridQueryBuilder, JoinPhase, JoinStep,
     RefQueryBuilder, ScanQueryBuilder, TableQueryBuilder, TextSearchBuilder, ThreeWayJoinBuilder,
-    VectorQueryBuilder,
+    TraversalDirection, VectorQueryBuilder,
+};
+use super::cross_modal::{
+    cross_modal_entity_vectors, cross_modal_graph_neighbors, cross_modal_graph_node_matches_ref,
+    cross_modal_lookup_graph_nodes_by_ref, cross_modal_ref_matches_edge_label,
+    cross_modal_value_matches_entity, merge_cross_modal_match,
 };
 use super::helpers::{apply_filters, calculate_entity_similarity, extract_searchable_text};
 use super::types::{MatchComponents, QueryResult, ScoredMatch};
 
-/// Execute a vector similarity query
+fn normalize_query_matches(matches: &mut Vec<ScoredMatch>, limit: Option<usize>) {
+    for item in matches.iter_mut() {
+        if let Some(final_score) = item.components.final_score.filter(|score| score.is_finite()) {
+            item.score = final_score;
+        } else {
+            item.components.final_score = Some(item.score);
+        }
+    }
+
+    matches.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.entity.id.raw().cmp(&right.entity.id.raw()))
+    });
+
+    if let Some(limit) = limit {
+        matches.truncate(limit);
+    }
+}
+
+/// Minimum number of dense vectors in a collection before we build an HNSW
+/// index instead of scanning brute-force.
+const HNSW_MIN_VECTORS: usize = 100;
+
+/// Execute a vector similarity query.
+///
+/// For collections with >= `HNSW_MIN_VECTORS` dense vectors whose dimension
+/// matches the query vector an HNSW index is built on-the-fly for fast
+/// approximate nearest-neighbor search.  Smaller or mixed-type collections
+/// fall back to an exact brute-force scan.
 pub fn execute_vector_query(
     query: VectorQueryBuilder,
     store: &Arc<UnifiedStore>,
@@ -27,23 +64,83 @@ pub fn execute_vector_query(
     let mut matches = Vec::new();
     let mut scanned = 0;
 
-    // Get collections to search
     let collections = query
         .collections
         .unwrap_or_else(|| store.list_collections());
 
+    let query_dim = query.vector.len();
+    let has_filters = !query.filters.is_empty();
+    let has_embedding_slot = query.embedding_slot.is_some();
+
     for col_name in &collections {
         if let Some(manager) = store.get_collection(col_name) {
             let entities = manager.query_all(|_| true);
+
+            // Decide whether HNSW is worthwhile for this collection.
+            // We only use HNSW when there are no custom filters or embedding
+            // slots, because those require per-entity evaluation that HNSW
+            // cannot perform internally.
+            let use_hnsw = !has_filters
+                && !has_embedding_slot
+                && entities.len() >= HNSW_MIN_VECTORS;
+
+            if use_hnsw {
+                // Collect dense vectors with matching dimension.
+                let id_vec_pairs: Vec<(u64, Vec<f32>)> = entities
+                    .iter()
+                    .filter_map(|e| match &e.data {
+                        EntityData::Vector(v)
+                            if !v.dense.is_empty() && v.dense.len() == query_dim =>
+                        {
+                            Some((e.id.raw(), v.dense.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+
+                if id_vec_pairs.len() >= HNSW_MIN_VECTORS {
+                    scanned += id_vec_pairs.len();
+
+                    let config = HnswConfig::with_m(16)
+                        .with_metric(DistanceMetric::Cosine)
+                        .with_ef_construction(100)
+                        .with_ef_search(50);
+                    let mut hnsw = HnswIndex::new(query_dim, config);
+                    for (id, vec) in &id_vec_pairs {
+                        hnsw.insert_with_id(*id, vec.clone());
+                    }
+
+                    let results = hnsw.search(&query.vector, query.k);
+                    for dr in &results {
+                        let entity_id = EntityId::new(dr.id);
+                        if let Some(entity) = store.get(col_name, entity_id) {
+                            let similarity = (1.0 - dr.distance).max(0.0);
+                            if similarity >= query.min_similarity {
+                                matches.push(ScoredMatch {
+                                    entity,
+                                    score: similarity,
+                                    components: MatchComponents {
+                                        vector_similarity: Some(similarity),
+                                        final_score: Some(similarity),
+                                        ..Default::default()
+                                    },
+                                    path: None,
+                                });
+                            }
+                        }
+                    }
+                    continue; // Done with this collection via HNSW.
+                }
+            }
+
+            // Brute-force fallback.
             for entity in entities {
                 scanned += 1;
 
-                // Apply filters first
                 if !apply_filters(&entity, &query.filters) {
                     continue;
                 }
 
-                // Calculate similarity
                 let similarity =
                     calculate_entity_similarity(&entity, &query.vector, &query.embedding_slot);
 
@@ -63,13 +160,7 @@ pub fn execute_vector_query(
         }
     }
 
-    // Sort by score
-    matches.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    matches.truncate(query.k);
+    normalize_query_matches(&mut matches, Some(query.k));
 
     Ok(QueryResult {
         matches,
@@ -160,16 +251,7 @@ pub fn execute_graph_query(
         }
     }
 
-    // Sort by score
-    matches.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    if let Some(limit) = query.limit {
-        matches.truncate(limit);
-    }
+    normalize_query_matches(&mut matches, query.limit);
 
     Ok(QueryResult {
         matches,
@@ -208,7 +290,9 @@ pub fn execute_table_query(
         }
     }
 
-    // Apply limit/offset
+    normalize_query_matches(&mut matches, None);
+
+    // Apply offset/limit
     matches = matches.into_iter().skip(query.offset).collect();
     if let Some(limit) = query.limit {
         matches.truncate(limit);
@@ -249,6 +333,8 @@ pub fn execute_scan_query(
             }
         }
     }
+
+    normalize_query_matches(&mut matches, None);
 
     if let Some(limit) = query.limit {
         matches.truncate(limit);
@@ -305,6 +391,8 @@ pub fn execute_ref_query(
             }
         }
     }
+
+    normalize_query_matches(&mut matches, None);
 
     Ok(QueryResult {
         matches,
@@ -363,16 +451,7 @@ pub fn execute_text_query(
         }
     }
 
-    // Sort by score
-    matches.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    if let Some(limit) = query.limit {
-        matches.truncate(limit);
-    }
+    normalize_query_matches(&mut matches, query.limit);
 
     Ok(QueryResult {
         matches,
@@ -470,16 +549,7 @@ pub fn execute_hybrid_query(
         })
         .collect();
 
-    // Sort by score
-    matches.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    if let Some(limit) = query.limit {
-        matches.truncate(limit);
-    }
+    normalize_query_matches(&mut matches, query.limit);
 
     Ok(QueryResult {
         matches,
@@ -508,10 +578,10 @@ pub fn execute_three_way_join(
     match start_phase {
         JoinPhase::VectorStart { ref vector, k } => {
             // Find similar vectors
+            let mut scored: Vec<(EntityId, UnifiedEntity, f32)> = Vec::new();
             for col_name in store.list_collections() {
                 if let Some(manager) = store.get_collection(&col_name) {
                     let entities = manager.query_all(|_| true);
-                    let mut scored: Vec<(EntityId, UnifiedEntity, f32)> = Vec::new();
 
                     for entity in entities {
                         scanned += 1;
@@ -521,34 +591,37 @@ pub fn execute_three_way_join(
                         }
                     }
 
-                    // Sort and take top k
-                    scored
-                        .sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-                    scored.truncate(k);
-
-                    for (id, entity, sim) in scored {
-                        results.insert(
-                            id,
-                            CrossModalMatch {
-                                entity,
-                                vector_score: sim,
-                                graph_score: 0.0,
-                                table_score: 0.0,
-                                path: Vec::new(),
-                            },
-                        );
-                    }
                 }
+            }
+
+            scored.sort_by(|a, b| {
+                b.2.partial_cmp(&a.2)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.raw().cmp(&b.0.raw()))
+            });
+            if k > 0 {
+                scored.truncate(k);
+            }
+
+            for (id, entity, sim) in scored {
+                merge_cross_modal_match(
+                    &mut results,
+                    id,
+                    CrossModalMatch {
+                        entity,
+                        vector_score: sim,
+                        graph_score: 0.0,
+                        table_score: 0.0,
+                        path: Vec::new(),
+                    },
+                );
             }
         }
         JoinPhase::GraphStart { ref node_id } => {
             // Start from a graph node
             for col_name in store.list_collections() {
                 if let Some(manager) = store.get_collection(&col_name) {
-                    let entities = manager.query_all(|e| {
-                        matches!(&e.kind, EntityKind::GraphNode { label, .. } if label == node_id)
-                            || e.id.to_string() == *node_id
-                    });
+                    let entities = manager.query_all(|e| cross_modal_graph_node_matches_ref(e, node_id));
 
                     for entity in entities {
                         scanned += 1;
@@ -606,49 +679,133 @@ pub fn execute_three_way_join(
                 for id in &current_ids {
                     if let Some(current) = results.get(id) {
                         let mut seen = HashSet::new();
+                        seen.insert(*id);
+                        let mut frontier =
+                            VecDeque::from([(*id, current.path.clone(), 0u32, current.graph_score)]);
 
-                        for (target_id, _, target_collection) in store.get_refs_from(*id) {
-                            if let Some(entity) = store.get(&target_collection, target_id) {
-                                if seen.insert(entity.id) {
+                        while let Some((frontier_id, frontier_path, hops, frontier_graph_score)) =
+                            frontier.pop_front()
+                        {
+                            if hops >= *depth {
+                                continue;
+                            }
+
+                            let frontier_is_graph_node = store
+                                .get_any(frontier_id)
+                                .map(|(_, entity)| matches!(entity.kind, EntityKind::GraphNode { .. }))
+                                .unwrap_or(false);
+
+                            if frontier_is_graph_node {
+                                for entity in cross_modal_graph_neighbors(
+                                    store,
+                                    frontier_id,
+                                    direction,
+                                    edge_label.as_deref(),
+                                ) {
+                                    if !seen.insert(entity.id) {
+                                        continue;
+                                    }
+
                                     scanned += 1;
-                                    let entry = new_results.entry(entity.id).or_insert_with(|| {
-                                        let mut path = current.path.clone();
-                                        path.push(entity.id);
+                                    let mut path = if frontier_path.is_empty() {
+                                        vec![*id]
+                                    } else {
+                                        frontier_path.clone()
+                                    };
+                                    path.push(entity.id);
+                                    let graph_score =
+                                        frontier_graph_score + 1.0 / (hops as f32 + 2.0);
+                                    merge_cross_modal_match(
+                                        &mut new_results,
+                                        entity.id,
                                         CrossModalMatch {
                                             entity: entity.clone(),
                                             vector_score: current.vector_score,
-                                            graph_score: current.graph_score
-                                                + 1.0 / (*depth as f32 + 1.0),
+                                            graph_score,
                                             table_score: current.table_score,
-                                            path,
-                                        }
-                                    });
-                                    entry.graph_score = entry
-                                        .graph_score
-                                        .max(current.graph_score + 1.0 / (*depth as f32 + 1.0));
+                                            path: path.clone(),
+                                        },
+                                    );
+                                    frontier.push_back((entity.id, path, hops + 1, graph_score));
+                                }
+                                continue;
+                            }
+
+                            if matches!(direction, TraversalDirection::Out | TraversalDirection::Both)
+                            {
+                                for (target_id, ref_type, target_collection) in
+                                    store.get_refs_from(frontier_id)
+                                {
+                                    if !cross_modal_ref_matches_edge_label(
+                                        ref_type,
+                                        edge_label.as_deref(),
+                                    ) || !seen.insert(target_id)
+                                    {
+                                        continue;
+                                    }
+
+                                    if let Some(entity) = store.get(&target_collection, target_id) {
+                                        scanned += 1;
+                                        let mut path = if frontier_path.is_empty() {
+                                            vec![*id]
+                                        } else {
+                                            frontier_path.clone()
+                                        };
+                                        path.push(entity.id);
+                                        let graph_score =
+                                            frontier_graph_score + 1.0 / (hops as f32 + 2.0);
+                                        merge_cross_modal_match(
+                                            &mut new_results,
+                                            entity.id,
+                                            CrossModalMatch {
+                                                entity: entity.clone(),
+                                                vector_score: current.vector_score,
+                                                graph_score,
+                                                table_score: current.table_score,
+                                                path: path.clone(),
+                                            },
+                                        );
+                                        frontier.push_back((entity.id, path, hops + 1, graph_score));
+                                    }
                                 }
                             }
-                        }
 
-                        for (source_id, _, source_collection) in store.get_refs_to(*id) {
-                            if let Some(entity) = store.get(&source_collection, source_id) {
-                                if seen.insert(entity.id) {
-                                    scanned += 1;
-                                    let entry = new_results.entry(entity.id).or_insert_with(|| {
-                                        let mut path = current.path.clone();
+                            if matches!(direction, TraversalDirection::In | TraversalDirection::Both)
+                            {
+                                for (source_id, ref_type, source_collection) in
+                                    store.get_refs_to(frontier_id)
+                                {
+                                    if !cross_modal_ref_matches_edge_label(
+                                        ref_type,
+                                        edge_label.as_deref(),
+                                    ) || !seen.insert(source_id)
+                                    {
+                                        continue;
+                                    }
+
+                                    if let Some(entity) = store.get(&source_collection, source_id) {
+                                        scanned += 1;
+                                        let mut path = if frontier_path.is_empty() {
+                                            vec![*id]
+                                        } else {
+                                            frontier_path.clone()
+                                        };
                                         path.push(entity.id);
-                                        CrossModalMatch {
-                                            entity: entity.clone(),
-                                            vector_score: current.vector_score,
-                                            graph_score: current.graph_score
-                                                + 1.0 / (*depth as f32 + 1.0),
-                                            table_score: current.table_score,
-                                            path,
-                                        }
-                                    });
-                                    entry.graph_score = entry
-                                        .graph_score
-                                        .max(current.graph_score + 1.0 / (*depth as f32 + 1.0));
+                                        let graph_score =
+                                            frontier_graph_score + 1.0 / (hops as f32 + 2.0);
+                                        merge_cross_modal_match(
+                                            &mut new_results,
+                                            entity.id,
+                                            CrossModalMatch {
+                                                entity: entity.clone(),
+                                                vector_score: current.vector_score,
+                                                graph_score,
+                                                table_score: current.table_score,
+                                                path: path.clone(),
+                                            },
+                                        );
+                                        frontier.push_back((entity.id, path, hops + 1, graph_score));
+                                    }
                                 }
                             }
                         }
@@ -657,7 +814,7 @@ pub fn execute_three_way_join(
 
                 // Merge new results
                 for (id, m) in new_results {
-                    results.entry(id).or_insert(m);
+                    merge_cross_modal_match(&mut results, id, m);
                 }
             }
             JoinStep::JoinTable { table, on_field } => {
@@ -673,36 +830,44 @@ pub fn execute_three_way_join(
                             // Find matching table rows
                             for table_entity in &table_entities {
                                 scanned += 1;
-                                // Check if table entity references current entity
-                                let matches = store
+                                // Check if the relationship exists in either direction, or via
+                                // explicit field match when requested.
+                                let row_references_current = store
                                     .get_refs_from(table_entity.id)
                                     .iter()
-                                    .any(|(target_id, _, _)| target_id == id)
-                                    || on_field
-                                        .as_ref()
-                                        .map(|f| match &table_entity.data {
-                                            EntityData::Row(row) => row
-                                                .named
-                                                .as_ref()
-                                                .and_then(|n| n.get(f))
-                                                .map(|v| v.to_string() == id.to_string())
-                                                .unwrap_or(false),
-                                            _ => false,
-                                        })
-                                        .unwrap_or(false);
+                                    .any(|(target_id, _, _)| target_id == id);
+                                let current_references_row = store
+                                    .get_refs_from(*id)
+                                    .iter()
+                                    .any(|(target_id, _, _)| target_id == &table_entity.id);
+                                let field_matches_current = on_field
+                                    .as_ref()
+                                    .map(|f| match &table_entity.data {
+                                        EntityData::Row(row) => row
+                                            .named
+                                            .as_ref()
+                                            .and_then(|n| n.get(f))
+                                            .map(|v| cross_modal_value_matches_entity(v, &current.entity))
+                                            .unwrap_or(false),
+                                        _ => false,
+                                    })
+                                    .unwrap_or(false);
+                                let matches = row_references_current
+                                    || current_references_row
+                                    || field_matches_current;
 
                                 if matches {
-                                    let entry =
-                                        new_results.entry(table_entity.id).or_insert_with(|| {
-                                            CrossModalMatch {
-                                                entity: table_entity.clone(),
-                                                vector_score: current.vector_score,
-                                                graph_score: current.graph_score,
-                                                table_score: 1.0,
-                                                path: current.path.clone(),
-                                            }
-                                        });
-                                    entry.table_score = entry.table_score.max(1.0);
+                                    merge_cross_modal_match(
+                                        &mut new_results,
+                                        table_entity.id,
+                                        CrossModalMatch {
+                                            entity: table_entity.clone(),
+                                            vector_score: current.vector_score,
+                                            graph_score: current.graph_score,
+                                            table_score: 1.0,
+                                            path: current.path.clone(),
+                                        },
+                                    );
                                 }
                             }
                         }
@@ -710,7 +875,7 @@ pub fn execute_three_way_join(
 
                     // Merge new results
                     for (id, m) in new_results {
-                        results.entry(id).or_insert(m);
+                        merge_cross_modal_match(&mut results, id, m);
                     }
                 }
             }
@@ -720,46 +885,51 @@ pub fn execute_three_way_join(
 
                 for id in &current_ids {
                     if let Some(current) = results.get(id) {
-                        // Get embeddings from current entity
-                        for emb in &current.entity.embeddings {
+                        // Get vectors from the current entity, whether they come from
+                        // explicit embedding slots or from a native vector entity.
+                        for vector in cross_modal_entity_vectors(&current.entity) {
+                            let mut scored: Vec<(EntityId, UnifiedEntity, f32)> = Vec::new();
                             for col_name in store.list_collections() {
                                 if let Some(manager) = store.get_collection(&col_name) {
                                     let entities = manager.query_all(|_| true);
-                                    let mut scored: Vec<(EntityId, UnifiedEntity, f32)> =
-                                        Vec::new();
 
                                     for entity in entities {
                                         if entity.id != *id {
                                             scanned += 1;
                                             let sim = calculate_entity_similarity(
                                                 &entity,
-                                                &emb.vector,
+                                                &vector,
                                                 &None,
                                             );
-                                            if sim > 0.3 {
+                                            if sim.is_finite() && sim > 0.0 {
                                                 scored.push((entity.id, entity, sim));
                                             }
                                         }
                                     }
-
-                                    scored.sort_by(|a, b| {
-                                        b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal)
-                                    });
-                                    scored.truncate(*k);
-
-                                    for (eid, entity, sim) in scored {
-                                        let entry = new_results.entry(eid).or_insert_with(|| {
-                                            CrossModalMatch {
-                                                entity,
-                                                vector_score: sim,
-                                                graph_score: current.graph_score,
-                                                table_score: current.table_score,
-                                                path: current.path.clone(),
-                                            }
-                                        });
-                                        entry.vector_score = entry.vector_score.max(sim);
-                                    }
                                 }
+                            }
+
+                            scored.sort_by(|a, b| {
+                                b.2.partial_cmp(&a.2)
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                                    .then_with(|| a.0.raw().cmp(&b.0.raw()))
+                            });
+                            if *k > 0 {
+                                scored.truncate(*k);
+                            }
+
+                            for (eid, entity, sim) in scored {
+                                merge_cross_modal_match(
+                                    &mut new_results,
+                                    eid,
+                                    CrossModalMatch {
+                                        entity,
+                                        vector_score: sim,
+                                        graph_score: current.graph_score,
+                                        table_score: current.table_score,
+                                        path: current.path.clone(),
+                                    },
+                                );
                             }
                         }
                     }
@@ -767,7 +937,7 @@ pub fn execute_three_way_join(
 
                 // Merge new results
                 for (id, m) in new_results {
-                    results.entry(id).or_insert(m);
+                    merge_cross_modal_match(&mut results, id, m);
                 }
             }
         }
@@ -791,6 +961,7 @@ pub fn execute_three_way_join(
                     } else {
                         None
                     },
+                    text_relevance: None,
                     graph_match: if m.graph_score > 0.0 {
                         Some(m.graph_score)
                     } else {
@@ -805,7 +976,7 @@ pub fn execute_three_way_join(
                     hop_distance: if m.path.is_empty() {
                         None
                     } else {
-                        Some(m.path.len() as u32)
+                        Some(m.path.len().saturating_sub(1) as u32)
                     },
                     final_score: Some(score),
                 },
@@ -819,17 +990,7 @@ pub fn execute_three_way_join(
         .filter(|m| m.score >= query.min_score)
         .collect();
 
-    // Sort by score
-    matches.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    // Apply limit
-    if let Some(limit) = query.limit {
-        matches.truncate(limit);
-    }
+    normalize_query_matches(&mut matches, query.limit);
 
     Ok(QueryResult {
         matches,

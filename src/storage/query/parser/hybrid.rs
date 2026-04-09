@@ -63,6 +63,7 @@ impl<'a> Parser<'a> {
         };
 
         let vector = VectorQuery {
+            alias: None,
             collection,
             query_vector,
             k: 10, // Will be overridden by limit
@@ -85,6 +86,7 @@ impl<'a> Parser<'a> {
         };
 
         Ok(QueryExpr::Hybrid(HybridQuery {
+            alias: None,
             structured: Box::new(structured),
             vector,
             fusion,

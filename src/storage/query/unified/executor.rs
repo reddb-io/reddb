@@ -1,7 +1,16 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
-use super::*;
+use super::{
+    ExecutionError, GraphPath, MatchedEdge, MatchedNode, QueryStats, UnifiedRecord, UnifiedResult,
+};
+use crate::storage::engine::graph_store::{GraphEdgeType, GraphStore, StoredNode};
+use crate::storage::engine::graph_table_index::GraphTableIndex;
+use crate::storage::query::ast::{
+    CompareOp, EdgeDirection, EdgePattern, FieldRef, Filter, GraphPattern, GraphQuery, JoinQuery,
+    JoinType, NodePattern, NodeSelector, PathQuery, Projection, QueryExpr, TableQuery,
+};
+use crate::storage::schema::Value;
 
 pub struct UnifiedExecutor {
     /// Graph storage

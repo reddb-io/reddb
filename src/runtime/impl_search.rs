@@ -13,10 +13,15 @@ impl RedDBRuntime {
         let plan = planner.plan(expr.clone());
         let cardinality = CostEstimator::new().estimate_cardinality(&plan.optimized);
 
+        let is_universal = match &expr {
+            QueryExpr::Table(t) => is_universal_query_source(&t.table),
+            _ => false,
+        };
         Ok(RuntimeQueryExplain {
             query: query.to_string(),
             mode,
             statement,
+            is_universal,
             plan_cost: plan.cost,
             estimated_rows: cardinality.rows,
             estimated_selectivity: cardinality.selectivity,
@@ -38,6 +43,13 @@ impl RedDBRuntime {
             return Err(RedDBError::NotFound(collection.to_string()));
         }
         results.retain(|result| result.score >= min_score);
+        results.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.entity_id.raw().cmp(&right.entity_id.raw()))
+        });
         Ok(results)
     }
 
@@ -97,7 +109,7 @@ impl RedDBRuntime {
         ivf.add_batch_with_ids(consistent);
 
         let stats = ivf.stats();
-        let matches = ivf
+        let mut matches: Vec<_> = ivf
             .search_with_probes(vector, k.max(1), probes)
             .into_iter()
             .map(|result| RuntimeIvfMatch {
@@ -106,6 +118,12 @@ impl RedDBRuntime {
                 entity: self.inner.db.get(EntityId::new(result.id)),
             })
             .collect();
+        matches.sort_by(|left, right| {
+            left.distance
+                .partial_cmp(&right.distance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.entity_id.cmp(&right.entity_id))
+        });
 
         Ok(RuntimeIvfSearchResult {
             collection: collection.to_string(),
@@ -156,12 +174,36 @@ impl RedDBRuntime {
             filter: 0.2,
         });
         let result_limit = limit.or(k).unwrap_or(10).max(1);
-        let fetch_k = k.unwrap_or(result_limit).max(1);
         let min_score = min_score
-            .filter(f32::is_finite)
+            .filter(|v| v.is_finite())
             .unwrap_or(0.0f32)
             .max(0.0);
         let graph_pattern_filter = graph_pattern.clone();
+        let has_entity_type_filters = entity_types
+            .as_ref()
+            .is_some_and(|items| items.iter().any(|item| !item.trim().is_empty()));
+        let has_capability_filters = capabilities
+            .as_ref()
+            .is_some_and(|items| items.iter().any(|item| !item.trim().is_empty()));
+        let needs_fetch_expansion = query.is_some()
+            || min_score > 0.0
+            || !dsl_filters.is_empty()
+            || graph_pattern_filter.is_some()
+            || has_entity_type_filters
+            || has_capability_filters;
+        let fetch_k = if needs_fetch_expansion {
+            k.unwrap_or(result_limit)
+                .max(result_limit)
+                .saturating_mul(4)
+                .max(32)
+        } else {
+            k.unwrap_or(result_limit).max(1)
+        };
+        let text_fetch_limit = if needs_fetch_expansion {
+            Some(fetch_k)
+        } else {
+            Some(result_limit)
+        };
 
         let matches_graph_pattern = |entity: &UnifiedEntity| {
             let Some(pattern) = graph_pattern_filter.as_ref() else {
@@ -195,7 +237,7 @@ impl RedDBRuntime {
                 None,
                 None,
                 None,
-                Some(result_limit),
+                text_fetch_limit,
                 false,
             )?;
             if min_score > 0.0 {
@@ -214,6 +256,11 @@ impl RedDBRuntime {
                 entity_types.clone(),
                 capabilities.clone(),
             );
+            for item in &mut result.matches {
+                item.components.text_relevance = Some(item.score);
+                item.components.final_score = Some(item.score);
+            }
+            result.matches.truncate(result_limit);
             return Ok(result);
         }
 
@@ -230,8 +277,6 @@ impl RedDBRuntime {
         if min_score > 0.0 {
             builder = builder.min_score(min_score);
         }
-        builder = builder.limit(result_limit);
-
         builder = builder.similar_to(&vector, fetch_k);
         if let Some(collections) = collection_scope.clone() {
             for collection in collections {
@@ -241,8 +286,9 @@ impl RedDBRuntime {
         builder.filters = dsl_filters.clone();
 
         let mut result = builder
-            .execute(self.inner.db.store())
+            .execute(&self.inner.db.store())
             .map_err(|err| RedDBError::Query(err.to_string()))?;
+        normalize_runtime_dsl_result_scores(&mut result);
 
         if let Some(query) = query {
             let mut text_result = self.search_text(
@@ -251,7 +297,7 @@ impl RedDBRuntime {
                 None,
                 None,
                 None,
-                Some(result_limit),
+                text_fetch_limit,
                 false,
             )?;
             if min_score > 0.0 {
@@ -303,14 +349,7 @@ impl RedDBRuntime {
                 execution_time_us: result.execution_time_us + text_result.execution_time_us,
                 explanation: result.explanation,
             };
-            merged.matches.sort_by(|left, right| {
-                right
-                    .score
-                    .partial_cmp(&left.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            merged.matches.truncate(result_limit);
-
+            normalize_runtime_dsl_result_scores(&mut merged);
             if min_score > 0.0 {
                 merged.matches.retain(|item| item.score >= min_score);
             }
@@ -320,6 +359,7 @@ impl RedDBRuntime {
                 entity_types.clone(),
                 capabilities.clone(),
             );
+            merged.matches.truncate(result_limit);
             return Ok(merged);
         }
 
@@ -328,6 +368,7 @@ impl RedDBRuntime {
             entity_types.clone(),
             capabilities.clone(),
         );
+        result.matches.truncate(result_limit);
         Ok(result)
     }
 
@@ -356,18 +397,21 @@ impl RedDBRuntime {
             }
         }
 
-        if let Some(limit) = limit {
-            builder = builder.limit(limit.max(1));
-        }
-
         if fuzzy {
             builder = builder.fuzzy();
         }
 
         let mut result = builder
-            .execute(self.inner.db.store())
+            .execute(&self.inner.db.store())
             .map_err(|err| RedDBError::Query(err.to_string()))?;
+        for item in &mut result.matches {
+            item.components.text_relevance = Some(item.score);
+            item.components.final_score = Some(item.score);
+        }
         runtime_filter_dsl_result(&mut result, entity_types, capabilities);
+        if let Some(limit) = limit {
+            result.matches.truncate(limit.max(1));
+        }
         Ok(result)
     }
 

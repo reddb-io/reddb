@@ -10,7 +10,7 @@ impl UnifiedStore {
         self.format_version.load(Ordering::SeqCst)
     }
 
-    fn set_format_version(&self, version: u32) {
+    pub(crate) fn set_format_version(&self, version: u32) {
         self.format_version.store(version, Ordering::SeqCst);
     }
 
@@ -19,7 +19,7 @@ impl UnifiedStore {
         EntityId::new(self.next_entity_id.fetch_add(1, Ordering::SeqCst))
     }
 
-    fn register_entity_id(&self, id: EntityId) {
+    pub(crate) fn register_entity_id(&self, id: EntityId) {
         let candidate = id.raw().saturating_add(1);
         let mut current = self.next_entity_id.load(Ordering::SeqCst);
         while candidate > current {
@@ -151,7 +151,12 @@ impl UnifiedStore {
         buf.extend_from_slice(&STORE_VERSION_V2.to_le_bytes());
 
         // Get all collections
-        let collections = self.collections.read().unwrap();
+        let collections = self
+            .collections
+            .read()
+            .map_err(|_| -> Box<dyn std::error::Error> {
+                "collections lock poisoned".into()
+            })?;
         write_varu32(&mut buf, collections.len() as u32);
 
         for (name, manager) in collections.iter() {
@@ -169,7 +174,12 @@ impl UnifiedStore {
         }
 
         // Write cross-references
-        let cross_refs = self.cross_refs.read().unwrap();
+        let cross_refs = self
+            .cross_refs
+            .read()
+            .map_err(|_| -> Box<dyn std::error::Error> {
+                "cross_refs lock poisoned".into()
+            })?;
         let total_refs: usize = cross_refs.values().map(|v| v.len()).sum();
         write_varu32(&mut buf, total_refs as u32);
 
@@ -192,7 +202,7 @@ impl UnifiedStore {
     }
 
     /// Read entity from binary buffer
-    fn read_entity_binary(
+    pub(crate) fn read_entity_binary(
         buf: &[u8],
         pos: &mut usize,
         format_version: u32,
@@ -268,7 +278,7 @@ impl UnifiedStore {
                 for _ in 0..col_count {
                     columns.push(Self::read_value_binary(buf, pos)?);
                 }
-                EntityData::Row(super::entity::RowData::new(columns))
+                EntityData::Row(RowData::new(columns))
             }
             1 => {
                 // Node
@@ -281,7 +291,7 @@ impl UnifiedStore {
                     let value = Self::read_value_binary(buf, pos)?;
                     properties.insert(key, value);
                 }
-                EntityData::Node(super::entity::NodeData::with_properties(properties))
+                EntityData::Node(NodeData::with_properties(properties))
             }
             2 => {
                 // Edge
@@ -297,7 +307,7 @@ impl UnifiedStore {
                     let value = Self::read_value_binary(buf, pos)?;
                     properties.insert(key, value);
                 }
-                let mut edge = super::entity::EdgeData::new(weight);
+                let mut edge = EdgeData::new(weight);
                 edge.properties = properties;
                 EntityData::Edge(edge)
             }
@@ -310,7 +320,7 @@ impl UnifiedStore {
                     *pos += 4;
                     dense.push(f32::from_le_bytes(bytes));
                 }
-                EntityData::Vector(super::entity::VectorData::new(dense))
+                EntityData::Vector(VectorData::new(dense))
             }
             _ => return Err(format!("Unknown EntityData type: {}", data_type).into()),
         };
@@ -404,7 +414,7 @@ impl UnifiedStore {
     }
 
     /// Write entity to binary buffer
-    fn write_entity_binary(buf: &mut Vec<u8>, entity: &UnifiedEntity, format_version: u32) {
+    pub(crate) fn write_entity_binary(buf: &mut Vec<u8>, entity: &UnifiedEntity, format_version: u32) {
         // Entity ID
         write_varu64(buf, entity.id.raw());
 
@@ -810,5 +820,4 @@ impl UnifiedStore {
         }
     }
 
-    /// Create with custom configuration
 }

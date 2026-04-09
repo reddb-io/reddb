@@ -438,7 +438,7 @@ impl HnswIndex {
 
         // Convert results to sorted vector (closest first)
         let mut result_vec: Vec<DistanceResult> = results.into_iter().map(|r| r.0).collect();
-        result_vec.sort_by(|a, b| cmp_f32(a.distance, b.distance));
+        result_vec.sort_by(|a, b| cmp_f32(a.distance, b.distance).then_with(|| a.id.cmp(&b.id)));
         result_vec
     }
 
@@ -492,7 +492,7 @@ impl HnswIndex {
             .collect();
 
         // Sort by distance (closest first)
-        scored.sort_by(|a, b| cmp_f32(a.distance, b.distance));
+        scored.sort_by(|a, b| cmp_f32(a.distance, b.distance).then_with(|| a.id.cmp(&b.id)));
 
         // Keep only max_connections closest
         let kept: Vec<NodeId> = scored

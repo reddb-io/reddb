@@ -1,10 +1,10 @@
 use super::*;
 
-fn analytics_job_json(job: &crate::PhysicalAnalyticsJob) -> JsonValue {
+pub(crate) fn analytics_job_json(job: &crate::PhysicalAnalyticsJob) -> JsonValue {
     crate::presentation::admin_json::analytics_job_json(job)
 }
 
-fn create_row_reply(
+pub(crate) fn create_row_reply(
     runtime: &GrpcRuntime,
     request: JsonCreateRequest,
 ) -> Result<EntityReply, Status> {
@@ -20,7 +20,7 @@ fn create_row_reply(
         .map_err(entity_error_to_status)
 }
 
-fn create_node_reply(
+pub(crate) fn create_node_reply(
     runtime: &GrpcRuntime,
     request: JsonCreateRequest,
 ) -> Result<EntityReply, Status> {
@@ -36,7 +36,7 @@ fn create_node_reply(
         .map_err(entity_error_to_status)
 }
 
-fn create_edge_reply(
+pub(crate) fn create_edge_reply(
     runtime: &GrpcRuntime,
     request: JsonCreateRequest,
 ) -> Result<EntityReply, Status> {
@@ -52,7 +52,7 @@ fn create_edge_reply(
         .map_err(entity_error_to_status)
 }
 
-fn create_vector_reply(
+pub(crate) fn create_vector_reply(
     runtime: &GrpcRuntime,
     request: JsonCreateRequest,
 ) -> Result<EntityReply, Status> {
@@ -70,7 +70,7 @@ fn create_vector_reply(
         .map_err(entity_error_to_status)
 }
 
-fn bulk_create_reply(
+pub(crate) fn bulk_create_reply(
     runtime: &GrpcRuntime,
     request: JsonBulkCreateRequest,
     handler: fn(&GrpcRuntime, JsonCreateRequest) -> Result<EntityReply, Status>,
@@ -97,7 +97,7 @@ fn bulk_create_reply(
     })
 }
 
-fn patch_entity_reply(
+pub(crate) fn patch_entity_reply(
     runtime: &GrpcRuntime,
     request: UpdateEntityRequest,
 ) -> Result<EntityReply, Status> {
@@ -114,7 +114,11 @@ fn patch_entity_reply(
         .map_err(entity_error_to_status)
 }
 
-fn entity_reply_from_output(output: CreateEntityOutput) -> EntityReply {
+pub(crate) fn entity_json_string(entity: &crate::storage::UnifiedEntity) -> String {
+    crate::presentation::entity_json::compact_entity_json_string(entity)
+}
+
+pub(crate) fn entity_reply_from_output(output: CreateEntityOutput) -> EntityReply {
     EntityReply {
         ok: true,
         id: output.id.raw(),
@@ -126,7 +130,7 @@ fn entity_reply_from_output(output: CreateEntityOutput) -> EntityReply {
     }
 }
 
-fn entity_error_to_status(err: crate::api::RedDBError) -> Status {
+pub(crate) fn entity_error_to_status(err: crate::api::RedDBError) -> Status {
     match err {
         crate::api::RedDBError::NotFound(msg) => Status::not_found(msg),
         crate::api::RedDBError::InvalidConfig(msg)
@@ -138,7 +142,7 @@ fn entity_error_to_status(err: crate::api::RedDBError) -> Status {
     }
 }
 
-fn parse_json_payload(payload_json: &str) -> Result<JsonValue, Status> {
+pub(crate) fn parse_json_payload(payload_json: &str) -> Result<JsonValue, Status> {
     json_from_str::<JsonValue>(payload_json)
         .map_err(|err| Status::invalid_argument(format!("invalid payload_json: {err}")))
 }

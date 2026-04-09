@@ -3,7 +3,7 @@
 //! Stores the database encryption password in the system keyring
 //! so users don't need to enter it every time.
 //!
-//! On Linux: Uses ~/.config/redblue/keyring (encrypted with user-specific key)
+//! On Linux: Uses ~/.config/reddb/keyring (encrypted with user-specific key)
 //! On macOS: Uses Keychain when available (TBD)
 //! On Windows: Uses Credential Manager when available (TBD)
 
@@ -15,7 +15,7 @@ use crate::crypto::aes_gcm::{aes256_gcm_decrypt, aes256_gcm_encrypt};
 use crate::crypto::sha256::sha256;
 use crate::crypto::uuid::Uuid;
 
-const SERVICE_NAME: &str = "redblue";
+const SERVICE_NAME: &str = "reddb";
 const KEYRING_FILE: &str = "keyring.enc";
 
 /// Result of password resolution
@@ -23,7 +23,7 @@ const KEYRING_FILE: &str = "keyring.enc";
 pub enum PasswordSource {
     /// Password from --db-password flag
     Flag(String),
-    /// Password from REDBLUE_DB_KEY environment variable
+    /// Password from REDDB_KEY environment variable
     EnvVar(String),
     /// Password from system keyring
     Keyring(String),
@@ -57,7 +57,7 @@ impl PasswordSource {
 
 /// Resolve password from multiple sources (priority order)
 /// 1. --db-password flag (highest priority)
-/// 2. REDBLUE_DB_KEY environment variable
+/// 2. REDDB_KEY environment variable
 /// 3. System keyring
 /// 4. None (no encryption)
 pub fn resolve_password(flag_password: Option<&str>) -> PasswordSource {
@@ -68,8 +68,8 @@ pub fn resolve_password(flag_password: Option<&str>) -> PasswordSource {
         }
     }
 
-    // Priority 2: Environment variable
-    if let Ok(pwd) = std::env::var("REDBLUE_DB_KEY") {
+    // Priority 2: Environment variable (try REDDB_KEY first, fall back to REDBLUE_DB_KEY)
+    if let Ok(pwd) = std::env::var("REDDB_KEY").or_else(|_| std::env::var("REDBLUE_DB_KEY")) {
         if !pwd.is_empty() {
             return PasswordSource::EnvVar(pwd);
         }
@@ -223,7 +223,7 @@ fn derive_keyring_key() -> [u8; 32] {
     }
 
     // Add a fixed salt for the keyring
-    identity.push_str(":redblue-keyring-v1");
+    identity.push_str(":reddb-keyring-v1");
 
     sha256(identity.as_bytes())
 }
@@ -316,7 +316,7 @@ mod tests {
     #[test]
     fn test_resolve_password_empty_flag() {
         let _lock = KEYRING_TEST_LOCK.lock().unwrap();
-        std::env::remove_var("REDBLUE_DB_KEY");
+        std::env::remove_var("REDDB_KEY");
         let _ = clear_keyring();
 
         // Empty flag should not be used
@@ -329,9 +329,9 @@ mod tests {
         let _lock = KEYRING_TEST_LOCK.lock().unwrap();
         let _ = clear_keyring();
 
-        std::env::set_var("REDBLUE_DB_KEY", "env_test_password");
+        std::env::set_var("REDDB_KEY", "env_test_password");
         let result = resolve_password(None);
-        std::env::remove_var("REDBLUE_DB_KEY");
+        std::env::remove_var("REDDB_KEY");
 
         assert!(matches!(result, PasswordSource::EnvVar(_)));
         if let PasswordSource::EnvVar(pwd) = result {
@@ -341,9 +341,9 @@ mod tests {
 
     #[test]
     fn test_resolve_password_flag_overrides_env() {
-        std::env::set_var("REDBLUE_DB_KEY", "env_password");
+        std::env::set_var("REDDB_KEY", "env_password");
         let result = resolve_password(Some("flag_password"));
-        std::env::remove_var("REDBLUE_DB_KEY");
+        std::env::remove_var("REDDB_KEY");
 
         assert!(matches!(result, PasswordSource::Flag(_)));
     }
@@ -458,7 +458,7 @@ mod tests {
     #[test]
     fn test_resolve_password_keyring_integration() {
         let _lock = KEYRING_TEST_LOCK.lock().unwrap();
-        std::env::remove_var("REDBLUE_DB_KEY");
+        std::env::remove_var("REDDB_KEY");
         let _ = clear_keyring();
 
         // Save to keyring
@@ -477,7 +477,7 @@ mod tests {
     #[test]
     fn test_resolve_password_none_when_empty() {
         let _lock = KEYRING_TEST_LOCK.lock().unwrap();
-        std::env::remove_var("REDBLUE_DB_KEY");
+        std::env::remove_var("REDDB_KEY");
         let _ = clear_keyring();
 
         let result = resolve_password(None);
@@ -491,7 +491,7 @@ mod tests {
         // This might be None in very restricted environments
         if path.is_some() {
             let p = path.unwrap();
-            assert!(p.to_string_lossy().contains("redblue"));
+            assert!(p.to_string_lossy().contains("reddb"));
             assert!(p.to_string_lossy().contains("keyring.enc"));
         }
     }

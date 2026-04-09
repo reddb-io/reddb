@@ -31,7 +31,7 @@
 //! let config = SpillConfig::new()
 //!     .max_memory(512 * 1024 * 1024)  // 512MB
 //!     .spill_threshold(0.8)            // 80%
-//!     .spill_dir("/tmp/redblue-spill");
+//!     .spill_dir("/tmp/reddb-spill");
 //!
 //! let mut manager = SpillManager::new(config);
 //!
@@ -90,7 +90,7 @@ impl SpillConfig {
         Self {
             max_memory: 512 * 1024 * 1024, // 512MB default
             spill_threshold: 0.80,         // Spill at 80%
-            spill_dir: std::env::temp_dir().join("redblue-spill"),
+            spill_dir: std::env::temp_dir().join("reddb-spill"),
             target_after_spill: 0.60,    // Target 60% after spill
             min_spill_size: 1024 * 1024, // 1MB minimum
             access_decay: 0.95,          // 5% decay per check cycle
@@ -784,12 +784,15 @@ mod tests {
     use std::env;
 
     fn test_config() -> SpillConfig {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
         SpillConfig::new()
             .max_memory(1024 * 1024) // 1MB for testing
             .spill_threshold(0.5)
             .target_after_spill(0.3)
             .min_spill_size(100)
-            .spill_dir(env::temp_dir().join("redblue-spill-test"))
+            .spill_dir(env::temp_dir().join(format!("reddb-spill-test-{}-{}", std::process::id(), id)))
     }
 
     #[test]

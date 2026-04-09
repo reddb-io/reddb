@@ -1,7 +1,7 @@
 use super::*;
 
 impl RedDBServer {
-    fn route(&self, request: HttpRequest) -> HttpResponse {
+    pub(crate) fn route(&self, request: HttpRequest) -> HttpResponse {
         let HttpRequest {
             method,
             path,
@@ -731,7 +731,7 @@ impl RedDBServer {
         }
     }
 
-    fn resolve_projection_payload(
+    pub(crate) fn resolve_projection_payload(
         &self,
         payload: &JsonValue,
     ) -> Result<Option<RuntimeGraphProjection>, HttpResponse> {

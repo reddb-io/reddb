@@ -196,6 +196,10 @@ fn apply_entity_type_alias(
             entity_types.push("table".to_string());
             Ok(true)
         }
+        "kv" | "kvs" | "keyvalue" | "keyvalues" => {
+            entity_types.push("kv".to_string());
+            Ok(true)
+        }
         "document" | "doc" | "documents" => {
             capabilities.push("document".to_string());
             Ok(true)
@@ -231,6 +235,10 @@ fn normalize_capability_filter(
         "all" | "any" | "*" => Ok(false),
         "table" => {
             capabilities.push("table".to_string());
+            Ok(true)
+        }
+        "kv" | "kvs" | "keyvalue" | "keyvalues" => {
+            capabilities.push("kv".to_string());
             Ok(true)
         }
         "structured" => {
@@ -309,6 +317,28 @@ fn parse_optional_query(payload: &JsonValue) -> RedDBResult<Option<String>> {
             }
             Ok(Some(query.to_string()))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_entity_type_alias_accepts_kv_shortcuts() {
+        let mut entity_types = Vec::new();
+        let mut capabilities = Vec::new();
+
+        assert!(apply_entity_type_alias("kv", &mut entity_types, &mut capabilities).is_ok());
+        assert_eq!(entity_types, vec!["kv".to_string()]);
+        assert!(capabilities.is_empty());
+    }
+
+    #[test]
+    fn parse_capability_alias_accepts_kv_shortcuts() {
+        let mut capabilities = Vec::new();
+        assert!(normalize_capability_filter("key-value", &mut capabilities).is_ok());
+        assert_eq!(capabilities, vec!["kv".to_string()]);
     }
 }
 
