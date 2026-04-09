@@ -25,8 +25,6 @@ COPY proto/ proto/
 # Create dummy binaries so dependency compilation is cached before source copy
 RUN mkdir -p src/bin \
     && echo 'fn main() {}' > src/bin/red.rs \
-    && echo 'fn main() {}' > src/bin/reddb.rs \
-    && echo '#[tokio::main] async fn main() {}' > src/bin/reddb-grpc.rs \
     && echo '' > src/lib.rs \
     && cargo build --release --locked --bin red 2>/dev/null || true \
     && rm -rf src

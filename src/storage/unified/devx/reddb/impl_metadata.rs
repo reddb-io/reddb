@@ -2,19 +2,170 @@ use super::*;
 
 impl RedDB {
     pub fn enforce_retention_policy(&self) -> Result<(), Box<dyn std::error::Error>> {
-        if self.options.mode != StorageMode::Persistent || self.options.read_only {
+        if self.options.read_only {
             return Ok(());
         }
-        let Some(path) = self.path() else {
-            return Ok(());
-        };
 
-        let Ok(mut metadata) = self.load_or_bootstrap_physical_metadata(true) else {
-            return Ok(());
-        };
+        let mut deleted_count = 0usize;
 
-        self.prune_export_registry(&mut metadata.exports);
-        metadata.save_for_data_path(path)?;
+        // Export pruning is only meaningful for persistent mode where we
+        // have a metadata sidecar that tracks file-backed export artifacts.
+        if self.options.mode == StorageMode::Persistent {
+            let Some(path) = self.path() else {
+                return Ok(());
+            };
+
+            let Ok(mut metadata) = self.load_or_bootstrap_physical_metadata(true) else {
+                return Ok(());
+            };
+
+            self.prune_export_registry(&mut metadata.exports);
+            metadata.save_for_data_path(path)?;
+            deleted_count += 1;
+        }
+
+        deleted_count += self.sweep_ttl_expired_entities()?;
+
+        if deleted_count > 0 {
+            self.log_retention_delete_count(deleted_count);
+        }
+
+        Ok(())
+    }
+
+    fn sweep_ttl_expired_entities(&self) -> Result<usize, Box<dyn std::error::Error>> {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+
+        let mut to_delete = Vec::<(String, EntityId)>::new();
+
+        let mut absolute_expired = self.expired_entities_by_expires_at(now_ms)?;
+        to_delete.append(&mut absolute_expired);
+
+        let mut relative_expired = self.expired_entities_by_ttl(now_ms)?;
+        to_delete.append(&mut relative_expired);
+
+        to_delete.sort_unstable();
+        to_delete.dedup();
+
+        let mut deleted = 0usize;
+        for (collection, id) in to_delete {
+            match self.store.delete(&collection, id) {
+                Ok(true) => deleted = deleted.saturating_add(1),
+                Ok(false) => {}
+                Err(err) => {
+                    return Err(format!(
+                        "failed deleting expired entity {id} from collection '{collection}': {err:?}"
+                    )
+                    .into());
+                }
+            }
+        }
+
+        Ok(deleted)
+    }
+
+    fn expired_entities_by_expires_at(
+        &self,
+        now_ms: u64,
+    ) -> Result<Vec<(String, EntityId)>, Box<dyn std::error::Error>> {
+        let mut ids = self.store.filter_metadata_all(&[(
+            "expires_at".to_string(),
+            MetadataFilter::Le(MetadataValue::Timestamp(now_ms)),
+        )]);
+
+        if let Ok(now_ms_i64) = i64::try_from(now_ms) {
+            ids.extend(self.store.filter_metadata_all(&[(
+                "expires_at".to_string(),
+                MetadataFilter::Le(MetadataValue::Int(now_ms_i64)),
+            )]));
+        }
+
+        if let Ok(now_ms_u64_from_float) = (now_ms as f64).try_into() {
+            if now_ms_u64_from_float == now_ms {
+                ids.extend(self.store.filter_metadata_all(&[(
+                    "expires_at".to_string(),
+                    MetadataFilter::Le(MetadataValue::Float(now_ms as f64)),
+                )]));
+            }
+        }
+
+        Ok(ids)
+    }
+
+    fn expired_entities_by_ttl(
+        &self,
+        now_ms: u64,
+    ) -> Result<Vec<(String, EntityId)>, Box<dyn std::error::Error>> {
+        let mut candidates = Vec::<(String, EntityId)>::new();
+
+        let ttl_ms_candidates = self
+            .store
+            .filter_metadata_all(&[("ttl_ms".to_string(), MetadataFilter::IsNotNull)]);
+        candidates.extend(ttl_ms_candidates);
+
+        let ttl_candidates = self
+            .store
+            .filter_metadata_all(&[("ttl".to_string(), MetadataFilter::IsNotNull)]);
+        candidates.extend(ttl_candidates);
+
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        candidates.sort_unstable();
+        candidates.dedup();
+
+        let mut expired = Vec::<(String, EntityId)>::new();
+        for (collection, entity_id) in candidates {
+            let Some(entity) = self.store.get(&collection, entity_id) else {
+                continue;
+            };
+
+            let Some(metadata) = self.store.get_metadata(&collection, entity_id) else {
+                continue;
+            };
+
+            let ttl_ms = metadata
+                .get("ttl_ms")
+                .and_then(|value| Self::metadata_u64(value));
+            let ttl_secs = ttl_ms.and_then(|_| None).or_else(|| {
+                metadata.get("ttl").and_then(|value| {
+                    Self::metadata_u64(value).and_then(|value_ms| value_ms.saturating_mul(1000))
+                })
+            });
+
+            let Some(ttl_ms) = ttl_ms.or(ttl_secs) else {
+                continue;
+            };
+
+            let created_at_ms = entity.created_at.saturating_mul(1000);
+            let expiry_ms = created_at_ms.saturating_add(ttl_ms);
+            if expiry_ms <= now_ms {
+                expired.push((collection, entity_id));
+            }
+        }
+
+        Ok(expired)
+    }
+
+    fn metadata_u64(value: &MetadataValue) -> Option<u64> {
+        match value {
+            MetadataValue::Int(v) if *v >= 0 => Some(*v as u64),
+            MetadataValue::Timestamp(v) => Some(*v),
+            MetadataValue::Float(v) => Some(v.max(0.0).round() as u64),
+            MetadataValue::String(v) => v.parse::<u64>().ok(),
+            _ => None,
+        }
+    }
+
+    fn log_retention_delete_count(&self, count: usize) {
+        if !crate::application::ports_impls_native::LOG_RETENTION_EVENTS {
+            return;
+        };
         Ok(())
     }
 
