@@ -545,7 +545,6 @@ pub struct LootEntry {
     pub metadata: LootMetadata,
 }
 
-
 mod entry_impl;
 // ==================== Helper Functions ====================
 
@@ -682,7 +681,6 @@ pub struct LootSegment {
     index: HashMap<String, usize>,
     sorted: bool,
 }
-
 
 mod segment_impl;
 // ==================== Loot Segment View (Zero-Copy) ====================

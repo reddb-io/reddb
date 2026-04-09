@@ -1,10 +1,14 @@
 use super::*;
 
-pub(crate) fn parse_serverless_readiness_requirements(payload: &JsonValue) -> Result<Vec<String>, String> {
+pub(crate) fn parse_serverless_readiness_requirements(
+    payload: &JsonValue,
+) -> Result<Vec<String>, String> {
     crate::application::serverless_payload::parse_serverless_readiness_requirements(payload)
 }
 
-pub(crate) fn parse_serverless_reclaim_operations(payload: &JsonValue) -> Result<Vec<String>, String> {
+pub(crate) fn parse_serverless_reclaim_operations(
+    payload: &JsonValue,
+) -> Result<Vec<String>, String> {
     crate::application::serverless_payload::parse_serverless_reclaim_operations(payload)
 }
 
@@ -53,8 +57,8 @@ pub(crate) fn serverless_readiness_summary_to_json(
 }
 
 pub(crate) fn deployment_profile_from_token(value: &str) -> Option<DeploymentProfile> {
-    crate::application::serverless_payload::deployment_profile_from_token(value).map(
-        |profile| match profile {
+    crate::application::serverless_payload::deployment_profile_from_token(value).map(|profile| {
+        match profile {
             crate::application::serverless_payload::DeploymentProfileToken::Embedded => {
                 DeploymentProfile::Embedded
             }
@@ -64,6 +68,6 @@ pub(crate) fn deployment_profile_from_token(value: &str) -> Option<DeploymentPro
             crate::application::serverless_payload::DeploymentProfileToken::Serverless => {
                 DeploymentProfile::Serverless
             }
-        },
-    )
+        }
+    })
 }

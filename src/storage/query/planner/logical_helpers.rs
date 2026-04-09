@@ -7,7 +7,7 @@ use crate::storage::query::is_universal_entity_source as is_universal_query_sour
 use crate::storage::schema::Value;
 use crate::storage::RedDB;
 
-use super::{AccessPathDecision, CardinalityEstimate, CanonicalLogicalNode, CostEstimator};
+use super::{AccessPathDecision, CanonicalLogicalNode, CardinalityEstimate, CostEstimator};
 
 pub(crate) fn wrap_unary_plan(
     operator: &str,
@@ -32,7 +32,9 @@ pub(crate) fn wrap_unary_plan(
     }
 }
 
-pub(crate) fn btree_details<const N: usize>(pairs: [(&str, String); N]) -> BTreeMap<String, String> {
+pub(crate) fn btree_details<const N: usize>(
+    pairs: [(&str, String); N],
+) -> BTreeMap<String, String> {
     pairs
         .into_iter()
         .map(|(key, value)| (key.to_string(), value))
@@ -192,12 +194,13 @@ pub(crate) fn table_access_path_hint(db: &RedDB, query: &TableQuery) -> AccessPa
             .iter()
             .find(|status| status.kind == "document.pathvalue")
         {
-        return AccessPathDecision {
-            path: "document_path_index_seek",
-            index_hint: Some(index.name.clone()),
-            reason: "document path/value index is declared, operational, and enabled".to_string(),
-            warning: None,
-        };
+            return AccessPathDecision {
+                path: "document_path_index_seek",
+                index_hint: Some(index.name.clone()),
+                reason: "document path/value index is declared, operational, and enabled"
+                    .to_string(),
+                warning: None,
+            };
         }
     }
 
@@ -227,7 +230,10 @@ pub(crate) fn table_access_path_hint(db: &RedDB, query: &TableQuery) -> AccessPa
 }
 
 pub(crate) fn uses_document_path_filter(db: &RedDB, query: &TableQuery) -> bool {
-    query.filter.as_ref().is_some_and(|filter| filter_uses_document_path(filter, query))
+    query
+        .filter
+        .as_ref()
+        .is_some_and(|filter| filter_uses_document_path(filter, query))
         || (query.filter.is_some()
             && !is_universal_entity_source(query.table.as_str())
             && is_document_like_collection(db, query.table.as_str())
@@ -251,7 +257,8 @@ pub(crate) fn is_document_projection(db: &RedDB, query: &TableQuery) -> bool {
 }
 
 pub(crate) fn uses_document_path_sort(query: &TableQuery) -> bool {
-    query.order_by
+    query
+        .order_by
         .iter()
         .any(|clause| field_ref_uses_document_path(&clause.field, query))
 }
@@ -263,7 +270,8 @@ pub(crate) fn requires_implicit_entity_sort(query: &TableQuery) -> bool {
 }
 
 pub(crate) fn uses_document_path_join_sort(query: &JoinQuery) -> bool {
-    query.order_by
+    query
+        .order_by
         .iter()
         .any(|clause| join_field_ref_uses_document_path(&clause.field, query))
 }
@@ -277,7 +285,9 @@ pub(crate) fn requires_implicit_entity_sort_join(query: &JoinQuery) -> bool {
         QueryExpr::Table(right) => is_universal_query_source(right.table.as_str()),
         _ => false,
     };
-    (left_universal || right_universal) && query.order_by.is_empty() && (query.limit.is_some() || query.offset.is_some())
+    (left_universal || right_universal)
+        && query.order_by.is_empty()
+        && (query.limit.is_some() || query.offset.is_some())
 }
 
 pub(crate) fn filter_uses_document_path(filter: &Filter, query: &TableQuery) -> bool {
@@ -302,8 +312,7 @@ pub(crate) fn projection_uses_document_path(projection: &Projection, query: &Tab
     match projection {
         Projection::Column(name) | Projection::Alias(name, _) => {
             name.split_once('.').is_some_and(|(head, tail)| {
-                tail.contains('.')
-                    || (head != query.table && query.alias.as_deref() != Some(head))
+                tail.contains('.') || (head != query.table && query.alias.as_deref() != Some(head))
             })
         }
         Projection::Field(field, _) => field_ref_uses_document_path(field, query),
@@ -352,6 +361,14 @@ pub(crate) fn join_expr_exposes_field_table(expr: &QueryExpr, table: &str) -> bo
         QueryExpr::Vector(query) => query.alias.as_deref() == Some(table) || table == "vector",
         QueryExpr::Hybrid(query) => query.alias.as_deref() == Some(table) || table == "hybrid",
         QueryExpr::Join(query) => join_query_exposes_field_table(query, table),
+        QueryExpr::Insert(_)
+        | QueryExpr::Update(_)
+        | QueryExpr::Delete(_)
+        | QueryExpr::CreateTable(_)
+        | QueryExpr::DropTable(_)
+        | QueryExpr::AlterTable(_)
+        | QueryExpr::GraphCommand(_)
+        | QueryExpr::SearchCommand(_) => false,
     }
 }
 
@@ -360,7 +377,12 @@ pub(crate) fn is_document_like_collection(db: &RedDB, collection: &str) -> bool 
         .collections
         .into_iter()
         .find(|descriptor| descriptor.name == collection)
-        .map(|descriptor| matches!(descriptor.model, crate::catalog::CollectionModel::Document | crate::catalog::CollectionModel::Mixed))
+        .map(|descriptor| {
+            matches!(
+                descriptor.model,
+                crate::catalog::CollectionModel::Document | crate::catalog::CollectionModel::Mixed
+            )
+        })
         .unwrap_or(false)
 }
 
@@ -433,16 +455,9 @@ pub(crate) fn vector_access_path_hint(db: &RedDB, collection: &str) -> AccessPat
 }
 
 pub(crate) fn graph_access_path_hint(db: &RedDB) -> AccessPathDecision {
-    if let Some(index) = db
-        .index_statuses()
-        .into_iter()
-        .find(|status| {
-            status.kind == "graph.adjacency"
-                && status.declared
-                && status.operational
-                && status.enabled
-        })
-    {
+    if let Some(index) = db.index_statuses().into_iter().find(|status| {
+        status.kind == "graph.adjacency" && status.declared && status.operational && status.enabled
+    }) {
         return AccessPathDecision {
             path: "graph_adjacency_expand",
             index_hint: Some(index.name),
@@ -471,7 +486,10 @@ pub(crate) fn index_lifecycle_warning(
         "stale" => Some(format!("index {} is stale", status.name)),
         "failed" => Some(format!("index {} is failed", status.name)),
         "building" => Some(format!("index {} is still building", status.name)),
-        "declared" => Some(format!("index {} is declared but not operational", status.name)),
+        "declared" => Some(format!(
+            "index {} is declared but not operational",
+            status.name
+        )),
         "orphaned-operational" => Some(format!(
             "index {} is operational without matching declaration",
             status.name
@@ -503,7 +521,10 @@ pub(crate) fn join_strategy_reason(query: &JoinQuery) -> &'static str {
 }
 
 pub(crate) fn has_explicit_projection(projections: &[Projection]) -> bool {
-    !projections.is_empty() && !projections.iter().all(|projection| matches!(projection, Projection::All))
+    !projections.is_empty()
+        && !projections
+            .iter()
+            .all(|projection| matches!(projection, Projection::All))
 }
 
 pub(crate) fn projection_summary(projections: &[Projection]) -> String {
@@ -515,9 +536,9 @@ pub(crate) fn projection_summary(projections: &[Projection]) -> String {
             Projection::Alias(name, alias) => format!("{name} AS {alias}"),
             Projection::Function(name, args) => format!("{name}({})", args.len()),
             Projection::Expression(_, alias) => alias.clone().unwrap_or_else(|| "expr".to_string()),
-            Projection::Field(field, alias) => alias
-                .clone()
-                .unwrap_or_else(|| field_ref_summary(field)),
+            Projection::Field(field, alias) => {
+                alias.clone().unwrap_or_else(|| field_ref_summary(field))
+            }
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -541,21 +562,34 @@ pub(crate) fn order_by_summary(order_by: &[OrderByClause]) -> String {
 pub(crate) fn filter_summary(filter: &Filter) -> String {
     match filter {
         Filter::Compare { field, op, value } => {
-            format!("{} {} {}", field_ref_summary(field), op, summarize_value(value))
+            format!(
+                "{} {} {}",
+                field_ref_summary(field),
+                op,
+                summarize_value(value)
+            )
         }
-        Filter::And(left, right) => format!("({}) AND ({})", filter_summary(left), filter_summary(right)),
-        Filter::Or(left, right) => format!("({}) OR ({})", filter_summary(left), filter_summary(right)),
+        Filter::And(left, right) => {
+            format!("({}) AND ({})", filter_summary(left), filter_summary(right))
+        }
+        Filter::Or(left, right) => {
+            format!("({}) OR ({})", filter_summary(left), filter_summary(right))
+        }
         Filter::Not(inner) => format!("NOT ({})", filter_summary(inner)),
         Filter::IsNull(field) => format!("{} IS NULL", field_ref_summary(field)),
         Filter::IsNotNull(field) => format!("{} IS NOT NULL", field_ref_summary(field)),
-        Filter::In { field, values } => format!("{} IN [{}]", field_ref_summary(field), values.len()),
+        Filter::In { field, values } => {
+            format!("{} IN [{}]", field_ref_summary(field), values.len())
+        }
         Filter::Between { field, low, high } => format!(
             "{} BETWEEN {} AND {}",
             field_ref_summary(field),
             summarize_value(low),
             summarize_value(high)
         ),
-        Filter::Like { field, pattern } => format!("{} LIKE {:?}", field_ref_summary(field), pattern),
+        Filter::Like { field, pattern } => {
+            format!("{} LIKE {:?}", field_ref_summary(field), pattern)
+        }
         Filter::StartsWith { field, prefix } => {
             format!("{} STARTS WITH {:?}", field_ref_summary(field), prefix)
         }
@@ -600,6 +634,14 @@ pub(crate) fn query_expr_kind(expr: &QueryExpr) -> &'static str {
         QueryExpr::Path(_) => "path",
         QueryExpr::Vector(_) => "vector",
         QueryExpr::Hybrid(_) => "hybrid",
+        QueryExpr::Insert(_) => "insert",
+        QueryExpr::Update(_) => "update",
+        QueryExpr::Delete(_) => "delete",
+        QueryExpr::CreateTable(_) => "create_table",
+        QueryExpr::DropTable(_) => "drop_table",
+        QueryExpr::AlterTable(_) => "alter_table",
+        QueryExpr::GraphCommand(_) => "graph_command",
+        QueryExpr::SearchCommand(_) => "search_command",
     }
 }
 
@@ -623,6 +665,68 @@ pub(crate) fn summarize_value(value: &Value) -> String {
         Value::VectorRef(collection, vector_id) => format!("vector_ref({collection}:{vector_id})"),
         Value::NodeRef(value) => value.clone(),
         Value::EdgeRef(value) => value.clone(),
+        Value::Color([r, g, b]) => format!("#{:02X}{:02X}{:02X}", r, g, b),
+        Value::Email(value) => value.clone(),
+        Value::Url(value) => value.clone(),
+        Value::Phone(n) => format!("+{}", n),
+        Value::Semver(packed) => format!(
+            "{}.{}.{}",
+            packed / 1_000_000,
+            (packed / 1_000) % 1_000,
+            packed % 1_000
+        ),
+        Value::Cidr(ip, prefix) => format!(
+            "{}.{}.{}.{}/{}",
+            (ip >> 24) & 0xFF,
+            (ip >> 16) & 0xFF,
+            (ip >> 8) & 0xFF,
+            ip & 0xFF,
+            prefix
+        ),
+        Value::Date(days) => format!("date({})", days),
+        Value::Time(ms) => format!("time({})", ms),
+        Value::Decimal(v) => format!("{:.4}", *v as f64 / 10_000.0),
+        Value::EnumValue(i) => format!("enum({})", i),
+        Value::Array(elems) => format!("array({})", elems.len()),
+        Value::TimestampMs(ms) => format!("timestamp_ms({})", ms),
+        Value::Ipv4(ip) => format!(
+            "{}.{}.{}.{}",
+            (ip >> 24) & 0xFF,
+            (ip >> 16) & 0xFF,
+            (ip >> 8) & 0xFF,
+            ip & 0xFF
+        ),
+        Value::Ipv6(bytes) => format!("{}", std::net::Ipv6Addr::from(*bytes)),
+        Value::Subnet(ip, mask) => {
+            let prefix = mask.leading_ones();
+            format!(
+                "{}.{}.{}.{}/{}",
+                (ip >> 24) & 0xFF,
+                (ip >> 16) & 0xFF,
+                (ip >> 8) & 0xFF,
+                ip & 0xFF,
+                prefix
+            )
+        }
+        Value::Port(p) => format!("port({})", p),
+        Value::Latitude(micro) => format!("lat({:.6})", *micro as f64 / 1_000_000.0),
+        Value::Longitude(micro) => format!("lon({:.6})", *micro as f64 / 1_000_000.0),
+        Value::GeoPoint(lat, lon) => format!(
+            "geo({:.6},{:.6})",
+            *lat as f64 / 1_000_000.0,
+            *lon as f64 / 1_000_000.0
+        ),
+        Value::Country2(c) => format!("country({})", String::from_utf8_lossy(c)),
+        Value::Country3(c) => format!("country({})", String::from_utf8_lossy(c)),
+        Value::Lang2(c) => format!("lang({})", String::from_utf8_lossy(c)),
+        Value::Lang5(c) => format!("lang({})", String::from_utf8_lossy(c)),
+        Value::Currency(c) => format!("currency({})", String::from_utf8_lossy(c)),
+        Value::ColorAlpha([r, g, b, a]) => format!("#{:02X}{:02X}{:02X}{:02X}", r, g, b, a),
+        Value::BigInt(v) => format!("bigint({})", v),
+        Value::KeyRef(col, key) => format!("key_ref({}:{})", col, key),
+        Value::DocRef(col, id) => format!("doc_ref({}#{})", col, id),
+        Value::TableRef(name) => format!("table_ref({})", name),
+        Value::PageRef(page_id) => format!("page_ref({})", page_id),
     }
 }
 

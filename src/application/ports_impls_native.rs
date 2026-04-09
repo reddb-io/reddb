@@ -100,15 +100,11 @@ impl RuntimeNativePort for RedDBRuntime {
         RedDBRuntime::warmup_native_vector_artifact(self, collection, artifact_kind)
     }
 
-    fn inspect_native_vector_artifacts(
-        &self,
-    ) -> RedDBResult<NativeVectorArtifactBatchInspection> {
+    fn inspect_native_vector_artifacts(&self) -> RedDBResult<NativeVectorArtifactBatchInspection> {
         RedDBRuntime::inspect_native_vector_artifacts(self)
     }
 
-    fn warmup_native_vector_artifacts(
-        &self,
-    ) -> RedDBResult<NativeVectorArtifactBatchInspection> {
+    fn warmup_native_vector_artifacts(&self) -> RedDBResult<NativeVectorArtifactBatchInspection> {
         RedDBRuntime::warmup_native_vector_artifacts(self)
     }
 
@@ -160,4 +156,3 @@ impl RuntimeNativePort for RedDBRuntime {
         RedDBRuntime::readiness_for_repair_serverless(self)
     }
 }
-

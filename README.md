@@ -117,7 +117,8 @@ Run HTTP server:
 docker run --rm -it \
   -p 8080:8080 \
   -v $(pwd)/data:/data \
-  --name reddb-http reddb
+  --name reddb-http \
+  reddb red server --http --path /data/reddb.rdb --bind 0.0.0.0:8080
 ```
 
 Run gRPC server:
@@ -127,7 +128,7 @@ docker run --rm -it \
   -p 50051:50051 \
   -v $(pwd)/data:/data \
   --name reddb-grpc \
-  reddb reddb-grpc --path /data/reddb.rdb --bind 0.0.0.0:50051
+  reddb red server --grpc --path /data/reddb.rdb --bind 0.0.0.0:50051
 ```
 
 Persisting data:
@@ -139,14 +140,14 @@ mkdir -p data
 docker run --rm -d \
   -p 8080:8080 \
   -v $(pwd)/data:/data \
-  reddb
+  reddb red server --http --path /data/reddb.rdb --bind 0.0.0.0:8080
 ```
 
 ### 1) Run the HTTP server
 
 ```bash
 mkdir -p ./data
-reddb --path ./data/reddb.rdb --bind 127.0.0.1:8080
+red server --http --path ./data/reddb.rdb --bind 127.0.0.1:8080
 ```
 
 ### 2) Create row, node, vector in one dataset
@@ -204,8 +205,29 @@ curl -s http://127.0.0.1:8080/stats
 ### Optional: run gRPC server
 
 ```bash
-reddb-grpc --path ./data/reddb.rdb --bind 127.0.0.1:50051
+red server --grpc --path ./data/reddb.rdb --bind 127.0.0.1:50051
 ```
+
+### Optional: install as a service on Linux
+
+Build and install the unified binary:
+
+```bash
+cargo build --release --bin red
+sudo install -m 0755 target/release/red /usr/local/bin/red
+```
+
+Install and enable a `systemd` unit that auto-starts on boot:
+
+```bash
+sudo ./scripts/install-systemd-service.sh \
+  --binary /usr/local/bin/red \
+  --grpc \
+  --path /var/lib/reddb/data.rdb \
+  --bind 0.0.0.0:50051
+```
+
+That unit is configured with `Restart=always` and `systemctl enable`, so it comes back after reboot.
 
 ```bash
 grpcurl \

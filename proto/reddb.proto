@@ -104,6 +104,27 @@ service RedDb {
   rpc ApplyRetention(Empty) returns (OperationReply);
   rpc DeleteEntity(DeleteEntityRequest) returns (OperationReply);
   rpc Checkpoint(Empty) returns (OperationReply);
+
+  // Replication
+  rpc ReplicationStatus(Empty) returns (PayloadReply);
+  rpc PullWalRecords(JsonPayloadRequest) returns (PayloadReply);
+  rpc ReplicationSnapshot(Empty) returns (PayloadReply);
+
+  // DDL
+  rpc CreateCollection(JsonPayloadRequest) returns (PayloadReply);
+  rpc DropCollection(JsonPayloadRequest) returns (OperationReply);
+  rpc DescribeCollection(CollectionRequest) returns (PayloadReply);
+
+  // Auth
+  rpc AuthBootstrap(JsonPayloadRequest) returns (PayloadReply);
+  rpc AuthLogin(JsonPayloadRequest) returns (PayloadReply);
+  rpc AuthCreateUser(JsonPayloadRequest) returns (PayloadReply);
+  rpc AuthDeleteUser(JsonPayloadRequest) returns (PayloadReply);
+  rpc AuthListUsers(Empty) returns (PayloadReply);
+  rpc AuthCreateApiKey(JsonPayloadRequest) returns (PayloadReply);
+  rpc AuthRevokeApiKey(JsonPayloadRequest) returns (PayloadReply);
+  rpc AuthChangePassword(JsonPayloadRequest) returns (PayloadReply);
+  rpc AuthWhoAmI(Empty) returns (PayloadReply);
 }
 
 message Empty {}

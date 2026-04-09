@@ -38,6 +38,9 @@ pub mod wal;
 // Encryption Layer (Security)
 pub mod encryption;
 
+// Remote Storage Backend Abstraction (S3, R2, GCS, Turso, D1)
+pub mod backend;
+
 // Keyring integration for secure password storage
 pub mod keyring;
 
@@ -51,6 +54,7 @@ pub mod query;
 pub(crate) mod unified;
 
 // Public surface re-used by the rest of the codebase.
+pub use backend::{BackendError, LocalBackend, RemoteBackend};
 pub use client::{
     ActionConfig, ActionRecorder, PasswordSource, PersistenceConfig, PersistenceManager,
     QueryManager,
@@ -129,6 +133,10 @@ pub use unified::{
     MetadataType,
 
     MetadataValue,
+    // =========================================================================
+    // PRIMARY INTERFACE - Use these for all new code
+    // =========================================================================
+    NativeHeaderRepairPolicy,
     NodeData,
     QueryResultItem,
     RefQueryBuilder,
@@ -145,6 +153,7 @@ pub use unified::{
     SegmentManager,
     SegmentState,
     SegmentStats,
+    SimilarResult,
     SortOrder,
     SparseVector,
     StoreError,
@@ -159,12 +168,6 @@ pub use unified::{
     UnifiedMetadataFilter,
     // Segments
     UnifiedSegment,
-    // =========================================================================
-    // PRIMARY INTERFACE - Use these for all new code
-    // =========================================================================
-
-    NativeHeaderRepairPolicy,
-    SimilarResult,
     // Store - THE primary storage interface
     UnifiedStore,
     UnifiedStore as Store,

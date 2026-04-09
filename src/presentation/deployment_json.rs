@@ -20,8 +20,14 @@ pub(crate) fn deployment_profile_json(profile: DeploymentProfileView) -> JsonVal
         JsonValue::String(description.to_string()),
     );
     object.insert("allowed_endpoints".to_string(), string_array_json(allowed));
-    object.insert("forbidden_endpoints".to_string(), string_array_json(forbidden));
-    object.insert("host_opaque_endpoints".to_string(), string_array_json(opaque));
+    object.insert(
+        "forbidden_endpoints".to_string(),
+        string_array_json(forbidden),
+    );
+    object.insert(
+        "host_opaque_endpoints".to_string(),
+        string_array_json(opaque),
+    );
     object.insert(
         "mandatory_bootstrap_apis".to_string(),
         string_array_json(mandatory),

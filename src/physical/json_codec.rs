@@ -113,8 +113,7 @@ pub(super) fn manifest_from_json(value: &JsonValue) -> io::Result<SchemaManifest
     options.read_only = json_bool_required(options_object, "read_only")?;
     options.create_if_missing = json_bool_required(options_object, "create_if_missing")?;
     options.verify_checksums = json_bool_required(options_object, "verify_checksums")?;
-    options.auto_checkpoint_pages =
-        json_u32_required(options_object, "auto_checkpoint_pages")?;
+    options.auto_checkpoint_pages = json_u32_required(options_object, "auto_checkpoint_pages")?;
     options.cache_pages = json_usize_required(options_object, "cache_pages")?;
     options.snapshot_retention = options_object
         .get("snapshot_retention")
@@ -135,22 +134,28 @@ pub(super) fn manifest_from_json(value: &JsonValue) -> io::Result<SchemaManifest
         .map(|metadata| {
             metadata
                 .iter()
-                .filter_map(|(key, value)| value.as_str().map(|value| (key.clone(), value.to_string())))
+                .filter_map(|(key, value)| {
+                    value.as_str().map(|value| (key.clone(), value.to_string()))
+                })
                 .collect()
         })
         .unwrap_or_default();
-    if let Some(capabilities) = options_object.get("capabilities").and_then(JsonValue::as_array) {
-        options.feature_gates = capabilities.iter().fold(Default::default(), |set, value| {
-            match value.as_str() {
-                Some("table") => set.with(crate::api::Capability::Table),
-                Some("graph") => set.with(crate::api::Capability::Graph),
-                Some("vector") => set.with(crate::api::Capability::Vector),
-                Some("fulltext") => set.with(crate::api::Capability::FullText),
-                Some("security") => set.with(crate::api::Capability::Security),
-                Some("encryption") => set.with(crate::api::Capability::Encryption),
-                _ => set,
-            }
-        });
+    if let Some(capabilities) = options_object
+        .get("capabilities")
+        .and_then(JsonValue::as_array)
+    {
+        options.feature_gates =
+            capabilities
+                .iter()
+                .fold(Default::default(), |set, value| match value.as_str() {
+                    Some("table") => set.with(crate::api::Capability::Table),
+                    Some("graph") => set.with(crate::api::Capability::Graph),
+                    Some("vector") => set.with(crate::api::Capability::Vector),
+                    Some("fulltext") => set.with(crate::api::Capability::FullText),
+                    Some("security") => set.with(crate::api::Capability::Security),
+                    Some("encryption") => set.with(crate::api::Capability::Encryption),
+                    _ => set,
+                });
     }
 
     Ok(SchemaManifest {
@@ -166,12 +171,18 @@ pub(super) fn catalog_to_json(catalog: &CatalogSnapshot) -> JsonValue {
     let mut stats = Map::new();
     for (name, stat) in &catalog.stats_by_collection {
         let mut entry = Map::new();
-        entry.insert("entities".to_string(), JsonValue::Number(stat.entities as f64));
+        entry.insert(
+            "entities".to_string(),
+            JsonValue::Number(stat.entities as f64),
+        );
         entry.insert(
             "cross_refs".to_string(),
             JsonValue::Number(stat.cross_refs as f64),
         );
-        entry.insert("segments".to_string(), JsonValue::Number(stat.segments as f64));
+        entry.insert(
+            "segments".to_string(),
+            JsonValue::Number(stat.segments as f64),
+        );
         stats.insert(name.clone(), JsonValue::Object(entry));
     }
 
@@ -201,7 +212,10 @@ pub(super) fn catalog_to_json(catalog: &CatalogSnapshot) -> JsonValue {
 
 pub(super) fn catalog_from_json(value: &JsonValue) -> io::Result<CatalogSnapshot> {
     let object = expect_object(value, "catalog")?;
-    let stats = expect_object(json_required(object, "stats_by_collection")?, "catalog.stats")?;
+    let stats = expect_object(
+        json_required(object, "stats_by_collection")?,
+        "catalog.stats",
+    )?;
     let mut stats_by_collection = BTreeMap::new();
     for (name, value) in stats {
         let entry = expect_object(value, "catalog.stats entry")?;
@@ -220,11 +234,12 @@ pub(super) fn catalog_from_json(value: &JsonValue) -> io::Result<CatalogSnapshot
         total_entities: json_usize_required(object, "total_entities")?,
         total_collections: json_usize_required(object, "total_collections")?,
         stats_by_collection,
-        updated_at: UNIX_EPOCH + std::time::Duration::from_millis(
-            json_u128_required(object, "updated_at_unix_ms")?
-                .try_into()
-                .unwrap_or(u64::MAX),
-        ),
+        updated_at: UNIX_EPOCH
+            + std::time::Duration::from_millis(
+                json_u128_required(object, "updated_at_unix_ms")?
+                    .try_into()
+                    .unwrap_or(u64::MAX),
+            ),
     })
 }
 
@@ -261,7 +276,10 @@ pub(super) fn superblock_to_json(superblock: &SuperblockHeader) -> JsonValue {
 
 pub(super) fn superblock_from_json(value: &JsonValue) -> io::Result<SuperblockHeader> {
     let object = expect_object(value, "superblock")?;
-    let roots = expect_object(json_required(object, "collection_roots")?, "superblock.roots")?;
+    let roots = expect_object(
+        json_required(object, "collection_roots")?,
+        "superblock.roots",
+    )?;
     let mut collection_roots = BTreeMap::new();
     for (name, root) in roots {
         collection_roots.insert(name.clone(), json_u64_value(root)?);
@@ -321,7 +339,11 @@ pub(super) fn manifest_event_from_json(value: &JsonValue) -> io::Result<Manifest
             "update" => ManifestEventKind::Update,
             "remove" => ManifestEventKind::Remove,
             "checkpoint" => ManifestEventKind::Checkpoint,
-            other => return Err(invalid_data(format!("unsupported manifest event kind '{other}'"))),
+            other => {
+                return Err(invalid_data(format!(
+                    "unsupported manifest event kind '{other}'"
+                )))
+            }
         },
         block: block_reference_from_json(json_required(object, "block")?)?,
         snapshot_min: json_u64_required(object, "snapshot_min")?,
@@ -333,8 +355,14 @@ pub(super) fn manifest_event_from_json(value: &JsonValue) -> io::Result<Manifest
 
 pub(super) fn manifest_pointers_to_json(pointers: &ManifestPointers) -> JsonValue {
     let mut object = Map::new();
-    object.insert("oldest".to_string(), block_reference_to_json(pointers.oldest));
-    object.insert("newest".to_string(), block_reference_to_json(pointers.newest));
+    object.insert(
+        "oldest".to_string(),
+        block_reference_to_json(pointers.oldest),
+    );
+    object.insert(
+        "newest".to_string(),
+        block_reference_to_json(pointers.newest),
+    );
     JsonValue::Object(object)
 }
 
@@ -409,7 +437,10 @@ pub(super) fn index_state_to_json(index: &PhysicalIndexState) -> JsonValue {
         },
     );
     object.insert("enabled".to_string(), JsonValue::Bool(index.enabled));
-    object.insert("entries".to_string(), JsonValue::Number(index.entries as f64));
+    object.insert(
+        "entries".to_string(),
+        JsonValue::Number(index.entries as f64),
+    );
     object.insert(
         "estimated_memory_bytes".to_string(),
         json_u64(index.estimated_memory_bytes),
@@ -490,7 +521,10 @@ pub(super) fn index_state_from_json(value: &JsonValue) -> io::Result<PhysicalInd
 
 pub(super) fn graph_projection_to_json(projection: &PhysicalGraphProjection) -> JsonValue {
     let mut object = Map::new();
-    object.insert("name".to_string(), JsonValue::String(projection.name.clone()));
+    object.insert(
+        "name".to_string(),
+        JsonValue::String(projection.name.clone()),
+    );
     object.insert(
         "created_at_unix_ms".to_string(),
         json_u128(projection.created_at_unix_ms),
@@ -658,7 +692,9 @@ pub(super) fn analytics_job_from_json(value: &JsonValue) -> io::Result<PhysicalA
             .map(|values| {
                 values
                     .iter()
-                    .filter_map(|(key, value)| value.as_str().map(|value| (key.clone(), value.to_string())))
+                    .filter_map(|(key, value)| {
+                        value.as_str().map(|value| (key.clone(), value.to_string()))
+                    })
                     .collect()
             })
             .unwrap_or_default(),
@@ -730,4 +766,3 @@ pub(super) fn export_descriptor_from_json(value: &JsonValue) -> io::Result<Expor
         total_entities: json_usize_required(object, "total_entities")?,
     })
 }
-

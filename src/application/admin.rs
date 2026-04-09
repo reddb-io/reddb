@@ -1,9 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::application::ports::RuntimeAdminPort;
-use crate::catalog::{
-    CatalogAnalyticsJobStatus, CatalogGraphProjectionStatus, CatalogIndexStatus,
-};
+use crate::catalog::{CatalogAnalyticsJobStatus, CatalogGraphProjectionStatus, CatalogIndexStatus};
 use crate::runtime::RuntimeGraphProjection;
 use crate::{PhysicalAnalyticsJob, PhysicalGraphProjection, PhysicalIndexState, RedDBResult};
 
@@ -30,11 +28,7 @@ impl<'a, P: RuntimeAdminPort + ?Sized> AdminUseCases<'a, P> {
         Self { runtime }
     }
 
-    pub fn set_index_enabled(
-        &self,
-        name: &str,
-        enabled: bool,
-    ) -> RedDBResult<PhysicalIndexState> {
+    pub fn set_index_enabled(&self, name: &str, enabled: bool) -> RedDBResult<PhysicalIndexState> {
         self.runtime.set_index_enabled(name, enabled)
     }
 
@@ -89,10 +83,7 @@ impl<'a, P: RuntimeAdminPort + ?Sized> AdminUseCases<'a, P> {
         self.runtime.fail_graph_projection(name)
     }
 
-    pub fn mark_graph_projection_stale(
-        &self,
-        name: &str,
-    ) -> RedDBResult<PhysicalGraphProjection> {
+    pub fn mark_graph_projection_stale(&self, name: &str) -> RedDBResult<PhysicalGraphProjection> {
         self.runtime.mark_graph_projection_stale(name)
     }
 
@@ -102,7 +93,8 @@ impl<'a, P: RuntimeAdminPort + ?Sized> AdminUseCases<'a, P> {
         projection_name: Option<String>,
         metadata: BTreeMap<String, String>,
     ) -> RedDBResult<PhysicalAnalyticsJob> {
-        self.runtime.save_analytics_job(kind, projection_name, metadata)
+        self.runtime
+            .save_analytics_job(kind, projection_name, metadata)
     }
 
     pub fn start_analytics_job(
@@ -111,7 +103,8 @@ impl<'a, P: RuntimeAdminPort + ?Sized> AdminUseCases<'a, P> {
         projection_name: Option<String>,
         metadata: BTreeMap<String, String>,
     ) -> RedDBResult<PhysicalAnalyticsJob> {
-        self.runtime.start_analytics_job(kind, projection_name, metadata)
+        self.runtime
+            .start_analytics_job(kind, projection_name, metadata)
     }
 
     pub fn queue_analytics_job(
@@ -120,7 +113,8 @@ impl<'a, P: RuntimeAdminPort + ?Sized> AdminUseCases<'a, P> {
         projection_name: Option<String>,
         metadata: BTreeMap<String, String>,
     ) -> RedDBResult<PhysicalAnalyticsJob> {
-        self.runtime.queue_analytics_job(kind, projection_name, metadata)
+        self.runtime
+            .queue_analytics_job(kind, projection_name, metadata)
     }
 
     pub fn fail_analytics_job(
@@ -129,7 +123,8 @@ impl<'a, P: RuntimeAdminPort + ?Sized> AdminUseCases<'a, P> {
         projection_name: Option<String>,
         metadata: BTreeMap<String, String>,
     ) -> RedDBResult<PhysicalAnalyticsJob> {
-        self.runtime.fail_analytics_job(kind, projection_name, metadata)
+        self.runtime
+            .fail_analytics_job(kind, projection_name, metadata)
     }
 
     pub fn mark_analytics_job_stale(
@@ -148,7 +143,8 @@ impl<'a, P: RuntimeAdminPort + ?Sized> AdminUseCases<'a, P> {
         projection_name: Option<String>,
         metadata: BTreeMap<String, String>,
     ) -> RedDBResult<PhysicalAnalyticsJob> {
-        self.runtime.complete_analytics_job(kind, projection_name, metadata)
+        self.runtime
+            .complete_analytics_job(kind, projection_name, metadata)
     }
 
     pub fn build_serverless_warmup_plan(

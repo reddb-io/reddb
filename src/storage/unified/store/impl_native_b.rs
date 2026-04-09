@@ -27,10 +27,8 @@ impl UnifiedStore {
             ));
         }
 
-        let collection_count =
-            u32::from_le_bytes([content[4], content[5], content[6], content[7]]);
-        let index_count =
-            u32::from_le_bytes([content[8], content[9], content[10], content[11]]);
+        let collection_count = u32::from_le_bytes([content[4], content[5], content[6], content[7]]);
+        let index_count = u32::from_le_bytes([content[8], content[9], content[10], content[11]]);
         let graph_projection_count =
             u32::from_le_bytes([content[12], content[13], content[14], content[15]]);
         let analytics_job_count =
@@ -255,8 +253,7 @@ impl UnifiedStore {
                     "truncated native analytics job metadata count".to_string(),
                 ));
             }
-            let metadata_count =
-                u16::from_le_bytes([content[pos], content[pos + 1]]) as usize;
+            let metadata_count = u16::from_le_bytes([content[pos], content[pos + 1]]) as usize;
             pos += 2;
             let mut metadata = BTreeMap::new();
             for _ in 0..metadata_count {
@@ -458,10 +455,8 @@ impl UnifiedStore {
             ));
         }
 
-        let snapshot_count =
-            u32::from_le_bytes([content[4], content[5], content[6], content[7]]);
-        let export_count =
-            u32::from_le_bytes([content[8], content[9], content[10], content[11]]);
+        let snapshot_count = u32::from_le_bytes([content[4], content[5], content[6], content[7]]);
+        let export_count = u32::from_le_bytes([content[8], content[9], content[10], content[11]]);
         let snapshots_complete = content[12] == 1;
         let exports_complete = content[13] == 1;
         let omitted_snapshot_count =
@@ -695,8 +690,7 @@ impl UnifiedStore {
             ));
         }
 
-        let collection_count =
-            u32::from_le_bytes([content[4], content[5], content[6], content[7]]);
+        let collection_count = u32::from_le_bytes([content[4], content[5], content[6], content[7]]);
         let total_entities = u64::from_le_bytes([
             content[8],
             content[9],
@@ -889,5 +883,4 @@ impl UnifiedStore {
             last_healed_at_unix_ms,
         })
     }
-
 }

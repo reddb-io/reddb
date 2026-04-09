@@ -154,9 +154,7 @@ impl UnifiedStore {
         let collections = self
             .collections
             .read()
-            .map_err(|_| -> Box<dyn std::error::Error> {
-                "collections lock poisoned".into()
-            })?;
+            .map_err(|_| -> Box<dyn std::error::Error> { "collections lock poisoned".into() })?;
         write_varu32(&mut buf, collections.len() as u32);
 
         for (name, manager) in collections.iter() {
@@ -177,9 +175,7 @@ impl UnifiedStore {
         let cross_refs = self
             .cross_refs
             .read()
-            .map_err(|_| -> Box<dyn std::error::Error> {
-                "cross_refs lock poisoned".into()
-            })?;
+            .map_err(|_| -> Box<dyn std::error::Error> { "cross_refs lock poisoned".into() })?;
         let total_refs: usize = cross_refs.values().map(|v| v.len()).sum();
         write_varu32(&mut buf, total_refs as u32);
 
@@ -414,7 +410,11 @@ impl UnifiedStore {
     }
 
     /// Write entity to binary buffer
-    pub(crate) fn write_entity_binary(buf: &mut Vec<u8>, entity: &UnifiedEntity, format_version: u32) {
+    pub(crate) fn write_entity_binary(
+        buf: &mut Vec<u8>,
+        entity: &UnifiedEntity,
+        format_version: u32,
+    ) {
         // Entity ID
         write_varu64(buf, entity.id.raw());
 
@@ -715,6 +715,239 @@ impl UnifiedStore {
                 *pos += 8;
                 Value::RowRef(s, id)
             }
+            18 => {
+                let rgb = [buf[*pos], buf[*pos + 1], buf[*pos + 2]];
+                *pos += 3;
+                Value::Color(rgb)
+            }
+            19 => {
+                let len = Self::read_varu32_safe(buf, pos)?;
+                let s = String::from_utf8(buf[*pos..*pos + len].to_vec())?;
+                *pos += len;
+                Value::Email(s)
+            }
+            20 => {
+                let len = Self::read_varu32_safe(buf, pos)?;
+                let s = String::from_utf8(buf[*pos..*pos + len].to_vec())?;
+                *pos += len;
+                Value::Url(s)
+            }
+            21 => {
+                let val = u64::from_le_bytes([
+                    buf[*pos],
+                    buf[*pos + 1],
+                    buf[*pos + 2],
+                    buf[*pos + 3],
+                    buf[*pos + 4],
+                    buf[*pos + 5],
+                    buf[*pos + 6],
+                    buf[*pos + 7],
+                ]);
+                *pos += 8;
+                Value::Phone(val)
+            }
+            22 => {
+                let val =
+                    u32::from_le_bytes([buf[*pos], buf[*pos + 1], buf[*pos + 2], buf[*pos + 3]]);
+                *pos += 4;
+                Value::Semver(val)
+            }
+            23 => {
+                let ip =
+                    u32::from_le_bytes([buf[*pos], buf[*pos + 1], buf[*pos + 2], buf[*pos + 3]]);
+                *pos += 4;
+                let prefix = buf[*pos];
+                *pos += 1;
+                Value::Cidr(ip, prefix)
+            }
+            24 => {
+                let val =
+                    i32::from_le_bytes([buf[*pos], buf[*pos + 1], buf[*pos + 2], buf[*pos + 3]]);
+                *pos += 4;
+                Value::Date(val)
+            }
+            25 => {
+                let val =
+                    u32::from_le_bytes([buf[*pos], buf[*pos + 1], buf[*pos + 2], buf[*pos + 3]]);
+                *pos += 4;
+                Value::Time(val)
+            }
+            26 => {
+                let val = i64::from_le_bytes([
+                    buf[*pos],
+                    buf[*pos + 1],
+                    buf[*pos + 2],
+                    buf[*pos + 3],
+                    buf[*pos + 4],
+                    buf[*pos + 5],
+                    buf[*pos + 6],
+                    buf[*pos + 7],
+                ]);
+                *pos += 8;
+                Value::Decimal(val)
+            }
+            27 => {
+                let val = buf[*pos];
+                *pos += 1;
+                Value::EnumValue(val)
+            }
+            28 => {
+                let len = Self::read_varu32_safe(buf, pos)?;
+                let mut elems = Vec::with_capacity(len);
+                for _ in 0..len {
+                    elems.push(Self::read_value_binary(buf, pos)?);
+                }
+                Value::Array(elems)
+            }
+            29 => {
+                let val = i64::from_le_bytes([
+                    buf[*pos],
+                    buf[*pos + 1],
+                    buf[*pos + 2],
+                    buf[*pos + 3],
+                    buf[*pos + 4],
+                    buf[*pos + 5],
+                    buf[*pos + 6],
+                    buf[*pos + 7],
+                ]);
+                *pos += 8;
+                Value::TimestampMs(val)
+            }
+            30 => {
+                let val =
+                    u32::from_le_bytes([buf[*pos], buf[*pos + 1], buf[*pos + 2], buf[*pos + 3]]);
+                *pos += 4;
+                Value::Ipv4(val)
+            }
+            31 => {
+                let mut bytes = [0u8; 16];
+                bytes.copy_from_slice(&buf[*pos..*pos + 16]);
+                *pos += 16;
+                Value::Ipv6(bytes)
+            }
+            32 => {
+                let ip =
+                    u32::from_le_bytes([buf[*pos], buf[*pos + 1], buf[*pos + 2], buf[*pos + 3]]);
+                *pos += 4;
+                let mask =
+                    u32::from_le_bytes([buf[*pos], buf[*pos + 1], buf[*pos + 2], buf[*pos + 3]]);
+                *pos += 4;
+                Value::Subnet(ip, mask)
+            }
+            33 => {
+                let val = u16::from_le_bytes([buf[*pos], buf[*pos + 1]]);
+                *pos += 2;
+                Value::Port(val)
+            }
+            34 => {
+                let val =
+                    i32::from_le_bytes([buf[*pos], buf[*pos + 1], buf[*pos + 2], buf[*pos + 3]]);
+                *pos += 4;
+                Value::Latitude(val)
+            }
+            35 => {
+                let val =
+                    i32::from_le_bytes([buf[*pos], buf[*pos + 1], buf[*pos + 2], buf[*pos + 3]]);
+                *pos += 4;
+                Value::Longitude(val)
+            }
+            36 => {
+                let lat =
+                    i32::from_le_bytes([buf[*pos], buf[*pos + 1], buf[*pos + 2], buf[*pos + 3]]);
+                *pos += 4;
+                let lon =
+                    i32::from_le_bytes([buf[*pos], buf[*pos + 1], buf[*pos + 2], buf[*pos + 3]]);
+                *pos += 4;
+                Value::GeoPoint(lat, lon)
+            }
+            37 => {
+                let c = [buf[*pos], buf[*pos + 1]];
+                *pos += 2;
+                Value::Country2(c)
+            }
+            38 => {
+                let c = [buf[*pos], buf[*pos + 1], buf[*pos + 2]];
+                *pos += 3;
+                Value::Country3(c)
+            }
+            39 => {
+                let c = [buf[*pos], buf[*pos + 1]];
+                *pos += 2;
+                Value::Lang2(c)
+            }
+            40 => {
+                let c = [
+                    buf[*pos],
+                    buf[*pos + 1],
+                    buf[*pos + 2],
+                    buf[*pos + 3],
+                    buf[*pos + 4],
+                ];
+                *pos += 5;
+                Value::Lang5(c)
+            }
+            41 => {
+                let c = [buf[*pos], buf[*pos + 1], buf[*pos + 2]];
+                *pos += 3;
+                Value::Currency(c)
+            }
+            42 => {
+                let rgba = [buf[*pos], buf[*pos + 1], buf[*pos + 2], buf[*pos + 3]];
+                *pos += 4;
+                Value::ColorAlpha(rgba)
+            }
+            43 => {
+                let val = i64::from_le_bytes([
+                    buf[*pos],
+                    buf[*pos + 1],
+                    buf[*pos + 2],
+                    buf[*pos + 3],
+                    buf[*pos + 4],
+                    buf[*pos + 5],
+                    buf[*pos + 6],
+                    buf[*pos + 7],
+                ]);
+                *pos += 8;
+                Value::BigInt(val)
+            }
+            44 => {
+                let col_len = Self::read_varu32_safe(buf, pos)?;
+                let col = String::from_utf8(buf[*pos..*pos + col_len].to_vec())?;
+                *pos += col_len;
+                let key_len = Self::read_varu32_safe(buf, pos)?;
+                let key = String::from_utf8(buf[*pos..*pos + key_len].to_vec())?;
+                *pos += key_len;
+                Value::KeyRef(col, key)
+            }
+            45 => {
+                let col_len = Self::read_varu32_safe(buf, pos)?;
+                let col = String::from_utf8(buf[*pos..*pos + col_len].to_vec())?;
+                *pos += col_len;
+                let id = u64::from_le_bytes([
+                    buf[*pos],
+                    buf[*pos + 1],
+                    buf[*pos + 2],
+                    buf[*pos + 3],
+                    buf[*pos + 4],
+                    buf[*pos + 5],
+                    buf[*pos + 6],
+                    buf[*pos + 7],
+                ]);
+                *pos += 8;
+                Value::DocRef(col, id)
+            }
+            46 => {
+                let len = Self::read_varu32_safe(buf, pos)?;
+                let name = String::from_utf8(buf[*pos..*pos + len].to_vec())?;
+                *pos += len;
+                Value::TableRef(name)
+            }
+            47 => {
+                let val =
+                    u32::from_le_bytes([buf[*pos], buf[*pos + 1], buf[*pos + 2], buf[*pos + 3]]);
+                *pos += 4;
+                Value::PageRef(val)
+            }
             _ => return Err(format!("Unknown Value type: {}", type_byte).into()),
         })
     }
@@ -817,7 +1050,140 @@ impl UnifiedStore {
                 buf.extend_from_slice(s.as_bytes());
                 buf.extend_from_slice(&id.to_le_bytes());
             }
+            Value::Color(rgb) => {
+                buf.push(18);
+                buf.extend_from_slice(rgb);
+            }
+            Value::Email(s) => {
+                buf.push(19);
+                write_varu32(buf, s.len() as u32);
+                buf.extend_from_slice(s.as_bytes());
+            }
+            Value::Url(s) => {
+                buf.push(20);
+                write_varu32(buf, s.len() as u32);
+                buf.extend_from_slice(s.as_bytes());
+            }
+            Value::Phone(n) => {
+                buf.push(21);
+                buf.extend_from_slice(&n.to_le_bytes());
+            }
+            Value::Semver(v) => {
+                buf.push(22);
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+            Value::Cidr(ip, prefix) => {
+                buf.push(23);
+                buf.extend_from_slice(&ip.to_le_bytes());
+                buf.push(*prefix);
+            }
+            Value::Date(d) => {
+                buf.push(24);
+                buf.extend_from_slice(&d.to_le_bytes());
+            }
+            Value::Time(t) => {
+                buf.push(25);
+                buf.extend_from_slice(&t.to_le_bytes());
+            }
+            Value::Decimal(v) => {
+                buf.push(26);
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+            Value::EnumValue(i) => {
+                buf.push(27);
+                buf.push(*i);
+            }
+            Value::Array(elems) => {
+                buf.push(28);
+                write_varu32(buf, elems.len() as u32);
+                for elem in elems {
+                    Self::write_value_binary(buf, elem);
+                }
+            }
+            Value::TimestampMs(v) => {
+                buf.push(29);
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+            Value::Ipv4(v) => {
+                buf.push(30);
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+            Value::Ipv6(bytes) => {
+                buf.push(31);
+                buf.extend_from_slice(bytes);
+            }
+            Value::Subnet(ip, mask) => {
+                buf.push(32);
+                buf.extend_from_slice(&ip.to_le_bytes());
+                buf.extend_from_slice(&mask.to_le_bytes());
+            }
+            Value::Port(v) => {
+                buf.push(33);
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+            Value::Latitude(v) => {
+                buf.push(34);
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+            Value::Longitude(v) => {
+                buf.push(35);
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+            Value::GeoPoint(lat, lon) => {
+                buf.push(36);
+                buf.extend_from_slice(&lat.to_le_bytes());
+                buf.extend_from_slice(&lon.to_le_bytes());
+            }
+            Value::Country2(c) => {
+                buf.push(37);
+                buf.extend_from_slice(c);
+            }
+            Value::Country3(c) => {
+                buf.push(38);
+                buf.extend_from_slice(c);
+            }
+            Value::Lang2(c) => {
+                buf.push(39);
+                buf.extend_from_slice(c);
+            }
+            Value::Lang5(c) => {
+                buf.push(40);
+                buf.extend_from_slice(c);
+            }
+            Value::Currency(c) => {
+                buf.push(41);
+                buf.extend_from_slice(c);
+            }
+            Value::ColorAlpha(rgba) => {
+                buf.push(42);
+                buf.extend_from_slice(rgba);
+            }
+            Value::BigInt(v) => {
+                buf.push(43);
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+            Value::KeyRef(col, key) => {
+                buf.push(44);
+                write_varu32(buf, col.len() as u32);
+                buf.extend_from_slice(col.as_bytes());
+                write_varu32(buf, key.len() as u32);
+                buf.extend_from_slice(key.as_bytes());
+            }
+            Value::DocRef(col, id) => {
+                buf.push(45);
+                write_varu32(buf, col.len() as u32);
+                buf.extend_from_slice(col.as_bytes());
+                buf.extend_from_slice(&id.to_le_bytes());
+            }
+            Value::TableRef(name) => {
+                buf.push(46);
+                write_varu32(buf, name.len() as u32);
+                buf.extend_from_slice(name.as_bytes());
+            }
+            Value::PageRef(page_id) => {
+                buf.push(47);
+                buf.extend_from_slice(&page_id.to_le_bytes());
+            }
         }
     }
-
 }

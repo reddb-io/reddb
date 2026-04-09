@@ -1,12 +1,11 @@
 use crate::application::ports::RuntimeGraphPort;
 use crate::runtime::{
-    RuntimeGraphCentralityAlgorithm, RuntimeGraphCentralityResult,
-    RuntimeGraphClusteringResult, RuntimeGraphCommunityAlgorithm, RuntimeGraphCommunityResult,
-    RuntimeGraphComponentsMode, RuntimeGraphComponentsResult, RuntimeGraphCyclesResult,
-    RuntimeGraphDirection, RuntimeGraphHitsResult, RuntimeGraphNeighborhoodResult,
-    RuntimeGraphPathAlgorithm, RuntimeGraphPathResult, RuntimeGraphProjection,
-    RuntimeGraphTopologicalSortResult, RuntimeGraphTraversalResult,
-    RuntimeGraphTraversalStrategy,
+    RuntimeGraphCentralityAlgorithm, RuntimeGraphCentralityResult, RuntimeGraphClusteringResult,
+    RuntimeGraphCommunityAlgorithm, RuntimeGraphCommunityResult, RuntimeGraphComponentsMode,
+    RuntimeGraphComponentsResult, RuntimeGraphCyclesResult, RuntimeGraphDirection,
+    RuntimeGraphHitsResult, RuntimeGraphNeighborhoodResult, RuntimeGraphPathAlgorithm,
+    RuntimeGraphPathResult, RuntimeGraphProjection, RuntimeGraphTopologicalSortResult,
+    RuntimeGraphTraversalResult, RuntimeGraphTraversalStrategy,
 };
 use crate::RedDBResult;
 
@@ -150,7 +149,10 @@ impl<'a, P: RuntimeGraphPort + ?Sized> GraphUseCases<'a, P> {
         )
     }
 
-    pub fn components(&self, input: GraphComponentsInput) -> RedDBResult<RuntimeGraphComponentsResult> {
+    pub fn components(
+        &self,
+        input: GraphComponentsInput,
+    ) -> RedDBResult<RuntimeGraphComponentsResult> {
         self.runtime
             .graph_components(input.mode, input.min_size, input.projection)
     }
@@ -206,8 +208,12 @@ impl<'a, P: RuntimeGraphPort + ?Sized> GraphUseCases<'a, P> {
     }
 
     pub fn hits(&self, input: GraphHitsInput) -> RedDBResult<RuntimeGraphHitsResult> {
-        self.runtime
-            .graph_hits(input.top_k, input.epsilon, input.max_iterations, input.projection)
+        self.runtime.graph_hits(
+            input.top_k,
+            input.epsilon,
+            input.max_iterations,
+            input.projection,
+        )
     }
 
     pub fn cycles(&self, input: GraphCyclesInput) -> RedDBResult<RuntimeGraphCyclesResult> {

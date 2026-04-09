@@ -5,22 +5,20 @@
 //! reports, index lifecycle, checkpointing, multi-collection isolation, large batch inserts,
 //! and read-after-write consistency.
 
-use reddb::{
-    ArtifactState, RedDBRuntime, EntityId, EntityUseCases, QueryUseCases, GraphUseCases,
-    NativeUseCases, CatalogUseCases, HealthState,
-};
 use reddb::application::{
-    CreateRowInput, CreateNodeInput, CreateEdgeInput,
-    GraphNeighborhoodInput, GraphTraversalInput, GraphShortestPathInput,
-    GraphComponentsInput, GraphCentralityInput, GraphCommunitiesInput,
-    GraphCyclesInput, GraphClusteringInput, ExecuteQueryInput,
+    CreateEdgeInput, CreateNodeInput, CreateRowInput, ExecuteQueryInput, GraphCentralityInput,
+    GraphClusteringInput, GraphCommunitiesInput, GraphComponentsInput, GraphCyclesInput,
+    GraphNeighborhoodInput, GraphShortestPathInput, GraphTraversalInput,
 };
 use reddb::runtime::{
-    RuntimeGraphDirection, RuntimeGraphTraversalStrategy, RuntimeGraphPathAlgorithm,
-    RuntimeGraphCentralityAlgorithm, RuntimeGraphCommunityAlgorithm,
-    RuntimeGraphComponentsMode,
+    RuntimeGraphCentralityAlgorithm, RuntimeGraphCommunityAlgorithm, RuntimeGraphComponentsMode,
+    RuntimeGraphDirection, RuntimeGraphPathAlgorithm, RuntimeGraphTraversalStrategy,
 };
 use reddb::storage::schema::Value;
+use reddb::{
+    ArtifactState, CatalogUseCases, EntityId, EntityUseCases, GraphUseCases, HealthState,
+    NativeUseCases, QueryUseCases, RedDBRuntime,
+};
 
 fn rt() -> RedDBRuntime {
     RedDBRuntime::in_memory().expect("failed to create in-memory runtime")
@@ -207,7 +205,10 @@ fn test_graph_shortest_path() {
         .expect("shortest_path should succeed");
 
     let path = result.path.expect("a path should exist from A to D");
-    assert_eq!(path.hop_count, 2, "shortest path should have 2 hops (A->B->D)");
+    assert_eq!(
+        path.hop_count, 2,
+        "shortest path should have 2 hops (A->B->D)"
+    );
     assert!(
         path.total_weight <= 2.5,
         "shortest path weight should be ~2.0, got {}",
@@ -446,7 +447,10 @@ fn test_graph_clustering_coefficient() {
     );
     // When triangles are requested, triangle_count should be present and >= 1.
     if let Some(count) = result.triangle_count {
-        assert!(count >= 1, "fully connected triangle should have >= 1 triangle, got {count}");
+        assert!(
+            count >= 1,
+            "fully connected triangle should have >= 1 triangle, got {count}"
+        );
     }
 }
 
@@ -567,20 +571,11 @@ fn test_index_lifecycle() {
     // The ArtifactState type models Declared -> Building -> Ready.
 
     let declared = ArtifactState::Declared;
-    assert!(
-        declared.can_rebuild(),
-        "Declared should allow rebuilding"
-    );
-    assert!(
-        !declared.is_queryable(),
-        "Declared should not be queryable"
-    );
+    assert!(declared.can_rebuild(), "Declared should allow rebuilding");
+    assert!(!declared.is_queryable(), "Declared should not be queryable");
 
     let building = ArtifactState::Building;
-    assert!(
-        !building.is_queryable(),
-        "Building should not be queryable"
-    );
+    assert!(!building.is_queryable(), "Building should not be queryable");
     assert!(
         !building.can_rebuild(),
         "Building should not allow rebuild while in progress"
@@ -588,10 +583,7 @@ fn test_index_lifecycle() {
 
     let ready = ArtifactState::Ready;
     assert!(ready.is_queryable(), "Ready should be queryable");
-    assert!(
-        !ready.can_rebuild(),
-        "Ready should not need rebuild"
-    );
+    assert!(!ready.can_rebuild(), "Ready should not need rebuild");
 
     // String round-trips
     assert_eq!(ArtifactState::Declared.to_string(), "declared");

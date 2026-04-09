@@ -293,6 +293,14 @@ pub struct ColumnDef {
     pub default: Option<Vec<u8>>,
     /// Vector dimension (for Vector type)
     pub vector_dim: Option<u32>,
+    /// Whether to compress this column's data (e.g., brotli for text)
+    pub compress: bool,
+    /// For Enum type: list of valid variants
+    pub enum_variants: Vec<String>,
+    /// For Decimal type: number of decimal places (default 4)
+    pub decimal_precision: u8,
+    /// For Array type: element data type
+    pub element_type: Option<DataType>,
     /// Additional column metadata
     pub metadata: HashMap<String, String>,
 }
@@ -306,6 +314,10 @@ impl ColumnDef {
             nullable: true,
             default: None,
             vector_dim: None,
+            compress: false,
+            enum_variants: Vec::new(),
+            decimal_precision: 4,
+            element_type: None,
             metadata: HashMap::new(),
         }
     }
@@ -334,6 +346,30 @@ impl ColumnDef {
         self
     }
 
+    /// Enable per-column compression
+    pub fn compressed(mut self) -> Self {
+        self.compress = true;
+        self
+    }
+
+    /// Set enum variants (for Enum type columns)
+    pub fn with_variants(mut self, variants: Vec<String>) -> Self {
+        self.enum_variants = variants;
+        self
+    }
+
+    /// Set decimal precision (for Decimal type columns)
+    pub fn with_precision(mut self, precision: u8) -> Self {
+        self.decimal_precision = precision;
+        self
+    }
+
+    /// Set element type (for Array type columns)
+    pub fn with_element_type(mut self, dt: DataType) -> Self {
+        self.element_type = Some(dt);
+        self
+    }
+
     /// Serialize column definition
     fn write_to(&self, buf: &mut Vec<u8>) {
         write_string(buf, &self.name);
@@ -353,6 +389,26 @@ impl ColumnDef {
         if let Some(dim) = self.vector_dim {
             buf.push(1);
             buf.extend_from_slice(&dim.to_le_bytes());
+        } else {
+            buf.push(0);
+        }
+
+        // Compress flag
+        buf.push(if self.compress { 1 } else { 0 });
+
+        // Enum variants
+        write_varint(buf, self.enum_variants.len() as u64);
+        for variant in &self.enum_variants {
+            write_string(buf, variant);
+        }
+
+        // Decimal precision
+        buf.push(self.decimal_precision);
+
+        // Element type (for Array)
+        if let Some(et) = self.element_type {
+            buf.push(1);
+            buf.push(et.to_byte());
         } else {
             buf.push(0);
         }
@@ -418,6 +474,47 @@ impl ColumnDef {
             None
         };
 
+        // Compress flag
+        if data.len() < offset + 1 {
+            return Err(TableDefError::TruncatedData);
+        }
+        let compress = data[offset] != 0;
+        offset += 1;
+
+        // Enum variants
+        let (variant_count, varint_len) = read_varint(&data[offset..])?;
+        offset += varint_len;
+        let mut enum_variants = Vec::with_capacity(variant_count as usize);
+        for _ in 0..variant_count {
+            let (variant, variant_len) = read_string(&data[offset..])?;
+            offset += variant_len;
+            enum_variants.push(variant);
+        }
+
+        // Decimal precision
+        if data.len() < offset + 1 {
+            return Err(TableDefError::TruncatedData);
+        }
+        let decimal_precision = data[offset];
+        offset += 1;
+
+        // Element type
+        if data.len() < offset + 1 {
+            return Err(TableDefError::TruncatedData);
+        }
+        let has_element_type = data[offset] != 0;
+        offset += 1;
+        let element_type = if has_element_type {
+            if data.len() < offset + 1 {
+                return Err(TableDefError::TruncatedData);
+            }
+            let et = DataType::from_byte(data[offset]).ok_or(TableDefError::InvalidDataType)?;
+            offset += 1;
+            Some(et)
+        } else {
+            None
+        };
+
         // Metadata
         let (meta_count, varint_len) = read_varint(&data[offset..])?;
         offset += varint_len;
@@ -437,6 +534,10 @@ impl ColumnDef {
                 nullable,
                 default,
                 vector_dim,
+                compress,
+                enum_variants,
+                decimal_precision,
+                element_type,
                 metadata,
             },
             offset,

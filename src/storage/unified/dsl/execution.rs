@@ -26,7 +26,11 @@ use super::types::{MatchComponents, QueryResult, ScoredMatch};
 
 fn normalize_query_matches(matches: &mut Vec<ScoredMatch>, limit: Option<usize>) {
     for item in matches.iter_mut() {
-        if let Some(final_score) = item.components.final_score.filter(|score| score.is_finite()) {
+        if let Some(final_score) = item
+            .components
+            .final_score
+            .filter(|score| score.is_finite())
+        {
             item.score = final_score;
         } else {
             item.components.final_score = Some(item.score);
@@ -80,9 +84,8 @@ pub fn execute_vector_query(
             // We only use HNSW when there are no custom filters or embedding
             // slots, because those require per-entity evaluation that HNSW
             // cannot perform internally.
-            let use_hnsw = !has_filters
-                && !has_embedding_slot
-                && entities.len() >= HNSW_MIN_VECTORS;
+            let use_hnsw =
+                !has_filters && !has_embedding_slot && entities.len() >= HNSW_MIN_VECTORS;
 
             if use_hnsw {
                 // Collect dense vectors with matching dimension.
@@ -504,9 +507,7 @@ pub fn execute_hybrid_query(
                     let matches = match (&entity.kind, &pattern.node_label, &pattern.node_type) {
                         (
                             EntityKind::GraphNode {
-                                label,
-                                node_type,
-                                ..
+                                label, node_type, ..
                             },
                             label_filter,
                             type_filter,
@@ -590,7 +591,6 @@ pub fn execute_three_way_join(
                             scored.push((entity.id, entity, sim));
                         }
                     }
-
                 }
             }
 
@@ -621,7 +621,8 @@ pub fn execute_three_way_join(
             // Start from a graph node
             for col_name in store.list_collections() {
                 if let Some(manager) = store.get_collection(&col_name) {
-                    let entities = manager.query_all(|e| cross_modal_graph_node_matches_ref(e, node_id));
+                    let entities =
+                        manager.query_all(|e| cross_modal_graph_node_matches_ref(e, node_id));
 
                     for entity in entities {
                         scanned += 1;
@@ -680,8 +681,12 @@ pub fn execute_three_way_join(
                     if let Some(current) = results.get(id) {
                         let mut seen = HashSet::new();
                         seen.insert(*id);
-                        let mut frontier =
-                            VecDeque::from([(*id, current.path.clone(), 0u32, current.graph_score)]);
+                        let mut frontier = VecDeque::from([(
+                            *id,
+                            current.path.clone(),
+                            0u32,
+                            current.graph_score,
+                        )]);
 
                         while let Some((frontier_id, frontier_path, hops, frontier_graph_score)) =
                             frontier.pop_front()
@@ -692,7 +697,9 @@ pub fn execute_three_way_join(
 
                             let frontier_is_graph_node = store
                                 .get_any(frontier_id)
-                                .map(|(_, entity)| matches!(entity.kind, EntityKind::GraphNode { .. }))
+                                .map(|(_, entity)| {
+                                    matches!(entity.kind, EntityKind::GraphNode { .. })
+                                })
                                 .unwrap_or(false);
 
                             if frontier_is_graph_node {
@@ -731,8 +738,10 @@ pub fn execute_three_way_join(
                                 continue;
                             }
 
-                            if matches!(direction, TraversalDirection::Out | TraversalDirection::Both)
-                            {
+                            if matches!(
+                                direction,
+                                TraversalDirection::Out | TraversalDirection::Both
+                            ) {
                                 for (target_id, ref_type, target_collection) in
                                     store.get_refs_from(frontier_id)
                                 {
@@ -765,13 +774,20 @@ pub fn execute_three_way_join(
                                                 path: path.clone(),
                                             },
                                         );
-                                        frontier.push_back((entity.id, path, hops + 1, graph_score));
+                                        frontier.push_back((
+                                            entity.id,
+                                            path,
+                                            hops + 1,
+                                            graph_score,
+                                        ));
                                     }
                                 }
                             }
 
-                            if matches!(direction, TraversalDirection::In | TraversalDirection::Both)
-                            {
+                            if matches!(
+                                direction,
+                                TraversalDirection::In | TraversalDirection::Both
+                            ) {
                                 for (source_id, ref_type, source_collection) in
                                     store.get_refs_to(frontier_id)
                                 {
@@ -804,7 +820,12 @@ pub fn execute_three_way_join(
                                                 path: path.clone(),
                                             },
                                         );
-                                        frontier.push_back((entity.id, path, hops + 1, graph_score));
+                                        frontier.push_back((
+                                            entity.id,
+                                            path,
+                                            hops + 1,
+                                            graph_score,
+                                        ));
                                     }
                                 }
                             }
@@ -847,7 +868,9 @@ pub fn execute_three_way_join(
                                             .named
                                             .as_ref()
                                             .and_then(|n| n.get(f))
-                                            .map(|v| cross_modal_value_matches_entity(v, &current.entity))
+                                            .map(|v| {
+                                                cross_modal_value_matches_entity(v, &current.entity)
+                                            })
                                             .unwrap_or(false),
                                         _ => false,
                                     })
@@ -897,9 +920,7 @@ pub fn execute_three_way_join(
                                         if entity.id != *id {
                                             scanned += 1;
                                             let sim = calculate_entity_similarity(
-                                                &entity,
-                                                &vector,
-                                                &None,
+                                                &entity, &vector, &None,
                                             );
                                             if sim.is_finite() && sim > 0.0 {
                                                 scored.push((entity.id, entity, sim));

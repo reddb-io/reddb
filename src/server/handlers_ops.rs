@@ -88,12 +88,13 @@ impl RedDBServer {
             readiness.write_serverless,
             readiness.repair_serverless,
         );
-        let missing = crate::application::serverless_payload::missing_serverless_warmup_preconditions(
-            dry_run,
-            query_ready,
-            write_ready,
-            repair_ready,
-        );
+        let missing =
+            crate::application::serverless_payload::missing_serverless_warmup_preconditions(
+                dry_run,
+                query_ready,
+                write_ready,
+                repair_ready,
+            );
         if !missing.is_empty() {
             let mut object = Map::new();
             object.insert("ready".to_string(), JsonValue::Bool(false));
@@ -158,9 +159,9 @@ impl RedDBServer {
         if !dry_run {
             for name in &plan.indexes {
                 match self.admin_use_cases().warmup_index(name) {
-                    Ok(index) => ready_indexes.push(
-                        crate::presentation::admin_json::index_json(&index),
-                    ),
+                    Ok(index) => {
+                        ready_indexes.push(crate::presentation::admin_json::index_json(&index))
+                    }
                     Err(err) => {
                         let mut failure = Map::new();
                         failure.insert("kind".to_string(), JsonValue::String("index".to_string()));
@@ -173,7 +174,10 @@ impl RedDBServer {
             }
 
             for name in &plan.graph_projections {
-                if let Err(err) = self.admin_use_cases().mark_graph_projection_materializing(name) {
+                if let Err(err) = self
+                    .admin_use_cases()
+                    .mark_graph_projection_materializing(name)
+                {
                     let mut failure = Map::new();
                     failure.insert(
                         "kind".to_string(),
@@ -206,9 +210,10 @@ impl RedDBServer {
             }
 
             for job in &plan.analytics_jobs {
-                let metadata = crate::application::graph_payload::analytics_metadata(vec![
-                    ("source", "serverless_warmup".to_string()),
-                ]);
+                let metadata = crate::application::graph_payload::analytics_metadata(vec![(
+                    "source",
+                    "serverless_warmup".to_string(),
+                )]);
                 match self.admin_use_cases().queue_analytics_job(
                     job.kind.clone(),
                     job.projection.clone(),
@@ -247,7 +252,7 @@ impl RedDBServer {
                                 "status".to_string(),
                                 JsonValue::String("executed".to_string()),
                             );
-                        object.insert(
+                            object.insert(
                             "batch".to_string(),
                             crate::presentation::native_state_json::native_vector_artifact_batch_json(
                                 &batch,
@@ -517,7 +522,11 @@ impl RedDBServer {
         json_response(200, JsonValue::Object(object))
     }
 
-    pub(crate) fn handle_rebuild_indexes(&self, body: Vec<u8>, path_collection: Option<&str>) -> HttpResponse {
+    pub(crate) fn handle_rebuild_indexes(
+        &self,
+        body: Vec<u8>,
+        path_collection: Option<&str>,
+    ) -> HttpResponse {
         let body_collection = if body.iter().any(|byte| !byte.is_ascii_whitespace()) {
             match parse_json_body(&body) {
                 Ok(payload) => payload
@@ -534,12 +543,82 @@ impl RedDBServer {
             .map(|value| value.to_string())
             .or(body_collection);
 
-        match self.admin_use_cases().rebuild_indexes(collection.as_deref()) {
-            Ok(indexes) => json_response(
-                200,
-                crate::presentation::admin_json::indexes_json(&indexes),
-            ),
+        match self
+            .admin_use_cases()
+            .rebuild_indexes(collection.as_deref())
+        {
+            Ok(indexes) => {
+                json_response(200, crate::presentation::admin_json::indexes_json(&indexes))
+            }
             Err(err) => json_error(400, err.to_string()),
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // DDL: Create / Drop / Describe Collection
+    // ------------------------------------------------------------------
+
+    pub(crate) fn handle_create_collection(&self, body: Vec<u8>) -> HttpResponse {
+        let payload = match parse_json_body(&body) {
+            Ok(payload) => payload,
+            Err(response) => return response,
+        };
+
+        let Some(name) = payload.get("name").and_then(JsonValue::as_str) else {
+            return json_error(400, "field 'name' must be a string");
+        };
+        if name.trim().is_empty() {
+            return json_error(400, "field 'name' cannot be empty");
+        }
+
+        match self.runtime.db().store().create_collection(name) {
+            Ok(()) => {
+                let mut object = Map::new();
+                object.insert("ok".to_string(), JsonValue::Bool(true));
+                object.insert(
+                    "collection".to_string(),
+                    JsonValue::String(name.to_string()),
+                );
+                json_response(200, JsonValue::Object(object))
+            }
+            Err(err) => json_error(400, format!("{err:?}")),
+        }
+    }
+
+    pub(crate) fn handle_drop_collection(&self, name: &str) -> HttpResponse {
+        if name.trim().is_empty() {
+            return json_error(400, "collection name cannot be empty");
+        }
+
+        match self.runtime.db().store().drop_collection(name) {
+            Ok(()) => {
+                let mut object = Map::new();
+                object.insert("ok".to_string(), JsonValue::Bool(true));
+                object.insert(
+                    "dropped".to_string(),
+                    JsonValue::String(name.to_string()),
+                );
+                json_response(200, JsonValue::Object(object))
+            }
+            Err(err) => json_error(400, format!("{err:?}")),
+        }
+    }
+
+    pub(crate) fn handle_describe_collection(&self, name: &str) -> HttpResponse {
+        let store = self.runtime.db().store();
+        match store.get_collection(name) {
+            Some(manager) => {
+                let count = manager.count();
+                let mut object = Map::new();
+                object.insert("ok".to_string(), JsonValue::Bool(true));
+                object.insert(
+                    "collection".to_string(),
+                    JsonValue::String(name.to_string()),
+                );
+                object.insert("entity_count".to_string(), JsonValue::Number(count as f64));
+                json_response(200, JsonValue::Object(object))
+            }
+            None => json_error(404, format!("collection '{}' not found", name)),
         }
     }
 }

@@ -1,0 +1,53 @@
+services:
+  primary:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: reddb-primary
+    ports:
+      - "50051:50051"
+    command:
+      - "server"
+      - "--grpc"
+      - "--bind"
+      - "0.0.0.0:50051"
+      - "--role"
+      - "primary"
+
+  replica-1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: reddb-replica-1
+    ports:
+      - "50052:50051"
+    command:
+      - "server"
+      - "--grpc"
+      - "--bind"
+      - "0.0.0.0:50051"
+      - "--role"
+      - "replica"
+      - "--primary-addr"
+      - "http://primary:50051"
+    depends_on:
+      - primary
+
+  replica-2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: reddb-replica-2
+    ports:
+      - "50053:50051"
+    command:
+      - "server"
+      - "--grpc"
+      - "--bind"
+      - "0.0.0.0:50051"
+      - "--role"
+      - "replica"
+      - "--primary-addr"
+      - "http://primary:50051"
+    depends_on:
+      - primary

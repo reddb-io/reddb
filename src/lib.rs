@@ -1,36 +1,44 @@
 #![allow(dead_code, unused_imports, unused_variables)]
 
+pub mod api;
 pub mod application;
+pub mod auth;
+pub mod catalog;
+pub mod cli;
+pub mod client;
 pub mod config;
 pub mod crypto;
-pub mod api;
-pub mod catalog;
 pub mod engine;
-pub mod health;
 pub mod grpc;
+pub mod health;
 pub mod index;
 pub mod json;
+pub mod mcp;
 pub mod modules;
 pub mod physical;
 pub(crate) mod presentation;
+pub mod replication;
 pub mod runtime;
-pub mod server;
 pub mod serde_json;
+pub mod server;
+pub mod service_cli;
 pub mod storage;
 pub mod utils;
 
 pub mod prelude {
+    pub use crate::api::{
+        Capability, CapabilitySet, CatalogService, CatalogSnapshot, CollectionStats, DataOps,
+        QueryPlanner, RedDBError, RedDBOptions, RedDBResult, SchemaManifest, StorageMode,
+        DEFAULT_EXPORT_RETENTION, DEFAULT_SNAPSHOT_RETENTION, REDDB_FORMAT_VERSION,
+        REDDB_PROTOCOL_VERSION,
+    };
     pub use crate::application::{
         AdminUseCases, CatalogUseCases, EntityUseCases, GraphUseCases, NativeUseCases,
-        QueryUseCases, RuntimeAdminPort, RuntimeCatalogPort, RuntimeEntityPort,
-        RuntimeGraphPort, RuntimeNativePort, RuntimeQueryPort,
+        QueryUseCases, RuntimeAdminPort, RuntimeCatalogPort, RuntimeEntityPort, RuntimeGraphPort,
+        RuntimeNativePort, RuntimeQueryPort,
     };
-    pub use crate::api::{
-        CatalogService, CatalogSnapshot, Capability, CapabilitySet, CollectionStats, DataOps,
-        QueryPlanner, RedDBError, RedDBOptions, RedDBResult, DEFAULT_EXPORT_RETENTION,
-        DEFAULT_SNAPSHOT_RETENTION, REDDB_FORMAT_VERSION, REDDB_PROTOCOL_VERSION,
-        SchemaManifest, StorageMode,
-    };
+    pub use crate::auth::store::AuthStore;
+    pub use crate::auth::{AuthConfig, AuthError, Role as AuthRole};
     pub use crate::catalog::{
         snapshot_store, CatalogModelSnapshot, CollectionDescriptor, CollectionModel, SchemaMode,
     };
@@ -42,40 +50,38 @@ pub mod prelude {
         IndexStats,
     };
     pub use crate::physical::{
-        ArtifactState, BlockReference, CompactionPolicy, GridLayout, ManifestEvent,
-        ManifestEventKind, ExportDescriptor, ManifestPointers, PhysicalAnalyticsJob,
+        ArtifactState, BlockReference, CompactionPolicy, ExportDescriptor, GridLayout,
+        ManifestEvent, ManifestEventKind, ManifestPointers, PhysicalAnalyticsJob,
         PhysicalGraphProjection, PhysicalIndexState, PhysicalLayout, PhysicalMetadataFile,
         SnapshotDescriptor, SuperblockHeader, WalPolicy, DEFAULT_MANIFEST_EVENT_HISTORY,
         PHYSICAL_METADATA_PROTOCOL_VERSION,
     };
     pub use crate::runtime::{
-        ConnectionPoolConfig, RedDBRuntime, RuntimeConnection, RuntimeIvfMatch,
-        RuntimeIvfSearchResult, RuntimeFilter, RuntimeFilterValue,
-        RuntimeGraphCentralityAlgorithm, RuntimeGraphCentralityResult,
-        RuntimeGraphCentralityScore, RuntimeGraphClusteringResult,
-        RuntimeGraphCommunity, RuntimeGraphCommunityAlgorithm, RuntimeGraphCommunityResult,
-        RuntimeGraphComponentsMode, RuntimeGraphComponentsResult, RuntimeGraphComponent,
-        RuntimeGraphDegreeScore, RuntimeGraphDirection, RuntimeGraphEdge,
-        RuntimeGraphHitsResult, RuntimeGraphNeighborhoodResult, RuntimeGraphNode, RuntimeGraphPath,
+        ConnectionPoolConfig, RedDBRuntime, RuntimeConnection, RuntimeFilter, RuntimeFilterValue,
+        RuntimeGraphCentralityAlgorithm, RuntimeGraphCentralityResult, RuntimeGraphCentralityScore,
+        RuntimeGraphClusteringResult, RuntimeGraphCommunity, RuntimeGraphCommunityAlgorithm,
+        RuntimeGraphCommunityResult, RuntimeGraphComponent, RuntimeGraphComponentsMode,
+        RuntimeGraphComponentsResult, RuntimeGraphCyclesResult, RuntimeGraphDegreeScore,
+        RuntimeGraphDirection, RuntimeGraphEdge, RuntimeGraphHitsResult,
+        RuntimeGraphNeighborhoodResult, RuntimeGraphNode, RuntimeGraphPath,
         RuntimeGraphPathAlgorithm, RuntimeGraphPathResult, RuntimeGraphPattern,
-        RuntimeGraphProjection,
-        RuntimeGraphTopologicalSortResult, RuntimeGraphTraversalResult,
-        RuntimeGraphTraversalStrategy, RuntimeGraphVisit, RuntimeGraphCyclesResult,
+        RuntimeGraphProjection, RuntimeGraphTopologicalSortResult, RuntimeGraphTraversalResult,
+        RuntimeGraphTraversalStrategy, RuntimeGraphVisit, RuntimeIvfMatch, RuntimeIvfSearchResult,
         RuntimeQueryResult, RuntimeQueryWeights, RuntimeStats, ScanCursor, ScanPage,
     };
-    pub use crate::server::{RedDBServer, ServerOptions};
+    pub use crate::server::{RedDBServer, ServerOptions, ServerReplicationState};
 }
 
-pub use crate::application::{
-    AdminUseCases, CatalogUseCases, EntityUseCases, GraphUseCases, NativeUseCases,
-    QueryUseCases, RuntimeAdminPort, RuntimeCatalogPort, RuntimeEntityPort,
-    RuntimeGraphPort, RuntimeNativePort, RuntimeQueryPort,
-};
 pub use crate::api::{
-    CatalogService, CatalogSnapshot, Capability, CapabilitySet, CollectionStats, DataOps,
-    QueryPlanner, RedDBError, RedDBOptions, RedDBResult, DEFAULT_EXPORT_RETENTION,
-    DEFAULT_SNAPSHOT_RETENTION, REDDB_FORMAT_VERSION, REDDB_PROTOCOL_VERSION,
-    SchemaManifest, StorageMode,
+    Capability, CapabilitySet, CatalogService, CatalogSnapshot, CollectionStats, DataOps,
+    QueryPlanner, RedDBError, RedDBOptions, RedDBResult, SchemaManifest, StorageMode,
+    DEFAULT_EXPORT_RETENTION, DEFAULT_SNAPSHOT_RETENTION, REDDB_FORMAT_VERSION,
+    REDDB_PROTOCOL_VERSION,
+};
+pub use crate::application::{
+    AdminUseCases, CatalogUseCases, EntityUseCases, GraphUseCases, NativeUseCases, QueryUseCases,
+    RuntimeAdminPort, RuntimeCatalogPort, RuntimeEntityPort, RuntimeGraphPort, RuntimeNativePort,
+    RuntimeQueryPort,
 };
 pub use crate::catalog::{
     snapshot_store, CatalogModelSnapshot, CollectionDescriptor, CollectionModel, SchemaMode,
@@ -88,27 +94,25 @@ pub use crate::index::{
     IndexStats,
 };
 pub use crate::physical::{
-    ArtifactState, BlockReference, CompactionPolicy, GridLayout, ManifestEvent,
-    ManifestEventKind, ExportDescriptor, ManifestPointers, PhysicalAnalyticsJob,
-    PhysicalGraphProjection, PhysicalIndexState, PhysicalLayout, PhysicalMetadataFile,
-    SnapshotDescriptor, SuperblockHeader, WalPolicy, DEFAULT_MANIFEST_EVENT_HISTORY,
-    PHYSICAL_METADATA_PROTOCOL_VERSION,
+    ArtifactState, BlockReference, CompactionPolicy, ExportDescriptor, GridLayout, ManifestEvent,
+    ManifestEventKind, ManifestPointers, PhysicalAnalyticsJob, PhysicalGraphProjection,
+    PhysicalIndexState, PhysicalLayout, PhysicalMetadataFile, SnapshotDescriptor, SuperblockHeader,
+    WalPolicy, DEFAULT_MANIFEST_EVENT_HISTORY, PHYSICAL_METADATA_PROTOCOL_VERSION,
 };
+pub use crate::replication::{ReplicationConfig, ReplicationRole};
 pub use crate::runtime::{
-    ConnectionPoolConfig, RedDBRuntime, RuntimeConnection, RuntimeIvfMatch,
-    RuntimeIvfSearchResult, RuntimeFilter, RuntimeFilterValue,
-    RuntimeGraphCentralityAlgorithm, RuntimeGraphCentralityResult,
-    RuntimeGraphCentralityScore, RuntimeGraphClusteringResult,
-    RuntimeGraphCommunity, RuntimeGraphCommunityAlgorithm, RuntimeGraphCommunityResult,
-    RuntimeGraphComponentsMode, RuntimeGraphComponentsResult, RuntimeGraphComponent,
-    RuntimeGraphDegreeScore, RuntimeGraphDirection, RuntimeGraphEdge,
-    RuntimeGraphHitsResult, RuntimeGraphNeighborhoodResult, RuntimeGraphNode, RuntimeGraphPath,
-    RuntimeGraphPathAlgorithm, RuntimeGraphPathResult, RuntimeGraphPattern,
-    RuntimeGraphProjection,
-    RuntimeGraphTopologicalSortResult, RuntimeGraphTraversalResult,
-    RuntimeGraphTraversalStrategy, RuntimeGraphVisit, RuntimeGraphCyclesResult,
-    RuntimeQueryResult, RuntimeQueryWeights, RuntimeStats, ScanCursor, ScanPage,
+    ConnectionPoolConfig, RedDBRuntime, RuntimeConnection, RuntimeFilter, RuntimeFilterValue,
+    RuntimeGraphCentralityAlgorithm, RuntimeGraphCentralityResult, RuntimeGraphCentralityScore,
+    RuntimeGraphClusteringResult, RuntimeGraphCommunity, RuntimeGraphCommunityAlgorithm,
+    RuntimeGraphCommunityResult, RuntimeGraphComponent, RuntimeGraphComponentsMode,
+    RuntimeGraphComponentsResult, RuntimeGraphCyclesResult, RuntimeGraphDegreeScore,
+    RuntimeGraphDirection, RuntimeGraphEdge, RuntimeGraphHitsResult,
+    RuntimeGraphNeighborhoodResult, RuntimeGraphNode, RuntimeGraphPath, RuntimeGraphPathAlgorithm,
+    RuntimeGraphPathResult, RuntimeGraphPattern, RuntimeGraphProjection,
+    RuntimeGraphTopologicalSortResult, RuntimeGraphTraversalResult, RuntimeGraphTraversalStrategy,
+    RuntimeGraphVisit, RuntimeIvfMatch, RuntimeIvfSearchResult, RuntimeQueryResult,
+    RuntimeQueryWeights, RuntimeStats, ScanCursor, ScanPage,
 };
-pub use crate::server::{RedDBServer, ServerOptions};
+pub use crate::server::{RedDBServer, ServerOptions, ServerReplicationState};
 
 pub use crate::storage::*;

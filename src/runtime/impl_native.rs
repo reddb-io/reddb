@@ -31,9 +31,7 @@ impl RedDBRuntime {
             .ok_or_else(|| RedDBError::NotFound("native physical header".to_string()))
     }
 
-    pub fn native_collection_roots(
-        &self,
-    ) -> RedDBResult<std::collections::BTreeMap<String, u64>> {
+    pub fn native_collection_roots(&self) -> RedDBResult<std::collections::BTreeMap<String, u64>> {
         self.inner
             .db
             .native_collection_roots()
@@ -149,11 +147,9 @@ impl RedDBRuntime {
     }
 
     pub fn native_header_repair_policy(&self) -> RedDBResult<String> {
-        let policy = self
-            .inner
-            .db
-            .native_header_repair_policy()
-            .ok_or_else(|| RedDBError::NotFound("native physical header repair policy".to_string()))?;
+        let policy = self.inner.db.native_header_repair_policy().ok_or_else(|| {
+            RedDBError::NotFound("native physical header repair policy".to_string())
+        })?;
         Ok(match policy {
             crate::storage::NativeHeaderRepairPolicy::InSync => "in_sync",
             crate::storage::NativeHeaderRepairPolicy::RepairNativeFromMetadata => {
@@ -302,5 +298,4 @@ impl RedDBRuntime {
         }
         Err(RedDBError::NotFound("physical metadata".to_string()))
     }
-
 }

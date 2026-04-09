@@ -39,7 +39,10 @@ pub(crate) fn cross_modal_normalize_token(token: &str) -> String {
         .replace(' ', "_")
 }
 
-pub(crate) fn cross_modal_ref_matches_edge_label(ref_type: RefType, edge_label: Option<&str>) -> bool {
+pub(crate) fn cross_modal_ref_matches_edge_label(
+    ref_type: RefType,
+    edge_label: Option<&str>,
+) -> bool {
     let Some(edge_label) = edge_label else {
         return true;
     };
@@ -91,7 +94,11 @@ pub(crate) fn cross_modal_parse_entity_id_token(token: &str) -> Option<EntityId>
     trimmed
         .parse::<u64>()
         .ok()
-        .or_else(|| trimmed.strip_prefix('e').and_then(|value| value.parse::<u64>().ok()))
+        .or_else(|| {
+            trimmed
+                .strip_prefix('e')
+                .and_then(|value| value.parse::<u64>().ok())
+        })
         .map(EntityId::new)
 }
 
@@ -134,7 +141,9 @@ pub(crate) fn cross_modal_value_matches_entity_id(
 ) -> bool {
     match value {
         crate::storage::schema::Value::UnsignedInteger(value) => *value == entity_id.raw(),
-        crate::storage::schema::Value::Integer(value) if *value >= 0 => *value as u64 == entity_id.raw(),
+        crate::storage::schema::Value::Integer(value) if *value >= 0 => {
+            *value as u64 == entity_id.raw()
+        }
         crate::storage::schema::Value::Text(_)
         | crate::storage::schema::Value::NodeRef(_)
         | crate::storage::schema::Value::EdgeRef(_)
@@ -222,7 +231,11 @@ pub(crate) fn cross_modal_value_tokens(value: &crate::storage::schema::Value) ->
                         }
                         push(tokens, seen, trimmed.to_string());
                         if trimmed.contains([',', ';', '|']) {
-                            for item in trimmed.split([',', ';', '|']).map(str::trim).filter(|item| !item.is_empty()) {
+                            for item in trimmed
+                                .split([',', ';', '|'])
+                                .map(str::trim)
+                                .filter(|item| !item.is_empty())
+                            {
                                 push(tokens, seen, item.to_string());
                             }
                         }
@@ -456,7 +469,9 @@ pub(crate) fn cross_modal_lookup_graph_nodes_by_ref(
             continue;
         };
 
-        for entity in manager.query_all(|candidate| matches!(&candidate.kind, EntityKind::GraphNode { .. })) {
+        for entity in
+            manager.query_all(|candidate| matches!(&candidate.kind, EntityKind::GraphNode { .. }))
+        {
             if cross_modal_graph_node_matches_ref(&entity, node_ref) && seen.insert(entity.id) {
                 nodes.push(entity);
             }
@@ -483,27 +498,34 @@ pub(crate) fn cross_modal_graph_neighbors(
             continue;
         };
 
-        for entity in manager.query_all(|candidate| matches!(&candidate.kind, EntityKind::GraphEdge { .. })) {
+        for entity in
+            manager.query_all(|candidate| matches!(&candidate.kind, EntityKind::GraphEdge { .. }))
+        {
             let EntityKind::GraphEdge {
                 label,
                 from_node,
                 to_node,
                 ..
-            } = &entity.kind else {
+            } = &entity.kind
+            else {
                 continue;
             };
 
-            if edge_label
-                .is_some_and(|requested| cross_modal_normalize_token(requested) != cross_modal_normalize_token(label))
-            {
+            if edge_label.is_some_and(|requested| {
+                cross_modal_normalize_token(requested) != cross_modal_normalize_token(label)
+            }) {
                 continue;
             }
 
             let neighbor_ref = match direction {
-                TraversalDirection::Out if cross_modal_graph_node_matches_ref(&current_node, from_node) => {
+                TraversalDirection::Out
+                    if cross_modal_graph_node_matches_ref(&current_node, from_node) =>
+                {
                     Some(to_node.as_str())
                 }
-                TraversalDirection::In if cross_modal_graph_node_matches_ref(&current_node, to_node) => {
+                TraversalDirection::In
+                    if cross_modal_graph_node_matches_ref(&current_node, to_node) =>
+                {
                     Some(from_node.as_str())
                 }
                 TraversalDirection::Both

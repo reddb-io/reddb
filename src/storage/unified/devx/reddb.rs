@@ -9,13 +9,18 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::{collections::{BTreeMap, BTreeSet}, fmt::Debug};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::Debug,
+};
 
 use super::super::{
-    EntityData, EntityId, EntityKind, StoreStats, UnifiedStore, UnifiedStoreConfig, UnifiedEntity,
+    EntityData, EntityId, EntityKind, StoreStats, UnifiedEntity, UnifiedStore, UnifiedStoreConfig,
 };
 use super::batch::BatchBuilder;
-use super::builders::{DocumentBuilder, EdgeBuilder, KvBuilder, NodeBuilder, RowBuilder, VectorBuilder};
+use super::builders::{
+    DocumentBuilder, EdgeBuilder, KvBuilder, NodeBuilder, RowBuilder, VectorBuilder,
+};
 use super::helpers::cosine_similarity;
 use super::preprocessors::{IndexConfig, Preprocessor};
 use super::query::QueryBuilder;
@@ -24,8 +29,8 @@ use super::types::{LinkedEntity, SimilarResult};
 use crate::api::{Capability, CatalogSnapshot, CollectionStats, RedDBOptions, StorageMode};
 use crate::catalog::{
     consistency_report, snapshot_store_with_declarations, CatalogConsistencyReport,
-    CatalogDeclarations, CatalogIndexStatus, CatalogModelSnapshot,
-    CollectionDescriptor, CollectionModel,
+    CatalogDeclarations, CatalogIndexStatus, CatalogModelSnapshot, CollectionDescriptor,
+    CollectionModel,
 };
 use crate::health::{storage_file_health, HealthReport, HealthState};
 use crate::index::{IndexCatalog, IndexConfig as RuntimeIndexConfig, IndexKind};
@@ -33,15 +38,16 @@ use crate::physical::{
     ExportDescriptor, PhysicalAnalyticsJob, PhysicalGraphProjection, PhysicalIndexState,
     PhysicalMetadataFile,
 };
+use crate::replication::{primary::PrimaryReplication, ReplicationRole};
 use crate::serde_json::Value as JsonValue;
 use crate::storage::engine::{HnswIndex, IvfConfig, IvfIndex, IvfStats, PhysicalFileHeader};
 use crate::storage::schema::Value;
 use crate::storage::unified::store::{
     NativeCatalogCollectionSummary, NativeCatalogSummary, NativeExportSummary,
-    NativeManifestSummary, NativeMetadataStateSummary, NativePhysicalState,
-    NativeRecoverySummary, NativeRegistryIndexSummary, NativeRegistryJobSummary,
-    NativeRegistryProjectionSummary, NativeRegistrySummary, NativeSnapshotSummary,
-    NativeVectorArtifactPageSummary, NativeVectorArtifactSummary,
+    NativeManifestSummary, NativeMetadataStateSummary, NativePhysicalState, NativeRecoverySummary,
+    NativeRegistryIndexSummary, NativeRegistryJobSummary, NativeRegistryProjectionSummary,
+    NativeRegistrySummary, NativeSnapshotSummary, NativeVectorArtifactPageSummary,
+    NativeVectorArtifactSummary,
 };
 
 /// RedDB - Unified Database with Best-in-Class DevX
@@ -63,6 +69,12 @@ pub struct RedDB {
     /// Per-collection HNSW vector index cache for fast approximate nearest neighbor search.
     /// Lazily built on first vector similarity query per collection.
     vector_indexes: RwLock<HashMap<String, CachedVectorIndex>>,
+    /// Optional remote storage backend for snapshot transport.
+    pub(crate) remote_backend: Option<Box<dyn crate::storage::backend::RemoteBackend>>,
+    /// Remote object key used by the remote backend.
+    pub(crate) remote_key: Option<String>,
+    /// Primary replication state (only present when role is Primary).
+    pub(crate) replication: Option<Arc<PrimaryReplication>>,
 }
 
 /// A cached HNSW index together with the entity count at build time.
@@ -149,12 +161,11 @@ pub struct NativeVectorArtifactBatchInspection {
     pub failures: Vec<(String, String, String)>,
 }
 
-
+mod impl_access;
 mod impl_core_a;
 mod impl_core_b;
-mod impl_registry;
 mod impl_metadata;
-mod impl_access;
+mod impl_registry;
 
 impl Default for RedDB {
     fn default() -> Self {

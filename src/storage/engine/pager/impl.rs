@@ -92,7 +92,9 @@ impl Pager {
 
     /// Acquire a lock on the header_dirty Mutex, mapping poison errors.
     fn header_dirty_lock(&self) -> Result<std::sync::MutexGuard<'_, bool>, PagerError> {
-        self.header_dirty.lock().map_err(|_| PagerError::LockPoisoned)
+        self.header_dirty
+            .lock()
+            .map_err(|_| PagerError::LockPoisoned)
     }
 
     /// Load database header from page 0
@@ -739,10 +741,7 @@ impl Pager {
         Ok(self.header_read()?.physical)
     }
 
-    pub fn update_physical_header(
-        &self,
-        physical: PhysicalFileHeader,
-    ) -> Result<(), PagerError> {
+    pub fn update_physical_header(&self, physical: PhysicalFileHeader) -> Result<(), PagerError> {
         if self.config.read_only {
             return Err(PagerError::ReadOnly);
         }

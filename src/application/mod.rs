@@ -31,6 +31,6 @@ pub use ports::{
     RuntimeQueryPort,
 };
 pub use query::{
-    ExecuteQueryInput, ExplainQueryInput, QueryUseCases, ScanCollectionInput,
-    SearchHybridInput, SearchIvfInput, SearchSimilarInput, SearchTextInput,
+    ExecuteQueryInput, ExplainQueryInput, QueryUseCases, ScanCollectionInput, SearchHybridInput,
+    SearchIvfInput, SearchSimilarInput, SearchTextInput,
 };

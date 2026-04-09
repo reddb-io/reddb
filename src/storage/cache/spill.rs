@@ -792,7 +792,11 @@ mod tests {
             .spill_threshold(0.5)
             .target_after_spill(0.3)
             .min_spill_size(100)
-            .spill_dir(env::temp_dir().join(format!("reddb-spill-test-{}-{}", std::process::id(), id)))
+            .spill_dir(env::temp_dir().join(format!(
+                "reddb-spill-test-{}-{}",
+                std::process::id(),
+                id
+            )))
     }
 
     #[test]

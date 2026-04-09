@@ -41,9 +41,11 @@ impl RedDBRuntime {
     }
 
     pub fn acquire(&self) -> RedDBResult<RuntimeConnection> {
-        let mut pool = self.inner.pool.lock().map_err(|e| {
-            RedDBError::Internal(format!("connection pool lock poisoned: {e}"))
-        })?;
+        let mut pool = self
+            .inner
+            .pool
+            .lock()
+            .map_err(|e| RedDBError::Internal(format!("connection pool lock poisoned: {e}")))?;
         if pool.active >= self.inner.pool_config.max_connections {
             return Err(RedDBError::Internal(
                 "connection pool exhausted".to_string(),
@@ -142,7 +144,11 @@ impl RedDBRuntime {
     }
 
     pub fn stats(&self) -> RuntimeStats {
-        let pool = self.inner.pool.lock().expect("stats: connection pool lock poisoned");
+        let pool = self
+            .inner
+            .pool
+            .lock()
+            .expect("stats: connection pool lock poisoned");
         RuntimeStats {
             active_connections: pool.active,
             idle_connections: pool.idle.len(),
@@ -165,10 +171,9 @@ impl RedDBRuntime {
         match expr {
             QueryExpr::Graph(_) | QueryExpr::Path(_) => {
                 let graph = materialize_graph(self.inner.db.store().as_ref())?;
-                let result = crate::storage::query::unified::UnifiedExecutor::execute_on(
-                    &graph, &expr,
-                )
-                .map_err(|err| RedDBError::Query(err.to_string()))?;
+                let result =
+                    crate::storage::query::unified::UnifiedExecutor::execute_on(&graph, &expr)
+                        .map_err(|err| RedDBError::Query(err.to_string()))?;
 
                 Ok(RuntimeQueryResult {
                     query: query.to_string(),
@@ -176,6 +181,8 @@ impl RedDBRuntime {
                     statement,
                     engine: "materialized-graph",
                     result,
+                    affected_rows: 0,
+                    statement_type: "select",
                 })
             }
             QueryExpr::Table(table) => Ok(RuntimeQueryResult {
@@ -184,6 +191,8 @@ impl RedDBRuntime {
                 statement,
                 engine: "runtime-table",
                 result: execute_runtime_table_query(&self.inner.db, &table)?,
+                affected_rows: 0,
+                statement_type: "select",
             }),
             QueryExpr::Join(join) => Ok(RuntimeQueryResult {
                 query: query.to_string(),
@@ -191,6 +200,8 @@ impl RedDBRuntime {
                 statement,
                 engine: "runtime-join",
                 result: execute_runtime_join_query(&self.inner.db, &join)?,
+                affected_rows: 0,
+                statement_type: "select",
             }),
             QueryExpr::Vector(vector) => Ok(RuntimeQueryResult {
                 query: query.to_string(),
@@ -198,6 +209,8 @@ impl RedDBRuntime {
                 statement,
                 engine: "runtime-vector",
                 result: execute_runtime_vector_query(&self.inner.db, &vector)?,
+                affected_rows: 0,
+                statement_type: "select",
             }),
             QueryExpr::Hybrid(hybrid) => Ok(RuntimeQueryResult {
                 query: query.to_string(),
@@ -205,8 +218,21 @@ impl RedDBRuntime {
                 statement,
                 engine: "runtime-hybrid",
                 result: execute_runtime_hybrid_query(&self.inner.db, &hybrid)?,
+                affected_rows: 0,
+                statement_type: "select",
             }),
+            // DML execution
+            QueryExpr::Insert(ref insert) => self.execute_insert(query, insert),
+            QueryExpr::Update(ref update) => self.execute_update(query, update),
+            QueryExpr::Delete(ref delete) => self.execute_delete(query, delete),
+            // DDL execution
+            QueryExpr::CreateTable(ref create) => self.execute_create_table(query, create),
+            QueryExpr::DropTable(ref drop_tbl) => self.execute_drop_table(query, drop_tbl),
+            QueryExpr::AlterTable(ref alter) => self.execute_alter_table(query, alter),
+            // Graph analytics commands
+            QueryExpr::GraphCommand(ref cmd) => self.execute_graph_command(query, cmd),
+            // Search commands
+            QueryExpr::SearchCommand(ref cmd) => self.execute_search_command(query, cmd),
         }
     }
-
 }

@@ -11,13 +11,10 @@ use crate::storage::query::is_universal_entity_source as is_universal_query_sour
 use crate::storage::schema::Value;
 use crate::storage::RedDB;
 
-use super::{AccessPathDecision, CardinalityEstimate, CanonicalLogicalNode, CostEstimator};
+use super::{AccessPathDecision, CanonicalLogicalNode, CardinalityEstimate, CostEstimator};
 use logical_helpers::*;
 
-pub(super) fn logical_plan_node_with_catalog(
-    db: &RedDB,
-    expr: &QueryExpr,
-) -> CanonicalLogicalNode {
+pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> CanonicalLogicalNode {
     match expr {
         QueryExpr::Table(query) => {
             let mut details = BTreeMap::new();
@@ -52,17 +49,22 @@ pub(super) fn logical_plan_node_with_catalog(
             details.insert("order_by".to_string(), query.order_by.len().to_string());
             details.insert(
                 "limit".to_string(),
-                query.limit
+                query
+                    .limit
                     .map(|value| value.to_string())
                     .unwrap_or_else(|| "none".to_string()),
             );
             details.insert(
                 "offset".to_string(),
-                query.offset
+                query
+                    .offset
                     .map(|value| value.to_string())
                     .unwrap_or_else(|| "none".to_string()),
             );
-            details.insert("projection_count".to_string(), query.columns.len().to_string());
+            details.insert(
+                "projection_count".to_string(),
+                query.columns.len().to_string(),
+            );
             let mut node = CanonicalLogicalNode {
                 operator: access.path.to_string(),
                 source: Some(query.table.clone()),
@@ -125,7 +127,8 @@ pub(super) fn logical_plan_node_with_catalog(
                     if is_any { "entity_offset" } else { "offset" },
                     btree_details([(
                         "offset",
-                        query.offset
+                        query
+                            .offset
                             .map(|value| value.to_string())
                             .unwrap_or_else(|| "none".to_string()),
                     )]),
@@ -142,14 +145,13 @@ pub(super) fn logical_plan_node_with_catalog(
                 );
                 node = wrap_unary_plan(
                     if is_any { "entity_limit" } else { "limit" },
-                    btree_details([
-                        (
-                            "limit",
-                            query.limit
-                                .map(|value| value.to_string())
-                                .unwrap_or_else(|| "none".to_string()),
-                        ),
-                    ]),
+                    btree_details([(
+                        "limit",
+                        query
+                            .limit
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "none".to_string()),
+                    )]),
                     Some(limit_estimate),
                     node,
                 );
@@ -244,10 +246,7 @@ pub(super) fn logical_plan_node_with_catalog(
                 "right_expr_kind".to_string(),
                 query_expr_kind(query.right.as_ref()).to_string(),
             );
-            details.insert(
-                "join_strategy".to_string(),
-                join_strategy.to_string(),
-            );
+            details.insert("join_strategy".to_string(), join_strategy.to_string());
             details.insert(
                 "join_strategy_reason".to_string(),
                 join_strategy_reason(query).to_string(),
@@ -256,13 +255,15 @@ pub(super) fn logical_plan_node_with_catalog(
             details.insert("order_by".to_string(), query.order_by.len().to_string());
             details.insert(
                 "limit".to_string(),
-                query.limit
+                query
+                    .limit
                     .map(|value| value.to_string())
                     .unwrap_or_else(|| "none".to_string()),
             );
             details.insert(
                 "offset".to_string(),
-                query.offset
+                query
+                    .offset
                     .map(|value| value.to_string())
                     .unwrap_or_else(|| "none".to_string()),
             );
@@ -320,7 +321,8 @@ pub(super) fn logical_plan_node_with_catalog(
                     "offset",
                     btree_details([(
                         "offset",
-                        query.offset
+                        query
+                            .offset
                             .map(|value| value.to_string())
                             .unwrap_or_else(|| "none".to_string()),
                     )]),
@@ -339,7 +341,8 @@ pub(super) fn logical_plan_node_with_catalog(
                     "limit",
                     btree_details([(
                         "limit",
-                        query.limit
+                        query
+                            .limit
                             .map(|value| value.to_string())
                             .unwrap_or_else(|| "none".to_string()),
                     )]),
@@ -417,13 +420,15 @@ pub(super) fn logical_plan_node_with_catalog(
             details.insert("filter".to_string(), query.filter.is_some().to_string());
             details.insert(
                 "metric".to_string(),
-                query.metric
+                query
+                    .metric
                     .map(|metric| format!("{metric:?}"))
                     .unwrap_or_else(|| "default".to_string()),
             );
             details.insert(
                 "threshold".to_string(),
-                query.threshold
+                query
+                    .threshold
                     .map(|value| value.to_string())
                     .unwrap_or_else(|| "none".to_string()),
             );
@@ -432,7 +437,10 @@ pub(super) fn logical_plan_node_with_catalog(
                 match &query.query_vector {
                     VectorSource::Literal(values) => format!("literal({})", values.len()),
                     VectorSource::Text(_) => "text".to_string(),
-                    VectorSource::Reference { collection, vector_id } => {
+                    VectorSource::Reference {
+                        collection,
+                        vector_id,
+                    } => {
                         format!("reference({collection}:{vector_id})")
                     }
                     VectorSource::Subquery(_) => "subquery".to_string(),
@@ -467,7 +475,8 @@ pub(super) fn logical_plan_node_with_catalog(
                     "similarity_threshold",
                     btree_details([(
                         "threshold",
-                        query.threshold
+                        query
+                            .threshold
                             .map(|value| value.to_string())
                             .unwrap_or_else(|| "none".to_string()),
                     )]),
@@ -519,7 +528,8 @@ pub(super) fn logical_plan_node_with_catalog(
             );
             details.insert(
                 "limit".to_string(),
-                query.limit
+                query
+                    .limit
                     .map(|value| value.to_string())
                     .unwrap_or_else(|| "none".to_string()),
             );
@@ -567,6 +577,28 @@ pub(super) fn logical_plan_node_with_catalog(
                 node
             } else {
                 node
+            }
+        }
+        // DML/DDL statements produce a simple passthrough plan node
+        QueryExpr::Insert(_)
+        | QueryExpr::Update(_)
+        | QueryExpr::Delete(_)
+        | QueryExpr::CreateTable(_)
+        | QueryExpr::DropTable(_)
+        | QueryExpr::AlterTable(_)
+        | QueryExpr::GraphCommand(_)
+        | QueryExpr::SearchCommand(_) => {
+            let mut details = BTreeMap::new();
+            details.insert("type".to_string(), "dml_ddl".to_string());
+            CanonicalLogicalNode {
+                operator: "dml_ddl".to_string(),
+                source: None,
+                details,
+                estimated_rows: 0.0,
+                estimated_selectivity: 1.0,
+                estimated_confidence: 1.0,
+                operator_cost: 1.0,
+                children: Vec::new(),
             }
         }
     }

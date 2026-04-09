@@ -271,9 +271,7 @@ impl IvfIndex {
             .iter()
             .enumerate()
             .map(|(i, c)| (i, l2_squared_simd(vector, c)))
-            .min_by(|(li, la), (ri, rb)| {
-                cmp_f32(*la, *rb).then_with(|| li.cmp(ri))
-            })
+            .min_by(|(li, la), (ri, rb)| cmp_f32(*la, *rb).then_with(|| li.cmp(ri)))
             .map(|(i, _)| i)
             .unwrap_or(0)
     }
@@ -287,9 +285,7 @@ impl IvfIndex {
             .map(|(i, list)| (i, l2_squared_simd(vector, &list.centroid)))
             .collect();
 
-        distances.sort_by(|(li, la), (ri, lb)| {
-            cmp_f32(*la, *lb).then_with(|| li.cmp(ri))
-        });
+        distances.sort_by(|(li, la), (ri, lb)| cmp_f32(*la, *lb).then_with(|| li.cmp(ri)));
         distances.into_iter().take(k).map(|(i, _)| i).collect()
     }
 
@@ -380,9 +376,7 @@ impl IvfIndex {
         }
 
         // Sort and return top k
-        candidates.sort_by(|a, b| {
-            cmp_f32(a.distance, b.distance).then_with(|| a.id.cmp(&b.id))
-        });
+        candidates.sort_by(|a, b| cmp_f32(a.distance, b.distance).then_with(|| a.id.cmp(&b.id)));
         candidates.truncate(k);
         candidates
     }
@@ -495,12 +489,8 @@ impl IvfIndex {
             if *pos + 4 > buf.len() {
                 return Err("truncated IVF payload".to_string());
             }
-            let value = u32::from_le_bytes([
-                buf[*pos],
-                buf[*pos + 1],
-                buf[*pos + 2],
-                buf[*pos + 3],
-            ]);
+            let value =
+                u32::from_le_bytes([buf[*pos], buf[*pos + 1], buf[*pos + 2], buf[*pos + 3]]);
             *pos += 4;
             Ok(value)
         };
@@ -525,12 +515,8 @@ impl IvfIndex {
             if *pos + 4 > buf.len() {
                 return Err("truncated IVF payload".to_string());
             }
-            let value = f32::from_le_bytes([
-                buf[*pos],
-                buf[*pos + 1],
-                buf[*pos + 2],
-                buf[*pos + 3],
-            ]);
+            let value =
+                f32::from_le_bytes([buf[*pos], buf[*pos + 1], buf[*pos + 2], buf[*pos + 3]]);
             *pos += 4;
             Ok(value)
         };

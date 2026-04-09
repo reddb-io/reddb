@@ -67,10 +67,7 @@ impl RedDBRuntime {
             .map_err(|err| RedDBError::Internal(err.to_string()))
     }
 
-    pub fn materialize_graph_projection(
-        &self,
-        name: &str,
-    ) -> RedDBResult<PhysicalGraphProjection> {
+    pub fn materialize_graph_projection(&self, name: &str) -> RedDBResult<PhysicalGraphProjection> {
         self.inner
             .db
             .materialize_graph_projection(name)
@@ -89,10 +86,7 @@ impl RedDBRuntime {
             .ok_or_else(|| RedDBError::NotFound(name.to_string()))
     }
 
-    pub fn fail_graph_projection(
-        &self,
-        name: &str,
-    ) -> RedDBResult<PhysicalGraphProjection> {
+    pub fn fail_graph_projection(&self, name: &str) -> RedDBResult<PhysicalGraphProjection> {
         self.inner
             .db
             .fail_graph_projection(name)
@@ -100,10 +94,7 @@ impl RedDBRuntime {
             .ok_or_else(|| RedDBError::NotFound(name.to_string()))
     }
 
-    pub fn mark_graph_projection_stale(
-        &self,
-        name: &str,
-    ) -> RedDBResult<PhysicalGraphProjection> {
+    pub fn mark_graph_projection_stale(&self, name: &str) -> RedDBResult<PhysicalGraphProjection> {
         self.inner
             .db
             .mark_graph_projection_stale(name)
@@ -296,7 +287,10 @@ impl RedDBRuntime {
         self.inner.db.declared_indexes()
     }
 
-    pub fn declared_indexes_for_collection(&self, collection: &str) -> Vec<crate::PhysicalIndexState> {
+    pub fn declared_indexes_for_collection(
+        &self,
+        collection: &str,
+    ) -> Vec<crate::PhysicalIndexState> {
         self.inner
             .db
             .declared_indexes()
@@ -310,11 +304,17 @@ impl RedDBRuntime {
     }
 
     pub fn graph_projection_statuses(&self) -> Vec<crate::catalog::CatalogGraphProjectionStatus> {
-        self.inner.db.catalog_model_snapshot().graph_projection_statuses
+        self.inner
+            .db
+            .catalog_model_snapshot()
+            .graph_projection_statuses
     }
 
     pub fn analytics_job_statuses(&self) -> Vec<crate::catalog::CatalogAnalyticsJobStatus> {
-        self.inner.db.catalog_model_snapshot().analytics_job_statuses
+        self.inner
+            .db
+            .catalog_model_snapshot()
+            .analytics_job_statuses
     }
 
     pub fn indexes_for_collection(&self, collection: &str) -> Vec<crate::PhysicalIndexState> {
@@ -436,5 +436,4 @@ impl RedDBRuntime {
             }
         }
     }
-
 }

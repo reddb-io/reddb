@@ -1,6 +1,8 @@
 use super::*;
 
-pub(crate) fn parse_patch_operations(payload: &JsonValue) -> Result<Vec<PatchOperation>, HttpResponse> {
+pub(crate) fn parse_patch_operations(
+    payload: &JsonValue,
+) -> Result<Vec<PatchOperation>, HttpResponse> {
     let Some(value) = payload.get("operations") else {
         return Ok(Vec::new());
     };

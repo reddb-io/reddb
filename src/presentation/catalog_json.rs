@@ -93,7 +93,9 @@ pub(crate) fn catalog_model_snapshot_json(snapshot: &CatalogModelSnapshot) -> Js
     );
     object.insert(
         "declared_graph_projections".to_string(),
-        crate::presentation::admin_json::graph_projections_json(&snapshot.declared_graph_projections),
+        crate::presentation::admin_json::graph_projections_json(
+            &snapshot.declared_graph_projections,
+        ),
     );
     object.insert(
         "declared_analytics_jobs".to_string(),
@@ -115,7 +117,13 @@ pub(crate) fn catalog_model_snapshot_json(snapshot: &CatalogModelSnapshot) -> Js
     );
     object.insert(
         "index_statuses".to_string(),
-        JsonValue::Array(snapshot.index_statuses.iter().map(index_status_json).collect()),
+        JsonValue::Array(
+            snapshot
+                .index_statuses
+                .iter()
+                .map(index_status_json)
+                .collect(),
+        ),
     );
     object.insert(
         "graph_projection_statuses".to_string(),
@@ -235,10 +243,7 @@ pub(crate) fn index_status_json(status: &CatalogIndexStatus) -> JsonValue {
         "artifact_state".to_string(),
         JsonValue::String(status.artifact_state.as_str().to_string()),
     );
-    object.insert(
-        "queryable".to_string(),
-        JsonValue::Bool(status.queryable),
-    );
+    object.insert("queryable".to_string(), JsonValue::Bool(status.queryable));
     object.insert(
         "requires_rebuild".to_string(),
         JsonValue::Bool(status.requires_rebuild),
@@ -297,10 +302,7 @@ pub(crate) fn graph_projection_status_json(status: &CatalogGraphProjectionStatus
         JsonValue::Bool(status.operational),
     );
     object.insert("in_sync".to_string(), JsonValue::Bool(status.in_sync));
-    object.insert(
-        "queryable".to_string(),
-        JsonValue::Bool(status.queryable),
-    );
+    object.insert("queryable".to_string(), JsonValue::Bool(status.queryable));
     object.insert(
         "requires_rematerialization".to_string(),
         JsonValue::Bool(status.requires_rematerialization),
@@ -427,10 +429,7 @@ pub(crate) fn analytics_job_status_json(status: &CatalogAnalyticsJobStatus) -> J
             .map(JsonValue::Bool)
             .unwrap_or(JsonValue::Null),
     );
-    object.insert(
-        "executable".to_string(),
-        JsonValue::Bool(status.executable),
-    );
+    object.insert("executable".to_string(), JsonValue::Bool(status.executable));
     object.insert(
         "requires_rerun".to_string(),
         JsonValue::Bool(status.requires_rerun),
@@ -591,15 +590,11 @@ pub(crate) fn collection_readiness_json(descriptor: &CollectionDescriptor) -> Js
     JsonValue::Object(object)
 }
 
-pub(crate) fn catalog_collection_readiness_json(
-    collections: &[CollectionDescriptor],
-) -> JsonValue {
+pub(crate) fn catalog_collection_readiness_json(collections: &[CollectionDescriptor]) -> JsonValue {
     JsonValue::Array(collections.iter().map(collection_readiness_json).collect())
 }
 
-pub(crate) fn catalog_collection_attention_json(
-    collections: &[CollectionDescriptor],
-) -> JsonValue {
+pub(crate) fn catalog_collection_attention_json(collections: &[CollectionDescriptor]) -> JsonValue {
     JsonValue::Array(
         collections
             .iter()

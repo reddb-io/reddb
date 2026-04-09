@@ -1,18 +1,18 @@
 //! Minimal HTTP server for RedDB management and remote access.
 
-pub(crate) use crate::application::{
-    AdminUseCases, CatalogUseCases, ExecuteQueryInput, ExplainQueryInput, GraphCentralityInput,
-    GraphClusteringInput, GraphCommunitiesInput, GraphComponentsInput, GraphCyclesInput,
-    GraphHitsInput, GraphNeighborhoodInput, GraphPersonalizedPageRankInput,
-    GraphShortestPathInput, GraphTopologicalSortInput, GraphTraversalInput, GraphUseCases,
-    CreateEdgeInput, CreateEntityOutput, CreateNodeEmbeddingInput, CreateNodeGraphLinkInput,
-    CreateNodeInput, CreateNodeTableLinkInput, CreateRowInput, CreateVectorInput,
-    DeleteEntityInput, PatchEntityInput, PatchEntityOperation, PatchEntityOperationType,
-    EntityUseCases, InspectNativeArtifactInput, NativeUseCases, QueryUseCases,
-    SearchHybridInput, SearchIvfInput, SearchSimilarInput, SearchTextInput,
-};
 pub(crate) use crate::application::json_input::{
     json_bool_field, json_f32_field, json_string_field, json_usize_field,
+};
+pub(crate) use crate::application::{
+    AdminUseCases, CatalogUseCases, CreateEdgeInput, CreateEntityOutput, CreateNodeEmbeddingInput,
+    CreateNodeGraphLinkInput, CreateNodeInput, CreateNodeTableLinkInput, CreateRowInput,
+    CreateVectorInput, DeleteEntityInput, EntityUseCases, ExecuteQueryInput, ExplainQueryInput,
+    GraphCentralityInput, GraphClusteringInput, GraphCommunitiesInput, GraphComponentsInput,
+    GraphCyclesInput, GraphHitsInput, GraphNeighborhoodInput, GraphPersonalizedPageRankInput,
+    GraphShortestPathInput, GraphTopologicalSortInput, GraphTraversalInput, GraphUseCases,
+    InspectNativeArtifactInput, NativeUseCases, PatchEntityInput, PatchEntityOperation,
+    PatchEntityOperationType, QueryUseCases, SearchHybridInput, SearchIvfInput, SearchSimilarInput,
+    SearchTextInput,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::io::{self, Read, Write};
@@ -20,7 +20,10 @@ use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use std::sync::Arc;
+
 use crate::api::{RedDBError, RedDBOptions, RedDBResult};
+use crate::auth::store::AuthStore;
 use crate::catalog::{CatalogModelSnapshot, CollectionDescriptor, CollectionModel, SchemaMode};
 use crate::health::{HealthProvider, HealthReport, HealthState};
 use crate::json::{parse_json, to_vec as json_to_vec, Map, Value as JsonValue};
@@ -44,16 +47,16 @@ fn analytics_job_json(job: &crate::PhysicalAnalyticsJob) -> JsonValue {
     crate::presentation::admin_json::analytics_job_json(job)
 }
 
-fn graph_projection_json(
-    projection: &crate::PhysicalGraphProjection,
-) -> JsonValue {
+fn graph_projection_json(projection: &crate::PhysicalGraphProjection) -> JsonValue {
     crate::presentation::admin_json::graph_projection_json(projection)
 }
 
+mod handlers_auth;
 mod handlers_entity;
 mod handlers_graph;
 mod handlers_ops;
 mod handlers_query;
+mod handlers_replication;
 mod input_parsing;
 mod patch_support;
 mod request_body;
@@ -79,8 +82,6 @@ pub struct ServerOptions {
     pub read_timeout_ms: u64,
     pub write_timeout_ms: u64,
     pub max_scan_limit: usize,
-    pub auth_token: Option<String>,
-    pub write_token: Option<String>,
 }
 
 impl Default for ServerOptions {
@@ -91,16 +92,22 @@ impl Default for ServerOptions {
             read_timeout_ms: 5_000,
             write_timeout_ms: 5_000,
             max_scan_limit: 1_000,
-            auth_token: None,
-            write_token: None,
         }
     }
+}
+
+/// Replication state exposed to the HTTP server.
+pub struct ServerReplicationState {
+    pub config: crate::replication::ReplicationConfig,
+    pub primary: Option<crate::replication::primary::PrimaryReplication>,
 }
 
 #[derive(Clone)]
 pub struct RedDBServer {
     runtime: RedDBRuntime,
     options: ServerOptions,
+    auth_store: Option<Arc<AuthStore>>,
+    replication: Option<Arc<ServerReplicationState>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,7 +174,24 @@ impl RedDBServer {
     }
 
     pub fn with_options(runtime: RedDBRuntime, options: ServerOptions) -> Self {
-        Self { runtime, options }
+        Self {
+            runtime,
+            options,
+            auth_store: None,
+            replication: None,
+        }
+    }
+
+    /// Attach an `AuthStore` for HTTP-layer authentication.
+    pub fn with_auth(mut self, auth_store: Arc<AuthStore>) -> Self {
+        self.auth_store = Some(auth_store);
+        self
+    }
+
+    /// Attach replication state for status and snapshot endpoints.
+    pub fn with_replication(mut self, state: Arc<ServerReplicationState>) -> Self {
+        self.replication = Some(state);
+        self
     }
 
     pub fn runtime(&self) -> &RedDBRuntime {

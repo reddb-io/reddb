@@ -51,12 +51,17 @@ pub fn detect_mode(input: &str) -> QueryMode {
         return QueryMode::Cypher;
     }
 
-    // SQL: SELECT, FROM, INSERT, UPDATE, DELETE at start
+    // SQL: SELECT, FROM, INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, GRAPH, SEARCH at start
     if lower.starts_with("select ")
         || lower.starts_with("from ")
         || lower.starts_with("insert ")
         || lower.starts_with("update ")
         || lower.starts_with("delete ")
+        || lower.starts_with("create ")
+        || lower.starts_with("drop ")
+        || lower.starts_with("alter ")
+        || lower.starts_with("graph ")
+        || lower.starts_with("search ")
     {
         // But check if it's SPARQL-style SELECT with ?variable
         if lower.starts_with("select ") && lower.contains(" ?") {

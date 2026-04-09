@@ -651,7 +651,6 @@ pub struct GraphSegment {
     sorted: bool,
 }
 
-
 #[path = "graph/impl.rs"]
 mod graph_impl;
 // ==================== Graph Segment View (Zero-Copy) ====================

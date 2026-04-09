@@ -611,10 +611,7 @@ impl KvBuilder {
 
     /// Save the key-value pair as a table row with named fields `key` and `value`
     pub fn save(self) -> Result<EntityId, DevXError> {
-        let columns = vec![
-            ("key", Value::Text(self.key)),
-            ("value", self.value),
-        ];
+        let columns = vec![("key", Value::Text(self.key)), ("value", self.value)];
         let mut builder = RowBuilder::new(self.store, &self.collection, columns);
         for (k, v) in self.metadata {
             builder = builder.metadata(k, v);
@@ -699,7 +696,12 @@ impl DocumentBuilder {
         };
 
         // Build the full JSON body object
-        let body_object = JsonValue::Object(self.body.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+        let body_object = JsonValue::Object(
+            self.body
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        );
         let body_bytes = json_to_vec(&body_object)
             .map_err(|e| DevXError::Storage(format!("failed to serialize document body: {e}")))?;
 
@@ -729,11 +731,9 @@ impl DocumentBuilder {
 
         // Store metadata
         if !self.metadata.is_empty() {
-            let _ = self.store.set_metadata(
-                &self.collection,
-                id,
-                Metadata::with_fields(self.metadata),
-            );
+            let _ =
+                self.store
+                    .set_metadata(&self.collection, id, Metadata::with_fields(self.metadata));
         }
 
         Ok(id)
@@ -753,11 +753,9 @@ fn json_value_to_storage_value(value: &JsonValue) -> Value {
             }
         }
         JsonValue::String(s) => Value::Text(s.clone()),
-        JsonValue::Array(_) | JsonValue::Object(_) => {
-            match json_to_vec(value) {
-                Ok(bytes) => Value::Json(bytes),
-                Err(_) => Value::Null,
-            }
-        }
+        JsonValue::Array(_) | JsonValue::Object(_) => match json_to_vec(value) {
+            Ok(bytes) => Value::Json(bytes),
+            Err(_) => Value::Null,
+        },
     }
 }

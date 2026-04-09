@@ -186,7 +186,6 @@ pub struct BTree {
     root_page_id: RwLock<u32>,
 }
 
-
 #[path = "btree/impl.rs"]
 mod btree_impl;
 // ==================== Search Helpers ====================

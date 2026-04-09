@@ -15,6 +15,19 @@ impl RedDBServer {
         }
 
         match (method.as_str(), path.as_str()) {
+            // Auth endpoints
+            ("POST", "/auth/bootstrap") => return self.handle_auth_bootstrap(body),
+            ("POST", "/auth/login") => return self.handle_auth_login(body),
+            ("POST", "/auth/users") => return self.handle_auth_create_user(body),
+            ("GET", "/auth/users") => return self.handle_auth_list_users(),
+            ("POST", "/auth/api-keys") => return self.handle_auth_create_api_key(body),
+            ("POST", "/auth/change-password") => return self.handle_auth_change_password(body),
+            ("GET", "/auth/whoami") => return self.handle_auth_whoami(&headers),
+
+            // Replication endpoints
+            ("GET", "/replication/status") => return self.handle_replication_status(),
+            ("POST", "/replication/snapshot") => return self.handle_replication_snapshot(),
+
             ("GET", "/health") => {
                 let report = self.native_use_cases().health();
                 let status = if report.is_healthy() { 200 } else { 503 };
@@ -183,20 +196,16 @@ impl RedDBServer {
                     &self.catalog_use_cases().consistency_report(),
                 ),
             ),
-            ("GET", "/catalog/indexes/declared") => {
-                json_response(
-                    200,
-                    crate::presentation::admin_json::indexes_json(
-                        &self.catalog_use_cases().declared_indexes(),
-                    ),
-                )
-            }
-            ("GET", "/catalog/indexes/operational") => {
-                json_response(
-                    200,
-                    crate::presentation::admin_json::indexes_json(&self.catalog_use_cases().indexes()),
-                )
-            }
+            ("GET", "/catalog/indexes/declared") => json_response(
+                200,
+                crate::presentation::admin_json::indexes_json(
+                    &self.catalog_use_cases().declared_indexes(),
+                ),
+            ),
+            ("GET", "/catalog/indexes/operational") => json_response(
+                200,
+                crate::presentation::admin_json::indexes_json(&self.catalog_use_cases().indexes()),
+            ),
             ("GET", "/catalog/indexes/status") => json_response(
                 200,
                 crate::presentation::catalog_json::catalog_index_statuses_json(
@@ -236,13 +245,15 @@ impl RedDBServer {
                     &self.catalog_use_cases().graph_projection_attention(),
                 ),
             ),
-            ("GET", "/catalog/analytics-jobs/declared") => match self.catalog_use_cases().analytics_jobs() {
-                Ok(jobs) => json_response(
-                    200,
-                    crate::presentation::admin_json::analytics_jobs_json(&jobs),
-                ),
-                Err(err) => json_error(404, err.to_string()),
-            },
+            ("GET", "/catalog/analytics-jobs/declared") => {
+                match self.catalog_use_cases().analytics_jobs() {
+                    Ok(jobs) => json_response(
+                        200,
+                        crate::presentation::admin_json::analytics_jobs_json(&jobs),
+                    ),
+                    Err(err) => json_error(404, err.to_string()),
+                }
+            }
             ("GET", "/catalog/analytics-jobs/operational") => json_response(
                 200,
                 crate::presentation::admin_json::analytics_jobs_json(
@@ -281,28 +292,38 @@ impl RedDBServer {
                     Err(err) => json_error(404, err.to_string()),
                 }
             }
-            ("GET", "/physical/native-manifest") => match self.native_use_cases().native_manifest_summary() {
-                Ok(summary) => json_response(
-                    200,
-                    crate::presentation::native_json::native_manifest_summary_json(&summary),
-                ),
-                Err(err) => json_error(404, err.to_string()),
-            },
-            ("GET", "/physical/native-registry") => match self.native_use_cases().native_registry_summary() {
-                Ok(summary) => json_response(
-                    200,
-                    crate::presentation::ops_json::native_registry_summary_json(&summary),
-                ),
-                Err(err) => json_error(404, err.to_string()),
-            },
-            ("GET", "/physical/native-recovery") => match self.native_use_cases().native_recovery_summary() {
+            ("GET", "/physical/native-manifest") => {
+                match self.native_use_cases().native_manifest_summary() {
+                    Ok(summary) => json_response(
+                        200,
+                        crate::presentation::native_json::native_manifest_summary_json(&summary),
+                    ),
+                    Err(err) => json_error(404, err.to_string()),
+                }
+            }
+            ("GET", "/physical/native-registry") => {
+                match self.native_use_cases().native_registry_summary() {
+                    Ok(summary) => json_response(
+                        200,
+                        crate::presentation::ops_json::native_registry_summary_json(&summary),
+                    ),
+                    Err(err) => json_error(404, err.to_string()),
+                }
+            }
+            ("GET", "/physical/native-recovery") => match self
+                .native_use_cases()
+                .native_recovery_summary()
+            {
                 Ok(summary) => json_response(
                     200,
                     crate::presentation::native_state_json::native_recovery_summary_json(&summary),
                 ),
                 Err(err) => json_error(404, err.to_string()),
             },
-            ("GET", "/physical/native-catalog") => match self.native_use_cases().native_catalog_summary() {
+            ("GET", "/physical/native-catalog") => match self
+                .native_use_cases()
+                .native_catalog_summary()
+            {
                 Ok(summary) => json_response(
                     200,
                     crate::presentation::native_state_json::native_catalog_summary_json(&summary),
@@ -311,14 +332,12 @@ impl RedDBServer {
             },
             ("GET", "/physical/native-metadata-state") => {
                 match self.native_use_cases().native_metadata_state_summary() {
-                    Ok(summary) => {
-                        json_response(
-                            200,
-                            crate::presentation::native_state_json::native_metadata_state_summary_json(
-                                &summary,
-                            ),
-                        )
-                    }
+                    Ok(summary) => json_response(
+                        200,
+                        crate::presentation::native_state_json::native_metadata_state_summary_json(
+                            &summary,
+                        ),
+                    ),
                     Err(err) => json_error(404, err.to_string()),
                 }
             }
@@ -328,29 +347,29 @@ impl RedDBServer {
                     &self.native_use_cases().physical_authority_status(),
                 ),
             ),
-            ("GET", "/physical/native-state") => match self.native_use_cases().native_physical_state() {
-                Ok(state) => json_response(
-                    200,
-                    crate::presentation::native_state_json::native_physical_state_json(
-                        &state,
-                        crate::presentation::native_json::native_header_json,
-                        crate::presentation::native_json::collection_roots_json,
-                        crate::presentation::native_json::native_manifest_summary_json,
-                        crate::presentation::ops_json::native_registry_summary_json,
+            ("GET", "/physical/native-state") => {
+                match self.native_use_cases().native_physical_state() {
+                    Ok(state) => json_response(
+                        200,
+                        crate::presentation::native_state_json::native_physical_state_json(
+                            &state,
+                            crate::presentation::native_json::native_header_json,
+                            crate::presentation::native_json::collection_roots_json,
+                            crate::presentation::native_json::native_manifest_summary_json,
+                            crate::presentation::ops_json::native_registry_summary_json,
+                        ),
                     ),
-                ),
-                Err(err) => json_error(404, err.to_string()),
-            },
+                    Err(err) => json_error(404, err.to_string()),
+                }
+            }
             ("GET", "/physical/native-vector-artifacts") => {
                 match self.native_use_cases().native_vector_artifact_pages() {
-                    Ok(summaries) => {
-                        json_response(
-                            200,
-                            crate::presentation::native_state_json::native_vector_artifact_pages_json(
-                                &summaries,
-                            ),
-                        )
-                    }
+                    Ok(summaries) => json_response(
+                        200,
+                        crate::presentation::native_state_json::native_vector_artifact_pages_json(
+                            &summaries,
+                        ),
+                    ),
                     Err(err) => json_error(404, err.to_string()),
                 }
             }
@@ -422,20 +441,16 @@ impl RedDBServer {
                 ),
                 Err(err) => json_error(404, err.to_string()),
             },
-            ("GET", "/indexes") => {
-                json_response(
-                    200,
-                    crate::presentation::admin_json::indexes_json(&self.catalog_use_cases().indexes()),
-                )
-            }
-            ("GET", "/stats") => {
-                json_response(
-                    200,
-                    crate::presentation::query_result_json::runtime_stats_json(
-                        &self.catalog_use_cases().stats(),
-                    ),
-                )
-            }
+            ("GET", "/indexes") => json_response(
+                200,
+                crate::presentation::admin_json::indexes_json(&self.catalog_use_cases().indexes()),
+            ),
+            ("GET", "/stats") => json_response(
+                200,
+                crate::presentation::query_result_json::runtime_stats_json(
+                    &self.catalog_use_cases().stats(),
+                ),
+            ),
             ("GET", "/collections") => {
                 let values = self
                     .catalog_use_cases()
@@ -447,6 +462,7 @@ impl RedDBServer {
                 object.insert("collections".to_string(), JsonValue::Array(values));
                 json_response(200, JsonValue::Object(object))
             }
+            ("POST", "/collections") => self.handle_create_collection(body),
             ("POST", "/checkpoint") => match self.native_use_cases().checkpoint() {
                 Ok(()) => json_ok("checkpoint completed"),
                 Err(err) => json_error(500, err.to_string()),
@@ -468,7 +484,10 @@ impl RedDBServer {
                 }
             }
             ("POST", "/physical/metadata/rebuild") => {
-                match self.native_use_cases().rebuild_physical_metadata_from_native_state() {
+                match self
+                    .native_use_cases()
+                    .rebuild_physical_metadata_from_native_state()
+                {
                     Ok(true) => json_ok("physical metadata rebuilt from native state"),
                     Ok(false) => {
                         json_error(409, "native state is not available for metadata rebuild")
@@ -477,7 +496,10 @@ impl RedDBServer {
                 }
             }
             ("POST", "/physical/native-state/repair") => {
-                match self.native_use_cases().repair_native_physical_state_from_metadata() {
+                match self
+                    .native_use_cases()
+                    .repair_native_physical_state_from_metadata()
+                {
                     Ok(true) => json_ok("native physical state republished from physical metadata"),
                     Ok(false) => json_error(
                         409,
@@ -502,10 +524,12 @@ impl RedDBServer {
             ("POST", "/serverless/reclaim") => self.handle_serverless_reclaim(body),
             ("POST", "/export") => self.handle_export(body),
             ("POST", "/indexes/rebuild") => self.handle_rebuild_indexes(body, None),
-            ("POST", "/retention/apply") => match self.native_use_cases().apply_retention_policy() {
-                Ok(()) => json_ok("retention policy applied"),
-                Err(err) => json_error(500, err.to_string()),
-            },
+            ("POST", "/retention/apply") => {
+                match self.native_use_cases().apply_retention_policy() {
+                    Ok(()) => json_ok("retention policy applied"),
+                    Err(err) => json_error(500, err.to_string()),
+                }
+            }
             ("POST", "/maintenance") => match self.native_use_cases().run_maintenance() {
                 Ok(()) => json_ok("maintenance completed"),
                 Err(err) => json_error(500, err.to_string()),
@@ -539,6 +563,9 @@ impl RedDBServer {
             ("POST", "/graph/jobs/fail") => self.handle_analytics_job_fail(body),
             _ => {
                 if method == "GET" {
+                    if let Some(collection) = collection_from_schema_path(&path) {
+                        return self.handle_describe_collection(collection);
+                    }
                     if let Some(collection) = collection_from_scan_path(&path) {
                         return self.handle_scan(collection, &query);
                     }
@@ -663,7 +690,9 @@ impl RedDBServer {
                         return self.materialize_graph_projection_transition(&name);
                     }
                     if let Some(name) = graph_projection_named_action_path(&path, "materializing") {
-                        return match self.admin_use_cases().mark_graph_projection_materializing(&name)
+                        return match self
+                            .admin_use_cases()
+                            .mark_graph_projection_materializing(&name)
                         {
                             Ok(projection) => {
                                 json_response(200, graph_projection_json(&projection))
@@ -722,6 +751,24 @@ impl RedDBServer {
                     }
                 }
                 if method == "DELETE" {
+                    // DDL: DELETE /collections/:name
+                    if let Some(name) = collection_from_bare_path(&path) {
+                        return self.handle_drop_collection(name);
+                    }
+                    // Auth: DELETE /auth/users/:username
+                    if let Some(username) = path.strip_prefix("/auth/users/") {
+                        let username = username.trim_matches('/');
+                        if !username.is_empty() {
+                            return self.handle_auth_delete_user(username);
+                        }
+                    }
+                    // Auth: DELETE /auth/api-keys/:key
+                    if let Some(key) = path.strip_prefix("/auth/api-keys/") {
+                        let key = key.trim_matches('/');
+                        if !key.is_empty() {
+                            return self.handle_auth_revoke_api_key(key);
+                        }
+                    }
                     if let Some((collection, id)) = collection_entity_path(&path) {
                         return self.handle_delete_entity(collection, id);
                     }
@@ -743,23 +790,63 @@ impl RedDBServer {
             .map_err(|err| json_error(400, err.to_string()))
     }
 
-    fn is_authorized(&self, method: &str, path: &str, headers: &BTreeMap<String, String>) -> bool {
-        if matches!((method, path), ("GET", "/health") | ("GET", "/ready")) {
+    fn is_authorized(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &BTreeMap<String, String>,
+    ) -> bool {
+        // Public endpoints that never require authentication.
+        if matches!(
+            (method, path),
+            ("GET", "/health")
+                | ("GET", "/ready")
+                | ("GET", "/ready/query")
+                | ("GET", "/ready/write")
+                | ("GET", "/ready/repair")
+                | ("GET", "/ready/serverless")
+                | ("GET", "/ready/serverless/query")
+                | ("GET", "/ready/serverless/write")
+                | ("GET", "/ready/serverless/repair")
+                | ("POST", "/auth/login")
+                | ("POST", "/auth/bootstrap")
+        ) {
             return true;
         }
 
-        let token = authorization_bearer_token(headers);
-        let is_write = !matches!(method, "GET" | "HEAD");
+        // If no auth store is configured, all requests are permitted.
+        let auth_store = match &self.auth_store {
+            Some(store) => store,
+            None => return true,
+        };
 
-        if is_write {
-            if let Some(expected) = self.options.write_token.as_deref() {
-                return token == Some(expected);
-            }
+        // If auth is disabled in the config, allow everything.
+        if !auth_store.is_enabled() {
+            return true;
         }
 
-        match self.options.auth_token.as_deref() {
-            Some(expected) => token == Some(expected),
-            None => !is_write || self.options.write_token.is_none() || token.is_some(),
+        // Extract bearer token from Authorization header.
+        let token = headers
+            .get("authorization")
+            .and_then(|v| v.strip_prefix("Bearer "));
+
+        match token {
+            Some(tok) => {
+                if let Some((_username, role)) = auth_store.validate_token(tok) {
+                    let is_write = !matches!(method, "GET" | "HEAD" | "OPTIONS");
+                    if is_write {
+                        role.can_write()
+                    } else {
+                        role.can_read()
+                    }
+                } else {
+                    false
+                }
+            }
+            None => {
+                // No token: allow only if require_auth is false.
+                !auth_store.config().require_auth
+            }
         }
     }
 }
@@ -845,5 +932,30 @@ fn graph_projection_named_action_path(path: &str, action: &str) -> Option<String
         None
     } else {
         Some(name.to_string())
+    }
+}
+
+/// Match `/collections/:name/schema` to extract the collection name.
+fn collection_from_schema_path(path: &str) -> Option<&str> {
+    let prefix = "/collections/";
+    let suffix = "/schema";
+    let trimmed = path.strip_prefix(prefix)?.strip_suffix(suffix)?;
+    let name = trimmed.trim_matches('/');
+    if name.is_empty() || name.contains('/') {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+/// Match bare `/collections/:name` (no further sub-path) to extract the collection name.
+fn collection_from_bare_path(path: &str) -> Option<&str> {
+    let prefix = "/collections/";
+    let trimmed = path.strip_prefix(prefix)?;
+    let name = trimmed.trim_matches('/');
+    if name.is_empty() || name.contains('/') {
+        None
+    } else {
+        Some(name)
     }
 }

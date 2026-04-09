@@ -208,7 +208,6 @@ pub struct Pager {
     header_dirty: Mutex<bool>,
 }
 
-
 #[path = "pager/impl.rs"]
 mod pager_impl;
 impl Drop for Pager {

@@ -361,7 +361,9 @@ pub(crate) fn apply_patch_operations_to_vector_fields(
 
     if touched_dense {
         let Some(value) = object.get("dense") else {
-            return Err(RedDBError::Query("field 'dense' cannot be unset".to_string()));
+            return Err(RedDBError::Query(
+                "field 'dense' cannot be unset".to_string(),
+            ));
         };
         vector.dense = parse_patch_f32_vector(value, "dense")?;
     }
@@ -457,6 +459,80 @@ fn storage_value_to_json(value: &Value) -> JsonValue {
             object.insert("row_id".to_string(), JsonValue::Number(*row_id as f64));
             JsonValue::Object(object)
         }
+        Value::Color([r, g, b]) => JsonValue::String(format!("#{:02X}{:02X}{:02X}", r, g, b)),
+        Value::Email(s) => JsonValue::String(s.clone()),
+        Value::Url(s) => JsonValue::String(s.clone()),
+        Value::Phone(n) => JsonValue::Number(*n as f64),
+        Value::Semver(packed) => JsonValue::String(format!(
+            "{}.{}.{}",
+            packed / 1_000_000,
+            (packed / 1_000) % 1_000,
+            packed % 1_000
+        )),
+        Value::Cidr(ip, prefix) => JsonValue::String(format!(
+            "{}.{}.{}.{}/{}",
+            (ip >> 24) & 0xFF,
+            (ip >> 16) & 0xFF,
+            (ip >> 8) & 0xFF,
+            ip & 0xFF,
+            prefix
+        )),
+        Value::Date(days) => JsonValue::Number(*days as f64),
+        Value::Time(ms) => JsonValue::Number(*ms as f64),
+        Value::Decimal(v) => JsonValue::Number(*v as f64 / 10_000.0),
+        Value::EnumValue(i) => JsonValue::Number(*i as f64),
+        Value::Array(elems) => JsonValue::Array(elems.iter().map(storage_value_to_json).collect()),
+        Value::TimestampMs(ms) => JsonValue::Number(*ms as f64),
+        Value::Ipv4(ip) => JsonValue::String(format!(
+            "{}.{}.{}.{}",
+            (ip >> 24) & 0xFF,
+            (ip >> 16) & 0xFF,
+            (ip >> 8) & 0xFF,
+            ip & 0xFF
+        )),
+        Value::Ipv6(bytes) => JsonValue::String(format!("{}", std::net::Ipv6Addr::from(*bytes))),
+        Value::Subnet(ip, mask) => {
+            let prefix = mask.leading_ones();
+            JsonValue::String(format!(
+                "{}.{}.{}.{}/{}",
+                (ip >> 24) & 0xFF,
+                (ip >> 16) & 0xFF,
+                (ip >> 8) & 0xFF,
+                ip & 0xFF,
+                prefix
+            ))
+        }
+        Value::Port(p) => JsonValue::Number(*p as f64),
+        Value::Latitude(micro) => JsonValue::Number(*micro as f64 / 1_000_000.0),
+        Value::Longitude(micro) => JsonValue::Number(*micro as f64 / 1_000_000.0),
+        Value::GeoPoint(lat, lon) => JsonValue::String(format!(
+            "{:.6},{:.6}",
+            *lat as f64 / 1_000_000.0,
+            *lon as f64 / 1_000_000.0
+        )),
+        Value::Country2(c) => JsonValue::String(String::from_utf8_lossy(c).to_string()),
+        Value::Country3(c) => JsonValue::String(String::from_utf8_lossy(c).to_string()),
+        Value::Lang2(c) => JsonValue::String(String::from_utf8_lossy(c).to_string()),
+        Value::Lang5(c) => JsonValue::String(String::from_utf8_lossy(c).to_string()),
+        Value::Currency(c) => JsonValue::String(String::from_utf8_lossy(c).to_string()),
+        Value::ColorAlpha([r, g, b, a]) => {
+            JsonValue::String(format!("#{:02X}{:02X}{:02X}{:02X}", r, g, b, a))
+        }
+        Value::BigInt(v) => JsonValue::Number(*v as f64),
+        Value::KeyRef(col, key) => {
+            let mut object = Map::new();
+            object.insert("collection".to_string(), JsonValue::String(col.clone()));
+            object.insert("key".to_string(), JsonValue::String(key.clone()));
+            JsonValue::Object(object)
+        }
+        Value::DocRef(col, id) => {
+            let mut object = Map::new();
+            object.insert("collection".to_string(), JsonValue::String(col.clone()));
+            object.insert("id".to_string(), JsonValue::Number(*id as f64));
+            JsonValue::Object(object)
+        }
+        Value::TableRef(name) => JsonValue::String(name.clone()),
+        Value::PageRef(page_id) => JsonValue::Number(*page_id as f64),
     }
 }
 
@@ -545,7 +621,12 @@ fn metadata_value_to_json(value: &MetadataValue) -> JsonValue {
             );
             object.insert(
                 "values".to_string(),
-                JsonValue::Array(values.iter().map(|r| metadata_value_to_json(&MetadataValue::Reference(r.clone()))).collect()),
+                JsonValue::Array(
+                    values
+                        .iter()
+                        .map(|r| metadata_value_to_json(&MetadataValue::Reference(r.clone())))
+                        .collect(),
+                ),
             );
             JsonValue::Object(object)
         }
@@ -621,7 +702,9 @@ fn metadata_value_from_json(value: &JsonValue) -> RedDBResult<MetadataValue> {
                                 })?;
                         return Ok(MetadataValue::Geo { lat, lon });
                     }
-                    "reference" => return parse_metadata_reference(object).map(MetadataValue::Reference),
+                    "reference" => {
+                        return parse_metadata_reference(object).map(MetadataValue::Reference)
+                    }
                     "references" => {
                         let values = object
                             .get("values")
@@ -698,7 +781,9 @@ fn parse_metadata_reference_value(value: &JsonValue) -> RedDBResult<RefTarget> {
 
 fn parse_patch_u64_value(value: &JsonValue, field: &str) -> RedDBResult<u64> {
     let Some(value) = value.as_f64() else {
-        return Err(RedDBError::Query(format!("field '{field}' must be a number")));
+        return Err(RedDBError::Query(format!(
+            "field '{field}' must be a number"
+        )));
     };
     if value.is_sign_negative() {
         return Err(RedDBError::Query(format!(
@@ -768,15 +853,15 @@ fn parse_sparse_vector_value(value: &JsonValue) -> RedDBResult<Option<SparseVect
         JsonValue::Null => Ok(None),
         JsonValue::Object(object) => {
             let indices = parse_sparse_index_array(
-                object
-                    .get("indices")
-                    .ok_or_else(|| RedDBError::Query("sparse metadata requires 'indices'".to_string()))?,
+                object.get("indices").ok_or_else(|| {
+                    RedDBError::Query("sparse metadata requires 'indices'".to_string())
+                })?,
                 "sparse.indices",
             )?;
             let values = parse_sparse_value_array(
-                object
-                    .get("values")
-                    .ok_or_else(|| RedDBError::Query("sparse metadata requires 'values'".to_string()))?,
+                object.get("values").ok_or_else(|| {
+                    RedDBError::Query("sparse metadata requires 'values'".to_string())
+                })?,
                 "sparse.values",
             )?;
             if indices.len() != values.len() {
@@ -792,7 +877,9 @@ fn parse_sparse_vector_value(value: &JsonValue) -> RedDBResult<Option<SparseVect
                         ));
                     }
                     if value > usize::MAX as f64 {
-                        return Err(RedDBError::Query("sparse dimension is too large".to_string()));
+                        return Err(RedDBError::Query(
+                            "sparse dimension is too large".to_string(),
+                        ));
                     }
                     value as usize
                 }

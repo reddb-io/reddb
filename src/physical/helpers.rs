@@ -17,7 +17,10 @@ pub(super) fn json_required<'a>(
         .ok_or_else(|| invalid_data(format!("missing field '{key}'")))
 }
 
-pub(super) fn json_string_required(object: &Map<String, JsonValue>, key: &str) -> io::Result<String> {
+pub(super) fn json_string_required(
+    object: &Map<String, JsonValue>,
+    key: &str,
+) -> io::Result<String> {
     json_required(object, key)?
         .as_str()
         .map(|value| value.to_string())

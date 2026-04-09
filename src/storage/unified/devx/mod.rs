@@ -55,7 +55,9 @@ mod types;
 
 // Re-export all public types
 pub use batch::{BatchBuilder, BatchResult};
-pub use builders::{DocumentBuilder, EdgeBuilder, KvBuilder, NodeBuilder, RowBuilder, VectorBuilder};
+pub use builders::{
+    DocumentBuilder, EdgeBuilder, KvBuilder, NodeBuilder, RowBuilder, VectorBuilder,
+};
 pub use error::DevXError;
 pub use helpers::cosine_similarity;
 pub use preprocessors::{
@@ -66,8 +68,8 @@ pub use query::{
     ExpandedEntity, MetadataFilter, PropertyFilter, QueryBuilder, QueryResult, QueryResultItem,
 };
 pub use reddb::{
-    NativeHeaderRepairPolicy, NativeVectorArtifactBatchInspection,
-    NativeVectorArtifactInspection, PhysicalAuthorityStatus, RedDB,
+    NativeHeaderRepairPolicy, NativeVectorArtifactBatchInspection, NativeVectorArtifactInspection,
+    PhysicalAuthorityStatus, RedDB,
 };
 pub use refs::{AnyRef, NodeRef, TableRef, VectorRef};
 pub use types::{LinkedEntity, SimilarResult};

@@ -1,6 +1,9 @@
 use super::*;
 
-pub(super) fn execute_runtime_table_query(db: &RedDB, query: &TableQuery) -> RedDBResult<UnifiedResult> {
+pub(super) fn execute_runtime_table_query(
+    db: &RedDB,
+    query: &TableQuery,
+) -> RedDBResult<UnifiedResult> {
     let records = execute_runtime_canonical_table_query(db, query)?;
     let columns = projected_columns(&records, &query.columns);
 
@@ -204,13 +207,13 @@ pub(super) fn compare_runtime_ranked_records(
     runtime_record_rank_score(right)
         .partial_cmp(&runtime_record_rank_score(left))
         .unwrap_or(Ordering::Equal)
-        .then_with(|| {
-            runtime_record_identity_key(left)
-                .cmp(&runtime_record_identity_key(right))
-        })
+        .then_with(|| runtime_record_identity_key(left).cmp(&runtime_record_identity_key(right)))
 }
 
-pub(super) fn execute_runtime_join_query(db: &RedDB, query: &JoinQuery) -> RedDBResult<UnifiedResult> {
+pub(super) fn execute_runtime_join_query(
+    db: &RedDB,
+    query: &JoinQuery,
+) -> RedDBResult<UnifiedResult> {
     let records = execute_runtime_canonical_join_query(db, query)?;
     let columns = projected_columns(&records, &query.return_);
 
@@ -353,20 +356,18 @@ pub(super) fn execute_runtime_canonical_join_base(
         execute_runtime_canonical_expr_node(db, &node.children[1], query.right.as_ref())?;
 
     match join_strategy {
-        CanonicalJoinStrategy::IndexedNestedLoop => {
-            execute_runtime_indexed_join(
-                left_query,
-                &left_records,
-                left_table_name,
-                left_table_alias,
-                &left_join_field,
-                &right_records,
-                right_table_name,
-                right_table_alias,
-                &right_join_field,
-                join_type,
-            )
-        }
+        CanonicalJoinStrategy::IndexedNestedLoop => execute_runtime_indexed_join(
+            left_query,
+            &left_records,
+            left_table_name,
+            left_table_alias,
+            &left_join_field,
+            &right_records,
+            right_table_name,
+            right_table_alias,
+            &right_join_field,
+            join_type,
+        ),
         CanonicalJoinStrategy::NestedLoop => execute_runtime_full_scan_join(
             left_query,
             &left_records,
@@ -410,12 +411,7 @@ pub(super) fn execute_runtime_canonical_join_child(
 
 pub(super) fn runtime_join_table_context(
     query: &JoinQuery,
-) -> (
-    Option<&str>,
-    Option<&str>,
-    Option<&str>,
-    Option<&str>,
-) {
+) -> (Option<&str>, Option<&str>, Option<&str>, Option<&str>) {
     let (left_table_name, left_table_alias) = match query.left.as_ref() {
         QueryExpr::Table(table) => (
             Some(table.table.as_str()),
@@ -430,13 +426,17 @@ pub(super) fn runtime_join_table_context(
         ),
         QueryExpr::Graph(graph) => (Some("graph"), graph.alias.as_deref().or(Some("graph"))),
         QueryExpr::Path(path) => (Some("path"), path.alias.as_deref().or(Some("path"))),
-        QueryExpr::Vector(vector) => {
-            (Some("vector"), vector.alias.as_deref().or(Some("vector")))
-        }
-        QueryExpr::Hybrid(hybrid) => {
-            (Some("hybrid"), hybrid.alias.as_deref().or(Some("hybrid")))
-        }
+        QueryExpr::Vector(vector) => (Some("vector"), vector.alias.as_deref().or(Some("vector"))),
+        QueryExpr::Hybrid(hybrid) => (Some("hybrid"), hybrid.alias.as_deref().or(Some("hybrid"))),
         QueryExpr::Join(_) => (Some("join"), Some("join")),
+        QueryExpr::Insert(_)
+        | QueryExpr::Update(_)
+        | QueryExpr::Delete(_)
+        | QueryExpr::CreateTable(_)
+        | QueryExpr::DropTable(_)
+        | QueryExpr::AlterTable(_)
+        | QueryExpr::GraphCommand(_)
+        | QueryExpr::SearchCommand(_) => (None, None),
     };
 
     (
@@ -487,8 +487,10 @@ pub(super) fn project_runtime_join_record(
     right_table_name: Option<&str>,
     right_table_alias: Option<&str>,
 ) -> UnifiedRecord {
-    let select_all =
-        projections.is_empty() || projections.iter().any(|item| matches!(item, Projection::All));
+    let select_all = projections.is_empty()
+        || projections
+            .iter()
+            .any(|item| matches!(item, Projection::All));
     let mut record = UnifiedRecord::new();
     record.nodes = source.nodes.clone();
     record.edges = source.edges.clone();
@@ -523,16 +525,16 @@ pub(super) fn project_runtime_join_record(
                 right_table_name,
                 right_table_alias,
             ),
-            Projection::Expression(filter, _) => Some(Value::Boolean(
-                evaluate_runtime_join_filter(
+            Projection::Expression(filter, _) => {
+                Some(Value::Boolean(evaluate_runtime_join_filter(
                     source,
                     filter,
                     left_table_name,
                     left_table_alias,
                     right_table_name,
                     right_table_alias,
-                ),
-            )),
+                )))
+            }
             Projection::Function(_, _) => Some(Value::Null),
             Projection::All => None,
         };
@@ -753,8 +755,7 @@ pub(super) fn compare_runtime_join_order(
         }
     }
 
-    runtime_record_identity_key(left)
-        .cmp(&runtime_record_identity_key(right))
+    runtime_record_identity_key(left).cmp(&runtime_record_identity_key(right))
 }
 
 pub(super) fn execute_runtime_canonical_expr_node(
@@ -788,7 +789,10 @@ pub(super) fn execute_runtime_canonical_expr_node(
     }
 }
 
-pub(super) fn execute_runtime_vector_query(db: &RedDB, query: &VectorQuery) -> RedDBResult<UnifiedResult> {
+pub(super) fn execute_runtime_vector_query(
+    db: &RedDB,
+    query: &VectorQuery,
+) -> RedDBResult<UnifiedResult> {
     let plan = CanonicalPlanner::new(db).build(&QueryExpr::Vector(query.clone()));
     let records = execute_runtime_canonical_vector_node(db, &plan.root, query)?;
 
@@ -817,12 +821,7 @@ pub(super) fn execute_runtime_canonical_vector_node(
             let mut records = execute_runtime_canonical_vector_child(db, node, query)?;
             if let Some(filter) = query.filter.as_ref() {
                 records.retain(|record| {
-                    runtime_vector_record_matches_filter(
-                        db,
-                        &query.collection,
-                        record,
-                        filter,
-                    )
+                    runtime_vector_record_matches_filter(db, &query.collection, record, filter)
                 });
             }
             Ok(records)
@@ -933,7 +932,10 @@ pub(super) fn runtime_vector_record_matches_filter(
     filter.matches(&entry)
 }
 
-pub(super) fn execute_runtime_hybrid_query(db: &RedDB, query: &HybridQuery) -> RedDBResult<UnifiedResult> {
+pub(super) fn execute_runtime_hybrid_query(
+    db: &RedDB,
+    query: &HybridQuery,
+) -> RedDBResult<UnifiedResult> {
     let plan = CanonicalPlanner::new(db).build(&QueryExpr::Hybrid(query.clone()));
     let mut records = execute_runtime_canonical_hybrid_node(db, &plan.root, query)?;
     if let Some(limit) = query.limit {
@@ -999,7 +1001,8 @@ pub(super) fn execute_runtime_canonical_hybrid_fusion(
         ));
     }
 
-    let structured = execute_runtime_canonical_expr_node(db, &node.children[0], query.structured.as_ref())?;
+    let structured =
+        execute_runtime_canonical_expr_node(db, &node.children[0], query.structured.as_ref())?;
     let vector_expr = QueryExpr::Vector(query.vector.clone());
     let vector = execute_runtime_canonical_expr_node(db, &node.children[1], &vector_expr)?;
 
@@ -1019,11 +1022,7 @@ pub(super) fn execute_runtime_canonical_hybrid_fusion(
         vector_map.insert(key, record);
     }
 
-    let ordered_keys = hybrid_candidate_keys(
-        &structured_map,
-        &vector_map,
-        &query.fusion,
-    );
+    let ordered_keys = hybrid_candidate_keys(&structured_map, &vector_map, &query.fusion);
 
     let mut scored_records = Vec::new();
     for key in ordered_keys {

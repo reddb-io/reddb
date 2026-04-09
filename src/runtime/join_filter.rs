@@ -78,7 +78,12 @@ pub(super) fn execute_runtime_nested_loop_join(
         }
 
         if !matched && matches!(join_type, JoinType::LeftOuter) {
-            records.push(merge_join_records(Some(left_record), None, left_query, None));
+            records.push(merge_join_records(
+                Some(left_record),
+                None,
+                left_query,
+                None,
+            ));
         }
     }
 
@@ -160,7 +165,12 @@ pub(super) fn execute_runtime_graph_lookup_join(
         }
 
         if !matched && matches!(join_type, JoinType::LeftOuter) {
-            records.push(merge_join_records(Some(left_record), None, left_query, None));
+            records.push(merge_join_records(
+                Some(left_record),
+                None,
+                left_query,
+                None,
+            ));
         }
     }
 
@@ -194,9 +204,12 @@ pub(super) fn execute_runtime_indexed_join(
 ) -> RedDBResult<Vec<UnifiedRecord>> {
     let mut right_index: HashMap<String, Vec<usize>> = HashMap::new();
     for (index, right_record) in right_records.iter().enumerate() {
-        let Some(value) =
-            resolve_runtime_field(right_record, right_join_field, right_table_name, right_table_alias)
-        else {
+        let Some(value) = resolve_runtime_field(
+            right_record,
+            right_join_field,
+            right_table_name,
+            right_table_alias,
+        ) else {
             continue;
         };
         let Some(key) = runtime_join_lookup_key(&value) else {
@@ -209,8 +222,12 @@ pub(super) fn execute_runtime_indexed_join(
     let mut records = Vec::new();
 
     for left_record in left_records {
-        let left_value =
-            resolve_runtime_field(left_record, left_join_field, left_table_name, left_table_alias);
+        let left_value = resolve_runtime_field(
+            left_record,
+            left_join_field,
+            left_table_name,
+            left_table_alias,
+        );
         let candidate_indexes = left_value
             .as_ref()
             .and_then(runtime_join_lookup_key)
@@ -242,7 +259,12 @@ pub(super) fn execute_runtime_indexed_join(
         }
 
         if !matched && matches!(join_type, JoinType::LeftOuter) {
-            records.push(merge_join_records(Some(left_record), None, left_query, None));
+            records.push(merge_join_records(
+                Some(left_record),
+                None,
+                left_query,
+                None,
+            ));
         }
     }
 
@@ -304,9 +326,12 @@ pub(super) fn runtime_graph_join_record_keys(
 ) -> Vec<String> {
     let mut keys = Vec::new();
 
-    if let Some(value) =
-        resolve_runtime_field(record, right_join_field, right_table_name, right_table_alias)
-    {
+    if let Some(value) = resolve_runtime_field(
+        record,
+        right_join_field,
+        right_table_name,
+        right_table_alias,
+    ) {
         keys.extend(runtime_join_lookup_keys(&value));
     }
 
@@ -338,9 +363,12 @@ pub(super) fn runtime_graph_join_probe_indexes(
     right_index: &HashMap<String, Vec<usize>>,
 ) -> Vec<usize> {
     let mut candidates = BTreeSet::new();
-    if let Some(value) =
-        resolve_runtime_field(left_record, left_join_field, left_table_name, left_table_alias)
-    {
+    if let Some(value) = resolve_runtime_field(
+        left_record,
+        left_join_field,
+        left_table_name,
+        left_table_alias,
+    ) {
         for key in runtime_join_lookup_keys(&value) {
             if let Some(indexes) = right_index.get(&key) {
                 candidates.extend(indexes.iter().copied());
@@ -393,7 +421,10 @@ pub(super) fn project_runtime_record(
     document_projection: bool,
     entity_projection: bool,
 ) -> UnifiedRecord {
-    let select_all = projections.is_empty() || projections.iter().any(|item| matches!(item, Projection::All));
+    let select_all = projections.is_empty()
+        || projections
+            .iter()
+            .any(|item| matches!(item, Projection::All));
     let mut record = UnifiedRecord::new();
     record.nodes = source.nodes.clone();
     record.edges = source.edges.clone();
@@ -435,15 +466,16 @@ pub(super) fn project_runtime_record(
                 resolve_runtime_field(source, field, table_name, table_alias)
             }
             Projection::Expression(filter, _) => Some(Value::Boolean(evaluate_runtime_filter(
-                source, filter, table_name, table_alias,
+                source,
+                filter,
+                table_name,
+                table_alias,
             ))),
             Projection::Function(_, _) => Some(Value::Null),
             Projection::All => None,
         };
 
-        record
-            .values
-            .insert(label, value.unwrap_or(Value::Null));
+        record.values.insert(label, value.unwrap_or(Value::Null));
     }
 
     record
@@ -460,10 +492,7 @@ pub(super) fn resolve_runtime_projection_value(
     source.values.get(column).cloned().or_else(|| {
         if document_projection || entity_projection {
             let field = FieldRef::TableColumn {
-                table: table_alias
-                    .or(table_name)
-                    .unwrap_or_default()
-                    .to_string(),
+                table: table_alias.or(table_name).unwrap_or_default().to_string(),
                 column: column.to_string(),
             };
             resolve_runtime_field(source, &field, table_name, table_alias)
@@ -473,8 +502,15 @@ pub(super) fn resolve_runtime_projection_value(
     })
 }
 
-pub(super) fn projected_columns(records: &[UnifiedRecord], projections: &[Projection]) -> Vec<String> {
-    if projections.is_empty() || projections.iter().any(|item| matches!(item, Projection::All)) {
+pub(super) fn projected_columns(
+    records: &[UnifiedRecord],
+    projections: &[Projection],
+) -> Vec<String> {
+    if projections.is_empty()
+        || projections
+            .iter()
+            .any(|item| matches!(item, Projection::All))
+    {
         return collect_visible_columns(records);
     }
 
@@ -539,17 +575,17 @@ pub(super) fn evaluate_runtime_filter(
     table_alias: Option<&str>,
 ) -> bool {
     match filter {
-        Filter::Compare { field, op, value } => resolve_runtime_field(record, field, table_name, table_alias)
-            .as_ref()
-            .and_then(|candidate| {
-                evaluate_metadata_field_compare(field, candidate, *op, value)
-            })
-            .or_else(|| {
-                resolve_runtime_field(record, field, table_name, table_alias)
-                    .as_ref()
-                    .map(|candidate| compare_runtime_values(candidate, value, *op))
-            })
-            .unwrap_or(false),
+        Filter::Compare { field, op, value } => {
+            resolve_runtime_field(record, field, table_name, table_alias)
+                .as_ref()
+                .and_then(|candidate| evaluate_metadata_field_compare(field, candidate, *op, value))
+                .or_else(|| {
+                    resolve_runtime_field(record, field, table_name, table_alias)
+                        .as_ref()
+                        .map(|candidate| compare_runtime_values(candidate, value, *op))
+                })
+                .unwrap_or(false)
+        }
         Filter::And(left, right) => {
             evaluate_runtime_filter(record, left, table_name, table_alias)
                 && evaluate_runtime_filter(record, right, table_name, table_alias)
@@ -565,35 +601,49 @@ pub(super) fn evaluate_runtime_filter(
         Filter::IsNotNull(field) => resolve_runtime_field(record, field, table_name, table_alias)
             .map(|value| value != Value::Null)
             .unwrap_or(false),
-        Filter::In { field, values } => resolve_runtime_field(record, field, table_name, table_alias)
-            .as_ref()
-            .map_or(false, |candidate| {
-                evaluate_metadata_field_in(field, candidate, values).unwrap_or_else(|| {
-                    values.iter().any(|value| compare_runtime_values(candidate, value, CompareOp::Eq))
+        Filter::In { field, values } => {
+            resolve_runtime_field(record, field, table_name, table_alias)
+                .as_ref()
+                .map_or(false, |candidate| {
+                    evaluate_metadata_field_in(field, candidate, values).unwrap_or_else(|| {
+                        values
+                            .iter()
+                            .any(|value| compare_runtime_values(candidate, value, CompareOp::Eq))
+                    })
                 })
-            }),
-        Filter::Between { field, low, high } => resolve_runtime_field(record, field, table_name, table_alias)
-            .as_ref()
-            .is_some_and(|candidate| {
-                compare_runtime_values(candidate, low, CompareOp::Ge)
-                    && compare_runtime_values(candidate, high, CompareOp::Le)
-            }),
-        Filter::Like { field, pattern } => resolve_runtime_field(record, field, table_name, table_alias)
-            .as_ref()
-            .and_then(runtime_value_text)
-            .is_some_and(|value| like_matches(&value, pattern)),
-        Filter::StartsWith { field, prefix } => resolve_runtime_field(record, field, table_name, table_alias)
-            .as_ref()
-            .and_then(runtime_value_text)
-            .is_some_and(|value| value.starts_with(prefix)),
-        Filter::EndsWith { field, suffix } => resolve_runtime_field(record, field, table_name, table_alias)
-            .as_ref()
-            .and_then(runtime_value_text)
-            .is_some_and(|value| value.ends_with(suffix)),
-        Filter::Contains { field, substring } => resolve_runtime_field(record, field, table_name, table_alias)
-            .as_ref()
-            .and_then(runtime_value_text)
-            .is_some_and(|value| value.contains(substring)),
+        }
+        Filter::Between { field, low, high } => {
+            resolve_runtime_field(record, field, table_name, table_alias)
+                .as_ref()
+                .is_some_and(|candidate| {
+                    compare_runtime_values(candidate, low, CompareOp::Ge)
+                        && compare_runtime_values(candidate, high, CompareOp::Le)
+                })
+        }
+        Filter::Like { field, pattern } => {
+            resolve_runtime_field(record, field, table_name, table_alias)
+                .as_ref()
+                .and_then(runtime_value_text)
+                .is_some_and(|value| like_matches(&value, pattern))
+        }
+        Filter::StartsWith { field, prefix } => {
+            resolve_runtime_field(record, field, table_name, table_alias)
+                .as_ref()
+                .and_then(runtime_value_text)
+                .is_some_and(|value| value.starts_with(prefix))
+        }
+        Filter::EndsWith { field, suffix } => {
+            resolve_runtime_field(record, field, table_name, table_alias)
+                .as_ref()
+                .and_then(runtime_value_text)
+                .is_some_and(|value| value.ends_with(suffix))
+        }
+        Filter::Contains { field, substring } => {
+            resolve_runtime_field(record, field, table_name, table_alias)
+                .as_ref()
+                .and_then(runtime_value_text)
+                .is_some_and(|value| value.contains(substring))
+        }
     }
 }
 
@@ -622,8 +672,7 @@ pub(super) fn compare_runtime_order(
         }
     }
 
-    runtime_record_identity_key(left)
-        .cmp(&runtime_record_identity_key(right))
+    runtime_record_identity_key(left).cmp(&runtime_record_identity_key(right))
 }
 
 pub(super) fn compare_runtime_optional_values(
@@ -756,7 +805,10 @@ pub(super) fn resolve_runtime_document_path(record: &UnifiedRecord, path: &str) 
     resolve_runtime_document_path_from_value(root_value, tail)
 }
 
-pub(super) fn resolve_runtime_document_path_from_value(value: &Value, path: &[String]) -> Option<Value> {
+pub(super) fn resolve_runtime_document_path_from_value(
+    value: &Value,
+    path: &[String],
+) -> Option<Value> {
     if path.is_empty() {
         return Some(value.clone());
     }
@@ -770,17 +822,24 @@ pub(super) fn resolve_runtime_document_path_from_value(value: &Value, path: &[St
     }
 }
 
-pub(super) fn resolve_runtime_document_json_path(value: &JsonValue, path: &[String]) -> Option<Value> {
+pub(super) fn resolve_runtime_document_json_path(
+    value: &JsonValue,
+    path: &[String],
+) -> Option<Value> {
     let mut current = value;
     for segment in path {
         current = match current {
-            JsonValue::Object(entries) => entries.iter().find_map(|(key, value)| {
-                if key == segment {
-                    Some(value)
-                } else {
-                    None
-                }
-            })?,
+            JsonValue::Object(entries) => {
+                entries.iter().find_map(
+                    |(key, value)| {
+                        if key == segment {
+                            Some(value)
+                        } else {
+                            None
+                        }
+                    },
+                )?
+            }
             JsonValue::Array(items) => {
                 let index = segment.parse::<usize>().ok()?;
                 items.get(index)?
@@ -922,6 +981,76 @@ pub(super) fn runtime_value_text(value: &Value) -> Option<String> {
         Value::Duration(value) => Some(value.to_string()),
         Value::Null => None,
         Value::Blob(_) | Value::Vector(_) | Value::Json(_) => None,
+        Value::Color([r, g, b]) => Some(format!("#{:02X}{:02X}{:02X}", r, g, b)),
+        Value::Email(s) => Some(s.clone()),
+        Value::Url(s) => Some(s.clone()),
+        Value::Phone(n) => Some(format!("+{}", n)),
+        Value::Semver(packed) => Some(format!(
+            "{}.{}.{}",
+            packed / 1_000_000,
+            (packed / 1_000) % 1_000,
+            packed % 1_000
+        )),
+        Value::Cidr(ip, prefix) => Some(format!(
+            "{}.{}.{}.{}/{}",
+            (ip >> 24) & 0xFF,
+            (ip >> 16) & 0xFF,
+            (ip >> 8) & 0xFF,
+            ip & 0xFF,
+            prefix
+        )),
+        Value::Date(days) => Some(days.to_string()),
+        Value::Time(ms) => {
+            let total_secs = ms / 1000;
+            Some(format!(
+                "{:02}:{:02}:{:02}",
+                total_secs / 3600,
+                (total_secs / 60) % 60,
+                total_secs % 60
+            ))
+        }
+        Value::Decimal(v) => Some(format!("{:.4}", *v as f64 / 10_000.0)),
+        Value::EnumValue(i) => Some(format!("enum({})", i)),
+        Value::Array(_) => None,
+        Value::TimestampMs(ms) => Some(ms.to_string()),
+        Value::Ipv4(ip) => Some(format!(
+            "{}.{}.{}.{}",
+            (ip >> 24) & 0xFF,
+            (ip >> 16) & 0xFF,
+            (ip >> 8) & 0xFF,
+            ip & 0xFF
+        )),
+        Value::Ipv6(bytes) => Some(format!("{}", std::net::Ipv6Addr::from(*bytes))),
+        Value::Subnet(ip, mask) => {
+            let prefix = mask.leading_ones();
+            Some(format!(
+                "{}.{}.{}.{}/{}",
+                (ip >> 24) & 0xFF,
+                (ip >> 16) & 0xFF,
+                (ip >> 8) & 0xFF,
+                ip & 0xFF,
+                prefix
+            ))
+        }
+        Value::Port(p) => Some(p.to_string()),
+        Value::Latitude(micro) => Some(format!("{:.6}", *micro as f64 / 1_000_000.0)),
+        Value::Longitude(micro) => Some(format!("{:.6}", *micro as f64 / 1_000_000.0)),
+        Value::GeoPoint(lat, lon) => Some(format!(
+            "{:.6},{:.6}",
+            *lat as f64 / 1_000_000.0,
+            *lon as f64 / 1_000_000.0
+        )),
+        Value::Country2(c) => Some(String::from_utf8_lossy(c).to_string()),
+        Value::Country3(c) => Some(String::from_utf8_lossy(c).to_string()),
+        Value::Lang2(c) => Some(String::from_utf8_lossy(c).to_string()),
+        Value::Lang5(c) => Some(String::from_utf8_lossy(c).to_string()),
+        Value::Currency(c) => Some(String::from_utf8_lossy(c).to_string()),
+        Value::ColorAlpha([r, g, b, a]) => Some(format!("#{:02X}{:02X}{:02X}{:02X}", r, g, b, a)),
+        Value::BigInt(v) => Some(v.to_string()),
+        Value::KeyRef(col, key) => Some(format!("{}:{}", col, key)),
+        Value::DocRef(col, id) => Some(format!("{}#{}", col, id)),
+        Value::TableRef(name) => Some(name.clone()),
+        Value::PageRef(page_id) => Some(format!("page:{}", page_id)),
     }
 }
 
@@ -943,10 +1072,8 @@ pub(super) fn evaluate_metadata_field_compare(
     };
     if !column.eq_ignore_ascii_case("_capabilities") {
         if column.eq_ignore_ascii_case("_entity_type") {
-            let candidate = runtime_value_text(candidate)
-                .map(|item| item.to_ascii_lowercase())?;
-            let value = runtime_value_text(value)
-                .map(|item| item.to_ascii_lowercase())?;
+            let candidate = runtime_value_text(candidate).map(|item| item.to_ascii_lowercase())?;
+            let value = runtime_value_text(value).map(|item| item.to_ascii_lowercase())?;
             return Some(match op {
                 CompareOp::Eq => candidate == value,
                 CompareOp::Ne => candidate != value,
@@ -986,8 +1113,7 @@ pub(super) fn evaluate_metadata_field_in(
             return None;
         }
 
-        let candidate = runtime_value_text(candidate)
-            .map(|item| item.to_ascii_lowercase())?;
+        let candidate = runtime_value_text(candidate).map(|item| item.to_ascii_lowercase())?;
 
         for value in values {
             let Some(value) = runtime_value_text(value) else {
@@ -1038,7 +1164,9 @@ pub(super) fn like_matches_bytes(value: &[u8], pattern: &[u8]) -> bool {
                 || (!value.is_empty() && like_matches_bytes(&value[1..], pattern))
         }
         b'_' => !value.is_empty() && like_matches_bytes(&value[1..], &pattern[1..]),
-        byte => !value.is_empty() && value[0] == byte && like_matches_bytes(&value[1..], &pattern[1..]),
+        byte => {
+            !value.is_empty() && value[0] == byte && like_matches_bytes(&value[1..], &pattern[1..])
+        }
     }
 }
 
@@ -1050,6 +1178,14 @@ pub(super) fn query_expr_name(expr: &QueryExpr) -> &'static str {
         QueryExpr::Path(_) => "path",
         QueryExpr::Vector(_) => "vector",
         QueryExpr::Hybrid(_) => "hybrid",
+        QueryExpr::Insert(_) => "insert",
+        QueryExpr::Update(_) => "update",
+        QueryExpr::Delete(_) => "delete",
+        QueryExpr::CreateTable(_) => "create_table",
+        QueryExpr::DropTable(_) => "drop_table",
+        QueryExpr::AlterTable(_) => "alter_table",
+        QueryExpr::GraphCommand(_) => "graph_command",
+        QueryExpr::SearchCommand(_) => "search_command",
     }
 }
 

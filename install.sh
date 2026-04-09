@@ -11,12 +11,10 @@ set -e
 
 REPO="forattini-dev/reddb"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
-BINARY_NAME="reddb"
-GRPC_BINARY_NAME="reddb-grpc"
+BINARY_NAME="red"
 CHANNEL="stable"
 VERSION=""
 STATIC=""
-WITH_GRPC="false"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -32,10 +30,6 @@ while [[ $# -gt 0 ]]; do
       INSTALL_DIR="$2"
       shift 2
       ;;
-    --with-grpc)
-      WITH_GRPC="true"
-      shift
-      ;;
     --static)
       STATIC="true"
       shift
@@ -49,7 +43,6 @@ while [[ $# -gt 0 ]]; do
       echo "  --channel <stable|next|latest>  Release channel (default: stable)"
       echo "  --version <version>             Install specific version (e.g., v0.1.0)"
       echo "  --install-dir <path>            Installation directory (default: ~/.local/bin)"
-      echo "  --with-grpc                     Also install reddb-grpc"
       echo "  --static                        Use static aarch64 build when available"
       echo "  -h, --help                      Show this help message"
       exit 0
@@ -244,9 +237,6 @@ main() {
   declare -a DOWNLOADED_FILES
 
   download_binary "$BINARY_NAME"
-  if [[ "$WITH_GRPC" == "true" ]]; then
-    download_binary "$GRPC_BINARY_NAME"
-  fi
 
   for entry in "${DOWNLOADED_FILES[@]}"; do
     name="${entry%%:*}"
@@ -258,11 +248,7 @@ main() {
   echo "✅ RedDB installed."
   echo ""
   echo "Quick start:"
-  echo "  reddb --help"
-  if [[ "$WITH_GRPC" == "true" ]]; then
-    echo "  reddb-grpc --help"
-  fi
+  echo "  red --help"
 }
 
 main
-

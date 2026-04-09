@@ -185,8 +185,7 @@ impl ContextFusion {
         // Assign ranks
         for (source, mut items) in by_source {
             items.sort_by(|a, b| {
-                b.1
-                    .partial_cmp(&a.1)
+                b.1.partial_cmp(&a.1)
                     .unwrap_or(std::cmp::Ordering::Equal)
                     .then_with(|| a.0.cmp(&b.0))
             });

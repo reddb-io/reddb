@@ -82,16 +82,19 @@ impl RedDB {
                 .catalog
                 .stats_by_collection
                 .len()
-                .saturating_sub(collection_names.len()) as u32,
+                .saturating_sub(collection_names.len())
+                as u32,
             omitted_index_count: metadata.indexes.len().saturating_sub(indexes.len()) as u32,
             omitted_graph_projection_count: metadata
                 .graph_projections
                 .len()
-                .saturating_sub(graph_projections.len()) as u32,
+                .saturating_sub(graph_projections.len())
+                as u32,
             omitted_analytics_job_count: metadata
                 .analytics_jobs
                 .len()
-                .saturating_sub(analytics_jobs.len()) as u32,
+                .saturating_sub(analytics_jobs.len())
+                as u32,
             omitted_vector_artifact_count: vector_artifact_count
                 .saturating_sub(vector_artifacts.len() as u32),
             collection_names,
@@ -106,7 +109,9 @@ impl RedDB {
         self.native_vector_artifact_records().len()
     }
 
-    pub(crate) fn native_vector_artifact_records(&self) -> Vec<(NativeVectorArtifactSummary, Vec<u8>)> {
+    pub(crate) fn native_vector_artifact_records(
+        &self,
+    ) -> Vec<(NativeVectorArtifactSummary, Vec<u8>)> {
         let mut artifacts = Vec::new();
         for collection in self.store.list_collections() {
             let Some(manager) = self.store.get_collection(&collection) else {
@@ -151,7 +156,10 @@ impl RedDB {
             if !vectors.is_empty() {
                 let dimension = vectors[0].1.len();
                 let mut hnsw = HnswIndex::with_dimension(dimension);
-                for (id, vector) in vectors.into_iter().filter(|(_, vector)| vector.len() == dimension) {
+                for (id, vector) in vectors
+                    .into_iter()
+                    .filter(|(_, vector)| vector.len() == dimension)
+                {
                     hnsw.insert_with_id(id.raw(), vector);
                 }
                 let stats = hnsw.stats();
@@ -173,7 +181,9 @@ impl RedDB {
                     .query_all(|_| true)
                     .into_iter()
                     .filter_map(|entity| match entity.data {
-                        EntityData::Vector(vector) if vector.dense.len() == dimension => Some(vector.dense),
+                        EntityData::Vector(vector) if vector.dense.len() == dimension => {
+                            Some(vector.dense)
+                        }
                         _ => None,
                     })
                     .collect::<Vec<_>>();
@@ -206,8 +216,7 @@ impl RedDB {
             if !graph_edges.is_empty() {
                 let bytes = Self::serialize_native_graph_adjacency_artifact(&graph_edges);
                 let (edge_count, node_count, label_count) =
-                    Self::inspect_native_graph_adjacency_artifact(&bytes)
-                        .unwrap_or((0, 0, 0));
+                    Self::inspect_native_graph_adjacency_artifact(&bytes).unwrap_or((0, 0, 0));
                 let summary = NativeVectorArtifactSummary {
                     collection: collection.clone(),
                     artifact_kind: "graph.adjacency".to_string(),
@@ -277,17 +286,16 @@ impl RedDB {
         data
     }
 
-    pub(crate) fn inspect_native_graph_adjacency_artifact(bytes: &[u8]) -> Result<(u64, u64, u32), String> {
+    pub(crate) fn inspect_native_graph_adjacency_artifact(
+        bytes: &[u8],
+    ) -> Result<(u64, u64, u32), String> {
         if bytes.len() < 8 || &bytes[0..4] != b"RDGA" {
             return Err("invalid graph adjacency artifact".to_string());
         }
         let mut pos = 4usize;
-        let edge_count = u32::from_le_bytes([
-            bytes[pos],
-            bytes[pos + 1],
-            bytes[pos + 2],
-            bytes[pos + 3],
-        ]) as usize;
+        let edge_count =
+            u32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]])
+                as usize;
         pos += 4;
         let mut nodes = BTreeSet::new();
         let mut labels = BTreeSet::new();
@@ -344,7 +352,9 @@ impl RedDB {
         data
     }
 
-    pub(crate) fn inspect_native_fulltext_artifact(bytes: &[u8]) -> Result<(u64, u64, u64), String> {
+    pub(crate) fn inspect_native_fulltext_artifact(
+        bytes: &[u8],
+    ) -> Result<(u64, u64, u64), String> {
         if bytes.len() < 12 || &bytes[0..4] != b"RDFT" {
             return Err("invalid fulltext artifact".to_string());
         }
@@ -353,19 +363,11 @@ impl RedDB {
         if pos + 8 > bytes.len() {
             return Err("truncated fulltext artifact".to_string());
         }
-        let doc_count = u32::from_le_bytes([
-            bytes[pos],
-            bytes[pos + 1],
-            bytes[pos + 2],
-            bytes[pos + 3],
-        ]) as u64;
+        let doc_count =
+            u32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]) as u64;
         pos += 4;
-        let term_count = u32::from_le_bytes([
-            bytes[pos],
-            bytes[pos + 1],
-            bytes[pos + 2],
-            bytes[pos + 3],
-        ]) as u64;
+        let term_count =
+            u32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]) as u64;
         pos += 4;
         let mut posting_count = 0u64;
         for _ in 0..term_count {
@@ -373,12 +375,9 @@ impl RedDB {
             if pos + 4 > bytes.len() {
                 return Err("truncated fulltext posting count".to_string());
             }
-            let entry_count = u32::from_le_bytes([
-                bytes[pos],
-                bytes[pos + 1],
-                bytes[pos + 2],
-                bytes[pos + 3],
-            ]) as u64;
+            let entry_count =
+                u32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]])
+                    as u64;
             pos += 4;
             posting_count += entry_count;
             let bytes_needed = entry_count as usize * 12;
@@ -422,19 +421,11 @@ impl RedDB {
         if pos + 8 > bytes.len() {
             return Err("truncated document path/value artifact".to_string());
         }
-        let doc_count = u32::from_le_bytes([
-            bytes[pos],
-            bytes[pos + 1],
-            bytes[pos + 2],
-            bytes[pos + 3],
-        ]) as u64;
+        let doc_count =
+            u32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]) as u64;
         pos += 4;
-        let total_entries = u32::from_le_bytes([
-            bytes[pos],
-            bytes[pos + 1],
-            bytes[pos + 2],
-            bytes[pos + 3],
-        ]) as u64;
+        let total_entries =
+            u32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]) as u64;
         pos += 4;
         let mut paths = BTreeSet::new();
         let mut values = BTreeSet::new();
@@ -444,12 +435,9 @@ impl RedDB {
                 return Err("truncated document path/value record".to_string());
             }
             pos += 8;
-            let entry_count = u32::from_le_bytes([
-                bytes[pos],
-                bytes[pos + 1],
-                bytes[pos + 2],
-                bytes[pos + 3],
-            ]) as usize;
+            let entry_count =
+                u32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]])
+                    as usize;
             pos += 4;
             for _ in 0..entry_count {
                 let path = Self::read_native_artifact_string(bytes, &mut pos)?;
@@ -462,7 +450,12 @@ impl RedDB {
         if seen_entries != total_entries {
             return Err("document path/value artifact entry count mismatch".to_string());
         }
-        Ok((doc_count, paths.len() as u64, total_entries, values.len() as u64))
+        Ok((
+            doc_count,
+            paths.len() as u64,
+            total_entries,
+            values.len() as u64,
+        ))
     }
 
     fn native_document_pathvalue_for_entity(
@@ -607,6 +600,78 @@ impl RedDB {
             Value::Timestamp(value) => Some(value.to_string()),
             Value::Duration(value) => Some(value.to_string()),
             Value::Uuid(_) | Value::MacAddr(_) | Value::Vector(_) | Value::Null => None,
+            Value::Color([r, g, b]) => Some(format!("#{:02X}{:02X}{:02X}", r, g, b)),
+            Value::Email(s) => Some(s.clone()),
+            Value::Url(s) => Some(s.clone()),
+            Value::Phone(n) => Some(format!("+{}", n)),
+            Value::Semver(packed) => Some(format!(
+                "{}.{}.{}",
+                packed / 1_000_000,
+                (packed / 1_000) % 1_000,
+                packed % 1_000
+            )),
+            Value::Cidr(ip, prefix) => Some(format!(
+                "{}.{}.{}.{}/{}",
+                (ip >> 24) & 0xFF,
+                (ip >> 16) & 0xFF,
+                (ip >> 8) & 0xFF,
+                ip & 0xFF,
+                prefix
+            )),
+            Value::Date(days) => Some(days.to_string()),
+            Value::Time(ms) => {
+                let total_secs = ms / 1000;
+                Some(format!(
+                    "{:02}:{:02}:{:02}",
+                    total_secs / 3600,
+                    (total_secs / 60) % 60,
+                    total_secs % 60
+                ))
+            }
+            Value::Decimal(v) => Some(format!("{:.4}", *v as f64 / 10_000.0)),
+            Value::EnumValue(i) => Some(format!("enum({})", i)),
+            Value::Array(_) => None,
+            Value::TimestampMs(ms) => Some(ms.to_string()),
+            Value::Ipv4(ip) => Some(format!(
+                "{}.{}.{}.{}",
+                (ip >> 24) & 0xFF,
+                (ip >> 16) & 0xFF,
+                (ip >> 8) & 0xFF,
+                ip & 0xFF
+            )),
+            Value::Ipv6(bytes) => Some(format!("{}", std::net::Ipv6Addr::from(*bytes))),
+            Value::Subnet(ip, mask) => {
+                let prefix = mask.leading_ones();
+                Some(format!(
+                    "{}.{}.{}.{}/{}",
+                    (ip >> 24) & 0xFF,
+                    (ip >> 16) & 0xFF,
+                    (ip >> 8) & 0xFF,
+                    ip & 0xFF,
+                    prefix
+                ))
+            }
+            Value::Port(p) => Some(p.to_string()),
+            Value::Latitude(micro) => Some(format!("{:.6}", *micro as f64 / 1_000_000.0)),
+            Value::Longitude(micro) => Some(format!("{:.6}", *micro as f64 / 1_000_000.0)),
+            Value::GeoPoint(lat, lon) => Some(format!(
+                "{:.6},{:.6}",
+                *lat as f64 / 1_000_000.0,
+                *lon as f64 / 1_000_000.0
+            )),
+            Value::Country2(c) => Some(String::from_utf8_lossy(c).to_string()),
+            Value::Country3(c) => Some(String::from_utf8_lossy(c).to_string()),
+            Value::Lang2(c) => Some(String::from_utf8_lossy(c).to_string()),
+            Value::Lang5(c) => Some(String::from_utf8_lossy(c).to_string()),
+            Value::Currency(c) => Some(String::from_utf8_lossy(c).to_string()),
+            Value::ColorAlpha([r, g, b, a]) => {
+                Some(format!("#{:02X}{:02X}{:02X}{:02X}", r, g, b, a))
+            }
+            Value::BigInt(v) => Some(v.to_string()),
+            Value::KeyRef(col, key) => Some(format!("{}:{}", col, key)),
+            Value::DocRef(col, id) => Some(format!("{}#{}", col, id)),
+            Value::TableRef(name) => Some(name.clone()),
+            Value::PageRef(page_id) => Some(format!("page:{}", page_id)),
         }
     }
 
@@ -655,12 +720,12 @@ impl RedDB {
             .iter()
             .rev()
             .take(SAMPLE_LIMIT)
-                    .map(|snapshot| NativeSnapshotSummary {
-                        snapshot_id: snapshot.snapshot_id,
-                        created_at_unix_ms: snapshot.created_at_unix_ms,
-                        superblock_sequence: snapshot.superblock_sequence,
-                        collection_count: snapshot.collection_count as u32,
-                        total_entities: snapshot.total_entities as u64,
+            .map(|snapshot| NativeSnapshotSummary {
+                snapshot_id: snapshot.snapshot_id,
+                created_at_unix_ms: snapshot.created_at_unix_ms,
+                superblock_sequence: snapshot.superblock_sequence,
+                collection_count: snapshot.collection_count as u32,
+                total_entities: snapshot.total_entities as u64,
             })
             .collect();
         let exports: Vec<_> = metadata
@@ -668,12 +733,12 @@ impl RedDB {
             .iter()
             .rev()
             .take(SAMPLE_LIMIT)
-                    .map(|export| NativeExportSummary {
-                        name: export.name.clone(),
-                        created_at_unix_ms: export.created_at_unix_ms,
-                        snapshot_id: export.snapshot_id,
-                        superblock_sequence: export.superblock_sequence,
-                        collection_count: export.collection_count as u32,
+            .map(|export| NativeExportSummary {
+                name: export.name.clone(),
+                created_at_unix_ms: export.created_at_unix_ms,
+                snapshot_id: export.snapshot_id,
+                superblock_sequence: export.superblock_sequence,
+                collection_count: export.collection_count as u32,
                 total_entities: export.total_entities as u64,
             })
             .collect();
@@ -860,25 +925,22 @@ impl RedDB {
         }
     }
 
-    pub(crate) fn prune_export_registry(
-        &self,
-        exports: &mut Vec<ExportDescriptor>,
-    ) {
+    pub(crate) fn prune_export_registry(&self, exports: &mut Vec<ExportDescriptor>) {
         let retention = self.options.export_retention.max(1);
         if exports.len() <= retention {
             return;
         }
 
         exports.sort_by_key(|export| export.created_at_unix_ms);
-        let removed: Vec<ExportDescriptor> = exports
-            .drain(0..(exports.len() - retention))
-            .collect();
+        let removed: Vec<ExportDescriptor> =
+            exports.drain(0..(exports.len() - retention)).collect();
 
         for export in removed {
             let _ = fs::remove_file(&export.data_path);
             let _ = fs::remove_file(&export.metadata_path);
-            let binary_path =
-                PhysicalMetadataFile::metadata_binary_path_for(std::path::Path::new(&export.data_path));
+            let binary_path = PhysicalMetadataFile::metadata_binary_path_for(std::path::Path::new(
+                &export.data_path,
+            ));
             let _ = fs::remove_file(binary_path);
         }
     }
@@ -889,13 +951,19 @@ impl RedDB {
             self.options.has_capability(Capability::Graph),
         );
         if self.options.has_capability(Capability::FullText) {
-            catalog.register(RuntimeIndexConfig::new("text-fulltext", IndexKind::FullText));
+            catalog.register(RuntimeIndexConfig::new(
+                "text-fulltext",
+                IndexKind::FullText,
+            ));
             catalog.register(RuntimeIndexConfig::new(
                 "document-pathvalue",
                 IndexKind::DocumentPathValue,
             ));
         }
-        catalog.register(RuntimeIndexConfig::new("search-hybrid", IndexKind::HybridSearch));
+        catalog.register(RuntimeIndexConfig::new(
+            "search-hybrid",
+            IndexKind::HybridSearch,
+        ));
         catalog
     }
 
@@ -1027,7 +1095,12 @@ impl RedDB {
     }
 
     /// Brute-force cosine similarity scan (exact results, O(n)).
-    fn similar_brute_force(&self, collection: &str, vector: &[f32], k: usize) -> Vec<SimilarResult> {
+    fn similar_brute_force(
+        &self,
+        collection: &str,
+        vector: &[f32],
+        k: usize,
+    ) -> Vec<SimilarResult> {
         let manager = match self.store.get_collection(collection) {
             Some(m) => m,
             None => return Vec::new(),
@@ -1039,12 +1112,11 @@ impl RedDB {
             .filter_map(|e| {
                 let score = match &e.data {
                     EntityData::Vector(v) => cosine_similarity(vector, &v.dense),
-                    _ => {
-                        e.embeddings
-                            .iter()
-                            .map(|emb| cosine_similarity(vector, &emb.vector))
-                            .fold(0.0f32, f32::max)
-                    }
+                    _ => e
+                        .embeddings
+                        .iter()
+                        .map(|emb| cosine_similarity(vector, &emb.vector))
+                        .fold(0.0f32, f32::max),
                 };
                 let distance = (1.0 - score).max(0.0);
                 if score > 0.0 {
@@ -1088,7 +1160,10 @@ impl RedDB {
 
         // Fast path: check if a fresh index already exists.
         {
-            let indexes = self.vector_indexes.read().unwrap_or_else(|e| e.into_inner());
+            let indexes = self
+                .vector_indexes
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
             if let Some(cached) = indexes.get(collection) {
                 if cached.entity_count == live_count {
                     return Some(Arc::clone(&cached.index));
@@ -1129,7 +1204,10 @@ impl RedDB {
         let index = Arc::new(RwLock::new(hnsw));
 
         // Store in the cache (double-check pattern to avoid duplicate builds).
-        let mut indexes = self.vector_indexes.write().unwrap_or_else(|e| e.into_inner());
+        let mut indexes = self
+            .vector_indexes
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         // Re-check under write lock: another thread may have built in the meantime.
         if let Some(cached) = indexes.get(collection) {
             if cached.entity_count == live_count {
@@ -1178,7 +1256,10 @@ impl RedDB {
     /// Called after vector inserts / deletes so the next search lazily rebuilds
     /// a fresh index that includes the new data.
     pub(crate) fn invalidate_vector_index(&self, collection: &str) {
-        let mut indexes = self.vector_indexes.write().unwrap_or_else(|e| e.into_inner());
+        let mut indexes = self
+            .vector_indexes
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         indexes.remove(collection);
     }
 

@@ -231,7 +231,15 @@ impl JoinQueryBuilder {
             QueryExpr::Path(path) => path.alias = Some(alias.clone()),
             QueryExpr::Vector(vector) => vector.alias = Some(alias.clone()),
             QueryExpr::Hybrid(hybrid) => hybrid.alias = Some(alias.clone()),
-            QueryExpr::Join(_) => {}
+            QueryExpr::Join(_)
+            | QueryExpr::Insert(_)
+            | QueryExpr::Update(_)
+            | QueryExpr::Delete(_)
+            | QueryExpr::CreateTable(_)
+            | QueryExpr::DropTable(_)
+            | QueryExpr::AlterTable(_)
+            | QueryExpr::GraphCommand(_)
+            | QueryExpr::SearchCommand(_) => {}
         }
         self
     }

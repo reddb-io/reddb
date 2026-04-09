@@ -1,0 +1,74 @@
+# ==========================================================================
+# RedDB - Primary + Read-Replica test environment
+# ==========================================================================
+# Usage:
+#   docker compose up -d --build      # start cluster
+#   docker compose logs -f             # follow logs
+#   docker compose down -v             # tear down with volumes
+# ==========================================================================
+
+services:
+  primary:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: reddb-primary
+    ports:
+      - "50051:50051"
+    volumes:
+      - primary-data:/data
+    command:
+      - "server"
+      - "--grpc"
+      - "--path"
+      - "/data/data.rdb"
+      - "--bind"
+      - "0.0.0.0:50051"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      - RUST_LOG=info
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/red", "health", "--grpc", "--bind", "127.0.0.1:50051"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  replica:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: reddb-replica
+    ports:
+      - "50052:50051"
+    volumes:
+      - replica-data:/data
+    command:
+      - "server"
+      - "--grpc"
+      - "--path"
+      - "/data/data.rdb"
+      - "--bind"
+      - "0.0.0.0:50051"
+      - "--role"
+      - "replica"
+      - "--primary-addr"
+      - "http://primary:50051"
+      - "--read-only"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      - RUST_LOG=info
+      - REDDB_PRIMARY_ADDR=http://primary:50051
+    depends_on:
+      primary:
+        condition: service_healthy
+
+volumes:
+  primary-data:
+  replica-data:

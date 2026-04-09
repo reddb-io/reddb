@@ -10,6 +10,9 @@ impl RedDB {
             options: RedDBOptions::in_memory(),
             paged_mode: false,
             vector_indexes: RwLock::new(HashMap::new()),
+            remote_backend: None,
+            remote_key: None,
+            replication: None,
         }
     }
 
@@ -19,9 +22,28 @@ impl RedDB {
     }
 
     /// Open using the crate-level runtime options.
-    pub fn open_with_options(
-        options: &RedDBOptions,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn open_with_options(options: &RedDBOptions) -> Result<Self, Box<dyn std::error::Error>> {
+        // If remote backend configured, download before opening
+        if let (Some(backend), Some(key)) = (&options.remote_backend, &options.remote_key) {
+            let local_path = options.resolved_path("data.rdb");
+            if !local_path.exists() {
+                // Ensure parent directory exists for the download target
+                if let Some(parent) = local_path.parent() {
+                    if !parent.exists() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                }
+                // Download from remote to local cache
+                match backend.download(key, &local_path) {
+                    Ok(true) => { /* downloaded successfully */ }
+                    Ok(false) => { /* doesn't exist remotely, will create fresh */ }
+                    Err(e) => {
+                        return Err(format!("remote backend download failed: {e}").into());
+                    }
+                }
+            }
+        }
+
         let (store, path, paged_mode) = match options.mode {
             StorageMode::InMemory => (
                 UnifiedStore::with_config(UnifiedStoreConfig::default()),
@@ -29,10 +51,14 @@ impl RedDB {
                 false,
             ),
             StorageMode::Persistent => {
-                let path_buf = options.resolved_path("reddb.rdb");
+                let path_buf = options.resolved_path("data.rdb");
                 if path_buf.exists() {
                     if Self::is_binary_dump(&path_buf)? {
-                        (UnifiedStore::load_from_file(&path_buf)?, Some(path_buf), false)
+                        (
+                            UnifiedStore::load_from_file(&path_buf)?,
+                            Some(path_buf),
+                            false,
+                        )
                     } else {
                         (UnifiedStore::open(&path_buf)?, Some(path_buf), true)
                     }
@@ -49,6 +75,16 @@ impl RedDB {
             }
         };
 
+        // Take ownership of the remote backend from options (it is not Clone).
+        // The clone below will set remote_backend to None; we capture the key separately.
+        let remote_key = options.remote_key.clone();
+
+        // Initialize primary replication state if configured as primary.
+        let replication = match &options.replication.role {
+            ReplicationRole::Primary => Some(Arc::new(PrimaryReplication::new())),
+            _ => None,
+        };
+
         Ok(Self {
             store: Arc::new(store),
             preprocessors: Vec::new(),
@@ -57,6 +93,9 @@ impl RedDB {
             options: options.clone(),
             paged_mode,
             vector_indexes: RwLock::new(HashMap::new()),
+            remote_backend: None,
+            remote_key,
+            replication,
         }
         .with_initialized_metadata()?)
     }
@@ -71,6 +110,9 @@ impl RedDB {
             options: RedDBOptions::in_memory(),
             paged_mode: false,
             vector_indexes: RwLock::new(HashMap::new()),
+            remote_backend: None,
+            remote_key: None,
+            replication: None,
         }
     }
 
@@ -83,6 +125,13 @@ impl RedDB {
                 self.store.save_to_file(path)?;
             }
             self.persist_metadata()?;
+
+            // Upload to remote backend if configured
+            if let (Some(backend), Some(key)) = (&self.remote_backend, &self.remote_key) {
+                backend
+                    .upload(path, key)
+                    .map_err(|e| format!("remote backend upload failed: {e}"))?;
+            }
         }
         Ok(())
     }
@@ -122,7 +171,9 @@ impl RedDB {
     pub fn inspect_native_header(&self) -> Option<NativeHeaderInspection> {
         let native = self.store.physical_file_header()?;
         let metadata = self.physical_metadata()?;
-        Some(Self::inspect_native_header_against_metadata(native, &metadata))
+        Some(Self::inspect_native_header_against_metadata(
+            native, &metadata,
+        ))
     }
 
     /// Read native collection roots persisted in the paged file, when available.
@@ -136,25 +187,33 @@ impl RedDB {
     /// Read native manifest summary persisted in the paged file, when available.
     pub fn native_manifest_summary(&self) -> Option<NativeManifestSummary> {
         let header = self.store.physical_file_header()?;
-        self.store.read_native_manifest_summary(header.manifest_page).ok()
+        self.store
+            .read_native_manifest_summary(header.manifest_page)
+            .ok()
     }
 
     /// Read native operational registry summary persisted in the paged file, when available.
     pub fn native_registry_summary(&self) -> Option<NativeRegistrySummary> {
         let header = self.store.physical_file_header()?;
-        self.store.read_native_registry_summary(header.registry_page).ok()
+        self.store
+            .read_native_registry_summary(header.registry_page)
+            .ok()
     }
 
     /// Read native snapshot/export summary persisted in the paged file, when available.
     pub fn native_recovery_summary(&self) -> Option<NativeRecoverySummary> {
         let header = self.store.physical_file_header()?;
-        self.store.read_native_recovery_summary(header.recovery_page).ok()
+        self.store
+            .read_native_recovery_summary(header.recovery_page)
+            .ok()
     }
 
     /// Read native catalog summary persisted in the paged file, when available.
     pub fn native_catalog_summary(&self) -> Option<NativeCatalogSummary> {
         let header = self.store.physical_file_header()?;
-        self.store.read_native_catalog_summary(header.catalog_page).ok()
+        self.store
+            .read_native_catalog_summary(header.catalog_page)
+            .ok()
     }
 
     /// Read native metadata status persisted in the paged file, when available.
@@ -393,16 +452,11 @@ impl RedDB {
         let mut artifacts = Vec::new();
         let mut failures = Vec::new();
         for summary in summaries {
-            match self.inspect_native_vector_artifact(
-                &summary.collection,
-                Some(&summary.artifact_kind),
-            ) {
+            match self
+                .inspect_native_vector_artifact(&summary.collection, Some(&summary.artifact_kind))
+            {
                 Ok(artifact) => artifacts.push(artifact),
-                Err(err) => failures.push((
-                    summary.collection,
-                    summary.artifact_kind,
-                    err,
-                )),
+                Err(err) => failures.push((summary.collection, summary.artifact_kind, err)),
             }
         }
         Ok(NativeVectorArtifactBatchInspection {
@@ -443,9 +497,7 @@ impl RedDB {
         let native_header_repair_policy = self.native_header_repair_policy().map(|policy| {
             match policy {
                 NativeHeaderRepairPolicy::InSync => "in_sync",
-                NativeHeaderRepairPolicy::RepairNativeFromMetadata => {
-                    "repair_native_from_metadata"
-                }
+                NativeHeaderRepairPolicy::RepairNativeFromMetadata => "repair_native_from_metadata",
                 NativeHeaderRepairPolicy::NativeAheadOfMetadata => "native_ahead_of_metadata",
             }
             .to_string()
@@ -523,9 +575,13 @@ impl RedDB {
                 .as_ref()
                 .and_then(|state| state.catalog.as_ref())
                 .map(|catalog| catalog.collections_complete),
-            sidecar_loaded_from: sidecar.as_ref().map(|(_, source)| source.as_str().to_string()),
+            sidecar_loaded_from: sidecar
+                .as_ref()
+                .map(|(_, source)| source.as_str().to_string()),
             native_header_repair_policy,
-            metadata_sequence: sidecar.as_ref().map(|(metadata, _)| metadata.superblock.sequence),
+            metadata_sequence: sidecar
+                .as_ref()
+                .map(|(metadata, _)| metadata.superblock.sequence),
             native_sequence: native_state.as_ref().map(|state| state.header.sequence),
             native_metadata_last_loaded_from: native_state
                 .as_ref()
@@ -558,7 +614,8 @@ impl RedDB {
         let policy = Self::repair_policy_for_inspection(&inspection);
 
         if policy == NativeHeaderRepairPolicy::RepairNativeFromMetadata {
-            self.store.update_physical_file_header(inspection.expected)?;
+            self.store
+                .update_physical_file_header(inspection.expected)?;
             self.store.persist()?;
         }
 
@@ -569,7 +626,9 @@ impl RedDB {
     pub fn repair_native_physical_state_from_metadata(
         &self,
     ) -> Result<bool, Box<dyn std::error::Error>> {
-        if self.options.mode != StorageMode::Persistent || !self.paged_mode || self.options.read_only
+        if self.options.mode != StorageMode::Persistent
+            || !self.paged_mode
+            || self.options.read_only
         {
             return Ok(false);
         }
@@ -618,14 +677,16 @@ impl RedDB {
     /// Full logical catalog snapshot including inferred collection models and indices.
     pub fn catalog_model_snapshot(&self) -> CatalogModelSnapshot {
         let catalog = self.runtime_index_catalog();
-        let declarations = self.physical_metadata().map(|metadata| CatalogDeclarations {
-            declared_indexes: metadata.indexes,
-            declared_graph_projections: metadata.graph_projections,
-            declared_analytics_jobs: metadata.analytics_jobs,
-            operational_indexes: self.physical_indexes(),
-            operational_graph_projections: self.graph_projections(),
-            operational_analytics_jobs: self.analytics_jobs(),
-        });
+        let declarations = self
+            .physical_metadata()
+            .map(|metadata| CatalogDeclarations {
+                declared_indexes: metadata.indexes,
+                declared_graph_projections: metadata.graph_projections,
+                declared_analytics_jobs: metadata.analytics_jobs,
+                operational_indexes: self.physical_indexes(),
+                operational_graph_projections: self.graph_projections(),
+                operational_analytics_jobs: self.analytics_jobs(),
+            });
         snapshot_store_with_declarations(
             "reddb",
             self.store.as_ref(),
@@ -700,12 +761,13 @@ impl RedDB {
         let authority = self.physical_authority_status();
         let native_bootstrap_ready = authority.native_bootstrap_ready;
         let query_allowed = native_bootstrap_ready && matches!(report.state, HealthState::Healthy);
-        let write_allowed =
-            !self.options.read_only && native_bootstrap_ready && report.state != HealthState::Unhealthy;
-        let repair_allowed =
-            !self.options.read_only && native_bootstrap_ready && report.state != HealthState::Unhealthy;
+        let write_allowed = !self.options.read_only
+            && native_bootstrap_ready
+            && report.state != HealthState::Unhealthy;
+        let repair_allowed = !self.options.read_only
+            && native_bootstrap_ready
+            && report.state != HealthState::Unhealthy;
 
         (query_allowed, write_allowed, repair_allowed)
     }
-
 }

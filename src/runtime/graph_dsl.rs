@@ -59,12 +59,7 @@ pub(super) fn materialize_graph_with_projection(
             };
 
             graph
-                .add_edge(
-                    from_node,
-                    to_node,
-                    graph_edge_type(label),
-                    resolved_weight,
-                )
+                .add_edge(from_node, to_node, graph_edge_type(label), resolved_weight)
                 .map_err(|err| RedDBError::Query(err.to_string()))?;
         }
     }
@@ -103,7 +98,9 @@ pub(super) fn matches_graph_edge_projection(
     label: &str,
     edge_filters: Option<&BTreeSet<String>>,
 ) -> bool {
-    edge_filters.map_or(true, |filters| filters.contains(&normalize_graph_token(label)))
+    edge_filters.map_or(true, |filters| {
+        filters.contains(&normalize_graph_token(label))
+    })
 }
 
 pub(super) fn ensure_graph_node(graph: &GraphStore, id: &str) -> RedDBResult<()> {
@@ -214,13 +211,15 @@ pub(super) fn cycle_to_runtime(
 }
 
 pub(super) fn normalize_edge_filters(edge_labels: Option<Vec<String>>) -> Option<BTreeSet<String>> {
-    edge_labels.map(|labels| {
-        labels
-            .into_iter()
-            .map(|label| normalize_graph_token(&label))
-            .filter(|label| !label.is_empty())
-            .collect()
-    }).filter(|set: &BTreeSet<String>| !set.is_empty())
+    edge_labels
+        .map(|labels| {
+            labels
+                .into_iter()
+                .map(|label| normalize_graph_token(&label))
+                .filter(|label| !label.is_empty())
+                .collect()
+        })
+        .filter(|set: &BTreeSet<String>| !set.is_empty())
 }
 
 pub(super) fn merge_edge_filters(
@@ -250,20 +249,21 @@ pub(super) fn merge_runtime_projection(
     base: Option<RuntimeGraphProjection>,
     overlay: Option<RuntimeGraphProjection>,
 ) -> Option<RuntimeGraphProjection> {
-    let merge_list = |left: Option<Vec<String>>, right: Option<Vec<String>>| -> Option<Vec<String>> {
-        let mut values = BTreeSet::new();
-        if let Some(left) = left {
-            values.extend(left);
-        }
-        if let Some(right) = right {
-            values.extend(right);
-        }
-        if values.is_empty() {
-            None
-        } else {
-            Some(values.into_iter().collect())
-        }
-    };
+    let merge_list =
+        |left: Option<Vec<String>>, right: Option<Vec<String>>| -> Option<Vec<String>> {
+            let mut values = BTreeSet::new();
+            if let Some(left) = left {
+                values.extend(left);
+            }
+            if let Some(right) = right {
+                values.extend(right);
+            }
+            if values.is_empty() {
+                None
+            } else {
+                Some(values.into_iter().collect())
+            }
+        };
 
     let Some(_) = base.clone().or(overlay.clone()) else {
         return None;
@@ -271,16 +271,25 @@ pub(super) fn merge_runtime_projection(
 
     Some(RuntimeGraphProjection {
         node_labels: merge_list(
-            base.as_ref().and_then(|projection| projection.node_labels.clone()),
-            overlay.as_ref().and_then(|projection| projection.node_labels.clone()),
+            base.as_ref()
+                .and_then(|projection| projection.node_labels.clone()),
+            overlay
+                .as_ref()
+                .and_then(|projection| projection.node_labels.clone()),
         ),
         node_types: merge_list(
-            base.as_ref().and_then(|projection| projection.node_types.clone()),
-            overlay.as_ref().and_then(|projection| projection.node_types.clone()),
+            base.as_ref()
+                .and_then(|projection| projection.node_types.clone()),
+            overlay
+                .as_ref()
+                .and_then(|projection| projection.node_types.clone()),
         ),
         edge_labels: merge_list(
-            base.as_ref().and_then(|projection| projection.edge_labels.clone()),
-            overlay.as_ref().and_then(|projection| projection.edge_labels.clone()),
+            base.as_ref()
+                .and_then(|projection| projection.edge_labels.clone()),
+            overlay
+                .as_ref()
+                .and_then(|projection| projection.edge_labels.clone()),
         ),
     })
 }
@@ -299,7 +308,10 @@ pub(super) fn graph_adjacent_edges(
 ) -> Vec<(String, RuntimeGraphEdge)> {
     let mut adjacent = Vec::new();
 
-    if matches!(direction, RuntimeGraphDirection::Outgoing | RuntimeGraphDirection::Both) {
+    if matches!(
+        direction,
+        RuntimeGraphDirection::Outgoing | RuntimeGraphDirection::Both
+    ) {
         for (edge_type, target, weight) in graph.outgoing_edges(node) {
             if edge_allowed(edge_type, edge_filters) {
                 adjacent.push((
@@ -315,7 +327,10 @@ pub(super) fn graph_adjacent_edges(
         }
     }
 
-    if matches!(direction, RuntimeGraphDirection::Incoming | RuntimeGraphDirection::Both) {
+    if matches!(
+        direction,
+        RuntimeGraphDirection::Incoming | RuntimeGraphDirection::Both
+    ) {
         for (edge_type, source, weight) in graph.incoming_edges(node) {
             if edge_allowed(edge_type, edge_filters) {
                 adjacent.push((
@@ -521,10 +536,12 @@ pub(super) fn top_runtime_scores(
     pairs
         .into_iter()
         .filter_map(|(node_id, score)| {
-            graph.get_node(&node_id).map(|node| RuntimeGraphCentralityScore {
-                node: stored_node_to_runtime(node),
-                score,
-            })
+            graph
+                .get_node(&node_id)
+                .map(|node| RuntimeGraphCentralityScore {
+                    node: stored_node_to_runtime(node),
+                    score,
+                })
         })
         .collect()
 }
@@ -627,9 +644,7 @@ pub(super) fn parse_runtime_filter_op(op: &str) -> RedDBResult<DslFilterOp> {
             Ok(DslFilterOp::GreaterThanOrEquals)
         }
         "lt" | "less_than" | "less-than" => Ok(DslFilterOp::LessThan),
-        "lte" | "less_than_or_equals" | "less-than-or-equals" => {
-            Ok(DslFilterOp::LessThanOrEquals)
-        }
+        "lte" | "less_than_or_equals" | "less-than-or-equals" => Ok(DslFilterOp::LessThanOrEquals),
         "contains" => Ok(DslFilterOp::Contains),
         "starts_with" | "starts-with" => Ok(DslFilterOp::StartsWith),
         "ends_with" | "ends-with" => Ok(DslFilterOp::EndsWith),

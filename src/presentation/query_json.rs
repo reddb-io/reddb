@@ -1,7 +1,7 @@
 use crate::json::{Map, Value as JsonValue};
 use crate::runtime::RuntimeIvfSearchResult;
-use crate::storage::unified::dsl::QueryResult as DslQueryResult;
 use crate::storage::unified::devx::SimilarResult;
+use crate::storage::unified::dsl::QueryResult as DslQueryResult;
 use crate::storage::{MatchComponents, ScoredMatch, UnifiedEntity};
 use std::cmp::Ordering;
 
@@ -153,16 +153,16 @@ where
                     );
                     entry.insert("_score".to_string(), JsonValue::Number(score as f64));
                     entry.insert("score".to_string(), JsonValue::Number(score as f64));
-                    entry.insert(
-                        "final_score".to_string(),
-                        JsonValue::Number(score as f64),
-                    );
+                    entry.insert("final_score".to_string(), JsonValue::Number(score as f64));
                     entry.insert(
                         "_collection".to_string(),
                         JsonValue::String(result.collection.clone()),
                     );
                     entry.insert("_kind".to_string(), JsonValue::String("vector".to_string()));
-                    entry.insert("_entity_type".to_string(), JsonValue::String("vector".to_string()));
+                    entry.insert(
+                        "_entity_type".to_string(),
+                        JsonValue::String("vector".to_string()),
+                    );
                     entry.insert(
                         "_capabilities".to_string(),
                         JsonValue::String("vector,similarity,embedding".to_string()),
@@ -266,10 +266,7 @@ where
         JsonValue::String(item.entity.kind.storage_type().to_string()),
     );
     object.insert("_entity_type".to_string(), JsonValue::String(entity_type));
-    object.insert(
-        "_capabilities".to_string(),
-        JsonValue::String(capabilities),
-    );
+    object.insert("_capabilities".to_string(), JsonValue::String(capabilities));
     object.insert(
         "_created_at".to_string(),
         JsonValue::Number(item.entity.created_at as f64),
@@ -333,14 +330,12 @@ fn entity_capability_profile(entity: &UnifiedEntity) -> (String, String) {
 
             (entity_type.to_string(), capabilities.join(","))
         }
-        (crate::storage::EntityKind::GraphNode { .. }, crate::storage::EntityData::Node(_)) => (
-            "graph_node".to_string(),
-            "graph,graph_node".to_string(),
-        ),
-        (crate::storage::EntityKind::GraphEdge { .. }, crate::storage::EntityData::Edge(_)) => (
-            "graph_edge".to_string(),
-            "graph,graph_edge".to_string(),
-        ),
+        (crate::storage::EntityKind::GraphNode { .. }, crate::storage::EntityData::Node(_)) => {
+            ("graph_node".to_string(), "graph,graph_node".to_string())
+        }
+        (crate::storage::EntityKind::GraphEdge { .. }, crate::storage::EntityData::Edge(_)) => {
+            ("graph_edge".to_string(), "graph,graph_edge".to_string())
+        }
         (crate::storage::EntityKind::Vector { .. }, crate::storage::EntityData::Vector(_)) => (
             "vector".to_string(),
             "vector,similarity,embedding".to_string(),

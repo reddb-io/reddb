@@ -16,7 +16,9 @@ pub(crate) fn parse_analytics_job_mutation_input(
     payload: &JsonValue,
 ) -> RedDBResult<AnalyticsJobMutationInput> {
     let Some(kind) = json_string_field(payload, "kind") else {
-        return Err(RedDBError::Query("field 'kind' must be a string".to_string()));
+        return Err(RedDBError::Query(
+            "field 'kind' must be a string".to_string(),
+        ));
     };
 
     Ok(AnalyticsJobMutationInput {

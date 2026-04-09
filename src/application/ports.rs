@@ -19,9 +19,9 @@ use crate::runtime::{
     RuntimeGraphComponentsResult, RuntimeGraphCyclesResult, RuntimeGraphDirection,
     RuntimeGraphHitsResult, RuntimeGraphNeighborhoodResult, RuntimeGraphPathAlgorithm,
     RuntimeGraphPathResult, RuntimeGraphPattern, RuntimeGraphProjection,
-    RuntimeGraphTopologicalSortResult, RuntimeGraphTraversalResult,
-    RuntimeGraphTraversalStrategy, RuntimeIvfSearchResult, RuntimeQueryExplain,
-    RuntimeQueryResult, RuntimeQueryWeights, RuntimeStats, ScanCursor, ScanPage,
+    RuntimeGraphTopologicalSortResult, RuntimeGraphTraversalResult, RuntimeGraphTraversalStrategy,
+    RuntimeIvfSearchResult, RuntimeQueryExplain, RuntimeQueryResult, RuntimeQueryWeights,
+    RuntimeStats, ScanCursor, ScanPage,
 };
 use crate::storage::engine::PhysicalFileHeader;
 use crate::storage::unified::devx::refs::{NodeRef, TableRef, VectorRef};
@@ -31,12 +31,11 @@ use crate::storage::unified::devx::{
 };
 use crate::storage::unified::dsl::QueryResult as DslQueryResult;
 use crate::storage::unified::store::{
-    NativeCatalogSummary, NativeManifestSummary, NativeMetadataStateSummary,
-    NativePhysicalState, NativeRecoverySummary, NativeRegistrySummary,
-    NativeVectorArtifactPageSummary,
+    NativeCatalogSummary, NativeManifestSummary, NativeMetadataStateSummary, NativePhysicalState,
+    NativeRecoverySummary, NativeRegistrySummary, NativeVectorArtifactPageSummary,
 };
-use crate::{PhysicalAnalyticsJob, PhysicalGraphProjection, PhysicalIndexState};
 use crate::RedDBResult;
+use crate::{PhysicalAnalyticsJob, PhysicalGraphProjection, PhysicalIndexState};
 
 pub trait RuntimeQueryPort {
     fn execute_query(&self, query: &str) -> RedDBResult<RuntimeQueryResult>;
@@ -95,7 +94,11 @@ pub trait RuntimeEntityPort {
     fn create_vector(&self, input: CreateVectorInput) -> RedDBResult<CreateEntityOutput>;
     fn create_document(&self, input: CreateDocumentInput) -> RedDBResult<CreateEntityOutput>;
     fn create_kv(&self, input: CreateKvInput) -> RedDBResult<CreateEntityOutput>;
-    fn get_kv(&self, collection: &str, key: &str) -> RedDBResult<Option<(crate::storage::schema::Value, crate::storage::EntityId)>>;
+    fn get_kv(
+        &self,
+        collection: &str,
+        key: &str,
+    ) -> RedDBResult<Option<(crate::storage::schema::Value, crate::storage::EntityId)>>;
     fn delete_kv(&self, collection: &str, key: &str) -> RedDBResult<bool>;
     fn patch_entity(&self, input: PatchEntityInput) -> RedDBResult<CreateEntityOutput>;
     fn delete_entity(&self, input: DeleteEntityInput) -> RedDBResult<DeleteEntityOutput>;
@@ -221,12 +224,8 @@ pub trait RuntimeNativePort {
         collection: &str,
         artifact_kind: Option<&str>,
     ) -> RedDBResult<NativeVectorArtifactInspection>;
-    fn inspect_native_vector_artifacts(
-        &self,
-    ) -> RedDBResult<NativeVectorArtifactBatchInspection>;
-    fn warmup_native_vector_artifacts(
-        &self,
-    ) -> RedDBResult<NativeVectorArtifactBatchInspection>;
+    fn inspect_native_vector_artifacts(&self) -> RedDBResult<NativeVectorArtifactBatchInspection>;
+    fn warmup_native_vector_artifacts(&self) -> RedDBResult<NativeVectorArtifactBatchInspection>;
     fn native_header_repair_policy(&self) -> RedDBResult<String>;
     fn repair_native_header_from_metadata(&self) -> RedDBResult<String>;
     fn rebuild_physical_metadata_from_native_state(&self) -> RedDBResult<bool>;
@@ -330,7 +329,6 @@ pub trait RuntimeGraphPort {
         projection: Option<RuntimeGraphProjection>,
     ) -> RedDBResult<RuntimeGraphTopologicalSortResult>;
 }
-
 
 #[path = "ports_impls.rs"]
 mod ports_impls;

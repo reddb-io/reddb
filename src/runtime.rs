@@ -13,44 +13,45 @@ use crate::catalog::{
 use crate::health::{HealthProvider, HealthReport};
 use crate::index::IndexCatalog;
 use crate::physical::{
-    ExportDescriptor, ManifestEvent, PhysicalAnalyticsJob, PhysicalGraphProjection,
-    PhysicalLayout, SnapshotDescriptor,
+    ExportDescriptor, ManifestEvent, PhysicalAnalyticsJob, PhysicalGraphProjection, PhysicalLayout,
+    SnapshotDescriptor,
 };
 use crate::serde_json::Value as JsonValue;
+use crate::storage::engine::pathfinding::{Dijkstra, BFS, DFS};
 use crate::storage::engine::{
     BetweennessCentrality, ClosenessCentrality, ClusteringCoefficient, ConnectedComponents,
     CycleDetector, DegreeCentrality, EigenvectorCentrality, GraphEdgeType, GraphNodeType,
-    GraphStore, HITS, IvfConfig, IvfIndex, IvfStats, LabelPropagation, Louvain, MetadataEntry,
+    GraphStore, IvfConfig, IvfIndex, IvfStats, LabelPropagation, Louvain, MetadataEntry,
     MetadataFilter as VectorMetadataFilter, MetadataValue as VectorMetadataValue, PageRank,
-    PersonalizedPageRank, PhysicalFileHeader, StoredNode,
-    StronglyConnectedComponents, WeaklyConnectedComponents,
+    PersonalizedPageRank, PhysicalFileHeader, StoredNode, StronglyConnectedComponents,
+    WeaklyConnectedComponents, HITS,
 };
 use crate::storage::query::ast::{
-    CompareOp, FieldRef, Filter, FusionStrategy, HybridQuery, JoinQuery, JoinType,
-    OrderByClause, Projection, QueryExpr, TableQuery, VectorQuery, VectorSource,
+    AlterOperation, AlterTableQuery, CompareOp, CreateTableQuery, DeleteQuery, DropTableQuery,
+    FieldRef, Filter, FusionStrategy, GraphCommand, HybridQuery, InsertEntityType, InsertQuery,
+    JoinQuery, JoinType, OrderByClause, Projection, QueryExpr, SearchCommand, TableQuery,
+    UpdateQuery, VectorQuery, VectorSource,
 };
+use crate::storage::query::is_universal_entity_source as is_universal_query_source;
 use crate::storage::query::modes::{detect_mode, parse_multi, QueryMode};
 use crate::storage::query::planner::{
     CanonicalLogicalPlan, CanonicalPlanner, CostEstimator, QueryPlanner,
 };
 use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
-use crate::storage::query::is_universal_entity_source as is_universal_query_source;
 use crate::storage::schema::Value;
-use crate::storage::engine::pathfinding::{BFS, DFS, Dijkstra};
 use crate::storage::unified::dsl::{
-    cosine_similarity,
-    Filter as DslFilter, FilterOp as DslFilterOp, FilterValue as DslFilterValue,
-    apply_filters, GraphPatternDsl, HybridQueryBuilder, QueryResult as DslQueryResult,
-    ScoredMatch, TextSearchBuilder,
+    apply_filters, cosine_similarity, Filter as DslFilter, FilterOp as DslFilterOp,
+    FilterValue as DslFilterValue, GraphPatternDsl, HybridQueryBuilder,
+    QueryResult as DslQueryResult, ScoredMatch, TextSearchBuilder,
 };
-use crate::storage::{
-    EntityData, EntityId, EntityKind, RedDB, RefType, SimilarResult, StoreStats, UnifiedEntity,
-    UnifiedStore,
-};
-use crate::storage::unified::{Metadata, MetadataValue as UnifiedMetadataValue, RefTarget};
 use crate::storage::unified::store::{
     NativeCatalogSummary, NativeManifestSummary, NativePhysicalState, NativeRecoverySummary,
     NativeRegistrySummary,
+};
+use crate::storage::unified::{Metadata, MetadataValue as UnifiedMetadataValue, RefTarget};
+use crate::storage::{
+    EntityData, EntityId, EntityKind, RedDB, RefType, SimilarResult, StoreStats, UnifiedEntity,
+    UnifiedStore,
 };
 
 #[derive(Debug, Clone)]
@@ -98,6 +99,48 @@ pub struct RuntimeQueryResult {
     pub statement: &'static str,
     pub engine: &'static str,
     pub result: UnifiedResult,
+    pub affected_rows: u64,
+    /// High-level statement type: "select", "insert", "update", "delete", "create", "drop", "alter"
+    pub statement_type: &'static str,
+}
+
+impl RuntimeQueryResult {
+    /// Construct a result representing a DML operation (insert/update/delete).
+    pub fn dml_result(
+        query: String,
+        affected: u64,
+        statement_type: &'static str,
+        engine: &'static str,
+    ) -> Self {
+        Self {
+            query,
+            mode: QueryMode::Sql,
+            statement: statement_type,
+            engine,
+            result: UnifiedResult::empty(),
+            affected_rows: affected,
+            statement_type,
+        }
+    }
+
+    /// Construct a result representing a DDL message (create/drop/alter).
+    pub fn ok_message(query: String, message: &str, statement_type: &'static str) -> Self {
+        let mut result = UnifiedResult::empty();
+        let mut record = UnifiedRecord::new();
+        record.set("message", Value::Text(message.to_string()));
+        result.push(record);
+        result.columns = vec!["message".to_string()];
+
+        Self {
+            query,
+            mode: QueryMode::Sql,
+            statement: statement_type,
+            engine: "runtime-ddl",
+            result,
+            affected_rows: 0,
+            statement_type,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -352,17 +395,19 @@ pub struct RuntimeConnection {
     inner: Arc<RuntimeInner>,
 }
 
-
+mod graph_dsl;
+mod health_connection;
 mod impl_core;
-mod impl_search;
+mod impl_ddl;
+mod impl_dml;
+mod impl_graph;
+mod impl_graph_commands;
 mod impl_native;
 mod impl_physical;
-mod impl_graph;
-mod health_connection;
+mod impl_search;
+mod join_filter;
 mod query_exec;
 mod record_search;
-mod join_filter;
-mod graph_dsl;
 
 pub use self::graph_dsl::*;
 use self::join_filter::*;

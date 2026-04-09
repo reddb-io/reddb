@@ -159,11 +159,8 @@ mod tests {
 
     #[test]
     fn test_path_join_query_builder() {
-        let path = PathQuery::new(
-            NodeSelector::by_id("host:a"),
-            NodeSelector::by_id("host:b"),
-        )
-        .via(GraphEdgeType::ConnectsTo);
+        let path = PathQuery::new(NodeSelector::by_id("host:a"), NodeSelector::by_id("host:b"))
+            .via(GraphEdgeType::ConnectsTo);
         let query = QueryExpr::table("hosts")
             .alias("h")
             .join_path(

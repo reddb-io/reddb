@@ -4,8 +4,8 @@
 #
 set -e
 
-BINARY_NAME="reddb"
-GRPC_BINARY_NAME="reddb-grpc"
+PRIMARY_BINARY_NAME="red"
+LEGACY_BINARIES=("reddb" "reddb-grpc")
 COMMON_INSTALL_DIRS=(
   "$HOME/.local/bin"
   "/usr/local/bin"
@@ -17,7 +17,7 @@ FOUND=()
 
 find_installations() {
   for dir in "${COMMON_INSTALL_DIRS[@]}"; do
-    for b in "$BINARY_NAME" "$GRPC_BINARY_NAME"; do
+    for b in "$PRIMARY_BINARY_NAME" "${LEGACY_BINARIES[@]}"; do
       if [ -f "$dir/$b" ]; then
         FOUND+=("$dir/$b")
       fi
@@ -61,4 +61,3 @@ main() {
 }
 
 main
-

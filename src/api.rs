@@ -12,6 +12,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::auth::AuthConfig;
+use crate::replication::ReplicationConfig;
+
 pub const DEFAULT_SNAPSHOT_RETENTION: usize = 16;
 pub const DEFAULT_EXPORT_RETENTION: usize = 16;
 
@@ -94,7 +97,6 @@ impl CapabilitySet {
     }
 }
 
-#[derive(Debug, Clone)]
 pub struct RedDBOptions {
     pub mode: StorageMode,
     pub data_path: Option<PathBuf>,
@@ -108,6 +110,62 @@ pub struct RedDBOptions {
     pub feature_gates: CapabilitySet,
     pub force_create: bool,
     pub metadata: BTreeMap<String, String>,
+    /// Optional remote storage backend for snapshot transport.
+    pub remote_backend: Option<Box<dyn crate::storage::backend::RemoteBackend>>,
+    /// Remote object key used by the remote backend.
+    pub remote_key: Option<String>,
+    /// Replication configuration.
+    pub replication: ReplicationConfig,
+    /// Authentication & authorization configuration.
+    pub auth: AuthConfig,
+}
+
+impl fmt::Debug for RedDBOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let backend_name = self.remote_backend.as_ref().map(|b| b.name().to_string());
+        f.debug_struct("RedDBOptions")
+            .field("mode", &self.mode)
+            .field("data_path", &self.data_path)
+            .field("read_only", &self.read_only)
+            .field("create_if_missing", &self.create_if_missing)
+            .field("verify_checksums", &self.verify_checksums)
+            .field("auto_checkpoint_pages", &self.auto_checkpoint_pages)
+            .field("cache_pages", &self.cache_pages)
+            .field("snapshot_retention", &self.snapshot_retention)
+            .field("export_retention", &self.export_retention)
+            .field("feature_gates", &self.feature_gates)
+            .field("force_create", &self.force_create)
+            .field("metadata", &self.metadata)
+            .field("remote_backend", &backend_name)
+            .field("remote_key", &self.remote_key)
+            .field("replication", &self.replication)
+            .field("auth", &self.auth)
+            .finish()
+    }
+}
+
+impl Clone for RedDBOptions {
+    fn clone(&self) -> Self {
+        Self {
+            mode: self.mode,
+            data_path: self.data_path.clone(),
+            read_only: self.read_only,
+            create_if_missing: self.create_if_missing,
+            verify_checksums: self.verify_checksums,
+            auto_checkpoint_pages: self.auto_checkpoint_pages,
+            cache_pages: self.cache_pages,
+            snapshot_retention: self.snapshot_retention,
+            export_retention: self.export_retention,
+            feature_gates: self.feature_gates.clone(),
+            force_create: self.force_create,
+            metadata: self.metadata.clone(),
+            // Remote backend is not cloneable; clone produces None.
+            remote_backend: None,
+            remote_key: self.remote_key.clone(),
+            replication: self.replication.clone(),
+            auth: self.auth.clone(),
+        }
+    }
 }
 
 impl Default for RedDBOptions {
@@ -128,6 +186,10 @@ impl Default for RedDBOptions {
                 .with(Capability::Vector),
             force_create: true,
             metadata: BTreeMap::new(),
+            remote_backend: None,
+            remote_key: None,
+            replication: ReplicationConfig::standalone(),
+            auth: AuthConfig::default(),
         }
     }
 }
@@ -197,6 +259,31 @@ impl RedDBOptions {
 
     pub fn with_capability(mut self, capability: Capability) -> Self {
         self.feature_gates = self.feature_gates.with(capability);
+        self
+    }
+
+    /// Attach a remote storage backend for snapshot transport.
+    ///
+    /// On open, the database snapshot is downloaded from the remote `key`
+    /// to the local data path. On flush, the local file is uploaded back
+    /// to the remote backend under the same key.
+    pub fn with_remote_backend(
+        mut self,
+        backend: Box<dyn crate::storage::backend::RemoteBackend>,
+        key: impl Into<String>,
+    ) -> Self {
+        self.remote_backend = Some(backend);
+        self.remote_key = Some(key.into());
+        self
+    }
+
+    pub fn with_replication(mut self, config: ReplicationConfig) -> Self {
+        self.replication = config;
+        self
+    }
+
+    pub fn with_auth(mut self, config: AuthConfig) -> Self {
+        self.auth = config;
         self
     }
 
@@ -284,7 +371,10 @@ impl fmt::Display for RedDBError {
         match self {
             Self::InvalidConfig(msg) => write!(f, "invalid config: {msg}"),
             Self::SchemaVersionMismatch { expected, found } => {
-                write!(f, "schema version mismatch: expected {expected}, found {found}")
+                write!(
+                    f,
+                    "schema version mismatch: expected {expected}, found {found}"
+                )
             }
             Self::FeatureNotEnabled(msg) => write!(f, "feature disabled: {msg}"),
             Self::NotFound(msg) => write!(f, "not found: {msg}"),
@@ -351,8 +441,8 @@ pub trait DataOps {
 
 pub mod prelude {
     pub use super::{
-        CatalogService, CatalogSnapshot, Capability, CapabilitySet, CollectionStats, DataOps,
-        QueryPlanner, RedDBError, RedDBOptions, RedDBResult, REDDB_FORMAT_VERSION,
-        REDDB_PROTOCOL_VERSION, SchemaManifest, StorageMode,
+        Capability, CapabilitySet, CatalogService, CatalogSnapshot, CollectionStats, DataOps,
+        QueryPlanner, RedDBError, RedDBOptions, RedDBResult, SchemaManifest, StorageMode,
+        REDDB_FORMAT_VERSION, REDDB_PROTOCOL_VERSION,
     };
 }

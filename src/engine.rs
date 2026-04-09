@@ -62,7 +62,7 @@ impl RedDBEngine {
         let db = match options.mode {
             StorageMode::InMemory => None,
             Persistent => {
-                let path = options.resolved_path("reddb.rdb");
+                let path = options.resolved_path("data.rdb");
                 let mut config = storage::engine::DatabaseConfig::default();
                 config.read_only = options.read_only;
                 config.create = options.create_if_missing;
@@ -203,10 +203,7 @@ impl HealthProvider for RedDBEngine {
             Some(path) => storage_file_health(path),
             None => HealthReport::healthy().with_diagnostic("mode", "in-memory"),
         };
-        report = report.with_diagnostic(
-            "engine-started-at",
-            self.started_at_unix_ms.to_string(),
-        );
+        report = report.with_diagnostic("engine-started-at", self.started_at_unix_ms.to_string());
         report = report.with_diagnostic("read-only", self.options.read_only.to_string());
         report.with_diagnostic("persistent", self.layout.is_persistent().to_string())
     }

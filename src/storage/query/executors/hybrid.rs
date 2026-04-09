@@ -138,12 +138,12 @@ impl HybridExecutor {
             .collect();
 
         // Sort by combined score (descending), then deterministic key
-        scored.sort_by(|a, b| {
-            match b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal) {
+        scored.sort_by(
+            |a, b| match b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal) {
                 std::cmp::Ordering::Equal => a.0.cmp(&b.0),
                 ordering => ordering,
-            }
-        });
+            },
+        );
 
         // Build result
         let mut result = UnifiedResult::with_columns(structured_result.columns);
@@ -413,12 +413,12 @@ impl HybridExecutor {
             .into_iter()
             .map(|(key, (record, score))| (key, record, score))
             .collect();
-        sorted.sort_by(|a, b| {
-            match b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal) {
+        sorted.sort_by(
+            |a, b| match b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal) {
                 std::cmp::Ordering::Equal => a.0.cmp(&b.0),
                 ordering => ordering,
-            }
-        });
+            },
+        );
 
         // 4. Build result
         let mut columns = structured_result.columns.clone();
@@ -606,12 +606,12 @@ impl InMemoryHybridExecutor {
             scored.push((key, record, combined));
         }
 
-        scored.sort_by(|a, b| {
-            match b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal) {
+        scored.sort_by(
+            |a, b| match b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal) {
                 std::cmp::Ordering::Equal => a.0.cmp(&b.0),
                 ordering => ordering,
-            }
-        });
+            },
+        );
 
         let mut result = UnifiedResult::with_columns(vec!["id".to_string()]);
         for (_key, mut record, score) in scored {
@@ -686,12 +686,12 @@ impl InMemoryHybridExecutor {
             scored.push((key, record, rrf_score));
         }
 
-        scored.sort_by(|a, b| {
-            match b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal) {
+        scored.sort_by(
+            |a, b| match b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal) {
                 std::cmp::Ordering::Equal => a.0.cmp(&b.0),
                 ordering => ordering,
-            }
-        });
+            },
+        );
 
         let mut result =
             UnifiedResult::with_columns(vec!["id".to_string(), "distance".to_string()]);

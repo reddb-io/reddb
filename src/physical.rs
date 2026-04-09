@@ -204,8 +204,8 @@ impl ArtifactState {
         }
         match s {
             "ready" => Self::Ready,
-            "building" | "catalog-derived" | "metadata-only"
-            | "artifact-published" | "registry-loaded" => Self::Building,
+            "building" | "catalog-derived" | "metadata-only" | "artifact-published"
+            | "registry-loaded" => Self::Building,
             "stale" => Self::Stale,
             "failed" => Self::Failed,
             "requires_rebuild" | "requires-rebuild" => Self::RequiresRebuild,
@@ -233,7 +233,10 @@ impl ArtifactState {
 
     /// Whether a rebuild operation is valid from this state.
     pub fn can_rebuild(&self) -> bool {
-        matches!(self, Self::Declared | Self::Stale | Self::Failed | Self::RequiresRebuild)
+        matches!(
+            self,
+            Self::Declared | Self::Stale | Self::Failed | Self::RequiresRebuild
+        )
     }
 
     /// Whether this state indicates the artifact needs attention.
@@ -325,10 +328,9 @@ pub struct PhysicalMetadataFile {
     pub snapshots: Vec<SnapshotDescriptor>,
 }
 
-
-mod metadata_file;
-mod json_codec;
 mod helpers;
+mod json_codec;
+mod metadata_file;
 
-use self::json_codec::*;
 use self::helpers::*;
+use self::json_codec::*;

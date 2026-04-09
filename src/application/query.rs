@@ -95,12 +95,8 @@ impl<'a, P: RuntimeQueryPort + ?Sized> QueryUseCases<'a, P> {
     }
 
     pub fn search_similar(&self, input: SearchSimilarInput) -> RedDBResult<Vec<SimilarResult>> {
-        self.runtime.search_similar(
-            &input.collection,
-            &input.vector,
-            input.k,
-            input.min_score,
-        )
+        self.runtime
+            .search_similar(&input.collection, &input.vector, input.k, input.min_score)
     }
 
     pub fn search_ivf(&self, input: SearchIvfInput) -> RedDBResult<RuntimeIvfSearchResult> {

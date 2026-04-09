@@ -1980,4 +1980,472 @@ async fn checkpoint(&self, _request: Request<Empty>) -> Result<Response<Operatio
         message: "checkpoint completed".to_string(),
     }))
 }
+
+async fn replication_status(
+    &self,
+    request: Request<Empty>,
+) -> Result<Response<PayloadReply>, Status> {
+    self.authorize_read(request.metadata())?;
+    let db = self.runtime.db();
+    let role = &db.options().replication.role;
+    let mut map = crate::json::Map::new();
+
+    match role {
+        crate::replication::ReplicationRole::Standalone => {
+            map.insert("role".into(), JsonValue::String("standalone".into()));
+        }
+        crate::replication::ReplicationRole::Primary => {
+            map.insert("role".into(), JsonValue::String("primary".into()));
+            if let Some(ref repl) = db.replication {
+                let lsn = repl.wal_buffer.current_lsn();
+                map.insert("current_lsn".into(), JsonValue::Number(lsn as f64));
+                map.insert(
+                    "replica_count".into(),
+                    JsonValue::Number(repl.replica_count() as f64),
+                );
+                if let Some(oldest) = repl.wal_buffer.oldest_lsn() {
+                    map.insert("oldest_available_lsn".into(), JsonValue::Number(oldest as f64));
+                }
+            }
+        }
+        crate::replication::ReplicationRole::Replica { primary_addr } => {
+            map.insert("role".into(), JsonValue::String("replica".into()));
+            map.insert("primary_addr".into(), JsonValue::String(primary_addr.clone()));
+        }
+    }
+
+    Ok(Response::new(json_payload_reply(JsonValue::Object(map))))
+}
+
+async fn pull_wal_records(
+    &self,
+    request: Request<JsonPayloadRequest>,
+) -> Result<Response<PayloadReply>, Status> {
+    self.authorize_read(request.metadata())?;
+    let db = self.runtime.db();
+    let repl = db.replication.as_ref().ok_or_else(|| {
+        Status::failed_precondition("this instance is not a replication primary")
+    })?;
+
+    let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
+    let since_lsn = json_usize_field(&payload, "since_lsn").unwrap_or(0) as u64;
+    let max_count = json_usize_field(&payload, "max_count").unwrap_or(1000);
+
+    let records = repl.wal_buffer.read_since(since_lsn, max_count);
+    let mut entries = Vec::with_capacity(records.len());
+    for (lsn, data) in &records {
+        let mut entry = crate::json::Map::new();
+        entry.insert("lsn".into(), JsonValue::Number(*lsn as f64));
+        entry.insert("data".into(), JsonValue::String(hex::encode(data)));
+        entries.push(JsonValue::Object(entry));
+    }
+
+    let mut map = crate::json::Map::new();
+    map.insert("records".into(), JsonValue::Array(entries));
+    map.insert(
+        "current_lsn".into(),
+        JsonValue::Number(repl.wal_buffer.current_lsn() as f64),
+    );
+
+    Ok(Response::new(json_payload_reply(JsonValue::Object(map))))
+}
+
+async fn replication_snapshot(
+    &self,
+    request: Request<Empty>,
+) -> Result<Response<PayloadReply>, Status> {
+    self.authorize_read(request.metadata())?;
+    let db = self.runtime.db();
+
+    if db.replication.is_none() {
+        return Err(Status::failed_precondition(
+            "this instance is not a replication primary",
+        ));
+    }
+
+    // Trigger a checkpoint first to ensure data is flushed
+    db.flush().map_err(|e| Status::internal(e.to_string()))?;
+
+    let mut map = crate::json::Map::new();
+    map.insert("snapshot_available".into(), JsonValue::Bool(true));
+    if let Some(path) = db.path() {
+        map.insert(
+            "snapshot_path".into(),
+            JsonValue::String(path.display().to_string()),
+        );
+    }
+    if let Some(ref repl) = db.replication {
+        map.insert(
+            "snapshot_lsn".into(),
+            JsonValue::Number(repl.wal_buffer.current_lsn() as f64),
+        );
+    }
+
+    Ok(Response::new(json_payload_reply(JsonValue::Object(map))))
+}
+
+// =========================================================================
+// Auth RPCs
+// =========================================================================
+
+async fn auth_bootstrap(
+    &self,
+    request: Request<JsonPayloadRequest>,
+) -> Result<Response<PayloadReply>, Status> {
+    let payload = parse_json_payload(&request.into_inner().payload_json)?;
+    let username = json_string_field(&payload, "username")
+        .ok_or_else(|| Status::invalid_argument("missing field: username"))?;
+    let password = json_string_field(&payload, "password")
+        .ok_or_else(|| Status::invalid_argument("missing field: password"))?;
+
+    let result = self
+        .auth_store
+        .bootstrap(&username, &password)
+        .map_err(|e| Status::failed_precondition(e.to_string()))?;
+
+    let mut map = Map::new();
+    map.insert("ok".into(), JsonValue::Bool(true));
+    map.insert("username".into(), JsonValue::String(result.user.username));
+    map.insert("role".into(), JsonValue::String(result.user.role.as_str().to_string()));
+    map.insert("api_key".into(), JsonValue::String(result.api_key.key));
+    map.insert("api_key_name".into(), JsonValue::String(result.api_key.name));
+    if let Some(cert) = result.certificate {
+        map.insert("certificate".into(), JsonValue::String(cert));
+        map.insert("message".into(), JsonValue::String(
+            "Save this certificate — it is the ONLY way to unseal the vault after restart.".into()
+        ));
+    }
+
+    Ok(Response::new(json_payload_reply(JsonValue::Object(map))))
+}
+
+async fn auth_login(
+    &self,
+    request: Request<JsonPayloadRequest>,
+) -> Result<Response<PayloadReply>, Status> {
+    if !self.auth_store.is_enabled() {
+        return Err(Status::failed_precondition("authentication is disabled"));
+    }
+
+    let payload = parse_json_payload(&request.into_inner().payload_json)?;
+    let username = json_string_field(&payload, "username")
+        .ok_or_else(|| Status::invalid_argument("missing field: username"))?;
+    let password = json_string_field(&payload, "password")
+        .ok_or_else(|| Status::invalid_argument("missing field: password"))?;
+
+    let session = self
+        .auth_store
+        .authenticate(&username, &password)
+        .map_err(|e| Status::unauthenticated(e.to_string()))?;
+
+    let mut map = Map::new();
+    map.insert("token".into(), JsonValue::String(session.token));
+    map.insert("username".into(), JsonValue::String(session.username));
+    map.insert("role".into(), JsonValue::String(session.role.as_str().to_string()));
+    map.insert("expires_at".into(), JsonValue::Number(session.expires_at as f64));
+
+    Ok(Response::new(json_payload_reply(JsonValue::Object(map))))
+}
+
+async fn auth_create_user(
+    &self,
+    request: Request<JsonPayloadRequest>,
+) -> Result<Response<PayloadReply>, Status> {
+    if !self.auth_store.is_enabled() {
+        return Err(Status::failed_precondition("authentication is disabled"));
+    }
+
+    self.authorize_admin(request.metadata())?;
+
+    let payload = parse_json_payload(&request.into_inner().payload_json)?;
+    let username = json_string_field(&payload, "username")
+        .ok_or_else(|| Status::invalid_argument("missing field: username"))?;
+    let password = json_string_field(&payload, "password")
+        .ok_or_else(|| Status::invalid_argument("missing field: password"))?;
+    let role_str = json_string_field(&payload, "role").unwrap_or_else(|| "read".to_string());
+    let role = crate::auth::Role::from_str(&role_str)
+        .ok_or_else(|| Status::invalid_argument(format!("invalid role: {role_str}")))?;
+
+    let user = self
+        .auth_store
+        .create_user(&username, &password, role)
+        .map_err(|e| Status::already_exists(e.to_string()))?;
+
+    let mut map = Map::new();
+    map.insert("username".into(), JsonValue::String(user.username));
+    map.insert("role".into(), JsonValue::String(user.role.as_str().to_string()));
+    map.insert("enabled".into(), JsonValue::Bool(user.enabled));
+    map.insert("created_at".into(), JsonValue::Number(user.created_at as f64));
+
+    Ok(Response::new(json_payload_reply(JsonValue::Object(map))))
+}
+
+async fn auth_delete_user(
+    &self,
+    request: Request<JsonPayloadRequest>,
+) -> Result<Response<PayloadReply>, Status> {
+    if !self.auth_store.is_enabled() {
+        return Err(Status::failed_precondition("authentication is disabled"));
+    }
+
+    self.authorize_admin(request.metadata())?;
+
+    let payload = parse_json_payload(&request.into_inner().payload_json)?;
+    let username = json_string_field(&payload, "username")
+        .ok_or_else(|| Status::invalid_argument("missing field: username"))?;
+
+    self.auth_store
+        .delete_user(&username)
+        .map_err(|e| Status::not_found(e.to_string()))?;
+
+    let mut map = Map::new();
+    map.insert("deleted".into(), JsonValue::Bool(true));
+    map.insert("username".into(), JsonValue::String(username));
+
+    Ok(Response::new(json_payload_reply(JsonValue::Object(map))))
+}
+
+async fn auth_list_users(
+    &self,
+    request: Request<Empty>,
+) -> Result<Response<PayloadReply>, Status> {
+    if !self.auth_store.is_enabled() {
+        return Err(Status::failed_precondition("authentication is disabled"));
+    }
+
+    self.authorize_admin(request.metadata())?;
+
+    let users = self.auth_store.list_users();
+    let user_list: Vec<JsonValue> = users
+        .into_iter()
+        .map(|u| {
+            let mut m = Map::new();
+            m.insert("username".into(), JsonValue::String(u.username));
+            m.insert("role".into(), JsonValue::String(u.role.as_str().to_string()));
+            m.insert("enabled".into(), JsonValue::Bool(u.enabled));
+            m.insert("created_at".into(), JsonValue::Number(u.created_at as f64));
+            m.insert("updated_at".into(), JsonValue::Number(u.updated_at as f64));
+
+            let keys: Vec<JsonValue> = u
+                .api_keys
+                .iter()
+                .map(|k| {
+                    let mut km = Map::new();
+                    let redacted = if k.key.len() > 6 {
+                        format!("{}...", &k.key[..6])
+                    } else {
+                        k.key.clone()
+                    };
+                    km.insert("key".into(), JsonValue::String(redacted));
+                    km.insert("name".into(), JsonValue::String(k.name.clone()));
+                    km.insert("role".into(), JsonValue::String(k.role.as_str().to_string()));
+                    km.insert("created_at".into(), JsonValue::Number(k.created_at as f64));
+                    JsonValue::Object(km)
+                })
+                .collect();
+            m.insert("api_keys".into(), JsonValue::Array(keys));
+
+            JsonValue::Object(m)
+        })
+        .collect();
+
+    let mut map = Map::new();
+    map.insert("users".into(), JsonValue::Array(user_list));
+
+    Ok(Response::new(json_payload_reply(JsonValue::Object(map))))
+}
+
+async fn auth_create_api_key(
+    &self,
+    request: Request<JsonPayloadRequest>,
+) -> Result<Response<PayloadReply>, Status> {
+    if !self.auth_store.is_enabled() {
+        return Err(Status::failed_precondition("authentication is disabled"));
+    }
+
+    self.authorize_admin(request.metadata())?;
+
+    let payload = parse_json_payload(&request.into_inner().payload_json)?;
+    let username = json_string_field(&payload, "username")
+        .ok_or_else(|| Status::invalid_argument("missing field: username"))?;
+    let name = json_string_field(&payload, "name")
+        .ok_or_else(|| Status::invalid_argument("missing field: name"))?;
+    let role_str = json_string_field(&payload, "role").unwrap_or_else(|| "read".to_string());
+    let role = crate::auth::Role::from_str(&role_str)
+        .ok_or_else(|| Status::invalid_argument(format!("invalid role: {role_str}")))?;
+
+    let api_key = self
+        .auth_store
+        .create_api_key(&username, &name, role)
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+    let mut map = Map::new();
+    map.insert("key".into(), JsonValue::String(api_key.key));
+    map.insert("name".into(), JsonValue::String(api_key.name));
+    map.insert("role".into(), JsonValue::String(api_key.role.as_str().to_string()));
+    map.insert("created_at".into(), JsonValue::Number(api_key.created_at as f64));
+
+    Ok(Response::new(json_payload_reply(JsonValue::Object(map))))
+}
+
+async fn auth_revoke_api_key(
+    &self,
+    request: Request<JsonPayloadRequest>,
+) -> Result<Response<PayloadReply>, Status> {
+    if !self.auth_store.is_enabled() {
+        return Err(Status::failed_precondition("authentication is disabled"));
+    }
+
+    self.authorize_admin(request.metadata())?;
+
+    let payload = parse_json_payload(&request.into_inner().payload_json)?;
+    let key = json_string_field(&payload, "key")
+        .ok_or_else(|| Status::invalid_argument("missing field: key"))?;
+
+    self.auth_store
+        .revoke_api_key(&key)
+        .map_err(|e| Status::not_found(e.to_string()))?;
+
+    let mut map = Map::new();
+    map.insert("revoked".into(), JsonValue::Bool(true));
+
+    Ok(Response::new(json_payload_reply(JsonValue::Object(map))))
+}
+
+async fn auth_change_password(
+    &self,
+    request: Request<JsonPayloadRequest>,
+) -> Result<Response<PayloadReply>, Status> {
+    if !self.auth_store.is_enabled() {
+        return Err(Status::failed_precondition("authentication is disabled"));
+    }
+
+    let auth = self.resolve_auth(request.metadata());
+    let caller_username = match &auth {
+        AuthResult::Authenticated { username, .. } => username.clone(),
+        _ => return Err(Status::unauthenticated("authentication required")),
+    };
+
+    let payload = parse_json_payload(&request.into_inner().payload_json)?;
+    let target_username = json_string_field(&payload, "username")
+        .unwrap_or_else(|| caller_username.clone());
+    let old_password = json_string_field(&payload, "old_password")
+        .ok_or_else(|| Status::invalid_argument("missing field: old_password"))?;
+    let new_password = json_string_field(&payload, "new_password")
+        .ok_or_else(|| Status::invalid_argument("missing field: new_password"))?;
+
+    if target_username != caller_username {
+        check_permission(&auth, false, true)
+            .map_err(|msg| Status::permission_denied(msg))?;
+    }
+
+    self.auth_store
+        .change_password(&target_username, &old_password, &new_password)
+        .map_err(|e| Status::unauthenticated(e.to_string()))?;
+
+    let mut map = Map::new();
+    map.insert("changed".into(), JsonValue::Bool(true));
+    map.insert("username".into(), JsonValue::String(target_username));
+
+    Ok(Response::new(json_payload_reply(JsonValue::Object(map))))
+}
+
+async fn auth_who_am_i(
+    &self,
+    request: Request<Empty>,
+) -> Result<Response<PayloadReply>, Status> {
+    let auth = self.resolve_auth(request.metadata());
+
+    let mut map = Map::new();
+    match &auth {
+        AuthResult::Authenticated { username, role } => {
+            map.insert("authenticated".into(), JsonValue::Bool(true));
+            map.insert("username".into(), JsonValue::String(username.clone()));
+            map.insert("role".into(), JsonValue::String(role.as_str().to_string()));
+            map.insert("auth_method".into(), JsonValue::String("token".to_string()));
+        }
+        AuthResult::Anonymous => {
+            map.insert("authenticated".into(), JsonValue::Bool(false));
+            map.insert("auth_method".into(), JsonValue::String("anonymous".to_string()));
+        }
+        AuthResult::Denied(reason) => {
+            map.insert("authenticated".into(), JsonValue::Bool(false));
+            map.insert("denied".into(), JsonValue::Bool(true));
+            map.insert("reason".into(), JsonValue::String(reason.clone()));
+        }
+    }
+
+    map.insert("auth_enabled".into(), JsonValue::Bool(self.auth_store.is_enabled()));
+
+    Ok(Response::new(json_payload_reply(JsonValue::Object(map))))
+}
+
+// =========================================================================
+// DDL: Create / Drop / Describe Collection
+// =========================================================================
+
+async fn create_collection(
+    &self,
+    request: Request<JsonPayloadRequest>,
+) -> Result<Response<PayloadReply>, Status> {
+    self.authorize_write(request.metadata())?;
+    let payload = parse_json_payload(&request.into_inner().payload_json)?;
+    let name = json_string_field(&payload, "name")
+        .ok_or_else(|| Status::invalid_argument("missing field: name"))?;
+
+    self.runtime
+        .db()
+        .store()
+        .create_collection(&name)
+        .map_err(|e| Status::internal(format!("{e:?}")))?;
+
+    let mut map = Map::new();
+    map.insert("ok".into(), JsonValue::Bool(true));
+    map.insert("collection".into(), JsonValue::String(name));
+    Ok(Response::new(json_payload_reply(JsonValue::Object(map))))
+}
+
+async fn drop_collection(
+    &self,
+    request: Request<JsonPayloadRequest>,
+) -> Result<Response<OperationReply>, Status> {
+    self.authorize_admin(request.metadata())?;
+    let payload = parse_json_payload(&request.into_inner().payload_json)?;
+    let name = json_string_field(&payload, "name")
+        .ok_or_else(|| Status::invalid_argument("missing field: name"))?;
+
+    self.runtime
+        .db()
+        .store()
+        .drop_collection(&name)
+        .map_err(|e| Status::internal(format!("{e:?}")))?;
+
+    Ok(Response::new(OperationReply {
+        ok: true,
+        message: format!("collection '{}' dropped", name),
+    }))
+}
+
+async fn describe_collection(
+    &self,
+    request: Request<CollectionRequest>,
+) -> Result<Response<PayloadReply>, Status> {
+    self.authorize_read(request.metadata())?;
+    let collection = &request.into_inner().collection;
+    let store = self.runtime.db().store();
+
+    let manager = store
+        .get_collection(collection)
+        .ok_or_else(|| Status::not_found(format!("collection '{}' not found", collection)))?;
+
+    let count = manager.count();
+    let mut map = Map::new();
+    map.insert("ok".into(), JsonValue::Bool(true));
+    map.insert(
+        "collection".into(),
+        JsonValue::String(collection.clone()),
+    );
+    map.insert("entity_count".into(), JsonValue::Number(count as f64));
+    Ok(Response::new(json_payload_reply(JsonValue::Object(map))))
+}
 }

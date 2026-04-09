@@ -1,0 +1,47 @@
+{
+  "name": "reddb",
+  "version": "0.1.0",
+  "description": "JavaScript/TypeScript SDK for RedDB - unified multi-model database",
+  "type": "commonjs",
+  "main": "./sdk/red-sdk.js",
+  "types": "./sdk/index.d.ts",
+  "bin": {
+    "red": "./sdk/red-sdk.js"
+  },
+  "exports": {
+    ".": {
+      "require": "./sdk/red-sdk.js",
+      "types": "./sdk/index.d.ts",
+      "default": "./sdk/red-sdk.js"
+    }
+  },
+  "files": [
+    "sdk/red-sdk.js",
+    "sdk/postinstall.js",
+    "sdk/index.d.ts"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "postinstall": "node sdk/postinstall.js",
+    "test": "node sdk/test/sdk.test.js",
+    "version": "node scripts/sync-version.js && git add Cargo.toml"
+  },
+  "keywords": [
+    "database",
+    "multi-model",
+    "vector-search",
+    "graph",
+    "document-store",
+    "key-value",
+    "rust",
+    "embedded"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/forattini-dev/reddb"
+  },
+  "homepage": "https://github.com/forattini-dev/reddb"
+}

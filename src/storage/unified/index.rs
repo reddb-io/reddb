@@ -651,7 +651,6 @@ struct HnswIndexInfo {
     entry_point: Option<EntityId>,
 }
 
-
 mod manager_impl;
 impl Default for IntegratedIndexManager {
     fn default() -> Self {

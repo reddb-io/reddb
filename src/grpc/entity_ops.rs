@@ -57,11 +57,9 @@ pub(crate) fn create_vector_reply(
     request: JsonCreateRequest,
 ) -> Result<EntityReply, Status> {
     let payload = parse_json_payload(&request.payload_json)?;
-    let input = crate::application::entity_payload::parse_create_vector_input(
-        request.collection,
-        &payload,
-    )
-    .map_err(entity_error_to_status)?;
+    let input =
+        crate::application::entity_payload::parse_create_vector_input(request.collection, &payload)
+            .map_err(entity_error_to_status)?;
 
     runtime
         .entity_use_cases()

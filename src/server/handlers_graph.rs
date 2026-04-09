@@ -10,12 +10,12 @@ impl RedDBServer {
             Ok(projection) => projection,
             Err(response) => return response,
         };
-        let input =
-            match crate::application::graph_payload::parse_graph_neighborhood_input(&payload, projection)
-            {
-                Ok(input) => input,
-                Err(err) => return json_error(400, err.to_string()),
-            };
+        let input = match crate::application::graph_payload::parse_graph_neighborhood_input(
+            &payload, projection,
+        ) {
+            Ok(input) => input,
+            Err(err) => return json_error(400, err.to_string()),
+        };
 
         match self.graph_use_cases().neighborhood(input) {
             Ok(result) => json_response(
@@ -35,12 +35,12 @@ impl RedDBServer {
             Ok(projection) => projection,
             Err(response) => return response,
         };
-        let input =
-            match crate::application::graph_payload::parse_graph_traversal_input(&payload, projection)
-            {
-                Ok(input) => input,
-                Err(err) => return json_error(400, err.to_string()),
-            };
+        let input = match crate::application::graph_payload::parse_graph_traversal_input(
+            &payload, projection,
+        ) {
+            Ok(input) => input,
+            Err(err) => return json_error(400, err.to_string()),
+        };
 
         match self.graph_use_cases().traverse(input) {
             Ok(result) => json_response(
@@ -60,12 +60,12 @@ impl RedDBServer {
             Ok(projection) => projection,
             Err(response) => return response,
         };
-        let input =
-            match crate::application::graph_payload::parse_graph_shortest_path_input(&payload, projection)
-            {
-                Ok(input) => input,
-                Err(err) => return json_error(400, err.to_string()),
-            };
+        let input = match crate::application::graph_payload::parse_graph_shortest_path_input(
+            &payload, projection,
+        ) {
+            Ok(input) => input,
+            Err(err) => return json_error(400, err.to_string()),
+        };
 
         match self.graph_use_cases().shortest_path(input) {
             Ok(result) => json_response(
@@ -86,7 +86,8 @@ impl RedDBServer {
             Ok(projection) => projection,
             Err(response) => return response,
         };
-        let input = crate::application::graph_payload::parse_graph_components_input(&payload, projection);
+        let input =
+            crate::application::graph_payload::parse_graph_components_input(&payload, projection);
         let metadata = crate::application::graph_payload::graph_components_metadata(&input);
         if let Err(response) = self.start_graph_analytics_job(
             "graph.components",
@@ -105,7 +106,10 @@ impl RedDBServer {
                 ) {
                     return response;
                 }
-                json_response(200, crate::presentation::graph_json::graph_components_json(&result))
+                json_response(
+                    200,
+                    crate::presentation::graph_json::graph_components_json(&result),
+                )
             }
             Err(err) => {
                 let _ = self.fail_graph_analytics_job(
@@ -128,7 +132,8 @@ impl RedDBServer {
             Ok(projection) => projection,
             Err(response) => return response,
         };
-        let input = crate::application::graph_payload::parse_graph_centrality_input(&payload, projection);
+        let input =
+            crate::application::graph_payload::parse_graph_centrality_input(&payload, projection);
         let metadata = crate::application::graph_payload::graph_centrality_metadata(&input);
         let kind = crate::application::graph_payload::graph_centrality_kind(input.algorithm);
         if let Err(response) =
@@ -137,17 +142,17 @@ impl RedDBServer {
             return response;
         }
 
-        match self
-            .graph_use_cases()
-            .centrality(input)
-        {
+        match self.graph_use_cases().centrality(input) {
             Ok(result) => {
                 if let Err(response) =
                     self.complete_graph_analytics_job(&kind, projection_name.as_deref(), metadata)
                 {
                     return response;
                 }
-                json_response(200, crate::presentation::graph_json::graph_centrality_json(&result))
+                json_response(
+                    200,
+                    crate::presentation::graph_json::graph_centrality_json(&result),
+                )
             }
             Err(err) => {
                 let _ = self.fail_graph_analytics_job(&kind, projection_name.as_deref(), metadata);
@@ -183,7 +188,10 @@ impl RedDBServer {
                 {
                     return response;
                 }
-                json_response(200, crate::presentation::graph_json::graph_community_json(&result))
+                json_response(
+                    200,
+                    crate::presentation::graph_json::graph_community_json(&result),
+                )
             }
             Err(err) => {
                 let _ = self.fail_graph_analytics_job(&kind, projection_name.as_deref(), metadata);
@@ -222,7 +230,10 @@ impl RedDBServer {
                 ) {
                     return response;
                 }
-                json_response(200, crate::presentation::graph_json::graph_clustering_json(&result))
+                json_response(
+                    200,
+                    crate::presentation::graph_json::graph_clustering_json(&result),
+                )
             }
             Err(err) => {
                 let _ = self.fail_graph_analytics_job(
@@ -246,8 +257,7 @@ impl RedDBServer {
             Err(response) => return response,
         };
         let input = match crate::application::graph_payload::parse_graph_personalized_pagerank_input(
-            &payload,
-            projection,
+            &payload, projection,
         ) {
             Ok(input) => input,
             Err(err) => return json_error(400, err.to_string()),
@@ -262,10 +272,7 @@ impl RedDBServer {
             return response;
         }
 
-        match self
-            .graph_use_cases()
-            .personalized_pagerank(input)
-        {
+        match self.graph_use_cases().personalized_pagerank(input) {
             Ok(result) => {
                 if let Err(response) = self.complete_graph_analytics_job(
                     "graph.pagerank.personalized",
@@ -274,7 +281,10 @@ impl RedDBServer {
                 ) {
                     return response;
                 }
-                json_response(200, crate::presentation::graph_json::graph_centrality_json(&result))
+                json_response(
+                    200,
+                    crate::presentation::graph_json::graph_centrality_json(&result),
+                )
             }
             Err(err) => {
                 let _ = self.fail_graph_analytics_job(
@@ -316,7 +326,10 @@ impl RedDBServer {
                 ) {
                     return response;
                 }
-                json_response(200, crate::presentation::graph_json::graph_hits_json(&result))
+                json_response(
+                    200,
+                    crate::presentation::graph_json::graph_hits_json(&result),
+                )
             }
             Err(err) => {
                 let _ = self.fail_graph_analytics_job(
@@ -339,7 +352,8 @@ impl RedDBServer {
             Ok(projection) => projection,
             Err(response) => return response,
         };
-        let input = crate::application::graph_payload::parse_graph_cycles_input(&payload, projection);
+        let input =
+            crate::application::graph_payload::parse_graph_cycles_input(&payload, projection);
         let metadata = crate::application::graph_payload::graph_cycles_metadata(&input);
         if let Err(response) = self.start_graph_analytics_job(
             "graph.cycles",
@@ -358,7 +372,10 @@ impl RedDBServer {
                 ) {
                     return response;
                 }
-                json_response(200, crate::presentation::graph_json::graph_cycles_json(&result))
+                json_response(
+                    200,
+                    crate::presentation::graph_json::graph_cycles_json(&result),
+                )
             }
             Err(err) => {
                 let _ = self.fail_graph_analytics_job(
@@ -381,7 +398,8 @@ impl RedDBServer {
             Ok(projection) => projection,
             Err(response) => return response,
         };
-        let input = crate::application::graph_payload::parse_graph_topological_sort_input(projection);
+        let input =
+            crate::application::graph_payload::parse_graph_topological_sort_input(projection);
         let metadata = BTreeMap::new();
         if let Err(response) = self.start_graph_analytics_job(
             "graph.topological_sort",
@@ -438,10 +456,11 @@ impl RedDBServer {
             Err(err) => return json_error(400, err.to_string()),
         };
 
-        match self
-            .admin_use_cases()
-            .save_graph_projection(input.name, input.projection, input.source)
-        {
+        match self.admin_use_cases().save_graph_projection(
+            input.name,
+            input.projection,
+            input.source,
+        ) {
             Ok(projection) => json_response(
                 200,
                 crate::presentation::admin_json::graph_projection_json(&projection),
@@ -451,7 +470,10 @@ impl RedDBServer {
     }
 
     pub(crate) fn materialize_graph_projection_transition(&self, name: &str) -> HttpResponse {
-        if let Err(err) = self.admin_use_cases().mark_graph_projection_materializing(name) {
+        if let Err(err) = self
+            .admin_use_cases()
+            .mark_graph_projection_materializing(name)
+        {
             return json_error(400, err.to_string());
         }
 
@@ -521,12 +543,11 @@ impl RedDBServer {
             Ok(payload) => payload,
             Err(response) => return response,
         };
-        let input = match crate::application::admin_payload::parse_analytics_job_mutation_input(
-            &payload,
-        ) {
-            Ok(input) => input,
-            Err(err) => return json_error(400, err.to_string()),
-        };
+        let input =
+            match crate::application::admin_payload::parse_analytics_job_mutation_input(&payload) {
+                Ok(input) => input,
+                Err(err) => return json_error(400, err.to_string()),
+            };
 
         match apply(input.kind, input.projection, input.metadata) {
             Ok(job) => json_response(200, analytics_job_json(&job)),

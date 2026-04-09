@@ -1,0 +1,39 @@
+# Source code (Rust)
+src/
+proto/
+benches/
+tests/
+build.rs
+Cargo.toml
+Cargo.lock
+target/
+
+# Docs site
+docs/
+
+# CI/CD
+.github/
+.claude/
+scripts/
+
+# Docker
+Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# Dev files
+.gitignore
+.study
+PLAN.md
+AGENTS.md
+CLAUDE.md
+coverage/
+
+# Only publish:
+# sdk/red-sdk.js
+# sdk/postinstall.js
+# sdk/index.d.ts
+# package.json
+# README.md
+# LICENSE
+# RELEASE.md

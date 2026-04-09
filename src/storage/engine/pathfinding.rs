@@ -125,7 +125,6 @@ pub struct AllPathsResult {
 /// Time: O(V + E), Space: O(V)
 pub struct BFS;
 
-
 mod bfs_impl;
 
 // ============================================================================
@@ -137,7 +136,6 @@ mod bfs_impl;
 /// Use for finding paths, detecting cycles, topological sorting.
 /// Time: O(V + E), Space: O(V)
 pub struct DFS;
-
 
 mod dfs_impl;
 // ============================================================================
@@ -181,7 +179,6 @@ impl PartialOrd for DijkstraState {
 /// Use when edges have non-negative weights (e.g., exploit difficulty).
 /// Time: O((V + E) log V), Space: O(V)
 pub struct Dijkstra;
-
 
 mod dijkstra_impl;
 
@@ -228,7 +225,6 @@ impl PartialOrd for AStarState {
 /// Time: O((V + E) log V) typical, Space: O(V)
 pub struct AStar;
 
-
 mod astar_impl;
 
 // ============================================================================
@@ -255,7 +251,6 @@ pub struct BellmanFordResult {
 /// Time: O(V * E), Space: O(V)
 pub struct BellmanFord;
 
-
 mod bellman_ford_impl;
 
 // ============================================================================
@@ -268,7 +263,6 @@ mod bellman_ford_impl;
 /// Useful for finding alternative attack paths.
 /// Time: O(k * V * (V + E) log V), Space: O(k * V)
 pub struct KShortestPaths;
-
 
 mod k_shortest_impl;
 
@@ -307,7 +301,6 @@ impl PartialOrd for PathCandidate {
 
 /// Find all shortest paths (same minimum length) between two nodes
 pub struct AllShortestPaths;
-
 
 mod all_shortest_impl;
 

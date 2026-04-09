@@ -53,7 +53,10 @@ pub(super) fn push_native_string_list(data: &mut Vec<u8>, values: &[String]) {
     }
 }
 
-pub(super) fn read_native_string_list(content: &[u8], pos: &mut usize) -> Result<Vec<String>, StoreError> {
+pub(super) fn read_native_string_list(
+    content: &[u8],
+    pos: &mut usize,
+) -> Result<Vec<String>, StoreError> {
     if *pos + 2 > content.len() {
         return Err(StoreError::Serialization(
             "truncated native string list count".to_string(),
@@ -67,4 +70,3 @@ pub(super) fn read_native_string_list(content: &[u8], pos: &mut usize) -> Result
     }
     Ok(values)
 }
-

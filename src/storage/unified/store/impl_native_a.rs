@@ -15,7 +15,9 @@ impl UnifiedStore {
 
     /// Read the minimal physical header mirrored into page 0 for paged databases.
     pub fn physical_file_header(&self) -> Option<PhysicalFileHeader> {
-        self.pager.as_ref().and_then(|pager| pager.physical_header().ok())
+        self.pager
+            .as_ref()
+            .and_then(|pager| pager.physical_header().ok())
     }
 
     /// Persist native collection roots into a dedicated page in the paged file.
@@ -148,9 +150,7 @@ impl UnifiedStore {
         data.extend_from_slice(&sequence.to_le_bytes());
         data.extend_from_slice(&(events.len() as u32).to_le_bytes());
         data.push(u8::from(events.len() <= NATIVE_MANIFEST_SAMPLE_LIMIT));
-        data.extend_from_slice(
-            &(events.len().saturating_sub(sample.len()) as u32).to_le_bytes(),
-        );
+        data.extend_from_slice(&(events.len().saturating_sub(sample.len()) as u32).to_le_bytes());
         data.extend_from_slice(&(sample.len() as u32).to_le_bytes());
         for event in sample {
             data.push(native_manifest_kind_to_byte(event.kind));
@@ -213,11 +213,16 @@ impl UnifiedStore {
         }
 
         let sequence = u64::from_le_bytes([
-            content[4], content[5], content[6], content[7], content[8], content[9], content[10],
+            content[4],
+            content[5],
+            content[6],
+            content[7],
+            content[8],
+            content[9],
+            content[10],
             content[11],
         ]);
-        let event_count =
-            u32::from_le_bytes([content[12], content[13], content[14], content[15]]);
+        let event_count = u32::from_le_bytes([content[12], content[13], content[14], content[15]]);
         let events_complete = content[16] == 1;
         let omitted_event_count =
             u32::from_le_bytes([content[17], content[18], content[19], content[20]]);
@@ -232,8 +237,7 @@ impl UnifiedStore {
             }
             let kind = native_manifest_kind_from_byte(content[pos]).to_string();
             pos += 1;
-            let collection_len =
-                u16::from_le_bytes([content[pos], content[pos + 1]]) as usize;
+            let collection_len = u16::from_le_bytes([content[pos], content[pos + 1]]) as usize;
             pos += 2;
             if pos + collection_len + 2 > content.len() {
                 break;
@@ -241,8 +245,7 @@ impl UnifiedStore {
             let collection = String::from_utf8(content[pos..pos + collection_len].to_vec())
                 .map_err(|err| StoreError::Serialization(err.to_string()))?;
             pos += collection_len;
-            let object_key_len =
-                u16::from_le_bytes([content[pos], content[pos + 1]]) as usize;
+            let object_key_len = u16::from_le_bytes([content[pos], content[pos + 1]]) as usize;
             pos += 2;
             if pos + object_key_len + 8 + 16 + 8 + 1 > content.len() {
                 break;
@@ -456,5 +459,4 @@ impl UnifiedStore {
             .map_err(|err| StoreError::Serialization(err.to_string()))?;
         Ok((page_id, checksum))
     }
-
 }

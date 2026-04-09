@@ -180,6 +180,15 @@ impl RewriteRule for NormalizeRule {
                 hq.structured = Box::new(self.apply(*hq.structured, ctx));
                 QueryExpr::Hybrid(hq)
             }
+            // DML/DDL/Command statements pass through without normalization
+            other @ (QueryExpr::Insert(_)
+            | QueryExpr::Update(_)
+            | QueryExpr::Delete(_)
+            | QueryExpr::CreateTable(_)
+            | QueryExpr::DropTable(_)
+            | QueryExpr::AlterTable(_)
+            | QueryExpr::GraphCommand(_)
+            | QueryExpr::SearchCommand(_)) => other,
         }
     }
 
@@ -231,6 +240,15 @@ impl RewriteRule for SimplifyFiltersRule {
                 hq.structured = Box::new(self.apply(*hq.structured, ctx));
                 QueryExpr::Hybrid(hq)
             }
+            // DML/DDL/Command statements pass through without filter simplification
+            other @ (QueryExpr::Insert(_)
+            | QueryExpr::Update(_)
+            | QueryExpr::Delete(_)
+            | QueryExpr::CreateTable(_)
+            | QueryExpr::DropTable(_)
+            | QueryExpr::AlterTable(_)
+            | QueryExpr::GraphCommand(_)
+            | QueryExpr::SearchCommand(_)) => other,
         }
     }
 
@@ -242,6 +260,15 @@ impl RewriteRule for SimplifyFiltersRule {
             QueryExpr::Path(_) => false,
             QueryExpr::Vector(vq) => vq.filter.is_some(),
             QueryExpr::Hybrid(_) => true, // May have filters in structured part
+            // DML/DDL/Command statements are not applicable for filter simplification
+            QueryExpr::Insert(_)
+            | QueryExpr::Update(_)
+            | QueryExpr::Delete(_)
+            | QueryExpr::CreateTable(_)
+            | QueryExpr::DropTable(_)
+            | QueryExpr::AlterTable(_)
+            | QueryExpr::GraphCommand(_)
+            | QueryExpr::SearchCommand(_) => false,
         }
     }
 }

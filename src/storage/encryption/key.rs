@@ -53,7 +53,7 @@ impl SecureKey {
 }
 
 fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
-    if !s.len().is_multiple_of(2) {
+    if s.len() % 2 != 0 {
         return Err("Odd length".to_string());
     }
 

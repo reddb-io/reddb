@@ -6,8 +6,8 @@ use std::time::SystemTime;
 use crate::api::{CatalogSnapshot, CollectionStats};
 use crate::index::{IndexCatalog, IndexCatalogSnapshot, IndexKind};
 use crate::physical::{PhysicalAnalyticsJob, PhysicalGraphProjection, PhysicalIndexState};
-use crate::storage::{EntityKind, UnifiedEntity};
 use crate::storage::unified::UnifiedStore;
+use crate::storage::{EntityKind, UnifiedEntity};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CollectionModel {
@@ -299,7 +299,10 @@ pub fn snapshot_store_with_declarations(
 
     let summary = CatalogSnapshot {
         name: name.to_string(),
-        total_entities: stats_by_collection.values().map(|stats| stats.entities).sum(),
+        total_entities: stats_by_collection
+            .values()
+            .map(|stats| stats.entities)
+            .sum(),
         total_collections: stats_by_collection.len(),
         stats_by_collection,
         updated_at: SystemTime::now(),
@@ -329,7 +332,10 @@ pub fn snapshot_store_with_declarations(
         operational_analytics_jobs: declarations
             .map(|declarations| declarations.operational_analytics_jobs.clone())
             .unwrap_or_default(),
-        queryable_index_count: index_statuses.iter().filter(|status| status.queryable).count(),
+        queryable_index_count: index_statuses
+            .iter()
+            .filter(|status| status.queryable)
+            .count(),
         indexes_requiring_rebuild_count: index_statuses
             .iter()
             .filter(|status| status.requires_rebuild)
@@ -396,7 +402,9 @@ fn infer_indices(
         return declared;
     }
 
-    let available = index_catalog.map(IndexCatalog::snapshot).unwrap_or_default();
+    let available = index_catalog
+        .map(IndexCatalog::snapshot)
+        .unwrap_or_default();
     let mut selected = Vec::new();
 
     for metric in available {
@@ -548,10 +556,7 @@ fn collection_analytics_job_readiness(
         })
         .collect::<Vec<_>>();
     let executable_count = local.iter().filter(|status| status.executable).count();
-    let requires_rerun_count = local
-        .iter()
-        .filter(|status| status.requires_rerun)
-        .count();
+    let requires_rerun_count = local.iter().filter(|status| status.requires_rerun).count();
     let locally_in_sync = local
         .iter()
         .all(|status| status.in_sync && status.dependency_in_sync.unwrap_or(true));
@@ -577,11 +582,7 @@ fn graph_projection_statuses(
     let mut names = declared
         .iter()
         .map(|projection| projection.name.clone())
-        .chain(
-            operational
-                .iter()
-                .map(|projection| projection.name.clone()),
-        )
+        .chain(operational.iter().map(|projection| projection.name.clone()))
         .collect::<Vec<_>>();
     names.sort();
     names.dedup();
@@ -590,8 +591,9 @@ fn graph_projection_statuses(
         .into_iter()
         .map(|name| {
             let declared_projection = declared.iter().find(|projection| projection.name == name);
-            let operational_projection =
-                operational.iter().find(|projection| projection.name == name);
+            let operational_projection = operational
+                .iter()
+                .find(|projection| projection.name == name);
             let declared_present = declared_projection.is_some();
             let operational_present = operational_projection.is_some();
             let mut dependent_job_ids = BTreeSet::new();
@@ -637,7 +639,9 @@ fn graph_projection_statuses(
                 && matches!(
                     declared_projection
                         .map(|projection| projection.state.as_str())
-                        .or_else(|| operational_projection.map(|projection| projection.state.as_str()))
+                        .or_else(
+                            || operational_projection.map(|projection| projection.state.as_str())
+                        )
                         .unwrap_or_default(),
                     "materialized"
                 );
@@ -748,8 +752,10 @@ fn index_statuses(declarations: Option<&CatalogDeclarations>) -> Vec<CatalogInde
             if matches!(build_state.as_deref().unwrap_or_default(), "stale") {
                 attention_reasons.push("stale".to_string());
             }
-            if matches!(build_state.as_deref().unwrap_or_default(), "building" | "declared-unbuilt")
-            {
+            if matches!(
+                build_state.as_deref().unwrap_or_default(),
+                "building" | "declared-unbuilt"
+            ) {
                 attention_reasons.push("requires_rebuild".to_string());
             }
             let queryable = declared_present
@@ -900,14 +906,19 @@ fn analytics_job_statuses(
                     })
             });
             let dependency_in_sync = projection.as_ref().map(|_| {
-                matches!(projection_lifecycle, Some("materialized")) && projection_operational == Some(true)
+                matches!(projection_lifecycle, Some("materialized"))
+                    && projection_operational == Some(true)
             });
             let lifecycle_state = match (declared_present, operational_present, state.as_str()) {
                 (true, false, _) => "declared",
-                (true, true, _) if matches!(
-                    projection_lifecycle,
-                    Some("stale" | "failed" | "materializing" | "declared")
-                ) => "stale",
+                (true, true, _)
+                    if matches!(
+                        projection_lifecycle,
+                        Some("stale" | "failed" | "materializing" | "declared")
+                    ) =>
+                {
+                    "stale"
+                }
                 (true, true, "completed") => "completed",
                 (true, true, "running") => "running",
                 (true, true, "failed") => "failed",
@@ -922,8 +933,8 @@ fn analytics_job_statuses(
                 && operational_present
                 && !matches!(state.as_str(), "failed" | "stale")
                 && dependency_in_sync.unwrap_or(true);
-            let requires_rerun = matches!(state.as_str(), "stale" | "failed")
-                || dependency_in_sync == Some(false);
+            let requires_rerun =
+                matches!(state.as_str(), "stale" | "failed") || dependency_in_sync == Some(false);
             let mut attention_reasons = Vec::new();
             if declared_present != operational_present {
                 attention_reasons.push("declaration_drift".to_string());
@@ -1132,9 +1143,7 @@ pub fn graph_projection_attention(
     statuses
 }
 
-pub fn analytics_job_attention(
-    snapshot: &CatalogModelSnapshot,
-) -> Vec<CatalogAnalyticsJobStatus> {
+pub fn analytics_job_attention(snapshot: &CatalogModelSnapshot) -> Vec<CatalogAnalyticsJobStatus> {
     let mut statuses = snapshot
         .analytics_job_statuses
         .iter()

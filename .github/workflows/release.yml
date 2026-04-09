@@ -25,6 +25,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  BINARY_NAME: red
 
 concurrency:
   group: release-${{ github.workflow }}-${{ github.ref }}
@@ -40,7 +41,6 @@ jobs:
       release_tag: ${{ steps.plan.outputs.release_tag }}
       package_version: ${{ steps.plan.outputs.package_version }}
       github_prerelease: ${{ steps.plan.outputs.github_prerelease }}
-      skip_reason: ${{ steps.plan.outputs.skip_reason }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -49,71 +49,49 @@ jobs:
         id: plan
         run: |
           set -euo pipefail
-
           EVENT_NAME="${{ github.event_name }}"
           REF="${{ github.ref }}"
           INPUT_CHANNEL="${{ github.event.inputs.channel || 'stable' }}"
           INPUT_VERSION="${{ github.event.inputs.version || '' }}"
-
           SHOULD_SKIP=false
           RELEASE_CHANNEL=""
           RELEASE_TAG=""
           PACKAGE_VERSION=""
           IS_PRERELEASE=false
-          SKIP_REASON=""
 
-          normalize_version() {
-            echo "${1#v}"
-          }
-
-          next_version() {
-            local base_version="$1"
-            local run_number="${{ github.run_number }}"
-            echo "${base_version}-next.${run_number}"
-          }
+          normalize_version() { echo "${1#v}"; }
+          next_version() { echo "${1}-next.${GITHUB_RUN_NUMBER}"; }
 
           if [[ "$EVENT_NAME" == "push" && "$REF" == refs/tags/v* ]]; then
             RELEASE_CHANNEL="stable"
             RELEASE_TAG="${REF#refs/tags/}"
             PACKAGE_VERSION="$(normalize_version "$RELEASE_TAG")"
-            IS_PRERELEASE=false
           elif [[ "$EVENT_NAME" == "push" && "$REF" == "refs/heads/main" ]]; then
             COMMIT_MSG="${{ github.event.head_commit.message }}"
-            if [[ "$COMMIT_MSG" =~ ^chore:\\ release ]] || [[ "$COMMIT_MSG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            if [[ "$COMMIT_MSG" =~ ^chore:\ release ]] || [[ "$COMMIT_MSG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
               SHOULD_SKIP=true
-              SKIP_REASON="Version bump/release commit; skipping next."
             else
               BASE_VERSION=$(awk -F'"' '/^version = / {print $2; exit}' Cargo.toml)
               PACKAGE_VERSION="$(next_version "$BASE_VERSION")"
               RELEASE_CHANNEL="next"
               RELEASE_TAG="v${PACKAGE_VERSION}"
               IS_PRERELEASE=true
-              SKIP_REASON="Main branch auto next release"
             fi
           elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
             if [[ "$INPUT_CHANNEL" == "stable" ]]; then
-              if [[ -z "$INPUT_VERSION" ]]; then
-                echo "Stable channel requires version input."
-                exit 1
-            fi
-            RELEASE_CHANNEL="stable"
-            PACKAGE_VERSION="$(normalize_version "$INPUT_VERSION")"
-            RELEASE_TAG="v${PACKAGE_VERSION}"
-            IS_PRERELEASE=false
-            elif [[ "$INPUT_CHANNEL" == "next" ]]; then
+              [[ -z "$INPUT_VERSION" ]] && { echo "Stable requires version"; exit 1; }
+              RELEASE_CHANNEL="stable"
+              PACKAGE_VERSION="$(normalize_version "$INPUT_VERSION")"
+              RELEASE_TAG="v${PACKAGE_VERSION}"
+            else
               BASE_VERSION=$(awk -F'"' '/^version = / {print $2; exit}' Cargo.toml)
-              if [[ -n "$INPUT_VERSION" ]]; then
-                PACKAGE_VERSION="$(normalize_version "$INPUT_VERSION")"
-              else
-                PACKAGE_VERSION="$(next_version "$BASE_VERSION")"
-              fi
+              PACKAGE_VERSION="${INPUT_VERSION:-$(next_version "$BASE_VERSION")}"
               RELEASE_CHANNEL="next"
               RELEASE_TAG="v${PACKAGE_VERSION}"
               IS_PRERELEASE=true
             fi
           else
             SHOULD_SKIP=true
-            SKIP_REASON="Unhandled event/ref for release workflow."
           fi
 
           echo "should_skip=${SHOULD_SKIP}" >> "$GITHUB_OUTPUT"
@@ -121,10 +99,9 @@ jobs:
           echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
           echo "package_version=${PACKAGE_VERSION}" >> "$GITHUB_OUTPUT"
           echo "github_prerelease=${IS_PRERELEASE}" >> "$GITHUB_OUTPUT"
-          echo "skip_reason=${SKIP_REASON}" >> "$GITHUB_OUTPUT"
 
   build:
-    name: Build ${{ matrix.target }}
+    name: Build ${{ matrix.asset_name }}
     needs: [plan]
     if: needs.plan.outputs.should_skip != 'true'
     runs-on: ${{ matrix.os }}
@@ -132,165 +109,94 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            asset_name: linux-x86_64
-            cross: false
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            asset_name: linux-aarch64
-            cross: true
-          - os: ubuntu-latest
-            target: armv7-unknown-linux-gnueabihf
-            asset_name: linux-armv7
-            cross: true
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-musl
-            asset_name: linux-aarch64-static
-            cross: true
-
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu,      asset_name: linux-x86_64,        cross: false }
+          - { os: ubuntu-latest,  target: aarch64-unknown-linux-gnu,     asset_name: linux-aarch64,       cross: true  }
+          - { os: ubuntu-latest,  target: armv7-unknown-linux-gnueabihf, asset_name: linux-armv7,         cross: true  }
+          - { os: ubuntu-latest,  target: aarch64-unknown-linux-musl,    asset_name: linux-aarch64-static, cross: true }
+          - { os: macos-13,       target: x86_64-apple-darwin,           asset_name: macos-x86_64,        cross: false }
+          - { os: macos-14,       target: aarch64-apple-darwin,          asset_name: macos-aarch64,       cross: false }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,       asset_name: windows-x86_64,      cross: false }
     steps:
       - uses: actions/checkout@v4
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-      - name: Build release binary
-        if: matrix.target != 'aarch64-unknown-linux-musl'
-        run: |
-          if [[ "${{ matrix.cross }}" == "true" ]]; then
-            sudo apt-get update
-            sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
-          fi
 
-          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
-            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
-            export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
-            export CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++
-            export AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar
-          fi
-
-          if [[ "${{ matrix.target }}" == "armv7-unknown-linux-gnueabihf" ]]; then
-            export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc
-            export CC_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-gcc
-            export CXX_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-g++
-            export AR_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-ar
-          fi
-
-          cargo build --locked --release --target ${{ matrix.target }} --bins
-      - name: Build release binary (musl container)
-        if: matrix.target == 'aarch64-unknown-linux-musl'
-        run: |
-          mkdir -p "${HOME}/.cargo/registry" "${HOME}/.cargo/git"
-          docker run --rm \
-            -v "${PWD}:/volume" \
-            -v "${HOME}/.cargo/registry:/root/.cargo/registry" \
-            -v "${HOME}/.cargo/git:/root/.cargo/git" \
-            -w /volume \
-            messense/rust-musl-cross:aarch64-musl \
-            bash -lc 'apt-get update >/dev/null && apt-get install -y golang-go >/dev/null && cargo build --locked --release --target aarch64-unknown-linux-musl --bins'
-          sudo chown -R "$(id -u):$(id -g)" target/aarch64-unknown-linux-musl
-      - name: Strip binary (Linux x86_64)
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
-        run: strip target/${{ matrix.target }}/release/reddb && strip target/${{ matrix.target }}/release/reddb-grpc
-      - name: Strip binary (Cross Linux)
-        if: matrix.cross && matrix.target != 'aarch64-unknown-linux-musl'
-        run: |
-          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
-            aarch64-linux-gnu-strip target/${{ matrix.target }}/release/reddb || true
-            aarch64-linux-gnu-strip target/${{ matrix.target }}/release/reddb-grpc || true
-          elif [[ "${{ matrix.target }}" == "armv7-unknown-linux-gnueabihf" ]]; then
-            arm-linux-gnueabihf-strip target/${{ matrix.target }}/release/reddb || true
-            arm-linux-gnueabihf-strip target/${{ matrix.target }}/release/reddb-grpc || true
-          fi
-      - name: Prepare binaries
+      - name: Sync version across Cargo.toml + package.json
         shell: bash
         run: |
-          REDDB_BIN="reddb-${{ matrix.asset_name }}"
-          REDDB_GRPC_BIN="reddb-grpc-${{ matrix.asset_name }}"
-          cp target/${{ matrix.target }}/release/reddb "${REDDB_BIN}"
-          cp target/${{ matrix.target }}/release/reddb-grpc "${REDDB_GRPC_BIN}"
-          shasum -a 256 "${REDDB_BIN}" > "${REDDB_BIN}.sha256" || certutil -hashfile "${REDDB_BIN}" SHA256 > "${REDDB_BIN}.sha256"
-          shasum -a 256 "${REDDB_GRPC_BIN}" > "${REDDB_GRPC_BIN}.sha256" || certutil -hashfile "${REDDB_GRPC_BIN}" SHA256 > "${REDDB_GRPC_BIN}.sha256"
-          echo "Prepared ${REDDB_BIN} and ${REDDB_GRPC_BIN}"
-      - name: Verify self
-        if: "!matrix.cross"
+          VERSION="${{ needs.plan.outputs.package_version }}"
+          echo "Setting version to ${VERSION} in Cargo.toml and package.json"
+          sed -i.bak "s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml && rm -f Cargo.toml.bak
+          node -e "const p=require('./package.json');p.version='${VERSION}';require('fs').writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')"
+          echo "Cargo.toml: $(grep '^version' Cargo.toml)"
+          echo "package.json: $(grep '\"version\"' package.json)"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: '28.x'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ runner.os }}-${{ matrix.target }}
+
+      - name: Cross-compile tools
+        if: matrix.cross && matrix.target != 'aarch64-unknown-linux-musl'
         run: |
-          ./"reddb-${{ matrix.asset_name }}" --help > /dev/null
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
+
+      - name: Build
+        if: matrix.target != 'aarch64-unknown-linux-musl'
+        shell: bash
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
+        run: cargo build --locked --release --target ${{ matrix.target }} --bin red
+
+      - name: Build (musl)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: |
+          docker run --rm -v "${PWD}:/volume" -w /volume messense/rust-musl-cross:aarch64-musl \
+            bash -lc 'apt-get update >/dev/null && apt-get install -y protobuf-compiler >/dev/null && cargo build --locked --release --target aarch64-unknown-linux-musl --bin red'
+          sudo chown -R "$(id -u):$(id -g)" target/aarch64-unknown-linux-musl
+
+      - name: Strip (Linux native)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: strip target/${{ matrix.target }}/release/red
+
+      - name: Package asset
+        shell: bash
+        run: |
+          EXT=""; [[ "${{ matrix.target }}" == *windows* ]] && EXT=".exe"
+          ASSET="red-${{ matrix.asset_name }}${EXT}"
+          cp "target/${{ matrix.target }}/release/red${EXT}" "${ASSET}"
+          shasum -a 256 "${ASSET}" > "${ASSET}.sha256" 2>/dev/null || certutil -hashfile "${ASSET}" SHA256 > "${ASSET}.sha256"
+
+      - name: Smoke test
+        if: "!matrix.cross"
+        shell: bash
+        run: |
+          EXT=""; [[ "${{ matrix.target }}" == *windows* ]] && EXT=".exe"
+          ./"red-${{ matrix.asset_name }}${EXT}" version
+
+      - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
-          path: |
-            reddb-${{ matrix.asset_name }}
-            reddb-${{ matrix.asset_name }}.sha256
-            reddb-grpc-${{ matrix.asset_name }}
-            reddb-grpc-${{ matrix.asset_name }}.sha256
-
-  prepare-release:
-    name: Prepare release payload
-    needs: [plan, build]
-    if: needs.plan.outputs.should_skip != 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-      - name: Collect payload
-        run: |
-          mkdir -p release
-          find artifacts -type f \( -name "reddb-*" -o -name "reddb-grpc-*" -o -name "*.sha256" \) -exec cp {} release/ \;
-          shasum -a 256 release/* > release/REDB_RELEASE_SHA256S.txt
-          ls -la release/
-      - name: Upload release payload
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-bundle
-          path: release/
-          if-no-files-found: error
+          path: red-${{ matrix.asset_name }}*
 
   publish-github:
-    name: Publish GitHub release
-    needs: [plan, prepare-release]
+    name: GitHub Release
+    needs: [plan, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     if: needs.plan.outputs.should_skip != 'true'
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
-          fetch-depth: 0
-      - name: Download release payload
-        uses: actions/download-artifact@v4
-        with:
-          name: release-bundle
           path: release
           merge-multiple: true
-      - name: Render release body
-        id: changelog
-        run: |
-          VERSION_NUMBER="${{ needs.plan.outputs.package_version }}"
-          if [[ -f CHANGELOG.md ]]; then
-            CHANGELOG_CHUNK=$(awk '/^## \['"${VERSION_NUMBER}"'\]/,/^## \['/{if(/^## \['"${VERSION_NUMBER}"'\]/){next}if(/^## \[/){exit}print}' CHANGELOG.md)
-          else
-            CHANGELOG_CHUNK=$(git log --pretty=format:"- %s" --no-merges -15)
-          fi
-          if [[ -z "$CHANGELOG_CHUNK" ]]; then
-            CHANGELOG_CHUNK="No changes detected."
-          fi
-          echo "changes<<EOF" >> "$GITHUB_OUTPUT"
-          echo "## Changes" >> "$GITHUB_OUTPUT"
-          echo "" >> "$GITHUB_OUTPUT"
-          echo "$CHANGELOG_CHUNK" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
@@ -299,26 +205,53 @@ jobs:
           body: |
             # RedDB ${{ needs.plan.outputs.release_tag }}
 
-            ${{ steps.changelog.outputs.changes }}
-
             ## Install
+
+            **npm / pnpm:**
             ```bash
-            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | bash
+            pnpm add reddb
+            ```
+
+            **Binary (Linux x86_64):**
+            ```bash
+            curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ needs.plan.outputs.release_tag }}/red-linux-x86_64 -o red && chmod +x red
+            ```
+
+            **Docker:**
+            ```bash
+            docker run --rm ghcr.io/${{ github.repository }}:${{ needs.plan.outputs.release_tag }} version
             ```
           prerelease: ${{ needs.plan.outputs.github_prerelease }}
           files: release/*
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Job summary
+  publish-npm:
+    name: Publish to npm
+    needs: [plan, publish-github]
+    runs-on: ubuntu-latest
+    if: needs.plan.outputs.should_skip != 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Set version
         run: |
-          echo "## Release published" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Property | Value |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| --- | --- |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Channel | \`${{ needs.plan.outputs.release_channel }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Tag | \`${{ needs.plan.outputs.release_tag }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          node -e "
+            const pkg = require('./package.json');
+            pkg.version = '${{ needs.plan.outputs.package_version }}';
+            require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          TAG=$([[ "${{ needs.plan.outputs.release_channel }}" == "next" ]] && echo "next" || echo "latest")
+          npm publish --tag "${TAG}" --access public
 
   publish-cargo:
-    name: Publish crate to crates.io
+    name: Publish to crates.io
     needs: [plan, publish-github]
     runs-on: ubuntu-latest
     if: |
@@ -326,14 +259,16 @@ jobs:
       needs.plan.outputs.release_channel == 'stable'
     steps:
       - uses: actions/checkout@v4
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-      - name: Publish crate
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: '28.x'
+      - name: Sync Cargo.toml version
+        run: |
+          VERSION="${{ needs.plan.outputs.package_version }}"
+          sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml
+          echo "Publishing reddb@${VERSION} to crates.io"
+      - name: Publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          if [ -z "${CARGO_REGISTRY_TOKEN}" ]; then
-            echo "❌ Missing CARGO_REGISTRY_TOKEN secret"
-            exit 1
-          fi
-          cargo publish --locked --token "${CARGO_REGISTRY_TOKEN}"
+        run: cargo publish --allow-dirty --token "${CARGO_REGISTRY_TOKEN}"

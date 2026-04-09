@@ -76,6 +76,8 @@ pub enum PageType {
     GraphMeta = 10,
     /// Native physical metadata page (engine-published auxiliary state)
     NativeMeta = 11,
+    /// Encrypted auth vault page (users, API keys, bootstrap state)
+    Vault = 12,
 }
 
 impl PageType {
@@ -94,6 +96,7 @@ impl PageType {
             9 => Some(Self::GraphAdjacency),
             10 => Some(Self::GraphMeta),
             11 => Some(Self::NativeMeta),
+            12 => Some(Self::Vault),
             _ => None,
         }
     }
@@ -289,7 +292,6 @@ pub struct Page {
     /// Raw page data
     data: [u8; PAGE_SIZE],
 }
-
 
 #[path = "page/impl.rs"]
 mod page_impl;
@@ -507,6 +509,8 @@ mod tests {
             PageType::GraphEdge,
             PageType::GraphAdjacency,
             PageType::GraphMeta,
+            PageType::NativeMeta,
+            PageType::Vault,
         ];
 
         for (i, &pt) in page_types.iter().enumerate() {
@@ -523,7 +527,8 @@ mod tests {
         assert_eq!(PageType::from_u8(2), Some(PageType::BTreeInterior));
         assert_eq!(PageType::from_u8(10), Some(PageType::GraphMeta));
         assert_eq!(PageType::from_u8(11), Some(PageType::NativeMeta));
-        assert_eq!(PageType::from_u8(12), None);
+        assert_eq!(PageType::from_u8(12), Some(PageType::Vault));
+        assert_eq!(PageType::from_u8(13), None);
         assert_eq!(PageType::from_u8(255), None);
     }
 

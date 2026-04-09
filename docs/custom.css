@@ -1,0 +1,146 @@
+/* Hide Docsify navbar when on homepage */
+body.ready .app-nav {
+  display: none !important;
+}
+
+/* Hide reading time and word count that might leak */
+.markdown-section .reading-time,
+.content .reading-time {
+  display: none !important;
+}
+
+/* Cover Page - Hero Background */
+section.cover {
+  background: linear-gradient(135deg, #1a1d24 0%, #0a0d12 100%) !important;
+}
+
+section.cover.show {
+  background: linear-gradient(135deg, #1a1d24 0%, #0a0d12 100%) !important;
+}
+
+/* Cover page code block */
+section.cover pre {
+  text-align: left !important;
+  background: rgba(0, 0, 0, 0.3) !important;
+  border-radius: 8px !important;
+  padding: 1rem !important;
+  margin: 1.5rem auto !important;
+  max-width: 500px !important;
+}
+
+/* Fix sidebar toggle (hamburger menu) position */
+.sidebar-toggle {
+  position: fixed !important;
+  top: 1rem !important;
+  left: 1rem !important;
+  bottom: auto !important;
+  width: 40px !important;
+  height: 40px !important;
+  z-index: 999 !important;
+}
+
+/* Card grid for landing page */
+.grid-3 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1rem;
+  margin: 2rem 0;
+}
+
+.card {
+  display: block;
+  padding: 1.5rem;
+  border-radius: 8px;
+  background: var(--theme-color, #dc2626);
+  background: linear-gradient(135deg, rgba(220, 38, 38, 0.1) 0%, rgba(220, 38, 38, 0.05) 100%);
+  border: 1px solid rgba(220, 38, 38, 0.2);
+  text-decoration: none;
+  color: inherit;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  text-decoration: none;
+}
+
+.card h4 {
+  margin: 0 0 0.5rem 0;
+  color: var(--theme-color, #dc2626);
+}
+
+.card p {
+  margin: 0;
+  font-size: 0.9rem;
+  opacity: 0.8;
+}
+
+/* Sidebar category labels */
+.sidebar-nav li small {
+  font-size: 0.7rem;
+  opacity: 0.6;
+  margin-left: 0.5rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* Code blocks */
+.markdown-section pre {
+  border-radius: 6px;
+  padding: 1rem;
+}
+
+.markdown-section code {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 0.9em;
+}
+
+/* Tables */
+.markdown-section table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.markdown-section table th {
+  background: rgba(220, 38, 38, 0.1);
+  font-weight: 600;
+}
+
+.markdown-section table th,
+.markdown-section table td {
+  padding: 0.75rem 1rem;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+}
+
+/* Dark mode table */
+body.dark .markdown-section table th {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+body.dark .markdown-section table th,
+body.dark .markdown-section table td {
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+/* API Reference tables */
+.markdown-section table code {
+  background: rgba(220, 38, 38, 0.1);
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  font-size: 0.85em;
+}
+
+/* Blockquotes as callouts */
+.markdown-section blockquote {
+  border-left: 4px solid var(--theme-color, #dc2626);
+  background: rgba(220, 38, 38, 0.05);
+  padding: 1rem 1.5rem;
+  margin: 1.5rem 0;
+  border-radius: 0 6px 6px 0;
+}
+
+/* Inline code in tables */
+.markdown-section td code {
+  white-space: nowrap;
+}

@@ -11,10 +11,23 @@ pub(super) fn execute_runtime_expr(db: &RedDB, expr: &QueryExpr) -> RedDBResult<
         QueryExpr::Join(join) => execute_runtime_join_query(db, join),
         QueryExpr::Vector(vector) => execute_runtime_vector_query(db, vector),
         QueryExpr::Hybrid(hybrid) => execute_runtime_hybrid_query(db, hybrid),
+        QueryExpr::Insert(_)
+        | QueryExpr::Update(_)
+        | QueryExpr::Delete(_)
+        | QueryExpr::CreateTable(_)
+        | QueryExpr::DropTable(_)
+        | QueryExpr::AlterTable(_)
+        | QueryExpr::GraphCommand(_)
+        | QueryExpr::SearchCommand(_) => Err(RedDBError::Query(
+            "DML/DDL/Command statements are not supported through this execution path".to_string(),
+        )),
     }
 }
 
-pub(super) fn scan_runtime_table_records(db: &RedDB, query: &TableQuery) -> RedDBResult<Vec<UnifiedRecord>> {
+pub(super) fn scan_runtime_table_records(
+    db: &RedDB,
+    query: &TableQuery,
+) -> RedDBResult<Vec<UnifiedRecord>> {
     let mut records = scan_runtime_table_source_records(db, &query.table)?;
     let table_name = query.table.as_str();
     let table_alias = query.alias.as_deref().unwrap_or(table_name);
@@ -92,16 +105,15 @@ pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<
     }
 
     record.set("_entity_id", Value::UnsignedInteger(entity.id.raw()));
-    record.set("_collection", Value::Text(entity.kind.collection().to_string()));
+    record.set(
+        "_collection",
+        Value::Text(entity.kind.collection().to_string()),
+    );
     record.set("_kind", Value::Text(entity.kind.storage_type().to_string()));
     record.set("_created_at", Value::UnsignedInteger(entity.created_at));
     record.set("_updated_at", Value::UnsignedInteger(entity.updated_at));
     record.set("_sequence_id", Value::UnsignedInteger(entity.sequence_id));
-    set_runtime_entity_metadata(
-        &mut record,
-        "table",
-        runtime_row_capabilities(&row),
-    );
+    set_runtime_entity_metadata(&mut record, "table", runtime_row_capabilities(&row));
 
     if let Some(named) = row.named {
         for (key, value) in named {
@@ -143,10 +155,7 @@ pub(super) fn runtime_any_record_from_entity(entity: UnifiedEntity) -> Option<Un
             }
             (entity_type, capabilities, record)
         }
-        (
-            EntityKind::GraphNode { label, node_type },
-            EntityData::Node(node),
-        ) => {
+        (EntityKind::GraphNode { label, node_type }, EntityData::Node(node)) => {
             let mut record = UnifiedRecord::new();
             record.set("id", Value::UnsignedInteger(entity_id));
             record.set("label", Value::Text(label));
@@ -154,7 +163,11 @@ pub(super) fn runtime_any_record_from_entity(entity: UnifiedEntity) -> Option<Un
             for (key, value) in node.properties {
                 record.set(&key, value);
             }
-            ("graph_node", runtime_record_capability_list(["graph", "graph_node"]), record)
+            (
+                "graph_node",
+                runtime_record_capability_list(["graph", "graph_node"]),
+                record,
+            )
         }
         (
             EntityKind::GraphEdge {
@@ -173,11 +186,18 @@ pub(super) fn runtime_any_record_from_entity(entity: UnifiedEntity) -> Option<Un
             for (key, value) in edge.properties {
                 record.set(&key, value);
             }
-            ("graph_edge", runtime_record_capability_list(["graph", "graph_edge"]), record)
+            (
+                "graph_edge",
+                runtime_record_capability_list(["graph", "graph_edge"]),
+                record,
+            )
         }
         (EntityKind::Vector { .. }, EntityData::Vector(vector)) => {
             let mut record = UnifiedRecord::new();
-            record.set("dimension", Value::UnsignedInteger(vector.dense.len() as u64));
+            record.set(
+                "dimension",
+                Value::UnsignedInteger(vector.dense.len() as u64),
+            );
             if let Some(content) = vector.content {
                 record.set("content", Value::Text(content));
             }
@@ -212,7 +232,9 @@ pub(super) fn set_runtime_entity_metadata(
     record.set("_capabilities", Value::Text(capabilities_text));
 }
 
-pub(super) fn runtime_record_capability_list<const N: usize>(values: [&str; N]) -> BTreeSet<String> {
+pub(super) fn runtime_record_capability_list<const N: usize>(
+    values: [&str; N],
+) -> BTreeSet<String> {
     values.into_iter().map(|value| value.to_string()).collect()
 }
 
@@ -265,7 +287,10 @@ pub(super) fn runtime_documentish_value(value: &Value) -> bool {
     matches!(value, Value::Json(_) | Value::Blob(_))
 }
 
-pub(super) fn runtime_search_collections(db: &RedDB, collections: Option<Vec<String>>) -> Option<Vec<String>> {
+pub(super) fn runtime_search_collections(
+    db: &RedDB,
+    collections: Option<Vec<String>>,
+) -> Option<Vec<String>> {
     match collections {
         Some(collections) if !collections.is_empty() => Some(collections),
         _ => Some(db.store().list_collections()),
@@ -279,7 +304,8 @@ pub(super) fn runtime_filter_dsl_result(
 ) {
     let entity_types = entity_types
         .map(|items| {
-            items.into_iter()
+            items
+                .into_iter()
                 .map(|item| item.trim().to_ascii_lowercase())
                 .filter(|item| !item.is_empty())
                 .collect::<BTreeSet<_>>()
@@ -287,7 +313,8 @@ pub(super) fn runtime_filter_dsl_result(
         .filter(|items| !items.is_empty());
     let capabilities = capabilities
         .map(|items| {
-            items.into_iter()
+            items
+                .into_iter()
                 .map(|item| item.trim().to_ascii_lowercase())
                 .filter(|item| !item.is_empty())
                 .collect::<BTreeSet<_>>()
@@ -304,7 +331,9 @@ pub(super) fn runtime_filter_dsl_result(
             .as_ref()
             .map_or(true, |accepted| accepted.contains(entity_type));
         let capability_ok = capabilities.as_ref().map_or(true, |accepted| {
-            item_capabilities.iter().any(|capability| accepted.contains(capability))
+            item_capabilities
+                .iter()
+                .any(|capability| accepted.contains(capability))
         });
         type_ok && capability_ok
     });
@@ -314,7 +343,11 @@ pub(super) fn runtime_filter_dsl_result(
 
 pub(super) fn normalize_runtime_dsl_result_scores(result: &mut DslQueryResult) {
     for item in &mut result.matches {
-        if let Some(final_score) = item.components.final_score.filter(|score| score.is_finite()) {
+        if let Some(final_score) = item
+            .components
+            .final_score
+            .filter(|score| score.is_finite())
+        {
             item.score = final_score;
         } else {
             item.components.final_score = Some(item.score);
@@ -330,7 +363,9 @@ pub(super) fn normalize_runtime_dsl_result_scores(result: &mut DslQueryResult) {
     });
 }
 
-pub(super) fn runtime_entity_type_and_capabilities(entity: &UnifiedEntity) -> (&'static str, BTreeSet<String>) {
+pub(super) fn runtime_entity_type_and_capabilities(
+    entity: &UnifiedEntity,
+) -> (&'static str, BTreeSet<String>) {
     match (&entity.kind, &entity.data) {
         (EntityKind::TableRow { .. }, EntityData::Row(row)) => {
             (runtime_row_entity_type(row), runtime_row_capabilities(row))
@@ -351,7 +386,10 @@ pub(super) fn runtime_entity_type_and_capabilities(entity: &UnifiedEntity) -> (&
     }
 }
 
-pub(super) fn resolve_runtime_vector_source(db: &RedDB, source: &VectorSource) -> RedDBResult<Vec<f32>> {
+pub(super) fn resolve_runtime_vector_source(
+    db: &RedDB,
+    source: &VectorSource,
+) -> RedDBResult<Vec<f32>> {
     match source {
         VectorSource::Literal(vector) => Ok(vector.clone()),
         VectorSource::Reference {
@@ -369,8 +407,7 @@ pub(super) fn resolve_runtime_vector_source(db: &RedDB, source: &VectorSource) -
             }
         }
         VectorSource::Text(_) => Err(RedDBError::Query(
-            "text-to-embedding vector queries are parsed but not yet wired into /query"
-                .to_string(),
+            "text-to-embedding vector queries are parsed but not yet wired into /query".to_string(),
         )),
         VectorSource::Subquery(_) => Err(RedDBError::Query(
             "subquery vector sources are parsed but not yet wired into /query".to_string(),
@@ -403,9 +440,18 @@ pub(super) fn runtime_vector_record_from_match(item: SimilarResult) -> UnifiedRe
         "_kind",
         Value::Text(item.entity.kind.storage_type().to_string()),
     );
-    record.set("_created_at", Value::UnsignedInteger(item.entity.created_at));
-    record.set("_updated_at", Value::UnsignedInteger(item.entity.updated_at));
-    record.set("_sequence_id", Value::UnsignedInteger(item.entity.sequence_id));
+    record.set(
+        "_created_at",
+        Value::UnsignedInteger(item.entity.created_at),
+    );
+    record.set(
+        "_updated_at",
+        Value::UnsignedInteger(item.entity.updated_at),
+    );
+    record.set(
+        "_sequence_id",
+        Value::UnsignedInteger(item.entity.sequence_id),
+    );
     set_runtime_entity_metadata(&mut record, entity_type, capabilities);
     apply_runtime_identity_hints(&mut record, &item.entity);
 
@@ -454,16 +500,15 @@ pub(super) fn hybrid_candidate_keys(
 
     match fusion {
         FusionStrategy::Rerank { .. } => structured_keys.into_iter().collect(),
-        FusionStrategy::FilterThenSearch | FusionStrategy::SearchThenFilter | FusionStrategy::Intersection => {
-            structured_keys
-                .intersection(&vector_keys)
-                .cloned()
-                .collect()
-        }
-        FusionStrategy::Union { .. } | FusionStrategy::RRF { .. } => structured_keys
-            .union(&vector_keys)
+        FusionStrategy::FilterThenSearch
+        | FusionStrategy::SearchThenFilter
+        | FusionStrategy::Intersection => structured_keys
+            .intersection(&vector_keys)
             .cloned()
             .collect(),
+        FusionStrategy::Union { .. } | FusionStrategy::RRF { .. } => {
+            structured_keys.union(&vector_keys).cloned().collect()
+        }
     }
 }
 
@@ -482,15 +527,25 @@ pub(super) fn runtime_record_identity_key(record: &UnifiedRecord) -> String {
         }
     }
 
-    if let Some(value) = record.values.get("entity_id").or_else(|| record.values.get("_entity_id")) {
+    if let Some(value) = record
+        .values
+        .get("entity_id")
+        .or_else(|| record.values.get("_entity_id"))
+    {
         if let Some(fragment) = runtime_identity_fragment(value) {
             return format!("entity:{fragment}");
         }
     }
 
     if let (Some(collection), Some(row_id)) = (
-        record.values.get("_collection").and_then(runtime_value_text),
-        record.values.get("row_id").or_else(|| record.values.get("id")),
+        record
+            .values
+            .get("_collection")
+            .and_then(runtime_value_text),
+        record
+            .values
+            .get("row_id")
+            .or_else(|| record.values.get("id")),
     ) {
         if let Some(fragment) = runtime_identity_fragment(row_id) {
             return format!("row:{collection}:{fragment}");
@@ -521,7 +576,10 @@ pub(super) fn runtime_record_identity_key(record: &UnifiedRecord) -> String {
         return format!("path:{node}");
     }
 
-    format!("fingerprint:{:016x}", runtime_record_identity_fingerprint(record))
+    format!(
+        "fingerprint:{:016x}",
+        runtime_record_identity_fingerprint(record)
+    )
 }
 
 fn runtime_record_identity_fingerprint(record: &UnifiedRecord) -> u64 {
@@ -646,21 +704,27 @@ pub(super) fn apply_runtime_identity_hints(record: &mut UnifiedRecord, entity: &
         if let Some(value) = value {
             match cross_ref.ref_type {
                 RefType::VectorToRow | RefType::NodeToRow => {
-                    record.values.insert("_source_row".to_string(), value.clone());
+                    record
+                        .values
+                        .insert("_source_row".to_string(), value.clone());
                     record
                         .values
                         .entry("_linked_identity".to_string())
                         .or_insert(value);
                 }
                 RefType::VectorToNode | RefType::RowToNode => {
-                    record.values.insert("_source_node".to_string(), value.clone());
+                    record
+                        .values
+                        .insert("_source_node".to_string(), value.clone());
                     record
                         .values
                         .entry("_linked_identity".to_string())
                         .or_insert(value);
                 }
                 RefType::RowToEdge | RefType::EdgeToVector => {
-                    record.values.insert("_source_edge".to_string(), value.clone());
+                    record
+                        .values
+                        .insert("_source_edge".to_string(), value.clone());
                     record
                         .values
                         .entry("_linked_identity".to_string())
@@ -705,7 +769,9 @@ pub(super) fn runtime_metadata_entry(metadata: &Metadata) -> MetadataEntry {
     entry
 }
 
-pub(super) fn runtime_vector_metadata_value(value: &UnifiedMetadataValue) -> Option<VectorMetadataValue> {
+pub(super) fn runtime_vector_metadata_value(
+    value: &UnifiedMetadataValue,
+) -> Option<VectorMetadataValue> {
     match value {
         UnifiedMetadataValue::Null => Some(VectorMetadataValue::Null),
         UnifiedMetadataValue::Bool(value) => Some(VectorMetadataValue::Bool(*value)),
@@ -713,9 +779,9 @@ pub(super) fn runtime_vector_metadata_value(value: &UnifiedMetadataValue) -> Opt
         UnifiedMetadataValue::Float(value) => Some(VectorMetadataValue::Float(*value)),
         UnifiedMetadataValue::String(value) => Some(VectorMetadataValue::String(value.clone())),
         UnifiedMetadataValue::Timestamp(value) => Some(VectorMetadataValue::Integer(*value as i64)),
-        UnifiedMetadataValue::Reference(target) => {
-            Some(VectorMetadataValue::String(runtime_ref_target_string(target)))
-        }
+        UnifiedMetadataValue::Reference(target) => Some(VectorMetadataValue::String(
+            runtime_ref_target_string(target),
+        )),
         UnifiedMetadataValue::References(targets) => Some(VectorMetadataValue::String(
             targets
                 .iter()
@@ -737,7 +803,9 @@ pub(super) fn runtime_vector_metadata_value(value: &UnifiedMetadataValue) -> Opt
                 .collect::<Vec<_>>()
                 .join(","),
         )),
-        UnifiedMetadataValue::Object(_) | UnifiedMetadataValue::Bytes(_) | UnifiedMetadataValue::Geo { .. } => None,
+        UnifiedMetadataValue::Object(_)
+        | UnifiedMetadataValue::Bytes(_)
+        | UnifiedMetadataValue::Geo { .. } => None,
     }
 }
 
@@ -830,10 +898,16 @@ pub(super) fn merge_hybrid_records(
         }
 
         for (alias, node) in &vector_record.nodes {
-            merged.nodes.entry(alias.clone()).or_insert_with(|| node.clone());
+            merged
+                .nodes
+                .entry(alias.clone())
+                .or_insert_with(|| node.clone());
         }
         for (alias, edge) in &vector_record.edges {
-            merged.edges.entry(alias.clone()).or_insert_with(|| edge.clone());
+            merged
+                .edges
+                .entry(alias.clone())
+                .or_insert_with(|| edge.clone());
         }
         merged.paths.extend(vector_record.paths.clone());
         merged
@@ -869,7 +943,9 @@ pub(super) fn merge_join_records(
         for (key, value) in &right_record.values {
             if merged.values.contains_key(key) {
                 if let Some(prefix) = right_prefix {
-                    merged.values.insert(format!("{prefix}.{key}"), value.clone());
+                    merged
+                        .values
+                        .insert(format!("{prefix}.{key}"), value.clone());
                 }
             } else {
                 merged.values.insert(key.clone(), value.clone());
@@ -901,12 +977,8 @@ pub(super) fn join_condition_matches(
     right_table_alias: Option<&str>,
     right_field: &FieldRef,
 ) -> bool {
-    let left_value = resolve_runtime_field(
-        left_record,
-        left_field,
-        left_table_name,
-        left_table_alias,
-    );
+    let left_value =
+        resolve_runtime_field(left_record, left_field, left_table_name, left_table_alias);
     let right_value = resolve_runtime_field(
         right_record,
         right_field,
@@ -940,9 +1012,10 @@ pub(super) fn canonical_join_field(
     node: &crate::storage::query::planner::CanonicalLogicalNode,
     key: &str,
 ) -> RedDBResult<FieldRef> {
-    let value = node.details.get(key).ok_or_else(|| {
-        RedDBError::Query(format!("canonical join operator is missing {key}"))
-    })?;
+    let value = node
+        .details
+        .get(key)
+        .ok_or_else(|| RedDBError::Query(format!("canonical join operator is missing {key}")))?;
     parse_canonical_field_ref(value)
 }
 

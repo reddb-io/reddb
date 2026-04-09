@@ -418,15 +418,14 @@ pub struct UnifiedStore {
     btree_indices: RwLock<HashMap<String, BTree>>,
 }
 
-
+mod builder;
+mod impl_entities;
 mod impl_file;
-mod impl_pages;
 mod impl_native_a;
 mod impl_native_b;
 mod impl_native_c;
-mod impl_entities;
+mod impl_pages;
 mod native_helpers;
-mod builder;
 
-use self::native_helpers::*;
 pub use self::builder::EntityBuilder;
+use self::native_helpers::*;

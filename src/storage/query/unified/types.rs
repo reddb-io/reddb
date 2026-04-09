@@ -1,12 +1,12 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
+use crate::storage::engine::graph_store::{GraphEdgeType, GraphNodeType, GraphStore, StoredNode};
+use crate::storage::engine::graph_table_index::GraphTableIndex;
 use crate::storage::query::ast::{
     CompareOp, EdgeDirection, EdgePattern, FieldRef, Filter, GraphPattern, GraphQuery, JoinQuery,
     JoinType, NodePattern, NodeSelector, PathQuery, Projection, QueryExpr, TableQuery,
 };
-use crate::storage::engine::graph_store::{GraphEdgeType, GraphNodeType, GraphStore, StoredNode};
-use crate::storage::engine::graph_table_index::GraphTableIndex;
 use crate::storage::schema::Value;
 
 /// Execution error

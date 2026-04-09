@@ -19,11 +19,15 @@ impl RedDB {
         );
         report = report.with_diagnostic(
             "catalog.declared_graph_projections",
-            catalog_consistency.declared_graph_projection_count.to_string(),
+            catalog_consistency
+                .declared_graph_projection_count
+                .to_string(),
         );
         report = report.with_diagnostic(
             "catalog.operational_graph_projections",
-            catalog_consistency.operational_graph_projection_count.to_string(),
+            catalog_consistency
+                .operational_graph_projection_count
+                .to_string(),
         );
         report = report.with_diagnostic(
             "catalog.declared_analytics_jobs",
@@ -31,15 +35,23 @@ impl RedDB {
         );
         report = report.with_diagnostic(
             "catalog.operational_analytics_jobs",
-            catalog_consistency.operational_analytics_job_count.to_string(),
+            catalog_consistency
+                .operational_analytics_job_count
+                .to_string(),
         );
         report = report.with_diagnostic(
             "catalog.missing_operational_indexes",
-            catalog_consistency.missing_operational_indexes.len().to_string(),
+            catalog_consistency
+                .missing_operational_indexes
+                .len()
+                .to_string(),
         );
         report = report.with_diagnostic(
             "catalog.undeclared_operational_indexes",
-            catalog_consistency.undeclared_operational_indexes.len().to_string(),
+            catalog_consistency
+                .undeclared_operational_indexes
+                .len()
+                .to_string(),
         );
         report = report.with_diagnostic(
             "catalog.missing_operational_graph_projections",
@@ -70,7 +82,9 @@ impl RedDB {
                 .to_string(),
         );
         if !catalog_consistency.missing_operational_indexes.is_empty()
-            || !catalog_consistency.undeclared_operational_indexes.is_empty()
+            || !catalog_consistency
+                .undeclared_operational_indexes
+                .is_empty()
             || !catalog_consistency
                 .missing_operational_graph_projections
                 .is_empty()
@@ -170,8 +184,7 @@ impl RedDB {
         let index_attention = crate::catalog::index_attention(&catalog_snapshot);
         let graph_projection_attention =
             crate::catalog::graph_projection_attention(&catalog_snapshot);
-        let analytics_job_attention =
-            crate::catalog::analytics_job_attention(&catalog_snapshot);
+        let analytics_job_attention = crate::catalog::analytics_job_attention(&catalog_snapshot);
         report = report.with_diagnostic(
             "catalog.queryable_graph_projections",
             queryable_graph_projections.to_string(),
@@ -180,22 +193,10 @@ impl RedDB {
             "catalog.graph_projections_requiring_rematerialization",
             graph_projections_requiring_rematerialization.to_string(),
         );
-        report = report.with_diagnostic(
-            "catalog.queryable_indexes",
-            queryable_indexes.to_string(),
-        );
-        report = report.with_diagnostic(
-            "catalog.stale_indexes",
-            stale_indexes.to_string(),
-        );
-        report = report.with_diagnostic(
-            "catalog.failed_indexes",
-            failed_indexes.to_string(),
-        );
-        report = report.with_diagnostic(
-            "catalog.building_indexes",
-            building_indexes.to_string(),
-        );
+        report = report.with_diagnostic("catalog.queryable_indexes", queryable_indexes.to_string());
+        report = report.with_diagnostic("catalog.stale_indexes", stale_indexes.to_string());
+        report = report.with_diagnostic("catalog.failed_indexes", failed_indexes.to_string());
+        report = report.with_diagnostic("catalog.building_indexes", building_indexes.to_string());
         report = report.with_diagnostic(
             "catalog.indexes_requiring_rebuild",
             indexes_requiring_rebuild.to_string(),
@@ -233,10 +234,8 @@ impl RedDB {
             collections_requiring_attention.to_string(),
         );
         if let Some(collection) = attention_summary.top_collection.as_ref() {
-            report = report.with_diagnostic(
-                "catalog.top_attention_collection",
-                collection.name.clone(),
-            );
+            report =
+                report.with_diagnostic("catalog.top_attention_collection", collection.name.clone());
             report = report.with_diagnostic(
                 "catalog.top_attention_collection_score",
                 collection.attention_score.to_string(),
@@ -247,10 +246,7 @@ impl RedDB {
             );
         }
         if let Some(index) = attention_summary.top_index.as_ref() {
-            report = report.with_diagnostic(
-                "catalog.top_attention_index",
-                index.name.clone(),
-            );
+            report = report.with_diagnostic("catalog.top_attention_index", index.name.clone());
             report = report.with_diagnostic(
                 "catalog.top_attention_index_score",
                 index.attention_score.to_string(),
@@ -275,10 +271,7 @@ impl RedDB {
             );
         }
         if let Some(job) = attention_summary.top_analytics_job.as_ref() {
-            report = report.with_diagnostic(
-                "catalog.top_attention_analytics_job",
-                job.id.clone(),
-            );
+            report = report.with_diagnostic("catalog.top_attention_analytics_job", job.id.clone());
             report = report.with_diagnostic(
                 "catalog.top_attention_analytics_job_score",
                 job.attention_score.to_string(),
@@ -387,10 +380,8 @@ impl RedDB {
             let metadata_for_native = self.physical_metadata();
             if let Some(native_state) = self.native_physical_state() {
                 let native = native_state.header;
-                report = report.with_diagnostic(
-                    "native_header.sequence",
-                    native.sequence.to_string(),
-                );
+                report =
+                    report.with_diagnostic("native_header.sequence", native.sequence.to_string());
                 report = report.with_diagnostic(
                     "native_header.format_version",
                     native.format_version.to_string(),
@@ -431,10 +422,8 @@ impl RedDB {
                     "native_header.snapshot_count",
                     native.snapshot_count.to_string(),
                 );
-                report = report.with_diagnostic(
-                    "native_header.index_count",
-                    native.index_count.to_string(),
-                );
+                report = report
+                    .with_diagnostic("native_header.index_count", native.index_count.to_string());
                 report = report.with_diagnostic(
                     "native_header.catalog_collection_count",
                     native.catalog_collection_count.to_string(),
@@ -619,7 +608,8 @@ impl RedDB {
                     );
 
                     if let Some(metadata) = metadata_for_native.as_ref() {
-                        let expected_registry = self.native_registry_summary_from_metadata(metadata);
+                        let expected_registry =
+                            self.native_registry_summary_from_metadata(metadata);
                         if *native_registry != expected_registry {
                             report.issue(
                                 "native_registry",
@@ -739,7 +729,8 @@ impl RedDB {
                         native_recovery.omitted_export_count.to_string(),
                     );
                     if let Some(metadata) = metadata_for_native.as_ref() {
-                        let expected_recovery = Self::native_recovery_summary_from_metadata(metadata);
+                        let expected_recovery =
+                            Self::native_recovery_summary_from_metadata(metadata);
                         if *native_recovery != expected_recovery {
                             report.issue(
                                 "native_recovery",
@@ -806,10 +797,8 @@ impl RedDB {
                     .map(|paths| paths.len())
                     .unwrap_or(0);
                 report = report.with_diagnostic("metadata.loaded_from", source.as_str());
-                report = report.with_diagnostic(
-                    "metadata.journal_entries",
-                    journal_count.to_string(),
-                );
+                report =
+                    report.with_diagnostic("metadata.journal_entries", journal_count.to_string());
                 report = report.with_diagnostic(
                     "metadata.last_loaded_from",
                     metadata
@@ -828,20 +817,15 @@ impl RedDB {
                     "metadata.sequence",
                     metadata.superblock.sequence.to_string(),
                 );
-                report = report.with_diagnostic(
-                    "metadata.snapshots",
-                    metadata.snapshots.len().to_string(),
-                );
-                report = report.with_diagnostic(
-                    "metadata.indexes",
-                    metadata.indexes.len().to_string(),
-                );
-                report = report.with_diagnostic(
-                    "metadata.exports",
-                    metadata.exports.len().to_string(),
-                );
+                report = report
+                    .with_diagnostic("metadata.snapshots", metadata.snapshots.len().to_string());
+                report =
+                    report.with_diagnostic("metadata.indexes", metadata.indexes.len().to_string());
+                report =
+                    report.with_diagnostic("metadata.exports", metadata.exports.len().to_string());
                 if let Some(native) = self.store.physical_file_header() {
-                    let inspection = Self::inspect_native_header_against_metadata(native, &metadata);
+                    let inspection =
+                        Self::inspect_native_header_against_metadata(native, &metadata);
                     report = report.with_diagnostic(
                         "native_header.matches_metadata",
                         inspection.consistent.to_string(),
@@ -909,10 +893,12 @@ impl RedDB {
                     metadata.analytics_jobs.len().to_string(),
                 );
             } else if self.options.mode == StorageMode::Persistent {
-                report.issue("metadata", "physical metadata sidecar is missing or unreadable");
+                report.issue(
+                    "metadata",
+                    "physical metadata sidecar is missing or unreadable",
+                );
             }
         }
         report.with_diagnostic("paged_mode", self.paged_mode.to_string())
     }
-
 }

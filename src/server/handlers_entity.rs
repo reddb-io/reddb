@@ -1,7 +1,11 @@
 use super::*;
 
 impl RedDBServer {
-    pub(crate) fn handle_scan(&self, collection: &str, query: &BTreeMap<String, String>) -> HttpResponse {
+    pub(crate) fn handle_scan(
+        &self,
+        collection: &str,
+        query: &BTreeMap<String, String>,
+    ) -> HttpResponse {
         let offset = query
             .get("offset")
             .and_then(|value| value.parse::<usize>().ok())
@@ -30,14 +34,13 @@ impl RedDBServer {
             Ok(payload) => payload,
             Err(response) => return response,
         };
-        let input =
-            match crate::application::entity_payload::parse_create_row_input(
-                collection.to_string(),
-                &payload,
-            ) {
-                Ok(input) => input,
-                Err(err) => return json_error(400, err.to_string()),
-            };
+        let input = match crate::application::entity_payload::parse_create_row_input(
+            collection.to_string(),
+            &payload,
+        ) {
+            Ok(input) => input,
+            Err(err) => return json_error(400, err.to_string()),
+        };
 
         match self.entity_use_cases().create_row(input) {
             Ok(output) => json_response(
@@ -53,14 +56,13 @@ impl RedDBServer {
             Ok(payload) => payload,
             Err(response) => return response,
         };
-        let input =
-            match crate::application::entity_payload::parse_create_node_input(
-                collection.to_string(),
-                &payload,
-            ) {
-                Ok(input) => input,
-                Err(err) => return json_error(400, err.to_string()),
-            };
+        let input = match crate::application::entity_payload::parse_create_node_input(
+            collection.to_string(),
+            &payload,
+        ) {
+            Ok(input) => input,
+            Err(err) => return json_error(400, err.to_string()),
+        };
 
         match self.entity_use_cases().create_node(input) {
             Ok(output) => json_response(
@@ -76,14 +78,13 @@ impl RedDBServer {
             Ok(payload) => payload,
             Err(response) => return response,
         };
-        let input =
-            match crate::application::entity_payload::parse_create_edge_input(
-                collection.to_string(),
-                &payload,
-            ) {
-                Ok(input) => input,
-                Err(err) => return json_error(400, err.to_string()),
-            };
+        let input = match crate::application::entity_payload::parse_create_edge_input(
+            collection.to_string(),
+            &payload,
+        ) {
+            Ok(input) => input,
+            Err(err) => return json_error(400, err.to_string()),
+        };
 
         match self.entity_use_cases().create_edge(input) {
             Ok(output) => json_response(
@@ -153,14 +154,13 @@ impl RedDBServer {
             Ok(payload) => payload,
             Err(response) => return response,
         };
-        let input =
-            match crate::application::entity_payload::parse_create_vector_input(
-                collection.to_string(),
-                &payload,
-            ) {
-                Ok(input) => input,
-                Err(err) => return json_error(400, err.to_string()),
-            };
+        let input = match crate::application::entity_payload::parse_create_vector_input(
+            collection.to_string(),
+            &payload,
+        ) {
+            Ok(input) => input,
+            Err(err) => return json_error(400, err.to_string()),
+        };
 
         match self.entity_use_cases().create_vector(input) {
             Ok(output) => json_response(
@@ -171,7 +171,12 @@ impl RedDBServer {
         }
     }
 
-    pub(crate) fn handle_patch_entity(&self, collection: &str, id: u64, body: Vec<u8>) -> HttpResponse {
+    pub(crate) fn handle_patch_entity(
+        &self,
+        collection: &str,
+        id: u64,
+        body: Vec<u8>,
+    ) -> HttpResponse {
         let payload = match parse_json_body_allow_empty(&body) {
             Ok(payload) => payload,
             Err(response) => return response,

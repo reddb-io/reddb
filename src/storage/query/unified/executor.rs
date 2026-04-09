@@ -55,6 +55,16 @@ impl UnifiedExecutor {
             QueryExpr::Hybrid(_) => Err(ExecutionError::new(
                 "Hybrid queries require VectorStore integration",
             )),
+            QueryExpr::Insert(_)
+            | QueryExpr::Update(_)
+            | QueryExpr::Delete(_)
+            | QueryExpr::CreateTable(_)
+            | QueryExpr::DropTable(_)
+            | QueryExpr::AlterTable(_)
+            | QueryExpr::GraphCommand(_)
+            | QueryExpr::SearchCommand(_) => Err(ExecutionError::new(
+                "DML/DDL/Command statements are not supported in UnifiedExecutor",
+            )),
         }
     }
 
@@ -229,6 +239,16 @@ impl UnifiedExecutor {
                     "Hybrid queries not yet implemented in UnifiedExecutor",
                 ))
             }
+            QueryExpr::Insert(_)
+            | QueryExpr::Update(_)
+            | QueryExpr::Delete(_)
+            | QueryExpr::CreateTable(_)
+            | QueryExpr::DropTable(_)
+            | QueryExpr::AlterTable(_)
+            | QueryExpr::GraphCommand(_)
+            | QueryExpr::SearchCommand(_) => Err(ExecutionError::new(
+                "DML/DDL/Command statements are not supported in UnifiedExecutor",
+            )),
         }
     }
 

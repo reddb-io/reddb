@@ -1,10 +1,10 @@
 use std::fmt;
 
+use super::builders::{GraphQueryBuilder, PathQueryBuilder, TableQueryBuilder};
 pub use crate::storage::engine::distance::DistanceMetric;
 pub use crate::storage::engine::graph_store::{GraphEdgeType, GraphNodeType};
 pub use crate::storage::engine::vector_metadata::MetadataFilter;
 use crate::storage::schema::Value;
-use super::builders::{TableQueryBuilder, GraphQueryBuilder, PathQueryBuilder};
 
 /// Root query expression
 #[derive(Debug, Clone)]
@@ -21,6 +21,22 @@ pub enum QueryExpr {
     Vector(VectorQuery),
     /// Hybrid query combining structured and vector search
     Hybrid(HybridQuery),
+    /// INSERT INTO table (cols) VALUES (vals)
+    Insert(InsertQuery),
+    /// UPDATE table SET col=val WHERE filter
+    Update(UpdateQuery),
+    /// DELETE FROM table WHERE filter
+    Delete(DeleteQuery),
+    /// CREATE TABLE name (columns)
+    CreateTable(CreateTableQuery),
+    /// DROP TABLE name
+    DropTable(DropTableQuery),
+    /// ALTER TABLE name ADD/DROP/RENAME COLUMN
+    AlterTable(AlterTableQuery),
+    /// GRAPH subcommand (NEIGHBORHOOD, SHORTEST_PATH, etc.)
+    GraphCommand(GraphCommand),
+    /// SEARCH subcommand (SIMILAR, TEXT, HYBRID)
+    SearchCommand(SearchCommand),
 }
 
 impl QueryExpr {
@@ -671,6 +687,133 @@ impl Default for FusionStrategy {
 }
 
 // ============================================================================
+// DML/DDL Query Types
+// ============================================================================
+
+/// Entity type qualifier for INSERT statements
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InsertEntityType {
+    /// Default: plain row
+    Row,
+    /// INSERT INTO t NODE (...)
+    Node,
+    /// INSERT INTO t EDGE (...)
+    Edge,
+    /// INSERT INTO t VECTOR (...)
+    Vector,
+    /// INSERT INTO t DOCUMENT (...)
+    Document,
+    /// INSERT INTO t KV (...)
+    Kv,
+}
+
+impl Default for InsertEntityType {
+    fn default() -> Self {
+        Self::Row
+    }
+}
+
+/// INSERT INTO table (columns) VALUES (row1), (row2), ...
+#[derive(Debug, Clone)]
+pub struct InsertQuery {
+    /// Target table name
+    pub table: String,
+    /// Entity type qualifier
+    pub entity_type: InsertEntityType,
+    /// Column names
+    pub columns: Vec<String>,
+    /// Rows of values (each inner Vec is one row)
+    pub values: Vec<Vec<Value>>,
+    /// Whether to return inserted rows
+    pub returning: bool,
+}
+
+/// UPDATE table SET col=val, ... WHERE filter
+#[derive(Debug, Clone)]
+pub struct UpdateQuery {
+    /// Target table name
+    pub table: String,
+    /// Column-value assignments
+    pub assignments: Vec<(String, Value)>,
+    /// Optional WHERE filter
+    pub filter: Option<Filter>,
+}
+
+/// DELETE FROM table WHERE filter
+#[derive(Debug, Clone)]
+pub struct DeleteQuery {
+    /// Target table name
+    pub table: String,
+    /// Optional WHERE filter
+    pub filter: Option<Filter>,
+}
+
+/// CREATE TABLE name (columns)
+#[derive(Debug, Clone)]
+pub struct CreateTableQuery {
+    /// Table name
+    pub name: String,
+    /// Column definitions
+    pub columns: Vec<CreateColumnDef>,
+    /// IF NOT EXISTS flag
+    pub if_not_exists: bool,
+}
+
+/// Column definition for CREATE TABLE
+#[derive(Debug, Clone)]
+pub struct CreateColumnDef {
+    /// Column name
+    pub name: String,
+    /// Data type (e.g. TEXT, INTEGER, EMAIL, ENUM(...), ARRAY(TEXT), DECIMAL(2))
+    pub data_type: String,
+    /// NOT NULL constraint
+    pub not_null: bool,
+    /// DEFAULT value expression
+    pub default: Option<String>,
+    /// Compression level (COMPRESS:N)
+    pub compress: Option<u8>,
+    /// UNIQUE constraint
+    pub unique: bool,
+    /// PRIMARY KEY constraint
+    pub primary_key: bool,
+    /// Enum variant names (for ENUM type)
+    pub enum_variants: Vec<String>,
+    /// Array element type (for ARRAY type)
+    pub array_element: Option<String>,
+    /// Decimal precision (for DECIMAL type)
+    pub decimal_precision: Option<u8>,
+}
+
+/// DROP TABLE name
+#[derive(Debug, Clone)]
+pub struct DropTableQuery {
+    /// Table name
+    pub name: String,
+    /// IF EXISTS flag
+    pub if_exists: bool,
+}
+
+/// ALTER TABLE name operations
+#[derive(Debug, Clone)]
+pub struct AlterTableQuery {
+    /// Table name
+    pub name: String,
+    /// Alter operations
+    pub operations: Vec<AlterOperation>,
+}
+
+/// Single ALTER TABLE operation
+#[derive(Debug, Clone)]
+pub enum AlterOperation {
+    /// ADD COLUMN definition
+    AddColumn(CreateColumnDef),
+    /// DROP COLUMN name
+    DropColumn(String),
+    /// RENAME COLUMN from TO to
+    RenameColumn { from: String, to: String },
+}
+
+// ============================================================================
 // Shared Types
 // ============================================================================
 
@@ -826,6 +969,80 @@ impl OrderByClause {
             nulls_first: true,
         }
     }
+}
+
+// ============================================================================
+// Graph Commands
+// ============================================================================
+
+/// Graph analytics command issued via SQL-like syntax
+#[derive(Debug, Clone)]
+pub enum GraphCommand {
+    /// GRAPH NEIGHBORHOOD 'source' [DEPTH n] [DIRECTION dir]
+    Neighborhood {
+        source: String,
+        depth: u32,
+        direction: String,
+    },
+    /// GRAPH SHORTEST_PATH 'source' TO 'target' [ALGORITHM alg] [DIRECTION dir]
+    ShortestPath {
+        source: String,
+        target: String,
+        algorithm: String,
+        direction: String,
+    },
+    /// GRAPH TRAVERSE 'source' [STRATEGY bfs|dfs] [DEPTH n] [DIRECTION dir]
+    Traverse {
+        source: String,
+        strategy: String,
+        depth: u32,
+        direction: String,
+    },
+    /// GRAPH CENTRALITY [ALGORITHM alg]
+    Centrality { algorithm: String },
+    /// GRAPH COMMUNITY [ALGORITHM alg] [MAX_ITERATIONS n]
+    Community {
+        algorithm: String,
+        max_iterations: u32,
+    },
+    /// GRAPH COMPONENTS [MODE connected|weak|strong]
+    Components { mode: String },
+    /// GRAPH CYCLES [MAX_LENGTH n]
+    Cycles { max_length: u32 },
+    /// GRAPH CLUSTERING
+    Clustering,
+    /// GRAPH TOPOLOGICAL_SORT
+    TopologicalSort,
+}
+
+// ============================================================================
+// Search Commands
+// ============================================================================
+
+/// Search command issued via SQL-like syntax
+#[derive(Debug, Clone)]
+pub enum SearchCommand {
+    /// SEARCH SIMILAR [v1, v2, ...] [COLLECTION col] [LIMIT n] [MIN_SCORE f]
+    Similar {
+        vector: Vec<f32>,
+        collection: String,
+        limit: usize,
+        min_score: f32,
+    },
+    /// SEARCH TEXT 'query' [COLLECTION col] [LIMIT n] [FUZZY]
+    Text {
+        query: String,
+        collection: Option<String>,
+        limit: usize,
+        fuzzy: bool,
+    },
+    /// SEARCH HYBRID [vector] [TEXT 'query'] COLLECTION col [LIMIT n]
+    Hybrid {
+        vector: Option<Vec<f32>>,
+        query: Option<String>,
+        collection: String,
+        limit: usize,
+    },
 }
 
 // ============================================================================

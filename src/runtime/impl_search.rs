@@ -210,18 +210,9 @@ impl RedDBRuntime {
                 return true;
             };
             match &entity.kind {
-                EntityKind::GraphNode {
-                    label,
-                    node_type,
-                } => {
-                    pattern
-                        .node_label
-                        .as_ref()
-                        .is_none_or(|n| label == n)
-                        && pattern
-                            .node_type
-                            .as_ref()
-                            .is_none_or(|t| node_type == t)
+                EntityKind::GraphNode { label, node_type } => {
+                    pattern.node_label.as_ref().is_none_or(|n| label == n)
+                        && pattern.node_type.as_ref().is_none_or(|t| node_type == t)
                 }
                 _ => false,
             }
@@ -248,14 +239,12 @@ impl RedDBRuntime {
                     apply_filters(&item.entity, &dsl_filters) && matches_graph_pattern(&item.entity)
                 });
             } else if graph_pattern_filter.is_some() {
-                result.matches.retain(|item| matches_graph_pattern(&item.entity));
+                result
+                    .matches
+                    .retain(|item| matches_graph_pattern(&item.entity));
             }
 
-            runtime_filter_dsl_result(
-                &mut result,
-                entity_types.clone(),
-                capabilities.clone(),
-            );
+            runtime_filter_dsl_result(&mut result, entity_types.clone(), capabilities.clone());
             for item in &mut result.matches {
                 item.components.text_relevance = Some(item.score);
                 item.components.final_score = Some(item.score);
@@ -354,20 +343,12 @@ impl RedDBRuntime {
                 merged.matches.retain(|item| item.score >= min_score);
             }
 
-            runtime_filter_dsl_result(
-                &mut merged,
-                entity_types.clone(),
-                capabilities.clone(),
-            );
+            runtime_filter_dsl_result(&mut merged, entity_types.clone(), capabilities.clone());
             merged.matches.truncate(result_limit);
             return Ok(merged);
         }
 
-        runtime_filter_dsl_result(
-            &mut result,
-            entity_types.clone(),
-            capabilities.clone(),
-        );
+        runtime_filter_dsl_result(&mut result, entity_types.clone(), capabilities.clone());
         result.matches.truncate(result_limit);
         Ok(result)
     }
@@ -414,5 +395,4 @@ impl RedDBRuntime {
         }
         Ok(result)
     }
-
 }

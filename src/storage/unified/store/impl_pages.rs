@@ -1,6 +1,11 @@
 use super::*;
 
 impl UnifiedStore {
+    /// Get a reference to the underlying pager (if in paged mode).
+    pub fn pager(&self) -> Option<&Arc<Pager>> {
+        self.pager.as_ref()
+    }
+
     pub fn with_config(config: UnifiedStoreConfig) -> Self {
         Self {
             config,
@@ -169,9 +174,7 @@ impl UnifiedStore {
                             self.btree_indices
                                 .write()
                                 .map_err(|_| {
-                                    StoreError::Internal(
-                                        "btree_indices lock poisoned".into(),
-                                    )
+                                    StoreError::Internal("btree_indices lock poisoned".into())
                                 })?
                                 .insert(name, btree);
                         }
@@ -240,9 +243,7 @@ impl UnifiedStore {
 
                         self.cross_refs
                             .write()
-                            .map_err(|_| {
-                                StoreError::Internal("cross_refs lock poisoned".into())
-                            })?
+                            .map_err(|_| StoreError::Internal("cross_refs lock poisoned".into()))?
                             .entry(source_id)
                             .or_default()
                             .push((target_id, ref_type, target_collection.clone()));
@@ -274,7 +275,10 @@ impl UnifiedStore {
     }
 
     /// Deserialize an entity from binary bytes
-    pub(crate) fn deserialize_entity(data: &[u8], format_version: u32) -> Result<UnifiedEntity, StoreError> {
+    pub(crate) fn deserialize_entity(
+        data: &[u8],
+        format_version: u32,
+    ) -> Result<UnifiedEntity, StoreError> {
         let mut pos = 0;
         Self::read_entity_binary(data, &mut pos, format_version)
             .map_err(|e| StoreError::Serialization(e.to_string()))
@@ -457,5 +461,4 @@ impl UnifiedStore {
     pub fn db_path(&self) -> Option<&Path> {
         self.db_path.as_deref()
     }
-
 }

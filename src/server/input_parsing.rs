@@ -1,6 +1,9 @@
 use super::*;
 
-pub(crate) fn json_vector_field(payload: &JsonValue, field: &str) -> Result<Vec<f32>, HttpResponse> {
+pub(crate) fn json_vector_field(
+    payload: &JsonValue,
+    field: &str,
+) -> Result<Vec<f32>, HttpResponse> {
     let values = payload
         .get(field)
         .and_then(JsonValue::as_array)
@@ -56,10 +59,6 @@ pub(crate) fn optional_json_vector_field(
         Some(JsonValue::Null) | None => Ok(None),
         Some(_) => json_vector_field(payload, field).map(Some),
     }
-}
-
-pub(crate) fn authorization_bearer_token<'a>(headers: &'a BTreeMap<String, String>) -> Option<&'a str> {
-    headers.get("authorization")?.strip_prefix("Bearer ")
 }
 
 pub(crate) fn json_collection_entity_ref(

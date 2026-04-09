@@ -38,7 +38,10 @@ impl RedDB {
     pub fn exports(&self) -> Vec<ExportDescriptor> {
         self.physical_metadata()
             .map(|metadata| metadata.exports)
-            .or_else(|| self.native_physical_state().map(|state| self.exports_from_native_state(&state)))
+            .or_else(|| {
+                self.native_physical_state()
+                    .map(|state| self.exports_from_native_state(&state))
+            })
             .unwrap_or_default()
     }
 
@@ -46,7 +49,10 @@ impl RedDB {
     pub fn snapshots(&self) -> Vec<crate::physical::SnapshotDescriptor> {
         self.physical_metadata()
             .map(|metadata| metadata.snapshots)
-            .or_else(|| self.native_physical_state().map(|state| self.snapshots_from_native_state(&state)))
+            .or_else(|| {
+                self.native_physical_state()
+                    .map(|state| self.snapshots_from_native_state(&state))
+            })
             .unwrap_or_default()
     }
 
@@ -201,7 +207,8 @@ impl RedDB {
             if let Some(idx) = idx {
                 metadata.graph_projections[idx].updated_at_unix_ms = now;
                 metadata.graph_projections[idx].state = "materialized".to_string();
-                metadata.graph_projections[idx].last_materialized_sequence = Some(metadata.superblock.sequence);
+                metadata.graph_projections[idx].last_materialized_sequence =
+                    Some(metadata.superblock.sequence);
                 let result = metadata.graph_projections[idx].clone();
                 Self::rearm_projection_dependent_jobs_declared(metadata, name, now);
                 return Some(result);
@@ -655,7 +662,10 @@ impl RedDB {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis(),
-            snapshot_id: metadata.snapshots.last().map(|snapshot| snapshot.snapshot_id),
+            snapshot_id: metadata
+                .snapshots
+                .last()
+                .map(|snapshot| snapshot.snapshot_id),
             superblock_sequence: metadata.superblock.sequence,
             data_path: export_data_path.display().to_string(),
             metadata_path: export_metadata_path.display().to_string(),
@@ -663,7 +673,9 @@ impl RedDB {
             total_entities: metadata.catalog.total_entities,
         };
 
-        metadata.exports.retain(|export| export.name != descriptor.name);
+        metadata
+            .exports
+            .retain(|export| export.name != descriptor.name);
         metadata.exports.push(descriptor.clone());
         self.prune_export_registry(&mut metadata.exports);
         metadata.save_for_data_path(path)?;
@@ -813,10 +825,9 @@ impl RedDB {
             return Err(format!("index '{name}' is disabled").into());
         }
         if !status.operational {
-            return Err(format!(
-                "index '{name}' is declared but not operationally materialized"
-            )
-            .into());
+            return Err(
+                format!("index '{name}' is declared but not operationally materialized").into(),
+            );
         }
         let warmed_artifact = self
             .physical_indexes()
@@ -884,14 +895,14 @@ impl RedDB {
                 rebuilt.artifact_kind = rebuilt
                     .artifact_kind
                     .or_else(|| declared_index.artifact_kind.clone());
-                rebuilt.artifact_root_page =
-                    rebuilt.artifact_root_page.or(declared_index.artifact_root_page);
-                rebuilt.artifact_checksum =
-                    rebuilt.artifact_checksum.or(declared_index.artifact_checksum);
-                rebuilt.build_state = Self::finalize_rebuilt_index_build_state(
-                    &declared_index,
-                    &rebuilt,
-                );
+                rebuilt.artifact_root_page = rebuilt
+                    .artifact_root_page
+                    .or(declared_index.artifact_root_page);
+                rebuilt.artifact_checksum = rebuilt
+                    .artifact_checksum
+                    .or(declared_index.artifact_checksum);
+                rebuilt.build_state =
+                    Self::finalize_rebuilt_index_build_state(&declared_index, &rebuilt);
                 rebuilt.last_refresh_ms = Some(now);
 
                 if let Some(existing) = metadata
@@ -950,5 +961,4 @@ impl RedDB {
 
         "declared-unbuilt".to_string()
     }
-
 }

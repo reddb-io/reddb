@@ -172,6 +172,15 @@ impl CostEstimator {
             QueryExpr::Path(pq) => self.estimate_path(pq),
             QueryExpr::Vector(vq) => self.estimate_vector(vq),
             QueryExpr::Hybrid(hq) => self.estimate_hybrid(hq),
+            // DML/DDL statements have minimal query cost
+            QueryExpr::Insert(_)
+            | QueryExpr::Update(_)
+            | QueryExpr::Delete(_)
+            | QueryExpr::CreateTable(_)
+            | QueryExpr::DropTable(_)
+            | QueryExpr::AlterTable(_)
+            | QueryExpr::GraphCommand(_)
+            | QueryExpr::SearchCommand(_) => PlanCost::new(1.0, 1.0, 0.0),
         }
     }
 
@@ -184,6 +193,15 @@ impl CostEstimator {
             QueryExpr::Path(pq) => self.estimate_path_cardinality(pq),
             QueryExpr::Vector(vq) => self.estimate_vector_cardinality(vq),
             QueryExpr::Hybrid(hq) => self.estimate_hybrid_cardinality(hq),
+            // DML/DDL/Command statements return affected-row count or nothing
+            QueryExpr::Insert(_)
+            | QueryExpr::Update(_)
+            | QueryExpr::Delete(_)
+            | QueryExpr::CreateTable(_)
+            | QueryExpr::DropTable(_)
+            | QueryExpr::AlterTable(_)
+            | QueryExpr::GraphCommand(_)
+            | QueryExpr::SearchCommand(_) => CardinalityEstimate::new(1.0, 1.0),
         }
     }
 

@@ -426,12 +426,12 @@ impl InMemoryVectorExecutor {
             })
             .collect();
 
-        results.sort_by(|a, b| {
-            match a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal) {
+        results.sort_by(
+            |a, b| match a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal) {
                 std::cmp::Ordering::Equal => a.0.cmp(&b.0),
                 ordering => ordering,
-            }
-        });
+            },
+        );
         results.truncate(k);
         results
     }

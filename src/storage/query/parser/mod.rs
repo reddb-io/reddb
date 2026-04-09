@@ -36,13 +36,17 @@
 //! ```
 
 mod cte;
+mod ddl;
+mod dml;
 mod error;
 mod filter;
 mod graph;
+mod graph_commands;
 mod helpers;
 mod hybrid;
 mod join;
 mod path;
+mod search_commands;
 mod table;
 mod vector;
 
@@ -227,8 +231,19 @@ impl<'a> Parser<'a> {
             Token::From => self.parse_from_query(),
             Token::Vector => self.parse_vector_query(),
             Token::Hybrid => self.parse_hybrid_query(),
+            Token::Insert => self.parse_insert_query(),
+            Token::Update => self.parse_update_query(),
+            Token::Delete => self.parse_delete_query(),
+            Token::Create => self.parse_create_table_query(),
+            Token::Drop => self.parse_drop_table_query(),
+            Token::Alter => self.parse_alter_table_query(),
+            Token::Graph => self.parse_graph_command(),
+            Token::Search => self.parse_search_command(),
             other => Err(ParseError::expected(
-                vec!["SELECT", "MATCH", "PATH", "FROM", "VECTOR", "HYBRID"],
+                vec![
+                    "SELECT", "MATCH", "PATH", "FROM", "VECTOR", "HYBRID", "INSERT", "UPDATE",
+                    "DELETE", "CREATE", "DROP", "ALTER", "GRAPH", "SEARCH",
+                ],
                 other,
                 self.position(),
             )),

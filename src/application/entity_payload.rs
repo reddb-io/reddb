@@ -21,8 +21,7 @@ pub(crate) fn parse_create_row_input(
     if let Some(links) = payload.get("links").and_then(JsonValue::as_object) {
         if let Some(nodes) = links.get("nodes").and_then(JsonValue::as_array) {
             for node in nodes {
-                let (target_collection, id) =
-                    parse_collection_entity_ref(node, "row node link")?;
+                let (target_collection, id) = parse_collection_entity_ref(node, "row node link")?;
                 node_links.push(NodeRef::new(target_collection, EntityId::new(id)));
             }
         }
@@ -63,9 +62,9 @@ pub(crate) fn parse_create_node_input(
     if let Some(links) = payload.get("links").and_then(JsonValue::as_object) {
         if let Some(tables) = links.get("tables").and_then(JsonValue::as_array) {
             for table in tables {
-                let object = table.as_object().ok_or_else(|| {
-                    RedDBError::Query("table links must be objects".to_string())
-                })?;
+                let object = table
+                    .as_object()
+                    .ok_or_else(|| RedDBError::Query("table links must be objects".to_string()))?;
                 let key = object
                     .get("key")
                     .and_then(JsonValue::as_str)
@@ -73,9 +72,7 @@ pub(crate) fn parse_create_node_input(
                 let table_name = object
                     .get("table")
                     .and_then(JsonValue::as_str)
-                    .ok_or_else(|| {
-                        RedDBError::Query("table links require 'table'".to_string())
-                    })?;
+                    .ok_or_else(|| RedDBError::Query("table links require 'table'".to_string()))?;
                 let row_id = parse_required_u64_field(object, "row_id", "table links")?;
                 table_links.push(CreateNodeTableLinkInput {
                     key: key.to_string(),
@@ -85,9 +82,9 @@ pub(crate) fn parse_create_node_input(
         }
         if let Some(nodes) = links.get("nodes").and_then(JsonValue::as_array) {
             for node in nodes {
-                let object = node.as_object().ok_or_else(|| {
-                    RedDBError::Query("node links must be objects".to_string())
-                })?;
+                let object = node
+                    .as_object()
+                    .ok_or_else(|| RedDBError::Query("node links must be objects".to_string()))?;
                 let target = parse_required_u64_field(object, "id", "node links")?;
                 let edge_label = object
                     .get("edge_label")
@@ -165,15 +162,12 @@ pub(crate) fn parse_create_vector_input(
             let table = object
                 .get("table")
                 .and_then(JsonValue::as_str)
-                .ok_or_else(|| {
-                    RedDBError::Query("vector row link requires 'table'".to_string())
-                })?;
+                .ok_or_else(|| RedDBError::Query("vector row link requires 'table'".to_string()))?;
             let row_id = parse_required_u64_field(object, "row_id", "vector row link")?;
             link_row = Some(TableRef::new(table, row_id));
         }
         if let Some(node) = link.get("node") {
-            let (target_collection, id) =
-                parse_collection_entity_ref(node, "vector node link")?;
+            let (target_collection, id) = parse_collection_entity_ref(node, "vector node link")?;
             link_node = Some(NodeRef::new(target_collection, EntityId::new(id)));
         }
     }
@@ -227,7 +221,9 @@ fn parse_required_value_map(
     Ok(out)
 }
 
-fn parse_metadata_entries(payload: &JsonValue) -> RedDBResult<Vec<(String, crate::storage::unified::MetadataValue)>> {
+fn parse_metadata_entries(
+    payload: &JsonValue,
+) -> RedDBResult<Vec<(String, crate::storage::unified::MetadataValue)>> {
     let mut out = Vec::new();
     if let Some(metadata) = payload.get("metadata").and_then(JsonValue::as_object) {
         out.reserve(metadata.len());
@@ -245,9 +241,9 @@ fn parse_node_embeddings(payload: &JsonValue) -> RedDBResult<Vec<CreateNodeEmbed
 
     let mut out = Vec::with_capacity(values.len());
     for value in values {
-        let object = value.as_object().ok_or_else(|| {
-            RedDBError::Query("embeddings must be objects".to_string())
-        })?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| RedDBError::Query("embeddings must be objects".to_string()))?;
         let name = object
             .get("name")
             .and_then(JsonValue::as_str)
@@ -279,18 +275,18 @@ fn parse_collection_entity_ref(value: &JsonValue, context: &str) -> RedDBResult<
     Ok((collection.to_string(), id))
 }
 
-fn parse_required_u64_json(
-    payload: &JsonValue,
-    field: &str,
-    context: &str,
-) -> RedDBResult<u64> {
+fn parse_required_u64_json(payload: &JsonValue, field: &str, context: &str) -> RedDBResult<u64> {
     let value = payload
         .get(field)
         .ok_or_else(|| RedDBError::Query(format!("{context} requires '{field}'")))?;
     parse_u64_value(value, field)
 }
 
-fn parse_required_u64_field(object: &Map<String, JsonValue>, field: &str, context: &str) -> RedDBResult<u64> {
+fn parse_required_u64_field(
+    object: &Map<String, JsonValue>,
+    field: &str,
+    context: &str,
+) -> RedDBResult<u64> {
     let value = object
         .get(field)
         .ok_or_else(|| RedDBError::Query(format!("{context} requires '{field}'")))?;
@@ -324,7 +320,9 @@ fn parse_f32_array_value(value: &JsonValue, field: &str) -> RedDBResult<Vec<f32>
 
 fn parse_u64_value(value: &JsonValue, field: &str) -> RedDBResult<u64> {
     let Some(value) = value.as_f64() else {
-        return Err(RedDBError::Query(format!("field '{field}' must be a number")));
+        return Err(RedDBError::Query(format!(
+            "field '{field}' must be a number"
+        )));
     };
     if value.is_sign_negative() {
         return Err(RedDBError::Query(format!(

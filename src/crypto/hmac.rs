@@ -19,8 +19,8 @@ impl HmacCtx {
 
 pub fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
     type HmacSha256 = Hmac<Sha256>;
-    let mut mac = HmacSha256::new_from_slice(key)
-        .unwrap_or_else(|_| panic!("invalid HMAC key size"));
+    let mut mac =
+        HmacSha256::new_from_slice(key).unwrap_or_else(|_| panic!("invalid HMAC key size"));
     mac.update(message);
     let result = mac.finalize().into_bytes();
     let mut out = [0u8; 32];

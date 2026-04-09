@@ -3,10 +3,15 @@ use super::*;
 pub(crate) fn status_text(status: u16) -> &'static str {
     match status {
         200 => "OK",
+        201 => "Created",
         400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        409 => "Conflict",
         500 => "Internal Server Error",
+        501 => "Not Implemented",
         503 => "Service Unavailable",
         _ => "OK",
     }
@@ -47,9 +52,9 @@ impl HttpRequest {
         let (method, target, headers) = {
             let head = String::from_utf8_lossy(&buffer[..header_end]);
             let mut lines = head.lines();
-            let request_line = lines
-                .next()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing request line"))?;
+            let request_line = lines.next().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "missing request line")
+            })?;
             let mut request_parts = request_line.split_whitespace();
             let method = request_parts
                 .next()

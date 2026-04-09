@@ -8,9 +8,9 @@ use crate::application::{
 };
 use crate::json::Value as JsonValue;
 use crate::runtime::{
-    RuntimeGraphCentralityAlgorithm, RuntimeGraphCommunityAlgorithm,
-    RuntimeGraphComponentsMode, RuntimeGraphDirection, RuntimeGraphPathAlgorithm,
-    RuntimeGraphProjection, RuntimeGraphTraversalStrategy,
+    RuntimeGraphCentralityAlgorithm, RuntimeGraphCommunityAlgorithm, RuntimeGraphComponentsMode,
+    RuntimeGraphDirection, RuntimeGraphPathAlgorithm, RuntimeGraphProjection,
+    RuntimeGraphTraversalStrategy,
 };
 use crate::{RedDBError, RedDBResult};
 
@@ -53,8 +53,10 @@ pub(crate) fn parse_graph_traversal_input(
         direction: parse_graph_direction(payload.get("direction").and_then(JsonValue::as_str))
             .unwrap_or(RuntimeGraphDirection::Outgoing),
         max_depth: json_usize_field(payload, "max_depth").unwrap_or(3).max(1),
-        strategy: parse_graph_traversal_strategy(payload.get("strategy").and_then(JsonValue::as_str))
-            .unwrap_or(RuntimeGraphTraversalStrategy::Bfs),
+        strategy: parse_graph_traversal_strategy(
+            payload.get("strategy").and_then(JsonValue::as_str),
+        )
+        .unwrap_or(RuntimeGraphTraversalStrategy::Bfs),
         edge_labels: json_string_list_field(payload, "edge_labels"),
         projection,
     })
@@ -100,8 +102,10 @@ pub(crate) fn parse_graph_centrality_input(
     projection: Option<RuntimeGraphProjection>,
 ) -> GraphCentralityInput {
     GraphCentralityInput {
-        algorithm: parse_graph_centrality_algorithm(payload.get("algorithm").and_then(JsonValue::as_str))
-            .unwrap_or(RuntimeGraphCentralityAlgorithm::PageRank),
+        algorithm: parse_graph_centrality_algorithm(
+            payload.get("algorithm").and_then(JsonValue::as_str),
+        )
+        .unwrap_or(RuntimeGraphCentralityAlgorithm::PageRank),
         top_k: json_usize_field(payload, "top_k").unwrap_or(25).max(1),
         normalize: json_bool_field(payload, "normalize").unwrap_or(true),
         max_iterations: json_usize_field(payload, "max_iterations"),
@@ -133,8 +137,10 @@ pub(crate) fn parse_graph_communities_input(
     projection: Option<RuntimeGraphProjection>,
 ) -> GraphCommunitiesInput {
     GraphCommunitiesInput {
-        algorithm: parse_graph_community_algorithm(payload.get("algorithm").and_then(JsonValue::as_str))
-            .unwrap_or(RuntimeGraphCommunityAlgorithm::Louvain),
+        algorithm: parse_graph_community_algorithm(
+            payload.get("algorithm").and_then(JsonValue::as_str),
+        )
+        .unwrap_or(RuntimeGraphCommunityAlgorithm::Louvain),
         min_size: json_usize_field(payload, "min_size").unwrap_or(1).max(1),
         max_iterations: json_usize_field(payload, "max_iterations"),
         resolution: json_f32_field(payload, "resolution").map(|value| value as f64),
@@ -171,7 +177,12 @@ pub(crate) fn graph_clustering_metadata(input: &GraphClusteringInput) -> BTreeMa
         ("top_k", input.top_k.to_string()),
         (
             "include_triangles",
-            if input.include_triangles { "true" } else { "false" }.to_string(),
+            if input.include_triangles {
+                "true"
+            } else {
+                "false"
+            }
+            .to_string(),
         ),
     ])
 }
@@ -224,7 +235,9 @@ pub(crate) fn parse_graph_cycles_input(
 ) -> GraphCyclesInput {
     GraphCyclesInput {
         max_length: json_usize_field(payload, "max_length").unwrap_or(10).max(2),
-        max_cycles: json_usize_field(payload, "max_cycles").unwrap_or(100).max(1),
+        max_cycles: json_usize_field(payload, "max_cycles")
+            .unwrap_or(100)
+            .max(1),
         projection,
     }
 }
@@ -272,7 +285,9 @@ pub(crate) fn parse_graph_path_algorithm(value: Option<&str>) -> Option<RuntimeG
     }
 }
 
-pub(crate) fn parse_graph_components_mode(value: Option<&str>) -> Option<RuntimeGraphComponentsMode> {
+pub(crate) fn parse_graph_components_mode(
+    value: Option<&str>,
+) -> Option<RuntimeGraphComponentsMode> {
     match value.map(normalize_graph_token).as_deref() {
         Some("connected") | Some("undirected") => Some(RuntimeGraphComponentsMode::Connected),
         Some("weak") | Some("wcc") => Some(RuntimeGraphComponentsMode::Weak),
@@ -371,7 +386,9 @@ pub(crate) fn analytics_metadata(entries: Vec<(&str, String)>) -> BTreeMap<Strin
 
 fn parse_required_string_field(payload: &JsonValue, field: &str) -> RedDBResult<String> {
     let Some(value) = payload.get(field).and_then(JsonValue::as_str) else {
-        return Err(RedDBError::Query(format!("field '{field}' must be a string")));
+        return Err(RedDBError::Query(format!(
+            "field '{field}' must be a string"
+        )));
     };
     Ok(value.to_string())
 }

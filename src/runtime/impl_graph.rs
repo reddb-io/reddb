@@ -9,7 +9,8 @@ impl RedDBRuntime {
         edge_labels: Option<Vec<String>>,
         projection: Option<RuntimeGraphProjection>,
     ) -> RedDBResult<RuntimeGraphNeighborhoodResult> {
-        let graph = materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
+        let graph =
+            materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
         ensure_graph_node(&graph, node)?;
         let edge_filters = merge_edge_filters(edge_labels, projection.as_ref());
 
@@ -34,7 +35,8 @@ impl RedDBRuntime {
                 continue;
             }
 
-            let mut adjacent = graph_adjacent_edges(&graph, &current, direction, edge_filters.as_ref());
+            let mut adjacent =
+                graph_adjacent_edges(&graph, &current, direction, edge_filters.as_ref());
             adjacent.sort_by(|left, right| left.0.cmp(&right.0));
 
             for (neighbor, edge) in adjacent {
@@ -64,7 +66,8 @@ impl RedDBRuntime {
         edge_labels: Option<Vec<String>>,
         projection: Option<RuntimeGraphProjection>,
     ) -> RedDBResult<RuntimeGraphTraversalResult> {
-        let graph = materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
+        let graph =
+            materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
         ensure_graph_node(&graph, source)?;
         let edge_filters = merge_edge_filters(edge_labels, projection.as_ref());
 
@@ -152,7 +155,8 @@ impl RedDBRuntime {
         edge_labels: Option<Vec<String>>,
         projection: Option<RuntimeGraphProjection>,
     ) -> RedDBResult<RuntimeGraphPathResult> {
-        let graph = materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
+        let graph =
+            materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
         ensure_graph_node(&graph, source)?;
         ensure_graph_node(&graph, target)?;
 
@@ -174,16 +178,14 @@ impl RedDBRuntime {
                     path: result.path.map(|path| path_to_runtime(&graph, &path)),
                 }
             }
-            _ => {
-                shortest_path_runtime(
-                    &graph,
-                    source,
-                    target,
-                    direction,
-                    algorithm,
-                    merged_edge_filters.as_ref(),
-                )?
-            }
+            _ => shortest_path_runtime(
+                &graph,
+                source,
+                target,
+                direction,
+                algorithm,
+                merged_edge_filters.as_ref(),
+            )?,
         };
 
         Ok(path)
@@ -195,7 +197,8 @@ impl RedDBRuntime {
         min_size: usize,
         projection: Option<RuntimeGraphProjection>,
     ) -> RedDBResult<RuntimeGraphComponentsResult> {
-        let graph = materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
+        let graph =
+            materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
         let min_size = min_size.max(1);
         let components = match mode {
             RuntimeGraphComponentsMode::Connected => ConnectedComponents::find(&graph)
@@ -249,7 +252,8 @@ impl RedDBRuntime {
         alpha: Option<f64>,
         projection: Option<RuntimeGraphProjection>,
     ) -> RedDBResult<RuntimeGraphCentralityResult> {
-        let graph = materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
+        let graph =
+            materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
         let top_k = top_k.max(1);
 
         match algorithm {
@@ -261,7 +265,8 @@ impl RedDBRuntime {
                     .iter()
                     .map(|(node_id, total_degree)| (node_id.clone(), *total_degree))
                     .collect();
-                pairs.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+                pairs
+                    .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
                 pairs.truncate(top_k);
 
                 for (node_id, total_degree) in pairs {
@@ -356,7 +361,8 @@ impl RedDBRuntime {
         resolution: Option<f64>,
         projection: Option<RuntimeGraphProjection>,
     ) -> RedDBResult<RuntimeGraphCommunityResult> {
-        let graph = materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
+        let graph =
+            materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
         let min_size = min_size.max(1);
 
         match algorithm {
@@ -406,7 +412,10 @@ impl RedDBRuntime {
                     })
                     .collect::<Vec<_>>();
                 communities.sort_by(|left, right| {
-                    right.size.cmp(&left.size).then_with(|| left.id.cmp(&right.id))
+                    right
+                        .size
+                        .cmp(&left.size)
+                        .then_with(|| left.id.cmp(&right.id))
                 });
                 Ok(RuntimeGraphCommunityResult {
                     algorithm,
@@ -427,7 +436,8 @@ impl RedDBRuntime {
         include_triangles: bool,
         projection: Option<RuntimeGraphProjection>,
     ) -> RedDBResult<RuntimeGraphClusteringResult> {
-        let graph = materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
+        let graph =
+            materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
         let top_k = top_k.max(1);
         let result = ClusteringCoefficient::compute(&graph);
         let triangle_count = if include_triangles {
@@ -452,9 +462,12 @@ impl RedDBRuntime {
         max_iterations: Option<usize>,
         projection: Option<RuntimeGraphProjection>,
     ) -> RedDBResult<RuntimeGraphCentralityResult> {
-        let graph = materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
+        let graph =
+            materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
         if seeds.is_empty() {
-            return Err(RedDBError::Query("personalized pagerank requires at least one seed".to_string()));
+            return Err(RedDBError::Query(
+                "personalized pagerank requires at least one seed".to_string(),
+            ));
         }
         for seed in &seeds {
             ensure_graph_node(&graph, seed)?;
@@ -489,7 +502,8 @@ impl RedDBRuntime {
         max_iterations: Option<usize>,
         projection: Option<RuntimeGraphProjection>,
     ) -> RedDBResult<RuntimeGraphHitsResult> {
-        let graph = materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
+        let graph =
+            materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
         let mut runner = HITS::new();
         if let Some(epsilon) = epsilon {
             runner.epsilon = epsilon.max(0.0);
@@ -513,7 +527,8 @@ impl RedDBRuntime {
         max_cycles: usize,
         projection: Option<RuntimeGraphProjection>,
     ) -> RedDBResult<RuntimeGraphCyclesResult> {
-        let graph = materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
+        let graph =
+            materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
         let result = CycleDetector::new()
             .max_length(max_length.max(2))
             .max_cycles(max_cycles.max(1))
@@ -533,7 +548,8 @@ impl RedDBRuntime {
         &self,
         projection: Option<RuntimeGraphProjection>,
     ) -> RedDBResult<RuntimeGraphTopologicalSortResult> {
-        let graph = materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
+        let graph =
+            materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
         let ordered_nodes = match DFS::topological_sort(&graph) {
             Some(order) => order
                 .into_iter()

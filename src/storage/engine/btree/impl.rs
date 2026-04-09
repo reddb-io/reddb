@@ -19,7 +19,10 @@ impl BTree {
 
     /// Get the root page ID
     pub fn root_page_id(&self) -> u32 {
-        *self.root_page_id.read().expect("btree root_page_id RwLock poisoned")
+        *self
+            .root_page_id
+            .read()
+            .expect("btree root_page_id RwLock poisoned")
     }
 
     /// Check if tree is empty
@@ -341,7 +344,9 @@ impl BTree {
             let new_root_id = new_root.page_id();
             self.pager.write_page(new_root_id, new_root)?;
             *self.root_page_id.write().map_err(|e| {
-                BTreeError::LockPoisoned(format!("insert_into_parent: root_page_id write lock: {e}"))
+                BTreeError::LockPoisoned(format!(
+                    "insert_into_parent: root_page_id write lock: {e}"
+                ))
             })? = new_root_id;
             return Ok(());
         }
@@ -655,7 +660,9 @@ impl BTree {
                 if interior_entries_size(&left_keys).saturating_sub(borrow_size) >= min_bytes {
                     let parent_key = parent_keys[child_index - 1].clone();
                     let borrowed_key = left_keys.pop().ok_or_else(|| {
-                        BTreeError::Corrupted("rebalance_interior: left_keys empty after check".into())
+                        BTreeError::Corrupted(
+                            "rebalance_interior: left_keys empty after check".into(),
+                        )
                     })?;
                     let borrowed_child = left_children.pop().ok_or_else(|| {
                         BTreeError::Corrupted("rebalance_interior: left_children empty".into())

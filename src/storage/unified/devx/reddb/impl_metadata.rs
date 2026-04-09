@@ -124,10 +124,7 @@ impl RedDB {
                 if let Some(ref named) = row.named {
                     if let Some(Value::Text(ref k)) = named.get("key") {
                         if k == key {
-                            let value = named
-                                .get("value")
-                                .cloned()
-                                .unwrap_or(Value::Null);
+                            let value = named.get("value").cloned().unwrap_or(Value::Null);
                             return Some((value, entity.id));
                         }
                     }
@@ -138,7 +135,11 @@ impl RedDB {
     }
 
     /// Delete a key-value pair by key, returning whether it was found and removed
-    pub fn delete_kv(&self, collection: &str, key: &str) -> Result<bool, super::super::error::DevXError> {
+    pub fn delete_kv(
+        &self,
+        collection: &str,
+        key: &str,
+    ) -> Result<bool, super::super::error::DevXError> {
         let Some((_, id)) = self.get_kv(collection, key) else {
             return Ok(false);
         };
@@ -148,9 +149,7 @@ impl RedDB {
         Ok(true)
     }
 
-    pub(crate) fn with_initialized_metadata(
-        self,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    pub(crate) fn with_initialized_metadata(self) -> Result<Self, Box<dyn std::error::Error>> {
         if self.options.mode == StorageMode::Persistent && !self.options.read_only {
             if self.load_or_bootstrap_physical_metadata(true).is_err() {
                 self.persist_metadata()?;
@@ -186,9 +185,7 @@ impl RedDB {
         Ok(())
     }
 
-    fn bootstrap_metadata_from_native_state(
-        &self,
-    ) -> Result<bool, Box<dyn std::error::Error>> {
+    fn bootstrap_metadata_from_native_state(&self) -> Result<bool, Box<dyn std::error::Error>> {
         if self.options.mode != StorageMode::Persistent || self.options.read_only {
             return Ok(false);
         }
@@ -254,8 +251,10 @@ impl RedDB {
         match PhysicalMetadataFile::load_for_data_path(path) {
             Ok(metadata) => {
                 if let Some(native_state) = native_state.as_ref() {
-                    let inspection =
-                        Self::inspect_native_header_against_metadata(native_state.header, &metadata);
+                    let inspection = Self::inspect_native_header_against_metadata(
+                        native_state.header,
+                        &metadata,
+                    );
                     if Self::repair_policy_for_inspection(&inspection)
                         == NativeHeaderRepairPolicy::NativeAheadOfMetadata
                     {
@@ -323,10 +322,8 @@ impl RedDB {
         let catalog_total_collections = catalog.total_collections;
         let indexes = self.physical_index_state();
 
-        let mut manifest = crate::api::SchemaManifest::now(
-            self.options.clone(),
-            catalog.total_collections,
-        );
+        let mut manifest =
+            crate::api::SchemaManifest::now(self.options.clone(), catalog.total_collections);
         manifest.updated_at_unix_ms = now;
 
         let manifest_events = native_state
@@ -661,7 +658,10 @@ impl RedDB {
         };
 
         for index in &mut fresh {
-            if let Some(native) = registry.indexes.iter().find(|candidate| candidate.name == index.name)
+            if let Some(native) = registry
+                .indexes
+                .iter()
+                .find(|candidate| candidate.name == index.name)
             {
                 index.enabled = native.enabled;
                 index.last_refresh_ms = native.last_refresh_ms;
@@ -975,10 +975,7 @@ impl RedDB {
         )?;
         let (collection_roots_page, collection_roots_checksum) = self
             .store
-            .write_native_collection_roots(
-                &metadata.superblock.collection_roots,
-                existing_page,
-            )?;
+            .write_native_collection_roots(&metadata.superblock.collection_roots, existing_page)?;
         let registry_summary = self.native_registry_summary_from_metadata(metadata);
         let (registry_page, registry_checksum) = self
             .store
@@ -992,9 +989,8 @@ impl RedDB {
             .store
             .write_native_catalog_summary(&catalog_summary, existing_catalog_page)?;
         let metadata_state_summary = Self::native_metadata_state_summary_from_metadata(metadata);
-        let (metadata_state_page, metadata_state_checksum) = self
-            .store
-            .write_native_metadata_state_summary(
+        let (metadata_state_page, metadata_state_checksum) =
+            self.store.write_native_metadata_state_summary(
                 &metadata_state_summary,
                 existing_metadata_state_page,
             )?;
@@ -1009,9 +1005,8 @@ impl RedDB {
                 )
             })
             .collect::<Vec<_>>();
-        let (vector_artifact_page, vector_artifact_checksum, _vector_artifact_pages) = self
-            .store
-            .write_native_vector_artifact_store(
+        let (vector_artifact_page, vector_artifact_checksum, _vector_artifact_pages) =
+            self.store.write_native_vector_artifact_store(
                 &vector_artifact_payloads,
                 existing_vector_artifact_page,
             )?;
@@ -1035,7 +1030,9 @@ impl RedDB {
         Ok(())
     }
 
-    pub(crate) fn native_header_from_metadata(metadata: &PhysicalMetadataFile) -> PhysicalFileHeader {
+    pub(crate) fn native_header_from_metadata(
+        metadata: &PhysicalMetadataFile,
+    ) -> PhysicalFileHeader {
         PhysicalFileHeader {
             format_version: metadata.superblock.format_version,
             sequence: metadata.superblock.sequence,
@@ -1067,5 +1064,4 @@ impl RedDB {
             vector_artifact_checksum: 0,
         }
     }
-
 }

@@ -1,16 +1,15 @@
 use std::collections::BTreeMap;
 
-use crate::health::HealthReport;
 use crate::application::ports::RuntimeNativePort;
+use crate::health::HealthReport;
 use crate::physical::{ExportDescriptor, ManifestEvent, PhysicalMetadataFile, SnapshotDescriptor};
 use crate::storage::engine::PhysicalFileHeader;
 use crate::storage::unified::devx::{
     NativeVectorArtifactBatchInspection, NativeVectorArtifactInspection, PhysicalAuthorityStatus,
 };
 use crate::storage::unified::store::{
-    NativeCatalogSummary, NativeManifestSummary, NativeMetadataStateSummary,
-    NativePhysicalState, NativeRecoverySummary, NativeRegistrySummary,
-    NativeVectorArtifactPageSummary,
+    NativeCatalogSummary, NativeManifestSummary, NativeMetadataStateSummary, NativePhysicalState,
+    NativeRecoverySummary, NativeRegistrySummary, NativeVectorArtifactPageSummary,
 };
 use crate::RedDBResult;
 
@@ -127,20 +126,16 @@ impl<'a, P: RuntimeNativePort + ?Sized> NativeUseCases<'a, P> {
         &self,
         input: InspectNativeArtifactInput,
     ) -> RedDBResult<NativeVectorArtifactInspection> {
-        self.runtime.inspect_native_vector_artifact(
-            &input.collection,
-            input.artifact_kind.as_deref(),
-        )
+        self.runtime
+            .inspect_native_vector_artifact(&input.collection, input.artifact_kind.as_deref())
     }
 
     pub fn warmup_vector_artifact(
         &self,
         input: InspectNativeArtifactInput,
     ) -> RedDBResult<NativeVectorArtifactInspection> {
-        self.runtime.warmup_native_vector_artifact(
-            &input.collection,
-            input.artifact_kind.as_deref(),
-        )
+        self.runtime
+            .warmup_native_vector_artifact(&input.collection, input.artifact_kind.as_deref())
     }
 
     pub fn inspect_vector_artifacts(&self) -> RedDBResult<NativeVectorArtifactBatchInspection> {

@@ -199,7 +199,9 @@ fn test_parse_select_ALL_keyword_with_where() {
 
 #[test]
 fn test_parse_select_any_with_capabilities_in() {
-    let query = parse("SELECT * FROM ANY WHERE _capabilities IN ('vector', 'graph_node', 'document')").unwrap();
+    let query =
+        parse("SELECT * FROM ANY WHERE _capabilities IN ('vector', 'graph_node', 'document')")
+            .unwrap();
     if let QueryExpr::Table(tq) = query {
         match tq.filter {
             Some(Filter::In { .. }) => {}
@@ -417,7 +419,8 @@ fn test_parse_join_query() {
 
 #[test]
 fn test_parse_join_with_universal_left_alias() {
-    let query = parse("FROM ANY a JOIN GRAPH (n:Host)-[:AFFECTED_BY]->(v) ON a._entity_id = n.id").unwrap();
+    let query =
+        parse("FROM ANY a JOIN GRAPH (n:Host)-[:AFFECTED_BY]->(v) ON a._entity_id = n.id").unwrap();
     if let QueryExpr::Join(jq) = query {
         match &*jq.left {
             QueryExpr::Table(tq) => assert_eq!(tq.alias.as_deref(), Some("a")),
@@ -431,10 +434,8 @@ fn test_parse_join_with_universal_left_alias() {
 
 #[test]
 fn test_parse_join_with_universal_right_alias() {
-    let query = parse(
-        "FROM hosts h JOIN ANY a ON h.id = a._entity_id RETURN h.id, a._score",
-    )
-    .unwrap();
+    let query =
+        parse("FROM hosts h JOIN ANY a ON h.id = a._entity_id RETURN h.id, a._score").unwrap();
     if let QueryExpr::Join(jq) = query {
         match &*jq.right {
             QueryExpr::Table(tq) => {
@@ -751,4 +752,699 @@ fn test_parse_fusion_strategies() {
             panic!("Expected Union fusion");
         }
     }
+}
+
+// ========================================================================
+// DML Tests: INSERT, UPDATE, DELETE
+// ========================================================================
+
+#[test]
+fn test_parse_insert_single_row() {
+    let query = parse("INSERT INTO hosts (ip, hostname) VALUES ('10.0.0.1', 'web01')").unwrap();
+    if let QueryExpr::Insert(iq) = query {
+        assert_eq!(iq.table, "hosts");
+        assert_eq!(iq.columns, vec!["ip", "hostname"]);
+        assert_eq!(iq.values.len(), 1);
+        assert_eq!(iq.values[0].len(), 2);
+        assert!(!iq.returning);
+    } else {
+        panic!("Expected InsertQuery");
+    }
+}
+
+#[test]
+fn test_parse_insert_multi_row() {
+    let query = parse(
+        "INSERT INTO hosts (ip, port) VALUES ('10.0.0.1', 22), ('10.0.0.2', 80), ('10.0.0.3', 443)",
+    )
+    .unwrap();
+    if let QueryExpr::Insert(iq) = query {
+        assert_eq!(iq.table, "hosts");
+        assert_eq!(iq.columns, vec!["ip", "port"]);
+        assert_eq!(iq.values.len(), 3);
+        assert_eq!(iq.values[0].len(), 2);
+        assert_eq!(iq.values[1].len(), 2);
+        assert_eq!(iq.values[2].len(), 2);
+    } else {
+        panic!("Expected InsertQuery");
+    }
+}
+
+#[test]
+fn test_parse_insert_with_returning() {
+    let query =
+        parse("INSERT INTO hosts (ip, hostname) VALUES ('10.0.0.1', 'web01') RETURNING").unwrap();
+    if let QueryExpr::Insert(iq) = query {
+        assert!(iq.returning);
+    } else {
+        panic!("Expected InsertQuery");
+    }
+}
+
+#[test]
+fn test_parse_insert_mixed_types() {
+    let query =
+        parse("INSERT INTO metrics (name, value, active) VALUES ('cpu', 3.14, true)").unwrap();
+    if let QueryExpr::Insert(iq) = query {
+        assert_eq!(iq.values[0].len(), 3);
+        assert!(matches!(iq.values[0][0], crate::storage::schema::Value::Text(_)));
+        assert!(matches!(iq.values[0][1], crate::storage::schema::Value::Float(_)));
+        assert!(matches!(iq.values[0][2], crate::storage::schema::Value::Boolean(true)));
+    } else {
+        panic!("Expected InsertQuery");
+    }
+}
+
+#[test]
+fn test_parse_update_with_where() {
+    let query = parse("UPDATE hosts SET hostname = 'new-name' WHERE ip = '10.0.0.1'").unwrap();
+    if let QueryExpr::Update(uq) = query {
+        assert_eq!(uq.table, "hosts");
+        assert_eq!(uq.assignments.len(), 1);
+        assert_eq!(uq.assignments[0].0, "hostname");
+        assert!(uq.filter.is_some());
+    } else {
+        panic!("Expected UpdateQuery");
+    }
+}
+
+#[test]
+fn test_parse_update_no_where() {
+    let query = parse("UPDATE hosts SET status = 'inactive'").unwrap();
+    if let QueryExpr::Update(uq) = query {
+        assert_eq!(uq.table, "hosts");
+        assert_eq!(uq.assignments.len(), 1);
+        assert!(uq.filter.is_none());
+    } else {
+        panic!("Expected UpdateQuery");
+    }
+}
+
+#[test]
+fn test_parse_update_multiple_assignments() {
+    let query = parse("UPDATE hosts SET hostname = 'web01', port = 8080, active = true WHERE id = 1").unwrap();
+    if let QueryExpr::Update(uq) = query {
+        assert_eq!(uq.assignments.len(), 3);
+        assert_eq!(uq.assignments[0].0, "hostname");
+        assert_eq!(uq.assignments[1].0, "port");
+        assert_eq!(uq.assignments[2].0, "active");
+        assert!(uq.filter.is_some());
+    } else {
+        panic!("Expected UpdateQuery");
+    }
+}
+
+#[test]
+fn test_parse_delete_with_where() {
+    let query = parse("DELETE FROM hosts WHERE status = 'inactive'").unwrap();
+    if let QueryExpr::Delete(dq) = query {
+        assert_eq!(dq.table, "hosts");
+        assert!(dq.filter.is_some());
+    } else {
+        panic!("Expected DeleteQuery");
+    }
+}
+
+#[test]
+fn test_parse_delete_no_where() {
+    let query = parse("DELETE FROM hosts").unwrap();
+    if let QueryExpr::Delete(dq) = query {
+        assert_eq!(dq.table, "hosts");
+        assert!(dq.filter.is_none());
+    } else {
+        panic!("Expected DeleteQuery");
+    }
+}
+
+// ========================================================================
+// DDL Tests: CREATE TABLE, DROP TABLE, ALTER TABLE
+// ========================================================================
+
+#[test]
+fn test_parse_create_table_simple() {
+    let query = parse("CREATE TABLE hosts (ip TEXT, hostname TEXT, port INTEGER)").unwrap();
+    if let QueryExpr::CreateTable(ct) = query {
+        assert_eq!(ct.name, "hosts");
+        assert_eq!(ct.columns.len(), 3);
+        assert!(!ct.if_not_exists);
+        assert_eq!(ct.columns[0].name, "ip");
+        assert_eq!(ct.columns[0].data_type, "TEXT");
+        assert_eq!(ct.columns[1].name, "hostname");
+        assert_eq!(ct.columns[2].name, "port");
+        assert_eq!(ct.columns[2].data_type, "INTEGER");
+    } else {
+        panic!("Expected CreateTableQuery");
+    }
+}
+
+#[test]
+fn test_parse_create_table_full() {
+    let query = parse(
+        "CREATE TABLE IF NOT EXISTS users (\
+         id INTEGER PRIMARY KEY, \
+         email TEXT NOT NULL UNIQUE, \
+         name TEXT DEFAULT = 'unknown', \
+         bio TEXT COMPRESS:3\
+         )",
+    )
+    .unwrap();
+    if let QueryExpr::CreateTable(ct) = query {
+        assert_eq!(ct.name, "users");
+        assert!(ct.if_not_exists);
+        assert_eq!(ct.columns.len(), 4);
+
+        // id column
+        assert_eq!(ct.columns[0].name, "id");
+        assert_eq!(ct.columns[0].data_type, "INTEGER");
+        assert!(ct.columns[0].primary_key);
+
+        // email column
+        assert_eq!(ct.columns[1].name, "email");
+        assert_eq!(ct.columns[1].data_type, "TEXT");
+        assert!(ct.columns[1].not_null);
+        assert!(ct.columns[1].unique);
+
+        // name column
+        assert_eq!(ct.columns[2].name, "name");
+        assert_eq!(ct.columns[2].default, Some("unknown".to_string()));
+
+        // bio column
+        assert_eq!(ct.columns[3].name, "bio");
+        assert_eq!(ct.columns[3].compress, Some(3));
+    } else {
+        panic!("Expected CreateTableQuery");
+    }
+}
+
+#[test]
+fn test_parse_create_table_with_enum() {
+    let query = parse(
+        "CREATE TABLE statuses (status ENUM('active','inactive','pending'))",
+    )
+    .unwrap();
+    if let QueryExpr::CreateTable(ct) = query {
+        assert_eq!(ct.columns[0].data_type, "ENUM('active','inactive','pending')");
+    } else {
+        panic!("Expected CreateTableQuery");
+    }
+}
+
+#[test]
+fn test_parse_drop_table() {
+    let query = parse("DROP TABLE hosts").unwrap();
+    if let QueryExpr::DropTable(dt) = query {
+        assert_eq!(dt.name, "hosts");
+        assert!(!dt.if_exists);
+    } else {
+        panic!("Expected DropTableQuery");
+    }
+}
+
+#[test]
+fn test_parse_drop_table_if_exists() {
+    let query = parse("DROP TABLE IF EXISTS hosts").unwrap();
+    if let QueryExpr::DropTable(dt) = query {
+        assert_eq!(dt.name, "hosts");
+        assert!(dt.if_exists);
+    } else {
+        panic!("Expected DropTableQuery");
+    }
+}
+
+#[test]
+fn test_parse_alter_table_add_column() {
+    let query = parse("ALTER TABLE hosts ADD COLUMN status TEXT NOT NULL").unwrap();
+    if let QueryExpr::AlterTable(at) = query {
+        assert_eq!(at.name, "hosts");
+        assert_eq!(at.operations.len(), 1);
+        match &at.operations[0] {
+            crate::storage::query::ast::AlterOperation::AddColumn(col) => {
+                assert_eq!(col.name, "status");
+                assert_eq!(col.data_type, "TEXT");
+                assert!(col.not_null);
+            }
+            _ => panic!("Expected AddColumn"),
+        }
+    } else {
+        panic!("Expected AlterTableQuery");
+    }
+}
+
+#[test]
+fn test_parse_alter_table_drop_column() {
+    let query = parse("ALTER TABLE hosts DROP COLUMN old_field").unwrap();
+    if let QueryExpr::AlterTable(at) = query {
+        assert_eq!(at.name, "hosts");
+        assert_eq!(at.operations.len(), 1);
+        match &at.operations[0] {
+            crate::storage::query::ast::AlterOperation::DropColumn(name) => {
+                assert_eq!(name, "old_field");
+            }
+            _ => panic!("Expected DropColumn"),
+        }
+    } else {
+        panic!("Expected AlterTableQuery");
+    }
+}
+
+#[test]
+fn test_parse_alter_table_rename_column() {
+    let query = parse("ALTER TABLE hosts RENAME COLUMN old_name TO new_name").unwrap();
+    if let QueryExpr::AlterTable(at) = query {
+        assert_eq!(at.name, "hosts");
+        assert_eq!(at.operations.len(), 1);
+        match &at.operations[0] {
+            crate::storage::query::ast::AlterOperation::RenameColumn { from, to } => {
+                assert_eq!(from, "old_name");
+                assert_eq!(to, "new_name");
+            }
+            _ => panic!("Expected RenameColumn"),
+        }
+    } else {
+        panic!("Expected AlterTableQuery");
+    }
+}
+
+// ========================================================================
+// INSERT with entity types: NODE, EDGE, VECTOR, DOCUMENT, KV
+// ========================================================================
+
+#[test]
+fn test_parse_insert_row_default() {
+    let query = parse("INSERT INTO hosts (ip, port) VALUES ('10.0.0.1', 22)").unwrap();
+    if let QueryExpr::Insert(ins) = query {
+        assert_eq!(ins.table, "hosts");
+        assert_eq!(ins.entity_type, crate::storage::query::ast::InsertEntityType::Row);
+        assert_eq!(ins.columns, vec!["ip", "port"]);
+        assert_eq!(ins.values.len(), 1);
+    } else {
+        panic!("Expected InsertQuery");
+    }
+}
+
+#[test]
+fn test_parse_insert_node() {
+    let query =
+        parse("INSERT INTO network NODE (label, node_type, ip) VALUES ('router', 'device', '10.0.0.1')")
+            .unwrap();
+    if let QueryExpr::Insert(ins) = query {
+        assert_eq!(ins.table, "network");
+        assert_eq!(ins.entity_type, crate::storage::query::ast::InsertEntityType::Node);
+        assert_eq!(ins.columns, vec!["label", "node_type", "ip"]);
+        assert_eq!(ins.values.len(), 1);
+        assert_eq!(ins.values[0].len(), 3);
+    } else {
+        panic!("Expected InsertQuery with Node entity type");
+    }
+}
+
+#[test]
+fn test_parse_insert_edge() {
+    let query =
+        parse("INSERT INTO network EDGE (label, from, to, weight) VALUES ('connects', 1, 2, 0.5)")
+            .unwrap();
+    if let QueryExpr::Insert(ins) = query {
+        assert_eq!(ins.table, "network");
+        assert_eq!(ins.entity_type, crate::storage::query::ast::InsertEntityType::Edge);
+        // Keywords as column names are returned uppercase
+        assert_eq!(ins.columns.len(), 4);
+        assert!(ins.columns[0].eq_ignore_ascii_case("label"));
+        assert!(ins.columns[1].eq_ignore_ascii_case("from"));
+        assert!(ins.columns[2].eq_ignore_ascii_case("to"));
+        assert!(ins.columns[3].eq_ignore_ascii_case("weight"));
+    } else {
+        panic!("Expected InsertQuery with Edge entity type");
+    }
+}
+
+#[test]
+fn test_parse_insert_vector() {
+    let query =
+        parse("INSERT INTO embeddings VECTOR (dense, content) VALUES ([0.1, 0.2, 0.3], 'hello world')")
+            .unwrap();
+    if let QueryExpr::Insert(ins) = query {
+        assert_eq!(ins.table, "embeddings");
+        assert_eq!(ins.entity_type, crate::storage::query::ast::InsertEntityType::Vector);
+        assert_eq!(ins.columns, vec!["dense", "content"]);
+        assert_eq!(ins.values.len(), 1);
+        // The vector literal should be parsed as Value::Vector
+        match &ins.values[0][0] {
+            crate::storage::schema::Value::Vector(v) => {
+                assert_eq!(v.len(), 3);
+                assert!((v[0] - 0.1).abs() < 0.01);
+            }
+            other => panic!("Expected Vector value, got {other:?}"),
+        }
+    } else {
+        panic!("Expected InsertQuery with Vector entity type");
+    }
+}
+
+#[test]
+fn test_parse_insert_document() {
+    let query = parse(
+        r#"INSERT INTO docs DOCUMENT (body) VALUES ('{"name":"test","value":42}')"#,
+    )
+    .unwrap();
+    if let QueryExpr::Insert(ins) = query {
+        assert_eq!(ins.table, "docs");
+        assert_eq!(ins.entity_type, crate::storage::query::ast::InsertEntityType::Document);
+        assert_eq!(ins.columns, vec!["body"]);
+    } else {
+        panic!("Expected InsertQuery with Document entity type");
+    }
+}
+
+#[test]
+fn test_parse_insert_kv() {
+    let query =
+        parse("INSERT INTO cache KV (key, value) VALUES ('session:123', 'token-abc')").unwrap();
+    if let QueryExpr::Insert(ins) = query {
+        assert_eq!(ins.table, "cache");
+        assert_eq!(ins.entity_type, crate::storage::query::ast::InsertEntityType::Kv);
+        assert_eq!(ins.columns.len(), 2);
+        assert!(ins.columns[0].eq_ignore_ascii_case("key"));
+        assert!(ins.columns[1].eq_ignore_ascii_case("value"));
+    } else {
+        panic!("Expected InsertQuery with Kv entity type");
+    }
+}
+
+#[test]
+fn test_parse_insert_vector_array_literal() {
+    // Test array literal parsing in VALUES
+    let query =
+        parse("INSERT INTO emb VECTOR (dense) VALUES ([1, 2, 3])").unwrap();
+    if let QueryExpr::Insert(ins) = query {
+        match &ins.values[0][0] {
+            crate::storage::schema::Value::Vector(v) => {
+                assert_eq!(v, &[1.0, 2.0, 3.0]);
+            }
+            other => panic!("Expected Vector value, got {other:?}"),
+        }
+    } else {
+        panic!("Expected InsertQuery");
+    }
+}
+
+// ========================================================================
+// GRAPH Command Tests
+// ========================================================================
+
+#[test]
+fn test_parse_graph_neighborhood_defaults() {
+    let query = parse("GRAPH NEIGHBORHOOD 'node_1'").unwrap();
+    if let QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::Neighborhood {
+        source,
+        depth,
+        direction,
+    }) = query
+    {
+        assert_eq!(source, "node_1");
+        assert_eq!(depth, 3);
+        assert_eq!(direction, "outgoing");
+    } else {
+        panic!("Expected GraphCommand::Neighborhood");
+    }
+}
+
+#[test]
+fn test_parse_graph_neighborhood_with_options() {
+    let query = parse("GRAPH NEIGHBORHOOD 'node_a' DEPTH 5 DIRECTION both").unwrap();
+    if let QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::Neighborhood {
+        source,
+        depth,
+        direction,
+    }) = query
+    {
+        assert_eq!(source, "node_a");
+        assert_eq!(depth, 5);
+        assert!(direction.eq_ignore_ascii_case("both"));
+    } else {
+        panic!("Expected GraphCommand::Neighborhood");
+    }
+}
+
+#[test]
+fn test_parse_graph_shortest_path() {
+    let query = parse("GRAPH SHORTEST_PATH 'a' TO 'b' ALGORITHM dijkstra").unwrap();
+    if let QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::ShortestPath {
+        source,
+        target,
+        algorithm,
+        direction,
+    }) = query
+    {
+        assert_eq!(source, "a");
+        assert_eq!(target, "b");
+        assert_eq!(algorithm, "dijkstra");
+        assert_eq!(direction, "outgoing");
+    } else {
+        panic!("Expected GraphCommand::ShortestPath");
+    }
+}
+
+#[test]
+fn test_parse_graph_traverse() {
+    let query = parse("GRAPH TRAVERSE 'root' STRATEGY dfs DEPTH 10 DIRECTION incoming").unwrap();
+    if let QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::Traverse {
+        source,
+        strategy,
+        depth,
+        direction,
+    }) = query
+    {
+        assert_eq!(source, "root");
+        assert_eq!(strategy, "dfs");
+        assert_eq!(depth, 10);
+        assert!(direction.eq_ignore_ascii_case("incoming"));
+    } else {
+        panic!("Expected GraphCommand::Traverse");
+    }
+}
+
+#[test]
+fn test_parse_graph_centrality() {
+    let query = parse("GRAPH CENTRALITY ALGORITHM pagerank").unwrap();
+    if let QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::Centrality {
+        algorithm,
+    }) = query
+    {
+        assert_eq!(algorithm, "pagerank");
+    } else {
+        panic!("Expected GraphCommand::Centrality");
+    }
+}
+
+#[test]
+fn test_parse_graph_centrality_default() {
+    let query = parse("GRAPH CENTRALITY").unwrap();
+    if let QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::Centrality {
+        algorithm,
+    }) = query
+    {
+        assert_eq!(algorithm, "degree");
+    } else {
+        panic!("Expected GraphCommand::Centrality with default algorithm");
+    }
+}
+
+#[test]
+fn test_parse_graph_community() {
+    let query = parse("GRAPH COMMUNITY ALGORITHM louvain MAX_ITERATIONS 50").unwrap();
+    if let QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::Community {
+        algorithm,
+        max_iterations,
+    }) = query
+    {
+        assert_eq!(algorithm, "louvain");
+        assert_eq!(max_iterations, 50);
+    } else {
+        panic!("Expected GraphCommand::Community");
+    }
+}
+
+#[test]
+fn test_parse_graph_components() {
+    let query = parse("GRAPH COMPONENTS MODE strong").unwrap();
+    if let QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::Components {
+        mode,
+    }) = query
+    {
+        assert_eq!(mode, "strong");
+    } else {
+        panic!("Expected GraphCommand::Components");
+    }
+}
+
+#[test]
+fn test_parse_graph_cycles() {
+    let query = parse("GRAPH CYCLES MAX_LENGTH 5").unwrap();
+    if let QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::Cycles {
+        max_length,
+    }) = query
+    {
+        assert_eq!(max_length, 5);
+    } else {
+        panic!("Expected GraphCommand::Cycles");
+    }
+}
+
+#[test]
+fn test_parse_graph_clustering() {
+    let query = parse("GRAPH CLUSTERING").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::Clustering)
+    ));
+}
+
+#[test]
+fn test_parse_graph_topological_sort() {
+    let query = parse("GRAPH TOPOLOGICAL_SORT").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::TopologicalSort)
+    ));
+}
+
+// ========================================================================
+// SEARCH Command Tests
+// ========================================================================
+
+#[test]
+fn test_parse_search_similar() {
+    let query =
+        parse("SEARCH SIMILAR [0.1, 0.2, 0.3] COLLECTION embeddings LIMIT 5 MIN_SCORE 0.8")
+            .unwrap();
+    if let QueryExpr::SearchCommand(crate::storage::query::ast::SearchCommand::Similar {
+        vector,
+        collection,
+        limit,
+        min_score,
+    }) = query
+    {
+        assert_eq!(vector.len(), 3);
+        assert!((vector[0] - 0.1).abs() < 0.01);
+        assert_eq!(collection, "embeddings");
+        assert_eq!(limit, 5);
+        assert!((min_score - 0.8).abs() < 0.01);
+    } else {
+        panic!("Expected SearchCommand::Similar");
+    }
+}
+
+#[test]
+fn test_parse_search_similar_defaults() {
+    let query = parse("SEARCH SIMILAR [1, 2, 3] COLLECTION vecs").unwrap();
+    if let QueryExpr::SearchCommand(crate::storage::query::ast::SearchCommand::Similar {
+        limit,
+        min_score,
+        ..
+    }) = query
+    {
+        assert_eq!(limit, 10);
+        assert!((min_score).abs() < 0.01);
+    } else {
+        panic!("Expected SearchCommand::Similar");
+    }
+}
+
+#[test]
+fn test_parse_search_text() {
+    let query =
+        parse("SEARCH TEXT 'find all vulnerabilities' COLLECTION hosts LIMIT 20 FUZZY").unwrap();
+    if let QueryExpr::SearchCommand(crate::storage::query::ast::SearchCommand::Text {
+        query: q,
+        collection,
+        limit,
+        fuzzy,
+    }) = query
+    {
+        assert_eq!(q, "find all vulnerabilities");
+        assert_eq!(collection, Some("hosts".to_string()));
+        assert_eq!(limit, 20);
+        assert!(fuzzy);
+    } else {
+        panic!("Expected SearchCommand::Text");
+    }
+}
+
+#[test]
+fn test_parse_search_text_minimal() {
+    let query = parse("SEARCH TEXT 'hello world'").unwrap();
+    if let QueryExpr::SearchCommand(crate::storage::query::ast::SearchCommand::Text {
+        query: q,
+        collection,
+        limit,
+        fuzzy,
+    }) = query
+    {
+        assert_eq!(q, "hello world");
+        assert_eq!(collection, None);
+        assert_eq!(limit, 10);
+        assert!(!fuzzy);
+    } else {
+        panic!("Expected SearchCommand::Text");
+    }
+}
+
+#[test]
+fn test_parse_search_hybrid() {
+    let query =
+        parse("SEARCH HYBRID SIMILAR [0.1, 0.2] TEXT 'query string' COLLECTION data LIMIT 15")
+            .unwrap();
+    if let QueryExpr::SearchCommand(crate::storage::query::ast::SearchCommand::Hybrid {
+        vector,
+        query: q,
+        collection,
+        limit,
+    }) = query
+    {
+        assert_eq!(vector.unwrap().len(), 2);
+        assert_eq!(q.unwrap(), "query string");
+        assert_eq!(collection, "data");
+        assert_eq!(limit, 15);
+    } else {
+        panic!("Expected SearchCommand::Hybrid");
+    }
+}
+
+#[test]
+fn test_parse_search_hybrid_text_only() {
+    let query = parse("SEARCH HYBRID TEXT 'query' COLLECTION data").unwrap();
+    if let QueryExpr::SearchCommand(crate::storage::query::ast::SearchCommand::Hybrid {
+        vector,
+        query: q,
+        ..
+    }) = query
+    {
+        assert!(vector.is_none());
+        assert_eq!(q.unwrap(), "query");
+    } else {
+        panic!("Expected SearchCommand::Hybrid");
+    }
+}
+
+#[test]
+fn test_parse_search_hybrid_vector_only() {
+    let query = parse("SEARCH HYBRID SIMILAR [1, 2, 3] COLLECTION data").unwrap();
+    if let QueryExpr::SearchCommand(crate::storage::query::ast::SearchCommand::Hybrid {
+        vector,
+        query: q,
+        ..
+    }) = query
+    {
+        assert!(vector.is_some());
+        assert!(q.is_none());
+    } else {
+        panic!("Expected SearchCommand::Hybrid");
+    }
+}
+
+#[test]
+fn test_parse_search_hybrid_requires_input() {
+    // Must have at least SIMILAR or TEXT
+    let result = parse("SEARCH HYBRID COLLECTION data");
+    assert!(result.is_err());
 }

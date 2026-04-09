@@ -3,9 +3,7 @@ use crate::application::{
     SearchHybridInput, SearchIvfInput, SearchSimilarInput, SearchTextInput,
 };
 use crate::json::Value as JsonValue;
-use crate::runtime::{
-    RuntimeFilter, RuntimeFilterValue, RuntimeGraphPattern, RuntimeQueryWeights,
-};
+use crate::runtime::{RuntimeFilter, RuntimeFilterValue, RuntimeGraphPattern, RuntimeQueryWeights};
 use crate::{RedDBError, RedDBResult};
 
 pub(crate) fn parse_text_search_input(payload: &JsonValue) -> RedDBResult<SearchTextInput> {
@@ -227,10 +225,7 @@ fn apply_entity_type_alias(
     }
 }
 
-fn normalize_capability_filter(
-    value: &str,
-    capabilities: &mut Vec<String>,
-) -> RedDBResult<bool> {
+fn normalize_capability_filter(value: &str, capabilities: &mut Vec<String>) -> RedDBResult<bool> {
     match normalize_search_token(value).as_str() {
         "all" | "any" | "*" => Ok(false),
         "table" => {
@@ -295,11 +290,15 @@ fn normalize_search_token(value: &str) -> String {
 
 fn parse_required_query(payload: &JsonValue) -> RedDBResult<String> {
     let Some(query) = payload.get("query").and_then(JsonValue::as_str) else {
-        return Err(RedDBError::Query("field 'query' must be a string".to_string()));
+        return Err(RedDBError::Query(
+            "field 'query' must be a string".to_string(),
+        ));
     };
     let query = query.trim();
     if query.is_empty() {
-        return Err(RedDBError::Query("field 'query' cannot be empty".to_string()));
+        return Err(RedDBError::Query(
+            "field 'query' cannot be empty".to_string(),
+        ));
     }
     Ok(query.to_string())
 }
@@ -309,11 +308,15 @@ fn parse_optional_query(payload: &JsonValue) -> RedDBResult<Option<String>> {
         None | Some(JsonValue::Null) => Ok(None),
         Some(value) => {
             let Some(query) = value.as_str() else {
-                return Err(RedDBError::Query("field 'query' must be a string".to_string()));
+                return Err(RedDBError::Query(
+                    "field 'query' must be a string".to_string(),
+                ));
             };
             let query = query.trim();
             if query.is_empty() {
-                return Err(RedDBError::Query("field 'query' cannot be empty".to_string()));
+                return Err(RedDBError::Query(
+                    "field 'query' cannot be empty".to_string(),
+                ));
             }
             Ok(Some(query.to_string()))
         }
@@ -348,7 +351,9 @@ fn json_vector_field(payload: &JsonValue, field: &str) -> RedDBResult<Vec<f32>> 
         .and_then(JsonValue::as_array)
         .ok_or_else(|| RedDBError::Query(format!("field '{field}' must be an array")))?;
     if values.is_empty() {
-        return Err(RedDBError::Query(format!("field '{field}' cannot be empty")));
+        return Err(RedDBError::Query(format!(
+            "field '{field}' cannot be empty"
+        )));
     }
     values
         .iter()
@@ -360,10 +365,7 @@ fn json_vector_field(payload: &JsonValue, field: &str) -> RedDBResult<Vec<f32>> 
         .collect()
 }
 
-fn optional_json_vector_field(
-    payload: &JsonValue,
-    field: &str,
-) -> RedDBResult<Option<Vec<f32>>> {
+fn optional_json_vector_field(payload: &JsonValue, field: &str) -> RedDBResult<Option<Vec<f32>>> {
     match payload.get(field) {
         Some(JsonValue::Null) | None => Ok(None),
         Some(_) => json_vector_field(payload, field).map(Some),
@@ -375,7 +377,9 @@ fn json_graph_pattern(payload: &JsonValue) -> RedDBResult<Option<RuntimeGraphPat
         return Ok(None);
     };
     let Some(graph) = graph.as_object() else {
-        return Err(RedDBError::Query("field 'graph' must be an object".to_string()));
+        return Err(RedDBError::Query(
+            "field 'graph' must be an object".to_string(),
+        ));
     };
 
     Ok(Some(RuntimeGraphPattern {
@@ -424,13 +428,17 @@ fn json_filters(payload: &JsonValue) -> RedDBResult<Vec<RuntimeFilter>> {
         return Ok(Vec::new());
     };
     let Some(values) = values.as_array() else {
-        return Err(RedDBError::Query("field 'filters' must be an array".to_string()));
+        return Err(RedDBError::Query(
+            "field 'filters' must be an array".to_string(),
+        ));
     };
 
     let mut filters = Vec::with_capacity(values.len());
     for value in values {
         let Some(object) = value.as_object() else {
-            return Err(RedDBError::Query("every filter must be an object".to_string()));
+            return Err(RedDBError::Query(
+                "every filter must be an object".to_string(),
+            ));
         };
         let Some(field) = object.get("field").and_then(JsonValue::as_str) else {
             return Err(RedDBError::Query(

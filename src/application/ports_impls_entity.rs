@@ -127,10 +127,13 @@ impl RuntimeEntityPort for RedDBRuntime {
         let db = self.db();
 
         // Serialize the full body as Value::Json for the "body" field
-        let body_bytes = json_to_vec(&input.body)
-            .map_err(|err| crate::RedDBError::Query(format!("failed to serialize document body: {err}")))?;
-        let mut fields: Vec<(String, crate::storage::schema::Value)> =
-            vec![("body".to_string(), crate::storage::schema::Value::Json(body_bytes))];
+        let body_bytes = json_to_vec(&input.body).map_err(|err| {
+            crate::RedDBError::Query(format!("failed to serialize document body: {err}"))
+        })?;
+        let mut fields: Vec<(String, crate::storage::schema::Value)> = vec![(
+            "body".to_string(),
+            crate::storage::schema::Value::Json(body_bytes),
+        )];
 
         // Flatten top-level keys from the body into named fields for filtering
         if let JsonValue::Object(ref map) = input.body {
@@ -152,7 +155,10 @@ impl RuntimeEntityPort for RedDBRuntime {
 
     fn create_kv(&self, input: CreateKvInput) -> RedDBResult<CreateEntityOutput> {
         let fields = vec![
-            ("key".to_string(), crate::storage::schema::Value::Text(input.key)),
+            (
+                "key".to_string(),
+                crate::storage::schema::Value::Text(input.key),
+            ),
             ("value".to_string(), input.value),
         ];
         let row_input = CreateRowInput {
@@ -278,7 +284,9 @@ impl RuntimeEntityPort for RedDBRuntime {
                     apply_patch_operations_to_storage_map(named, &field_ops)?;
                 }
 
-                if let Some(fields) = payload.get("fields").and_then(crate::json::Value::as_object)
+                if let Some(fields) = payload
+                    .get("fields")
+                    .and_then(crate::json::Value::as_object)
                 {
                     let named = row.named.get_or_insert_with(Default::default);
                     for (key, value) in fields {
@@ -336,7 +344,9 @@ impl RuntimeEntityPort for RedDBRuntime {
                     apply_patch_operations_to_storage_map(&mut node.properties, &field_ops)?;
                 }
 
-                if let Some(fields) = payload.get("fields").and_then(crate::json::Value::as_object)
+                if let Some(fields) = payload
+                    .get("fields")
+                    .and_then(crate::json::Value::as_object)
                 {
                     for (key, value) in fields {
                         node.properties
@@ -426,7 +436,9 @@ impl RuntimeEntityPort for RedDBRuntime {
                     }
                 }
 
-                if let Some(fields) = payload.get("fields").and_then(crate::json::Value::as_object)
+                if let Some(fields) = payload
+                    .get("fields")
+                    .and_then(crate::json::Value::as_object)
                 {
                     for (key, value) in fields {
                         edge.properties
@@ -494,9 +506,12 @@ impl RuntimeEntityPort for RedDBRuntime {
                     apply_patch_operations_to_vector_fields(vector, &field_ops)?;
                 }
 
-                if let Some(fields) = payload.get("fields").and_then(crate::json::Value::as_object)
+                if let Some(fields) = payload
+                    .get("fields")
+                    .and_then(crate::json::Value::as_object)
                 {
-                    if let Some(content) = fields.get("content").and_then(crate::json::Value::as_str)
+                    if let Some(content) =
+                        fields.get("content").and_then(crate::json::Value::as_str)
                     {
                         vector.content = Some(content.to_string());
                     }
@@ -530,7 +545,10 @@ impl RuntimeEntityPort for RedDBRuntime {
             }
         }
 
-        if let Some(metadata) = payload.get("metadata").and_then(crate::json::Value::as_object) {
+        if let Some(metadata) = payload
+            .get("metadata")
+            .and_then(crate::json::Value::as_object)
+        {
             for (key, value) in metadata {
                 patch_metadata.set(key.clone(), json_to_metadata_value(value)?);
             }

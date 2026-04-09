@@ -275,6 +275,15 @@ impl JoinReorderingPass {
                 let base = structured_size.min(vector_size);
                 hq.limit.map(|l| base.min(l as f64)).unwrap_or(base)
             }
+            // DML/DDL/Command statements return minimal result sets
+            QueryExpr::Insert(_)
+            | QueryExpr::Update(_)
+            | QueryExpr::Delete(_)
+            | QueryExpr::CreateTable(_)
+            | QueryExpr::DropTable(_)
+            | QueryExpr::AlterTable(_)
+            | QueryExpr::GraphCommand(_)
+            | QueryExpr::SearchCommand(_) => 1.0,
         }
     }
 }

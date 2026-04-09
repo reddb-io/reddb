@@ -2,9 +2,9 @@ use super::*;
 
 impl UnifiedStore {
     pub fn read_native_physical_state(&self) -> Result<NativePhysicalState, StoreError> {
-        let header = self
-            .physical_file_header()
-            .ok_or_else(|| StoreError::Serialization("native physical header is not available".to_string()))?;
+        let header = self.physical_file_header().ok_or_else(|| {
+            StoreError::Serialization("native physical header is not available".to_string())
+        })?;
 
         let collection_roots = self.read_native_collection_roots(header.collection_roots_page)?;
         let manifest = if header.manifest_page != 0 {
@@ -92,7 +92,8 @@ impl UnifiedStore {
             return Ok((0, 0, 0));
         }
 
-        let chunk_capacity = crate::storage::engine::PAGE_SIZE - crate::storage::engine::HEADER_SIZE - 12;
+        let chunk_capacity =
+            crate::storage::engine::PAGE_SIZE - crate::storage::engine::HEADER_SIZE - 12;
         let page_count = ((payload.len() + chunk_capacity - 1) / chunk_capacity) as u32;
         let mut page_ids = existing_root
             .map(|root| self.read_native_blob_chain_page_ids(root))
@@ -100,7 +101,8 @@ impl UnifiedStore {
             .unwrap_or_default();
         while page_ids.len() < page_count as usize {
             page_ids.push(
-                pager.allocate_page(crate::storage::engine::PageType::NativeMeta)
+                pager
+                    .allocate_page(crate::storage::engine::PageType::NativeMeta)
                     .map_err(|err| StoreError::Serialization(err.to_string()))?
                     .page_id(),
             );
@@ -123,7 +125,8 @@ impl UnifiedStore {
             let content_start = crate::storage::engine::HEADER_SIZE;
             let copy_len = data.len().min(bytes.len() - content_start);
             bytes[content_start..content_start + copy_len].copy_from_slice(&data[..copy_len]);
-            pager.write_page(page_id, page)
+            pager
+                .write_page(page_id, page)
                 .map_err(|err| StoreError::Serialization(err.to_string()))?;
         }
 
@@ -157,7 +160,8 @@ impl UnifiedStore {
                 ));
             }
             let next_page = u32::from_le_bytes([content[4], content[5], content[6], content[7]]);
-            let chunk_len = u32::from_le_bytes([content[8], content[9], content[10], content[11]]) as usize;
+            let chunk_len =
+                u32::from_le_bytes([content[8], content[9], content[10], content[11]]) as usize;
             if 12 + chunk_len > content.len() {
                 return Err(StoreError::Serialization(
                     "truncated native blob page".to_string(),
@@ -194,7 +198,9 @@ impl UnifiedStore {
         for (collection, artifact_kind, bytes) in artifacts {
             let existing_root = existing
                 .iter()
-                .find(|entry| entry.collection == *collection && entry.artifact_kind == *artifact_kind)
+                .find(|entry| {
+                    entry.collection == *collection && entry.artifact_kind == *artifact_kind
+                })
                 .map(|entry| entry.root_page);
             let (root_page, page_count, checksum) =
                 self.write_native_blob_chain(bytes, existing_root)?;
@@ -229,7 +235,8 @@ impl UnifiedStore {
         let content_start = crate::storage::engine::HEADER_SIZE;
         let copy_len = data.len().min(bytes.len() - content_start);
         bytes[content_start..content_start + copy_len].copy_from_slice(&data[..copy_len]);
-        pager.write_page(page_id, page)
+        pager
+            .write_page(page_id, page)
             .map_err(|err| StoreError::Serialization(err.to_string()))?;
         Ok((page_id, checksum, summaries))
     }
@@ -265,18 +272,40 @@ impl UnifiedStore {
             if pos + 24 > content.len() {
                 break;
             }
-            let root_page = u32::from_le_bytes([content[pos], content[pos + 1], content[pos + 2], content[pos + 3]]);
+            let root_page = u32::from_le_bytes([
+                content[pos],
+                content[pos + 1],
+                content[pos + 2],
+                content[pos + 3],
+            ]);
             pos += 4;
-            let page_count = u32::from_le_bytes([content[pos], content[pos + 1], content[pos + 2], content[pos + 3]]);
+            let page_count = u32::from_le_bytes([
+                content[pos],
+                content[pos + 1],
+                content[pos + 2],
+                content[pos + 3],
+            ]);
             pos += 4;
             let byte_len = u64::from_le_bytes([
-                content[pos], content[pos + 1], content[pos + 2], content[pos + 3],
-                content[pos + 4], content[pos + 5], content[pos + 6], content[pos + 7],
+                content[pos],
+                content[pos + 1],
+                content[pos + 2],
+                content[pos + 3],
+                content[pos + 4],
+                content[pos + 5],
+                content[pos + 6],
+                content[pos + 7],
             ]);
             pos += 8;
             let checksum = u64::from_le_bytes([
-                content[pos], content[pos + 1], content[pos + 2], content[pos + 3],
-                content[pos + 4], content[pos + 5], content[pos + 6], content[pos + 7],
+                content[pos],
+                content[pos + 1],
+                content[pos + 2],
+                content[pos + 3],
+                content[pos + 4],
+                content[pos + 5],
+                content[pos + 6],
+                content[pos + 7],
             ]);
             pos += 8;
             summaries.push(NativeVectorArtifactPageSummary {
@@ -307,5 +336,4 @@ impl UnifiedStore {
         let bytes = self.read_native_blob_chain(summary.root_page)?;
         Ok(Some((summary, bytes)))
     }
-
 }

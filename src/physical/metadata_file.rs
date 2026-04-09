@@ -68,7 +68,9 @@ impl PhysicalMetadataFile {
             analytics_jobs: previous
                 .map(|previous| previous.analytics_jobs.clone())
                 .unwrap_or_default(),
-            exports: previous.map(|previous| previous.exports.clone()).unwrap_or_default(),
+            exports: previous
+                .map(|previous| previous.exports.clone())
+                .unwrap_or_default(),
             superblock,
             snapshots,
         }
@@ -78,7 +80,7 @@ impl PhysicalMetadataFile {
         let file_name = data_path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "reddb.rdb".to_string());
+            .unwrap_or_else(|| "data.rdb".to_string());
         let meta_file = format!("{file_name}.meta.json");
         match data_path.parent() {
             Some(parent) => parent.join(meta_file),
@@ -90,7 +92,7 @@ impl PhysicalMetadataFile {
         let file_name = data_path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "reddb.rdb".to_string());
+            .unwrap_or_else(|| "data.rdb".to_string());
         let meta_file = format!("{file_name}.{PHYSICAL_METADATA_BINARY_EXTENSION}");
         match data_path.parent() {
             Some(parent) => parent.join(meta_file),
@@ -102,10 +104,9 @@ impl PhysicalMetadataFile {
         let file_name = data_path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "reddb.rdb".to_string());
-        let meta_file = format!(
-            "{file_name}.{PHYSICAL_METADATA_BINARY_EXTENSION}.seq-{sequence:020}"
-        );
+            .unwrap_or_else(|| "data.rdb".to_string());
+        let meta_file =
+            format!("{file_name}.{PHYSICAL_METADATA_BINARY_EXTENSION}.seq-{sequence:020}");
         match data_path.parent() {
             Some(parent) => parent.join(meta_file),
             None => PathBuf::from(meta_file),
@@ -116,7 +117,7 @@ impl PhysicalMetadataFile {
         let file_name = data_path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "reddb.rdb".to_string());
+            .unwrap_or_else(|| "data.rdb".to_string());
         let stem = file_name.strip_suffix(".rdb").unwrap_or(&file_name);
         let export_file = format!("{stem}.export.{}.rdb", sanitize_export_name(name));
         match data_path.parent() {
@@ -143,7 +144,8 @@ impl PhysicalMetadataFile {
                     journal_paths.reverse();
                     for journal_path in journal_paths {
                         if let Ok(metadata) = Self::load_from_binary_path(&journal_path) {
-                            let healed = metadata.mark_recovery(PhysicalMetadataSource::BinaryJournal);
+                            let healed =
+                                metadata.mark_recovery(PhysicalMetadataSource::BinaryJournal);
                             let _ = healed.heal_primary_metadata_for_data_path(data_path);
                             return Ok((healed, PhysicalMetadataSource::BinaryJournal));
                         }
@@ -219,7 +221,7 @@ impl PhysicalMetadataFile {
         let file_name = data_path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "reddb.rdb".to_string());
+            .unwrap_or_else(|| "data.rdb".to_string());
         let prefix = format!("{file_name}.{PHYSICAL_METADATA_BINARY_EXTENSION}.seq-");
 
         let mut paths = Vec::new();
@@ -324,7 +326,10 @@ impl PhysicalMetadataFile {
             "exports".to_string(),
             JsonValue::Array(self.exports.iter().map(export_descriptor_to_json).collect()),
         );
-        root.insert("superblock".to_string(), superblock_to_json(&self.superblock));
+        root.insert(
+            "superblock".to_string(),
+            superblock_to_json(&self.superblock),
+        );
         root.insert(
             "snapshots".to_string(),
             JsonValue::Array(

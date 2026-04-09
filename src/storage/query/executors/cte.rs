@@ -400,6 +400,134 @@ where
                 table.hash(hasher);
                 id.hash(hasher);
             }
+            Value::Color(rgb) => {
+                18u8.hash(hasher);
+                rgb.hash(hasher);
+            }
+            Value::Email(s) => {
+                19u8.hash(hasher);
+                s.hash(hasher);
+            }
+            Value::Url(s) => {
+                20u8.hash(hasher);
+                s.hash(hasher);
+            }
+            Value::Phone(n) => {
+                21u8.hash(hasher);
+                n.hash(hasher);
+            }
+            Value::Semver(v) => {
+                22u8.hash(hasher);
+                v.hash(hasher);
+            }
+            Value::Cidr(ip, prefix) => {
+                23u8.hash(hasher);
+                ip.hash(hasher);
+                prefix.hash(hasher);
+            }
+            Value::Date(d) => {
+                24u8.hash(hasher);
+                d.hash(hasher);
+            }
+            Value::Time(t) => {
+                25u8.hash(hasher);
+                t.hash(hasher);
+            }
+            Value::Decimal(v) => {
+                26u8.hash(hasher);
+                v.hash(hasher);
+            }
+            Value::EnumValue(i) => {
+                27u8.hash(hasher);
+                i.hash(hasher);
+            }
+            Value::Array(elems) => {
+                28u8.hash(hasher);
+                elems.len().hash(hasher);
+                for elem in elems {
+                    self.hash_value(elem, hasher);
+                }
+            }
+            Value::TimestampMs(v) => {
+                29u8.hash(hasher);
+                v.hash(hasher);
+            }
+            Value::Ipv4(v) => {
+                30u8.hash(hasher);
+                v.hash(hasher);
+            }
+            Value::Ipv6(bytes) => {
+                31u8.hash(hasher);
+                bytes.hash(hasher);
+            }
+            Value::Subnet(ip, mask) => {
+                32u8.hash(hasher);
+                ip.hash(hasher);
+                mask.hash(hasher);
+            }
+            Value::Port(v) => {
+                33u8.hash(hasher);
+                v.hash(hasher);
+            }
+            Value::Latitude(v) => {
+                34u8.hash(hasher);
+                v.hash(hasher);
+            }
+            Value::Longitude(v) => {
+                35u8.hash(hasher);
+                v.hash(hasher);
+            }
+            Value::GeoPoint(lat, lon) => {
+                36u8.hash(hasher);
+                lat.hash(hasher);
+                lon.hash(hasher);
+            }
+            Value::Country2(c) => {
+                37u8.hash(hasher);
+                c.hash(hasher);
+            }
+            Value::Country3(c) => {
+                38u8.hash(hasher);
+                c.hash(hasher);
+            }
+            Value::Lang2(c) => {
+                39u8.hash(hasher);
+                c.hash(hasher);
+            }
+            Value::Lang5(c) => {
+                40u8.hash(hasher);
+                c.hash(hasher);
+            }
+            Value::Currency(c) => {
+                41u8.hash(hasher);
+                c.hash(hasher);
+            }
+            Value::ColorAlpha(rgba) => {
+                42u8.hash(hasher);
+                rgba.hash(hasher);
+            }
+            Value::BigInt(v) => {
+                43u8.hash(hasher);
+                v.hash(hasher);
+            }
+            Value::KeyRef(col, key) => {
+                44u8.hash(hasher);
+                col.hash(hasher);
+                key.hash(hasher);
+            }
+            Value::DocRef(col, id) => {
+                45u8.hash(hasher);
+                col.hash(hasher);
+                id.hash(hasher);
+            }
+            Value::TableRef(name) => {
+                46u8.hash(hasher);
+                name.hash(hasher);
+            }
+            Value::PageRef(page_id) => {
+                47u8.hash(hasher);
+                page_id.hash(hasher);
+            }
         }
     }
 }

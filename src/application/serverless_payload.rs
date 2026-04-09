@@ -63,7 +63,9 @@ pub(crate) fn parse_serverless_readiness_requirements(
     Ok(normalized)
 }
 
-pub(crate) fn parse_serverless_reclaim_operations(payload: &JsonValue) -> Result<Vec<String>, String> {
+pub(crate) fn parse_serverless_reclaim_operations(
+    payload: &JsonValue,
+) -> Result<Vec<String>, String> {
     let value = payload.get("operations");
     let mut operations = match value {
         None => vec![

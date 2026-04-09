@@ -4,17 +4,16 @@
 //! with filtering/ordering/pagination, universal queries, EXPLAIN, scan, similarity search,
 //! text search, and cross-model entity scenarios.
 
-use reddb::{RedDBRuntime, EntityUseCases, QueryUseCases};
 use reddb::application::{
-    CreateRowInput, CreateNodeInput, CreateEdgeInput, CreateVectorInput,
-    CreateKvInput, CreateDocumentInput, DeleteEntityInput,
-    PatchEntityInput, PatchEntityOperation, PatchEntityOperationType,
-    ExecuteQueryInput, ExplainQueryInput, ScanCollectionInput,
-    SearchSimilarInput, SearchTextInput,
+    CreateDocumentInput, CreateEdgeInput, CreateKvInput, CreateNodeInput, CreateRowInput,
+    CreateVectorInput, DeleteEntityInput, ExecuteQueryInput, ExplainQueryInput, PatchEntityInput,
+    PatchEntityOperation, PatchEntityOperationType, ScanCollectionInput, SearchSimilarInput,
+    SearchTextInput,
 };
+use reddb::json::Value as JsonValue;
 use reddb::storage::schema::Value;
 use reddb::MetadataValue;
-use reddb::json::Value as JsonValue;
+use reddb::{EntityUseCases, QueryUseCases, RedDBRuntime};
 
 fn rt() -> RedDBRuntime {
     RedDBRuntime::in_memory().expect("failed to create in-memory runtime")
@@ -46,14 +45,21 @@ fn test_row_create_and_query() {
             node_links: vec![],
             vector_links: vec![],
         });
-        assert!(out.is_ok(), "create_row should succeed for {}: {:?}", name, out.err());
+        assert!(
+            out.is_ok(),
+            "create_row should succeed for {}: {:?}",
+            name,
+            out.err()
+        );
         ids.push(out.unwrap().id);
     }
 
     // Verify all IDs are unique
     let unique_count = {
         let mut set = std::collections::HashSet::new();
-        ids.iter().for_each(|id| { set.insert(id.raw()); });
+        ids.iter().for_each(|id| {
+            set.insert(id.raw());
+        });
         set.len()
     };
     assert_eq!(unique_count, 5, "all IDs should be unique");
@@ -90,16 +96,18 @@ fn test_row_patch_set() {
     let entity = EntityUseCases::new(&rt);
     let query = QueryUseCases::new(&rt);
 
-    let out = entity.create_row(CreateRowInput {
-        collection: "patch_set".into(),
-        fields: vec![
-            ("name".into(), Value::Text("Alice".into())),
-            ("role".into(), Value::Text("developer".into())),
-        ],
-        metadata: vec![],
-        node_links: vec![],
-        vector_links: vec![],
-    }).expect("create_row should succeed");
+    let out = entity
+        .create_row(CreateRowInput {
+            collection: "patch_set".into(),
+            fields: vec![
+                ("name".into(), Value::Text("Alice".into())),
+                ("role".into(), Value::Text("developer".into())),
+            ],
+            metadata: vec![],
+            node_links: vec![],
+            vector_links: vec![],
+        })
+        .expect("create_row should succeed");
 
     // Patch with Set operation to change the role
     let patched = entity.patch(PatchEntityInput {
@@ -115,9 +123,11 @@ fn test_row_patch_set() {
     assert!(patched.is_ok(), "patch should succeed: {:?}", patched.err());
 
     // Verify the field changed by querying
-    let result = query.execute(ExecuteQueryInput {
-        query: "SELECT * FROM patch_set".into(),
-    }).expect("SELECT should succeed");
+    let result = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT * FROM patch_set".into(),
+        })
+        .expect("SELECT should succeed");
 
     assert_eq!(result.result.records.len(), 1, "should have exactly 1 row");
 
@@ -137,17 +147,19 @@ fn test_row_patch_unset() {
     let entity = EntityUseCases::new(&rt);
     let query = QueryUseCases::new(&rt);
 
-    let out = entity.create_row(CreateRowInput {
-        collection: "patch_unset".into(),
-        fields: vec![
-            ("name".into(), Value::Text("Bob".into())),
-            ("email".into(), Value::Text("bob@example.com".into())),
-            ("phone".into(), Value::Text("+1234567890".into())),
-        ],
-        metadata: vec![],
-        node_links: vec![],
-        vector_links: vec![],
-    }).expect("create_row should succeed");
+    let out = entity
+        .create_row(CreateRowInput {
+            collection: "patch_unset".into(),
+            fields: vec![
+                ("name".into(), Value::Text("Bob".into())),
+                ("email".into(), Value::Text("bob@example.com".into())),
+                ("phone".into(), Value::Text("+1234567890".into())),
+            ],
+            metadata: vec![],
+            node_links: vec![],
+            vector_links: vec![],
+        })
+        .expect("create_row should succeed");
 
     // Unset the phone field
     let patched = entity.patch(PatchEntityInput {
@@ -160,11 +172,17 @@ fn test_row_patch_unset() {
             value: None,
         }],
     });
-    assert!(patched.is_ok(), "unset patch should succeed: {:?}", patched.err());
+    assert!(
+        patched.is_ok(),
+        "unset patch should succeed: {:?}",
+        patched.err()
+    );
 
-    let result = query.execute(ExecuteQueryInput {
-        query: "SELECT * FROM patch_unset".into(),
-    }).expect("SELECT should succeed");
+    let result = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT * FROM patch_unset".into(),
+        })
+        .expect("SELECT should succeed");
 
     assert_eq!(result.result.records.len(), 1);
     let record = &result.result.records[0];
@@ -178,8 +196,14 @@ fn test_row_patch_unset() {
     );
 
     // name and email should still exist
-    assert!(record.values.get("name").is_some(), "name should still exist");
-    assert!(record.values.get("email").is_some(), "email should still exist");
+    assert!(
+        record.values.get("name").is_some(),
+        "name should still exist"
+    );
+    assert!(
+        record.values.get("email").is_some(),
+        "email should still exist"
+    );
 }
 
 // 4. test_row_delete
@@ -189,34 +213,49 @@ fn test_row_delete() {
     let entity = EntityUseCases::new(&rt);
     let query = QueryUseCases::new(&rt);
 
-    let out = entity.create_row(CreateRowInput {
-        collection: "delete_test".into(),
-        fields: vec![
-            ("name".into(), Value::Text("ToBeDeleted".into())),
-        ],
-        metadata: vec![],
-        node_links: vec![],
-        vector_links: vec![],
-    }).expect("create_row should succeed");
+    let out = entity
+        .create_row(CreateRowInput {
+            collection: "delete_test".into(),
+            fields: vec![("name".into(), Value::Text("ToBeDeleted".into()))],
+            metadata: vec![],
+            node_links: vec![],
+            vector_links: vec![],
+        })
+        .expect("create_row should succeed");
 
     // Verify it exists
-    let result = query.execute(ExecuteQueryInput {
-        query: "SELECT * FROM delete_test".into(),
-    }).expect("SELECT should succeed");
-    assert_eq!(result.result.records.len(), 1, "row should exist before delete");
+    let result = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT * FROM delete_test".into(),
+        })
+        .expect("SELECT should succeed");
+    assert_eq!(
+        result.result.records.len(),
+        1,
+        "row should exist before delete"
+    );
 
     // Delete it
     let deleted = entity.delete(DeleteEntityInput {
         collection: "delete_test".into(),
         id: out.id,
     });
-    assert!(deleted.is_ok(), "delete should succeed: {:?}", deleted.err());
-    assert!(deleted.unwrap().deleted, "delete should report deleted=true");
+    assert!(
+        deleted.is_ok(),
+        "delete should succeed: {:?}",
+        deleted.err()
+    );
+    assert!(
+        deleted.unwrap().deleted,
+        "delete should report deleted=true"
+    );
 
     // Verify query returns nothing
-    let result = query.execute(ExecuteQueryInput {
-        query: "SELECT * FROM delete_test".into(),
-    }).expect("SELECT should succeed");
+    let result = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT * FROM delete_test".into(),
+        })
+        .expect("SELECT should succeed");
     assert_eq!(
         result.result.records.len(),
         0,
@@ -248,12 +287,20 @@ fn test_document_create_and_flatten() {
         node_links: vec![],
         vector_links: vec![],
     });
-    assert!(out.is_ok(), "create_document should succeed: {:?}", out.err());
+    assert!(
+        out.is_ok(),
+        "create_document should succeed: {:?}",
+        out.err()
+    );
 
     let result = query.execute(ExecuteQueryInput {
         query: "SELECT * FROM doc_flatten".into(),
     });
-    assert!(result.is_ok(), "query documents should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "query documents should succeed: {:?}",
+        result.err()
+    );
     let result = result.unwrap();
     assert_eq!(result.result.records.len(), 1, "should have 1 document");
 
@@ -282,18 +329,22 @@ fn test_document_multiple() {
         body.insert("title".into(), JsonValue::String(format!("Doc {}", i)));
         body.insert("index".into(), JsonValue::Number(i as f64));
 
-        entity.create_document(CreateDocumentInput {
-            collection: "doc_multi".into(),
-            body: JsonValue::Object(body),
-            metadata: vec![],
-            node_links: vec![],
-            vector_links: vec![],
-        }).unwrap_or_else(|e| panic!("create_document {} failed: {:?}", i, e));
+        entity
+            .create_document(CreateDocumentInput {
+                collection: "doc_multi".into(),
+                body: JsonValue::Object(body),
+                metadata: vec![],
+                node_links: vec![],
+                vector_links: vec![],
+            })
+            .unwrap_or_else(|e| panic!("create_document {} failed: {:?}", i, e));
     }
 
-    let result = query.execute(ExecuteQueryInput {
-        query: "SELECT * FROM doc_multi".into(),
-    }).expect("SELECT should succeed");
+    let result = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT * FROM doc_multi".into(),
+        })
+        .expect("SELECT should succeed");
 
     assert_eq!(
         result.result.records.len(),
@@ -316,12 +367,18 @@ fn test_kv_set_get_delete() {
             value: Value::Text(format!("value_{}", i)),
             metadata: vec![],
         });
-        assert!(out.is_ok(), "create_kv should succeed for key_{}: {:?}", i, out.err());
+        assert!(
+            out.is_ok(),
+            "create_kv should succeed for key_{}: {:?}",
+            i,
+            out.err()
+        );
     }
 
     // Get each key
     for i in 0..5 {
-        let val = uc.get_kv("kv_crud", &format!("key_{}", i))
+        let val = uc
+            .get_kv("kv_crud", &format!("key_{}", i))
             .expect("get_kv should succeed")
             .expect("key should exist");
         match &val.0 {
@@ -331,17 +388,21 @@ fn test_kv_set_get_delete() {
     }
 
     // Overwrite key_0: delete first, then re-create with new value
-    let deleted = uc.delete_kv("kv_crud", "key_0").expect("delete_kv for overwrite should succeed");
+    let deleted = uc
+        .delete_kv("kv_crud", "key_0")
+        .expect("delete_kv for overwrite should succeed");
     assert!(deleted, "should have deleted old key_0");
     uc.create_kv(CreateKvInput {
         collection: "kv_crud".into(),
         key: "key_0".into(),
         value: Value::Text("overwritten".into()),
         metadata: vec![],
-    }).expect("re-create with new value should succeed");
+    })
+    .expect("re-create with new value should succeed");
 
     // Verify overwritten value
-    let val = uc.get_kv("kv_crud", "key_0")
+    let val = uc
+        .get_kv("kv_crud", "key_0")
         .expect("get_kv should succeed")
         .expect("key should still exist");
     match &val.0 {
@@ -350,21 +411,29 @@ fn test_kv_set_get_delete() {
     }
 
     // Delete key_0 again
-    let deleted = uc.delete_kv("kv_crud", "key_0").expect("delete_kv should succeed");
+    let deleted = uc
+        .delete_kv("kv_crud", "key_0")
+        .expect("delete_kv should succeed");
     assert!(deleted, "should have deleted key_0");
 
     // Confirm deleted
-    let val = uc.get_kv("kv_crud", "key_0").expect("get_kv should succeed");
+    let val = uc
+        .get_kv("kv_crud", "key_0")
+        .expect("get_kv should succeed");
     assert!(val.is_none(), "key_0 should be gone after delete");
 
     // Other keys should still be present
     for i in 1..5 {
-        let val = uc.get_kv("kv_crud", &format!("key_{}", i)).expect("get_kv should succeed");
+        let val = uc
+            .get_kv("kv_crud", &format!("key_{}", i))
+            .expect("get_kv should succeed");
         assert!(val.is_some(), "key_{} should still exist", i);
     }
 
     // Delete a non-existent key
-    let deleted = uc.delete_kv("kv_crud", "nonexistent").expect("delete_kv should succeed");
+    let deleted = uc
+        .delete_kv("kv_crud", "nonexistent")
+        .expect("delete_kv should succeed");
     assert!(!deleted, "deleting non-existent key should return false");
 }
 
@@ -377,12 +446,14 @@ fn test_kv_list_all() {
 
     // Create 10 KV pairs
     for i in 0..10 {
-        entity.create_kv(CreateKvInput {
-            collection: "kv_list".into(),
-            key: format!("setting.{}", i),
-            value: Value::Integer(i * 100),
-            metadata: vec![],
-        }).expect("create_kv should succeed");
+        entity
+            .create_kv(CreateKvInput {
+                collection: "kv_list".into(),
+                key: format!("setting.{}", i),
+                value: Value::Integer(i * 100),
+                metadata: vec![],
+            })
+            .expect("create_kv should succeed");
     }
 
     // Scan the collection
@@ -421,11 +492,13 @@ fn test_node_create_with_properties() {
     });
     assert!(out.is_ok(), "create_node should succeed: {:?}", out.err());
 
-    let page = query.scan(ScanCollectionInput {
-        collection: "node_props".into(),
-        offset: 0,
-        limit: 10,
-    }).expect("scan should succeed");
+    let page = query
+        .scan(ScanCollectionInput {
+            collection: "node_props".into(),
+            offset: 0,
+            limit: 10,
+        })
+        .expect("scan should succeed");
     assert_eq!(page.items.len(), 1, "should have 1 node");
 
     let item = &page.items[0];
@@ -443,27 +516,31 @@ fn test_edge_create_bidirectional() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
 
-    let node_a = entity.create_node(CreateNodeInput {
-        collection: "edge_net".into(),
-        label: "server_a".into(),
-        node_type: Some("Server".into()),
-        properties: vec![("ip".into(), Value::Text("10.0.0.1".into()))],
-        metadata: vec![],
-        embeddings: vec![],
-        table_links: vec![],
-        node_links: vec![],
-    }).expect("create node_a should succeed");
+    let node_a = entity
+        .create_node(CreateNodeInput {
+            collection: "edge_net".into(),
+            label: "server_a".into(),
+            node_type: Some("Server".into()),
+            properties: vec![("ip".into(), Value::Text("10.0.0.1".into()))],
+            metadata: vec![],
+            embeddings: vec![],
+            table_links: vec![],
+            node_links: vec![],
+        })
+        .expect("create node_a should succeed");
 
-    let node_b = entity.create_node(CreateNodeInput {
-        collection: "edge_net".into(),
-        label: "server_b".into(),
-        node_type: Some("Server".into()),
-        properties: vec![("ip".into(), Value::Text("10.0.0.2".into()))],
-        metadata: vec![],
-        embeddings: vec![],
-        table_links: vec![],
-        node_links: vec![],
-    }).expect("create node_b should succeed");
+    let node_b = entity
+        .create_node(CreateNodeInput {
+            collection: "edge_net".into(),
+            label: "server_b".into(),
+            node_type: Some("Server".into()),
+            properties: vec![("ip".into(), Value::Text("10.0.0.2".into()))],
+            metadata: vec![],
+            embeddings: vec![],
+            table_links: vec![],
+            node_links: vec![],
+        })
+        .expect("create node_b should succeed");
 
     // Create edge A -> B
     let edge_ab = entity.create_edge(CreateEdgeInput {
@@ -475,7 +552,11 @@ fn test_edge_create_bidirectional() {
         properties: vec![("latency_ms".into(), Value::Integer(5))],
         metadata: vec![],
     });
-    assert!(edge_ab.is_ok(), "edge A->B should succeed: {:?}", edge_ab.err());
+    assert!(
+        edge_ab.is_ok(),
+        "edge A->B should succeed: {:?}",
+        edge_ab.err()
+    );
 
     // Create edge B -> A (bidirectional)
     let edge_ba = entity.create_edge(CreateEdgeInput {
@@ -487,15 +568,21 @@ fn test_edge_create_bidirectional() {
         properties: vec![("latency_ms".into(), Value::Integer(3))],
         metadata: vec![],
     });
-    assert!(edge_ba.is_ok(), "edge B->A should succeed: {:?}", edge_ba.err());
+    assert!(
+        edge_ba.is_ok(),
+        "edge B->A should succeed: {:?}",
+        edge_ba.err()
+    );
 
     // Scan — should contain 2 nodes + 2 edges = 4 entities
     let query = QueryUseCases::new(&rt);
-    let page = query.scan(ScanCollectionInput {
-        collection: "edge_net".into(),
-        offset: 0,
-        limit: 20,
-    }).expect("scan should succeed");
+    let page = query
+        .scan(ScanCollectionInput {
+            collection: "edge_net".into(),
+            offset: 0,
+            limit: 20,
+        })
+        .expect("scan should succeed");
     assert_eq!(
         page.items.len(),
         4,
@@ -524,21 +611,30 @@ fn test_vector_create_with_metadata() {
         metadata: vec![
             ("source".into(), MetadataValue::String("sensor_1".into())),
             ("confidence".into(), MetadataValue::Float(0.95)),
-            ("tags".into(), MetadataValue::Array(vec![
-                MetadataValue::String("important".into()),
-                MetadataValue::String("verified".into()),
-            ])),
+            (
+                "tags".into(),
+                MetadataValue::Array(vec![
+                    MetadataValue::String("important".into()),
+                    MetadataValue::String("verified".into()),
+                ]),
+            ),
         ],
         link_row: None,
         link_node: None,
     });
-    assert!(out.is_ok(), "create_vector with metadata should succeed: {:?}", out.err());
+    assert!(
+        out.is_ok(),
+        "create_vector with metadata should succeed: {:?}",
+        out.err()
+    );
 
-    let page = query.scan(ScanCollectionInput {
-        collection: "vec_meta".into(),
-        offset: 0,
-        limit: 10,
-    }).expect("scan should succeed");
+    let page = query
+        .scan(ScanCollectionInput {
+            collection: "vec_meta".into(),
+            offset: 0,
+            limit: 10,
+        })
+        .expect("scan should succeed");
     assert_eq!(page.items.len(), 1, "should have 1 vector");
 
     let item = &page.items[0];
@@ -558,14 +654,16 @@ fn test_vector_create_and_search() {
     // Create 50 vectors spread across directions
     for i in 0..50 {
         let angle = (i as f32) * std::f32::consts::PI * 2.0 / 50.0;
-        entity.create_vector(CreateVectorInput {
-            collection: "vec_search".into(),
-            dense: vec![angle.cos(), angle.sin(), 0.0],
-            content: Some(format!("vector_{}", i)),
-            metadata: vec![],
-            link_row: None,
-            link_node: None,
-        }).unwrap_or_else(|e| panic!("create_vector {} failed: {:?}", i, e));
+        entity
+            .create_vector(CreateVectorInput {
+                collection: "vec_search".into(),
+                dense: vec![angle.cos(), angle.sin(), 0.0],
+                content: Some(format!("vector_{}", i)),
+                metadata: vec![],
+                link_row: None,
+                link_node: None,
+            })
+            .unwrap_or_else(|e| panic!("create_vector {} failed: {:?}", i, e));
     }
 
     // Search for vectors similar to [1, 0, 0]
@@ -575,7 +673,11 @@ fn test_vector_create_and_search() {
         k: 5,
         min_score: 0.0,
     });
-    assert!(results.is_ok(), "search_similar should succeed: {:?}", results.err());
+    assert!(
+        results.is_ok(),
+        "search_similar should succeed: {:?}",
+        results.err()
+    );
     let results = results.unwrap();
 
     assert!(!results.is_empty(), "should find similar vectors");
@@ -619,23 +721,29 @@ fn test_select_with_filter() {
     ];
 
     for (name, dept, age) in &entries {
-        entity.create_row(CreateRowInput {
-            collection: "filter_test".into(),
-            fields: vec![
-                ("name".into(), Value::Text(name.to_string())),
-                ("dept".into(), Value::Text(dept.to_string())),
-                ("age".into(), Value::Integer(*age)),
-            ],
-            metadata: vec![],
-            node_links: vec![],
-            vector_links: vec![],
-        }).expect("create_row should succeed");
+        entity
+            .create_row(CreateRowInput {
+                collection: "filter_test".into(),
+                fields: vec![
+                    ("name".into(), Value::Text(name.to_string())),
+                    ("dept".into(), Value::Text(dept.to_string())),
+                    ("age".into(), Value::Integer(*age)),
+                ],
+                metadata: vec![],
+                node_links: vec![],
+                vector_links: vec![],
+            })
+            .expect("create_row should succeed");
     }
 
     let result = query.execute(ExecuteQueryInput {
         query: "SELECT * FROM filter_test WHERE dept = 'engineering'".into(),
     });
-    assert!(result.is_ok(), "filtered SELECT should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "filtered SELECT should succeed: {:?}",
+        result.err()
+    );
     let result = result.unwrap();
     assert_eq!(
         result.result.records.len(),
@@ -662,26 +770,35 @@ fn test_select_with_order_by() {
 
     let ages = [30, 25, 35, 28, 40];
     for (i, age) in ages.iter().enumerate() {
-        entity.create_row(CreateRowInput {
-            collection: "order_test".into(),
-            fields: vec![
-                ("name".into(), Value::Text(format!("user_{}", i))),
-                ("age".into(), Value::Integer(*age)),
-            ],
-            metadata: vec![],
-            node_links: vec![],
-            vector_links: vec![],
-        }).expect("create_row should succeed");
+        entity
+            .create_row(CreateRowInput {
+                collection: "order_test".into(),
+                fields: vec![
+                    ("name".into(), Value::Text(format!("user_{}", i))),
+                    ("age".into(), Value::Integer(*age)),
+                ],
+                metadata: vec![],
+                node_links: vec![],
+                vector_links: vec![],
+            })
+            .expect("create_row should succeed");
     }
 
     let result = query.execute(ExecuteQueryInput {
         query: "SELECT * FROM order_test ORDER BY age ASC".into(),
     });
-    assert!(result.is_ok(), "ordered SELECT should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "ordered SELECT should succeed: {:?}",
+        result.err()
+    );
     let result = result.unwrap();
     assert_eq!(result.result.records.len(), 5);
 
-    let result_ages: Vec<i64> = result.result.records.iter()
+    let result_ages: Vec<i64> = result
+        .result
+        .records
+        .iter()
         .filter_map(|r| match r.values.get("age") {
             Some(Value::Integer(n)) => Some(*n),
             Some(Value::Float(f)) => Some(*f as i64),
@@ -707,22 +824,28 @@ fn test_select_with_limit_offset() {
     let query = QueryUseCases::new(&rt);
 
     for i in 0..20 {
-        entity.create_row(CreateRowInput {
-            collection: "paginate".into(),
-            fields: vec![
-                ("index".into(), Value::Integer(i)),
-                ("name".into(), Value::Text(format!("item_{}", i))),
-            ],
-            metadata: vec![],
-            node_links: vec![],
-            vector_links: vec![],
-        }).expect("create_row should succeed");
+        entity
+            .create_row(CreateRowInput {
+                collection: "paginate".into(),
+                fields: vec![
+                    ("index".into(), Value::Integer(i)),
+                    ("name".into(), Value::Text(format!("item_{}", i))),
+                ],
+                metadata: vec![],
+                node_links: vec![],
+                vector_links: vec![],
+            })
+            .expect("create_row should succeed");
     }
 
     let result = query.execute(ExecuteQueryInput {
         query: "SELECT * FROM paginate LIMIT 5 OFFSET 3".into(),
     });
-    assert!(result.is_ok(), "paginated SELECT should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "paginated SELECT should succeed: {:?}",
+        result.err()
+    );
     let result = result.unwrap();
 
     assert!(
@@ -732,9 +855,11 @@ fn test_select_with_limit_offset() {
     );
 
     // Verify LIMIT alone
-    let result_limit = query.execute(ExecuteQueryInput {
-        query: "SELECT * FROM paginate LIMIT 3".into(),
-    }).expect("SELECT with LIMIT should succeed");
+    let result_limit = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT * FROM paginate LIMIT 3".into(),
+        })
+        .expect("SELECT with LIMIT should succeed");
     assert_eq!(
         result_limit.result.records.len(),
         3,
@@ -750,38 +875,48 @@ fn test_select_universal_from_any() {
     let query = QueryUseCases::new(&rt);
 
     // Create a mix of rows, nodes, and vectors
-    entity.create_row(CreateRowInput {
-        collection: "universal_mix".into(),
-        fields: vec![("kind".into(), Value::Text("row".into()))],
-        metadata: vec![],
-        node_links: vec![],
-        vector_links: vec![],
-    }).expect("create row");
+    entity
+        .create_row(CreateRowInput {
+            collection: "universal_mix".into(),
+            fields: vec![("kind".into(), Value::Text("row".into()))],
+            metadata: vec![],
+            node_links: vec![],
+            vector_links: vec![],
+        })
+        .expect("create row");
 
-    entity.create_node(CreateNodeInput {
-        collection: "universal_mix".into(),
-        label: "node_one".into(),
-        node_type: Some("Type".into()),
-        properties: vec![("kind".into(), Value::Text("node".into()))],
-        metadata: vec![],
-        embeddings: vec![],
-        table_links: vec![],
-        node_links: vec![],
-    }).expect("create node");
+    entity
+        .create_node(CreateNodeInput {
+            collection: "universal_mix".into(),
+            label: "node_one".into(),
+            node_type: Some("Type".into()),
+            properties: vec![("kind".into(), Value::Text("node".into()))],
+            metadata: vec![],
+            embeddings: vec![],
+            table_links: vec![],
+            node_links: vec![],
+        })
+        .expect("create node");
 
-    entity.create_vector(CreateVectorInput {
-        collection: "universal_mix".into(),
-        dense: vec![1.0, 0.0, 0.0],
-        content: Some("a vector".into()),
-        metadata: vec![],
-        link_row: None,
-        link_node: None,
-    }).expect("create vector");
+    entity
+        .create_vector(CreateVectorInput {
+            collection: "universal_mix".into(),
+            dense: vec![1.0, 0.0, 0.0],
+            content: Some("a vector".into()),
+            metadata: vec![],
+            link_row: None,
+            link_node: None,
+        })
+        .expect("create vector");
 
     let result = query.execute(ExecuteQueryInput {
         query: "SELECT * FROM any".into(),
     });
-    assert!(result.is_ok(), "SELECT * FROM any should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "SELECT * FROM any should succeed: {:?}",
+        result.err()
+    );
     let result = result.unwrap();
     assert!(
         result.result.records.len() >= 3,
@@ -798,22 +933,26 @@ fn test_select_universal_with_filter() {
     let query = QueryUseCases::new(&rt);
 
     for i in 0..3 {
-        entity.create_row(CreateRowInput {
-            collection: "univ_a".into(),
-            fields: vec![("val".into(), Value::Integer(i))],
-            metadata: vec![],
-            node_links: vec![],
-            vector_links: vec![],
-        }).expect("create row in univ_a");
+        entity
+            .create_row(CreateRowInput {
+                collection: "univ_a".into(),
+                fields: vec![("val".into(), Value::Integer(i))],
+                metadata: vec![],
+                node_links: vec![],
+                vector_links: vec![],
+            })
+            .expect("create row in univ_a");
     }
     for i in 0..2 {
-        entity.create_row(CreateRowInput {
-            collection: "univ_b".into(),
-            fields: vec![("val".into(), Value::Integer(i))],
-            metadata: vec![],
-            node_links: vec![],
-            vector_links: vec![],
-        }).expect("create row in univ_b");
+        entity
+            .create_row(CreateRowInput {
+                collection: "univ_b".into(),
+                fields: vec![("val".into(), Value::Integer(i))],
+                metadata: vec![],
+                node_links: vec![],
+                vector_links: vec![],
+            })
+            .expect("create row in univ_b");
     }
 
     // In universal queries, the collection field is stored as "_collection"
@@ -843,22 +982,39 @@ fn test_explain_query() {
     let explain = query.explain(ExplainQueryInput {
         query: "SELECT * FROM any".into(),
     });
-    assert!(explain.is_ok(), "explain should succeed: {:?}", explain.err());
+    assert!(
+        explain.is_ok(),
+        "explain should succeed: {:?}",
+        explain.err()
+    );
     let explain = explain.unwrap();
 
     assert!(explain.is_universal, "FROM any should be universal");
     // statement reflects the parsed expression type (e.g. "table", "graph", "vector")
-    assert_eq!(explain.statement, "table", "statement should be 'table' for SELECT queries");
+    assert_eq!(
+        explain.statement, "table",
+        "statement should be 'table' for SELECT queries"
+    );
     assert!(!explain.query.is_empty(), "query field should be populated");
 
     // Explain a non-universal query
     let explain2 = query.explain(ExplainQueryInput {
         query: "SELECT * FROM some_table".into(),
     });
-    assert!(explain2.is_ok(), "explain non-universal should succeed: {:?}", explain2.err());
+    assert!(
+        explain2.is_ok(),
+        "explain non-universal should succeed: {:?}",
+        explain2.err()
+    );
     let explain2 = explain2.unwrap();
-    assert!(!explain2.is_universal, "FROM some_table should NOT be universal");
-    assert_eq!(explain2.statement, "table", "statement for table query should be 'table'");
+    assert!(
+        !explain2.is_universal,
+        "FROM some_table should NOT be universal"
+    );
+    assert_eq!(
+        explain2.statement, "table",
+        "statement for table query should be 'table'"
+    );
 }
 
 // 19. test_scan_collection
@@ -869,49 +1025,57 @@ fn test_scan_collection() {
     let query = QueryUseCases::new(&rt);
 
     for i in 0..15 {
-        entity.create_row(CreateRowInput {
-            collection: "scan_test".into(),
-            fields: vec![
-                ("idx".into(), Value::Integer(i)),
-            ],
-            metadata: vec![],
-            node_links: vec![],
-            vector_links: vec![],
-        }).expect("create_row should succeed");
+        entity
+            .create_row(CreateRowInput {
+                collection: "scan_test".into(),
+                fields: vec![("idx".into(), Value::Integer(i))],
+                metadata: vec![],
+                node_links: vec![],
+                vector_links: vec![],
+            })
+            .expect("create_row should succeed");
     }
 
     // Scan with offset=0, limit=5
-    let page1 = query.scan(ScanCollectionInput {
-        collection: "scan_test".into(),
-        offset: 0,
-        limit: 5,
-    }).expect("scan page 1 should succeed");
+    let page1 = query
+        .scan(ScanCollectionInput {
+            collection: "scan_test".into(),
+            offset: 0,
+            limit: 5,
+        })
+        .expect("scan page 1 should succeed");
     assert_eq!(page1.items.len(), 5, "first page should have 5 items");
     assert_eq!(page1.total, 15, "total should be 15");
     assert!(page1.next.is_some(), "should have a next cursor");
 
     // Scan with offset=5, limit=5
-    let page2 = query.scan(ScanCollectionInput {
-        collection: "scan_test".into(),
-        offset: 5,
-        limit: 5,
-    }).expect("scan page 2 should succeed");
+    let page2 = query
+        .scan(ScanCollectionInput {
+            collection: "scan_test".into(),
+            offset: 5,
+            limit: 5,
+        })
+        .expect("scan page 2 should succeed");
     assert_eq!(page2.items.len(), 5, "second page should have 5 items");
 
     // Scan with offset=10, limit=5
-    let page3 = query.scan(ScanCollectionInput {
-        collection: "scan_test".into(),
-        offset: 10,
-        limit: 5,
-    }).expect("scan page 3 should succeed");
+    let page3 = query
+        .scan(ScanCollectionInput {
+            collection: "scan_test".into(),
+            offset: 10,
+            limit: 5,
+        })
+        .expect("scan page 3 should succeed");
     assert_eq!(page3.items.len(), 5, "third page should have 5 items");
 
     // Scan with offset=14, limit=5
-    let page_last = query.scan(ScanCollectionInput {
-        collection: "scan_test".into(),
-        offset: 14,
-        limit: 5,
-    }).expect("scan last page should succeed");
+    let page_last = query
+        .scan(ScanCollectionInput {
+            collection: "scan_test".into(),
+            offset: 14,
+            limit: 5,
+        })
+        .expect("scan last page should succeed");
     assert_eq!(page_last.items.len(), 1, "last page should have 1 item");
 
     // All pages together should cover all entities
@@ -937,22 +1101,26 @@ fn test_search_similar() {
     ];
 
     for (i, v) in vectors.iter().enumerate() {
-        entity.create_vector(CreateVectorInput {
-            collection: "sim_search".into(),
-            dense: v.clone(),
-            content: Some(format!("vec_{}", i)),
-            metadata: vec![],
-            link_row: None,
-            link_node: None,
-        }).expect("create_vector should succeed");
+        entity
+            .create_vector(CreateVectorInput {
+                collection: "sim_search".into(),
+                dense: v.clone(),
+                content: Some(format!("vec_{}", i)),
+                metadata: vec![],
+                link_row: None,
+                link_node: None,
+            })
+            .expect("create_vector should succeed");
     }
 
-    let results = query.search_similar(SearchSimilarInput {
-        collection: "sim_search".into(),
-        vector: vec![1.0, 0.0, 0.0],
-        k: 3,
-        min_score: 0.0,
-    }).expect("search_similar should succeed");
+    let results = query
+        .search_similar(SearchSimilarInput {
+            collection: "sim_search".into(),
+            vector: vec![1.0, 0.0, 0.0],
+            k: 3,
+            min_score: 0.0,
+        })
+        .expect("search_similar should succeed");
 
     assert_eq!(results.len(), 3, "should return k=3 results");
 
@@ -963,12 +1131,14 @@ fn test_search_similar() {
     );
 
     // Test with min_score filtering
-    let results_filtered = query.search_similar(SearchSimilarInput {
-        collection: "sim_search".into(),
-        vector: vec![1.0, 0.0, 0.0],
-        k: 10,
-        min_score: 0.8,
-    }).expect("search_similar with min_score should succeed");
+    let results_filtered = query
+        .search_similar(SearchSimilarInput {
+            collection: "sim_search".into(),
+            vector: vec![1.0, 0.0, 0.0],
+            k: 10,
+            min_score: 0.8,
+        })
+        .expect("search_similar with min_score should succeed");
 
     for r in &results_filtered {
         assert!(
@@ -987,24 +1157,38 @@ fn test_search_text() {
     let query = QueryUseCases::new(&rt);
 
     let texts = [
-        ("Database Management Systems", "Explains relational databases and SQL"),
-        ("Network Security Fundamentals", "Covers firewalls and intrusion detection"),
-        ("Machine Learning Basics", "Introduction to neural networks and deep learning"),
-        ("Database Optimization Techniques", "Indexing and query optimization for databases"),
+        (
+            "Database Management Systems",
+            "Explains relational databases and SQL",
+        ),
+        (
+            "Network Security Fundamentals",
+            "Covers firewalls and intrusion detection",
+        ),
+        (
+            "Machine Learning Basics",
+            "Introduction to neural networks and deep learning",
+        ),
+        (
+            "Database Optimization Techniques",
+            "Indexing and query optimization for databases",
+        ),
         ("Web Development Guide", "HTML CSS and JavaScript tutorials"),
     ];
 
     for (title, description) in &texts {
-        entity.create_row(CreateRowInput {
-            collection: "text_search".into(),
-            fields: vec![
-                ("title".into(), Value::Text(title.to_string())),
-                ("description".into(), Value::Text(description.to_string())),
-            ],
-            metadata: vec![],
-            node_links: vec![],
-            vector_links: vec![],
-        }).expect("create_row should succeed");
+        entity
+            .create_row(CreateRowInput {
+                collection: "text_search".into(),
+                fields: vec![
+                    ("title".into(), Value::Text(title.to_string())),
+                    ("description".into(), Value::Text(description.to_string())),
+                ],
+                metadata: vec![],
+                node_links: vec![],
+                vector_links: vec![],
+            })
+            .expect("create_row should succeed");
     }
 
     let result = query.search_text(SearchTextInput {
@@ -1016,7 +1200,11 @@ fn test_search_text() {
         limit: Some(10),
         fuzzy: false,
     });
-    assert!(result.is_ok(), "search_text should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "search_text should succeed: {:?}",
+        result.err()
+    );
     let result = result.unwrap();
     assert!(
         !result.matches.is_empty(),
@@ -1067,23 +1255,27 @@ fn test_node_with_embedding() {
             ("field".into(), Value::Text("computer_science".into())),
         ],
         metadata: vec![],
-        embeddings: vec![
-            CreateNodeEmbeddingInput {
-                name: "semantic".into(),
-                vector: vec![0.5, 0.3, 0.8, 0.1],
-                model: Some("test-model".into()),
-            },
-        ],
+        embeddings: vec![CreateNodeEmbeddingInput {
+            name: "semantic".into(),
+            vector: vec![0.5, 0.3, 0.8, 0.1],
+            model: Some("test-model".into()),
+        }],
         table_links: vec![],
         node_links: vec![],
     });
-    assert!(out.is_ok(), "create_node with embedding should succeed: {:?}", out.err());
+    assert!(
+        out.is_ok(),
+        "create_node with embedding should succeed: {:?}",
+        out.err()
+    );
 
-    let page = query.scan(ScanCollectionInput {
-        collection: "embed_nodes".into(),
-        offset: 0,
-        limit: 10,
-    }).expect("scan should succeed");
+    let page = query
+        .scan(ScanCollectionInput {
+            collection: "embed_nodes".into(),
+            offset: 0,
+            limit: 10,
+        })
+        .expect("scan should succeed");
     assert_eq!(page.items.len(), 1, "should have 1 node");
 
     let item = &page.items[0];
@@ -1102,36 +1294,43 @@ fn test_row_linked_to_node() {
     let entity = EntityUseCases::new(&rt);
     let query = QueryUseCases::new(&rt);
 
-    let node_out = entity.create_node(CreateNodeInput {
-        collection: "linked".into(),
-        label: "product_alpha".into(),
-        node_type: Some("Product".into()),
-        properties: vec![
-            ("sku".into(), Value::Text("SKU-001".into())),
-        ],
-        metadata: vec![],
-        embeddings: vec![],
-        table_links: vec![],
-        node_links: vec![],
-    }).expect("create_node should succeed");
+    let node_out = entity
+        .create_node(CreateNodeInput {
+            collection: "linked".into(),
+            label: "product_alpha".into(),
+            node_type: Some("Product".into()),
+            properties: vec![("sku".into(), Value::Text("SKU-001".into()))],
+            metadata: vec![],
+            embeddings: vec![],
+            table_links: vec![],
+            node_links: vec![],
+        })
+        .expect("create_node should succeed");
 
-    let row_out = entity.create_row(CreateRowInput {
-        collection: "linked".into(),
-        fields: vec![
-            ("description".into(), Value::Text("Alpha product review".into())),
-            ("rating".into(), Value::Integer(5)),
-        ],
-        metadata: vec![],
-        node_links: vec![],
-        vector_links: vec![],
-    }).expect("create_row should succeed");
+    let row_out = entity
+        .create_row(CreateRowInput {
+            collection: "linked".into(),
+            fields: vec![
+                (
+                    "description".into(),
+                    Value::Text("Alpha product review".into()),
+                ),
+                ("rating".into(), Value::Integer(5)),
+            ],
+            metadata: vec![],
+            node_links: vec![],
+            vector_links: vec![],
+        })
+        .expect("create_row should succeed");
 
     // Both entities should be in the same collection
-    let page = query.scan(ScanCollectionInput {
-        collection: "linked".into(),
-        offset: 0,
-        limit: 10,
-    }).expect("scan should succeed");
+    let page = query
+        .scan(ScanCollectionInput {
+            collection: "linked".into(),
+            offset: 0,
+            limit: 10,
+        })
+        .expect("scan should succeed");
 
     assert_eq!(
         page.items.len(),

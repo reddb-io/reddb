@@ -62,10 +62,11 @@ pub mod unified;
 
 // Re-export common types
 pub use ast::{
-    CompareOp, CteDefinition, CteQueryBuilder, EdgeDirection, EdgePattern, FieldRef,
-    Filter as AstFilter, GraphPattern, GraphQuery, JoinCondition, JoinQuery, JoinType, NodePattern,
-    NodeSelector, OrderByClause, PathQuery, Projection, QueryExpr, QueryWithCte, TableQuery,
-    WithClause,
+    AlterOperation, AlterTableQuery, CompareOp, CreateColumnDef, CreateTableQuery, CteDefinition,
+    CteQueryBuilder, DeleteQuery, DropTableQuery, EdgeDirection, EdgePattern, FieldRef,
+    Filter as AstFilter, GraphCommand, GraphPattern, GraphQuery, InsertEntityType, InsertQuery,
+    JoinCondition, JoinQuery, JoinType, NodePattern, NodeSelector, OrderByClause, PathQuery,
+    Projection, QueryExpr, QueryWithCte, SearchCommand, TableQuery, UpdateQuery, WithClause,
 };
 pub use engine::{
     Binding, BindingBuilder, BindingIterator, Op, OpBGP, OpDisjunction, OpDistinct, OpExtend,

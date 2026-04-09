@@ -1,7 +1,9 @@
 use std::collections::BTreeSet;
 
 use crate::application::CreateEntityOutput;
-use crate::json::{from_slice as json_from_slice, to_string as json_to_string, Map, Value as JsonValue};
+use crate::json::{
+    from_slice as json_from_slice, to_string as json_to_string, Map, Value as JsonValue,
+};
 use crate::runtime::ScanPage;
 use crate::storage::schema::Value;
 use crate::storage::{CrossRef, EntityData, EntityKind, UnifiedEntity};
@@ -82,9 +84,8 @@ pub(crate) fn storage_value_to_json(value: &Value) -> JsonValue {
                 .map(|entry| JsonValue::Number(*entry as f64))
                 .collect(),
         ),
-        Value::Json(value) => {
-            json_from_slice::<JsonValue>(value).unwrap_or_else(|_| JsonValue::String(hex::encode(value)))
-        }
+        Value::Json(value) => json_from_slice::<JsonValue>(value)
+            .unwrap_or_else(|_| JsonValue::String(hex::encode(value))),
         Value::Uuid(value) => JsonValue::String(hex::encode(value)),
         Value::NodeRef(value) => JsonValue::String(value.clone()),
         Value::EdgeRef(value) => JsonValue::String(value.clone()),
@@ -103,6 +104,80 @@ pub(crate) fn storage_value_to_json(value: &Value) -> JsonValue {
             object.insert("row_id".to_string(), JsonValue::Number(*row_id as f64));
             JsonValue::Object(object)
         }
+        Value::Color([r, g, b]) => JsonValue::String(format!("#{:02X}{:02X}{:02X}", r, g, b)),
+        Value::Email(s) => JsonValue::String(s.clone()),
+        Value::Url(s) => JsonValue::String(s.clone()),
+        Value::Phone(n) => JsonValue::Number(*n as f64),
+        Value::Semver(packed) => JsonValue::String(format!(
+            "{}.{}.{}",
+            packed / 1_000_000,
+            (packed / 1_000) % 1_000,
+            packed % 1_000
+        )),
+        Value::Cidr(ip, prefix) => JsonValue::String(format!(
+            "{}.{}.{}.{}/{}",
+            (ip >> 24) & 0xFF,
+            (ip >> 16) & 0xFF,
+            (ip >> 8) & 0xFF,
+            ip & 0xFF,
+            prefix
+        )),
+        Value::Date(days) => JsonValue::Number(*days as f64),
+        Value::Time(ms) => JsonValue::Number(*ms as f64),
+        Value::Decimal(v) => JsonValue::Number(*v as f64 / 10_000.0),
+        Value::EnumValue(i) => JsonValue::Number(*i as f64),
+        Value::Array(elems) => JsonValue::Array(elems.iter().map(storage_value_to_json).collect()),
+        Value::TimestampMs(ms) => JsonValue::Number(*ms as f64),
+        Value::Ipv4(ip) => JsonValue::String(format!(
+            "{}.{}.{}.{}",
+            (ip >> 24) & 0xFF,
+            (ip >> 16) & 0xFF,
+            (ip >> 8) & 0xFF,
+            ip & 0xFF
+        )),
+        Value::Ipv6(bytes) => JsonValue::String(format!("{}", std::net::Ipv6Addr::from(*bytes))),
+        Value::Subnet(ip, mask) => {
+            let prefix = mask.leading_ones();
+            JsonValue::String(format!(
+                "{}.{}.{}.{}/{}",
+                (ip >> 24) & 0xFF,
+                (ip >> 16) & 0xFF,
+                (ip >> 8) & 0xFF,
+                ip & 0xFF,
+                prefix
+            ))
+        }
+        Value::Port(p) => JsonValue::Number(*p as f64),
+        Value::Latitude(micro) => JsonValue::Number(*micro as f64 / 1_000_000.0),
+        Value::Longitude(micro) => JsonValue::Number(*micro as f64 / 1_000_000.0),
+        Value::GeoPoint(lat, lon) => JsonValue::String(format!(
+            "{:.6},{:.6}",
+            *lat as f64 / 1_000_000.0,
+            *lon as f64 / 1_000_000.0
+        )),
+        Value::Country2(c) => JsonValue::String(String::from_utf8_lossy(c).to_string()),
+        Value::Country3(c) => JsonValue::String(String::from_utf8_lossy(c).to_string()),
+        Value::Lang2(c) => JsonValue::String(String::from_utf8_lossy(c).to_string()),
+        Value::Lang5(c) => JsonValue::String(String::from_utf8_lossy(c).to_string()),
+        Value::Currency(c) => JsonValue::String(String::from_utf8_lossy(c).to_string()),
+        Value::ColorAlpha([r, g, b, a]) => {
+            JsonValue::String(format!("#{:02X}{:02X}{:02X}{:02X}", r, g, b, a))
+        }
+        Value::BigInt(v) => JsonValue::Number(*v as f64),
+        Value::KeyRef(col, key) => {
+            let mut object = Map::new();
+            object.insert("collection".to_string(), JsonValue::String(col.clone()));
+            object.insert("key".to_string(), JsonValue::String(key.clone()));
+            JsonValue::Object(object)
+        }
+        Value::DocRef(col, id) => {
+            let mut object = Map::new();
+            object.insert("collection".to_string(), JsonValue::String(col.clone()));
+            object.insert("id".to_string(), JsonValue::Number(*id as f64));
+            JsonValue::Object(object)
+        }
+        Value::TableRef(name) => JsonValue::String(name.clone()),
+        Value::PageRef(page_id) => JsonValue::Number(*page_id as f64),
     }
 }
 

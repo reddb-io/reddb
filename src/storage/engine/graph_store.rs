@@ -634,7 +634,6 @@ pub struct GraphStore {
     edge_count: AtomicU64,
 }
 
-
 #[path = "graph_store/impl.rs"]
 mod graph_store_impl;
 impl Default for GraphStore {

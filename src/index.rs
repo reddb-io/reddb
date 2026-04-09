@@ -150,7 +150,10 @@ impl IndexCatalog {
             ));
         }
         catalog.register(IndexConfig::new("vector-hnsw", IndexKind::VectorHnsw).with_warmup(true));
-        catalog.register(IndexConfig::new("vector-inverted", IndexKind::VectorInverted));
+        catalog.register(IndexConfig::new(
+            "vector-inverted",
+            IndexKind::VectorInverted,
+        ));
         catalog
     }
 }

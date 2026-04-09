@@ -160,9 +160,7 @@ fn execute_kv_query(
             }
 
             // Insert the new KV pair as a row
-            use crate::storage::unified::entity::{
-                EntityKind, RowData, UnifiedEntity,
-            };
+            use crate::storage::unified::entity::{EntityKind, RowData, UnifiedEntity};
             use std::collections::HashMap;
 
             let id = store.next_entity_id();

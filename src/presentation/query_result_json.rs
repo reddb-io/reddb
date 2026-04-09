@@ -62,6 +62,18 @@ pub(crate) fn runtime_query_json(
         "record_count".to_string(),
         JsonValue::Number(records.len() as f64),
     );
+    if result.affected_rows > 0 {
+        object.insert(
+            "affected_rows".to_string(),
+            JsonValue::Number(result.affected_rows as f64),
+        );
+    }
+    if result.statement_type != "select" {
+        object.insert(
+            "statement_type".to_string(),
+            JsonValue::String(result.statement_type.to_string()),
+        );
+    }
     object.insert(
         "result".to_string(),
         unified_result_json_with_records(&result.result, &records),
@@ -121,7 +133,12 @@ pub(crate) fn unified_result_values_only_json_with_records(
     object.insert("selection".to_string(), selection);
     object.insert(
         "records".to_string(),
-        JsonValue::Array(records.iter().map(unified_record_values_only_json).collect()),
+        JsonValue::Array(
+            records
+                .iter()
+                .map(unified_record_values_only_json)
+                .collect(),
+        ),
     );
     JsonValue::Object(object)
 }
@@ -331,7 +348,10 @@ fn vector_search_result_json(result: &VectorSearchResult) -> JsonValue {
     let mut object = Map::new();
     object.insert("id".to_string(), JsonValue::Number(result.id as f64));
     object.insert("entity_id".to_string(), JsonValue::Number(result.id as f64));
-    object.insert("_entity_id".to_string(), JsonValue::Number(result.id as f64));
+    object.insert(
+        "_entity_id".to_string(),
+        JsonValue::Number(result.id as f64),
+    );
     object.insert(
         "collection".to_string(),
         JsonValue::String(result.collection.clone()),
@@ -341,16 +361,16 @@ fn vector_search_result_json(result: &VectorSearchResult) -> JsonValue {
         JsonValue::String(result.collection.clone()),
     );
     object.insert("_kind".to_string(), JsonValue::String("vector".to_string()));
-    object.insert("_entity_type".to_string(), JsonValue::String("vector".to_string()));
+    object.insert(
+        "_entity_type".to_string(),
+        JsonValue::String("vector".to_string()),
+    );
     object.insert(
         "_capabilities".to_string(),
         JsonValue::String("vector,similarity,embedding".to_string()),
     );
     object.insert("_score".to_string(), JsonValue::Number(score as f64));
-    object.insert(
-        "final_score".to_string(),
-        JsonValue::Number(score as f64),
-    );
+    object.insert("final_score".to_string(), JsonValue::Number(score as f64));
     object.insert(
         "distance".to_string(),
         JsonValue::Number(result.distance as f64),
