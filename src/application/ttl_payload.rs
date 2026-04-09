@@ -54,7 +54,7 @@ pub(crate) fn format_ttl_ms(ms: u64) -> String {
         (60_000, "m"),
         (1_000, "s"),
     ] {
-        if ms >= unit_ms && ms % unit_ms == 0 {
+        if ms >= unit_ms && ms.is_multiple_of(unit_ms) {
             return format!("{}{}", ms / unit_ms, suffix);
         }
     }
