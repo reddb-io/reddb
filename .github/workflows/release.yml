@@ -113,7 +113,6 @@ jobs:
           - { os: ubuntu-latest,  target: aarch64-unknown-linux-gnu,     asset_name: linux-aarch64,       cross: true  }
           - { os: ubuntu-latest,  target: armv7-unknown-linux-gnueabihf, asset_name: linux-armv7,         cross: true  }
           - { os: ubuntu-latest,  target: aarch64-unknown-linux-musl,    asset_name: linux-aarch64-static, cross: true }
-          - { os: macos-13,       target: x86_64-apple-darwin,           asset_name: macos-x86_64,        cross: false }
           - { os: macos-14,       target: aarch64-apple-darwin,          asset_name: macos-aarch64,       cross: false }
           - { os: windows-latest, target: x86_64-pc-windows-msvc,       asset_name: windows-x86_64,      cross: false }
     steps:
