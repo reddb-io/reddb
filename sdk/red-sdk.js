@@ -828,7 +828,7 @@ async function createClient(options = {}) {
 
     // Version
     async version() {
-      return runJson(binaryPath, ['version'], defaults);
+      return runJson(binaryPath, ['version', '--json'], defaults);
     },
 
     // Raw exec

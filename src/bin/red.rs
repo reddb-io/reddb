@@ -14,6 +14,34 @@ use reddb::service_cli::{
     probe_listener, run_server_with_large_stack, ServerCommandConfig, ServerTransport,
 };
 
+// ---------------------------------------------------------------------------
+// JSON output helpers
+// ---------------------------------------------------------------------------
+
+/// Returns `true` when the caller requested structured JSON output.
+fn wants_json(flags: &HashMap<String, FlagValue>) -> bool {
+    flag_bool(flags, "json") || flag_string(flags, "output").as_deref() == Some("json")
+}
+
+/// Print a successful JSON envelope to **stdout** and return.
+fn json_ok(command: &str, data: &str) {
+    println!(
+        "{{\"ok\":true,\"command\":\"{}\",\"data\":{}}}",
+        json_escape(command),
+        data
+    );
+}
+
+/// Print an error JSON envelope to **stderr** and exit with code 1.
+fn json_error(command: &str, error: &str) -> ! {
+    eprintln!(
+        "{{\"ok\":false,\"command\":\"{}\",\"error\":\"{}\"}}",
+        json_escape(command),
+        json_escape(error)
+    );
+    std::process::exit(1);
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -67,12 +95,27 @@ fn main() {
 
     // Handle --version.
     if result.flags.get("version").is_some_and(|v| v.is_truthy()) {
-        println!("reddb {}", env!("CARGO_PKG_VERSION"));
+        if wants_json(&result.flags) {
+            json_ok(
+                "version",
+                &format!("{{\"version\":\"{}\"}}", env!("CARGO_PKG_VERSION")),
+            );
+        } else {
+            println!("reddb {}", env!("CARGO_PKG_VERSION"));
+        }
         return;
     }
 
     // Check for parse errors.
     if !result.errors.is_empty() {
+        if wants_json(&result.flags) {
+            let msgs: Vec<String> = result
+                .errors
+                .iter()
+                .map(|e| json_escape(&e.format_human()))
+                .collect();
+            json_error("parse", &msgs.join("; "));
+        }
         for err in &result.errors {
             eprint!("{}", err.format_human());
         }
@@ -109,92 +152,203 @@ fn main() {
         }
 
         "version" => {
-            println!("reddb {}", env!("CARGO_PKG_VERSION"));
+            if wants_json(&result.flags) {
+                json_ok(
+                    "version",
+                    &format!("{{\"version\":\"{}\"}}", env!("CARGO_PKG_VERSION")),
+                );
+            } else {
+                println!("reddb {}", env!("CARGO_PKG_VERSION"));
+            }
         }
 
         "server" => {
+            let json_mode = wants_json(&result.flags);
             let config = build_server_config(&result.flags, None).unwrap_or_else(|err| {
+                if json_mode {
+                    json_error("server", &err);
+                }
                 eprintln!("error: {err}");
                 std::process::exit(1);
             });
+            if json_mode {
+                eprintln!(
+                    "{{\"ok\":true,\"command\":\"server\",\"data\":{{\"bind\":\"{}\",\"transport\":\"{}\"}}}}",
+                    json_escape(&config.bind_addr),
+                    json_escape(config.transport.as_str())
+                );
+            }
             if let Err(err) = run_server_with_large_stack(config) {
+                if json_mode {
+                    json_error("server", &err.to_string());
+                }
                 eprintln!("red server: {err}");
                 std::process::exit(1);
             }
         }
 
         "replica" => {
+            let json_mode = wants_json(&result.flags);
             let config =
                 build_server_config(&result.flags, Some("replica")).unwrap_or_else(|err| {
+                    if json_mode {
+                        json_error("replica", &err);
+                    }
                     eprintln!("error: {err}");
                     std::process::exit(1);
                 });
+            if json_mode {
+                eprintln!(
+                    "{{\"ok\":true,\"command\":\"replica\",\"data\":{{\"bind\":\"{}\",\"transport\":\"{}\"}}}}",
+                    json_escape(&config.bind_addr),
+                    json_escape(config.transport.as_str())
+                );
+            }
             if let Err(err) = run_server_with_large_stack(config) {
+                if json_mode {
+                    json_error("replica", &err.to_string());
+                }
                 eprintln!("red replica: {err}");
                 std::process::exit(1);
             }
         }
 
         "query" => {
+            let json_mode = wants_json(&result.flags);
             let sql = remaining.first().map(|s| s.as_str()).unwrap_or("");
             if sql.is_empty() {
+                if json_mode {
+                    json_error("query", "Usage: red query <sql>");
+                }
                 eprintln!("Usage: red query <sql>");
                 eprintln!("Example: red query \"SELECT * FROM users\"");
                 std::process::exit(1);
             }
-            println!("Query: {}", sql);
-            // TODO: Wire to actual query execution
-            eprintln!("Query execution not yet wired.");
+            if json_mode {
+                json_ok(
+                    "query",
+                    &format!(
+                        "{{\"sql\":\"{}\",\"result\":null,\"message\":\"query execution not yet wired\"}}",
+                        json_escape(sql)
+                    ),
+                );
+            } else {
+                println!("Query: {}", sql);
+                // TODO: Wire to actual query execution
+                eprintln!("Query execution not yet wired.");
+            }
         }
 
         "insert" => {
+            let json_mode = wants_json(&result.flags);
             if remaining.len() < 2 {
+                if json_mode {
+                    json_error("insert", "Usage: red insert <collection> <json>");
+                }
                 eprintln!("Usage: red insert <collection> <json>");
                 eprintln!("Example: red insert users '{{\"name\": \"Alice\"}}'");
                 std::process::exit(1);
             }
             let collection = &remaining[0];
             let json_data = &remaining[1];
-            println!("Inserting into '{}': {}", collection, json_data);
-            // TODO: Wire to actual insert
-            eprintln!("Insert not yet wired.");
+            if json_mode {
+                json_ok(
+                    "insert",
+                    &format!(
+                        "{{\"collection\":\"{}\",\"document\":{},\"result\":null,\"message\":\"insert not yet wired\"}}",
+                        json_escape(collection),
+                        json_data
+                    ),
+                );
+            } else {
+                println!("Inserting into '{}': {}", collection, json_data);
+                // TODO: Wire to actual insert
+                eprintln!("Insert not yet wired.");
+            }
         }
 
         "get" => {
+            let json_mode = wants_json(&result.flags);
             if remaining.len() < 2 {
+                if json_mode {
+                    json_error("get", "Usage: red get <collection> <id>");
+                }
                 eprintln!("Usage: red get <collection> <id>");
                 eprintln!("Example: red get users abc123");
                 std::process::exit(1);
             }
             let collection = &remaining[0];
             let id = &remaining[1];
-            println!("Getting from '{}': {}", collection, id);
-            // TODO: Wire to actual get
-            eprintln!("Get not yet wired.");
+            if json_mode {
+                json_ok(
+                    "get",
+                    &format!(
+                        "{{\"collection\":\"{}\",\"id\":\"{}\",\"entity\":null,\"message\":\"get not yet wired\"}}",
+                        json_escape(collection),
+                        json_escape(id)
+                    ),
+                );
+            } else {
+                println!("Getting from '{}': {}", collection, id);
+                // TODO: Wire to actual get
+                eprintln!("Get not yet wired.");
+            }
         }
 
         "delete" => {
+            let json_mode = wants_json(&result.flags);
             if remaining.len() < 2 {
+                if json_mode {
+                    json_error("delete", "Usage: red delete <collection> <id>");
+                }
                 eprintln!("Usage: red delete <collection> <id>");
                 eprintln!("Example: red delete users abc123");
                 std::process::exit(1);
             }
             let collection = &remaining[0];
             let id = &remaining[1];
-            println!("Deleting from '{}': {}", collection, id);
-            // TODO: Wire to actual delete
-            eprintln!("Delete not yet wired.");
+            if json_mode {
+                json_ok(
+                    "delete",
+                    &format!(
+                        "{{\"collection\":\"{}\",\"id\":\"{}\",\"deleted\":false,\"message\":\"delete not yet wired\"}}",
+                        json_escape(collection),
+                        json_escape(id)
+                    ),
+                );
+            } else {
+                println!("Deleting from '{}': {}", collection, id);
+                // TODO: Wire to actual delete
+                eprintln!("Delete not yet wired.");
+            }
         }
 
         "health" => {
+            let json_mode = wants_json(&result.flags);
             let transport = select_transport(&result.flags).unwrap_or_else(|err| {
+                if json_mode {
+                    json_error("health", &err);
+                }
                 eprintln!("error: {err}");
                 std::process::exit(1);
             });
             let bind_addr = flag_string(&result.flags, "bind")
                 .unwrap_or_else(|| transport.default_bind_addr().to_string());
             let ok = probe_listener(&bind_addr, Duration::from_secs(1));
-            if ok {
+            if json_mode {
+                json_ok(
+                    "health",
+                    &format!(
+                        "{{\"healthy\":{},\"transport\":\"{}\",\"address\":\"{}\"}}",
+                        ok,
+                        json_escape(transport.as_str()),
+                        json_escape(&bind_addr)
+                    ),
+                );
+                if !ok {
+                    std::process::exit(1);
+                }
+            } else if ok {
                 println!("ok {} {}", transport.as_str(), bind_addr);
             } else {
                 eprintln!("unreachable {} {}", transport.as_str(), bind_addr);
@@ -203,6 +357,7 @@ fn main() {
         }
 
         "tick" => {
+            let json_mode = wants_json(&result.flags);
             let bind_addr =
                 flag_string(&result.flags, "bind").unwrap_or_else(|| "127.0.0.1:8080".to_string());
             let operations = flag_string(&result.flags, "operations");
@@ -210,17 +365,32 @@ fn main() {
 
             let payload = build_tick_payload(operations.as_deref(), dry_run);
             let body = post_json_to_http(&bind_addr, "/tick", &payload).unwrap_or_else(|err| {
+                if json_mode {
+                    json_error("tick", &err.to_string());
+                }
                 eprintln!("error: {err}");
                 std::process::exit(1);
             });
 
-            println!("{body}");
+            if json_mode {
+                // The body from /tick is already JSON; wrap it in the envelope.
+                json_ok("tick", &body);
+            } else {
+                println!("{body}");
+            }
         }
 
         "status" => {
-            println!("Checking replication status...");
-            // TODO: Wire to actual status
-            eprintln!("Status check not yet wired.");
+            if wants_json(&result.flags) {
+                json_ok(
+                    "status",
+                    "{\"status\":null,\"message\":\"status check not yet wired\"}",
+                );
+            } else {
+                println!("Checking replication status...");
+                // TODO: Wire to actual status
+                eprintln!("Status check not yet wired.");
+            }
         }
 
         "mcp" => {
@@ -242,6 +412,7 @@ fn main() {
         }
 
         "auth" => {
+            let json_mode = wants_json(&result.flags);
             let subcommand = result
                 .positionals
                 .first()
@@ -267,55 +438,94 @@ fn main() {
                         .get("password")
                         .map(|v| v.as_str_value())
                         .unwrap_or_else(|| {
+                            if json_mode {
+                                json_error(
+                                    "auth.bootstrap",
+                                    "--password is required for bootstrap",
+                                );
+                            }
                             eprintln!("error: --password is required for bootstrap");
                             std::process::exit(1);
                         });
 
                     match auth_store.bootstrap(&user, &password) {
                         Ok(br) => {
-                            println!(
-                                "Admin user '{}' created (role: {})",
-                                br.user.username,
-                                br.user.role.as_str()
-                            );
-                            println!("API Key: {}", br.api_key.key);
-
-                            if let Some(cert) = br.certificate {
-                                println!();
-                                println!("CERTIFICATE (save this — required to unseal the vault):");
-                                println!("  {}", cert);
-                                println!();
-                                println!("Without this certificate, the vault cannot be decrypted after restart.");
+                            if json_mode {
+                                let cert_json = br
+                                    .certificate
+                                    .as_ref()
+                                    .map(|c| format!("\"{}\"", json_escape(c)))
+                                    .unwrap_or_else(|| "null".to_string());
+                                json_ok(
+                                    "auth.bootstrap",
+                                    &format!(
+                                        "{{\"username\":\"{}\",\"role\":\"{}\",\"api_key\":\"{}\",\"certificate\":{}}}",
+                                        json_escape(&br.user.username),
+                                        json_escape(br.user.role.as_str()),
+                                        json_escape(&br.api_key.key),
+                                        cert_json
+                                    ),
+                                );
                             } else {
-                                println!();
-                                println!("Save this API key — it will not be shown again.");
+                                println!(
+                                    "Admin user '{}' created (role: {})",
+                                    br.user.username,
+                                    br.user.role.as_str()
+                                );
+                                println!("API Key: {}", br.api_key.key);
+
+                                if let Some(cert) = br.certificate {
+                                    println!();
+                                    println!(
+                                        "CERTIFICATE (save this — required to unseal the vault):"
+                                    );
+                                    println!("  {}", cert);
+                                    println!();
+                                    println!("Without this certificate, the vault cannot be decrypted after restart.");
+                                } else {
+                                    println!();
+                                    println!("Save this API key — it will not be shown again.");
+                                }
                             }
                         }
                         Err(e) => {
+                            if json_mode {
+                                json_error("auth.bootstrap", &format!("{e}"));
+                            }
                             eprintln!("error: {e}");
                             std::process::exit(1);
                         }
                     }
                 }
                 _ => {
-                    println!("Usage: red auth <subcommand>");
-                    println!();
-                    println!("Subcommands:");
-                    println!(
-                        "  bootstrap    Create the first admin user (only when no users exist)"
-                    );
-                    println!("  create-user  Create a new user (requires admin)");
-                    println!("  list-users   List all users");
-                    println!("  login        Login and get a session token");
-                    println!();
-                    println!("Examples:");
-                    println!("  red auth bootstrap --password s3cret!");
-                    println!("  red auth create-user --user alice --password pass --role write");
+                    if json_mode {
+                        json_ok(
+                            "auth",
+                            "{\"subcommands\":[\"bootstrap\",\"create-user\",\"list-users\",\"login\"],\"message\":\"use a subcommand, e.g. red auth bootstrap --password s3cret!\"}",
+                        );
+                    } else {
+                        println!("Usage: red auth <subcommand>");
+                        println!();
+                        println!("Subcommands:");
+                        println!(
+                            "  bootstrap    Create the first admin user (only when no users exist)"
+                        );
+                        println!("  create-user  Create a new user (requires admin)");
+                        println!("  list-users   List all users");
+                        println!("  login        Login and get a session token");
+                        println!();
+                        println!("Examples:");
+                        println!("  red auth bootstrap --password s3cret!");
+                        println!(
+                            "  red auth create-user --user alice --password pass --role write"
+                        );
+                    }
                 }
             }
         }
 
         "connect" => {
+            let json_mode = wants_json(&result.flags);
             let addr = remaining
                 .first()
                 .map(|s| s.to_string())
@@ -332,6 +542,9 @@ fn main() {
                 let mut client = match reddb::client::RedDBClient::connect(&addr, token).await {
                     Ok(c) => c,
                     Err(e) => {
+                        if json_mode {
+                            json_error("connect", &format!("Failed to connect to {}: {}", addr, e));
+                        }
                         eprintln!("Failed to connect to {}: {}", addr, e);
                         std::process::exit(1);
                     }
@@ -340,20 +553,32 @@ fn main() {
                 if let Some(query) = one_shot_query {
                     // One-shot mode: execute a single query and exit
                     match client.query(&query).await {
-                        Ok(json) => println!("{}", json),
+                        Ok(json) => {
+                            if json_mode {
+                                json_ok("connect", &json);
+                            } else {
+                                println!("{}", json);
+                            }
+                        }
                         Err(e) => {
+                            if json_mode {
+                                json_error("connect", &format!("{}", e));
+                            }
                             eprintln!("error: {}", e);
                             std::process::exit(1);
                         }
                     }
                 } else {
-                    // Interactive REPL
+                    // Interactive REPL -- JSON mode not applicable
                     reddb::client::repl::run_repl(&mut client).await;
                 }
             });
         }
 
         _ => {
+            if wants_json(&result.flags) {
+                json_error("unknown", &format!("Unknown command: {}", cmd));
+            }
             eprintln!("Unknown command: {}", cmd);
             eprintln!();
             print!("{}", cli::commands::main_help_text());
