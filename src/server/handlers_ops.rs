@@ -1,4 +1,5 @@
 use super::*;
+use crate::application::ttl_payload::{format_ttl_ms, parse_collection_default_ttl_ms};
 
 impl RedDBServer {
     pub(crate) fn handle_export(&self, body: Vec<u8>) -> HttpResponse {
@@ -570,15 +571,38 @@ impl RedDBServer {
         if name.trim().is_empty() {
             return json_error(400, "field 'name' cannot be empty");
         }
+        let default_ttl_ms = match parse_collection_default_ttl_ms(&payload) {
+            Ok(default_ttl_ms) => default_ttl_ms,
+            Err(err) => return json_error(400, err.to_string()),
+        };
 
         match self.runtime.db().store().create_collection(name) {
             Ok(()) => {
+                if let Some(default_ttl_ms) = default_ttl_ms {
+                    self.runtime
+                        .db()
+                        .set_collection_default_ttl_ms(name, default_ttl_ms);
+                }
+                if let Err(err) = self.runtime.db().persist_metadata() {
+                    return json_error(500, err.to_string());
+                }
+
                 let mut object = Map::new();
                 object.insert("ok".to_string(), JsonValue::Bool(true));
                 object.insert(
                     "collection".to_string(),
                     JsonValue::String(name.to_string()),
                 );
+                if let Some(default_ttl_ms) = default_ttl_ms {
+                    object.insert(
+                        "default_ttl_ms".to_string(),
+                        JsonValue::Number(default_ttl_ms as f64),
+                    );
+                    object.insert(
+                        "default_ttl".to_string(),
+                        JsonValue::String(format_ttl_ms(default_ttl_ms)),
+                    );
+                }
                 json_response(200, JsonValue::Object(object))
             }
             Err(err) => json_error(400, format!("{err:?}")),
@@ -592,6 +616,10 @@ impl RedDBServer {
 
         match self.runtime.db().store().drop_collection(name) {
             Ok(()) => {
+                self.runtime.db().clear_collection_default_ttl_ms(name);
+                if let Err(err) = self.runtime.db().persist_metadata() {
+                    return json_error(500, err.to_string());
+                }
                 let mut object = Map::new();
                 object.insert("ok".to_string(), JsonValue::Bool(true));
                 object.insert("dropped".to_string(), JsonValue::String(name.to_string()));
@@ -613,6 +641,16 @@ impl RedDBServer {
                     JsonValue::String(name.to_string()),
                 );
                 object.insert("entity_count".to_string(), JsonValue::Number(count as f64));
+                if let Some(default_ttl_ms) = self.runtime.db().collection_default_ttl_ms(name) {
+                    object.insert(
+                        "default_ttl_ms".to_string(),
+                        JsonValue::Number(default_ttl_ms as f64),
+                    );
+                    object.insert(
+                        "default_ttl".to_string(),
+                        JsonValue::String(format_ttl_ms(default_ttl_ms)),
+                    );
+                }
                 json_response(200, JsonValue::Object(object))
             }
             None => json_error(404, format!("collection '{}' not found", name)),

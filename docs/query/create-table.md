@@ -8,7 +8,7 @@ The `CREATE TABLE` statement defines a new collection with a typed schema.
 CREATE TABLE table_name (
   column_name DataType [NOT NULL] [DEFAULT value],
   ...
-)
+) [WITH TTL 60s]
 ```
 
 ## Example
@@ -42,6 +42,19 @@ CREATE TABLE network_scan (
 )
 ```
 
+## Default TTL
+
+Collections can declare a default retention policy directly in DDL:
+
+```sql
+CREATE TABLE sessions (
+  token Text NOT NULL,
+  user_id Text NOT NULL
+) WITH TTL 60m
+```
+
+This TTL is persisted as collection metadata. On insert, if the item does not provide its own TTL, RedDB materializes the collection default into the item metadata.
+
 ## DROP TABLE
 
 Remove a table and all its data:
@@ -72,14 +85,14 @@ Create a collection via the DDL endpoint:
 ```bash
 curl -X POST http://127.0.0.1:8080/collections \
   -H 'content-type: application/json' \
-  -d '{"name": "hosts"}'
+  -d '{"name": "hosts", "ttl": "60m"}'
 ```
 
 ## Via gRPC
 
 ```bash
 grpcurl -plaintext \
-  -d '{"payloadJson": "{\"name\":\"hosts\"}"}' \
+  -d '{"payloadJson": "{\"name\":\"hosts\",\"ttl\":\"60m\"}"}' \
   127.0.0.1:50051 reddb.v1.RedDb/CreateCollection
 ```
 

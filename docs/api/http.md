@@ -79,6 +79,30 @@ red server --http --path ./data/reddb.rdb --bind 0.0.0.0:8080
 | `PATCH` | `/collections/{name}/entities/{id}` | Update an entity |
 | `DELETE` | `/collections/{name}/entities/{id}` | Delete an entity |
 
+### TTL over HTTP
+
+For entity writes, use top-level control fields:
+
+- `ttl`: relative duration such as `60`, `"60s"`, `"5m"`, `"250ms"`
+- `ttl_ms`: relative duration in milliseconds
+- `expires_at`: absolute expiration in Unix epoch milliseconds
+
+Examples:
+
+```bash
+curl -X POST http://127.0.0.1:8080/collections/sessions/rows \
+  -H 'content-type: application/json' \
+  -d '{"fields":{"token":"t-1","user_id":"u-1"},"ttl":"15m"}'
+
+curl -X PATCH http://127.0.0.1:8080/collections/sessions/entities/1 \
+  -H 'content-type: application/json' \
+  -d '{"ttl":"30m"}'
+
+curl -X PATCH http://127.0.0.1:8080/collections/sessions/entities/1 \
+  -H 'content-type: application/json' \
+  -d '{"operations":[{"op":"set","path":"ttl","value":"0s"}]}'
+```
+
 ## Query & Search
 
 | Method | Path | Description |
@@ -147,6 +171,16 @@ red server --http --path ./data/reddb.rdb --bind 0.0.0.0:8080
 | `POST` | `/collections` | Create a collection |
 | `DELETE` | `/collections/{name}` | Drop a collection |
 | `GET` | `/collections/{name}/describe` | Describe collection schema |
+
+Collection creation accepts `ttl` or `ttl_ms` as the default retention policy:
+
+```bash
+curl -X POST http://127.0.0.1:8080/collections \
+  -H 'content-type: application/json' \
+  -d '{"name":"sessions","ttl":"60m"}'
+```
+
+`GET /collections/{name}/describe` now returns `default_ttl_ms` and `default_ttl` when configured.
 
 ## Example: Full Workflow
 

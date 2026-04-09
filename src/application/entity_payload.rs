@@ -3,6 +3,7 @@ use crate::application::entity::{
     CreateNodeGraphLinkInput, CreateNodeInput, CreateNodeTableLinkInput, CreateRowInput,
     CreateVectorInput,
 };
+use crate::application::ttl_payload::parse_top_level_ttl_metadata_entries;
 use crate::json::{Map, Value as JsonValue};
 use crate::storage::schema::Value;
 use crate::storage::unified::devx::refs::{NodeRef, TableRef, VectorRef};
@@ -230,90 +231,9 @@ fn parse_metadata_entries(payload: &JsonValue) -> RedDBResult<Vec<(String, Metad
             out.push((key.clone(), json_to_metadata_value(value)?));
         }
     }
-
-    for field in ["_ttl", "_ttl_ms", "_expires_at"] {
-        let Some(value) = payload.get(field) else {
-            continue;
-        };
-
-        if out.iter().any(|(key, _)| key == field) {
-            return Err(RedDBError::Query(format!(
-                "ttl field '{field}' cannot be defined both at the top level and inside metadata"
-            )));
-        }
-
-        out.push((field.to_string(), parse_ttl_metadata_value(field, value)?));
-    }
+    out.extend(parse_top_level_ttl_metadata_entries(payload)?);
 
     Ok(out)
-}
-
-fn parse_ttl_metadata_value(field: &str, value: &JsonValue) -> RedDBResult<MetadataValue> {
-    match value {
-        JsonValue::Null => Ok(MetadataValue::Null),
-        JsonValue::Number(value) => parse_ttl_u64(field, *value).map(ttl_u64_to_metadata),
-        JsonValue::String(value) => parse_ttl_text(field, value),
-        _ => Err(RedDBError::Query(format!(
-            "field '{field}' expects a numeric value for TTL metadata"
-        ))),
-    }
-}
-
-fn parse_ttl_text(field: &str, value: &str) -> RedDBResult<MetadataValue> {
-    let value = value.trim();
-
-    if let Ok(value) = value.parse::<u64>() {
-        return Ok(ttl_u64_to_metadata(value));
-    }
-
-    if let Ok(value) = value.parse::<i64>() {
-        if value < 0 {
-            return Err(RedDBError::Query(format!(
-                "field '{field}' must be non-negative for TTL metadata"
-            )));
-        }
-        return Ok(ttl_u64_to_metadata(value as u64));
-    }
-
-    if let Ok(value) = value.parse::<f64>() {
-        return parse_ttl_u64(field, value).map(ttl_u64_to_metadata);
-    }
-
-    Err(RedDBError::Query(format!(
-        "field '{field}' expects a numeric value for TTL metadata"
-    )))
-}
-
-fn parse_ttl_u64(field: &str, value: f64) -> RedDBResult<u64> {
-    if !value.is_finite() {
-        return Err(RedDBError::Query(format!(
-            "field '{field}' must be a finite number"
-        )));
-    }
-    if value.fract().abs() >= f64::EPSILON {
-        return Err(RedDBError::Query(format!(
-            "field '{field}' must be an integer (TTL metadata must be an integer)"
-        )));
-    }
-    if value < 0.0 {
-        return Err(RedDBError::Query(format!(
-            "field '{field}' must be non-negative for TTL metadata"
-        )));
-    }
-    if value > u64::MAX as f64 {
-        return Err(RedDBError::Query(format!(
-            "field '{field}' value is too large"
-        )));
-    }
-    Ok(value as u64)
-}
-
-fn ttl_u64_to_metadata(value: u64) -> MetadataValue {
-    if value <= i64::MAX as u64 {
-        MetadataValue::Int(value as i64)
-    } else {
-        MetadataValue::Timestamp(value)
-    }
 }
 
 fn parse_node_embeddings(payload: &JsonValue) -> RedDBResult<Vec<CreateNodeEmbeddingInput>> {
@@ -442,11 +362,11 @@ mod tests {
                 "fields",
                 object(vec![("name", JsonValue::String("alice".to_string()))]),
             ),
-            ("_ttl_ms", JsonValue::Number(1500.0)),
+            ("ttl", JsonValue::String("1.5s".to_string())),
         ]);
 
         let input = parse_create_row_input("users".to_string(), &payload)
-            .expect("row payload with _ttl_ms should parse");
+            .expect("row payload with ttl should parse");
 
         assert!(input
             .metadata
@@ -458,7 +378,7 @@ mod tests {
     fn parse_create_node_input_rejects_duplicate_ttl_definition() {
         let payload = object(vec![
             ("label", JsonValue::String("host-a".to_string())),
-            ("_ttl", JsonValue::Number(60.0)),
+            ("ttl", JsonValue::Number(60.0)),
             ("metadata", object(vec![("_ttl", JsonValue::Number(30.0))])),
         ]);
 

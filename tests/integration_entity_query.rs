@@ -208,6 +208,99 @@ fn test_row_patch_unset() {
 
 // 4. test_row_delete
 #[test]
+fn test_row_patch_top_level_ttl_payload_expires_entity() {
+    let rt = rt();
+    let entity = EntityUseCases::new(&rt);
+    let query = QueryUseCases::new(&rt);
+    let native = NativeUseCases::new(&rt);
+
+    let out = entity
+        .create_row(CreateRowInput {
+            collection: "patch_ttl_payload".into(),
+            fields: vec![("name".into(), Value::Text("ttl-payload".into()))],
+            metadata: vec![],
+            node_links: vec![],
+            vector_links: vec![],
+        })
+        .expect("create_row should succeed");
+
+    entity
+        .patch(PatchEntityInput {
+            collection: "patch_ttl_payload".into(),
+            id: out.id,
+            payload: JsonValue::Object(
+                [("ttl".to_string(), JsonValue::String("0s".into()))]
+                    .into_iter()
+                    .collect(),
+            ),
+            operations: vec![],
+        })
+        .expect("patch with top-level ttl should succeed");
+
+    native
+        .apply_retention_policy()
+        .expect("apply_retention_policy should succeed");
+
+    let result = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT * FROM patch_ttl_payload".into(),
+        })
+        .expect("SELECT should succeed");
+    assert_eq!(
+        result.result.records.len(),
+        0,
+        "row should expire after ttl patch"
+    );
+}
+
+#[test]
+fn test_row_patch_public_ttl_operation_expires_entity() {
+    let rt = rt();
+    let entity = EntityUseCases::new(&rt);
+    let query = QueryUseCases::new(&rt);
+    let native = NativeUseCases::new(&rt);
+
+    let out = entity
+        .create_row(CreateRowInput {
+            collection: "patch_ttl_operation".into(),
+            fields: vec![("name".into(), Value::Text("ttl-op".into()))],
+            metadata: vec![],
+            node_links: vec![],
+            vector_links: vec![],
+        })
+        .expect("create_row should succeed");
+
+    entity
+        .patch(PatchEntityInput {
+            collection: "patch_ttl_operation".into(),
+            id: out.id,
+            payload: JsonValue::Object(Default::default()),
+            operations: vec![PatchEntityOperation {
+                op: PatchEntityOperationType::Set,
+                path: vec!["ttl".into()],
+                value: Some(JsonValue::String("0s".into())),
+            }],
+        })
+        .expect("patch operation with ttl should succeed");
+
+    native
+        .apply_retention_policy()
+        .expect("apply_retention_policy should succeed");
+
+    let result = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT * FROM patch_ttl_operation".into(),
+        })
+        .expect("SELECT should succeed");
+    assert_eq!(
+        result.result.records.len(),
+        0,
+        "row should expire after ttl patch"
+    );
+}
+
+// 4. test_row_delete
+#[test]
 fn test_row_delete() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);

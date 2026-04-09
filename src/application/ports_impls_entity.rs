@@ -1,21 +1,18 @@
 use crate::application::entity::{CreateDocumentInput, CreateKvInput};
+use crate::application::ttl_payload::{
+    has_internal_ttl_metadata, normalize_ttl_patch_operations, parse_top_level_ttl_metadata_entries,
+};
 use crate::json::{to_vec as json_to_vec, Value as JsonValue};
 use crate::storage::unified::MetadataValue;
 
 use super::*;
-
-const RESERVED_TTL_METADATA_KEYS: [&str; 3] = ["_ttl", "_ttl_ms", "_expires_at"];
 
 fn apply_collection_default_ttl(
     db: &crate::storage::unified::devx::RedDB,
     collection: &str,
     metadata: &mut Vec<(String, MetadataValue)>,
 ) {
-    if metadata.iter().any(|(key, _)| {
-        RESERVED_TTL_METADATA_KEYS
-            .iter()
-            .any(|reserved| key.eq_ignore_ascii_case(reserved))
-    }) {
+    if has_internal_ttl_metadata(metadata) {
         return;
     }
 
@@ -259,6 +256,7 @@ impl RuntimeEntityPort for RedDBRuntime {
             payload,
             operations,
         } = input;
+        let operations = normalize_ttl_patch_operations(operations)?;
 
         let db = self.db();
         let store = db.store();
@@ -588,6 +586,15 @@ impl RuntimeEntityPort for RedDBRuntime {
         {
             for (key, value) in metadata {
                 patch_metadata.set(key.clone(), json_to_metadata_value(value)?);
+            }
+            metadata_changed = true;
+        }
+
+        for (key, value) in parse_top_level_ttl_metadata_entries(&payload)? {
+            if matches!(value, crate::storage::unified::MetadataValue::Null) {
+                patch_metadata.remove(&key);
+            } else {
+                patch_metadata.set(key, value);
             }
             metadata_changed = true;
         }

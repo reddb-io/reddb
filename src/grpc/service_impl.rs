@@ -2392,16 +2392,39 @@ async fn create_collection(
     let payload = parse_json_payload(&request.into_inner().payload_json)?;
     let name = json_string_field(&payload, "name")
         .ok_or_else(|| Status::invalid_argument("missing field: name"))?;
+    let default_ttl_ms = crate::application::ttl_payload::parse_collection_default_ttl_ms(&payload)
+        .map_err(entity_error_to_status)?;
 
     self.runtime
         .db()
         .store()
         .create_collection(&name)
         .map_err(|e| Status::internal(format!("{e:?}")))?;
+    if let Some(default_ttl_ms) = default_ttl_ms {
+        self.runtime
+            .db()
+            .set_collection_default_ttl_ms(&name, default_ttl_ms);
+    }
+    self.runtime
+        .db()
+        .persist_metadata()
+        .map_err(|err| Status::internal(err.to_string()))?;
 
     let mut map = Map::new();
     map.insert("ok".into(), JsonValue::Bool(true));
     map.insert("collection".into(), JsonValue::String(name));
+    if let Some(default_ttl_ms) = default_ttl_ms {
+        map.insert(
+            "default_ttl_ms".into(),
+            JsonValue::Number(default_ttl_ms as f64),
+        );
+        map.insert(
+            "default_ttl".into(),
+            JsonValue::String(crate::application::ttl_payload::format_ttl_ms(
+                default_ttl_ms,
+            )),
+        );
+    }
     Ok(Response::new(json_payload_reply(JsonValue::Object(map))))
 }
 
@@ -2419,6 +2442,11 @@ async fn drop_collection(
         .store()
         .drop_collection(&name)
         .map_err(|e| Status::internal(format!("{e:?}")))?;
+    self.runtime.db().clear_collection_default_ttl_ms(&name);
+    self.runtime
+        .db()
+        .persist_metadata()
+        .map_err(|err| Status::internal(err.to_string()))?;
 
     Ok(Response::new(OperationReply {
         ok: true,
@@ -2446,6 +2474,18 @@ async fn describe_collection(
         JsonValue::String(collection.clone()),
     );
     map.insert("entity_count".into(), JsonValue::Number(count as f64));
+    if let Some(default_ttl_ms) = self.runtime.db().collection_default_ttl_ms(collection) {
+        map.insert(
+            "default_ttl_ms".into(),
+            JsonValue::Number(default_ttl_ms as f64),
+        );
+        map.insert(
+            "default_ttl".into(),
+            JsonValue::String(crate::application::ttl_payload::format_ttl_ms(
+                default_ttl_ms,
+            )),
+        );
+    }
     Ok(Response::new(json_payload_reply(JsonValue::Object(map))))
 }
 }

@@ -11,6 +11,7 @@ pub mod ports;
 pub mod query;
 pub(crate) mod query_payload;
 pub(crate) mod serverless_payload;
+pub(crate) mod ttl_payload;
 
 pub use admin::{AdminUseCases, ServerlessAnalyticsWarmupTarget, ServerlessWarmupPlan};
 pub use catalog::CatalogUseCases;

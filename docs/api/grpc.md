@@ -49,6 +49,26 @@ grpcurl -plaintext 127.0.0.1:50051 reddb.v1.RedDb/Collections
 | `PatchEntity` | `UpdateEntityRequest` | Update an entity by ID |
 | `DeleteEntity` | `DeleteEntityRequest` | Delete an entity by ID |
 
+### TTL over gRPC
+
+Entity RPCs keep using `JsonCreateRequest` and `UpdateEntityRequest`, but the JSON payload now accepts:
+
+- `ttl`: relative duration such as `60`, `"60s"`, `"5m"`, `"250ms"`
+- `ttl_ms`: relative duration in milliseconds
+- `expires_at`: absolute expiration in Unix epoch milliseconds
+
+Examples:
+
+```bash
+grpcurl -plaintext \
+  -d '{"collection":"sessions","payloadJson":"{\"fields\":{\"token\":\"t-1\",\"user_id\":\"u-1\"},\"ttl\":\"15m\"}"}' \
+  127.0.0.1:50051 reddb.v1.RedDb/CreateRow
+
+grpcurl -plaintext \
+  -d '{"collection":"sessions","id":1,"payloadJson":"{\"ttl\":\"30m\"}"}' \
+  127.0.0.1:50051 reddb.v1.RedDb/PatchEntity
+```
+
 ### Query & Search
 
 | RPC | Request | Description |
@@ -177,6 +197,16 @@ grpcurl -plaintext 127.0.0.1:50051 reddb.v1.RedDb/Collections
 | `CreateCollection` | `JsonPayloadRequest` | Create a collection |
 | `DropCollection` | `JsonPayloadRequest` | Drop a collection |
 | `DescribeCollection` | `CollectionRequest` | Describe collection schema |
+
+`CreateCollection` accepts `ttl` or `ttl_ms` in `payloadJson` as the default collection TTL:
+
+```bash
+grpcurl -plaintext \
+  -d '{"payloadJson":"{\"name\":\"sessions\",\"ttl\":\"60m\"}"}' \
+  127.0.0.1:50051 reddb.v1.RedDb/CreateCollection
+```
+
+`DescribeCollection` returns `default_ttl_ms` and `default_ttl` when configured.
 
 ### Auth
 
