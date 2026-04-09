@@ -162,7 +162,7 @@ jobs:
         if: matrix.target == 'aarch64-unknown-linux-musl'
         run: |
           docker run --rm -v "${PWD}:/volume" -w /volume messense/rust-musl-cross:aarch64-musl \
-            bash -lc 'apt-get update >/dev/null && apt-get install -y protobuf-compiler >/dev/null && cargo build --locked --release --target aarch64-unknown-linux-musl --bin red'
+            bash -lc 'rm -f rust-toolchain.toml && apt-get update >/dev/null && apt-get install -y protobuf-compiler >/dev/null && cargo build --release --target aarch64-unknown-linux-musl --bin red'
           sudo chown -R "$(id -u):$(id -g)" target/aarch64-unknown-linux-musl
 
       - name: Strip (Linux native)
