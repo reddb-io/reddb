@@ -521,6 +521,7 @@ impl RedDBServer {
             }
             ("POST", "/serverless/attach") => self.handle_serverless_attach(body),
             ("POST", "/serverless/warmup") => self.handle_serverless_warmup(body),
+            ("POST", "/tick") => self.handle_serverless_reclaim(body),
             ("POST", "/serverless/reclaim") => self.handle_serverless_reclaim(body),
             ("POST", "/export") => self.handle_export(body),
             ("POST", "/indexes/rebuild") => self.handle_rebuild_indexes(body, None),

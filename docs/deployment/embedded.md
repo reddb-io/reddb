@@ -51,3 +51,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 - Edge/IoT devices
 
 See [Embedded Rust API](/api/embedded.md) for the complete API reference.
+
+## TTL and Maintenance in Embedded Mode
+
+Embedded mode does not have a long-running process to trigger `red tick` automatically.
+You have two practical options:
+
+- Run maintenance inline at safe points (after write batches, before shutdown, or on startup).
+- Expose your own internal scheduler (thread, timer, or task queue) that calls:
+
+```rust
+let db = RedDB::open("data/reddb.rdb")?;
+db.enforce_retention_policy()?;
+```
+
+Both options keep contracts unchanged and work for rows, nodes, edges, vectors, and any resource.

@@ -105,6 +105,12 @@ pub fn all_commands() -> Vec<CommandDef> {
       flags: health_flags(),
     },
     CommandDef {
+      name: "tick",
+      summary: "Run maintenance/reclaim tick operations",
+      usage: "red tick [--bind 127.0.0.1:8080] [--operations maintenance,retention,checkpoint] [--dry-run]",
+      flags: tick_flags(),
+    },
+    CommandDef {
       name: "replica",
       summary: "Start as a read replica connected to a primary",
       usage: "red replica --primary-addr http://primary:50051 [--grpc|--http] [--path ./data/reddb.rdb]",
@@ -182,6 +188,9 @@ pub fn main_help_text() -> String {
     out.push_str("  red insert users '{\"name\": \"Alice\"}'\n");
     out.push_str("  red get users abc123\n");
     out.push_str("  red health\n");
+    out.push_str(
+        "  red tick --bind 127.0.0.1:8080 --operations maintenance,retention,checkpoint\n",
+    );
     out.push_str("  red auth create-user alice --password secret --role admin\n");
     out.push_str("  red auth create-api-key alice --name \"ci-token\" --role write\n");
     out.push_str("  red auth list-users\n");
@@ -334,6 +343,19 @@ fn health_flags() -> Vec<FlagSchema> {
     ]
 }
 
+fn tick_flags() -> Vec<FlagSchema> {
+    vec![
+        FlagSchema::new("bind")
+            .with_short('b')
+            .with_description("Server HTTP bind address")
+            .with_default("127.0.0.1:8080"),
+        FlagSchema::new("operations")
+            .with_description("Comma-separated operations: maintenance,retention,checkpoint"),
+        FlagSchema::boolean("dry-run")
+            .with_description("Validate operations without applying changes"),
+    ]
+}
+
 fn status_flags() -> Vec<FlagSchema> {
     vec![FlagSchema::new("bind")
         .with_short('b')
@@ -396,6 +418,7 @@ pub fn completion_domains() -> Vec<(String, Vec<String>)> {
     vec![
         ("server".to_string(), vec![]),
         ("replica".to_string(), vec![]),
+        ("tick".to_string(), vec![]),
         ("query".to_string(), vec!["q".to_string()]),
         ("insert".to_string(), vec!["i".to_string()]),
         ("get".to_string(), vec![]),
@@ -435,6 +458,7 @@ mod tests {
         assert!(names.contains(&"get"));
         assert!(names.contains(&"delete"));
         assert!(names.contains(&"health"));
+        assert!(names.contains(&"tick"));
         assert!(names.contains(&"status"));
         assert!(names.contains(&"connect"));
         assert!(names.contains(&"version"));

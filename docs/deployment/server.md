@@ -60,3 +60,39 @@ curl http://localhost:8080/ready
 # Statistics
 curl http://localhost:8080/stats
 ```
+
+## Maintenance Scheduling
+
+Use an OS-level scheduler to call maintenance on a fixed interval:
+
+```bash
+# every 5 minutes
+*/5 * * * * /usr/local/bin/red tick --bind 127.0.0.1:8080 --operations maintenance,retention,checkpoint
+```
+
+For production services, prefer a dedicated service/timer so you can observe failures:
+
+```ini
+# /etc/systemd/system/reddb-tick.service
+[Unit]
+Description=RedDB periodic maintenance tick
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/red tick --bind 127.0.0.1:8080 --operations maintenance,retention,checkpoint
+```
+
+```ini
+# /etc/systemd/system/reddb-tick.timer
+[Unit]
+Description=Run RedDB maintenance every 5 minutes
+
+[Timer]
+OnUnitActiveSec=5m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+For Kubernetes, run the same command as a `CronJob` that targets the service DNS name.

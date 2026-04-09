@@ -1,12 +1,11 @@
 use super::*;
+use crate::storage::unified::metadata::{MetadataFilter, MetadataValue};
 
 impl RedDB {
     pub fn enforce_retention_policy(&self) -> Result<(), Box<dyn std::error::Error>> {
         if self.options.read_only {
             return Ok(());
         }
-
-        let mut deleted_count = 0usize;
 
         // Export pruning is only meaningful for persistent mode where we
         // have a metadata sidecar that tracks file-backed export artifacts.
@@ -21,14 +20,9 @@ impl RedDB {
 
             self.prune_export_registry(&mut metadata.exports);
             metadata.save_for_data_path(path)?;
-            deleted_count += 1;
         }
 
-        deleted_count += self.sweep_ttl_expired_entities()?;
-
-        if deleted_count > 0 {
-            self.log_retention_delete_count(deleted_count);
-        }
+        let _ = self.sweep_ttl_expired_entities()?;
 
         Ok(())
     }
@@ -84,13 +78,12 @@ impl RedDB {
             )]));
         }
 
-        if let Ok(now_ms_u64_from_float) = (now_ms as f64).try_into() {
-            if now_ms_u64_from_float == now_ms {
-                ids.extend(self.store.filter_metadata_all(&[(
-                    "expires_at".to_string(),
-                    MetadataFilter::Le(MetadataValue::Float(now_ms as f64)),
-                )]));
-            }
+        let now_ms_f64 = now_ms as f64;
+        if now_ms_f64.is_finite() {
+            ids.extend(self.store.filter_metadata_all(&[(
+                "expires_at".to_string(),
+                MetadataFilter::Le(MetadataValue::Float(now_ms_f64)),
+            )]));
         }
 
         Ok(ids)
@@ -129,14 +122,14 @@ impl RedDB {
                 continue;
             };
 
-            let ttl_ms = metadata
-                .get("ttl_ms")
-                .and_then(|value| Self::metadata_u64(value));
-            let ttl_secs = ttl_ms.and_then(|_| None).or_else(|| {
+            let ttl_ms = metadata.get("ttl_ms").and_then(Self::metadata_u64);
+            let ttl_secs = if ttl_ms.is_none() {
                 metadata.get("ttl").and_then(|value| {
-                    Self::metadata_u64(value).and_then(|value_ms| value_ms.saturating_mul(1000))
+                    Self::metadata_u64(value).and_then(|value_secs| value_secs.checked_mul(1000))
                 })
-            });
+            } else {
+                None
+            };
 
             let Some(ttl_ms) = ttl_ms.or(ttl_secs) else {
                 continue;
@@ -156,17 +149,18 @@ impl RedDB {
         match value {
             MetadataValue::Int(v) if *v >= 0 => Some(*v as u64),
             MetadataValue::Timestamp(v) => Some(*v),
-            MetadataValue::Float(v) => Some(v.max(0.0).round() as u64),
+            MetadataValue::Float(v) => {
+                if !v.is_finite() || !v.is_sign_positive() || v.fract().abs() >= f64::EPSILON {
+                    return None;
+                }
+                if *v > u64::MAX as f64 {
+                    return None;
+                }
+                Some(v.trunc() as u64)
+            }
             MetadataValue::String(v) => v.parse::<u64>().ok(),
             _ => None,
         }
-    }
-
-    fn log_retention_delete_count(&self, count: usize) {
-        if !crate::application::ports_impls_native::LOG_RETENTION_EVENTS {
-            return;
-        };
-        Ok(())
     }
 
     // ========================================================================

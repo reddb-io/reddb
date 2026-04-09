@@ -46,6 +46,16 @@ grpcurl -plaintext \
   127.0.0.1:50051 reddb.v1.RedDb/ServerlessReclaim
 ```
 
+When you need platform-level hooks (or external workflows), call:
+
+```bash
+curl -X POST http://127.0.0.1:8080/tick \
+  -H 'content-type: application/json' \
+  -d '{"operations":["maintenance","retention","checkpoint"],"dry_run":false}'
+```
+
+`/tick` is equivalent to `/serverless/reclaim` for serverless reclaim semantics.
+
 ## Readiness
 
 Check serverless-specific readiness:

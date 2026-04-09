@@ -3,6 +3,8 @@
 /// Parses argv using the schema-driven CLI parser, routes to the
 /// appropriate command, and dispatches execution.
 use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -198,6 +200,21 @@ fn main() {
                 eprintln!("unreachable {} {}", transport.as_str(), bind_addr);
                 std::process::exit(1);
             }
+        }
+
+        "tick" => {
+            let bind_addr =
+                flag_string(&result.flags, "bind").unwrap_or_else(|| "127.0.0.1:8080".to_string());
+            let operations = flag_string(&result.flags, "operations");
+            let dry_run = flag_bool(&result.flags, "dry-run");
+
+            let payload = build_tick_payload(operations.as_deref(), dry_run);
+            let body = post_json_to_http(&bind_addr, "/tick", &payload).unwrap_or_else(|err| {
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            });
+
+            println!("{body}");
         }
 
         "status" => {
@@ -438,6 +455,19 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                 cli::types::FlagSchema::boolean("http").with_description("Probe an HTTP listener"),
             ]);
         }
+        Some("tick") => {
+            flags.extend(vec![
+                cli::types::FlagSchema::new("bind")
+                    .with_short('b')
+                    .with_description("Server HTTP bind address")
+                    .with_default("127.0.0.1:8080"),
+                cli::types::FlagSchema::new("operations").with_description(
+                    "Comma-separated operations: maintenance,retention,checkpoint",
+                ),
+                cli::types::FlagSchema::boolean("dry-run")
+                    .with_description("Validate operations without applying"),
+            ]);
+        }
         Some("connect") => {
             flags.extend(vec![
                 cli::types::FlagSchema::new("token")
@@ -470,6 +500,7 @@ fn build_completion_tree() -> Vec<(String, Vec<(String, Vec<String>)>)> {
         ("insert".to_string(), vec![]),
         ("get".to_string(), vec![]),
         ("delete".to_string(), vec![]),
+        ("tick".to_string(), vec![]),
         ("health".to_string(), vec![]),
         ("status".to_string(), vec![]),
         ("mcp".to_string(), vec![]),
@@ -529,4 +560,92 @@ fn flag_bool(flags: &HashMap<String, FlagValue>, name: &str) -> bool {
 
 fn flag_string(flags: &HashMap<String, FlagValue>, name: &str) -> Option<String> {
     flags.get(name).map(|value| value.as_str_value())
+}
+
+fn build_tick_payload(operations: Option<&str>, dry_run: bool) -> String {
+    match operations {
+        None => {
+            format!("{{\"dry_run\":{}}}", if dry_run { "true" } else { "false" })
+        }
+        Some(raw) => {
+            let normalized: Vec<String> = raw
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(json_escape)
+                .map(|value| format!("\"{value}\""))
+                .collect();
+
+            if normalized.is_empty() {
+                return format!("{{\"dry_run\":{}}}", if dry_run { "true" } else { "false" });
+            }
+
+            format!(
+                "{{\"operations\":[{}],\"dry_run\":{}}}",
+                normalized.join(","),
+                if dry_run { "true" } else { "false" }
+            )
+        }
+    }
+}
+
+fn json_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn post_json_to_http(bind_addr: &str, path: &str, payload: &str) -> Result<String, String> {
+    let bind_addr = bind_addr
+        .trim()
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
+    let mut stream = TcpStream::connect(bind_addr)
+        .map_err(|err| format!("failed to connect to {bind_addr}: {err}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .map_err(|err| format!("failed to set read timeout: {err}"))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(10)))
+        .map_err(|err| format!("failed to set write timeout: {err}"))?;
+
+    let request = format!(
+        "POST {path} HTTP/1.1\r\n\
+         Host: {host}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {content_length}\r\n\
+         Connection: close\r\n\
+         \r\n\
+         {payload}",
+        path = path,
+        host = bind_addr,
+        content_length = payload.len(),
+        payload = payload
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|err| format!("failed to write request: {err}"))?;
+
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|err| format!("failed to read response: {err}"))?;
+
+    let mut lines = response.lines();
+    let status_line = lines
+        .next()
+        .ok_or_else(|| "empty response from server".to_string())?;
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<u16>().ok())
+        .ok_or_else(|| format!("invalid response status line: {status_line}"))?;
+
+    let body = response
+        .split_once("\r\n\r\n")
+        .map(|(_headers, body)| body.to_string())
+        .unwrap_or_default();
+    if status >= 400 {
+        Err(format!("server responded with {status}: {body}"))
+    } else {
+        Ok(body)
+    }
 }

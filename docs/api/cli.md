@@ -20,6 +20,7 @@ red <command> [args] [flags]
 | `health` | Run a health check against a server |
 | `replica` | Start as a read replica connected to a primary |
 | `status` | Show replication status |
+| `tick` | Run maintenance/reclaim tick operations |
 | `mcp` | Start MCP server for AI agent integration |
 | `auth` | Manage authentication (users, tokens, roles) |
 | `connect` | Connect to a remote RedDB server (interactive REPL) |
@@ -137,6 +138,20 @@ red health [--bind host:port] [--grpc|--http]
 | `--grpc` | | Probe gRPC listener (default) |
 | `--http` | | Probe HTTP listener |
 
+## red tick
+
+Run maintenance operations on a running server.
+
+```bash
+red tick [--bind 127.0.0.1:8080] [--operations maintenance,retention,checkpoint] [--dry-run]
+```
+
+| Flag | Short | Default | Description |
+|:-----|:------|:--------|:------------|
+| `--bind` | `-b` | `127.0.0.1:8080` | HTTP server address |
+| `--operations` | | `maintenance,retention,checkpoint` | Comma-separated operations |
+| `--dry-run` | | `false` | Validate operation plan without applying |
+
 ## red replica
 
 Start as a read replica.
@@ -214,4 +229,5 @@ red server --http --path ./data/reddb.rdb --bind 127.0.0.1:8080 &
 red insert users '{"name": "Alice", "age": 30}' --bind 127.0.0.1:8080
 red query "SELECT * FROM users" --bind 127.0.0.1:8080
 red health --http --bind 127.0.0.1:8080
+red tick --bind 127.0.0.1:8080 --operations maintenance,retention,checkpoint
 ```

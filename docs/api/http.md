@@ -117,6 +117,7 @@ red server --http --path ./data/reddb.rdb --bind 0.0.0.0:8080
 | `GET` | `/exports` | List exports |
 | `POST` | `/snapshots` | Create a snapshot |
 | `POST` | `/exports` | Create a named export |
+| `POST` | `/tick` | Run maintenance/reclaim tick (maintenance, retention, checkpoint) |
 | `POST` | `/retention/apply` | Apply retention policy |
 | `POST` | `/checkpoint` | Force WAL checkpoint |
 
