@@ -5,6 +5,31 @@ edition = "2021"
 authors = ["RedBlue Team"]
 description = "Unified multi-model database: tables, documents, graphs, vectors, and key-value in one engine"
 license = "MIT"
+homepage = "https://github.com/forattini-dev/reddb"
+repository = "https://github.com/forattini-dev/reddb"
+documentation = "https://docs.rs/reddb"
+readme = "README.md"
+keywords = ["database", "vector-search", "graph", "document-store", "rust"]
+categories = ["database-implementations", "data-structures"]
+include = [
+    "src/**/*.rs",
+    "benches/**/*.rs",
+    "proto/**/*.proto",
+    "build.rs",
+    "README.md",
+    "Cargo.toml",
+    "LICENSE",
+    "CHANGELOG.md",
+    "RELEASE.md"
+]
+
+[[bin]]
+name = "reddb"
+path = "src/bin/reddb.rs"
+
+[[bin]]
+name = "reddb-grpc"
+path = "src/bin/reddb-grpc.rs"
 
 [dependencies]
 aes-gcm = "0.10"

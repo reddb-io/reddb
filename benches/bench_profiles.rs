@@ -5,7 +5,7 @@ use reddb::application::{
 };
 use reddb::health::HealthProvider;
 use reddb::storage::schema::Value;
-use reddb::{EntityUseCases, QueryUseCases, RedDBRuntime, RuntimeEntityPort, RuntimeQueryPort};
+use reddb::{EntityUseCases, QueryUseCases, RedDBRuntime};
 
 // ---------------------------------------------------------------------------
 // Embedded profile: insert + query cycle

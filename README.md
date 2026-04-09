@@ -92,17 +92,64 @@ What this means in practice:
 
 ## Quick start
 
-### Server
-
-Run `RedDB` as an HTTP server or as a gRPC server.
-
-#### 1. Start the HTTP server
+### Install
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/forattini-dev/reddb/main/install.sh | bash
+```
+
+Optional channels:
+
+```bash
+# next (pre-releases)
+curl -fsSL https://raw.githubusercontent.com/forattini-dev/reddb/main/install.sh | bash -s -- --channel next
+```
+
+### Docker quick start
+
+```bash
+docker build -t reddb .
+```
+
+Run HTTP server:
+
+```bash
+docker run --rm -it \
+  -p 8080:8080 \
+  -v $(pwd)/data:/data \
+  --name reddb-http reddb
+```
+
+Run gRPC server:
+
+```bash
+docker run --rm -it \
+  -p 50051:50051 \
+  -v $(pwd)/data:/data \
+  --name reddb-grpc \
+  reddb reddb-grpc --path /data/reddb.rdb --bind 0.0.0.0:50051
+```
+
+Persisting data:
+
+```bash
+mkdir -p data
+
+# both containers below mount the same ./data directory
+docker run --rm -d \
+  -p 8080:8080 \
+  -v $(pwd)/data:/data \
+  reddb
+```
+
+### 1) Run the HTTP server
+
+```bash
+mkdir -p ./data
 reddb --path ./data/reddb.rdb --bind 127.0.0.1:8080
 ```
 
-#### 2. Create a row
+### 2) Create row, node, vector in one dataset
 
 ```bash
 curl -X POST http://127.0.0.1:8080/collections/hosts/rows \
@@ -112,16 +159,9 @@ curl -X POST http://127.0.0.1:8080/collections/hosts/rows \
       "ip": "10.0.0.1",
       "os": "linux",
       "critical": true
-    },
-    "metadata": {
-      "source": "quickstart"
     }
   }'
-```
 
-#### 3. Create a node
-
-```bash
 curl -X POST http://127.0.0.1:8080/collections/graph/nodes \
   -H 'content-type: application/json' \
   -d '{
@@ -131,11 +171,7 @@ curl -X POST http://127.0.0.1:8080/collections/graph/nodes \
       "ip": "10.0.0.1"
     }
   }'
-```
 
-#### 4. Create a vector
-
-```bash
 curl -X POST http://127.0.0.1:8080/collections/embeddings/vectors \
   -H 'content-type: application/json' \
   -d '{
@@ -147,33 +183,37 @@ curl -X POST http://127.0.0.1:8080/collections/embeddings/vectors \
   }'
 ```
 
-#### 5. Run a universal query
+### 3) Query mixed entities immediately
 
 ```bash
 curl -X POST http://127.0.0.1:8080/query \
   -H 'content-type: application/json' \
   -d '{
-    "query": "FROM ANY WHERE _entity_type IN ('table', 'graph_node', 'vector') ORDER BY _score DESC LIMIT 10"
+    "query": "FROM ANY ORDER BY _score DESC LIMIT 10"
   }'
 ```
 
-#### 6. Start the gRPC server
+### 4) Check health/status
+
+```bash
+curl -s http://127.0.0.1:8080/health
+curl -s http://127.0.0.1:8080/ready
+curl -s http://127.0.0.1:8080/stats
+```
+
+### Optional: run gRPC server
 
 ```bash
 reddb-grpc --path ./data/reddb.rdb --bind 127.0.0.1:50051
 ```
 
-#### 7. Query over gRPC
-
 ```bash
 grpcurl \
   -plaintext \
-  -d '{"query":"FROM hosts h WHERE h.os = \"linux\" LIMIT 5"}' \
+  -d '{"query":"FROM ANY ORDER BY _score DESC LIMIT 5"}' \
   127.0.0.1:50051 \
   reddb.v1.RedDb/Query
 ```
-
-#### 8. Create a row over gRPC
 
 ```bash
 grpcurl \
@@ -558,6 +598,49 @@ Current feature flags:
 - `query-graph`
 - `query-fulltext`
 - `encryption`
+
+## Publicação no crates.io
+
+### 1) Validar pacote antes de publicar
+
+```bash
+make publish-dry-run
+```
+
+ou:
+
+```bash
+./scripts/publish.sh --dry-run
+```
+
+### 2) Publicar no crates.io
+
+```bash
+# Use token na sessão
+cargo login
+
+# ou configure temporariamente
+export CARGO_REGISTRY_TOKEN=<SEU_TOKEN>
+
+# Publica o crate
+make publish
+```
+
+### 3) Publicar pela automação do GitHub
+
+O workflow de release também pode publicar no crates.io automaticamente:
+
+- tag `vX.Y.Z` (evento `push` de tag, normalmente criado a partir do `main`) para
+  o canal `stable`
+- `workflow_dispatch` manual com `channel: stable` e `version: X.Y.Z`
+
+No fluxo automático, após o release no GitHub o job `publish-cargo` executa `cargo publish`.
+
+### Boas práticas
+
+- Faça validações locais (check/build/release) antes do release.
+- Mantenha `Cargo.toml`/`Cargo.lock` consistentes.
+- Garanta que o secret `CARGO_REGISTRY_TOKEN` esteja presente no repositório do GitHub.
 
 ---
 

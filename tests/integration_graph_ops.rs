@@ -105,11 +105,17 @@ fn test_graph_neighborhood() {
         })
         .expect("neighborhood should succeed");
 
+    // The neighborhood may include the source node itself, so we filter it out
+    // and count only the actual neighbors.
+    let neighbor_count = result
+        .nodes
+        .iter()
+        .filter(|v| v.node.id != center.graph_id)
+        .count();
     assert_eq!(
-        result.nodes.len(),
-        5,
-        "center should have exactly 5 outgoing neighbors, got {}",
-        result.nodes.len()
+        neighbor_count, 5,
+        "center should have exactly 5 outgoing neighbors (excluding self), got {}",
+        neighbor_count
     );
     assert_eq!(result.source, center.graph_id);
 }

@@ -3,9 +3,8 @@ use reddb::application::{
     CreateDocumentInput, CreateEdgeInput, CreateKvInput, CreateNodeInput, CreateRowInput,
     CreateVectorInput, ExecuteQueryInput, SearchSimilarInput,
 };
-use reddb::health::HealthProvider;
 use reddb::storage::schema::Value;
-use reddb::{EntityUseCases, QueryUseCases, RedDBRuntime, RuntimeEntityPort, RuntimeQueryPort};
+use reddb::{EntityUseCases, QueryUseCases, RedDBRuntime};
 
 // ---------------------------------------------------------------------------
 // Row benchmarks
@@ -116,7 +115,7 @@ fn bench_document_insert(c: &mut Criterion) {
         b.iter(|| {
             let body = reddb::json!({
                 "title": "Benchmark Document",
-                "tags": ["perf", "test"],
+                "category": "performance",
                 "score": 42.5
             });
             uc.create_document(CreateDocumentInput {
