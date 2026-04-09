@@ -75,7 +75,6 @@ assert.ok(sdk._internal, '_internal namespace should exist');
 assert.strictEqual(typeof sdk._internal.buildFlags, 'function');
 assert.strictEqual(typeof sdk._internal.exists, 'function');
 assert.strictEqual(typeof sdk._internal.parseInstalledVersion, 'function');
-assert.strictEqual(typeof sdk._internal.splitWrapperArgs, 'function');
 console.log('PASS: Internal exports accessible');
 
 // Test 12: buildFlags helper
@@ -90,15 +89,8 @@ assert.strictEqual(sdk._internal.parseInstalledVersion(''), null);
 assert.strictEqual(sdk._internal.parseInstalledVersion(null), null);
 console.log('PASS: parseInstalledVersion parses correctly');
 
-// Test 14: splitWrapperArgs
-const split = sdk._internal.splitWrapperArgs(['--install', '--', 'query', 'SELECT 1']);
-assert.deepStrictEqual(split.wrapperArgs, ['--install']);
-assert.deepStrictEqual(split.passthroughArgs, ['query', 'SELECT 1']);
-assert.strictEqual(split.usedDoubleDash, true);
-console.log('PASS: splitWrapperArgs splits correctly');
-
-// Test 15: default export
+// Test 14: default export
 assert.strictEqual(sdk.default, sdk);
 console.log('PASS: default export is self-reference');
 
-console.log('\nAll %d tests passed!', 15);
+console.log('\nAll %d tests passed!', 14);

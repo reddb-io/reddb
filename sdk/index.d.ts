@@ -135,8 +135,6 @@ export interface InternalNamespace {
   ensureObject: (...args: unknown[]) => unknown;
   execFilePromise: (...args: unknown[]) => unknown;
   exists: (...args: unknown[]) => unknown;
-  formatWrapperBinaryStatus: (...args: unknown[]) => unknown;
-  formatWrapperHelp: (...args: unknown[]) => unknown;
   getBinaryInfo: (...args: unknown[]) => unknown;
   getDefaultBinaryName: (...args: unknown[]) => unknown;
   getInstalledVersion: (...args: unknown[]) => unknown;
@@ -146,7 +144,6 @@ export interface InternalNamespace {
   legacyInstallDir: (...args: unknown[]) => unknown;
   normalizeReleaseTag: (...args: unknown[]) => unknown;
   parseInstalledVersion: (...args: unknown[]) => unknown;
-  parseWrapperArgs: (...args: unknown[]) => unknown;
   request: (...args: unknown[]) => unknown;
   requestJson: (...args: unknown[]) => unknown;
   requestText: (...args: unknown[]) => unknown;
@@ -157,11 +154,9 @@ export interface InternalNamespace {
   resolveManagedBinaryPath: (...args: unknown[]) => unknown;
   resolveManagedUpgradeDestination: (...args: unknown[]) => unknown;
   sha256File: (...args: unknown[]) => unknown;
-  splitWrapperArgs: (...args: unknown[]) => unknown;
   spawnBinary: (...args: unknown[]) => unknown;
   upgradeBinary: (...args: unknown[]) => unknown;
   waitForChild: (...args: unknown[]) => unknown;
-  writeLine: (...args: unknown[]) => unknown;
   verifyChecksum: (...args: unknown[]) => unknown;
 }
 

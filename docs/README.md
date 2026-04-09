@@ -64,16 +64,16 @@ Manual assets:
 
 ### `npx`
 
-Install or resolve the managed binary through npm:
+Run the npm package directly:
 
 ```bash
-npx reddb --install
+npx reddb-cli@latest version
 ```
 
-Run RedDB directly through the wrapper:
+Start RedDB through `npx`:
 
 ```bash
-npx reddb --auto-download -- server --http --path ./data/reddb.rdb --bind 127.0.0.1:8080
+npx reddb-cli@latest server --http --path ./data/reddb.rdb --bind 127.0.0.1:8080
 ```
 
 ## First connection

@@ -1,6 +1,6 @@
 # Installation
 
-RedDB ships as a single binary called `red`, and it can also be used through the `reddb` npm wrapper or as a Rust dependency for embedded mode.
+RedDB ships as a single binary called `red`, and it can also be used through the `reddb-cli` npm package or as a Rust dependency for embedded mode.
 
 ## Install from GitHub Releases
 
@@ -52,30 +52,18 @@ red version
 
 ## Install with `npx`
 
-The npm package wraps the real `red` binary and can install or download it for you.
+The npm package installs the real `red` binary and forwards CLI arguments directly to it.
 
-Install the managed binary:
+Run a command through `npx`:
 
 ```bash
-npx reddb --install
+npx reddb-cli@latest version
 ```
 
-Run a command with on-demand download:
+Start an HTTP server through `npx`:
 
 ```bash
-npx reddb --auto-download -- version
-```
-
-Start an HTTP server through the wrapper:
-
-```bash
-npx reddb --auto-download -- server --http --path ./data/reddb.rdb --bind 127.0.0.1:8080
-```
-
-Show wrapper help:
-
-```bash
-npx reddb --sdk-help
+npx reddb-cli@latest server --http --path ./data/reddb.rdb --bind 127.0.0.1:8080
 ```
 
 If you use `pnpm`:

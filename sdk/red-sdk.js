@@ -11,27 +11,6 @@ const { execFile, spawn } = require('child_process');
 
 const SDK_VERSION = require(path.join(__dirname, '..', 'package.json')).version;
 const DEFAULT_REPO = 'forattini-dev/reddb';
-const WRAPPER_OPTION_TYPES = Object.freeze({
-  'asset-name': 'string',
-  'auto-download': 'boolean',
-  'binary-path': 'string',
-  channel: 'string',
-  'check-update': 'boolean',
-  download: 'boolean',
-  force: 'boolean',
-  'github-token': 'string',
-  install: 'boolean',
-  'no-verify': 'boolean',
-  'print-binary-path': 'boolean',
-  'release-version': 'string',
-  repo: 'string',
-  'sdk-help': 'boolean',
-  'static-build': 'boolean',
-  'target-dir': 'string',
-  upgrade: 'boolean',
-  version: 'string',
-  verify: 'boolean'
-});
 
 function getDefaultBinaryName(platform = process.platform) {
   return platform === 'win32' ? 'red.exe' : 'red';
@@ -537,193 +516,6 @@ function spawnBinary(binaryPath, args, options = {}) {
   });
 }
 
-function splitWrapperArgs(argv) {
-  const rawArgs = Array.isArray(argv) ? argv.slice() : [];
-  const wrapperArgs = [];
-  let index = 0;
-
-  while (index < rawArgs.length) {
-    const token = rawArgs[index];
-
-    if (token === '--') {
-      return {
-        wrapperArgs,
-        passthroughArgs: rawArgs.slice(index + 1),
-        usedDoubleDash: true
-      };
-    }
-
-    if (!token || !token.startsWith('--')) {
-      break;
-    }
-
-    const eqIndex = token.indexOf('=');
-    const optionName = token.slice(2, eqIndex === -1 ? undefined : eqIndex);
-    const optionType = WRAPPER_OPTION_TYPES[optionName];
-
-    if (!optionType) {
-      break;
-    }
-
-    if (optionType === 'string' && eqIndex === -1) {
-      const nextToken = rawArgs[index + 1];
-      if (optionName === 'version' && (!nextToken || String(nextToken).startsWith('-'))) {
-        break;
-      }
-      if (nextToken === undefined) {
-        wrapperArgs.push(token);
-        index += 1;
-        continue;
-      }
-    }
-
-    wrapperArgs.push(token);
-    index += 1;
-
-    if (optionType === 'string' && eqIndex === -1 && index < rawArgs.length) {
-      wrapperArgs.push(rawArgs[index]);
-      index += 1;
-    }
-  }
-
-  return {
-    wrapperArgs,
-    passthroughArgs: rawArgs.slice(index),
-    usedDoubleDash: false
-  };
-}
-
-async function parseWrapperArgs(argv, runtime = {}) {
-  const split = splitWrapperArgs(argv);
-
-  const options = {};
-  const wrapperArgs = split.wrapperArgs;
-
-  for (let i = 0; i < wrapperArgs.length; i++) {
-    const token = wrapperArgs[i];
-    if (!token.startsWith('--')) continue;
-
-    const eqIndex = token.indexOf('=');
-    const name = eqIndex !== -1 ? token.slice(2, eqIndex) : token.slice(2);
-    const type = WRAPPER_OPTION_TYPES[name];
-
-    if (!type) continue;
-
-    if (type === 'boolean') {
-      options[name] = true;
-    } else if (eqIndex !== -1) {
-      options[name] = token.slice(eqIndex + 1);
-    } else if (i + 1 < wrapperArgs.length) {
-      i++;
-      options[name] = wrapperArgs[i];
-    }
-  }
-
-  const releaseVersion = options['release-version'] || options['version'];
-
-  return {
-    passthroughArgs: split.passthroughArgs,
-    rawArgs: Array.isArray(argv) ? argv.slice() : [],
-    usedDoubleDash: split.usedDoubleDash,
-    resolveOptions: {
-      binaryPath: options['binary-path'],
-      targetDir: options['target-dir'],
-      autoDownload: options['auto-download'] || options['download'] || false,
-      repo: options['repo'],
-      channel: options['channel'],
-      releaseVersion,
-      assetName: options['asset-name'],
-      githubToken: options['github-token'],
-      verify: options['verify'] !== false && !options['no-verify'],
-      staticBuild: options['static-build'] || false,
-      force: options['force'] || false,
-      version: releaseVersion
-    },
-    wrapperOptions: {
-      sdkHelp: options['sdk-help'] || false,
-      checkUpdate: options['check-update'] || false,
-      upgrade: options['upgrade'] || false,
-      install: options['install'] || false,
-      printBinaryPath: options['print-binary-path'] || false
-    }
-  };
-}
-
-function writeLine(stream, message) {
-  stream.write(`${message}\n`);
-}
-
-function formatWrapperBinaryStatus(result) {
-  if (result && Object.prototype.hasOwnProperty.call(result, 'latestVersion')) {
-    if (!result.currentVersion) {
-      return `reddb is not installed; latest available is ${result.latestVersion}`;
-    }
-    if (result.hasUpdate) {
-      return `reddb update available at ${result.binaryPath}: ${result.currentVersion} -> ${result.latestVersion}`;
-    }
-    return `reddb is up to date at ${result.binaryPath} (${result.currentVersion})`;
-  }
-
-  if (result && Object.prototype.hasOwnProperty.call(result, 'previousVersion')) {
-    if (!result.changed) {
-      return `reddb already at ${result.binaryPath} (${result.version || 'version unknown'})`;
-    }
-    if (result.previousVersion) {
-      return `reddb upgraded at ${result.binaryPath}: ${result.previousVersion} -> ${result.version}`;
-    }
-    return `reddb installed at ${result.binaryPath} (${result.version || 'version unknown'})`;
-  }
-
-  if (result && result.binaryPath) {
-    if (!result.changed) {
-      return `reddb already installed at ${result.binaryPath}${result.version ? ` (${result.version})` : ''}`;
-    }
-    return `reddb installed at ${result.binaryPath}${result.version ? ` (${result.version})` : ''}`;
-  }
-
-  return 'reddb binary status unavailable';
-}
-
-function formatWrapperHelp() {
-  const lines = [
-    'reddb SDK wrapper',
-    '',
-    'Usage:',
-    '  red [wrapper options] [reddb args]',
-    '  npx reddb [reddb args]',
-    '  pnpm dlx reddb -- [reddb args]',
-    '',
-    'Wrapper options:',
-    '  --binary-path <path>     Use an explicit reddb binary',
-    '  --target-dir <dir>       Resolve or install the managed binary in this directory',
-    '  --auto-download          Download the binary if it is missing before command execution',
-    '  --install                Ensure the managed binary is installed',
-    '  --upgrade                Upgrade the managed binary to the requested release',
-    '  --check-update           Check the installed binary against the latest release',
-    '  --print-binary-path      Print the resolved binary path and exit',
-    '  --channel <name>         Release channel for downloads (stable, latest, next)',
-    '  --release-version <tag>  Pin a release version for install or upgrade',
-    '  --version <tag>          Alias for --release-version',
-    '  --asset-name <name>      Override the release asset name',
-    '  --repo <owner/name>      Override the GitHub repository',
-    '  --github-token <token>   GitHub token for release downloads',
-    '  --static-build           Prefer static Linux assets when available',
-    '  --force                  Force a reinstall when used with --upgrade',
-    '  --no-verify              Skip SHA256 verification on download',
-    '  --sdk-help               Show this wrapper help',
-    '',
-    'Notes:',
-    '  Wrapper options must come before the reddb command.',
-    '  Managed installs default to ~/.local/bin and still detect legacy ~/.reddb/bin installs.',
-    '  When installed from pnpm/npm, the package postinstall step stores the managed binary',
-    '  in package-local .reddb/bin and the wrapper can use it automatically.',
-    '  Use "red --version" to query the real reddb binary version after installation.',
-    ''
-  ];
-
-  return lines.join('\n');
-}
-
 function waitForChild(child) {
   return new Promise((resolve, reject) => {
     child.on('error', reject);
@@ -844,82 +636,21 @@ async function createClient(options = {}) {
 }
 
 async function runCli(argv = process.argv.slice(2), runtime = {}) {
-  const stdout = runtime.stdout || process.stdout;
   const stderr = runtime.stderr || process.stderr;
 
   try {
-    const parsed = await parseWrapperArgs(argv, runtime);
-    const cliOptions = Object.assign({}, parsed.resolveOptions, {
+    const rawArgs = Array.isArray(argv) ? argv.slice() : [];
+    const cliOptions = {
       cwd: runtime.cwd || process.cwd(),
       env: Object.assign({}, process.env, runtime.env || {})
-    });
-
-    if (parsed.wrapperOptions.sdkHelp) {
-      writeLine(stdout, formatWrapperHelp());
-      return 0;
-    }
-
-    let resolvedInfo = null;
-
-    if (parsed.wrapperOptions.checkUpdate) {
-      const updateStatus = await checkForUpdates(cliOptions);
-      const updateMessage = formatWrapperBinaryStatus(updateStatus);
-
-      if (parsed.passthroughArgs.length === 0) {
-        writeLine(stdout, updateMessage);
-        return 0;
-      }
-
-      writeLine(stderr, updateMessage);
-    }
-
-    if (parsed.wrapperOptions.upgrade) {
-      const upgradeResult = await upgradeBinary(cliOptions);
-      resolvedInfo = {
-        binaryPath: upgradeResult.binaryPath,
-        source: upgradeResult.source
-      };
-
-      if (parsed.passthroughArgs.length === 0 && !parsed.wrapperOptions.printBinaryPath) {
-        writeLine(stdout, formatWrapperBinaryStatus(upgradeResult));
-        return 0;
-      }
-
-      writeLine(stderr, formatWrapperBinaryStatus(upgradeResult));
-    } else if (parsed.wrapperOptions.install) {
-      const installResult = await ensureInstalled(cliOptions);
-      resolvedInfo = {
-        binaryPath: installResult.binaryPath,
-        source: installResult.source
-      };
-
-      if (parsed.passthroughArgs.length === 0 && !parsed.wrapperOptions.printBinaryPath) {
-        writeLine(stdout, formatWrapperBinaryStatus(installResult));
-        return 0;
-      }
-
-      writeLine(stderr, formatWrapperBinaryStatus(installResult));
-    }
-
-    if (!resolvedInfo) {
-      resolvedInfo = await resolveBinaryWithInfo(cliOptions);
-    }
-
-    if (parsed.wrapperOptions.printBinaryPath) {
-      if (parsed.passthroughArgs.length === 0) {
-        writeLine(stdout, resolvedInfo.binaryPath);
-        return 0;
-      }
-      writeLine(stderr, `reddb binary: ${resolvedInfo.binaryPath}`);
-    }
-
-    const binaryPath = resolvedInfo.binaryPath;
+    };
+    const binaryPath = await resolveBinary(cliOptions);
     const spawnOptions = {
       cwd: runtime.cwd || process.cwd(),
       env: Object.assign({}, process.env, runtime.env || {}),
       stdio: runtime.stdio || 'inherit'
     };
-    const child = spawnBinary(binaryPath, parsed.passthroughArgs, spawnOptions);
+    const child = spawnBinary(binaryPath, rawArgs, spawnOptions);
 
     return waitForChild(child);
   } catch (error) {
@@ -955,8 +686,6 @@ module.exports._internal = {
   ensureObject,
   execFilePromise,
   exists,
-  formatWrapperBinaryStatus,
-  formatWrapperHelp,
   getBinaryInfo,
   getDefaultBinaryName,
   getInstalledVersion,
@@ -966,7 +695,6 @@ module.exports._internal = {
   legacyInstallDir,
   normalizeReleaseTag,
   parseInstalledVersion,
-  parseWrapperArgs,
   request,
   requestJson,
   requestText,
@@ -977,11 +705,9 @@ module.exports._internal = {
   resolveManagedBinaryPath,
   resolveManagedUpgradeDestination,
   sha256File,
-  splitWrapperArgs,
   spawnBinary,
   upgradeBinary,
   waitForChild,
-  writeLine,
   verifyChecksum
 };
 

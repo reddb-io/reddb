@@ -69,24 +69,18 @@ Release page:
 
 ### npx
 
-`reddb` is also published as an npm wrapper that resolves and runs the real `red` binary for you.
+`reddb-cli` is also published as an npm package that installs and runs the real `red` binary for you.
 
-Install the managed binary:
+Run RedDB through `npx`:
 
 ```bash
-npx reddb --install
+npx reddb-cli@latest version
 ```
 
-Run RedDB through `npx` with auto-download when needed:
+Start an HTTP server through `npx`:
 
 ```bash
-npx reddb --auto-download -- server --http --path ./data/reddb.rdb --bind 127.0.0.1:8080
-```
-
-Wrapper help:
-
-```bash
-npx reddb --sdk-help
+npx reddb-cli@latest server --http --path ./data/reddb.rdb --bind 127.0.0.1:8080
 ```
 
 ### Build from source

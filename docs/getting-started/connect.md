@@ -84,24 +84,24 @@ red connect --token "$REDDB_TOKEN" 127.0.0.1:50051
 
 ## Connect from `npx`
 
-You can run the same flows through the npm wrapper.
+You can run the same flows through the npm package.
 
 Start HTTP:
 
 ```bash
-npx reddb --auto-download -- server --http --path ./data/reddb.rdb --bind 127.0.0.1:8080
+npx reddb-cli@latest server --http --path ./data/reddb.rdb --bind 127.0.0.1:8080
 ```
 
 Start gRPC:
 
 ```bash
-npx reddb --auto-download -- server --grpc --path ./data/reddb.rdb --bind 127.0.0.1:50051
+npx reddb-cli@latest server --grpc --path ./data/reddb.rdb --bind 127.0.0.1:50051
 ```
 
 Open the REPL through the wrapper:
 
 ```bash
-npx reddb --auto-download -- connect 127.0.0.1:50051
+npx reddb-cli@latest connect 127.0.0.1:50051
 ```
 
 ## Which one should you use?
