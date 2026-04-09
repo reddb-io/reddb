@@ -1,5 +1,5 @@
 {
-  "name": "reddb",
+  "name": "reddb-cli",
   "version": "0.1.1",
   "description": "JavaScript/TypeScript SDK for RedDB - unified multi-model database",
   "type": "commonjs",
