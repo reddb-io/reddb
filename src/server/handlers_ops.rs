@@ -594,10 +594,7 @@ impl RedDBServer {
             Ok(()) => {
                 let mut object = Map::new();
                 object.insert("ok".to_string(), JsonValue::Bool(true));
-                object.insert(
-                    "dropped".to_string(),
-                    JsonValue::String(name.to_string()),
-                );
+                object.insert("dropped".to_string(), JsonValue::String(name.to_string()));
                 json_response(200, JsonValue::Object(object))
             }
             Err(err) => json_error(400, format!("{err:?}")),

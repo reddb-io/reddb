@@ -807,9 +807,18 @@ fn test_parse_insert_mixed_types() {
         parse("INSERT INTO metrics (name, value, active) VALUES ('cpu', 3.14, true)").unwrap();
     if let QueryExpr::Insert(iq) = query {
         assert_eq!(iq.values[0].len(), 3);
-        assert!(matches!(iq.values[0][0], crate::storage::schema::Value::Text(_)));
-        assert!(matches!(iq.values[0][1], crate::storage::schema::Value::Float(_)));
-        assert!(matches!(iq.values[0][2], crate::storage::schema::Value::Boolean(true)));
+        assert!(matches!(
+            iq.values[0][0],
+            crate::storage::schema::Value::Text(_)
+        ));
+        assert!(matches!(
+            iq.values[0][1],
+            crate::storage::schema::Value::Float(_)
+        ));
+        assert!(matches!(
+            iq.values[0][2],
+            crate::storage::schema::Value::Boolean(true)
+        ));
     } else {
         panic!("Expected InsertQuery");
     }
@@ -842,7 +851,9 @@ fn test_parse_update_no_where() {
 
 #[test]
 fn test_parse_update_multiple_assignments() {
-    let query = parse("UPDATE hosts SET hostname = 'web01', port = 8080, active = true WHERE id = 1").unwrap();
+    let query =
+        parse("UPDATE hosts SET hostname = 'web01', port = 8080, active = true WHERE id = 1")
+            .unwrap();
     if let QueryExpr::Update(uq) = query {
         assert_eq!(uq.assignments.len(), 3);
         assert_eq!(uq.assignments[0].0, "hostname");
@@ -938,12 +949,13 @@ fn test_parse_create_table_full() {
 
 #[test]
 fn test_parse_create_table_with_enum() {
-    let query = parse(
-        "CREATE TABLE statuses (status ENUM('active','inactive','pending'))",
-    )
-    .unwrap();
+    let query =
+        parse("CREATE TABLE statuses (status ENUM('active','inactive','pending'))").unwrap();
     if let QueryExpr::CreateTable(ct) = query {
-        assert_eq!(ct.columns[0].data_type, "ENUM('active','inactive','pending')");
+        assert_eq!(
+            ct.columns[0].data_type,
+            "ENUM('active','inactive','pending')"
+        );
     } else {
         panic!("Expected CreateTableQuery");
     }
@@ -1034,7 +1046,10 @@ fn test_parse_insert_row_default() {
     let query = parse("INSERT INTO hosts (ip, port) VALUES ('10.0.0.1', 22)").unwrap();
     if let QueryExpr::Insert(ins) = query {
         assert_eq!(ins.table, "hosts");
-        assert_eq!(ins.entity_type, crate::storage::query::ast::InsertEntityType::Row);
+        assert_eq!(
+            ins.entity_type,
+            crate::storage::query::ast::InsertEntityType::Row
+        );
         assert_eq!(ins.columns, vec!["ip", "port"]);
         assert_eq!(ins.values.len(), 1);
     } else {
@@ -1044,12 +1059,16 @@ fn test_parse_insert_row_default() {
 
 #[test]
 fn test_parse_insert_node() {
-    let query =
-        parse("INSERT INTO network NODE (label, node_type, ip) VALUES ('router', 'device', '10.0.0.1')")
-            .unwrap();
+    let query = parse(
+        "INSERT INTO network NODE (label, node_type, ip) VALUES ('router', 'device', '10.0.0.1')",
+    )
+    .unwrap();
     if let QueryExpr::Insert(ins) = query {
         assert_eq!(ins.table, "network");
-        assert_eq!(ins.entity_type, crate::storage::query::ast::InsertEntityType::Node);
+        assert_eq!(
+            ins.entity_type,
+            crate::storage::query::ast::InsertEntityType::Node
+        );
         assert_eq!(ins.columns, vec!["label", "node_type", "ip"]);
         assert_eq!(ins.values.len(), 1);
         assert_eq!(ins.values[0].len(), 3);
@@ -1065,7 +1084,10 @@ fn test_parse_insert_edge() {
             .unwrap();
     if let QueryExpr::Insert(ins) = query {
         assert_eq!(ins.table, "network");
-        assert_eq!(ins.entity_type, crate::storage::query::ast::InsertEntityType::Edge);
+        assert_eq!(
+            ins.entity_type,
+            crate::storage::query::ast::InsertEntityType::Edge
+        );
         // Keywords as column names are returned uppercase
         assert_eq!(ins.columns.len(), 4);
         assert!(ins.columns[0].eq_ignore_ascii_case("label"));
@@ -1079,12 +1101,16 @@ fn test_parse_insert_edge() {
 
 #[test]
 fn test_parse_insert_vector() {
-    let query =
-        parse("INSERT INTO embeddings VECTOR (dense, content) VALUES ([0.1, 0.2, 0.3], 'hello world')")
-            .unwrap();
+    let query = parse(
+        "INSERT INTO embeddings VECTOR (dense, content) VALUES ([0.1, 0.2, 0.3], 'hello world')",
+    )
+    .unwrap();
     if let QueryExpr::Insert(ins) = query {
         assert_eq!(ins.table, "embeddings");
-        assert_eq!(ins.entity_type, crate::storage::query::ast::InsertEntityType::Vector);
+        assert_eq!(
+            ins.entity_type,
+            crate::storage::query::ast::InsertEntityType::Vector
+        );
         assert_eq!(ins.columns, vec!["dense", "content"]);
         assert_eq!(ins.values.len(), 1);
         // The vector literal should be parsed as Value::Vector
@@ -1102,13 +1128,14 @@ fn test_parse_insert_vector() {
 
 #[test]
 fn test_parse_insert_document() {
-    let query = parse(
-        r#"INSERT INTO docs DOCUMENT (body) VALUES ('{"name":"test","value":42}')"#,
-    )
-    .unwrap();
+    let query =
+        parse(r#"INSERT INTO docs DOCUMENT (body) VALUES ('{"name":"test","value":42}')"#).unwrap();
     if let QueryExpr::Insert(ins) = query {
         assert_eq!(ins.table, "docs");
-        assert_eq!(ins.entity_type, crate::storage::query::ast::InsertEntityType::Document);
+        assert_eq!(
+            ins.entity_type,
+            crate::storage::query::ast::InsertEntityType::Document
+        );
         assert_eq!(ins.columns, vec!["body"]);
     } else {
         panic!("Expected InsertQuery with Document entity type");
@@ -1121,7 +1148,10 @@ fn test_parse_insert_kv() {
         parse("INSERT INTO cache KV (key, value) VALUES ('session:123', 'token-abc')").unwrap();
     if let QueryExpr::Insert(ins) = query {
         assert_eq!(ins.table, "cache");
-        assert_eq!(ins.entity_type, crate::storage::query::ast::InsertEntityType::Kv);
+        assert_eq!(
+            ins.entity_type,
+            crate::storage::query::ast::InsertEntityType::Kv
+        );
         assert_eq!(ins.columns.len(), 2);
         assert!(ins.columns[0].eq_ignore_ascii_case("key"));
         assert!(ins.columns[1].eq_ignore_ascii_case("value"));
@@ -1133,8 +1163,7 @@ fn test_parse_insert_kv() {
 #[test]
 fn test_parse_insert_vector_array_literal() {
     // Test array literal parsing in VALUES
-    let query =
-        parse("INSERT INTO emb VECTOR (dense) VALUES ([1, 2, 3])").unwrap();
+    let query = parse("INSERT INTO emb VECTOR (dense) VALUES ([1, 2, 3])").unwrap();
     if let QueryExpr::Insert(ins) = query {
         match &ins.values[0][0] {
             crate::storage::schema::Value::Vector(v) => {
@@ -1267,9 +1296,8 @@ fn test_parse_graph_community() {
 #[test]
 fn test_parse_graph_components() {
     let query = parse("GRAPH COMPONENTS MODE strong").unwrap();
-    if let QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::Components {
-        mode,
-    }) = query
+    if let QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::Components { mode }) =
+        query
     {
         assert_eq!(mode, "strong");
     } else {
@@ -1314,9 +1342,8 @@ fn test_parse_graph_topological_sort() {
 
 #[test]
 fn test_parse_search_similar() {
-    let query =
-        parse("SEARCH SIMILAR [0.1, 0.2, 0.3] COLLECTION embeddings LIMIT 5 MIN_SCORE 0.8")
-            .unwrap();
+    let query = parse("SEARCH SIMILAR [0.1, 0.2, 0.3] COLLECTION embeddings LIMIT 5 MIN_SCORE 0.8")
+        .unwrap();
     if let QueryExpr::SearchCommand(crate::storage::query::ast::SearchCommand::Similar {
         vector,
         collection,

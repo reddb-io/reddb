@@ -184,9 +184,9 @@ impl<'a> Parser<'a> {
                 self.expect(Token::RBracket)?;
 
                 // Check if all items are numeric (Integer or Float) -> Value::Vector
-                let all_numeric = items.iter().all(|v| {
-                    matches!(v, Value::Integer(_) | Value::Float(_))
-                });
+                let all_numeric = items
+                    .iter()
+                    .all(|v| matches!(v, Value::Integer(_) | Value::Float(_)));
                 if all_numeric && !items.is_empty() {
                     let floats: Vec<f32> = items
                         .iter()

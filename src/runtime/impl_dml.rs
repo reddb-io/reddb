@@ -60,7 +60,8 @@ impl RedDBRuntime {
                 }
                 InsertEntityType::Node => {
                     let label = find_column_value_string(&query.columns, row_values, "label")?;
-                    let node_type = find_column_value_opt_string(&query.columns, row_values, "node_type");
+                    let node_type =
+                        find_column_value_opt_string(&query.columns, row_values, "node_type");
                     let properties = extract_remaining_properties(
                         &query.columns,
                         row_values,
@@ -101,7 +102,8 @@ impl RedDBRuntime {
                 }
                 InsertEntityType::Vector => {
                     let dense = find_column_value_vec_f32(&query.columns, row_values, "dense")?;
-                    let content = find_column_value_opt_string(&query.columns, row_values, "content");
+                    let content =
+                        find_column_value_opt_string(&query.columns, row_values, "content");
                     let input = CreateVectorInput {
                         collection: query.table.clone(),
                         dense,
@@ -335,11 +337,7 @@ fn find_column_value_opt_string(
 }
 
 /// Find a required column value and coerce to u64.
-fn find_column_value_u64(
-    columns: &[String],
-    values: &[Value],
-    name: &str,
-) -> RedDBResult<u64> {
+fn find_column_value_u64(columns: &[String], values: &[Value], name: &str) -> RedDBResult<u64> {
     let val = find_column_value(columns, values, name)?;
     match val {
         Value::Integer(n) => Ok(n as u64),
@@ -354,11 +352,7 @@ fn find_column_value_u64(
 }
 
 /// Find an optional column value as f32.
-fn find_column_value_f32_opt(
-    columns: &[String],
-    values: &[Value],
-    name: &str,
-) -> Option<f32> {
+fn find_column_value_f32_opt(columns: &[String], values: &[Value], name: &str) -> Option<f32> {
     for (i, col) in columns.iter().enumerate() {
         if col.eq_ignore_ascii_case(name) {
             return match &values[i] {
@@ -383,10 +377,12 @@ fn find_column_value_vec_f32(
         Value::Vector(v) => Ok(v),
         Value::Json(bytes) => {
             // Try to parse as JSON array of numbers
-            let s = std::str::from_utf8(&bytes)
-                .map_err(|_| RedDBError::Query(format!("column '{name}' contains invalid UTF-8")))?;
-            let arr: Vec<f32> = crate::json::from_str(s)
-                .map_err(|e| RedDBError::Query(format!("column '{name}' invalid vector JSON: {e}")))?;
+            let s = std::str::from_utf8(&bytes).map_err(|_| {
+                RedDBError::Query(format!("column '{name}' contains invalid UTF-8"))
+            })?;
+            let arr: Vec<f32> = crate::json::from_str(s).map_err(|e| {
+                RedDBError::Query(format!("column '{name}' invalid vector JSON: {e}"))
+            })?;
             Ok(arr)
         }
         other => Err(RedDBError::Query(format!(

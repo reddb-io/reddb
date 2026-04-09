@@ -52,10 +52,7 @@ impl RedDBServer {
                     JsonValue::String(result.api_key.key.clone()),
                 );
                 if let Some(ref cert) = result.certificate {
-                    object.insert(
-                        "certificate".to_string(),
-                        JsonValue::String(cert.clone()),
-                    );
+                    object.insert("certificate".to_string(), JsonValue::String(cert.clone()));
                 }
                 json_response(200, JsonValue::Object(object))
             }
@@ -142,10 +139,7 @@ impl RedDBServer {
             None => {
                 return json_error(
                     400,
-                    format!(
-                        "invalid role '{}': must be read, write, or admin",
-                        role_str
-                    ),
+                    format!("invalid role '{}': must be read, write, or admin", role_str),
                 )
             }
         };
@@ -158,10 +152,7 @@ impl RedDBServer {
                     "username".to_string(),
                     JsonValue::String(user.username.clone()),
                 );
-                object.insert(
-                    "role".to_string(),
-                    JsonValue::String(user.role.to_string()),
-                );
+                object.insert("role".to_string(), JsonValue::String(user.role.to_string()));
                 object.insert("enabled".to_string(), JsonValue::Bool(user.enabled));
                 json_response(201, JsonValue::Object(object))
             }
@@ -263,10 +254,7 @@ impl RedDBServer {
             None => {
                 return json_error(
                     400,
-                    format!(
-                        "invalid role '{}': must be read, write, or admin",
-                        role_str
-                    ),
+                    format!("invalid role '{}': must be read, write, or admin", role_str),
                 )
             }
         };
@@ -371,10 +359,7 @@ impl RedDBServer {
                         "username".to_string(),
                         JsonValue::String("anonymous".to_string()),
                     );
-                    object.insert(
-                        "role".to_string(),
-                        JsonValue::String("admin".to_string()),
-                    );
+                    object.insert("role".to_string(), JsonValue::String("admin".to_string()));
                     object.insert("authenticated".to_string(), JsonValue::Bool(false));
                     object.insert(
                         "note".to_string(),

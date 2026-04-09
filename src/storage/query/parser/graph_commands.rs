@@ -160,9 +160,7 @@ impl<'a> Parser<'a> {
         } else {
             10
         };
-        Ok(QueryExpr::GraphCommand(GraphCommand::Cycles {
-            max_length,
-        }))
+        Ok(QueryExpr::GraphCommand(GraphCommand::Cycles { max_length }))
     }
 
     /// Parse: GRAPH CLUSTERING

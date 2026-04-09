@@ -874,9 +874,7 @@ impl McpServer {
 
         let uc = QueryUseCases::new(&self.runtime);
         let result = uc
-            .execute(ExecuteQueryInput {
-                query: sql,
-            })
+            .execute(ExecuteQueryInput { query: sql })
             .map_err(|e| format!("{}", e))?;
 
         let mut resp = Map::new();
@@ -885,8 +883,7 @@ impl McpServer {
             "affected_rows".into(),
             JsonValue::Number(result.affected_rows as f64),
         );
-        json_to_string(&JsonValue::Object(resp))
-            .map_err(|e| format!("serialization error: {}", e))
+        json_to_string(&JsonValue::Object(resp)).map_err(|e| format!("serialization error: {}", e))
     }
 
     fn tool_scan(&self, args: &JsonValue) -> Result<String, String> {
@@ -1038,8 +1035,7 @@ impl McpServer {
         let mut resp = Map::new();
         resp.insert("ok".into(), JsonValue::Bool(true));
         resp.insert("collection".into(), JsonValue::String(name.to_string()));
-        json_to_string(&JsonValue::Object(resp))
-            .map_err(|e| format!("serialization error: {}", e))
+        json_to_string(&JsonValue::Object(resp)).map_err(|e| format!("serialization error: {}", e))
     }
 
     fn tool_drop_collection(&self, args: &JsonValue) -> Result<String, String> {
@@ -1052,8 +1048,7 @@ impl McpServer {
         let mut resp = Map::new();
         resp.insert("ok".into(), JsonValue::Bool(true));
         resp.insert("dropped".into(), JsonValue::String(name.to_string()));
-        json_to_string(&JsonValue::Object(resp))
-            .map_err(|e| format!("serialization error: {}", e))
+        json_to_string(&JsonValue::Object(resp)).map_err(|e| format!("serialization error: {}", e))
     }
 }
 

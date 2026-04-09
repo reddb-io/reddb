@@ -562,8 +562,7 @@ mod tests {
             .get("required")
             .and_then(|v| v.as_array())
             .unwrap();
-        let required_strs: Vec<&str> =
-            required.iter().filter_map(|v| v.as_str()).collect();
+        let required_strs: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
         assert!(required_strs.contains(&"collection"));
         assert!(required_strs.contains(&"set"));
         assert!(!required_strs.contains(&"where_filter"));
@@ -586,8 +585,7 @@ mod tests {
             .get("required")
             .and_then(|v| v.as_array())
             .unwrap();
-        let required_strs: Vec<&str> =
-            required.iter().filter_map(|v| v.as_str()).collect();
+        let required_strs: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
         assert!(required_strs.contains(&"collection"));
         // limit and offset are optional
         assert!(!required_strs.contains(&"limit"));
@@ -612,8 +610,7 @@ mod tests {
             .get("required")
             .and_then(|v| v.as_array())
             .unwrap();
-        let required_strs: Vec<&str> =
-            required.iter().filter_map(|v| v.as_str()).collect();
+        let required_strs: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
         assert!(required_strs.contains(&"algorithm"));
     }
 
@@ -636,8 +633,7 @@ mod tests {
             .get("required")
             .and_then(|v| v.as_array())
             .unwrap();
-        let required_strs: Vec<&str> =
-            required.iter().filter_map(|v| v.as_str()).collect();
+        let required_strs: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
         assert!(required_strs.contains(&"algorithm"));
         assert!(!required_strs.contains(&"max_iterations"));
     }
@@ -661,8 +657,7 @@ mod tests {
             .and_then(|v| v.as_array())
             .unwrap();
         // mode is optional (has default)
-        let required_strs: Vec<&str> =
-            required.iter().filter_map(|v| v.as_str()).collect();
+        let required_strs: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
         assert!(required_strs.is_empty());
     }
 
@@ -686,8 +681,7 @@ mod tests {
             .and_then(|v| v.as_array())
             .unwrap();
         // All optional
-        let required_strs: Vec<&str> =
-            required.iter().filter_map(|v| v.as_str()).collect();
+        let required_strs: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
         assert!(required_strs.is_empty());
     }
 
@@ -730,8 +724,7 @@ mod tests {
             .get("required")
             .and_then(|v| v.as_array())
             .unwrap();
-        let required_strs: Vec<&str> =
-            required.iter().filter_map(|v| v.as_str()).collect();
+        let required_strs: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
         assert!(required_strs.contains(&"name"));
     }
 
@@ -753,8 +746,7 @@ mod tests {
             .get("required")
             .and_then(|v| v.as_array())
             .unwrap();
-        let required_strs: Vec<&str> =
-            required.iter().filter_map(|v| v.as_str()).collect();
+        let required_strs: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
         assert!(required_strs.contains(&"name"));
     }
 }

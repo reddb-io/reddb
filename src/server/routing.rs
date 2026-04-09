@@ -790,12 +790,7 @@ impl RedDBServer {
             .map_err(|err| json_error(400, err.to_string()))
     }
 
-    fn is_authorized(
-        &self,
-        method: &str,
-        path: &str,
-        headers: &BTreeMap<String, String>,
-    ) -> bool {
+    fn is_authorized(&self, method: &str, path: &str, headers: &BTreeMap<String, String>) -> bool {
         // Public endpoints that never require authentication.
         if matches!(
             (method, path),

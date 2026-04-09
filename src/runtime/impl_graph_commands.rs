@@ -64,10 +64,7 @@ impl RedDBRuntime {
                 let mut record = UnifiedRecord::new();
                 record.set("source", Value::Text(res.source));
                 record.set("target", Value::Text(res.target));
-                record.set(
-                    "nodes_visited",
-                    Value::Integer(res.nodes_visited as i64),
-                );
+                record.set("nodes_visited", Value::Integer(res.nodes_visited as i64));
                 if let Some(ref path) = res.path {
                     record.set("hop_count", Value::Integer(path.hop_count as i64));
                     record.set("total_weight", Value::Float(path.total_weight));
@@ -94,8 +91,7 @@ impl RedDBRuntime {
             } => {
                 let dir = parse_direction(direction)?;
                 let strat = parse_traversal_strategy(strategy)?;
-                let res =
-                    self.graph_traverse(source, dir, *depth as usize, strat, None, None)?;
+                let res = self.graph_traverse(source, dir, *depth as usize, strat, None, None)?;
                 let mut result = UnifiedResult::with_columns(vec![
                     "node_id".into(),
                     "label".into(),
@@ -139,10 +135,7 @@ impl RedDBRuntime {
                     let mut record = UnifiedRecord::new();
                     record.set("node_id", Value::Text(ds.node.id.clone()));
                     record.set("label", Value::Text(ds.node.label.clone()));
-                    record.set(
-                        "score",
-                        Value::Float(ds.total_degree as f64),
-                    );
+                    record.set("score", Value::Float(ds.total_degree as f64));
                     result.push(record);
                 }
                 Ok(RuntimeQueryResult {
@@ -160,17 +153,10 @@ impl RedDBRuntime {
                 max_iterations,
             } => {
                 let alg = parse_community_algorithm(algorithm)?;
-                let res = self.graph_communities(
-                    alg,
-                    1,
-                    Some(*max_iterations as usize),
-                    None,
-                    None,
-                )?;
-                let mut result = UnifiedResult::with_columns(vec![
-                    "community_id".into(),
-                    "size".into(),
-                ]);
+                let res =
+                    self.graph_communities(alg, 1, Some(*max_iterations as usize), None, None)?;
+                let mut result =
+                    UnifiedResult::with_columns(vec!["community_id".into(), "size".into()]);
                 for community in &res.communities {
                     let mut record = UnifiedRecord::new();
                     record.set("community_id", Value::Text(community.id.clone()));
@@ -190,10 +176,8 @@ impl RedDBRuntime {
             GraphCommand::Components { mode } => {
                 let m = parse_components_mode(mode)?;
                 let res = self.graph_components(m, 1, None)?;
-                let mut result = UnifiedResult::with_columns(vec![
-                    "component_id".into(),
-                    "size".into(),
-                ]);
+                let mut result =
+                    UnifiedResult::with_columns(vec!["component_id".into(), "size".into()]);
                 for component in &res.components {
                     let mut record = UnifiedRecord::new();
                     record.set("component_id", Value::Text(component.id.clone()));
@@ -212,10 +196,8 @@ impl RedDBRuntime {
             }
             GraphCommand::Cycles { max_length } => {
                 let res = self.graph_cycles(*max_length as usize, 100, None)?;
-                let mut result = UnifiedResult::with_columns(vec![
-                    "cycle_index".into(),
-                    "length".into(),
-                ]);
+                let mut result =
+                    UnifiedResult::with_columns(vec!["cycle_index".into(), "length".into()]);
                 for (i, cycle) in res.cycles.iter().enumerate() {
                     let mut record = UnifiedRecord::new();
                     record.set("cycle_index", Value::Integer(i as i64));
@@ -303,16 +285,11 @@ impl RedDBRuntime {
                 min_score,
             } => {
                 let results = self.search_similar(collection, vector, *limit, *min_score)?;
-                let mut result = UnifiedResult::with_columns(vec![
-                    "entity_id".into(),
-                    "score".into(),
-                ]);
+                let mut result =
+                    UnifiedResult::with_columns(vec!["entity_id".into(), "score".into()]);
                 for sr in &results {
                     let mut record = UnifiedRecord::new();
-                    record.set(
-                        "entity_id",
-                        Value::UnsignedInteger(sr.entity_id.raw()),
-                    );
+                    record.set("entity_id", Value::UnsignedInteger(sr.entity_id.raw()));
                     record.set("score", Value::Float(sr.score as f64));
                     result.push(record);
                 }
@@ -342,16 +319,11 @@ impl RedDBRuntime {
                     Some(*limit),
                     *fuzzy,
                 )?;
-                let mut result = UnifiedResult::with_columns(vec![
-                    "entity_id".into(),
-                    "score".into(),
-                ]);
+                let mut result =
+                    UnifiedResult::with_columns(vec!["entity_id".into(), "score".into()]);
                 for item in &res.matches {
                     let mut record = UnifiedRecord::new();
-                    record.set(
-                        "entity_id",
-                        Value::UnsignedInteger(item.entity.id.raw()),
-                    );
+                    record.set("entity_id", Value::UnsignedInteger(item.entity.id.raw()));
                     record.set("score", Value::Float(item.score as f64));
                     result.push(record);
                 }
@@ -384,16 +356,11 @@ impl RedDBRuntime {
                     None,
                     Some(*limit),
                 )?;
-                let mut result = UnifiedResult::with_columns(vec![
-                    "entity_id".into(),
-                    "score".into(),
-                ]);
+                let mut result =
+                    UnifiedResult::with_columns(vec!["entity_id".into(), "score".into()]);
                 for item in &res.matches {
                     let mut record = UnifiedRecord::new();
-                    record.set(
-                        "entity_id",
-                        Value::UnsignedInteger(item.entity.id.raw()),
-                    );
+                    record.set("entity_id", Value::UnsignedInteger(item.entity.id.raw()));
                     record.set("score", Value::Float(item.score as f64));
                     result.push(record);
                 }

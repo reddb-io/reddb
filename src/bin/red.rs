@@ -493,8 +493,7 @@ fn build_server_config(
         .or_else(|| flag_string(flags, "role"))
         .unwrap_or_else(|| "standalone".to_string());
 
-    let workers = flag_string(flags, "workers")
-        .and_then(|v| v.parse::<usize>().ok());
+    let workers = flag_string(flags, "workers").and_then(|v| v.parse::<usize>().ok());
 
     Ok(ServerCommandConfig {
         transport,

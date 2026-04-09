@@ -17,17 +17,11 @@ impl RedDBServer {
                     crate::replication::ReplicationRole::Primary => "primary",
                     crate::replication::ReplicationRole::Replica { .. } => "replica",
                 };
-                object.insert(
-                    "role".to_string(),
-                    JsonValue::String(role_str.to_string()),
-                );
+                object.insert("role".to_string(), JsonValue::String(role_str.to_string()));
 
                 if let Some(ref primary) = replication.primary {
                     let wal_lsn = primary.wal_buffer.current_lsn();
-                    object.insert(
-                        "wal_lsn".to_string(),
-                        JsonValue::Number(wal_lsn as f64),
-                    );
+                    object.insert("wal_lsn".to_string(), JsonValue::Number(wal_lsn as f64));
 
                     let oldest = primary.wal_buffer.oldest_lsn();
                     if let Some(oldest_lsn) = oldest {
