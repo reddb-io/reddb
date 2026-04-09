@@ -1,10 +1,43 @@
 use crate::application::entity::{CreateDocumentInput, CreateKvInput};
 use crate::json::{to_vec as json_to_vec, Value as JsonValue};
+use crate::storage::unified::MetadataValue;
 
 use super::*;
+
+const RESERVED_TTL_METADATA_KEYS: [&str; 3] = ["_ttl", "_ttl_ms", "_expires_at"];
+
+fn apply_collection_default_ttl(
+    db: &crate::storage::unified::devx::RedDB,
+    collection: &str,
+    metadata: &mut Vec<(String, MetadataValue)>,
+) {
+    if metadata.iter().any(|(key, _)| {
+        RESERVED_TTL_METADATA_KEYS
+            .iter()
+            .any(|reserved| key.eq_ignore_ascii_case(reserved))
+    }) {
+        return;
+    }
+
+    let Some(default_ttl_ms) = db.collection_default_ttl_ms(collection) else {
+        return;
+    };
+
+    metadata.push((
+        "_ttl_ms".to_string(),
+        if default_ttl_ms <= i64::MAX as u64 {
+            MetadataValue::Int(default_ttl_ms as i64)
+        } else {
+            MetadataValue::Timestamp(default_ttl_ms)
+        },
+    ));
+}
+
 impl RuntimeEntityPort for RedDBRuntime {
     fn create_row(&self, input: CreateRowInput) -> RedDBResult<CreateEntityOutput> {
         let db = self.db();
+        let mut metadata = input.metadata;
+        apply_collection_default_ttl(&db, &input.collection, &mut metadata);
         let columns: Vec<(&str, crate::storage::schema::Value)> = input
             .fields
             .iter()
@@ -12,7 +45,7 @@ impl RuntimeEntityPort for RedDBRuntime {
             .collect();
         let mut builder = db.row(&input.collection, columns);
 
-        for (key, value) in input.metadata {
+        for (key, value) in metadata {
             builder = builder.metadata(key, value);
         }
 
@@ -33,6 +66,8 @@ impl RuntimeEntityPort for RedDBRuntime {
 
     fn create_node(&self, input: CreateNodeInput) -> RedDBResult<CreateEntityOutput> {
         let db = self.db();
+        let mut metadata = input.metadata;
+        apply_collection_default_ttl(&db, &input.collection, &mut metadata);
         let mut builder = db.node(&input.collection, &input.label);
 
         if let Some(node_type) = input.node_type {
@@ -43,7 +78,7 @@ impl RuntimeEntityPort for RedDBRuntime {
             builder = builder.property(key, value);
         }
 
-        for (key, value) in input.metadata {
+        for (key, value) in metadata {
             builder = builder.metadata(key, value);
         }
 
@@ -72,6 +107,8 @@ impl RuntimeEntityPort for RedDBRuntime {
 
     fn create_edge(&self, input: CreateEdgeInput) -> RedDBResult<CreateEntityOutput> {
         let db = self.db();
+        let mut metadata = input.metadata;
+        apply_collection_default_ttl(&db, &input.collection, &mut metadata);
         let mut builder = db
             .edge(&input.collection, &input.label)
             .from(input.from)
@@ -85,7 +122,7 @@ impl RuntimeEntityPort for RedDBRuntime {
             builder = builder.property(key, value);
         }
 
-        for (key, value) in input.metadata {
+        for (key, value) in metadata {
             builder = builder.metadata(key, value);
         }
 
@@ -98,13 +135,15 @@ impl RuntimeEntityPort for RedDBRuntime {
 
     fn create_vector(&self, input: CreateVectorInput) -> RedDBResult<CreateEntityOutput> {
         let db = self.db();
+        let mut metadata = input.metadata;
+        apply_collection_default_ttl(&db, &input.collection, &mut metadata);
         let mut builder = db.vector(&input.collection).dense(input.dense);
 
         if let Some(content) = input.content {
             builder = builder.content(content);
         }
 
-        for (key, value) in input.metadata {
+        for (key, value) in metadata {
             builder = builder.metadata(key, value);
         }
 

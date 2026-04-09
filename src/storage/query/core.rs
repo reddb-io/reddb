@@ -752,6 +752,8 @@ pub struct CreateTableQuery {
     pub columns: Vec<CreateColumnDef>,
     /// IF NOT EXISTS flag
     pub if_not_exists: bool,
+    /// Optional default TTL applied to newly inserted items in this collection.
+    pub default_ttl_ms: Option<u64>,
 }
 
 /// Column definition for CREATE TABLE

@@ -323,6 +323,7 @@ pub struct PhysicalMetadataFile {
     pub indexes: Vec<PhysicalIndexState>,
     pub graph_projections: Vec<PhysicalGraphProjection>,
     pub analytics_jobs: Vec<PhysicalAnalyticsJob>,
+    pub collection_ttl_defaults_ms: BTreeMap<String, u64>,
     pub exports: Vec<ExportDescriptor>,
     pub superblock: SuperblockHeader,
     pub snapshots: Vec<SnapshotDescriptor>,

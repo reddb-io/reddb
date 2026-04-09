@@ -27,10 +27,17 @@ impl<'a> Parser<'a> {
         }
         self.expect(Token::RParen)?;
 
+        let default_ttl_ms = if self.consume(&Token::With)? {
+            self.parse_create_table_ttl_clause()?
+        } else {
+            None
+        };
+
         Ok(QueryExpr::CreateTable(CreateTableQuery {
             name,
             columns,
             if_not_exists,
+            default_ttl_ms,
         }))
     }
 
@@ -210,6 +217,63 @@ impl<'a> Parser<'a> {
                 self.position(),
             )),
         }
+    }
+
+    fn parse_create_table_ttl_clause(&mut self) -> Result<Option<u64>, ParseError> {
+        let option_name = self.expect_ident_or_keyword()?;
+        if !option_name.eq_ignore_ascii_case("ttl") {
+            return Err(ParseError::new(
+                format!("unsupported CREATE TABLE option '{option_name}', expected TTL"),
+                self.position(),
+            ));
+        }
+
+        let ttl_value = self.parse_float()?;
+        let ttl_unit = match self.peek() {
+            Token::Ident(unit) => {
+                let unit = unit.clone();
+                self.advance()?;
+                unit
+            }
+            _ => "s".to_string(),
+        };
+
+        let multiplier_ms = match ttl_unit.to_ascii_lowercase().as_str() {
+            "ms" | "msec" | "millisecond" | "milliseconds" => 1.0,
+            "s" | "sec" | "secs" | "second" | "seconds" => 1_000.0,
+            "m" | "min" | "mins" | "minute" | "minutes" => 60_000.0,
+            "h" | "hr" | "hrs" | "hour" | "hours" => 3_600_000.0,
+            "d" | "day" | "days" => 86_400_000.0,
+            other => {
+                return Err(ParseError::new(
+                    format!("unsupported TTL unit '{other}'"),
+                    self.position(),
+                ))
+            }
+        };
+
+        if !ttl_value.is_finite() || ttl_value < 0.0 {
+            return Err(ParseError::new(
+                "TTL must be a finite, non-negative duration".to_string(),
+                self.position(),
+            ));
+        }
+
+        let ttl_ms = ttl_value * multiplier_ms;
+        if ttl_ms > u64::MAX as f64 {
+            return Err(ParseError::new(
+                "TTL duration is too large".to_string(),
+                self.position(),
+            ));
+        }
+        if ttl_ms.fract().abs() >= f64::EPSILON {
+            return Err(ParseError::new(
+                "TTL duration must resolve to a whole number of milliseconds".to_string(),
+                self.position(),
+            ));
+        }
+
+        Ok(Some(ttl_ms as u64))
     }
 
     /// Try to match IF NOT EXISTS sequence

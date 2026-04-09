@@ -41,9 +41,24 @@ impl RedDBRuntime {
             .create_collection(&query.name)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
 
+        if let Some(default_ttl_ms) = query.default_ttl_ms {
+            self.inner
+                .db
+                .set_collection_default_ttl_ms(&query.name, default_ttl_ms);
+        }
+        self.inner
+            .db
+            .persist_metadata()
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+
+        let ttl_suffix = query
+            .default_ttl_ms
+            .map(|ttl_ms| format!(" with default TTL {}ms", ttl_ms))
+            .unwrap_or_default();
+
         Ok(RuntimeQueryResult::ok_message(
             raw_query.to_string(),
-            &format!("table '{}' created", query.name),
+            &format!("table '{}' created{}", query.name, ttl_suffix),
             "create",
         ))
     }
@@ -75,6 +90,11 @@ impl RedDBRuntime {
 
         store
             .drop_collection(&query.name)
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        self.inner.db.clear_collection_default_ttl_ms(&query.name);
+        self.inner
+            .db
+            .persist_metadata()
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
 
         Ok(RuntimeQueryResult::ok_message(

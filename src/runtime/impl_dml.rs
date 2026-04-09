@@ -299,14 +299,14 @@ impl RedDBRuntime {
 // Helper functions for extracting typed values from column/value pairs
 // =============================================================================
 
-const SQL_TTL_METADATA_COLUMNS: [&str; 3] = ["ttl", "ttl_ms", "expires_at"];
+const SQL_TTL_METADATA_COLUMNS: [&str; 3] = ["_ttl", "_ttl_ms", "_expires_at"];
 
 fn resolve_sql_ttl_metadata_key(column: &str) -> Option<&'static str> {
-    if column.eq_ignore_ascii_case("ttl") {
+    if column.eq_ignore_ascii_case("_ttl") {
         Some(SQL_TTL_METADATA_COLUMNS[0])
-    } else if column.eq_ignore_ascii_case("ttl_ms") {
+    } else if column.eq_ignore_ascii_case("_ttl_ms") {
         Some(SQL_TTL_METADATA_COLUMNS[1])
-    } else if column.eq_ignore_ascii_case("expires_at") {
+    } else if column.eq_ignore_ascii_case("_expires_at") {
         Some(SQL_TTL_METADATA_COLUMNS[2])
     } else {
         None

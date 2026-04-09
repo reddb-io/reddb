@@ -898,6 +898,7 @@ fn test_parse_create_table_simple() {
         assert_eq!(ct.name, "hosts");
         assert_eq!(ct.columns.len(), 3);
         assert!(!ct.if_not_exists);
+        assert_eq!(ct.default_ttl_ms, None);
         assert_eq!(ct.columns[0].name, "ip");
         assert_eq!(ct.columns[0].data_type, "TEXT");
         assert_eq!(ct.columns[1].name, "hostname");
@@ -922,6 +923,7 @@ fn test_parse_create_table_full() {
     if let QueryExpr::CreateTable(ct) = query {
         assert_eq!(ct.name, "users");
         assert!(ct.if_not_exists);
+        assert_eq!(ct.default_ttl_ms, None);
         assert_eq!(ct.columns.len(), 4);
 
         // id column
@@ -956,6 +958,19 @@ fn test_parse_create_table_with_enum() {
             ct.columns[0].data_type,
             "ENUM('active','inactive','pending')"
         );
+        assert_eq!(ct.default_ttl_ms, None);
+    } else {
+        panic!("Expected CreateTableQuery");
+    }
+}
+
+#[test]
+fn test_parse_create_table_with_ttl_clause() {
+    let query = parse("CREATE TABLE sessions (token TEXT, user_id TEXT) WITH TTL 60s").unwrap();
+    if let QueryExpr::CreateTable(ct) = query {
+        assert_eq!(ct.name, "sessions");
+        assert_eq!(ct.default_ttl_ms, Some(60_000));
+        assert_eq!(ct.columns.len(), 2);
     } else {
         panic!("Expected CreateTableQuery");
     }

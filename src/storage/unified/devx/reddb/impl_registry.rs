@@ -1,6 +1,49 @@
 use super::*;
 
 impl RedDB {
+    pub fn collection_default_ttl_ms(&self, collection: &str) -> Option<u64> {
+        self.collection_ttl_defaults_ms
+            .read()
+            .ok()
+            .and_then(|defaults| defaults.get(collection).copied())
+    }
+
+    pub fn set_collection_default_ttl_ms(&self, collection: impl Into<String>, ttl_ms: u64) {
+        if let Ok(mut defaults) = self.collection_ttl_defaults_ms.write() {
+            defaults.insert(collection.into(), ttl_ms);
+        }
+    }
+
+    pub fn clear_collection_default_ttl_ms(&self, collection: &str) {
+        if let Ok(mut defaults) = self.collection_ttl_defaults_ms.write() {
+            defaults.remove(collection);
+        }
+    }
+
+    pub(crate) fn collection_ttl_defaults_snapshot(&self) -> BTreeMap<String, u64> {
+        self.collection_ttl_defaults_ms
+            .read()
+            .map(|defaults| {
+                defaults
+                    .iter()
+                    .map(|(collection, ttl_ms)| (collection.clone(), *ttl_ms))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn load_collection_ttl_defaults_from_metadata(&self) {
+        let defaults = self
+            .physical_metadata()
+            .map(|metadata| metadata.collection_ttl_defaults_ms)
+            .unwrap_or_default();
+
+        if let Ok(mut current) = self.collection_ttl_defaults_ms.write() {
+            current.clear();
+            current.extend(defaults);
+        }
+    }
+
     pub fn run_maintenance(&self) -> Result<(), Box<dyn std::error::Error>> {
         self.store.run_maintenance()?;
         self.persist_metadata()?;

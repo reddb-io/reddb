@@ -69,6 +69,8 @@ pub struct RedDB {
     /// Per-collection HNSW vector index cache for fast approximate nearest neighbor search.
     /// Lazily built on first vector similarity query per collection.
     vector_indexes: RwLock<HashMap<String, CachedVectorIndex>>,
+    /// Default TTL policy declared at the collection level, in milliseconds.
+    collection_ttl_defaults_ms: RwLock<HashMap<String, u64>>,
     /// Optional remote storage backend for snapshot transport.
     pub(crate) remote_backend: Option<Box<dyn crate::storage::backend::RemoteBackend>>,
     /// Remote object key used by the remote backend.

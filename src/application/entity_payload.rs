@@ -231,7 +231,7 @@ fn parse_metadata_entries(payload: &JsonValue) -> RedDBResult<Vec<(String, Metad
         }
     }
 
-    for field in ["ttl", "ttl_ms", "expires_at"] {
+    for field in ["_ttl", "_ttl_ms", "_expires_at"] {
         let Some(value) = payload.get(field) else {
             continue;
         };
@@ -442,24 +442,24 @@ mod tests {
                 "fields",
                 object(vec![("name", JsonValue::String("alice".to_string()))]),
             ),
-            ("ttl_ms", JsonValue::Number(1500.0)),
+            ("_ttl_ms", JsonValue::Number(1500.0)),
         ]);
 
         let input = parse_create_row_input("users".to_string(), &payload)
-            .expect("row payload with ttl_ms should parse");
+            .expect("row payload with _ttl_ms should parse");
 
         assert!(input
             .metadata
             .iter()
-            .any(|(key, value)| { key == "ttl_ms" && matches!(value, MetadataValue::Int(1500)) }));
+            .any(|(key, value)| { key == "_ttl_ms" && matches!(value, MetadataValue::Int(1500)) }));
     }
 
     #[test]
     fn parse_create_node_input_rejects_duplicate_ttl_definition() {
         let payload = object(vec![
             ("label", JsonValue::String("host-a".to_string())),
-            ("ttl", JsonValue::Number(60.0)),
-            ("metadata", object(vec![("ttl", JsonValue::Number(30.0))])),
+            ("_ttl", JsonValue::Number(60.0)),
+            ("metadata", object(vec![("_ttl", JsonValue::Number(30.0))])),
         ]);
 
         let err = parse_create_node_input("hosts".to_string(), &payload)

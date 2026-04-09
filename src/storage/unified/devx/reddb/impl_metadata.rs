@@ -67,13 +67,13 @@ impl RedDB {
         now_ms: u64,
     ) -> Result<Vec<(String, EntityId)>, Box<dyn std::error::Error>> {
         let mut ids = self.store.filter_metadata_all(&[(
-            "expires_at".to_string(),
+            "_expires_at".to_string(),
             MetadataFilter::Le(MetadataValue::Timestamp(now_ms)),
         )]);
 
         if let Ok(now_ms_i64) = i64::try_from(now_ms) {
             ids.extend(self.store.filter_metadata_all(&[(
-                "expires_at".to_string(),
+                "_expires_at".to_string(),
                 MetadataFilter::Le(MetadataValue::Int(now_ms_i64)),
             )]));
         }
@@ -81,7 +81,7 @@ impl RedDB {
         let now_ms_f64 = now_ms as f64;
         if now_ms_f64.is_finite() {
             ids.extend(self.store.filter_metadata_all(&[(
-                "expires_at".to_string(),
+                "_expires_at".to_string(),
                 MetadataFilter::Le(MetadataValue::Float(now_ms_f64)),
             )]));
         }
@@ -97,12 +97,12 @@ impl RedDB {
 
         let ttl_ms_candidates = self
             .store
-            .filter_metadata_all(&[("ttl_ms".to_string(), MetadataFilter::IsNotNull)]);
+            .filter_metadata_all(&[("_ttl_ms".to_string(), MetadataFilter::IsNotNull)]);
         candidates.extend(ttl_ms_candidates);
 
         let ttl_candidates = self
             .store
-            .filter_metadata_all(&[("ttl".to_string(), MetadataFilter::IsNotNull)]);
+            .filter_metadata_all(&[("_ttl".to_string(), MetadataFilter::IsNotNull)]);
         candidates.extend(ttl_candidates);
 
         if candidates.is_empty() {
@@ -122,9 +122,9 @@ impl RedDB {
                 continue;
             };
 
-            let ttl_ms = metadata.get("ttl_ms").and_then(Self::metadata_u64);
+            let ttl_ms = metadata.get("_ttl_ms").and_then(Self::metadata_u64);
             let ttl_secs = if ttl_ms.is_none() {
-                metadata.get("ttl").and_then(|value| {
+                metadata.get("_ttl").and_then(|value| {
                     Self::metadata_u64(value).and_then(|value_secs| value_secs.checked_mul(1000))
                 })
             } else {
@@ -301,6 +301,7 @@ impl RedDB {
             }
             let _ = self.repair_native_header_from_metadata();
         }
+        self.load_collection_ttl_defaults_from_metadata();
         Ok(self)
     }
 
@@ -318,13 +319,14 @@ impl RedDB {
             .native_physical_state()
             .map(|state| self.physical_index_state_from_native_state(&state, previous.as_ref()))
             .unwrap_or_else(|| self.physical_index_state());
-        let metadata = PhysicalMetadataFile::from_state(
+        let mut metadata = PhysicalMetadataFile::from_state(
             self.options.clone(),
             self.catalog_snapshot(),
             collection_roots,
             indexes,
             previous.as_ref(),
         );
+        metadata.collection_ttl_defaults_ms = self.collection_ttl_defaults_snapshot();
         metadata.save_for_data_path(path)?;
         self.persist_native_physical_header(&metadata)?;
         Ok(())
@@ -670,6 +672,9 @@ impl RedDB {
                 updated_at: SystemTime::now(),
             },
             manifest_events,
+            collection_ttl_defaults_ms: previous
+                .map(|metadata| metadata.collection_ttl_defaults_ms.clone())
+                .unwrap_or_default(),
             indexes,
             graph_projections,
             analytics_jobs,

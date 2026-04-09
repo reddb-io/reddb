@@ -1361,11 +1361,11 @@ fn test_sql_insert_row_ttl_ms_expiration() {
     let native = NativeUseCases::new(&rt);
 
     let inserted = query.execute(ExecuteQueryInput {
-        query: "INSERT INTO ttl_rows (name, ttl_ms) VALUES ('row-with-ttl-ms', 1)".into(),
+        query: "INSERT INTO ttl_rows (name, _ttl_ms) VALUES ('row-with-ttl-ms', 1)".into(),
     });
     assert!(
         inserted.is_ok(),
-        "row INSERT with ttl_ms should succeed: {:?}",
+        "row INSERT with _ttl_ms should succeed: {:?}",
         inserted.err()
     );
 
@@ -1392,7 +1392,7 @@ fn test_sql_insert_row_ttl_ms_expiration() {
     assert_eq!(
         after.result.records.len(),
         0,
-        "row should be deleted after ttl_ms expiration"
+        "row should be deleted after _ttl_ms expiration"
     );
 }
 
@@ -1407,7 +1407,7 @@ fn test_sql_insert_node_ttl_expiration() {
     let native = NativeUseCases::new(&rt);
 
     let inserted = query.execute(ExecuteQueryInput {
-        query: "INSERT INTO ttl_nodes NODE (label, node_type, ip, ttl_ms) VALUES ('node-ttl-ms', 'Host', '10.0.0.1', 1)"
+        query: "INSERT INTO ttl_nodes NODE (label, node_type, ip, _ttl_ms) VALUES ('node-ttl-ms', 'Host', '10.0.0.1', 1)"
             .into(),
     });
     assert!(
@@ -1497,7 +1497,7 @@ fn test_sql_insert_edge_ttl_expiration() {
 
     let inserted = query.execute(ExecuteQueryInput {
         query: format!(
-            "INSERT INTO ttl_edges EDGE (label, from, to, weight, ttl_ms) VALUES ('connects', {}, {}, 0.9, 1)",
+            "INSERT INTO ttl_edges EDGE (label, from, to, weight, _ttl_ms) VALUES ('connects', {}, {}, 0.9, 1)",
             from.id.raw(),
             to.id.raw()
         )
@@ -1505,7 +1505,7 @@ fn test_sql_insert_edge_ttl_expiration() {
     });
     assert!(
         inserted.is_ok(),
-        "edge INSERT with ttl_ms should succeed: {:?}",
+        "edge INSERT with _ttl_ms should succeed: {:?}",
         inserted.err()
     );
 
@@ -1568,11 +1568,11 @@ fn test_sql_update_ttl_after_insert() {
     );
 
     let updated = query.execute(ExecuteQueryInput {
-        query: "UPDATE ttl_updates SET ttl = 0 WHERE name = 'target-row'".into(),
+        query: "UPDATE ttl_updates SET _ttl = 0 WHERE name = 'target-row'".into(),
     });
     assert!(
         updated.is_ok(),
-        "UPDATE with ttl should succeed: {:?}",
+        "UPDATE with _ttl should succeed: {:?}",
         updated.err()
     );
 
@@ -1599,7 +1599,7 @@ fn test_sql_update_ttl_after_insert() {
     assert_eq!(
         after.result.records.len(),
         0,
-        "row should be removed after SQL UPDATE ttl=0"
+        "row should be removed after SQL UPDATE _ttl=0"
     );
 }
 
@@ -1624,11 +1624,11 @@ fn test_sql_update_ttl_on_node_after_insert() {
     );
 
     let updated = query.execute(ExecuteQueryInput {
-        query: "UPDATE ttl_node_updates SET ttl = 0 WHERE label = 'node-update-target'".into(),
+        query: "UPDATE ttl_node_updates SET _ttl = 0 WHERE label = 'node-update-target'".into(),
     });
     assert!(
         updated.is_ok(),
-        "node UPDATE with ttl should succeed: {:?}",
+        "node UPDATE with _ttl should succeed: {:?}",
         updated.err()
     );
 
@@ -1667,7 +1667,7 @@ fn test_sql_update_ttl_on_node_after_insert() {
             .filter(|item| item.data.is_node())
             .count(),
         0,
-        "node should be removed after SQL UPDATE ttl=0"
+        "node should be removed after SQL UPDATE _ttl=0"
     );
 }
 
@@ -1719,5 +1719,68 @@ fn test_sql_delete_node_with_where_clause() {
             .count(),
         0,
         "node should be removed after SQL DELETE"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 30. CREATE TABLE WITH TTL applies default retention to inserts
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_create_table_with_ttl_applies_default_to_api_insert() {
+    let rt = rt();
+    let entity = EntityUseCases::new(&rt);
+    let query = QueryUseCases::new(&rt);
+    let native = NativeUseCases::new(&rt);
+
+    let created = query.execute(ExecuteQueryInput {
+        query: "CREATE TABLE sessions (token TEXT, user_id TEXT) WITH TTL 0s".into(),
+    });
+    assert!(
+        created.is_ok(),
+        "CREATE TABLE ... WITH TTL should succeed: {:?}",
+        created.err()
+    );
+
+    let inserted = entity.create_row(CreateRowInput {
+        collection: "sessions".into(),
+        fields: vec![
+            ("token".into(), Value::Text("t-1".into())),
+            ("user_id".into(), Value::Text("u-1".into())),
+        ],
+        metadata: vec![],
+        node_links: vec![],
+        vector_links: vec![],
+    });
+    assert!(
+        inserted.is_ok(),
+        "row insert into table with default TTL should succeed: {:?}",
+        inserted.err()
+    );
+
+    let before = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT * FROM sessions".into(),
+        })
+        .expect("SELECT before retention should succeed");
+    assert_eq!(
+        before.result.records.len(),
+        1,
+        "row should exist before retention sweep"
+    );
+
+    native
+        .apply_retention_policy()
+        .expect("apply_retention_policy should succeed");
+
+    let after = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT * FROM sessions".into(),
+        })
+        .expect("SELECT after retention should succeed");
+    assert_eq!(
+        after.result.records.len(),
+        0,
+        "default table TTL should be applied to inserted rows"
     );
 }

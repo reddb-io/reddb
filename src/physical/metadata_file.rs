@@ -68,6 +68,9 @@ impl PhysicalMetadataFile {
             analytics_jobs: previous
                 .map(|previous| previous.analytics_jobs.clone())
                 .unwrap_or_default(),
+            collection_ttl_defaults_ms: previous
+                .map(|previous| previous.collection_ttl_defaults_ms.clone())
+                .unwrap_or_default(),
             exports: previous
                 .map(|previous| previous.exports.clone())
                 .unwrap_or_default(),
@@ -323,6 +326,15 @@ impl PhysicalMetadataFile {
             ),
         );
         root.insert(
+            "collection_ttl_defaults_ms".to_string(),
+            JsonValue::Object(
+                self.collection_ttl_defaults_ms
+                    .iter()
+                    .map(|(collection, ttl_ms)| (collection.clone(), json_u64(*ttl_ms)))
+                    .collect(),
+            ),
+        );
+        root.insert(
             "exports".to_string(),
             JsonValue::Array(self.exports.iter().map(export_descriptor_to_json).collect()),
         );
@@ -400,6 +412,20 @@ impl PhysicalMetadataFile {
                         .collect::<io::Result<Vec<_>>>()
                 })
                 .transpose()?
+                .unwrap_or_default(),
+            collection_ttl_defaults_ms: object
+                .get("collection_ttl_defaults_ms")
+                .and_then(JsonValue::as_object)
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(|(collection, ttl_ms)| {
+                            json_u64_value(ttl_ms)
+                                .ok()
+                                .map(|ttl_ms| (collection.clone(), ttl_ms))
+                        })
+                        .collect()
+                })
                 .unwrap_or_default(),
             exports: object
                 .get("exports")
