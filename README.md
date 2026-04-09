@@ -1,156 +1,111 @@
 # RedDB
 
-<p align="center">
-  <img width="180" src="https://img.icons8.com/fluency/240/database.png" alt="RedDB">
-</p>
+RedDB is a unified multi-model database engine for teams that do not want to split operational data, documents, graph relationships, vector embeddings, and key-value state across different systems.
 
-<p align="center">
-  <strong>One engine for all your data shapes: rows, docs, graphs and vectors</strong><br>
-  <em>single runtime • one API surface • embedded-first • server and serverless profiles</em>
-</p>
+It gives you one engine, one persistence layer, and one operational surface for:
 
-<p align="center">
-  <strong>RedDB</strong> is a multi-structure database for systems that need stateful tables,
-  document payloads, linked entities, semantic retrieval and graph analytics in one place,
-  without operational split-brain.
-</p>
+- tables and rows
+- JSON-like documents
+- graph nodes and edges
+- vector embeddings and similarity search
+- key-value records
 
-<p align="center">
-  <img src="https://img.shields.io/badge/runtime-embedded--first-0f766e?style=flat" alt="embedded-first">
-  &nbsp;
-  <img src="https://img.shields.io/badge/profiles-embedded%20%7C%20server%20%7C%20serverless-7c3aed?style=flat" alt="profiles">
-  &nbsp;
-  <img src="https://img.shields.io/badge/shape-multi--model-b7410e?style=flat&logo=rust" alt="multi-model">
-  &nbsp;
-  <img src="https://img.shields.io/badge/queries-ANY%20/ SELECT%20SEARCH-dc2626?style=flat" alt="queries">
-  &nbsp;
-  <img src="https://img.shields.io/badge/interfaces-HTTP%20%2B%20gRPC-2563eb?style=flat" alt="interfaces">
-  &nbsp;
-  <img src="https://img.shields.io/badge/version-0.1.0-111111?style=flat" alt="version">
-</p>
+## What RedDB does
 
-<p align="center">
-  <img src="https://img.shields.io/badge/core%20flows-queries%20%2F%20writes%20%2F%20recovery-0ea5e9?style=flat" alt="core flows">
-  &nbsp;
-  <img src="https://img.shields.io/badge/artifacts-native%20indexes%20%2F%20state-eab308?style=flat" alt="artifacts">
-  &nbsp;
-  <img src="https://img.shields.io/badge/operations-manifests%20%2F%20snapshots%20%2F%20exports-f59e0b?style=flat" alt="operations">
-</p>
+RedDB lets one application work with different data shapes in the same database file or server runtime.
 
----
+Typical use cases:
 
-## Save multiple shapes without moving data
+- operational application state with SQL-style querying
+- graph-aware products that also need regular tables
+- semantic retrieval and vector search next to first-party data
+- local-first or edge deployments that want an embedded database
+- AI/agent workflows that need MCP, HTTP, gRPC, or in-process access
 
-`RedDB` is for systems that don’t fit in one model.
+## How RedDB works
 
-<table>
-<tr>
-<td width="33%">
-<strong>Operational tables</strong><br><br>
+RedDB uses the same core engine across three practical modes:
 
-- rows
-- tables
-- typed values and constraints
-- point/range scans
-- predicates and joins
-- explicit delete/update flows
+| Mode | When to use it | How you access it |
+|:-----|:---------------|:------------------|
+| Embedded | Your app should own the database directly, like SQLite | Rust API (`RedDB` or `RedDBRuntime`) |
+| Server | Multiple clients or services need to connect | HTTP or gRPC |
+| Agent / tooling | You want CLI or MCP integration on top of the same engine | `red` CLI or MCP server |
 
-</td>
-<td width="33%">
-<strong>Payload-first entities</strong><br><br>
+That means the storage model stays the same whether you:
 
-- documents / JSON payloads
-- metadata
-- binary blobs
-- key-value fields
-- snapshots and exports
+- open a local `.rdb` file inside your Rust process
+- run `red server --http`
+- run `red server --grpc`
+- expose the same database to AI agents through MCP
 
-</td>
-<td width="33%">
-<strong>Connected + semantic retrieval</strong><br><br>
+## Install
 
-- graph nodes
-- graph edges
-- paths
-- vectors
-- embeddings
-- hybrid search
-- ANN index-backed search readiness
+### GitHub releases
 
-</td>
-</tr>
-</table>
-
-What this means in practice:
-
-- store operational state, documents, relationships, and embeddings in one catalog
-- evolve from row-driven models to graph and vector workflows without migration hell
-- run the same data model in embedded and server/runtime modes
-- keep manifests, native state, snapshots, and exports in the same control plane
-
----
-
-## Quick start
-
-### Install
+The recommended install path is the release installer, which pulls the correct asset from GitHub Releases:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/forattini-dev/reddb/main/install.sh | bash
 ```
 
-Optional channels:
+Pin a version:
 
 ```bash
-# next (pre-releases)
+curl -fsSL https://raw.githubusercontent.com/forattini-dev/reddb/main/install.sh | bash -s -- --version v0.1.2
+```
+
+Use the prerelease channel:
+
+```bash
 curl -fsSL https://raw.githubusercontent.com/forattini-dev/reddb/main/install.sh | bash -s -- --channel next
 ```
 
-### Docker quick start
+If you prefer manual installation, download the asset for your platform from GitHub Releases and place the `red` binary somewhere in your `PATH`.
+
+Release page:
+
+`https://github.com/forattini-dev/reddb/releases`
+
+### npx
+
+`reddb` is also published as an npm wrapper that resolves and runs the real `red` binary for you.
+
+Install the managed binary:
 
 ```bash
-docker build -t reddb .
+npx reddb --install
 ```
 
-Run HTTP server:
+Run RedDB through `npx` with auto-download when needed:
 
 ```bash
-docker run --rm -it \
-  -p 8080:8080 \
-  -v $(pwd)/data:/data \
-  --name reddb-http \
-  reddb red server --http --path /data/reddb.rdb --bind 0.0.0.0:8080
+npx reddb --auto-download -- server --http --path ./data/reddb.rdb --bind 127.0.0.1:8080
 ```
 
-Run gRPC server:
+Wrapper help:
 
 ```bash
-docker run --rm -it \
-  -p 50051:50051 \
-  -v $(pwd)/data:/data \
-  --name reddb-grpc \
-  reddb red server --grpc --path /data/reddb.rdb --bind 0.0.0.0:50051
+npx reddb --sdk-help
 ```
 
-Persisting data:
+### Build from source
 
 ```bash
-mkdir -p data
-
-# both containers below mount the same ./data directory
-docker run --rm -d \
-  -p 8080:8080 \
-  -v $(pwd)/data:/data \
-  reddb red server --http --path /data/reddb.rdb --bind 0.0.0.0:8080
+cargo build --release --bin red
+./target/release/red version
 ```
 
-### 1) Run the HTTP server
+## Run a server
+
+### HTTP
 
 ```bash
 mkdir -p ./data
 red server --http --path ./data/reddb.rdb --bind 127.0.0.1:8080
 ```
 
-### 2) Create row, node, vector in one dataset
+Create data:
 
 ```bash
 curl -X POST http://127.0.0.1:8080/collections/hosts/rows \
@@ -162,583 +117,149 @@ curl -X POST http://127.0.0.1:8080/collections/hosts/rows \
       "critical": true
     }
   }'
-
-curl -X POST http://127.0.0.1:8080/collections/graph/nodes \
-  -H 'content-type: application/json' \
-  -d '{
-    "label": "Host",
-    "node_type": "host",
-    "properties": {
-      "ip": "10.0.0.1"
-    }
-  }'
-
-curl -X POST http://127.0.0.1:8080/collections/embeddings/vectors \
-  -H 'content-type: application/json' \
-  -d '{
-    "dense": [0.12, 0.91, 0.44],
-    "content": "host 10.0.0.1 running ssh",
-    "metadata": {
-      "kind": "host_embedding"
-    }
-  }'
 ```
 
-### 3) Query mixed entities immediately
+Query it:
 
 ```bash
 curl -X POST http://127.0.0.1:8080/query \
   -H 'content-type: application/json' \
-  -d '{
-    "query": "FROM ANY ORDER BY _score DESC LIMIT 10"
-  }'
+  -d '{"query":"SELECT * FROM hosts WHERE critical = true"}'
 ```
 
-### 4) Check health/status
+Health check:
 
 ```bash
 curl -s http://127.0.0.1:8080/health
-curl -s http://127.0.0.1:8080/ready
-curl -s http://127.0.0.1:8080/stats
 ```
 
-### Optional: run gRPC server
+### gRPC
+
+```bash
+mkdir -p ./data
+red server --grpc --path ./data/reddb.rdb --bind 127.0.0.1:50051
+```
+
+## Connect to RedDB
+
+There are two main connection paths:
+
+- HTTP clients call the REST endpoints directly.
+- `red connect` opens a gRPC session to a running RedDB server.
+
+### Connect over HTTP
+
+```bash
+curl -s http://127.0.0.1:8080/health
+
+curl -X POST http://127.0.0.1:8080/query \
+  -H 'content-type: application/json' \
+  -d '{"query":"FROM ANY ORDER BY _score DESC LIMIT 10"}'
+```
+
+### Connect with the CLI REPL
+
+Start a gRPC server first:
 
 ```bash
 red server --grpc --path ./data/reddb.rdb --bind 127.0.0.1:50051
 ```
 
-### Optional: install as a service on Linux
-
-Build and install the unified binary:
+Then connect:
 
 ```bash
-cargo build --release --bin red
-sudo install -m 0755 target/release/red /usr/local/bin/red
+red connect 127.0.0.1:50051
 ```
 
-Install and enable a `systemd` unit that auto-starts on boot:
+One-shot query:
 
 ```bash
-sudo ./scripts/install-systemd-service.sh \
-  --binary /usr/local/bin/red \
-  --grpc \
-  --path /var/lib/reddb/data.rdb \
-  --bind 0.0.0.0:50051
+red connect --query "SELECT * FROM hosts" 127.0.0.1:50051
 ```
 
-That unit is configured with `Restart=always` and `systemctl enable`, so it comes back after reboot.
+If auth is enabled:
 
 ```bash
-grpcurl \
-  -plaintext \
-  -d '{"query":"FROM ANY ORDER BY _score DESC LIMIT 5"}' \
-  127.0.0.1:50051 \
-  reddb.v1.RedDb/Query
+red connect --token "$REDDB_TOKEN" 127.0.0.1:50051
 ```
 
-```bash
-grpcurl \
-  -plaintext \
-  -d '{
-    "collection": "hosts",
-    "payloadJson": "{\"fields\":{\"ip\":\"10.0.0.3\",\"os\":\"linux\"}}"
-  }' \
-  127.0.0.1:50051 \
-  reddb.v1.RedDb/CreateRow
-```
+## Embedded like SQLite
 
-### Embedded
+If you want RedDB inside your process, open the database directly from Rust and work against the same engine without a separate server.
 
-Use `RedDB` directly inside your Rust process.
-
-#### 1. Create a database handle
+### Fluent embedded API
 
 ```rust
-use reddb::{RedDB, Value};
+use reddb::RedDB;
+use reddb::storage::schema::Value;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db = RedDB::new();
+    let db = RedDB::open("./data/reddb.rdb")?;
 
-    let host_id = db
-        .row(
-            "hosts",
-            vec![
-                ("ip", Value::Text("10.0.0.1".into())),
-                ("os", Value::Text("linux".into())),
-                ("critical", Value::Boolean(true)),
-            ],
-        )
+    let _user_id = db.row("users", vec![
+        ("name", Value::Text("Alice".into())),
+        ("active", Value::Boolean(true)),
+    ]).save()?;
+
+    let _node_id = db.node("identity", "user")
+        .node_type("account")
+        .property("name", "Alice")
         .save()?;
 
-    let node_id = db
-        .node("graph", "Host")
-        .node_type("host")
-        .property("ip", "10.0.0.1")
-        .save()?;
+    let results = db.query()
+        .collection("users")
+        .where_prop("active", true)
+        .limit(10)
+        .execute()?;
 
-    let vector_id = db
-        .vector("embeddings")
-        .dense(vec![0.12, 0.91, 0.44])
-        .content("host 10.0.0.1 running ssh")
-        .save()?;
+    println!("matched {}", results.len());
 
-    println!("host={host_id} node={node_id} vector={vector_id}");
+    db.flush()?;
     Ok(())
 }
 ```
 
-#### 2. What happened
-
-In a few lines, the same database stored:
-
-- a table row
-- a graph node
-- a vector embedding
-
-No extra services. No separate graph store. No separate vector engine.
-
----
-
-## A real multi-structure flow
-
-This is the shape `RedDB` is built for:
-
-| Need | Store it as |
-| --- | --- |
-| operational facts | rows |
-| rich object payloads | documents / JSON-like values |
-| raw files or opaque bytes | binary payloads |
-| linked entities | graph nodes and edges |
-| semantic retrieval | vectors and embeddings |
-| search context | metadata |
-| operational durability state | manifests, roots, snapshots and exports |
-
-And this is the point:
-
-- one application can write a row
-- link it to a graph node
-- attach one or more embeddings
-- run structured queries
-- run graph traversal
-- run vector or hybrid retrieval
-- export and snapshot the same dataset
-
-without changing databases halfway through the system design.
-
----
-
-## What is `RedDB`?
-
-`RedDB` is a standalone Rust database engine for multi-structure workloads.
-
-It is not trying to be “just SQL”, “just document”, or “just vector”.
-It is a **multi-structure database core** with one persistence layer and one operational surface for:
-
-- structured rows and scans
-- semi-structured documents
-- graph nodes, edges, traversals and analytics
-- dense vector search, IVF and hybrid retrieval
-- physical metadata, manifests, snapshots and exports
-
-`RedDB` is designed to feel like one coherent system:
-
-- one engine
-- one runtime
-- one operational surface
-- multiple native data shapes
-
----
-
-## Why `RedDB`
-
-Most storage stacks get awkward the moment your application needs more than one structure.
-
-You start with rows.
-Then you need metadata-heavy docs.
-Then graph relationships.
-Then embeddings.
-Then hybrid search.
-Then operational metadata.
-Then exports, scans, health and online maintenance.
-
-`RedDB` is built so all of that belongs to the same system from day one.
-
-- rows, docs, graph and vectors live in one engine
-- one transaction boundary can touch multiple structures
-- one runtime exposes scans, queries, analytics and operations
-- one physical metadata story tracks snapshots, roots, manifests and exports
-
----
-
-## What makes it special
-
-### One database, not four glued together
-
-- table data
-- document-like payloads
-- graph entities and traversals
-- vector retrieval and hybrid ranking
-
-All of these are first-class.
-
-### Embedded-first, server-capable
-
-Use `RedDB` directly as a Rust crate inside your process, or run it as a server.
-
-- low-latency local access
-- no mandatory network hop
-- clean server surface when you do want remote access
-
-### Operational by default
-
-- health endpoints
-- runtime stats
-- manifests
-- collection roots
-- snapshots
-- exports
-- retention controls
-- maintenance and checkpointing
-
-### Search that crosses structures
-
-- text search
-- vector search
-- IVF search
-- hybrid search
-- graph-aware traversal and analytics
-
-### Analytics built into the graph layer
-
-- shortest path
-- traversals
-- components
-- centrality
-- communities
-- clustering
-- cycles
-- topological sort
-
----
-
-## Current capabilities
-
-### Core engine
-
-- unified entity model
-- persistence for rows, graph entities and vectors
-- paged backend support
-- physical metadata sidecar
-- manifest trail and collection roots
-- snapshots and named exports
-- retention policy for snapshots and exports
-- health diagnostics and runtime stats
-
-### Query/runtime
-
-- embedded runtime with connection pool
-- HTTP server surface
-- gRPC server surface
-- collection scans
-- table query execution in `/query`
-- join execution in `/query`
-- graph query execution in `/query`
-- path query execution in `/query`
-- vector query execution in `/query`
-- hybrid query execution in `/query`
-
-### Vector
-
-- similarity search
-- IVF search
-- k-means-backed IVF training on demand
-- hybrid search
-- text/doc search API
-- vector metadata filtering in runtime query path
-
-### Graph
-
-- neighborhood expansion
-- BFS / DFS traversal
-- shortest path
-- connected / weak / strong components
-- degree / closeness / betweenness / eigenvector centrality
-- PageRank and personalized PageRank
-- HITS
-- Louvain and label propagation
-- clustering coefficient
-- cycle discovery
-- topological sort
-- named graph projections
-- persisted analytics job metadata
-
-### Operations
-
-- `GET /health`
-- `GET /ready`
-- `GET /stats`
-- `GET /catalog`
-- `GET /manifest`
-- `GET /roots`
-- `GET /snapshots`
-- `GET /exports`
-- `GET /indexes`
-- `GET /graph/projections`
-- `GET /graph/jobs`
-- `POST /collections/{name}/rows`
-- `POST /collections/{name}/nodes`
-- `POST /collections/{name}/edges`
-- `POST /collections/{name}/vectors`
-- `POST /collections/{name}/bulk/rows`
-- `POST /collections/{name}/bulk/nodes`
-- `POST /collections/{name}/bulk/edges`
-- `POST /collections/{name}/bulk/vectors`
-- `PATCH /collections/{name}/entities/{id}`
-- `DELETE /collections/{name}/entities/{id}`
-- gRPC `Health`
-- gRPC `Ready`
-- gRPC `Stats`
-- gRPC `Collections`
-- gRPC `Scan`
-- gRPC `Query`
-- gRPC `CreateRow`
-- gRPC `CreateNode`
-- gRPC `CreateEdge`
-- gRPC `CreateVector`
-- gRPC `BulkCreateRows`
-- gRPC `BulkCreateNodes`
-- gRPC `BulkCreateEdges`
-- gRPC `BulkCreateVectors`
-- gRPC `PatchEntity`
-- gRPC `DeleteEntity`
-- gRPC `Checkpoint`
-
----
-
-## Feature matrix
-
-| Area | What `RedDB` already exposes |
-| --- | --- |
-| Storage | rows, graph entities, vectors, paged persistence, metadata sidecar |
-| Query | table, join, graph, path, vector and hybrid execution |
-| Search | text, similarity, IVF, hybrid |
-| Graph | traversals, pathfinding, centrality, communities, clustering, cycles |
-| Operations | health, stats, manifest, roots, snapshots, exports, retention, CRUD, bulk ingest |
-| Runtime | embedded runtime, connection pool, HTTP server, gRPC server |
-
----
-
-## Architecture direction
-
-`RedDB` is being shaped as a layered database engine:
-
-1. **Physical layer**
-   - durable file layout
-   - metadata manifest
-   - snapshots
-   - exports
-   - collection roots
-
-2. **Logical catalog**
-   - collections
-   - schema manifests
-   - index descriptors
-   - graph projections
-   - analytics jobs
-
-3. **Execution layer**
-   - scans
-   - table filters
-   - joins
-   - graph traversal
-   - vector retrieval
-   - hybrid ranking
-
-4. **Operational surface**
-   - embedded runtime
-   - HTTP API
-   - gRPC API
-   - health
-   - stats
-   - maintenance
-   - checkpointing
-
-The physical side is still evolving toward a tighter root-publication model. The repo already persists operational metadata, roots, manifests, snapshots and exports, but the final publication path is still being hardened.
-
----
-
-## Repo status
-
-This repository is already beyond “scaffold”, but it is **not at 1.0 shape yet**.
-
-What is already strong:
-
-- storage extraction is complete
-- runtime/API surface is broad
-- graph and vector capabilities are real
-- operational metadata exists and is queryable
-
-What still needs to harden:
-
-- final physical publication model
-- persistent binary index formats
-- stronger SQL/table planner and executor depth
-- replication and log shipping
-
----
-
-## Philosophy
-
-`RedDB` is built around one principle:
-
-- one storage engine
-- one runtime
-- one operational story
-- multiple native data shapes
-
-Rows, docs, graphs and vectors should feel like different faces of the same database.
-
-That is the bar.
-
----
-
-## Crate
-
-`Cargo.toml`
-
-```toml
-[package]
-name = "reddb"
-version = "0.1.0"
-edition = "2021"
+### Embedded runtime with SQL-style queries
+
+If you want embedded execution with the runtime/use-case layer, use `RedDBRuntime`. This is the closest path to using RedDB "like SQLite", but with the project's multi-model runtime.
+
+```rust
+use reddb::application::{CreateRowInput, ExecuteQueryInput};
+use reddb::storage::schema::Value;
+use reddb::{EntityUseCases, QueryUseCases, RedDBOptions, RedDBRuntime};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let rt = RedDBRuntime::with_options(
+        RedDBOptions::persistent("./data/reddb.rdb")
+    )?;
+
+    EntityUseCases::new(&rt).create_row(CreateRowInput {
+        collection: "users".into(),
+        fields: vec![
+            ("name".into(), Value::Text("Alice".into())),
+            ("age".into(), Value::Integer(30)),
+        ],
+        metadata: vec![],
+        node_links: vec![],
+        vector_links: vec![],
+    })?;
+
+    let result = QueryUseCases::new(&rt).execute(ExecuteQueryInput {
+        query: "SELECT * FROM users".into(),
+    })?;
+
+    println!("rows = {}", result.result.records.len());
+    rt.checkpoint()?;
+    Ok(())
+}
 ```
 
-Current feature flags:
+## Documentation
 
-- `query-vector`
-- `query-graph`
-- `query-fulltext`
-- `encryption`
-
-## Publicação no crates.io
-
-### 1) Validar pacote antes de publicar
-
-```bash
-make publish-dry-run
-```
-
-ou:
-
-```bash
-./scripts/publish.sh --dry-run
-```
-
-### 2) Publicar no crates.io
-
-```bash
-# Use token na sessão
-cargo login
-
-# ou configure temporariamente
-export CARGO_REGISTRY_TOKEN=<SEU_TOKEN>
-
-# Publica o crate
-make publish
-```
-
-### 3) Publicar pela automação do GitHub
-
-O workflow de release também pode publicar no crates.io automaticamente:
-
-- tag `vX.Y.Z` (evento `push` de tag, normalmente criado a partir do `main`) para
-  o canal `stable`
-- `workflow_dispatch` manual com `channel: stable` e `version: X.Y.Z`
-
-No fluxo automático, após o release no GitHub o job `publish-cargo` executa `cargo publish`.
-
-### Boas práticas
-
-- Faça validações locais (check/build/release) antes do release.
-- Mantenha `Cargo.toml`/`Cargo.lock` consistentes.
-- Garanta que o secret `CARGO_REGISTRY_TOKEN` esteja presente no repositório do GitHub.
-
----
-
-## Artifact Lifecycle
-
-Every index and artifact in RedDB follows a canonical lifecycle:
-
-```mermaid
-stateDiagram-v2
-    [*] --> Declared
-    Declared --> Building : rebuild / warmup
-    Building --> Ready : materialization complete
-    Building --> Failed : build error
-    Ready --> Stale : underlying data changed
-    Ready --> Disabled : operator disables
-    Stale --> RequiresRebuild : TTL exceeded
-    Failed --> RequiresRebuild : operator requests rebuild
-    RequiresRebuild --> Building : rebuild triggered
-    Disabled --> Ready : operator re-enables (if materialized)
-    Disabled --> Declared : operator re-enables (if not materialized)
-
-    state "Queryable" as q {
-        Ready
-    }
-
-    note right of Ready : Only state that serves reads
-    note right of Failed : Needs manual intervention
-```
-
-States: `declared` | `building` | `ready` | `disabled` | `stale` | `failed` | `requires_rebuild`
-
-- **Ready** is the only state that serves query reads.
-- **can_rebuild()**: `declared`, `stale`, `failed`, `requires_rebuild`.
-- **needs_attention()**: `failed`, `stale`, `requires_rebuild`.
-
----
-
-## Query Execution Flow
-
-```mermaid
-flowchart TD
-    A[Query Input] --> B{Detect Mode}
-    B -->|SQL| C[Parser]
-    B -->|Gremlin| C
-    B -->|SPARQL| C
-    B -->|Natural| C
-    C --> D[Query AST]
-    D --> E[Planner / Optimizer]
-    E --> F{Source Type}
-    F -->|FROM table| G[Table Scan / Index Seek]
-    F -->|FROM any / universal| H[Entity Scan - all collections]
-    F -->|MATCH graph| I[Graph Pattern Match]
-    F -->|JOIN| J[Nested Loop Join]
-    G --> K[Filter + Sort + Paginate]
-    H --> K
-    I --> K
-    J --> K
-    K --> L[Universal Envelope]
-    L --> M[Response: _entity_id, _collection, _kind, _entity_type, _capabilities, _score]
-```
-
----
-
-## v1 Beta Limitations
-
-| Feature | Status | Notes |
-|---|---|---|
-| Multi-region replication | Not supported | Planned for v2 |
-| Automatic sharding | Not supported | Single-node only |
-| Advanced RBAC | Not supported | Token-based auth only |
-| Cross-entity transactions | Not supported | Per-collection atomicity |
-| Distributed query planner | Not supported | Local cost-based planner |
-| ACID guarantees | WAL-based | Best-effort durability |
-
----
-
-## License
-
-MIT License. See [LICENSE](LICENSE) for details.
+- Docs home: [docs/README.md](/home/cyber/Work/FF/reddb/docs/README.md)
+- Installation: [docs/getting-started/installation.md](/home/cyber/Work/FF/reddb/docs/getting-started/installation.md)
+- Quick start: [docs/getting-started/quick-start.md](/home/cyber/Work/FF/reddb/docs/getting-started/quick-start.md)
+- Connection guide: [docs/getting-started/connect.md](/home/cyber/Work/FF/reddb/docs/getting-started/connect.md)
+- Embedded guide: [docs/api/embedded.md](/home/cyber/Work/FF/reddb/docs/api/embedded.md)
+- HTTP API: [docs/api/http.md](/home/cyber/Work/FF/reddb/docs/api/http.md)
+- CLI reference: [docs/api/cli.md](/home/cyber/Work/FF/reddb/docs/api/cli.md)

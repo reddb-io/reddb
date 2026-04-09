@@ -11,7 +11,8 @@ use std::time::Duration;
 use reddb::cli;
 use reddb::cli::types::FlagValue;
 use reddb::service_cli::{
-    probe_listener, run_server_with_large_stack, ServerCommandConfig, ServerTransport,
+    install_systemd_service, probe_listener, render_systemd_unit, run_server_with_large_stack,
+    ServerCommandConfig, ServerTransport, SystemdServiceConfig,
 };
 
 // ---------------------------------------------------------------------------
@@ -184,6 +185,73 @@ fn main() {
                 }
                 eprintln!("red server: {err}");
                 std::process::exit(1);
+            }
+        }
+
+        "service" => {
+            let json_mode = wants_json(&result.flags);
+            let subcommand = remaining.first().map(|s| s.as_str()).unwrap_or("help");
+
+            match subcommand {
+                "install" => {
+                    let config =
+                        build_systemd_service_config(&result.flags).unwrap_or_else(|err| {
+                            if json_mode {
+                                json_error("service.install", &err);
+                            }
+                            eprintln!("error: {err}");
+                            std::process::exit(1);
+                        });
+
+                    install_systemd_service(&config).unwrap_or_else(|err| {
+                        if json_mode {
+                            json_error("service.install", &err);
+                        }
+                        eprintln!("error: {err}");
+                        std::process::exit(1);
+                    });
+
+                    let unit_name = format!("{}.service", config.service_name);
+                    if json_mode {
+                        json_ok(
+                            "service.install",
+                            &format!(
+                                "{{\"unit\":\"{}\",\"path\":\"{}\",\"transport\":\"{}\",\"bind\":\"{}\"}}",
+                                json_escape(&unit_name),
+                                json_escape(&config.unit_path().display().to_string()),
+                                json_escape(config.transport.as_str()),
+                                json_escape(&config.bind_addr)
+                            ),
+                        );
+                    } else {
+                        println!("Installed and started {}", unit_name);
+                        println!("Status: systemctl status {}", unit_name);
+                    }
+                }
+                "print-unit" => {
+                    let config =
+                        build_systemd_service_config(&result.flags).unwrap_or_else(|err| {
+                            if json_mode {
+                                json_error("service.print-unit", &err);
+                            }
+                            eprintln!("error: {err}");
+                            std::process::exit(1);
+                        });
+                    let unit = render_systemd_unit(&config);
+                    if json_mode {
+                        json_ok("service.print-unit", &format!("{{\"unit\":{:?}}}", unit));
+                    } else {
+                        print!("{unit}");
+                    }
+                }
+                _ => {
+                    let help = "Usage: red service <install|print-unit> [flags]\n\nExamples:\n  sudo red service install --binary /usr/local/bin/red --grpc --path /var/lib/reddb/data.rdb --bind 0.0.0.0:50051\n  red service print-unit --http --path /var/lib/reddb/data.rdb --bind 127.0.0.1:8080\n";
+                    if json_mode {
+                        json_ok("service", "{\"subcommands\":[\"install\",\"print-unit\"]}");
+                    } else {
+                        print!("{help}");
+                    }
+                }
             }
         }
 
@@ -654,6 +722,32 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                     .with_description("Enable the encrypted auth vault"),
             ]);
         }
+        Some("service") => {
+            flags.extend(vec![
+                cli::types::FlagSchema::new("binary")
+                    .with_description("Path to the red binary")
+                    .with_default("/usr/local/bin/red"),
+                cli::types::FlagSchema::new("service-name")
+                    .with_description("systemd unit name")
+                    .with_default("reddb"),
+                cli::types::FlagSchema::new("user")
+                    .with_description("Service user")
+                    .with_default("reddb"),
+                cli::types::FlagSchema::new("group")
+                    .with_description("Service group")
+                    .with_default("reddb"),
+                cli::types::FlagSchema::new("path")
+                    .with_short('d')
+                    .with_description("Persistent database file path")
+                    .with_default("/var/lib/reddb/data.rdb"),
+                cli::types::FlagSchema::new("bind")
+                    .with_short('b')
+                    .with_description("Bind address (host:port); defaults by transport"),
+                cli::types::FlagSchema::boolean("grpc")
+                    .with_description("Install a gRPC service (default transport)"),
+                cli::types::FlagSchema::boolean("http").with_description("Install an HTTP service"),
+            ]);
+        }
         Some("mcp") => {
             flags.push(
                 cli::types::FlagSchema::new("path")
@@ -720,6 +814,7 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
 fn build_completion_tree() -> Vec<(String, Vec<(String, Vec<String>)>)> {
     vec![
         ("server".to_string(), vec![]),
+        ("service".to_string(), vec![]),
         ("replica".to_string(), vec![]),
         ("query".to_string(), vec![]),
         ("insert".to_string(), vec![]),
@@ -762,6 +857,39 @@ fn build_server_config(
         primary_addr: flag_string(flags, "primary-addr").filter(|value| !value.is_empty()),
         vault: flag_bool(flags, "vault"),
         workers,
+    })
+}
+
+fn build_systemd_service_config(
+    flags: &HashMap<String, FlagValue>,
+) -> Result<SystemdServiceConfig, String> {
+    let transport = select_transport(flags)?;
+    let binary_path = flag_string(flags, "binary")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/usr/local/bin/red"));
+    let data_path = flag_string(flags, "path")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/var/lib/reddb/data.rdb"));
+    let bind_addr = flag_string(flags, "bind")
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| transport.default_bind_addr().to_string());
+
+    Ok(SystemdServiceConfig {
+        service_name: flag_string(flags, "service-name")
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "reddb".to_string()),
+        binary_path,
+        run_user: flag_string(flags, "user")
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "reddb".to_string()),
+        run_group: flag_string(flags, "group")
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "reddb".to_string()),
+        data_path,
+        bind_addr,
+        transport,
     })
 }
 

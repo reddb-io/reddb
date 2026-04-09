@@ -1,177 +1,186 @@
 # RedDB
 
-> Unified multi-model database: tables, documents, graphs, vectors, and key-value in one engine
+> One engine for tables, documents, graphs, vectors, and key-value data.
 
-**RedDB** is a standalone Rust database engine for multi-structure workloads. It stores operational rows, document payloads, linked graph entities, semantic vector embeddings, and key-value data in a single runtime with one API surface.
+RedDB is a multi-model database for applications that need more than one data shape but do not want more than one database runtime.
 
-It is not "just SQL", "just document", or "just vector". It is a **multi-model database core** with one persistence layer and one operational surface for every data shape your application needs.
+It is designed for teams that want:
 
-## Why RedDB?
+- rows and SQL-style queries
+- documents and payload-oriented records
+- graph relationships and analytics
+- vector embeddings and semantic search
+- embedded, server, and agent-facing access without changing engines
 
-| Feature | Description |
-|:--------|:------------|
-| **Multi-Model** | Rows, documents, graphs, vectors, and KV in one engine |
-| **Single Binary** | One `red` binary for embedded, server, and serverless modes |
-| **48 Native Types** | From `Integer` to `GeoPoint`, `Cidr`, `Semver`, and `Currency` |
-| **Universal Query** | `FROM ANY` queries across all entity types simultaneously |
-| **Graph Analytics** | PageRank, Louvain communities, shortest path, centrality, cycles |
-| **Vector Search** | HNSW, IVF, product quantization, SIMD-accelerated distance |
-| **AI-Ready** | 29 MCP tools for direct AI agent integration |
+## What RedDB does
 
-## Key Numbers
+RedDB keeps different data models inside the same database core so you can work with operational records, linked entities, and semantic retrieval in one place.
 
-| Metric | Count |
-|:-------|:------|
-| gRPC RPCs | 116 |
-| HTTP routes | 97+ |
-| MCP tools | 29 |
-| Native data types | 48 |
-| Graph algorithms | 12+ |
-| Deployment profiles | 3 (embedded, server, serverless) |
+Instead of pushing data between a SQL store, a graph store, and a vector store, RedDB keeps those concerns in one runtime and exposes them through:
 
-## Quick Example
+- an embedded Rust API
+- an HTTP server
+- a gRPC server
+- the `red` CLI
+- an MCP server for agent integrations
 
-Create a table row, a graph node, and a vector embedding in the same database:
+## How RedDB works
+
+The same core engine can be used in three ways:
+
+| Mode | Best for | Access path |
+|:-----|:---------|:------------|
+| Embedded | local-first apps, CLIs, workers, edge binaries | `RedDB` or `RedDBRuntime` inside Rust |
+| Server | shared databases and service-to-service traffic | HTTP or gRPC |
+| Agent tooling | AI workflows and local operations | CLI or MCP |
+
+This is the key idea behind the project: you do not switch products when your architecture changes. You switch how you expose the same engine.
+
+## Install
+
+### GitHub Releases
+
+Use the release installer:
 
 ```bash
-# Start the server
-red server --http --path ./data/reddb.rdb --bind 127.0.0.1:8080
-
-# Insert a table row
-curl -X POST http://127.0.0.1:8080/collections/hosts/rows \
-  -H 'content-type: application/json' \
-  -d '{"fields": {"ip": "10.0.0.1", "os": "linux", "critical": true}}'
-
-# Insert a graph node
-curl -X POST http://127.0.0.1:8080/collections/graph/nodes \
-  -H 'content-type: application/json' \
-  -d '{"label": "Host", "node_type": "host", "properties": {"ip": "10.0.0.1"}}'
-
-# Insert a vector embedding
-curl -X POST http://127.0.0.1:8080/collections/embeddings/vectors \
-  -H 'content-type: application/json' \
-  -d '{"dense": [0.12, 0.91, 0.44], "content": "host 10.0.0.1 running ssh"}'
-
-# Query across all entity types
-curl -X POST http://127.0.0.1:8080/query \
-  -H 'content-type: application/json' \
-  -d '{"query": "FROM ANY ORDER BY _score DESC LIMIT 10"}'
+curl -fsSL https://raw.githubusercontent.com/forattini-dev/reddb/main/install.sh | bash
 ```
 
-Or use the embedded Rust API directly:
+Pin a version:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/forattini-dev/reddb/main/install.sh | bash -s -- --version v0.1.2
+```
+
+Use the prerelease channel:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/forattini-dev/reddb/main/install.sh | bash -s -- --channel next
+```
+
+Manual assets:
+
+`https://github.com/forattini-dev/reddb/releases`
+
+### `npx`
+
+Install or resolve the managed binary through npm:
+
+```bash
+npx reddb --install
+```
+
+Run RedDB directly through the wrapper:
+
+```bash
+npx reddb --auto-download -- server --http --path ./data/reddb.rdb --bind 127.0.0.1:8080
+```
+
+## First connection
+
+### HTTP
+
+```bash
+red server --http --path ./data/reddb.rdb --bind 127.0.0.1:8080
+```
+
+```bash
+curl -s http://127.0.0.1:8080/health
+```
+
+```bash
+curl -X POST http://127.0.0.1:8080/query \
+  -H 'content-type: application/json' \
+  -d '{"query":"SELECT * FROM hosts"}'
+```
+
+### gRPC + CLI REPL
+
+```bash
+red server --grpc --path ./data/reddb.rdb --bind 127.0.0.1:50051
+```
+
+```bash
+red connect 127.0.0.1:50051
+```
+
+`red connect` is for gRPC servers. For HTTP servers, use the REST endpoints directly.
+
+## Embedded like SQLite
+
+If you want RedDB inside your process, use it directly from Rust.
+
+Builder-first API:
 
 ```rust
-use reddb::{RedDB, Value};
+use reddb::RedDB;
+use reddb::storage::schema::Value;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db = RedDB::new();
+    let db = RedDB::open("./data/reddb.rdb")?;
 
-    // Table row
-    let host_id = db.row("hosts", vec![
-        ("ip", Value::Text("10.0.0.1".into())),
-        ("os", Value::Text("linux".into())),
-        ("critical", Value::Boolean(true)),
+    db.row("users", vec![
+        ("name", Value::Text("Alice".into())),
+        ("active", Value::Boolean(true)),
     ]).save()?;
 
-    // Graph node
-    let node_id = db.node("graph", "Host")
-        .node_type("host")
-        .property("ip", "10.0.0.1")
-        .save()?;
+    let results = db.query()
+        .collection("users")
+        .where_prop("active", true)
+        .limit(10)
+        .execute()?;
 
-    // Vector embedding
-    let vector_id = db.vector("embeddings")
-        .dense(vec![0.12, 0.91, 0.44])
-        .content("host 10.0.0.1 running ssh")
-        .save()?;
-
-    println!("host={host_id} node={node_id} vector={vector_id}");
+    println!("matched {}", results.len());
+    db.flush()?;
     Ok(())
 }
 ```
 
-## Feature Matrix
+Runtime/use-case API with SQL-style execution:
 
-| Area | Capabilities |
-|:-----|:------------|
-| **Storage** | Rows, documents, graph entities, vectors, KV, paged persistence, metadata sidecar |
-| **Query** | Table, join, graph, path, vector, and hybrid execution; Gremlin, SPARQL, natural language modes |
-| **Search** | Text, similarity, IVF, hybrid, tiered |
-| **Graph** | Traversals, pathfinding, centrality (degree/closeness/betweenness/eigenvector), PageRank, HITS, Louvain, label propagation, clustering, cycles, topological sort |
-| **Operations** | Health, stats, manifest, roots, snapshots, exports, retention, CRUD, bulk ingest, checkpoints |
-| **Auth** | Users, roles (admin/write/read), API keys, session tokens, encrypted vault |
-| **Runtime** | Embedded, HTTP server, gRPC server, MCP server, CLI, read replicas |
+```rust
+use reddb::application::{CreateRowInput, ExecuteQueryInput};
+use reddb::storage::schema::Value;
+use reddb::{EntityUseCases, QueryUseCases, RedDBOptions, RedDBRuntime};
 
-## Architecture
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let rt = RedDBRuntime::with_options(
+        RedDBOptions::persistent("./data/reddb.rdb")
+    )?;
 
-```mermaid
-flowchart TB
-    subgraph Clients
-        CLI[CLI - red]
-        HTTP[HTTP API]
-        GRPC[gRPC API]
-        MCP[MCP Server]
-        EMB[Embedded Rust]
-    end
+    EntityUseCases::new(&rt).create_row(CreateRowInput {
+        collection: "users".into(),
+        fields: vec![
+            ("name".into(), Value::Text("Alice".into())),
+            ("age".into(), Value::Integer(30)),
+        ],
+        metadata: vec![],
+        node_links: vec![],
+        vector_links: vec![],
+    })?;
 
-    subgraph Runtime
-        POOL[Connection Pool]
-        QE[Query Engine]
-        AUTH[Auth Layer]
-    end
+    let result = QueryUseCases::new(&rt).execute(ExecuteQueryInput {
+        query: "SELECT * FROM users".into(),
+    })?;
 
-    subgraph Execution
-        TP[Table Planner]
-        GP[Graph Engine]
-        VE[Vector Engine]
-        HY[Hybrid Search]
-    end
-
-    subgraph Storage
-        PAGER[Page-Based Storage]
-        BTREE[B-Tree Index]
-        WAL[WAL + Recovery]
-        CACHE[SIEVE Cache]
-        CRYPT[Encryption Layer]
-    end
-
-    CLI --> POOL
-    HTTP --> AUTH --> POOL
-    GRPC --> AUTH
-    MCP --> POOL
-    EMB --> POOL
-
-    POOL --> QE
-    QE --> TP
-    QE --> GP
-    QE --> VE
-    QE --> HY
-
-    TP --> PAGER
-    GP --> PAGER
-    VE --> PAGER
-    HY --> VE
-    HY --> TP
-
-    PAGER --> BTREE
-    PAGER --> WAL
-    PAGER --> CACHE
-    PAGER --> CRYPT
+    println!("rows = {}", result.result.records.len());
+    Ok(())
+}
 ```
 
-## Next Steps
+## Start here
 
 <div class="grid-3">
   <a href="#/getting-started/installation" class="card">
     <h4>Installation</h4>
-    <p>Install RedDB from source, binary, or Docker</p>
+    <p>Install from GitHub Releases, npx, or source.</p>
   </a>
-  <a href="#/getting-started/quick-start" class="card">
-    <h4>Quick Start</h4>
-    <p>Store and query your first multi-model data in 5 minutes</p>
+  <a href="#/getting-started/connect" class="card">
+    <h4>Connect</h4>
+    <p>Choose HTTP, gRPC, CLI, or embedded access.</p>
   </a>
-  <a href="#/api/grpc" class="card">
-    <h4>API Reference</h4>
-    <p>Full gRPC and HTTP endpoint documentation</p>
+  <a href="#/api/embedded" class="card">
+    <h4>Embedded</h4>
+    <p>Run RedDB in-process, like SQLite, but multi-model.</p>
   </a>
 </div>

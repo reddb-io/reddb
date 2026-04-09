@@ -2,6 +2,31 @@
 
 RedDB includes a first-class graph engine for nodes, edges, traversals, pathfinding, and analytics. The graph model is fully integrated with the query engine and shares the same storage layer as tables and vectors.
 
+## SQL First
+
+Graph usage in RedDB is not an afterthought. The query engine has graph-native commands, so the shortest explanation is with query examples:
+
+```sql
+MATCH (a:person)-[r:REPORTS_TO]->(b:person)
+RETURN a.name, b.name, r.since
+```
+
+```sql
+GRAPH TRAVERSE FROM 'alice' STRATEGY bfs DIRECTION outgoing MAX_DEPTH 3
+```
+
+```sql
+GRAPH SHORTEST_PATH FROM 'alice' TO 'charlie' ALGORITHM dijkstra
+```
+
+```sql
+GRAPH CENTRALITY ALGORITHM pagerank
+```
+
+```sql
+PATH FROM 'web-01' TO 'db-01' ALGORITHM bfs DIRECTION both
+```
+
 ## Creating Nodes
 
 <!-- tabs:start -->
@@ -95,6 +120,16 @@ curl -X POST http://127.0.0.1:8080/graph/traverse \
 | `strategy` | `bfs`, `dfs` | `bfs` |
 | `max_depth` | any positive integer | `3` |
 
+SQL form:
+
+```sql
+GRAPH TRAVERSE FROM 'alice' STRATEGY bfs DIRECTION outgoing MAX_DEPTH 3
+```
+
+```sql
+GRAPH TRAVERSE FROM 'alice' STRATEGY dfs DIRECTION both MAX_DEPTH 2
+```
+
 ## Shortest Path
 
 Find the shortest path between two nodes:
@@ -111,6 +146,16 @@ curl -X POST http://127.0.0.1:8080/graph/shortest-path \
 
 Algorithms: `bfs` (unweighted) or `dijkstra` (weighted).
 
+SQL form:
+
+```sql
+GRAPH SHORTEST_PATH FROM 'alice' TO 'charlie' ALGORITHM dijkstra
+```
+
+```sql
+PATH FROM 'alice' TO 'charlie' ALGORITHM bfs DIRECTION both
+```
+
 ## Graph Analytics
 
 RedDB provides built-in graph analytics:
@@ -125,6 +170,12 @@ curl -X POST http://127.0.0.1:8080/graph/centrality \
 
 Available algorithms: `degree`, `closeness`, `betweenness`, `eigenvector`, `pagerank`.
 
+SQL form:
+
+```sql
+GRAPH CENTRALITY ALGORITHM pagerank
+```
+
 ### Community Detection
 
 ```bash
@@ -135,6 +186,12 @@ curl -X POST http://127.0.0.1:8080/graph/community \
 
 Algorithms: `louvain`, `label_propagation`.
 
+SQL form:
+
+```sql
+GRAPH COMMUNITY ALGORITHM louvain MAX_ITERATIONS 100
+```
+
 ### Connected Components
 
 ```bash
@@ -143,12 +200,24 @@ curl -X POST http://127.0.0.1:8080/graph/components \
   -d '{"mode": "weakly_connected"}'
 ```
 
+SQL form:
+
+```sql
+GRAPH COMPONENTS MODE weakly_connected
+```
+
 ### Cycle Detection
 
 ```bash
 curl -X POST http://127.0.0.1:8080/graph/cycles \
   -H 'content-type: application/json' \
   -d '{"max_length": 10, "max_cycles": 50}'
+```
+
+SQL form:
+
+```sql
+GRAPH CYCLES MAX_LENGTH 10 MAX_CYCLES 50
 ```
 
 ### Additional Analytics
@@ -182,6 +251,29 @@ Use `MATCH` syntax in the query engine:
 
 ```sql
 MATCH (a:person)-[r:REPORTS_TO]->(b:person) RETURN a.name, b.name, r.since
+```
+
+More examples:
+
+```sql
+MATCH (a:person)-[r:COLLABORATES]->(b:person)
+WHERE a.department = 'engineering'
+RETURN a.name, b.name, r.weight
+```
+
+```sql
+MATCH (svc:service)-[r:DEPENDS_ON]->(dep:service)
+RETURN svc.name, dep.name
+```
+
+You can also inspect graph entities through the universal envelope:
+
+```sql
+FROM ANY WHERE _kind = 'node' AND _collection = 'social' LIMIT 20
+```
+
+```sql
+FROM ANY WHERE _kind = 'edge' AND _collection = 'social' LIMIT 20
 ```
 
 See [Graph Commands](/query/graph-commands.md) for the full graph query syntax.

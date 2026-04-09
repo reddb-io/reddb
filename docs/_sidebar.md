@@ -2,6 +2,7 @@
   - [Introduction](/)
   - [Installation](/getting-started/installation.md)
   - [Quick Start](/getting-started/quick-start.md)
+  - [Connect](/getting-started/connect.md)
   - [Configuration](/getting-started/configuration.md)
 
 - **Data Models**

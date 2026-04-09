@@ -2,6 +2,34 @@
 
 RedDB includes a native vector engine for similarity search, supporting HNSW, IVF, product quantization, and hybrid retrieval. Vectors live alongside rows and graph entities in the same database.
 
+## SQL First
+
+If you want to work with vectors from the query language, RedDB exposes search commands directly in SQL-style syntax:
+
+```sql
+SEARCH SIMILAR [0.12, 0.91, 0.44] IN embeddings K 5 MIN_SCORE 0.7
+```
+
+```sql
+SEARCH TEXT 'machine learning basics' IN docs LIMIT 10
+```
+
+```sql
+SEARCH HYBRID TEXT 'neural networks' VECTOR [0.15, 0.89, 0.40] IN docs K 10
+```
+
+```sql
+SEARCH IVF [0.12, 0.91, 0.44] IN embeddings K 10 PROBES 3
+```
+
+And if you just want to inspect stored vectors:
+
+```sql
+FROM ANY
+WHERE _kind = 'vector' AND _collection = 'docs'
+LIMIT 20
+```
+
 ## Inserting Vectors
 
 <!-- tabs:start -->
@@ -76,6 +104,15 @@ Parameters:
 | `k` | `int` | `10` | Number of results |
 | `min_score` | `f32` | `0.0` | Minimum cosine similarity threshold |
 
+SQL form:
+
+```sql
+SEARCH SIMILAR [0.15, 0.89, 0.40, 0.30, 0.70, 0.85, 0.25, 0.50]
+IN docs
+K 5
+MIN_SCORE 0.7
+```
+
 ## IVF Search
 
 Use inverted file index for approximate search on large datasets:
@@ -91,6 +128,15 @@ curl -X POST http://127.0.0.1:8080/search/ivf \
   }'
 ```
 
+SQL form:
+
+```sql
+SEARCH IVF [0.15, 0.89, 0.40, 0.30, 0.70, 0.85, 0.25, 0.50]
+IN docs
+K 10
+PROBES 3
+```
+
 ## Text Search
 
 Full-text search across vector content and metadata:
@@ -104,6 +150,16 @@ curl -X POST http://127.0.0.1:8080/search/text \
     "limit": 10,
     "fuzzy": true
   }'
+```
+
+SQL form:
+
+```sql
+SEARCH TEXT 'machine learning basics' IN docs LIMIT 10
+```
+
+```sql
+SEARCH TEXT 'machne lerning' IN docs FUZZY LIMIT 10
 ```
 
 ## Hybrid Search
@@ -123,6 +179,25 @@ curl -X POST http://127.0.0.1:8080/search/hybrid \
     }
   }'
 ```
+
+SQL form:
+
+```sql
+SEARCH HYBRID TEXT 'neural networks' VECTOR [0.15, 0.89, 0.40] IN docs K 10
+```
+
+## Inspecting Stored Vectors with SQL
+
+Use universal queries when you want the vector entities themselves instead of a search result:
+
+```sql
+FROM ANY
+WHERE _kind = 'vector' AND _collection = 'docs'
+ORDER BY _entity_id DESC
+LIMIT 20
+```
+
+This is useful for debugging ingestion pipelines, checking metadata, or auditing collections.
 
 ## Bulk Insert
 

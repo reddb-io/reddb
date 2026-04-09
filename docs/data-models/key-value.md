@@ -2,6 +2,38 @@
 
 The key-value interface provides fast, direct access to data by key. It is ideal for caches, feature flags, session storage, and any lookup-by-name pattern.
 
+## SQL First
+
+Even though KV has a direct key-based API, the underlying data is still queryable.
+
+Think of a KV collection as a queryable set of `key` / `value` records:
+
+```sql
+SELECT * FROM config
+```
+
+```sql
+SELECT key, value
+FROM config
+WHERE key = 'max_retries'
+```
+
+```sql
+SELECT key, value
+FROM config
+WHERE key LIKE 'feature.%'
+ORDER BY key
+```
+
+Across collections, you can also use the universal envelope:
+
+```sql
+FROM ANY
+WHERE _kind = 'kv' AND _collection = 'config'
+ORDER BY key
+LIMIT 50
+```
+
 ## Setting a Value
 
 <!-- tabs:start -->
@@ -73,10 +105,50 @@ Response:
 
 <!-- tabs:end -->
 
+## Querying KV with SQL
+
+Direct lookup:
+
+```sql
+SELECT value
+FROM config
+WHERE key = 'max_retries'
+```
+
+List a namespace:
+
+```sql
+SELECT key, value
+FROM config
+WHERE key LIKE 'feature.%'
+ORDER BY key
+```
+
+Inspect everything in the collection:
+
+```sql
+SELECT * FROM config ORDER BY key
+```
+
+Universal query form:
+
+```sql
+FROM ANY
+WHERE _kind = 'kv'
+  AND _collection = 'config'
+LIMIT 100
+```
+
 ## Deleting a Key
 
 ```bash
 curl -X DELETE http://127.0.0.1:8080/collections/config/kv/max_retries
+```
+
+Delete through the query engine:
+
+```sql
+DELETE FROM config WHERE key = 'max_retries'
 ```
 
 ## Value Types

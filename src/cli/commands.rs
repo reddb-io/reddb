@@ -75,6 +75,12 @@ pub fn all_commands() -> Vec<CommandDef> {
       flags: server_flags(),
     },
     CommandDef {
+      name: "service",
+      summary: "Install or inspect a systemd service",
+      usage: "red service <install|print-unit> [--binary /usr/local/bin/red] [--grpc|--http] [--path /var/lib/reddb/data.rdb] [--bind 0.0.0.0:50051]",
+      flags: service_flags(),
+    },
+    CommandDef {
       name: "query",
       summary: "Execute a query against the database",
       usage: "red query \"SELECT * FROM users WHERE age > 21\"",
@@ -183,6 +189,7 @@ pub fn main_help_text() -> String {
     out.push_str("Examples:\n");
     out.push_str("  red server --grpc --path ./data/reddb.rdb --bind 127.0.0.1:50051\n");
     out.push_str("  red server --http --path ./data/reddb.rdb --bind 127.0.0.1:8080\n");
+    out.push_str("  sudo red service install --binary /usr/local/bin/red --grpc --path /var/lib/reddb/data.rdb --bind 0.0.0.0:50051\n");
     out.push_str("  red replica --primary-addr http://primary:50051 --path ./data/replica.rdb\n");
     out.push_str("  red query \"SELECT * FROM users\"\n");
     out.push_str("  red insert users '{\"name\": \"Alice\"}'\n");
@@ -305,6 +312,32 @@ fn replica_flags() -> Vec<FlagSchema> {
     ]
 }
 
+fn service_flags() -> Vec<FlagSchema> {
+    vec![
+        FlagSchema::new("binary")
+            .with_description("Path to the red binary")
+            .with_default("/usr/local/bin/red"),
+        FlagSchema::new("service-name")
+            .with_description("systemd unit name")
+            .with_default("reddb"),
+        FlagSchema::new("user")
+            .with_description("Service user")
+            .with_default("reddb"),
+        FlagSchema::new("group")
+            .with_description("Service group")
+            .with_default("reddb"),
+        FlagSchema::new("path")
+            .with_short('d')
+            .with_description("Persistent database file path")
+            .with_default("/var/lib/reddb/data.rdb"),
+        FlagSchema::new("bind")
+            .with_short('b')
+            .with_description("Bind address (host:port); defaults by transport"),
+        FlagSchema::boolean("grpc").with_description("Install a gRPC service (default transport)"),
+        FlagSchema::boolean("http").with_description("Install an HTTP service"),
+    ]
+}
+
 fn query_flags() -> Vec<FlagSchema> {
     vec![FlagSchema::new("bind")
         .with_short('b')
@@ -417,6 +450,7 @@ fn auth_flags() -> Vec<FlagSchema> {
 pub fn completion_domains() -> Vec<(String, Vec<String>)> {
     vec![
         ("server".to_string(), vec![]),
+        ("service".to_string(), vec![]),
         ("replica".to_string(), vec![]),
         ("tick".to_string(), vec![]),
         ("query".to_string(), vec!["q".to_string()]),

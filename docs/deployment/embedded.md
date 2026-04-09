@@ -1,34 +1,36 @@
 # Embedded Mode
 
-In embedded mode, RedDB runs as a Rust library inside your application process. No separate server, no network hop.
+Embedded mode runs RedDB inside your Rust process, without a separate server. Operationally, this is the closest RedDB gets to the "SQLite model": your application opens the database file directly and calls the API in-process.
 
-## Setup
+## When to choose embedded mode
 
-```toml
-[dependencies]
-reddb = { version = "0.1", features = ["query-vector", "query-graph"] }
-```
+- you want zero network hops
+- your app owns the database lifecycle
+- you are building a CLI, desktop app, worker, or edge service
+- you want simple local deployment with one process
 
-## Usage
+## Example
 
 ```rust
 use reddb::RedDB;
+use reddb::storage::schema::Value;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // In-memory
-    let db = RedDB::new();
+    let db = RedDB::open("./data/reddb.rdb")?;
 
-    // Or file-backed
-    // let db = RedDB::open("./data/reddb.rdb")?;
-
-    // Use directly
-    let id = db.row("users", vec![
-        ("name", reddb::Value::Text("Alice".into())),
+    db.row("users", vec![
+        ("name", Value::Text("Alice".into())),
+        ("active", Value::Boolean(true)),
     ]).save()?;
 
-    let results = db.query("SELECT * FROM users")?;
-    println!("{} users found", results.record_count);
+    let results = db.query()
+        .collection("users")
+        .where_prop("active", true)
+        .limit(10)
+        .execute()?;
 
+    println!("matched {}", results.len());
+    db.flush()?;
     Ok(())
 }
 ```
@@ -37,32 +39,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | Property | Value |
 |:---------|:------|
-| Latency | Nanoseconds (no network) |
-| Concurrency | Thread-safe with connection pool |
-| Persistence | Optional (file-backed or in-memory) |
-| Deployment | Single binary, no external processes |
+| Process model | In-process |
+| Latency profile | No network serialization |
+| Persistence | In-memory or file-backed |
+| Operational shape | Application-owned lifecycle |
 
-## When to Use
+## Maintenance
 
-- CLI tools that need local storage
-- Desktop applications with built-in database
-- Microservices with co-located data
-- Testing and development
-- Edge/IoT devices
-
-See [Embedded Rust API](/api/embedded.md) for the complete API reference.
-
-## TTL and Maintenance in Embedded Mode
-
-Embedded mode does not have a long-running process to trigger `red tick` automatically.
-You have two practical options:
-
-- Run maintenance inline at safe points (after write batches, before shutdown, or on startup).
-- Expose your own internal scheduler (thread, timer, or task queue) that calls:
+Embedded mode does not have a long-running RedDB server process to trigger maintenance on your behalf. Call it from your application where appropriate:
 
 ```rust
-let db = RedDB::open("data/reddb.rdb")?;
-db.enforce_retention_policy()?;
+use reddb::RedDB;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let db = RedDB::open("./data/reddb.rdb")?;
+    db.enforce_retention_policy()?;
+    db.flush()?;
+    Ok(())
+}
 ```
 
-Both options keep contracts unchanged and work for rows, nodes, edges, vectors, and any resource.
+For the full API surface, see [Embedded (Rust)](/api/embedded.md).

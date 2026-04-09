@@ -2,6 +2,37 @@
 
 Tables are the structured, relational face of RedDB. Each row is an entity with typed fields, stored in a named collection.
 
+## SQL First
+
+If you are thinking in SQL, tables are the most direct RedDB model.
+
+Typical flow:
+
+```sql
+CREATE TABLE users (
+  name Text NOT NULL,
+  email Text,
+  age Integer,
+  active Boolean DEFAULT true
+)
+
+INSERT INTO users (name, email, age, active)
+VALUES ('Alice', 'alice@example.com', 30, true)
+
+SELECT name, email, age
+FROM users
+WHERE age >= 21 AND active = true
+ORDER BY name
+LIMIT 10
+
+UPDATE users
+SET age = 31
+WHERE name = 'Alice'
+
+DELETE FROM users
+WHERE active = false
+```
+
 ## Creating Rows
 
 <!-- tabs:start -->
@@ -53,6 +84,24 @@ Use SQL-like syntax to query rows:
 SELECT * FROM users WHERE age > 21 AND active = true ORDER BY name LIMIT 10
 ```
 
+More examples:
+
+```sql
+SELECT name, email FROM users
+```
+
+```sql
+SELECT * FROM users WHERE email IS NOT NULL ORDER BY age DESC LIMIT 20
+```
+
+```sql
+SELECT * FROM users WHERE name LIKE '%ali%'
+```
+
+```sql
+SELECT * FROM users WHERE age BETWEEN 18 AND 65
+```
+
 Via HTTP:
 
 ```bash
@@ -75,6 +124,12 @@ Or via SQL:
 UPDATE users SET age = 31 WHERE name = 'Alice'
 ```
 
+```sql
+UPDATE users
+SET active = false, age = 32
+WHERE email = 'alice@example.com'
+```
+
 ## Deleting Rows
 
 ```bash
@@ -85,6 +140,31 @@ Or via SQL:
 
 ```sql
 DELETE FROM users WHERE name = 'Alice'
+```
+
+```sql
+DELETE FROM users WHERE active = false
+```
+
+## Creating Tables with DDL
+
+If you want schema upfront instead of implicit collection creation:
+
+```sql
+CREATE TABLE hosts (
+  ip IpAddr NOT NULL,
+  hostname Text NOT NULL,
+  os Text,
+  critical Boolean DEFAULT false,
+  last_seen Timestamp
+)
+```
+
+```sql
+CREATE TABLE sessions (
+  token Text NOT NULL,
+  user_id Text NOT NULL
+) WITH TTL 60m
 ```
 
 ## Bulk Insert
@@ -107,6 +187,12 @@ Paginate through all rows in a collection:
 
 ```bash
 curl "http://127.0.0.1:8080/collections/users/scan?offset=0&limit=50"
+```
+
+If you prefer staying in SQL:
+
+```sql
+SELECT * FROM users ORDER BY _entity_id ASC LIMIT 50 OFFSET 0
 ```
 
 ## Row Envelope

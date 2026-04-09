@@ -1,20 +1,19 @@
 # Quick Start
 
-This guide walks you through storing and querying multi-model data in RedDB in under 5 minutes.
+This guide gets RedDB running, writes multiple data shapes, and shows how to query them back.
 
-## 1. Start the Server
+## 1. Start RedDB
+
+Start an HTTP server:
 
 ```bash
 mkdir -p ./data
 red server --http --path ./data/reddb.rdb --bind 127.0.0.1:8080
 ```
 
-> [!TIP]
-> Drop `--path` for a purely in-memory database that requires no disk.
+If you want an ephemeral database for testing, omit `--path`.
 
-## 2. Create a Table Row
-
-Insert a structured row into the `hosts` collection:
+## 2. Write a row
 
 ```bash
 curl -X POST http://127.0.0.1:8080/collections/hosts/rows \
@@ -28,144 +27,105 @@ curl -X POST http://127.0.0.1:8080/collections/hosts/rows \
   }'
 ```
 
-Response:
-
-```json
-{
-  "ok": true,
-  "id": 1,
-  "entity": {
-    "_entity_id": 1,
-    "_collection": "hosts",
-    "_kind": "row",
-    "ip": "10.0.0.1",
-    "os": "linux",
-    "critical": true
-  }
-}
-```
-
-## 3. Create a Graph Node
+## 3. Write a graph node
 
 ```bash
 curl -X POST http://127.0.0.1:8080/collections/network/nodes \
   -H 'content-type: application/json' \
   -d '{
-    "label": "web-server-01",
+    "label": "host-10.0.0.1",
     "node_type": "host",
     "properties": {
       "ip": "10.0.0.1",
-      "datacenter": "us-east"
+      "environment": "prod"
     }
   }'
 ```
 
-## 4. Create a Graph Edge
-
-Link two nodes with a relationship:
-
-```bash
-curl -X POST http://127.0.0.1:8080/collections/network/edges \
-  -H 'content-type: application/json' \
-  -d '{
-    "label": "CONNECTS_TO",
-    "from": 1,
-    "to": 2,
-    "weight": 1.0,
-    "properties": {
-      "protocol": "tcp",
-      "port": 443
-    }
-  }'
-```
-
-## 5. Insert a Vector Embedding
+## 4. Write a vector
 
 ```bash
 curl -X POST http://127.0.0.1:8080/collections/embeddings/vectors \
   -H 'content-type: application/json' \
   -d '{
-    "dense": [0.12, 0.91, 0.44, 0.33, 0.67],
-    "content": "web server running nginx on port 443",
+    "dense": [0.12, 0.91, 0.44],
+    "content": "prod linux host running ssh",
     "metadata": {
-      "source": "scan-2024-01"
+      "source": "inventory"
     }
   }'
 ```
 
-## 6. Query with SQL
+## 5. Query with SQL-style syntax
 
 ```bash
 curl -X POST http://127.0.0.1:8080/query \
   -H 'content-type: application/json' \
-  -d '{"query": "SELECT * FROM hosts WHERE critical = true"}'
+  -d '{"query":"SELECT * FROM hosts WHERE critical = true"}'
 ```
 
-Response envelope:
-
-```json
-{
-  "ok": true,
-  "mode": "sql",
-  "engine": "table",
-  "columns": ["_entity_id", "_collection", "_kind", "ip", "os", "critical"],
-  "record_count": 1,
-  "records": [
-    {
-      "_entity_id": 1,
-      "_collection": "hosts",
-      "_kind": "row",
-      "ip": "10.0.0.1",
-      "os": "linux",
-      "critical": true
-    }
-  ]
-}
-```
-
-## 7. Universal Query (FROM ANY)
-
-Query across all entity types at once:
+## 6. Query across models
 
 ```bash
 curl -X POST http://127.0.0.1:8080/query \
   -H 'content-type: application/json' \
-  -d '{"query": "FROM ANY ORDER BY _score DESC LIMIT 10"}'
+  -d '{"query":"FROM ANY ORDER BY _score DESC LIMIT 10"}'
 ```
 
-This returns rows, nodes, edges, and vectors from all collections in a single result set.
+`FROM ANY` is the shortest way to ask RedDB for a cross-model result set.
 
-## 8. Check Health
+## 7. Check health
 
 ```bash
-curl -s http://127.0.0.1:8080/health | python3 -m json.tool
+curl -s http://127.0.0.1:8080/health
+curl -s http://127.0.0.1:8080/ready
+curl -s http://127.0.0.1:8080/stats
 ```
 
-```json
-{
-  "healthy": true,
-  "state": "running",
-  "checked_at": "2024-01-15T10:30:00Z"
+## 8. Optional: connect over gRPC
+
+Start a second server in gRPC mode:
+
+```bash
+red server --grpc --path ./data/reddb.rdb --bind 127.0.0.1:50051
+```
+
+Then connect with the CLI:
+
+```bash
+red connect 127.0.0.1:50051
+```
+
+## 9. Optional: use it embedded instead
+
+If you want RedDB in-process, open the same kind of file directly from Rust:
+
+```rust
+use reddb::RedDB;
+use reddb::storage::schema::Value;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let db = RedDB::open("./data/reddb.rdb")?;
+
+    db.row("hosts", vec![
+        ("ip", Value::Text("10.0.0.1".into())),
+        ("critical", Value::Boolean(true)),
+    ]).save()?;
+
+    let results = db.query()
+        .collection("hosts")
+        .where_prop("critical", true)
+        .execute()?;
+
+    println!("matched {}", results.len());
+    db.flush()?;
+    Ok(())
 }
 ```
 
-## 9. Bulk Insert
+## What next
 
-Insert many rows at once for better throughput:
-
-```bash
-curl -X POST http://127.0.0.1:8080/collections/hosts/bulk/rows \
-  -H 'content-type: application/json' \
-  -d '[
-    {"fields": {"ip": "10.0.0.2", "os": "windows", "critical": false}},
-    {"fields": {"ip": "10.0.0.3", "os": "linux", "critical": true}},
-    {"fields": {"ip": "10.0.0.4", "os": "macos", "critical": false}}
-  ]'
-```
-
-## What's Next?
-
-- [Data Models](/data-models/tables.md) -- Learn about each entity type in depth
-- [Query Language](/query/select.md) -- Full SELECT syntax and operators
-- [gRPC API](/api/grpc.md) -- All 116 RPC endpoints
-- [Configuration](/getting-started/configuration.md) -- Server flags, env vars, and storage modes
+- [Installation](/getting-started/installation.md)
+- [Connect](/getting-started/connect.md)
+- [HTTP API](/api/http.md)
+- [Embedded API](/api/embedded.md)

@@ -2,6 +2,41 @@
 
 Documents store semi-structured JSON payloads with optional metadata. They are ideal for configuration objects, event logs, API responses, and any data that doesn't fit a rigid table schema.
 
+## SQL First
+
+Documents are still queryable with SQL-style reads because RedDB flattens top-level fields from the document body into queryable columns.
+
+Typical flow:
+
+```sql
+SELECT * FROM events
+```
+
+```sql
+SELECT event_type, user_id, timestamp
+FROM events
+WHERE event_type = 'login'
+ORDER BY timestamp DESC
+LIMIT 20
+```
+
+```sql
+SELECT title, category
+FROM articles
+WHERE published = true
+ORDER BY _entity_id DESC
+LIMIT 10
+```
+
+If you want to search documents across collections, use the universal envelope:
+
+```sql
+FROM ANY
+WHERE _kind = 'document' AND _collection = 'events'
+ORDER BY _entity_id DESC
+LIMIT 20
+```
+
 ## Creating Documents
 
 <!-- tabs:start -->
@@ -72,10 +107,50 @@ A document entity consists of:
 
 ## Querying Documents
 
-Documents are queryable through the universal query engine:
+Documents are queryable both as collection-scoped SQL reads and through the universal query engine.
+
+Collection-scoped examples:
+
+```sql
+SELECT * FROM events
+```
+
+```sql
+SELECT event_type, user_id, body
+FROM events
+WHERE event_type = 'login'
+LIMIT 20
+```
+
+```sql
+SELECT title, index
+FROM doc_multi
+WHERE index >= 2
+ORDER BY index DESC
+```
+
+Universal examples:
 
 ```sql
 FROM ANY WHERE _kind = 'document' AND _collection = 'events' LIMIT 20
+```
+
+```sql
+FROM ANY
+WHERE _kind = 'document'
+  AND _collection = 'events'
+  AND event_type = 'login'
+LIMIT 20
+```
+
+This works best when the fields you need are at the top level of the document body.
+
+Via HTTP:
+
+```bash
+curl -X POST http://127.0.0.1:8080/query \
+  -H 'content-type: application/json' \
+  -d '{"query":"SELECT event_type, user_id, body FROM events WHERE event_type = '\''login'\'' LIMIT 20"}'
 ```
 
 ## Updating Documents
@@ -107,6 +182,25 @@ curl -X DELETE http://127.0.0.1:8080/collections/events/entities/42
 - **Configuration**: Application config objects that change over time
 - **API caching**: Cache external API responses with metadata
 - **Content storage**: Blog posts, articles, CMS content with flexible schemas
+
+## Practical SQL Patterns
+
+Query the flattened fields:
+
+```sql
+SELECT name, age, active
+FROM doc_flatten
+WHERE active = true
+```
+
+Keep the full JSON body in the result:
+
+```sql
+SELECT title, body
+FROM articles
+WHERE category = 'database'
+LIMIT 10
+```
 
 > [!TIP]
 > Documents and rows can coexist in the same collection. Use `FROM ANY` queries to search across both shapes.

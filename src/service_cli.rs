@@ -1,5 +1,6 @@
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
+use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
@@ -67,6 +68,30 @@ pub struct ServerCommandConfig {
     pub workers: Option<usize>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SystemdServiceConfig {
+    pub service_name: String,
+    pub binary_path: PathBuf,
+    pub run_user: String,
+    pub run_group: String,
+    pub data_path: PathBuf,
+    pub bind_addr: String,
+    pub transport: ServerTransport,
+}
+
+impl SystemdServiceConfig {
+    pub fn data_dir(&self) -> PathBuf {
+        self.data_path
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    pub fn unit_path(&self) -> PathBuf {
+        PathBuf::from(format!("/etc/systemd/system/{}.service", self.service_name))
+    }
+}
+
 impl ServerCommandConfig {
     fn to_db_options(&self) -> RedDBOptions {
         let mut options = match &self.path {
@@ -101,6 +126,186 @@ impl ServerCommandConfig {
 
         options
     }
+}
+
+pub fn render_systemd_unit(config: &SystemdServiceConfig) -> String {
+    let data_dir = config.data_dir();
+    format!(
+        "[Unit]\n\
+Description=RedDB unified database service\n\
+After=network-online.target\n\
+Wants=network-online.target\n\
+\n\
+[Service]\n\
+Type=simple\n\
+User={user}\n\
+Group={group}\n\
+WorkingDirectory={workdir}\n\
+ExecStart={binary} server --{transport} --path {data_path} --bind {bind_addr}\n\
+Restart=always\n\
+RestartSec=2\n\
+LimitSTACK=16M\n\
+NoNewPrivileges=true\n\
+PrivateTmp=true\n\
+ProtectSystem=strict\n\
+ProtectHome=true\n\
+ProtectControlGroups=true\n\
+ProtectKernelTunables=true\n\
+ProtectKernelModules=true\n\
+RestrictNamespaces=true\n\
+LockPersonality=true\n\
+MemoryDenyWriteExecute=true\n\
+ReadWritePaths={workdir}\n\
+\n\
+[Install]\n\
+WantedBy=multi-user.target\n",
+        user = config.run_user,
+        group = config.run_group,
+        workdir = data_dir.display(),
+        binary = config.binary_path.display(),
+        transport = match config.transport {
+            ServerTransport::Grpc => "grpc",
+            ServerTransport::Http => "http",
+        },
+        data_path = config.data_path.display(),
+        bind_addr = config.bind_addr,
+    )
+}
+
+pub fn install_systemd_service(config: &SystemdServiceConfig) -> Result<(), String> {
+    ensure_root()?;
+    ensure_command_available("systemctl")?;
+    ensure_command_available("getent")?;
+    ensure_command_available("groupadd")?;
+    ensure_command_available("useradd")?;
+    ensure_command_available("install")?;
+    ensure_executable(&config.binary_path)?;
+
+    if !command_success("getent", ["group", config.run_group.as_str()])? {
+        run_command("groupadd", ["--system", config.run_group.as_str()])?;
+    }
+
+    if !command_success("id", ["-u", config.run_user.as_str()])? {
+        let data_dir = config.data_dir();
+        run_command(
+            "useradd",
+            [
+                "--system",
+                "--gid",
+                config.run_group.as_str(),
+                "--home-dir",
+                data_dir.to_string_lossy().as_ref(),
+                "--shell",
+                "/usr/sbin/nologin",
+                config.run_user.as_str(),
+            ],
+        )?;
+    }
+
+    let data_dir = config.data_dir();
+    run_command(
+        "install",
+        [
+            "-d",
+            "-o",
+            config.run_user.as_str(),
+            "-g",
+            config.run_group.as_str(),
+            "-m",
+            "0750",
+            data_dir.to_string_lossy().as_ref(),
+        ],
+    )?;
+
+    std::fs::write(config.unit_path(), render_systemd_unit(config))
+        .map_err(|err| format!("failed to write systemd unit: {err}"))?;
+
+    run_command("systemctl", ["daemon-reload"])?;
+    run_command(
+        "systemctl",
+        [
+            "enable",
+            "--now",
+            format!("{}.service", config.service_name).as_str(),
+        ],
+    )?;
+
+    Ok(())
+}
+
+fn ensure_root() -> Result<(), String> {
+    let output = Command::new("id")
+        .arg("-u")
+        .output()
+        .map_err(|err| format!("failed to determine current uid: {err}"))?;
+    if !output.status.success() {
+        return Err("failed to determine current uid".to_string());
+    }
+    let uid = String::from_utf8_lossy(&output.stdout);
+    if uid.trim() != "0" {
+        return Err("run this command as root (sudo)".to_string());
+    }
+    Ok(())
+}
+
+fn ensure_command_available(command: &str) -> Result<(), String> {
+    let status = Command::new("sh")
+        .args(["-lc", &format!("command -v {command} >/dev/null 2>&1")])
+        .status()
+        .map_err(|err| format!("failed to check command '{command}': {err}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("required command not found: {command}"))
+    }
+}
+
+fn ensure_executable(path: &std::path::Path) -> Result<(), String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|err| format!("binary not found '{}': {err}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err(format!("binary is not executable: {}", path.display()));
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        if !metadata.is_file() {
+            return Err(format!("binary is not a file: {}", path.display()));
+        }
+    }
+    Ok(())
+}
+
+fn command_success<const N: usize>(program: &str, args: [&str; N]) -> Result<bool, String> {
+    Command::new(program)
+        .args(args)
+        .status()
+        .map(|status| status.success())
+        .map_err(|err| format!("failed to run {program}: {err}"))
+}
+
+fn run_command<const N: usize>(program: &str, args: [&str; N]) -> Result<(), String> {
+    let output = Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|err| format!("failed to run {program}: {err}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if !stderr.is_empty() {
+        stderr
+    } else if !stdout.is_empty() {
+        stdout
+    } else {
+        format!("exit status {}", output.status)
+    };
+    Err(format!("{program} failed: {detail}"))
 }
 
 pub fn run_server_with_large_stack(config: ServerCommandConfig) -> Result<(), String> {
@@ -180,4 +385,45 @@ fn run_grpc_server(config: ServerCommandConfig) -> Result<(), String> {
         );
         server.serve().await.map_err(|err| err.to_string())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_systemd_unit_contains_expected_execstart() {
+        let config = SystemdServiceConfig {
+            service_name: "reddb".to_string(),
+            binary_path: PathBuf::from("/usr/local/bin/red"),
+            run_user: "reddb".to_string(),
+            run_group: "reddb".to_string(),
+            data_path: PathBuf::from("/var/lib/reddb/data.rdb"),
+            bind_addr: "0.0.0.0:50051".to_string(),
+            transport: ServerTransport::Grpc,
+        };
+
+        let unit = render_systemd_unit(&config);
+        assert!(unit.contains("ExecStart=/usr/local/bin/red server --grpc"));
+        assert!(unit.contains("ReadWritePaths=/var/lib/reddb"));
+    }
+
+    #[test]
+    fn systemd_service_config_derives_paths() {
+        let config = SystemdServiceConfig {
+            service_name: "reddb-api".to_string(),
+            binary_path: PathBuf::from("/usr/local/bin/red"),
+            run_user: "reddb".to_string(),
+            run_group: "reddb".to_string(),
+            data_path: PathBuf::from("/srv/reddb/live/data.rdb"),
+            bind_addr: "127.0.0.1:8080".to_string(),
+            transport: ServerTransport::Http,
+        };
+
+        assert_eq!(config.data_dir(), PathBuf::from("/srv/reddb/live"));
+        assert_eq!(
+            config.unit_path(),
+            PathBuf::from("/etc/systemd/system/reddb-api.service")
+        );
+    }
 }

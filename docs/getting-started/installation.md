@@ -1,46 +1,109 @@
 # Installation
 
-RedDB ships as a single binary called `red`. There are several ways to install it.
+RedDB ships as a single binary called `red`, and it can also be used through the `reddb` npm wrapper or as a Rust dependency for embedded mode.
 
-## Quick Install (Script)
+## Install from GitHub Releases
 
-The fastest way to install the latest stable release:
+### Recommended: installer script
+
+The installer resolves the correct GitHub Release asset for your platform:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/forattini-dev/reddb/main/install.sh | bash
 ```
 
-For pre-release (next channel):
+Install a specific version:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/forattini-dev/reddb/main/install.sh | bash -s -- --version v0.1.2
+```
+
+Install the prerelease channel:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/forattini-dev/reddb/main/install.sh | bash -s -- --channel next
 ```
 
-## Build from Source
-
-RedDB requires Rust 1.75+ and the `protoc` protobuf compiler.
+Change the install location:
 
 ```bash
-# Clone the repository
-git clone https://github.com/forattini-dev/reddb.git
-cd reddb
-
-# Build the release binary
-cargo build --release --bin red
-
-# Install to system path
-sudo install -m 0755 target/release/red /usr/local/bin/red
+curl -fsSL https://raw.githubusercontent.com/forattini-dev/reddb/main/install.sh | bash -s -- --install-dir "$HOME/.local/bin"
 ```
 
-Verify the installation:
+Verify:
 
 ```bash
 red version
 ```
 
-## Cargo (as a Library)
+### Manual release download
 
-To use RedDB as an embedded database in your Rust project:
+If you want to manage the binary yourself, download the asset for your OS and architecture from:
+
+`https://github.com/forattini-dev/reddb/releases`
+
+Then place `red` somewhere in your `PATH`:
+
+```bash
+chmod +x ./red
+sudo install -m 0755 ./red /usr/local/bin/red
+red version
+```
+
+## Install with `npx`
+
+The npm package wraps the real `red` binary and can install or download it for you.
+
+Install the managed binary:
+
+```bash
+npx reddb --install
+```
+
+Run a command with on-demand download:
+
+```bash
+npx reddb --auto-download -- version
+```
+
+Start an HTTP server through the wrapper:
+
+```bash
+npx reddb --auto-download -- server --http --path ./data/reddb.rdb --bind 127.0.0.1:8080
+```
+
+Show wrapper help:
+
+```bash
+npx reddb --sdk-help
+```
+
+If you use `pnpm`:
+
+```bash
+pnpm dlx reddb -- --version
+```
+
+## Build from source
+
+RedDB requires Rust and `protoc`.
+
+```bash
+git clone https://github.com/forattini-dev/reddb.git
+cd reddb
+cargo build --release --bin red
+./target/release/red version
+```
+
+Install the built binary:
+
+```bash
+sudo install -m 0755 target/release/red /usr/local/bin/red
+```
+
+## Use as an embedded Rust dependency
+
+For in-process usage, add `reddb` to your project:
 
 ```toml
 [dependencies]
@@ -54,12 +117,12 @@ Optional feature flags:
 | `query-vector` | Enable vector similarity queries |
 | `query-graph` | Enable graph traversal and analytics queries |
 | `query-fulltext` | Enable full-text search |
-| `encryption` | Enable AES-256-GCM encryption at rest |
+| `encryption` | Enable encryption at rest |
 | `backend-s3` | Enable S3-compatible remote storage |
-| `backend-turso` | Enable Turso (libSQL) as a remote backend |
-| `backend-d1` | Enable Cloudflare D1 as a remote backend |
+| `backend-turso` | Enable Turso/libSQL backend integration |
+| `backend-d1` | Enable Cloudflare D1 backend integration |
 
-Example with features enabled:
+Example:
 
 ```toml
 [dependencies]
@@ -68,13 +131,13 @@ reddb = { version = "0.1", features = ["query-vector", "query-graph", "encryptio
 
 ## Docker
 
-Pull and run the pre-built image:
+Build the image locally:
 
 ```bash
 docker build -t reddb .
 ```
 
-Run an HTTP server:
+Run HTTP:
 
 ```bash
 docker run --rm -it \
@@ -83,7 +146,7 @@ docker run --rm -it \
   reddb red server --http --path /data/reddb.rdb --bind 0.0.0.0:8080
 ```
 
-Run a gRPC server:
+Run gRPC:
 
 ```bash
 docker run --rm -it \
@@ -92,11 +155,7 @@ docker run --rm -it \
   reddb red server --grpc --path /data/reddb.rdb --bind 0.0.0.0:50051
 ```
 
-See [Docker Deployment](/deployment/docker.md) for production configurations.
-
-## Systemd Service (Linux)
-
-Install as a system service that auto-starts on boot:
+## Linux service install
 
 ```bash
 sudo ./scripts/install-systemd-service.sh \
@@ -106,20 +165,6 @@ sudo ./scripts/install-systemd-service.sh \
   --bind 0.0.0.0:50051
 ```
 
-This configures `Restart=always` and `systemctl enable` for the unit.
+## Next step
 
-## Verify Installation
-
-```bash
-# Check version
-red version
-
-# Start an in-memory server for testing
-red server --http --bind 127.0.0.1:8080
-
-# In another terminal, check health
-curl http://127.0.0.1:8080/health
-```
-
-> [!TIP]
-> For development, omit the `--path` flag to run entirely in-memory. No files are created.
+After installation, go to [Connect](/getting-started/connect.md) to choose HTTP, gRPC, CLI, or embedded mode.
