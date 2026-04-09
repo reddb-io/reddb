@@ -4,11 +4,14 @@ This guide gets RedDB running, writes multiple data shapes, and shows how to que
 
 ## 1. Start RedDB
 
-Start an HTTP server:
+Start RedDB with both remote APIs in one process:
 
 ```bash
 mkdir -p ./data
-red server --http --path ./data/reddb.rdb --bind 127.0.0.1:8080
+red server \
+  --path ./data/reddb.rdb \
+  --grpc-bind 127.0.0.1:50051 \
+  --http-bind 127.0.0.1:8080
 ```
 
 If you want an ephemeral database for testing, omit `--path`.
@@ -83,12 +86,6 @@ curl -s http://127.0.0.1:8080/stats
 ```
 
 ## 8. Optional: connect over gRPC
-
-Start a second server in gRPC mode:
-
-```bash
-red server --grpc --path ./data/reddb.rdb --bind 127.0.0.1:50051
-```
 
 Then connect with the CLI:
 

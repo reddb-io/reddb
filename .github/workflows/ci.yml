@@ -42,3 +42,40 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked --verbose
+
+  containers:
+    name: Container Stack
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and start primary + replica
+        run: docker compose up -d --build
+      - name: Wait for HTTP health endpoints
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8080/health >/dev/null && curl -fsS http://127.0.0.1:8081/health >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose ps
+          docker compose logs
+          exit 1
+      - name: Verify gRPC listeners inside containers
+        run: |
+          docker compose exec -T primary /usr/local/bin/red health --grpc --bind 127.0.0.1:50051
+          docker compose exec -T replica /usr/local/bin/red health --grpc --bind 127.0.0.1:50051
+      - name: Verify primary and replica respond over HTTP
+        run: |
+          curl -fsS http://127.0.0.1:8080/health
+          curl -fsS http://127.0.0.1:8081/health
+      - name: Show container status
+        if: always()
+        run: docker compose ps
+      - name: Dump container logs
+        if: failure()
+        run: docker compose logs
+      - name: Tear down stack
+        if: always()
+        run: docker compose down -v

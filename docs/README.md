@@ -73,15 +73,15 @@ npx reddb-cli@latest version
 Start RedDB through `npx`:
 
 ```bash
-npx reddb-cli@latest server --http --path ./data/reddb.rdb --bind 127.0.0.1:8080
+npx reddb-cli@latest server --path ./data/reddb.rdb --grpc-bind 127.0.0.1:50051 --http-bind 127.0.0.1:8080
 ```
 
 ## First connection
 
-### HTTP
+### Local dev
 
 ```bash
-red server --http --path ./data/reddb.rdb --bind 127.0.0.1:8080
+red server --path ./data/reddb.rdb --grpc-bind 127.0.0.1:50051 --http-bind 127.0.0.1:8080
 ```
 
 ```bash
@@ -94,11 +94,7 @@ curl -X POST http://127.0.0.1:8080/query \
   -d '{"query":"SELECT * FROM hosts"}'
 ```
 
-### gRPC + CLI REPL
-
-```bash
-red server --grpc --path ./data/reddb.rdb --bind 127.0.0.1:50051
-```
+The same process also exposes gRPC for the CLI REPL:
 
 ```bash
 red connect 127.0.0.1:50051

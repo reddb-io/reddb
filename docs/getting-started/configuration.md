@@ -11,14 +11,27 @@ red server [flags]
 | Flag | Short | Description | Default |
 |:-----|:------|:------------|:--------|
 | `--path` | `-d` | Persistent database file path (omit for in-memory) | `./data/reddb.rdb` |
-| `--bind` | `-b` | Bind address `host:port` | `127.0.0.1:50051` (gRPC) or `127.0.0.1:8080` (HTTP) |
-| `--grpc` | | Serve the gRPC API (default transport) | `true` |
-| `--http` | | Serve the HTTP API | `false` |
+| `--bind` | `-b` | Legacy single-transport bind address `host:port` | `127.0.0.1:50051` |
+| `--grpc` | | Enable the gRPC API | disabled unless selected explicitly or by default fallback |
+| `--http` | | Enable the HTTP API | `false` |
+| `--grpc-bind` | | Explicit gRPC bind address `host:port` | |
+| `--http-bind` | | Explicit HTTP bind address `host:port` | |
 | `--role` | `-r` | Replication role: `standalone`, `primary`, `replica` | `standalone` |
 | `--primary-addr` | | Primary gRPC address for replica mode | |
 | `--read-only` | | Open database in read-only mode | `false` |
 | `--no-create-if-missing` | | Fail if database file doesn't exist | `false` |
 | `--vault` | | Enable encrypted auth vault | `false` |
+
+Recommended pattern:
+
+```bash
+red server \
+  --path ./data/reddb.rdb \
+  --grpc-bind 127.0.0.1:50051 \
+  --http-bind 127.0.0.1:8080
+```
+
+Use `--bind` only when you want a single transport and do not care about the other one.
 
 ## Storage Modes
 
@@ -35,7 +48,7 @@ red server --http --bind 127.0.0.1:8080
 Specify `--path` to persist data to disk with WAL-based durability:
 
 ```bash
-red server --http --path ./data/reddb.rdb --bind 127.0.0.1:8080
+red server --path ./data/reddb.rdb --grpc-bind 127.0.0.1:50051 --http-bind 127.0.0.1:8080
 ```
 
 ### Read-Only
@@ -67,7 +80,11 @@ curl http://127.0.0.1:8080/deployment/profiles?profile=server
 ### Primary Mode
 
 ```bash
-red server --grpc --path ./data/primary.rdb --role primary --bind 0.0.0.0:50051
+red server \
+  --path ./data/primary.rdb \
+  --role primary \
+  --grpc-bind 0.0.0.0:50051 \
+  --http-bind 0.0.0.0:8080
 ```
 
 ### Replica Mode
@@ -76,7 +93,8 @@ red server --grpc --path ./data/primary.rdb --role primary --bind 0.0.0.0:50051
 red replica \
   --primary-addr http://primary-host:50051 \
   --path ./data/replica.rdb \
-  --http --bind 0.0.0.0:8080
+  --grpc-bind 0.0.0.0:50051 \
+  --http-bind 0.0.0.0:8080
 ```
 
 Check replication status:

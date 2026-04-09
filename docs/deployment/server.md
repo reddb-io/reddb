@@ -5,22 +5,24 @@ In server mode, RedDB runs as a standalone process exposing HTTP and/or gRPC API
 ## Starting
 
 ```bash
-# HTTP server
+# Recommended: one process, both APIs
+red server \
+  --path ./data/reddb.rdb \
+  --grpc-bind 0.0.0.0:50051 \
+  --http-bind 0.0.0.0:8080
+
+# HTTP only
 red server --http --path ./data/reddb.rdb --bind 0.0.0.0:8080
 
-# gRPC server
+# gRPC only
 red server --grpc --path ./data/reddb.rdb --bind 0.0.0.0:50051
-
-# Both (two processes)
-red server --http --path ./data/reddb.rdb --bind 0.0.0.0:8080 &
-red server --grpc --path ./data/reddb.rdb --bind 0.0.0.0:50051 &
 ```
 
 ## Characteristics
 
 | Property | Value |
 |:---------|:------|
-| Transport | HTTP or gRPC |
+| Transport | HTTP, gRPC, or both in one process |
 | Latency | Microseconds (network) |
 | Concurrency | Connection pool + async runtime |
 | Persistence | File-backed with WAL |
@@ -41,11 +43,11 @@ red server --grpc --path ./data/reddb.rdb --bind 0.0.0.0:50051 &
 Install as a system service:
 
 ```bash
-sudo ./scripts/install-systemd-service.sh \
+sudo red service install \
   --binary /usr/local/bin/red \
-  --http \
   --path /var/lib/reddb/data.rdb \
-  --bind 0.0.0.0:8080
+  --grpc-bind 0.0.0.0:50051 \
+  --http-bind 0.0.0.0:8080
 ```
 
 ## Health Monitoring

@@ -78,6 +78,8 @@
   - [Remote Backends (S3, R2, Turso, D1)](/deployment/backends.md)
 
 - **Guides**
+  - [Local Dev with Docker](/guides/local-dev-docker.md)
+  - [Read Replica Tutorial](/guides/read-replica-tutorial.md)
   - [Building a REST API](/guides/rest-api.md)
   - [Vector Search App](/guides/vector-search.md)
   - [Graph Analytics](/guides/graph-analytics.md)

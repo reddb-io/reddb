@@ -71,13 +71,13 @@ pub fn all_commands() -> Vec<CommandDef> {
     CommandDef {
       name: "server",
       summary: "Start the database server",
-      usage: "red server [--grpc|--http] [--path ./data/reddb.rdb] [--bind 127.0.0.1:50051]",
+      usage: "red server [--grpc] [--http] [--grpc-bind 127.0.0.1:50051] [--http-bind 127.0.0.1:8080] [--path ./data/reddb.rdb]",
       flags: server_flags(),
     },
     CommandDef {
       name: "service",
       summary: "Install or inspect a systemd service",
-      usage: "red service <install|print-unit> [--binary /usr/local/bin/red] [--grpc|--http] [--path /var/lib/reddb/data.rdb] [--bind 0.0.0.0:50051]",
+      usage: "red service <install|print-unit> [--binary /usr/local/bin/red] [--grpc-bind 0.0.0.0:50051] [--http-bind 0.0.0.0:8080] [--path /var/lib/reddb/data.rdb]",
       flags: service_flags(),
     },
     CommandDef {
@@ -119,7 +119,7 @@ pub fn all_commands() -> Vec<CommandDef> {
     CommandDef {
       name: "replica",
       summary: "Start as a read replica connected to a primary",
-      usage: "red replica --primary-addr http://primary:50051 [--grpc|--http] [--path ./data/reddb.rdb]",
+      usage: "red replica --primary-addr http://primary:50051 [--grpc] [--http] [--grpc-bind 127.0.0.1:50051] [--http-bind 127.0.0.1:8080] [--path ./data/reddb.rdb]",
       flags: replica_flags(),
     },
     CommandDef {
@@ -188,8 +188,8 @@ pub fn main_help_text() -> String {
 
     out.push_str("Examples:\n");
     out.push_str("  red server --grpc --path ./data/reddb.rdb --bind 127.0.0.1:50051\n");
-    out.push_str("  red server --http --path ./data/reddb.rdb --bind 127.0.0.1:8080\n");
-    out.push_str("  sudo red service install --binary /usr/local/bin/red --grpc --path /var/lib/reddb/data.rdb --bind 0.0.0.0:50051\n");
+    out.push_str("  red server --grpc-bind 127.0.0.1:50051 --http-bind 127.0.0.1:8080 --path ./data/reddb.rdb\n");
+    out.push_str("  sudo red service install --binary /usr/local/bin/red --grpc-bind 0.0.0.0:50051 --http-bind 0.0.0.0:8080 --path /var/lib/reddb/data.rdb\n");
     out.push_str("  red replica --primary-addr http://primary:50051 --path ./data/replica.rdb\n");
     out.push_str("  red query \"SELECT * FROM users\"\n");
     out.push_str("  red insert users '{\"name\": \"Alice\"}'\n");
@@ -264,32 +264,30 @@ pub fn command_help_text(name: &str) -> Option<String> {
 
 fn server_flags() -> Vec<FlagSchema> {
     vec![
-    FlagSchema::new("path")
-      .with_short('d')
-      .with_description("Persistent database file path (omit for in-memory)")
-      .with_default("./data/reddb.rdb"),
-    FlagSchema::new("bind")
-      .with_short('b')
-      .with_description("Bind address (host:port); defaults to 127.0.0.1:50051 for gRPC or 127.0.0.1:8080 for HTTP"),
-    FlagSchema::boolean("grpc")
-      .with_description("Serve the gRPC API (default transport)"),
-    FlagSchema::boolean("http")
-      .with_description("Serve the HTTP API"),
-    FlagSchema::new("role")
-      .with_short('r')
-      .with_description("Replication role")
-      .with_choices(&["standalone", "primary", "replica"])
-      .with_default("standalone"),
-    FlagSchema::new("primary-addr")
-      .with_description("Primary gRPC address for replica mode"),
-    FlagSchema::boolean("read-only")
-      .with_description("Open the database in read-only mode"),
-    FlagSchema::boolean("no-create-if-missing")
-      .with_description("Fail instead of creating the database file"),
-    FlagSchema::new("vault")
-      .with_description("Enable encrypted auth vault (reserved pages in main .rdb file)")
-      .with_default("false"),
-  ]
+        FlagSchema::new("path")
+            .with_short('d')
+            .with_description("Persistent database file path (omit for in-memory)")
+            .with_default("./data/reddb.rdb"),
+        FlagSchema::new("bind")
+            .with_short('b')
+            .with_description("Bind address (host:port) for legacy single-transport mode"),
+        FlagSchema::boolean("grpc").with_description("Enable the gRPC API"),
+        FlagSchema::boolean("http").with_description("Serve the HTTP API"),
+        FlagSchema::new("grpc-bind").with_description("Explicit gRPC bind address (host:port)"),
+        FlagSchema::new("http-bind").with_description("Explicit HTTP bind address (host:port)"),
+        FlagSchema::new("role")
+            .with_short('r')
+            .with_description("Replication role")
+            .with_choices(&["standalone", "primary", "replica"])
+            .with_default("standalone"),
+        FlagSchema::new("primary-addr").with_description("Primary gRPC address for replica mode"),
+        FlagSchema::boolean("read-only").with_description("Open the database in read-only mode"),
+        FlagSchema::boolean("no-create-if-missing")
+            .with_description("Fail instead of creating the database file"),
+        FlagSchema::new("vault")
+            .with_description("Enable encrypted auth vault (reserved pages in main .rdb file)")
+            .with_default("false"),
+    ]
 }
 
 fn replica_flags() -> Vec<FlagSchema> {
@@ -303,9 +301,11 @@ fn replica_flags() -> Vec<FlagSchema> {
             .with_default("./data/reddb.rdb"),
         FlagSchema::new("bind")
             .with_short('b')
-            .with_description("Bind address (host:port); defaults by transport"),
-        FlagSchema::boolean("grpc").with_description("Serve the gRPC API (default transport)"),
+            .with_description("Bind address (host:port) for legacy single-transport mode"),
+        FlagSchema::boolean("grpc").with_description("Enable the gRPC API"),
         FlagSchema::boolean("http").with_description("Serve the HTTP API"),
+        FlagSchema::new("grpc-bind").with_description("Explicit gRPC bind address (host:port)"),
+        FlagSchema::new("http-bind").with_description("Explicit HTTP bind address (host:port)"),
         FlagSchema::new("vault")
             .with_description("Enable encrypted auth vault (reserved pages in main .rdb file)")
             .with_default("false"),
@@ -332,9 +332,11 @@ fn service_flags() -> Vec<FlagSchema> {
             .with_default("/var/lib/reddb/data.rdb"),
         FlagSchema::new("bind")
             .with_short('b')
-            .with_description("Bind address (host:port); defaults by transport"),
-        FlagSchema::boolean("grpc").with_description("Install a gRPC service (default transport)"),
+            .with_description("Bind address (host:port) for legacy single-transport mode"),
+        FlagSchema::boolean("grpc").with_description("Enable the gRPC API in the service"),
         FlagSchema::boolean("http").with_description("Install an HTTP service"),
+        FlagSchema::new("grpc-bind").with_description("Explicit gRPC bind address (host:port)"),
+        FlagSchema::new("http-bind").with_description("Explicit HTTP bind address (host:port)"),
     ]
 }
 

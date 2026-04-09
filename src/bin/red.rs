@@ -173,11 +173,7 @@ fn main() {
                 std::process::exit(1);
             });
             if json_mode {
-                eprintln!(
-                    "{{\"ok\":true,\"command\":\"server\",\"data\":{{\"bind\":\"{}\",\"transport\":\"{}\"}}}}",
-                    json_escape(&config.bind_addr),
-                    json_escape(config.transport.as_str())
-                );
+                eprintln!("{}", server_command_json("server", &config));
             }
             if let Err(err) = run_server_with_large_stack(config) {
                 if json_mode {
@@ -216,11 +212,11 @@ fn main() {
                         json_ok(
                             "service.install",
                             &format!(
-                                "{{\"unit\":\"{}\",\"path\":\"{}\",\"transport\":\"{}\",\"bind\":\"{}\"}}",
+                                "{{\"unit\":\"{}\",\"path\":\"{}\",\"grpc_bind\":{},\"http_bind\":{}}}",
                                 json_escape(&unit_name),
                                 json_escape(&config.unit_path().display().to_string()),
-                                json_escape(config.transport.as_str()),
-                                json_escape(&config.bind_addr)
+                                json_optional_string(config.grpc_bind_addr.as_deref()),
+                                json_optional_string(config.http_bind_addr.as_deref())
                             ),
                         );
                     } else {
@@ -245,7 +241,7 @@ fn main() {
                     }
                 }
                 _ => {
-                    let help = "Usage: red service <install|print-unit> [flags]\n\nExamples:\n  sudo red service install --binary /usr/local/bin/red --grpc --path /var/lib/reddb/data.rdb --bind 0.0.0.0:50051\n  red service print-unit --http --path /var/lib/reddb/data.rdb --bind 127.0.0.1:8080\n";
+                    let help = "Usage: red service <install|print-unit> [flags]\n\nExamples:\n  sudo red service install --binary /usr/local/bin/red --grpc-bind 0.0.0.0:50051 --http-bind 0.0.0.0:8080 --path /var/lib/reddb/data.rdb\n  red service print-unit --http --path /var/lib/reddb/data.rdb --bind 127.0.0.1:8080\n";
                     if json_mode {
                         json_ok("service", "{\"subcommands\":[\"install\",\"print-unit\"]}");
                     } else {
@@ -266,11 +262,7 @@ fn main() {
                     std::process::exit(1);
                 });
             if json_mode {
-                eprintln!(
-                    "{{\"ok\":true,\"command\":\"replica\",\"data\":{{\"bind\":\"{}\",\"transport\":\"{}\"}}}}",
-                    json_escape(&config.bind_addr),
-                    json_escape(config.transport.as_str())
-                );
+                eprintln!("{}", server_command_json("replica", &config));
             }
             if let Err(err) = run_server_with_large_stack(config) {
                 if json_mode {
@@ -681,10 +673,13 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                     .with_default("./data/reddb.rdb"),
                 cli::types::FlagSchema::new("bind")
                     .with_short('b')
-                    .with_description("Bind address (host:port); defaults by transport"),
-                cli::types::FlagSchema::boolean("grpc")
-                    .with_description("Serve the gRPC API (default transport)"),
+                    .with_description("Bind address (host:port) for legacy single-transport mode"),
+                cli::types::FlagSchema::boolean("grpc").with_description("Enable the gRPC API"),
                 cli::types::FlagSchema::boolean("http").with_description("Serve the HTTP API"),
+                cli::types::FlagSchema::new("grpc-bind")
+                    .with_description("Explicit gRPC bind address (host:port)"),
+                cli::types::FlagSchema::new("http-bind")
+                    .with_description("Explicit HTTP bind address (host:port)"),
                 cli::types::FlagSchema::new("role")
                     .with_short('r')
                     .with_description("Server role")
@@ -711,13 +706,16 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                     .with_default("./data/reddb.rdb"),
                 cli::types::FlagSchema::new("bind")
                     .with_short('b')
-                    .with_description("Bind address (host:port); defaults by transport"),
+                    .with_description("Bind address (host:port) for legacy single-transport mode"),
                 cli::types::FlagSchema::new("primary-addr")
                     .with_short('p')
                     .with_description("Primary gRPC address for replication"),
-                cli::types::FlagSchema::boolean("grpc")
-                    .with_description("Serve the gRPC API (default transport)"),
+                cli::types::FlagSchema::boolean("grpc").with_description("Enable the gRPC API"),
                 cli::types::FlagSchema::boolean("http").with_description("Serve the HTTP API"),
+                cli::types::FlagSchema::new("grpc-bind")
+                    .with_description("Explicit gRPC bind address (host:port)"),
+                cli::types::FlagSchema::new("http-bind")
+                    .with_description("Explicit HTTP bind address (host:port)"),
                 cli::types::FlagSchema::boolean("vault")
                     .with_description("Enable the encrypted auth vault"),
             ]);
@@ -742,10 +740,14 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                     .with_default("/var/lib/reddb/data.rdb"),
                 cli::types::FlagSchema::new("bind")
                     .with_short('b')
-                    .with_description("Bind address (host:port); defaults by transport"),
+                    .with_description("Bind address (host:port) for legacy single-transport mode"),
                 cli::types::FlagSchema::boolean("grpc")
-                    .with_description("Install a gRPC service (default transport)"),
+                    .with_description("Enable the gRPC API in the service"),
                 cli::types::FlagSchema::boolean("http").with_description("Install an HTTP service"),
+                cli::types::FlagSchema::new("grpc-bind")
+                    .with_description("Explicit gRPC bind address (host:port)"),
+                cli::types::FlagSchema::new("http-bind")
+                    .with_description("Explicit HTTP bind address (host:port)"),
             ]);
         }
         Some("mcp") => {
@@ -833,13 +835,10 @@ fn build_server_config(
     flags: &HashMap<String, FlagValue>,
     forced_role: Option<&str>,
 ) -> Result<ServerCommandConfig, String> {
-    let transport = select_transport(flags)?;
+    let (grpc_bind_addr, http_bind_addr) = resolve_server_binds(flags)?;
     let path = flag_string(flags, "path")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
-    let bind_addr = flag_string(flags, "bind")
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| transport.default_bind_addr().to_string());
     let role = forced_role
         .map(|value| value.to_string())
         .or_else(|| flag_string(flags, "role"))
@@ -848,9 +847,9 @@ fn build_server_config(
     let workers = flag_string(flags, "workers").and_then(|v| v.parse::<usize>().ok());
 
     Ok(ServerCommandConfig {
-        transport,
         path,
-        bind_addr,
+        grpc_bind_addr,
+        http_bind_addr,
         create_if_missing: !flag_bool(flags, "no-create-if-missing"),
         read_only: flag_bool(flags, "read-only"),
         role,
@@ -863,7 +862,7 @@ fn build_server_config(
 fn build_systemd_service_config(
     flags: &HashMap<String, FlagValue>,
 ) -> Result<SystemdServiceConfig, String> {
-    let transport = select_transport(flags)?;
+    let (grpc_bind_addr, http_bind_addr) = resolve_server_binds(flags)?;
     let binary_path = flag_string(flags, "binary")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
@@ -872,9 +871,6 @@ fn build_systemd_service_config(
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/var/lib/reddb/data.rdb"));
-    let bind_addr = flag_string(flags, "bind")
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| transport.default_bind_addr().to_string());
 
     Ok(SystemdServiceConfig {
         service_name: flag_string(flags, "service-name")
@@ -888,9 +884,48 @@ fn build_systemd_service_config(
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "reddb".to_string()),
         data_path,
-        bind_addr,
-        transport,
+        grpc_bind_addr,
+        http_bind_addr,
     })
+}
+
+fn resolve_server_binds(
+    flags: &HashMap<String, FlagValue>,
+) -> Result<(Option<String>, Option<String>), String> {
+    let grpc = flag_bool(flags, "grpc");
+    let http = flag_bool(flags, "http");
+    let legacy_bind = flag_string(flags, "bind").filter(|value| !value.is_empty());
+    let mut grpc_bind = flag_string(flags, "grpc-bind").filter(|value| !value.is_empty());
+    let mut http_bind = flag_string(flags, "http-bind").filter(|value| !value.is_empty());
+
+    if legacy_bind.is_some() && (grpc_bind.is_some() || http_bind.is_some()) {
+        return Err("use either --bind or the explicit --grpc-bind/--http-bind flags".to_string());
+    }
+
+    if let Some(bind_addr) = legacy_bind {
+        match (grpc, http) {
+            (true, true) => {
+                return Err(
+                    "--bind is ambiguous when both --grpc and --http are enabled; use --grpc-bind and --http-bind".to_string(),
+                )
+            }
+            (false, true) => http_bind = Some(bind_addr),
+            _ => grpc_bind = Some(bind_addr),
+        }
+    } else {
+        if grpc {
+            grpc_bind.get_or_insert_with(|| ServerTransport::Grpc.default_bind_addr().to_string());
+        }
+        if http {
+            http_bind.get_or_insert_with(|| ServerTransport::Http.default_bind_addr().to_string());
+        }
+    }
+
+    if grpc_bind.is_none() && http_bind.is_none() {
+        grpc_bind = Some(ServerTransport::Grpc.default_bind_addr().to_string());
+    }
+
+    Ok((grpc_bind, http_bind))
 }
 
 fn select_transport(flags: &HashMap<String, FlagValue>) -> Result<ServerTransport, String> {
@@ -913,6 +948,22 @@ fn flag_bool(flags: &HashMap<String, FlagValue>, name: &str) -> bool {
 
 fn flag_string(flags: &HashMap<String, FlagValue>, name: &str) -> Option<String> {
     flags.get(name).map(|value| value.as_str_value())
+}
+
+fn json_optional_string(value: Option<&str>) -> String {
+    match value {
+        Some(value) => format!("\"{}\"", json_escape(value)),
+        None => "null".to_string(),
+    }
+}
+
+fn server_command_json(command: &str, config: &ServerCommandConfig) -> String {
+    format!(
+        "{{\"ok\":true,\"command\":\"{}\",\"data\":{{\"grpc_bind\":{},\"http_bind\":{}}}}}",
+        json_escape(command),
+        json_optional_string(config.grpc_bind_addr.as_deref()),
+        json_optional_string(config.http_bind_addr.as_deref()),
+    )
 }
 
 fn build_tick_payload(operations: Option<&str>, dry_run: bool) -> String {
@@ -1000,5 +1051,59 @@ fn post_json_to_http(bind_addr: &str, path: &str, payload: &str) -> Result<Strin
         Err(format!("server responded with {status}: {body}"))
     } else {
         Ok(body)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bool_flag(value: bool) -> FlagValue {
+        FlagValue::Bool(value)
+    }
+
+    fn str_flag(value: &str) -> FlagValue {
+        FlagValue::Str(value.to_string())
+    }
+
+    #[test]
+    fn resolve_server_binds_defaults_to_grpc() {
+        let flags = HashMap::new();
+        let (grpc_bind, http_bind) = resolve_server_binds(&flags).unwrap();
+        assert_eq!(grpc_bind.as_deref(), Some("127.0.0.1:50051"));
+        assert_eq!(http_bind, None);
+    }
+
+    #[test]
+    fn resolve_server_binds_supports_dual_stack_defaults() {
+        let flags = HashMap::from([
+            ("grpc".to_string(), bool_flag(true)),
+            ("http".to_string(), bool_flag(true)),
+        ]);
+        let (grpc_bind, http_bind) = resolve_server_binds(&flags).unwrap();
+        assert_eq!(grpc_bind.as_deref(), Some("127.0.0.1:50051"));
+        assert_eq!(http_bind.as_deref(), Some("127.0.0.1:8080"));
+    }
+
+    #[test]
+    fn resolve_server_binds_rejects_ambiguous_legacy_bind() {
+        let flags = HashMap::from([
+            ("grpc".to_string(), bool_flag(true)),
+            ("http".to_string(), bool_flag(true)),
+            ("bind".to_string(), str_flag("0.0.0.0:9999")),
+        ]);
+        let error = resolve_server_binds(&flags).unwrap_err();
+        assert!(error.contains("--bind is ambiguous"));
+    }
+
+    #[test]
+    fn resolve_server_binds_accepts_explicit_dual_addresses() {
+        let flags = HashMap::from([
+            ("grpc-bind".to_string(), str_flag("0.0.0.0:50051")),
+            ("http-bind".to_string(), str_flag("0.0.0.0:8080")),
+        ]);
+        let (grpc_bind, http_bind) = resolve_server_binds(&flags).unwrap();
+        assert_eq!(grpc_bind.as_deref(), Some("0.0.0.0:50051"));
+        assert_eq!(http_bind.as_deref(), Some("0.0.0.0:8080"));
     }
 }

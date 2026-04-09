@@ -18,7 +18,11 @@ flowchart LR
 ### Primary
 
 ```bash
-red server --grpc --path ./data/primary.rdb --role primary --bind 0.0.0.0:50051
+red server \
+  --path ./data/primary.rdb \
+  --role primary \
+  --grpc-bind 0.0.0.0:50051 \
+  --http-bind 0.0.0.0:8080
 ```
 
 ### Replica
@@ -27,8 +31,15 @@ red server --grpc --path ./data/primary.rdb --role primary --bind 0.0.0.0:50051
 red replica \
   --primary-addr http://primary-host:50051 \
   --path ./data/replica.rdb \
-  --http --bind 0.0.0.0:8080
+  --grpc-bind 0.0.0.0:50051 \
+  --http-bind 0.0.0.0:8080
 ```
+
+Recommended topology:
+
+- Primary exposes gRPC for replica streaming and HTTP for ops endpoints
+- Replicas expose gRPC for service clients and HTTP for health, query, and observability
+- All writes go to the primary
 
 ## How It Works
 
@@ -69,6 +80,7 @@ grpcurl -plaintext 127.0.0.1:50051 reddb.v1.RedDb/ReplicationSnapshot
 ## Docker Compose Example
 
 See [Docker Deployment](/deployment/docker.md) for a complete primary + replica Docker Compose setup.
+For a terminal-first walkthrough, see [Read Replica Tutorial](/guides/read-replica-tutorial.md).
 
 > [!NOTE]
 > Multi-region replication and automatic failover are planned for a future release. Currently, replication is single-region with manual failover.

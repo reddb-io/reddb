@@ -21,6 +21,7 @@ red <command> [args] [flags]
 | `replica` | Start as a read replica connected to a primary |
 | `status` | Show replication status |
 | `tick` | Run maintenance/reclaim tick operations |
+| `service` | Install or inspect a systemd service |
 | `mcp` | Start MCP server for AI agent integration |
 | `auth` | Manage authentication (users, tokens, roles) |
 | `connect` | Connect to a remote RedDB server (interactive REPL) |
@@ -42,15 +43,17 @@ red <command> [args] [flags]
 Start the database server.
 
 ```bash
-red server [--grpc|--http] [--path ./data/reddb.rdb] [--bind 127.0.0.1:50051]
+red server [--grpc] [--http] [--grpc-bind 127.0.0.1:50051] [--http-bind 127.0.0.1:8080] [--path ./data/reddb.rdb]
 ```
 
 | Flag | Short | Default | Description |
 |:-----|:------|:--------|:------------|
 | `--path` | `-d` | `./data/reddb.rdb` | Database file path (omit for in-memory) |
-| `--bind` | `-b` | by transport | Bind address `host:port` |
-| `--grpc` | | default | Serve gRPC API |
-| `--http` | | | Serve HTTP API |
+| `--bind` | `-b` | gRPC `127.0.0.1:50051` | Legacy single-transport bind address |
+| `--grpc` | | | Enable gRPC API |
+| `--http` | | | Enable HTTP API |
+| `--grpc-bind` | | | Explicit gRPC bind address |
+| `--http-bind` | | | Explicit HTTP bind address |
 | `--role` | `-r` | `standalone` | Replication role: `standalone`, `primary`, `replica` |
 | `--primary-addr` | | | Primary gRPC address (for replica mode) |
 | `--read-only` | | | Open in read-only mode |
@@ -60,14 +63,50 @@ red server [--grpc|--http] [--path ./data/reddb.rdb] [--bind 127.0.0.1:50051]
 Examples:
 
 ```bash
-# HTTP server with persistent storage
-red server --http --path ./data/reddb.rdb --bind 0.0.0.0:8080
+# Local dev with both APIs
+red server --path ./data/reddb.rdb --grpc-bind 127.0.0.1:50051 --http-bind 127.0.0.1:8080
 
-# gRPC server (in-memory)
-red server --grpc --bind 127.0.0.1:50051
+# HTTP-only server
+red server --http --bind 0.0.0.0:8080
 
 # Primary mode with vault
-red server --grpc --path ./data/primary.rdb --role primary --vault --bind 0.0.0.0:50051
+red server --path ./data/primary.rdb --role primary --vault --grpc-bind 0.0.0.0:50051 --http-bind 0.0.0.0:8080
+```
+
+## red service
+
+Install or inspect a systemd unit.
+
+```bash
+red service <install|print-unit> [--binary /usr/local/bin/red] [--grpc-bind 0.0.0.0:50051] [--http-bind 0.0.0.0:8080] [--path /var/lib/reddb/data.rdb]
+```
+
+| Flag | Short | Default | Description |
+|:-----|:------|:--------|:------------|
+| `--binary` | | `/usr/local/bin/red` | Path to the `red` binary |
+| `--service-name` | | `reddb` | systemd unit name |
+| `--user` | | `reddb` | Service user |
+| `--group` | | `reddb` | Service group |
+| `--path` | `-d` | `/var/lib/reddb/data.rdb` | Persistent database file path |
+| `--bind` | `-b` | gRPC `127.0.0.1:50051` | Legacy single-transport bind address |
+| `--grpc` | | | Enable gRPC API in the service |
+| `--http` | | | Enable HTTP API in the service |
+| `--grpc-bind` | | | Explicit gRPC bind address |
+| `--http-bind` | | | Explicit HTTP bind address |
+
+Examples:
+
+```bash
+sudo red service install \
+  --binary /usr/local/bin/red \
+  --path /var/lib/reddb/data.rdb \
+  --grpc-bind 0.0.0.0:50051 \
+  --http-bind 0.0.0.0:8080
+
+red service print-unit \
+  --path /var/lib/reddb/data.rdb \
+  --grpc-bind 0.0.0.0:50051 \
+  --http-bind 0.0.0.0:8080
 ```
 
 ## red query
@@ -157,16 +196,18 @@ red tick [--bind 127.0.0.1:8080] [--operations maintenance,retention,checkpoint]
 Start as a read replica.
 
 ```bash
-red replica --primary-addr http://primary:50051 [--path ./data/replica.rdb]
+red replica --primary-addr http://primary:50051 [--grpc-bind 127.0.0.1:50051] [--http-bind 127.0.0.1:8080] [--path ./data/replica.rdb]
 ```
 
 | Flag | Short | Default | Description |
 |:-----|:------|:--------|:------------|
 | `--primary-addr` | `-p` | | Primary gRPC address |
 | `--path` | `-d` | `./data/reddb.rdb` | Local replica path |
-| `--bind` | `-b` | by transport | Bind address |
-| `--grpc` | | default | Serve gRPC |
-| `--http` | | | Serve HTTP |
+| `--bind` | `-b` | gRPC `127.0.0.1:50051` | Legacy single-transport bind address |
+| `--grpc` | | | Enable gRPC |
+| `--http` | | | Enable HTTP |
+| `--grpc-bind` | | | Explicit gRPC bind address |
+| `--http-bind` | | | Explicit HTTP bind address |
 | `--vault` | | `false` | Enable vault |
 
 ## red mcp
@@ -225,7 +266,7 @@ red connect --query "SELECT * FROM users" localhost:6380
 
 ```bash
 # Start server, insert data, and query
-red server --http --path ./data/reddb.rdb --bind 127.0.0.1:8080 &
+red server --path ./data/reddb.rdb --grpc-bind 127.0.0.1:50051 --http-bind 127.0.0.1:8080 &
 red insert users '{"name": "Alice", "age": 30}' --bind 127.0.0.1:8080
 red query "SELECT * FROM users" --bind 127.0.0.1:8080
 red health --http --bind 127.0.0.1:8080

@@ -15,15 +15,19 @@ services:
     container_name: reddb-primary
     ports:
       - "50051:50051"
+      - "8080:8080"
     volumes:
       - primary-data:/data
     command:
       - "server"
-      - "--grpc"
       - "--path"
       - "/data/data.rdb"
-      - "--bind"
+      - "--role"
+      - "primary"
+      - "--grpc-bind"
       - "0.0.0.0:50051"
+      - "--http-bind"
+      - "0.0.0.0:8080"
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -31,7 +35,7 @@ services:
     environment:
       - RUST_LOG=info
     healthcheck:
-      test: ["CMD", "/usr/local/bin/red", "health", "--grpc", "--bind", "127.0.0.1:50051"]
+      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:8080"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -44,20 +48,19 @@ services:
     container_name: reddb-replica
     ports:
       - "50052:50051"
+      - "8081:8080"
     volumes:
       - replica-data:/data
     command:
-      - "server"
-      - "--grpc"
-      - "--path"
-      - "/data/data.rdb"
-      - "--bind"
-      - "0.0.0.0:50051"
-      - "--role"
       - "replica"
       - "--primary-addr"
       - "http://primary:50051"
-      - "--read-only"
+      - "--path"
+      - "/data/data.rdb"
+      - "--grpc-bind"
+      - "0.0.0.0:50051"
+      - "--http-bind"
+      - "0.0.0.0:8080"
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -68,6 +71,12 @@ services:
     depends_on:
       primary:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:8080"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
 
 volumes:
   primary-data:

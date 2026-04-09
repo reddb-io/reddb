@@ -35,8 +35,7 @@ RedDB uses the same core engine across three practical modes:
 That means the storage model stays the same whether you:
 
 - open a local `.rdb` file inside your Rust process
-- run `red server --http`
-- run `red server --grpc`
+- run `red server --grpc-bind 127.0.0.1:50051 --http-bind 127.0.0.1:8080`
 - expose the same database to AI agents through MCP
 
 ## Install
@@ -92,11 +91,14 @@ cargo build --release --bin red
 
 ## Run a server
 
-### HTTP
+### Local Dev
 
 ```bash
 mkdir -p ./data
-red server --http --path ./data/reddb.rdb --bind 127.0.0.1:8080
+red server \
+  --path ./data/reddb.rdb \
+  --grpc-bind 127.0.0.1:50051 \
+  --http-bind 127.0.0.1:8080
 ```
 
 Create data:
@@ -127,12 +129,10 @@ Health check:
 curl -s http://127.0.0.1:8080/health
 ```
 
-### gRPC
+This is the recommended local setup because it gives you:
 
-```bash
-mkdir -p ./data
-red server --grpc --path ./data/reddb.rdb --bind 127.0.0.1:50051
-```
+- HTTP for `curl`, browser tooling, and scripts
+- gRPC for `red connect` and service-to-service clients
 
 ## Connect to RedDB
 
@@ -156,7 +156,10 @@ curl -X POST http://127.0.0.1:8080/query \
 Start a gRPC server first:
 
 ```bash
-red server --grpc --path ./data/reddb.rdb --bind 127.0.0.1:50051
+red server \
+  --path ./data/reddb.rdb \
+  --grpc-bind 127.0.0.1:50051 \
+  --http-bind 127.0.0.1:8080
 ```
 
 Then connect:

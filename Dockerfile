@@ -7,7 +7,7 @@
 # Stage 2: Minimal non-root runtime image
 # ============================================================================
 
-FROM rust:1.85-slim-bookworm AS builder
+FROM rust:1.91-slim-bookworm AS builder
 
 ARG DEBIAN_FRONTEND=noninteractive
 ENV CARGO_PROFILE_RELEASE_STRIP=symbols
@@ -58,6 +58,8 @@ EXPOSE 50051 8080
 
 ENV REDDB_DATA_PATH=/data/data.rdb
 ENV REDDB_BIND_ADDR=0.0.0.0:50051
+ENV REDDB_GRPC_BIND_ADDR=0.0.0.0:50051
+ENV REDDB_HTTP_BIND_ADDR=0.0.0.0:8080
 ENV RUST_MIN_STACK=8388608
 
 # Set these to auto-create the first admin user on startup:
@@ -70,4 +72,4 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
     CMD ["/usr/local/bin/red", "health", "--grpc", "--bind", "127.0.0.1:50051"]
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
-CMD ["server", "--grpc", "--path", "/data/data.rdb", "--bind", "0.0.0.0:50051"]
+CMD ["server"]
