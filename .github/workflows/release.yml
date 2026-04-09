@@ -135,6 +135,7 @@ jobs:
       - uses: arduino/setup-protoc@v3
         with:
           version: '28.x'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Regenerate lockfile after version sync
         run: cargo generate-lockfile
@@ -267,6 +268,7 @@ jobs:
       - uses: arduino/setup-protoc@v3
         with:
           version: '28.x'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Sync Cargo.toml version
         run: |
           VERSION="${{ needs.plan.outputs.package_version }}"

@@ -1,7 +1,6 @@
-//! Memory-mapped I/O - DEPRECATED
+//! Memory-mapped I/O
 //!
-//! This module has been moved to `storage::primitives::mmap`.
-//! Please update your imports to use the new location.
+//! Re-exports from `storage::primitives::mmap` (Unix only).
 
-// Re-export everything from primitives::mmap
+#[cfg(unix)]
 pub use crate::storage::primitives::mmap::*;

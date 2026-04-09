@@ -23,6 +23,7 @@ jobs:
       - uses: arduino/setup-protoc@v3
         with:
           version: '28.x'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       - run: cargo check --locked --all
@@ -38,6 +39,6 @@ jobs:
       - uses: arduino/setup-protoc@v3
         with:
           version: '28.x'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked --verbose
-

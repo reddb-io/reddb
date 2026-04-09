@@ -13,6 +13,7 @@
 pub mod bloom;
 pub mod encoding;
 pub mod ids;
+#[cfg(unix)]
 pub mod mmap;
 pub mod serializer;
 
@@ -27,5 +28,6 @@ pub use ids::{
     current_timestamp, next_btree_node_id, next_timestamp, next_txn_id, BTreeNodeId, EntityId,
     HnswNodeId, PageId, SegmentId, Timestamp, TxnId, VectorId,
 };
+#[cfg(unix)]
 pub use mmap::{MadviseAdvice, MmapFile};
 pub use serializer::{Record, Serializer};

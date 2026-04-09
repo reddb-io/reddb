@@ -110,14 +110,14 @@ unsafe fn linux_mmap(
 
 #[cfg(all(target_os = "linux", not(target_arch = "x86_64")))]
 unsafe fn linux_mmap(
-    addr: *mut u8,
-    len: usize,
-    prot: i32,
-    flags: i32,
-    fd: i32,
-    offset: i64,
+    _addr: *mut u8,
+    _len: usize,
+    _prot: i32,
+    _flags: i32,
+    _fd: i32,
+    _offset: i64,
 ) -> isize {
-    libc::mmap(addr.cast(), len, prot, flags, fd, offset as libc::off_t) as isize
+    -1 // mmap not supported on non-x86_64 without libc
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -126,8 +126,8 @@ unsafe fn linux_msync(addr: *mut u8, len: usize, flags: i32) -> i64 {
 }
 
 #[cfg(all(target_os = "linux", not(target_arch = "x86_64")))]
-unsafe fn linux_msync(addr: *mut u8, len: usize, flags: i32) -> i64 {
-    libc::msync(addr.cast(), len, flags) as i64
+unsafe fn linux_msync(_addr: *mut u8, _len: usize, _flags: i32) -> i64 {
+    -1
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -136,8 +136,8 @@ unsafe fn linux_madvise(addr: *mut u8, len: usize, advice: i32) -> i64 {
 }
 
 #[cfg(all(target_os = "linux", not(target_arch = "x86_64")))]
-unsafe fn linux_madvise(addr: *mut u8, len: usize, advice: i32) -> i64 {
-    libc::madvise(addr.cast(), len, advice) as i64
+unsafe fn linux_madvise(_addr: *mut u8, _len: usize, _advice: i32) -> i64 {
+    -1
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -146,8 +146,8 @@ unsafe fn linux_munmap(addr: *mut u8, len: usize) -> i64 {
 }
 
 #[cfg(all(target_os = "linux", not(target_arch = "x86_64")))]
-unsafe fn linux_munmap(addr: *mut u8, len: usize) -> i64 {
-    libc::munmap(addr.cast(), len) as i64
+unsafe fn linux_munmap(_addr: *mut u8, _len: usize) -> i64 {
+    -1
 }
 
 /// Memory access advice for madvise
