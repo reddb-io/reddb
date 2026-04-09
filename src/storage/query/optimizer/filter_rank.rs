@@ -390,7 +390,7 @@ impl FilterRanker {
                             let upper_bound = upper.and_then(|v| v.as_f64()).unwrap_or(max);
 
                             let fraction = (upper_bound - lower_bound) / range;
-                            return fraction.max(0.0).min(1.0);
+                            return fraction.clamp(0.0, 1.0);
                         }
                     }
                 }

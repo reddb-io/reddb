@@ -199,7 +199,7 @@ impl std::error::Error for MemoryLimitError {}
 impl MemoryConstraint {
     /// Calculate bytes per vector for given dimension and storage mode
     pub fn bytes_per_vector(dim: usize, store_fp32: bool) -> usize {
-        let binary_bytes = (dim + 63) / 64 * 8; // Packed u64
+        let binary_bytes = dim.div_ceil(64) * 8; // Packed u64
         let int8_bytes = dim + 8; // data + scale + norm
         let fp32_bytes = if store_fp32 { dim * 4 } else { 0 };
         binary_bytes + int8_bytes + fp32_bytes

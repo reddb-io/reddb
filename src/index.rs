@@ -83,17 +83,9 @@ pub struct IndexMetric {
     pub stats: IndexStats,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct IndexCatalog {
     metrics: BTreeMap<String, IndexMetric>,
-}
-
-impl Default for IndexCatalog {
-    fn default() -> Self {
-        Self {
-            metrics: BTreeMap::new(),
-        }
-    }
 }
 
 impl IndexCatalog {
@@ -120,9 +112,9 @@ impl IndexCatalog {
     }
 
     pub fn disable(&mut self, name: &str) -> bool {
-        self.metrics.get_mut(name).map(|metric| {
+        if let Some(metric) = self.metrics.get_mut(name) {
             metric.enabled = false;
-        });
+        }
 
         self.metrics.contains_key(name)
     }

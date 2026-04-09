@@ -242,7 +242,7 @@ fn normalize_serverless_readiness_requirement(value: &str) -> Option<&'static st
 }
 
 fn normalize_serverless_reclaim_operation(value: &str) -> Result<Option<String>, String> {
-    if normalize_serverless_token(value).as_str().is_empty() {
+    if normalize_serverless_token(value).is_empty() {
         return Err("invalid reclaim operation".to_string());
     }
 
@@ -259,7 +259,7 @@ fn normalize_serverless_reclaim_operation(value: &str) -> Result<Option<String>,
 fn normalize_serverless_scope(
     value: &str,
 ) -> Result<Option<Vec<ServerlessWarmupScopeToken>>, String> {
-    if normalize_serverless_token(value).as_str().is_empty() {
+    if normalize_serverless_token(value).is_empty() {
         return Err("invalid serverless scope".to_string());
     }
 

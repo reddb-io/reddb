@@ -668,7 +668,7 @@ impl NaturalQuery {
                     alias: current_alias.clone(),
                     property: filter.property.clone(),
                 },
-                op: filter.op.clone(),
+                op: filter.op,
                 value: Value::Text(filter.value.clone()),
             });
         }

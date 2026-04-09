@@ -26,8 +26,7 @@ impl QueryManager {
         let path_ref = path.as_ref();
 
         // Open the Modern RedDB store
-        let db = RedDB::open(path_ref)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        let db = RedDB::open(path_ref).map_err(|e| io::Error::other(e.to_string()))?;
 
         Ok(Self { db })
     }

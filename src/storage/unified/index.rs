@@ -178,7 +178,7 @@ impl GraphAdjacencyIndex {
             if let Ok(outgoing) = self.outgoing.read() {
                 if let Some(entries) = outgoing.get(&node_id) {
                     for entry in entries {
-                        if label_filter.map_or(true, |l| entry.label == l) {
+                        if label_filter.is_none_or(|l| entry.label == l) {
                             results.push(entry.clone());
                         }
                     }
@@ -190,7 +190,7 @@ impl GraphAdjacencyIndex {
             if let Ok(incoming) = self.incoming.read() {
                 if let Some(entries) = incoming.get(&node_id) {
                     for entry in entries {
-                        if label_filter.map_or(true, |l| entry.label == l) {
+                        if label_filter.is_none_or(|l| entry.label == l) {
                             results.push(entry.clone());
                         }
                     }

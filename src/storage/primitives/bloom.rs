@@ -12,7 +12,7 @@ pub struct BloomFilter {
 impl BloomFilter {
     /// Create new bloom filter with given size in bits
     pub fn new(size: u32, num_hashes: u8) -> Self {
-        let byte_size = ((size + 7) / 8) as usize;
+        let byte_size = size.div_ceil(8) as usize;
         Self {
             bits: vec![0u8; byte_size],
             num_hashes,
@@ -40,7 +40,7 @@ impl BloomFilter {
         let n = elements as f64;
         let m = size as f64;
         let k = (m / n) * 2.0_f64.ln();
-        k.ceil().min(10.0).max(1.0) as u8
+        k.ceil().clamp(1.0, 10.0) as u8
     }
 
     /// Insert key into bloom filter

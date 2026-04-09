@@ -1,7 +1,8 @@
 use std::fmt;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub enum Severity {
+    #[default]
     Info,
     Low,
     Medium,
@@ -83,12 +84,6 @@ impl Severity {
             Self::High => "\x1b[31m",
             Self::Critical => "\x1b[91m",
         }
-    }
-}
-
-impl Default for Severity {
-    fn default() -> Self {
-        Self::Info
     }
 }
 

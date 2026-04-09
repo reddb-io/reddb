@@ -346,8 +346,10 @@ impl QueryExecutor for MemoryExecutor {
             .get(&plan.table)
             .ok_or_else(|| QueryError::TableNotFound(plan.table.clone()))?;
 
-        let mut stats = QueryStats::default();
-        stats.rows_scanned = rows.len();
+        let mut stats = QueryStats {
+            rows_scanned: rows.len(),
+            ..Default::default()
+        };
 
         // Filter rows
         let mut matched_rows: Vec<Row> = rows

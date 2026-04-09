@@ -16,14 +16,11 @@ impl WalWriter {
 
         let mut file = OpenOptions::new()
             .read(true) // Read needed for finding EOF LSN? No, seek is enough.
-            .write(true)
             .create(true)
             .append(true)
             .open(path)?;
 
-        let current_lsn;
-
-        if !exists || file.metadata()?.len() == 0 {
+        let current_lsn = if !exists || file.metadata()?.len() == 0 {
             // Write header for new file
             // Format: Magic (4) + Version (1) + Reserved (3)
             let mut header = Vec::with_capacity(8);
@@ -33,11 +30,11 @@ impl WalWriter {
 
             file.write_all(&header)?;
             file.sync_all()?;
-            current_lsn = 8;
+            8
         } else {
             // Existing file, set LSN to current end
-            current_lsn = file.seek(SeekFrom::End(0))?;
-        }
+            file.seek(SeekFrom::End(0))?
+        };
 
         Ok(Self { file, current_lsn })
     }

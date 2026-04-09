@@ -630,7 +630,7 @@ impl InMemoryRetriever {
     pub fn add_vector(&mut self, collection: &str, id: u64, vector: Vec<f32>, content: &str) {
         self.vectors
             .entry(collection.to_string())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push((id, vector, content.to_string()));
     }
 

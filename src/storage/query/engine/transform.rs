@@ -462,11 +462,11 @@ impl TransformPushFilter {
     /// Extract variables used in a filter
     fn extract_filter_vars(&self, filter: &FilterExpr) -> Vec<Var> {
         let mut vars = Vec::new();
-        self.collect_filter_vars(filter, &mut vars);
+        Self::collect_filter_vars(filter, &mut vars);
         vars
     }
 
-    fn collect_filter_vars(&self, filter: &FilterExpr, vars: &mut Vec<Var>) {
+    fn collect_filter_vars(filter: &FilterExpr, vars: &mut Vec<Var>) {
         match filter {
             FilterExpr::Eq(l, r)
             | FilterExpr::NotEq(l, r)
@@ -474,15 +474,15 @@ impl TransformPushFilter {
             | FilterExpr::LtEq(l, r)
             | FilterExpr::Gt(l, r)
             | FilterExpr::GtEq(l, r) => {
-                self.collect_term_vars(l, vars);
-                self.collect_term_vars(r, vars);
+                Self::collect_term_vars(l, vars);
+                Self::collect_term_vars(r, vars);
             }
             FilterExpr::And(l, r) | FilterExpr::Or(l, r) => {
-                self.collect_filter_vars(l, vars);
-                self.collect_filter_vars(r, vars);
+                Self::collect_filter_vars(l, vars);
+                Self::collect_filter_vars(r, vars);
             }
             FilterExpr::Not(e) => {
-                self.collect_filter_vars(e, vars);
+                Self::collect_filter_vars(e, vars);
             }
             FilterExpr::Bound(v) => {
                 if !vars.contains(v) {
@@ -496,19 +496,19 @@ impl TransformPushFilter {
             | FilterExpr::IsUri(t)
             | FilterExpr::IsLiteral(t)
             | FilterExpr::IsBlank(t) => {
-                self.collect_term_vars(t, vars);
+                Self::collect_term_vars(t, vars);
             }
             FilterExpr::In(t, list) | FilterExpr::NotIn(t, list) => {
-                self.collect_term_vars(t, vars);
+                Self::collect_term_vars(t, vars);
                 for item in list {
-                    self.collect_term_vars(item, vars);
+                    Self::collect_term_vars(item, vars);
                 }
             }
             FilterExpr::True | FilterExpr::False => {}
         }
     }
 
-    fn collect_term_vars(&self, term: &ExprTerm, vars: &mut Vec<Var>) {
+    fn collect_term_vars(term: &ExprTerm, vars: &mut Vec<Var>) {
         match term {
             ExprTerm::Var(v) => {
                 if !vars.contains(v) {
@@ -519,11 +519,11 @@ impl TransformPushFilter {
             | ExprTerm::LCase(inner)
             | ExprTerm::UCase(inner)
             | ExprTerm::StrLen(inner) => {
-                self.collect_term_vars(inner, vars);
+                Self::collect_term_vars(inner, vars);
             }
             ExprTerm::Concat(terms) => {
                 for t in terms {
-                    self.collect_term_vars(t, vars);
+                    Self::collect_term_vars(t, vars);
                 }
             }
             ExprTerm::Const(_) => {}

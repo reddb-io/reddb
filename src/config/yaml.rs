@@ -63,13 +63,7 @@ static CACHE: OnceLock<YamlConfig> = OnceLock::new();
 impl YamlConfig {
     /// Load from current directory once and cache the result.
     pub fn load_from_cwd_cached() -> &'static YamlConfig {
-        CACHE.get_or_init(|| {
-            if let Some(cfg) = YamlConfig::load_from_cwd() {
-                cfg
-            } else {
-                YamlConfig::default() // Load default if no file found
-            }
-        })
+        CACHE.get_or_init(|| YamlConfig::load_from_cwd().unwrap_or_default())
     }
 
     /// Load config from file

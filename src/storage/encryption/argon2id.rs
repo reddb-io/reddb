@@ -265,12 +265,10 @@ fn index_alpha(
     if candidate == prev_idx {
         if lane_len == 1 {
             (candidate + 1) % ctx.params.m_cost
+        } else if candidate == 0 {
+            ctx.params.m_cost - 1
         } else {
-            if candidate == 0 {
-                ctx.params.m_cost - 1
-            } else {
-                candidate - 1
-            }
+            candidate - 1
         }
     } else {
         candidate
@@ -286,15 +284,11 @@ fn compress_block(block: &mut Block, other: &Block) {
     for chunk in 0..8 {
         let start = chunk * 16;
         let mut lane = [0u64; 16];
-        for i in 0..16 {
-            lane[i] = mixed.0[start + i];
-        }
+        lane.copy_from_slice(&mixed.0[start..(16 + start)]);
 
         mix_round_16(&mut lane);
 
-        for i in 0..16 {
-            mixed.0[start + i] = lane[i];
-        }
+        mixed.0[start..(16 + start)].copy_from_slice(&lane);
     }
 
     for i in 0..128 {

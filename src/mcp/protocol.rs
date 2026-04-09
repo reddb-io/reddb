@@ -23,7 +23,7 @@ pub fn read_payload<R: BufRead>(reader: &mut R) -> Result<Option<String>, String
             return Ok(None);
         }
 
-        let trimmed = header.trim_end_matches(|c| matches!(c, '\n' | '\r'));
+        let trimmed = header.trim_end_matches(['\n', '\r']);
         if trimmed.is_empty() {
             break;
         }
@@ -65,13 +65,8 @@ pub fn read_payload<R: BufRead>(reader: &mut R) -> Result<Option<String>, String
 
 /// Write a Content-Length framed JSON-RPC message to a writer.
 pub fn write_message<W: Write>(writer: &mut W, body: &str) -> Result<(), String> {
-    write!(
-        writer,
-        "Content-Length: {}\r\n\r\n{}",
-        body.as_bytes().len(),
-        body
-    )
-    .map_err(|e| format!("failed to write response: {}", e))?;
+    write!(writer, "Content-Length: {}\r\n\r\n{}", body.len(), body)
+        .map_err(|e| format!("failed to write response: {}", e))?;
     writer
         .flush()
         .map_err(|e| format!("failed to flush: {}", e))

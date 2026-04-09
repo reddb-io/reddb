@@ -44,7 +44,7 @@ fn main() {
     let result = parser.parse(&tokens);
 
     // Handle --help with no command or before command detection.
-    if result.flags.get("help").map_or(false, |v| v.is_truthy()) {
+    if result.flags.get("help").is_some_and(|v| v.is_truthy()) {
         match command.as_deref() {
             Some(cmd) => match cli::commands::command_help_text(cmd) {
                 Some(text) => {
@@ -64,7 +64,7 @@ fn main() {
     }
 
     // Handle --version.
-    if result.flags.get("version").map_or(false, |v| v.is_truthy()) {
+    if result.flags.get("version").is_some_and(|v| v.is_truthy()) {
         println!("reddb {}", env!("CARGO_PKG_VERSION"));
         return;
     }
@@ -230,7 +230,7 @@ fn main() {
                 .first()
                 .map(|s| s.as_str())
                 .unwrap_or("help");
-            let rt = reddb::RedDBRuntime::in_memory().expect("failed to create runtime");
+            let _rt = reddb::RedDBRuntime::in_memory().expect("failed to create runtime");
             let auth_store = std::sync::Arc::new(reddb::auth::store::AuthStore::new(
                 reddb::auth::AuthConfig {
                     enabled: true,
@@ -461,6 +461,7 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
 }
 
 /// Build the completion tree for runtime tab-completion.
+#[allow(clippy::type_complexity)]
 fn build_completion_tree() -> Vec<(String, Vec<(String, Vec<String>)>)> {
     vec![
         ("server".to_string(), vec![]),

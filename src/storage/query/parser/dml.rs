@@ -147,12 +147,10 @@ impl<'a> Parser<'a> {
                 Ok(Value::Text(s))
             }
             Token::Integer(n) => {
-                let n = n;
                 self.advance()?;
                 Ok(Value::Integer(n))
             }
             Token::Float(n) => {
-                let n = n;
                 self.advance()?;
                 Ok(Value::Float(n))
             }

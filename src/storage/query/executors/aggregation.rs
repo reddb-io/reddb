@@ -75,9 +75,7 @@ impl CountAggregator {
 
 impl Aggregator for CountAggregator {
     fn accumulate(&mut self, value: Option<&Value>) {
-        if self.count_all {
-            self.count += 1;
-        } else if value.is_some() && !matches!(value, Some(Value::Null)) {
+        if self.count_all || (value.is_some() && !matches!(value, Some(Value::Null))) {
             self.count += 1;
         }
     }

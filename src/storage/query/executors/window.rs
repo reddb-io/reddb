@@ -131,24 +131,19 @@ pub enum FrameType {
 }
 
 /// Frame boundary specification
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum FrameBound {
     /// UNBOUNDED PRECEDING
     UnboundedPreceding,
     /// UNBOUNDED FOLLOWING
     UnboundedFollowing,
     /// CURRENT ROW
+    #[default]
     CurrentRow,
     /// n PRECEDING
     Preceding(i64),
     /// n FOLLOWING
     Following(i64),
-}
-
-impl Default for FrameBound {
-    fn default() -> Self {
-        Self::CurrentRow
-    }
 }
 
 /// Frame specification for window function
@@ -274,7 +269,7 @@ impl WindowOrderBy {
 }
 
 /// Complete window definition
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct WindowDef {
     /// Optional window name
     pub name: Option<String>,
@@ -284,17 +279,6 @@ pub struct WindowDef {
     pub order_by: Vec<WindowOrderBy>,
     /// Frame specification
     pub frame: FrameSpec,
-}
-
-impl Default for WindowDef {
-    fn default() -> Self {
-        Self {
-            name: None,
-            partition_by: Vec::new(),
-            order_by: Vec::new(),
-            frame: FrameSpec::default(),
-        }
-    }
 }
 
 impl WindowDef {

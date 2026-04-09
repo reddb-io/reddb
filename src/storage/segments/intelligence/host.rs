@@ -702,11 +702,9 @@ impl<'a> HostIntelligence<'a> {
 
         for host in self.graph.nodes_of_type(NodeType::Host) {
             for edge in &host.out_edges {
-                if edge.edge_type == EdgeType::HasService {
-                    if edge.target_id.contains(&port_str) {
-                        hosts.push(host.id.trim_start_matches("host:").to_string());
-                        break;
-                    }
+                if edge.edge_type == EdgeType::HasService && edge.target_id.contains(&port_str) {
+                    hosts.push(host.id.trim_start_matches("host:").to_string());
+                    break;
                 }
             }
         }

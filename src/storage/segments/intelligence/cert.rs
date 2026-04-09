@@ -222,8 +222,8 @@ impl<'a> CertIntelligence<'a> {
         let issuer = parse_issuer(label);
         let (not_before, not_after, days_until_expiry) = parse_validity(label);
         let is_self_signed = is_self_signed(label, &subject, &issuer);
-        let is_expired = days_until_expiry.map_or(false, |d| d < 0);
-        let is_expiring_soon = days_until_expiry.map_or(false, |d| d >= 0 && d <= 30);
+        let is_expired = days_until_expiry.is_some_and(|d| d < 0);
+        let is_expiring_soon = days_until_expiry.is_some_and(|d| (0..=30).contains(&d));
         let sans = parse_sans(label);
         let (key_type, key_size) = parse_key_info(label);
         let signature_algorithm = parse_signature_algorithm(label);
@@ -369,7 +369,7 @@ impl<'a> CertIntelligence<'a> {
     pub fn expiring(&self, days: i64) -> Vec<CertProfile> {
         self.all_profiles()
             .into_iter()
-            .filter(|c| c.days_until_expiry.map_or(false, |d| d >= 0 && d <= days))
+            .filter(|c| c.days_until_expiry.is_some_and(|d| d >= 0 && d <= days))
             .collect()
     }
 
@@ -500,18 +500,14 @@ fn parse_subject(label: &str) -> CertSubject {
     // Look for CN= pattern
     if let Some(cn_start) = label.find("CN=") {
         let cn_part = &label[cn_start + 3..];
-        let cn_end = cn_part
-            .find(|c: char| c == ',' || c == '/' || c == ' ')
-            .unwrap_or(cn_part.len());
+        let cn_end = cn_part.find([',', '/', ' ']).unwrap_or(cn_part.len());
         subject.common_name = Some(cn_part[..cn_end].to_string());
     }
 
     // Look for O= pattern
     if let Some(o_start) = label.find("O=") {
         let o_part = &label[o_start + 2..];
-        let o_end = o_part
-            .find(|c: char| c == ',' || c == '/' || c == ' ')
-            .unwrap_or(o_part.len());
+        let o_end = o_part.find([',', '/', ' ']).unwrap_or(o_part.len());
         subject.organization = Some(o_part[..o_end].to_string());
     }
 
@@ -523,12 +519,9 @@ fn parse_issuer(label: &str) -> String {
     // Look for Issuer: or issuer= pattern
     if let Some(idx) = label.to_lowercase().find("issuer") {
         let part = &label[idx..];
-        let start = part
-            .find(|c: char| c == ':' || c == '=')
-            .map(|i| i + 1)
-            .unwrap_or(7);
+        let start = part.find([':', '=']).map(|i| i + 1).unwrap_or(7);
         let end = part[start..]
-            .find(|c: char| c == '\n' || c == ';')
+            .find(['\n', ';'])
             .unwrap_or(part.len() - start);
         return part[start..start + end].trim().to_string();
     }
@@ -580,9 +573,7 @@ fn parse_sans(label: &str) -> Vec<String> {
     // Also look for DNS: entries
     for (idx, _) in label.match_indices("DNS:") {
         let part = &label[idx + 4..];
-        let end = part
-            .find(|c: char| c == ',' || c == ' ' || c == '\n')
-            .unwrap_or(part.len());
+        let end = part.find([',', ' ', '\n']).unwrap_or(part.len());
         let san = part[..end].trim();
         if !san.is_empty() && !sans.contains(&san.to_string()) {
             sans.push(san.to_string());

@@ -404,7 +404,7 @@ impl GraphSegment {
         insights.extend(self.find_coverage_gaps());
 
         // Sort by priority (highest first)
-        insights.sort_by(|a, b| b.priority().cmp(&a.priority()));
+        insights.sort_by_key(|b| std::cmp::Reverse(b.priority()));
 
         insights
     }
@@ -556,8 +556,8 @@ impl GraphSegment {
             let current = unvisited
                 .iter()
                 .min_by(|a, b| {
-                    let da = distances.get(&a.to_string()).unwrap_or(&f32::INFINITY);
-                    let db = distances.get(&b.to_string()).unwrap_or(&f32::INFINITY);
+                    let da = distances.get::<str>(a).unwrap_or(&f32::INFINITY);
+                    let db = distances.get::<str>(b).unwrap_or(&f32::INFINITY);
                     da.partial_cmp(db).unwrap_or(std::cmp::Ordering::Equal)
                 })
                 .map(|s| s.to_string())?;

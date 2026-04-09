@@ -39,12 +39,12 @@ impl GrpcRuntime {
 
     pub(crate) fn authorize(&self, metadata: &MetadataMap, is_write: bool) -> Result<(), Status> {
         let auth = self.resolve_auth(metadata);
-        check_permission(&auth, is_write, false).map_err(|msg| Status::unauthenticated(msg))
+        check_permission(&auth, is_write, false).map_err(Status::unauthenticated)
     }
 
     pub(crate) fn authorize_admin(&self, metadata: &MetadataMap) -> Result<(), Status> {
         let auth = self.resolve_auth(metadata);
-        check_permission(&auth, false, true).map_err(|msg| Status::permission_denied(msg))
+        check_permission(&auth, false, true).map_err(Status::permission_denied)
     }
 
     pub(crate) fn start_graph_analytics_job(
@@ -92,7 +92,7 @@ pub(crate) fn to_status(err: crate::api::RedDBError) -> Status {
     Status::internal(err.to_string())
 }
 
-pub(crate) fn grpc_token<'a>(metadata: &'a MetadataMap) -> Option<&'a str> {
+pub(crate) fn grpc_token(metadata: &MetadataMap) -> Option<&str> {
     if let Some(value) = metadata.get("authorization") {
         let value = value.to_str().ok()?;
         if let Some(token) = value.strip_prefix("Bearer ") {

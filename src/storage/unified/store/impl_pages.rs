@@ -40,12 +40,8 @@ impl UnifiedStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref();
         let pager_config = PagerConfig::default();
-        let pager = Pager::open(path, pager_config).map_err(|e| {
-            StoreError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ))
-        })?;
+        let pager = Pager::open(path, pager_config)
+            .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
 
         let store = Self {
             config: UnifiedStoreConfig::default(),
@@ -76,10 +72,10 @@ impl UnifiedStore {
 
         // Get page count
         let page_count = pager.page_count().map_err(|e| {
-            StoreError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("failed to read page count: {}", e),
-            ))
+            StoreError::Io(std::io::Error::other(format!(
+                "failed to read page count: {}",
+                e
+            )))
         })?;
         if page_count <= 1 {
             // Empty database (only header page)
@@ -305,8 +301,7 @@ impl UnifiedStore {
                         .save_to_file(path)
                         .map_err(|e| StoreError::Serialization(e.to_string()));
                 }
-                return Err(StoreError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                return Err(StoreError::Io(std::io::Error::other(
                     "No pager or path configured for persistence",
                 )));
             }
@@ -317,26 +312,13 @@ impl UnifiedStore {
             Err(PagerError::PageNotFound(_)) => {
                 let meta_page = pager
                     .allocate_page(crate::storage::engine::PageType::Header)
-                    .map_err(|e| {
-                        StoreError::Io(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            e.to_string(),
-                        ))
-                    })?;
+                    .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
                 pager
                     .write_page(meta_page.page_id(), meta_page)
-                    .map_err(|e| {
-                        StoreError::Io(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            e.to_string(),
-                        ))
-                    })?;
+                    .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
             }
             Err(e) => {
-                return Err(StoreError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    e.to_string(),
-                )));
+                return Err(StoreError::Io(std::io::Error::other(e.to_string())));
             }
         }
 
@@ -373,10 +355,10 @@ impl UnifiedStore {
                         let _ = btree.insert(&key, &value);
                     }
                     Err(e) => {
-                        return Err(StoreError::Io(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            format!("B-tree insert error: {}", e),
-                        )));
+                        return Err(StoreError::Io(std::io::Error::other(format!(
+                            "B-tree insert error: {}",
+                            e
+                        ))));
                     }
                 }
             }
@@ -434,20 +416,14 @@ impl UnifiedStore {
         page_data[content_start..content_start + copy_len].copy_from_slice(&meta_data[..copy_len]);
 
         // Write page
-        pager.write_page(1, meta_page).map_err(|e| {
-            StoreError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ))
-        })?;
+        pager
+            .write_page(1, meta_page)
+            .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
 
         // Flush all pages to disk
-        pager.flush().map_err(|e| {
-            StoreError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ))
-        })?;
+        pager
+            .flush()
+            .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
 
         Ok(())
     }

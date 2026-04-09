@@ -203,7 +203,8 @@ impl JsonlImporter {
         // Create entity
         let entity = if let Some(emb) = embedding {
             // Entity with embedding - store as vector
-            let entity = UnifiedEntity::new(
+
+            UnifiedEntity::new(
                 entity_id,
                 EntityKind::Vector {
                     collection: self.config.collection.clone(),
@@ -213,8 +214,7 @@ impl JsonlImporter {
                     sparse: None,
                     content: Some(line.to_string()),
                 }),
-            );
-            entity
+            )
         } else {
             // Plain row entity
             let row_data = RowData {

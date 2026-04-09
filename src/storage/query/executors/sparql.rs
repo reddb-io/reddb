@@ -678,15 +678,7 @@ impl SparqlExecutor {
                         }
                         BoundValue::Edge(from, etype, to) => {
                             record.set_edge(col, MatchedEdge::from_tuple(from, *etype, to, 1.0));
-                            record.set(
-                                col,
-                                Value::Text(format!(
-                                    "{}->{}({})",
-                                    from,
-                                    to,
-                                    format!("{:?}", etype)
-                                )),
-                            );
+                            record.set(col, Value::Text(format!("{}->{}({:?})", from, to, etype)));
                         }
                         BoundValue::Literal(s) => {
                             record.set(col, Value::Text(s.clone()));

@@ -79,7 +79,7 @@ impl UnifiedExecutor {
         // Get all nodes that match the pattern
         for pattern_node in &query.pattern.nodes {
             let matching_nodes: Vec<_> = if let Some(ref node_type) = pattern_node.node_type {
-                graph.nodes_of_type(node_type.clone())
+                graph.nodes_of_type(*node_type)
             } else {
                 graph.iter_nodes().collect()
             };
@@ -179,7 +179,7 @@ impl UnifiedExecutor {
                 node_type,
                 filter: _,
             } => graph
-                .nodes_of_type(node_type.clone())
+                .nodes_of_type(*node_type)
                 .into_iter()
                 .map(|n| n.id)
                 .collect(),
@@ -199,9 +199,7 @@ impl UnifiedExecutor {
                     // scan graph nodes directly by table_ref row linkage.
                     if ids.is_empty() {
                         ids.extend(graph.iter_nodes().filter_map(|node| {
-                            let Some(table_ref) = node.table_ref else {
-                                return None;
-                            };
+                            let table_ref = node.table_ref?;
                             if table_ref.table_id == table_id && table_ref.row_id == row_id {
                                 Some(node.id)
                             } else {
@@ -603,11 +601,9 @@ impl UnifiedExecutor {
         if pattern.starts_with('%') && pattern.ends_with('%') {
             let inner = &pattern[1..pattern.len() - 1];
             text.contains(inner)
-        } else if pattern.starts_with('%') {
-            let suffix = &pattern[1..];
+        } else if let Some(suffix) = pattern.strip_prefix('%') {
             text.ends_with(suffix)
-        } else if pattern.ends_with('%') {
-            let prefix = &pattern[..pattern.len() - 1];
+        } else if let Some(prefix) = pattern.strip_suffix('%') {
             text.starts_with(prefix)
         } else {
             text == pattern || regex_pattern == text
@@ -640,7 +636,7 @@ impl UnifiedExecutor {
                 }
                 Projection::Column(col) => {
                     // Try to find a matching column in nodes
-                    for (_, node) in &matched.nodes {
+                    for node in matched.nodes.values() {
                         match col.as_str() {
                             "id" => record.set(col, Value::Text(node.id.clone())),
                             "label" => record.set(col, Value::Text(node.label.clone())),
@@ -649,7 +645,7 @@ impl UnifiedExecutor {
                     }
                 }
                 Projection::Alias(col, alias) => {
-                    for (_, node) in &matched.nodes {
+                    for node in matched.nodes.values() {
                         match col.as_str() {
                             "id" => record.set(alias, Value::Text(node.id.clone())),
                             "label" => record.set(alias, Value::Text(node.label.clone())),

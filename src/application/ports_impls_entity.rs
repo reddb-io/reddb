@@ -235,9 +235,7 @@ impl RuntimeEntityPort for RedDBRuntime {
             )));
         };
 
-        let mut patch_metadata = store
-            .get_metadata(&collection, id)
-            .unwrap_or_else(crate::storage::unified::Metadata::new);
+        let mut patch_metadata = store.get_metadata(&collection, id).unwrap_or_default();
         let mut metadata_changed = false;
 
         match &mut entity.data {

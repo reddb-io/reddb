@@ -523,7 +523,7 @@ impl MetadataStorage {
         if self
             .entity_keys
             .get(&entity_id)
-            .map_or(false, |keys| keys.contains(key))
+            .is_some_and(|keys| keys.contains(key))
         {
             return Some(MetadataValue::Null);
         }

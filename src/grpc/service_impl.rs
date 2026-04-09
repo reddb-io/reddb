@@ -393,7 +393,7 @@ async fn serverless_warmup(
             );
             object.insert(
                 "native_artifacts".to_string(),
-                native_artifacts.unwrap_or_else(|| JsonValue::Null),
+                native_artifacts.unwrap_or(JsonValue::Null),
             );
             object
         }),
@@ -2336,7 +2336,7 @@ async fn auth_change_password(
 
     if target_username != caller_username {
         check_permission(&auth, false, true)
-            .map_err(|msg| Status::permission_denied(msg))?;
+            .map_err(Status::permission_denied)?;
     }
 
     self.auth_store

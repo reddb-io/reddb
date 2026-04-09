@@ -273,7 +273,7 @@ impl<'a> JsonParser<'a> {
             }
             b'1'..=b'9' => {
                 self.pos += 1;
-                while !self.eof() && matches!(self.current_char(), b'0'..=b'9') {
+                while !self.eof() && self.current_char().is_ascii_digit() {
                     self.pos += 1;
                 }
             }
@@ -282,10 +282,10 @@ impl<'a> JsonParser<'a> {
 
         if !self.eof() && self.current_char() == b'.' {
             self.pos += 1;
-            if self.eof() || !matches!(self.current_char(), b'0'..=b'9') {
+            if self.eof() || !self.current_char().is_ascii_digit() {
                 return Err("invalid number literal".to_string());
             }
-            while !self.eof() && matches!(self.current_char(), b'0'..=b'9') {
+            while !self.eof() && self.current_char().is_ascii_digit() {
                 self.pos += 1;
             }
         }
@@ -295,10 +295,10 @@ impl<'a> JsonParser<'a> {
             if !self.eof() && (self.current_char() == b'+' || self.current_char() == b'-') {
                 self.pos += 1;
             }
-            if self.eof() || !matches!(self.current_char(), b'0'..=b'9') {
+            if self.eof() || !self.current_char().is_ascii_digit() {
                 return Err("invalid number literal".to_string());
             }
-            while !self.eof() && matches!(self.current_char(), b'0'..=b'9') {
+            while !self.eof() && self.current_char().is_ascii_digit() {
                 self.pos += 1;
             }
         }

@@ -135,7 +135,7 @@ impl<'a> PathIntelligence<'a> {
 
                     let is_better = distances
                         .get(&edge.target_id)
-                        .map_or(true, |&d| next_cost < d);
+                        .is_none_or(|&d| next_cost < d);
 
                     if is_better {
                         distances.insert(edge.target_id.clone(), next_cost);

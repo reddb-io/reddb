@@ -15,7 +15,7 @@ pub fn fill_bytes(buf: &mut [u8]) -> Result<(), String> {
             .map_err(|e| format!("CSPRNG open failed: {}", e))?;
         file.read_exact(buf)
             .map_err(|e| format!("CSPRNG read failed: {}", e))?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(windows)]

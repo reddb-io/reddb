@@ -311,7 +311,7 @@ where
         for key in keys {
             key.hash(&mut hasher);
             if let Some(value) = record.values.get(key) {
-                self.hash_value(value, &mut hasher);
+                Self::hash_value(value, &mut hasher);
             }
         }
 
@@ -319,7 +319,7 @@ where
     }
 
     /// Hash a Value for deduplication
-    fn hash_value(&self, value: &Value, hasher: &mut impl std::hash::Hasher) {
+    fn hash_value(value: &Value, hasher: &mut impl std::hash::Hasher) {
         use std::hash::Hash;
 
         match value {
@@ -445,7 +445,7 @@ where
                 28u8.hash(hasher);
                 elems.len().hash(hasher);
                 for elem in elems {
-                    self.hash_value(elem, hasher);
+                    Self::hash_value(elem, hasher);
                 }
             }
             Value::TimestampMs(v) => {

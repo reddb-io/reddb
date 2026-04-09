@@ -100,22 +100,17 @@ pub enum TxnState {
 }
 
 /// Isolation level
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum IsolationLevel {
     /// Read uncommitted (no isolation)
     ReadUncommitted,
     /// Read committed (see committed values)
     ReadCommitted,
     /// Repeatable read / Snapshot isolation
+    #[default]
     SnapshotIsolation,
     /// Serializable (full isolation)
     Serializable,
-}
-
-impl Default for IsolationLevel {
-    fn default() -> Self {
-        IsolationLevel::SnapshotIsolation
-    }
 }
 
 /// Transaction configuration

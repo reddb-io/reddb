@@ -85,7 +85,7 @@ impl RedDB {
             _ => None,
         };
 
-        Ok(Self {
+        Self {
             store: Arc::new(store),
             preprocessors: Vec::new(),
             index_config: IndexConfig::default(),
@@ -97,7 +97,7 @@ impl RedDB {
             remote_key,
             replication,
         }
-        .with_initialized_metadata()?)
+        .with_initialized_metadata()
     }
 
     /// Create with custom store

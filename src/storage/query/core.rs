@@ -691,9 +691,10 @@ impl Default for FusionStrategy {
 // ============================================================================
 
 /// Entity type qualifier for INSERT statements
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InsertEntityType {
     /// Default: plain row
+    #[default]
     Row,
     /// INSERT INTO t NODE (...)
     Node,
@@ -705,12 +706,6 @@ pub enum InsertEntityType {
     Document,
     /// INSERT INTO t KV (...)
     Kv,
-}
-
-impl Default for InsertEntityType {
-    fn default() -> Self {
-        Self::Row
-    }
 }
 
 /// INSERT INTO table (columns) VALUES (row1), (row2), ...

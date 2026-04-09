@@ -85,7 +85,7 @@ impl InMemoryEngine {
             right_bindings.push(binding);
         }
         let right_set: std::collections::HashSet<_> =
-            right_bindings.iter().map(|b| binding_hash(b)).collect();
+            right_bindings.iter().map(binding_hash).collect();
 
         // Filter left side to only include bindings that appear in right
         Box::new(QueryIterFilter::new(left, move |b| {

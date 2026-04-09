@@ -40,7 +40,7 @@ impl ColumnStats {
 
     /// Set null fraction
     pub fn with_null_fraction(mut self, fraction: f64) -> Self {
-        self.null_fraction = fraction.max(0.0).min(1.0);
+        self.null_fraction = fraction.clamp(0.0, 1.0);
         self
     }
 
@@ -67,7 +67,7 @@ impl ColumnStats {
                 let range = max - min;
                 let low = lower.unwrap_or(min);
                 let high = upper.unwrap_or(max);
-                ((high - low) / range).max(0.0).min(1.0)
+                ((high - low) / range).clamp(0.0, 1.0)
             }
             _ => 0.25, // Default
         }

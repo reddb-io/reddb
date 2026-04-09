@@ -369,21 +369,21 @@ pub fn execute_ref_query(
 
         if let Some((_, entity)) = store.get_any(current_id) {
             // Skip source unless include_source is set
-            if current_id != query.source_id || query.include_source {
-                if apply_filters(&entity, &query.filters) {
-                    let score = 1.0 - (depth as f32 * 0.2);
-                    matches.push(ScoredMatch {
-                        entity: entity.clone(),
-                        score,
-                        components: MatchComponents {
-                            structured_match: Some(score),
-                            hop_distance: Some(depth),
-                            final_score: Some(score),
-                            ..Default::default()
-                        },
-                        path: None,
-                    });
-                }
+            if (current_id != query.source_id || query.include_source)
+                && apply_filters(&entity, &query.filters)
+            {
+                let score = 1.0 - (depth as f32 * 0.2);
+                matches.push(ScoredMatch {
+                    entity: entity.clone(),
+                    score,
+                    components: MatchComponents {
+                        structured_match: Some(score),
+                        hop_distance: Some(depth),
+                        final_score: Some(score),
+                        ..Default::default()
+                    },
+                    path: None,
+                });
             }
 
             // Expand cross-refs via store index

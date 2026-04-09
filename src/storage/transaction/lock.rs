@@ -43,13 +43,13 @@ impl LockMode {
     /// Check if this mode can be upgraded to another
     pub fn can_upgrade_to(&self, target: &LockMode) -> bool {
         use LockMode::*;
-        match (self, target) {
-            (Shared, Exclusive) => true,
-            (IntentShared, IntentExclusive) => true,
-            (IntentShared, SharedIntentExclusive) => true,
-            (Shared, SharedIntentExclusive) => true,
-            _ => false,
-        }
+        matches!(
+            (self, target),
+            (Shared, Exclusive)
+                | (IntentShared, IntentExclusive)
+                | (IntentShared, SharedIntentExclusive)
+                | (Shared, SharedIntentExclusive)
+        )
     }
 }
 
@@ -309,10 +309,7 @@ impl LockManager {
 
                 // Track in txn_locks
                 let mut txn_locks = self.txn_locks.write().unwrap();
-                txn_locks
-                    .entry(txn_id)
-                    .or_insert_with(HashSet::new)
-                    .insert(resource_key);
+                txn_locks.entry(txn_id).or_default().insert(resource_key);
 
                 let mut stats = self.stats.write().unwrap();
                 stats.granted += 1;
@@ -540,7 +537,7 @@ impl LockManager {
         let mut visited = HashSet::new();
         let mut stack = HashSet::new();
 
-        self.dfs_cycle(start, &mut visited, &mut stack, wait_graph)
+        Self::dfs_cycle(start, &mut visited, &mut stack, wait_graph)
     }
 
     fn build_wait_graph_from_locks(
@@ -565,7 +562,6 @@ impl LockManager {
     }
 
     fn dfs_cycle(
-        &self,
         node: TxnId,
         visited: &mut HashSet<TxnId>,
         stack: &mut HashSet<TxnId>,
@@ -583,7 +579,7 @@ impl LockManager {
 
         if let Some(waiting_for) = wait_graph.get(&node) {
             for &next in waiting_for {
-                if self.dfs_cycle(next, visited, stack, wait_graph) {
+                if Self::dfs_cycle(next, visited, stack, wait_graph) {
                     return true;
                 }
             }

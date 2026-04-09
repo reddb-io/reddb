@@ -410,13 +410,10 @@ impl RedDB {
                 .unwrap_or_default()
                 .as_millis();
 
-            let Some(existing) = metadata
+            let existing = metadata
                 .analytics_jobs
                 .iter_mut()
-                .find(|job| job.id == job_id)
-            else {
-                return None;
-            };
+                .find(|job| job.id == job_id)?;
             existing.state = "completed".to_string();
             existing.kind = kind.clone();
             existing.projection = projection.clone();
@@ -467,13 +464,10 @@ impl RedDB {
                 .unwrap_or_default()
                 .as_millis();
 
-            let Some(existing) = metadata
+            let existing = metadata
                 .analytics_jobs
                 .iter_mut()
-                .find(|job| job.id == job_id)
-            else {
-                return None;
-            };
+                .find(|job| job.id == job_id)?;
             existing.state = "queued".to_string();
             existing.kind = kind.clone();
             existing.projection = projection.clone();
@@ -523,13 +517,10 @@ impl RedDB {
                 .unwrap_or_default()
                 .as_millis();
 
-            let Some(existing) = metadata
+            let existing = metadata
                 .analytics_jobs
                 .iter_mut()
-                .find(|job| job.id == job_id)
-            else {
-                return None;
-            };
+                .find(|job| job.id == job_id)?;
             existing.state = "running".to_string();
             existing.kind = kind.clone();
             existing.projection = projection.clone();
@@ -565,13 +556,10 @@ impl RedDB {
                 .unwrap_or_default()
                 .as_millis();
 
-            let Some(existing) = metadata
+            let existing = metadata
                 .analytics_jobs
                 .iter_mut()
-                .find(|job| job.id == job_id)
-            else {
-                return None;
-            };
+                .find(|job| job.id == job_id)?;
             existing.state = "failed".to_string();
             existing.kind = kind.clone();
             existing.projection = projection.clone();
@@ -607,13 +595,10 @@ impl RedDB {
                 .unwrap_or_default()
                 .as_millis();
 
-            let Some(existing) = metadata
+            let existing = metadata
                 .analytics_jobs
                 .iter_mut()
-                .find(|job| job.id == job_id)
-            else {
-                return None;
-            };
+                .find(|job| job.id == job_id)?;
             existing.state = "stale".to_string();
             existing.kind = kind.clone();
             existing.projection = projection.clone();
@@ -875,7 +860,7 @@ impl RedDB {
             let mut affected = Vec::new();
             let declared = metadata.indexes.clone();
             for declared_index in declared {
-                let matches_collection = collection.map_or(true, |collection_name| {
+                let matches_collection = collection.is_none_or(|collection_name| {
                     declared_index.collection.as_deref() == Some(collection_name)
                 });
                 if !matches_collection {

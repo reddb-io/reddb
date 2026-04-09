@@ -15,7 +15,7 @@ pub(crate) fn wrap_unary_plan(
     estimate: Option<CardinalityEstimate>,
     child: CanonicalLogicalNode,
 ) -> CanonicalLogicalNode {
-    let estimate = estimate.unwrap_or_else(|| CardinalityEstimate {
+    let estimate = estimate.unwrap_or(CardinalityEstimate {
         rows: child.estimated_rows,
         selectivity: child.estimated_selectivity,
         confidence: child.estimated_confidence,

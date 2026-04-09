@@ -63,11 +63,13 @@ impl RedDBEngine {
             StorageMode::InMemory => None,
             Persistent => {
                 let path = options.resolved_path("data.rdb");
-                let mut config = storage::engine::DatabaseConfig::default();
-                config.read_only = options.read_only;
-                config.create = options.create_if_missing;
-                config.verify_checksums = options.verify_checksums;
-                config.auto_checkpoint_threshold = options.auto_checkpoint_pages;
+                let config = storage::engine::DatabaseConfig {
+                    read_only: options.read_only,
+                    create: options.create_if_missing,
+                    verify_checksums: options.verify_checksums,
+                    auto_checkpoint_threshold: options.auto_checkpoint_pages,
+                    ..Default::default()
+                };
                 Some(storage::engine::Database::open_with_config(path, config)?)
             }
         };

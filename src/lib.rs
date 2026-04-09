@@ -1,4 +1,15 @@
 #![allow(dead_code, unused_imports, unused_variables)]
+// Structural lints we accept for API design reasons:
+#![allow(
+    clippy::too_many_arguments,   // complex DB operations legitimately need many params
+    clippy::type_complexity,      // internal types with nested generics
+    clippy::result_large_err,     // tonic::Status is 176 bytes, can't box it
+    clippy::should_implement_trait, // from_str() returns Option, not Result — different semantics
+    clippy::new_without_default,  // some constructors have side effects
+    clippy::enum_variant_names,   // JoinPhase variants all end in Start by design
+    clippy::wrong_self_convention, // to_bytes on Copy types in our serialization
+    clippy::len_without_is_empty  // segment structs don't need is_empty
+)]
 
 pub mod api;
 pub mod application;

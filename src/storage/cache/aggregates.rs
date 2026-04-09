@@ -137,7 +137,7 @@ impl CardinalityEstimate {
         } else {
             // Approximate mode: use probabilistic estimation
             // Simple: just increment if hash is "rare enough"
-            if hash % 1000 == 0 {
+            if hash.is_multiple_of(1000) {
                 if let Some(ref mut count) = self.approximate {
                     *count += 1;
                 }

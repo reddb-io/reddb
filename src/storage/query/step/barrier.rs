@@ -369,7 +369,7 @@ impl BarrierStep for GroupStep {
 
         self.groups
             .entry(key)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(traverser.value().to_json());
     }
 

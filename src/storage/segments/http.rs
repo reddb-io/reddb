@@ -916,7 +916,7 @@ fn extract_host(url: &str) -> &str {
         .next()
         .unwrap_or("")
         .split('@')
-        .last()
+        .next_back()
         .unwrap_or("")
 }
 

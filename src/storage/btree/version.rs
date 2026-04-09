@@ -100,10 +100,11 @@ impl<V: Clone> Version<V> {
         }
 
         // If deleted by a committed transaction before snapshot
-        if self.is_deleted() {
-            if snapshot.is_committed(self.deleted_by) && self.deleted_at <= snapshot.start_ts {
-                return VersionVisibility::Deleted;
-            }
+        if self.is_deleted()
+            && snapshot.is_committed(self.deleted_by)
+            && self.deleted_at <= snapshot.start_ts
+        {
+            return VersionVisibility::Deleted;
         }
 
         // Visible

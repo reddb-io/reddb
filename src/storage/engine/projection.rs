@@ -241,7 +241,7 @@ impl GraphProjection {
                     id: node.id.clone(),
                     label: node.label.clone(),
                     node_type: if property_projection.include_label {
-                        Some(node.node_type.clone())
+                        Some(node.node_type)
                     } else {
                         None
                     },
@@ -284,7 +284,7 @@ impl GraphProjection {
                     for (edge_type, weight) in edges {
                         outgoing.entry(source.clone()).or_default().push((
                             target.clone(),
-                            edge_type.clone(),
+                            edge_type,
                             weight,
                         ));
                         incoming.entry(target.clone()).or_default().push((
@@ -321,14 +321,13 @@ impl GraphProjection {
 
                         outgoing.entry(source.clone()).or_default().push((
                             target.clone(),
-                            first_type.clone(),
+                            *first_type,
                             weight,
                         ));
-                        incoming.entry(target).or_default().push((
-                            source,
-                            first_type.clone(),
-                            weight,
-                        ));
+                        incoming
+                            .entry(target)
+                            .or_default()
+                            .push((source, *first_type, weight));
                         stats.edge_count += 1;
                     }
                 }
@@ -399,7 +398,7 @@ impl GraphProjection {
                     .unwrap_or(false);
 
                 if !has_reverse {
-                    additional.push((target.clone(), source.clone(), edge_type.clone(), *weight));
+                    additional.push((target.clone(), source.clone(), *edge_type, *weight));
                 }
             }
         }
@@ -409,7 +408,7 @@ impl GraphProjection {
                 .outgoing
                 .entry(source.clone())
                 .or_default()
-                .push((target.clone(), edge_type.clone(), weight));
+                .push((target.clone(), edge_type, weight));
             projection
                 .incoming
                 .entry(target)

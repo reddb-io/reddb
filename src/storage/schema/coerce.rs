@@ -158,10 +158,10 @@ fn parse_date(input: &str) -> Result<Value, String> {
     let year: i32 = parts[0].parse().map_err(|_| "invalid year")?;
     let month: u32 = parts[1].parse().map_err(|_| "invalid month")?;
     let day: u32 = parts[2].parse().map_err(|_| "invalid day")?;
-    if month < 1 || month > 12 {
+    if !(1..=12).contains(&month) {
         return Err("month must be 1-12".into());
     }
-    if day < 1 || day > 31 {
+    if !(1..=31).contains(&day) {
         return Err("day must be 1-31".into());
     }
     let days = civil_days(year, month, day);
@@ -236,10 +236,10 @@ fn parse_iso_datetime_ms(input: &str) -> Result<i64, String> {
     let year: i32 = date_parts[0].parse().map_err(|_| "invalid year")?;
     let month: u32 = date_parts[1].parse().map_err(|_| "invalid month")?;
     let day: u32 = date_parts[2].parse().map_err(|_| "invalid day")?;
-    if month < 1 || month > 12 {
+    if !(1..=12).contains(&month) {
         return Err("month must be 1-12".into());
     }
-    if day < 1 || day > 31 {
+    if !(1..=31).contains(&day) {
         return Err("day must be 1-31".into());
     }
 
@@ -322,7 +322,7 @@ fn parse_latitude(input: &str) -> Result<Value, String> {
         .trim()
         .parse()
         .map_err(|_| "invalid latitude".to_string())?;
-    if lat < -90.0 || lat > 90.0 {
+    if !(-90.0..=90.0).contains(&lat) {
         return Err("latitude must be -90 to 90".into());
     }
     Ok(Value::Latitude((lat * 1_000_000.0) as i32))
@@ -333,7 +333,7 @@ fn parse_longitude(input: &str) -> Result<Value, String> {
         .trim()
         .parse()
         .map_err(|_| "invalid longitude".to_string())?;
-    if lon < -180.0 || lon > 180.0 {
+    if !(-180.0..=180.0).contains(&lon) {
         return Err("longitude must be -180 to 180".into());
     }
     Ok(Value::Longitude((lon * 1_000_000.0) as i32))
@@ -352,10 +352,10 @@ fn parse_geopoint(input: &str) -> Result<Value, String> {
         .trim()
         .parse()
         .map_err(|_| "invalid longitude".to_string())?;
-    if lat < -90.0 || lat > 90.0 {
+    if !(-90.0..=90.0).contains(&lat) {
         return Err("latitude must be -90 to 90".into());
     }
-    if lon < -180.0 || lon > 180.0 {
+    if !(-180.0..=180.0).contains(&lon) {
         return Err("longitude must be -180 to 180".into());
     }
     Ok(Value::GeoPoint(

@@ -292,7 +292,7 @@ impl ResultCache {
             max_memory: max_memory_bytes,
             current_memory: 0,
             stats: ResultCacheStats {
-                max_memory_bytes: max_memory_bytes,
+                max_memory_bytes,
                 ..Default::default()
             },
         }
@@ -347,7 +347,7 @@ impl ResultCache {
         for dep in &policy.dependencies {
             self.dependency_index
                 .entry(dep.clone())
-                .or_insert_with(HashSet::new)
+                .or_default()
                 .insert(key.clone());
         }
 
@@ -522,7 +522,7 @@ impl MaterializedViewCache {
         for dep in &def.dependencies {
             self.dependency_index
                 .entry(dep.clone())
-                .or_insert_with(HashSet::new)
+                .or_default()
                 .insert(def.name.clone());
         }
 

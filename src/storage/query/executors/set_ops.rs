@@ -110,7 +110,7 @@ pub fn set_union(
 /// Returns only rows that appear in both left and right.
 pub fn set_intersect(left: Vec<Binding>, right: Vec<Binding>) -> Vec<Binding> {
     // Build hash set of right side
-    let right_hashes: HashSet<u64> = right.iter().map(|b| binding_hash(b)).collect();
+    let right_hashes: HashSet<u64> = right.iter().map(binding_hash).collect();
 
     // Filter left to only include those in right
     let mut seen: HashSet<u64> = HashSet::new();
@@ -131,7 +131,7 @@ pub fn set_intersect(left: Vec<Binding>, right: Vec<Binding>) -> Vec<Binding> {
 /// Returns rows from left that don't appear in right.
 pub fn set_except(left: Vec<Binding>, right: Vec<Binding>) -> Vec<Binding> {
     // Build hash set of right side
-    let right_hashes: HashSet<u64> = right.iter().map(|b| binding_hash(b)).collect();
+    let right_hashes: HashSet<u64> = right.iter().map(binding_hash).collect();
 
     // Filter left to only include those NOT in right
     let mut seen: HashSet<u64> = HashSet::new();

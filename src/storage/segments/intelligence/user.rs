@@ -209,8 +209,8 @@ impl<'a> UserIntelligence<'a> {
         for credential in credentials {
             let password = credential
                 .trim_start_matches("cred:")
-                .splitn(2, ':')
-                .nth(1)
+                .split_once(':')
+                .map(|x| x.1)
                 .unwrap_or("");
 
             if password.is_empty() {

@@ -173,11 +173,11 @@ fn simple_regex_match(s: &str, pattern: &str) -> bool {
     if pattern.starts_with('^') && pattern.ends_with('$') {
         return s == &pattern[1..pattern.len() - 1];
     }
-    if pattern.starts_with('^') {
-        return s.starts_with(&pattern[1..]);
+    if let Some(stripped) = pattern.strip_prefix('^') {
+        return s.starts_with(stripped);
     }
-    if pattern.ends_with('$') {
-        return s.ends_with(&pattern[..pattern.len() - 1]);
+    if let Some(stripped) = pattern.strip_suffix('$') {
+        return s.ends_with(stripped);
     }
     s.contains(pattern)
 }

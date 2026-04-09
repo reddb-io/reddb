@@ -94,7 +94,7 @@ impl UnifiedStore {
 
         let chunk_capacity =
             crate::storage::engine::PAGE_SIZE - crate::storage::engine::HEADER_SIZE - 12;
-        let page_count = ((payload.len() + chunk_capacity - 1) / chunk_capacity) as u32;
+        let page_count = payload.len().div_ceil(chunk_capacity) as u32;
         let mut page_ids = existing_root
             .map(|root| self.read_native_blob_chain_page_ids(root))
             .transpose()?

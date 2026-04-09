@@ -13,9 +13,9 @@ impl<'a> Parser<'a> {
 
         // Parse table name and alias
         let table = self.parse_table_source()?;
-        let alias = if self.consume(&Token::As)? {
-            Some(self.expect_ident()?)
-        } else if self.check(&Token::Ident("".into())) && !self.is_join_keyword() {
+        let alias = if self.consume(&Token::As)?
+            || (self.check(&Token::Ident("".into())) && !self.is_join_keyword())
+        {
             Some(self.expect_ident()?)
         } else {
             None
@@ -145,9 +145,9 @@ impl<'a> Parser<'a> {
         join_type: JoinType,
     ) -> Result<QueryExpr, ParseError> {
         let table = self.parse_table_source()?;
-        let alias = if self.consume(&Token::As)? {
-            Some(self.expect_ident()?)
-        } else if self.check(&Token::Ident("".into())) && !self.is_clause_keyword() {
+        let alias = if self.consume(&Token::As)?
+            || (self.check(&Token::Ident("".into())) && !self.is_clause_keyword())
+        {
             Some(self.expect_ident()?)
         } else {
             None
@@ -307,9 +307,9 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_join_rhs_alias(&mut self) -> Result<Option<String>, ParseError> {
-        if self.consume(&Token::As)? {
-            Ok(Some(self.expect_ident()?))
-        } else if self.check(&Token::Ident("".into())) && !self.is_join_rhs_clause_keyword() {
+        if self.consume(&Token::As)?
+            || (self.check(&Token::Ident("".into())) && !self.is_join_rhs_clause_keyword())
+        {
             Ok(Some(self.expect_ident()?))
         } else {
             Ok(None)

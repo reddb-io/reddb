@@ -425,9 +425,7 @@ impl StateSegment {
 
     /// Get or create a state manager for an execution
     pub fn get_or_create(&mut self, execution_id: &str) -> &mut StateManager {
-        self.states
-            .entry(execution_id.to_string())
-            .or_insert_with(StateManager::new)
+        self.states.entry(execution_id.to_string()).or_default()
     }
 
     /// Get state manager for an execution

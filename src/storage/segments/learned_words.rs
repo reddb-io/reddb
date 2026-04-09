@@ -249,10 +249,7 @@ impl GlobalVocabulary {
 
     /// Add word to global vocabulary
     pub fn add_word(&mut self, word: String, context: &str, score: f64) {
-        let context_words = self
-            .contexts
-            .entry(context.to_string())
-            .or_insert_with(HashMap::new);
+        let context_words = self.contexts.entry(context.to_string()).or_default();
 
         if let Some(entry) = context_words.get_mut(&word) {
             entry.update(score);

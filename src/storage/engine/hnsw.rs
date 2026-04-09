@@ -338,9 +338,8 @@ impl HnswIndex {
         let uniform = (self.rng_state as f64) / (u64::MAX as f64);
 
         // Exponential distribution: -ln(uniform) * ml
-        let level = (-uniform.ln() * self.config.ml).floor() as usize;
 
-        level
+        (-uniform.ln() * self.config.ml).floor() as usize
     }
 
     /// Search a single layer for the closest node (greedy)
@@ -485,9 +484,9 @@ impl HnswIndex {
 
         let mut scored: Vec<DistanceResult> = neighbors
             .iter()
-            .filter_map(|&neighbor_id| {
+            .map(|&neighbor_id| {
                 let dist = self.compute_distance(&node_vector, neighbor_id);
-                Some(DistanceResult::new(neighbor_id, dist))
+                DistanceResult::new(neighbor_id, dist)
             })
             .collect();
 
@@ -609,8 +608,9 @@ impl HnswIndex {
         let mut min_connections = usize::MAX;
 
         for node in self.nodes.values() {
-            for layer in 0..=node.max_layer {
-                layer_counts[layer] += 1;
+            for (layer, layer_count) in layer_counts.iter_mut().enumerate().take(node.max_layer + 1)
+            {
+                *layer_count += 1;
                 let conns = node.connections[layer].len();
                 total_connections += conns;
                 max_connections = max_connections.max(conns);
@@ -777,7 +777,7 @@ impl HnswIndex {
             }
 
             let mut connections = vec![Vec::new(); level + 1];
-            for layer in 0..=level {
+            for conn_list in connections.iter_mut().take(level + 1) {
                 let conn_count =
                     u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
                 pos += 4;
@@ -785,7 +785,7 @@ impl HnswIndex {
                 for _ in 0..conn_count {
                     let conn = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap());
                     pos += 8;
-                    connections[layer].push(conn);
+                    conn_list.push(conn);
                 }
             }
 
@@ -845,7 +845,7 @@ pub struct Bitset {
 impl Bitset {
     /// Create a new bitset with capacity for n elements
     pub fn with_capacity(n: usize) -> Self {
-        let num_words = (n + 63) / 64;
+        let num_words = n.div_ceil(64);
         Self {
             bits: vec![0; num_words],
             len: n,
@@ -854,11 +854,11 @@ impl Bitset {
 
     /// Create a bitset with all bits set
     pub fn all(n: usize) -> Self {
-        let num_words = (n + 63) / 64;
+        let num_words = n.div_ceil(64);
         let mut bits = vec![u64::MAX; num_words];
 
         // Clear excess bits in last word
-        if n % 64 != 0 {
+        if !n.is_multiple_of(64) {
             let last_idx = num_words - 1;
             let valid_bits = n % 64;
             bits[last_idx] = (1u64 << valid_bits) - 1;

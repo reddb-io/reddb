@@ -408,7 +408,7 @@ impl TripleIndex {
         let key = (k1.to_string(), k2.to_string());
 
         let mut data = self.data.write().unwrap();
-        data.entry(key).or_insert_with(Vec::new).push(v.to_string());
+        data.entry(key).or_default().push(v.to_string());
 
         let mut stats = self.stats.write().unwrap();
         stats.inserts += 1;
@@ -573,9 +573,9 @@ impl TripleStore {
                         .scan()
                         .into_iter()
                         .filter(|(s, p, o)| {
-                            subject.map_or(true, |sub| s == sub)
-                                && predicate.map_or(true, |pre| p == pre)
-                                && object.map_or(true, |obj| o == obj)
+                            subject.is_none_or(|sub| s == sub)
+                                && predicate.is_none_or(|pre| p == pre)
+                                && object.is_none_or(|obj| o == obj)
                         })
                         .collect()
                 }

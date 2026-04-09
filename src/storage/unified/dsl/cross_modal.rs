@@ -32,11 +32,7 @@ pub(crate) fn merge_cross_modal_match(
 }
 
 pub(crate) fn cross_modal_normalize_token(token: &str) -> String {
-    token
-        .trim()
-        .to_ascii_lowercase()
-        .replace('-', "_")
-        .replace(' ', "_")
+    token.trim().to_ascii_lowercase().replace(['-', ' '], "_")
 }
 
 pub(crate) fn cross_modal_ref_matches_edge_label(

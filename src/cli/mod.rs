@@ -15,20 +15,15 @@ pub mod types;
 use std::collections::HashMap;
 
 /// Output format for CLI results.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OutputFormat {
     /// Human-readable colorized output (default)
+    #[default]
     Human,
     /// JSON output for automation/scripting
     Json,
     /// YAML output for configuration
     Yaml,
-}
-
-impl Default for OutputFormat {
-    fn default() -> Self {
-        OutputFormat::Human
-    }
 }
 
 impl OutputFormat {

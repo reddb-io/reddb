@@ -307,7 +307,7 @@ impl StronglyConnectedComponents {
         }
 
         // Sort components by size descending
-        components.sort_by(|a, b| b.len().cmp(&a.len()));
+        components.sort_by_key(|b| std::cmp::Reverse(b.len()));
 
         SCCResult {
             count: components.len(),

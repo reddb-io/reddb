@@ -273,7 +273,7 @@ impl SubdomainSegment {
         let mut domain_entries: Vec<(u32, DomainRange)> = self
             .domain_index
             .iter()
-            .map(|(id, range)| (*id, range.clone()))
+            .map(|(id, range)| (*id, *range))
             .collect();
         domain_entries.sort_by_key(|(id, _)| *id);
 

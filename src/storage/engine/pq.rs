@@ -61,7 +61,7 @@ impl Default for PQConfig {
 impl PQConfig {
     pub fn new(dimension: usize, n_subvectors: usize) -> Self {
         assert!(
-            dimension % n_subvectors == 0,
+            dimension.is_multiple_of(n_subvectors),
             "dimension must be divisible by n_subvectors"
         );
         Self {

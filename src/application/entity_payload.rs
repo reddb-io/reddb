@@ -190,7 +190,7 @@ fn parse_optional_value_map(
     fields: &[&str],
 ) -> RedDBResult<Vec<(String, Value)>> {
     for field in fields {
-        if let Some(object) = payload.get(*field).and_then(JsonValue::as_object) {
+        if let Some(object) = payload.get(field).and_then(JsonValue::as_object) {
             let mut out = Vec::with_capacity(object.len());
             for (key, value) in object {
                 out.push((key.clone(), json_to_storage_value(value)?));

@@ -275,7 +275,7 @@ impl UnifiedStoreAdapter {
         // 3. Scan all collections and score entities
         for col_name in &self.store.list_collections() {
             if let Some(cols) = &query.collections {
-                if !cols.iter().any(|c| *c == col_name.as_str()) {
+                if !cols.contains(&col_name.as_str()) {
                     continue;
                 }
             }
@@ -347,7 +347,7 @@ impl UnifiedStoreAdapter {
         entity_id: EntityId,
         config: &RagConfig,
     ) -> Result<RetrievalContext, ExecutionError> {
-        let mut context = RetrievalContext::new(&format!("expand:{}", entity_id.0));
+        let mut context = RetrievalContext::new(format!("expand:{}", entity_id.0));
 
         // Find the entity first
         let (collection, entity) = self
@@ -442,12 +442,12 @@ impl UnifiedStoreAdapter {
             for entity in entities {
                 let is_match = match (&entity.kind, &pattern.node_pattern) {
                     (EntityKind::GraphNode { label, node_type }, Some(pat)) => {
-                        let label_match = pat.label.as_ref().map_or(true, |l| label == l);
-                        let type_match = pat.node_type.as_ref().map_or(true, |t| node_type == t);
+                        let label_match = pat.label.as_ref().is_none_or(|l| label == l);
+                        let type_match = pat.node_type.as_ref().is_none_or(|t| node_type == t);
                         label_match && type_match
                     }
                     (EntityKind::GraphEdge { label, .. }, Some(pat)) => {
-                        pat.label.as_ref().map_or(false, |l| label == l)
+                        pat.label.as_ref() == Some(label)
                     }
                     (_, None) => true,
                     _ => false,

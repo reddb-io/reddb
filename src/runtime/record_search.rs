@@ -329,8 +329,8 @@ pub(super) fn runtime_filter_dsl_result(
         let (entity_type, item_capabilities) = runtime_entity_type_and_capabilities(&item.entity);
         let type_ok = entity_types
             .as_ref()
-            .map_or(true, |accepted| accepted.contains(entity_type));
-        let capability_ok = capabilities.as_ref().map_or(true, |accepted| {
+            .is_none_or(|accepted| accepted.contains(entity_type));
+        let capability_ok = capabilities.as_ref().is_none_or(|accepted| {
             item_capabilities
                 .iter()
                 .any(|capability| accepted.contains(capability))
@@ -754,7 +754,7 @@ pub(super) fn runtime_vector_entity_matches_filter(
     let metadata = db
         .store()
         .get_metadata(collection, entity.id)
-        .unwrap_or_else(Metadata::new);
+        .unwrap_or_default();
     let entry = runtime_metadata_entry(&metadata);
     filter.matches(&entry)
 }

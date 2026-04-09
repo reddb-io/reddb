@@ -477,7 +477,7 @@ impl NaturalExecutor {
                 let endpoints: Vec<&str> = query
                     .entities
                     .iter()
-                    .filter_map(|e| e.value.as_ref().map(|s| s.as_str()))
+                    .filter_map(|e| e.value.as_deref())
                     .collect();
                 if endpoints.len() >= 2 {
                     format!("PATH FROM '{}' TO '{}'", endpoints[0], endpoints[1])
@@ -511,7 +511,7 @@ impl NaturalExecutor {
                 let endpoints: Vec<&str> = query
                     .entities
                     .iter()
-                    .filter_map(|e| e.value.as_ref().map(|s| s.as_str()))
+                    .filter_map(|e| e.value.as_deref())
                     .collect();
                 if endpoints.len() >= 2 {
                     format!(

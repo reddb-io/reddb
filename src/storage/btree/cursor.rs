@@ -117,7 +117,7 @@ where
     /// Move to first entry
     pub fn first(&mut self) -> bool {
         // Find first leaf
-        let first_leaf = match self.tree.first_leaf.read().unwrap().clone() {
+        let first_leaf = match *self.tree.first_leaf.read().unwrap() {
             Some(id) => id,
             None => {
                 self.state = CursorState::AfterLast;
@@ -135,7 +135,7 @@ where
     /// Move to last entry
     pub fn last(&mut self) -> bool {
         // Find last leaf by traversing from first
-        let mut leaf_id = match self.tree.first_leaf.read().unwrap().clone() {
+        let mut leaf_id = match *self.tree.first_leaf.read().unwrap() {
             Some(id) => id,
             None => {
                 self.state = CursorState::BeforeFirst;
@@ -144,18 +144,14 @@ where
         };
 
         // Walk to last leaf
-        loop {
-            if let Some(node) = self.tree.get_node(leaf_id) {
-                let node = node.read().unwrap();
-                if let Node::Leaf(leaf) = &*node {
-                    match leaf.next {
-                        Some(next_id) => {
-                            leaf_id = next_id;
-                        }
-                        None => break,
+        while let Some(node) = self.tree.get_node(leaf_id) {
+            let node = node.read().unwrap();
+            if let Node::Leaf(leaf) = &*node {
+                match leaf.next {
+                    Some(next_id) => {
+                        leaf_id = next_id;
                     }
-                } else {
-                    break;
+                    None => break,
                 }
             } else {
                 break;
@@ -239,7 +235,7 @@ where
 
     /// Find leaf for key
     fn find_leaf(&self, key: &K) -> Option<NodeId> {
-        let root_id = self.tree.root.read().unwrap().clone()?;
+        let root_id = (*self.tree.root.read().unwrap())?;
         self.find_leaf_from(root_id, key)
     }
 

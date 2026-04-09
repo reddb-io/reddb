@@ -224,7 +224,7 @@ impl CostEstimator {
 
         // Apply filter selectivity
         if let Some(ref filter) = query.filter {
-            let selectivity = self.estimate_filter_selectivity(filter);
+            let selectivity = Self::estimate_filter_selectivity(filter);
             estimate = estimate.with_filter(selectivity);
         }
 
@@ -267,7 +267,7 @@ impl CostEstimator {
 
         // Apply filter
         if let Some(ref filter) = query.filter {
-            let selectivity = self.estimate_filter_selectivity(filter);
+            let selectivity = Self::estimate_filter_selectivity(filter);
             estimate = estimate.with_filter(selectivity);
         }
 
@@ -416,7 +416,7 @@ impl CostEstimator {
     // Filter Selectivity
     // =========================================================================
 
-    fn estimate_filter_selectivity(&self, filter: &AstFilter) -> f64 {
+    fn estimate_filter_selectivity(filter: &AstFilter) -> f64 {
         match filter {
             AstFilter::Compare { op, .. } => {
                 match op {
@@ -438,14 +438,14 @@ impl CostEstimator {
             AstFilter::IsNull { .. } => 0.01,
             AstFilter::IsNotNull { .. } => 0.99,
             AstFilter::And(left, right) => {
-                self.estimate_filter_selectivity(left) * self.estimate_filter_selectivity(right)
+                Self::estimate_filter_selectivity(left) * Self::estimate_filter_selectivity(right)
             }
             AstFilter::Or(left, right) => {
-                let s1 = self.estimate_filter_selectivity(left);
-                let s2 = self.estimate_filter_selectivity(right);
+                let s1 = Self::estimate_filter_selectivity(left);
+                let s2 = Self::estimate_filter_selectivity(right);
                 s1 + s2 - (s1 * s2) // Inclusion-exclusion
             }
-            AstFilter::Not(inner) => 1.0 - self.estimate_filter_selectivity(inner),
+            AstFilter::Not(inner) => 1.0 - Self::estimate_filter_selectivity(inner),
         }
     }
 }
@@ -490,14 +490,14 @@ mod tests {
             op: CompareOp::Eq,
             value: Value::Integer(1),
         };
-        assert!(estimator.estimate_filter_selectivity(&eq_filter) < 0.1);
+        assert!(CostEstimator::estimate_filter_selectivity(&eq_filter) < 0.1);
 
         let ne_filter = AstFilter::Compare {
             field: FieldRef::column("hosts", "id"),
             op: CompareOp::Ne,
             value: Value::Integer(1),
         };
-        assert!(estimator.estimate_filter_selectivity(&ne_filter) > 0.9);
+        assert!(CostEstimator::estimate_filter_selectivity(&ne_filter) > 0.9);
     }
 
     #[test]
@@ -517,7 +517,7 @@ mod tests {
             }),
         );
 
-        let selectivity = estimator.estimate_filter_selectivity(&and_filter);
+        let selectivity = CostEstimator::estimate_filter_selectivity(&and_filter);
         assert!(selectivity < 0.01); // AND should be very selective
     }
 

@@ -178,10 +178,10 @@ impl DFS {
         }
 
         for node in &nodes {
-            if !visited.contains(node) {
-                if !visit(graph, node, &mut visited, &mut temp_marks, &mut result) {
-                    return None; // Cycle detected
-                }
+            if !visited.contains(node)
+                && !visit(graph, node, &mut visited, &mut temp_marks, &mut result)
+            {
+                return None; // Cycle detected
             }
         }
 

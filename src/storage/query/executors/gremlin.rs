@@ -158,11 +158,9 @@ impl GremlinExecutor {
         let mut found_source = false;
         for step in &traversal.steps {
             // Skip the source step we already processed
-            if !found_source {
-                if matches!(step, GremlinStep::V(_) | GremlinStep::E(_)) {
-                    found_source = true;
-                    continue;
-                }
+            if !found_source && matches!(step, GremlinStep::V(_) | GremlinStep::E(_)) {
+                found_source = true;
+                continue;
             }
 
             traversers = self.execute_step(traversers, step, &mut stats)?;

@@ -176,7 +176,7 @@ impl ParsedCommand {
     }
 
     pub fn has_flag(&self, name: &str) -> bool {
-        self.flags.get(name).map_or(false, |v| v.is_truthy())
+        self.flags.get(name).is_some_and(|v| v.is_truthy())
     }
 }
 

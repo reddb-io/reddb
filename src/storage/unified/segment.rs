@@ -391,10 +391,12 @@ impl UnifiedSegment for GrowingSegment {
     }
 
     fn stats(&self) -> SegmentStats {
-        let mut stats = SegmentStats::default();
-        stats.entity_count = self.entities.len();
-        stats.deleted_count = self.deleted.len();
-        stats.memory_bytes = self.memory_bytes.load(Ordering::Relaxed) as usize;
+        let mut stats = SegmentStats {
+            entity_count: self.entities.len(),
+            deleted_count: self.deleted.len(),
+            memory_bytes: self.memory_bytes.load(Ordering::Relaxed) as usize,
+            ..Default::default()
+        };
 
         for entity in self.entities.values() {
             match &entity.kind {

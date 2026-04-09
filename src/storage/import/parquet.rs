@@ -295,14 +295,14 @@ impl ParquetReader {
 
             let mut text_start = None;
             for (idx, &b) in data.iter().enumerate() {
-                if b >= 0x20 && b <= 0x7E {
+                if (0x20..=0x7E).contains(&b) {
                     // Printable ASCII
                     if text_start.is_none() {
                         text_start = Some(idx);
                     }
                 } else if let Some(start) = text_start {
                     let len = idx - start;
-                    if len >= 2 && len <= 50 {
+                    if (2..=50).contains(&len) {
                         // Possible column name
                         if let Ok(name) = std::str::from_utf8(&data[start..idx]) {
                             if !name.contains(' ')

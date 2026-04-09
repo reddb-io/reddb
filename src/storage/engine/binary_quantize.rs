@@ -55,7 +55,7 @@ impl BinaryVector {
     /// Positive values become 1, negative/zero become 0
     pub fn from_f32(values: &[f32]) -> Self {
         let dim = values.len();
-        let n_words = (dim + 63) / 64; // Ceiling division
+        let n_words = dim.div_ceil(64); // Ceiling division
         let mut data = vec![0u64; n_words];
 
         for (i, &v) in values.iter().enumerate() {
@@ -74,7 +74,7 @@ impl BinaryVector {
     /// Values above threshold become 1, below become 0
     pub fn from_f32_threshold(values: &[f32], threshold: f32) -> Self {
         let dim = values.len();
-        let n_words = (dim + 63) / 64;
+        let n_words = dim.div_ceil(64);
         let mut data = vec![0u64; n_words];
 
         for (i, &v) in values.iter().enumerate() {
@@ -95,7 +95,7 @@ impl BinaryVector {
     pub fn from_f32_median(values: &[f32]) -> Self {
         let mut sorted = values.to_vec();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
-        let median = if sorted.len() % 2 == 0 {
+        let median = if sorted.len().is_multiple_of(2) {
             (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2.0
         } else {
             sorted[sorted.len() / 2]
@@ -240,7 +240,7 @@ pub struct BinaryIndex {
 impl BinaryIndex {
     /// Create a new binary index
     pub fn new(dim: usize) -> Self {
-        let words_per_vector = (dim + 63) / 64;
+        let words_per_vector = dim.div_ceil(64);
         Self {
             vectors: Vec::new(),
             words_per_vector,
@@ -251,7 +251,7 @@ impl BinaryIndex {
 
     /// Create with pre-allocated capacity
     pub fn with_capacity(dim: usize, capacity: usize) -> Self {
-        let words_per_vector = (dim + 63) / 64;
+        let words_per_vector = dim.div_ceil(64);
         Self {
             vectors: Vec::with_capacity(capacity * words_per_vector),
             words_per_vector,

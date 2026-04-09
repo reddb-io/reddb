@@ -204,7 +204,7 @@ impl DiskBackedGraph {
 
     /// Iterate over all nodes (streaming for large graphs)
     pub fn iter_nodes(&self) -> impl Iterator<Item = GraphNode> + '_ {
-        self.store.iter_nodes().filter_map(|stored| {
+        self.store.iter_nodes().map(|stored| {
             let out_edges: Vec<EdgeRef> = self
                 .store
                 .outgoing_edges(&stored.id)
@@ -227,7 +227,7 @@ impl DiskBackedGraph {
                 })
                 .collect();
 
-            Some(GraphNode {
+            GraphNode {
                 id: stored.id.clone(),
                 node_type: stored.node_type.into(),
                 label: stored.label.clone(),
@@ -237,7 +237,7 @@ impl DiskBackedGraph {
                 cache_generation: 0,
                 cache_value: 0.0,
                 depth: 0,
-            })
+            }
         })
     }
 

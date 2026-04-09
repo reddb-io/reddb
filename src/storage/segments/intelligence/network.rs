@@ -175,13 +175,12 @@ impl<'a> NetworkIntelligence<'a> {
             if let Some(node) = self.graph.get_node(&format!("host:{}", host)) {
                 // Check for typical internet-facing services
                 for edge in &node.out_edges {
-                    if edge.edge_type == EdgeType::HasService {
-                        if edge.target_id.contains(":80:")
+                    if edge.edge_type == EdgeType::HasService
+                        && (edge.target_id.contains(":80:")
                             || edge.target_id.contains(":443:")
-                            || edge.target_id.contains(":25:")
-                        {
-                            return true;
-                        }
+                            || edge.target_id.contains(":25:"))
+                    {
+                        return true;
                     }
                 }
             }

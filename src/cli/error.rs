@@ -1,7 +1,7 @@
 /// CLI parse error with context for helpful messages.
 ///
 /// Self-contained ANSI color constants -- no external terminal dependency.
-
+///
 /// Minimal ANSI escape codes for error formatting.
 mod ansi {
     pub const BOLD: &str = "\x1b[1m";
@@ -399,8 +399,8 @@ pub fn levenshtein(a: &str, b: &str) -> usize {
     for i in 0..=a_len {
         matrix[i * width] = i;
     }
-    for j in 0..=b_len {
-        matrix[j] = j;
+    for (j, item) in matrix.iter_mut().enumerate().take(b_len + 1) {
+        *item = j;
     }
 
     let a_bytes = a.as_bytes();

@@ -16,17 +16,17 @@ impl RedDBServer {
 
         match (method.as_str(), path.as_str()) {
             // Auth endpoints
-            ("POST", "/auth/bootstrap") => return self.handle_auth_bootstrap(body),
-            ("POST", "/auth/login") => return self.handle_auth_login(body),
-            ("POST", "/auth/users") => return self.handle_auth_create_user(body),
-            ("GET", "/auth/users") => return self.handle_auth_list_users(),
-            ("POST", "/auth/api-keys") => return self.handle_auth_create_api_key(body),
-            ("POST", "/auth/change-password") => return self.handle_auth_change_password(body),
-            ("GET", "/auth/whoami") => return self.handle_auth_whoami(&headers),
+            ("POST", "/auth/bootstrap") => self.handle_auth_bootstrap(body),
+            ("POST", "/auth/login") => self.handle_auth_login(body),
+            ("POST", "/auth/users") => self.handle_auth_create_user(body),
+            ("GET", "/auth/users") => self.handle_auth_list_users(),
+            ("POST", "/auth/api-keys") => self.handle_auth_create_api_key(body),
+            ("POST", "/auth/change-password") => self.handle_auth_change_password(body),
+            ("GET", "/auth/whoami") => self.handle_auth_whoami(&headers),
 
             // Replication endpoints
-            ("GET", "/replication/status") => return self.handle_replication_status(),
-            ("POST", "/replication/snapshot") => return self.handle_replication_snapshot(),
+            ("GET", "/replication/status") => self.handle_replication_status(),
+            ("POST", "/replication/snapshot") => self.handle_replication_snapshot(),
 
             ("GET", "/health") => {
                 let report = self.native_use_cases().health();

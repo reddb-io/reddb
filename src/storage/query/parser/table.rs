@@ -31,9 +31,9 @@ impl<'a> Parser<'a> {
         // Parse optional alias (only when a FROM clause exists).
         let alias = if !has_from {
             None
-        } else if self.consume(&Token::As)? {
-            Some(self.expect_ident()?)
-        } else if self.check(&Token::Ident("".into())) && !self.is_clause_keyword() {
+        } else if self.consume(&Token::As)?
+            || (self.check(&Token::Ident("".into())) && !self.is_clause_keyword())
+        {
             Some(self.expect_ident()?)
         } else {
             None

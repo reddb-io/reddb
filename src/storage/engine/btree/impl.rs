@@ -553,7 +553,7 @@ impl BTree {
             let mut left = self.pager.read_page(left_id)?;
             let mut left_entries = read_leaf_entries(&left)?;
 
-            left_entries.extend(leaf_entries.into_iter());
+            left_entries.extend(leaf_entries);
             write_leaf_entries(&mut left, &left_entries)?;
 
             let next_leaf = read_next_leaf(&leaf);
@@ -585,7 +585,7 @@ impl BTree {
             let right = self.pager.read_page(right_id)?;
             let right_entries = read_leaf_entries(&right)?;
 
-            leaf_entries.extend(right_entries.into_iter());
+            leaf_entries.extend(right_entries);
             write_leaf_entries(&mut leaf, &leaf_entries)?;
 
             let next_leaf = read_next_leaf(&right);
@@ -730,8 +730,8 @@ impl BTree {
             parent_children.remove(child_index);
 
             left_keys.push(parent_key);
-            left_keys.extend(node_keys.into_iter());
-            left_children.extend(node_children.into_iter());
+            left_keys.extend(node_keys);
+            left_children.extend(node_children);
 
             write_interior_entries(&mut left, &left_keys, &left_children)?;
             left.update_checksum();
@@ -753,8 +753,8 @@ impl BTree {
             parent_children.remove(child_index + 1);
 
             node_keys.push(parent_key);
-            node_keys.extend(right_keys.into_iter());
-            node_children.extend(right_children.into_iter());
+            node_keys.extend(right_keys);
+            node_children.extend(right_children);
 
             write_interior_entries(&mut node, &node_keys, &node_children)?;
             node.update_checksum();

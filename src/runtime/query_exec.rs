@@ -648,7 +648,7 @@ pub(super) fn evaluate_runtime_join_filter(
             right_table_alias,
         )
         .as_ref()
-        .map_or(false, |candidate| {
+        .is_some_and(|candidate| {
             evaluate_metadata_field_in(field, candidate, values).unwrap_or_else(|| {
                 values
                     .iter()
@@ -927,7 +927,7 @@ pub(super) fn runtime_vector_record_matches_filter(
     let metadata = db
         .store()
         .get_metadata(collection, entity_id)
-        .unwrap_or_else(Metadata::new);
+        .unwrap_or_default();
     let entry = runtime_metadata_entry(&metadata);
     filter.matches(&entry)
 }

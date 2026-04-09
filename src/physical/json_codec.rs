@@ -96,50 +96,52 @@ pub(super) fn manifest_to_json(manifest: &SchemaManifest) -> JsonValue {
 pub(super) fn manifest_from_json(value: &JsonValue) -> io::Result<SchemaManifest> {
     let object = expect_object(value, "manifest")?;
     let options_object = expect_object(json_required(object, "options")?, "manifest.options")?;
-    let mut options = RedDBOptions::default();
-    options.mode = match json_string_required(options_object, "mode")?.as_str() {
-        "persistent" => StorageMode::Persistent,
-        "in_memory" => StorageMode::InMemory,
-        other => {
-            return Err(invalid_data(format!(
-                "unsupported storage mode in manifest: {other}"
-            )))
-        }
+    let mut options = RedDBOptions {
+        mode: match json_string_required(options_object, "mode")?.as_str() {
+            "persistent" => StorageMode::Persistent,
+            "in_memory" => StorageMode::InMemory,
+            other => {
+                return Err(invalid_data(format!(
+                    "unsupported storage mode in manifest: {other}"
+                )))
+            }
+        },
+        data_path: options_object
+            .get("data_path")
+            .and_then(JsonValue::as_str)
+            .map(PathBuf::from),
+        read_only: json_bool_required(options_object, "read_only")?,
+        create_if_missing: json_bool_required(options_object, "create_if_missing")?,
+        verify_checksums: json_bool_required(options_object, "verify_checksums")?,
+        auto_checkpoint_pages: json_u32_required(options_object, "auto_checkpoint_pages")?,
+        cache_pages: json_usize_required(options_object, "cache_pages")?,
+        snapshot_retention: options_object
+            .get("snapshot_retention")
+            .map(|_value| json_usize_required(options_object, "snapshot_retention"))
+            .transpose()?
+            .unwrap_or(crate::api::DEFAULT_SNAPSHOT_RETENTION)
+            .max(1),
+        export_retention: options_object
+            .get("export_retention")
+            .map(|_value| json_usize_required(options_object, "export_retention"))
+            .transpose()?
+            .unwrap_or(crate::api::DEFAULT_EXPORT_RETENTION)
+            .max(1),
+        force_create: json_bool_required(options_object, "force_create")?,
+        metadata: options_object
+            .get("metadata")
+            .and_then(JsonValue::as_object)
+            .map(|metadata| {
+                metadata
+                    .iter()
+                    .filter_map(|(key, value)| {
+                        value.as_str().map(|value| (key.clone(), value.to_string()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        ..Default::default()
     };
-    options.data_path = options_object
-        .get("data_path")
-        .and_then(JsonValue::as_str)
-        .map(PathBuf::from);
-    options.read_only = json_bool_required(options_object, "read_only")?;
-    options.create_if_missing = json_bool_required(options_object, "create_if_missing")?;
-    options.verify_checksums = json_bool_required(options_object, "verify_checksums")?;
-    options.auto_checkpoint_pages = json_u32_required(options_object, "auto_checkpoint_pages")?;
-    options.cache_pages = json_usize_required(options_object, "cache_pages")?;
-    options.snapshot_retention = options_object
-        .get("snapshot_retention")
-        .map(|value| json_usize_required(options_object, "snapshot_retention"))
-        .transpose()?
-        .unwrap_or(crate::api::DEFAULT_SNAPSHOT_RETENTION)
-        .max(1);
-    options.export_retention = options_object
-        .get("export_retention")
-        .map(|value| json_usize_required(options_object, "export_retention"))
-        .transpose()?
-        .unwrap_or(crate::api::DEFAULT_EXPORT_RETENTION)
-        .max(1);
-    options.force_create = json_bool_required(options_object, "force_create")?;
-    options.metadata = options_object
-        .get("metadata")
-        .and_then(JsonValue::as_object)
-        .map(|metadata| {
-            metadata
-                .iter()
-                .filter_map(|(key, value)| {
-                    value.as_str().map(|value| (key.clone(), value.to_string()))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
     if let Some(capabilities) = options_object
         .get("capabilities")
         .and_then(JsonValue::as_array)

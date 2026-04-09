@@ -322,10 +322,8 @@ impl IntegratedIndexManager {
                     if let Ok(mut indices) = self.hnsw_indices.write() {
                         indices.remove(coll);
                     }
-                } else {
-                    if let Ok(mut indices) = self.hnsw_indices.write() {
-                        indices.clear();
-                    }
+                } else if let Ok(mut indices) = self.hnsw_indices.write() {
+                    indices.clear();
                 }
             }
             IndexType::Graph => {

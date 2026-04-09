@@ -487,9 +487,9 @@ pub fn merge_join(
                     }
 
                     // Match with all right rows in the group
-                    for r_idx in match_start_right..right_idx {
+                    for right_row in right_sorted.iter().take(right_idx).skip(match_start_right) {
                         left_matched[left_idx] = true;
-                        let merged = merge_bindings(&left_sorted[left_idx], &right_sorted[r_idx]);
+                        let merged = merge_bindings(&left_sorted[left_idx], right_row);
                         results.push(merged);
                     }
                     left_idx += 1;
@@ -612,7 +612,7 @@ pub fn execute_join(
     stats: Option<JoinStats>,
 ) -> Vec<Binding> {
     // Determine strategy
-    let actual_stats = stats.unwrap_or_else(|| JoinStats {
+    let actual_stats = stats.unwrap_or(JoinStats {
         left_cardinality: left.len(),
         right_cardinality: right.len(),
         left_sorted: false,

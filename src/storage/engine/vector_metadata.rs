@@ -462,7 +462,7 @@ impl MetadataStore {
             if let Some(value) = entry.get(&key) {
                 self.indexes
                     .entry(key.clone())
-                    .or_insert_with(KeyIndex::new)
+                    .or_default()
                     .insert(id, &value);
             }
         }

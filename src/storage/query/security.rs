@@ -599,7 +599,7 @@ impl SecurityQueries {
     /// Find most critical nodes using PageRank
     pub fn critical_assets(&self, top_k: usize) -> Result<Vec<(String, f64)>, ExecutionError> {
         let pagerank = PageRank::default();
-        let result = pagerank.run(&*self.graph);
+        let result = pagerank.run(&self.graph);
 
         // Use PageRankResult's top() method for efficiency
         Ok(result.top(top_k))
@@ -608,7 +608,7 @@ impl SecurityQueries {
     /// Find choke points using betweenness centrality
     pub fn choke_points(&self, top_k: usize) -> Result<Vec<(String, f64)>, ExecutionError> {
         // BetweennessCentrality uses static compute() method
-        let result = BetweennessCentrality::compute(&*self.graph, true);
+        let result = BetweennessCentrality::compute(&self.graph, true);
 
         let mut scores: Vec<_> = result.scores.into_iter().collect();
         scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));

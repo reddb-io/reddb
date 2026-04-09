@@ -2,7 +2,7 @@
 ///
 /// Generates static completion scripts for bash, zsh, and fish shells,
 /// plus a dynamic `complete_partial` function for runtime tab-completion.
-
+///
 /// Supported shell targets for completion script generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shell {
@@ -97,8 +97,7 @@ pub fn complete_partial(
         // Four or more tokens: suggest flag names starting with --
         _ => {
             let last = *tokens.last().unwrap_or(&"");
-            if last.starts_with("--") {
-                let prefix = &last[2..];
+            if let Some(prefix) = last.strip_prefix("--") {
                 let flag_names = ["help", "json", "output", "verbose", "no-color", "version"];
                 flag_names
                     .iter()
@@ -194,10 +193,9 @@ fn generate_zsh(
         match short {
             Some(ch) => {
                 out.push_str(&format!(
-                    "        '(-{ch} --{long})'{{{short_dash},--{long}}}'[{long}]'\n",
+                    "        '(-{ch} --{long})'{{-{ch},--{long}}}'[{long}]'\n",
                     ch = ch,
                     long = long,
-                    short_dash = format!("-{}", ch),
                 ));
             }
             None => {

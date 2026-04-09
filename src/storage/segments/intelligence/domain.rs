@@ -352,7 +352,7 @@ impl<'a> DomainIntelligence<'a> {
         let exposed: Vec<_> = services
             .iter()
             .filter(|(addr, _)| {
-                let port = addr.split(':').last().unwrap_or("");
+                let port = addr.split(':').next_back().unwrap_or("");
                 sensitive_ports.contains(&port)
             })
             .collect();
@@ -404,7 +404,7 @@ impl<'a> DomainIntelligence<'a> {
         for node in self.graph.all_nodes() {
             if let Some(domain) = extract_domain_from_label(&node.label) {
                 // Only add if it looks like a domain (has at least one dot)
-                if domain.contains('.') && !domain.parse::<std::net::Ipv4Addr>().is_ok() {
+                if domain.contains('.') && domain.parse::<std::net::Ipv4Addr>().is_err() {
                     domains.insert(domain);
                 }
             }
@@ -421,7 +421,7 @@ fn extract_domain_from_id(id: &str) -> Option<String> {
     let parts: Vec<&str> = id.split(':').collect();
     if parts.len() >= 2 {
         let potential = parts[1];
-        if potential.contains('.') && !potential.parse::<std::net::Ipv4Addr>().is_ok() {
+        if potential.contains('.') && potential.parse::<std::net::Ipv4Addr>().is_err() {
             return Some(potential.to_string());
         }
     }
@@ -435,12 +435,12 @@ fn extract_domain_from_label(label: &str) -> Option<String> {
     for word in words {
         let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '-');
         if clean.contains('.')
-            && !clean.parse::<std::net::Ipv4Addr>().is_ok()
+            && clean.parse::<std::net::Ipv4Addr>().is_err()
             && clean.chars().filter(|&c| c == '.').count() >= 1
         {
             // Check if it looks like a domain
             let parts: Vec<&str> = clean.split('.').collect();
-            if parts.len() >= 2 && parts.last().map_or(false, |p| p.len() >= 2) {
+            if parts.len() >= 2 && parts.last().is_some_and(|p| p.len() >= 2) {
                 return Some(clean.to_string());
             }
         }

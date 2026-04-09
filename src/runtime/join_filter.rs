@@ -604,7 +604,7 @@ pub(super) fn evaluate_runtime_filter(
         Filter::In { field, values } => {
             resolve_runtime_field(record, field, table_name, table_alias)
                 .as_ref()
-                .map_or(false, |candidate| {
+                .is_some_and(|candidate| {
                     evaluate_metadata_field_in(field, candidate, values).unwrap_or_else(|| {
                         values
                             .iter()
@@ -877,7 +877,7 @@ pub(super) fn parse_runtime_document_path(path: &str) -> Vec<String> {
                     segments.push(std::mem::take(&mut current));
                 }
                 let mut index = String::new();
-                while let Some(next) = chars.next() {
+                for next in chars.by_ref() {
                     if next == ']' {
                         break;
                     }
@@ -1067,9 +1067,7 @@ pub(super) fn evaluate_metadata_field_compare(
     op: CompareOp,
     value: &Value,
 ) -> Option<bool> {
-    let Some(column) = table_column_name(field) else {
-        return None;
-    };
+    let column = table_column_name(field)?;
     if !column.eq_ignore_ascii_case("_capabilities") {
         if column.eq_ignore_ascii_case("_entity_type") {
             let candidate = runtime_value_text(candidate).map(|item| item.to_ascii_lowercase())?;
@@ -1105,9 +1103,7 @@ pub(super) fn evaluate_metadata_field_in(
     candidate: &Value,
     values: &[Value],
 ) -> Option<bool> {
-    let Some(column) = table_column_name(field) else {
-        return None;
-    };
+    let column = table_column_name(field)?;
     if !column.eq_ignore_ascii_case("_capabilities") {
         if !column.eq_ignore_ascii_case("_entity_type") {
             return None;

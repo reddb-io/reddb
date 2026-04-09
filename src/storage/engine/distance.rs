@@ -23,20 +23,15 @@ pub use super::simd_distance::{
 };
 
 /// Distance metric types supported by vector operations
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum DistanceMetric {
     /// Euclidean (L2) distance - good for dense vectors
+    #[default]
     L2,
     /// Cosine distance - good for normalized embeddings
     Cosine,
     /// Inner product (dot product) - for maximum inner product search
     InnerProduct,
-}
-
-impl Default for DistanceMetric {
-    fn default() -> Self {
-        Self::L2
-    }
 }
 
 /// Compute L2 (Euclidean) squared distance between two vectors

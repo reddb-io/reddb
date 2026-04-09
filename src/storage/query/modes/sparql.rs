@@ -903,7 +903,7 @@ fn convert_sparql_filter(filter: &SparqlFilter) -> Option<Filter> {
             };
             Some(Filter::Compare {
                 field: var_to_field(var),
-                op: op.clone(),
+                op: *op,
                 value,
             })
         }

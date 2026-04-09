@@ -325,7 +325,7 @@ impl RedDBServer {
                 );
                 object.insert(
                     "native_artifacts".to_string(),
-                    native_artifacts.unwrap_or_else(|| JsonValue::Null),
+                    native_artifacts.unwrap_or(JsonValue::Null),
                 );
                 object
             }),

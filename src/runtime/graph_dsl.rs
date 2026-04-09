@@ -85,12 +85,10 @@ pub(super) fn matches_graph_node_projection(
     label_filters: Option<&BTreeSet<String>>,
     node_type_filters: Option<&BTreeSet<String>>,
 ) -> bool {
-    let label_ok = label_filters.map_or(true, |filters| {
-        filters.contains(&normalize_graph_token(label))
-    });
-    let node_type_ok = node_type_filters.map_or(true, |filters| {
-        filters.contains(&normalize_graph_token(node_type))
-    });
+    let label_ok =
+        label_filters.is_none_or(|filters| filters.contains(&normalize_graph_token(label)));
+    let node_type_ok =
+        node_type_filters.is_none_or(|filters| filters.contains(&normalize_graph_token(node_type)));
     label_ok && node_type_ok
 }
 
@@ -98,9 +96,7 @@ pub(super) fn matches_graph_edge_projection(
     label: &str,
     edge_filters: Option<&BTreeSet<String>>,
 ) -> bool {
-    edge_filters.map_or(true, |filters| {
-        filters.contains(&normalize_graph_token(label))
-    })
+    edge_filters.is_none_or(|filters| filters.contains(&normalize_graph_token(label)))
 }
 
 pub(super) fn ensure_graph_node(graph: &GraphStore, id: &str) -> RedDBResult<()> {
@@ -265,9 +261,7 @@ pub(super) fn merge_runtime_projection(
             }
         };
 
-    let Some(_) = base.clone().or(overlay.clone()) else {
-        return None;
-    };
+    let _ = base.clone().or(overlay.clone())?;
 
     Some(RuntimeGraphProjection {
         node_labels: merge_list(
@@ -295,9 +289,7 @@ pub(super) fn merge_runtime_projection(
 }
 
 pub(super) fn edge_allowed(edge_type: GraphEdgeType, filters: Option<&BTreeSet<String>>) -> bool {
-    filters.map_or(true, |filters| {
-        filters.contains(&normalize_graph_token(edge_type.as_str()))
-    })
+    filters.is_none_or(|filters| filters.contains(&normalize_graph_token(edge_type.as_str())))
 }
 
 pub(super) fn graph_adjacent_edges(
@@ -455,7 +447,7 @@ pub(super) fn shortest_path_runtime(
                 adjacent.sort_by(|left, right| left.0.cmp(&right.0));
                 for (neighbor, edge) in adjacent {
                     let next_cost = cost + edge.weight as f64;
-                    if dist.get(&neighbor).map_or(true, |best| next_cost < *best) {
+                    if dist.get(&neighbor).is_none_or(|best| next_cost < *best) {
                         dist.insert(neighbor.clone(), next_cost);
                         previous.insert(neighbor.clone(), (node.clone(), edge));
                         heap.push(RuntimeDijkstraState {

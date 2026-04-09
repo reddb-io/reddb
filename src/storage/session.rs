@@ -194,13 +194,13 @@ impl SessionFile {
         // Remove user info (user@host)
         let without_user = without_protocol
             .split('@')
-            .last()
+            .next_back()
             .unwrap_or(without_protocol);
 
         // Get just the host part (before /, ?, #)
         let base = without_user
             .trim_start_matches('/')
-            .split(|c| matches!(c, '/' | '?' | '#'))
+            .split(['/', '?', '#'])
             .next()
             .unwrap_or(without_user);
 

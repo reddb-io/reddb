@@ -346,10 +346,7 @@ where
             idx
         } else {
             // Find empty slot
-            match slots.iter().position(|s| matches!(s, Slot::Empty)) {
-                Some(idx) => idx,
-                None => return None, // Cache is full and couldn't evict
-            }
+            slots.iter().position(|s| matches!(s, Slot::Empty))?
         };
 
         // Insert into slot and entry map

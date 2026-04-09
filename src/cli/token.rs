@@ -46,8 +46,7 @@ pub fn tokenize(args: &[String]) -> Vec<Token> {
         }
 
         // Long flags: starts with `--` (already ruled out bare `--` above).
-        if arg.starts_with("--") {
-            let rest = &arg[2..];
+        if let Some(rest) = arg.strip_prefix("--") {
             if let Some(eq_pos) = rest.find('=') {
                 tokens.push(Token::LongFlag {
                     name: rest[..eq_pos].to_string(),

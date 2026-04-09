@@ -184,7 +184,7 @@ impl SqliteReader {
             let cell_count =
                 u16::from_be_bytes([page[header_offset + 3], page[header_offset + 4]]) as usize;
 
-            let cell_arr_start = header_offset + 8 + if page_id == 1 { 0 } else { 0 }; // Page 1 header logic is tricky, usually handled by offset
+            let cell_arr_start = header_offset + 8; // Page 1 header logic is tricky, usually handled by offset
 
             // Logic for Leaf Table (0x0D) and Interior Table (0x05)
             match page_type {

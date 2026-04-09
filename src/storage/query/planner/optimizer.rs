@@ -53,7 +53,7 @@ impl QueryOptimizer {
     pub fn add_pass(&mut self, pass: Box<dyn OptimizationPass>) {
         self.passes.push(pass);
         // Sort by benefit (highest first)
-        self.passes.sort_by(|a, b| b.benefit().cmp(&a.benefit()));
+        self.passes.sort_by_key(|b| std::cmp::Reverse(b.benefit()));
     }
 
     /// Optimize a query expression
@@ -213,8 +213,8 @@ impl OptimizationPass for JoinReorderingPass {
 impl JoinReorderingPass {
     fn optimize_join_order(&self, query: JoinQuery) -> QueryExpr {
         // Estimate cardinalities
-        let left_size = self.estimate_size(&query.left);
-        let right_size = self.estimate_size(&query.right);
+        let left_size = Self::estimate_size(&query.left);
+        let right_size = Self::estimate_size(&query.right);
 
         // For hash join, smaller table should be build side (left)
         if left_size > right_size && query.join_type == JoinType::Inner {
@@ -246,7 +246,7 @@ impl JoinReorderingPass {
         }
     }
 
-    fn estimate_size(&self, query: &QueryExpr) -> f64 {
+    fn estimate_size(query: &QueryExpr) -> f64 {
         match query {
             QueryExpr::Table(tq) => {
                 let base = 1000.0;
@@ -260,7 +260,7 @@ impl JoinReorderingPass {
             }
             QueryExpr::Graph(_) => 100.0,
             QueryExpr::Join(jq) => {
-                self.estimate_size(&jq.left) * self.estimate_size(&jq.right) * 0.1
+                Self::estimate_size(&jq.left) * Self::estimate_size(&jq.right) * 0.1
             }
             QueryExpr::Path(_) => 10.0,
             QueryExpr::Vector(vq) => {
@@ -269,7 +269,7 @@ impl JoinReorderingPass {
             }
             QueryExpr::Hybrid(hq) => {
                 // Hybrid query combines structured and vector results
-                let structured_size = self.estimate_size(&hq.structured);
+                let structured_size = Self::estimate_size(&hq.structured);
                 let vector_size = hq.vector.k as f64;
                 // Fusion typically reduces to min of both, limited by limit
                 let base = structured_size.min(vector_size);

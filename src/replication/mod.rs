@@ -24,9 +24,10 @@ pub mod primary;
 pub mod replica;
 
 /// Role of this RedDB instance in a replication cluster.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ReplicationRole {
     /// Standalone instance (default, no replication).
+    #[default]
     Standalone,
     /// Primary: accepts reads and writes, streams WAL to replicas.
     Primary,
@@ -35,12 +36,6 @@ pub enum ReplicationRole {
         /// gRPC address of the primary (e.g., "http://primary:50051")
         primary_addr: String,
     },
-}
-
-impl Default for ReplicationRole {
-    fn default() -> Self {
-        Self::Standalone
-    }
 }
 
 /// Configuration for replication.

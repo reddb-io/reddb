@@ -533,11 +533,8 @@ impl QueryIterSort {
         }
 
         let mut bindings = Vec::new();
-        loop {
-            match self.upstream.next_binding()? {
-                Some(b) => bindings.push(b),
-                None => break,
-            }
+        while let Some(b) = self.upstream.next_binding()? {
+            bindings.push(b);
         }
 
         // Sort by comparators

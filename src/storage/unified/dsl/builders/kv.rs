@@ -246,20 +246,18 @@ fn execute_kv_query(
                         &entity.data,
                         EntityData::Row(ref row) if row.named.as_ref().is_some_and(|n| n.contains_key("key") && n.contains_key("value"))
                     );
-                    if is_kv {
-                        if super::super::helpers::apply_filters(&entity, &query.filters) {
-                            matches.push(ScoredMatch {
-                                entity,
-                                score: 1.0,
-                                components: MatchComponents {
-                                    structured_match: Some(1.0),
-                                    filter_match: true,
-                                    final_score: Some(1.0),
-                                    ..Default::default()
-                                },
-                                path: None,
-                            });
-                        }
+                    if is_kv && super::super::helpers::apply_filters(&entity, &query.filters) {
+                        matches.push(ScoredMatch {
+                            entity,
+                            score: 1.0,
+                            components: MatchComponents {
+                                structured_match: Some(1.0),
+                                filter_match: true,
+                                final_score: Some(1.0),
+                                ..Default::default()
+                            },
+                            path: None,
+                        });
                     }
                 }
             }

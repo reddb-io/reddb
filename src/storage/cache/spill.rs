@@ -468,7 +468,7 @@ impl SpillManager {
         let segments = self
             .segments
             .read()
-            .map_err(|_| SpillError::Io(io::Error::new(io::ErrorKind::Other, "Lock poisoned")))?;
+            .map_err(|_| SpillError::Io(io::Error::other("Lock poisoned")))?;
 
         let info = segments
             .get(name)
@@ -536,7 +536,7 @@ impl SpillManager {
         let segments = self
             .segments
             .read()
-            .map_err(|_| SpillError::Io(io::Error::new(io::ErrorKind::Other, "Lock poisoned")))?;
+            .map_err(|_| SpillError::Io(io::Error::other("Lock poisoned")))?;
 
         let info = segments
             .get(name)
