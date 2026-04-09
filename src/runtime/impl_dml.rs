@@ -12,6 +12,7 @@ use crate::application::entity::{
     PatchEntityOperationType,
 };
 use crate::application::ports::RuntimeEntityPort;
+use crate::storage::unified::MetadataValue;
 
 use super::*;
 
@@ -42,37 +43,30 @@ impl RedDBRuntime {
 
             match query.entity_type {
                 InsertEntityType::Row => {
-                    let fields: Vec<(String, Value)> = query
-                        .columns
-                        .iter()
-                        .zip(row_values.iter())
-                        .map(|(col, val)| (col.clone(), val.clone()))
-                        .collect();
-
+                    let (fields, metadata) = split_insert_metadata(&query.columns, row_values)?;
                     let input = CreateRowInput {
                         collection: query.table.clone(),
                         fields,
-                        metadata: Vec::new(),
+                        metadata,
                         node_links: Vec::new(),
                         vector_links: Vec::new(),
                     };
                     self.create_row(input)?;
                 }
                 InsertEntityType::Node => {
-                    let label = find_column_value_string(&query.columns, row_values, "label")?;
-                    let node_type =
-                        find_column_value_opt_string(&query.columns, row_values, "node_type");
-                    let properties = extract_remaining_properties(
-                        &query.columns,
-                        row_values,
-                        &["label", "node_type"],
-                    );
+                    let (node_values, metadata) =
+                        split_insert_metadata(&query.columns, row_values)?;
+                    let (columns, values) = pairwise_columns_values(&node_values);
+                    let label = find_column_value_string(&columns, &values, "label")?;
+                    let node_type = find_column_value_opt_string(&columns, &values, "node_type");
+                    let properties =
+                        extract_remaining_properties(&columns, &values, &["label", "node_type"]);
                     let input = CreateNodeInput {
                         collection: query.table.clone(),
                         label,
                         node_type,
                         properties,
-                        metadata: Vec::new(),
+                        metadata,
                         embeddings: Vec::new(),
                         table_links: Vec::new(),
                         node_links: Vec::new(),
@@ -80,13 +74,16 @@ impl RedDBRuntime {
                     self.create_node(input)?;
                 }
                 InsertEntityType::Edge => {
-                    let label = find_column_value_string(&query.columns, row_values, "label")?;
-                    let from_id = find_column_value_u64(&query.columns, row_values, "from")?;
-                    let to_id = find_column_value_u64(&query.columns, row_values, "to")?;
-                    let weight = find_column_value_f32_opt(&query.columns, row_values, "weight");
+                    let (edge_values, metadata) =
+                        split_insert_metadata(&query.columns, row_values)?;
+                    let (columns, values) = pairwise_columns_values(&edge_values);
+                    let label = find_column_value_string(&columns, &values, "label")?;
+                    let from_id = find_column_value_u64(&columns, &values, "from")?;
+                    let to_id = find_column_value_u64(&columns, &values, "to")?;
+                    let weight = find_column_value_f32_opt(&columns, &values, "weight");
                     let properties = extract_remaining_properties(
-                        &query.columns,
-                        row_values,
+                        &columns,
+                        &values,
                         &["label", "from", "to", "weight"],
                     );
                     let input = CreateEdgeInput {
@@ -96,45 +93,52 @@ impl RedDBRuntime {
                         to: EntityId::new(to_id),
                         weight,
                         properties,
-                        metadata: Vec::new(),
+                        metadata,
                     };
                     self.create_edge(input)?;
                 }
                 InsertEntityType::Vector => {
-                    let dense = find_column_value_vec_f32(&query.columns, row_values, "dense")?;
-                    let content =
-                        find_column_value_opt_string(&query.columns, row_values, "content");
+                    let (vector_values, metadata) =
+                        split_insert_metadata(&query.columns, row_values)?;
+                    let (columns, values) = pairwise_columns_values(&vector_values);
+                    let dense = find_column_value_vec_f32(&columns, &values, "dense")?;
+                    let content = find_column_value_opt_string(&columns, &values, "content");
                     let input = CreateVectorInput {
                         collection: query.table.clone(),
                         dense,
                         content,
-                        metadata: Vec::new(),
+                        metadata,
                         link_row: None,
                         link_node: None,
                     };
                     self.create_vector(input)?;
                 }
                 InsertEntityType::Document => {
-                    let body_str = find_column_value_string(&query.columns, row_values, "body")?;
+                    let (document_values, metadata) =
+                        split_insert_metadata(&query.columns, row_values)?;
+                    let (columns, values) = pairwise_columns_values(&document_values);
+                    let body_str = find_column_value_string(&columns, &values, "body")?;
                     let body: crate::json::Value = crate::json::from_str(&body_str)
                         .map_err(|e| RedDBError::Query(format!("invalid JSON body: {e}")))?;
                     let input = CreateDocumentInput {
                         collection: query.table.clone(),
                         body,
-                        metadata: Vec::new(),
+                        metadata,
                         node_links: Vec::new(),
                         vector_links: Vec::new(),
                     };
                     self.create_document(input)?;
                 }
                 InsertEntityType::Kv => {
-                    let key = find_column_value_string(&query.columns, row_values, "key")?;
-                    let value = find_column_value(&query.columns, row_values, "value")?;
+                    let (kv_values, metadata) = split_insert_metadata(&query.columns, row_values)?;
+                    let (columns, values) = pairwise_columns_values(&kv_values);
+                    let key = find_column_value_string(&columns, &values, "key")?;
+                    let value = find_column_value(&columns, &values, "value")?;
                     let input = CreateKvInput {
                         collection: query.table.clone(),
                         key,
                         value,
-                        metadata: Vec::new(),
+                        metadata,
                     };
                     self.create_kv(input)?;
                 }
@@ -170,8 +174,8 @@ impl RedDBRuntime {
         let mut affected: u64 = 0;
 
         for entity in entities {
-            // Convert entity to a UnifiedRecord for filter evaluation.
-            let record = match record_search::runtime_table_record_from_entity(entity.clone()) {
+            // UPDATE must work across every resource kind stored in the collection.
+            let record = match record_search::runtime_any_record_from_entity(entity.clone()) {
                 Some(r) => r,
                 None => continue,
             };
@@ -191,19 +195,27 @@ impl RedDBRuntime {
                 continue;
             }
 
-            // Build patch operations from SET assignments.
             let operations: Vec<PatchEntityOperation> = query
                 .assignments
                 .iter()
                 .map(|(col, val)| {
-                    let json_val = storage_value_to_json(val);
-                    PatchEntityOperation {
-                        op: PatchEntityOperationType::Set,
-                        path: vec!["fields".to_string(), col.clone()],
-                        value: Some(json_val),
+                    if let Some(metadata_key) = resolve_sql_ttl_metadata_key(col) {
+                        let metadata_value = sql_literal_to_metadata_value(metadata_key, val)?;
+                        Ok(PatchEntityOperation {
+                            op: PatchEntityOperationType::Set,
+                            path: vec!["metadata".to_string(), metadata_key.to_string()],
+                            value: Some(metadata_value_to_json(&metadata_value)),
+                        })
+                    } else {
+                        let json_val = storage_value_to_json(val);
+                        Ok(PatchEntityOperation {
+                            op: PatchEntityOperationType::Set,
+                            path: vec!["fields".to_string(), col.clone()],
+                            value: Some(json_val),
+                        })
                     }
                 })
-                .collect();
+                .collect::<RedDBResult<Vec<_>>>()?;
 
             let input = PatchEntityInput {
                 collection: query.table.clone(),
@@ -245,7 +257,7 @@ impl RedDBRuntime {
         let mut ids_to_delete = Vec::new();
 
         for entity in entities {
-            let record = match record_search::runtime_table_record_from_entity(entity.clone()) {
+            let record = match record_search::runtime_any_record_from_entity(entity.clone()) {
                 Some(r) => r,
                 None => continue,
             };
@@ -286,6 +298,53 @@ impl RedDBRuntime {
 // =============================================================================
 // Helper functions for extracting typed values from column/value pairs
 // =============================================================================
+
+const SQL_TTL_METADATA_COLUMNS: [&str; 3] = ["ttl", "ttl_ms", "expires_at"];
+
+fn resolve_sql_ttl_metadata_key(column: &str) -> Option<&'static str> {
+    if column.eq_ignore_ascii_case("ttl") {
+        Some(SQL_TTL_METADATA_COLUMNS[0])
+    } else if column.eq_ignore_ascii_case("ttl_ms") {
+        Some(SQL_TTL_METADATA_COLUMNS[1])
+    } else if column.eq_ignore_ascii_case("expires_at") {
+        Some(SQL_TTL_METADATA_COLUMNS[2])
+    } else {
+        None
+    }
+}
+
+fn split_insert_metadata(
+    columns: &[String],
+    values: &[Value],
+) -> RedDBResult<(Vec<(String, Value)>, Vec<(String, MetadataValue)>)> {
+    let mut fields = Vec::new();
+    let mut metadata = Vec::new();
+
+    for (column, value) in columns.iter().zip(values.iter()) {
+        if let Some(metadata_key) = resolve_sql_ttl_metadata_key(column) {
+            metadata.push((
+                metadata_key.to_string(),
+                sql_literal_to_metadata_value(metadata_key, value)?,
+            ));
+            continue;
+        }
+        fields.push((column.clone(), value.clone()));
+    }
+
+    Ok((fields, metadata))
+}
+
+fn pairwise_columns_values(pairs: &[(String, Value)]) -> (Vec<String>, Vec<Value>) {
+    let mut columns = Vec::with_capacity(pairs.len());
+    let mut values = Vec::with_capacity(pairs.len());
+
+    for (column, value) in pairs {
+        columns.push(column.clone());
+        values.push(value.clone());
+    }
+
+    (columns, values)
+}
 
 /// Find a required column value and return it as-is.
 fn find_column_value(columns: &[String], values: &[Value], name: &str) -> RedDBResult<Value> {
@@ -403,6 +462,152 @@ fn extract_remaining_properties(
         .filter(|(col, _)| !exclude.iter().any(|e| col.eq_ignore_ascii_case(e)))
         .map(|(col, val)| (col.clone(), val.clone()))
         .collect()
+}
+
+fn metadata_value_to_json(value: &MetadataValue) -> crate::json::Value {
+    use crate::json::{Map, Value as JV};
+    match value {
+        MetadataValue::Null => JV::Null,
+        MetadataValue::Bool(value) => JV::Bool(*value),
+        MetadataValue::Int(value) => JV::Number(*value as f64),
+        MetadataValue::Float(value) => JV::Number(*value),
+        MetadataValue::String(value) => JV::String(value.clone()),
+        MetadataValue::Bytes(value) => JV::Array(
+            value
+                .iter()
+                .map(|value| JV::Number(*value as f64))
+                .collect(),
+        ),
+        MetadataValue::Timestamp(value) => JV::Number(*value as f64),
+        MetadataValue::Array(values) => {
+            JV::Array(values.iter().map(metadata_value_to_json).collect())
+        }
+        MetadataValue::Object(object) => {
+            let entries = object
+                .iter()
+                .map(|(key, value)| (key.clone(), metadata_value_to_json(value)))
+                .collect();
+            JV::Object(entries)
+        }
+        MetadataValue::Geo { lat, lon } => {
+            let mut object = Map::new();
+            object.insert("lat".to_string(), JV::Number(*lat));
+            object.insert("lon".to_string(), JV::Number(*lon));
+            JV::Object(object)
+        }
+        MetadataValue::Reference(target) => {
+            let mut object = Map::new();
+            object.insert(
+                "collection".to_string(),
+                JV::String(target.collection().to_string()),
+            );
+            object.insert(
+                "entity_id".to_string(),
+                JV::Number(target.entity_id().raw() as f64),
+            );
+            JV::Object(object)
+        }
+        MetadataValue::References(values) => {
+            let refs = values
+                .iter()
+                .map(|target| {
+                    let mut object = Map::new();
+                    object.insert(
+                        "collection".to_string(),
+                        JV::String(target.collection().to_string()),
+                    );
+                    object.insert(
+                        "entity_id".to_string(),
+                        JV::Number(target.entity_id().raw() as f64),
+                    );
+                    JV::Object(object)
+                })
+                .collect();
+            JV::Array(refs)
+        }
+    }
+}
+
+fn sql_literal_to_metadata_value(field: &str, value: &Value) -> RedDBResult<MetadataValue> {
+    match value {
+        Value::Null => Ok(MetadataValue::Null),
+        Value::Integer(value) if *value >= 0 => Ok(metadata_u64_to_value(*value as u64)),
+        Value::Integer(_) => Err(RedDBError::Query(format!(
+            "column '{field}' must be non-negative for TTL metadata"
+        ))),
+        Value::UnsignedInteger(value) => Ok(metadata_u64_to_value(*value)),
+        Value::Float(value) if value.is_finite() => {
+            if value.fract().abs() >= f64::EPSILON {
+                return Err(RedDBError::Query(format!(
+                    "column '{field}' must be an integer (TTL metadata must be an integer)"
+                )));
+            }
+            if *value < 0.0 {
+                return Err(RedDBError::Query(format!(
+                    "column '{field}' must be non-negative for TTL metadata"
+                )));
+            }
+            if *value > u64::MAX as f64 {
+                return Err(RedDBError::Query(format!(
+                    "column '{field}' value is too large"
+                )));
+            }
+            Ok(metadata_u64_to_value(*value as u64))
+        }
+        Value::Float(_) => Err(RedDBError::Query(format!(
+            "column '{field}' must be a finite number"
+        ))),
+        Value::Text(value) => {
+            let value = value.trim();
+            if let Ok(value) = value.parse::<u64>() {
+                Ok(metadata_u64_to_value(value))
+            } else if let Ok(value) = value.parse::<i64>() {
+                if value < 0 {
+                    return Err(RedDBError::Query(format!(
+                        "column '{field}' must be non-negative for TTL metadata"
+                    )));
+                }
+                Ok(metadata_u64_to_value(value as u64))
+            } else if let Ok(value) = value.parse::<f64>() {
+                if !value.is_finite() {
+                    return Err(RedDBError::Query(format!(
+                        "column '{field}' must be a finite number"
+                    )));
+                }
+                if value.fract().abs() >= f64::EPSILON {
+                    return Err(RedDBError::Query(format!(
+                        "column '{field}' must be an integer (TTL metadata must be an integer)"
+                    )));
+                }
+                if value < 0.0 {
+                    return Err(RedDBError::Query(format!(
+                        "column '{field}' must be non-negative for TTL metadata"
+                    )));
+                }
+                if value > u64::MAX as f64 {
+                    return Err(RedDBError::Query(format!(
+                        "column '{field}' value is too large"
+                    )));
+                }
+                Ok(metadata_u64_to_value(value as u64))
+            } else {
+                Err(RedDBError::Query(format!(
+                    "column '{field}' expects a numeric value for TTL metadata"
+                )))
+            }
+        }
+        _ => Err(RedDBError::Query(format!(
+            "column '{field}' expects a numeric value for TTL metadata"
+        ))),
+    }
+}
+
+fn metadata_u64_to_value(value: u64) -> MetadataValue {
+    if value <= i64::MAX as u64 {
+        MetadataValue::Int(value as i64)
+    } else {
+        MetadataValue::Timestamp(value)
+    }
 }
 
 /// Convert a storage [`Value`] to a JSON [`crate::json::Value`] for patch

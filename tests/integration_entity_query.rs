@@ -13,7 +13,7 @@ use reddb::application::{
 use reddb::json::Value as JsonValue;
 use reddb::storage::schema::Value;
 use reddb::MetadataValue;
-use reddb::{EntityUseCases, QueryUseCases, RedDBRuntime};
+use reddb::{EntityUseCases, NativeUseCases, QueryUseCases, RedDBRuntime};
 
 fn rt() -> RedDBRuntime {
     RedDBRuntime::in_memory().expect("failed to create in-memory runtime")
@@ -1347,5 +1347,377 @@ fn test_row_linked_to_node() {
     assert_ne!(
         node_out.id, row_out.id,
         "node and row should have different IDs"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 24. SQL TTL in Row Insert
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_sql_insert_row_ttl_ms_expiration() {
+    let rt = rt();
+    let query = QueryUseCases::new(&rt);
+    let native = NativeUseCases::new(&rt);
+
+    let inserted = query.execute(ExecuteQueryInput {
+        query: "INSERT INTO ttl_rows (name, ttl_ms) VALUES ('row-with-ttl-ms', 1)".into(),
+    });
+    assert!(
+        inserted.is_ok(),
+        "row INSERT with ttl_ms should succeed: {:?}",
+        inserted.err()
+    );
+
+    let before = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT * FROM ttl_rows".into(),
+        })
+        .expect("SELECT before retention should succeed");
+    assert_eq!(
+        before.result.records.len(),
+        1,
+        "row should exist before retention sweep"
+    );
+
+    native
+        .apply_retention_policy()
+        .expect("apply_retention_policy should succeed");
+
+    let after = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT * FROM ttl_rows".into(),
+        })
+        .expect("SELECT after retention should succeed");
+    assert_eq!(
+        after.result.records.len(),
+        0,
+        "row should be deleted after ttl_ms expiration"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 25. SQL TTL in Node Insert
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_sql_insert_node_ttl_expiration() {
+    let rt = rt();
+    let query = QueryUseCases::new(&rt);
+    let native = NativeUseCases::new(&rt);
+
+    let inserted = query.execute(ExecuteQueryInput {
+        query: "INSERT INTO ttl_nodes NODE (label, node_type, ip, ttl_ms) VALUES ('node-ttl-ms', 'Host', '10.0.0.1', 1)"
+            .into(),
+    });
+    assert!(
+        inserted.is_ok(),
+        "node INSERT with ttl should succeed: {:?}",
+        inserted.err()
+    );
+
+    let before_scan = query
+        .scan(ScanCollectionInput {
+            collection: "ttl_nodes".into(),
+            offset: 0,
+            limit: 10,
+        })
+        .expect("scan before retention should succeed");
+    assert_eq!(
+        before_scan
+            .items
+            .iter()
+            .filter(|item| item.data.is_node())
+            .count(),
+        1,
+        "node should exist before retention sweep"
+    );
+
+    native
+        .apply_retention_policy()
+        .expect("apply_retention_policy should succeed");
+
+    let after_scan = query
+        .scan(ScanCollectionInput {
+            collection: "ttl_nodes".into(),
+            offset: 0,
+            limit: 10,
+        })
+        .expect("scan after retention should succeed");
+    assert_eq!(
+        after_scan
+            .items
+            .iter()
+            .filter(|item| item.data.is_node())
+            .count(),
+        0,
+        "ttl-based node records should be deleted"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 26. SQL TTL in Edge Insert
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_sql_insert_edge_ttl_expiration() {
+    let rt = rt();
+    let entity = EntityUseCases::new(&rt);
+    let query = QueryUseCases::new(&rt);
+    let native = NativeUseCases::new(&rt);
+
+    let from = entity.create_node(CreateNodeInput {
+        collection: "ttl_edges".into(),
+        label: "edge-node-a".into(),
+        node_type: Some("Host".into()),
+        properties: vec![("name".into(), Value::Text("node-a".into()))],
+        metadata: vec![],
+        embeddings: vec![],
+        table_links: vec![],
+        node_links: vec![],
+    });
+    assert!(
+        from.is_ok(),
+        "from node should be created: {:?}",
+        from.err()
+    );
+    let to = entity.create_node(CreateNodeInput {
+        collection: "ttl_edges".into(),
+        label: "edge-node-b".into(),
+        node_type: Some("Host".into()),
+        properties: vec![("name".into(), Value::Text("node-b".into()))],
+        metadata: vec![],
+        embeddings: vec![],
+        table_links: vec![],
+        node_links: vec![],
+    });
+    assert!(to.is_ok(), "to node should be created: {:?}", to.err());
+    let from = from.unwrap();
+    let to = to.unwrap();
+
+    let inserted = query.execute(ExecuteQueryInput {
+        query: format!(
+            "INSERT INTO ttl_edges EDGE (label, from, to, weight, ttl_ms) VALUES ('connects', {}, {}, 0.9, 1)",
+            from.id.raw(),
+            to.id.raw()
+        )
+        .into(),
+    });
+    assert!(
+        inserted.is_ok(),
+        "edge INSERT with ttl_ms should succeed: {:?}",
+        inserted.err()
+    );
+
+    let before_scan = query
+        .scan(ScanCollectionInput {
+            collection: "ttl_edges".into(),
+            offset: 0,
+            limit: 20,
+        })
+        .expect("scan before retention should succeed");
+    assert_eq!(
+        before_scan
+            .items
+            .iter()
+            .filter(|item| item.data.is_edge())
+            .count(),
+        1,
+        "edge should exist before retention sweep"
+    );
+
+    native
+        .apply_retention_policy()
+        .expect("apply_retention_policy should succeed");
+
+    let after_scan = query
+        .scan(ScanCollectionInput {
+            collection: "ttl_edges".into(),
+            offset: 0,
+            limit: 20,
+        })
+        .expect("scan after retention should succeed");
+    assert_eq!(
+        after_scan
+            .items
+            .iter()
+            .filter(|item| item.data.is_edge())
+            .count(),
+        0,
+        "edge should be deleted after ttl expiration"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 27. SQL TTL Update to Any Resource
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_sql_update_ttl_after_insert() {
+    let rt = rt();
+    let query = QueryUseCases::new(&rt);
+    let native = NativeUseCases::new(&rt);
+
+    let inserted = query.execute(ExecuteQueryInput {
+        query: "INSERT INTO ttl_updates (name, status) VALUES ('target-row', 'alive')".into(),
+    });
+    assert!(
+        inserted.is_ok(),
+        "initial INSERT without ttl should succeed: {:?}",
+        inserted.err()
+    );
+
+    let updated = query.execute(ExecuteQueryInput {
+        query: "UPDATE ttl_updates SET ttl = 0 WHERE name = 'target-row'".into(),
+    });
+    assert!(
+        updated.is_ok(),
+        "UPDATE with ttl should succeed: {:?}",
+        updated.err()
+    );
+
+    let before = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT * FROM ttl_updates".into(),
+        })
+        .expect("SELECT before retention should succeed");
+    assert_eq!(
+        before.result.records.len(),
+        1,
+        "row should exist before retention sweep"
+    );
+
+    native
+        .apply_retention_policy()
+        .expect("apply_retention_policy should succeed");
+
+    let after = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT * FROM ttl_updates".into(),
+        })
+        .expect("SELECT after retention should succeed");
+    assert_eq!(
+        after.result.records.len(),
+        0,
+        "row should be removed after SQL UPDATE ttl=0"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 28. SQL TTL Update on Node
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_sql_update_ttl_on_node_after_insert() {
+    let rt = rt();
+    let query = QueryUseCases::new(&rt);
+    let native = NativeUseCases::new(&rt);
+
+    let inserted = query.execute(ExecuteQueryInput {
+        query: "INSERT INTO ttl_node_updates NODE (label, node_type, ip) VALUES ('node-update-target', 'Host', '10.0.0.8')"
+            .into(),
+    });
+    assert!(
+        inserted.is_ok(),
+        "initial node INSERT without ttl should succeed: {:?}",
+        inserted.err()
+    );
+
+    let updated = query.execute(ExecuteQueryInput {
+        query: "UPDATE ttl_node_updates SET ttl = 0 WHERE label = 'node-update-target'".into(),
+    });
+    assert!(
+        updated.is_ok(),
+        "node UPDATE with ttl should succeed: {:?}",
+        updated.err()
+    );
+
+    let before_scan = query
+        .scan(ScanCollectionInput {
+            collection: "ttl_node_updates".into(),
+            offset: 0,
+            limit: 10,
+        })
+        .expect("scan before retention should succeed");
+    assert_eq!(
+        before_scan
+            .items
+            .iter()
+            .filter(|item| item.data.is_node())
+            .count(),
+        1,
+        "node should exist before retention sweep"
+    );
+
+    native
+        .apply_retention_policy()
+        .expect("apply_retention_policy should succeed");
+
+    let after_scan = query
+        .scan(ScanCollectionInput {
+            collection: "ttl_node_updates".into(),
+            offset: 0,
+            limit: 10,
+        })
+        .expect("scan after retention should succeed");
+    assert_eq!(
+        after_scan
+            .items
+            .iter()
+            .filter(|item| item.data.is_node())
+            .count(),
+        0,
+        "node should be removed after SQL UPDATE ttl=0"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 29. SQL DELETE on Node
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_sql_delete_node_with_where_clause() {
+    let rt = rt();
+    let query = QueryUseCases::new(&rt);
+
+    let inserted = query.execute(ExecuteQueryInput {
+        query: "INSERT INTO delete_nodes NODE (label, node_type, ip) VALUES ('delete-me', 'Host', '10.0.0.9')"
+            .into(),
+    });
+    assert!(
+        inserted.is_ok(),
+        "initial node INSERT should succeed: {:?}",
+        inserted.err()
+    );
+
+    let deleted = query.execute(ExecuteQueryInput {
+        query: "DELETE FROM delete_nodes WHERE label = 'delete-me'".into(),
+    });
+    assert!(
+        deleted.is_ok(),
+        "node DELETE should succeed: {:?}",
+        deleted.err()
+    );
+    assert_eq!(
+        deleted.unwrap().affected_rows,
+        1,
+        "node DELETE should affect exactly one entity"
+    );
+
+    let after_scan = query
+        .scan(ScanCollectionInput {
+            collection: "delete_nodes".into(),
+            offset: 0,
+            limit: 10,
+        })
+        .expect("scan after delete should succeed");
+    assert_eq!(
+        after_scan
+            .items
+            .iter()
+            .filter(|item| item.data.is_node())
+            .count(),
+        0,
+        "node should be removed after SQL DELETE"
     );
 }
