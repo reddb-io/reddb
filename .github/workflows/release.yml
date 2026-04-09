@@ -135,6 +135,10 @@ jobs:
       - uses: arduino/setup-protoc@v3
         with:
           version: '28.x'
+
+      - name: Regenerate lockfile after version sync
+        run: cargo generate-lockfile
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ runner.os }}-${{ matrix.target }}
@@ -267,6 +271,7 @@ jobs:
         run: |
           VERSION="${{ needs.plan.outputs.package_version }}"
           sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml
+          cargo generate-lockfile
           echo "Publishing reddb@${VERSION} to crates.io"
       - name: Publish
         env:
