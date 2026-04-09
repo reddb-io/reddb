@@ -17,18 +17,16 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-      - name: Check Formatting
-        run: cargo fmt --all -- --check
-      - name: Check
-        run: cargo check --locked --all
-      - name: Clippy
-        run: cargo clippy --locked --all -- -D warnings
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: '28.x'
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo check --locked --all
+      - run: cargo clippy --locked --all -- -D warnings
 
   tests:
     name: Test Suite
@@ -36,10 +34,10 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-      - name: Run Tests
-        run: cargo test --locked --verbose
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: '28.x'
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked --verbose
 
