@@ -67,6 +67,21 @@ pub(super) fn materialize_graph_with_projection(
     Ok(graph)
 }
 
+pub(super) fn materialize_graph_node_properties(
+    store: &UnifiedStore,
+) -> RedDBResult<HashMap<String, HashMap<String, Value>>> {
+    let mut node_properties = HashMap::new();
+
+    for (_, entity) in store.query_all(|_| true) {
+        if let (EntityKind::GraphNode { .. }, EntityData::Node(node)) = (&entity.kind, &entity.data)
+        {
+            node_properties.insert(entity.id.raw().to_string(), node.properties.clone());
+        }
+    }
+
+    Ok(node_properties)
+}
+
 pub(super) fn normalize_token_filter_list(values: Option<Vec<String>>) -> Option<BTreeSet<String>> {
     values
         .map(|values| {

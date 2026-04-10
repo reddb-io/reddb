@@ -1,6 +1,6 @@
 # Search Commands
 
-RedDB supports vector, text, and hybrid search commands within the query engine.
+RedDB supports vector, text, hybrid, multimodal, and indexed lookup commands within the query engine.
 
 ## SEARCH SIMILAR
 
@@ -49,15 +49,36 @@ Use the IVF index for approximate search on large collections:
 SEARCH IVF [0.12, 0.91, 0.44] IN embeddings K 10 PROBES 3
 ```
 
+## SEARCH MULTIMODAL
+
+Lookup global por chave em tabelas, documentos, key-values, vetores e grafos:
+
+```sql
+SEARCH MULTIMODAL 'CPF: 081.232.036-08' COLLECTION people LIMIT 20
+```
+
+## SEARCH INDEX
+
+Lookup estruturado por índice global:
+
+```sql
+SEARCH INDEX cpf VALUE '081.232.036-08' COLLECTION people LIMIT 20
+```
+
+Por padrão, o lookup é exato. Para modo mais flexível:
+
+```sql
+SEARCH INDEX cpf VALUE '081.232.036-08' FUZZY LIMIT 20
+```
+
 ## Via HTTP
 
 ### Similarity Search
 
 ```bash
-curl -X POST http://127.0.0.1:8080/search/similar \
+curl -X POST http://127.0.0.1:8080/collections/docs/similar \
   -H 'content-type: application/json' \
   -d '{
-    "collection": "docs",
     "vector": [0.12, 0.91, 0.44],
     "k": 5,
     "min_score": 0.7
@@ -67,7 +88,7 @@ curl -X POST http://127.0.0.1:8080/search/similar \
 ### Text Search
 
 ```bash
-curl -X POST http://127.0.0.1:8080/search/text \
+curl -X POST http://127.0.0.1:8080/text/search \
   -H 'content-type: application/json' \
   -d '{
     "query": "machine learning",
@@ -80,15 +101,47 @@ curl -X POST http://127.0.0.1:8080/search/text \
 ### Hybrid Search
 
 ```bash
-curl -X POST http://127.0.0.1:8080/search/hybrid \
+curl -X POST http://127.0.0.1:8080/hybrid/search \
   -H 'content-type: application/json' \
   -d '{
-    "collection": "docs",
+    "collections": ["docs"],
     "vector": [0.12, 0.91, 0.44],
-    "text_query": "neural networks",
+    "query": "neural networks",
     "k": 10
   }'
 ```
+
+### Multimodal Search
+
+```bash
+curl -X POST http://127.0.0.1:8080/multimodal/search \
+  -H 'content-type: application/json' \
+  -d '{
+    "query": "CPF: 081.232.036-08",
+    "collections": ["people", "documents", "graph", "vectors"],
+    "limit": 20
+  }'
+```
+
+You can also send `"key"` instead of `"query"` in the payload.
+
+### Unified Search (single box)
+
+```bash
+curl -X POST http://127.0.0.1:8080/search \
+  -H 'content-type: application/json' \
+  -d '{
+    "mode": "index",
+    "lookup": {
+      "index": "cpf",
+      "value": "081.232.036-08",
+      "exact": true
+    },
+    "limit": 20
+  }'
+```
+
+`mode` aceita `auto`, `index`, `multimodal` ou `hybrid`.
 
 ## Response Format
 

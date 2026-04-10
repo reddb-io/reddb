@@ -751,7 +751,7 @@ pub(super) fn resolve_runtime_field(
                 "id" => Some(Value::NodeRef(node.id.clone())),
                 "label" => Some(Value::Text(node.label.clone())),
                 "type" | "node_type" => Some(Value::Text(format!("{:?}", node.node_type))),
-                _ => None,
+                _ => node.properties.get(property).cloned(),
             }
         }
         FieldRef::EdgeProperty { alias, property } => {
@@ -1188,6 +1188,7 @@ pub(super) fn query_expr_name(expr: &QueryExpr) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::query::unified::MatchedNode;
 
     #[test]
     fn test_evaluate_metadata_field_compare_entity_type_is_case_insensitive() {
@@ -1265,6 +1266,29 @@ mod tests {
                 &Value::Text("vector".to_string()),
             ),
             Some(false)
+        );
+    }
+
+    #[test]
+    fn test_resolve_runtime_field_node_property_from_node_properties() {
+        let mut record = UnifiedRecord::new();
+        let mut node_properties = HashMap::new();
+        node_properties.insert(
+            "nginx_version".to_string(),
+            Value::Text("1.22.1".to_string()),
+        );
+        let node = MatchedNode {
+            id: "svc:nginx:80".to_string(),
+            label: "nginx".to_string(),
+            node_type: GraphNodeType::Service,
+            properties: node_properties,
+        };
+        record.set_node("svc", node);
+
+        let field = FieldRef::node_prop("svc", "nginx_version");
+        assert_eq!(
+            resolve_runtime_field(&record, &field, None, None),
+            Some(Value::Text("1.22.1".to_string()))
         );
     }
 }

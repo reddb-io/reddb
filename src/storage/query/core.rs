@@ -1040,6 +1040,20 @@ pub enum SearchCommand {
         collection: String,
         limit: usize,
     },
+    /// SEARCH MULTIMODAL 'key_or_query' [COLLECTION col] [LIMIT n]
+    Multimodal {
+        query: String,
+        collection: Option<String>,
+        limit: usize,
+    },
+    /// SEARCH INDEX index VALUE 'value' [COLLECTION col] [LIMIT n] [EXACT]
+    Index {
+        index: String,
+        value: String,
+        collection: Option<String>,
+        limit: usize,
+        exact: bool,
+    },
 }
 
 // ============================================================================

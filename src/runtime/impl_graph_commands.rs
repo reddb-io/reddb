@@ -374,6 +374,67 @@ impl RedDBRuntime {
                     statement_type: "select",
                 })
             }
+            SearchCommand::Multimodal {
+                query,
+                collection,
+                limit,
+            } => {
+                let collections = collection.as_ref().map(|c| vec![c.clone()]);
+                let res =
+                    self.search_multimodal(query.clone(), collections, None, None, Some(*limit))?;
+                let mut result =
+                    UnifiedResult::with_columns(vec!["entity_id".into(), "score".into()]);
+                for item in &res.matches {
+                    let mut record = UnifiedRecord::new();
+                    record.set("entity_id", Value::UnsignedInteger(item.entity.id.raw()));
+                    record.set("score", Value::Float(item.score as f64));
+                    result.push(record);
+                }
+                Ok(RuntimeQueryResult {
+                    query: raw_query.to_string(),
+                    mode: QueryMode::Sql,
+                    statement: "search_multimodal",
+                    engine: "runtime-search",
+                    result,
+                    affected_rows: 0,
+                    statement_type: "select",
+                })
+            }
+            SearchCommand::Index {
+                index,
+                value,
+                collection,
+                limit,
+                exact,
+            } => {
+                let collections = collection.as_ref().map(|c| vec![c.clone()]);
+                let res = self.search_index(
+                    index.clone(),
+                    value.clone(),
+                    *exact,
+                    collections,
+                    None,
+                    None,
+                    Some(*limit),
+                )?;
+                let mut result =
+                    UnifiedResult::with_columns(vec!["entity_id".into(), "score".into()]);
+                for item in &res.matches {
+                    let mut record = UnifiedRecord::new();
+                    record.set("entity_id", Value::UnsignedInteger(item.entity.id.raw()));
+                    record.set("score", Value::Float(item.score as f64));
+                    result.push(record);
+                }
+                Ok(RuntimeQueryResult {
+                    query: raw_query.to_string(),
+                    mode: QueryMode::Sql,
+                    statement: "search_index",
+                    engine: "runtime-search",
+                    result,
+                    affected_rows: 0,
+                    statement_type: "select",
+                })
+            }
         }
     }
 }

@@ -23,6 +23,9 @@ impl RedDBServer {
             ("POST", "/auth/api-keys") => self.handle_auth_create_api_key(body),
             ("POST", "/auth/change-password") => self.handle_auth_change_password(body),
             ("GET", "/auth/whoami") => self.handle_auth_whoami(&headers),
+            ("POST", "/ai/embeddings") => self.handle_ai_embeddings(body),
+            ("POST", "/ai/prompt") => self.handle_ai_prompt(body),
+            ("POST", "/ai/credentials") => self.handle_ai_credentials(body),
 
             // Replication endpoints
             ("GET", "/replication/status") => self.handle_replication_status(),
@@ -539,6 +542,7 @@ impl RedDBServer {
             ("POST", "/query") => self.handle_query(body),
             ("POST", "/search") => self.handle_universal_search(body),
             ("POST", "/text/search") => self.handle_text_search(body),
+            ("POST", "/multimodal/search") => self.handle_multimodal_search(body),
             ("POST", "/hybrid/search") => self.handle_hybrid_search(body),
             ("POST", "/graph/neighborhood") => self.handle_graph_neighborhood(body),
             ("POST", "/graph/traverse") => self.handle_graph_traverse(body),

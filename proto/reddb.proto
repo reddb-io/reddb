@@ -75,7 +75,9 @@ service RedDb {
   rpc Scan(ScanRequest) returns (ScanReply);
   rpc ExplainQuery(QueryRequest) returns (PayloadReply);
   rpc Query(QueryRequest) returns (QueryReply);
+  rpc Search(JsonPayloadRequest) returns (PayloadReply);
   rpc TextSearch(JsonPayloadRequest) returns (PayloadReply);
+  rpc MultimodalSearch(JsonPayloadRequest) returns (PayloadReply);
   rpc HybridSearch(JsonPayloadRequest) returns (PayloadReply);
   rpc Similar(JsonCreateRequest) returns (PayloadReply);
   rpc IvfSearch(JsonCreateRequest) returns (PayloadReply);

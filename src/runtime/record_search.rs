@@ -4,8 +4,13 @@ pub(super) fn execute_runtime_expr(db: &RedDB, expr: &QueryExpr) -> RedDBResult<
     match expr {
         QueryExpr::Graph(_) | QueryExpr::Path(_) => {
             let graph = materialize_graph(db.store().as_ref())?;
-            crate::storage::query::unified::UnifiedExecutor::execute_on(&graph, expr)
-                .map_err(|err| RedDBError::Query(err.to_string()))
+            let node_properties = materialize_graph_node_properties(db.store().as_ref())?;
+            crate::storage::query::unified::UnifiedExecutor::execute_on_with_node_properties(
+                &graph,
+                expr,
+                node_properties,
+            )
+            .map_err(|err| RedDBError::Query(err.to_string()))
         }
         QueryExpr::Table(table) => execute_runtime_table_query(db, table),
         QueryExpr::Join(join) => execute_runtime_join_query(db, join),

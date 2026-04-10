@@ -7,7 +7,7 @@
 Built in Rust. Embedded, Server, or Serverless.
 
 ```bash
-red server --path ./data --bind 0.0.0.0:6380
+red server --path ./data/reddb.rdb --grpc-bind 127.0.0.1:50051 --http-bind 127.0.0.1:8080
 ```
 
 [Get Started](/getting-started/quick-start.md)

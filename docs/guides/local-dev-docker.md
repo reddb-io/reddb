@@ -17,7 +17,8 @@ From the repository root:
 docker compose up -d --build
 ```
 
-This uses [docker-compose.yml](/home/cyber/Work/FF/reddb/docker-compose.yml).
+This uses
+[docker-compose.yml](https://github.com/forattini-dev/reddb/blob/main/docker-compose.yml).
 
 The topology is:
 

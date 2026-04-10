@@ -163,7 +163,7 @@ RedDB provides built-in graph analytics:
 ### Centrality
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/centrality \
+curl -X POST http://127.0.0.1:8080/graph/analytics/centrality \
   -H 'content-type: application/json' \
   -d '{"algorithm": "pagerank"}'
 ```
@@ -179,7 +179,7 @@ GRAPH CENTRALITY ALGORITHM pagerank
 ### Community Detection
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/community \
+curl -X POST http://127.0.0.1:8080/graph/analytics/community \
   -H 'content-type: application/json' \
   -d '{"algorithm": "louvain", "max_iterations": 100}'
 ```
@@ -195,7 +195,7 @@ GRAPH COMMUNITY ALGORITHM louvain MAX_ITERATIONS 100
 ### Connected Components
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/components \
+curl -X POST http://127.0.0.1:8080/graph/analytics/components \
   -H 'content-type: application/json' \
   -d '{"mode": "weakly_connected"}'
 ```
@@ -209,7 +209,7 @@ GRAPH COMPONENTS MODE weakly_connected
 ### Cycle Detection
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/cycles \
+curl -X POST http://127.0.0.1:8080/graph/analytics/cycles \
   -H 'content-type: application/json' \
   -d '{"max_length": 10, "max_cycles": 50}'
 ```
@@ -224,10 +224,10 @@ GRAPH CYCLES MAX_LENGTH 10 MAX_CYCLES 50
 
 | Endpoint | Description |
 |:---------|:------------|
-| `POST /graph/clustering` | Clustering coefficient |
-| `POST /graph/hits` | HITS (hubs and authorities) |
-| `POST /graph/topological-sort` | Topological ordering |
-| `POST /graph/personalized-pagerank` | Personalized PageRank from a source node |
+| `POST /graph/analytics/clustering` | Clustering coefficient |
+| `POST /graph/analytics/hits` | HITS (hubs and authorities) |
+| `POST /graph/analytics/topological-sort` | Topological ordering |
+| `POST /graph/analytics/pagerank/personalized` | Personalized PageRank from a source node |
 
 ## Graph Projections
 

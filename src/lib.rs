@@ -11,6 +11,7 @@
     clippy::len_without_is_empty  // segment structs don't need is_empty
 )]
 
+pub mod ai;
 pub mod api;
 pub mod application;
 pub mod auth;

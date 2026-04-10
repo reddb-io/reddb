@@ -1,139 +1,119 @@
 # Type System Overview
 
-RedDB supports 48 native data types organized into categories. All types have efficient binary serialization and are usable as column types in table schemas.
+RedDB has a typed schema system with two layers:
 
-## All Types
+1. Standard application types you already expect in a database.
+2. Native domain-aware types (network, geo, locale, references, colors) that reduce parsing and validation work in your app.
 
-| ID | Type | Category | Description | Storage |
-|:---|:-----|:---------|:------------|:--------|
-| 1 | `Integer` | Primitive | Signed 64-bit integer | 8 bytes |
-| 2 | `UnsignedInteger` | Primitive | Unsigned 64-bit integer | 8 bytes |
-| 3 | `Float` | Primitive | 64-bit IEEE 754 float | 8 bytes |
-| 4 | `Text` | Primitive | Variable-length UTF-8 string | variable |
-| 5 | `Blob` | Primitive | Variable-length binary data | variable |
-| 6 | `Boolean` | Primitive | True/false | 1 byte |
-| 7 | `Timestamp` | Temporal | Unix timestamp (seconds) | 8 bytes |
-| 8 | `Duration` | Temporal | Duration in milliseconds | 8 bytes |
-| 9 | `IpAddr` | Network | IPv4 or IPv6 address | 4 or 16 bytes |
-| 10 | `MacAddr` | Network | MAC address | 6 bytes |
-| 11 | `Vector` | Special | Fixed-dimension float vector | variable |
-| 12 | `Nullable` | Wrapper | Nullable wrapper for any type | variable |
-| 13 | `Json` | Primitive | JSON-like structured data | variable |
-| 14 | `Uuid` | Primitive | UUID (v4) | 16 bytes |
-| 15 | `NodeRef` | Reference | Reference to a graph node | 8 bytes |
-| 16 | `EdgeRef` | Reference | Reference to a graph edge | 8 bytes |
-| 17 | `VectorRef` | Reference | Reference to a vector | 8 bytes |
-| 18 | `RowRef` | Reference | Reference to a table row | 16 bytes |
-| 19 | `Color` | Primitive | RGB color | 3 bytes |
-| 20 | `Email` | Primitive | Validated email address | variable |
-| 21 | `Url` | Primitive | Validated URL | variable |
-| 22 | `Phone` | Primitive | Phone number | 8 bytes |
-| 23 | `Semver` | Primitive | Semantic version (major.minor.patch) | 4 bytes |
-| 24 | `Cidr` | Network | CIDR notation (IP + prefix length) | 5 bytes |
-| 25 | `Date` | Temporal | Date only (days since epoch) | 4 bytes |
-| 26 | `Time` | Temporal | Time only (ms since midnight) | 4 bytes |
-| 27 | `Decimal` | Primitive | Fixed-point decimal | 8 bytes |
-| 28 | `Enum` | Primitive | Enumerated type (variant index) | 1 byte |
-| 29 | `Array` | Primitive | Homogeneous array | variable |
-| 30 | `TimestampMs` | Temporal | Timestamp with millisecond precision | 8 bytes |
-| 31 | `Ipv4` | Network | IPv4 address | 4 bytes |
-| 32 | `Ipv6` | Network | IPv6 address | 16 bytes |
-| 33 | `Subnet` | Network | Network subnet (IP + mask) | 8 bytes |
-| 34 | `Port` | Network | TCP/UDP port number | 2 bytes |
-| 35 | `Latitude` | Geo | Latitude in microdegrees | 4 bytes |
-| 36 | `Longitude` | Geo | Longitude in microdegrees | 4 bytes |
-| 37 | `GeoPoint` | Geo | Geographic point (lat + lon) | 8 bytes |
-| 38 | `Country2` | Locale | ISO 3166-1 alpha-2 country code | 2 bytes |
-| 39 | `Country3` | Locale | ISO 3166-1 alpha-3 country code | 3 bytes |
-| 40 | `Lang2` | Locale | ISO 639-1 language code | 2 bytes |
-| 41 | `Lang5` | Locale | IETF language tag (e.g. "pt-BR") | 5 bytes |
-| 42 | `Currency` | Locale | ISO 4217 currency code | 3 bytes |
-| 43 | `ColorAlpha` | Primitive | RGBA color with alpha | 4 bytes |
-| 44 | `BigInt` | Primitive | Large signed 64-bit integer | 8 bytes |
-| 45 | `KeyRef` | Reference | Reference to a KV pair | variable |
-| 46 | `DocRef` | Reference | Reference to a document | variable |
-| 47 | `TableRef` | Reference | Reference to a table/collection | variable |
-| 48 | `PageRef` | Reference | Reference to a storage page | variable |
+The goal is simple: keep common data easy, and make domain data first-class.
 
-## Categories
+## Start with Standard Types
 
-### Primitive Types
+Use these for most business entities:
 
-The basic building blocks: `Integer`, `UnsignedInteger`, `Float`, `Text`, `Blob`, `Boolean`, `Json`, `Uuid`, `Color`, `ColorAlpha`, `Email`, `Url`, `Phone`, `Semver`, `Decimal`, `Enum`, `Array`, `BigInt`.
+- Numbers: `Integer`, `UnsignedInteger`, `Float`, `Decimal`, `BigInt`
+- Text and binary: `Text`, `Blob`, `Json`
+- Booleans and identifiers: `Boolean`, `Uuid`
+- Time fields: `Timestamp`, `TimestampMs`, `Date`, `Time`, `Duration`
+- General collections: `Array`, `Enum`
 
-See [Primitive Types](/types/primitives.md).
-
-### Network Types
-
-Purpose-built for network data: `IpAddr`, `MacAddr`, `Cidr`, `Ipv4`, `Ipv6`, `Subnet`, `Port`.
-
-See [Network Types](/types/network.md).
-
-### Temporal Types
-
-Time and date types: `Timestamp`, `Duration`, `Date`, `Time`, `TimestampMs`.
-
-See [Temporal Types](/types/temporal.md).
-
-### Geo Types
-
-Geographic data: `Latitude`, `Longitude`, `GeoPoint`.
-
-See [Geo Types](/types/geo.md).
-
-### Locale Types
-
-Internationalization: `Country2`, `Country3`, `Lang2`, `Lang5`, `Currency`.
-
-See [Locale Types](/types/locale.md).
-
-### Reference Types
-
-Cross-entity references: `NodeRef`, `EdgeRef`, `VectorRef`, `RowRef`, `KeyRef`, `DocRef`, `TableRef`, `PageRef`.
-
-See [Reference Types](/types/references.md).
-
-## Usage in Schemas
-
-Types are specified when defining table columns:
+Example schema using only standard types:
 
 ```sql
-CREATE TABLE hosts (
-  ip IpAddr NOT NULL,
-  mac MacAddr,
-  location GeoPoint,
-  os Text NOT NULL,
-  version Semver,
-  last_seen Timestamp
+CREATE TABLE users (
+  id UnsignedInteger NOT NULL,
+  name Text NOT NULL,
+  email Text,
+  active Boolean DEFAULT true,
+  profile Json,
+  created_at TimestampMs NOT NULL
 )
 ```
 
-## Rust API
+## Then Add Native RedDB Types
 
-In the embedded API, use the `Value` enum:
+When a field has domain semantics, switch from plain `Text` to a native type.
+
+### Network-native
+
+- `IpAddr`, `Ipv4`, `Ipv6`
+- `MacAddr`, `Cidr`, `Subnet`, `Port`
+
+### Locale-native
+
+- `Country2`, `Country3`
+- `Lang2`, `Lang5`
+- `Currency`
+
+### Geo-native
+
+- `Latitude`, `Longitude`, `GeoPoint`
+
+### Rich primitives
+
+- `Email`, `Url`, `Phone`, `Semver`
+- `Color`, `ColorAlpha`
+
+### Cross-model references
+
+- `NodeRef`, `EdgeRef`, `VectorRef`, `RowRef`
+- `KeyRef`, `DocRef`, `TableRef`, `PageRef`
+
+Example with native/custom types:
+
+```sql
+CREATE TABLE assets (
+  host_ip Ipv4 NOT NULL,
+  service_port Port NOT NULL,
+  mgmt_subnet Cidr,
+  owner_country Country2,
+  ui_theme Color,
+  build_version Semver,
+  position GeoPoint
+)
+```
+
+In this model, you get semantic validation on write instead of post-processing strings in your service.
+
+## Why This Matters
+
+- Less parsing code in API/services.
+- Fewer invalid records entering storage.
+- Better schema readability: type already explains intent (`Ipv4` vs generic `Text`).
+- Faster operational debugging because values are normalized.
+
+## Practical Typing Strategy
+
+1. Start with standard types while modeling quickly.
+2. Promote hot or error-prone fields to native types (`Text` -> `Email`, `Text` -> `Ipv4`, etc.).
+3. Add reference types only when you need explicit cross-model links.
+
+## Rust API Example
+
+Use typed values directly in embedded mode:
 
 ```rust
-use reddb::Value;
+use reddb::storage::schema::Value;
 
 let row = vec![
-    ("ip", Value::IpAddr("10.0.0.1".parse()?)),
-    ("name", Value::Text("web-01".into())),
-    ("port", Value::Integer(443)),
+    ("host_ip", Value::IpAddr("10.0.0.1".parse()?)),
+    ("service_port", Value::Port(443)),
+    ("owner_country", Value::Country2([b'B', b'R'])),
+    ("ui_theme", Value::Color([0x1E, 0x90, 0xFF])),
     ("active", Value::Boolean(true)),
-    ("score", Value::Float(0.95)),
 ];
 ```
 
-## Type Coercion
+## Coercion and Validation
 
-RedDB performs automatic type coercion when possible:
+RedDB can coerce safe inputs (for example string to `Ipv4` or `Email`) and rejects invalid values early.
 
-| From | To | Example |
-|:-----|:---|:--------|
-| String `"123"` | Integer `123` | Numeric strings to integers |
-| String `"true"` | Boolean `true` | Boolean strings |
-| Integer `443` | Float `443.0` | Integer to float promotion |
-| String `"10.0.0.1"` | IpAddr | IP address parsing |
-| String `"alice@x.com"` | Email | Email validation |
+See:
 
-See [Validation & Coercion](/types/validation.md) for the full coercion matrix.
+- [Primitive Types](/types/primitives.md)
+- [Network Types](/types/network.md)
+- [Temporal Types](/types/temporal.md)
+- [Geo Types](/types/geo.md)
+- [Locale Types](/types/locale.md)
+- [Reference Types](/types/references.md)
+- [Validation & Coercion](/types/validation.md)

@@ -76,7 +76,9 @@ grpcurl -plaintext \
 | `Query` | `QueryRequest` | Execute SQL/universal query |
 | `ExplainQuery` | `QueryRequest` | Get execution plan |
 | `Scan` | `ScanRequest` | Paginate through a collection |
+| `Search` | `JsonPayloadRequest` | Unified search (`mode=auto|index|multimodal|hybrid`) |
 | `TextSearch` | `JsonPayloadRequest` | Full-text search |
+| `MultimodalSearch` | `JsonPayloadRequest` | Global multimodal lookup across all structures |
 | `HybridSearch` | `JsonPayloadRequest` | Combined text + vector search |
 | `Similar` | `JsonCreateRequest` | Vector similarity search |
 | `IvfSearch` | `JsonCreateRequest` | IVF approximate search |

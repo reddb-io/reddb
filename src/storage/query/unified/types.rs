@@ -126,6 +126,7 @@ pub struct MatchedNode {
     pub id: String,
     pub label: String,
     pub node_type: GraphNodeType,
+    pub properties: HashMap<String, Value>,
 }
 
 impl MatchedNode {
@@ -135,6 +136,7 @@ impl MatchedNode {
             id: node.id.clone(),
             label: node.label.clone(),
             node_type: node.node_type,
+            properties: HashMap::new(),
         }
     }
 }

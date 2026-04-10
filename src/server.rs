@@ -4,15 +4,15 @@ pub(crate) use crate::application::json_input::{
     json_bool_field, json_f32_field, json_string_field, json_usize_field,
 };
 pub(crate) use crate::application::{
-    AdminUseCases, CatalogUseCases, CreateEdgeInput, CreateEntityOutput, CreateNodeEmbeddingInput,
-    CreateNodeGraphLinkInput, CreateNodeInput, CreateNodeTableLinkInput, CreateRowInput,
-    CreateVectorInput, DeleteEntityInput, EntityUseCases, ExecuteQueryInput, ExplainQueryInput,
-    GraphCentralityInput, GraphClusteringInput, GraphCommunitiesInput, GraphComponentsInput,
-    GraphCyclesInput, GraphHitsInput, GraphNeighborhoodInput, GraphPersonalizedPageRankInput,
-    GraphShortestPathInput, GraphTopologicalSortInput, GraphTraversalInput, GraphUseCases,
-    InspectNativeArtifactInput, NativeUseCases, PatchEntityInput, PatchEntityOperation,
-    PatchEntityOperationType, QueryUseCases, SearchHybridInput, SearchIvfInput, SearchSimilarInput,
-    SearchTextInput,
+    AdminUseCases, CatalogUseCases, CreateEdgeInput, CreateEntityOutput, CreateKvInput,
+    CreateNodeEmbeddingInput, CreateNodeGraphLinkInput, CreateNodeInput, CreateNodeTableLinkInput,
+    CreateRowInput, CreateVectorInput, DeleteEntityInput, EntityUseCases, ExecuteQueryInput,
+    ExplainQueryInput, GraphCentralityInput, GraphClusteringInput, GraphCommunitiesInput,
+    GraphComponentsInput, GraphCyclesInput, GraphHitsInput, GraphNeighborhoodInput,
+    GraphPersonalizedPageRankInput, GraphShortestPathInput, GraphTopologicalSortInput,
+    GraphTraversalInput, GraphUseCases, InspectNativeArtifactInput, NativeUseCases,
+    PatchEntityInput, PatchEntityOperation, PatchEntityOperationType, QueryUseCases,
+    SearchHybridInput, SearchIvfInput, SearchMultimodalInput, SearchSimilarInput, SearchTextInput,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::io::{self, Read, Write};
@@ -51,6 +51,7 @@ fn graph_projection_json(projection: &crate::PhysicalGraphProjection) -> JsonVal
     crate::presentation::admin_json::graph_projection_json(projection)
 }
 
+mod handlers_ai;
 mod handlers_auth;
 mod handlers_entity;
 mod handlers_graph;
@@ -64,6 +65,7 @@ mod routing;
 mod serverless_support;
 mod transport;
 
+use self::handlers_ai::*;
 use self::handlers_entity::*;
 use self::handlers_graph::*;
 use self::handlers_ops::*;

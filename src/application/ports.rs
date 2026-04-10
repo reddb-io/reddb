@@ -85,6 +85,24 @@ pub trait RuntimeQueryPort {
         limit: Option<usize>,
         fuzzy: bool,
     ) -> RedDBResult<DslQueryResult>;
+    fn search_multimodal(
+        &self,
+        query: String,
+        collections: Option<Vec<String>>,
+        entity_types: Option<Vec<String>>,
+        capabilities: Option<Vec<String>>,
+        limit: Option<usize>,
+    ) -> RedDBResult<DslQueryResult>;
+    fn search_index(
+        &self,
+        index: String,
+        value: String,
+        exact: bool,
+        collections: Option<Vec<String>>,
+        entity_types: Option<Vec<String>>,
+        capabilities: Option<Vec<String>>,
+        limit: Option<usize>,
+    ) -> RedDBResult<DslQueryResult>;
 }
 
 pub trait RuntimeEntityPort {

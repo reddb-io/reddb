@@ -14,8 +14,12 @@ impl<'a> Parser<'a> {
             Token::Similar => self.parse_search_similar(),
             Token::Text => self.parse_search_text(),
             Token::Hybrid => self.parse_search_hybrid(),
+            Token::Index => self.parse_search_index(),
+            Token::Ident(name) if name.eq_ignore_ascii_case("MULTIMODAL") => {
+                self.parse_search_multimodal()
+            }
             _ => Err(ParseError::expected(
-                vec!["SIMILAR", "TEXT", "HYBRID"],
+                vec!["SIMILAR", "TEXT", "HYBRID", "MULTIMODAL", "INDEX"],
                 self.peek(),
                 self.position(),
             )),
@@ -129,6 +133,88 @@ impl<'a> Parser<'a> {
             collection,
             limit,
         }))
+    }
+
+    /// Parse: SEARCH MULTIMODAL 'query' [COLLECTION col] [LIMIT n]
+    fn parse_search_multimodal(&mut self) -> Result<QueryExpr, ParseError> {
+        self.advance()?; // consume MULTIMODAL identifier
+
+        let query = self.parse_string()?;
+
+        let collection = if self.consume(&Token::Collection)? {
+            Some(self.expect_ident()?)
+        } else {
+            None
+        };
+
+        let limit = if self.consume(&Token::Limit)? {
+            self.parse_integer()? as usize
+        } else {
+            25
+        };
+
+        Ok(QueryExpr::SearchCommand(SearchCommand::Multimodal {
+            query,
+            collection,
+            limit,
+        }))
+    }
+
+    /// Parse: SEARCH INDEX index VALUE 'value' [COLLECTION col] [LIMIT n] [EXACT|FUZZY]
+    fn parse_search_index(&mut self) -> Result<QueryExpr, ParseError> {
+        self.advance()?; // consume INDEX keyword
+
+        let index = self.expect_ident()?;
+        self.expect_search_ident("VALUE")?;
+        let value = self.parse_string()?;
+
+        let collection = if self.consume(&Token::Collection)? {
+            Some(self.expect_ident()?)
+        } else {
+            None
+        };
+
+        let limit = if self.consume(&Token::Limit)? {
+            self.parse_integer()? as usize
+        } else {
+            25
+        };
+
+        let fuzzy = self.consume(&Token::Fuzzy)? || self.consume_search_ident("FUZZY")?;
+        if !fuzzy {
+            let _ = self.consume_search_ident("EXACT")?;
+        }
+        let exact = !fuzzy;
+
+        Ok(QueryExpr::SearchCommand(SearchCommand::Index {
+            index,
+            value,
+            collection,
+            limit,
+            exact,
+        }))
+    }
+
+    fn expect_search_ident(&mut self, expected: &str) -> Result<(), ParseError> {
+        if self.consume_search_ident(expected)? {
+            Ok(())
+        } else {
+            Err(ParseError::expected(
+                vec![expected],
+                self.peek(),
+                self.position(),
+            ))
+        }
+    }
+
+    fn consume_search_ident(&mut self, expected: &str) -> Result<bool, ParseError> {
+        match self.peek().clone() {
+            Token::Ident(name) if name.eq_ignore_ascii_case(expected) => {
+                self.advance()?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
     }
 
     /// Parse a vector literal: [0.1, 0.2, 0.3]

@@ -11,7 +11,7 @@ The Louvain algorithm maximizes modularity through iterative optimization:
 3. Communities are merged and the process repeats
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/community \
+curl -X POST http://127.0.0.1:8080/graph/analytics/community \
   -H 'content-type: application/json' \
   -d '{
     "algorithm": "louvain",
@@ -32,7 +32,7 @@ A fast, near-linear algorithm:
 3. Repeat until convergence
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/community \
+curl -X POST http://127.0.0.1:8080/graph/analytics/community \
   -H 'content-type: application/json' \
   -d '{
     "algorithm": "label_propagation",
@@ -78,7 +78,7 @@ curl -X POST http://127.0.0.1:8080/graph/community \
 Related but distinct: find disconnected subgraphs:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/components \
+curl -X POST http://127.0.0.1:8080/graph/analytics/components \
   -H 'content-type: application/json' \
   -d '{"mode": "weakly_connected"}'
 ```

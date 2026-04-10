@@ -86,10 +86,9 @@ let vector_id = db.vector("docs")
 Find the most similar vectors to a query vector:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/search/similar \
+curl -X POST http://127.0.0.1:8080/collections/docs/similar \
   -H 'content-type: application/json' \
   -d '{
-    "collection": "docs",
     "vector": [0.15, 0.89, 0.40, 0.30, 0.70, 0.85, 0.25, 0.50],
     "k": 5,
     "min_score": 0.7
@@ -118,10 +117,9 @@ MIN_SCORE 0.7
 Use inverted file index for approximate search on large datasets:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/search/ivf \
+curl -X POST http://127.0.0.1:8080/collections/docs/ivf/search \
   -H 'content-type: application/json' \
   -d '{
-    "collection": "docs",
     "vector": [0.15, 0.89, 0.40, 0.30, 0.70, 0.85, 0.25, 0.50],
     "k": 10,
     "n_probes": 3
@@ -142,7 +140,7 @@ PROBES 3
 Full-text search across vector content and metadata:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/search/text \
+curl -X POST http://127.0.0.1:8080/text/search \
   -H 'content-type: application/json' \
   -d '{
     "query": "machine learning basics",
@@ -167,12 +165,12 @@ SEARCH TEXT 'machne lerning' IN docs FUZZY LIMIT 10
 Combine structured filters with vector similarity:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/search/hybrid \
+curl -X POST http://127.0.0.1:8080/hybrid/search \
   -H 'content-type: application/json' \
   -d '{
-    "collection": "docs",
+    "collections": ["docs"],
     "vector": [0.15, 0.89, 0.40, 0.30, 0.70, 0.85, 0.25, 0.50],
-    "text_query": "neural networks",
+    "query": "neural networks",
     "k": 10,
     "filters": {
       "topic": "ml-basics"

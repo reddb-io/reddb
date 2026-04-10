@@ -42,12 +42,12 @@ curl -X POST http://127.0.0.1:8080/collections/social/edges \
 
 ```bash
 # PageRank
-curl -X POST http://127.0.0.1:8080/graph/centrality \
+curl -X POST http://127.0.0.1:8080/graph/analytics/centrality \
   -H 'content-type: application/json' \
   -d '{"algorithm": "pagerank"}'
 
 # Degree centrality (most connected)
-curl -X POST http://127.0.0.1:8080/graph/centrality \
+curl -X POST http://127.0.0.1:8080/graph/analytics/centrality \
   -H 'content-type: application/json' \
   -d '{"algorithm": "degree"}'
 ```
@@ -55,7 +55,7 @@ curl -X POST http://127.0.0.1:8080/graph/centrality \
 ## 3. Detect Communities
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/community \
+curl -X POST http://127.0.0.1:8080/graph/analytics/community \
   -H 'content-type: application/json' \
   -d '{"algorithm": "louvain"}'
 ```
@@ -77,7 +77,7 @@ curl -X POST http://127.0.0.1:8080/graph/traverse \
 ## 5. Check for Cycles
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/cycles \
+curl -X POST http://127.0.0.1:8080/graph/analytics/cycles \
   -H 'content-type: application/json' \
   -d '{"max_length": 5}'
 ```
@@ -87,7 +87,7 @@ curl -X POST http://127.0.0.1:8080/graph/cycles \
 Find nodes that bridge different communities:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/centrality \
+curl -X POST http://127.0.0.1:8080/graph/analytics/centrality \
   -H 'content-type: application/json' \
   -d '{"algorithm": "betweenness"}'
 ```

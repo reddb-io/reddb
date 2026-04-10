@@ -4,6 +4,7 @@ use crate::storage::engine::{
 };
 use crate::storage::query::ast::*;
 use crate::storage::schema::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 fn create_test_graph() -> Arc<GraphStore> {
@@ -133,6 +134,39 @@ fn test_matched_node() {
 }
 
 #[test]
+fn test_graph_query_filter_custom_node_property() {
+    let mut graph = GraphStore::new();
+    let _ = graph.add_node("host:1", "host-1", GraphNodeType::Host);
+    let _ = graph.add_node("host:2", "host-2", GraphNodeType::Host);
+
+    let mut node_properties = HashMap::new();
+    node_properties.insert(
+        "host:1".to_string(),
+        HashMap::from([("os".to_string(), Value::Text("linux".to_string()))]),
+    );
+
+    let graph = Arc::new(graph);
+    let index = create_test_index();
+    let executor = UnifiedExecutor::new_with_node_properties(graph, index, node_properties);
+
+    let query = QueryExpr::graph()
+        .node(
+            super::super::ast::NodePattern::new("h")
+                .of_type(GraphNodeType::Host)
+                .with_property("os", CompareOp::Eq, Value::Text("linux".to_string())),
+        )
+        .return_field(FieldRef::node_prop("h", "os"))
+        .build();
+
+    let result = executor.execute(&query).unwrap();
+    assert_eq!(result.records.len(), 1);
+    assert_eq!(
+        result.records[0].get("h.os"),
+        Some(&Value::Text("linux".to_string()))
+    );
+}
+
+#[test]
 fn test_graph_path() {
     let path = GraphPath::start("node:1");
     assert!(path.is_empty());
@@ -174,6 +208,7 @@ fn test_unified_record_operations() {
         id: "n1".to_string(),
         label: "Node 1".to_string(),
         node_type: GraphNodeType::Host,
+        properties: HashMap::new(),
     };
     record.set_node("h", node.clone());
     assert_eq!(record.get_node("h").unwrap().id, "n1");

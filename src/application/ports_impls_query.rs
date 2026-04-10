@@ -89,4 +89,37 @@ impl RuntimeQueryPort for RedDBRuntime {
             fuzzy,
         )
     }
+
+    fn search_multimodal(
+        &self,
+        query: String,
+        collections: Option<Vec<String>>,
+        entity_types: Option<Vec<String>>,
+        capabilities: Option<Vec<String>>,
+        limit: Option<usize>,
+    ) -> RedDBResult<DslQueryResult> {
+        RedDBRuntime::search_multimodal(self, query, collections, entity_types, capabilities, limit)
+    }
+
+    fn search_index(
+        &self,
+        index: String,
+        value: String,
+        exact: bool,
+        collections: Option<Vec<String>>,
+        entity_types: Option<Vec<String>>,
+        capabilities: Option<Vec<String>>,
+        limit: Option<usize>,
+    ) -> RedDBResult<DslQueryResult> {
+        RedDBRuntime::search_index(
+            self,
+            index,
+            value,
+            exact,
+            collections,
+            entity_types,
+            capabilities,
+            limit,
+        )
+    }
 }

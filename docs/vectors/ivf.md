@@ -42,10 +42,9 @@ flowchart TB
 ## Usage
 
 ```bash
-curl -X POST http://127.0.0.1:8080/search/ivf \
+curl -X POST http://127.0.0.1:8080/collections/large_embeddings/ivf/search \
   -H 'content-type: application/json' \
   -d '{
-    "collection": "large_embeddings",
     "vector": [0.12, 0.91, 0.44, 0.33, 0.67],
     "k": 10,
     "n_probes": 5

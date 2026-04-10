@@ -53,6 +53,26 @@ pub struct SearchTextInput {
 }
 
 #[derive(Debug, Clone)]
+pub struct SearchMultimodalInput {
+    pub query: String,
+    pub collections: Option<Vec<String>>,
+    pub entity_types: Option<Vec<String>>,
+    pub capabilities: Option<Vec<String>>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SearchIndexInput {
+    pub index: String,
+    pub value: String,
+    pub exact: bool,
+    pub collections: Option<Vec<String>>,
+    pub entity_types: Option<Vec<String>>,
+    pub capabilities: Option<Vec<String>>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
 pub struct SearchHybridInput {
     pub vector: Option<Vec<f32>>,
     pub query: Option<String>,
@@ -118,6 +138,28 @@ impl<'a, P: RuntimeQueryPort + ?Sized> QueryUseCases<'a, P> {
             input.fields,
             input.limit,
             input.fuzzy,
+        )
+    }
+
+    pub fn search_multimodal(&self, input: SearchMultimodalInput) -> RedDBResult<DslQueryResult> {
+        self.runtime.search_multimodal(
+            input.query,
+            input.collections,
+            input.entity_types,
+            input.capabilities,
+            input.limit,
+        )
+    }
+
+    pub fn search_index(&self, input: SearchIndexInput) -> RedDBResult<DslQueryResult> {
+        self.runtime.search_index(
+            input.index,
+            input.value,
+            input.exact,
+            input.collections,
+            input.entity_types,
+            input.capabilities,
+            input.limit,
         )
     }
 

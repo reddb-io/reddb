@@ -776,7 +776,13 @@ pub(super) fn execute_runtime_canonical_expr_node(
         }
         QueryExpr::Graph(_) | QueryExpr::Path(_) => {
             let graph = materialize_graph(db.store().as_ref())?;
-            let result = crate::storage::query::unified::UnifiedExecutor::execute_on(&graph, expr)
+            let node_properties = materialize_graph_node_properties(db.store().as_ref())?;
+            let result =
+                crate::storage::query::unified::UnifiedExecutor::execute_on_with_node_properties(
+                    &graph,
+                    expr,
+                    node_properties,
+                )
                 .map_err(|err| RedDBError::Query(err.to_string()))?;
             Ok(result.records)
         }

@@ -1,4 +1,9 @@
 use super::*;
+use crate::application::multimodal_index::{
+    entity_multimodal_tokens_for_search, metadata_key_for_field_lookup,
+    metadata_key_for_multimodal_token, query_lookup_index_tokens, query_multimodal_tokens,
+    query_multimodal_tokens_exact,
+};
 
 impl RedDBRuntime {
     pub fn explain_query(&self, query: &str) -> RedDBResult<RuntimeQueryExplain> {
@@ -349,6 +354,245 @@ impl RedDBRuntime {
         }
 
         runtime_filter_dsl_result(&mut result, entity_types.clone(), capabilities.clone());
+        result.matches.truncate(result_limit);
+        Ok(result)
+    }
+
+    pub fn search_multimodal(
+        &self,
+        query: String,
+        collections: Option<Vec<String>>,
+        entity_types: Option<Vec<String>>,
+        capabilities: Option<Vec<String>>,
+        limit: Option<usize>,
+    ) -> RedDBResult<DslQueryResult> {
+        let started = std::time::Instant::now();
+        let query = query.trim().to_string();
+        if query.is_empty() {
+            return Err(RedDBError::Query(
+                "field 'query' cannot be empty".to_string(),
+            ));
+        }
+
+        let query_tokens = query_multimodal_tokens(&query);
+        if query_tokens.is_empty() {
+            return Err(RedDBError::Query(
+                "query does not contain indexable tokens".to_string(),
+            ));
+        }
+
+        let collection_scope = runtime_search_collections(&self.inner.db, collections);
+        let allowed_collections: Option<BTreeSet<String>> =
+            collection_scope.as_ref().map(|items| {
+                items
+                    .iter()
+                    .map(|item| item.trim().to_string())
+                    .filter(|item| !item.is_empty())
+                    .collect()
+            });
+        let result_limit = limit.unwrap_or(25).max(1);
+
+        let store = self.inner.db.store();
+        let mut scored: HashMap<u64, (UnifiedEntity, usize)> = HashMap::new();
+        let mut scanned = 0usize;
+        let mut index_hits = 0usize;
+
+        for token in &query_tokens {
+            let metadata_key = metadata_key_for_multimodal_token(token);
+            let matches =
+                store.filter_metadata_all(&[(metadata_key, UnifiedMetadataFilter::IsNotNull)]);
+            scanned += matches.len();
+            for (collection, id) in matches {
+                if allowed_collections
+                    .as_ref()
+                    .is_some_and(|allowed| !allowed.contains(&collection))
+                {
+                    continue;
+                }
+                let Some(entity) = store.get(&collection, id) else {
+                    continue;
+                };
+                index_hits += 1;
+                let entry = scored.entry(entity.id.raw()).or_insert((entity, 0usize));
+                entry.1 = entry.1.saturating_add(1);
+            }
+        }
+
+        if scored.is_empty() {
+            if let Some(collections) = collection_scope {
+                for collection in collections {
+                    let Some(manager) = store.get_collection(&collection) else {
+                        continue;
+                    };
+                    for entity in manager.query_all(|_| true) {
+                        scanned = scanned.saturating_add(1);
+                        let entity_tokens = entity_multimodal_tokens_for_search(&entity);
+                        let overlap = query_tokens
+                            .iter()
+                            .filter(|token| entity_tokens.binary_search(token).is_ok())
+                            .count();
+                        if overlap == 0 {
+                            continue;
+                        }
+                        let entry = scored.entry(entity.id.raw()).or_insert((entity, 0usize));
+                        entry.1 = entry.1.max(overlap);
+                    }
+                }
+            }
+        }
+
+        let token_count = query_tokens.len().max(1) as f32;
+        let mut result = DslQueryResult {
+            matches: scored
+                .into_values()
+                .map(|(entity, overlap)| {
+                    let score = (overlap as f32 / token_count).min(1.0);
+                    ScoredMatch {
+                        entity,
+                        score,
+                        components: MatchComponents {
+                            text_relevance: Some(score),
+                            structured_match: Some(score),
+                            filter_match: true,
+                            final_score: Some(score),
+                            ..Default::default()
+                        },
+                        path: None,
+                    }
+                })
+                .collect(),
+            scanned,
+            execution_time_us: started.elapsed().as_micros() as u64,
+            explanation: format!(
+                "Multimodal indexed search for '{query}' ({} tokens, {index_hits} index hits)",
+                query_tokens.len()
+            ),
+        };
+
+        normalize_runtime_dsl_result_scores(&mut result);
+        runtime_filter_dsl_result(&mut result, entity_types, capabilities);
+        result.matches.truncate(result_limit);
+        Ok(result)
+    }
+
+    pub fn search_index(
+        &self,
+        index: String,
+        value: String,
+        exact: bool,
+        collections: Option<Vec<String>>,
+        entity_types: Option<Vec<String>>,
+        capabilities: Option<Vec<String>>,
+        limit: Option<usize>,
+    ) -> RedDBResult<DslQueryResult> {
+        let started = std::time::Instant::now();
+        let index = index.trim().to_string();
+        let value = value.trim().to_string();
+
+        if index.is_empty() {
+            return Err(RedDBError::Query(
+                "field 'index' cannot be empty".to_string(),
+            ));
+        }
+        if value.is_empty() {
+            return Err(RedDBError::Query(
+                "field 'value' cannot be empty".to_string(),
+            ));
+        }
+
+        let index_tokens = query_lookup_index_tokens(&index);
+        let value_tokens = if exact {
+            query_multimodal_tokens_exact(&value)
+        } else {
+            query_multimodal_tokens(&value)
+        };
+
+        if index_tokens.is_empty() || value_tokens.is_empty() {
+            return Err(RedDBError::Query(
+                "lookup index or value does not contain indexable tokens".to_string(),
+            ));
+        }
+
+        let collection_scope = runtime_search_collections(&self.inner.db, collections.clone());
+        let allowed_collections: Option<BTreeSet<String>> =
+            collection_scope.as_ref().map(|items| {
+                items
+                    .iter()
+                    .map(|item| item.trim().to_string())
+                    .filter(|item| !item.is_empty())
+                    .collect()
+            });
+        let result_limit = limit.unwrap_or(25).max(1);
+
+        let store = self.inner.db.store();
+        let mut scored: HashMap<u64, (UnifiedEntity, usize)> = HashMap::new();
+        let mut scanned = 0usize;
+        let mut index_hits = 0usize;
+
+        for index_token in &index_tokens {
+            for value_token in &value_tokens {
+                let metadata_key = metadata_key_for_field_lookup(index_token, value_token);
+                let matches =
+                    store.filter_metadata_all(&[(metadata_key, UnifiedMetadataFilter::IsNotNull)]);
+                scanned += matches.len();
+                for (collection, id) in matches {
+                    if allowed_collections
+                        .as_ref()
+                        .is_some_and(|allowed| !allowed.contains(&collection))
+                    {
+                        continue;
+                    }
+                    let Some(entity) = store.get(&collection, id) else {
+                        continue;
+                    };
+                    index_hits += 1;
+                    let entry = scored.entry(entity.id.raw()).or_insert((entity, 0usize));
+                    entry.1 = entry.1.saturating_add(1);
+                }
+            }
+        }
+
+        if scored.is_empty() {
+            return self.search_multimodal(
+                format!("{index}:{value}"),
+                collections,
+                entity_types,
+                capabilities,
+                limit,
+            );
+        }
+
+        let max_overlap = (index_tokens.len() * value_tokens.len()).max(1) as f32;
+        let mut result = DslQueryResult {
+            matches: scored
+                .into_values()
+                .map(|(entity, overlap)| {
+                    let score = (overlap as f32 / max_overlap).min(1.0);
+                    ScoredMatch {
+                        entity,
+                        score,
+                        components: MatchComponents {
+                            text_relevance: Some(score),
+                            structured_match: Some(score),
+                            filter_match: true,
+                            final_score: Some(score),
+                            ..Default::default()
+                        },
+                        path: None,
+                    }
+                })
+                .collect(),
+            scanned,
+            execution_time_us: started.elapsed().as_micros() as u64,
+            explanation: format!(
+                "Indexed lookup for {index}={value} (exact={exact}, {}x{} tokens, {index_hits} index hits)",
+                index_tokens.len(),
+                value_tokens.len(),
+            ),
+        };
+
+        normalize_runtime_dsl_result_scores(&mut result);
+        runtime_filter_dsl_result(&mut result, entity_types, capabilities);
         result.matches.truncate(result_limit);
         Ok(result)
     }

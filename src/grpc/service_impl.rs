@@ -1413,6 +1413,64 @@ async fn explain_query(
     )))
 }
 
+async fn search(
+    &self,
+    request: Request<JsonPayloadRequest>,
+) -> Result<Response<PayloadReply>, Status> {
+    self.authorize_read(request.metadata())?;
+    let payload = parse_json_payload(&request.into_inner().payload_json)?;
+    let input =
+        crate::application::query_payload::parse_unified_search_input(&payload).map_err(to_status)?;
+    let response = match input {
+        crate::application::query_payload::UnifiedSearchInput::Hybrid(input) => {
+            let selection = crate::presentation::query_view::search_selection_json(
+                &input.entity_types,
+                &input.capabilities,
+            );
+            let result = self
+                .query_use_cases()
+                .search_hybrid(input)
+                .map_err(to_status)?;
+            crate::presentation::query_json::dsl_query_result_json(&result, selection, |item| {
+                crate::presentation::query_json::scored_match_json(
+                    item,
+                    crate::presentation::entity_json::entity_json,
+                )
+            })
+        }
+        crate::application::query_payload::UnifiedSearchInput::Multimodal(input) => {
+            let selection = crate::presentation::query_view::search_selection_json(
+                &input.entity_types,
+                &input.capabilities,
+            );
+            let result = self
+                .query_use_cases()
+                .search_multimodal(input)
+                .map_err(to_status)?;
+            crate::presentation::query_json::dsl_query_result_json(&result, selection, |item| {
+                crate::presentation::query_json::scored_match_json(
+                    item,
+                crate::presentation::entity_json::entity_json,
+            )
+        })
+    }
+        crate::application::query_payload::UnifiedSearchInput::Index(input) => {
+            let selection = crate::presentation::query_view::search_selection_json(
+                &input.entity_types,
+                &input.capabilities,
+            );
+            let result = self.query_use_cases().search_index(input).map_err(to_status)?;
+            crate::presentation::query_json::dsl_query_result_json(&result, selection, |item| {
+                crate::presentation::query_json::scored_match_json(
+                    item,
+                    crate::presentation::entity_json::entity_json,
+                )
+            })
+        }
+    };
+    Ok(Response::new(json_payload_reply(response)))
+}
+
 async fn text_search(
     &self,
     request: Request<JsonPayloadRequest>,
@@ -1440,24 +1498,22 @@ async fn text_search(
     )))
 }
 
-async fn hybrid_search(
+async fn multimodal_search(
     &self,
     request: Request<JsonPayloadRequest>,
 ) -> Result<Response<PayloadReply>, Status> {
     self.authorize_read(request.metadata())?;
     let payload = parse_json_payload(&request.into_inner().payload_json)?;
-    let input = crate::application::query_payload::parse_hybrid_search_input(
-        &payload,
-        "hybrid search",
-    )
-    .map_err(to_status)?;
+    let input = crate::application::query_payload::parse_multimodal_search_input(&payload)
+        .map_err(to_status)?;
     let selection = crate::presentation::query_view::search_selection_json(
         &input.entity_types,
         &input.capabilities,
     );
+
     let result = self
         .query_use_cases()
-        .search_hybrid(input)
+        .search_multimodal(input)
         .map_err(to_status)?;
     Ok(Response::new(json_payload_reply(
         crate::presentation::query_json::dsl_query_result_json(&result, selection, |item| {
@@ -1467,6 +1523,64 @@ async fn hybrid_search(
             )
         }),
     )))
+}
+
+async fn hybrid_search(
+    &self,
+    request: Request<JsonPayloadRequest>,
+) -> Result<Response<PayloadReply>, Status> {
+    self.authorize_read(request.metadata())?;
+    let payload = parse_json_payload(&request.into_inner().payload_json)?;
+    let input =
+        crate::application::query_payload::parse_unified_search_input(&payload).map_err(to_status)?;
+    let response = match input {
+        crate::application::query_payload::UnifiedSearchInput::Hybrid(input) => {
+            let selection = crate::presentation::query_view::search_selection_json(
+                &input.entity_types,
+                &input.capabilities,
+            );
+            let result = self
+                .query_use_cases()
+                .search_hybrid(input)
+                .map_err(to_status)?;
+            crate::presentation::query_json::dsl_query_result_json(&result, selection, |item| {
+                crate::presentation::query_json::scored_match_json(
+                    item,
+                    crate::presentation::entity_json::entity_json,
+                )
+            })
+        }
+        crate::application::query_payload::UnifiedSearchInput::Multimodal(input) => {
+            let selection = crate::presentation::query_view::search_selection_json(
+                &input.entity_types,
+                &input.capabilities,
+            );
+            let result = self
+                .query_use_cases()
+                .search_multimodal(input)
+                .map_err(to_status)?;
+            crate::presentation::query_json::dsl_query_result_json(&result, selection, |item| {
+                crate::presentation::query_json::scored_match_json(
+                    item,
+                crate::presentation::entity_json::entity_json,
+            )
+        })
+    }
+        crate::application::query_payload::UnifiedSearchInput::Index(input) => {
+            let selection = crate::presentation::query_view::search_selection_json(
+                &input.entity_types,
+                &input.capabilities,
+            );
+            let result = self.query_use_cases().search_index(input).map_err(to_status)?;
+            crate::presentation::query_json::dsl_query_result_json(&result, selection, |item| {
+                crate::presentation::query_json::scored_match_json(
+                    item,
+                    crate::presentation::entity_json::entity_json,
+                )
+            })
+        }
+    };
+    Ok(Response::new(json_payload_reply(response)))
 }
 
 async fn similar(

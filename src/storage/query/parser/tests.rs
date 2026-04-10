@@ -1490,3 +1490,81 @@ fn test_parse_search_hybrid_requires_input() {
     let result = parse("SEARCH HYBRID COLLECTION data");
     assert!(result.is_err());
 }
+
+#[test]
+fn test_parse_search_multimodal() {
+    let query =
+        parse("SEARCH MULTIMODAL 'CPF: 081.232.036-08' COLLECTION people LIMIT 20").unwrap();
+    if let QueryExpr::SearchCommand(crate::storage::query::ast::SearchCommand::Multimodal {
+        query,
+        collection,
+        limit,
+    }) = query
+    {
+        assert_eq!(query, "CPF: 081.232.036-08");
+        assert_eq!(collection, Some("people".to_string()));
+        assert_eq!(limit, 20);
+    } else {
+        panic!("Expected SearchCommand::Multimodal");
+    }
+}
+
+#[test]
+fn test_parse_search_multimodal_defaults() {
+    let query = parse("SEARCH MULTIMODAL 'user:123'").unwrap();
+    if let QueryExpr::SearchCommand(crate::storage::query::ast::SearchCommand::Multimodal {
+        query,
+        collection,
+        limit,
+    }) = query
+    {
+        assert_eq!(query, "user:123");
+        assert_eq!(collection, None);
+        assert_eq!(limit, 25);
+    } else {
+        panic!("Expected SearchCommand::Multimodal");
+    }
+}
+
+#[test]
+fn test_parse_search_index_defaults() {
+    let query = parse("SEARCH INDEX cpf VALUE '081.232.036-08'").unwrap();
+    if let QueryExpr::SearchCommand(crate::storage::query::ast::SearchCommand::Index {
+        index,
+        value,
+        collection,
+        limit,
+        exact,
+    }) = query
+    {
+        assert_eq!(index, "cpf");
+        assert_eq!(value, "081.232.036-08");
+        assert_eq!(collection, None);
+        assert_eq!(limit, 25);
+        assert!(exact);
+    } else {
+        panic!("Expected SearchCommand::Index");
+    }
+}
+
+#[test]
+fn test_parse_search_index_with_collection_limit_fuzzy() {
+    let query =
+        parse("SEARCH INDEX cpf VALUE '081.232.036-08' COLLECTION people LIMIT 20 FUZZY").unwrap();
+    if let QueryExpr::SearchCommand(crate::storage::query::ast::SearchCommand::Index {
+        index,
+        value,
+        collection,
+        limit,
+        exact,
+    }) = query
+    {
+        assert_eq!(index, "cpf");
+        assert_eq!(value, "081.232.036-08");
+        assert_eq!(collection, Some("people".to_string()));
+        assert_eq!(limit, 20);
+        assert!(!exact);
+    } else {
+        panic!("Expected SearchCommand::Index");
+    }
+}

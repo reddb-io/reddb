@@ -58,10 +58,9 @@ flowchart TB
 HNSW is the default index for vector similarity search:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/search/similar \
+curl -X POST http://127.0.0.1:8080/collections/embeddings/similar \
   -H 'content-type: application/json' \
   -d '{
-    "collection": "embeddings",
     "vector": [0.12, 0.91, 0.44],
     "k": 10
   }'

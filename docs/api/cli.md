@@ -13,17 +13,17 @@ red <command> [args] [flags]
 | Command | Description |
 |:--------|:------------|
 | `server` | Start the database server (HTTP or gRPC) |
-| `query` | Execute a query against a running server |
-| `insert` | Insert an entity into a collection |
-| `get` | Get an entity by ID |
-| `delete` | Delete an entity by ID |
+| `query` | Query command (currently placeholder; execution not wired) |
+| `insert` | Insert command (currently placeholder; execution not wired) |
+| `get` | Get command (currently placeholder; execution not wired) |
+| `delete` | Delete command (currently placeholder; execution not wired) |
 | `health` | Run a health check against a server |
 | `replica` | Start as a read replica connected to a primary |
-| `status` | Show replication status |
+| `status` | Replication status command (currently placeholder) |
 | `tick` | Run maintenance/reclaim tick operations |
 | `service` | Install or inspect a systemd service |
 | `mcp` | Start MCP server for AI agent integration |
-| `auth` | Manage authentication (users, tokens, roles) |
+| `auth` | Authentication commands (bootstrap implemented) |
 | `connect` | Connect to a remote RedDB server (interactive REPL) |
 | `version` | Show version information |
 
@@ -111,7 +111,10 @@ red service print-unit \
 
 ## red query
 
-Execute a query against a running server.
+Query command scaffold.
+
+> [!WARNING]
+> `red query` is not wired to runtime execution yet. For actual query execution, use `red connect --query "<sql>" <grpc-addr>` or `POST /query` over HTTP.
 
 ```bash
 red query "SELECT * FROM users WHERE age > 21"
@@ -119,19 +122,21 @@ red query "SELECT * FROM users WHERE age > 21"
 
 | Flag | Short | Default | Description |
 |:-----|:------|:--------|:------------|
-| `--bind` | `-b` | `0.0.0.0:6380` | Server address |
+| `--bind` | `-b` | `0.0.0.0:6380` | Reserved for future runtime wiring |
 
 Examples:
 
 ```bash
-red query "SELECT * FROM users" --bind 127.0.0.1:50051
-red query "FROM ANY LIMIT 10"
-red query "INSERT INTO users (name, age) VALUES ('Alice', 30)"
+red connect --query "SELECT * FROM users" 127.0.0.1:50051
+curl -X POST http://127.0.0.1:8080/query -H 'content-type: application/json' -d '{"query":"FROM ANY LIMIT 10"}'
 ```
 
 ## red insert
 
-Insert an entity into a collection.
+Insert command scaffold.
+
+> [!WARNING]
+> `red insert` is not wired yet. For inserts today, use HTTP `POST /collections/{name}/rows` or the gRPC `CreateRow` RPC.
 
 ```bash
 red insert <collection> '<json>'
@@ -139,17 +144,19 @@ red insert <collection> '<json>'
 
 | Flag | Short | Default | Description |
 |:-----|:------|:--------|:------------|
-| `--bind` | `-b` | `0.0.0.0:6380` | Server address |
+| `--bind` | `-b` | `0.0.0.0:6380` | Reserved for future runtime wiring |
 
 Example:
 
 ```bash
-red insert users '{"name": "Alice", "age": 30}'
+curl -X POST http://127.0.0.1:8080/collections/users/rows \
+  -H 'content-type: application/json' \
+  -d '{"fields":{"name":"Alice","age":30}}'
 ```
 
 ## red get
 
-Retrieve an entity by ID.
+Get command scaffold (`not yet wired`).
 
 ```bash
 red get <collection> <id>
@@ -157,7 +164,7 @@ red get <collection> <id>
 
 ## red delete
 
-Delete an entity by ID.
+Delete command scaffold (`not yet wired`).
 
 ```bash
 red delete <collection> <id>
@@ -230,14 +237,13 @@ Manage authentication.
 red auth <subcommand>
 ```
 
-Subcommands:
+Implemented today:
 
 ```bash
-red auth create-user alice --password secret --role admin
-red auth create-api-key alice --name "ci-token" --role write
-red auth list-users
-red auth login alice --password secret
+red auth bootstrap --password s3cret!
 ```
+
+`create-user`, `list-users`, and `login` are listed in help output but are not wired in the current CLI command dispatcher.
 
 ## red connect
 
@@ -256,10 +262,10 @@ Examples:
 
 ```bash
 # Interactive REPL
-red connect localhost:6380
+red connect 127.0.0.1:50051
 
 # One-shot query
-red connect --query "SELECT * FROM users" localhost:6380
+red connect --query "SELECT * FROM users" 127.0.0.1:50051
 ```
 
 ## Examples
@@ -267,8 +273,8 @@ red connect --query "SELECT * FROM users" localhost:6380
 ```bash
 # Start server, insert data, and query
 red server --path ./data/reddb.rdb --grpc-bind 127.0.0.1:50051 --http-bind 127.0.0.1:8080 &
-red insert users '{"name": "Alice", "age": 30}' --bind 127.0.0.1:8080
-red query "SELECT * FROM users" --bind 127.0.0.1:8080
+curl -X POST http://127.0.0.1:8080/collections/users/rows -H 'content-type: application/json' -d '{"fields":{"name":"Alice","age":30}}'
+red connect --query "SELECT * FROM users" 127.0.0.1:50051
 red health --http --bind 127.0.0.1:8080
 red tick --bind 127.0.0.1:8080 --operations maintenance,retention,checkpoint
 ```

@@ -5,7 +5,7 @@ Detect cycles (circular paths) in the graph. Useful for dependency analysis, dea
 ## Usage
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/cycles \
+curl -X POST http://127.0.0.1:8080/graph/analytics/cycles \
   -H 'content-type: application/json' \
   -d '{
     "max_length": 10,
@@ -54,7 +54,7 @@ curl -X POST http://127.0.0.1:8080/graph/cycles \
 For DAGs (Directed Acyclic Graphs), compute a valid ordering:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/topological-sort \
+curl -X POST http://127.0.0.1:8080/graph/analytics/topological-sort \
   -H 'content-type: application/json' \
   -d '{}'
 ```
@@ -66,7 +66,7 @@ Topological sort fails if the graph contains cycles. Use cycle detection first t
 Measures how tightly connected a node's neighbors are to each other:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/graph/clustering \
+curl -X POST http://127.0.0.1:8080/graph/analytics/clustering \
   -H 'content-type: application/json' \
   -d '{}'
 ```

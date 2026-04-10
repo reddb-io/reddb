@@ -253,10 +253,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Documentation
 
-- Docs home: [docs/README.md](/home/cyber/Work/FF/reddb/docs/README.md)
-- Installation: [docs/getting-started/installation.md](/home/cyber/Work/FF/reddb/docs/getting-started/installation.md)
-- Quick start: [docs/getting-started/quick-start.md](/home/cyber/Work/FF/reddb/docs/getting-started/quick-start.md)
-- Connection guide: [docs/getting-started/connect.md](/home/cyber/Work/FF/reddb/docs/getting-started/connect.md)
-- Embedded guide: [docs/api/embedded.md](/home/cyber/Work/FF/reddb/docs/api/embedded.md)
-- HTTP API: [docs/api/http.md](/home/cyber/Work/FF/reddb/docs/api/http.md)
-- CLI reference: [docs/api/cli.md](/home/cyber/Work/FF/reddb/docs/api/cli.md)
+- Docs home: [docs/README.md](docs/README.md)
+- Installation: [docs/getting-started/installation.md](docs/getting-started/installation.md)
+- Quick start: [docs/getting-started/quick-start.md](docs/getting-started/quick-start.md)
+- Connection guide: [docs/getting-started/connect.md](docs/getting-started/connect.md)
+- Embedded guide: [docs/api/embedded.md](docs/api/embedded.md)
+- HTTP API: [docs/api/http.md](docs/api/http.md)
+- CLI reference: [docs/api/cli.md](docs/api/cli.md)

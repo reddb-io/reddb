@@ -61,10 +61,9 @@ curl -X POST http://127.0.0.1:8080/collections/articles/bulk/vectors \
 Generate an embedding for the user's query and search:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/search/similar \
+curl -X POST http://127.0.0.1:8080/collections/articles/similar \
   -H 'content-type: application/json' \
   -d '{
-    "collection": "articles",
     "vector": [0.15, 0.42, 0.75, 0.20, 0.58, 0.85, 0.30, 0.65],
     "k": 5,
     "min_score": 0.5
@@ -76,12 +75,12 @@ curl -X POST http://127.0.0.1:8080/search/similar \
 Combine vector similarity with text matching:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/search/hybrid \
+curl -X POST http://127.0.0.1:8080/hybrid/search \
   -H 'content-type: application/json' \
   -d '{
-    "collection": "articles",
+    "collections": ["articles"],
     "vector": [0.15, 0.42, 0.75, 0.20, 0.58, 0.85, 0.30, 0.65],
-    "text_query": "machine learning",
+    "query": "machine learning",
     "k": 10
   }'
 ```
@@ -91,7 +90,7 @@ curl -X POST http://127.0.0.1:8080/search/hybrid \
 When you don't have an embedding model available:
 
 ```bash
-curl -X POST http://127.0.0.1:8080/search/text \
+curl -X POST http://127.0.0.1:8080/text/search \
   -H 'content-type: application/json' \
   -d '{
     "query": "database indexing performance",

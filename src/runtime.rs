@@ -41,14 +41,16 @@ use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
 use crate::storage::schema::Value;
 use crate::storage::unified::dsl::{
     apply_filters, cosine_similarity, Filter as DslFilter, FilterOp as DslFilterOp,
-    FilterValue as DslFilterValue, GraphPatternDsl, HybridQueryBuilder,
+    FilterValue as DslFilterValue, GraphPatternDsl, HybridQueryBuilder, MatchComponents,
     QueryResult as DslQueryResult, ScoredMatch, TextSearchBuilder,
 };
 use crate::storage::unified::store::{
     NativeCatalogSummary, NativeManifestSummary, NativePhysicalState, NativeRecoverySummary,
     NativeRegistrySummary,
 };
-use crate::storage::unified::{Metadata, MetadataValue as UnifiedMetadataValue, RefTarget};
+use crate::storage::unified::{
+    Metadata, MetadataValue as UnifiedMetadataValue, RefTarget, UnifiedMetadataFilter,
+};
 use crate::storage::{
     EntityData, EntityId, EntityKind, RedDB, RefType, SimilarResult, StoreStats, UnifiedEntity,
     UnifiedStore,

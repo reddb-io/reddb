@@ -17,12 +17,76 @@ pub struct UnifiedExecutor {
     graph: Arc<GraphStore>,
     /// Graph-table index for joins
     index: Arc<GraphTableIndex>,
+    /// Optional node properties loaded from the unified entity store
+    node_properties: Arc<HashMap<String, HashMap<String, Value>>>,
 }
 
 impl UnifiedExecutor {
     /// Create a new executor
     pub fn new(graph: Arc<GraphStore>, index: Arc<GraphTableIndex>) -> Self {
-        Self { graph, index }
+        Self::new_with_node_properties(graph, index, HashMap::new())
+    }
+
+    /// Create a new executor with node properties
+    pub fn new_with_node_properties(
+        graph: Arc<GraphStore>,
+        index: Arc<GraphTableIndex>,
+        node_properties: HashMap<String, HashMap<String, Value>>,
+    ) -> Self {
+        Self {
+            graph,
+            index,
+            node_properties: Arc::new(node_properties),
+        }
+    }
+
+    fn matched_node(&self, node: &StoredNode) -> MatchedNode {
+        let mut node = MatchedNode::from_stored(node);
+        if let Some(properties) = self.node_properties.get(&node.id) {
+            node.properties = properties.clone();
+        }
+        node
+    }
+
+    fn node_stored_property_value(node: &StoredNode, property: &str) -> Option<Value> {
+        if let Some(properties) = match property {
+            "id" => Some(Value::Text(node.id.clone())),
+            "label" => Some(Value::Text(node.label.clone())),
+            "type" | "node_type" => Some(Value::Text(format!("{:?}", node.node_type))),
+            _ => None,
+        } {
+            return Some(properties);
+        }
+
+        None
+    }
+
+    fn node_property_value(&self, node: &StoredNode, property: &str) -> Option<Value> {
+        self.node_properties
+            .get(&node.id)
+            .and_then(|properties| properties.get(property).cloned())
+            .or_else(|| Self::node_stored_property_value(node, property))
+    }
+
+    fn node_property_value_by_id(&self, node_id: &str, property: &str) -> Option<Value> {
+        if property == "id" {
+            return Some(Value::Text(node_id.to_string()));
+        }
+        if property == "label" {
+            if let Some(node) = self.graph.get_node(node_id).as_ref() {
+                return Some(Value::Text(node.label.clone()));
+            }
+            return None;
+        }
+        if property == "type" || property == "node_type" {
+            return self
+                .graph
+                .get_node(node_id)
+                .map(|node| Value::Text(format!("{:?}", node.node_type)));
+        }
+        self.node_properties
+            .get(node_id)
+            .and_then(|properties| properties.get(property).cloned())
     }
 
     /// Execute a query directly against a graph reference
@@ -33,12 +97,20 @@ impl UnifiedExecutor {
         graph: &GraphStore,
         query: &QueryExpr,
     ) -> Result<UnifiedResult, ExecutionError> {
-        // Create a temporary executor with empty index
-        // This works for graph and path queries, but not table/join queries
-        let temp = Self {
-            graph: Arc::new(GraphStore::new()), // Placeholder - we'll access graph directly
-            index: Arc::new(GraphTableIndex::new()),
-        };
+        Self::execute_on_with_node_properties(graph, query, HashMap::new())
+    }
+
+    /// Execute a query directly against a graph reference with custom node properties
+    pub fn execute_on_with_node_properties(
+        graph: &GraphStore,
+        query: &QueryExpr,
+        node_properties: HashMap<String, HashMap<String, Value>>,
+    ) -> Result<UnifiedResult, ExecutionError> {
+        let temp = Self::new_with_node_properties(
+            Arc::new(GraphStore::new()),
+            Arc::new(GraphTableIndex::new()),
+            node_properties,
+        );
 
         match query {
             QueryExpr::Graph(q) => temp.exec_graph_on(graph, q),
@@ -86,24 +158,17 @@ impl UnifiedExecutor {
 
             // Filter and add matching nodes
             for node in matching_nodes {
-                // Property filters use label matching (since StoredNode doesn't have properties HashMap)
                 let mut matches = true;
                 for prop_filter in &pattern_node.properties {
-                    // Match against label for now since we don't have a properties field
-                    // Convert Value to string for comparison
-                    let filter_str = match &prop_filter.value {
-                        Value::Text(s) => s.clone(),
-                        Value::Integer(i) => i.to_string(),
-                        Value::Float(f) => f.to_string(),
-                        Value::Boolean(b) => b.to_string(),
-                        _ => String::new(),
-                    };
-                    matches = matches && node.label.contains(&filter_str);
+                    if !self.eval_node_property_filter(&node, prop_filter) {
+                        matches = false;
+                        break;
+                    }
                 }
 
                 if matches {
                     let mut record = UnifiedRecord::new();
-                    record.set_node(&pattern_node.alias, MatchedNode::from_stored(&node));
+                    record.set_node(&pattern_node.alias, self.matched_node(&node));
                     result.records.push(record);
                 }
             }
@@ -324,7 +389,7 @@ impl UnifiedExecutor {
                 }
             }
 
-            // Check property filters (id and label only in this storage model)
+            // Check property filters
             let mut match_props = true;
             for prop_filter in &pattern.properties {
                 if !self.eval_node_property_filter(&node, prop_filter) {
@@ -336,7 +401,7 @@ impl UnifiedExecutor {
             if match_props {
                 let mut pm = PatternMatch::new();
                 pm.nodes
-                    .insert(pattern.alias.clone(), MatchedNode::from_stored(&node));
+                    .insert(pattern.alias.clone(), self.matched_node(&node));
                 matches.push(pm);
             }
         }
@@ -443,7 +508,7 @@ impl UnifiedExecutor {
                         let mut new_pm = pm.clone();
                         new_pm.nodes.insert(
                             target_pattern.alias.clone(),
-                            MatchedNode::from_stored(&target_node),
+                            self.matched_node(&target_node),
                         );
                         if let Some(ref alias) = edge_pattern.alias {
                             // Create edge with proper from/to direction
@@ -464,16 +529,13 @@ impl UnifiedExecutor {
     }
 
     /// Evaluate a property filter on a stored node
-    /// StoredNode only has id, label, node_type - no arbitrary properties
     fn eval_node_property_filter(
         &self,
         node: &StoredNode,
         filter: &crate::storage::query::ast::PropertyFilter,
     ) -> bool {
-        let value = match filter.name.as_str() {
-            "id" => Value::Text(node.id.clone()),
-            "label" => Value::Text(node.label.clone()),
-            _ => return false, // No other properties available
+        let Some(value) = self.node_property_value(node, filter.name.as_str()) else {
+            return false;
         };
 
         self.compare_values(&value, &filter.op, &filter.value)
@@ -558,40 +620,6 @@ impl UnifiedExecutor {
         }
     }
 
-    /// Get a field value from a pattern match
-    fn get_field_value(&self, field: &FieldRef, matched: &PatternMatch) -> Option<Value> {
-        match field {
-            FieldRef::NodeId { alias } => {
-                matched.nodes.get(alias).map(|n| Value::Text(n.id.clone()))
-            }
-            FieldRef::NodeProperty { alias, property } => {
-                matched.nodes.get(alias).and_then(|n| {
-                    match property.as_str() {
-                        "id" => Some(Value::Text(n.id.clone())),
-                        "label" => Some(Value::Text(n.label.clone())),
-                        // No other properties available in MatchedNode
-                        _ => None,
-                    }
-                })
-            }
-            FieldRef::EdgeProperty { alias, property } => {
-                matched.edges.get(alias).and_then(|e| {
-                    match property.as_str() {
-                        "weight" => Some(Value::Float(e.weight as f64)),
-                        "from" => Some(Value::Text(e.from.clone())),
-                        "to" => Some(Value::Text(e.to.clone())),
-                        // No other properties available in MatchedEdge
-                        _ => None,
-                    }
-                })
-            }
-            FieldRef::TableColumn { .. } => {
-                // Table columns not available in graph-only match
-                None
-            }
-        }
-    }
-
     /// Simple LIKE pattern matching (% and _ wildcards)
     fn match_like(&self, text: &str, pattern: &str) -> bool {
         // Simple implementation: convert % to .* and _ to .
@@ -610,7 +638,75 @@ impl UnifiedExecutor {
         }
     }
 
-    /// Project a match into a result record
+    /// Get a field value from a pattern match
+    fn get_field_value(&self, field: &FieldRef, matched: &PatternMatch) -> Option<Value> {
+        match field {
+            FieldRef::NodeId { alias } => {
+                matched.nodes.get(alias).map(|n| Value::Text(n.id.clone()))
+            }
+            FieldRef::NodeProperty { alias, property } => {
+                matched
+                    .nodes
+                    .get(alias)
+                    .and_then(|n| match property.as_str() {
+                        "id" => Some(Value::Text(n.id.clone())),
+                        "label" => Some(Value::Text(n.label.clone())),
+                        "type" | "node_type" => Some(Value::Text(format!("{:?}", n.node_type))),
+                        _ => n.properties.get(property).cloned(),
+                    })
+            }
+            FieldRef::EdgeProperty { alias, property } => {
+                matched
+                    .edges
+                    .get(alias)
+                    .and_then(|e| match property.as_str() {
+                        "weight" => Some(Value::Float(e.weight as f64)),
+                        "from" => Some(Value::Text(e.from.clone())),
+                        "to" => Some(Value::Text(e.to.clone())),
+                        _ => None,
+                    })
+            }
+            FieldRef::TableColumn { .. } => {
+                // Table columns not available in graph-only match
+                None
+            }
+        }
+    }
+
+    /// Get a value for join condition
+    fn get_join_value(&self, field: &FieldRef, record: &UnifiedRecord) -> Option<Value> {
+        match field {
+            FieldRef::TableColumn { column, .. } => record.values.get(column).cloned(),
+            FieldRef::NodeId { alias } => record
+                .nodes
+                .get(alias)
+                .map(|node| Value::Text(node.id.clone())),
+            FieldRef::NodeProperty { alias, property } => {
+                record
+                    .nodes
+                    .get(alias)
+                    .and_then(|n| match property.as_str() {
+                        "id" => Some(Value::Text(n.id.clone())),
+                        "label" => Some(Value::Text(n.label.clone())),
+                        "type" | "node_type" => Some(Value::Text(format!("{:?}", n.node_type))),
+                        _ => n.properties.get(property).cloned(),
+                    })
+            }
+            FieldRef::EdgeProperty { alias, property } => {
+                record
+                    .edges
+                    .get(alias)
+                    .and_then(|e| match property.as_str() {
+                        "weight" => Some(Value::Float(e.weight as f64)),
+                        "from" => Some(Value::Text(e.from.clone())),
+                        "to" => Some(Value::Text(e.to.clone())),
+                        _ => None,
+                    })
+            }
+        }
+    }
+
+    /// Get an index-agnostic view of matched records for projections
     fn project_match(&self, matched: &PatternMatch, projections: &[Projection]) -> UnifiedRecord {
         let mut record = UnifiedRecord::new();
 
@@ -718,37 +814,6 @@ impl UnifiedExecutor {
         }
 
         Ok(result)
-    }
-
-    /// Get a value for join condition
-    fn get_join_value(&self, field: &FieldRef, record: &UnifiedRecord) -> Option<Value> {
-        match field {
-            FieldRef::TableColumn { column, .. } => record.values.get(column).cloned(),
-            FieldRef::NodeId { alias } => {
-                record.nodes.get(alias).map(|n| Value::Text(n.id.clone()))
-            }
-            FieldRef::NodeProperty { alias, property } => {
-                record
-                    .nodes
-                    .get(alias)
-                    .and_then(|n| match property.as_str() {
-                        "id" => Some(Value::Text(n.id.clone())),
-                        "label" => Some(Value::Text(n.label.clone())),
-                        _ => None,
-                    })
-            }
-            FieldRef::EdgeProperty { alias, property } => {
-                record
-                    .edges
-                    .get(alias)
-                    .and_then(|e| match property.as_str() {
-                        "weight" => Some(Value::Float(e.weight as f64)),
-                        "from" => Some(Value::Text(e.from.clone())),
-                        "to" => Some(Value::Text(e.to.clone())),
-                        _ => None,
-                    })
-            }
-        }
     }
 
     /// Execute a path query

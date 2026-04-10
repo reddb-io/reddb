@@ -153,33 +153,78 @@ impl RedDBServer {
             Ok(payload) => payload,
             Err(response) => return response,
         };
-        let input = match crate::application::query_payload::parse_hybrid_search_input(
-            &payload,
-            "universal search",
-        ) {
+        let input = match crate::application::query_payload::parse_unified_search_input(&payload) {
             Ok(input) => input,
             Err(err) => return json_error(400, err.to_string()),
         };
-        let selection = crate::presentation::query_view::search_selection_json(
-            &input.entity_types,
-            &input.capabilities,
-        );
 
-        match self.query_use_cases().search_hybrid(input) {
-            Ok(result) => json_response(
-                200,
-                crate::presentation::query_json::dsl_query_result_json(
-                    &result,
-                    selection,
-                    |item| {
-                        crate::presentation::query_json::scored_match_json(
-                            item,
-                            crate::presentation::entity_json::entity_json,
-                        )
-                    },
-                ),
-            ),
-            Err(err) => json_error(400, err.to_string()),
+        match input {
+            crate::application::query_payload::UnifiedSearchInput::Hybrid(input) => {
+                let selection = crate::presentation::query_view::search_selection_json(
+                    &input.entity_types,
+                    &input.capabilities,
+                );
+                match self.query_use_cases().search_hybrid(input) {
+                    Ok(result) => json_response(
+                        200,
+                        crate::presentation::query_json::dsl_query_result_json(
+                            &result,
+                            selection,
+                            |item| {
+                                crate::presentation::query_json::scored_match_json(
+                                    item,
+                                    crate::presentation::entity_json::entity_json,
+                                )
+                            },
+                        ),
+                    ),
+                    Err(err) => json_error(400, err.to_string()),
+                }
+            }
+            crate::application::query_payload::UnifiedSearchInput::Multimodal(input) => {
+                let selection = crate::presentation::query_view::search_selection_json(
+                    &input.entity_types,
+                    &input.capabilities,
+                );
+                match self.query_use_cases().search_multimodal(input) {
+                    Ok(result) => json_response(
+                        200,
+                        crate::presentation::query_json::dsl_query_result_json(
+                            &result,
+                            selection,
+                            |item| {
+                                crate::presentation::query_json::scored_match_json(
+                                    item,
+                                    crate::presentation::entity_json::entity_json,
+                                )
+                            },
+                        ),
+                    ),
+                    Err(err) => json_error(400, err.to_string()),
+                }
+            }
+            crate::application::query_payload::UnifiedSearchInput::Index(input) => {
+                let selection = crate::presentation::query_view::search_selection_json(
+                    &input.entity_types,
+                    &input.capabilities,
+                );
+                match self.query_use_cases().search_index(input) {
+                    Ok(result) => json_response(
+                        200,
+                        crate::presentation::query_json::dsl_query_result_json(
+                            &result,
+                            selection,
+                            |item| {
+                                crate::presentation::query_json::scored_match_json(
+                                    item,
+                                    crate::presentation::entity_json::entity_json,
+                                )
+                            },
+                        ),
+                    ),
+                    Err(err) => json_error(400, err.to_string()),
+                }
+            }
         }
     }
 
@@ -198,6 +243,39 @@ impl RedDBServer {
         );
 
         match self.query_use_cases().search_text(input) {
+            Ok(result) => json_response(
+                200,
+                crate::presentation::query_json::dsl_query_result_json(
+                    &result,
+                    selection,
+                    |item| {
+                        crate::presentation::query_json::scored_match_json(
+                            item,
+                            crate::presentation::entity_json::entity_json,
+                        )
+                    },
+                ),
+            ),
+            Err(err) => json_error(400, err.to_string()),
+        }
+    }
+
+    pub(crate) fn handle_multimodal_search(&self, body: Vec<u8>) -> HttpResponse {
+        let payload = match parse_json_body(&body) {
+            Ok(payload) => payload,
+            Err(response) => return response,
+        };
+        let input = match crate::application::query_payload::parse_multimodal_search_input(&payload)
+        {
+            Ok(input) => input,
+            Err(err) => return json_error(400, err.to_string()),
+        };
+        let selection = crate::presentation::query_view::search_selection_json(
+            &input.entity_types,
+            &input.capabilities,
+        );
+
+        match self.query_use_cases().search_multimodal(input) {
             Ok(result) => json_response(
                 200,
                 crate::presentation::query_json::dsl_query_result_json(

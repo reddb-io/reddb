@@ -1,10 +1,17 @@
 use crate::application::{
     json_input::{json_bool_field, json_f32_field, json_string_list_field, json_usize_field},
-    SearchHybridInput, SearchIvfInput, SearchSimilarInput, SearchTextInput,
+    SearchHybridInput, SearchIndexInput, SearchIvfInput, SearchMultimodalInput, SearchSimilarInput,
+    SearchTextInput,
 };
 use crate::json::Value as JsonValue;
 use crate::runtime::{RuntimeFilter, RuntimeFilterValue, RuntimeGraphPattern, RuntimeQueryWeights};
 use crate::{RedDBError, RedDBResult};
+
+pub(crate) enum UnifiedSearchInput {
+    Hybrid(SearchHybridInput),
+    Multimodal(SearchMultimodalInput),
+    Index(SearchIndexInput),
+}
 
 pub(crate) fn parse_text_search_input(payload: &JsonValue) -> RedDBResult<SearchTextInput> {
     let query = parse_required_query(payload)?;
@@ -18,6 +25,63 @@ pub(crate) fn parse_text_search_input(payload: &JsonValue) -> RedDBResult<Search
         fields: json_string_list_field(payload, "fields"),
         limit: json_usize_field(payload, "limit"),
         fuzzy: json_bool_field(payload, "fuzzy").unwrap_or(false),
+    })
+}
+
+pub(crate) fn parse_multimodal_search_input(
+    payload: &JsonValue,
+) -> RedDBResult<SearchMultimodalInput> {
+    let query = parse_required_query_or_key(payload)?;
+    let (entity_types, capabilities) = parse_search_filters(payload)?;
+
+    Ok(SearchMultimodalInput {
+        query,
+        collections: json_string_list_field(payload, "collections"),
+        entity_types,
+        capabilities,
+        limit: json_usize_field(payload, "limit"),
+    })
+}
+
+pub(crate) fn parse_unified_search_input(payload: &JsonValue) -> RedDBResult<UnifiedSearchInput> {
+    if payload_requests_index(payload) {
+        return parse_index_search_input(payload).map(UnifiedSearchInput::Index);
+    }
+
+    match parse_search_mode(payload)? {
+        SearchMode::Index => parse_index_search_input(payload).map(UnifiedSearchInput::Index),
+        SearchMode::Hybrid => {
+            parse_hybrid_search_input(payload, "unified search").map(UnifiedSearchInput::Hybrid)
+        }
+        SearchMode::Multimodal => {
+            parse_multimodal_search_input(payload).map(UnifiedSearchInput::Multimodal)
+        }
+        SearchMode::Auto => {
+            if payload_requests_hybrid(payload) {
+                parse_hybrid_search_input(payload, "unified search").map(UnifiedSearchInput::Hybrid)
+            } else {
+                parse_multimodal_search_input(payload).map(UnifiedSearchInput::Multimodal)
+            }
+        }
+    }
+}
+
+pub(crate) fn parse_index_search_input(payload: &JsonValue) -> RedDBResult<SearchIndexInput> {
+    let (entity_types, capabilities) = parse_search_filters(payload)?;
+    let lookup = parse_lookup_object(payload)?;
+
+    let index = lookup_or_payload_string(payload, lookup, "index")?;
+    let value = lookup_or_payload_string(payload, lookup, "value")?;
+    let exact = lookup_or_payload_bool(payload, lookup, "exact")?.unwrap_or(true);
+
+    Ok(SearchIndexInput {
+        index,
+        value,
+        exact,
+        collections: json_string_list_field(payload, "collections"),
+        entity_types,
+        capabilities,
+        limit: json_usize_field(payload, "limit"),
     })
 }
 
@@ -303,6 +367,128 @@ fn parse_required_query(payload: &JsonValue) -> RedDBResult<String> {
     Ok(query.to_string())
 }
 
+#[derive(Debug, Clone, Copy)]
+enum SearchMode {
+    Auto,
+    Hybrid,
+    Multimodal,
+    Index,
+}
+
+fn parse_search_mode(payload: &JsonValue) -> RedDBResult<SearchMode> {
+    let mode = payload
+        .get("mode")
+        .or_else(|| payload.get("search_mode"))
+        .and_then(JsonValue::as_str);
+    let Some(mode) = mode else {
+        return Ok(SearchMode::Auto);
+    };
+
+    let normalized = mode.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "auto" => Ok(SearchMode::Auto),
+        "hybrid" | "semantic" | "universal" => Ok(SearchMode::Hybrid),
+        "multimodal" | "lookup" | "global" => Ok(SearchMode::Multimodal),
+        "index" | "indexed" => Ok(SearchMode::Index),
+        other => Err(RedDBError::Query(format!(
+            "invalid search mode '{other}'. expected auto, hybrid, multimodal, or index"
+        ))),
+    }
+}
+
+fn payload_requests_hybrid(payload: &JsonValue) -> bool {
+    payload.get("vector").is_some()
+        || payload.get("graph").is_some()
+        || payload.get("filters").is_some()
+        || payload.get("weights").is_some()
+        || payload.get("min_score").is_some()
+        || payload.get("k").is_some()
+}
+
+fn payload_requests_index(payload: &JsonValue) -> bool {
+    payload.get("lookup").is_some()
+        || payload.get("index").is_some()
+        || payload.get("value").is_some()
+}
+
+fn parse_lookup_object(
+    payload: &JsonValue,
+) -> RedDBResult<Option<&crate::serde_json::Map<String, JsonValue>>> {
+    match payload.get("lookup") {
+        None | Some(JsonValue::Null) => Ok(None),
+        Some(value) => value.as_object().map(Some).ok_or_else(|| {
+            RedDBError::Query("field 'lookup' must be an object when present".to_string())
+        }),
+    }
+}
+
+fn lookup_or_payload_string(
+    payload: &JsonValue,
+    lookup: Option<&crate::serde_json::Map<String, JsonValue>>,
+    field: &str,
+) -> RedDBResult<String> {
+    let value = lookup
+        .and_then(|item| item.get(field))
+        .or_else(|| payload.get(field))
+        .ok_or_else(|| RedDBError::Query(format!("field '{field}' must be a string")))?;
+
+    let Some(value) = value.as_str() else {
+        return Err(RedDBError::Query(format!(
+            "field '{field}' must be a string"
+        )));
+    };
+
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(RedDBError::Query(format!(
+            "field '{field}' cannot be empty"
+        )));
+    }
+    Ok(value.to_string())
+}
+
+fn lookup_or_payload_bool(
+    payload: &JsonValue,
+    lookup: Option<&crate::serde_json::Map<String, JsonValue>>,
+    field: &str,
+) -> RedDBResult<Option<bool>> {
+    let value = lookup
+        .and_then(|item| item.get(field))
+        .or_else(|| payload.get(field));
+
+    match value {
+        None | Some(JsonValue::Null) => Ok(None),
+        Some(value) => value
+            .as_bool()
+            .map(Some)
+            .ok_or_else(|| RedDBError::Query(format!("field '{field}' must be a boolean"))),
+    }
+}
+
+fn parse_required_query_or_key(payload: &JsonValue) -> RedDBResult<String> {
+    if let Some(query) = payload.get("query").and_then(JsonValue::as_str) {
+        let query = query.trim();
+        if query.is_empty() {
+            return Err(RedDBError::Query(
+                "field 'query' cannot be empty".to_string(),
+            ));
+        }
+        return Ok(query.to_string());
+    }
+
+    if let Some(key) = payload.get("key").and_then(JsonValue::as_str) {
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(RedDBError::Query("field 'key' cannot be empty".to_string()));
+        }
+        return Ok(key.to_string());
+    }
+
+    Err(RedDBError::Query(
+        "field 'query' or 'key' must be a string".to_string(),
+    ))
+}
+
 fn parse_optional_query(payload: &JsonValue) -> RedDBResult<Option<String>> {
     match payload.get("query") {
         None | Some(JsonValue::Null) => Ok(None),
@@ -342,6 +528,31 @@ mod tests {
         let mut capabilities = Vec::new();
         assert!(normalize_capability_filter("key-value", &mut capabilities).is_ok());
         assert_eq!(capabilities, vec!["kv".to_string()]);
+    }
+
+    #[test]
+    fn parse_unified_prefers_lookup_payload() {
+        let payload: JsonValue = crate::json::from_str(
+            r#"{"lookup":{"index":"cpf","value":"081.232.036-08"},"mode":"hybrid"}"#,
+        )
+        .expect("valid json");
+        let input = parse_unified_search_input(&payload).expect("lookup should parse");
+        assert!(matches!(input, UnifiedSearchInput::Index(_)));
+    }
+
+    #[test]
+    fn parse_index_payload_supports_top_level_fields() {
+        let payload: JsonValue = crate::json::from_str(
+            r#"{"mode":"index","index":"cpf","value":"081.232.036-08","exact":false}"#,
+        )
+        .expect("valid json");
+        let input = parse_unified_search_input(&payload).expect("index payload should parse");
+        let UnifiedSearchInput::Index(input) = input else {
+            panic!("expected index input");
+        };
+        assert_eq!(input.index, "cpf");
+        assert_eq!(input.value, "081.232.036-08");
+        assert!(!input.exact);
     }
 }
 

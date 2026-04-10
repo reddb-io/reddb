@@ -1,4 +1,5 @@
 use crate::application::entity::{CreateDocumentInput, CreateKvInput};
+use crate::application::multimodal_index::rebuild_entity_multimodal_index;
 use crate::application::ttl_payload::{
     has_internal_ttl_metadata, normalize_ttl_patch_operations, parse_top_level_ttl_metadata_entries,
 };
@@ -30,6 +31,24 @@ fn apply_collection_default_ttl(
     ));
 }
 
+fn refresh_multimodal_index(
+    db: &crate::storage::unified::devx::RedDB,
+    collection: &str,
+    id: crate::storage::EntityId,
+) -> RedDBResult<()> {
+    let store = db.store();
+    let Some(entity) = store.get(collection, id) else {
+        return Ok(());
+    };
+
+    let mut metadata = store.get_metadata(collection, id).unwrap_or_default();
+    rebuild_entity_multimodal_index(&mut metadata, &entity);
+    store
+        .set_metadata(collection, id, metadata)
+        .map_err(|err| crate::RedDBError::Query(err.to_string()))?;
+    Ok(())
+}
+
 impl RuntimeEntityPort for RedDBRuntime {
     fn create_row(&self, input: CreateRowInput) -> RedDBResult<CreateEntityOutput> {
         let db = self.db();
@@ -55,6 +74,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         }
 
         let id = builder.save()?;
+        refresh_multimodal_index(&db, &input.collection, id)?;
         Ok(CreateEntityOutput {
             id,
             entity: db.get(id),
@@ -96,6 +116,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         }
 
         let id = builder.save()?;
+        refresh_multimodal_index(&db, &input.collection, id)?;
         Ok(CreateEntityOutput {
             id,
             entity: db.get(id),
@@ -124,6 +145,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         }
 
         let id = builder.save()?;
+        refresh_multimodal_index(&db, &input.collection, id)?;
         Ok(CreateEntityOutput {
             id,
             entity: db.get(id),
@@ -153,6 +175,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         }
 
         let id = builder.save()?;
+        refresh_multimodal_index(&db, &input.collection, id)?;
         Ok(CreateEntityOutput {
             id,
             entity: db.get(id),
@@ -613,6 +636,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         manager
             .update(entity)
             .map_err(|err| crate::RedDBError::Query(err.to_string()))?;
+        refresh_multimodal_index(&db, &collection, id)?;
 
         Ok(CreateEntityOutput {
             id,

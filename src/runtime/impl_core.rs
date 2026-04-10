@@ -171,8 +171,14 @@ impl RedDBRuntime {
         match expr {
             QueryExpr::Graph(_) | QueryExpr::Path(_) => {
                 let graph = materialize_graph(self.inner.db.store().as_ref())?;
+                let node_properties =
+                    materialize_graph_node_properties(self.inner.db.store().as_ref())?;
                 let result =
-                    crate::storage::query::unified::UnifiedExecutor::execute_on(&graph, &expr)
+                    crate::storage::query::unified::UnifiedExecutor::execute_on_with_node_properties(
+                        &graph,
+                        &expr,
+                        node_properties,
+                    )
                         .map_err(|err| RedDBError::Query(err.to_string()))?;
 
                 Ok(RuntimeQueryResult {
