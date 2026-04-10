@@ -184,7 +184,9 @@ impl CostEstimator {
             | QueryExpr::CreateIndex(_)
             | QueryExpr::DropIndex(_)
             | QueryExpr::ProbabilisticCommand(_)
-            | QueryExpr::Ask(_) => PlanCost::new(1.0, 1.0, 0.0),
+            | QueryExpr::Ask(_)
+            | QueryExpr::SetConfig { .. }
+            | QueryExpr::ShowConfig { .. } => PlanCost::new(1.0, 1.0, 0.0),
         }
     }
 
@@ -209,7 +211,9 @@ impl CostEstimator {
             | QueryExpr::CreateIndex(_)
             | QueryExpr::DropIndex(_)
             | QueryExpr::ProbabilisticCommand(_)
-            | QueryExpr::Ask(_) => CardinalityEstimate::new(1.0, 1.0),
+            | QueryExpr::Ask(_)
+            | QueryExpr::SetConfig { .. }
+            | QueryExpr::ShowConfig { .. } => CardinalityEstimate::new(1.0, 1.0),
         }
     }
 

@@ -138,7 +138,9 @@ impl UnifiedExecutor {
             | QueryExpr::CreateIndex(_)
             | QueryExpr::DropIndex(_)
             | QueryExpr::ProbabilisticCommand(_)
-            | QueryExpr::Ask(_) => Err(ExecutionError::new(
+            | QueryExpr::Ask(_)
+            | QueryExpr::SetConfig { .. }
+            | QueryExpr::ShowConfig { .. } => Err(ExecutionError::new(
                 "DML/DDL/Command statements are not supported in UnifiedExecutor",
             )),
         }
@@ -317,7 +319,9 @@ impl UnifiedExecutor {
             | QueryExpr::CreateIndex(_)
             | QueryExpr::DropIndex(_)
             | QueryExpr::ProbabilisticCommand(_)
-            | QueryExpr::Ask(_) => Err(ExecutionError::new(
+            | QueryExpr::Ask(_)
+            | QueryExpr::SetConfig { .. }
+            | QueryExpr::ShowConfig { .. } => Err(ExecutionError::new(
                 "DML/DDL/Command statements are not supported in UnifiedExecutor",
             )),
         }

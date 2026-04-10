@@ -50,6 +50,9 @@ pub mod schema;
 // Time-Series Storage
 pub mod timeseries;
 
+// Queue / Deque Storage
+pub mod queue;
+
 // Query Engine (Filters, Sorting, Similarity Search)
 pub mod query;
 

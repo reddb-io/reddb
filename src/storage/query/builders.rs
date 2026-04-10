@@ -243,7 +243,9 @@ impl JoinQueryBuilder {
             | QueryExpr::CreateIndex(_)
             | QueryExpr::DropIndex(_)
             | QueryExpr::ProbabilisticCommand(_)
-            | QueryExpr::Ask(_) => {}
+            | QueryExpr::Ask(_)
+            | QueryExpr::SetConfig { .. }
+            | QueryExpr::ShowConfig { .. } => {}
         }
         self
     }

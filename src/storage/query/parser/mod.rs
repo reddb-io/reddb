@@ -295,6 +295,47 @@ impl<'a> Parser<'a> {
             Token::Graph => self.parse_graph_command(),
             Token::Search => self.parse_search_command(),
             Token::Ident(ref name) if name.eq_ignore_ascii_case("ASK") => self.parse_ask_query(),
+            Token::Ident(ref name) if name.eq_ignore_ascii_case("SHOW") => {
+                self.advance()?;
+                if self.consume_ident_ci("CONFIG")? {
+                    let prefix = if !self.check(&Token::Eof) {
+                        Some(self.expect_ident()?)
+                    } else {
+                        None
+                    };
+                    Ok(QueryExpr::ShowConfig { prefix })
+                } else {
+                    Err(ParseError::expected(
+                        vec!["CONFIG"],
+                        self.peek(),
+                        self.position(),
+                    ))
+                }
+            }
+            Token::Set => {
+                self.advance()?;
+                if self.consume_ident_ci("CONFIG")? {
+                    let key = self.expect_ident()?;
+                    // Allow dotted keys: red.ai.default.provider
+                    let mut full_key = key;
+                    while self.consume(&Token::Dot)? {
+                        let next = self.expect_ident_or_keyword()?;
+                        full_key = format!("{full_key}.{next}");
+                    }
+                    self.expect(Token::Eq)?;
+                    let value = self.parse_literal_value()?;
+                    Ok(QueryExpr::SetConfig {
+                        key: full_key,
+                        value,
+                    })
+                } else {
+                    Err(ParseError::expected(
+                        vec!["CONFIG"],
+                        self.peek(),
+                        self.position(),
+                    ))
+                }
+            }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("HLL") => self.parse_hll_command(),
             Token::Ident(ref name) if name.eq_ignore_ascii_case("SKETCH") => {
                 self.parse_sketch_command()

@@ -45,6 +45,10 @@ pub enum QueryExpr {
     DropIndex(DropIndexQuery),
     /// Probabilistic data structure commands (HLL, SKETCH, FILTER)
     ProbabilisticCommand(ProbabilisticCommand),
+    /// SET CONFIG key = value
+    SetConfig { key: String, value: Value },
+    /// SHOW CONFIG [prefix]
+    ShowConfig { prefix: Option<String> },
 }
 
 /// Probabilistic data structure commands

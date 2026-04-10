@@ -372,7 +372,9 @@ pub(crate) fn join_expr_exposes_field_table(expr: &QueryExpr, table: &str) -> bo
         | QueryExpr::CreateIndex(_)
         | QueryExpr::DropIndex(_)
         | QueryExpr::ProbabilisticCommand(_)
-        | QueryExpr::Ask(_) => false,
+        | QueryExpr::Ask(_)
+        | QueryExpr::SetConfig { .. }
+        | QueryExpr::ShowConfig { .. } => false,
     }
 }
 
@@ -650,6 +652,8 @@ pub(crate) fn query_expr_kind(expr: &QueryExpr) -> &'static str {
         QueryExpr::DropIndex(_) => "drop_index",
         QueryExpr::ProbabilisticCommand(_) => "probabilistic_command",
         QueryExpr::Ask(_) => "ask",
+        QueryExpr::SetConfig { .. } => "set_config",
+        QueryExpr::ShowConfig { .. } => "show_config",
     }
 }
 

@@ -603,6 +603,19 @@ impl RedDBServer {
                         );
                     }
                 }
+                // Config key routes: /config/{key.path}
+                if let Some(config_key) = path.strip_prefix("/config/") {
+                    let config_key = config_key.trim_matches('/');
+                    if !config_key.is_empty() {
+                        return match method.as_str() {
+                            "GET" => self.handle_config_get_key(config_key),
+                            "PUT" => self.handle_config_set_key(config_key, body),
+                            "DELETE" => self.handle_config_delete_key(config_key),
+                            _ => json_error(405, "method not allowed"),
+                        };
+                    }
+                }
+
                 // KV routes: /collections/{collection}/kvs/{key}
                 if let Some((collection, key)) = collection_kv_path(&path) {
                     return match method.as_str() {

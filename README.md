@@ -22,9 +22,9 @@ One command. RedDB searches across tables, graphs, vectors, documents, and key-v
 
 ---
 
-## 5 Data Models, 1 Engine
+## 7 Data Models, 1 Engine
 
-Stop running Postgres + Neo4j + Pinecone + Redis + Mongo. RedDB unifies them.
+Stop running Postgres + Neo4j + Pinecone + Redis + Mongo + InfluxDB + RabbitMQ. RedDB unifies them.
 
 ```sql
 -- Relational rows
@@ -41,6 +41,15 @@ SEARCH SIMILAR TEXT 'anomaly detected' COLLECTION events
 
 -- Key-value
 PUT config.theme = 'dark'
+
+-- Time-series metrics (with retention & downsampling)
+CREATE TIMESERIES cpu_metrics RETENTION 90 d
+INSERT INTO cpu_metrics (metric, value, tags) VALUES ('cpu.idle', 95.2, '{"host":"srv1"}')
+
+-- Message queues (FIFO, priority, consumer groups)
+CREATE QUEUE tasks MAX_SIZE 10000
+QUEUE PUSH tasks '{"job":"process","id":123}'
+QUEUE POP tasks
 ```
 
 Same file. Same engine. Same query language.
@@ -108,6 +117,49 @@ ASK 'what happened?'
 ```bash
 # Export/import all config as JSON
 curl http://127.0.0.1:8080/config
+```
+
+---
+
+## Probabilistic Data Structures
+
+Built-in approximate data structures for real-time analytics at scale.
+
+```sql
+-- HyperLogLog: count unique visitors (~0.8% error, ~16KB memory)
+CREATE HLL visitors
+HLL ADD visitors 'user1' 'user2' 'user3'
+HLL COUNT visitors
+
+-- Count-Min Sketch: frequency estimation
+CREATE SKETCH click_counter WIDTH 2000 DEPTH 7
+SKETCH ADD click_counter 'button_a' 5
+SKETCH COUNT click_counter 'button_a'
+
+-- Cuckoo Filter: membership testing with deletion (unlike Bloom filters)
+CREATE FILTER active_sessions CAPACITY 500000
+FILTER ADD active_sessions 'session_abc'
+FILTER CHECK active_sessions 'session_abc'
+FILTER DELETE active_sessions 'session_abc'
+```
+
+---
+
+## Advanced Indexes
+
+Beyond B-tree. Create the right index for your workload.
+
+```sql
+-- Hash index: O(1) exact-match lookups
+CREATE INDEX idx_email ON users (email) USING HASH
+
+-- Bitmap index: fast analytical queries on low-cardinality columns
+CREATE INDEX idx_status ON orders (status) USING BITMAP
+
+-- R-Tree: spatial queries on geo data
+CREATE INDEX idx_loc ON sites (location) USING RTREE
+SEARCH SPATIAL RADIUS 48.8566 2.3522 10.0 COLLECTION sites COLUMN location LIMIT 50
+SEARCH SPATIAL NEAREST 48.8566 2.3522 K 5 COLLECTION sites COLUMN location
 ```
 
 ---

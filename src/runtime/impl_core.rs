@@ -55,6 +55,85 @@ impl RedDBRuntime {
                         .as_millis() as u64
                 }),
             );
+
+            // Seed defaults on first boot (only if red_config is empty or missing defaults)
+            let store = runtime.inner.db.store();
+            if store
+                .get_collection("red_config")
+                .map(|m| m.query_all(|_| true).len())
+                .unwrap_or(0)
+                <= 10
+            {
+                store.set_config_tree("red.ai", &crate::json!({
+                    "default": crate::json!({
+                        "provider": "openai",
+                        "model": crate::ai::DEFAULT_OPENAI_PROMPT_MODEL
+                    }),
+                    "max_embedding_inputs": 256,
+                    "max_prompt_batch": 256,
+                    "timeout": crate::json!({ "connect_secs": 10, "read_secs": 90, "write_secs": 30 })
+                }));
+                store.set_config_tree(
+                    "red.server",
+                    &crate::json!({
+                        "max_scan_limit": 1000,
+                        "max_body_size": 1048576,
+                        "read_timeout_ms": 5000,
+                        "write_timeout_ms": 5000
+                    }),
+                );
+                store.set_config_tree(
+                    "red.storage",
+                    &crate::json!({
+                        "page_size": 4096,
+                        "page_cache_capacity": 100000,
+                        "auto_checkpoint_pages": 1000,
+                        "snapshot_retention": 16,
+                        "verify_checksums": true,
+                        "segment": crate::json!({
+                            "max_entities": 100000,
+                            "max_bytes": 268435456_u64,
+                            "compression_level": 6
+                        }),
+                        "hnsw": crate::json!({ "m": 16, "ef_construction": 100, "ef_search": 50 }),
+                        "ivf": crate::json!({ "n_lists": 100, "n_probes": 10 }),
+                        "bm25": crate::json!({ "k1": 1.2, "b": 0.75 })
+                    }),
+                );
+                store.set_config_tree(
+                    "red.search",
+                    &crate::json!({
+                        "rag": crate::json!({
+                            "max_chunks_per_source": 10,
+                            "max_total_chunks": 25,
+                            "similarity_threshold": 0.8,
+                            "graph_depth": 2,
+                            "min_relevance": 0.3
+                        }),
+                        "fusion": crate::json!({
+                            "vector_weight": 0.5,
+                            "graph_weight": 0.3,
+                            "table_weight": 0.2,
+                            "dedup_threshold": 0.85
+                        })
+                    }),
+                );
+                store.set_config_tree(
+                    "red.auth",
+                    &crate::json!({
+                        "enabled": false,
+                        "session_ttl_secs": 3600,
+                        "require_auth": false
+                    }),
+                );
+                store.set_config_tree(
+                    "red.query",
+                    &crate::json!({
+                        "connection_pool": crate::json!({ "max_connections": 64, "max_idle": 16 }),
+                        "max_recursion_depth": 1000
+                    }),
+                );
+            }
         }
 
         Ok(runtime)
@@ -273,6 +352,75 @@ impl RedDBRuntime {
                 "probabilistic commands not yet implemented",
                 "select",
             )),
+            // SET CONFIG key = value
+            QueryExpr::SetConfig { ref key, ref value } => {
+                let store = self.inner.db.store();
+                let json_val = match value {
+                    Value::Text(s) => crate::serde_json::Value::String(s.clone()),
+                    Value::Integer(n) => crate::serde_json::Value::Number(*n as f64),
+                    Value::Float(n) => crate::serde_json::Value::Number(*n),
+                    Value::Boolean(b) => crate::serde_json::Value::Bool(*b),
+                    _ => crate::serde_json::Value::String(value.to_string()),
+                };
+                store.set_config_tree(key, &json_val);
+                Ok(RuntimeQueryResult::ok_message(
+                    query.to_string(),
+                    &format!("config set: {key}"),
+                    "set",
+                ))
+            }
+            // SHOW CONFIG [prefix]
+            QueryExpr::ShowConfig { ref prefix } => {
+                let store = self.inner.db.store();
+                let all_collections = store.list_collections();
+                if !all_collections.contains(&"red_config".to_string()) {
+                    let result = UnifiedResult::with_columns(vec!["key".into(), "value".into()]);
+                    return Ok(RuntimeQueryResult {
+                        query: query.to_string(),
+                        mode,
+                        statement: "show_config",
+                        engine: "runtime-config",
+                        result,
+                        affected_rows: 0,
+                        statement_type: "select",
+                    });
+                }
+                let manager = store
+                    .get_collection("red_config")
+                    .ok_or_else(|| RedDBError::NotFound("red_config".to_string()))?;
+                let entities = manager.query_all(|_| true);
+                let mut result = UnifiedResult::with_columns(vec!["key".into(), "value".into()]);
+                for entity in entities {
+                    if let EntityData::Row(ref row) = entity.data {
+                        if let Some(ref named) = row.named {
+                            let key_val = named.get("key").cloned().unwrap_or(Value::Null);
+                            let val = named.get("value").cloned().unwrap_or(Value::Null);
+                            let key_str = match &key_val {
+                                Value::Text(s) => s.as_str(),
+                                _ => continue,
+                            };
+                            if let Some(ref pfx) = prefix {
+                                if !key_str.starts_with(pfx.as_str()) {
+                                    continue;
+                                }
+                            }
+                            let mut record = UnifiedRecord::new();
+                            record.set("key", key_val);
+                            record.set("value", val);
+                            result.push(record);
+                        }
+                    }
+                }
+                Ok(RuntimeQueryResult {
+                    query: query.to_string(),
+                    mode,
+                    statement: "show_config",
+                    engine: "runtime-config",
+                    result,
+                    affected_rows: 0,
+                    statement_type: "select",
+                })
+            }
         }
     }
 }

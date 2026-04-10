@@ -591,7 +591,9 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
         | QueryExpr::CreateIndex(_)
         | QueryExpr::DropIndex(_)
         | QueryExpr::ProbabilisticCommand(_)
-        | QueryExpr::Ask(_) => {
+        | QueryExpr::Ask(_)
+        | QueryExpr::SetConfig { .. }
+        | QueryExpr::ShowConfig { .. } => {
             let mut details = BTreeMap::new();
             details.insert("type".to_string(), "dml_ddl".to_string());
             CanonicalLogicalNode {

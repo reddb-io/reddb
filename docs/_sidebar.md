@@ -18,9 +18,12 @@
   - [UPDATE](/query/update.md)
   - [DELETE](/query/delete.md)
   - [CREATE TABLE](/query/create-table.md)
+  - [CREATE INDEX](/query/create-index.md)
   - [Universal Query (FROM any)](/query/universal.md)
   - [Graph Commands](/query/graph-commands.md)
   - [Search Commands](/query/search-commands.md)
+  - [Spatial Search](/query/spatial-search.md)
+  - [Probabilistic Commands](/query/probabilistic-commands.md)
   - [Multi-Mode (Gremlin, SPARQL, NL)](/query/multi-mode.md)
 
 - **Data Models**
@@ -29,6 +32,9 @@
   - [Key-Value](/data-models/key-value.md)
   - [Graphs](/data-models/graphs.md)
   - [Vectors & Embeddings](/data-models/vectors.md)
+  - [Time-Series](/data-models/timeseries.md)
+  - [Queues & Deques](/data-models/queues.md)
+  - [Probabilistic Structures](/data-models/probabilistic.md)
 
 - **APIs**
   - [gRPC API](/api/grpc.md)
@@ -51,6 +57,11 @@
   - [Architecture](/engine/architecture.md)
   - [Page-Based Storage](/engine/pager.md)
   - [B-Tree Index](/engine/btree.md)
+  - [Hash Index](/engine/hash-index.md)
+  - [Bitmap Index](/engine/bitmap-index.md)
+  - [R-Tree (Spatial)](/engine/rtree.md)
+  - [Bloom Filter](/engine/bloom-filter.md)
+  - [Memtable & Skip List](/engine/memtable.md)
   - [WAL & Recovery](/engine/wal.md)
   - [SIEVE Cache](/engine/cache.md)
   - [Encryption at Rest](/engine/encryption.md)

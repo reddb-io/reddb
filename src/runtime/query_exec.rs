@@ -440,7 +440,9 @@ pub(super) fn runtime_join_table_context(
         | QueryExpr::CreateIndex(_)
         | QueryExpr::DropIndex(_)
         | QueryExpr::ProbabilisticCommand(_)
-        | QueryExpr::Ask(_) => (None, None),
+        | QueryExpr::Ask(_)
+        | QueryExpr::SetConfig { .. }
+        | QueryExpr::ShowConfig { .. } => (None, None),
     };
 
     (

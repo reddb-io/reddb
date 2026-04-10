@@ -78,6 +78,162 @@ impl RedDBServer {
         json_response(200, JsonValue::Object(wrapper))
     }
 
+    /// GET /config/{key} — get a single config value or subtree.
+    pub(crate) fn handle_config_get_key(&self, key_path: &str) -> HttpResponse {
+        let store = self.runtime.db().store();
+        let Some(manager) = store.get_collection(RED_CONFIG_COLLECTION) else {
+            return json_error(404, format!("config key not found: {key_path}"));
+        };
+
+        let entities = manager.query_all(|_| true);
+        let prefix = key_path.trim_matches('.');
+        let mut exact_match = None;
+        let mut subtree = Map::new();
+
+        for entity in entities {
+            if let EntityData::Row(ref row) = entity.data {
+                let Some(named) = row.named.as_ref() else {
+                    continue;
+                };
+                let key = named
+                    .get("key")
+                    .and_then(|v| match v {
+                        Value::Text(s) => Some(s.as_str()),
+                        _ => None,
+                    })
+                    .unwrap_or("");
+                if key.is_empty() {
+                    continue;
+                }
+                let value = named.get("value").cloned().unwrap_or(Value::Null);
+                let json_val = match &value {
+                    Value::Text(s) => JsonValue::String(s.clone()),
+                    Value::Integer(n) => JsonValue::Number(*n as f64),
+                    Value::Float(n) => JsonValue::Number(*n),
+                    Value::Boolean(b) => JsonValue::Bool(*b),
+                    Value::UnsignedInteger(n) => JsonValue::Number(*n as f64),
+                    _ => JsonValue::String(value.to_string()),
+                };
+
+                if key == prefix {
+                    exact_match = Some(json_val.clone());
+                }
+                if key.starts_with(prefix) {
+                    let suffix = key.strip_prefix(prefix).unwrap_or(key);
+                    let suffix = suffix.trim_start_matches('.');
+                    if suffix.is_empty() {
+                        subtree.insert("_value".to_string(), json_val);
+                    } else {
+                        let parts: Vec<&str> = suffix.split('.').collect();
+                        insert_nested(&mut subtree, &parts, json_val);
+                    }
+                }
+            }
+        }
+
+        if subtree.is_empty() {
+            if let Some(val) = exact_match {
+                let mut obj = Map::new();
+                obj.insert("ok".to_string(), JsonValue::Bool(true));
+                obj.insert("key".to_string(), JsonValue::String(prefix.to_string()));
+                obj.insert("value".to_string(), val);
+                return json_response(200, JsonValue::Object(obj));
+            }
+            return json_error(404, format!("config key not found: {prefix}"));
+        }
+
+        let mut obj = Map::new();
+        obj.insert("ok".to_string(), JsonValue::Bool(true));
+        obj.insert("key".to_string(), JsonValue::String(prefix.to_string()));
+        if subtree.len() == 1 && subtree.contains_key("_value") {
+            obj.insert("value".to_string(), subtree.remove("_value").unwrap());
+        } else {
+            obj.insert("value".to_string(), JsonValue::Object(subtree));
+        }
+        json_response(200, JsonValue::Object(obj))
+    }
+
+    /// PUT /config/{key} — set a single config value.
+    pub(crate) fn handle_config_set_key(&self, key_path: &str, body: Vec<u8>) -> HttpResponse {
+        let key = key_path.trim_matches('.').to_string();
+        if key.is_empty() {
+            return json_error(400, "config key cannot be empty");
+        }
+
+        let payload = match parse_json_body_allow_empty(&body) {
+            Ok(p) => p,
+            Err(resp) => return resp,
+        };
+
+        // Accept {"value": X} or just X directly
+        let value = match payload.get("value") {
+            Some(v) => v.clone(),
+            None => payload.clone(),
+        };
+
+        // If value is an object, set as subtree
+        if let JsonValue::Object(_) = &value {
+            let store = self.runtime.db().store();
+            let count = store.set_config_tree(&key, &value);
+            let mut obj = Map::new();
+            obj.insert("ok".to_string(), JsonValue::Bool(true));
+            obj.insert("key".to_string(), JsonValue::String(key));
+            obj.insert("set".to_string(), JsonValue::Number(count as f64));
+            return json_response(200, JsonValue::Object(obj));
+        }
+
+        let store_value = match &value {
+            JsonValue::String(s) => Value::Text(s.clone()),
+            JsonValue::Number(n) => {
+                if n.fract().abs() < f64::EPSILON {
+                    Value::Integer(*n as i64)
+                } else {
+                    Value::Float(*n)
+                }
+            }
+            JsonValue::Bool(b) => Value::Boolean(*b),
+            JsonValue::Null => Value::Null,
+            other => Value::Text(crate::json::to_string(other).unwrap_or_default()),
+        };
+
+        let _ = self
+            .entity_use_cases()
+            .delete_kv(RED_CONFIG_COLLECTION, &key);
+        match self.entity_use_cases().create_kv(CreateKvInput {
+            collection: RED_CONFIG_COLLECTION.to_string(),
+            key: key.clone(),
+            value: store_value,
+            metadata: Vec::new(),
+        }) {
+            Ok(_) => {
+                let mut obj = Map::new();
+                obj.insert("ok".to_string(), JsonValue::Bool(true));
+                obj.insert("key".to_string(), JsonValue::String(key));
+                obj.insert("value".to_string(), value);
+                json_response(200, JsonValue::Object(obj))
+            }
+            Err(err) => json_error(400, err.to_string()),
+        }
+    }
+
+    /// DELETE /config/{key} — delete a config key.
+    pub(crate) fn handle_config_delete_key(&self, key_path: &str) -> HttpResponse {
+        let key = key_path.trim_matches('.').to_string();
+        match self
+            .entity_use_cases()
+            .delete_kv(RED_CONFIG_COLLECTION, &key)
+        {
+            Ok(true) => {
+                let mut obj = Map::new();
+                obj.insert("ok".to_string(), JsonValue::Bool(true));
+                obj.insert("deleted".to_string(), JsonValue::String(key));
+                json_response(200, JsonValue::Object(obj))
+            }
+            Ok(false) => json_error(404, format!("config key not found: {key}")),
+            Err(err) => json_error(400, err.to_string()),
+        }
+    }
+
     /// POST /config — import a JSON tree as flat dot-notation KV pairs into red_config.
     pub(crate) fn handle_config_import(&self, body: Vec<u8>) -> HttpResponse {
         let payload = match parse_json_body(&body) {
