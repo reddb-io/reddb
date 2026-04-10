@@ -401,6 +401,7 @@ pub(crate) fn cross_modal_entity_reference_tokens(entity: &UnifiedEntity) -> Vec
                 }
             }
         }
+        EntityData::TimeSeries(_) | EntityData::QueueMessage(_) => {}
     }
 
     tokens

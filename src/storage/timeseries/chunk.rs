@@ -177,10 +177,7 @@ impl TimeSeriesChunk {
             .compressed_timestamps
             .as_ref()
             .map_or(0, |v| v.len() * 8) as f64
-            + self
-                .compressed_values
-                .as_ref()
-                .map_or(0, |v| v.len() * 8) as f64;
+            + self.compressed_values.as_ref().map_or(0, |v| v.len() * 8) as f64;
         if raw > 0.0 {
             Some(compressed / raw)
         } else {
@@ -269,7 +266,10 @@ mod tests {
         let mut chunk = TimeSeriesChunk::new("regular", HashMap::new());
         // Regular 1-second intervals with similar values → compresses well
         for i in 0..100 {
-            chunk.append(1_000_000_000 + i * 1_000_000_000, 95.0 + (i % 3) as f64 * 0.1);
+            chunk.append(
+                1_000_000_000 + i * 1_000_000_000,
+                95.0 + (i % 3) as f64 * 0.1,
+            );
         }
         chunk.seal();
 

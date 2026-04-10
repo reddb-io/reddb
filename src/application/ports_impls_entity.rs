@@ -598,6 +598,13 @@ impl RuntimeEntityPort for RedDBRuntime {
                     metadata_changed = true;
                 }
             }
+            crate::storage::EntityData::TimeSeries(_)
+            | crate::storage::EntityData::QueueMessage(_) => {
+                return Err(crate::RedDBError::Query(
+                    "patch operations are not supported for TimeSeries or QueueMessage entities"
+                        .to_string(),
+                ));
+            }
         }
 
         if let Some(metadata) = payload

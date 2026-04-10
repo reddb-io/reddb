@@ -453,6 +453,19 @@ impl UnifiedStore {
                 write_varu32(buf, collection.len() as u32);
                 buf.extend_from_slice(collection.as_bytes());
             }
+            EntityKind::TimeSeriesPoint { series, metric } => {
+                buf.push(4);
+                write_varu32(buf, series.len() as u32);
+                buf.extend_from_slice(series.as_bytes());
+                write_varu32(buf, metric.len() as u32);
+                buf.extend_from_slice(metric.as_bytes());
+            }
+            EntityKind::QueueMessage { queue, position } => {
+                buf.push(5);
+                write_varu32(buf, queue.len() as u32);
+                buf.extend_from_slice(queue.as_bytes());
+                write_varu64(buf, *position);
+            }
         }
 
         // EntityData
@@ -489,6 +502,19 @@ impl UnifiedStore {
                 for f in &vec.dense {
                     buf.extend_from_slice(&f.to_le_bytes());
                 }
+            }
+            EntityData::TimeSeries(ts) => {
+                buf.push(4);
+                write_varu32(buf, ts.metric.len() as u32);
+                buf.extend_from_slice(ts.metric.as_bytes());
+                write_varu64(buf, ts.timestamp_ns);
+                buf.extend_from_slice(&ts.value.to_le_bytes());
+            }
+            EntityData::QueueMessage(msg) => {
+                buf.push(5);
+                Self::write_value_binary(buf, &msg.payload);
+                write_varu64(buf, msg.enqueued_at_ns);
+                write_varu32(buf, msg.attempts);
             }
         }
 

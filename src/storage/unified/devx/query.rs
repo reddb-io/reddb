@@ -221,6 +221,8 @@ impl QueryBuilder {
             EntityData::Edge(e) => e.properties.clone(),
             EntityData::Row(r) => r.named.clone().unwrap_or_default(),
             EntityData::Vector(_) => HashMap::new(),
+            EntityData::TimeSeries(_) => HashMap::new(),
+            EntityData::QueueMessage(_) => HashMap::new(),
         }
     }
 

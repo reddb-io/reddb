@@ -422,6 +422,18 @@ pub(super) fn runtime_vector_record_from_match(item: SimilarResult) -> UnifiedRe
                 record.set(&key, value);
             }
         }
+        EntityData::TimeSeries(ts) => {
+            record.set("dimension", Value::Null);
+            record.set("metric", Value::Text(ts.metric));
+            record.set("timestamp_ns", Value::UnsignedInteger(ts.timestamp_ns));
+            record.set("value", Value::Float(ts.value));
+        }
+        EntityData::QueueMessage(msg) => {
+            record.set("dimension", Value::Null);
+            record.set("payload", msg.payload);
+            record.set("attempts", Value::UnsignedInteger(msg.attempts as u64));
+            record.set("acked", Value::Boolean(msg.acked));
+        }
     }
 
     record

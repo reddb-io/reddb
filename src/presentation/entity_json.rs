@@ -261,6 +261,22 @@ fn append_compact_entity_fields(object: &mut Map<String, JsonValue>, data: &Enti
                 object.insert("content".to_string(), JsonValue::String(content.clone()));
             }
         }
+        EntityData::TimeSeries(ts) => {
+            object.insert("metric".to_string(), JsonValue::String(ts.metric.clone()));
+            object.insert(
+                "timestamp_ns".to_string(),
+                JsonValue::Number(ts.timestamp_ns as f64),
+            );
+            object.insert("value".to_string(), JsonValue::Number(ts.value));
+        }
+        EntityData::QueueMessage(msg) => {
+            object.insert("payload".to_string(), storage_value_to_json(&msg.payload));
+            object.insert(
+                "attempts".to_string(),
+                JsonValue::Number(msg.attempts as f64),
+            );
+            object.insert("acked".to_string(), JsonValue::Bool(msg.acked));
+        }
     }
 }
 
@@ -361,6 +377,14 @@ fn entity_kind_json(kind: &EntityKind) -> JsonValue {
                 JsonValue::String(collection.clone()),
             );
         }
+        EntityKind::TimeSeriesPoint { series, metric } => {
+            object.insert("series".to_string(), JsonValue::String(series.clone()));
+            object.insert("metric".to_string(), JsonValue::String(metric.clone()));
+        }
+        EntityKind::QueueMessage { queue, position } => {
+            object.insert("queue".to_string(), JsonValue::String(queue.clone()));
+            object.insert("position".to_string(), JsonValue::Number(*position as f64));
+        }
     }
     JsonValue::Object(object)
 }
@@ -457,6 +481,42 @@ fn entity_data_json(data: &EntityData) -> JsonValue {
                     None => JsonValue::Null,
                 },
             );
+        }
+        EntityData::TimeSeries(ts) => {
+            object.insert("metric".to_string(), JsonValue::String(ts.metric.clone()));
+            object.insert(
+                "timestamp_ns".to_string(),
+                JsonValue::Number(ts.timestamp_ns as f64),
+            );
+            object.insert("value".to_string(), JsonValue::Number(ts.value));
+            object.insert(
+                "tags".to_string(),
+                JsonValue::Object(
+                    ts.tags
+                        .iter()
+                        .map(|(k, v)| (k.clone(), JsonValue::String(v.clone())))
+                        .collect(),
+                ),
+            );
+        }
+        EntityData::QueueMessage(msg) => {
+            object.insert("payload".to_string(), storage_value_to_json(&msg.payload));
+            if let Some(priority) = msg.priority {
+                object.insert("priority".to_string(), JsonValue::Number(priority as f64));
+            }
+            object.insert(
+                "enqueued_at_ns".to_string(),
+                JsonValue::Number(msg.enqueued_at_ns as f64),
+            );
+            object.insert(
+                "attempts".to_string(),
+                JsonValue::Number(msg.attempts as f64),
+            );
+            object.insert(
+                "max_attempts".to_string(),
+                JsonValue::Number(msg.max_attempts as f64),
+            );
+            object.insert("acked".to_string(), JsonValue::Bool(msg.acked));
         }
     }
     JsonValue::Object(object)

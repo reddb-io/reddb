@@ -86,6 +86,79 @@ pub struct ScanPage {
 }
 
 #[derive(Debug, Clone)]
+pub struct SystemInfo {
+    pub pid: u32,
+    pub cpu_cores: usize,
+    pub total_memory_bytes: u64,
+    pub available_memory_bytes: u64,
+    pub os: String,
+    pub arch: String,
+    pub hostname: String,
+}
+
+impl SystemInfo {
+    pub fn collect() -> Self {
+        Self {
+            pid: std::process::id(),
+            cpu_cores: std::thread::available_parallelism()
+                .map(|p| p.get())
+                .unwrap_or(1),
+            total_memory_bytes: Self::read_total_memory(),
+            available_memory_bytes: Self::read_available_memory(),
+            os: std::env::consts::OS.to_string(),
+            arch: std::env::consts::ARCH.to_string(),
+            hostname: std::env::var("HOSTNAME")
+                .or_else(|_| std::env::var("COMPUTERNAME"))
+                .unwrap_or_else(|_| "unknown".to_string()),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn read_total_memory() -> u64 {
+        std::fs::read_to_string("/proc/meminfo")
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find(|l| l.starts_with("MemTotal:"))
+                    .and_then(|l| {
+                        l.split_whitespace()
+                            .nth(1)
+                            .and_then(|v| v.parse::<u64>().ok())
+                    })
+                    .map(|kb| kb * 1024)
+            })
+            .unwrap_or(0)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn read_available_memory() -> u64 {
+        std::fs::read_to_string("/proc/meminfo")
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find(|l| l.starts_with("MemAvailable:"))
+                    .and_then(|l| {
+                        l.split_whitespace()
+                            .nth(1)
+                            .and_then(|v| v.parse::<u64>().ok())
+                    })
+                    .map(|kb| kb * 1024)
+            })
+            .unwrap_or(0)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn read_total_memory() -> u64 {
+        0
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn read_available_memory() -> u64 {
+        0
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct RuntimeStats {
     pub active_connections: usize,
     pub idle_connections: usize,
@@ -93,6 +166,7 @@ pub struct RuntimeStats {
     pub paged_mode: bool,
     pub started_at_unix_ms: u128,
     pub store: StoreStats,
+    pub system: SystemInfo,
 }
 
 #[derive(Debug, Clone)]

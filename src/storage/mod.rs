@@ -47,6 +47,9 @@ pub mod keyring;
 // Schema System (Types, Tables, Registry)
 pub mod schema;
 
+// Time-Series Storage
+pub mod timeseries;
+
 // Query Engine (Filters, Sorting, Similarity Search)
 pub mod query;
 

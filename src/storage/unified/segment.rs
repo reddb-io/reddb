@@ -286,6 +286,8 @@ impl GrowingSegment {
             EntityData::Vector(vec) => {
                 vec.dense.len() * 4 + vec.sparse.as_ref().map_or(0, |s| s.indices.len() * 8)
             }
+            EntityData::TimeSeries(_) => 64,
+            EntityData::QueueMessage(_) => 128,
         };
 
         // Add embeddings
@@ -432,6 +434,8 @@ impl UnifiedSegment for GrowingSegment {
                 EntityKind::GraphNode { .. } => stats.node_count += 1,
                 EntityKind::GraphEdge { .. } => stats.edge_count += 1,
                 EntityKind::Vector { .. } => stats.vector_count += 1,
+                EntityKind::TimeSeriesPoint { .. } => stats.row_count += 1,
+                EntityKind::QueueMessage { .. } => stats.row_count += 1,
             }
             stats.cross_ref_count += entity.cross_refs.len();
         }

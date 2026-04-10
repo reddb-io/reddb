@@ -202,6 +202,35 @@ pub(crate) fn runtime_stats_json(stats: &RuntimeStats) -> JsonValue {
         JsonValue::Number(stats.started_at_unix_ms as f64),
     );
     object.insert("store".to_string(), JsonValue::Object(store));
+
+    let mut system = Map::new();
+    system.insert(
+        "pid".to_string(),
+        JsonValue::Number(stats.system.pid as f64),
+    );
+    system.insert(
+        "cpu_cores".to_string(),
+        JsonValue::Number(stats.system.cpu_cores as f64),
+    );
+    system.insert(
+        "total_memory_bytes".to_string(),
+        JsonValue::Number(stats.system.total_memory_bytes as f64),
+    );
+    system.insert(
+        "available_memory_bytes".to_string(),
+        JsonValue::Number(stats.system.available_memory_bytes as f64),
+    );
+    system.insert("os".to_string(), JsonValue::String(stats.system.os.clone()));
+    system.insert(
+        "arch".to_string(),
+        JsonValue::String(stats.system.arch.clone()),
+    );
+    system.insert(
+        "hostname".to_string(),
+        JsonValue::String(stats.system.hostname.clone()),
+    );
+    object.insert("system".to_string(), JsonValue::Object(system));
+
     JsonValue::Object(object)
 }
 

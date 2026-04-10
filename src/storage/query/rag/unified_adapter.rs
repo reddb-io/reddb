@@ -391,6 +391,8 @@ impl UnifiedStoreAdapter {
             EntityData::Edge(edge) => edge.properties.clone(),
             EntityData::Row(row) => row.named.clone().unwrap_or_default(),
             EntityData::Vector(_) => HashMap::new(),
+            EntityData::TimeSeries(_) => HashMap::new(),
+            EntityData::QueueMessage(_) => HashMap::new(),
         };
 
         for (key, expected) in &filter.conditions {
@@ -692,6 +694,15 @@ fn entity_to_chunk(entity: &UnifiedEntity, collection: &str, score: f32) -> Cont
                 vec.sparse.is_some()
             )
         }
+        EntityData::TimeSeries(ts) => {
+            format!("TimeSeries: metric={}, value={}", ts.metric, ts.value)
+        }
+        EntityData::QueueMessage(msg) => {
+            format!(
+                "QueueMessage: attempts={}, acked={}",
+                msg.attempts, msg.acked
+            )
+        }
     };
 
     let (source, entity_type) = match &entity.kind {
@@ -724,6 +735,14 @@ fn entity_to_chunk(entity: &UnifiedEntity, collection: &str, score: f32) -> Cont
         EntityKind::Vector { collection: col } => (
             ChunkSource::Vector(col.clone()),
             Some(super::EntityType::Unknown), // Vectors don't have a direct type mapping
+        ),
+        EntityKind::TimeSeriesPoint { series, .. } => (
+            ChunkSource::Table(series.clone()),
+            Some(super::EntityType::Unknown),
+        ),
+        EntityKind::QueueMessage { queue, .. } => (
+            ChunkSource::Table(queue.clone()),
+            Some(super::EntityType::Unknown),
         ),
     };
 

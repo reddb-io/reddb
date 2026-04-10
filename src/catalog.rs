@@ -16,6 +16,8 @@ pub enum CollectionModel {
     Graph,
     Vector,
     Mixed,
+    TimeSeries,
+    Queue,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -372,6 +374,7 @@ fn infer_model(entities: &[UnifiedEntity]) -> CollectionModel {
             EntityKind::TableRow { .. } => has_table = true,
             EntityKind::GraphNode { .. } | EntityKind::GraphEdge { .. } => has_graph = true,
             EntityKind::Vector { .. } => has_vector = true,
+            EntityKind::TimeSeriesPoint { .. } | EntityKind::QueueMessage { .. } => {}
         }
     }
 
@@ -388,6 +391,8 @@ fn infer_schema_mode(model: CollectionModel) -> SchemaMode {
         CollectionModel::Table => SchemaMode::Strict,
         CollectionModel::Graph | CollectionModel::Vector => SchemaMode::SemiStructured,
         CollectionModel::Document | CollectionModel::Mixed => SchemaMode::Dynamic,
+        CollectionModel::TimeSeries => SchemaMode::SemiStructured,
+        CollectionModel::Queue => SchemaMode::Dynamic,
     }
 }
 

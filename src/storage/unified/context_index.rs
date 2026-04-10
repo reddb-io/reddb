@@ -435,6 +435,7 @@ fn extract_entity_tokens(entity: &UnifiedEntity) -> Vec<(String, String)> {
                 }
             }
         }
+        EntityKind::TimeSeriesPoint { .. } | EntityKind::QueueMessage { .. } => {}
     }
 
     // Data field tokens
@@ -506,6 +507,7 @@ fn extract_entity_tokens(entity: &UnifiedEntity) -> Vec<(String, String)> {
                 }
             }
         }
+        EntityData::TimeSeries(_) | EntityData::QueueMessage(_) => {}
     }
 
     // Cross-reference tokens
@@ -591,6 +593,7 @@ fn extract_field_lookup_pairs(entity: &UnifiedEntity) -> Vec<(String, String)> {
                 }
             }
         }
+        EntityData::TimeSeries(_) | EntityData::QueueMessage(_) => {}
     }
 
     pairs.into_iter().collect()

@@ -40,6 +40,8 @@ pub fn get_entity_field(entity: &UnifiedEntity, field: &str) -> Option<Value> {
                 None
             }
         }
+        EntityData::TimeSeries(_) => None,
+        EntityData::QueueMessage(_) => None,
     }
 }
 
@@ -148,6 +150,13 @@ pub fn extract_searchable_text(entity: &UnifiedEntity) -> String {
         EntityKind::Vector { collection } => {
             parts.push(collection.clone());
         }
+        EntityKind::TimeSeriesPoint { series, metric } => {
+            parts.push(series.clone());
+            parts.push(metric.clone());
+        }
+        EntityKind::QueueMessage { queue, .. } => {
+            parts.push(queue.clone());
+        }
     }
 
     // Add data properties
@@ -180,6 +189,10 @@ pub fn extract_searchable_text(entity: &UnifiedEntity) -> String {
                 parts.push(content.clone());
             }
         }
+        EntityData::TimeSeries(ts) => {
+            parts.push(ts.metric.clone());
+        }
+        EntityData::QueueMessage(_) => {}
     }
 
     parts.join(" ")

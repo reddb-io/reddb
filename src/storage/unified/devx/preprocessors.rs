@@ -159,6 +159,8 @@ impl Preprocessor for ContentHasher {
                     .join("|")
             }
             EntityData::Edge(_) => kind_label.unwrap_or("").to_string(),
+            EntityData::TimeSeries(ts) => ts.metric.clone(),
+            EntityData::QueueMessage(_) => String::new(),
         };
 
         if !content.is_empty() {

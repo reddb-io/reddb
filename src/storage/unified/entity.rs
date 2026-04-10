@@ -52,6 +52,10 @@ pub enum EntityKind {
     },
     /// A vector in a collection
     Vector { collection: String },
+    /// A time-series data point
+    TimeSeriesPoint { series: String, metric: String },
+    /// A queue message
+    QueueMessage { queue: String, position: u64 },
 }
 
 impl EntityKind {
@@ -62,6 +66,8 @@ impl EntityKind {
             Self::GraphNode { .. } => "graph_node",
             Self::GraphEdge { .. } => "graph_edge",
             Self::Vector { .. } => "vector",
+            Self::TimeSeriesPoint { .. } => "timeseries",
+            Self::QueueMessage { .. } => "queue",
         }
     }
 
@@ -72,6 +78,8 @@ impl EntityKind {
             Self::GraphNode { label, .. } => label,
             Self::GraphEdge { label, .. } => label,
             Self::Vector { collection } => collection,
+            Self::TimeSeriesPoint { series, .. } => series,
+            Self::QueueMessage { queue, .. } => queue,
         }
     }
 }
@@ -87,6 +95,10 @@ pub enum EntityData {
     Edge(EdgeData),
     /// Vector data
     Vector(VectorData),
+    /// Time-series data point
+    TimeSeries(TimeSeriesData),
+    /// Queue message data
+    QueueMessage(QueueMessageData),
 }
 
 impl EntityData {
@@ -319,6 +331,36 @@ impl VectorData {
     pub fn is_hybrid(&self) -> bool {
         self.sparse.is_some()
     }
+}
+
+/// Time-series data point
+#[derive(Debug, Clone)]
+pub struct TimeSeriesData {
+    /// Metric name (e.g., "cpu.idle")
+    pub metric: String,
+    /// Timestamp in nanoseconds since epoch
+    pub timestamp_ns: u64,
+    /// Metric value
+    pub value: f64,
+    /// Dimensional tags (e.g., {"host": "srv1"})
+    pub tags: std::collections::HashMap<String, String>,
+}
+
+/// Queue message data
+#[derive(Debug, Clone)]
+pub struct QueueMessageData {
+    /// Message payload
+    pub payload: Value,
+    /// Optional priority (higher = more urgent)
+    pub priority: Option<i32>,
+    /// Enqueue timestamp (nanoseconds)
+    pub enqueued_at_ns: u64,
+    /// Number of delivery attempts
+    pub attempts: u32,
+    /// Maximum delivery attempts before DLQ
+    pub max_attempts: u32,
+    /// Whether the message has been acknowledged
+    pub acked: bool,
 }
 
 /// Sparse vector representation

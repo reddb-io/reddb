@@ -486,6 +486,8 @@ impl RedDB {
                 }
             }
             EntityData::Vector(_) => {}
+            EntityData::TimeSeries(_) => {}
+            EntityData::QueueMessage(_) => {}
         }
         if entries.is_empty() {
             None
@@ -580,6 +582,8 @@ impl RedDB {
                 .collect::<Vec<_>>()
                 .join(" "),
             EntityData::Vector(vector) => vector.content.clone().unwrap_or_default(),
+            EntityData::TimeSeries(ts) => ts.metric.clone(),
+            EntityData::QueueMessage(_) => String::new(),
         }
     }
 
