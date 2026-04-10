@@ -792,7 +792,9 @@ impl RedDBRuntime {
                 .collect();
 
             if !seed_node_ids.is_empty() {
-                if let Ok(graph) = materialize_graph(store.as_ref()) {
+                // Use lazy graph materialization — only loads seed nodes + BFS neighbors
+                let seed_ids: Vec<u64> = seed_node_ids.iter().map(|(id, _, _)| *id).collect();
+                if let Ok(graph) = materialize_graph_lazy(store.as_ref(), &seed_ids, graph_depth) {
                     for (source_id, node_id_str, source_score) in &seed_node_ids {
                         let mut visited: HashSet<String> = HashSet::new();
                         let mut queue: VecDeque<(String, usize)> = VecDeque::new();

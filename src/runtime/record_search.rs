@@ -85,6 +85,37 @@ pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<
     Some(record)
 }
 
+/// Projected version — only materializes requested columns for better performance.
+/// Falls back to full materialization if columns is empty (SELECT *).
+pub(super) fn runtime_table_record_from_entity_projected(
+    entity: UnifiedEntity,
+    columns: &[String],
+) -> Option<UnifiedRecord> {
+    if columns.is_empty() {
+        return runtime_table_record_from_entity(entity);
+    }
+
+    let row = match entity.data {
+        EntityData::Row(row) => row,
+        _ => return None,
+    };
+
+    let mut record = UnifiedRecord::new();
+
+    // Always include system fields needed for filtering
+    record.set("_entity_id", Value::UnsignedInteger(entity.id.raw()));
+
+    if let Some(named) = row.named {
+        for col in columns {
+            if let Some(value) = named.get(col) {
+                record.set(col, value.clone());
+            }
+        }
+    }
+
+    Some(record)
+}
+
 pub(super) fn runtime_any_record_from_entity(entity: UnifiedEntity) -> Option<UnifiedRecord> {
     let identity_entity = entity.clone();
     let kind = entity.kind.clone();

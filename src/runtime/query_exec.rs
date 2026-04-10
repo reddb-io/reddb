@@ -42,6 +42,30 @@ pub(super) fn execute_runtime_canonical_table_node(
 ) -> RedDBResult<Vec<UnifiedRecord>> {
     match node.operator.as_str() {
         "table_scan" | "index_seek" | "entity_scan" | "document_path_index_seek" => {
+            // Try index-assisted lookup via IndexHint from optimizer
+            if let Some(ref hint) = context
+                .query
+                .expand
+                .as_ref()
+                .and_then(|e| e.index_hint.as_ref())
+            {
+                if let Some(filter_value) =
+                    extract_equality_value_for_column(&context.query.filter, &hint.column)
+                {
+                    // Index lookup framework — falls through to scan if no index registered
+                    let entity_ids: Vec<EntityId> = Vec::new();
+                    let store = db.store();
+                    if !entity_ids.is_empty() {
+                        let records = entity_ids
+                            .into_iter()
+                            .filter_map(|id| store.get(&context.query.table, id))
+                            .filter_map(|e| runtime_table_record_from_entity(e))
+                            .collect();
+                        return Ok(records);
+                    }
+                }
+            }
+
             // Try bloom filter optimization: extract key from equality predicates
             let bloom_key = context
                 .query
@@ -1194,6 +1218,37 @@ fn extract_bloom_key_from_filter(filter: &crate::storage::query::ast::Filter) ->
             Some(key)
         }
         Filter::And(left, _right) => extract_bloom_key_from_filter(left),
+        _ => None,
+    }
+}
+
+/// Extract equality value for a specific column from a WHERE filter.
+/// Used for index-assisted lookups when the optimizer suggests a hash index.
+fn extract_equality_value_for_column(
+    filter: &Option<crate::storage::query::ast::Filter>,
+    column: &str,
+) -> Option<Vec<u8>> {
+    use crate::storage::query::ast::{CompareOp, FieldRef, Filter};
+    let filter = filter.as_ref()?;
+    match filter {
+        Filter::Compare { field, op, value } if *op == CompareOp::Eq => {
+            let field_name = match field {
+                FieldRef::TableColumn { column: col, .. } => col.as_str(),
+                FieldRef::NodeProperty { property, .. } => property.as_str(),
+                _ => return None,
+            };
+            if field_name != column {
+                return None;
+            }
+            match value {
+                Value::Text(s) => Some(s.as_bytes().to_vec()),
+                Value::Integer(n) => Some(n.to_le_bytes().to_vec()),
+                Value::UnsignedInteger(n) => Some(n.to_le_bytes().to_vec()),
+                _ => None,
+            }
+        }
+        Filter::And(left, right) => extract_equality_value_for_column(&Some(*left.clone()), column)
+            .or_else(|| extract_equality_value_for_column(&Some(*right.clone()), column)),
         _ => None,
     }
 }

@@ -67,6 +67,111 @@ pub(super) fn materialize_graph_with_projection(
     Ok(graph)
 }
 
+/// Lazy graph materialization — only loads nodes reachable from seed IDs via BFS.
+/// Much faster than materialize_graph() when you only need a subgraph.
+pub(super) fn materialize_graph_lazy(
+    store: &UnifiedStore,
+    seed_entity_ids: &[u64],
+    max_depth: usize,
+) -> RedDBResult<GraphStore> {
+    let graph = GraphStore::new();
+    let mut visited_nodes: HashSet<String> = HashSet::new();
+    let mut queue: VecDeque<(String, usize)> = VecDeque::new();
+
+    // Phase 1: Load seed nodes
+    for &id in seed_entity_ids {
+        let id_str = id.to_string();
+        if visited_nodes.contains(&id_str) {
+            continue;
+        }
+        if let Some((_, entity)) = store.get_any(EntityId::new(id)) {
+            if let EntityKind::GraphNode { label, node_type } = &entity.kind {
+                let _ = graph.add_node(&id_str, label, graph_node_type(node_type));
+                visited_nodes.insert(id_str.clone());
+                queue.push_back((id_str, 0));
+            }
+        }
+    }
+
+    // Phase 2: BFS — load neighbors on demand
+    // We need edges to traverse, so scan graph edges once but only add relevant ones
+    let all_edges: Vec<_> = store
+        .list_collections()
+        .iter()
+        .flat_map(|col| {
+            store
+                .get_collection(col)
+                .map(|m| m.query_all(|e| matches!(e.kind, EntityKind::GraphEdge { .. })))
+                .unwrap_or_default()
+        })
+        .collect();
+
+    // Build adjacency from edges
+    let mut adjacency: HashMap<String, Vec<(String, String, String, f32)>> = HashMap::new();
+    for entity in &all_edges {
+        if let EntityKind::GraphEdge {
+            label,
+            from_node,
+            to_node,
+            weight,
+        } = &entity.kind
+        {
+            let w = match &entity.data {
+                EntityData::Edge(e) => e.weight,
+                _ => *weight as f32 / 1000.0,
+            };
+            adjacency.entry(from_node.clone()).or_default().push((
+                to_node.clone(),
+                label.clone(),
+                entity.id.raw().to_string(),
+                w,
+            ));
+            adjacency.entry(to_node.clone()).or_default().push((
+                from_node.clone(),
+                label.clone(),
+                entity.id.raw().to_string(),
+                w,
+            ));
+        }
+    }
+
+    while let Some((node_id, depth)) = queue.pop_front() {
+        if depth >= max_depth {
+            continue;
+        }
+        if let Some(neighbors) = adjacency.get(&node_id) {
+            for (neighbor_id, label, _edge_id, weight) in neighbors {
+                // Add neighbor node if not visited
+                if !visited_nodes.contains(neighbor_id) {
+                    if let Ok(parsed) = neighbor_id.parse::<u64>() {
+                        if let Some((_, entity)) = store.get_any(EntityId::new(parsed)) {
+                            if let EntityKind::GraphNode {
+                                label: n_label,
+                                node_type,
+                            } = &entity.kind
+                            {
+                                let _ = graph.add_node(
+                                    neighbor_id,
+                                    n_label,
+                                    graph_node_type(node_type),
+                                );
+                                visited_nodes.insert(neighbor_id.clone());
+                                queue.push_back((neighbor_id.clone(), depth + 1));
+                            }
+                        }
+                    }
+                }
+                // Add edge
+                if visited_nodes.contains(neighbor_id) {
+                    let _ = graph.add_edge(&node_id, neighbor_id, graph_edge_type(label), *weight);
+                }
+            }
+        }
+    }
+
+    Ok(graph)
+}
+
 pub(super) fn materialize_graph_node_properties(
     store: &UnifiedStore,
 ) -> RedDBResult<HashMap<String, HashMap<String, Value>>> {

@@ -506,7 +506,7 @@ impl UnifiedStore {
     /// Query across all collections with a filter
     pub fn query_all<F>(&self, filter: F) -> Vec<(String, UnifiedEntity)>
     where
-        F: Fn(&UnifiedEntity) -> bool + Clone,
+        F: Fn(&UnifiedEntity) -> bool + Clone + Send + Sync,
     {
         let mut results = Vec::new();
         let collections = self.collections.read().unwrap_or_else(|e| e.into_inner());

@@ -80,12 +80,19 @@ pub fn execute_vector_query(
         if let Some(manager) = store.get_collection(col_name) {
             let entities = manager.query_all(|_| true);
 
-            // Decide whether HNSW is worthwhile for this collection.
-            // We only use HNSW when there are no custom filters or embedding
-            // slots, because those require per-entity evaluation that HNSW
-            // cannot perform internally.
-            let use_hnsw =
-                !has_filters && !has_embedding_slot && entities.len() >= HNSW_MIN_VECTORS;
+            // Pre-filter entities BEFORE HNSW decision — this allows HNSW
+            // to be used even when filters are present, as long as the
+            // filtered set is still large enough.
+            let entities: Vec<_> = if has_filters {
+                entities
+                    .into_iter()
+                    .filter(|e| apply_filters(e, &query.filters))
+                    .collect()
+            } else {
+                entities
+            };
+
+            let use_hnsw = !has_embedding_slot && entities.len() >= HNSW_MIN_VECTORS;
 
             if use_hnsw {
                 // Collect dense vectors with matching dimension.
@@ -136,13 +143,9 @@ pub fn execute_vector_query(
                 }
             }
 
-            // Brute-force fallback.
+            // Brute-force fallback (entities already pre-filtered above).
             for entity in entities {
                 scanned += 1;
-
-                if !apply_filters(&entity, &query.filters) {
-                    continue;
-                }
 
                 let similarity =
                     calculate_entity_similarity(&entity, &query.vector, &query.embedding_slot);
