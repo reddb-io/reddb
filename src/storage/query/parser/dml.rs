@@ -217,7 +217,7 @@ impl<'a> Parser<'a> {
         let mut pairs = Vec::new();
         if !self.check(&Token::RParen) {
             loop {
-                let key = self.expect_ident()?;
+                let key = self.expect_ident_or_keyword()?.to_ascii_lowercase();
                 self.expect(Token::Eq)?;
                 let value = self.parse_literal_value()?;
                 pairs.push((key, value));

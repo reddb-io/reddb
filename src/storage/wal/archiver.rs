@@ -123,7 +123,7 @@ mod tests {
         let backend_dir = temp_dir.join("backend");
         let _ = std::fs::create_dir_all(&backend_dir);
 
-        let backend = Arc::new(LocalBackend::new(backend_dir.to_str().unwrap()));
+        let backend = Arc::new(LocalBackend);
         let archiver = WalArchiver::new(backend, "wal/");
 
         // Create a fake WAL file

@@ -202,6 +202,21 @@ For any setting, RedDB checks in order:
 | `red.auth.session_ttl_secs` | `3600` | Session TTL (1 hour) |
 | `red.auth.require_auth` | `false` | Require auth for all operations |
 
+### Backup & Recovery (`red.backup.*`)
+
+| Key | Default | Description |
+|:----|:--------|:------------|
+| `red.backup.enabled` | `false` | Enable scheduled backups |
+| `red.backup.interval_secs` | `3600` | Backup interval (1 hour) |
+| `red.backup.retention_count` | `24` | Snapshots to keep |
+| `red.backup.upload` | `false` | Auto-upload to remote backend |
+| `red.backup.backend` | `local` | Backend: `local`, `s3`, `r2`, `turso`, `d1` |
+| `red.wal.archive.enabled` | `false` | Archive WAL segments before truncation |
+| `red.wal.archive.retention_hours` | `168` | WAL archive retention (7 days) |
+| `red.wal.archive.prefix` | `wal/` | Remote key prefix for WAL segments |
+| `red.cdc.enabled` | `true` | Enable change data capture |
+| `red.cdc.buffer_size` | `100000` | CDC event buffer capacity |
+
 ### Query Engine (`red.query.*`)
 
 | Key | Default | Description |

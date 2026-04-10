@@ -221,6 +221,25 @@ Validation on write. No parsing in your app.
 
 ---
 
+## Backup & Recovery
+
+Built-in backup scheduler, WAL archiving, Change Data Capture (CDC), and Point-in-Time Recovery framework:
+
+```bash
+# Poll real-time changes
+curl 'localhost:8080/changes?since_lsn=0'
+
+# Trigger manual backup
+curl -X POST localhost:8080/backup/trigger
+
+# Check backup status
+curl localhost:8080/backup/status
+```
+
+Remote backends: S3, R2, DigitalOcean Spaces, GCS, Turso, Cloudflare D1, local filesystem.
+
+---
+
 ## 3 Deployment Modes
 
 | Mode | Think of it as... | Access via |

@@ -87,6 +87,12 @@
   - [Vault (Certificate Seal)](/security/vault.md)
   - [Encryption at Rest](/security/encryption.md)
 
+- **Backup & Recovery**
+  - [CDC (Change Data Capture)](/api/http.md#cdc--change-data-capture)
+  - [Scheduled Backups](/api/http.md#backups)
+  - [WAL Archiving](/getting-started/configuration.md#backup--recovery-redbackup)
+  - [Remote Backends](/deployment/backends.md)
+
 - **Deployment**
   - [Embedded Mode](/deployment/embedded.md)
   - [Server Mode](/deployment/server.md)

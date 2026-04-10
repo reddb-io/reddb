@@ -87,6 +87,34 @@
       },
       "max_recursion_depth": 1000,
       "max_recursive_rows": 100000
+    },
+    "backup": {
+      "enabled": false,
+      "interval_secs": 3600,
+      "retention_count": 24,
+      "upload": false,
+      "backend": "local",
+      "local": {
+        "path": "/var/backups/reddb/"
+      },
+      "s3": {
+        "bucket": "my-reddb-backups",
+        "region": "us-east-1",
+        "access_key": "",
+        "secret_key": "",
+        "prefix": "databases/prod/"
+      }
+    },
+    "wal": {
+      "archive": {
+        "enabled": false,
+        "retention_hours": 168,
+        "prefix": "wal/"
+      }
+    },
+    "cdc": {
+      "enabled": true,
+      "buffer_size": 100000
     }
   }
 }

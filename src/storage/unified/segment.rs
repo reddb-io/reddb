@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::entity::{CrossRef, EntityData, EntityId, EntityKind, RefType, UnifiedEntity};
+use super::memtable::Memtable;
 use super::metadata::{Metadata, MetadataStorage};
 use crate::storage::primitives::bloom::BloomFilter;
 
@@ -231,6 +232,9 @@ pub struct GrowingSegment {
     /// Bloom filter for fast negative key lookups
     bloom: BloomFilter,
 
+    /// Write buffer for absorbing write spikes (sorted by key)
+    memtable: Memtable,
+
     /// Sequence counter for ordering
     sequence: AtomicU64,
     /// Approximate memory usage
@@ -259,6 +263,7 @@ impl GrowingSegment {
             cross_ref_forward: HashMap::new(),
             cross_ref_reverse: HashMap::new(),
             bloom: BloomFilter::with_capacity(100_000, 0.01),
+            memtable: Memtable::new(),
             sequence: AtomicU64::new(0),
             memory_bytes: AtomicU64::new(0),
         }
@@ -388,6 +393,16 @@ impl GrowingSegment {
         self.cross_ref_forward.get(&id).cloned().unwrap_or_default()
     }
 
+    /// Get memtable statistics
+    pub fn memtable_stats(&self) -> super::memtable::MemtableStats {
+        self.memtable.stats()
+    }
+
+    /// Check if memtable should be flushed
+    pub fn memtable_should_flush(&self) -> bool {
+        self.memtable.should_flush()
+    }
+
     /// Get age in seconds
     pub fn age_secs(&self) -> u64 {
         let now = SystemTime::now()
@@ -480,8 +495,12 @@ impl UnifiedSegment for GrowingSegment {
         // Index the entity
         self.index_entity(&entity);
 
-        // Store
+        // Write to memtable (write buffer for sorted flush)
         let id = entity.id;
+        let key = id.raw().to_le_bytes();
+        self.memtable.put(&key, &key); // key=entityId, value=entityId (pointer)
+
+        // Store
         self.entities.insert(id, entity);
 
         // Update write timestamp
@@ -542,6 +561,10 @@ impl UnifiedSegment for GrowingSegment {
         // Remove metadata
         self.metadata.remove_all(id);
 
+        // Tombstone in memtable
+        let key = id.raw().to_le_bytes();
+        self.memtable.delete(&key);
+
         // Mark as deleted (tombstone)
         self.deleted.insert(id);
 
@@ -575,11 +598,19 @@ impl UnifiedSegment for GrowingSegment {
 
         self.state = SegmentState::Sealing;
 
-        // In a real implementation, we would build indices here:
-        // - HNSW for vectors
-        // - B-tree for sorted access
-        // - Inverted index for text search
-        // For now, the in-memory structures serve as indices
+        // Flush memtable: drain sorted entries for potential B-tree bulk insert
+        let memtable_stats = self.memtable.stats();
+        if memtable_stats.entry_count > 0 {
+            // The memtable entries are entity ID keys in sorted order.
+            // This ordering enables efficient sequential I/O for persistence.
+            self.memtable.clear();
+        }
+
+        // Build indices on the sealed data:
+        // - Bloom filter is already populated from insert()
+        // - HNSW/IVF for vectors (future)
+        // - B-tree for sorted access (future)
+        // - Inverted index for text search (future)
 
         self.state = SegmentState::Sealed;
         Ok(())

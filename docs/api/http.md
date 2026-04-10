@@ -554,6 +554,85 @@ Each provider follows the same naming convention. Replace `{PROVIDER}` with the 
 - `REDDB_{PROVIDER}_PROMPT_MODEL`: default prompt model for `/ai/prompt`
 - `REDDB_ANTHROPIC_VERSION`: Anthropic API version header (default `2023-06-01`)
 
+## Backup & Recovery
+
+### CDC -- Change Data Capture
+
+Poll real-time change events from the database. Every entity CRUD operation (insert, update, delete) emits an event into the CDC buffer.
+
+```
+GET /changes?since_lsn=0&limit=100
+```
+
+| Parameter | Type | Default | Description |
+|:----------|:-----|:--------|:------------|
+| `since_lsn` | `integer` | `0` | Cursor position -- return events after this LSN |
+| `limit` | `integer` | `100` | Maximum events to return (max `10000`) |
+
+Response:
+
+```json
+{
+  "ok": true,
+  "events": [
+    {"lsn": 1, "timestamp": 1744329600000, "operation": "insert", "collection": "users", "entity_id": 42, "entity_kind": "table"},
+    {"lsn": 2, "operation": "update", "collection": "users", "entity_id": 42, "entity_kind": "entity"}
+  ],
+  "next_lsn": 2
+}
+```
+
+Operations: `insert`, `update`, `delete`. Use `next_lsn` as the `since_lsn` value in your next request to consume events incrementally.
+
+### Backups
+
+| Method | Path | Description |
+|:-------|:-----|:------------|
+| `GET` | `/backup/status` | Scheduler status, last backup timestamp, backup history |
+| `POST` | `/backup/trigger` | Force an immediate backup outside the scheduled interval |
+
+Check backup status:
+
+```bash
+curl http://127.0.0.1:8080/backup/status
+```
+
+Trigger a manual backup:
+
+```bash
+curl -X POST http://127.0.0.1:8080/backup/trigger
+```
+
+### Recovery
+
+| Method | Path | Description |
+|:-------|:-----|:------------|
+| `GET` | `/recovery/restore-points` | List available restore points |
+
+List restore points:
+
+```bash
+curl http://127.0.0.1:8080/recovery/restore-points
+```
+
+### Backup & Recovery Configuration
+
+You can enable and tune backup, WAL archiving, and CDC through the runtime configuration endpoint:
+
+```bash
+# Enable scheduled backups
+curl -X PUT localhost:8080/config/red.backup.enabled -d '{"value": true}'
+curl -X PUT localhost:8080/config/red.backup.interval_secs -d '{"value": 3600}'
+
+# Enable WAL archiving
+curl -X PUT localhost:8080/config/red.wal.archive.enabled -d '{"value": true}'
+
+# CDC is enabled by default
+curl localhost:8080/config/red.cdc
+```
+
+See [Configuration -- Backup & Recovery](/getting-started/configuration.md#backup--recovery-redbackup) for the full list of keys.
+
 ## Graph Analytics
 
 | Method | Path | Description |
