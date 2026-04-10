@@ -226,7 +226,7 @@ The response groups results by structure type:
 | `POST` | `/ai/embeddings` | Generate embeddings (single, batch, query-row, query-result) |
 | `POST` | `/ai/prompt` | Execute prompts (single, batch, query-row, query-result) |
 | `POST` | `/ai/ask` | One-shot question against the database using any provider |
-| `POST` | `/ai/credentials` | Store provider API keys by alias in KV (`__ai_credentials`) |
+| `POST` | `/ai/credentials` | Store provider API keys by alias in KV (`red_config`) |
 
 ### Supported Providers
 
@@ -248,7 +248,7 @@ RedDB ships with a multi-provider AI layer. Every provider that exposes an OpenA
 
 ### Credential Configuration
 
-`POST /ai/credentials` stores API keys in the RedDB vault (the `__ai_credentials` KV collection). You can store keys by provider name and optional alias.
+`POST /ai/credentials` stores API keys in the RedDB vault (the `red_config` KV collection). You can store keys by provider name and optional alias.
 
 Store an API key:
 
@@ -284,9 +284,9 @@ curl -X POST http://127.0.0.1:8080/ai/credentials \
 When a request includes a `credential` alias, RedDB resolves the API key using the following chain. The first match wins.
 
 1. **Environment variable with alias**: `REDDB_{PROVIDER}_API_KEY_{ALIAS}` (e.g. `REDDB_OPENAI_API_KEY_PROD`)
-2. **RedDB vault**: KV key `{provider}/{alias}` in the `__ai_credentials` collection
+2. **RedDB vault**: KV key `{provider}/{alias}` in the `red_config` collection
 3. **Default environment variable**: `REDDB_{PROVIDER}_API_KEY` (e.g. `REDDB_GROQ_API_KEY`)
-4. **Default vault entry**: KV key `{provider}/default` in the `__ai_credentials` collection
+4. **Default vault entry**: KV key `{provider}/default` in the `red_config` collection
 
 ### Embeddings
 

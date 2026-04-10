@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub enum IndexKind {
     BTree,
     Hash,
+    Bitmap,
     VectorHnsw,
     VectorInverted,
     GraphAdjacency,
@@ -23,6 +24,7 @@ impl IndexKind {
         match self {
             Self::BTree => "btree",
             Self::Hash => "hash",
+            Self::Bitmap => "bitmap",
             Self::VectorHnsw => "vector.hnsw",
             Self::VectorInverted => "vector.inverted",
             Self::GraphAdjacency => "graph.adjacency",

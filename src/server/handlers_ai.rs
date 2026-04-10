@@ -1,6 +1,6 @@
 use super::*;
 
-const AI_CREDENTIALS_COLLECTION: &str = "__ai_credentials";
+const RED_CONFIG_COLLECTION: &str = "red_config";
 const DEFAULT_MAX_INPUTS: usize = 256;
 const DEFAULT_MAX_PROMPTS: usize = 256;
 
@@ -581,9 +581,9 @@ impl RedDBServer {
             let key_name = format!("{}/{}", provider.token(), alias);
             let _ = self
                 .entity_use_cases()
-                .delete_kv(AI_CREDENTIALS_COLLECTION, &key_name);
+                .delete_kv(RED_CONFIG_COLLECTION, &key_name);
             match self.entity_use_cases().create_kv(CreateKvInput {
-                collection: AI_CREDENTIALS_COLLECTION.to_string(),
+                collection: RED_CONFIG_COLLECTION.to_string(),
                 key: key_name.clone(),
                 value: Value::Text(api_key.clone()),
                 metadata: metadata.clone(),
@@ -598,9 +598,9 @@ impl RedDBServer {
             let base_key = format!("{}/{}/base_url", provider.token(), alias);
             let _ = self
                 .entity_use_cases()
-                .delete_kv(AI_CREDENTIALS_COLLECTION, &base_key);
+                .delete_kv(RED_CONFIG_COLLECTION, &base_key);
             match self.entity_use_cases().create_kv(CreateKvInput {
-                collection: AI_CREDENTIALS_COLLECTION.to_string(),
+                collection: RED_CONFIG_COLLECTION.to_string(),
                 key: base_key.clone(),
                 value: Value::Text(api_base.clone()),
                 metadata: Vec::new(),
@@ -643,9 +643,9 @@ impl RedDBServer {
         if is_default {
             let _ = self
                 .entity_use_cases()
-                .delete_kv(AI_CREDENTIALS_COLLECTION, "_default/provider");
+                .delete_kv(RED_CONFIG_COLLECTION, "_default/provider");
             let _ = self.entity_use_cases().create_kv(CreateKvInput {
-                collection: AI_CREDENTIALS_COLLECTION.to_string(),
+                collection: RED_CONFIG_COLLECTION.to_string(),
                 key: "_default/provider".to_string(),
                 value: Value::Text(provider.token().to_string()),
                 metadata: Vec::new(),
@@ -655,9 +655,9 @@ impl RedDBServer {
                 .unwrap_or_else(|| provider.default_prompt_model().to_string());
             let _ = self
                 .entity_use_cases()
-                .delete_kv(AI_CREDENTIALS_COLLECTION, "_default/model");
+                .delete_kv(RED_CONFIG_COLLECTION, "_default/model");
             let _ = self.entity_use_cases().create_kv(CreateKvInput {
-                collection: AI_CREDENTIALS_COLLECTION.to_string(),
+                collection: RED_CONFIG_COLLECTION.to_string(),
                 key: "_default/model".to_string(),
                 value: Value::Text(model.clone()),
                 metadata: Vec::new(),
@@ -928,7 +928,7 @@ impl RedDBServer {
         crate::ai::resolve_api_key(provider, credential_alias, |kv_key| {
             match self
                 .entity_use_cases()
-                .get_kv(AI_CREDENTIALS_COLLECTION, kv_key)
+                .get_kv(RED_CONFIG_COLLECTION, kv_key)
             {
                 Ok(Some((Value::Text(secret), _))) => Ok(Some(secret)),
                 Ok(_) => Ok(None),

@@ -830,6 +830,7 @@ fn index_kind_string(kind: IndexKind) -> String {
     match kind {
         IndexKind::BTree => "btree",
         IndexKind::Hash => "hash",
+        IndexKind::Bitmap => "bitmap",
         IndexKind::VectorHnsw => "vector.hnsw",
         IndexKind::VectorInverted => "vector.inverted",
         IndexKind::GraphAdjacency => "graph.adjacency",

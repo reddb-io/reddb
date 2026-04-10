@@ -36,6 +36,7 @@
 //! - GraphNode → Vector (node has embeddings)
 //! - Vector → TableRow (embedding source)
 
+pub mod bitmap_index;
 pub mod bloom_index;
 pub mod context_index;
 pub mod devx;
@@ -49,6 +50,7 @@ pub mod segment;
 pub mod store;
 pub mod tokenization;
 
+pub use bitmap_index::{BitmapColumnIndex, BitmapIndexManager, BitmapIndexStats};
 pub use bloom_index::{BloomFilterRegistry, BloomRegistryStats};
 pub use context_index::{ContextIndex, ContextIndexStats, ContextPosting, ContextSearchHit};
 pub use devx::{

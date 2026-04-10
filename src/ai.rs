@@ -848,7 +848,7 @@ pub fn parse_provider(name: &str) -> crate::RedDBResult<AiProvider> {
 
 /// Resolve the default AI provider. Checks:
 /// 1. `REDDB_AI_PROVIDER` env var
-/// 2. `__ai_credentials` KV key `_default/provider`
+/// 2. `red_config` KV key `_default/provider`
 /// 3. Falls back to OpenAI
 pub fn resolve_default_provider<F>(kv_getter: &F) -> AiProvider
 where
@@ -877,7 +877,7 @@ where
 
 /// Resolve the default AI model. Checks:
 /// 1. `REDDB_AI_MODEL` env var
-/// 2. `__ai_credentials` KV key `_default/model`
+/// 2. `red_config` KV key `_default/model`
 /// 3. Falls back to provider's default
 pub fn resolve_default_model<F>(provider: &AiProvider, kv_getter: &F) -> String
 where
@@ -913,7 +913,7 @@ pub fn resolve_defaults_from_runtime(
 ) -> (AiProvider, String) {
     use crate::application::ports::RuntimeEntityPort;
     let kv_getter = |key: &str| -> crate::RedDBResult<Option<String>> {
-        match runtime.get_kv("__ai_credentials", key)? {
+        match runtime.get_kv("red_config", key)? {
             Some((crate::storage::schema::Value::Text(s), _)) => Ok(Some(s)),
             _ => Ok(None),
         }
@@ -930,7 +930,7 @@ pub fn resolve_defaults_from_runtime_port<
     runtime: &P,
 ) -> (AiProvider, String) {
     let kv_getter = |key: &str| -> crate::RedDBResult<Option<String>> {
-        match runtime.get_kv("__ai_credentials", key)? {
+        match runtime.get_kv("red_config", key)? {
             Some((crate::storage::schema::Value::Text(s), _)) => Ok(Some(s)),
             _ => Ok(None),
         }
@@ -979,7 +979,7 @@ where
             }
         }
         return Err(crate::RedDBError::Query(format!(
-            "credential '{alias}' not found for {}. Set env {} or store in __ai_credentials",
+            "credential '{alias}' not found for {}. Set env {} or store in red_config",
             provider.token(),
             provider.alias_key_env_name(alias)
         )));
@@ -1039,7 +1039,7 @@ pub fn resolve_api_key_from_runtime(
 ) -> crate::RedDBResult<String> {
     use crate::application::ports::RuntimeEntityPort;
     resolve_api_key(provider, credential_alias, |kv_key| {
-        match runtime.get_kv("__ai_credentials", kv_key)? {
+        match runtime.get_kv("red_config", kv_key)? {
             Some((crate::storage::schema::Value::Text(secret), _)) => Ok(Some(secret)),
             Some(_) => Ok(None),
             None => Ok(None),
