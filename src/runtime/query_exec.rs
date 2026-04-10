@@ -66,12 +66,10 @@ pub(super) fn execute_runtime_canonical_table_node(
                 }
             }
 
-            // Try bloom filter optimization: extract key from equality predicates
-            let bloom_key = context
-                .query
-                .filter
-                .as_ref()
-                .and_then(extract_bloom_key_from_filter);
+            // Bloom filter hint is only safe for primary key / entity ID lookups.
+            // For arbitrary WHERE columns, bloom may incorrectly prune segments
+            // because only entity IDs and first-column values are indexed in bloom.
+            let bloom_key: Option<Vec<u8>> = None; // Disabled: use full scan for safety
 
             if let Some(ref key_bytes) = bloom_key {
                 let (records, _pruned) = scan_runtime_table_with_bloom_hint(
