@@ -83,6 +83,60 @@ g.V().hasLabel('user').has('active', true).values('name')
 FIND users who logged in this week
 ```
 
+## 7 data models, 1 engine
+
+Tables, documents, graphs, vectors, key-value, **time-series**, and **queues** -- all in one file.
+
+```sql
+-- Time-series with retention and compression
+CREATE TIMESERIES cpu_metrics RETENTION 90 d
+INSERT INTO cpu_metrics (metric, value, tags) VALUES ('cpu.idle', 95.2, {host: 'srv1'})
+
+-- Message queues with priority and consumer groups
+CREATE QUEUE tasks PRIORITY MAX_SIZE 10000
+QUEUE PUSH tasks {job: 'process', id: 123} PRIORITY 10
+QUEUE POP tasks
+```
+
+## Probabilistic data structures
+
+Built-in HyperLogLog, Count-Min Sketch, and Cuckoo Filter:
+
+```sql
+CREATE HLL visitors
+HLL ADD visitors 'user1' 'user2' 'user3'
+HLL COUNT visitors              -- ~3, using only 16KB of memory
+
+CREATE SKETCH clicks WIDTH 2000 DEPTH 7
+SKETCH ADD clicks 'signup_btn' 5
+SKETCH COUNT clicks 'signup_btn' -- ~5
+
+CREATE FILTER sessions CAPACITY 500000
+FILTER ADD sessions 'sess_abc'
+FILTER CHECK sessions 'sess_abc' -- true
+FILTER DELETE sessions 'sess_abc'
+```
+
+## Advanced indexes
+
+Hash, Bitmap, R-Tree, and Bloom filter -- the optimizer picks the right one:
+
+```sql
+CREATE INDEX idx_email ON users (email) USING HASH       -- O(1) exact match
+CREATE INDEX idx_status ON orders (status) USING BITMAP   -- instant COUNT/GROUP BY
+CREATE INDEX idx_loc ON sites (location) USING RTREE      -- geo queries
+
+SEARCH SPATIAL RADIUS 48.8566 2.3522 10.0 COLLECTION sites COLUMN location
+SEARCH SPATIAL NEAREST 48.8566 2.3522 K 5 COLLECTION sites COLUMN location
+```
+
+## JSON inline (no quotes needed)
+
+```sql
+INSERT INTO logs (data) VALUES ({level: 'info', msg: 'deploy complete', meta: {env: 'prod'}})
+QUEUE PUSH tasks {job: 'email', to: 'alice@co.com', template: 'welcome'}
+```
+
 ## Run anywhere
 
 The same engine runs embedded in your Rust binary, as an HTTP/gRPC server, or as an MCP tool server for AI agents.
