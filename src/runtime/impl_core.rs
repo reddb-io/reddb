@@ -38,60 +38,22 @@ impl RedDBRuntime {
 
         // Save system info to red_config on boot
         {
-            let rt = &runtime;
             let sys = SystemInfo::collect();
-            let store = rt.inner.db.store();
-            let kv = |k: &str, v: crate::storage::schema::Value| {
-                let _ = store.get_or_create_collection("red_config");
-                let _ = store.insert_auto(
-                    "red_config",
-                    crate::storage::UnifiedEntity::new(
-                        crate::storage::EntityId::new(0),
-                        crate::storage::EntityKind::TableRow {
-                            table: "red_config".to_string(),
-                            row_id: 0,
-                        },
-                        crate::storage::EntityData::Row(crate::storage::RowData {
-                            columns: Vec::new(),
-                            named: Some(
-                                [
-                                    (
-                                        "key".to_string(),
-                                        crate::storage::schema::Value::Text(k.to_string()),
-                                    ),
-                                    ("value".to_string(), v),
-                                ]
-                                .into_iter()
-                                .collect(),
-                            ),
-                        }),
-                    ),
-                );
-            };
-            kv("red.system.pid", Value::UnsignedInteger(sys.pid as u64));
-            kv(
-                "red.system.cpu_cores",
-                Value::UnsignedInteger(sys.cpu_cores as u64),
-            );
-            kv(
-                "red.system.total_memory_bytes",
-                Value::UnsignedInteger(sys.total_memory_bytes),
-            );
-            kv(
-                "red.system.available_memory_bytes",
-                Value::UnsignedInteger(sys.available_memory_bytes),
-            );
-            kv("red.system.os", Value::Text(sys.os));
-            kv("red.system.arch", Value::Text(sys.arch));
-            kv("red.system.hostname", Value::Text(sys.hostname));
-            kv(
-                "red.system.started_at",
-                Value::UnsignedInteger(
-                    SystemTime::now()
+            runtime.inner.db.store().set_config_tree(
+                "red.system",
+                &crate::serde_json::json!({
+                    "pid": sys.pid,
+                    "cpu_cores": sys.cpu_cores,
+                    "total_memory_bytes": sys.total_memory_bytes,
+                    "available_memory_bytes": sys.available_memory_bytes,
+                    "os": sys.os,
+                    "arch": sys.arch,
+                    "hostname": sys.hostname,
+                    "started_at": SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or_default()
-                        .as_millis() as u64,
-                ),
+                        .as_millis() as u64
+                }),
             );
         }
 

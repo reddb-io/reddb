@@ -49,6 +49,39 @@ impl UnifiedStore {
         &self.context_index
     }
 
+    /// Set multiple config KV pairs at once from a JSON tree.
+    /// Keys are flattened with dot-notation: `{"a":{"b":1}}` → `a.b = 1`.
+    pub fn set_config_tree(&self, prefix: &str, json: &crate::serde_json::Value) -> usize {
+        let _ = self.get_or_create_collection("red_config");
+        let mut pairs = Vec::new();
+        flatten_config_json(prefix, json, &mut pairs);
+        let mut saved = 0;
+        for (key, value) in pairs {
+            let entity = UnifiedEntity::new(
+                EntityId::new(0),
+                EntityKind::TableRow {
+                    table: "red_config".to_string(),
+                    row_id: 0,
+                },
+                EntityData::Row(RowData {
+                    columns: Vec::new(),
+                    named: Some(
+                        [
+                            ("key".to_string(), crate::storage::schema::Value::Text(key)),
+                            ("value".to_string(), value),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    ),
+                }),
+            );
+            if self.insert_auto("red_config", entity).is_ok() {
+                saved += 1;
+            }
+        }
+        saved
+    }
+
     /// List all collections
     pub fn list_collections(&self) -> Vec<String> {
         self.collections
@@ -533,5 +566,46 @@ impl UnifiedStore {
             manager.run_maintenance()?;
         }
         Ok(())
+    }
+}
+
+/// Flatten a JSON value into dot-notation key-value pairs for red_config.
+fn flatten_config_json(
+    prefix: &str,
+    value: &crate::serde_json::Value,
+    out: &mut Vec<(String, crate::storage::schema::Value)>,
+) {
+    use crate::storage::schema::Value;
+    match value {
+        crate::serde_json::Value::Object(map) => {
+            for (k, v) in map {
+                let key = if prefix.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{prefix}.{k}")
+                };
+                flatten_config_json(&key, v, out);
+            }
+        }
+        crate::serde_json::Value::String(s) => {
+            out.push((prefix.to_string(), Value::Text(s.clone())));
+        }
+        crate::serde_json::Value::Number(n) => {
+            if n.fract().abs() < f64::EPSILON {
+                out.push((prefix.to_string(), Value::UnsignedInteger(*n as u64)));
+            } else {
+                out.push((prefix.to_string(), Value::Float(*n)));
+            }
+        }
+        crate::serde_json::Value::Bool(b) => {
+            out.push((prefix.to_string(), Value::Boolean(*b)));
+        }
+        crate::serde_json::Value::Null => {
+            out.push((prefix.to_string(), Value::Null));
+        }
+        crate::serde_json::Value::Array(arr) => {
+            let json_str = crate::serde_json::to_string(value).unwrap_or_default();
+            out.push((prefix.to_string(), Value::Text(json_str)));
+        }
     }
 }

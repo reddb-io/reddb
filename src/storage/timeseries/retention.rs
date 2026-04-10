@@ -113,7 +113,7 @@ mod tests {
     #[test]
     fn test_retention_policy() {
         let policy = RetentionPolicy::from_days(30);
-        let now = 100_000_000_000_000u64; // some time in ns
+        let now = 5_000_000_000_000_000u64; // ~58 days in ns
         let old = now - 31 * 86_400_000_000_000; // 31 days ago
         let recent = now - 1_000_000_000; // 1 second ago
 
