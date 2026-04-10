@@ -194,7 +194,7 @@ fn infer_collection_index_kind(model: CollectionModel, index_name: &str) -> Inde
 
 fn estimate_index_entries(collection: &CollectionDescriptor, kind: IndexKind) -> usize {
     match kind {
-        IndexKind::BTree => collection.entities,
+        IndexKind::BTree | IndexKind::Hash => collection.entities,
         IndexKind::GraphAdjacency => collection.cross_refs.max(collection.entities),
         IndexKind::VectorHnsw | IndexKind::VectorInverted => collection.entities,
         IndexKind::FullText => collection.entities.saturating_mul(4),
@@ -206,6 +206,7 @@ fn estimate_index_entries(collection: &CollectionDescriptor, kind: IndexKind) ->
 fn estimate_index_memory(entries: usize, kind: IndexKind) -> u64 {
     let per_entry = match kind {
         IndexKind::BTree => 64,
+        IndexKind::Hash => 48,
         IndexKind::GraphAdjacency => 96,
         IndexKind::VectorHnsw => 256,
         IndexKind::VectorInverted => 128,
@@ -219,6 +220,7 @@ fn estimate_index_memory(entries: usize, kind: IndexKind) -> u64 {
 fn index_backend_name(kind: IndexKind) -> &'static str {
     match kind {
         IndexKind::BTree => "page-btree",
+        IndexKind::Hash => "hash-map",
         IndexKind::GraphAdjacency => "adjacency-map",
         IndexKind::VectorHnsw => "vector-hnsw",
         IndexKind::VectorInverted => "vector-ivf",

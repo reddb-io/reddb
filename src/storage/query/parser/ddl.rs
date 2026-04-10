@@ -67,10 +67,64 @@ impl<'a> Parser<'a> {
     pub fn parse_drop_table_query(&mut self) -> Result<QueryExpr, ParseError> {
         self.expect(Token::Drop)?;
         self.expect(Token::Table)?;
+        self.parse_drop_table_body()
+    }
 
-        let if_exists = self.match_if_exists()?;
+    /// Parse the body of CREATE TABLE after CREATE TABLE has been consumed
+    pub fn parse_create_table_body(&mut self) -> Result<QueryExpr, ParseError> {
+        let if_not_exists = self.match_if_not_exists()?;
         let name = self.expect_ident()?;
 
+        self.expect(Token::LParen)?;
+        let mut columns = Vec::new();
+        loop {
+            let col = self.parse_column_def()?;
+            columns.push(col);
+            if !self.consume(&Token::Comma)? {
+                break;
+            }
+        }
+        self.expect(Token::RParen)?;
+
+        let mut default_ttl_ms = None;
+        let mut context_index_fields = Vec::new();
+
+        while self.consume(&Token::With)? {
+            if self.consume_ident_ci("CONTEXT")? {
+                if !self.consume(&Token::Index)? {
+                    return Err(ParseError::expected(
+                        vec!["INDEX"],
+                        self.peek(),
+                        self.position(),
+                    ));
+                }
+                self.expect(Token::On)?;
+                self.expect(Token::LParen)?;
+                loop {
+                    context_index_fields.push(self.expect_ident()?);
+                    if !self.consume(&Token::Comma)? {
+                        break;
+                    }
+                }
+                self.expect(Token::RParen)?;
+            } else {
+                default_ttl_ms = self.parse_create_table_ttl_clause()?;
+            }
+        }
+
+        Ok(QueryExpr::CreateTable(CreateTableQuery {
+            name,
+            columns,
+            if_not_exists,
+            default_ttl_ms,
+            context_index_fields,
+        }))
+    }
+
+    /// Parse the body of DROP TABLE after DROP TABLE has been consumed
+    pub fn parse_drop_table_body(&mut self) -> Result<QueryExpr, ParseError> {
+        let if_exists = self.match_if_exists()?;
+        let name = self.expect_ident()?;
         Ok(QueryExpr::DropTable(DropTableQuery { name, if_exists }))
     }
 
@@ -315,7 +369,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Try to match IF NOT EXISTS sequence
-    fn match_if_not_exists(&mut self) -> Result<bool, ParseError> {
+    pub(super) fn match_if_not_exists(&mut self) -> Result<bool, ParseError> {
         if self.check(&Token::If) {
             self.advance()?;
             self.expect(Token::Not)?;
@@ -327,7 +381,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Try to match IF EXISTS sequence
-    fn match_if_exists(&mut self) -> Result<bool, ParseError> {
+    pub(super) fn match_if_exists(&mut self) -> Result<bool, ParseError> {
         if self.check(&Token::If) {
             self.advance()?;
             self.expect(Token::Exists)?;

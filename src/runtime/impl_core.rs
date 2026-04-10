@@ -241,6 +241,8 @@ impl RedDBRuntime {
             QueryExpr::SearchCommand(ref cmd) => self.execute_search_command(query, cmd),
             // ASK: RAG query with LLM synthesis
             QueryExpr::Ask(ref ask) => self.execute_ask(query, ask),
+            QueryExpr::CreateIndex(ref create_idx) => self.execute_create_index(query, create_idx),
+            QueryExpr::DropIndex(ref drop_idx) => self.execute_drop_index(query, drop_idx),
         }
     }
 }

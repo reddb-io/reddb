@@ -288,12 +288,15 @@ impl RedDBRuntime {
             } => {
                 // If text provided, generate embedding first (semantic search)
                 let search_vector = if let Some(query_text) = text {
-                    let provider =
-                        crate::ai::parse_provider(provider.as_deref().unwrap_or("openai"))?;
+                    let (default_provider, _) = crate::ai::resolve_defaults_from_runtime(self);
+                    let provider = match provider.as_deref() {
+                        Some(p) => crate::ai::parse_provider(p)?,
+                        None => default_provider,
+                    };
                     let api_key = crate::ai::resolve_api_key_from_runtime(&provider, None, self)?;
                     let model = std::env::var("REDDB_OPENAI_EMBEDDING_MODEL")
                         .ok()
-                        .unwrap_or_else(|| crate::ai::DEFAULT_OPENAI_EMBEDDING_MODEL.to_string());
+                        .unwrap_or_else(|| provider.default_embedding_model().to_string());
                     let response =
                         crate::ai::openai_embeddings(crate::ai::OpenAiEmbeddingRequest {
                             api_key,

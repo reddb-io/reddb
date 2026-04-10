@@ -41,6 +41,7 @@ pub mod context_index;
 pub mod devx;
 pub mod dsl;
 pub mod entity;
+pub mod hash_index;
 pub mod index;
 pub mod manager;
 pub mod metadata;
@@ -86,6 +87,9 @@ pub use devx::{
 pub use entity::{
     CrossRef, EdgeData, EmbeddingSlot, EntityData, EntityId, EntityKind, NodeData, RefType,
     RowData, SparseVector, UnifiedEntity, VectorData,
+};
+pub use hash_index::{
+    HashIndex, HashIndexConfig, HashIndexError, HashIndexManager, HashIndexStats,
 };
 pub use index::{
     AdjacencyEntry,

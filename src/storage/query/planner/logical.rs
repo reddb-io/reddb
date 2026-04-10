@@ -588,6 +588,8 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
         | QueryExpr::AlterTable(_)
         | QueryExpr::GraphCommand(_)
         | QueryExpr::SearchCommand(_)
+        | QueryExpr::CreateIndex(_)
+        | QueryExpr::DropIndex(_)
         | QueryExpr::Ask(_) => {
             let mut details = BTreeMap::new();
             details.insert("type".to_string(), "dml_ddl".to_string());

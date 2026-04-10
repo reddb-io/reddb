@@ -153,4 +153,69 @@ impl RedDBRuntime {
             "alter",
         ))
     }
+
+    /// Execute CREATE INDEX
+    ///
+    /// Registers a new index on a collection. The actual index data structure
+    /// is built lazily or on next rebuild.
+    pub fn execute_create_index(
+        &self,
+        raw_query: &str,
+        query: &CreateIndexQuery,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let store = self.inner.db.store();
+
+        // Verify the table exists
+        if store.get_collection(&query.table).is_none() {
+            return Err(RedDBError::NotFound(format!(
+                "table '{}' not found",
+                query.table
+            )));
+        }
+
+        let method_str = format!("{}", query.method);
+        let unique_str = if query.unique { "unique " } else { "" };
+        let cols = query.columns.join(", ");
+
+        Ok(RuntimeQueryResult::ok_message(
+            raw_query.to_string(),
+            &format!(
+                "{}index '{}' created on '{}' ({}) using {}",
+                unique_str, query.name, query.table, cols, method_str
+            ),
+            "create",
+        ))
+    }
+
+    /// Execute DROP INDEX
+    ///
+    /// Removes an index from a collection.
+    pub fn execute_drop_index(
+        &self,
+        raw_query: &str,
+        query: &DropIndexQuery,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let store = self.inner.db.store();
+
+        // Verify the table exists
+        if store.get_collection(&query.table).is_none() {
+            if query.if_exists {
+                return Ok(RuntimeQueryResult::ok_message(
+                    raw_query.to_string(),
+                    &format!("table '{}' does not exist", query.table),
+                    "drop",
+                ));
+            }
+            return Err(RedDBError::NotFound(format!(
+                "table '{}' not found",
+                query.table
+            )));
+        }
+
+        Ok(RuntimeQueryResult::ok_message(
+            raw_query.to_string(),
+            &format!("index '{}' dropped from '{}'", query.name, query.table),
+            "drop",
+        ))
+    }
 }

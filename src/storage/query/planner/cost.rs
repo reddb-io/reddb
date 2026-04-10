@@ -181,6 +181,8 @@ impl CostEstimator {
             | QueryExpr::AlterTable(_)
             | QueryExpr::GraphCommand(_)
             | QueryExpr::SearchCommand(_)
+            | QueryExpr::CreateIndex(_)
+            | QueryExpr::DropIndex(_)
             | QueryExpr::Ask(_) => PlanCost::new(1.0, 1.0, 0.0),
         }
     }
@@ -203,6 +205,8 @@ impl CostEstimator {
             | QueryExpr::AlterTable(_)
             | QueryExpr::GraphCommand(_)
             | QueryExpr::SearchCommand(_)
+            | QueryExpr::CreateIndex(_)
+            | QueryExpr::DropIndex(_)
             | QueryExpr::Ask(_) => CardinalityEstimate::new(1.0, 1.0),
         }
     }

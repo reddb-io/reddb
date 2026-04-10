@@ -369,6 +369,8 @@ pub(crate) fn join_expr_exposes_field_table(expr: &QueryExpr, table: &str) -> bo
         | QueryExpr::AlterTable(_)
         | QueryExpr::GraphCommand(_)
         | QueryExpr::SearchCommand(_)
+        | QueryExpr::CreateIndex(_)
+        | QueryExpr::DropIndex(_)
         | QueryExpr::Ask(_) => false,
     }
 }
@@ -643,6 +645,8 @@ pub(crate) fn query_expr_kind(expr: &QueryExpr) -> &'static str {
         QueryExpr::AlterTable(_) => "alter_table",
         QueryExpr::GraphCommand(_) => "graph_command",
         QueryExpr::SearchCommand(_) => "search_command",
+        QueryExpr::CreateIndex(_) => "create_index",
+        QueryExpr::DropIndex(_) => "drop_index",
         QueryExpr::Ask(_) => "ask",
     }
 }

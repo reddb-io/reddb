@@ -189,6 +189,8 @@ impl RewriteRule for NormalizeRule {
             | QueryExpr::AlterTable(_)
             | QueryExpr::GraphCommand(_)
             | QueryExpr::SearchCommand(_)
+            | QueryExpr::CreateIndex(_)
+            | QueryExpr::DropIndex(_)
             | QueryExpr::Ask(_)) => other,
         }
     }
@@ -250,6 +252,8 @@ impl RewriteRule for SimplifyFiltersRule {
             | QueryExpr::AlterTable(_)
             | QueryExpr::GraphCommand(_)
             | QueryExpr::SearchCommand(_)
+            | QueryExpr::CreateIndex(_)
+            | QueryExpr::DropIndex(_)
             | QueryExpr::Ask(_)) => other,
         }
     }
@@ -271,6 +275,8 @@ impl RewriteRule for SimplifyFiltersRule {
             | QueryExpr::AlterTable(_)
             | QueryExpr::GraphCommand(_)
             | QueryExpr::SearchCommand(_)
+            | QueryExpr::CreateIndex(_)
+            | QueryExpr::DropIndex(_)
             | QueryExpr::Ask(_) => false,
         }
     }

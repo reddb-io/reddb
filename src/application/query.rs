@@ -112,7 +112,9 @@ pub struct QueryUseCases<'a, P: ?Sized> {
     runtime: &'a P,
 }
 
-impl<'a, P: RuntimeQueryPort + ?Sized> QueryUseCases<'a, P> {
+impl<'a, P: RuntimeQueryPort + crate::application::ports::RuntimeEntityPort + ?Sized>
+    QueryUseCases<'a, P>
+{
     pub fn new(runtime: &'a P) -> Self {
         Self { runtime }
     }
@@ -139,12 +141,19 @@ impl<'a, P: RuntimeQueryPort + ?Sized> QueryUseCases<'a, P> {
         // Semantic search: if text provided, generate embedding on-the-fly
         if let Some(text) = input.text.take() {
             if input.vector.is_empty() {
-                let provider =
-                    crate::ai::parse_provider(input.provider.as_deref().unwrap_or("openai"))?;
+                let provider = match input.provider.as_deref() {
+                    Some(p) => crate::ai::parse_provider(p)?,
+                    None => {
+                        let name = std::env::var("REDDB_AI_PROVIDER")
+                            .ok()
+                            .unwrap_or_else(|| "openai".to_string());
+                        crate::ai::parse_provider(&name)?
+                    }
+                };
                 let api_key = self.runtime.resolve_semantic_api_key(&provider)?;
                 let model = std::env::var("REDDB_OPENAI_EMBEDDING_MODEL")
                     .ok()
-                    .unwrap_or_else(|| crate::ai::DEFAULT_OPENAI_EMBEDDING_MODEL.to_string());
+                    .unwrap_or_else(|| provider.default_embedding_model().to_string());
                 let response = crate::ai::openai_embeddings(crate::ai::OpenAiEmbeddingRequest {
                     api_key,
                     model,

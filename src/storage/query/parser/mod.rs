@@ -44,6 +44,7 @@ mod graph;
 mod graph_commands;
 mod helpers;
 mod hybrid;
+mod index_ddl;
 mod join;
 mod path;
 mod search_commands;
@@ -245,8 +246,38 @@ impl<'a> Parser<'a> {
             Token::Insert => self.parse_insert_query(),
             Token::Update => self.parse_update_query(),
             Token::Delete => self.parse_delete_query(),
-            Token::Create => self.parse_create_table_query(),
-            Token::Drop => self.parse_drop_table_query(),
+            Token::Create => {
+                let pos = self.position();
+                self.advance()?; // consume CREATE
+                if self.check(&Token::Index) || self.check(&Token::Unique) {
+                    self.parse_create_index_query()
+                } else if self.check(&Token::Table) {
+                    self.expect(Token::Table)?;
+                    self.parse_create_table_body()
+                } else {
+                    Err(ParseError::expected(
+                        vec!["TABLE", "INDEX", "UNIQUE"],
+                        self.peek(),
+                        pos,
+                    ))
+                }
+            }
+            Token::Drop => {
+                let pos = self.position();
+                self.advance()?; // consume DROP
+                if self.check(&Token::Index) {
+                    self.parse_drop_index_query()
+                } else if self.check(&Token::Table) {
+                    self.expect(Token::Table)?;
+                    self.parse_drop_table_body()
+                } else {
+                    Err(ParseError::expected(
+                        vec!["TABLE", "INDEX"],
+                        self.peek(),
+                        pos,
+                    ))
+                }
+            }
             Token::Alter => self.parse_alter_table_query(),
             Token::Graph => self.parse_graph_command(),
             Token::Search => self.parse_search_command(),

@@ -1096,14 +1096,14 @@ impl RedDBRuntime {
 
         let full_prompt = format!("{system_prompt}\n\nQuestion: {}", ask.question);
 
-        // Step 3: Call LLM
-        let provider = parse_provider(ask.provider.as_deref().unwrap_or("openai"))?;
+        // Step 3: Call LLM — use configured defaults if no provider/model specified
+        let (default_provider, default_model) = crate::ai::resolve_defaults_from_runtime(self);
+        let provider = match &ask.provider {
+            Some(p) => parse_provider(p)?,
+            None => default_provider,
+        };
         let api_key = resolve_api_key_from_runtime(&provider, None, self)?;
-        let model = ask.model.clone().unwrap_or_else(|| {
-            std::env::var(provider.prompt_model_env_name())
-                .ok()
-                .unwrap_or_else(|| provider.default_prompt_model().to_string())
-        });
+        let model = ask.model.clone().unwrap_or(default_model);
         let api_base = provider.resolve_api_base();
 
         let response = match provider {

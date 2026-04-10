@@ -846,6 +846,100 @@ pub fn parse_provider(name: &str) -> crate::RedDBResult<AiProvider> {
     }
 }
 
+/// Resolve the default AI provider. Checks:
+/// 1. `REDDB_AI_PROVIDER` env var
+/// 2. `__ai_credentials` KV key `_default/provider`
+/// 3. Falls back to OpenAI
+pub fn resolve_default_provider<F>(kv_getter: &F) -> AiProvider
+where
+    F: Fn(&str) -> crate::RedDBResult<Option<String>>,
+{
+    // 1. Env var
+    if let Ok(value) = std::env::var("REDDB_AI_PROVIDER") {
+        let value = value.trim().to_string();
+        if !value.is_empty() {
+            if let Ok(provider) = parse_provider(&value) {
+                return provider;
+            }
+        }
+    }
+    // 2. KV store
+    if let Ok(Some(value)) = kv_getter("_default/provider") {
+        let value = value.trim().to_string();
+        if !value.is_empty() {
+            if let Ok(provider) = parse_provider(&value) {
+                return provider;
+            }
+        }
+    }
+    AiProvider::OpenAi
+}
+
+/// Resolve the default AI model. Checks:
+/// 1. `REDDB_AI_MODEL` env var
+/// 2. `__ai_credentials` KV key `_default/model`
+/// 3. Falls back to provider's default
+pub fn resolve_default_model<F>(provider: &AiProvider, kv_getter: &F) -> String
+where
+    F: Fn(&str) -> crate::RedDBResult<Option<String>>,
+{
+    // 1. Env var
+    if let Ok(value) = std::env::var("REDDB_AI_MODEL") {
+        let value = value.trim().to_string();
+        if !value.is_empty() {
+            return value;
+        }
+    }
+    // 2. Provider-specific env var
+    if let Ok(value) = std::env::var(provider.prompt_model_env_name()) {
+        let value = value.trim().to_string();
+        if !value.is_empty() {
+            return value;
+        }
+    }
+    // 3. KV store
+    if let Ok(Some(value)) = kv_getter("_default/model") {
+        let value = value.trim().to_string();
+        if !value.is_empty() {
+            return value;
+        }
+    }
+    provider.default_prompt_model().to_string()
+}
+
+/// Resolve default provider + model from runtime KV store.
+pub fn resolve_defaults_from_runtime(
+    runtime: &crate::runtime::RedDBRuntime,
+) -> (AiProvider, String) {
+    use crate::application::ports::RuntimeEntityPort;
+    let kv_getter = |key: &str| -> crate::RedDBResult<Option<String>> {
+        match runtime.get_kv("__ai_credentials", key)? {
+            Some((crate::storage::schema::Value::Text(s), _)) => Ok(Some(s)),
+            _ => Ok(None),
+        }
+    };
+    let provider = resolve_default_provider(&kv_getter);
+    let model = resolve_default_model(&provider, &kv_getter);
+    (provider, model)
+}
+
+/// Resolve default provider + model via RuntimeEntityPort trait (for use in QueryUseCases).
+pub fn resolve_defaults_from_runtime_port<
+    P: crate::application::ports::RuntimeEntityPort + ?Sized,
+>(
+    runtime: &P,
+) -> (AiProvider, String) {
+    let kv_getter = |key: &str| -> crate::RedDBResult<Option<String>> {
+        match runtime.get_kv("__ai_credentials", key)? {
+            Some((crate::storage::schema::Value::Text(s), _)) => Ok(Some(s)),
+            _ => Ok(None),
+        }
+    };
+    let provider = resolve_default_provider(&kv_getter);
+    let model = resolve_default_model(&provider, &kv_getter);
+    (provider, model)
+}
+
 /// Resolve an API key for a provider. Uses the chain:
 /// 1. Environment variable with alias: `REDDB_OPENAI_API_KEY_{ALIAS}`
 /// 2. KV store lookup via `kv_getter` closure

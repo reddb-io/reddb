@@ -635,6 +635,38 @@ impl RedDBServer {
             ),
         );
 
+        // If "default": true, save this provider+model as the global default
+        let is_default = payload
+            .get("default")
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(false);
+        if is_default {
+            let _ = self
+                .entity_use_cases()
+                .delete_kv(AI_CREDENTIALS_COLLECTION, "_default/provider");
+            let _ = self.entity_use_cases().create_kv(CreateKvInput {
+                collection: AI_CREDENTIALS_COLLECTION.to_string(),
+                key: "_default/provider".to_string(),
+                value: Value::Text(provider.token().to_string()),
+                metadata: Vec::new(),
+            });
+
+            let model = json_string_field(&payload, "model")
+                .unwrap_or_else(|| provider.default_prompt_model().to_string());
+            let _ = self
+                .entity_use_cases()
+                .delete_kv(AI_CREDENTIALS_COLLECTION, "_default/model");
+            let _ = self.entity_use_cases().create_kv(CreateKvInput {
+                collection: AI_CREDENTIALS_COLLECTION.to_string(),
+                key: "_default/model".to_string(),
+                value: Value::Text(model.clone()),
+                metadata: Vec::new(),
+            });
+
+            object.insert("is_default".to_string(), JsonValue::Bool(true));
+            object.insert("default_model".to_string(), JsonValue::String(model));
+        }
+
         json_response(200, JsonValue::Object(object))
     }
 

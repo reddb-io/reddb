@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum IndexKind {
     BTree,
+    Hash,
     VectorHnsw,
     VectorInverted,
     GraphAdjacency,
@@ -21,6 +22,7 @@ impl IndexKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::BTree => "btree",
+            Self::Hash => "hash",
             Self::VectorHnsw => "vector.hnsw",
             Self::VectorInverted => "vector.inverted",
             Self::GraphAdjacency => "graph.adjacency",
