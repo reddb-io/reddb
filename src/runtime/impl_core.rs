@@ -36,6 +36,9 @@ impl RedDBRuntime {
                 index_store: super::index_store::IndexStore::new(),
                 cdc: crate::replication::cdc::CdcBuffer::new(100_000),
                 backup_scheduler: crate::replication::scheduler::BackupScheduler::new(3600),
+                query_cache: Mutex::new(crate::storage::query::planner::cache::PlanCache::new(
+                    1000,
+                )),
             }),
         };
 

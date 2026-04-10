@@ -543,6 +543,7 @@ struct RuntimeInner {
     index_store: index_store::IndexStore,
     cdc: crate::replication::cdc::CdcBuffer,
     backup_scheduler: crate::replication::scheduler::BackupScheduler,
+    query_cache: Mutex<crate::storage::query::planner::cache::PlanCache>,
 }
 
 #[derive(Clone)]
