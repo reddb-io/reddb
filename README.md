@@ -328,6 +328,32 @@ curl -X PUT http://127.0.0.1:8080/collections/config/kvs/theme \
 curl -X DELETE http://127.0.0.1:8080/collections/config/kvs/theme
 ```
 
+### AI and Multi-Provider LLM
+
+RedDB includes a built-in AI layer that routes to any OpenAI-compatible provider. You can generate embeddings, run prompts, or ask natural-language questions using providers like OpenAI, Anthropic, Groq, Ollama, Together, OpenRouter, Venice, DeepSeek, HuggingFace, or a custom URL.
+
+Use the `ASK` command from SQL or the `/ai/ask` HTTP endpoint:
+
+```sql
+-- Use any provider
+ASK 'what happened?' USING groq MODEL 'llama-3.3-70b-versatile'
+ASK 'summarize' USING ollama MODEL 'llama3'
+```
+
+Configure credentials through environment variables, the vault endpoint, or both:
+
+```bash
+# Environment variable
+export REDDB_GROQ_API_KEY=gsk_xxx
+
+# Or vault
+curl -X POST http://127.0.0.1:8080/ai/credentials \
+  -H 'content-type: application/json' \
+  -d '{"provider":"groq","api_key":"gsk_xxx"}'
+```
+
+Credential resolution follows a chain: alias env var, vault alias, default env var, vault default. See the [HTTP AI docs](docs/api/http.md#ai) for the full provider table and endpoint reference.
+
 ## Documentation
 
 - Docs home: [docs/README.md](docs/README.md)

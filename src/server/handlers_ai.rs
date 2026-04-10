@@ -556,33 +556,59 @@ impl RedDBServer {
             return json_error(400, "field 'alias' cannot be empty");
         }
 
-        let api_key = match json_string_field(&payload, "api_key") {
-            Some(value) if !value.trim().is_empty() => value.trim().to_string(),
-            _ => return json_error(400, "field 'api_key' is required and cannot be empty"),
-        };
+        let api_key = json_string_field(&payload, "api_key")
+            .or_else(|| json_string_field(&payload, "key"))
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+        let api_base = json_string_field(&payload, "api_base")
+            .or_else(|| json_string_field(&payload, "base_url"))
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+
+        if api_key.is_none() && api_base.is_none() {
+            return json_error(400, "at least 'api_key' or 'api_base' must be provided");
+        }
+
         let metadata = match parse_metadata_entries(payload.get("metadata")) {
             Ok(value) => value,
             Err(err) => return json_error(400, err),
         };
 
-        let key_name = format!("{}/{}", provider.token(), alias);
+        let mut saved_keys = Vec::new();
 
-        if let Err(err) = self
-            .entity_use_cases()
-            .delete_kv(AI_CREDENTIALS_COLLECTION, &key_name)
-        {
-            return json_error(400, format!("failed to remove previous credential: {err}"));
+        // Save API key
+        if let Some(api_key) = &api_key {
+            let key_name = format!("{}/{}", provider.token(), alias);
+            let _ = self
+                .entity_use_cases()
+                .delete_kv(AI_CREDENTIALS_COLLECTION, &key_name);
+            match self.entity_use_cases().create_kv(CreateKvInput {
+                collection: AI_CREDENTIALS_COLLECTION.to_string(),
+                key: key_name.clone(),
+                value: Value::Text(api_key.clone()),
+                metadata: metadata.clone(),
+            }) {
+                Ok(output) => saved_keys.push((key_name, output.id.raw())),
+                Err(err) => return json_error(400, format!("failed to store credential: {err}")),
+            }
         }
 
-        let output = match self.entity_use_cases().create_kv(CreateKvInput {
-            collection: AI_CREDENTIALS_COLLECTION.to_string(),
-            key: key_name.clone(),
-            value: Value::Text(api_key),
-            metadata: metadata.clone(),
-        }) {
-            Ok(output) => output,
-            Err(err) => return json_error(400, format!("failed to store credential: {err}")),
-        };
+        // Save API base URL
+        if let Some(api_base) = &api_base {
+            let base_key = format!("{}/{}/base_url", provider.token(), alias);
+            let _ = self
+                .entity_use_cases()
+                .delete_kv(AI_CREDENTIALS_COLLECTION, &base_key);
+            match self.entity_use_cases().create_kv(CreateKvInput {
+                collection: AI_CREDENTIALS_COLLECTION.to_string(),
+                key: base_key.clone(),
+                value: Value::Text(api_base.clone()),
+                metadata: Vec::new(),
+            }) {
+                Ok(output) => saved_keys.push((base_key, output.id.raw())),
+                Err(err) => return json_error(400, format!("failed to store base URL: {err}")),
+            }
+        }
 
         let mut object = Map::new();
         object.insert("ok".to_string(), JsonValue::Bool(true));
@@ -591,11 +617,22 @@ impl RedDBServer {
             JsonValue::String(provider.token().to_string()),
         );
         object.insert("alias".to_string(), JsonValue::String(alias.to_string()));
-        object.insert("key".to_string(), JsonValue::String(key_name));
-        object.insert("id".to_string(), JsonValue::Number(output.id.raw() as f64));
+        if let Some(ref base) = api_base {
+            object.insert("api_base".to_string(), JsonValue::String(base.clone()));
+        }
         object.insert(
-            "metadata_count".to_string(),
-            JsonValue::Number(metadata.len() as f64),
+            "saved".to_string(),
+            JsonValue::Array(
+                saved_keys
+                    .iter()
+                    .map(|(k, id)| {
+                        let mut o = Map::new();
+                        o.insert("key".to_string(), JsonValue::String(k.clone()));
+                        o.insert("id".to_string(), JsonValue::Number(*id as f64));
+                        JsonValue::Object(o)
+                    })
+                    .collect(),
+            ),
         );
 
         json_response(200, JsonValue::Object(object))

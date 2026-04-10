@@ -19,6 +19,27 @@ SEARCH SIMILAR [0.12, 0.91, 0.44] IN embeddings K 5 MIN_SCORE 0.7
 | `K n` | No | Number of results (default 10) |
 | `MIN_SCORE f` | No | Minimum similarity threshold |
 
+### Semantic Search (Text-Based Similarity)
+
+Instead of providing a raw vector, you can pass a text string. RedDB generates the embedding automatically and runs the similarity search against the target collection.
+
+```sql
+-- Search by text (embedding generated automatically)
+SEARCH SIMILAR TEXT 'suspicious login attempt' COLLECTION logs LIMIT 10
+SEARCH SIMILAR TEXT 'CVE in OpenSSH' COLLECTION cves LIMIT 5 USING openai
+
+-- Specify provider
+SEARCH SIMILAR TEXT 'anomaly detected' COLLECTION events USING groq
+SEARCH SIMILAR TEXT 'network scan' COLLECTION logs USING ollama
+```
+
+| Parameter | Required | Description |
+|:----------|:---------|:------------|
+| `TEXT 'query'` | Yes | Natural-language query to embed |
+| `COLLECTION col` | Yes | Collection to search |
+| `LIMIT n` | No | Number of results (default 10) |
+| `USING provider` | No | Embedding provider (`openai`, `groq`, `ollama`, `anthropic`) |
+
 ## SEARCH TEXT
 
 Full-text search across collections:
@@ -138,6 +159,27 @@ Results are grouped by structure type. The response includes a `connections` lis
   }
 }
 ```
+
+## ASK
+
+Ask natural-language questions against your data. RedDB retrieves relevant context from all collections and generates an answer using the configured LLM provider.
+
+```sql
+ASK 'what happened on host 10.0.0.1?' USING groq
+ASK 'summarize all vulnerabilities' USING anthropic MODEL 'claude-sonnet-4-20250514'
+ASK 'list all users with admin access' USING ollama MODEL 'llama3'
+```
+
+### Parameters
+
+| Parameter | Required | Description |
+|:----------|:---------|:------------|
+| `'question'` | Yes | Natural-language question |
+| `USING provider` | No | LLM provider (`openai`, `groq`, `ollama`, `anthropic`) |
+| `MODEL 'name'` | No | Specific model to use (provider-dependent) |
+
+> [!TIP]
+> `ASK` performs a context search behind the scenes, so it benefits from the same indexes and graph traversals used by `SEARCH CONTEXT`.
 
 ## Via HTTP
 

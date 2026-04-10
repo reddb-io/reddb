@@ -232,9 +232,12 @@ grpcurl -plaintext \
 
 | RPC | Request | Response | Description |
 |:----|:--------|:---------|:------------|
+| `Ask` | `JsonPayloadRequest` | `PayloadReply` | RAG query: search context + LLM answer |
 | `Embeddings` | `JsonPayloadRequest` | `PayloadReply` | Generate AI embeddings |
 | `AiPrompt` | `JsonPayloadRequest` | `PayloadReply` | Execute AI prompt |
-| `AiCredentials` | `JsonPayloadRequest` | `PayloadReply` | Configure AI credentials |
+| `AiCredentials` | `JsonPayloadRequest` | `PayloadReply` | Configure AI provider credentials and base URLs |
+
+All AI RPCs accept a `provider` field: `openai`, `anthropic`, `groq`, `openrouter`, `together`, `venice`, `deepseek`, `ollama`, `huggingface`, `local`, or a custom URL.
 
 ### Serverless
 

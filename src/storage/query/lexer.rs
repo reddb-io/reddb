@@ -115,6 +115,7 @@ pub enum Token {
     Returning,
     Cascade,
     Rename,
+    Using,
 
     // Entity type keywords
     Node,

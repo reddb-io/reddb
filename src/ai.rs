@@ -766,10 +766,36 @@ impl AiProvider {
     }
 
     pub fn resolve_api_base(&self) -> String {
-        std::env::var(self.api_base_env_name())
-            .ok()
-            .filter(|v| !v.trim().is_empty())
-            .unwrap_or_else(|| self.default_api_base().to_string())
+        if let Ok(value) = std::env::var(self.api_base_env_name()) {
+            let value = value.trim().to_string();
+            if !value.is_empty() {
+                return value;
+            }
+        }
+        self.default_api_base().to_string()
+    }
+
+    /// Resolve API base URL checking KV store too (for custom base_url config).
+    pub fn resolve_api_base_with_kv<F>(&self, alias: &str, kv_getter: &F) -> String
+    where
+        F: Fn(&str) -> crate::RedDBResult<Option<String>>,
+    {
+        // 1. Env var
+        if let Ok(value) = std::env::var(self.api_base_env_name()) {
+            let value = value.trim().to_string();
+            if !value.is_empty() {
+                return value;
+            }
+        }
+        // 2. KV store: {provider}/{alias}/base_url
+        let kv_key = format!("{}/{alias}/base_url", self.token());
+        if let Ok(Some(value)) = kv_getter(&kv_key) {
+            let value = value.trim().to_string();
+            if !value.is_empty() {
+                return value;
+            }
+        }
+        self.default_api_base().to_string()
     }
 
     /// Whether this provider uses the OpenAI-compatible API format.

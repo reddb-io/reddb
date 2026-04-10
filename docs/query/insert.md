@@ -131,7 +131,7 @@ You can attach expiration and metadata to inserted entities using `WITH` clauses
 ### Syntax
 
 ```sql
-INSERT INTO table_name (columns) VALUES (values) [WITH TTL duration] [WITH EXPIRES AT timestamp] [WITH METADATA (key = 'value', ...)]
+INSERT INTO table_name (columns) VALUES (values) [WITH TTL duration] [WITH EXPIRES AT timestamp] [WITH METADATA (key = 'value', ...)] [WITH AUTO EMBED (fields) USING provider]
 ```
 
 ### WITH TTL
@@ -165,6 +165,34 @@ You can chain multiple `WITH` clauses on a single statement:
 
 ```sql
 INSERT INTO sessions (token) VALUES ('abc') WITH TTL 1 h WITH METADATA (source = 'mobile')
+```
+
+### WITH AUTO EMBED
+
+Automatically generates a vector embedding for one or more text fields at insert time. RedDB sends the field value to the configured provider, stores the resulting vector alongside the entity, and makes it available for similarity search.
+
+```sql
+-- Auto-embed with different providers
+INSERT INTO articles (title, body) VALUES ('AI', 'Long text...')
+  WITH AUTO EMBED (body) USING openai
+
+INSERT INTO docs (content) VALUES ('Security report...')
+  WITH AUTO EMBED (content) USING ollama MODEL 'nomic-embed-text'
+```
+
+| Parameter | Required | Description |
+|:----------|:---------|:------------|
+| `(field, ...)` | Yes | Fields whose values are embedded |
+| `USING provider` | No | Embedding provider (`openai`, `groq`, `ollama`, `anthropic`) |
+| `MODEL 'name'` | No | Specific embedding model (provider-dependent) |
+
+You can combine `WITH AUTO EMBED` with other `WITH` clauses:
+
+```sql
+INSERT INTO logs (message) VALUES ('Unusual traffic spike')
+  WITH AUTO EMBED (message) USING openai
+  WITH TTL 30 d
+  WITH METADATA (severity = 'high')
 ```
 
 > [!TIP]

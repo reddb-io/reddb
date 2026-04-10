@@ -39,6 +39,49 @@ pub enum QueryExpr {
     SearchCommand(SearchCommand),
     /// ASK 'question' — RAG query with LLM synthesis
     Ask(AskQuery),
+    /// CREATE INDEX name ON table (columns) USING type
+    CreateIndex(CreateIndexQuery),
+    /// DROP INDEX name ON table
+    DropIndex(DropIndexQuery),
+}
+
+/// Index type for CREATE INDEX ... USING <type>
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexMethod {
+    BTree,
+    Hash,
+    Bitmap,
+    RTree,
+}
+
+impl fmt::Display for IndexMethod {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BTree => write!(f, "BTREE"),
+            Self::Hash => write!(f, "HASH"),
+            Self::Bitmap => write!(f, "BITMAP"),
+            Self::RTree => write!(f, "RTREE"),
+        }
+    }
+}
+
+/// CREATE INDEX [UNIQUE] [IF NOT EXISTS] name ON table (col1, col2, ...) [USING method]
+#[derive(Debug, Clone)]
+pub struct CreateIndexQuery {
+    pub name: String,
+    pub table: String,
+    pub columns: Vec<String>,
+    pub method: IndexMethod,
+    pub unique: bool,
+    pub if_not_exists: bool,
+}
+
+/// DROP INDEX [IF EXISTS] name ON table
+#[derive(Debug, Clone)]
+pub struct DropIndexQuery {
+    pub name: String,
+    pub table: String,
+    pub if_exists: bool,
 }
 
 /// ASK 'question' [USING provider] [MODEL 'model'] [DEPTH n] [LIMIT n] [COLLECTION col]

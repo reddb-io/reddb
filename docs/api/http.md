@@ -223,9 +223,72 @@ The response groups results by structure type:
 
 | Method | Path | Description |
 |:-------|:-----|:------------|
-| `POST` | `/ai/embeddings` | Generate embeddings via OpenAI (single, batch, query-row, query-result) |
-| `POST` | `/ai/prompt` | Execute prompts via OpenAI or Anthropic (single, batch, query-row, query-result) |
+| `POST` | `/ai/embeddings` | Generate embeddings (single, batch, query-row, query-result) |
+| `POST` | `/ai/prompt` | Execute prompts (single, batch, query-row, query-result) |
+| `POST` | `/ai/ask` | One-shot question against the database using any provider |
 | `POST` | `/ai/credentials` | Store provider API keys by alias in KV (`__ai_credentials`) |
+
+### Supported Providers
+
+RedDB ships with a multi-provider AI layer. Every provider that exposes an OpenAI-compatible API works out of the box. Set the `provider` field on any `/ai/*` request to route to a specific backend.
+
+| Provider | Token | API Base | Env Key | Embedding | Prompt |
+|:---------|:------|:---------|:--------|:----------|:-------|
+| OpenAI | `openai` | `api.openai.com/v1` | `REDDB_OPENAI_API_KEY` | yes | yes |
+| Anthropic | `anthropic` | `api.anthropic.com/v1` | `REDDB_ANTHROPIC_API_KEY` | no | yes |
+| Groq | `groq` | `api.groq.com/openai/v1` | `REDDB_GROQ_API_KEY` | yes | yes |
+| OpenRouter | `openrouter` | `openrouter.ai/api/v1` | `REDDB_OPENROUTER_API_KEY` | yes | yes |
+| Together | `together` | `api.together.xyz/v1` | `REDDB_TOGETHER_API_KEY` | yes | yes |
+| Venice | `venice` | `api.venice.ai/api/v1` | `REDDB_VENICE_API_KEY` | yes | yes |
+| DeepSeek | `deepseek` | `api.deepseek.com/v1` | `REDDB_DEEPSEEK_API_KEY` | yes | yes |
+| Ollama | `ollama` | `localhost:11434/v1` | *(none)* | yes | yes |
+| HuggingFace | `huggingface` | `api-inference.huggingface.co` | `REDDB_HF_API_KEY` | yes | yes |
+| Local | `local` | *(embedded)* | *(none)* | stub | stub |
+| Custom URL | *(url)* | user-defined | `REDDB_CUSTOM_API_KEY` | yes | yes |
+
+### Credential Configuration
+
+`POST /ai/credentials` stores API keys in the RedDB vault (the `__ai_credentials` KV collection). You can store keys by provider name and optional alias.
+
+Store an API key:
+
+```bash
+curl -X POST http://127.0.0.1:8080/ai/credentials \
+  -H 'content-type: application/json' \
+  -d '{"provider": "groq", "api_key": "gsk_xxx"}'
+```
+
+Store with a custom base URL:
+
+```bash
+curl -X POST http://127.0.0.1:8080/ai/credentials \
+  -H 'content-type: application/json' \
+  -d '{"provider": "custom", "api_key": "sk-xxx", "api_base": "https://my-proxy.com/v1"}'
+```
+
+Store with an alias:
+
+```bash
+curl -X POST http://127.0.0.1:8080/ai/credentials \
+  -H 'content-type: application/json' \
+  -d '{
+    "provider": "openai",
+    "api_key": "sk-...",
+    "alias": "prod",
+    "metadata": {"owner":"platform","rotation":"2026-04"}
+  }'
+```
+
+### Credential Resolution Chain
+
+When a request includes a `credential` alias, RedDB resolves the API key using the following chain. The first match wins.
+
+1. **Environment variable with alias**: `REDDB_{PROVIDER}_API_KEY_{ALIAS}` (e.g. `REDDB_OPENAI_API_KEY_PROD`)
+2. **RedDB vault**: KV key `{provider}/{alias}` in the `__ai_credentials` collection
+3. **Default environment variable**: `REDDB_{PROVIDER}_API_KEY` (e.g. `REDDB_GROQ_API_KEY`)
+4. **Default vault entry**: KV key `{provider}/default` in the `__ai_credentials` collection
+
+### Embeddings
 
 `POST /ai/embeddings` request modes:
 
@@ -263,8 +326,8 @@ Per-row example from query output:
 curl -X POST http://127.0.0.1:8080/ai/embeddings \
   -H 'content-type: application/json' \
   -d '{
-    "provider": "openai",
-    "model": "text-embedding-3-small",
+    "provider": "together",
+    "model": "togethercomputer/m2-bert-80M-8k-retrieval",
     "source_query": "SELECT description FROM incidents LIMIT 100",
     "source_mode": "row",
     "source_field": "description",
@@ -288,12 +351,7 @@ curl -X POST http://127.0.0.1:8080/ai/embeddings \
   }'
 ```
 
-Credential resolution order for OpenAI:
-
-1. `credential` alias env var: `REDDB_OPENAI_API_KEY_<ALIAS>`
-2. `credential` alias KV key: collection `__ai_credentials`, key `openai/<alias>`
-3. default env var: `REDDB_OPENAI_API_KEY`
-4. default KV key: collection `__ai_credentials`, key `openai/default`
+### Prompts
 
 `POST /ai/prompt` request modes:
 
@@ -308,17 +366,17 @@ Optional persistence for prompt outputs:
 - `save.response_field`: row field name for model response (default `response`)
 - `save.metadata`: metadata object applied to each saved row
 
-OpenAI prompt from query rows:
+Groq prompt from query rows:
 
 ```bash
 curl -X POST http://127.0.0.1:8080/ai/prompt \
   -H 'content-type: application/json' \
   -d '{
-    "provider": "openai",
-    "model": "gpt-4.1-mini",
+    "provider": "groq",
+    "model": "llama-3.3-70b-versatile",
     "source_query": "SELECT ip, risk FROM hosts LIMIT 20",
     "source_mode": "row",
-    "prompt_template": "Classifique o risco do host {{ip}} com score {{risk}} em 1 frase.",
+    "prompt_template": "Classify the risk of host {{ip}} with score {{risk}} in one sentence.",
     "credential": "prod",
     "save": {"collection": "host_risk_summaries"}
   }'
@@ -334,44 +392,85 @@ curl -X POST http://127.0.0.1:8080/ai/prompt \
     "model": "claude-3-5-haiku-latest",
     "source_query": "SELECT * FROM incidents WHERE severity = '\''high'\'' LIMIT 200",
     "source_mode": "result",
-    "prompt_template": "Resuma os principais achados:\n{{result}}",
+    "prompt_template": "Summarize the main findings:\n{{result}}",
     "credential": "ops"
   }'
 ```
 
-Credential resolution order for Anthropic:
-
-1. `credential` alias env var: `REDDB_ANTHROPIC_API_KEY_<ALIAS>`
-2. `credential` alias KV key: collection `__ai_credentials`, key `anthropic/<alias>`
-3. default env var: `REDDB_ANTHROPIC_API_KEY`
-4. default KV key: collection `__ai_credentials`, key `anthropic/default`
-
-Store provider credentials in KV:
+OpenAI prompt (direct):
 
 ```bash
-curl -X POST http://127.0.0.1:8080/ai/credentials \
+curl -X POST http://127.0.0.1:8080/ai/prompt \
   -H 'content-type: application/json' \
   -d '{
     "provider": "openai",
-    "alias": "prod",
-    "api_key": "sk-...",
-    "metadata": {"owner":"platform","rotation":"2026-04"}
+    "model": "gpt-4.1-mini",
+    "prompt": "Explain the difference between HNSW and IVF indexes."
   }'
 ```
 
-Environment configuration (optional):
+Ollama prompt (local, no API key required):
 
-- `REDDB_AI_PROVIDER`: default provider when request omits `provider` (`openai` or `anthropic`)
-- `REDDB_OPENAI_API_KEY`: default OpenAI API key
-- `REDDB_OPENAI_API_KEY_<ALIAS>`: OpenAI key for alias credential
-- `REDDB_OPENAI_API_BASE`: OpenAI base URL (default `https://api.openai.com/v1`)
-- `REDDB_OPENAI_EMBEDDING_MODEL`: default embedding model for `/ai/embeddings`
-- `REDDB_OPENAI_PROMPT_MODEL`: default prompt model for `/ai/prompt` when `provider=openai`
-- `REDDB_ANTHROPIC_API_KEY`: default Anthropic API key
-- `REDDB_ANTHROPIC_API_KEY_<ALIAS>`: Anthropic key for alias credential
-- `REDDB_ANTHROPIC_API_BASE`: Anthropic base URL (default `https://api.anthropic.com/v1`)
+```bash
+curl -X POST http://127.0.0.1:8080/ai/prompt \
+  -H 'content-type: application/json' \
+  -d '{
+    "provider": "ollama",
+    "model": "llama3",
+    "prompt": "List three advantages of multi-model databases."
+  }'
+```
+
+### ASK
+
+`POST /ai/ask` is a convenience endpoint that sends a natural-language question to a provider and returns the answer. It is the HTTP equivalent of the `ASK` SQL command.
+
+```bash
+curl -X POST http://127.0.0.1:8080/ai/ask \
+  -H 'content-type: application/json' \
+  -d '{
+    "question": "What happened with the last deployment?",
+    "provider": "groq",
+    "model": "llama-3.3-70b-versatile"
+  }'
+```
+
+Using Ollama (no credentials needed):
+
+```bash
+curl -X POST http://127.0.0.1:8080/ai/ask \
+  -H 'content-type: application/json' \
+  -d '{
+    "question": "Summarize the incidents from last week",
+    "provider": "ollama",
+    "model": "llama3"
+  }'
+```
+
+Using OpenRouter:
+
+```bash
+curl -X POST http://127.0.0.1:8080/ai/ask \
+  -H 'content-type: application/json' \
+  -d '{
+    "question": "Which hosts have the highest risk score?",
+    "provider": "openrouter",
+    "model": "meta-llama/llama-3.3-70b-instruct",
+    "credential": "prod"
+  }'
+```
+
+### Environment Configuration
+
+Each provider follows the same naming convention. Replace `{PROVIDER}` with the uppercase provider token (e.g. `OPENAI`, `GROQ`, `TOGETHER`).
+
+- `REDDB_AI_PROVIDER`: default provider when a request omits `provider`
+- `REDDB_{PROVIDER}_API_KEY`: default API key for the provider
+- `REDDB_{PROVIDER}_API_KEY_{ALIAS}`: API key for a specific credential alias
+- `REDDB_{PROVIDER}_API_BASE`: base URL override (useful for proxies or self-hosted endpoints)
+- `REDDB_{PROVIDER}_EMBEDDING_MODEL`: default embedding model for `/ai/embeddings`
+- `REDDB_{PROVIDER}_PROMPT_MODEL`: default prompt model for `/ai/prompt`
 - `REDDB_ANTHROPIC_VERSION`: Anthropic API version header (default `2023-06-01`)
-- `REDDB_ANTHROPIC_PROMPT_MODEL`: default prompt model for `/ai/prompt` when `provider=anthropic`
 
 ## Graph Analytics
 
