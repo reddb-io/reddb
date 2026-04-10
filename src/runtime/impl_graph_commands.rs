@@ -521,6 +521,72 @@ impl RedDBRuntime {
                     statement_type: "select",
                 })
             }
+            SearchCommand::SpatialRadius {
+                center_lat,
+                center_lon,
+                radius_km,
+                collection,
+                column,
+                limit,
+            } => {
+                let result =
+                    UnifiedResult::with_columns(vec!["entity_id".into(), "distance_km".into()]);
+                // Spatial search will be wired to SpatialIndexManager when indices are created.
+                // For now, return empty result with metadata about the search.
+                let _ = (center_lat, center_lon, radius_km, collection, column, limit);
+                Ok(RuntimeQueryResult {
+                    query: raw_query.to_string(),
+                    mode: QueryMode::Sql,
+                    statement: "search_spatial_radius",
+                    engine: "runtime-spatial",
+                    result,
+                    affected_rows: 0,
+                    statement_type: "select",
+                })
+            }
+            SearchCommand::SpatialBbox {
+                min_lat,
+                min_lon,
+                max_lat,
+                max_lon,
+                collection,
+                column,
+                limit,
+            } => {
+                let result = UnifiedResult::with_columns(vec!["entity_id".into()]);
+                let _ = (
+                    min_lat, min_lon, max_lat, max_lon, collection, column, limit,
+                );
+                Ok(RuntimeQueryResult {
+                    query: raw_query.to_string(),
+                    mode: QueryMode::Sql,
+                    statement: "search_spatial_bbox",
+                    engine: "runtime-spatial",
+                    result,
+                    affected_rows: 0,
+                    statement_type: "select",
+                })
+            }
+            SearchCommand::SpatialNearest {
+                lat,
+                lon,
+                k,
+                collection,
+                column,
+            } => {
+                let result =
+                    UnifiedResult::with_columns(vec!["entity_id".into(), "distance_km".into()]);
+                let _ = (lat, lon, k, collection, column);
+                Ok(RuntimeQueryResult {
+                    query: raw_query.to_string(),
+                    mode: QueryMode::Sql,
+                    statement: "search_spatial_nearest",
+                    engine: "runtime-spatial",
+                    result,
+                    affected_rows: 0,
+                    statement_type: "select",
+                })
+            }
         }
     }
 }

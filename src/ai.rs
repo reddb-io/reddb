@@ -788,7 +788,7 @@ impl AiProvider {
             }
         }
         // 2. KV store: {provider}/{alias}/base_url
-        let kv_key = format!("{}/{alias}/base_url", self.token());
+        let kv_key = format!("red.ai.{}.{alias}.base_url", self.token());
         if let Ok(Some(value)) = kv_getter(&kv_key) {
             let value = value.trim().to_string();
             if !value.is_empty() {
@@ -848,7 +848,7 @@ pub fn parse_provider(name: &str) -> crate::RedDBResult<AiProvider> {
 
 /// Resolve the default AI provider. Checks:
 /// 1. `REDDB_AI_PROVIDER` env var
-/// 2. `red_config` KV key `_default/provider`
+/// 2. `red_config` KV key `red.ai.default.provider`
 /// 3. Falls back to OpenAI
 pub fn resolve_default_provider<F>(kv_getter: &F) -> AiProvider
 where
@@ -864,7 +864,7 @@ where
         }
     }
     // 2. KV store
-    if let Ok(Some(value)) = kv_getter("_default/provider") {
+    if let Ok(Some(value)) = kv_getter("red.ai.default.provider") {
         let value = value.trim().to_string();
         if !value.is_empty() {
             if let Ok(provider) = parse_provider(&value) {
@@ -877,7 +877,7 @@ where
 
 /// Resolve the default AI model. Checks:
 /// 1. `REDDB_AI_MODEL` env var
-/// 2. `red_config` KV key `_default/model`
+/// 2. `red_config` KV key `red.ai.default.model`
 /// 3. Falls back to provider's default
 pub fn resolve_default_model<F>(provider: &AiProvider, kv_getter: &F) -> String
 where
@@ -898,7 +898,7 @@ where
         }
     }
     // 3. KV store
-    if let Ok(Some(value)) = kv_getter("_default/model") {
+    if let Ok(Some(value)) = kv_getter("red.ai.default.model") {
         let value = value.trim().to_string();
         if !value.is_empty() {
             return value;
@@ -972,7 +972,7 @@ where
             return Ok(key);
         }
         // Try KV store
-        let kv_key = format!("{}/{}", provider.token(), alias);
+        let kv_key = format!("red.ai.{}.{}.key", provider.token(), alias);
         if let Some(key) = kv_getter(&kv_key)? {
             if !key.trim().is_empty() {
                 return Ok(key);

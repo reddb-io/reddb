@@ -1167,6 +1167,33 @@ pub enum SearchCommand {
         limit: usize,
         depth: usize,
     },
+    /// SEARCH SPATIAL RADIUS lat lon radius_km COLLECTION col COLUMN col [LIMIT n]
+    SpatialRadius {
+        center_lat: f64,
+        center_lon: f64,
+        radius_km: f64,
+        collection: String,
+        column: String,
+        limit: usize,
+    },
+    /// SEARCH SPATIAL BBOX min_lat min_lon max_lat max_lon COLLECTION col COLUMN col [LIMIT n]
+    SpatialBbox {
+        min_lat: f64,
+        min_lon: f64,
+        max_lat: f64,
+        max_lon: f64,
+        collection: String,
+        column: String,
+        limit: usize,
+    },
+    /// SEARCH SPATIAL NEAREST lat lon K n COLLECTION col COLUMN col
+    SpatialNearest {
+        lat: f64,
+        lon: f64,
+        k: usize,
+        collection: String,
+        column: String,
+    },
 }
 
 // ============================================================================

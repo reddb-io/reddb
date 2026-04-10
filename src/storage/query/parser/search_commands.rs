@@ -21,6 +21,9 @@ impl<'a> Parser<'a> {
             Token::Ident(name) if name.eq_ignore_ascii_case("CONTEXT") => {
                 self.parse_search_context()
             }
+            Token::Ident(name) if name.eq_ignore_ascii_case("SPATIAL") => {
+                self.parse_search_spatial()
+            }
             _ => Err(ParseError::expected(
                 vec![
                     "SIMILAR",
@@ -29,6 +32,7 @@ impl<'a> Parser<'a> {
                     "MULTIMODAL",
                     "INDEX",
                     "CONTEXT",
+                    "SPATIAL",
                 ],
                 self.peek(),
                 self.position(),
@@ -279,6 +283,102 @@ impl<'a> Parser<'a> {
             limit,
             depth,
         }))
+    }
+
+    /// Parse: SEARCH SPATIAL (RADIUS | BBOX | NEAREST) ...
+    ///
+    /// Syntax:
+    /// - SEARCH SPATIAL RADIUS lat lon radius_km COLLECTION col COLUMN col [LIMIT n]
+    /// - SEARCH SPATIAL BBOX min_lat min_lon max_lat max_lon COLLECTION col COLUMN col [LIMIT n]
+    /// - SEARCH SPATIAL NEAREST lat lon K n COLLECTION col COLUMN col
+    fn parse_search_spatial(&mut self) -> Result<QueryExpr, ParseError> {
+        self.advance()?; // consume SPATIAL
+
+        match self.peek().clone() {
+            Token::Ident(ref name) if name.eq_ignore_ascii_case("RADIUS") => {
+                self.advance()?; // consume RADIUS
+                let center_lat = self.parse_float()?;
+                let center_lon = self.parse_float()?;
+                let radius_km = self.parse_float()?;
+
+                self.expect(Token::Collection)?;
+                let collection = self.expect_ident()?;
+
+                let _ = self.consume_search_ident("COLUMN")?;
+                let column = self.expect_ident()?;
+
+                let limit = if self.consume(&Token::Limit)? {
+                    self.parse_integer()? as usize
+                } else {
+                    100
+                };
+
+                Ok(QueryExpr::SearchCommand(SearchCommand::SpatialRadius {
+                    center_lat,
+                    center_lon,
+                    radius_km,
+                    collection,
+                    column,
+                    limit,
+                }))
+            }
+            Token::Ident(ref name) if name.eq_ignore_ascii_case("BBOX") => {
+                self.advance()?; // consume BBOX
+                let min_lat = self.parse_float()?;
+                let min_lon = self.parse_float()?;
+                let max_lat = self.parse_float()?;
+                let max_lon = self.parse_float()?;
+
+                self.expect(Token::Collection)?;
+                let collection = self.expect_ident()?;
+
+                let _ = self.consume_search_ident("COLUMN")?;
+                let column = self.expect_ident()?;
+
+                let limit = if self.consume(&Token::Limit)? {
+                    self.parse_integer()? as usize
+                } else {
+                    100
+                };
+
+                Ok(QueryExpr::SearchCommand(SearchCommand::SpatialBbox {
+                    min_lat,
+                    min_lon,
+                    max_lat,
+                    max_lon,
+                    collection,
+                    column,
+                    limit,
+                }))
+            }
+            Token::Ident(ref name) if name.eq_ignore_ascii_case("NEAREST") => {
+                self.advance()?; // consume NEAREST
+                let lat = self.parse_float()?;
+                let lon = self.parse_float()?;
+
+                self.expect(Token::K)?;
+                let k = self.parse_integer()? as usize;
+
+                self.expect(Token::Collection)?;
+                let collection = self.expect_ident()?;
+
+                let _ = self.consume_search_ident("COLUMN")?;
+                let column = self.expect_ident()?;
+
+                Ok(QueryExpr::SearchCommand(SearchCommand::SpatialNearest {
+                    lat,
+                    lon,
+                    k,
+                    collection,
+                    column,
+                }))
+            }
+            _ => Err(ParseError::expected(
+                vec!["RADIUS", "BBOX", "NEAREST"],
+                self.peek(),
+                self.position(),
+            )),
+        }
     }
 
     /// Parse a vector literal: [0.1, 0.2, 0.3]

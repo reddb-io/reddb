@@ -45,8 +45,11 @@ pub mod entity;
 pub mod hash_index;
 pub mod index;
 pub mod manager;
+pub mod memtable;
 pub mod metadata;
 pub mod segment;
+pub mod skiplist;
+pub mod spatial_index;
 pub mod store;
 pub mod tokenization;
 
@@ -118,6 +121,9 @@ pub use metadata::{
 };
 pub use segment::{
     SegmentConfig, SegmentError, SegmentId, SegmentState, SegmentStats, UnifiedSegment,
+};
+pub use spatial_index::{
+    SpatialIndex, SpatialIndexManager, SpatialIndexStats, SpatialSearchResult,
 };
 pub use store::{StoreError, StoreStats, UnifiedStore, UnifiedStoreConfig};
 // Query DSL for fluent multi-modal queries
