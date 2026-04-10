@@ -1496,14 +1496,14 @@ fn test_parse_search_hybrid_requires_input() {
 #[test]
 fn test_parse_search_multimodal() {
     let query =
-        parse("SEARCH MULTIMODAL 'CPF: 081.232.036-08' COLLECTION people LIMIT 20").unwrap();
+        parse("SEARCH MULTIMODAL 'CPF: 000.000.000-00' COLLECTION people LIMIT 20").unwrap();
     if let QueryExpr::SearchCommand(crate::storage::query::ast::SearchCommand::Multimodal {
         query,
         collection,
         limit,
     }) = query
     {
-        assert_eq!(query, "CPF: 081.232.036-08");
+        assert_eq!(query, "CPF: 000.000.000-00");
         assert_eq!(collection, Some("people".to_string()));
         assert_eq!(limit, 20);
     } else {
@@ -1530,7 +1530,7 @@ fn test_parse_search_multimodal_defaults() {
 
 #[test]
 fn test_parse_search_index_defaults() {
-    let query = parse("SEARCH INDEX cpf VALUE '081.232.036-08'").unwrap();
+    let query = parse("SEARCH INDEX cpf VALUE '000.000.000-00'").unwrap();
     if let QueryExpr::SearchCommand(crate::storage::query::ast::SearchCommand::Index {
         index,
         value,
@@ -1540,7 +1540,7 @@ fn test_parse_search_index_defaults() {
     }) = query
     {
         assert_eq!(index, "cpf");
-        assert_eq!(value, "081.232.036-08");
+        assert_eq!(value, "000.000.000-00");
         assert_eq!(collection, None);
         assert_eq!(limit, 25);
         assert!(exact);
@@ -1552,7 +1552,7 @@ fn test_parse_search_index_defaults() {
 #[test]
 fn test_parse_search_index_with_collection_limit_fuzzy() {
     let query =
-        parse("SEARCH INDEX cpf VALUE '081.232.036-08' COLLECTION people LIMIT 20 FUZZY").unwrap();
+        parse("SEARCH INDEX cpf VALUE '000.000.000-00' COLLECTION people LIMIT 20 FUZZY").unwrap();
     if let QueryExpr::SearchCommand(crate::storage::query::ast::SearchCommand::Index {
         index,
         value,
@@ -1562,7 +1562,7 @@ fn test_parse_search_index_with_collection_limit_fuzzy() {
     }) = query
     {
         assert_eq!(index, "cpf");
-        assert_eq!(value, "081.232.036-08");
+        assert_eq!(value, "000.000.000-00");
         assert_eq!(collection, Some("people".to_string()));
         assert_eq!(limit, 20);
         assert!(!exact);
@@ -1573,7 +1573,7 @@ fn test_parse_search_index_with_collection_limit_fuzzy() {
 
 #[test]
 fn test_parse_search_context_defaults() {
-    let query = parse("SEARCH CONTEXT '081.232.036-08'").unwrap();
+    let query = parse("SEARCH CONTEXT '000.000.000-00'").unwrap();
     if let QueryExpr::SearchCommand(crate::storage::query::ast::SearchCommand::Context {
         query: q,
         field,
@@ -1582,7 +1582,7 @@ fn test_parse_search_context_defaults() {
         depth,
     }) = query
     {
-        assert_eq!(q, "081.232.036-08");
+        assert_eq!(q, "000.000.000-00");
         assert_eq!(field, None);
         assert_eq!(collection, None);
         assert_eq!(limit, 25);
@@ -1595,7 +1595,7 @@ fn test_parse_search_context_defaults() {
 #[test]
 fn test_parse_search_context_with_field_collection_limit_depth() {
     let query =
-        parse("SEARCH CONTEXT '081.232.036-08' FIELD cpf COLLECTION customers LIMIT 50 DEPTH 2")
+        parse("SEARCH CONTEXT '000.000.000-00' FIELD cpf COLLECTION customers LIMIT 50 DEPTH 2")
             .unwrap();
     if let QueryExpr::SearchCommand(crate::storage::query::ast::SearchCommand::Context {
         query: q,
@@ -1605,7 +1605,7 @@ fn test_parse_search_context_with_field_collection_limit_depth() {
         depth,
     }) = query
     {
-        assert_eq!(q, "081.232.036-08");
+        assert_eq!(q, "000.000.000-00");
         assert_eq!(field, Some("cpf".to_string()));
         assert_eq!(collection, Some("customers".to_string()));
         assert_eq!(limit, 50);

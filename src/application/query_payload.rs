@@ -580,7 +580,7 @@ mod tests {
     #[test]
     fn parse_unified_prefers_lookup_payload() {
         let payload: JsonValue = crate::json::from_str(
-            r#"{"lookup":{"index":"cpf","value":"081.232.036-08"},"mode":"hybrid"}"#,
+            r#"{"lookup":{"index":"cpf","value":"000.000.000-00"},"mode":"hybrid"}"#,
         )
         .expect("valid json");
         let input = parse_unified_search_input(&payload).expect("lookup should parse");
@@ -590,7 +590,7 @@ mod tests {
     #[test]
     fn parse_index_payload_supports_top_level_fields() {
         let payload: JsonValue = crate::json::from_str(
-            r#"{"mode":"index","index":"cpf","value":"081.232.036-08","exact":false}"#,
+            r#"{"mode":"index","index":"cpf","value":"000.000.000-00","exact":false}"#,
         )
         .expect("valid json");
         let input = parse_unified_search_input(&payload).expect("index payload should parse");
@@ -598,7 +598,7 @@ mod tests {
             panic!("expected index input");
         };
         assert_eq!(input.index, "cpf");
-        assert_eq!(input.value, "081.232.036-08");
+        assert_eq!(input.value, "000.000.000-00");
         assert!(!input.exact);
     }
 }

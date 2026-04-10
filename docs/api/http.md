@@ -174,7 +174,7 @@ Only the `query` field is required. All other fields are optional and control ho
 curl -X POST http://127.0.0.1:8080/context \
   -H 'content-type: application/json' \
   -d '{
-    "query": "081.232.036-08",
+    "query": "000.000.000-00",
     "field": "cpf",
     "collections": ["customers"],
     "graph_depth": 1,

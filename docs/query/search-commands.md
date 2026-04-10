@@ -75,7 +75,7 @@ SEARCH IVF [0.12, 0.91, 0.44] IN embeddings K 10 PROBES 3
 Lookup global por chave em tabelas, documentos, key-values, vetores e grafos:
 
 ```sql
-SEARCH MULTIMODAL 'CPF: 081.232.036-08' COLLECTION people LIMIT 20
+SEARCH MULTIMODAL 'CPF: 000.000.000-00' COLLECTION people LIMIT 20
 ```
 
 ## SEARCH INDEX
@@ -83,13 +83,13 @@ SEARCH MULTIMODAL 'CPF: 081.232.036-08' COLLECTION people LIMIT 20
 Lookup estruturado por índice global:
 
 ```sql
-SEARCH INDEX cpf VALUE '081.232.036-08' COLLECTION people LIMIT 20
+SEARCH INDEX cpf VALUE '000.000.000-00' COLLECTION people LIMIT 20
 ```
 
 Por padrão, o lookup é exato. Para modo mais flexível:
 
 ```sql
-SEARCH INDEX cpf VALUE '081.232.036-08' FUZZY LIMIT 20
+SEARCH INDEX cpf VALUE '000.000.000-00' FUZZY LIMIT 20
 ```
 
 ## SEARCH CONTEXT
@@ -115,13 +115,13 @@ SEARCH CONTEXT '<query>' [FIELD <field>] [COLLECTION <col>] [DEPTH <n>] [LIMIT <
 Search across everything with a CPF:
 
 ```sql
-SEARCH CONTEXT '081.232.036-08'
+SEARCH CONTEXT '000.000.000-00'
 ```
 
 Narrow to a specific indexed field:
 
 ```sql
-SEARCH CONTEXT '081.232.036-08' FIELD cpf
+SEARCH CONTEXT '000.000.000-00' FIELD cpf
 ```
 
 Scope to a collection with deeper graph expansion:
@@ -227,7 +227,7 @@ curl -X POST http://127.0.0.1:8080/hybrid/search \
 curl -X POST http://127.0.0.1:8080/multimodal/search \
   -H 'content-type: application/json' \
   -d '{
-    "query": "CPF: 081.232.036-08",
+    "query": "CPF: 000.000.000-00",
     "collections": ["people", "documents", "graph", "vectors"],
     "limit": 20
   }'
@@ -244,7 +244,7 @@ curl -X POST http://127.0.0.1:8080/search \
     "mode": "index",
     "lookup": {
       "index": "cpf",
-      "value": "081.232.036-08",
+      "value": "000.000.000-00",
       "exact": true
     },
     "limit": 20
@@ -259,7 +259,7 @@ curl -X POST http://127.0.0.1:8080/search \
 curl -X POST http://127.0.0.1:8080/context \
   -H 'content-type: application/json' \
   -d '{
-    "query": "081.232.036-08",
+    "query": "000.000.000-00",
     "field": "cpf"
   }'
 ```

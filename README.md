@@ -15,7 +15,7 @@
 ## The Killer Feature: `ASK`
 
 ```sql
-ASK 'who owns CPF 081.232.036-08 and what services do they use?'
+ASK 'who owns CPF 000.000.000-00 and what services do they use?'
 ```
 
 One command. RedDB searches across tables, graphs, vectors, documents, and key-value stores -- builds context -- calls an LLM -- returns a natural-language answer. No pipelines. No glue code. No other database does this.

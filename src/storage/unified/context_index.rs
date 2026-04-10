@@ -13,7 +13,7 @@
 //! │  │  Token Index                 │  │  Field-Value Index           │  │
 //! │  │  BTreeMap<token, postings>   │  │  BTreeMap<(f,v), postings>  │  │
 //! │  │                              │  │                              │  │
-//! │  │  "08123203608" → [e42, e99]  │  │  ("cpf","081...") → [e42]   │  │
+//! │  │  "00000000000" → [e42, e99]  │  │  ("cpf","081...") → [e42]   │  │
 //! │  │  "alice" → [e42, e55]       │  │  ("name","alice") → [e55]   │  │
 //! │  └──────────────────────────────┘  └──────────────────────────────┘  │
 //! └──────────────────────────────────────────────────────────────────────┘
@@ -628,12 +628,12 @@ mod tests {
             "customers",
             vec![
                 ("name", Value::Text("Alice".to_string())),
-                ("cpf", Value::Text("081.232.036-08".to_string())),
+                ("cpf", Value::Text("000.000.000-00".to_string())),
             ],
         );
         index.index_entity("customers", &entity);
 
-        let results = index.search("081.232.036-08", 10, None);
+        let results = index.search("000.000.000-00", 10, None);
         assert!(!results.is_empty());
         assert_eq!(results[0].entity_id, EntityId::new(1));
         assert_eq!(results[0].collection, "customers");
@@ -645,11 +645,11 @@ mod tests {
         let entity = make_row_entity(
             42,
             "customers",
-            vec![("cpf", Value::Text("081.232.036-08".to_string()))],
+            vec![("cpf", Value::Text("000.000.000-00".to_string()))],
         );
         index.index_entity("customers", &entity);
 
-        let results = index.search_field("cpf", "081.232.036-08", true, 10, None);
+        let results = index.search_field("cpf", "000.000.000-00", true, 10, None);
         assert!(!results.is_empty());
         assert_eq!(results[0].entity_id, EntityId::new(42));
     }

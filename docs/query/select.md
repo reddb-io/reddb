@@ -154,7 +154,7 @@ SELECT dept FROM employees GROUP BY dept HAVING dept > 5 ORDER BY dept
 Perform a BFS traversal from every entity returned by the query. `DEPTH` controls how many hops to follow.
 
 ```sql
-SELECT * FROM customers WHERE cpf = '081.232.036-08' WITH EXPAND GRAPH DEPTH 2
+SELECT * FROM customers WHERE cpf = '000.000.000-00' WITH EXPAND GRAPH DEPTH 2
 ```
 
 ### Expand via Cross-References
