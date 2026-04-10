@@ -1,5 +1,6 @@
 use super::*;
 
+#[inline(never)]
 pub(super) fn scan_runtime_table_source_records(
     db: &RedDB,
     table: &str,
@@ -49,6 +50,7 @@ pub(super) fn is_universal_entity_source(table: &str) -> bool {
     is_universal_query_source(table)
 }
 
+#[inline(never)]
 pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<UnifiedRecord> {
     let row = match entity.data {
         EntityData::Row(row) => row,
@@ -87,6 +89,7 @@ pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<
 
 /// Projected version — only materializes requested columns for better performance.
 /// Falls back to full materialization if columns is empty (SELECT *).
+#[inline(never)]
 pub(super) fn runtime_table_record_from_entity_projected(
     entity: UnifiedEntity,
     columns: &[String],
@@ -116,6 +119,7 @@ pub(super) fn runtime_table_record_from_entity_projected(
     Some(record)
 }
 
+#[inline(never)]
 pub(super) fn runtime_any_record_from_entity(entity: UnifiedEntity) -> Option<UnifiedRecord> {
     let identity_entity = entity.clone();
     let kind = entity.kind.clone();
@@ -210,6 +214,7 @@ pub(super) fn runtime_any_record_from_entity(entity: UnifiedEntity) -> Option<Un
     Some(record)
 }
 
+#[inline(never)]
 pub(super) fn set_runtime_entity_metadata(
     record: &mut UnifiedRecord,
     entity_type: &str,

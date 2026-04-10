@@ -5,6 +5,7 @@ impl RedDBRuntime {
         Self::with_options(RedDBOptions::in_memory())
     }
 
+    #[inline(never)]
     pub fn with_options(options: RedDBOptions) -> RedDBResult<Self> {
         Self::with_pool(options, ConnectionPoolConfig::default())
     }
@@ -386,6 +387,7 @@ impl RedDBRuntime {
         }
     }
 
+    #[inline(never)]
     pub fn execute_query(&self, query: &str) -> RedDBResult<RuntimeQueryResult> {
         let mode = detect_mode(query);
         if matches!(mode, QueryMode::Unknown) {

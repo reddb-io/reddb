@@ -424,32 +424,27 @@ impl SegmentManager {
     /// Query across all segments
     pub fn query_all<F>(&self, filter: F) -> Vec<UnifiedEntity>
     where
-        F: Fn(&UnifiedEntity) -> bool + Send + Sync,
+        F: Fn(&UnifiedEntity) -> bool,
     {
-        use rayon::prelude::*;
-
         let mut results = Vec::new();
 
-        // Query growing segment (single, in-memory, fast)
+        // Query growing segment
         if let Some(growing_arc) = self.growing.read().unwrap().as_ref() {
             let growing = growing_arc.read().unwrap();
-            results.extend(growing.iter().filter(|e| filter(e)).cloned());
+            for entity in growing.iter() {
+                if filter(entity) {
+                    results.push(entity.clone());
+                }
+            }
         }
 
-        // Query sealed segments IN PARALLEL
+        // Query sealed segments
         let sealed = self.sealed.read().unwrap();
-        if sealed.len() > 1 {
-            let parallel_results: Vec<Vec<UnifiedEntity>> = sealed
-                .par_iter()
-                .map(|segment| segment.iter().filter(|e| filter(e)).cloned().collect())
-                .collect();
-            for batch in parallel_results {
-                results.extend(batch);
-            }
-        } else {
-            // Single segment — no parallelism overhead
-            for segment in sealed.iter() {
-                results.extend(segment.iter().filter(|e| filter(e)).cloned());
+        for segment in sealed.iter() {
+            for entity in segment.iter() {
+                if filter(entity) {
+                    results.push(entity.clone());
+                }
             }
         }
 

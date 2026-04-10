@@ -36,7 +36,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tonic = { version = "0.12", features = ["transport"] }
 prost = "0.13"
 ureq = { version = "2.10", default-features = false, features = ["tls"] }
-rayon = "1.10"
 roaring = "0.10"
 rstar = "0.12"
 
@@ -63,3 +62,5 @@ harness = false
 [[bench]]
 name = "bench_profiles"
 harness = false
+
+# [profile.release] — use default

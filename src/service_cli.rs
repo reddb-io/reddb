@@ -24,7 +24,7 @@ pub fn detect_runtime_config() -> RuntimeConfig {
     RuntimeConfig {
         available_cpus: cpus,
         suggested_workers,
-        stack_size: 16 * 1024 * 1024, // 16MB default
+        stack_size: 256 * 1024 * 1024, // 16MB default
     }
 }
 
@@ -330,7 +330,7 @@ pub fn run_server_with_large_stack(config: ServerCommandConfig) -> Result<(), St
 
     let handle = thread::Builder::new()
         .name(thread_name.into())
-        .stack_size(64 * 1024 * 1024)
+        .stack_size(256 * 1024 * 1024)
         .spawn(move || run_configured_servers(config))
         .map_err(|err| format!("failed to spawn server thread: {err}"))?;
 
@@ -371,6 +371,7 @@ pub fn probe_listener(target: &str, timeout: Duration) -> bool {
         .any(|address| TcpStream::connect_timeout(&address, timeout).is_ok())
 }
 
+#[inline(never)]
 fn run_configured_servers(config: ServerCommandConfig) -> Result<(), String> {
     match (config.grpc_bind_addr.clone(), config.http_bind_addr.clone()) {
         (Some(grpc_bind_addr), Some(http_bind_addr)) => {
@@ -382,6 +383,7 @@ fn run_configured_servers(config: ServerCommandConfig) -> Result<(), String> {
     }
 }
 
+#[inline(never)]
 fn build_runtime_and_auth_store(
     db_options: RedDBOptions,
 ) -> Result<(RedDBRuntime, Arc<AuthStore>), String> {
@@ -402,6 +404,7 @@ fn build_runtime_and_auth_store(
     Ok((runtime, auth_store))
 }
 
+#[inline(never)]
 fn build_http_server(
     runtime: RedDBRuntime,
     auth_store: Arc<AuthStore>,
@@ -417,14 +420,15 @@ fn build_http_server(
     .with_auth(auth_store)
 }
 
+#[inline(never)]
 fn run_http_server(config: ServerCommandConfig, bind_addr: String) -> Result<(), String> {
     let (runtime, auth_store) = build_runtime_and_auth_store(config.to_db_options())?;
     let server = build_http_server(runtime, auth_store, bind_addr.clone());
-
     eprintln!("red server (HTTP) listening on {bind_addr}");
     server.serve().map_err(|err| err.to_string())
 }
 
+#[inline(never)]
 fn run_grpc_server(config: ServerCommandConfig, bind_addr: String) -> Result<(), String> {
     let workers = config.workers;
     let db_options = config.to_db_options();
@@ -457,6 +461,7 @@ fn run_grpc_server(config: ServerCommandConfig, bind_addr: String) -> Result<(),
     })
 }
 
+#[inline(never)]
 fn run_dual_server(
     config: ServerCommandConfig,
     grpc_bind_addr: String,
