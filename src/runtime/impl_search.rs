@@ -1022,18 +1022,76 @@ impl RedDBRuntime {
             min_score: None,
         })?;
 
-        // Step 2: Build context string from search results
+        // Step 2: Build rich context with schema + search results
         let context_json =
             crate::presentation::query_json::context_search_result_json(&context_result);
         let context_str =
             crate::json::to_string(&context_json).unwrap_or_else(|_| "{}".to_string());
 
+        // Include database schema info so the LLM knows the structure
+        let store = self.inner.db.store();
+        let all_collections = store.list_collections();
+        let mut schema_lines = Vec::new();
+        schema_lines.push("Database structure:".to_string());
+        for col_name in &all_collections {
+            if let Some(manager) = store.get_collection(col_name) {
+                let stats = manager.stats();
+                schema_lines.push(format!(
+                    "- Collection '{col_name}': {} entities",
+                    stats.total_entities
+                ));
+            }
+        }
+
+        // Include graph structure if there are graph entities
+        if !context_result.graph.nodes.is_empty() || !context_result.graph.edges.is_empty() {
+            schema_lines.push(String::new());
+            schema_lines.push("Graph relationships found:".to_string());
+            for edge in &context_result.graph.edges {
+                if let EntityKind::GraphEdge {
+                    label,
+                    from_node,
+                    to_node,
+                    ..
+                } = &edge.entity.kind
+                {
+                    schema_lines.push(format!("- Edge '{label}': {from_node} → {to_node}"));
+                }
+            }
+        }
+
+        // Include connections map
+        if !context_result.connections.is_empty() {
+            schema_lines.push(String::new());
+            schema_lines.push("Entity connections:".to_string());
+            for conn in &context_result.connections {
+                let conn_type = match &conn.connection_type {
+                    ContextConnectionType::CrossRef(rt) => format!("cross-ref ({rt})"),
+                    ContextConnectionType::GraphEdge(et) => format!("graph edge ({et})"),
+                    ContextConnectionType::VectorSimilarity(s) => {
+                        format!("vector similarity ({s:.2})")
+                    }
+                };
+                schema_lines.push(format!(
+                    "- Entity {} → Entity {}: {conn_type} (weight={:.2})",
+                    conn.from_id, conn.to_id, conn.weight
+                ));
+            }
+        }
+
+        let schema_info = schema_lines.join("\n");
+
         let system_prompt = format!(
-            "You are an AI assistant answering questions based on data from a multi-modal database. \
-             Use the following context to answer the user's question. \
-             If the context does not contain enough information, say so. \
-             Always cite which collections and entity types your answer is based on.\n\n\
-             Database context:\n{context_str}"
+            "You are an AI assistant answering questions about data in RedDB, a multi-modal database \
+             that stores tables, graphs, vectors, documents, and key-values.\n\n\
+             {schema_info}\n\n\
+             Search results (entities found matching the question):\n{context_str}\n\n\
+             Instructions:\n\
+             - Use the database structure and search results above to answer the user's question.\n\
+             - For questions about table structure, refer to the collection descriptors.\n\
+             - For questions about relationships, refer to graph edges and connections.\n\
+             - If the context does not contain enough information, say so.\n\
+             - Cite which collections and entity types your answer is based on."
         );
 
         let full_prompt = format!("{system_prompt}\n\nQuestion: {}", ask.question);
