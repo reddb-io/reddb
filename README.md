@@ -240,6 +240,39 @@ Remote backends: S3, R2, DigitalOcean Spaces, GCS, Turso, Cloudflare D1, local f
 
 ---
 
+## KV REST API
+
+Every collection doubles as a key-value store with dedicated REST endpoints:
+
+```bash
+# Write a key
+curl -X PUT http://127.0.0.1:8080/collections/settings/kvs/theme \
+  -H 'content-type: application/json' -d '{"value": "dark"}'
+
+# Read a key
+curl http://127.0.0.1:8080/collections/settings/kvs/theme
+
+# Delete a key
+curl -X DELETE http://127.0.0.1:8080/collections/settings/kvs/theme
+```
+
+Config keys work the same way -- read, write, or delete any `red_config` setting at runtime:
+
+```bash
+# Set a config key
+curl -X PUT http://127.0.0.1:8080/config/red.ai.default.provider \
+  -d '{"value": "groq"}'
+
+# Read a config key
+curl http://127.0.0.1:8080/config/red.ai.default.provider
+
+# Or manage config from SQL
+SET CONFIG red.ai.default.provider = 'groq'
+SHOW CONFIG red.ai
+```
+
+---
+
 ## 3 Deployment Modes
 
 | Mode | Think of it as... | Access via |

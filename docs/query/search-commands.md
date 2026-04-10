@@ -175,11 +175,68 @@ ASK 'list all users with admin access' USING ollama MODEL 'llama3'
 | Parameter | Required | Description |
 |:----------|:---------|:------------|
 | `'question'` | Yes | Natural-language question |
-| `USING provider` | No | LLM provider (`openai`, `groq`, `ollama`, `anthropic`) |
+| `USING provider` | No | LLM provider (`openai`, `groq`, `ollama`, `anthropic`, etc.) |
 | `MODEL 'name'` | No | Specific model to use (provider-dependent) |
+| `DEPTH n` | No | Graph traversal depth for context retrieval (default from config) |
+| `LIMIT n` | No | Maximum context results per structure type |
+| `COLLECTION col` | No | Scope context retrieval to a specific collection |
+
+### Examples
+
+```sql
+-- Basic question using a specific provider
+ASK 'who owns CPF 000.000.000-00?' USING groq
+
+-- Specify model and depth
+ASK 'summarize all vulnerabilities' USING anthropic MODEL 'claude-sonnet-4-20250514' DEPTH 2
+
+-- Scope to a collection with a result limit
+ASK 'what changed today?' COLLECTION audit_logs LIMIT 50
+
+-- All optional clauses combined
+ASK 'explain the network topology' USING ollama MODEL 'llama3' DEPTH 3 LIMIT 100 COLLECTION network
+```
 
 > [!TIP]
 > `ASK` performs a context search behind the scenes, so it benefits from the same indexes and graph traversals used by `SEARCH CONTEXT`.
+
+## SET CONFIG / SHOW CONFIG
+
+Manage runtime configuration directly from the query engine. Changes take effect immediately without restart.
+
+### SET CONFIG
+
+```sql
+-- Set a config value
+SET CONFIG red.ai.default.provider = 'groq'
+SET CONFIG red.ai.default.model = 'llama-3.3-70b-versatile'
+SET CONFIG red.storage.hnsw.ef_search = 100
+SET CONFIG red.search.rag.graph_depth = 3
+SET CONFIG red.backup.enabled = true
+```
+
+### SHOW CONFIG
+
+```sql
+-- Show all config
+SHOW CONFIG
+
+-- Show config subtree
+SHOW CONFIG red.ai
+SHOW CONFIG red.storage
+SHOW CONFIG red.backup
+```
+
+### Parameters
+
+| Parameter | Required | Description |
+|:----------|:---------|:------------|
+| `key` | Yes (SET) | Dot-notation config key (e.g. `red.ai.default.provider`) |
+| `value` | Yes (SET) | Value to set (string, integer, float, or boolean) |
+| `prefix` | No (SHOW) | Filter by key prefix; omit to show all keys |
+
+> [!TIP]
+> These commands are equivalent to the `GET /config/{key}`, `PUT /config/{key}`, and `GET /config` HTTP endpoints. See [Configuration](/getting-started/configuration.md) for the full list of available keys.
 
 ## Via HTTP
 

@@ -330,7 +330,7 @@ pub fn run_server_with_large_stack(config: ServerCommandConfig) -> Result<(), St
 
     let handle = thread::Builder::new()
         .name(thread_name.into())
-        .stack_size(16 * 1024 * 1024)
+        .stack_size(64 * 1024 * 1024)
         .spawn(move || run_configured_servers(config))
         .map_err(|err| format!("failed to spawn server thread: {err}"))?;
 

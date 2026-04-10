@@ -19,8 +19,37 @@ red server --http --path ./data/reddb.rdb --bind 0.0.0.0:8080
 | `GET` | `/ready/serverless/query` | Serverless query readiness |
 | `GET` | `/ready/serverless/write` | Serverless write readiness |
 | `GET` | `/ready/serverless/repair` | Serverless repair readiness |
-| `GET` | `/stats` | Runtime statistics |
+| `GET` | `/stats` | Runtime statistics (includes `system` block) |
 | `GET` | `/deployment/profiles` | Deployment profile catalog |
+
+### Stats Response
+
+`GET /stats` returns runtime statistics including a `system` block with process and host information:
+
+```json
+{
+  "active_connections": 2,
+  "idle_connections": 14,
+  "total_checkouts": 57,
+  "paged_mode": true,
+  "started_at_unix_ms": 1744329600000,
+  "store": {
+    "collection_count": 5,
+    "total_entities": 12500,
+    "total_memory_bytes": 8388608,
+    "cross_ref_count": 320
+  },
+  "system": {
+    "pid": 42,
+    "cpu_cores": 8,
+    "total_memory_bytes": 17179869184,
+    "available_memory_bytes": 8589934592,
+    "os": "linux",
+    "arch": "x86_64",
+    "hostname": "db-server-01"
+  }
+}
+```
 
 ## Catalog
 
@@ -225,6 +254,9 @@ The response groups results by structure type:
 |:-------|:-----|:------------|
 | `GET` | `/config` | Export all configuration as nested JSON |
 | `POST` | `/config` | Import configuration from a JSON tree |
+| `GET` | `/config/{key}` | Read a single config key or subtree |
+| `PUT` | `/config/{key}` | Set a config key (scalar or JSON subtree) |
+| `DELETE` | `/config/{key}` | Delete a config key |
 
 Configuration is stored as dot-notation key-value pairs in the `red_config` collection. The `/config` endpoints automatically flatten JSON trees on import and nest them on export.
 
@@ -277,6 +309,59 @@ Response:
 
 ```json
 {"ok": true, "imported": 2, "keys": ["red.ai.default.provider", "red.ai.default.model"]}
+```
+
+### Individual Config Keys
+
+Read a single key or a subtree by path:
+
+```bash
+curl http://127.0.0.1:8080/config/red.ai.default.provider
+```
+
+If the key is an exact match, the response returns that value. If the key is a prefix, the response returns the nested subtree.
+
+Set a single scalar value:
+
+```bash
+curl -X PUT http://127.0.0.1:8080/config/red.ai.default.provider \
+  -H 'content-type: application/json' \
+  -d '{"value": "groq"}'
+```
+
+Set a subtree (the server flattens it into individual keys):
+
+```bash
+curl -X PUT http://127.0.0.1:8080/config/red.storage.hnsw \
+  -H 'content-type: application/json' \
+  -d '{"value": {"m": 32, "ef_search": 100}}'
+```
+
+Delete a config key:
+
+```bash
+curl -X DELETE http://127.0.0.1:8080/config/red.ai.default.model
+```
+
+### Configuration via SQL
+
+You can also manage configuration through the query engine:
+
+```bash
+# SET CONFIG via SQL
+curl -X POST http://127.0.0.1:8080/query \
+  -H 'content-type: application/json' \
+  -d '{"query": "SET CONFIG red.ai.default.provider = '\''groq'\''"}'
+
+# SHOW CONFIG via SQL
+curl -X POST http://127.0.0.1:8080/query \
+  -H 'content-type: application/json' \
+  -d '{"query": "SHOW CONFIG"}'
+
+# SHOW CONFIG subtree via SQL
+curl -X POST http://127.0.0.1:8080/query \
+  -H 'content-type: application/json' \
+  -d '{"query": "SHOW CONFIG red.ai"}'
 ```
 
 ## AI

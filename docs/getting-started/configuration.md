@@ -136,6 +136,40 @@ curl -X POST http://127.0.0.1:8080/config \
 
 See [`examples/config.json`](https://github.com/forattini-dev/reddb/blob/main/examples/config.json) for a complete example with all defaults.
 
+### SQL Commands
+
+You can read and write configuration directly from the query engine:
+
+```sql
+-- Set a config value
+SET CONFIG red.ai.default.provider = 'groq'
+SET CONFIG red.storage.hnsw.ef_search = 100
+
+-- Show all config
+SHOW CONFIG
+
+-- Show config subtree
+SHOW CONFIG red.ai
+SHOW CONFIG red.storage.hnsw
+```
+
+### Individual Key API
+
+Read, write, or delete a single config key via HTTP:
+
+```bash
+# Read a key or subtree
+curl http://127.0.0.1:8080/config/red.ai.default.provider
+
+# Set a key
+curl -X PUT http://127.0.0.1:8080/config/red.ai.default.provider \
+  -H 'content-type: application/json' \
+  -d '{"value": "groq"}'
+
+# Delete a key
+curl -X DELETE http://127.0.0.1:8080/config/red.ai.default.model
+```
+
 ### Resolution Order
 
 For any setting, RedDB checks in order:
