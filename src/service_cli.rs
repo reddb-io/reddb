@@ -24,7 +24,7 @@ pub fn detect_runtime_config() -> RuntimeConfig {
     RuntimeConfig {
         available_cpus: cpus,
         suggested_workers,
-        stack_size: 256 * 1024 * 1024, // 16MB default
+        stack_size: 8 * 1024 * 1024, // 16MB default
     }
 }
 
@@ -123,7 +123,7 @@ impl ServerCommandConfig {
             _ => ReplicationConfig::standalone(),
         };
 
-        if self.vault || self.path.is_some() {
+        if self.vault {
             options.auth.vault_enabled = true;
         }
 
@@ -330,7 +330,7 @@ pub fn run_server_with_large_stack(config: ServerCommandConfig) -> Result<(), St
 
     let handle = thread::Builder::new()
         .name(thread_name.into())
-        .stack_size(256 * 1024 * 1024)
+        .stack_size(8 * 1024 * 1024)
         .spawn(move || run_configured_servers(config))
         .map_err(|err| format!("failed to spawn server thread: {err}"))?;
 

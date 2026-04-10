@@ -972,7 +972,16 @@ impl RedDB {
     }
 
     pub(crate) fn physical_index_state(&self) -> Vec<PhysicalIndexState> {
-        let snapshot = self.catalog_model_snapshot();
+        // Use a lightweight catalog snapshot that does NOT call physical_metadata()
+        // to avoid infinite recursion: physical_metadata → metadata_from_native_state
+        // → physical_index_state → catalog_model_snapshot → physical_metadata → ...
+        let catalog = self.runtime_index_catalog();
+        let snapshot = crate::catalog::snapshot_store_with_declarations(
+            "reddb",
+            self.store.as_ref(),
+            Some(&catalog),
+            None, // No declarations — breaks the recursive cycle
+        );
         let mut metrics_by_name = std::collections::BTreeMap::new();
         for metric in &snapshot.indices {
             metrics_by_name.insert(metric.name.clone(), metric.clone());
