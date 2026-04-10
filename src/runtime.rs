@@ -27,11 +27,12 @@ use crate::storage::engine::{
     WeaklyConnectedComponents, HITS,
 };
 use crate::storage::query::ast::{
-    AlterOperation, AlterTableQuery, CompareOp, CreateIndexQuery, CreateTableQuery, DeleteQuery,
-    DropIndexQuery, DropTableQuery, FieldRef, Filter, FusionStrategy, GraphCommand, HybridQuery,
-    IndexMethod, InsertEntityType, InsertQuery, JoinQuery, JoinType, OrderByClause,
-    ProbabilisticCommand, Projection, QueryExpr, SearchCommand, TableQuery, UpdateQuery,
-    VectorQuery, VectorSource,
+    AlterOperation, AlterTableQuery, CompareOp, CreateIndexQuery, CreateQueueQuery,
+    CreateTableQuery, CreateTimeSeriesQuery, DeleteQuery, DropIndexQuery, DropQueueQuery,
+    DropTableQuery, DropTimeSeriesQuery, FieldRef, Filter, FusionStrategy, GraphCommand,
+    HybridQuery, IndexMethod, InsertEntityType, InsertQuery, JoinQuery, JoinType, OrderByClause,
+    ProbabilisticCommand, Projection, QueryExpr, QueueCommand, QueueSide, SearchCommand,
+    TableQuery, UpdateQuery, VectorQuery, VectorSource,
 };
 use crate::storage::query::is_universal_entity_source as is_universal_query_source;
 use crate::storage::query::modes::{detect_mode, parse_multi, QueryMode};
@@ -563,7 +564,9 @@ mod impl_graph_commands;
 mod impl_native;
 mod impl_physical;
 mod impl_probabilistic;
+mod impl_queue;
 mod impl_search;
+mod impl_timeseries;
 mod join_filter;
 mod probabilistic_store;
 mod query_exec;

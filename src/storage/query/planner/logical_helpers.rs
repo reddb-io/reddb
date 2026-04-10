@@ -374,7 +374,12 @@ pub(crate) fn join_expr_exposes_field_table(expr: &QueryExpr, table: &str) -> bo
         | QueryExpr::ProbabilisticCommand(_)
         | QueryExpr::Ask(_)
         | QueryExpr::SetConfig { .. }
-        | QueryExpr::ShowConfig { .. } => false,
+        | QueryExpr::ShowConfig { .. }
+        | QueryExpr::CreateTimeSeries(_)
+        | QueryExpr::DropTimeSeries(_)
+        | QueryExpr::CreateQueue(_)
+        | QueryExpr::DropQueue(_)
+        | QueryExpr::QueueCommand(_) => false,
     }
 }
 
@@ -654,6 +659,11 @@ pub(crate) fn query_expr_kind(expr: &QueryExpr) -> &'static str {
         QueryExpr::Ask(_) => "ask",
         QueryExpr::SetConfig { .. } => "set_config",
         QueryExpr::ShowConfig { .. } => "show_config",
+        QueryExpr::CreateTimeSeries(_) => "create_timeseries",
+        QueryExpr::DropTimeSeries(_) => "drop_timeseries",
+        QueryExpr::CreateQueue(_) => "create_queue",
+        QueryExpr::DropQueue(_) => "drop_queue",
+        QueryExpr::QueueCommand(_) => "queue_command",
     }
 }
 

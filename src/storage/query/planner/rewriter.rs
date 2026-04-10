@@ -194,7 +194,12 @@ impl RewriteRule for NormalizeRule {
             | QueryExpr::ProbabilisticCommand(_)
             | QueryExpr::Ask(_)
             | QueryExpr::SetConfig { .. }
-            | QueryExpr::ShowConfig { .. }) => other,
+            | QueryExpr::ShowConfig { .. }
+            | QueryExpr::CreateTimeSeries(_)
+            | QueryExpr::DropTimeSeries(_)
+            | QueryExpr::CreateQueue(_)
+            | QueryExpr::DropQueue(_)
+            | QueryExpr::QueueCommand(_)) => other,
         }
     }
 
@@ -260,7 +265,12 @@ impl RewriteRule for SimplifyFiltersRule {
             | QueryExpr::ProbabilisticCommand(_)
             | QueryExpr::Ask(_)
             | QueryExpr::SetConfig { .. }
-            | QueryExpr::ShowConfig { .. }) => other,
+            | QueryExpr::ShowConfig { .. }
+            | QueryExpr::CreateTimeSeries(_)
+            | QueryExpr::DropTimeSeries(_)
+            | QueryExpr::CreateQueue(_)
+            | QueryExpr::DropQueue(_)
+            | QueryExpr::QueueCommand(_)) => other,
         }
     }
 
@@ -286,7 +296,12 @@ impl RewriteRule for SimplifyFiltersRule {
             | QueryExpr::ProbabilisticCommand(_)
             | QueryExpr::Ask(_)
             | QueryExpr::SetConfig { .. }
-            | QueryExpr::ShowConfig { .. } => false,
+            | QueryExpr::ShowConfig { .. }
+            | QueryExpr::CreateTimeSeries(_)
+            | QueryExpr::DropTimeSeries(_)
+            | QueryExpr::CreateQueue(_)
+            | QueryExpr::DropQueue(_)
+            | QueryExpr::QueueCommand(_) => false,
         }
     }
 }

@@ -70,6 +70,12 @@ impl RuntimeEntityPort for RedDBRuntime {
 
         let id = builder.save()?;
         refresh_context_index(&db, &input.collection, id)?;
+        self.cdc_emit(
+            crate::replication::cdc::ChangeOperation::Insert,
+            &input.collection,
+            id.raw(),
+            "table",
+        );
         Ok(CreateEntityOutput {
             id,
             entity: db.get(id),
@@ -112,6 +118,12 @@ impl RuntimeEntityPort for RedDBRuntime {
 
         let id = builder.save()?;
         refresh_context_index(&db, &input.collection, id)?;
+        self.cdc_emit(
+            crate::replication::cdc::ChangeOperation::Insert,
+            &input.collection,
+            id.raw(),
+            "graph_node",
+        );
         Ok(CreateEntityOutput {
             id,
             entity: db.get(id),
@@ -141,6 +153,12 @@ impl RuntimeEntityPort for RedDBRuntime {
 
         let id = builder.save()?;
         refresh_context_index(&db, &input.collection, id)?;
+        self.cdc_emit(
+            crate::replication::cdc::ChangeOperation::Insert,
+            &input.collection,
+            id.raw(),
+            "graph_edge",
+        );
         Ok(CreateEntityOutput {
             id,
             entity: db.get(id),
@@ -171,6 +189,12 @@ impl RuntimeEntityPort for RedDBRuntime {
 
         let id = builder.save()?;
         refresh_context_index(&db, &input.collection, id)?;
+        self.cdc_emit(
+            crate::replication::cdc::ChangeOperation::Insert,
+            &input.collection,
+            id.raw(),
+            "vector",
+        );
         Ok(CreateEntityOutput {
             id,
             entity: db.get(id),
@@ -641,6 +665,12 @@ impl RuntimeEntityPort for RedDBRuntime {
             .update(entity)
             .map_err(|err| crate::RedDBError::Query(err.to_string()))?;
         refresh_context_index(&db, &collection, id)?;
+        self.cdc_emit(
+            crate::replication::cdc::ChangeOperation::Update,
+            &collection,
+            id.raw(),
+            "entity",
+        );
 
         Ok(CreateEntityOutput {
             id,
@@ -651,6 +681,12 @@ impl RuntimeEntityPort for RedDBRuntime {
     fn delete_entity(&self, input: DeleteEntityInput) -> RedDBResult<DeleteEntityOutput> {
         let store = self.db().store();
         store.context_index().remove_entity(input.id);
+        self.cdc_emit(
+            crate::replication::cdc::ChangeOperation::Delete,
+            &input.collection,
+            input.id.raw(),
+            "entity",
+        );
         let deleted = store
             .delete(&input.collection, input.id)
             .map_err(|err| crate::RedDBError::Internal(err.to_string()))?;

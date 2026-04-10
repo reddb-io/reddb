@@ -289,7 +289,12 @@ impl JoinReorderingPass {
             | QueryExpr::ProbabilisticCommand(_)
             | QueryExpr::Ask(_)
             | QueryExpr::SetConfig { .. }
-            | QueryExpr::ShowConfig { .. } => 1.0,
+            | QueryExpr::ShowConfig { .. }
+            | QueryExpr::CreateTimeSeries(_)
+            | QueryExpr::DropTimeSeries(_)
+            | QueryExpr::CreateQueue(_)
+            | QueryExpr::DropQueue(_)
+            | QueryExpr::QueueCommand(_) => 1.0,
         }
     }
 }

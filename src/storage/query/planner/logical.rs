@@ -593,7 +593,12 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
         | QueryExpr::ProbabilisticCommand(_)
         | QueryExpr::Ask(_)
         | QueryExpr::SetConfig { .. }
-        | QueryExpr::ShowConfig { .. } => {
+        | QueryExpr::ShowConfig { .. }
+        | QueryExpr::CreateTimeSeries(_)
+        | QueryExpr::DropTimeSeries(_)
+        | QueryExpr::CreateQueue(_)
+        | QueryExpr::DropQueue(_)
+        | QueryExpr::QueueCommand(_) => {
             let mut details = BTreeMap::new();
             details.insert("type".to_string(), "dml_ddl".to_string());
             CanonicalLogicalNode {

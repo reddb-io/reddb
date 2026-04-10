@@ -186,6 +186,33 @@ impl RedDBRuntime {
                         "consumer_idle_timeout_ms": 60000
                     }),
                 );
+                store.set_config_tree(
+                    "red.backup",
+                    &crate::json!({
+                        "enabled": false,
+                        "interval_secs": 3600,
+                        "retention_count": 24,
+                        "upload": false,
+                        "backend": "local"
+                    }),
+                );
+                store.set_config_tree(
+                    "red.wal",
+                    &crate::json!({
+                        "archive": crate::json!({
+                            "enabled": false,
+                            "retention_hours": 168,
+                            "prefix": "wal/"
+                        })
+                    }),
+                );
+                store.set_config_tree(
+                    "red.cdc",
+                    &crate::json!({
+                        "enabled": true,
+                        "buffer_size": 100000
+                    }),
+                );
             }
         }
 
@@ -444,6 +471,13 @@ impl RedDBRuntime {
                 "probabilistic commands not yet implemented",
                 "select",
             )),
+            // Time-series DDL
+            QueryExpr::CreateTimeSeries(ref ts) => self.execute_create_timeseries(query, ts),
+            QueryExpr::DropTimeSeries(ref ts) => self.execute_drop_timeseries(query, ts),
+            // Queue DDL and commands
+            QueryExpr::CreateQueue(ref q) => self.execute_create_queue(query, q),
+            QueryExpr::DropQueue(ref q) => self.execute_drop_queue(query, q),
+            QueryExpr::QueueCommand(ref cmd) => self.execute_queue_command(query, cmd),
             // SET CONFIG key = value
             QueryExpr::SetConfig { ref key, ref value } => {
                 let store = self.inner.db.store();

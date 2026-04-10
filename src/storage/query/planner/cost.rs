@@ -186,7 +186,12 @@ impl CostEstimator {
             | QueryExpr::ProbabilisticCommand(_)
             | QueryExpr::Ask(_)
             | QueryExpr::SetConfig { .. }
-            | QueryExpr::ShowConfig { .. } => PlanCost::new(1.0, 1.0, 0.0),
+            | QueryExpr::ShowConfig { .. }
+            | QueryExpr::CreateTimeSeries(_)
+            | QueryExpr::DropTimeSeries(_)
+            | QueryExpr::CreateQueue(_)
+            | QueryExpr::DropQueue(_)
+            | QueryExpr::QueueCommand(_) => PlanCost::new(1.0, 1.0, 0.0),
         }
     }
 
@@ -213,7 +218,12 @@ impl CostEstimator {
             | QueryExpr::ProbabilisticCommand(_)
             | QueryExpr::Ask(_)
             | QueryExpr::SetConfig { .. }
-            | QueryExpr::ShowConfig { .. } => CardinalityEstimate::new(1.0, 1.0),
+            | QueryExpr::ShowConfig { .. }
+            | QueryExpr::CreateTimeSeries(_)
+            | QueryExpr::DropTimeSeries(_)
+            | QueryExpr::CreateQueue(_)
+            | QueryExpr::DropQueue(_)
+            | QueryExpr::QueueCommand(_) => CardinalityEstimate::new(1.0, 1.0),
         }
     }
 

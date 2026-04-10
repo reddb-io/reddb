@@ -442,7 +442,12 @@ pub(super) fn runtime_join_table_context(
         | QueryExpr::ProbabilisticCommand(_)
         | QueryExpr::Ask(_)
         | QueryExpr::SetConfig { .. }
-        | QueryExpr::ShowConfig { .. } => (None, None),
+        | QueryExpr::ShowConfig { .. }
+        | QueryExpr::CreateTimeSeries(_)
+        | QueryExpr::DropTimeSeries(_)
+        | QueryExpr::CreateQueue(_)
+        | QueryExpr::DropQueue(_)
+        | QueryExpr::QueueCommand(_) => (None, None),
     };
 
     (

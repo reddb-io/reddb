@@ -245,7 +245,12 @@ impl JoinQueryBuilder {
             | QueryExpr::ProbabilisticCommand(_)
             | QueryExpr::Ask(_)
             | QueryExpr::SetConfig { .. }
-            | QueryExpr::ShowConfig { .. } => {}
+            | QueryExpr::ShowConfig { .. }
+            | QueryExpr::CreateTimeSeries(_)
+            | QueryExpr::DropTimeSeries(_)
+            | QueryExpr::CreateQueue(_)
+            | QueryExpr::DropQueue(_)
+            | QueryExpr::QueueCommand(_) => {}
         }
         self
     }
