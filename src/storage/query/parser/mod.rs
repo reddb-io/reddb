@@ -48,8 +48,10 @@ mod index_ddl;
 mod join;
 mod path;
 mod probabilistic_commands;
+mod queue;
 mod search_commands;
 mod table;
+mod timeseries;
 mod vector;
 
 #[cfg(test)]
@@ -255,6 +257,12 @@ impl<'a> Parser<'a> {
                 } else if self.check(&Token::Table) {
                     self.expect(Token::Table)?;
                     self.parse_create_table_body()
+                } else if self.check(&Token::Timeseries) {
+                    self.advance()?;
+                    self.parse_create_timeseries_body()
+                } else if self.check(&Token::Queue) {
+                    self.advance()?;
+                    self.parse_create_queue_body()
                 } else if matches!(self.peek(), Token::Ident(n) if
                     n.eq_ignore_ascii_case("HLL") ||
                     n.eq_ignore_ascii_case("SKETCH") ||
@@ -263,7 +271,16 @@ impl<'a> Parser<'a> {
                     self.parse_create_probabilistic()
                 } else {
                     Err(ParseError::expected(
-                        vec!["TABLE", "INDEX", "UNIQUE", "HLL", "SKETCH", "FILTER"],
+                        vec![
+                            "TABLE",
+                            "INDEX",
+                            "UNIQUE",
+                            "TIMESERIES",
+                            "QUEUE",
+                            "HLL",
+                            "SKETCH",
+                            "FILTER",
+                        ],
                         self.peek(),
                         pos,
                     ))
@@ -277,6 +294,12 @@ impl<'a> Parser<'a> {
                 } else if self.check(&Token::Table) {
                     self.expect(Token::Table)?;
                     self.parse_drop_table_body()
+                } else if self.check(&Token::Timeseries) {
+                    self.advance()?;
+                    self.parse_drop_timeseries_body()
+                } else if self.check(&Token::Queue) {
+                    self.advance()?;
+                    self.parse_drop_queue_body()
                 } else if matches!(self.peek(), Token::Ident(n) if
                     n.eq_ignore_ascii_case("HLL") ||
                     n.eq_ignore_ascii_case("SKETCH") ||
@@ -285,7 +308,15 @@ impl<'a> Parser<'a> {
                     self.parse_drop_probabilistic()
                 } else {
                     Err(ParseError::expected(
-                        vec!["TABLE", "INDEX", "HLL", "SKETCH", "FILTER"],
+                        vec![
+                            "TABLE",
+                            "INDEX",
+                            "TIMESERIES",
+                            "QUEUE",
+                            "HLL",
+                            "SKETCH",
+                            "FILTER",
+                        ],
                         self.peek(),
                         pos,
                     ))
@@ -336,6 +367,7 @@ impl<'a> Parser<'a> {
                     ))
                 }
             }
+            Token::Queue => self.parse_queue_command(),
             Token::Ident(ref name) if name.eq_ignore_ascii_case("HLL") => self.parse_hll_command(),
             Token::Ident(ref name) if name.eq_ignore_ascii_case("SKETCH") => {
                 self.parse_sketch_command()

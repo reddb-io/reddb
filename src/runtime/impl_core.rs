@@ -33,6 +33,8 @@ impl RedDBRuntime {
                     .unwrap_or_default()
                     .as_millis(),
                 probabilistic: super::probabilistic_store::ProbabilisticStore::new(),
+                cdc: crate::replication::cdc::CdcBuffer::new(100_000),
+                backup_scheduler: crate::replication::scheduler::BackupScheduler::new(3600),
             }),
         };
 
@@ -133,6 +135,57 @@ impl RedDBRuntime {
                         "max_recursion_depth": 1000
                     }),
                 );
+                store.set_config_tree(
+                    "red.indexes",
+                    &crate::json!({
+                        "auto_select": true,
+                        "bloom_filter": crate::json!({
+                            "enabled": true,
+                            "false_positive_rate": 0.01,
+                            "prune_on_scan": true
+                        }),
+                        "hash": crate::json!({ "enabled": true }),
+                        "bitmap": crate::json!({ "enabled": true, "max_cardinality": 1000 }),
+                        "spatial": crate::json!({ "enabled": true })
+                    }),
+                );
+                store.set_config_tree(
+                    "red.memtable",
+                    &crate::json!({
+                        "enabled": true,
+                        "max_bytes": 67108864_u64,
+                        "flush_threshold": 0.75
+                    }),
+                );
+                store.set_config_tree(
+                    "red.probabilistic",
+                    &crate::json!({
+                        "hll_registers": 16384,
+                        "sketch_default_width": 1000,
+                        "sketch_default_depth": 5,
+                        "filter_default_capacity": 100000
+                    }),
+                );
+                store.set_config_tree(
+                    "red.timeseries",
+                    &crate::json!({
+                        "default_chunk_size": 1024,
+                        "compression": crate::json!({
+                            "timestamps": "delta_of_delta",
+                            "values": "gorilla_xor"
+                        }),
+                        "default_retention_days": 0
+                    }),
+                );
+                store.set_config_tree(
+                    "red.queue",
+                    &crate::json!({
+                        "default_max_size": 0,
+                        "default_max_attempts": 3,
+                        "visibility_timeout_ms": 30000,
+                        "consumer_idle_timeout_ms": 60000
+                    }),
+                );
             }
         }
 
@@ -141,6 +194,45 @@ impl RedDBRuntime {
 
     pub fn db(&self) -> Arc<RedDB> {
         Arc::clone(&self.inner.db)
+    }
+
+    /// Emit a CDC change event.
+    pub fn cdc_emit(
+        &self,
+        operation: crate::replication::cdc::ChangeOperation,
+        collection: &str,
+        entity_id: u64,
+        entity_kind: &str,
+    ) {
+        self.inner
+            .cdc
+            .emit(operation, collection, entity_id, entity_kind);
+    }
+
+    /// Poll CDC events since a given LSN.
+    pub fn cdc_poll(
+        &self,
+        since_lsn: u64,
+        max_count: usize,
+    ) -> Vec<crate::replication::cdc::ChangeEvent> {
+        self.inner.cdc.poll(since_lsn, max_count)
+    }
+
+    /// Get backup scheduler status.
+    pub fn backup_status(&self) -> crate::replication::scheduler::BackupStatus {
+        self.inner.backup_scheduler.status()
+    }
+
+    /// Trigger an immediate backup.
+    pub fn trigger_backup(&self) -> RedDBResult<crate::replication::scheduler::BackupResult> {
+        let started = std::time::Instant::now();
+        let snapshot = self.create_snapshot()?;
+        Ok(crate::replication::scheduler::BackupResult {
+            snapshot_id: snapshot.snapshot_id,
+            uploaded: false, // TODO: auto-upload when backend configured
+            duration_ms: started.elapsed().as_millis() as u64,
+            timestamp: snapshot.created_at_unix_ms as u64,
+        })
     }
 
     pub fn acquire(&self) -> RedDBResult<RuntimeConnection> {

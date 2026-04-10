@@ -30,6 +30,12 @@ impl RedDBServer {
             ("POST", "/ai/prompt") => self.handle_ai_prompt(body),
             ("POST", "/ai/credentials") => self.handle_ai_credentials(body),
 
+            // CDC & Backup endpoints
+            ("GET", "/changes") => self.handle_cdc_poll(&query),
+            ("GET", "/backup/status") => self.handle_backup_status(),
+            ("POST", "/backup/trigger") => self.handle_backup_trigger(),
+            ("GET", "/recovery/restore-points") => self.handle_restore_points(),
+
             // Replication endpoints
             ("GET", "/replication/status") => self.handle_replication_status(),
             ("POST", "/replication/snapshot") => self.handle_replication_snapshot(),

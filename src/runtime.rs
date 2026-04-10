@@ -539,6 +539,8 @@ struct RuntimeInner {
     pool: Mutex<PoolState>,
     started_at_unix_ms: u128,
     probabilistic: probabilistic_store::ProbabilisticStore,
+    cdc: crate::replication::cdc::CdcBuffer,
+    backup_scheduler: crate::replication::scheduler::BackupScheduler,
 }
 
 #[derive(Clone)]

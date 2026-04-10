@@ -45,6 +45,16 @@ pub enum QueryExpr {
     DropIndex(DropIndexQuery),
     /// Probabilistic data structure commands (HLL, SKETCH, FILTER)
     ProbabilisticCommand(ProbabilisticCommand),
+    /// CREATE TIMESERIES name [RETENTION duration] [CHUNK_SIZE n]
+    CreateTimeSeries(CreateTimeSeriesQuery),
+    /// DROP TIMESERIES name
+    DropTimeSeries(DropTimeSeriesQuery),
+    /// CREATE QUEUE name [MAX_SIZE n] [PRIORITY] [WITH TTL duration]
+    CreateQueue(CreateQueueQuery),
+    /// DROP QUEUE name
+    DropQueue(DropQueueQuery),
+    /// QUEUE subcommand (PUSH, POP, PEEK, LEN, PURGE, GROUP, READ, ACK, NACK)
+    QueueCommand(QueueCommand),
     /// SET CONFIG key = value
     SetConfig { key: String, value: Value },
     /// SHOW CONFIG [prefix]
@@ -241,6 +251,8 @@ pub struct ExpandOptions {
     pub graph_depth: usize,
     /// Expand via cross-references (WITH EXPAND CROSS_REFS)
     pub cross_refs: bool,
+    /// Index hint from the optimizer (which index to prefer for this query)
+    pub index_hint: Option<crate::storage::query::planner::optimizer::IndexHint>,
 }
 
 impl TableQuery {
@@ -1284,6 +1296,100 @@ pub enum SearchCommand {
         k: usize,
         collection: String,
         column: String,
+    },
+}
+
+// ============================================================================
+// Time-Series DDL
+// ============================================================================
+
+/// CREATE TIMESERIES name [RETENTION duration] [CHUNK_SIZE n]
+#[derive(Debug, Clone)]
+pub struct CreateTimeSeriesQuery {
+    pub name: String,
+    pub retention_ms: Option<u64>,
+    pub chunk_size: Option<usize>,
+    pub if_not_exists: bool,
+}
+
+/// DROP TIMESERIES [IF EXISTS] name
+#[derive(Debug, Clone)]
+pub struct DropTimeSeriesQuery {
+    pub name: String,
+    pub if_exists: bool,
+}
+
+// ============================================================================
+// Queue DDL & Commands
+// ============================================================================
+
+/// CREATE QUEUE name [MAX_SIZE n] [PRIORITY] [WITH TTL duration]
+#[derive(Debug, Clone)]
+pub struct CreateQueueQuery {
+    pub name: String,
+    pub priority: bool,
+    pub max_size: Option<usize>,
+    pub ttl_ms: Option<u64>,
+    pub if_not_exists: bool,
+}
+
+/// DROP QUEUE [IF EXISTS] name
+#[derive(Debug, Clone)]
+pub struct DropQueueQuery {
+    pub name: String,
+    pub if_exists: bool,
+}
+
+/// Which end of the queue
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueSide {
+    Left,
+    Right,
+}
+
+/// Queue operation commands
+#[derive(Debug, Clone)]
+pub enum QueueCommand {
+    Push {
+        queue: String,
+        value: String,
+        side: QueueSide,
+        priority: Option<i32>,
+    },
+    Pop {
+        queue: String,
+        side: QueueSide,
+        count: usize,
+    },
+    Peek {
+        queue: String,
+        count: usize,
+    },
+    Len {
+        queue: String,
+    },
+    Purge {
+        queue: String,
+    },
+    GroupCreate {
+        queue: String,
+        group: String,
+    },
+    GroupRead {
+        queue: String,
+        group: String,
+        consumer: String,
+        count: usize,
+    },
+    Ack {
+        queue: String,
+        group: String,
+        message_id: String,
+    },
+    Nack {
+        queue: String,
+        group: String,
+        message_id: String,
     },
 }
 

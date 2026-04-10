@@ -20,8 +20,10 @@
 //!     .with_replication(ReplicationConfig::replica("http://primary:50051"));
 //! ```
 
+pub mod cdc;
 pub mod primary;
 pub mod replica;
+pub mod scheduler;
 
 /// Role of this RedDB instance in a replication cluster.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

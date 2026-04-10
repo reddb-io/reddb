@@ -8,15 +8,19 @@
 //! - **Records:** Sequence of variable-length records.
 //! - **Checksum:** Each record ends with a CRC32 checksum.
 
+pub mod archiver;
 pub mod checkpoint;
 pub mod reader;
 pub mod record;
+pub mod recovery;
 pub mod transaction;
 pub mod writer;
 
+pub use archiver::{WalArchiver, WalSegmentMeta};
 pub use checkpoint::{CheckpointError, CheckpointMode, CheckpointResult, Checkpointer};
 pub use reader::WalReader;
 pub use record::{RecordType, WalRecord};
+pub use recovery::{PointInTimeRecovery, RecoveryResult, RestorePoint};
 pub use transaction::{Transaction, TransactionManager, TxError, TxState};
 pub use writer::WalWriter;
 

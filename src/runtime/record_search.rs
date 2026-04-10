@@ -25,6 +25,26 @@ pub(super) fn scan_runtime_table_source_records(
         .collect())
 }
 
+/// Scan with bloom filter optimization: when we know the exact key we're looking for,
+/// use the bloom filter to skip segments that definitely don't contain it.
+pub(super) fn scan_runtime_table_with_bloom_hint(
+    db: &RedDB,
+    table: &str,
+    key_hint: Option<&[u8]>,
+) -> RedDBResult<(Vec<UnifiedRecord>, bool)> {
+    let manager = db
+        .store()
+        .get_collection(table)
+        .ok_or_else(|| RedDBError::NotFound(table.to_string()))?;
+
+    let (entities, pruned) = manager.query_with_bloom_hint(key_hint, |_| true);
+    let records = entities
+        .into_iter()
+        .filter_map(runtime_table_record_from_entity)
+        .collect();
+    Ok((records, pruned))
+}
+
 pub(super) fn is_universal_entity_source(table: &str) -> bool {
     is_universal_query_source(table)
 }

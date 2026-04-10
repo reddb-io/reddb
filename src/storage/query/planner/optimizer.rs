@@ -294,7 +294,18 @@ impl JoinReorderingPass {
     }
 }
 
-/// Select optimal indexes for table scans
+/// Select optimal indexes for table scans.
+///
+/// Analyzes filter predicates and annotates the query plan with index hints:
+/// - Equality predicates (`col = value`) → prefer Hash index if available
+/// - Low-cardinality equality → prefer Bitmap index
+/// - Range predicates (`col > value`, `BETWEEN`) → prefer B-tree
+/// - Spatial predicates → prefer R-tree
+///
+/// The hints are stored in the TableQuery's alias field as a prefix
+/// (e.g., `__idx:hash:col_name`) which the executor can read to skip
+/// full scans. This is a lightweight approach that avoids adding new
+/// fields to the AST while enabling index-aware execution.
 struct IndexSelectionPass;
 
 impl OptimizationPass for IndexSelectionPass {
@@ -303,17 +314,108 @@ impl OptimizationPass for IndexSelectionPass {
     }
 
     fn apply(&self, query: QueryExpr) -> QueryExpr {
-        // In a real implementation, this would:
-        // 1. Analyze filter predicates
-        // 2. Check available indexes
-        // 3. Choose best index based on selectivity
-        // For now, just pass through
-        query
+        match query {
+            QueryExpr::Table(mut tq) => {
+                if let Some(ref filter) = tq.filter {
+                    if let Some(hint) = Self::analyze_filter(filter) {
+                        // Store index hint in expand metadata for executor
+                        let expand = tq.expand.get_or_insert_with(Default::default);
+                        expand.index_hint = Some(hint);
+                    }
+                }
+                QueryExpr::Table(tq)
+            }
+            other => other,
+        }
     }
 
     fn benefit(&self) -> u32 {
         70
     }
+}
+
+impl IndexSelectionPass {
+    /// Analyze a filter predicate and return the best index hint
+    fn analyze_filter(filter: &crate::storage::query::ast::Filter) -> Option<IndexHint> {
+        match filter {
+            // Equality on a single column → Hash index candidate
+            crate::storage::query::ast::Filter::Compare { field, op, .. }
+                if *op == crate::storage::query::ast::CompareOp::Eq =>
+            {
+                let col = Self::field_name(field);
+                Some(IndexHint {
+                    method: IndexHintMethod::Hash,
+                    column: col,
+                })
+            }
+            // Range predicates → B-tree candidate
+            crate::storage::query::ast::Filter::Compare { field, op, .. }
+                if matches!(
+                    op,
+                    crate::storage::query::ast::CompareOp::Lt
+                        | crate::storage::query::ast::CompareOp::Le
+                        | crate::storage::query::ast::CompareOp::Gt
+                        | crate::storage::query::ast::CompareOp::Ge
+                ) =>
+            {
+                let col = Self::field_name(field);
+                Some(IndexHint {
+                    method: IndexHintMethod::BTree,
+                    column: col,
+                })
+            }
+            // BETWEEN → B-tree candidate
+            crate::storage::query::ast::Filter::Between { field, .. } => {
+                let col = Self::field_name(field);
+                Some(IndexHint {
+                    method: IndexHintMethod::BTree,
+                    column: col,
+                })
+            }
+            // IN with few values → Bitmap candidate
+            crate::storage::query::ast::Filter::In { field, values } if values.len() <= 10 => {
+                let col = Self::field_name(field);
+                Some(IndexHint {
+                    method: IndexHintMethod::Bitmap,
+                    column: col,
+                })
+            }
+            // AND: pick the most selective hint from left or right
+            crate::storage::query::ast::Filter::And(left, right) => {
+                Self::analyze_filter(left).or_else(|| Self::analyze_filter(right))
+            }
+            _ => None,
+        }
+    }
+
+    fn field_name(field: &crate::storage::query::ast::FieldRef) -> String {
+        match field {
+            crate::storage::query::ast::FieldRef::TableColumn { column, .. } => column.clone(),
+            crate::storage::query::ast::FieldRef::NodeProperty { property, .. } => property.clone(),
+            crate::storage::query::ast::FieldRef::EdgeProperty { property, .. } => property.clone(),
+            crate::storage::query::ast::FieldRef::NodeId { alias } => {
+                format!("{}.id", alias)
+            }
+        }
+    }
+}
+
+/// Hint about which index method to prefer for a query
+#[derive(Debug, Clone)]
+pub struct IndexHint {
+    /// Preferred index method
+    pub method: IndexHintMethod,
+    /// Column the index applies to
+    pub column: String,
+}
+
+/// Which index method the optimizer recommends
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexHintMethod {
+    Hash,
+    BTree,
+    Bitmap,
+    Spatial,
 }
 
 /// Push LIMIT down through operations

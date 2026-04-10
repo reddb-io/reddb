@@ -529,11 +529,35 @@ impl RedDBRuntime {
                 column,
                 limit,
             } => {
-                let result =
+                use crate::storage::unified::spatial_index::haversine_km;
+                let _ = column; // Column indicates which field holds geo data
+                let store = self.inner.db.store();
+                let entities = store
+                    .get_collection(collection)
+                    .map(|m| m.query_all(|_| true))
+                    .unwrap_or_default();
+
+                let mut hits: Vec<(u64, f64)> = Vec::new();
+                for entity in &entities {
+                    // Extract lat/lon from GeoPoint values in entity data
+                    if let Some((lat, lon)) = extract_geo_from_entity(entity) {
+                        let dist = haversine_km(*center_lat, *center_lon, lat, lon);
+                        if dist <= *radius_km {
+                            hits.push((entity.id.raw(), dist));
+                        }
+                    }
+                }
+                hits.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+                hits.truncate(*limit);
+
+                let mut result =
                     UnifiedResult::with_columns(vec!["entity_id".into(), "distance_km".into()]);
-                // Spatial search will be wired to SpatialIndexManager when indices are created.
-                // For now, return empty result with metadata about the search.
-                let _ = (center_lat, center_lon, radius_km, collection, column, limit);
+                for (id, dist) in &hits {
+                    let mut record = UnifiedRecord::new();
+                    record.set("entity_id", Value::UnsignedInteger(*id));
+                    record.set("distance_km", Value::Float(*dist));
+                    result.push(record);
+                }
                 Ok(RuntimeQueryResult {
                     query: raw_query.to_string(),
                     mode: QueryMode::Sql,
@@ -553,10 +577,29 @@ impl RedDBRuntime {
                 column,
                 limit,
             } => {
-                let result = UnifiedResult::with_columns(vec!["entity_id".into()]);
-                let _ = (
-                    min_lat, min_lon, max_lat, max_lon, collection, column, limit,
-                );
+                let _ = column;
+                let store = self.inner.db.store();
+                let entities = store
+                    .get_collection(collection)
+                    .map(|m| m.query_all(|_| true))
+                    .unwrap_or_default();
+
+                let mut result = UnifiedResult::with_columns(vec!["entity_id".into()]);
+                let mut count = 0;
+                for entity in &entities {
+                    if count >= *limit {
+                        break;
+                    }
+                    if let Some((lat, lon)) = extract_geo_from_entity(entity) {
+                        if lat >= *min_lat && lat <= *max_lat && lon >= *min_lon && lon <= *max_lon
+                        {
+                            let mut record = UnifiedRecord::new();
+                            record.set("entity_id", Value::UnsignedInteger(entity.id.raw()));
+                            result.push(record);
+                            count += 1;
+                        }
+                    }
+                }
                 Ok(RuntimeQueryResult {
                     query: raw_query.to_string(),
                     mode: QueryMode::Sql,
@@ -574,9 +617,32 @@ impl RedDBRuntime {
                 collection,
                 column,
             } => {
-                let result =
+                use crate::storage::unified::spatial_index::haversine_km;
+                let _ = column;
+                let store = self.inner.db.store();
+                let entities = store
+                    .get_collection(collection)
+                    .map(|m| m.query_all(|_| true))
+                    .unwrap_or_default();
+
+                let mut hits: Vec<(u64, f64)> = Vec::new();
+                for entity in &entities {
+                    if let Some((elat, elon)) = extract_geo_from_entity(entity) {
+                        let dist = haversine_km(*lat, *lon, elat, elon);
+                        hits.push((entity.id.raw(), dist));
+                    }
+                }
+                hits.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+                hits.truncate(*k);
+
+                let mut result =
                     UnifiedResult::with_columns(vec!["entity_id".into(), "distance_km".into()]);
-                let _ = (lat, lon, k, collection, column);
+                for (id, dist) in &hits {
+                    let mut record = UnifiedRecord::new();
+                    record.set("entity_id", Value::UnsignedInteger(*id));
+                    record.set("distance_km", Value::Float(*dist));
+                    result.push(record);
+                }
                 Ok(RuntimeQueryResult {
                     query: raw_query.to_string(),
                     mode: QueryMode::Sql,
@@ -659,5 +725,95 @@ fn parse_components_mode(s: &str) -> RedDBResult<RuntimeGraphComponentsMode> {
         _ => Err(RedDBError::Query(format!(
             "unknown components mode: '{s}', expected connected|weak|strong"
         ))),
+    }
+}
+
+/// Extract (latitude, longitude) from an entity.
+///
+/// Looks for GeoPoint values in the entity data (row columns or node properties)
+/// or dedicated lat/lon fields. Returns degrees.
+fn extract_geo_from_entity(entity: &UnifiedEntity) -> Option<(f64, f64)> {
+    match &entity.data {
+        EntityData::Row(row) => {
+            // Search named columns for GeoPoint or lat/lon pairs
+            if let Some(ref named) = row.named {
+                // Direct GeoPoint value
+                for value in named.values() {
+                    if let Value::GeoPoint(lat_micro, lon_micro) = value {
+                        return Some((
+                            *lat_micro as f64 / 1_000_000.0,
+                            *lon_micro as f64 / 1_000_000.0,
+                        ));
+                    }
+                }
+                // Try lat/lon or latitude/longitude named fields
+                let lat =
+                    named
+                        .get("lat")
+                        .or_else(|| named.get("latitude"))
+                        .and_then(|v| match v {
+                            Value::Float(f) => Some(*f),
+                            Value::Integer(i) => Some(*i as f64),
+                            _ => None,
+                        });
+                let lon = named
+                    .get("lon")
+                    .or_else(|| named.get("lng"))
+                    .or_else(|| named.get("longitude"))
+                    .and_then(|v| match v {
+                        Value::Float(f) => Some(*f),
+                        Value::Integer(i) => Some(*i as f64),
+                        _ => None,
+                    });
+                if let (Some(la), Some(lo)) = (lat, lon) {
+                    return Some((la, lo));
+                }
+            }
+            // Search positional columns for GeoPoint
+            for value in &row.columns {
+                if let Value::GeoPoint(lat_micro, lon_micro) = value {
+                    return Some((
+                        *lat_micro as f64 / 1_000_000.0,
+                        *lon_micro as f64 / 1_000_000.0,
+                    ));
+                }
+            }
+            None
+        }
+        EntityData::Node(node) => {
+            // Search node properties
+            for value in node.properties.values() {
+                if let Value::GeoPoint(lat_micro, lon_micro) = value {
+                    return Some((
+                        *lat_micro as f64 / 1_000_000.0,
+                        *lon_micro as f64 / 1_000_000.0,
+                    ));
+                }
+            }
+            let lat = node
+                .properties
+                .get("lat")
+                .or_else(|| node.properties.get("latitude"))
+                .and_then(|v| match v {
+                    Value::Float(f) => Some(*f),
+                    Value::Integer(i) => Some(*i as f64),
+                    _ => None,
+                });
+            let lon = node
+                .properties
+                .get("lon")
+                .or_else(|| node.properties.get("lng"))
+                .or_else(|| node.properties.get("longitude"))
+                .and_then(|v| match v {
+                    Value::Float(f) => Some(*f),
+                    Value::Integer(i) => Some(*i as f64),
+                    _ => None,
+                });
+            if let (Some(la), Some(lo)) = (lat, lon) {
+                return Some((la, lo));
+            }
+            None
+        }
+        _ => None,
     }
 }

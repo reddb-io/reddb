@@ -451,6 +451,61 @@ impl SegmentManager {
         results
     }
 
+    /// Query with bloom filter hint: skip the growing segment when bloom says key is absent.
+    ///
+    /// This is the integration point for bloom filter pruning.
+    /// When a query has an equality predicate on a known key, the executor
+    /// can call this instead of `query_all` to avoid scanning when the
+    /// bloom filter proves the key doesn't exist.
+    ///
+    /// Returns (results, bloom_pruned) where bloom_pruned indicates if the
+    /// segment was skipped.
+    pub fn query_with_bloom_hint<F>(
+        &self,
+        key_hint: Option<&[u8]>,
+        filter: F,
+    ) -> (Vec<UnifiedEntity>, bool)
+    where
+        F: Fn(&UnifiedEntity) -> bool,
+    {
+        let mut results = Vec::new();
+        let mut bloom_pruned = false;
+
+        if let Some(growing_arc) = self.growing.read().unwrap().as_ref() {
+            let growing = growing_arc.read().unwrap();
+            if let Some(key) = key_hint {
+                if !growing.bloom_might_contain_key(key) {
+                    bloom_pruned = true;
+                    return (results, bloom_pruned);
+                }
+            }
+            for entity in growing.iter() {
+                if filter(entity) {
+                    results.push(entity.clone());
+                }
+            }
+        }
+
+        // Sealed segments (currently empty iter, but future-proofed)
+        let sealed = self.sealed.read().unwrap();
+        for segment_arc in sealed.iter() {
+            let segment = segment_arc.read().unwrap();
+            if let Some(key) = key_hint {
+                if !segment.bloom_might_contain_key(key) {
+                    bloom_pruned = true;
+                    continue;
+                }
+            }
+            for entity in segment.iter() {
+                if filter(entity) {
+                    results.push(entity.clone());
+                }
+            }
+        }
+
+        (results, bloom_pruned)
+    }
+
     /// Filter by metadata across all segments
     pub fn filter_metadata(&self, filters: &[(String, MetadataFilter)]) -> Vec<EntityId> {
         let mut results = Vec::new();
