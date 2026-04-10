@@ -76,8 +76,56 @@ red server --http --path ./data/reddb.rdb --bind 0.0.0.0:8080
 | `POST` | `/collections/{name}/bulk/nodes` | Bulk create nodes |
 | `POST` | `/collections/{name}/bulk/edges` | Bulk create edges |
 | `POST` | `/collections/{name}/bulk/vectors` | Bulk create vectors |
+| `POST` | `/collections/{name}/documents` | Create a document |
+| `POST` | `/collections/{name}/bulk/documents` | Bulk create documents |
+| `GET` | `/collections/{name}/kvs/{key}` | Read a key-value pair by key |
+| `PUT` | `/collections/{name}/kvs/{key}` | Create or update a key-value pair |
+| `DELETE` | `/collections/{name}/kvs/{key}` | Delete a key-value pair by key |
 | `PATCH` | `/collections/{name}/entities/{id}` | Update an entity |
 | `DELETE` | `/collections/{name}/entities/{id}` | Delete an entity |
+
+### Documents
+
+Create a document entity with an arbitrary JSON body:
+
+```bash
+curl -X POST http://127.0.0.1:8080/collections/logs/documents \
+  -H 'content-type: application/json' \
+  -d '{"body": {"level": "info", "message": "test"}}'
+```
+
+Bulk create multiple documents in one request:
+
+```bash
+curl -X POST http://127.0.0.1:8080/collections/logs/bulk/documents \
+  -H 'content-type: application/json' \
+  -d '{"items": [
+    {"body": {"level": "info", "message": "first"}},
+    {"body": {"level": "warn", "message": "second"}}
+  ]}'
+```
+
+### Key-Value Pairs
+
+Read a key-value pair by key:
+
+```bash
+curl -s http://127.0.0.1:8080/collections/settings/kvs/theme
+```
+
+Create or update a key-value pair:
+
+```bash
+curl -X PUT http://127.0.0.1:8080/collections/settings/kvs/theme \
+  -H 'content-type: application/json' \
+  -d '{"value": "dark"}'
+```
+
+Delete a key-value pair by key:
+
+```bash
+curl -X DELETE http://127.0.0.1:8080/collections/settings/kvs/theme
+```
 
 ### TTL over HTTP
 
@@ -108,12 +156,68 @@ curl -X PATCH http://127.0.0.1:8080/collections/sessions/entities/1 \
 | Method | Path | Description |
 |:-------|:-----|:------------|
 | `POST` | `/query` | Execute SQL/universal query |
+| `POST` | `/context` | Unified context search across all data structures |
 | `POST` | `/collections/{name}/similar` | Vector similarity search in a collection |
 | `POST` | `/collections/{name}/ivf/search` | IVF approximate search in a collection |
 | `POST` | `/text/search` | Full-text search |
 | `POST` | `/multimodal/search` | Global multimodal lookup (table, document, kv, vector, graph) |
 | `POST` | `/hybrid/search` | Hybrid text + vector search |
 | `POST` | `/search` | Unified search (`mode=auto|index|multimodal|hybrid`) |
+
+### Context Search
+
+`POST /context` performs a unified context search across all data structures (tables, graphs, vectors, documents, key-value pairs). It follows cross-references and optionally expands graph neighborhoods in a single request.
+
+Only the `query` field is required. All other fields are optional and control how deep and wide the search reaches.
+
+```bash
+curl -X POST http://127.0.0.1:8080/context \
+  -H 'content-type: application/json' \
+  -d '{
+    "query": "081.232.036-08",
+    "field": "cpf",
+    "collections": ["customers"],
+    "graph_depth": 1,
+    "graph_max_edges": 20,
+    "max_cross_refs": 10,
+    "follow_cross_refs": true,
+    "expand_graph": true,
+    "global_scan": true,
+    "reindex": true,
+    "limit": 25,
+    "min_score": 0.0
+  }'
+```
+
+| Parameter | Type | Default | Description |
+|:----------|:-----|:--------|:------------|
+| `query` | `string` | *(required)* | Search term or value to look up |
+| `field` | `string` | `null` | Restrict table/document matching to a specific field |
+| `collections` | `string[]` | `null` | Limit search to these collections |
+| `graph_depth` | `integer` | `1` | How many hops to traverse when expanding graph results |
+| `graph_max_edges` | `integer` | `20` | Maximum edges returned per graph expansion |
+| `max_cross_refs` | `integer` | `10` | Maximum cross-references to follow |
+| `follow_cross_refs` | `boolean` | `true` | Whether to follow cross-references between entities |
+| `expand_graph` | `boolean` | `true` | Whether to expand graph neighborhoods around matched nodes |
+| `global_scan` | `boolean` | `true` | Scan all collections when `collections` is not specified |
+| `reindex` | `boolean` | `true` | Re-index before searching to include recent writes |
+| `limit` | `integer` | `25` | Maximum results per structure type |
+| `min_score` | `float` | `0.0` | Minimum relevance score for returned results |
+
+The response groups results by structure type:
+
+```json
+{
+  "ok": true,
+  "tables": [...],
+  "graph": { "nodes": [...], "edges": [...] },
+  "vectors": [...],
+  "documents": [...],
+  "key_values": [...],
+  "connections": [...],
+  "summary": { ... }
+}
+```
 
 ## AI
 

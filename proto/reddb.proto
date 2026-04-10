@@ -79,6 +79,7 @@ service RedDb {
   rpc TextSearch(JsonPayloadRequest) returns (PayloadReply);
   rpc MultimodalSearch(JsonPayloadRequest) returns (PayloadReply);
   rpc HybridSearch(JsonPayloadRequest) returns (PayloadReply);
+  rpc ContextSearch(JsonPayloadRequest) returns (PayloadReply);
   rpc Similar(JsonCreateRequest) returns (PayloadReply);
   rpc IvfSearch(JsonCreateRequest) returns (PayloadReply);
   rpc GraphNeighborhood(JsonPayloadRequest) returns (PayloadReply);
@@ -96,10 +97,16 @@ service RedDb {
   rpc CreateNode(JsonCreateRequest) returns (EntityReply);
   rpc CreateEdge(JsonCreateRequest) returns (EntityReply);
   rpc CreateVector(JsonCreateRequest) returns (EntityReply);
+  rpc CreateDocument(JsonCreateRequest) returns (EntityReply);
+  rpc CreateKv(JsonCreateRequest) returns (EntityReply);
   rpc BulkCreateRows(JsonBulkCreateRequest) returns (BulkEntityReply);
   rpc BulkCreateNodes(JsonBulkCreateRequest) returns (BulkEntityReply);
   rpc BulkCreateEdges(JsonBulkCreateRequest) returns (BulkEntityReply);
   rpc BulkCreateVectors(JsonBulkCreateRequest) returns (BulkEntityReply);
+  rpc BulkCreateDocuments(JsonBulkCreateRequest) returns (BulkEntityReply);
+  rpc Embeddings(JsonPayloadRequest) returns (PayloadReply);
+  rpc AiPrompt(JsonPayloadRequest) returns (PayloadReply);
+  rpc AiCredentials(JsonPayloadRequest) returns (PayloadReply);
   rpc PatchEntity(UpdateEntityRequest) returns (EntityReply);
   rpc CreateSnapshot(Empty) returns (PayloadReply);
   rpc CreateExport(ExportRequest) returns (PayloadReply);

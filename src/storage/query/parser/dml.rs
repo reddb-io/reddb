@@ -60,16 +60,141 @@ impl<'a> Parser<'a> {
 
         let returning = self.consume(&Token::Returning)?;
 
+        // Parse optional WITH clauses
+        let (ttl_ms, expires_at_ms, with_metadata) = self.parse_with_clauses()?;
+
         Ok(QueryExpr::Insert(InsertQuery {
             table,
             entity_type,
             columns,
             values: all_values,
             returning,
+            ttl_ms,
+            expires_at_ms,
+            with_metadata,
         }))
     }
 
-    /// Parse: UPDATE table SET col1=val1, col2=val2 [WHERE filter]
+    /// Parse TTL duration value using the same logic as CREATE TABLE ... WITH TTL.
+    fn parse_ttl_duration(&mut self) -> Result<u64, ParseError> {
+        // Reuse the DDL TTL parser: expects a number followed by optional unit
+        let ttl_value = self.parse_float()?;
+        let ttl_unit = match self.peek() {
+            Token::Ident(unit) => {
+                let unit = unit.clone();
+                self.advance()?;
+                unit
+            }
+            _ => "s".to_string(),
+        };
+
+        let multiplier_ms = match ttl_unit.to_ascii_lowercase().as_str() {
+            "ms" | "msec" | "millisecond" | "milliseconds" => 1.0,
+            "s" | "sec" | "secs" | "second" | "seconds" => 1_000.0,
+            "m" | "min" | "mins" | "minute" | "minutes" => 60_000.0,
+            "h" | "hr" | "hrs" | "hour" | "hours" => 3_600_000.0,
+            "d" | "day" | "days" => 86_400_000.0,
+            other => {
+                return Err(ParseError::new(
+                    format!("unsupported TTL unit '{other}'"),
+                    self.position(),
+                ))
+            }
+        };
+
+        Ok((ttl_value * multiplier_ms) as u64)
+    }
+
+    /// Parse WITH clauses: WITH TTL <duration> | WITH EXPIRES AT <timestamp> | WITH METADATA (k=v)
+    /// Returns (ttl_ms, expires_at_ms, metadata)
+    pub fn parse_with_clauses(
+        &mut self,
+    ) -> Result<(Option<u64>, Option<u64>, Vec<(String, Value)>), ParseError> {
+        let mut ttl_ms = None;
+        let mut expires_at_ms = None;
+        let mut with_metadata = Vec::new();
+
+        while self.consume(&Token::With)? {
+            if self.consume_ident_ci("TTL")? {
+                ttl_ms = Some(self.parse_ttl_duration()?);
+            } else if self.consume_ident_ci("EXPIRES")? {
+                // WITH EXPIRES AT <timestamp>
+                self.expect_ident_ci("AT")?;
+                let ts = self.parse_expires_at_value()?;
+                expires_at_ms = Some(ts);
+            } else if self.consume(&Token::Metadata)? || self.consume_ident_ci("METADATA")? {
+                with_metadata = self.parse_with_metadata_pairs()?;
+            } else {
+                return Err(ParseError::expected(
+                    vec!["TTL", "EXPIRES AT", "METADATA"],
+                    self.peek(),
+                    self.position(),
+                ));
+            }
+        }
+
+        Ok((ttl_ms, expires_at_ms, with_metadata))
+    }
+
+    /// Expect a case-insensitive identifier (error if not found)
+    fn expect_ident_ci(&mut self, expected: &str) -> Result<(), ParseError> {
+        if self.consume_ident_ci(expected)? {
+            Ok(())
+        } else {
+            Err(ParseError::expected(
+                vec![expected],
+                self.peek(),
+                self.position(),
+            ))
+        }
+    }
+
+    /// Parse an absolute expiration timestamp (unix ms or string date)
+    fn parse_expires_at_value(&mut self) -> Result<u64, ParseError> {
+        // Try integer (unix timestamp in ms)
+        if let Ok(value) = self.parse_integer() {
+            return Ok(value as u64);
+        }
+        // Try string like '2026-12-31' — convert to unix ms
+        if let Ok(text) = self.parse_string() {
+            // Simple ISO date parsing: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS
+            let trimmed = text.trim();
+            if let Ok(ts) = trimmed.parse::<u64>() {
+                return Ok(ts);
+            }
+            // Basic date parsing — delegate to chrono if available, or simple heuristic
+            return Err(ParseError::new(
+                format!("EXPIRES AT requires a unix timestamp in milliseconds, got '{trimmed}'"),
+                self.position(),
+            ));
+        }
+        Err(ParseError::expected(
+            vec!["timestamp (unix ms) or 'YYYY-MM-DD'"],
+            self.peek(),
+            self.position(),
+        ))
+    }
+
+    /// Parse WITH METADATA (key1 = 'value1', key2 = 42)
+    fn parse_with_metadata_pairs(&mut self) -> Result<Vec<(String, Value)>, ParseError> {
+        self.expect(Token::LParen)?;
+        let mut pairs = Vec::new();
+        if !self.check(&Token::RParen) {
+            loop {
+                let key = self.expect_ident()?;
+                self.expect(Token::Eq)?;
+                let value = self.parse_literal_value()?;
+                pairs.push((key, value));
+                if !self.consume(&Token::Comma)? {
+                    break;
+                }
+            }
+        }
+        self.expect(Token::RParen)?;
+        Ok(pairs)
+    }
+
+    /// Parse: UPDATE table SET col1=val1, col2=val2 [WHERE filter] [WITH TTL|EXPIRES AT|METADATA]
     pub fn parse_update_query(&mut self) -> Result<QueryExpr, ParseError> {
         self.expect(Token::Update)?;
         let table = self.expect_ident()?;
@@ -92,10 +217,15 @@ impl<'a> Parser<'a> {
             None
         };
 
+        let (ttl_ms, expires_at_ms, with_metadata) = self.parse_with_clauses()?;
+
         Ok(QueryExpr::Update(UpdateQuery {
             table,
             assignments,
             filter,
+            ttl_ms,
+            expires_at_ms,
+            with_metadata,
         }))
     }
 

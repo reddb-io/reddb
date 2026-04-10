@@ -1568,3 +1568,265 @@ fn test_parse_search_index_with_collection_limit_fuzzy() {
         panic!("Expected SearchCommand::Index");
     }
 }
+
+#[test]
+fn test_parse_search_context_defaults() {
+    let query = parse("SEARCH CONTEXT '081.232.036-08'").unwrap();
+    if let QueryExpr::SearchCommand(crate::storage::query::ast::SearchCommand::Context {
+        query: q,
+        field,
+        collection,
+        limit,
+        depth,
+    }) = query
+    {
+        assert_eq!(q, "081.232.036-08");
+        assert_eq!(field, None);
+        assert_eq!(collection, None);
+        assert_eq!(limit, 25);
+        assert_eq!(depth, 1);
+    } else {
+        panic!("Expected SearchCommand::Context");
+    }
+}
+
+#[test]
+fn test_parse_search_context_with_field_collection_limit_depth() {
+    let query =
+        parse("SEARCH CONTEXT '081.232.036-08' FIELD cpf COLLECTION customers LIMIT 50 DEPTH 2")
+            .unwrap();
+    if let QueryExpr::SearchCommand(crate::storage::query::ast::SearchCommand::Context {
+        query: q,
+        field,
+        collection,
+        limit,
+        depth,
+    }) = query
+    {
+        assert_eq!(q, "081.232.036-08");
+        assert_eq!(field, Some("cpf".to_string()));
+        assert_eq!(collection, Some("customers".to_string()));
+        assert_eq!(limit, 50);
+        assert_eq!(depth, 2);
+    } else {
+        panic!("Expected SearchCommand::Context");
+    }
+}
+
+#[test]
+fn test_parse_group_by() {
+    let query = parse("SELECT status FROM users GROUP BY status").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "users");
+        assert_eq!(tq.group_by, vec!["status".to_string()]);
+        assert!(tq.having.is_none());
+    } else {
+        panic!("Expected TableQuery");
+    }
+}
+
+#[test]
+fn test_parse_group_by_multiple_fields() {
+    let query = parse("SELECT dept, role FROM employees GROUP BY dept, role").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "employees");
+        assert_eq!(tq.group_by, vec!["dept".to_string(), "role".to_string()]);
+    } else {
+        panic!("Expected TableQuery");
+    }
+}
+
+#[test]
+fn test_parse_group_by_with_having() {
+    let query =
+        parse("SELECT dept FROM employees GROUP BY dept HAVING dept > 5 ORDER BY dept").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "employees");
+        assert_eq!(tq.group_by, vec!["dept".to_string()]);
+        assert!(tq.having.is_some());
+        assert!(!tq.order_by.is_empty());
+    } else {
+        panic!("Expected TableQuery");
+    }
+}
+
+#[test]
+fn test_parse_group_by_with_limit() {
+    let query = parse("SELECT * FROM logs GROUP BY level LIMIT 10").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "logs");
+        assert_eq!(tq.group_by, vec!["level".to_string()]);
+        assert_eq!(tq.limit, Some(10));
+    } else {
+        panic!("Expected TableQuery");
+    }
+}
+
+#[test]
+fn test_parse_insert_with_ttl() {
+    let query = parse("INSERT INTO sessions (token) VALUES ('abc') WITH TTL 60 s").unwrap();
+    if let QueryExpr::Insert(iq) = query {
+        assert_eq!(iq.table, "sessions");
+        assert_eq!(iq.ttl_ms, Some(60_000));
+        assert!(iq.with_metadata.is_empty());
+    } else {
+        panic!("Expected InsertQuery");
+    }
+}
+
+#[test]
+fn test_parse_insert_with_ttl_hours() {
+    let query = parse("INSERT INTO cache (key, value) VALUES ('k', 'v') WITH TTL 24 h").unwrap();
+    if let QueryExpr::Insert(iq) = query {
+        assert_eq!(iq.ttl_ms, Some(24 * 3_600_000));
+    } else {
+        panic!("Expected InsertQuery");
+    }
+}
+
+#[test]
+fn test_parse_insert_with_metadata() {
+    let query = parse(
+        "INSERT INTO events (name) VALUES ('login') WITH METADATA (priority = 'high', level = 3)",
+    )
+    .unwrap();
+    if let QueryExpr::Insert(iq) = query {
+        assert_eq!(iq.table, "events");
+        assert_eq!(iq.with_metadata.len(), 2);
+        assert_eq!(iq.with_metadata[0].0, "priority");
+        assert_eq!(iq.with_metadata[1].0, "level");
+    } else {
+        panic!("Expected InsertQuery");
+    }
+}
+
+#[test]
+fn test_parse_insert_with_ttl_and_metadata() {
+    let query = parse(
+        "INSERT INTO sessions (token) VALUES ('abc') WITH TTL 1 h WITH METADATA (source = 'web')",
+    )
+    .unwrap();
+    if let QueryExpr::Insert(iq) = query {
+        assert_eq!(iq.ttl_ms, Some(3_600_000));
+        assert_eq!(iq.with_metadata.len(), 1);
+        assert_eq!(iq.with_metadata[0].0, "source");
+    } else {
+        panic!("Expected InsertQuery");
+    }
+}
+
+#[test]
+fn test_parse_insert_with_expires_at() {
+    let query =
+        parse("INSERT INTO events (name) VALUES ('launch') WITH EXPIRES AT 1735689600000").unwrap();
+    if let QueryExpr::Insert(iq) = query {
+        assert_eq!(iq.expires_at_ms, Some(1735689600000));
+        assert_eq!(iq.ttl_ms, None);
+    } else {
+        panic!("Expected InsertQuery");
+    }
+}
+
+#[test]
+fn test_parse_update_with_ttl() {
+    let query = parse("UPDATE sessions SET active = true WHERE id = 1 WITH TTL 2 h").unwrap();
+    if let QueryExpr::Update(uq) = query {
+        assert_eq!(uq.table, "sessions");
+        assert_eq!(uq.ttl_ms, Some(7_200_000));
+        assert!(uq.filter.is_some());
+    } else {
+        panic!("Expected UpdateQuery");
+    }
+}
+
+#[test]
+fn test_parse_update_with_metadata() {
+    let query =
+        parse("UPDATE users SET name = 'Alice' WHERE id = 1 WITH METADATA (role = 'admin')")
+            .unwrap();
+    if let QueryExpr::Update(uq) = query {
+        assert_eq!(uq.with_metadata.len(), 1);
+        assert_eq!(uq.with_metadata[0].0, "role");
+    } else {
+        panic!("Expected UpdateQuery");
+    }
+}
+
+#[test]
+fn test_parse_update_with_expires_at() {
+    let query =
+        parse("UPDATE cache SET value = 'x' WHERE name = 'k' WITH EXPIRES AT 1735689600000")
+            .unwrap();
+    if let QueryExpr::Update(uq) = query {
+        assert_eq!(uq.expires_at_ms, Some(1735689600000));
+    } else {
+        panic!("Expected UpdateQuery");
+    }
+}
+
+#[test]
+fn test_parse_select_with_expand_graph() {
+    let query =
+        parse("SELECT * FROM customers WHERE cpf = '081' WITH EXPAND GRAPH DEPTH 2").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        let expand = tq.expand.unwrap();
+        assert!(expand.graph);
+        assert_eq!(expand.graph_depth, 2);
+    } else {
+        panic!("Expected TableQuery");
+    }
+}
+
+#[test]
+fn test_parse_select_with_expand_cross_refs() {
+    let query = parse("SELECT * FROM ANY WHERE name = 'Alice' WITH EXPAND CROSS_REFS").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        let expand = tq.expand.unwrap();
+        assert!(expand.cross_refs);
+        assert!(!expand.graph);
+    } else {
+        panic!("Expected TableQuery");
+    }
+}
+
+#[test]
+fn test_parse_select_with_expand_all() {
+    let query = parse("SELECT * FROM hosts WITH EXPAND ALL").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        let expand = tq.expand.unwrap();
+        assert!(expand.graph);
+        assert!(expand.cross_refs);
+    } else {
+        panic!("Expected TableQuery");
+    }
+}
+
+#[test]
+fn test_parse_create_table_with_context_index() {
+    let query = parse(
+        "CREATE TABLE customers (name TEXT, cpf TEXT, email TEXT) WITH CONTEXT INDEX ON (cpf, email)",
+    )
+    .unwrap();
+    if let QueryExpr::CreateTable(ct) = query {
+        assert_eq!(ct.name, "customers");
+        assert_eq!(
+            ct.context_index_fields,
+            vec!["cpf".to_string(), "email".to_string()]
+        );
+    } else {
+        panic!("Expected CreateTableQuery");
+    }
+}
+
+#[test]
+fn test_parse_create_table_with_ttl_and_context_index() {
+    let query =
+        parse("CREATE TABLE sessions (token TEXT) WITH TTL 24 h WITH CONTEXT INDEX ON (token)")
+            .unwrap();
+    if let QueryExpr::CreateTable(ct) = query {
+        assert_eq!(ct.default_ttl_ms, Some(86_400_000));
+        assert_eq!(ct.context_index_fields, vec!["token".to_string()]);
+    } else {
+        panic!("Expected CreateTableQuery");
+    }
+}

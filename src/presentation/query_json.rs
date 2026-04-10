@@ -423,3 +423,218 @@ pub(crate) fn match_components_json(components: &MatchComponents) -> JsonValue {
     );
     JsonValue::Object(object)
 }
+
+pub(crate) fn context_search_result_json(
+    result: &crate::runtime::ContextSearchResult,
+) -> JsonValue {
+    use crate::runtime::{
+        ContextConnection, ContextConnectionType, ContextEntity, ContextSearchResult,
+        ContextSummary, DiscoveryMethod,
+    };
+
+    fn entity_item_json(item: &ContextEntity) -> JsonValue {
+        let (entity_type, capabilities) =
+            crate::runtime::record_search_helpers::entity_type_and_capabilities(&item.entity);
+
+        let mut obj = Map::new();
+        obj.insert(
+            "entity".to_string(),
+            crate::presentation::entity_json::entity_json(&item.entity),
+        );
+        obj.insert("score".to_string(), JsonValue::Number(item.score as f64));
+        obj.insert(
+            "_entity_type".to_string(),
+            JsonValue::String(entity_type.to_string()),
+        );
+        obj.insert(
+            "_capabilities".to_string(),
+            JsonValue::Array(capabilities.into_iter().map(JsonValue::String).collect()),
+        );
+        obj.insert(
+            "discovery".to_string(),
+            match &item.discovery {
+                DiscoveryMethod::Indexed { field } => {
+                    let mut d = Map::new();
+                    d.insert("type".to_string(), JsonValue::String("indexed".to_string()));
+                    d.insert("field".to_string(), JsonValue::String(field.clone()));
+                    JsonValue::Object(d)
+                }
+                DiscoveryMethod::GlobalScan => JsonValue::String("global_scan".to_string()),
+                DiscoveryMethod::CrossReference {
+                    source_id,
+                    ref_type,
+                } => {
+                    let mut d = Map::new();
+                    d.insert(
+                        "type".to_string(),
+                        JsonValue::String("cross_reference".to_string()),
+                    );
+                    d.insert(
+                        "source_id".to_string(),
+                        JsonValue::Number(*source_id as f64),
+                    );
+                    d.insert("ref_type".to_string(), JsonValue::String(ref_type.clone()));
+                    JsonValue::Object(d)
+                }
+                DiscoveryMethod::GraphTraversal {
+                    source_id,
+                    edge_type,
+                    depth,
+                } => {
+                    let mut d = Map::new();
+                    d.insert(
+                        "type".to_string(),
+                        JsonValue::String("graph_traversal".to_string()),
+                    );
+                    d.insert(
+                        "source_id".to_string(),
+                        JsonValue::Number(*source_id as f64),
+                    );
+                    d.insert(
+                        "edge_type".to_string(),
+                        JsonValue::String(edge_type.clone()),
+                    );
+                    d.insert("depth".to_string(), JsonValue::Number(*depth as f64));
+                    JsonValue::Object(d)
+                }
+                DiscoveryMethod::VectorQuery { similarity } => {
+                    let mut d = Map::new();
+                    d.insert(
+                        "type".to_string(),
+                        JsonValue::String("vector_query".to_string()),
+                    );
+                    d.insert(
+                        "similarity".to_string(),
+                        JsonValue::Number(*similarity as f64),
+                    );
+                    JsonValue::Object(d)
+                }
+            },
+        );
+        obj.insert(
+            "collection".to_string(),
+            JsonValue::String(item.collection.clone()),
+        );
+        JsonValue::Object(obj)
+    }
+
+    fn connection_json(conn: &ContextConnection) -> JsonValue {
+        let mut obj = Map::new();
+        obj.insert(
+            "from_id".to_string(),
+            JsonValue::Number(conn.from_id as f64),
+        );
+        obj.insert("to_id".to_string(), JsonValue::Number(conn.to_id as f64));
+        match &conn.connection_type {
+            ContextConnectionType::CrossRef(ref_type) => {
+                obj.insert(
+                    "type".to_string(),
+                    JsonValue::String("cross_ref".to_string()),
+                );
+                obj.insert("ref_type".to_string(), JsonValue::String(ref_type.clone()));
+            }
+            ContextConnectionType::GraphEdge(edge_type) => {
+                obj.insert(
+                    "type".to_string(),
+                    JsonValue::String("graph_edge".to_string()),
+                );
+                obj.insert(
+                    "edge_type".to_string(),
+                    JsonValue::String(edge_type.clone()),
+                );
+            }
+            ContextConnectionType::VectorSimilarity(sim) => {
+                obj.insert(
+                    "type".to_string(),
+                    JsonValue::String("vector_similarity".to_string()),
+                );
+                obj.insert("similarity".to_string(), JsonValue::Number(*sim as f64));
+            }
+        }
+        obj.insert("weight".to_string(), JsonValue::Number(conn.weight as f64));
+        JsonValue::Object(obj)
+    }
+
+    let mut root = Map::new();
+    root.insert("query".to_string(), JsonValue::String(result.query.clone()));
+    root.insert(
+        "tables".to_string(),
+        JsonValue::Array(result.tables.iter().map(entity_item_json).collect()),
+    );
+
+    let mut graph = Map::new();
+    graph.insert(
+        "nodes".to_string(),
+        JsonValue::Array(result.graph.nodes.iter().map(entity_item_json).collect()),
+    );
+    graph.insert(
+        "edges".to_string(),
+        JsonValue::Array(result.graph.edges.iter().map(entity_item_json).collect()),
+    );
+    root.insert("graph".to_string(), JsonValue::Object(graph));
+
+    root.insert(
+        "vectors".to_string(),
+        JsonValue::Array(result.vectors.iter().map(entity_item_json).collect()),
+    );
+    root.insert(
+        "documents".to_string(),
+        JsonValue::Array(result.documents.iter().map(entity_item_json).collect()),
+    );
+    root.insert(
+        "key_values".to_string(),
+        JsonValue::Array(result.key_values.iter().map(entity_item_json).collect()),
+    );
+    root.insert(
+        "connections".to_string(),
+        JsonValue::Array(result.connections.iter().map(connection_json).collect()),
+    );
+
+    let mut summary = Map::new();
+    summary.insert(
+        "total_entities".to_string(),
+        JsonValue::Number(result.summary.total_entities as f64),
+    );
+    summary.insert(
+        "direct_matches".to_string(),
+        JsonValue::Number(result.summary.direct_matches as f64),
+    );
+    summary.insert(
+        "expanded_via_graph".to_string(),
+        JsonValue::Number(result.summary.expanded_via_graph as f64),
+    );
+    summary.insert(
+        "expanded_via_cross_refs".to_string(),
+        JsonValue::Number(result.summary.expanded_via_cross_refs as f64),
+    );
+    summary.insert(
+        "expanded_via_vector_query".to_string(),
+        JsonValue::Number(result.summary.expanded_via_vector_query as f64),
+    );
+    summary.insert(
+        "collections_searched".to_string(),
+        JsonValue::Number(result.summary.collections_searched as f64),
+    );
+    summary.insert(
+        "execution_time_us".to_string(),
+        JsonValue::Number(result.summary.execution_time_us as f64),
+    );
+    summary.insert(
+        "tiers_used".to_string(),
+        JsonValue::Array(
+            result
+                .summary
+                .tiers_used
+                .iter()
+                .map(|s| JsonValue::String(s.clone()))
+                .collect(),
+        ),
+    );
+    summary.insert(
+        "entities_reindexed".to_string(),
+        JsonValue::Number(result.summary.entities_reindexed as f64),
+    );
+    root.insert("summary".to_string(), JsonValue::Object(summary));
+
+    JsonValue::Object(root)
+}

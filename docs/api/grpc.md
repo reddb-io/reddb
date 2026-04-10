@@ -46,6 +46,9 @@ grpcurl -plaintext 127.0.0.1:50051 reddb.v1.RedDb/Collections
 | `BulkCreateNodes` | `JsonBulkCreateRequest` | Bulk insert nodes |
 | `BulkCreateEdges` | `JsonBulkCreateRequest` | Bulk insert edges |
 | `BulkCreateVectors` | `JsonBulkCreateRequest` | Bulk insert vectors |
+| `CreateDocument` | `JsonCreateRequest` | Create a document entity |
+| `CreateKv` | `JsonCreateRequest` | Create a key-value pair |
+| `BulkCreateDocuments` | `JsonBulkCreateRequest` | Bulk create documents |
 | `PatchEntity` | `UpdateEntityRequest` | Update an entity by ID |
 | `DeleteEntity` | `DeleteEntityRequest` | Delete an entity by ID |
 
@@ -82,6 +85,7 @@ grpcurl -plaintext \
 | `HybridSearch` | `JsonPayloadRequest` | Combined text + vector search |
 | `Similar` | `JsonCreateRequest` | Vector similarity search |
 | `IvfSearch` | `JsonCreateRequest` | IVF approximate search |
+| `ContextSearch` | `JsonPayloadRequest` | Context search across all data structures |
 
 ### Graph Analytics
 
@@ -223,6 +227,14 @@ grpcurl -plaintext \
 | `AuthRevokeApiKey` | `JsonPayloadRequest` | Revoke an API key |
 | `AuthChangePassword` | `JsonPayloadRequest` | Change password |
 | `AuthWhoAmI` | `Empty` | Get current user info |
+
+### AI
+
+| RPC | Request | Response | Description |
+|:----|:--------|:---------|:------------|
+| `Embeddings` | `JsonPayloadRequest` | `PayloadReply` | Generate AI embeddings |
+| `AiPrompt` | `JsonPayloadRequest` | `PayloadReply` | Execute AI prompt |
+| `AiCredentials` | `JsonPayloadRequest` | `PayloadReply` | Configure AI credentials |
 
 ### Serverless
 

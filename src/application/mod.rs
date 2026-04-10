@@ -6,7 +6,6 @@ pub(crate) mod entity_payload;
 pub mod graph;
 pub(crate) mod graph_payload;
 pub(crate) mod json_input;
-pub(crate) mod multimodal_index;
 pub mod native;
 pub mod ports;
 pub mod query;
@@ -33,6 +32,7 @@ pub use ports::{
     RuntimeQueryPort,
 };
 pub use query::{
-    ExecuteQueryInput, ExplainQueryInput, QueryUseCases, ScanCollectionInput, SearchHybridInput,
-    SearchIndexInput, SearchIvfInput, SearchMultimodalInput, SearchSimilarInput, SearchTextInput,
+    ExecuteQueryInput, ExplainQueryInput, QueryUseCases, ScanCollectionInput, SearchContextInput,
+    SearchHybridInput, SearchIndexInput, SearchIvfInput, SearchMultimodalInput, SearchSimilarInput,
+    SearchTextInput,
 };

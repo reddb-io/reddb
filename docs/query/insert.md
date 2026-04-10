@@ -124,6 +124,52 @@ grpcurl -plaintext \
   127.0.0.1:50051 reddb.v1.RedDb/BulkCreateRows
 ```
 
+## WITH Clauses
+
+You can attach expiration and metadata to inserted entities using `WITH` clauses. These are the structured alternative to the old approach of setting `_ttl` or `_ttl_ms` as regular columns.
+
+### Syntax
+
+```sql
+INSERT INTO table_name (columns) VALUES (values) [WITH TTL duration] [WITH EXPIRES AT timestamp] [WITH METADATA (key = 'value', ...)]
+```
+
+### WITH TTL
+
+Sets a relative expiration on the entity. After the specified duration, RedDB automatically removes the entity. Supported units: `ms` (milliseconds), `s` (seconds), `m` (minutes), `h` (hours), `d` (days).
+
+```sql
+INSERT INTO sessions (token, user_id) VALUES ('abc', 42) WITH TTL 1 h
+INSERT INTO cache (key, value) VALUES ('theme', 'dark') WITH TTL 30 m
+```
+
+### WITH EXPIRES AT
+
+Sets an absolute expiration using a Unix timestamp in milliseconds. The entity is removed when the system clock passes this timestamp.
+
+```sql
+INSERT INTO events (name) VALUES ('launch') WITH EXPIRES AT 1735689600000
+```
+
+### WITH METADATA
+
+Attaches structured key-value metadata to the entity. Metadata is stored separately from the entity fields and can be used for filtering, auditing, or routing.
+
+```sql
+INSERT INTO events (name) VALUES ('login') WITH METADATA (priority = 'high', source = 'web')
+```
+
+### Combining WITH Clauses
+
+You can chain multiple `WITH` clauses on a single statement:
+
+```sql
+INSERT INTO sessions (token) VALUES ('abc') WITH TTL 1 h WITH METADATA (source = 'mobile')
+```
+
+> [!TIP]
+> Prefer `WITH TTL` and `WITH EXPIRES AT` over setting `_ttl` or `_ttl_ms` as column values. The `WITH` syntax is clearer, validated at parse time, and keeps expiration concerns separate from your data fields.
+
 ## Response
 
 Single insert:

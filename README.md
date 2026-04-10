@@ -251,6 +251,83 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Advanced Query Features
+
+RedDB extends standard SQL with constructs designed for multi-model workflows. Below is a quick tour; see the full [query docs](docs/query/) for every option.
+
+### Context Search
+
+Find everything related to an entity across tables, graphs, vectors, documents, and key-values in one command:
+
+```sql
+SEARCH CONTEXT '081.232.036-08' FIELD cpf
+SEARCH CONTEXT 'Alice' COLLECTION customers DEPTH 2 LIMIT 50
+```
+
+Context search uses a three-tier strategy (field-value index, token index, then global scan), expands results through graph traversal, and groups hits by structure type.
+
+### WITH Clauses
+
+`WITH` clauses attach operational semantics directly to SQL statements:
+
+```sql
+-- Time-to-live on INSERT and UPDATE
+INSERT INTO sessions (token) VALUES ('abc') WITH TTL 1 h
+UPDATE sessions SET active = true WHERE id = 1 WITH TTL 2 h
+
+-- Absolute expiration (epoch milliseconds)
+INSERT INTO events (name) VALUES ('launch') WITH EXPIRES AT 1735689600000
+
+-- Structured metadata
+INSERT INTO logs (msg) VALUES ('test') WITH METADATA (source = 'api')
+
+-- Context index declaration
+CREATE TABLE customers (cpf TEXT, name TEXT) WITH CONTEXT INDEX ON (cpf)
+
+-- Graph expansion on SELECT
+SELECT * FROM customers WHERE cpf = '081' WITH EXPAND GRAPH DEPTH 2
+```
+
+### GROUP BY / HAVING
+
+Group results and filter groups after aggregation:
+
+```sql
+SELECT status FROM users GROUP BY status
+SELECT dept, role FROM employees GROUP BY dept, role
+SELECT dept FROM employees GROUP BY dept HAVING dept > 5 ORDER BY dept
+```
+
+### Multi-Language Queries
+
+The query engine auto-detects the language, so you can mix paradigms against the same dataset:
+
+| Language | Example |
+|:---------|:--------|
+| SQL | `SELECT * FROM hosts WHERE os = 'linux'` |
+| Cypher | `MATCH (a:User)-[:FOLLOWS]->(b) RETURN b.name` |
+| Gremlin | `g.V().hasLabel('person').out('FOLLOWS').values('name')` |
+| SPARQL | `SELECT ?name WHERE { ?p :name ?name }` |
+| Natural language | `show me all critical hosts` |
+
+See [multi-mode queries](docs/query/multi-mode.md) for supported steps and patterns.
+
+### Key-Value REST API
+
+Every collection doubles as a KV store through dedicated REST endpoints:
+
+```bash
+# Read a key
+curl http://127.0.0.1:8080/collections/config/kvs/theme
+
+# Write a key
+curl -X PUT http://127.0.0.1:8080/collections/config/kvs/theme \
+  -d '{"value":"dark"}'
+
+# Delete a key
+curl -X DELETE http://127.0.0.1:8080/collections/config/kvs/theme
+```
+
 ## Documentation
 
 - Docs home: [docs/README.md](docs/README.md)

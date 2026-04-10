@@ -471,9 +471,12 @@ mod tests {
             alias: None,
             columns: vec![Projection::All],
             filter: None,
+            group_by: Vec::new(),
+            having: None,
             order_by: vec![],
             limit: None,
             offset: None,
+            expand: None,
         });
 
         let cost = estimator.estimate(&query);
@@ -530,9 +533,12 @@ mod tests {
             alias: None,
             columns: vec![Projection::All],
             filter: None,
+            group_by: Vec::new(),
+            having: None,
             order_by: vec![],
             limit: Some(10),
             offset: None,
+            expand: None,
         };
 
         let card = estimator.estimate_table_cardinality(&query);

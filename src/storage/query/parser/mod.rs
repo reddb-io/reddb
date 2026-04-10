@@ -207,6 +207,17 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Try to consume an identifier case-insensitively (for keywords not in Token enum)
+    pub fn consume_ident_ci(&mut self, expected: &str) -> Result<bool, ParseError> {
+        match self.peek().clone() {
+            Token::Ident(name) if name.eq_ignore_ascii_case(expected) => {
+                self.advance()?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
     /// Parse a complete query
     pub fn parse(&mut self) -> Result<QueryExpr, ParseError> {
         let query = self.parse_query_expr()?;

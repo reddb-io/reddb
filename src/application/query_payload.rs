@@ -1,7 +1,7 @@
 use crate::application::{
     json_input::{json_bool_field, json_f32_field, json_string_list_field, json_usize_field},
-    SearchHybridInput, SearchIndexInput, SearchIvfInput, SearchMultimodalInput, SearchSimilarInput,
-    SearchTextInput,
+    SearchContextInput, SearchHybridInput, SearchIndexInput, SearchIvfInput, SearchMultimodalInput,
+    SearchSimilarInput, SearchTextInput,
 };
 use crate::json::Value as JsonValue;
 use crate::runtime::{RuntimeFilter, RuntimeFilterValue, RuntimeGraphPattern, RuntimeQueryWeights};
@@ -507,6 +507,32 @@ fn parse_optional_query(payload: &JsonValue) -> RedDBResult<Option<String>> {
             Ok(Some(query.to_string()))
         }
     }
+}
+
+pub(crate) fn parse_context_search_input(payload: &JsonValue) -> RedDBResult<SearchContextInput> {
+    let query = parse_required_query(payload)?;
+
+    let field = payload
+        .get("field")
+        .and_then(JsonValue::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    Ok(SearchContextInput {
+        query,
+        field,
+        vector: optional_json_vector_field(payload, "vector")?,
+        collections: json_string_list_field(payload, "collections"),
+        graph_depth: json_usize_field(payload, "graph_depth"),
+        graph_max_edges: json_usize_field(payload, "graph_max_edges"),
+        max_cross_refs: json_usize_field(payload, "max_cross_refs"),
+        follow_cross_refs: json_bool_field(payload, "follow_cross_refs"),
+        expand_graph: json_bool_field(payload, "expand_graph"),
+        global_scan: json_bool_field(payload, "global_scan"),
+        reindex: json_bool_field(payload, "reindex"),
+        limit: json_usize_field(payload, "limit"),
+        min_score: json_f32_field(payload, "min_score"),
+    })
 }
 
 #[cfg(test)]

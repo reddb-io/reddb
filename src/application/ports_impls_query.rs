@@ -122,4 +122,11 @@ impl RuntimeQueryPort for RedDBRuntime {
             limit,
         )
     }
+
+    fn search_context(
+        &self,
+        input: crate::application::SearchContextInput,
+    ) -> RedDBResult<crate::runtime::ContextSearchResult> {
+        RedDBRuntime::search_context(self, input)
+    }
 }

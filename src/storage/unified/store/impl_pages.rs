@@ -17,6 +17,7 @@ impl UnifiedStore {
             pager: None,
             db_path: None,
             btree_indices: RwLock::new(HashMap::new()),
+            context_index: ContextIndex::new(),
         }
     }
 
@@ -53,6 +54,7 @@ impl UnifiedStore {
             pager: Some(Arc::new(pager)),
             db_path: Some(path.to_path_buf()),
             btree_indices: RwLock::new(HashMap::new()),
+            context_index: ContextIndex::new(),
         };
 
         // Load existing data from pages if database exists
@@ -156,6 +158,7 @@ impl UnifiedStore {
                                     {
                                         if let Some(m) = &manager {
                                             let id = entity.id;
+                                            self.context_index.index_entity(&name, &entity);
                                             let _ = m.insert(entity.clone());
                                             self.register_entity_id(id);
                                             if self.config.auto_index_refs {

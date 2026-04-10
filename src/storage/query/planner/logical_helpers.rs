@@ -741,9 +741,12 @@ mod tests {
             alias: None,
             columns: vec![Projection::All],
             filter: None,
+            group_by: Vec::new(),
+            having: None,
             order_by: vec![],
             limit: None,
             offset: None,
+            expand: None,
         })
     }
 

@@ -8,7 +8,8 @@ The `CREATE TABLE` statement defines a new collection with a typed schema.
 CREATE TABLE table_name (
   column_name DataType [NOT NULL] [DEFAULT value],
   ...
-) [WITH TTL 60s]
+) [WITH TTL duration]
+  [WITH CONTEXT INDEX ON (column [, ...])]
 ```
 
 ## Example
@@ -54,6 +55,34 @@ CREATE TABLE sessions (
 ```
 
 This TTL is persisted as collection metadata. On insert, if the item does not provide its own TTL, RedDB materializes the collection default into the item metadata.
+
+## Context Index
+
+Use `WITH CONTEXT INDEX ON` to declare which columns are high-value identifiers for cross-structure context search (`SEARCH CONTEXT`). RedDB prioritizes these fields when resolving relationships across collections.
+
+### Declare Context Index Fields
+
+```sql
+CREATE TABLE customers (
+  name Text,
+  cpf Text,
+  email Text
+) WITH CONTEXT INDEX ON (cpf, email)
+```
+
+### Combine with TTL
+
+`WITH CONTEXT INDEX ON` composes with `WITH TTL` in any order:
+
+```sql
+CREATE TABLE sessions (
+  token Text,
+  user_id Text
+) WITH TTL 24 h WITH CONTEXT INDEX ON (token)
+```
+
+> [!NOTE]
+> Context-indexed fields are not unique constraints. They tell RedDB which fields carry identifying information so that `SEARCH CONTEXT` can link entities across different tables automatically.
 
 ## DROP TABLE
 

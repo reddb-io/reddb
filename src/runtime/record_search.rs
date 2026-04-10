@@ -1,73 +1,5 @@
 use super::*;
 
-pub(super) fn execute_runtime_expr(db: &RedDB, expr: &QueryExpr) -> RedDBResult<UnifiedResult> {
-    match expr {
-        QueryExpr::Graph(_) | QueryExpr::Path(_) => {
-            let graph = materialize_graph(db.store().as_ref())?;
-            let node_properties = materialize_graph_node_properties(db.store().as_ref())?;
-            crate::storage::query::unified::UnifiedExecutor::execute_on_with_node_properties(
-                &graph,
-                expr,
-                node_properties,
-            )
-            .map_err(|err| RedDBError::Query(err.to_string()))
-        }
-        QueryExpr::Table(table) => execute_runtime_table_query(db, table),
-        QueryExpr::Join(join) => execute_runtime_join_query(db, join),
-        QueryExpr::Vector(vector) => execute_runtime_vector_query(db, vector),
-        QueryExpr::Hybrid(hybrid) => execute_runtime_hybrid_query(db, hybrid),
-        QueryExpr::Insert(_)
-        | QueryExpr::Update(_)
-        | QueryExpr::Delete(_)
-        | QueryExpr::CreateTable(_)
-        | QueryExpr::DropTable(_)
-        | QueryExpr::AlterTable(_)
-        | QueryExpr::GraphCommand(_)
-        | QueryExpr::SearchCommand(_) => Err(RedDBError::Query(
-            "DML/DDL/Command statements are not supported through this execution path".to_string(),
-        )),
-    }
-}
-
-pub(super) fn scan_runtime_table_records(
-    db: &RedDB,
-    query: &TableQuery,
-) -> RedDBResult<Vec<UnifiedRecord>> {
-    let mut records = scan_runtime_table_source_records(db, &query.table)?;
-    let table_name = query.table.as_str();
-    let table_alias = query.alias.as_deref().unwrap_or(table_name);
-
-    if let Some(filter) = query.filter.as_ref() {
-        records.retain(|record| {
-            evaluate_runtime_filter(record, filter, Some(table_name), Some(table_alias))
-        });
-    }
-
-    if !query.order_by.is_empty() {
-        records.sort_by(|left, right| {
-            compare_runtime_order(
-                left,
-                right,
-                &query.order_by,
-                Some(table_name),
-                Some(table_alias),
-            )
-        });
-    } else if is_universal_entity_source(table_name) {
-        records.sort_by(|left, right| {
-            runtime_record_identity_key(left).cmp(&runtime_record_identity_key(right))
-        });
-    }
-
-    let offset = query.offset.unwrap_or(0) as usize;
-    let limit = query.limit.map(|value| value as usize);
-    let iter = records.into_iter().skip(offset);
-    Ok(match limit {
-        Some(limit) => iter.take(limit).collect(),
-        None => iter.collect(),
-    })
-}
-
 pub(super) fn scan_runtime_table_source_records(
     db: &RedDB,
     table: &str,
@@ -748,20 +680,6 @@ pub(super) fn apply_runtime_identity_hints(record: &mut UnifiedRecord, entity: &
             }
         }
     }
-}
-
-pub(super) fn runtime_vector_entity_matches_filter(
-    db: &RedDB,
-    collection: &str,
-    entity: &UnifiedEntity,
-    filter: &VectorMetadataFilter,
-) -> bool {
-    let metadata = db
-        .store()
-        .get_metadata(collection, entity.id)
-        .unwrap_or_default();
-    let entry = runtime_metadata_entry(&metadata);
-    filter.matches(&entry)
 }
 
 pub(super) fn runtime_metadata_entry(metadata: &Metadata) -> MetadataEntry {

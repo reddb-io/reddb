@@ -68,6 +68,64 @@ pub(crate) fn create_vector_reply(
         .map_err(entity_error_to_status)
 }
 
+pub(crate) fn create_document_reply(
+    runtime: &GrpcRuntime,
+    request: JsonCreateRequest,
+) -> Result<EntityReply, Status> {
+    let payload = parse_json_payload(&request.payload_json)?;
+    let body = payload
+        .get("body")
+        .cloned()
+        .unwrap_or_else(|| payload.clone());
+
+    runtime
+        .entity_use_cases()
+        .create_document(crate::application::CreateDocumentInput {
+            collection: request.collection,
+            body,
+            metadata: Vec::new(),
+            node_links: Vec::new(),
+            vector_links: Vec::new(),
+        })
+        .map(entity_reply_from_output)
+        .map_err(entity_error_to_status)
+}
+
+pub(crate) fn create_kv_reply(
+    runtime: &GrpcRuntime,
+    request: JsonCreateRequest,
+) -> Result<EntityReply, Status> {
+    let payload = parse_json_payload(&request.payload_json)?;
+    let key = payload
+        .get("key")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| Status::invalid_argument("field 'key' must be a string"))?
+        .to_string();
+    let value = match payload.get("value") {
+        Some(crate::serde_json::Value::String(s)) => crate::storage::schema::Value::Text(s.clone()),
+        Some(crate::serde_json::Value::Number(n)) => {
+            if n.fract().abs() < f64::EPSILON {
+                crate::storage::schema::Value::Integer(*n as i64)
+            } else {
+                crate::storage::schema::Value::Float(*n)
+            }
+        }
+        Some(crate::serde_json::Value::Bool(b)) => crate::storage::schema::Value::Boolean(*b),
+        _ => crate::storage::schema::Value::Null,
+    };
+
+    runtime
+        .entity_use_cases()
+        .create_kv(crate::application::CreateKvInput {
+            collection: request.collection,
+            key,
+            value,
+            metadata: Vec::new(),
+        })
+        .map(entity_reply_from_output)
+        .map_err(entity_error_to_status)
+}
+
 pub(crate) fn bulk_create_reply(
     runtime: &GrpcRuntime,
     request: JsonBulkCreateRequest,

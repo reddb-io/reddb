@@ -71,6 +71,74 @@ Por padrão, o lookup é exato. Para modo mais flexível:
 SEARCH INDEX cpf VALUE '081.232.036-08' FUZZY LIMIT 20
 ```
 
+## SEARCH CONTEXT
+
+Unified context search across **all** data structures — tables, graphs, vectors, documents, and key-values — in a single command. SEARCH CONTEXT uses a 3-tier strategy (field-value index, token index, then global scan), automatically expands results via graph traversal and cross-references, groups results by structure type, and returns connections between found entities.
+
+```sql
+SEARCH CONTEXT '<query>' [FIELD <field>] [COLLECTION <col>] [DEPTH <n>] [LIMIT <n>]
+```
+
+### Parameters
+
+| Parameter | Required | Description |
+|:----------|:---------|:------------|
+| `query` | Yes | Search term — CPF, IP, name, ID, or any value |
+| `FIELD field` | No | Target a specific field for indexed lookup |
+| `COLLECTION col` | No | Scope the search to a specific collection |
+| `DEPTH n` | No | Graph traversal depth (default 1, max 3) |
+| `LIMIT n` | No | Maximum results per structure type (default 25) |
+
+### Examples
+
+Search across everything with a CPF:
+
+```sql
+SEARCH CONTEXT '081.232.036-08'
+```
+
+Narrow to a specific indexed field:
+
+```sql
+SEARCH CONTEXT '081.232.036-08' FIELD cpf
+```
+
+Scope to a collection with deeper graph expansion:
+
+```sql
+SEARCH CONTEXT 'Alice' COLLECTION customers DEPTH 2 LIMIT 50
+```
+
+### Response Shape
+
+Results are grouped by structure type. The response includes a `connections` list linking related entities and a `summary` with hit counts:
+
+```json
+{
+  "ok": true,
+  "tables": [ /* matching table rows */ ],
+  "graph": {
+    "nodes": [ /* matching graph nodes */ ],
+    "edges": [ /* edges connecting found nodes */ ]
+  },
+  "vectors": [ /* matching vector entries */ ],
+  "documents": [ /* matching documents */ ],
+  "key_values": [ /* matching key-value pairs */ ],
+  "connections": [
+    { "from": "entity:42", "to": "entity:17", "rel": "KNOWS" }
+  ],
+  "summary": {
+    "total_hits": 12,
+    "tables": 3,
+    "graph_nodes": 4,
+    "graph_edges": 2,
+    "vectors": 1,
+    "documents": 1,
+    "key_values": 1
+  }
+}
+```
+
 ## Via HTTP
 
 ### Similarity Search
@@ -142,6 +210,19 @@ curl -X POST http://127.0.0.1:8080/search \
 ```
 
 `mode` aceita `auto`, `index`, `multimodal` ou `hybrid`.
+
+### Context Search
+
+```bash
+curl -X POST http://127.0.0.1:8080/context \
+  -H 'content-type: application/json' \
+  -d '{
+    "query": "081.232.036-08",
+    "field": "cpf"
+  }'
+```
+
+You can also pass `collection`, `depth`, and `limit` in the JSON body.
 
 ## Response Format
 

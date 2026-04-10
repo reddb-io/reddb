@@ -360,6 +360,84 @@ pub struct RuntimeGraphTopologicalSortResult {
     pub ordered_nodes: Vec<RuntimeGraphNode>,
 }
 
+// ============================================================================
+// Context Search types
+// ============================================================================
+
+#[derive(Debug, Clone)]
+pub struct ContextSearchResult {
+    pub query: String,
+    pub tables: Vec<ContextEntity>,
+    pub graph: ContextGraphResult,
+    pub vectors: Vec<ContextEntity>,
+    pub documents: Vec<ContextEntity>,
+    pub key_values: Vec<ContextEntity>,
+    pub connections: Vec<ContextConnection>,
+    pub summary: ContextSummary,
+}
+
+#[derive(Debug, Clone)]
+pub struct ContextEntity {
+    pub entity: UnifiedEntity,
+    pub score: f32,
+    pub discovery: DiscoveryMethod,
+    pub collection: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum DiscoveryMethod {
+    Indexed {
+        field: String,
+    },
+    GlobalScan,
+    CrossReference {
+        source_id: u64,
+        ref_type: String,
+    },
+    GraphTraversal {
+        source_id: u64,
+        edge_type: String,
+        depth: usize,
+    },
+    VectorQuery {
+        similarity: f32,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct ContextGraphResult {
+    pub nodes: Vec<ContextEntity>,
+    pub edges: Vec<ContextEntity>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ContextConnection {
+    pub from_id: u64,
+    pub to_id: u64,
+    pub connection_type: ContextConnectionType,
+    pub weight: f32,
+}
+
+#[derive(Debug, Clone)]
+pub enum ContextConnectionType {
+    CrossRef(String),
+    GraphEdge(String),
+    VectorSimilarity(f32),
+}
+
+#[derive(Debug, Clone)]
+pub struct ContextSummary {
+    pub total_entities: usize,
+    pub direct_matches: usize,
+    pub expanded_via_graph: usize,
+    pub expanded_via_cross_refs: usize,
+    pub expanded_via_vector_query: usize,
+    pub collections_searched: usize,
+    pub execution_time_us: u64,
+    pub tiers_used: Vec<String>,
+    pub entities_reindexed: usize,
+}
+
 struct PoolState {
     next_id: u64,
     active: usize,
@@ -415,3 +493,15 @@ pub use self::graph_dsl::*;
 use self::join_filter::*;
 use self::query_exec::*;
 use self::record_search::*;
+
+/// Public helpers re-exported for use by the presentation layer.
+pub mod record_search_helpers {
+    use crate::storage::UnifiedEntity;
+    use std::collections::BTreeSet;
+
+    pub fn entity_type_and_capabilities(
+        entity: &UnifiedEntity,
+    ) -> (&'static str, BTreeSet<String>) {
+        super::record_search::runtime_entity_type_and_capabilities(entity)
+    }
+}

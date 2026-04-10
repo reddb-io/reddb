@@ -8,9 +8,12 @@ The `SELECT` statement retrieves rows from a table with optional filtering, sort
 SELECT [columns | *]
 FROM table_name [AS alias]
 [WHERE condition]
+[GROUP BY column [, ...]]
+[HAVING condition]
 [ORDER BY column [ASC|DESC] [, ...]]
 [LIMIT n]
 [OFFSET n]
+[WITH EXPAND GRAPH [DEPTH n] | CROSS_REFS | ALL]
 ```
 
 ## Basic Examples
@@ -117,6 +120,67 @@ grpcurl -plaintext \
   -d '{"query": "SELECT * FROM users WHERE active = true"}' \
   127.0.0.1:50051 reddb.v1.RedDb/Query
 ```
+
+## GROUP BY / HAVING
+
+Group results by one or more columns. You can combine `GROUP BY` with `HAVING` to filter groups and with `ORDER BY` to sort them.
+
+### Group by a Single Column
+
+```sql
+SELECT status FROM users GROUP BY status
+```
+
+### Group by Multiple Columns
+
+```sql
+SELECT dept, role FROM employees GROUP BY dept, role
+```
+
+### Filter and Sort Groups
+
+```sql
+SELECT dept FROM employees GROUP BY dept HAVING dept > 5 ORDER BY dept
+```
+
+`HAVING` applies its condition **after** grouping, so it filters entire groups rather than individual rows.
+
+## WITH EXPAND
+
+`WITH EXPAND` triggers automatic discovery of related entities. When present, RedDB performs a secondary lookup after the initial query and includes graph neighbors and cross-referenced entities in the result set.
+
+### Expand via Graph Edges
+
+Perform a BFS traversal from every entity returned by the query. `DEPTH` controls how many hops to follow.
+
+```sql
+SELECT * FROM customers WHERE cpf = '081.232.036-08' WITH EXPAND GRAPH DEPTH 2
+```
+
+### Expand via Cross-References
+
+Include entities that share cross-referenced identifiers with the matched rows.
+
+```sql
+SELECT * FROM ANY WHERE name = 'Alice' WITH EXPAND CROSS_REFS
+```
+
+### Expand All (Graph + Cross-Refs)
+
+Combine both expansion strategies in a single pass.
+
+```sql
+SELECT * FROM hosts WITH EXPAND ALL
+```
+
+### Combine Graph and Cross-Refs Explicitly
+
+```sql
+SELECT * FROM users WITH EXPAND GRAPH, CROSS_REFS
+```
+
+> [!TIP]
+> `WITH EXPAND ALL` is equivalent to `WITH EXPAND GRAPH, CROSS_REFS`. Use the explicit form when you need to set a `DEPTH` for the graph traversal.
 
 ## Query Explain
 

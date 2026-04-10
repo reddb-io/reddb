@@ -667,3 +667,38 @@ mod tests {
         assert_eq!(parsed.stop_reason.as_deref(), Some("end_turn"));
     }
 }
+
+// ============================================================================
+// gRPC stubs — delegate to the same logic as HTTP handlers
+// ============================================================================
+
+/// gRPC stub for AI embeddings — returns not-yet-available until HTTP handler
+/// logic is extracted into shared functions.
+pub fn grpc_embeddings(
+    _runtime: &crate::runtime::RedDBRuntime,
+    _payload: &JsonValue,
+) -> crate::RedDBResult<JsonValue> {
+    Err(crate::RedDBError::FeatureNotEnabled(
+        "AI embeddings via gRPC requires HTTP endpoint; use POST /ai/embeddings".to_string(),
+    ))
+}
+
+/// gRPC stub for AI prompt.
+pub fn grpc_prompt(
+    _runtime: &crate::runtime::RedDBRuntime,
+    _payload: &JsonValue,
+) -> crate::RedDBResult<JsonValue> {
+    Err(crate::RedDBError::FeatureNotEnabled(
+        "AI prompt via gRPC requires HTTP endpoint; use POST /ai/prompt".to_string(),
+    ))
+}
+
+/// gRPC stub for AI credentials.
+pub fn grpc_credentials(
+    _runtime: &crate::runtime::RedDBRuntime,
+    _payload: &JsonValue,
+) -> crate::RedDBResult<JsonValue> {
+    Err(crate::RedDBError::FeatureNotEnabled(
+        "AI credentials via gRPC requires HTTP endpoint; use POST /ai/credentials".to_string(),
+    ))
+}

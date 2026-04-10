@@ -541,6 +541,7 @@ impl RedDBServer {
             ("POST", "/query/explain") => self.handle_query_explain(body),
             ("POST", "/query") => self.handle_query(body),
             ("POST", "/search") => self.handle_universal_search(body),
+            ("POST", "/context") => self.handle_context_search(body),
             ("POST", "/text/search") => self.handle_text_search(body),
             ("POST", "/multimodal/search") => self.handle_multimodal_search(body),
             ("POST", "/hybrid/search") => self.handle_hybrid_search(body),
@@ -599,7 +600,23 @@ impl RedDBServer {
                         );
                     }
                 }
+                // KV routes: /collections/{collection}/kvs/{key}
+                if let Some((collection, key)) = collection_kv_path(&path) {
+                    return match method.as_str() {
+                        "GET" => self.handle_get_kv(collection, key),
+                        "PUT" => self.handle_put_kv(collection, key, body),
+                        "DELETE" => self.handle_delete_kv(collection, key),
+                        _ => json_error(405, "method not allowed for KV endpoint"),
+                    };
+                }
                 if method == "POST" {
+                    if let Some(collection) = collection_from_action_path(&path, "bulk/documents") {
+                        return self.handle_bulk_create(
+                            collection,
+                            body,
+                            Self::handle_create_document,
+                        );
+                    }
                     if let Some(collection) = collection_from_action_path(&path, "bulk/rows") {
                         return self.handle_bulk_create(collection, body, Self::handle_create_row);
                     }
@@ -627,6 +644,9 @@ impl RedDBServer {
                     }
                     if let Some(collection) = collection_from_action_path(&path, "vectors") {
                         return self.handle_create_vector(collection, body);
+                    }
+                    if let Some(collection) = collection_from_action_path(&path, "documents") {
+                        return self.handle_create_document(collection, body);
                     }
                     if let Some(name) = index_named_action_path(&path, "enable") {
                         return match self.admin_use_cases().set_index_enabled(&name, true) {
@@ -932,6 +952,20 @@ fn graph_projection_named_action_path(path: &str, action: &str) -> Option<String
         None
     } else {
         Some(name.to_string())
+    }
+}
+
+/// Match `/collections/:name/kvs/:key` to extract collection and key.
+fn collection_kv_path(path: &str) -> Option<(&str, &str)> {
+    let prefix = "/collections/";
+    let trimmed = path.strip_prefix(prefix)?;
+    let (collection, rest) = trimmed.split_once("/kvs/")?;
+    let collection = collection.trim_matches('/');
+    let key = rest.trim_matches('/');
+    if collection.is_empty() || key.is_empty() {
+        None
+    } else {
+        Some((collection, key))
     }
 }
 

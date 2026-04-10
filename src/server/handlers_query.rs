@@ -260,6 +260,25 @@ impl RedDBServer {
         }
     }
 
+    pub(crate) fn handle_context_search(&self, body: Vec<u8>) -> HttpResponse {
+        let payload = match parse_json_body(&body) {
+            Ok(payload) => payload,
+            Err(response) => return response,
+        };
+        let input = match crate::application::query_payload::parse_context_search_input(&payload) {
+            Ok(input) => input,
+            Err(err) => return json_error(400, err.to_string()),
+        };
+
+        match self.query_use_cases().search_context(input) {
+            Ok(result) => json_response(
+                200,
+                crate::presentation::query_json::context_search_result_json(&result),
+            ),
+            Err(err) => json_error(400, err.to_string()),
+        }
+    }
+
     pub(crate) fn handle_multimodal_search(&self, body: Vec<u8>) -> HttpResponse {
         let payload = match parse_json_body(&body) {
             Ok(payload) => payload,

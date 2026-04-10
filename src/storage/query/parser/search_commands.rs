@@ -18,8 +18,18 @@ impl<'a> Parser<'a> {
             Token::Ident(name) if name.eq_ignore_ascii_case("MULTIMODAL") => {
                 self.parse_search_multimodal()
             }
+            Token::Ident(name) if name.eq_ignore_ascii_case("CONTEXT") => {
+                self.parse_search_context()
+            }
             _ => Err(ParseError::expected(
-                vec!["SIMILAR", "TEXT", "HYBRID", "MULTIMODAL", "INDEX"],
+                vec![
+                    "SIMILAR",
+                    "TEXT",
+                    "HYBRID",
+                    "MULTIMODAL",
+                    "INDEX",
+                    "CONTEXT",
+                ],
                 self.peek(),
                 self.position(),
             )),
@@ -215,6 +225,44 @@ impl<'a> Parser<'a> {
             }
             _ => Ok(false),
         }
+    }
+
+    /// Parse: SEARCH CONTEXT 'query' [FIELD field] [COLLECTION col] [DEPTH n] [LIMIT n]
+    fn parse_search_context(&mut self) -> Result<QueryExpr, ParseError> {
+        self.advance()?; // consume CONTEXT keyword
+
+        let query = self.parse_string()?;
+
+        let field = if self.consume_search_ident("FIELD")? {
+            Some(self.expect_ident()?)
+        } else {
+            None
+        };
+
+        let collection = if self.consume(&Token::Collection)? {
+            Some(self.expect_ident()?)
+        } else {
+            None
+        };
+
+        // Parse optional clauses in any order
+        let mut limit = 25usize;
+        let mut depth = 1usize;
+        for _ in 0..2 {
+            if self.consume(&Token::Limit)? {
+                limit = self.parse_integer()? as usize;
+            } else if self.consume(&Token::Depth)? {
+                depth = self.parse_integer()? as usize;
+            }
+        }
+
+        Ok(QueryExpr::SearchCommand(SearchCommand::Context {
+            query,
+            field,
+            collection,
+            limit,
+            depth,
+        }))
     }
 
     /// Parse a vector literal: [0.1, 0.2, 0.3]

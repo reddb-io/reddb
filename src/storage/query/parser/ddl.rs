@@ -27,17 +27,39 @@ impl<'a> Parser<'a> {
         }
         self.expect(Token::RParen)?;
 
-        let default_ttl_ms = if self.consume(&Token::With)? {
-            self.parse_create_table_ttl_clause()?
-        } else {
-            None
-        };
+        let mut default_ttl_ms = None;
+        let mut context_index_fields = Vec::new();
+
+        while self.consume(&Token::With)? {
+            if self.consume_ident_ci("CONTEXT")? {
+                // Consume INDEX token (reserved keyword)
+                if !self.consume(&Token::Index)? {
+                    return Err(ParseError::expected(
+                        vec!["INDEX"],
+                        self.peek(),
+                        self.position(),
+                    ));
+                }
+                self.expect(Token::On)?;
+                self.expect(Token::LParen)?;
+                loop {
+                    context_index_fields.push(self.expect_ident()?);
+                    if !self.consume(&Token::Comma)? {
+                        break;
+                    }
+                }
+                self.expect(Token::RParen)?;
+            } else {
+                default_ttl_ms = self.parse_create_table_ttl_clause()?;
+            }
+        }
 
         Ok(QueryExpr::CreateTable(CreateTableQuery {
             name,
             columns,
             if_not_exists,
             default_ttl_ms,
+            context_index_fields,
         }))
     }
 
@@ -216,6 +238,22 @@ impl<'a> Parser<'a> {
                 other,
                 self.position(),
             )),
+        }
+    }
+
+    fn check_ttl_keyword(&self) -> bool {
+        matches!(self.peek(), Token::Ident(name) if name.eq_ignore_ascii_case("ttl"))
+    }
+
+    fn expect_ident_ci_ddl(&mut self, expected: &str) -> Result<(), ParseError> {
+        if self.consume_ident_ci(expected)? {
+            Ok(())
+        } else {
+            Err(ParseError::expected(
+                vec![expected],
+                self.peek(),
+                self.position(),
+            ))
         }
     }
 

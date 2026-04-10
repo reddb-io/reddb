@@ -103,6 +103,10 @@ pub trait RuntimeQueryPort {
         capabilities: Option<Vec<String>>,
         limit: Option<usize>,
     ) -> RedDBResult<DslQueryResult>;
+    fn search_context(
+        &self,
+        input: crate::application::SearchContextInput,
+    ) -> RedDBResult<crate::runtime::ContextSearchResult>;
 }
 
 pub trait RuntimeEntityPort {

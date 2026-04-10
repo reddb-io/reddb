@@ -44,9 +44,12 @@ impl<'a> Parser<'a> {
             alias,
             columns,
             filter: None,
+            group_by: Vec::new(),
+            having: None,
             order_by: Vec::new(),
             limit: None,
             offset: None,
+            expand: None,
         };
 
         // Parse optional clauses
@@ -102,11 +105,22 @@ impl<'a> Parser<'a> {
         Ok(Projection::Field(field, alias))
     }
 
-    /// Parse table query clauses (WHERE, ORDER BY, LIMIT, OFFSET)
+    /// Parse table query clauses (WHERE, GROUP BY, HAVING, ORDER BY, LIMIT, OFFSET)
     pub fn parse_table_clauses(&mut self, query: &mut TableQuery) -> Result<(), ParseError> {
         // WHERE clause
         if self.consume(&Token::Where)? {
             query.filter = Some(self.parse_filter()?);
+        }
+
+        // GROUP BY clause
+        if self.consume(&Token::Group)? {
+            self.expect(Token::By)?;
+            query.group_by = self.parse_group_by_list()?;
+        }
+
+        // HAVING clause (only valid after GROUP BY)
+        if !query.group_by.is_empty() && self.consume_ident_ci("HAVING")? {
+            query.having = Some(self.parse_filter()?);
         }
 
         // ORDER BY clause
@@ -125,7 +139,65 @@ impl<'a> Parser<'a> {
             query.offset = Some(self.parse_integer()? as u64);
         }
 
+        // WITH EXPAND clause
+        if self.consume(&Token::With)? && self.consume_ident_ci("EXPAND")? {
+            query.expand = Some(self.parse_expand_options()?);
+        }
+
         Ok(())
+    }
+
+    /// Parse EXPAND options: GRAPH [DEPTH n], CROSS_REFS, ALL
+    fn parse_expand_options(
+        &mut self,
+    ) -> Result<crate::storage::query::ast::ExpandOptions, ParseError> {
+        use crate::storage::query::ast::ExpandOptions;
+        let mut opts = ExpandOptions::default();
+
+        loop {
+            if self.consume(&Token::Graph)? || self.consume_ident_ci("GRAPH")? {
+                opts.graph = true;
+                opts.graph_depth = if self.consume(&Token::Depth)? {
+                    self.parse_integer()? as usize
+                } else {
+                    1
+                };
+            } else if self.consume_ident_ci("CROSS_REFS")?
+                || self.consume_ident_ci("CROSSREFS")?
+                || self.consume_ident_ci("REFS")?
+            {
+                opts.cross_refs = true;
+            } else if self.consume(&Token::All)? || self.consume_ident_ci("ALL")? {
+                opts.graph = true;
+                opts.cross_refs = true;
+                opts.graph_depth = 1;
+            } else {
+                break;
+            }
+            if !self.consume(&Token::Comma)? {
+                break;
+            }
+        }
+
+        if !opts.graph && !opts.cross_refs {
+            opts.graph = true;
+            opts.cross_refs = true;
+            opts.graph_depth = 1;
+        }
+
+        Ok(opts)
+    }
+
+    /// Parse GROUP BY field list
+    pub fn parse_group_by_list(&mut self) -> Result<Vec<String>, ParseError> {
+        let mut fields = Vec::new();
+        loop {
+            fields.push(self.expect_ident()?);
+            if !self.consume(&Token::Comma)? {
+                break;
+            }
+        }
+        Ok(fields)
     }
 
     /// Parse ORDER BY list

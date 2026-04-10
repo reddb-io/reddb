@@ -26,9 +26,12 @@ impl<'a> Parser<'a> {
             alias,
             columns: Vec::new(),
             filter: None,
+            group_by: Vec::new(),
+            having: None,
             order_by: Vec::new(),
             limit: None,
             offset: None,
+            expand: None,
         };
 
         // Check for JOIN
@@ -161,9 +164,12 @@ impl<'a> Parser<'a> {
             alias,
             columns: Vec::new(),
             filter: None,
+            group_by: Vec::new(),
+            having: None,
             order_by: Vec::new(),
             limit: None,
             offset: None,
+            expand: None,
         };
 
         Ok(QueryExpr::Join(JoinQuery {

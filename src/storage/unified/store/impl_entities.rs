@@ -44,6 +44,11 @@ impl UnifiedStore {
             .map(Arc::clone)
     }
 
+    /// Get the context index for cross-structure search.
+    pub fn context_index(&self) -> &ContextIndex {
+        &self.context_index
+    }
+
     /// List all collections
     pub fn list_collections(&self) -> Vec<String> {
         self.collections
@@ -124,6 +129,10 @@ impl UnifiedStore {
         } else {
             self.register_entity_id(entity.id);
         }
+
+        // Index into context index before consuming the entity
+        self.context_index.index_entity(collection, &entity);
+
         let id = manager.insert(entity)?;
         self.register_entity_id(id);
 

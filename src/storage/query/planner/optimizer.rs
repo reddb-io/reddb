@@ -366,9 +366,12 @@ mod tests {
             alias: Some(name.to_string()),
             columns: vec![Projection::All],
             filter: None,
+            group_by: Vec::new(),
+            having: None,
             order_by: vec![],
             limit: None,
             offset: None,
+            expand: None,
         })
     }
 
@@ -391,9 +394,12 @@ mod tests {
             alias: None,
             columns: vec![Projection::All],
             filter: None,
+            group_by: Vec::new(),
+            having: None,
             order_by: vec![],
             limit: Some(10), // Small table
             offset: None,
+            expand: None,
         });
 
         let large = QueryExpr::Table(TableQuery {
@@ -401,9 +407,12 @@ mod tests {
             alias: None,
             columns: vec![Projection::All],
             filter: None,
+            group_by: Vec::new(),
+            having: None,
             order_by: vec![],
             limit: None, // Large table
             offset: None,
+            expand: None,
         });
 
         let join = QueryExpr::Join(JoinQuery {

@@ -43,7 +43,13 @@ impl RedDBRuntime {
 
             match query.entity_type {
                 InsertEntityType::Row => {
-                    let (fields, metadata) = split_insert_metadata(&query.columns, row_values)?;
+                    let (fields, mut metadata) = split_insert_metadata(&query.columns, row_values)?;
+                    merge_with_clauses(
+                        &mut metadata,
+                        query.ttl_ms,
+                        query.expires_at_ms,
+                        &query.with_metadata,
+                    );
                     let input = CreateRowInput {
                         collection: query.table.clone(),
                         fields,
@@ -54,8 +60,14 @@ impl RedDBRuntime {
                     self.create_row(input)?;
                 }
                 InsertEntityType::Node => {
-                    let (node_values, metadata) =
+                    let (node_values, mut metadata) =
                         split_insert_metadata(&query.columns, row_values)?;
+                    merge_with_clauses(
+                        &mut metadata,
+                        query.ttl_ms,
+                        query.expires_at_ms,
+                        &query.with_metadata,
+                    );
                     let (columns, values) = pairwise_columns_values(&node_values);
                     let label = find_column_value_string(&columns, &values, "label")?;
                     let node_type = find_column_value_opt_string(&columns, &values, "node_type");
@@ -74,8 +86,14 @@ impl RedDBRuntime {
                     self.create_node(input)?;
                 }
                 InsertEntityType::Edge => {
-                    let (edge_values, metadata) =
+                    let (edge_values, mut metadata) =
                         split_insert_metadata(&query.columns, row_values)?;
+                    merge_with_clauses(
+                        &mut metadata,
+                        query.ttl_ms,
+                        query.expires_at_ms,
+                        &query.with_metadata,
+                    );
                     let (columns, values) = pairwise_columns_values(&edge_values);
                     let label = find_column_value_string(&columns, &values, "label")?;
                     let from_id = find_column_value_u64(&columns, &values, "from")?;
@@ -98,8 +116,14 @@ impl RedDBRuntime {
                     self.create_edge(input)?;
                 }
                 InsertEntityType::Vector => {
-                    let (vector_values, metadata) =
+                    let (vector_values, mut metadata) =
                         split_insert_metadata(&query.columns, row_values)?;
+                    merge_with_clauses(
+                        &mut metadata,
+                        query.ttl_ms,
+                        query.expires_at_ms,
+                        &query.with_metadata,
+                    );
                     let (columns, values) = pairwise_columns_values(&vector_values);
                     let dense = find_column_value_vec_f32(&columns, &values, "dense")?;
                     let content = find_column_value_opt_string(&columns, &values, "content");
@@ -114,8 +138,14 @@ impl RedDBRuntime {
                     self.create_vector(input)?;
                 }
                 InsertEntityType::Document => {
-                    let (document_values, metadata) =
+                    let (document_values, mut metadata) =
                         split_insert_metadata(&query.columns, row_values)?;
+                    merge_with_clauses(
+                        &mut metadata,
+                        query.ttl_ms,
+                        query.expires_at_ms,
+                        &query.with_metadata,
+                    );
                     let (columns, values) = pairwise_columns_values(&document_values);
                     let body_str = find_column_value_string(&columns, &values, "body")?;
                     let body: crate::json::Value = crate::json::from_str(&body_str)
@@ -130,7 +160,14 @@ impl RedDBRuntime {
                     self.create_document(input)?;
                 }
                 InsertEntityType::Kv => {
-                    let (kv_values, metadata) = split_insert_metadata(&query.columns, row_values)?;
+                    let (kv_values, mut metadata) =
+                        split_insert_metadata(&query.columns, row_values)?;
+                    merge_with_clauses(
+                        &mut metadata,
+                        query.ttl_ms,
+                        query.expires_at_ms,
+                        &query.with_metadata,
+                    );
                     let (columns, values) = pairwise_columns_values(&kv_values);
                     let key = find_column_value_string(&columns, &values, "key")?;
                     let value = find_column_value(&columns, &values, "value")?;
@@ -217,11 +254,35 @@ impl RedDBRuntime {
                 })
                 .collect::<RedDBResult<Vec<_>>>()?;
 
+            // Merge WITH TTL / EXPIRES AT / METADATA into patch operations
+            let mut all_operations = operations;
+            if let Some(ttl_ms) = query.ttl_ms {
+                all_operations.push(PatchEntityOperation {
+                    op: PatchEntityOperationType::Set,
+                    path: vec!["metadata".to_string(), "_ttl_ms".to_string()],
+                    value: Some(crate::json::Value::Number(ttl_ms as f64)),
+                });
+            }
+            if let Some(expires_at_ms) = query.expires_at_ms {
+                all_operations.push(PatchEntityOperation {
+                    op: PatchEntityOperationType::Set,
+                    path: vec!["metadata".to_string(), "_expires_at".to_string()],
+                    value: Some(crate::json::Value::Number(expires_at_ms as f64)),
+                });
+            }
+            for (key, val) in &query.with_metadata {
+                all_operations.push(PatchEntityOperation {
+                    op: PatchEntityOperationType::Set,
+                    path: vec!["metadata".to_string(), key.clone()],
+                    value: Some(storage_value_to_json(val)),
+                });
+            }
+
             let input = PatchEntityInput {
                 collection: query.table.clone(),
                 id: entity.id,
                 payload: crate::json::Value::Null,
-                operations,
+                operations: all_operations,
             };
 
             self.patch_entity(input)?;
@@ -321,6 +382,7 @@ fn split_insert_metadata(
     let mut metadata = Vec::new();
 
     for (column, value) in columns.iter().zip(values.iter()) {
+        // Still support legacy _ttl columns for backward compat
         if let Some(metadata_key) = resolve_sql_ttl_metadata_key(column) {
             metadata.push((
                 metadata_key.to_string(),
@@ -332,6 +394,38 @@ fn split_insert_metadata(
     }
 
     Ok((fields, metadata))
+}
+
+/// Merge structured WITH TTL, WITH EXPIRES AT, and WITH METADATA clauses into metadata entries.
+fn merge_with_clauses(
+    metadata: &mut Vec<(String, MetadataValue)>,
+    ttl_ms: Option<u64>,
+    expires_at_ms: Option<u64>,
+    with_metadata: &[(String, Value)],
+) {
+    if let Some(ms) = ttl_ms {
+        metadata.push((
+            "_ttl_ms".to_string(),
+            if ms <= i64::MAX as u64 {
+                MetadataValue::Int(ms as i64)
+            } else {
+                MetadataValue::Timestamp(ms)
+            },
+        ));
+    }
+    if let Some(ms) = expires_at_ms {
+        metadata.push(("_expires_at".to_string(), MetadataValue::Timestamp(ms)));
+    }
+    for (key, value) in with_metadata {
+        let meta_value = match value {
+            Value::Text(s) => MetadataValue::String(s.clone()),
+            Value::Integer(n) => MetadataValue::Int(*n),
+            Value::Float(n) => MetadataValue::Float(*n),
+            Value::Boolean(b) => MetadataValue::Bool(*b),
+            _ => MetadataValue::String(value.to_string()),
+        };
+        metadata.push((key.clone(), meta_value));
+    }
 }
 
 fn pairwise_columns_values(pairs: &[(String, Value)]) -> (Vec<String>, Vec<Value>) {

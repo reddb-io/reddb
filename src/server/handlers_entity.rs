@@ -215,6 +215,135 @@ impl RedDBServer {
         }
     }
 
+    // ── KV endpoints ─────────────────────────────────────────────────
+
+    pub(crate) fn handle_get_kv(&self, collection: &str, key: &str) -> HttpResponse {
+        match self.entity_use_cases().get_kv(collection, key) {
+            Ok(Some((value, id))) => {
+                let mut object = Map::new();
+                object.insert("ok".to_string(), JsonValue::Bool(true));
+                object.insert(
+                    "collection".to_string(),
+                    JsonValue::String(collection.to_string()),
+                );
+                object.insert("key".to_string(), JsonValue::String(key.to_string()));
+                object.insert(
+                    "value".to_string(),
+                    crate::presentation::entity_json::storage_value_to_json(&value),
+                );
+                object.insert("id".to_string(), JsonValue::Number(id.raw() as f64));
+                json_response(200, JsonValue::Object(object))
+            }
+            Ok(None) => json_error(404, format!("key not found: {key}")),
+            Err(err) => json_error(400, err.to_string()),
+        }
+    }
+
+    pub(crate) fn handle_put_kv(&self, collection: &str, key: &str, body: Vec<u8>) -> HttpResponse {
+        let payload = match parse_json_body_allow_empty(&body) {
+            Ok(payload) => payload,
+            Err(response) => return response,
+        };
+
+        let value = match payload.get("value") {
+            Some(JsonValue::String(s)) => Value::Text(s.clone()),
+            Some(JsonValue::Number(n)) => {
+                if n.fract().abs() < f64::EPSILON {
+                    Value::Integer(*n as i64)
+                } else {
+                    Value::Float(*n)
+                }
+            }
+            Some(JsonValue::Bool(b)) => Value::Boolean(*b),
+            Some(JsonValue::Null) | None => Value::Null,
+            Some(other) => Value::Json(crate::json::to_vec(other).unwrap_or_default()),
+        };
+
+        // Try to find existing KV to update, otherwise create
+        match self.entity_use_cases().get_kv(collection, key) {
+            Ok(Some((_, existing_id))) => {
+                // Update existing
+                match self.entity_use_cases().patch(PatchEntityInput {
+                    collection: collection.to_string(),
+                    id: existing_id,
+                    payload: payload.clone(),
+                    operations: vec![PatchEntityOperation {
+                        op: PatchEntityOperationType::Set,
+                        path: vec!["value".to_string()],
+                        value: payload.get("value").cloned(),
+                    }],
+                }) {
+                    Ok(output) => json_response(
+                        200,
+                        crate::presentation::entity_json::created_entity_output_json(&output),
+                    ),
+                    Err(err) => json_error(400, err.to_string()),
+                }
+            }
+            Ok(None) => {
+                // Create new
+                match self.entity_use_cases().create_kv(CreateKvInput {
+                    collection: collection.to_string(),
+                    key: key.to_string(),
+                    value,
+                    metadata: Vec::new(),
+                }) {
+                    Ok(output) => json_response(
+                        201,
+                        crate::presentation::entity_json::created_entity_output_json(&output),
+                    ),
+                    Err(err) => json_error(400, err.to_string()),
+                }
+            }
+            Err(err) => json_error(400, err.to_string()),
+        }
+    }
+
+    pub(crate) fn handle_delete_kv(&self, collection: &str, key: &str) -> HttpResponse {
+        match self.entity_use_cases().delete_kv(collection, key) {
+            Ok(true) => {
+                let mut object = Map::new();
+                object.insert("ok".to_string(), JsonValue::Bool(true));
+                object.insert("deleted".to_string(), JsonValue::Bool(true));
+                object.insert("key".to_string(), JsonValue::String(key.to_string()));
+                json_response(200, JsonValue::Object(object))
+            }
+            Ok(false) => json_error(404, format!("key not found: {key}")),
+            Err(err) => json_error(400, err.to_string()),
+        }
+    }
+
+    // ── Document endpoint ───────────────────────────────────────────
+
+    pub(crate) fn handle_create_document(&self, collection: &str, body: Vec<u8>) -> HttpResponse {
+        let payload = match parse_json_body(&body) {
+            Ok(payload) => payload,
+            Err(response) => return response,
+        };
+
+        // If payload has "body" field, use it; otherwise treat entire payload as the document body
+        let body_value = payload
+            .get("body")
+            .cloned()
+            .unwrap_or_else(|| payload.clone());
+
+        match self
+            .entity_use_cases()
+            .create_document(CreateDocumentInput {
+                collection: collection.to_string(),
+                body: body_value,
+                metadata: Vec::new(),
+                node_links: Vec::new(),
+                vector_links: Vec::new(),
+            }) {
+            Ok(output) => json_response(
+                200,
+                crate::presentation::entity_json::created_entity_output_json(&output),
+            ),
+            Err(err) => json_error(400, err.to_string()),
+        }
+    }
+
     pub(crate) fn handle_delete_entity(&self, collection: &str, id: u64) -> HttpResponse {
         match self.entity_use_cases().delete(DeleteEntityInput {
             collection: collection.to_string(),

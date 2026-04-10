@@ -71,12 +71,29 @@ pub struct TableQuery {
     pub columns: Vec<Projection>,
     /// Filter condition
     pub filter: Option<Filter>,
+    /// GROUP BY fields
+    pub group_by: Vec<String>,
+    /// HAVING filter (applied after grouping)
+    pub having: Option<Filter>,
     /// Order by clauses
     pub order_by: Vec<OrderByClause>,
     /// Limit
     pub limit: Option<u64>,
     /// Offset
     pub offset: Option<u64>,
+    /// WITH EXPAND options (graph traversal, cross-ref following)
+    pub expand: Option<ExpandOptions>,
+}
+
+/// Options for WITH EXPAND clause on SELECT queries.
+#[derive(Debug, Clone, Default)]
+pub struct ExpandOptions {
+    /// Expand via graph edges (WITH EXPAND GRAPH)
+    pub graph: bool,
+    /// Graph expansion depth (DEPTH n)
+    pub graph_depth: usize,
+    /// Expand via cross-references (WITH EXPAND CROSS_REFS)
+    pub cross_refs: bool,
 }
 
 impl TableQuery {
@@ -87,9 +104,12 @@ impl TableQuery {
             alias: None,
             columns: Vec::new(),
             filter: None,
+            group_by: Vec::new(),
+            having: None,
             order_by: Vec::new(),
             limit: None,
             offset: None,
+            expand: None,
         }
     }
 }
@@ -708,7 +728,7 @@ pub enum InsertEntityType {
     Kv,
 }
 
-/// INSERT INTO table (columns) VALUES (row1), (row2), ...
+/// INSERT INTO table (columns) VALUES (row1), (row2), ... [WITH TTL duration] [WITH METADATA (k=v)]
 #[derive(Debug, Clone)]
 pub struct InsertQuery {
     /// Target table name
@@ -721,9 +741,15 @@ pub struct InsertQuery {
     pub values: Vec<Vec<Value>>,
     /// Whether to return inserted rows
     pub returning: bool,
+    /// Optional TTL in milliseconds (from WITH TTL clause)
+    pub ttl_ms: Option<u64>,
+    /// Optional absolute expiration (from WITH EXPIRES AT clause)
+    pub expires_at_ms: Option<u64>,
+    /// Optional metadata key-value pairs (from WITH METADATA clause)
+    pub with_metadata: Vec<(String, Value)>,
 }
 
-/// UPDATE table SET col=val, ... WHERE filter
+/// UPDATE table SET col=val, ... WHERE filter [WITH TTL duration] [WITH METADATA (...)]
 #[derive(Debug, Clone)]
 pub struct UpdateQuery {
     /// Target table name
@@ -732,6 +758,12 @@ pub struct UpdateQuery {
     pub assignments: Vec<(String, Value)>,
     /// Optional WHERE filter
     pub filter: Option<Filter>,
+    /// Optional TTL in milliseconds (from WITH TTL clause)
+    pub ttl_ms: Option<u64>,
+    /// Optional absolute expiration (from WITH EXPIRES AT clause)
+    pub expires_at_ms: Option<u64>,
+    /// Optional metadata key-value pairs (from WITH METADATA clause)
+    pub with_metadata: Vec<(String, Value)>,
 }
 
 /// DELETE FROM table WHERE filter
@@ -754,6 +786,8 @@ pub struct CreateTableQuery {
     pub if_not_exists: bool,
     /// Optional default TTL applied to newly inserted items in this collection.
     pub default_ttl_ms: Option<u64>,
+    /// Fields to prioritize in the context index (WITH CONTEXT INDEX ON (f1, f2))
+    pub context_index_fields: Vec<String>,
 }
 
 /// Column definition for CREATE TABLE
@@ -1053,6 +1087,14 @@ pub enum SearchCommand {
         collection: Option<String>,
         limit: usize,
         exact: bool,
+    },
+    /// SEARCH CONTEXT 'query' [FIELD field] [COLLECTION col] [LIMIT n] [DEPTH n]
+    Context {
+        query: String,
+        field: Option<String>,
+        collection: Option<String>,
+        limit: usize,
+        depth: usize,
     },
 }
 

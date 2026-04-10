@@ -435,6 +435,64 @@ impl RedDBRuntime {
                     statement_type: "select",
                 })
             }
+            SearchCommand::Context {
+                query,
+                field,
+                collection,
+                limit,
+                depth,
+            } => {
+                use crate::application::SearchContextInput;
+                let res = self.search_context(SearchContextInput {
+                    query: query.clone(),
+                    field: field.clone(),
+                    vector: None,
+                    collections: collection.as_ref().map(|c| vec![c.clone()]),
+                    graph_depth: Some(*depth),
+                    graph_max_edges: None,
+                    max_cross_refs: None,
+                    follow_cross_refs: None,
+                    expand_graph: None,
+                    global_scan: None,
+                    reindex: None,
+                    limit: Some(*limit),
+                    min_score: None,
+                })?;
+                let mut result = UnifiedResult::with_columns(vec![
+                    "entity_id".into(),
+                    "collection".into(),
+                    "score".into(),
+                    "discovery".into(),
+                    "kind".into(),
+                ]);
+                let all_entities = res
+                    .tables
+                    .iter()
+                    .map(|e| (e, "table"))
+                    .chain(res.graph.nodes.iter().map(|e| (e, "graph_node")))
+                    .chain(res.graph.edges.iter().map(|e| (e, "graph_edge")))
+                    .chain(res.vectors.iter().map(|e| (e, "vector")))
+                    .chain(res.documents.iter().map(|e| (e, "document")))
+                    .chain(res.key_values.iter().map(|e| (e, "kv")));
+                for (entity, kind) in all_entities {
+                    let mut record = UnifiedRecord::new();
+                    record.set("entity_id", Value::UnsignedInteger(entity.entity.id.raw()));
+                    record.set("collection", Value::Text(entity.collection.clone()));
+                    record.set("score", Value::Float(entity.score as f64));
+                    record.set("discovery", Value::Text(format!("{:?}", entity.discovery)));
+                    record.set("kind", Value::Text(kind.to_string()));
+                    result.push(record);
+                }
+                Ok(RuntimeQueryResult {
+                    query: raw_query.to_string(),
+                    mode: QueryMode::Sql,
+                    statement: "search_context",
+                    engine: "runtime-context",
+                    result,
+                    affected_rows: 0,
+                    statement_type: "select",
+                })
+            }
         }
     }
 }

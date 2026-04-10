@@ -1974,6 +1974,24 @@ async fn create_vector(
     Ok(Response::new(create_vector_reply(self, request)?))
 }
 
+async fn create_document(
+    &self,
+    request: Request<JsonCreateRequest>,
+) -> Result<Response<EntityReply>, Status> {
+    self.authorize_write(request.metadata())?;
+    let request = request.into_inner();
+    Ok(Response::new(create_document_reply(self, request)?))
+}
+
+async fn create_kv(
+    &self,
+    request: Request<JsonCreateRequest>,
+) -> Result<Response<EntityReply>, Status> {
+    self.authorize_write(request.metadata())?;
+    let request = request.into_inner();
+    Ok(Response::new(create_kv_reply(self, request)?))
+}
+
 async fn bulk_create_rows(
     &self,
     request: Request<JsonBulkCreateRequest>,
@@ -2008,6 +2026,62 @@ async fn bulk_create_vectors(
     self.authorize_write(request.metadata())?;
     let request = request.into_inner();
     Ok(Response::new(bulk_create_reply(self, request, create_vector_reply)?))
+}
+
+async fn bulk_create_documents(
+    &self,
+    request: Request<JsonBulkCreateRequest>,
+) -> Result<Response<BulkEntityReply>, Status> {
+    self.authorize_write(request.metadata())?;
+    let request = request.into_inner();
+    Ok(Response::new(bulk_create_reply(self, request, create_document_reply)?))
+}
+
+async fn context_search(
+    &self,
+    request: Request<JsonPayloadRequest>,
+) -> Result<Response<PayloadReply>, Status> {
+    self.authorize_read(request.metadata())?;
+    let payload = parse_json_payload(&request.into_inner().payload_json)?;
+    let input = crate::application::query_payload::parse_context_search_input(&payload)
+        .map_err(to_status)?;
+    let result = self
+        .query_use_cases()
+        .search_context(input)
+        .map_err(to_status)?;
+    Ok(Response::new(json_payload_reply(
+        crate::presentation::query_json::context_search_result_json(&result),
+    )))
+}
+
+async fn embeddings(
+    &self,
+    request: Request<JsonPayloadRequest>,
+) -> Result<Response<PayloadReply>, Status> {
+    self.authorize_write(request.metadata())?;
+    let payload = parse_json_payload(&request.into_inner().payload_json)?;
+    let result = crate::ai::grpc_embeddings(&self.runtime, &payload).map_err(to_status)?;
+    Ok(Response::new(json_payload_reply(result)))
+}
+
+async fn ai_prompt(
+    &self,
+    request: Request<JsonPayloadRequest>,
+) -> Result<Response<PayloadReply>, Status> {
+    self.authorize_write(request.metadata())?;
+    let payload = parse_json_payload(&request.into_inner().payload_json)?;
+    let result = crate::ai::grpc_prompt(&self.runtime, &payload).map_err(to_status)?;
+    Ok(Response::new(json_payload_reply(result)))
+}
+
+async fn ai_credentials(
+    &self,
+    request: Request<JsonPayloadRequest>,
+) -> Result<Response<PayloadReply>, Status> {
+    self.authorize_write(request.metadata())?;
+    let payload = parse_json_payload(&request.into_inner().payload_json)?;
+    let result = crate::ai::grpc_credentials(&self.runtime, &payload).map_err(to_status)?;
+    Ok(Response::new(json_payload_reply(result)))
 }
 
 async fn patch_entity(

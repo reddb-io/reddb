@@ -1,5 +1,4 @@
 use crate::application::entity::{CreateDocumentInput, CreateKvInput};
-use crate::application::multimodal_index::rebuild_entity_multimodal_index;
 use crate::application::ttl_payload::{
     has_internal_ttl_metadata, normalize_ttl_patch_operations, parse_top_level_ttl_metadata_entries,
 };
@@ -31,7 +30,7 @@ fn apply_collection_default_ttl(
     ));
 }
 
-fn refresh_multimodal_index(
+fn refresh_context_index(
     db: &crate::storage::unified::devx::RedDB,
     collection: &str,
     id: crate::storage::EntityId,
@@ -41,11 +40,7 @@ fn refresh_multimodal_index(
         return Ok(());
     };
 
-    let mut metadata = store.get_metadata(collection, id).unwrap_or_default();
-    rebuild_entity_multimodal_index(&mut metadata, &entity);
-    store
-        .set_metadata(collection, id, metadata)
-        .map_err(|err| crate::RedDBError::Query(err.to_string()))?;
+    store.context_index().index_entity(collection, &entity);
     Ok(())
 }
 
@@ -74,7 +69,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         }
 
         let id = builder.save()?;
-        refresh_multimodal_index(&db, &input.collection, id)?;
+        refresh_context_index(&db, &input.collection, id)?;
         Ok(CreateEntityOutput {
             id,
             entity: db.get(id),
@@ -116,7 +111,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         }
 
         let id = builder.save()?;
-        refresh_multimodal_index(&db, &input.collection, id)?;
+        refresh_context_index(&db, &input.collection, id)?;
         Ok(CreateEntityOutput {
             id,
             entity: db.get(id),
@@ -145,7 +140,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         }
 
         let id = builder.save()?;
-        refresh_multimodal_index(&db, &input.collection, id)?;
+        refresh_context_index(&db, &input.collection, id)?;
         Ok(CreateEntityOutput {
             id,
             entity: db.get(id),
@@ -175,7 +170,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         }
 
         let id = builder.save()?;
-        refresh_multimodal_index(&db, &input.collection, id)?;
+        refresh_context_index(&db, &input.collection, id)?;
         Ok(CreateEntityOutput {
             id,
             entity: db.get(id),
@@ -263,7 +258,9 @@ impl RuntimeEntityPort for RedDBRuntime {
         let found = self.get_kv(collection, key)?;
         if let Some((_, id)) = found {
             let db = self.db();
-            db.store()
+            let store = db.store();
+            store.context_index().remove_entity(id);
+            store
                 .delete(collection, id)
                 .map_err(|err| crate::RedDBError::Internal(err.to_string()))?;
             Ok(true)
@@ -636,7 +633,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         manager
             .update(entity)
             .map_err(|err| crate::RedDBError::Query(err.to_string()))?;
-        refresh_multimodal_index(&db, &collection, id)?;
+        refresh_context_index(&db, &collection, id)?;
 
         Ok(CreateEntityOutput {
             id,
@@ -645,9 +642,9 @@ impl RuntimeEntityPort for RedDBRuntime {
     }
 
     fn delete_entity(&self, input: DeleteEntityInput) -> RedDBResult<DeleteEntityOutput> {
-        let deleted = self
-            .db()
-            .store()
+        let store = self.db().store();
+        store.context_index().remove_entity(input.id);
+        let deleted = store
             .delete(&input.collection, input.id)
             .map_err(|err| crate::RedDBError::Internal(err.to_string()))?;
         Ok(DeleteEntityOutput {

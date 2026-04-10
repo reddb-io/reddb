@@ -1,9 +1,6 @@
 use super::*;
-use crate::application::multimodal_index::{
-    entity_multimodal_tokens_for_search, metadata_key_for_field_lookup,
-    metadata_key_for_multimodal_token, query_lookup_index_tokens, query_multimodal_tokens,
-    query_multimodal_tokens_exact,
-};
+use crate::application::SearchContextInput;
+use crate::storage::unified::context_index::{entity_tokens_for_search, tokenize_query};
 
 impl RedDBRuntime {
     pub fn explain_query(&self, query: &str) -> RedDBResult<RuntimeQueryExplain> {
@@ -374,13 +371,6 @@ impl RedDBRuntime {
             ));
         }
 
-        let query_tokens = query_multimodal_tokens(&query);
-        if query_tokens.is_empty() {
-            return Err(RedDBError::Query(
-                "query does not contain indexable tokens".to_string(),
-            ));
-        }
-
         let collection_scope = runtime_search_collections(&self.inner.db, collections);
         let allowed_collections: Option<BTreeSet<String>> =
             collection_scope.as_ref().map(|items| {
@@ -393,60 +383,51 @@ impl RedDBRuntime {
         let result_limit = limit.unwrap_or(25).max(1);
 
         let store = self.inner.db.store();
-        let mut scored: HashMap<u64, (UnifiedEntity, usize)> = HashMap::new();
-        let mut scanned = 0usize;
-        let mut index_hits = 0usize;
+        let fetch_limit = result_limit.saturating_mul(4).max(32);
 
-        for token in &query_tokens {
-            let metadata_key = metadata_key_for_multimodal_token(token);
-            let matches =
-                store.filter_metadata_all(&[(metadata_key, UnifiedMetadataFilter::IsNotNull)]);
-            scanned += matches.len();
-            for (collection, id) in matches {
-                if allowed_collections
-                    .as_ref()
-                    .is_some_and(|allowed| !allowed.contains(&collection))
-                {
-                    continue;
-                }
-                let Some(entity) = store.get(&collection, id) else {
-                    continue;
-                };
-                index_hits += 1;
-                let entry = scored.entry(entity.id.raw()).or_insert((entity, 0usize));
-                entry.1 = entry.1.saturating_add(1);
+        // Use the dedicated ContextIndex instead of _mm_index metadata
+        let hits = store
+            .context_index()
+            .search(&query, fetch_limit, allowed_collections.as_ref());
+        let index_hits = hits.len();
+
+        let mut scored: HashMap<u64, (UnifiedEntity, usize)> = HashMap::new();
+        for hit in &hits {
+            if let Some(entity) = store.get(&hit.collection, hit.entity_id) {
+                scored
+                    .entry(hit.entity_id.raw())
+                    .or_insert((entity, hit.matched_tokens));
             }
         }
 
+        // Fallback: global scan if ContextIndex returned nothing
         if scored.is_empty() {
+            let query_tokens = tokenize_query(&query);
             if let Some(collections) = collection_scope {
                 for collection in collections {
                     let Some(manager) = store.get_collection(&collection) else {
                         continue;
                     };
                     for entity in manager.query_all(|_| true) {
-                        scanned = scanned.saturating_add(1);
-                        let entity_tokens = entity_multimodal_tokens_for_search(&entity);
+                        let entity_tokens = entity_tokens_for_search(&entity);
                         let overlap = query_tokens
                             .iter()
                             .filter(|token| entity_tokens.binary_search(token).is_ok())
                             .count();
-                        if overlap == 0 {
-                            continue;
+                        if overlap > 0 {
+                            scored.entry(entity.id.raw()).or_insert((entity, overlap));
                         }
-                        let entry = scored.entry(entity.id.raw()).or_insert((entity, 0usize));
-                        entry.1 = entry.1.max(overlap);
                     }
                 }
             }
         }
 
-        let token_count = query_tokens.len().max(1) as f32;
+        let query_tokens_len = tokenize_query(&query).len().max(1) as f32;
         let mut result = DslQueryResult {
             matches: scored
                 .into_values()
                 .map(|(entity, overlap)| {
-                    let score = (overlap as f32 / token_count).min(1.0);
+                    let score = (overlap as f32 / query_tokens_len).min(1.0);
                     ScoredMatch {
                         entity,
                         score,
@@ -461,11 +442,10 @@ impl RedDBRuntime {
                     }
                 })
                 .collect(),
-            scanned,
+            scanned: index_hits,
             execution_time_us: started.elapsed().as_micros() as u64,
             explanation: format!(
-                "Multimodal indexed search for '{query}' ({} tokens, {index_hits} index hits)",
-                query_tokens.len()
+                "Multimodal search for '{query}' ({index_hits} index hits via ContextIndex)",
             ),
         };
 
@@ -500,19 +480,6 @@ impl RedDBRuntime {
             ));
         }
 
-        let index_tokens = query_lookup_index_tokens(&index);
-        let value_tokens = if exact {
-            query_multimodal_tokens_exact(&value)
-        } else {
-            query_multimodal_tokens(&value)
-        };
-
-        if index_tokens.is_empty() || value_tokens.is_empty() {
-            return Err(RedDBError::Query(
-                "lookup index or value does not contain indexable tokens".to_string(),
-            ));
-        }
-
         let collection_scope = runtime_search_collections(&self.inner.db, collections.clone());
         let allowed_collections: Option<BTreeSet<String>> =
             collection_scope.as_ref().map(|items| {
@@ -523,36 +490,22 @@ impl RedDBRuntime {
                     .collect()
             });
         let result_limit = limit.unwrap_or(25).max(1);
+        let fetch_limit = result_limit.saturating_mul(4).max(32);
 
         let store = self.inner.db.store();
-        let mut scored: HashMap<u64, (UnifiedEntity, usize)> = HashMap::new();
-        let mut scanned = 0usize;
-        let mut index_hits = 0usize;
 
-        for index_token in &index_tokens {
-            for value_token in &value_tokens {
-                let metadata_key = metadata_key_for_field_lookup(index_token, value_token);
-                let matches =
-                    store.filter_metadata_all(&[(metadata_key, UnifiedMetadataFilter::IsNotNull)]);
-                scanned += matches.len();
-                for (collection, id) in matches {
-                    if allowed_collections
-                        .as_ref()
-                        .is_some_and(|allowed| !allowed.contains(&collection))
-                    {
-                        continue;
-                    }
-                    let Some(entity) = store.get(&collection, id) else {
-                        continue;
-                    };
-                    index_hits += 1;
-                    let entry = scored.entry(entity.id.raw()).or_insert((entity, 0usize));
-                    entry.1 = entry.1.saturating_add(1);
-                }
-            }
-        }
+        // Use the dedicated ContextIndex field-value lookup instead of _mm_field_index metadata
+        let hits = store.context_index().search_field(
+            &index,
+            &value,
+            exact,
+            fetch_limit,
+            allowed_collections.as_ref(),
+        );
+        let index_hits = hits.len();
 
-        if scored.is_empty() {
+        if hits.is_empty() {
+            // Fallback to multimodal token search
             return self.search_multimodal(
                 format!("{index}:{value}"),
                 collections,
@@ -562,32 +515,30 @@ impl RedDBRuntime {
             );
         }
 
-        let max_overlap = (index_tokens.len() * value_tokens.len()).max(1) as f32;
         let mut result = DslQueryResult {
-            matches: scored
-                .into_values()
-                .map(|(entity, overlap)| {
-                    let score = (overlap as f32 / max_overlap).min(1.0);
-                    ScoredMatch {
-                        entity,
-                        score,
-                        components: MatchComponents {
-                            text_relevance: Some(score),
-                            structured_match: Some(score),
-                            filter_match: true,
-                            final_score: Some(score),
-                            ..Default::default()
-                        },
-                        path: None,
-                    }
+            matches: hits
+                .into_iter()
+                .filter_map(|hit| {
+                    store.get(&hit.collection, hit.entity_id).map(|entity| {
+                        ScoredMatch {
+                            entity,
+                            score: hit.score,
+                            components: MatchComponents {
+                                text_relevance: Some(hit.score),
+                                structured_match: Some(hit.score),
+                                filter_match: true,
+                                final_score: Some(hit.score),
+                                ..Default::default()
+                            },
+                            path: None,
+                        }
+                    })
                 })
                 .collect(),
-            scanned,
+            scanned: index_hits,
             execution_time_us: started.elapsed().as_micros() as u64,
             explanation: format!(
-                "Indexed lookup for {index}={value} (exact={exact}, {}x{} tokens, {index_hits} index hits)",
-                index_tokens.len(),
-                value_tokens.len(),
+                "Indexed lookup for {index}={value} (exact={exact}, {index_hits} hits via ContextIndex)",
             ),
         };
 
@@ -638,5 +589,408 @@ impl RedDBRuntime {
             result.matches.truncate(limit.max(1));
         }
         Ok(result)
+    }
+
+    pub fn search_context(&self, input: SearchContextInput) -> RedDBResult<ContextSearchResult> {
+        let started = std::time::Instant::now();
+        let result_limit = input.limit.unwrap_or(25).max(1);
+        let graph_depth = input.graph_depth.unwrap_or(1).min(3);
+        let graph_max_edges = input.graph_max_edges.unwrap_or(20);
+        let max_cross_refs = input.max_cross_refs.unwrap_or(10);
+        let follow_cross_refs = input.follow_cross_refs.unwrap_or(true);
+        let expand_graph = input.expand_graph.unwrap_or(true);
+        let do_global_scan = input.global_scan.unwrap_or(true);
+        let do_reindex = input.reindex.unwrap_or(true);
+        let min_score = input.min_score.unwrap_or(0.0).max(0.0);
+        let query = input.query.trim().to_string();
+        if query.is_empty() {
+            return Err(RedDBError::Query(
+                "field 'query' cannot be empty".to_string(),
+            ));
+        }
+
+        let store = self.inner.db.store();
+        let collection_scope = runtime_search_collections(&self.inner.db, input.collections);
+        let allowed_collections: Option<BTreeSet<String>> =
+            collection_scope.as_ref().map(|items| {
+                items
+                    .iter()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            });
+
+        let mut scored: HashMap<u64, (UnifiedEntity, f32, DiscoveryMethod, String)> =
+            HashMap::new();
+        let mut tiers_used: Vec<String> = Vec::new();
+        let mut entities_reindexed = 0usize;
+        let mut collections_searched = 0usize;
+
+        // ── Tier 1: Field-value index lookup ────────────────────────────
+        if let Some(ref field) = input.field {
+            let hits = store.context_index().search_field(
+                field,
+                &query,
+                true,
+                result_limit.saturating_mul(4).max(32),
+                allowed_collections.as_ref(),
+            );
+            if !hits.is_empty() {
+                tiers_used.push("index".to_string());
+            }
+            for hit in hits {
+                if hit.score >= min_score {
+                    if let Some(entity) = store.get(&hit.collection, hit.entity_id) {
+                        scored.entry(hit.entity_id.raw()).or_insert((
+                            entity,
+                            hit.score,
+                            DiscoveryMethod::Indexed {
+                                field: field.clone(),
+                            },
+                            hit.collection,
+                        ));
+                    }
+                }
+            }
+        }
+
+        // ── Tier 2: Token index ─────────────────────────────────────────
+        {
+            let hits = store.context_index().search(
+                &query,
+                result_limit.saturating_mul(4).max(32),
+                allowed_collections.as_ref(),
+            );
+            if !hits.is_empty() && !tiers_used.contains(&"multimodal".to_string()) {
+                tiers_used.push("multimodal".to_string());
+            }
+            for hit in hits {
+                if hit.score >= min_score {
+                    if let Some(entity) = store.get(&hit.collection, hit.entity_id) {
+                        scored.entry(hit.entity_id.raw()).or_insert((
+                            entity,
+                            hit.score,
+                            DiscoveryMethod::Indexed {
+                                field: "_token".to_string(),
+                            },
+                            hit.collection,
+                        ));
+                    }
+                }
+            }
+        }
+
+        // ── Tier 3: Global scan (fallback) ──────────────────────────────
+        if do_global_scan && scored.len() < result_limit {
+            let all_collections = match &collection_scope {
+                Some(cols) => cols.clone(),
+                None => store.list_collections(),
+            };
+            collections_searched = all_collections.len();
+
+            let query_tokens = tokenize_query(&query);
+            if !query_tokens.is_empty() {
+                let mut scan_found = false;
+                for collection_name in &all_collections {
+                    let Some(manager) = store.get_collection(collection_name) else {
+                        continue;
+                    };
+                    for entity in manager.query_all(|_| true) {
+                        if scored.contains_key(&entity.id.raw()) {
+                            continue;
+                        }
+                        let entity_tokens = entity_tokens_for_search(&entity);
+                        let overlap = query_tokens
+                            .iter()
+                            .filter(|t| entity_tokens.binary_search(t).is_ok())
+                            .count();
+                        if overlap == 0 {
+                            continue;
+                        }
+                        let score =
+                            (overlap as f32 / query_tokens.len().max(1) as f32).min(1.0) * 0.9;
+                        if score >= min_score {
+                            scan_found = true;
+                            if do_reindex {
+                                store.context_index().index_entity(collection_name, &entity);
+                                entities_reindexed += 1;
+                            }
+                            scored.insert(
+                                entity.id.raw(),
+                                (
+                                    entity,
+                                    score,
+                                    DiscoveryMethod::GlobalScan,
+                                    collection_name.clone(),
+                                ),
+                            );
+                        }
+                        if scored.len() >= result_limit.saturating_mul(4) {
+                            break;
+                        }
+                    }
+                    if scored.len() >= result_limit.saturating_mul(4) {
+                        break;
+                    }
+                }
+                if scan_found {
+                    tiers_used.push("scan".to_string());
+                }
+            }
+        }
+
+        let direct_matches = scored.len();
+
+        // ── Expansion: Cross-references ─────────────────────────────────
+        let mut expanded_cross_refs = 0usize;
+        if follow_cross_refs {
+            let seed: Vec<(u64, f32, Vec<crate::storage::CrossRef>)> = scored
+                .values()
+                .filter(|(entity, _, _, _)| !entity.cross_refs.is_empty())
+                .map(|(entity, score, _, _)| (entity.id.raw(), *score, entity.cross_refs.clone()))
+                .collect();
+
+            for (source_id, source_score, cross_refs) in seed {
+                for xref in cross_refs.iter().take(max_cross_refs) {
+                    if scored.contains_key(&xref.target.raw()) {
+                        continue;
+                    }
+                    if let Some(target) = self.inner.db.get(xref.target) {
+                        let decayed_score = source_score * xref.weight * 0.8;
+                        if decayed_score >= min_score {
+                            expanded_cross_refs += 1;
+                            scored.insert(
+                                xref.target.raw(),
+                                (
+                                    target,
+                                    decayed_score,
+                                    DiscoveryMethod::CrossReference {
+                                        source_id,
+                                        ref_type: format!("{:?}", xref.ref_type),
+                                    },
+                                    xref.target_collection.clone(),
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Expansion: Graph traversal ──────────────────────────────────
+        let mut expanded_graph = 0usize;
+        if expand_graph && graph_depth > 0 {
+            let seed_node_ids: Vec<(u64, String, f32)> = scored
+                .values()
+                .filter_map(|(entity, score, _, _)| {
+                    if matches!(entity.kind, EntityKind::GraphNode { .. }) {
+                        Some((entity.id.raw(), entity.id.raw().to_string(), *score))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            if !seed_node_ids.is_empty() {
+                if let Ok(graph) = materialize_graph(store.as_ref()) {
+                    for (source_id, node_id_str, source_score) in &seed_node_ids {
+                        let mut visited: HashSet<String> = HashSet::new();
+                        let mut queue: VecDeque<(String, usize)> = VecDeque::new();
+                        visited.insert(node_id_str.clone());
+                        queue.push_back((node_id_str.clone(), 0));
+
+                        while let Some((current, depth)) = queue.pop_front() {
+                            if depth >= graph_depth {
+                                continue;
+                            }
+                            let neighbors = graph_adjacent_edges(
+                                &graph,
+                                &current,
+                                RuntimeGraphDirection::Both,
+                                None,
+                            );
+                            for (neighbor_id, _edge) in neighbors.into_iter().take(graph_max_edges)
+                            {
+                                if !visited.insert(neighbor_id.clone()) {
+                                    continue;
+                                }
+                                if let Ok(parsed) = neighbor_id.parse::<u64>() {
+                                    if scored.contains_key(&parsed) {
+                                        continue;
+                                    }
+                                    if let Some(entity) = self.inner.db.get(EntityId::new(parsed)) {
+                                        let decay = 0.7f32.powi((depth + 1) as i32);
+                                        let decayed_score = source_score * decay;
+                                        if decayed_score >= min_score {
+                                            expanded_graph += 1;
+                                            let collection = entity.kind.collection().to_string();
+                                            scored.insert(
+                                                parsed,
+                                                (
+                                                    entity,
+                                                    decayed_score,
+                                                    DiscoveryMethod::GraphTraversal {
+                                                        source_id: *source_id,
+                                                        edge_type: "adjacent".to_string(),
+                                                        depth: depth + 1,
+                                                    },
+                                                    collection,
+                                                ),
+                                            );
+                                        }
+                                    }
+                                }
+                                queue.push_back((neighbor_id, depth + 1));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Expansion: Vectors ──────────────────────────────────────────
+        let mut expanded_vectors = 0usize;
+        if let Some(ref vector) = input.vector {
+            let vec_collections = collection_scope.unwrap_or_else(|| store.list_collections());
+            for collection in &vec_collections {
+                if let Ok(results) =
+                    self.search_similar(collection, vector, result_limit, min_score)
+                {
+                    for result in results {
+                        if scored.contains_key(&result.entity_id.raw()) {
+                            continue;
+                        }
+                        if let Some(entity) = self.inner.db.get(result.entity_id) {
+                            expanded_vectors += 1;
+                            scored.insert(
+                                result.entity_id.raw(),
+                                (
+                                    entity,
+                                    result.score * 0.9,
+                                    DiscoveryMethod::VectorQuery {
+                                        similarity: result.score,
+                                    },
+                                    collection.clone(),
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Build connections map ───────────────────────────────────────
+        let mut connections: Vec<ContextConnection> = Vec::new();
+        let found_ids: HashSet<u64> = scored.keys().copied().collect();
+        for (entity, _, _, _) in scored.values() {
+            for xref in &entity.cross_refs {
+                if found_ids.contains(&xref.target.raw()) {
+                    connections.push(ContextConnection {
+                        from_id: entity.id.raw(),
+                        to_id: xref.target.raw(),
+                        connection_type: ContextConnectionType::CrossRef(format!(
+                            "{:?}",
+                            xref.ref_type
+                        )),
+                        weight: xref.weight,
+                    });
+                }
+            }
+            if let EntityKind::GraphEdge {
+                from_node, to_node, ..
+            } = &entity.kind
+            {
+                if let (Ok(from), Ok(to)) = (from_node.parse::<u64>(), to_node.parse::<u64>()) {
+                    if found_ids.contains(&from) || found_ids.contains(&to) {
+                        connections.push(ContextConnection {
+                            from_id: from,
+                            to_id: to,
+                            connection_type: ContextConnectionType::GraphEdge(
+                                entity.kind.collection().to_string(),
+                            ),
+                            weight: match &entity.data {
+                                EntityData::Edge(e) => e.weight / 1000.0,
+                                _ => 1.0,
+                            },
+                        });
+                    }
+                }
+            }
+        }
+
+        // ── Group by entity kind ────────────────────────────────────────
+        let mut tables = Vec::new();
+        let mut graph_nodes = Vec::new();
+        let mut graph_edges = Vec::new();
+        let mut vectors = Vec::new();
+        let mut documents = Vec::new();
+        let mut key_values = Vec::new();
+
+        let mut all: Vec<(UnifiedEntity, f32, DiscoveryMethod, String)> =
+            scored.into_values().collect();
+        all.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.id.raw().cmp(&b.0.id.raw()))
+        });
+
+        for (entity, score, discovery, collection) in all {
+            let ctx_entity = ContextEntity {
+                score,
+                discovery,
+                collection,
+                entity,
+            };
+
+            let (entity_type, _) = runtime_entity_type_and_capabilities(&ctx_entity.entity);
+            match entity_type {
+                "table" => tables.push(ctx_entity),
+                "kv" => key_values.push(ctx_entity),
+                "document" => documents.push(ctx_entity),
+                "graph_node" => graph_nodes.push(ctx_entity),
+                "graph_edge" => graph_edges.push(ctx_entity),
+                "vector" => vectors.push(ctx_entity),
+                _ => tables.push(ctx_entity),
+            }
+        }
+
+        // Truncate each bucket
+        tables.truncate(result_limit);
+        graph_nodes.truncate(result_limit);
+        graph_edges.truncate(result_limit);
+        vectors.truncate(result_limit);
+        documents.truncate(result_limit);
+        key_values.truncate(result_limit);
+
+        let total = tables.len()
+            + graph_nodes.len()
+            + graph_edges.len()
+            + vectors.len()
+            + documents.len()
+            + key_values.len();
+
+        Ok(ContextSearchResult {
+            query,
+            tables,
+            graph: ContextGraphResult {
+                nodes: graph_nodes,
+                edges: graph_edges,
+            },
+            vectors,
+            documents,
+            key_values,
+            connections,
+            summary: ContextSummary {
+                total_entities: total,
+                direct_matches,
+                expanded_via_graph: expanded_graph,
+                expanded_via_cross_refs: expanded_cross_refs,
+                expanded_via_vector_query: expanded_vectors,
+                collections_searched,
+                execution_time_us: started.elapsed().as_micros() as u64,
+                tiers_used,
+                entities_reindexed,
+            },
+        })
     }
 }

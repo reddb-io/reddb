@@ -1,7 +1,7 @@
 use crate::application::ports::RuntimeQueryPort;
 use crate::runtime::{
-    RuntimeFilter, RuntimeGraphPattern, RuntimeIvfSearchResult, RuntimeQueryExplain,
-    RuntimeQueryResult, RuntimeQueryWeights, ScanCursor, ScanPage,
+    ContextSearchResult, RuntimeFilter, RuntimeGraphPattern, RuntimeIvfSearchResult,
+    RuntimeQueryExplain, RuntimeQueryResult, RuntimeQueryWeights, ScanCursor, ScanPage,
 };
 use crate::storage::unified::devx::SimilarResult;
 use crate::storage::unified::dsl::QueryResult as DslQueryResult;
@@ -85,6 +85,23 @@ pub struct SearchHybridInput {
     pub weights: Option<RuntimeQueryWeights>,
     pub min_score: Option<f32>,
     pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SearchContextInput {
+    pub query: String,
+    pub field: Option<String>,
+    pub vector: Option<Vec<f32>>,
+    pub collections: Option<Vec<String>>,
+    pub graph_depth: Option<usize>,
+    pub graph_max_edges: Option<usize>,
+    pub max_cross_refs: Option<usize>,
+    pub follow_cross_refs: Option<bool>,
+    pub expand_graph: Option<bool>,
+    pub global_scan: Option<bool>,
+    pub reindex: Option<bool>,
+    pub limit: Option<usize>,
+    pub min_score: Option<f32>,
 }
 
 pub struct QueryUseCases<'a, P: ?Sized> {
@@ -177,5 +194,9 @@ impl<'a, P: RuntimeQueryPort + ?Sized> QueryUseCases<'a, P> {
             input.min_score,
             input.limit,
         )
+    }
+
+    pub fn search_context(&self, input: SearchContextInput) -> RedDBResult<ContextSearchResult> {
+        self.runtime.search_context(input)
     }
 }

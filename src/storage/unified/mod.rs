@@ -36,6 +36,7 @@
 //! - GraphNode → Vector (node has embeddings)
 //! - Vector → TableRow (embedding source)
 
+pub mod context_index;
 pub mod devx;
 pub mod dsl;
 pub mod entity;
@@ -44,7 +45,9 @@ pub mod manager;
 pub mod metadata;
 pub mod segment;
 pub mod store;
+pub mod tokenization;
 
+pub use context_index::{ContextIndex, ContextIndexStats, ContextPosting, ContextSearchHit};
 pub use devx::{
     AnyRef,
     BatchBuilder,

@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
+use super::context_index::ContextIndex;
 use super::entity::{
     CrossRef, EdgeData, EmbeddingSlot, EntityData, EntityId, EntityKind, NodeData, RefType,
     RowData, UnifiedEntity, VectorData,
@@ -416,6 +417,8 @@ pub struct UnifiedStore {
     db_path: Option<PathBuf>,
     /// B-tree indices for O(log n) entity lookups by ID (per collection)
     btree_indices: RwLock<HashMap<String, BTree>>,
+    /// Cross-structure context index for unified search
+    context_index: ContextIndex,
 }
 
 mod builder;
