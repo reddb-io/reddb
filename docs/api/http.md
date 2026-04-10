@@ -219,6 +219,66 @@ The response groups results by structure type:
 }
 ```
 
+## Configuration
+
+| Method | Path | Description |
+|:-------|:-----|:------------|
+| `GET` | `/config` | Export all configuration as nested JSON |
+| `POST` | `/config` | Import configuration from a JSON tree |
+
+Configuration is stored as dot-notation key-value pairs in the `red_config` collection. The `/config` endpoints automatically flatten JSON trees on import and nest them on export.
+
+### Export Configuration
+
+`GET /config` returns the full configuration tree as nested JSON:
+
+```bash
+curl http://127.0.0.1:8080/config
+```
+
+Response:
+
+```json
+{
+  "ok": true,
+  "config": {
+    "red": {
+      "ai": {
+        "default": {
+          "provider": "groq",
+          "model": "llama-3.3-70b-versatile"
+        },
+        "groq": {
+          "default": { "key": "gsk_xxx" }
+        }
+      }
+    }
+  }
+}
+```
+
+### Import Configuration
+
+`POST /config` accepts a JSON tree and flattens it into dot-notation KV pairs:
+
+```bash
+curl -X POST http://127.0.0.1:8080/config \
+  -H 'content-type: application/json' \
+  -d '{
+    "red": {
+      "ai": {
+        "default": { "provider": "ollama", "model": "llama3" }
+      }
+    }
+  }'
+```
+
+Response:
+
+```json
+{"ok": true, "imported": 2, "keys": ["red.ai.default.provider", "red.ai.default.model"]}
+```
+
 ## AI
 
 | Method | Path | Description |
@@ -250,6 +310,15 @@ RedDB ships with a multi-provider AI layer. Every provider that exposes an OpenA
 
 `POST /ai/credentials` stores API keys in the RedDB vault (the `red_config` KV collection). You can store keys by provider name and optional alias.
 
+Credentials are persisted as dot-notation keys in the `red_config` collection:
+
+| Key Pattern | Example | Description |
+|:------------|:--------|:------------|
+| `red.ai.{provider}.{alias}.key` | `red.ai.groq.default.key` | API key for a provider/alias |
+| `red.ai.{provider}.{alias}.base_url` | `red.ai.custom.prod.base_url` | Base URL override |
+| `red.ai.default.provider` | `red.ai.default.provider` | Default provider for all AI requests |
+| `red.ai.default.model` | `red.ai.default.model` | Default model for all AI requests |
+
 Store an API key:
 
 ```bash
@@ -278,6 +347,19 @@ curl -X POST http://127.0.0.1:8080/ai/credentials \
     "metadata": {"owner":"platform","rotation":"2026-04"}
   }'
 ```
+
+Set a provider as the default (so you can omit `USING` in queries):
+
+```bash
+curl -X POST http://127.0.0.1:8080/ai/credentials \
+  -H 'content-type: application/json' \
+  -d '{"provider": "groq", "api_key": "gsk_xxx", "default": true}'
+```
+
+You can also set the default provider and model through other methods:
+
+- **Config endpoint**: `POST /config` with `{"red":{"ai":{"default":{"provider":"groq","model":"llama-3.3-70b-versatile"}}}}`
+- **Environment variables**: `REDDB_AI_PROVIDER` and `REDDB_AI_MODEL`
 
 ### Credential Resolution Chain
 

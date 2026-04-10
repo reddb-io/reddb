@@ -255,9 +255,15 @@ impl<'a> Parser<'a> {
                 } else if self.check(&Token::Table) {
                     self.expect(Token::Table)?;
                     self.parse_create_table_body()
+                } else if matches!(self.peek(), Token::Ident(n) if
+                    n.eq_ignore_ascii_case("HLL") ||
+                    n.eq_ignore_ascii_case("SKETCH") ||
+                    n.eq_ignore_ascii_case("FILTER"))
+                {
+                    self.parse_create_probabilistic()
                 } else {
                     Err(ParseError::expected(
-                        vec!["TABLE", "INDEX", "UNIQUE"],
+                        vec!["TABLE", "INDEX", "UNIQUE", "HLL", "SKETCH", "FILTER"],
                         self.peek(),
                         pos,
                     ))
@@ -271,9 +277,15 @@ impl<'a> Parser<'a> {
                 } else if self.check(&Token::Table) {
                     self.expect(Token::Table)?;
                     self.parse_drop_table_body()
+                } else if matches!(self.peek(), Token::Ident(n) if
+                    n.eq_ignore_ascii_case("HLL") ||
+                    n.eq_ignore_ascii_case("SKETCH") ||
+                    n.eq_ignore_ascii_case("FILTER"))
+                {
+                    self.parse_drop_probabilistic()
                 } else {
                     Err(ParseError::expected(
-                        vec!["TABLE", "INDEX"],
+                        vec!["TABLE", "INDEX", "HLL", "SKETCH", "FILTER"],
                         self.peek(),
                         pos,
                     ))
@@ -283,10 +295,18 @@ impl<'a> Parser<'a> {
             Token::Graph => self.parse_graph_command(),
             Token::Search => self.parse_search_command(),
             Token::Ident(ref name) if name.eq_ignore_ascii_case("ASK") => self.parse_ask_query(),
+            Token::Ident(ref name) if name.eq_ignore_ascii_case("HLL") => self.parse_hll_command(),
+            Token::Ident(ref name) if name.eq_ignore_ascii_case("SKETCH") => {
+                self.parse_sketch_command()
+            }
+            Token::Ident(ref name) if name.eq_ignore_ascii_case("FILTER") => {
+                self.parse_filter_command()
+            }
             other => Err(ParseError::expected(
                 vec![
                     "SELECT", "MATCH", "PATH", "FROM", "VECTOR", "HYBRID", "INSERT", "UPDATE",
-                    "DELETE", "CREATE", "DROP", "ALTER", "GRAPH", "SEARCH", "ASK",
+                    "DELETE", "CREATE", "DROP", "ALTER", "GRAPH", "SEARCH", "ASK", "HLL", "SKETCH",
+                    "FILTER",
                 ],
                 other,
                 self.position(),

@@ -92,6 +92,24 @@ ASK 'summarize alerts' USING ollama MODEL 'llama3'
 ASK 'summarize alerts' USING anthropic
 ```
 
+Set a default provider so you can drop `USING` from every query:
+
+```bash
+# Set default provider -- no more USING on every query
+curl -X POST http://127.0.0.1:8080/ai/credentials \
+  -d '{"provider":"groq","api_key":"gsk_xxx","default":true}'
+```
+
+```sql
+-- Now ASK uses groq by default
+ASK 'what happened?'
+```
+
+```bash
+# Export/import all config as JSON
+curl http://127.0.0.1:8080/config
+```
+
 ---
 
 ## SQL Extensions

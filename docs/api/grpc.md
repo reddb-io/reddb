@@ -239,6 +239,9 @@ grpcurl -plaintext \
 
 All AI RPCs accept a `provider` field: `openai`, `anthropic`, `groq`, `openrouter`, `together`, `venice`, `deepseek`, `ollama`, `huggingface`, `local`, or a custom URL.
 
+> [!NOTE]
+> Configuration export and import (the `/config` endpoints) are available via the HTTP API only. Use `GET /config` to export and `POST /config` to import configuration as nested JSON. See the [HTTP API docs](http.md#configuration) for details.
+
 ### Serverless
 
 | RPC | Request | Description |

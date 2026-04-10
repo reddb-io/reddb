@@ -484,8 +484,10 @@ mod impl_graph;
 mod impl_graph_commands;
 mod impl_native;
 mod impl_physical;
+mod impl_probabilistic;
 mod impl_search;
 mod join_filter;
+mod probabilistic_store;
 mod query_exec;
 mod record_search;
 
