@@ -1,6 +1,6 @@
 # Configuration
 
-RedDB is configured through CLI flags and environment variables. There are no configuration files by default -- the binary is self-contained.
+RedDB is configured through three layers: CLI flags, environment variables, and the `red_config` KV store. All runtime settings can be managed via HTTP without restart.
 
 ## Server Flags
 
@@ -115,6 +115,100 @@ These flags work with any `red` command:
 | `--verbose` | `-v` | Verbose output |
 | `--no-color` | | Disable colored output |
 | `--version` | | Show version |
+
+## Runtime Configuration (`red_config`)
+
+RedDB stores runtime settings in the `red_config` collection using dot-notation keys. Changes take effect immediately without restart.
+
+### Import / Export
+
+```bash
+# Export all config as nested JSON
+curl http://127.0.0.1:8080/config
+
+# Import from JSON file
+curl -X POST http://127.0.0.1:8080/config -d @examples/config.json
+
+# Override specific values
+curl -X POST http://127.0.0.1:8080/config \
+  -d '{"red":{"ai":{"default":{"provider":"ollama","model":"llama3"}}}}'
+```
+
+See [`examples/config.json`](https://github.com/forattini-dev/reddb/blob/main/examples/config.json) for a complete example with all defaults.
+
+### Resolution Order
+
+For any setting, RedDB checks in order:
+
+1. **Environment variable** (e.g., `REDDB_AI_PROVIDER`)
+2. **`red_config` KV store** (e.g., `red.ai.default.provider`)
+3. **Hardcoded default**
+
+### AI & LLM (`red.ai.*`)
+
+| Key | Default | Description |
+|:----|:--------|:------------|
+| `red.ai.default.provider` | `openai` | Default provider for ASK, SEARCH SIMILAR TEXT, AUTO EMBED |
+| `red.ai.default.model` | provider default | Default model |
+| `red.ai.{provider}.{alias}.key` | — | API key (e.g., `red.ai.groq.default.key`) |
+| `red.ai.{provider}.{alias}.base_url` | — | Custom API base URL |
+| `red.ai.max_embedding_inputs` | `256` | Max inputs per embedding batch |
+| `red.ai.max_prompt_batch` | `256` | Max prompts per batch |
+| `red.ai.timeout.connect_secs` | `10` | API connection timeout |
+| `red.ai.timeout.read_secs` | `90` | API read timeout |
+
+### Server (`red.server.*`)
+
+| Key | Default | Description |
+|:----|:--------|:------------|
+| `red.server.max_scan_limit` | `1000` | Max rows in a single scan |
+| `red.server.max_body_size` | `1048576` | Max HTTP body size (1 MB) |
+| `red.server.read_timeout_ms` | `5000` | HTTP read timeout |
+| `red.server.write_timeout_ms` | `5000` | HTTP write timeout |
+
+### Storage (`red.storage.*`)
+
+| Key | Default | Description |
+|:----|:--------|:------------|
+| `red.storage.page_size` | `4096` | Page size in bytes |
+| `red.storage.page_cache_capacity` | `100000` | Page cache capacity |
+| `red.storage.auto_checkpoint_pages` | `1000` | Checkpoint after N dirty pages |
+| `red.storage.snapshot_retention` | `16` | Snapshots to keep |
+| `red.storage.segment.max_entities` | `100000` | Entities per segment before sealing |
+| `red.storage.segment.compression_level` | `6` | Compression level (0-9) |
+| `red.storage.hnsw.m` | `16` | HNSW max connections per node |
+| `red.storage.hnsw.ef_search` | `50` | HNSW query-time candidate list |
+| `red.storage.ivf.n_lists` | `100` | IVF Voronoi cells |
+| `red.storage.ivf.n_probes` | `10` | IVF cells to probe |
+| `red.storage.bm25.k1` | `1.2` | BM25 TF saturation |
+| `red.storage.bm25.b` | `0.75` | BM25 length normalization |
+
+### Search & RAG (`red.search.*`)
+
+| Key | Default | Description |
+|:----|:--------|:------------|
+| `red.search.rag.max_total_chunks` | `25` | Context chunks for LLM |
+| `red.search.rag.similarity_threshold` | `0.8` | Vector similarity threshold |
+| `red.search.rag.graph_depth` | `2` | Graph traversal depth |
+| `red.search.fusion.vector_weight` | `0.5` | Vector weight in hybrid search |
+| `red.search.fusion.graph_weight` | `0.3` | Graph weight in hybrid search |
+| `red.search.fusion.dedup_threshold` | `0.85` | Deduplication similarity |
+
+### Auth (`red.auth.*`)
+
+| Key | Default | Description |
+|:----|:--------|:------------|
+| `red.auth.enabled` | `false` | Enable authentication |
+| `red.auth.session_ttl_secs` | `3600` | Session TTL (1 hour) |
+| `red.auth.require_auth` | `false` | Require auth for all operations |
+
+### Query Engine (`red.query.*`)
+
+| Key | Default | Description |
+|:----|:--------|:------------|
+| `red.query.connection_pool.max_connections` | `64` | Max connections |
+| `red.query.connection_pool.max_idle` | `16` | Max idle connections |
+| `red.query.max_recursion_depth` | `1000` | Max CTE recursion depth |
 
 ## Feature Flags (Compile-Time)
 

@@ -11,6 +11,8 @@
 //! used directly by external code.
 
 pub mod bloom;
+pub mod count_min_sketch;
+pub mod cuckoo_filter;
 pub mod encoding;
 pub mod hyperloglog;
 pub mod ids;

@@ -1,0 +1,92 @@
+{
+  "red": {
+    "ai": {
+      "default": {
+        "provider": "openai",
+        "model": "gpt-4.1-mini"
+      },
+      "openai": {
+        "default": {
+          "key": "sk-your-openai-key-here"
+        }
+      },
+      "timeout": {
+        "connect_secs": 10,
+        "read_secs": 90,
+        "write_secs": 30
+      },
+      "max_embedding_inputs": 256,
+      "max_prompt_batch": 256
+    },
+    "server": {
+      "max_scan_limit": 1000,
+      "max_body_size": 1048576,
+      "read_timeout_ms": 5000,
+      "write_timeout_ms": 5000
+    },
+    "storage": {
+      "page_size": 4096,
+      "page_cache_capacity": 100000,
+      "auto_checkpoint_pages": 1000,
+      "snapshot_retention": 16,
+      "verify_checksums": true,
+      "segment": {
+        "max_entities": 100000,
+        "max_bytes": 268435456,
+        "max_age_secs": 3600,
+        "compression_level": 6
+      },
+      "hnsw": {
+        "m": 16,
+        "ef_construction": 100,
+        "ef_search": 50,
+        "distance_metric": "cosine"
+      },
+      "ivf": {
+        "n_lists": 100,
+        "n_probes": 10
+      },
+      "bm25": {
+        "k1": 1.2,
+        "b": 0.75
+      },
+      "max_index_tokens": 256,
+      "max_token_len": 160
+    },
+    "search": {
+      "rag": {
+        "max_chunks_per_source": 10,
+        "max_total_chunks": 25,
+        "similarity_threshold": 0.8,
+        "graph_depth": 2,
+        "expand_cross_refs": true,
+        "min_relevance": 0.3
+      },
+      "fusion": {
+        "rrf_k": 60.0,
+        "vector_weight": 0.5,
+        "graph_weight": 0.3,
+        "table_weight": 0.2,
+        "cross_ref_boost": 0.15,
+        "dedup_threshold": 0.85,
+        "diversify": true,
+        "max_per_type": 5,
+        "graph_rerank": true
+      }
+    },
+    "auth": {
+      "enabled": false,
+      "session_ttl_secs": 3600,
+      "require_auth": false,
+      "vault_enabled": false
+    },
+    "query": {
+      "connection_pool": {
+        "max_connections": 64,
+        "max_idle": 16
+      },
+      "max_recursion_depth": 1000,
+      "max_recursive_rows": 100000
+    }
+  }
+}

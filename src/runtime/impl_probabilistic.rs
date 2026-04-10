@@ -161,23 +161,68 @@ impl RedDBRuntime {
                 ))
             }
 
-            // ── Count-Min Sketch (stubs for Phase 7) ─────────────────
-            ProbabilisticCommand::CreateSketch { name, .. } => Ok(RuntimeQueryResult::ok_message(
-                raw_query.to_string(),
-                &format!("SKETCH '{}' created", name),
-                "create",
-            )),
-            ProbabilisticCommand::SketchAdd { name, .. } => Ok(RuntimeQueryResult::ok_message(
-                raw_query.to_string(),
-                &format!("element added to SKETCH '{}'", name),
-                "insert",
-            )),
+            // ── Count-Min Sketch ───────────────────────────────────────
+            ProbabilisticCommand::CreateSketch {
+                name,
+                width,
+                depth,
+                if_not_exists,
+            } => {
+                let mut sketches = self.inner.probabilistic.sketches.write().unwrap();
+                if sketches.contains_key(name) {
+                    if *if_not_exists {
+                        return Ok(RuntimeQueryResult::ok_message(
+                            raw_query.to_string(),
+                            &format!("SKETCH '{}' already exists", name),
+                            "create",
+                        ));
+                    }
+                    return Err(RedDBError::Query(format!(
+                        "SKETCH '{}' already exists",
+                        name
+                    )));
+                }
+                sketches.insert(
+                    name.clone(),
+                    crate::storage::primitives::count_min_sketch::CountMinSketch::new(
+                        *width, *depth,
+                    ),
+                );
+                Ok(RuntimeQueryResult::ok_message(
+                    raw_query.to_string(),
+                    &format!(
+                        "SKETCH '{}' created (width={}, depth={})",
+                        name, width, depth
+                    ),
+                    "create",
+                ))
+            }
+            ProbabilisticCommand::SketchAdd {
+                name,
+                element,
+                count,
+            } => {
+                let mut sketches = self.inner.probabilistic.sketches.write().unwrap();
+                let sketch = sketches
+                    .get_mut(name)
+                    .ok_or_else(|| RedDBError::NotFound(format!("SKETCH '{}' not found", name)))?;
+                sketch.add(element.as_bytes(), *count);
+                Ok(RuntimeQueryResult::ok_message(
+                    raw_query.to_string(),
+                    &format!("added {} to SKETCH '{}'", count, name),
+                    "insert",
+                ))
+            }
             ProbabilisticCommand::SketchCount { name, element } => {
+                let sketches = self.inner.probabilistic.sketches.read().unwrap();
+                let sketch = sketches
+                    .get(name)
+                    .ok_or_else(|| RedDBError::NotFound(format!("SKETCH '{}' not found", name)))?;
+                let estimate = sketch.estimate(element.as_bytes());
                 let mut result = UnifiedResult::with_columns(vec!["estimate".into()]);
                 let mut record = UnifiedRecord::new();
-                record.set("estimate", Value::UnsignedInteger(0));
+                record.set("estimate", Value::UnsignedInteger(estimate));
                 result.push(record);
-                let _ = (name, element);
                 Ok(RuntimeQueryResult {
                     query: raw_query.to_string(),
                     mode: QueryMode::Sql,
@@ -188,15 +233,58 @@ impl RedDBRuntime {
                     statement_type: "select",
                 })
             }
-            ProbabilisticCommand::SketchMerge { dest, .. } => Ok(RuntimeQueryResult::ok_message(
-                raw_query.to_string(),
-                &format!("SKETCH '{}' merged", dest),
-                "create",
-            )),
+            ProbabilisticCommand::SketchMerge { dest, sources } => {
+                let mut sketches = self.inner.probabilistic.sketches.write().unwrap();
+                let first_src = sketches.get(&sources[0]).ok_or_else(|| {
+                    RedDBError::NotFound(format!("SKETCH '{}' not found", sources[0]))
+                })?;
+                let mut merged = crate::storage::primitives::count_min_sketch::CountMinSketch::new(
+                    first_src.width(),
+                    first_src.depth(),
+                );
+                for src in sources {
+                    let sketch = sketches.get(src).ok_or_else(|| {
+                        RedDBError::NotFound(format!("SKETCH '{}' not found", src))
+                    })?;
+                    if !merged.merge(sketch) {
+                        return Err(RedDBError::Query(format!(
+                            "SKETCH '{}' has incompatible dimensions",
+                            src
+                        )));
+                    }
+                }
+                sketches.insert(dest.clone(), merged);
+                Ok(RuntimeQueryResult::ok_message(
+                    raw_query.to_string(),
+                    &format!(
+                        "SKETCH '{}' created from merge of {}",
+                        dest,
+                        sources.join(", ")
+                    ),
+                    "create",
+                ))
+            }
             ProbabilisticCommand::SketchInfo { name } => {
-                let mut result = UnifiedResult::with_columns(vec!["name".into()]);
+                let sketches = self.inner.probabilistic.sketches.read().unwrap();
+                let sketch = sketches
+                    .get(name)
+                    .ok_or_else(|| RedDBError::NotFound(format!("SKETCH '{}' not found", name)))?;
+                let mut result = UnifiedResult::with_columns(vec![
+                    "name".into(),
+                    "width".into(),
+                    "depth".into(),
+                    "total".into(),
+                    "memory_bytes".into(),
+                ]);
                 let mut record = UnifiedRecord::new();
                 record.set("name", Value::Text(name.clone()));
+                record.set("width", Value::UnsignedInteger(sketch.width() as u64));
+                record.set("depth", Value::UnsignedInteger(sketch.depth() as u64));
+                record.set("total", Value::UnsignedInteger(sketch.total()));
+                record.set(
+                    "memory_bytes",
+                    Value::UnsignedInteger(sketch.memory_bytes() as u64),
+                );
                 result.push(record);
                 Ok(RuntimeQueryResult {
                     query: raw_query.to_string(),
@@ -208,29 +296,79 @@ impl RedDBRuntime {
                     statement_type: "select",
                 })
             }
-            ProbabilisticCommand::DropSketch { name, .. } => Ok(RuntimeQueryResult::ok_message(
-                raw_query.to_string(),
-                &format!("SKETCH '{}' dropped", name),
-                "drop",
-            )),
+            ProbabilisticCommand::DropSketch { name, if_exists } => {
+                let mut sketches = self.inner.probabilistic.sketches.write().unwrap();
+                if sketches.remove(name).is_none() {
+                    if *if_exists {
+                        return Ok(RuntimeQueryResult::ok_message(
+                            raw_query.to_string(),
+                            &format!("SKETCH '{}' does not exist", name),
+                            "drop",
+                        ));
+                    }
+                    return Err(RedDBError::NotFound(format!("SKETCH '{}' not found", name)));
+                }
+                Ok(RuntimeQueryResult::ok_message(
+                    raw_query.to_string(),
+                    &format!("SKETCH '{}' dropped", name),
+                    "drop",
+                ))
+            }
 
-            // ── Cuckoo Filter (stubs for Phase 8) ────────────────────
-            ProbabilisticCommand::CreateFilter { name, .. } => Ok(RuntimeQueryResult::ok_message(
-                raw_query.to_string(),
-                &format!("FILTER '{}' created", name),
-                "create",
-            )),
-            ProbabilisticCommand::FilterAdd { name, .. } => Ok(RuntimeQueryResult::ok_message(
-                raw_query.to_string(),
-                &format!("element added to FILTER '{}'", name),
-                "insert",
-            )),
+            // ── Cuckoo Filter ─────────────────────────────────────────
+            ProbabilisticCommand::CreateFilter {
+                name,
+                capacity,
+                if_not_exists,
+            } => {
+                let mut filters = self.inner.probabilistic.filters.write().unwrap();
+                if filters.contains_key(name) {
+                    if *if_not_exists {
+                        return Ok(RuntimeQueryResult::ok_message(
+                            raw_query.to_string(),
+                            &format!("FILTER '{}' already exists", name),
+                            "create",
+                        ));
+                    }
+                    return Err(RedDBError::Query(format!(
+                        "FILTER '{}' already exists",
+                        name
+                    )));
+                }
+                filters.insert(
+                    name.clone(),
+                    crate::storage::primitives::cuckoo_filter::CuckooFilter::new(*capacity),
+                );
+                Ok(RuntimeQueryResult::ok_message(
+                    raw_query.to_string(),
+                    &format!("FILTER '{}' created (capacity={})", name, capacity),
+                    "create",
+                ))
+            }
+            ProbabilisticCommand::FilterAdd { name, element } => {
+                let mut filters = self.inner.probabilistic.filters.write().unwrap();
+                let filter = filters
+                    .get_mut(name)
+                    .ok_or_else(|| RedDBError::NotFound(format!("FILTER '{}' not found", name)))?;
+                if !filter.insert(element.as_bytes()) {
+                    return Err(RedDBError::Query(format!("FILTER '{}' is full", name)));
+                }
+                Ok(RuntimeQueryResult::ok_message(
+                    raw_query.to_string(),
+                    &format!("element added to FILTER '{}'", name),
+                    "insert",
+                ))
+            }
             ProbabilisticCommand::FilterCheck { name, element } => {
+                let filters = self.inner.probabilistic.filters.read().unwrap();
+                let filter = filters
+                    .get(name)
+                    .ok_or_else(|| RedDBError::NotFound(format!("FILTER '{}' not found", name)))?;
+                let exists = filter.contains(element.as_bytes());
                 let mut result = UnifiedResult::with_columns(vec!["exists".into()]);
                 let mut record = UnifiedRecord::new();
-                record.set("exists", Value::Boolean(false));
+                record.set("exists", Value::Boolean(exists));
                 result.push(record);
-                let _ = (name, element);
                 Ok(RuntimeQueryResult {
                     query: raw_query.to_string(),
                     mode: QueryMode::Sql,
@@ -241,17 +379,31 @@ impl RedDBRuntime {
                     statement_type: "select",
                 })
             }
-            ProbabilisticCommand::FilterDelete { name, .. } => Ok(RuntimeQueryResult::ok_message(
-                raw_query.to_string(),
-                &format!("element deleted from FILTER '{}'", name),
-                "delete",
-            )),
+            ProbabilisticCommand::FilterDelete { name, element } => {
+                let mut filters = self.inner.probabilistic.filters.write().unwrap();
+                let filter = filters
+                    .get_mut(name)
+                    .ok_or_else(|| RedDBError::NotFound(format!("FILTER '{}' not found", name)))?;
+                let removed = filter.delete(element.as_bytes());
+                Ok(RuntimeQueryResult::ok_message(
+                    raw_query.to_string(),
+                    &format!(
+                        "element {} from FILTER '{}'",
+                        if removed { "deleted" } else { "not found in" },
+                        name
+                    ),
+                    "delete",
+                ))
+            }
             ProbabilisticCommand::FilterCount { name } => {
+                let filters = self.inner.probabilistic.filters.read().unwrap();
+                let filter = filters
+                    .get(name)
+                    .ok_or_else(|| RedDBError::NotFound(format!("FILTER '{}' not found", name)))?;
                 let mut result = UnifiedResult::with_columns(vec!["count".into()]);
                 let mut record = UnifiedRecord::new();
-                record.set("count", Value::UnsignedInteger(0));
+                record.set("count", Value::UnsignedInteger(filter.count() as u64));
                 result.push(record);
-                let _ = name;
                 Ok(RuntimeQueryResult {
                     query: raw_query.to_string(),
                     mode: QueryMode::Sql,
@@ -263,9 +415,24 @@ impl RedDBRuntime {
                 })
             }
             ProbabilisticCommand::FilterInfo { name } => {
-                let mut result = UnifiedResult::with_columns(vec!["name".into()]);
+                let filters = self.inner.probabilistic.filters.read().unwrap();
+                let filter = filters
+                    .get(name)
+                    .ok_or_else(|| RedDBError::NotFound(format!("FILTER '{}' not found", name)))?;
+                let mut result = UnifiedResult::with_columns(vec![
+                    "name".into(),
+                    "count".into(),
+                    "load_factor".into(),
+                    "memory_bytes".into(),
+                ]);
                 let mut record = UnifiedRecord::new();
                 record.set("name", Value::Text(name.clone()));
+                record.set("count", Value::UnsignedInteger(filter.count() as u64));
+                record.set("load_factor", Value::Float(filter.load_factor()));
+                record.set(
+                    "memory_bytes",
+                    Value::UnsignedInteger(filter.memory_bytes() as u64),
+                );
                 result.push(record);
                 Ok(RuntimeQueryResult {
                     query: raw_query.to_string(),
@@ -277,11 +444,24 @@ impl RedDBRuntime {
                     statement_type: "select",
                 })
             }
-            ProbabilisticCommand::DropFilter { name, .. } => Ok(RuntimeQueryResult::ok_message(
-                raw_query.to_string(),
-                &format!("FILTER '{}' dropped", name),
-                "drop",
-            )),
+            ProbabilisticCommand::DropFilter { name, if_exists } => {
+                let mut filters = self.inner.probabilistic.filters.write().unwrap();
+                if filters.remove(name).is_none() {
+                    if *if_exists {
+                        return Ok(RuntimeQueryResult::ok_message(
+                            raw_query.to_string(),
+                            &format!("FILTER '{}' does not exist", name),
+                            "drop",
+                        ));
+                    }
+                    return Err(RedDBError::NotFound(format!("FILTER '{}' not found", name)));
+                }
+                Ok(RuntimeQueryResult::ok_message(
+                    raw_query.to_string(),
+                    &format!("FILTER '{}' dropped", name),
+                    "drop",
+                ))
+            }
         }
     }
 }

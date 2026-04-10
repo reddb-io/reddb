@@ -32,6 +32,7 @@ impl RedDBRuntime {
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_millis(),
+                probabilistic: super::probabilistic_store::ProbabilisticStore::new(),
             }),
         })
     }
