@@ -371,8 +371,29 @@ pub(super) fn execute_runtime_canonical_join_base(
     let right_records =
         execute_runtime_canonical_expr_node(db, &node.children[1], query.right.as_ref())?;
 
+    // Auto-upgrade to hash join for large datasets
+    let join_strategy = if matches!(join_strategy, CanonicalJoinStrategy::NestedLoop)
+        && left_records.len() * right_records.len() > 10_000
+    {
+        CanonicalJoinStrategy::HashJoin
+    } else {
+        join_strategy
+    };
+
     match join_strategy {
         CanonicalJoinStrategy::IndexedNestedLoop => execute_runtime_indexed_join(
+            left_query,
+            &left_records,
+            left_table_name,
+            left_table_alias,
+            &left_join_field,
+            &right_records,
+            right_table_name,
+            right_table_alias,
+            &right_join_field,
+            join_type,
+        ),
+        CanonicalJoinStrategy::HashJoin => execute_runtime_hash_join(
             left_query,
             &left_records,
             left_table_name,

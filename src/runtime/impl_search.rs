@@ -383,7 +383,7 @@ impl RedDBRuntime {
         let result_limit = limit.unwrap_or(25).max(1);
 
         let store = self.inner.db.store();
-        let fetch_limit = result_limit.saturating_mul(4).max(32);
+        let fetch_limit = result_limit.saturating_mul(2).max(32);
 
         // Use the dedicated ContextIndex instead of _mm_index metadata
         let hits = store
@@ -490,7 +490,7 @@ impl RedDBRuntime {
                     .collect()
             });
         let result_limit = limit.unwrap_or(25).max(1);
-        let fetch_limit = result_limit.saturating_mul(4).max(32);
+        let fetch_limit = result_limit.saturating_mul(2).max(32);
 
         let store = self.inner.db.store();
 
@@ -632,7 +632,7 @@ impl RedDBRuntime {
                 field,
                 &query,
                 true,
-                result_limit.saturating_mul(4).max(32),
+                result_limit.saturating_mul(2).max(32),
                 allowed_collections.as_ref(),
             );
             if !hits.is_empty() {
@@ -658,7 +658,7 @@ impl RedDBRuntime {
         {
             let hits = store.context_index().search(
                 &query,
-                result_limit.saturating_mul(4).max(32),
+                result_limit.saturating_mul(2).max(32),
                 allowed_collections.as_ref(),
             );
             if !hits.is_empty() && !tiers_used.contains(&"multimodal".to_string()) {
@@ -725,11 +725,11 @@ impl RedDBRuntime {
                                 ),
                             );
                         }
-                        if scored.len() >= result_limit.saturating_mul(4) {
+                        if scored.len() >= result_limit.saturating_mul(2) {
                             break;
                         }
                     }
-                    if scored.len() >= result_limit.saturating_mul(4) {
+                    if scored.len() >= result_limit.saturating_mul(2) {
                         break;
                     }
                 }

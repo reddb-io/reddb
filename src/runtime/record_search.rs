@@ -978,6 +978,7 @@ pub(super) fn canonical_join_field(
 pub(super) enum CanonicalJoinStrategy {
     IndexedNestedLoop,
     GraphLookupJoin,
+    HashJoin,
     NestedLoop,
 }
 
@@ -987,6 +988,7 @@ pub(super) fn canonical_join_strategy(
     match node.details.get("join_strategy").map(String::as_str) {
         Some("indexed_nested_loop") => Ok(CanonicalJoinStrategy::IndexedNestedLoop),
         Some("graph_lookup_join") => Ok(CanonicalJoinStrategy::GraphLookupJoin),
+        Some("hash_join") => Ok(CanonicalJoinStrategy::HashJoin),
         Some("nested_loop") => Ok(CanonicalJoinStrategy::NestedLoop),
         Some(other) => Err(RedDBError::Query(format!(
             "unsupported canonical join strategy {other}"

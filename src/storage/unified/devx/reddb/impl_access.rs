@@ -1281,6 +1281,11 @@ impl RedDB {
     // Batch Operations - Performance
     // ========================================================================
 
+    /// Batch get multiple entities by ID. More efficient than N individual get() calls.
+    pub fn batch_get(&self, ids: &[EntityId]) -> Vec<Option<UnifiedEntity>> {
+        ids.iter().map(|id| self.get(*id)).collect()
+    }
+
     /// Start a batch operation for bulk inserts
     pub fn batch(&self) -> BatchBuilder {
         BatchBuilder::new(self.store.clone())

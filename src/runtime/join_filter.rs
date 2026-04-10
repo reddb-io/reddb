@@ -103,6 +103,88 @@ pub(super) fn execute_runtime_nested_loop_join(
     Ok(records)
 }
 
+/// Hash join — O(n+m) instead of O(n*m) for large record sets.
+/// Builds a hash table on the right side, probes with the left side.
+pub(super) fn execute_runtime_hash_join(
+    left_query: &TableQuery,
+    left_records: &[UnifiedRecord],
+    left_table_name: Option<&str>,
+    left_table_alias: Option<&str>,
+    left_join_field: &FieldRef,
+    right_records: &[UnifiedRecord],
+    right_table_name: Option<&str>,
+    right_table_alias: Option<&str>,
+    right_join_field: &FieldRef,
+    join_type: JoinType,
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    // Build hash table on right side
+    let mut hash_table: HashMap<String, Vec<usize>> = HashMap::new();
+    for (idx, right_record) in right_records.iter().enumerate() {
+        let key = resolve_runtime_field(
+            right_record,
+            right_join_field,
+            right_table_name,
+            right_table_alias,
+        )
+        .map(|v| v.to_string())
+        .unwrap_or_default();
+        hash_table.entry(key).or_default().push(idx);
+    }
+
+    let mut matched_right = vec![false; right_records.len()];
+    let mut records = Vec::new();
+
+    // Probe with left side — O(1) lookup per left record
+    for left_record in left_records {
+        let key = resolve_runtime_field(
+            left_record,
+            left_join_field,
+            left_table_name,
+            left_table_alias,
+        )
+        .map(|v| v.to_string())
+        .unwrap_or_default();
+
+        let mut matched = false;
+        if let Some(indices) = hash_table.get(&key) {
+            for &idx in indices {
+                matched = true;
+                matched_right[idx] = true;
+                records.push(merge_join_records(
+                    Some(left_record),
+                    Some(&right_records[idx]),
+                    left_query,
+                    right_table_alias.or(right_table_name),
+                ));
+            }
+        }
+
+        if !matched && matches!(join_type, JoinType::LeftOuter) {
+            records.push(merge_join_records(
+                Some(left_record),
+                None,
+                left_query,
+                None,
+            ));
+        }
+    }
+
+    if matches!(join_type, JoinType::RightOuter) {
+        for (matched, right_record) in matched_right.into_iter().zip(right_records.iter()) {
+            if !matched {
+                records.push(merge_join_records(
+                    None,
+                    Some(right_record),
+                    left_query,
+                    right_table_alias.or(right_table_name),
+                ));
+            }
+        }
+    }
+
+    Ok(records)
+}
+
 pub(super) fn execute_runtime_graph_lookup_join(
     left_query: &TableQuery,
     left_records: &[UnifiedRecord],
