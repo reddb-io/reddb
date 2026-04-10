@@ -673,83 +673,150 @@ mod tests {
 // ============================================================================
 
 /// AI provider identifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AiProvider {
     OpenAi,
     Anthropic,
+    Groq,
+    OpenRouter,
+    Together,
+    Venice,
+    Ollama,
+    DeepSeek,
+    HuggingFace,
+    Local,
+    Custom(String),
 }
 
 impl AiProvider {
-    pub fn token(self) -> &'static str {
+    pub fn token(&self) -> &str {
         match self {
             Self::OpenAi => "openai",
             Self::Anthropic => "anthropic",
+            Self::Groq => "groq",
+            Self::OpenRouter => "openrouter",
+            Self::Together => "together",
+            Self::Venice => "venice",
+            Self::Ollama => "ollama",
+            Self::DeepSeek => "deepseek",
+            Self::HuggingFace => "huggingface",
+            Self::Local => "local",
+            Self::Custom(name) => name.as_str(),
         }
     }
 
-    pub fn default_prompt_model(self) -> &'static str {
+    pub fn default_prompt_model(&self) -> &str {
         match self {
             Self::OpenAi => DEFAULT_OPENAI_PROMPT_MODEL,
             Self::Anthropic => DEFAULT_ANTHROPIC_PROMPT_MODEL,
+            Self::Groq => "llama-3.3-70b-versatile",
+            Self::OpenRouter => "auto",
+            Self::Together => "meta-llama/Meta-Llama-3-8B-Instruct",
+            Self::Venice => "llama-3.3-70b",
+            Self::Ollama => "llama3",
+            Self::DeepSeek => "deepseek-chat",
+            Self::HuggingFace => "mistralai/Mistral-7B-Instruct-v0.3",
+            Self::Local => "sentence-transformers/all-MiniLM-L6-v2",
+            Self::Custom(_) => DEFAULT_OPENAI_PROMPT_MODEL,
         }
     }
 
-    pub fn prompt_model_env_name(self) -> &'static str {
+    pub fn prompt_model_env_name(&self) -> String {
+        format!("REDDB_{}_PROMPT_MODEL", self.token().to_ascii_uppercase())
+    }
+
+    pub fn default_embedding_model(&self) -> &str {
         match self {
-            Self::OpenAi => "REDDB_OPENAI_PROMPT_MODEL",
-            Self::Anthropic => "REDDB_ANTHROPIC_PROMPT_MODEL",
+            Self::Ollama => "nomic-embed-text",
+            Self::HuggingFace | Self::Local => "sentence-transformers/all-MiniLM-L6-v2",
+            _ => DEFAULT_OPENAI_EMBEDDING_MODEL,
         }
     }
 
-    pub fn default_embedding_model(self) -> &'static str {
-        DEFAULT_OPENAI_EMBEDDING_MODEL
-    }
-
-    pub fn default_api_base(self) -> &'static str {
+    pub fn default_api_base(&self) -> &str {
         match self {
             Self::OpenAi => DEFAULT_OPENAI_API_BASE,
             Self::Anthropic => DEFAULT_ANTHROPIC_API_BASE,
+            Self::Groq => "https://api.groq.com/openai/v1",
+            Self::OpenRouter => "https://openrouter.ai/api/v1",
+            Self::Together => "https://api.together.xyz/v1",
+            Self::Venice => "https://api.venice.ai/api/v1",
+            Self::Ollama => "http://localhost:11434/v1",
+            Self::DeepSeek => "https://api.deepseek.com/v1",
+            Self::HuggingFace => "https://api-inference.huggingface.co",
+            Self::Local => "local",
+            Self::Custom(base) => base.as_str(),
         }
     }
 
-    pub fn api_base_env_name(self) -> &'static str {
-        match self {
-            Self::OpenAi => "REDDB_OPENAI_API_BASE",
-            Self::Anthropic => "REDDB_ANTHROPIC_API_BASE",
-        }
+    pub fn api_base_env_name(&self) -> String {
+        format!("REDDB_{}_API_BASE", self.token().to_ascii_uppercase())
     }
 
-    pub fn default_key_env_name(self) -> &'static str {
-        match self {
-            Self::OpenAi => "REDDB_OPENAI_API_KEY",
-            Self::Anthropic => "REDDB_ANTHROPIC_API_KEY",
-        }
+    pub fn default_key_env_name(&self) -> String {
+        format!("REDDB_{}_API_KEY", self.token().to_ascii_uppercase())
     }
 
-    pub fn alias_key_env_name(self, alias: &str) -> String {
+    pub fn alias_key_env_name(&self, alias: &str) -> String {
         let normalized = normalize_alias_token(alias);
-        match self {
-            Self::OpenAi => format!("REDDB_OPENAI_API_KEY_{normalized}"),
-            Self::Anthropic => format!("REDDB_ANTHROPIC_API_KEY_{normalized}"),
-        }
+        format!(
+            "REDDB_{}_API_KEY_{normalized}",
+            self.token().to_ascii_uppercase()
+        )
     }
 
-    pub fn resolve_api_base(self) -> String {
+    pub fn resolve_api_base(&self) -> String {
         std::env::var(self.api_base_env_name())
             .ok()
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| self.default_api_base().to_string())
     }
+
+    /// Whether this provider uses the OpenAI-compatible API format.
+    pub fn is_openai_compatible(&self) -> bool {
+        matches!(
+            self,
+            Self::OpenAi
+                | Self::Groq
+                | Self::OpenRouter
+                | Self::Together
+                | Self::Venice
+                | Self::Ollama
+                | Self::DeepSeek
+                | Self::Custom(_)
+        )
+    }
+
+    /// Whether this provider requires an API key (Ollama/Local don't).
+    pub fn requires_api_key(&self) -> bool {
+        !matches!(self, Self::Ollama | Self::Local)
+    }
 }
 
-/// Parse a provider string ("openai", "anthropic") into AiProvider.
+/// Parse a provider string into AiProvider.
 pub fn parse_provider(name: &str) -> crate::RedDBResult<AiProvider> {
     match name.trim().to_ascii_lowercase().as_str() {
         "openai" => Ok(AiProvider::OpenAi),
         "anthropic" => Ok(AiProvider::Anthropic),
-        other => Err(crate::RedDBError::Query(format!(
-            "unsupported AI provider '{other}'; expected 'openai' or 'anthropic'"
-        ))),
+        "groq" => Ok(AiProvider::Groq),
+        "openrouter" | "open_router" => Ok(AiProvider::OpenRouter),
+        "together" => Ok(AiProvider::Together),
+        "venice" => Ok(AiProvider::Venice),
+        "ollama" => Ok(AiProvider::Ollama),
+        "deepseek" | "deep_seek" => Ok(AiProvider::DeepSeek),
+        "huggingface" | "hf" => Ok(AiProvider::HuggingFace),
+        "local" => Ok(AiProvider::Local),
+        other => {
+            // Treat as custom provider if it looks like a URL
+            if other.starts_with("http://") || other.starts_with("https://") {
+                Ok(AiProvider::Custom(other.to_string()))
+            } else {
+                Err(crate::RedDBError::Query(format!(
+                    "unsupported AI provider '{other}'; expected: openai, anthropic, groq, \
+                     openrouter, together, venice, ollama, deepseek, huggingface, local"
+                )))
+            }
+        }
     }
 }
 
@@ -760,13 +827,25 @@ pub fn parse_provider(name: &str) -> crate::RedDBResult<AiProvider> {
 ///
 /// `kv_getter` receives a key string like "openai/prod" and returns the value if found.
 pub fn resolve_api_key<F>(
-    provider: AiProvider,
+    provider: &AiProvider,
     credential_alias: Option<&str>,
     kv_getter: F,
 ) -> crate::RedDBResult<String>
 where
     F: Fn(&str) -> crate::RedDBResult<Option<String>>,
 {
+    // Providers that don't require API keys
+    if !provider.requires_api_key() {
+        // Still try to find a key (user may have one for auth'd Ollama)
+        if let Ok(value) = std::env::var(provider.default_key_env_name()) {
+            let value = value.trim().to_string();
+            if !value.is_empty() {
+                return Ok(value);
+            }
+        }
+        return Ok(String::new());
+    }
+
     if let Some(alias) = credential_alias.map(str::trim).filter(|a| !a.is_empty()) {
         // Try env var with alias
         if let Some(key) = resolve_key_from_env_alias(provider, alias) {
@@ -809,7 +888,7 @@ where
     )))
 }
 
-fn resolve_key_from_env_alias(provider: AiProvider, alias: &str) -> Option<String> {
+fn resolve_key_from_env_alias(provider: &AiProvider, alias: &str) -> Option<String> {
     let env_name = provider.alias_key_env_name(alias);
     std::env::var(env_name)
         .ok()
@@ -834,7 +913,7 @@ fn normalize_alias_token(alias: &str) -> String {
 
 /// Convenience: resolve API key using a RedDBRuntime's KV store.
 pub fn resolve_api_key_from_runtime(
-    provider: AiProvider,
+    provider: &AiProvider,
     credential_alias: Option<&str>,
     runtime: &crate::runtime::RedDBRuntime,
 ) -> crate::RedDBResult<String> {
@@ -846,6 +925,152 @@ pub fn resolve_api_key_from_runtime(
             None => Ok(None),
         }
     })
+}
+
+// ============================================================================
+// HuggingFace Inference API
+// ============================================================================
+
+/// Generate embeddings via HuggingFace Inference API.
+pub fn huggingface_embeddings(
+    api_key: &str,
+    model: &str,
+    inputs: &[String],
+    api_base: &str,
+) -> crate::RedDBResult<OpenAiEmbeddingResponse> {
+    let url = format!("{api_base}/pipeline/feature-extraction/{model}");
+    let mut embeddings = Vec::with_capacity(inputs.len());
+
+    for input in inputs {
+        let payload = crate::serde_json::json!({ "inputs": input });
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(Duration::from_secs(10))
+            .timeout_read(Duration::from_secs(90))
+            .build();
+        let response = agent
+            .post(&url)
+            .set("Authorization", &format!("Bearer {api_key}"))
+            .set("Content-Type", "application/json")
+            .send_bytes(&crate::serde_json::to_vec(&payload).unwrap_or_default())
+            .map_err(|e| crate::RedDBError::Query(format!("HuggingFace API error: {e}")))?;
+
+        let body_str = response.into_string().unwrap_or_default();
+        let body: JsonValue = crate::serde_json::from_str(&body_str).map_err(|e| {
+            crate::RedDBError::Query(format!("HuggingFace response parse error: {e}"))
+        })?;
+
+        // HF returns [[f32, ...]] for single input
+        let vector: Vec<f32> = match &body {
+            JsonValue::Array(outer) => outer
+                .iter()
+                .filter_map(|v| v.as_f64().map(|n| n as f32))
+                .collect(),
+            _ => {
+                return Err(crate::RedDBError::Query(
+                    "unexpected HuggingFace embedding response format".to_string(),
+                ))
+            }
+        };
+        embeddings.push(vector);
+    }
+
+    Ok(OpenAiEmbeddingResponse {
+        provider: "huggingface",
+        model: model.to_string(),
+        embeddings,
+        prompt_tokens: None,
+        total_tokens: None,
+    })
+}
+
+/// Generate text via HuggingFace Inference API.
+pub fn huggingface_prompt(
+    api_key: &str,
+    model: &str,
+    prompt: &str,
+    temperature: Option<f32>,
+    max_tokens: Option<usize>,
+    api_base: &str,
+) -> crate::RedDBResult<AiPromptResponse> {
+    let url = format!("{api_base}/models/{model}");
+    let mut params = Map::new();
+    if let Some(t) = temperature {
+        params.insert("temperature".into(), JsonValue::Number(t as f64));
+    }
+    params.insert(
+        "max_new_tokens".into(),
+        JsonValue::Number(max_tokens.unwrap_or(512) as f64),
+    );
+    let payload = crate::serde_json::json!({
+        "inputs": prompt,
+        "parameters": JsonValue::Object(params)
+    });
+
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(10))
+        .timeout_read(Duration::from_secs(120))
+        .build();
+    let response = agent
+        .post(&url)
+        .set("Authorization", &format!("Bearer {api_key}"))
+        .set("Content-Type", "application/json")
+        .send_bytes(&crate::serde_json::to_vec(&payload).unwrap_or_default())
+        .map_err(|e| crate::RedDBError::Query(format!("HuggingFace API error: {e}")))?;
+
+    let body_str = response.into_string().unwrap_or_default();
+    let body: JsonValue = crate::serde_json::from_str(&body_str)
+        .map_err(|e| crate::RedDBError::Query(format!("HuggingFace response parse error: {e}")))?;
+
+    let output_text = match &body {
+        JsonValue::Array(arr) => arr
+            .first()
+            .and_then(|v| v.get("generated_text"))
+            .and_then(JsonValue::as_str)
+            .unwrap_or("")
+            .to_string(),
+        _ => body
+            .get("generated_text")
+            .and_then(JsonValue::as_str)
+            .unwrap_or("")
+            .to_string(),
+    };
+
+    Ok(AiPromptResponse {
+        provider: "huggingface",
+        model: model.to_string(),
+        output_text,
+        prompt_tokens: None,
+        completion_tokens: None,
+        total_tokens: None,
+        stop_reason: None,
+    })
+}
+
+// ============================================================================
+// Local model stubs (requires 'local-models' feature flag)
+// ============================================================================
+
+/// Local embedding via candle — requires `local-models` feature.
+pub fn local_embeddings(
+    _model_id: &str,
+    _texts: &[String],
+) -> crate::RedDBResult<OpenAiEmbeddingResponse> {
+    Err(crate::RedDBError::FeatureNotEnabled(
+        "local model inference requires the 'local-models' feature flag. \
+         Build with: cargo build --features local-models. \
+         Alternatively, use 'ollama' provider with a local Ollama server."
+            .to_string(),
+    ))
+}
+
+/// Local prompt via candle — requires `local-models` feature.
+pub fn local_prompt(_model_id: &str, _prompt: &str) -> crate::RedDBResult<AiPromptResponse> {
+    Err(crate::RedDBError::FeatureNotEnabled(
+        "local model inference requires the 'local-models' feature flag. \
+         Build with: cargo build --features local-models. \
+         Alternatively, use 'ollama' provider with a local Ollama server."
+            .to_string(),
+    ))
 }
 
 // ============================================================================

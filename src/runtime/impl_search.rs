@@ -1098,7 +1098,7 @@ impl RedDBRuntime {
 
         // Step 3: Call LLM
         let provider = parse_provider(ask.provider.as_deref().unwrap_or("openai"))?;
-        let api_key = resolve_api_key_from_runtime(provider, None, self)?;
+        let api_key = resolve_api_key_from_runtime(&provider, None, self)?;
         let model = ask.model.clone().unwrap_or_else(|| {
             std::env::var(provider.prompt_model_env_name())
                 .ok()
@@ -1107,21 +1107,6 @@ impl RedDBRuntime {
         let api_base = provider.resolve_api_base();
 
         let response = match provider {
-            AiProvider::OpenAi => {
-                let resp = openai_prompt(OpenAiPromptRequest {
-                    api_key,
-                    model: model.clone(),
-                    prompt: full_prompt,
-                    temperature: Some(0.3),
-                    max_output_tokens: Some(1024),
-                    api_base,
-                })?;
-                (
-                    resp.output_text,
-                    resp.prompt_tokens.unwrap_or(0),
-                    resp.completion_tokens.unwrap_or(0),
-                )
-            }
             AiProvider::Anthropic => {
                 let resp = anthropic_prompt(AnthropicPromptRequest {
                     api_key,
@@ -1131,6 +1116,21 @@ impl RedDBRuntime {
                     max_output_tokens: Some(1024),
                     api_base,
                     anthropic_version: crate::ai::DEFAULT_ANTHROPIC_VERSION.to_string(),
+                })?;
+                (
+                    resp.output_text,
+                    resp.prompt_tokens.unwrap_or(0),
+                    resp.completion_tokens.unwrap_or(0),
+                )
+            }
+            _ => {
+                let resp = openai_prompt(OpenAiPromptRequest {
+                    api_key,
+                    model: model.clone(),
+                    prompt: full_prompt,
+                    temperature: Some(0.3),
+                    max_output_tokens: Some(1024),
+                    api_base,
                 })?;
                 (
                     resp.output_text,

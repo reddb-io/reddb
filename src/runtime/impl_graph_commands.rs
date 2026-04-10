@@ -290,7 +290,7 @@ impl RedDBRuntime {
                 let search_vector = if let Some(query_text) = text {
                     let provider =
                         crate::ai::parse_provider(provider.as_deref().unwrap_or("openai"))?;
-                    let api_key = crate::ai::resolve_api_key_from_runtime(provider, None, self)?;
+                    let api_key = crate::ai::resolve_api_key_from_runtime(&provider, None, self)?;
                     let model = std::env::var("REDDB_OPENAI_EMBEDDING_MODEL")
                         .ok()
                         .unwrap_or_else(|| crate::ai::DEFAULT_OPENAI_EMBEDDING_MODEL.to_string());

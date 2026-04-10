@@ -107,7 +107,7 @@ pub trait RuntimeQueryPort {
         &self,
         input: crate::application::SearchContextInput,
     ) -> RedDBResult<crate::runtime::ContextSearchResult>;
-    fn resolve_semantic_api_key(&self, provider: crate::ai::AiProvider) -> RedDBResult<String>;
+    fn resolve_semantic_api_key(&self, provider: &crate::ai::AiProvider) -> RedDBResult<String>;
 }
 
 pub trait RuntimeEntityPort {

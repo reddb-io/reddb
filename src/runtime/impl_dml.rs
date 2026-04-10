@@ -188,7 +188,7 @@ impl RedDBRuntime {
         if let Some(ref embed_config) = query.auto_embed {
             let store = self.inner.db.store();
             let provider = crate::ai::parse_provider(&embed_config.provider)?;
-            let api_key = crate::ai::resolve_api_key_from_runtime(provider, None, self)?;
+            let api_key = crate::ai::resolve_api_key_from_runtime(&provider, None, self)?;
             let model = embed_config.model.clone().unwrap_or_else(|| {
                 std::env::var("REDDB_OPENAI_EMBEDDING_MODEL")
                     .ok()

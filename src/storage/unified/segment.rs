@@ -22,6 +22,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::entity::{CrossRef, EntityData, EntityId, EntityKind, RefType, UnifiedEntity};
 use super::metadata::{Metadata, MetadataStorage};
+use crate::storage::primitives::bloom::BloomFilter;
 
 /// Unique identifier for a segment
 pub type SegmentId = u64;
@@ -227,6 +228,9 @@ pub struct GrowingSegment {
     /// Reverse cross-reference index: target → Vec<(source, ref_type)>
     cross_ref_reverse: HashMap<EntityId, Vec<(EntityId, RefType)>>,
 
+    /// Bloom filter for fast negative key lookups
+    bloom: BloomFilter,
+
     /// Sequence counter for ordering
     sequence: AtomicU64,
     /// Approximate memory usage
@@ -254,6 +258,7 @@ impl GrowingSegment {
             kind_index: HashMap::new(),
             cross_ref_forward: HashMap::new(),
             cross_ref_reverse: HashMap::new(),
+            bloom: BloomFilter::with_capacity(100_000, 0.01),
             sequence: AtomicU64::new(0),
             memory_bytes: AtomicU64::new(0),
         }
@@ -303,10 +308,16 @@ impl GrowingSegment {
             .or_default()
             .insert(entity.id);
 
+        // Bloom filter: insert entity ID bytes for fast negative lookups
+        let id_bytes = entity.id.raw().to_le_bytes();
+        self.bloom.insert(&id_bytes);
+
         // Primary key index (if applicable)
         if let EntityData::Row(row) = &entity.data {
             if let Some(first_col) = row.columns.first() {
                 let pk_str = format!("{:?}", first_col);
+                // Also add PK to bloom filter
+                self.bloom.insert(pk_str.as_bytes());
                 self.pk_index
                     .insert((entity.kind.collection().to_string(), pk_str), entity.id);
             }
@@ -324,6 +335,23 @@ impl GrowingSegment {
                 .or_default()
                 .push((cross_ref.source, cross_ref.ref_type));
         }
+    }
+
+    /// Check if an entity ID might exist in this segment via bloom filter.
+    /// Returns `false` means *definitely not here*. `true` means *maybe here*.
+    pub fn bloom_might_contain_id(&self, id: EntityId) -> bool {
+        let id_bytes = id.raw().to_le_bytes();
+        self.bloom.contains(&id_bytes)
+    }
+
+    /// Check if a primary key value might exist in this segment via bloom filter.
+    pub fn bloom_might_contain_key(&self, key: &[u8]) -> bool {
+        self.bloom.contains(key)
+    }
+
+    /// Get bloom filter statistics
+    pub fn bloom_stats(&self) -> (f64, u32) {
+        (self.bloom.fill_ratio(), self.bloom.count_set_bits())
     }
 
     /// Remove entity from indices

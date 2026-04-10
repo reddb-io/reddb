@@ -208,6 +208,40 @@ impl BloomFilter {
     pub fn fill_ratio(&self) -> f64 {
         self.count_set_bits() as f64 / self.size as f64
     }
+
+    /// Merge two bloom filters via bitwise OR.
+    /// Returns `None` if the filters have different size or hash count.
+    pub fn merge(&self, other: &BloomFilter) -> Option<BloomFilter> {
+        if self.size != other.size || self.num_hashes != other.num_hashes {
+            return None;
+        }
+        let mut merged_bits = self.bits.clone();
+        for (i, &byte) in other.bits.iter().enumerate() {
+            merged_bits[i] |= byte;
+        }
+        Some(BloomFilter {
+            bits: merged_bits,
+            num_hashes: self.num_hashes,
+            size: self.size,
+        })
+    }
+
+    /// Merge another bloom filter into this one in-place.
+    /// Returns `false` if the filters are incompatible (different size/hashes).
+    pub fn union_inplace(&mut self, other: &BloomFilter) -> bool {
+        if self.size != other.size || self.num_hashes != other.num_hashes {
+            return false;
+        }
+        for (i, &byte) in other.bits.iter().enumerate() {
+            self.bits[i] |= byte;
+        }
+        true
+    }
+
+    /// Get the number of hash functions
+    pub fn num_hashes(&self) -> u8 {
+        self.num_hashes
+    }
 }
 
 /// Builder for creating bloom filters
@@ -373,6 +407,47 @@ mod tests {
         assert!(h1 < 1000);
         assert!(h2 < 1000);
         assert!(h3 < 1000);
+    }
+
+    #[test]
+    fn test_bloom_merge() {
+        let mut bloom1 = BloomFilter::new(1000, 3);
+        bloom1.insert(b"alpha");
+        bloom1.insert(b"beta");
+
+        let mut bloom2 = BloomFilter::new(1000, 3);
+        bloom2.insert(b"gamma");
+        bloom2.insert(b"delta");
+
+        let merged = bloom1.merge(&bloom2).unwrap();
+        assert!(merged.contains(b"alpha"));
+        assert!(merged.contains(b"beta"));
+        assert!(merged.contains(b"gamma"));
+        assert!(merged.contains(b"delta"));
+        assert!(!merged.contains(b"missing"));
+    }
+
+    #[test]
+    fn test_bloom_merge_incompatible() {
+        let bloom1 = BloomFilter::new(1000, 3);
+        let bloom2 = BloomFilter::new(2000, 3);
+        assert!(bloom1.merge(&bloom2).is_none());
+
+        let bloom3 = BloomFilter::new(1000, 4);
+        assert!(bloom1.merge(&bloom3).is_none());
+    }
+
+    #[test]
+    fn test_bloom_union_inplace() {
+        let mut bloom1 = BloomFilter::new(1000, 3);
+        bloom1.insert(b"one");
+
+        let mut bloom2 = BloomFilter::new(1000, 3);
+        bloom2.insert(b"two");
+
+        assert!(bloom1.union_inplace(&bloom2));
+        assert!(bloom1.contains(b"one"));
+        assert!(bloom1.contains(b"two"));
     }
 
     #[test]

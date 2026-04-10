@@ -46,7 +46,7 @@ impl RedDBServer {
             Err(err) => return json_error(400, err.to_string()),
         };
         let credential = json_string_field(&payload, "credential");
-        let api_key = match self.resolve_provider_api_key(provider, credential.as_deref()) {
+        let api_key = match self.resolve_provider_api_key(&provider, credential.as_deref()) {
             Ok(key) => key,
             Err(err) => return json_error(400, err),
         };
@@ -99,23 +99,6 @@ impl RedDBServer {
         let full_prompt = format!("{system_prompt}\n\nQuestion: {question}");
 
         let (answer, prompt_tokens, completion_tokens) = match provider {
-            AiProvider::OpenAi => {
-                match crate::ai::openai_prompt(crate::ai::OpenAiPromptRequest {
-                    api_key,
-                    model: model.clone(),
-                    prompt: full_prompt,
-                    temperature: Some(0.3),
-                    max_output_tokens: Some(2048),
-                    api_base,
-                }) {
-                    Ok(resp) => (
-                        resp.output_text,
-                        resp.prompt_tokens.unwrap_or(0),
-                        resp.completion_tokens.unwrap_or(0),
-                    ),
-                    Err(err) => return json_error(502, err.to_string()),
-                }
-            }
             AiProvider::Anthropic => {
                 match crate::ai::anthropic_prompt(crate::ai::AnthropicPromptRequest {
                     api_key,
@@ -125,6 +108,23 @@ impl RedDBServer {
                     max_output_tokens: Some(2048),
                     api_base,
                     anthropic_version: crate::ai::DEFAULT_ANTHROPIC_VERSION.to_string(),
+                }) {
+                    Ok(resp) => (
+                        resp.output_text,
+                        resp.prompt_tokens.unwrap_or(0),
+                        resp.completion_tokens.unwrap_or(0),
+                    ),
+                    Err(err) => return json_error(502, err.to_string()),
+                }
+            }
+            _ => {
+                match crate::ai::openai_prompt(crate::ai::OpenAiPromptRequest {
+                    api_key,
+                    model: model.clone(),
+                    prompt: full_prompt,
+                    temperature: Some(0.3),
+                    max_output_tokens: Some(2048),
+                    api_base,
                 }) {
                     Ok(resp) => (
                         resp.output_text,
@@ -208,7 +208,7 @@ impl RedDBServer {
         };
 
         let credential = json_string_field(&payload, "credential");
-        let api_key = match self.resolve_provider_api_key(provider, credential.as_deref()) {
+        let api_key = match self.resolve_provider_api_key(&provider, credential.as_deref()) {
             Ok(api_key) => api_key,
             Err(err) => return json_error(400, err),
         };
@@ -374,7 +374,7 @@ impl RedDBServer {
         };
 
         let credential = json_string_field(&payload, "credential");
-        let api_key = match self.resolve_provider_api_key(provider, credential.as_deref()) {
+        let api_key = match self.resolve_provider_api_key(&provider, credential.as_deref()) {
             Ok(key) => key,
             Err(err) => return json_error(400, err),
         };
@@ -394,14 +394,6 @@ impl RedDBServer {
 
         for (index, prompt) in prompts.iter().enumerate() {
             let response = match provider {
-                AiProvider::OpenAi => crate::ai::openai_prompt(crate::ai::OpenAiPromptRequest {
-                    api_key: api_key.clone(),
-                    model: model.clone(),
-                    prompt: prompt.clone(),
-                    temperature,
-                    max_output_tokens,
-                    api_base: api_base.clone(),
-                }),
                 AiProvider::Anthropic => {
                     crate::ai::anthropic_prompt(crate::ai::AnthropicPromptRequest {
                         api_key: api_key.clone(),
@@ -413,6 +405,14 @@ impl RedDBServer {
                         anthropic_version: anthropic_version.clone(),
                     })
                 }
+                _ => crate::ai::openai_prompt(crate::ai::OpenAiPromptRequest {
+                    api_key: api_key.clone(),
+                    model: model.clone(),
+                    prompt: prompt.clone(),
+                    temperature,
+                    max_output_tokens,
+                    api_base: api_base.clone(),
+                }),
             };
             let response = match response {
                 Ok(value) => value,
@@ -853,7 +853,7 @@ impl RedDBServer {
 
     fn resolve_provider_api_key(
         &self,
-        provider: AiProvider,
+        provider: &AiProvider,
         credential_alias: Option<&str>,
     ) -> Result<String, String> {
         crate::ai::resolve_api_key(provider, credential_alias, |kv_key| {

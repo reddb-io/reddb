@@ -141,7 +141,7 @@ impl<'a, P: RuntimeQueryPort + ?Sized> QueryUseCases<'a, P> {
             if input.vector.is_empty() {
                 let provider =
                     crate::ai::parse_provider(input.provider.as_deref().unwrap_or("openai"))?;
-                let api_key = self.runtime.resolve_semantic_api_key(provider)?;
+                let api_key = self.runtime.resolve_semantic_api_key(&provider)?;
                 let model = std::env::var("REDDB_OPENAI_EMBEDDING_MODEL")
                     .ok()
                     .unwrap_or_else(|| crate::ai::DEFAULT_OPENAI_EMBEDDING_MODEL.to_string());
