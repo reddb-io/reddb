@@ -42,7 +42,23 @@ pub(super) fn execute_runtime_canonical_table_node(
 ) -> RedDBResult<Vec<UnifiedRecord>> {
     match node.operator.as_str() {
         "table_scan" | "index_seek" | "entity_scan" | "document_path_index_seek" => {
-            scan_runtime_table_source_records(db, context.query.table.as_str())
+            // Try bloom filter optimization: extract key from equality predicates
+            let bloom_key = context
+                .query
+                .filter
+                .as_ref()
+                .and_then(extract_bloom_key_from_filter);
+
+            if let Some(ref key_bytes) = bloom_key {
+                let (records, _pruned) = scan_runtime_table_with_bloom_hint(
+                    db,
+                    context.query.table.as_str(),
+                    Some(key_bytes),
+                )?;
+                Ok(records)
+            } else {
+                scan_runtime_table_source_records(db, context.query.table.as_str())
+            }
         }
         "filter" | "entity_filter" => {
             let mut records = execute_runtime_canonical_table_child(db, node, context)?;
@@ -1138,4 +1154,25 @@ pub(super) fn execute_runtime_canonical_hybrid_fusion(
         .into_iter()
         .map(|(_, record)| record)
         .collect())
+}
+
+/// Extract a bloom filter key hint from a simple equality filter.
+///
+/// For `WHERE col = 'value'`, returns the value bytes so the bloom filter
+/// can skip segments that definitely don't contain it.
+fn extract_bloom_key_from_filter(filter: &crate::storage::query::ast::Filter) -> Option<Vec<u8>> {
+    use crate::storage::query::ast::{CompareOp, Filter};
+    match filter {
+        Filter::Compare { op, value, .. } if *op == CompareOp::Eq => {
+            let key = match value {
+                Value::Text(s) => s.as_bytes().to_vec(),
+                Value::Integer(n) => n.to_le_bytes().to_vec(),
+                Value::UnsignedInteger(n) => n.to_le_bytes().to_vec(),
+                _ => return None,
+            };
+            Some(key)
+        }
+        Filter::And(left, _right) => extract_bloom_key_from_filter(left),
+        _ => None,
+    }
 }

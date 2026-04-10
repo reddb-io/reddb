@@ -304,7 +304,7 @@ impl<'a> Parser<'a> {
                 self.expect(Token::Collection)?;
                 let collection = self.expect_ident()?;
 
-                let _ = self.consume_search_ident("COLUMN")?;
+                let _ = self.consume(&Token::Column)? || self.consume_search_ident("COLUMN")?;
                 let column = self.expect_ident()?;
 
                 let limit = if self.consume(&Token::Limit)? {
@@ -332,7 +332,7 @@ impl<'a> Parser<'a> {
                 self.expect(Token::Collection)?;
                 let collection = self.expect_ident()?;
 
-                let _ = self.consume_search_ident("COLUMN")?;
+                let _ = self.consume(&Token::Column)? || self.consume_search_ident("COLUMN")?;
                 let column = self.expect_ident()?;
 
                 let limit = if self.consume(&Token::Limit)? {
@@ -362,7 +362,7 @@ impl<'a> Parser<'a> {
                 self.expect(Token::Collection)?;
                 let collection = self.expect_ident()?;
 
-                let _ = self.consume_search_ident("COLUMN")?;
+                let _ = self.consume(&Token::Column)? || self.consume_search_ident("COLUMN")?;
                 let column = self.expect_ident()?;
 
                 Ok(QueryExpr::SearchCommand(SearchCommand::SpatialNearest {

@@ -418,8 +418,54 @@ impl<'a> Parser<'a> {
                     Ok(Value::Json(bytes))
                 }
             }
+            Token::LBrace => {
+                // Parse JSON object literal {key: value, ...}
+                self.advance()?; // consume '{'
+                let mut map = crate::json::Map::new();
+                if !self.check(&Token::RBrace) {
+                    loop {
+                        // Key: string or identifier
+                        let key = match self.peek().clone() {
+                            Token::String(s) => {
+                                self.advance()?;
+                                s
+                            }
+                            Token::Ident(s) => {
+                                self.advance()?;
+                                s
+                            }
+                            _ => self.expect_ident_or_keyword()?,
+                        };
+                        // Separator: ':' or '='
+                        if !self.consume(&Token::Colon)? {
+                            self.expect(Token::Eq)?;
+                        }
+                        // Value: recursive
+                        let val = self.parse_literal_value()?;
+                        let json_val = match val {
+                            Value::Null => crate::json::Value::Null,
+                            Value::Boolean(b) => crate::json::Value::Bool(b),
+                            Value::Integer(i) => crate::json::Value::Number(i as f64),
+                            Value::Float(f) => crate::json::Value::Number(f),
+                            Value::Text(s) => crate::json::Value::String(s),
+                            Value::Json(ref bytes) => {
+                                crate::json::from_slice(bytes).unwrap_or(crate::json::Value::Null)
+                            }
+                            _ => crate::json::Value::Null,
+                        };
+                        map.insert(key, json_val);
+                        if !self.consume(&Token::Comma)? {
+                            break;
+                        }
+                    }
+                }
+                self.expect(Token::RBrace)?;
+                let json_val = crate::json::Value::Object(map);
+                let bytes = crate::json::to_vec(&json_val).unwrap_or_default();
+                Ok(Value::Json(bytes))
+            }
             ref other => Err(ParseError::expected(
-                vec!["string", "number", "true", "false", "null", "["],
+                vec!["string", "number", "true", "false", "null", "[", "{"],
                 other,
                 self.position(),
             )),

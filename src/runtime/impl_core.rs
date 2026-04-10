@@ -33,6 +33,7 @@ impl RedDBRuntime {
                     .unwrap_or_default()
                     .as_millis(),
                 probabilistic: super::probabilistic_store::ProbabilisticStore::new(),
+                index_store: super::index_store::IndexStore::new(),
                 cdc: crate::replication::cdc::CdcBuffer::new(100_000),
                 backup_scheduler: crate::replication::scheduler::BackupScheduler::new(3600),
             }),
@@ -466,11 +467,9 @@ impl RedDBRuntime {
             QueryExpr::Ask(ref ask) => self.execute_ask(query, ask),
             QueryExpr::CreateIndex(ref create_idx) => self.execute_create_index(query, create_idx),
             QueryExpr::DropIndex(ref drop_idx) => self.execute_drop_index(query, drop_idx),
-            QueryExpr::ProbabilisticCommand(_) => Ok(RuntimeQueryResult::ok_message(
-                query.to_string(),
-                "probabilistic commands not yet implemented",
-                "select",
-            )),
+            QueryExpr::ProbabilisticCommand(ref cmd) => {
+                self.execute_probabilistic_command(query, cmd)
+            }
             // Time-series DDL
             QueryExpr::CreateTimeSeries(ref ts) => self.execute_create_timeseries(query, ts),
             QueryExpr::DropTimeSeries(ref ts) => self.execute_drop_timeseries(query, ts),

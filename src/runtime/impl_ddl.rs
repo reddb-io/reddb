@@ -156,8 +156,8 @@ impl RedDBRuntime {
 
     /// Execute CREATE INDEX
     ///
-    /// Registers a new index on a collection. The actual index data structure
-    /// is built lazily or on next rebuild.
+    /// Registers a new index on a collection, builds it from existing data,
+    /// and makes it available to the query executor for O(1) lookups.
     pub fn execute_create_index(
         &self,
         raw_query: &str,
@@ -166,12 +166,66 @@ impl RedDBRuntime {
         let store = self.inner.db.store();
 
         // Verify the table exists
-        if store.get_collection(&query.table).is_none() {
-            return Err(RedDBError::NotFound(format!(
-                "table '{}' not found",
-                query.table
-            )));
-        }
+        let manager = store
+            .get_collection(&query.table)
+            .ok_or_else(|| RedDBError::NotFound(format!("table '{}' not found", query.table)))?;
+
+        let method_kind = match query.method {
+            IndexMethod::Hash => super::index_store::IndexMethodKind::Hash,
+            IndexMethod::BTree => super::index_store::IndexMethodKind::BTree,
+            IndexMethod::Bitmap => super::index_store::IndexMethodKind::Bitmap,
+            IndexMethod::RTree => super::index_store::IndexMethodKind::Spatial,
+        };
+
+        // Extract fields from existing entities for indexing
+        let entities = manager.query_all(|_| true);
+        let entity_fields: Vec<(crate::storage::unified::EntityId, Vec<(String, Value)>)> =
+            entities
+                .iter()
+                .map(|e| {
+                    let fields = match &e.data {
+                        crate::storage::EntityData::Row(row) => {
+                            if let Some(ref named) = row.named {
+                                named.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+                            } else {
+                                Vec::new()
+                            }
+                        }
+                        crate::storage::EntityData::Node(node) => node
+                            .properties
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    (e.id, fields)
+                })
+                .collect();
+
+        // Build the index
+        let indexed_count = self
+            .inner
+            .index_store
+            .create_index(
+                &query.name,
+                &query.table,
+                &query.columns,
+                method_kind,
+                query.unique,
+                &entity_fields,
+            )
+            .map_err(|e| RedDBError::Internal(e))?;
+
+        // Register metadata
+        self.inner
+            .index_store
+            .register(super::index_store::RegisteredIndex {
+                name: query.name.clone(),
+                collection: query.table.clone(),
+                columns: query.columns.clone(),
+                method: method_kind,
+                unique: query.unique,
+            });
 
         let method_str = format!("{}", query.method);
         let unique_str = if query.unique { "unique " } else { "" };
@@ -180,8 +234,8 @@ impl RedDBRuntime {
         Ok(RuntimeQueryResult::ok_message(
             raw_query.to_string(),
             &format!(
-                "{}index '{}' created on '{}' ({}) using {}",
-                unique_str, query.name, query.table, cols, method_str
+                "{}index '{}' created on '{}' ({}) using {} ({} entities indexed)",
+                unique_str, query.name, query.table, cols, method_str, indexed_count
             ),
             "create",
         ))
@@ -211,6 +265,9 @@ impl RedDBRuntime {
                 query.table
             )));
         }
+
+        // Remove from IndexStore
+        self.inner.index_store.drop_index(&query.name, &query.table);
 
         Ok(RuntimeQueryResult::ok_message(
             raw_query.to_string(),

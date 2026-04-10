@@ -540,6 +540,7 @@ struct RuntimeInner {
     pool: Mutex<PoolState>,
     started_at_unix_ms: u128,
     probabilistic: probabilistic_store::ProbabilisticStore,
+    index_store: index_store::IndexStore,
     cdc: crate::replication::cdc::CdcBuffer,
     backup_scheduler: crate::replication::scheduler::BackupScheduler,
 }
@@ -567,6 +568,7 @@ mod impl_probabilistic;
 mod impl_queue;
 mod impl_search;
 mod impl_timeseries;
+mod index_store;
 mod join_filter;
 mod probabilistic_store;
 mod query_exec;

@@ -432,42 +432,9 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse a value
+    /// Parse a value (delegates to parse_literal_value for full JSON support)
     pub fn parse_value(&mut self) -> Result<Value, ParseError> {
-        match &self.current.token {
-            Token::String(s) => {
-                let s = s.clone();
-                self.advance()?;
-                Ok(Value::Text(s))
-            }
-            Token::Integer(n) => {
-                let n = *n;
-                self.advance()?;
-                Ok(Value::Integer(n))
-            }
-            Token::Float(n) => {
-                let n = *n;
-                self.advance()?;
-                Ok(Value::Float(n))
-            }
-            Token::True => {
-                self.advance()?;
-                Ok(Value::Boolean(true))
-            }
-            Token::False => {
-                self.advance()?;
-                Ok(Value::Boolean(false))
-            }
-            Token::Null => {
-                self.advance()?;
-                Ok(Value::Null)
-            }
-            other => Err(ParseError::expected(
-                vec!["string", "number", "true", "false", "null"],
-                other,
-                self.position(),
-            )),
-        }
+        self.parse_literal_value()
     }
 
     /// Parse value list for IN clause

@@ -5,7 +5,7 @@ use crate::storage::engine::graph_store::{GraphEdgeType, GraphNodeType};
 use crate::storage::engine::vector_metadata::MetadataValue;
 use crate::storage::query::ast::{
     DistanceMetric, EdgeDirection, FieldRef, Filter, FusionStrategy, JoinType, MetadataFilter,
-    Projection, TableQuery, VectorSource,
+    Projection, QueueCommand, TableQuery, VectorSource,
 };
 
 #[test]
@@ -1831,4 +1831,193 @@ fn test_parse_create_table_with_ttl_and_context_index() {
     } else {
         panic!("Expected CreateTableQuery");
     }
+}
+
+// ========================================================================
+// JSON inline literal tests
+// ========================================================================
+
+#[test]
+fn test_parse_insert_with_inline_json_object() {
+    let query = parse("INSERT INTO logs (data) VALUES ({level: 'info', msg: 'hello'})").unwrap();
+    if let QueryExpr::Insert(iq) = query {
+        assert_eq!(iq.table, "logs");
+        assert_eq!(iq.values.len(), 1);
+        // The JSON value should be Value::Json(...)
+        match &iq.values[0][0] {
+            crate::storage::schema::Value::Json(bytes) => {
+                let parsed: crate::json::Value = crate::json::from_slice(bytes).unwrap();
+                assert_eq!(parsed.get("level").and_then(|v| v.as_str()), Some("info"));
+                assert_eq!(parsed.get("msg").and_then(|v| v.as_str()), Some("hello"));
+            }
+            other => panic!("Expected Value::Json, got {:?}", other),
+        }
+    } else {
+        panic!("Expected InsertQuery");
+    }
+}
+
+#[test]
+fn test_parse_insert_with_nested_json() {
+    let query =
+        parse("INSERT INTO events (payload) VALUES ({type: 'click', meta: {x: 100, y: 200}})")
+            .unwrap();
+    if let QueryExpr::Insert(iq) = query {
+        match &iq.values[0][0] {
+            crate::storage::schema::Value::Json(bytes) => {
+                let parsed: crate::json::Value = crate::json::from_slice(bytes).unwrap();
+                assert_eq!(parsed.get("type").and_then(|v| v.as_str()), Some("click"));
+                let meta = parsed.get("meta").unwrap();
+                assert_eq!(meta.get("x").and_then(|v| v.as_f64()), Some(100.0));
+                assert_eq!(meta.get("y").and_then(|v| v.as_f64()), Some(200.0));
+            }
+            other => panic!("Expected Value::Json, got {:?}", other),
+        }
+    } else {
+        panic!("Expected InsertQuery");
+    }
+}
+
+#[test]
+fn test_parse_insert_json_with_colon_separator() {
+    // JSON-style with colons (standard JSON syntax)
+    let query =
+        parse(r#"INSERT INTO logs (data) VALUES ({"host": "srv1", "port": 8080})"#).unwrap();
+    if let QueryExpr::Insert(iq) = query {
+        match &iq.values[0][0] {
+            crate::storage::schema::Value::Json(bytes) => {
+                let parsed: crate::json::Value = crate::json::from_slice(bytes).unwrap();
+                assert_eq!(parsed.get("host").and_then(|v| v.as_str()), Some("srv1"));
+                assert_eq!(parsed.get("port").and_then(|v| v.as_f64()), Some(8080.0));
+            }
+            other => panic!("Expected Value::Json, got {:?}", other),
+        }
+    } else {
+        panic!("Expected InsertQuery");
+    }
+}
+
+#[test]
+fn test_parse_create_timeseries() {
+    let query = parse("CREATE TIMESERIES cpu_metrics RETENTION 90 d").unwrap();
+    if let QueryExpr::CreateTimeSeries(ts) = query {
+        assert_eq!(ts.name, "cpu_metrics");
+        assert_eq!(ts.retention_ms, Some(90 * 86_400_000));
+    } else {
+        panic!("Expected CreateTimeSeriesQuery");
+    }
+}
+
+#[test]
+fn test_parse_create_queue() {
+    let query = parse("CREATE QUEUE tasks MAX_SIZE 1000 PRIORITY").unwrap();
+    if let QueryExpr::CreateQueue(q) = query {
+        assert_eq!(q.name, "tasks");
+        assert_eq!(q.max_size, Some(1000));
+        assert!(q.priority);
+    } else {
+        panic!("Expected CreateQueueQuery");
+    }
+}
+
+#[test]
+fn test_parse_queue_push() {
+    let query = parse("QUEUE PUSH tasks 'hello world'").unwrap();
+    if let QueryExpr::QueueCommand(QueueCommand::Push { queue, value, .. }) = query {
+        assert_eq!(queue, "tasks");
+        assert_eq!(value, "hello world");
+    } else {
+        panic!("Expected QueueCommand::Push");
+    }
+}
+
+#[test]
+fn test_parse_queue_pop() {
+    let query = parse("QUEUE POP tasks").unwrap();
+    if let QueryExpr::QueueCommand(QueueCommand::Pop { queue, count, .. }) = query {
+        assert_eq!(queue, "tasks");
+        assert_eq!(count, 1);
+    } else {
+        panic!("Expected QueueCommand::Pop");
+    }
+}
+
+#[test]
+fn test_parse_create_index_hash() {
+    let query = parse("CREATE INDEX idx_email ON users (email) USING HASH").unwrap();
+    if let QueryExpr::CreateIndex(ci) = query {
+        assert_eq!(ci.name, "idx_email");
+        assert_eq!(ci.table, "users");
+        assert_eq!(ci.columns, vec!["email"]);
+        assert_eq!(ci.method, crate::storage::query::ast::IndexMethod::Hash);
+        assert!(!ci.unique);
+    } else {
+        panic!("Expected CreateIndexQuery");
+    }
+}
+
+#[test]
+fn test_parse_create_unique_index() {
+    let query = parse("CREATE UNIQUE INDEX idx_pk ON orders (id) USING HASH").unwrap();
+    if let QueryExpr::CreateIndex(ci) = query {
+        assert!(ci.unique);
+        assert_eq!(ci.method, crate::storage::query::ast::IndexMethod::Hash);
+    } else {
+        panic!("Expected CreateIndexQuery");
+    }
+}
+
+#[test]
+fn test_parse_search_spatial_radius() {
+    let query = parse(
+        "SEARCH SPATIAL RADIUS 48.8566 2.3522 10.0 COLLECTION sites COLUMN location LIMIT 50",
+    )
+    .unwrap();
+    if let QueryExpr::SearchCommand(crate::storage::query::ast::SearchCommand::SpatialRadius {
+        center_lat,
+        center_lon,
+        radius_km,
+        collection,
+        limit,
+        ..
+    }) = query
+    {
+        assert!((center_lat - 48.8566).abs() < 0.001);
+        assert!((center_lon - 2.3522).abs() < 0.001);
+        assert!((radius_km - 10.0).abs() < 0.001);
+        assert_eq!(collection, "sites");
+        assert_eq!(limit, 50);
+    } else {
+        panic!("Expected SearchCommand::SpatialRadius");
+    }
+}
+
+#[test]
+fn test_parse_hll_commands() {
+    let query = parse("CREATE HLL visitors").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::ProbabilisticCommand(
+            crate::storage::query::ast::ProbabilisticCommand::CreateHll { .. }
+        )
+    ));
+
+    let query = parse("HLL ADD visitors 'user1' 'user2'").unwrap();
+    if let QueryExpr::ProbabilisticCommand(
+        crate::storage::query::ast::ProbabilisticCommand::HllAdd { name, elements },
+    ) = query
+    {
+        assert_eq!(name, "visitors");
+        assert_eq!(elements, vec!["user1", "user2"]);
+    } else {
+        panic!("Expected HllAdd");
+    }
+
+    let query = parse("HLL COUNT visitors").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::ProbabilisticCommand(
+            crate::storage::query::ast::ProbabilisticCommand::HllCount { .. }
+        )
+    ));
 }
