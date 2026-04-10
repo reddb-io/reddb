@@ -243,6 +243,11 @@ impl RedDBRuntime {
             QueryExpr::Ask(ref ask) => self.execute_ask(query, ask),
             QueryExpr::CreateIndex(ref create_idx) => self.execute_create_index(query, create_idx),
             QueryExpr::DropIndex(ref drop_idx) => self.execute_drop_index(query, drop_idx),
+            QueryExpr::ProbabilisticCommand(_) => Ok(RuntimeQueryResult::ok_message(
+                query.to_string(),
+                "probabilistic commands not yet implemented",
+                "select",
+            )),
         }
     }
 }

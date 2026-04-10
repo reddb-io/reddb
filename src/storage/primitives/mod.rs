@@ -12,6 +12,7 @@
 
 pub mod bloom;
 pub mod encoding;
+pub mod hyperloglog;
 pub mod ids;
 #[cfg(unix)]
 pub mod mmap;
@@ -24,6 +25,7 @@ pub use encoding::{
     write_bytes, write_ip, write_string, write_vari32, write_vari64, write_varu32, write_varu64,
     DecodeError, IpKey,
 };
+pub use hyperloglog::HyperLogLog;
 pub use ids::{
     current_timestamp, next_btree_node_id, next_timestamp, next_txn_id, BTreeNodeId, EntityId,
     HnswNodeId, PageId, SegmentId, Timestamp, TxnId, VectorId,

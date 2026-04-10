@@ -191,6 +191,7 @@ impl RewriteRule for NormalizeRule {
             | QueryExpr::SearchCommand(_)
             | QueryExpr::CreateIndex(_)
             | QueryExpr::DropIndex(_)
+            | QueryExpr::ProbabilisticCommand(_)
             | QueryExpr::Ask(_)) => other,
         }
     }
@@ -254,6 +255,7 @@ impl RewriteRule for SimplifyFiltersRule {
             | QueryExpr::SearchCommand(_)
             | QueryExpr::CreateIndex(_)
             | QueryExpr::DropIndex(_)
+            | QueryExpr::ProbabilisticCommand(_)
             | QueryExpr::Ask(_)) => other,
         }
     }
@@ -277,6 +279,7 @@ impl RewriteRule for SimplifyFiltersRule {
             | QueryExpr::SearchCommand(_)
             | QueryExpr::CreateIndex(_)
             | QueryExpr::DropIndex(_)
+            | QueryExpr::ProbabilisticCommand(_)
             | QueryExpr::Ask(_) => false,
         }
     }

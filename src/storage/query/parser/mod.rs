@@ -47,6 +47,7 @@ mod hybrid;
 mod index_ddl;
 mod join;
 mod path;
+mod probabilistic_commands;
 mod search_commands;
 mod table;
 mod vector;

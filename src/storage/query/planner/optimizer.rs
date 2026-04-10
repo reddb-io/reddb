@@ -286,6 +286,7 @@ impl JoinReorderingPass {
             | QueryExpr::SearchCommand(_)
             | QueryExpr::CreateIndex(_)
             | QueryExpr::DropIndex(_)
+            | QueryExpr::ProbabilisticCommand(_)
             | QueryExpr::Ask(_) => 1.0,
         }
     }

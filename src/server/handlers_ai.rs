@@ -28,6 +28,118 @@ struct AiPromptSaveOptions {
 }
 
 impl RedDBServer {
+    /// GET /config — export all red_config KV pairs as a nested JSON tree.
+    pub(crate) fn handle_config_export(&self) -> HttpResponse {
+        let store = self.runtime.db().store();
+        let Some(manager) = store.get_collection(RED_CONFIG_COLLECTION) else {
+            return json_response(200, JsonValue::Object(Map::new()));
+        };
+
+        let entities = manager.query_all(|_| true);
+        let mut root = Map::new();
+
+        for entity in entities {
+            if let EntityData::Row(ref row) = entity.data {
+                let (key, value) = match row.named.as_ref() {
+                    Some(named) => {
+                        let k = named
+                            .get("key")
+                            .and_then(|v| match v {
+                                Value::Text(s) => Some(s.as_str()),
+                                _ => None,
+                            })
+                            .unwrap_or("");
+                        let v = named.get("value").cloned().unwrap_or(Value::Null);
+                        (k.to_string(), v)
+                    }
+                    None => continue,
+                };
+                if key.is_empty() {
+                    continue;
+                }
+
+                let json_val = match &value {
+                    Value::Text(s) => JsonValue::String(s.clone()),
+                    Value::Integer(n) => JsonValue::Number(*n as f64),
+                    Value::Float(n) => JsonValue::Number(*n),
+                    Value::Boolean(b) => JsonValue::Bool(*b),
+                    _ => JsonValue::String(value.to_string()),
+                };
+
+                // Build nested tree from dot-notation key
+                let parts: Vec<&str> = key.split('.').collect();
+                insert_nested(&mut root, &parts, json_val);
+            }
+        }
+
+        let mut wrapper = Map::new();
+        wrapper.insert("ok".to_string(), JsonValue::Bool(true));
+        wrapper.insert("config".to_string(), JsonValue::Object(root));
+        json_response(200, JsonValue::Object(wrapper))
+    }
+
+    /// POST /config — import a JSON tree as flat dot-notation KV pairs into red_config.
+    pub(crate) fn handle_config_import(&self, body: Vec<u8>) -> HttpResponse {
+        let payload = match parse_json_body(&body) {
+            Ok(payload) => payload,
+            Err(response) => return response,
+        };
+
+        let config = match payload.get("config") {
+            Some(c) => c.clone(),
+            None => payload.clone(),
+        };
+
+        let mut pairs = Vec::new();
+        flatten_json("", &config, &mut pairs);
+
+        let mut saved = 0usize;
+        for (key, value) in &pairs {
+            let _ = self
+                .entity_use_cases()
+                .delete_kv(RED_CONFIG_COLLECTION, key);
+            let store_value = match value {
+                JsonValue::String(s) => Value::Text(s.clone()),
+                JsonValue::Number(n) => {
+                    if n.fract().abs() < f64::EPSILON {
+                        Value::Integer(*n as i64)
+                    } else {
+                        Value::Float(*n)
+                    }
+                }
+                JsonValue::Bool(b) => Value::Boolean(*b),
+                JsonValue::Null => Value::Null,
+                other => Value::Text(crate::json::to_string(other).unwrap_or_default()),
+            };
+            if self
+                .entity_use_cases()
+                .create_kv(CreateKvInput {
+                    collection: RED_CONFIG_COLLECTION.to_string(),
+                    key: key.clone(),
+                    value: store_value,
+                    metadata: Vec::new(),
+                })
+                .is_ok()
+            {
+                saved += 1;
+            }
+        }
+
+        let mut object = Map::new();
+        object.insert("ok".to_string(), JsonValue::Bool(true));
+        object.insert("imported".to_string(), JsonValue::Number(saved as f64));
+        object.insert(
+            "keys".to_string(),
+            JsonValue::Array(
+                pairs
+                    .iter()
+                    .map(|(k, _)| JsonValue::String(k.clone()))
+                    .collect(),
+            ),
+        );
+        json_response(200, JsonValue::Object(object))
+    }
+
     pub(crate) fn handle_ai_ask(&self, body: Vec<u8>) -> HttpResponse {
         let payload = match parse_json_body(&body) {
             Ok(payload) => payload,
@@ -1182,5 +1294,43 @@ mod tests {
                 }
             });
         assert_eq!(rendered, "Summarize host 10.0.0.4 seen on port 443");
+    }
+}
+
+/// Insert a value into a nested Map following dot-separated path segments.
+fn insert_nested(root: &mut Map<String, JsonValue>, parts: &[&str], value: JsonValue) {
+    if parts.is_empty() {
+        return;
+    }
+    if parts.len() == 1 {
+        root.insert(parts[0].to_string(), value);
+        return;
+    }
+    let child = root
+        .entry(parts[0].to_string())
+        .or_insert_with(|| JsonValue::Object(Map::new()));
+    if let JsonValue::Object(ref mut map) = child {
+        insert_nested(map, &parts[1..], value);
+    }
+}
+
+/// Flatten a nested JSON object into dot-notation key-value pairs.
+fn flatten_json(prefix: &str, value: &JsonValue, out: &mut Vec<(String, JsonValue)>) {
+    match value {
+        JsonValue::Object(map) => {
+            for (k, v) in map {
+                let key = if prefix.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{prefix}.{k}")
+                };
+                flatten_json(&key, v, out);
+            }
+        }
+        _ => {
+            if !prefix.is_empty() {
+                out.push((prefix.to_string(), value.clone()));
+            }
+        }
     }
 }

@@ -43,6 +43,93 @@ pub enum QueryExpr {
     CreateIndex(CreateIndexQuery),
     /// DROP INDEX name ON table
     DropIndex(DropIndexQuery),
+    /// Probabilistic data structure commands (HLL, SKETCH, FILTER)
+    ProbabilisticCommand(ProbabilisticCommand),
+}
+
+/// Probabilistic data structure commands
+#[derive(Debug, Clone)]
+pub enum ProbabilisticCommand {
+    // HyperLogLog
+    CreateHll {
+        name: String,
+        if_not_exists: bool,
+    },
+    HllAdd {
+        name: String,
+        elements: Vec<String>,
+    },
+    HllCount {
+        names: Vec<String>,
+    },
+    HllMerge {
+        dest: String,
+        sources: Vec<String>,
+    },
+    HllInfo {
+        name: String,
+    },
+    DropHll {
+        name: String,
+        if_exists: bool,
+    },
+
+    // Count-Min Sketch (Fase 7)
+    CreateSketch {
+        name: String,
+        width: usize,
+        depth: usize,
+        if_not_exists: bool,
+    },
+    SketchAdd {
+        name: String,
+        element: String,
+        count: u64,
+    },
+    SketchCount {
+        name: String,
+        element: String,
+    },
+    SketchMerge {
+        dest: String,
+        sources: Vec<String>,
+    },
+    SketchInfo {
+        name: String,
+    },
+    DropSketch {
+        name: String,
+        if_exists: bool,
+    },
+
+    // Cuckoo Filter (Fase 8)
+    CreateFilter {
+        name: String,
+        capacity: usize,
+        if_not_exists: bool,
+    },
+    FilterAdd {
+        name: String,
+        element: String,
+    },
+    FilterCheck {
+        name: String,
+        element: String,
+    },
+    FilterDelete {
+        name: String,
+        element: String,
+    },
+    FilterCount {
+        name: String,
+    },
+    FilterInfo {
+        name: String,
+    },
+    DropFilter {
+        name: String,
+        if_exists: bool,
+    },
 }
 
 /// Index type for CREATE INDEX ... USING <type>

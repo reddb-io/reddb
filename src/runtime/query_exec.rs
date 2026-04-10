@@ -439,6 +439,7 @@ pub(super) fn runtime_join_table_context(
         | QueryExpr::SearchCommand(_)
         | QueryExpr::CreateIndex(_)
         | QueryExpr::DropIndex(_)
+        | QueryExpr::ProbabilisticCommand(_)
         | QueryExpr::Ask(_) => (None, None),
     };
 

@@ -1184,6 +1184,7 @@ pub(super) fn query_expr_name(expr: &QueryExpr) -> &'static str {
         QueryExpr::SearchCommand(_) => "search_command",
         QueryExpr::CreateIndex(_) => "create_index",
         QueryExpr::DropIndex(_) => "drop_index",
+        QueryExpr::ProbabilisticCommand(_) => "probabilistic_command",
         QueryExpr::Ask(_) => "ask",
     }
 }
