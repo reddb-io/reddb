@@ -1,365 +1,203 @@
-# RedDB
-
-RedDB is a unified multi-model database engine for teams that do not want to split operational data, documents, graph relationships, vector embeddings, and key-value state across different systems.
-
-It gives you one engine, one persistence layer, and one operational surface for:
-
-- tables and rows
-- JSON-like documents
-- graph nodes and edges
-- vector embeddings and similarity search
-- key-value records
-
-## What RedDB does
-
-RedDB lets one application work with different data shapes in the same database file or server runtime.
-
-Typical use cases:
-
-- operational application state with SQL-style querying
-- graph-aware products that also need regular tables
-- semantic retrieval and vector search next to first-party data
-- local-first or edge deployments that want an embedded database
-- AI/agent workflows that need MCP, HTTP, gRPC, or in-process access
-
-## How RedDB works
-
-RedDB uses the same core engine across three practical modes:
-
-| Mode | When to use it | How you access it |
-|:-----|:---------------|:------------------|
-| Embedded | Your app should own the database directly, like SQLite | Rust API (`RedDB` or `RedDBRuntime`) |
-| Server | Multiple clients or services need to connect | HTTP or gRPC |
-| Agent / tooling | You want CLI or MCP integration on top of the same engine | `red` CLI or MCP server |
-
-That means the storage model stays the same whether you:
-
-- open a local `.rdb` file inside your Rust process
-- run `red server --grpc-bind 127.0.0.1:50051 --http-bind 127.0.0.1:8080`
-- expose the same database to AI agents through MCP
-
-## Install
-
-### GitHub releases
-
-The recommended install path is the release installer, which pulls the correct asset from GitHub Releases:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/forattini-dev/reddb/main/install.sh | bash
-```
-
-Pin a version:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/forattini-dev/reddb/main/install.sh | bash -s -- --version v0.1.2
-```
-
-Use the prerelease channel:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/forattini-dev/reddb/main/install.sh | bash -s -- --channel next
-```
-
-If you prefer manual installation, download the asset for your platform from GitHub Releases and place the `red` binary somewhere in your `PATH`.
-
-Release page:
-
-`https://github.com/forattini-dev/reddb/releases`
-
-### npx
-
-`reddb-cli` is also published as an npm package that installs and runs the real `red` binary for you.
-
-Run RedDB through `npx`:
-
-```bash
-npx reddb-cli@latest version
-```
-
-Start an HTTP server through `npx`:
-
-```bash
-npx reddb-cli@latest server --http --path ./data/reddb.rdb --bind 127.0.0.1:8080
-```
-
-### Build from source
-
-```bash
-cargo build --release --bin red
-./target/release/red version
-```
-
-## Run a server
-
-### Local Dev
-
-```bash
-mkdir -p ./data
-red server \
-  --path ./data/reddb.rdb \
-  --grpc-bind 127.0.0.1:50051 \
-  --http-bind 127.0.0.1:8080
-```
-
-Create data:
-
-```bash
-curl -X POST http://127.0.0.1:8080/collections/hosts/rows \
-  -H 'content-type: application/json' \
-  -d '{
-    "fields": {
-      "ip": "10.0.0.1",
-      "os": "linux",
-      "critical": true
-    }
-  }'
-```
-
-Query it:
-
-```bash
-curl -X POST http://127.0.0.1:8080/query \
-  -H 'content-type: application/json' \
-  -d '{"query":"SELECT * FROM hosts WHERE critical = true"}'
-```
-
-Health check:
-
-```bash
-curl -s http://127.0.0.1:8080/health
-```
-
-This is the recommended local setup because it gives you:
-
-- HTTP for `curl`, browser tooling, and scripts
-- gRPC for `red connect` and service-to-service clients
-
-## Connect to RedDB
-
-There are two main connection paths:
-
-- HTTP clients call the REST endpoints directly.
-- `red connect` opens a gRPC session to a running RedDB server.
-
-### Connect over HTTP
-
-```bash
-curl -s http://127.0.0.1:8080/health
-
-curl -X POST http://127.0.0.1:8080/query \
-  -H 'content-type: application/json' \
-  -d '{"query":"FROM ANY ORDER BY _score DESC LIMIT 10"}'
-```
-
-### Connect with the CLI REPL
-
-Start a gRPC server first:
-
-```bash
-red server \
-  --path ./data/reddb.rdb \
-  --grpc-bind 127.0.0.1:50051 \
-  --http-bind 127.0.0.1:8080
-```
-
-Then connect:
-
-```bash
-red connect 127.0.0.1:50051
-```
-
-One-shot query:
-
-```bash
-red connect --query "SELECT * FROM hosts" 127.0.0.1:50051
-```
-
-If auth is enabled:
-
-```bash
-red connect --token "$REDDB_TOKEN" 127.0.0.1:50051
-```
-
-## Embedded like SQLite
-
-If you want RedDB inside your process, open the database directly from Rust and work against the same engine without a separate server.
-
-### Fluent embedded API
-
-```rust
-use reddb::RedDB;
-use reddb::storage::schema::Value;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db = RedDB::open("./data/reddb.rdb")?;
-
-    let _user_id = db.row("users", vec![
-        ("name", Value::Text("Alice".into())),
-        ("active", Value::Boolean(true)),
-    ]).save()?;
-
-    let _node_id = db.node("identity", "user")
-        .node_type("account")
-        .property("name", "Alice")
-        .save()?;
-
-    let results = db.query()
-        .collection("users")
-        .where_prop("active", true)
-        .limit(10)
-        .execute()?;
-
-    println!("matched {}", results.len());
-
-    db.flush()?;
-    Ok(())
-}
-```
-
-### Embedded runtime with SQL-style queries
-
-If you want embedded execution with the runtime/use-case layer, use `RedDBRuntime`. This is the closest path to using RedDB "like SQLite", but with the project's multi-model runtime.
-
-```rust
-use reddb::application::{CreateRowInput, ExecuteQueryInput};
-use reddb::storage::schema::Value;
-use reddb::{EntityUseCases, QueryUseCases, RedDBOptions, RedDBRuntime};
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let rt = RedDBRuntime::with_options(
-        RedDBOptions::persistent("./data/reddb.rdb")
-    )?;
-
-    EntityUseCases::new(&rt).create_row(CreateRowInput {
-        collection: "users".into(),
-        fields: vec![
-            ("name".into(), Value::Text("Alice".into())),
-            ("age".into(), Value::Integer(30)),
-        ],
-        metadata: vec![],
-        node_links: vec![],
-        vector_links: vec![],
-    })?;
-
-    let result = QueryUseCases::new(&rt).execute(ExecuteQueryInput {
-        query: "SELECT * FROM users".into(),
-    })?;
-
-    println!("rows = {}", result.result.records.len());
-    rt.checkpoint()?;
-    Ok(())
-}
-```
-
-## Advanced Query Features
-
-RedDB extends standard SQL with constructs designed for multi-model workflows. Below is a quick tour; see the full [query docs](docs/query/) for every option.
-
-### Context Search
-
-Find everything related to an entity across tables, graphs, vectors, documents, and key-values in one command:
+<p align="center">
+  <h1 align="center">RedDB</h1>
+  <p align="center"><strong>The AI-first multi-model database.</strong></p>
+  <p align="center">Tables. Documents. Graphs. Vectors. KV. One engine. Ask it anything.</p>
+</p>
+
+<p align="center">
+  <a href="https://github.com/forattini-dev/reddb/releases"><img src="https://img.shields.io/github/v/release/forattini-dev/reddb?style=flat-square" alt="Release"></a>
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License"></a>
+  <a href="https://www.npmjs.com/package/reddb-cli"><img src="https://img.shields.io/npm/v/reddb-cli?style=flat-square&label=npm" alt="npm"></a>
+</p>
+
+---
+
+## The Killer Feature: `ASK`
 
 ```sql
-SEARCH CONTEXT '081.232.036-08' FIELD cpf
-SEARCH CONTEXT 'Alice' COLLECTION customers DEPTH 2 LIMIT 50
+ASK 'who owns CPF 081.232.036-08 and what services do they use?'
 ```
 
-Context search uses a three-tier strategy (field-value index, token index, then global scan), expands results through graph traversal, and groups hits by structure type.
+One command. RedDB searches across tables, graphs, vectors, documents, and key-value stores -- builds context -- calls an LLM -- returns a natural-language answer. No pipelines. No glue code. No other database does this.
 
-### WITH Clauses
+---
 
-`WITH` clauses attach operational semantics directly to SQL statements:
+## 5 Data Models, 1 Engine
+
+Stop running Postgres + Neo4j + Pinecone + Redis + Mongo. RedDB unifies them.
 
 ```sql
--- Time-to-live on INSERT and UPDATE
+-- Relational rows
+INSERT INTO users (name, email) VALUES ('Alice', 'alice@co.com')
+
+-- JSON documents
+INSERT INTO logs DOCUMENT (body) VALUES ('{"level":"info","msg":"login"}')
+
+-- Graph edges
+INSERT INTO network EDGE (label, from, to) VALUES ('CONNECTS', 1, 2)
+
+-- Vector similarity search
+SEARCH SIMILAR TEXT 'anomaly detected' COLLECTION events
+
+-- Key-value
+PUT config.theme = 'dark'
+```
+
+Same file. Same engine. Same query language.
+
+---
+
+## AI-Native From Day One
+
+```sql
+-- Semantic search without managing vectors yourself
+SEARCH SIMILAR TEXT 'suspicious login' COLLECTION logs USING groq
+
+-- Auto-embed on insert -- vectors are created for you
+INSERT INTO articles (title, body) VALUES ('AI Safety', 'Alignment research...')
+  WITH AUTO EMBED (body) USING openai
+
+-- Context search: find everything related to an entity across all models
+SEARCH CONTEXT '192.168.1.1' FIELD ip DEPTH 2
+
+-- Ask questions in plain English
+ASK 'what vulnerabilities affect host 10.0.0.1?' USING anthropic
+```
+
+RedDB retrieves context from every data model, feeds it to the LLM, and gives you a grounded answer. RAG built into the database layer.
+
+---
+
+## 11 AI Providers
+
+Swap providers with a keyword. No code changes.
+
+| Provider | Keyword | API Key Required |
+|:---------|:--------|:-----------------|
+| OpenAI | `openai` | Yes |
+| Anthropic | `anthropic` | Yes |
+| Groq | `groq` | Yes |
+| OpenRouter | `openrouter` | Yes |
+| Together | `together` | Yes |
+| Venice | `venice` | Yes |
+| DeepSeek | `deepseek` | Yes |
+| HuggingFace | `huggingface` | Yes |
+| Ollama | `ollama` | No (local) |
+| Local | `local` | No |
+| Custom URL | `https://...` | Configurable |
+
+```sql
+ASK 'summarize alerts' USING groq MODEL 'llama-3.3-70b-versatile'
+ASK 'summarize alerts' USING ollama MODEL 'llama3'
+ASK 'summarize alerts' USING anthropic
+```
+
+---
+
+## SQL Extensions
+
+RedDB extends SQL with `WITH` clauses for operational semantics:
+
+```sql
+-- TTL: auto-expire records
 INSERT INTO sessions (token) VALUES ('abc') WITH TTL 1 h
-UPDATE sessions SET active = true WHERE id = 1 WITH TTL 2 h
 
--- Absolute expiration (epoch milliseconds)
+-- Context indexes for cross-model search
+CREATE TABLE customers (cpf TEXT) WITH CONTEXT INDEX ON (cpf)
+
+-- Graph expansion inline with SELECT
+SELECT * FROM users WITH EXPAND GRAPH DEPTH 2
+
+-- Metadata on write
+INSERT INTO logs (msg) VALUES ('deploy') WITH METADATA (source = 'ci')
+
+-- Absolute expiration
 INSERT INTO events (name) VALUES ('launch') WITH EXPIRES AT 1735689600000
-
--- Structured metadata
-INSERT INTO logs (msg) VALUES ('test') WITH METADATA (source = 'api')
-
--- Context index declaration
-CREATE TABLE customers (cpf TEXT, name TEXT) WITH CONTEXT INDEX ON (cpf)
-
--- Graph expansion on SELECT
-SELECT * FROM customers WHERE cpf = '081' WITH EXPAND GRAPH DEPTH 2
 ```
 
-### GROUP BY / HAVING
+---
 
-Group results and filter groups after aggregation:
+## 6 Query Languages
 
-```sql
-SELECT status FROM users GROUP BY status
-SELECT dept, role FROM employees GROUP BY dept, role
-SELECT dept FROM employees GROUP BY dept HAVING dept > 5 ORDER BY dept
-```
-
-### Multi-Language Queries
-
-The query engine auto-detects the language, so you can mix paradigms against the same dataset:
+Write in whatever you think in. The engine auto-detects the language.
 
 | Language | Example |
 |:---------|:--------|
-| SQL | `SELECT * FROM hosts WHERE os = 'linux'` |
-| Cypher | `MATCH (a:User)-[:FOLLOWS]->(b) RETURN b.name` |
-| Gremlin | `g.V().hasLabel('person').out('FOLLOWS').values('name')` |
-| SPARQL | `SELECT ?name WHERE { ?p :name ?name }` |
-| Natural language | `show me all critical hosts` |
+| **SQL** | `SELECT * FROM hosts WHERE os = 'linux'` |
+| **Cypher** | `MATCH (a:User)-[:FOLLOWS]->(b) RETURN b.name` |
+| **Gremlin** | `g.V().hasLabel('person').out('FOLLOWS').values('name')` |
+| **SPARQL** | `SELECT ?name WHERE { ?p :name ?name }` |
+| **Natural Language** | `show me all critical hosts` |
+| **ASK (RAG)** | `ASK 'what changed in the last 24 hours?'` |
 
-See [multi-mode queries](docs/query/multi-mode.md) for supported steps and patterns.
+All six hit the same engine, same data, same indexes.
 
-### Key-Value REST API
+---
 
-Every collection doubles as a KV store through dedicated REST endpoints:
+## 48 Built-in Types
+
+Not just `TEXT` and `INTEGER`. RedDB understands your domain.
+
+**Network:** `IpAddr`, `Ipv4`, `Ipv6`, `MacAddr`, `Cidr`, `Subnet`, `Port`
+**Geo:** `Latitude`, `Longitude`, `GeoPoint`
+**Locale:** `Country2`, `Country3`, `Lang2`, `Lang5`, `Currency`
+**Identity:** `Uuid`, `Email`, `Url`, `Phone`, `Semver`
+**Visual:** `Color`, `ColorAlpha`
+**Cross-model refs:** `NodeRef`, `EdgeRef`, `VectorRef`, `RowRef`, `KeyRef`, `DocRef`, `TableRef`, `PageRef`
+**Primitives:** `Integer`, `UnsignedInteger`, `Float`, `Decimal`, `BigInt`, `Text`, `Blob`, `Boolean`, `Json`, `Array`, `Enum`
+**Temporal:** `Timestamp`, `TimestampMs`, `Date`, `Time`, `Duration`
+
+Validation on write. No parsing in your app.
+
+---
+
+## 3 Deployment Modes
+
+| Mode | Think of it as... | Access via |
+|:-----|:-------------------|:-----------|
+| **Embedded** | SQLite | Rust API -- `RedDB::open("data.rdb")` |
+| **Server** | Postgres | HTTP + gRPC -- dual-stack |
+| **Agent** | MCP tool | `red mcp` -- AI agent integration |
+
+Same storage format across all three. Start embedded, scale to server, expose to agents -- no migration.
+
+---
+
+## Quick Start
 
 ```bash
-# Read a key
-curl http://127.0.0.1:8080/collections/config/kvs/theme
+# Install
+curl -fsSL https://raw.githubusercontent.com/forattini-dev/reddb/main/install.sh | bash
 
-# Write a key
-curl -X PUT http://127.0.0.1:8080/collections/config/kvs/theme \
-  -d '{"value":"dark"}'
+# Start the server
+red server --http-bind 127.0.0.1:8080 --path ./data.rdb
 
-# Delete a key
-curl -X DELETE http://127.0.0.1:8080/collections/config/kvs/theme
-```
-
-### AI and Multi-Provider LLM
-
-RedDB includes a built-in AI layer that routes to any OpenAI-compatible provider. You can generate embeddings, run prompts, or ask natural-language questions using providers like OpenAI, Anthropic, Groq, Ollama, Together, OpenRouter, Venice, DeepSeek, HuggingFace, or a custom URL.
-
-Use the `ASK` command from SQL or the `/ai/ask` HTTP endpoint:
-
-```sql
--- Use any provider
-ASK 'what happened?' USING groq MODEL 'llama-3.3-70b-versatile'
-ASK 'summarize' USING ollama MODEL 'llama3'
-```
-
-Configure credentials through environment variables, the vault endpoint, or both:
-
-```bash
-# Environment variable
-export REDDB_GROQ_API_KEY=gsk_xxx
-
-# Or vault
-curl -X POST http://127.0.0.1:8080/ai/credentials \
+# Insert data
+curl -X POST http://127.0.0.1:8080/query \
   -H 'content-type: application/json' \
-  -d '{"provider":"groq","api_key":"gsk_xxx"}'
+  -d '{"query":"INSERT INTO hosts (ip, os) VALUES ('\''10.0.0.1'\'', '\''linux'\'')"}'
+
+# Query it
+curl -X POST http://127.0.0.1:8080/query \
+  -H 'content-type: application/json' \
+  -d '{"query":"SELECT * FROM hosts"}'
 ```
 
-Credential resolution follows a chain: alias env var, vault alias, default env var, vault default. See the [HTTP AI docs](docs/api/http.md#ai) for the full provider table and endpoint reference.
+Or via npm:
 
-## Documentation
+```bash
+npx reddb-cli@latest server --http --bind 127.0.0.1:8080
+```
 
-- Docs home: [docs/README.md](docs/README.md)
-- Installation: [docs/getting-started/installation.md](docs/getting-started/installation.md)
-- Quick start: [docs/getting-started/quick-start.md](docs/getting-started/quick-start.md)
-- Connection guide: [docs/getting-started/connect.md](docs/getting-started/connect.md)
-- Embedded guide: [docs/api/embedded.md](docs/api/embedded.md)
-- HTTP API: [docs/api/http.md](docs/api/http.md)
-- CLI reference: [docs/api/cli.md](docs/api/cli.md)
+---
+
+## Links
+
+- [Documentation](https://forattini-dev.github.io/reddb)
+- [GitHub](https://github.com/forattini-dev/reddb)
+- [npm package](https://www.npmjs.com/package/reddb-cli)
+- [Releases](https://github.com/forattini-dev/reddb/releases)
+
+---
+
+**MIT License** -- Built by [Filipe Forattini](https://github.com/forattini-dev)

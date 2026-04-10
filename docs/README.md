@@ -1,46 +1,101 @@
 # RedDB
 
-> One engine for tables, documents, graphs, vectors, and key-value data.
+> The AI-first multi-model database. Ask questions in plain language, search semantically, and query tables, documents, graphs, vectors, and key-value data from one engine.
 
-RedDB is a multi-model database for applications that need more than one data shape but do not want more than one database runtime.
+## Ask your database anything
 
-It is designed for teams that want:
+RedDB has a built-in AI layer. You write a question, RedDB searches for relevant context across every collection, sends it to an LLM, and returns a synthesized answer. No external pipelines. No glue code.
 
-- rows and SQL-style queries
-- documents and payload-oriented records
-- graph relationships and analytics
-- vector embeddings and semantic search
-- embedded, server, and agent-facing access without changing engines
+```sql
+ASK 'what happened on host 10.0.0.1 in the last 24 hours?' USING groq
 
-## What RedDB does
+ASK 'summarize all critical vulnerabilities' USING anthropic MODEL 'claude-sonnet-4-20250514'
 
-RedDB keeps different data models inside the same database core so you can work with operational records, linked entities, and semantic retrieval in one place.
+ASK 'list users with admin access and their login history' USING ollama MODEL 'llama3'
+```
 
-Instead of pushing data between a SQL store, a graph store, and a vector store, RedDB keeps those concerns in one runtime and exposes them through:
+`ASK` works over every data model: it pulls rows, documents, graph paths, and vector matches into a single context window before the LLM answers.
 
-- an embedded Rust API
-- an HTTP server
-- a gRPC server
-- the `red` CLI
-- an MCP server for agent integrations
+## 11 AI providers, zero configuration
 
-## How RedDB works
+Set an API key and go. Every provider that exposes an OpenAI-compatible API works out of the box.
 
-The same core engine can be used in three ways:
+| Provider | Token | Embedding | Prompt |
+|:---------|:------|:----------|:-------|
+| OpenAI | `openai` | yes | yes |
+| Anthropic | `anthropic` | -- | yes |
+| Groq | `groq` | yes | yes |
+| OpenRouter | `openrouter` | yes | yes |
+| Together | `together` | yes | yes |
+| Venice | `venice` | yes | yes |
+| DeepSeek | `deepseek` | yes | yes |
+| Ollama | `ollama` | yes | yes |
+| HuggingFace | `huggingface` | yes | yes |
+| Local | `local` | stub | stub |
+| Custom URL | *(url)* | yes | yes |
+
+```bash
+export REDDB_GROQ_API_KEY=gsk_xxx
+red server --path ./data/reddb.rdb --http-bind 127.0.0.1:8080
+```
+
+## Semantic search built in
+
+Search by meaning, not just keywords. Pass a text string and RedDB generates the embedding, runs the similarity search, and returns ranked results.
+
+```sql
+SEARCH SIMILAR TEXT 'suspicious login attempt' COLLECTION logs LIMIT 10
+
+SEARCH SIMILAR TEXT 'CVE in OpenSSH' COLLECTION cves LIMIT 5 USING openai
+```
+
+Auto-embed on insert so every record is searchable the moment it lands:
+
+```sql
+INSERT INTO incidents (title, body) VALUES ('SSH brute force', 'Detected 500 failed attempts...')
+  WITH AUTO EMBED (body) USING openai
+```
+
+## Five data models, one runtime
+
+You do not need a SQL store, a document store, a graph database, a vector database, and a KV cache. RedDB keeps all five in one process.
+
+| Model | Use case | Example query |
+|:------|:---------|:--------------|
+| Tables & Rows | Structured records, typed columns | `SELECT * FROM users WHERE active = true` |
+| Documents | Schema-free payloads, nested fields | `SELECT * FROM logs WHERE payload.level = 'error'` |
+| Key-Value | Config, sessions, feature flags | `GET config/max_retries` |
+| Graphs | Relationships, traversals, analytics | `GRAPH SHORTEST_PATH FROM 'A' TO 'Z' IN network` |
+| Vectors | Embeddings, semantic search, RAG | `SEARCH SIMILAR [0.12, 0.91, 0.44] IN embeddings K 5` |
+
+## Six query languages
+
+Write queries in the style you already know. RedDB parses RQL, SQL, Gremlin, SPARQL, Cypher, and natural language.
+
+```sql
+-- RQL / SQL
+SELECT name, email FROM users WHERE active = true LIMIT 10
+
+-- Gremlin
+g.V().hasLabel('user').has('active', true).values('name')
+
+-- Natural language
+FIND users who logged in this week
+```
+
+## Run anywhere
+
+The same engine runs embedded in your Rust binary, as an HTTP/gRPC server, or as an MCP tool server for AI agents.
 
 | Mode | Best for | Access path |
 |:-----|:---------|:------------|
-| Embedded | local-first apps, CLIs, workers, edge binaries | `RedDB` or `RedDBRuntime` inside Rust |
-| Server | shared databases and service-to-service traffic | HTTP or gRPC |
-| Agent tooling | AI workflows and local operations | CLI or MCP |
-
-This is the key idea behind the project: you do not switch products when your architecture changes. You switch how you expose the same engine.
+| Embedded | Local-first apps, CLIs, edge binaries | `RedDB::open("./data.rdb")` in Rust |
+| Server | Shared databases, service-to-service traffic | HTTP or gRPC |
+| Agent tooling | AI workflows, MCP-compatible agents | CLI or MCP server |
 
 ## Install
 
 ### GitHub Releases
-
-Use the release installer:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/forattini-dev/reddb/main/install.sh | bash
@@ -52,41 +107,27 @@ Pin a version:
 curl -fsSL https://raw.githubusercontent.com/forattini-dev/reddb/main/install.sh | bash -s -- --version v0.1.2
 ```
 
-Use the prerelease channel:
+### npx
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/forattini-dev/reddb/main/install.sh | bash -s -- --channel next
-```
-
-Manual assets:
-
-`https://github.com/forattini-dev/reddb/releases`
-
-### `npx`
-
-Run the npm package directly:
-
-```bash
-npx reddb-cli@latest version
-```
-
-Start RedDB through `npx`:
-
-```bash
-npx reddb-cli@latest server --path ./data/reddb.rdb --grpc-bind 127.0.0.1:50051 --http-bind 127.0.0.1:8080
+npx reddb-cli@latest server --path ./data/reddb.rdb --http-bind 127.0.0.1:8080
 ```
 
 ## First connection
 
-### Local dev
+Start the server:
 
 ```bash
 red server --path ./data/reddb.rdb --grpc-bind 127.0.0.1:50051 --http-bind 127.0.0.1:8080
 ```
 
+Check health:
+
 ```bash
 curl -s http://127.0.0.1:8080/health
 ```
+
+Run a query:
 
 ```bash
 curl -X POST http://127.0.0.1:8080/query \
@@ -94,74 +135,18 @@ curl -X POST http://127.0.0.1:8080/query \
   -d '{"query":"SELECT * FROM hosts"}'
 ```
 
-The same process also exposes gRPC for the CLI REPL:
+Ask a question:
+
+```bash
+curl -X POST http://127.0.0.1:8080/ai/ask \
+  -H 'content-type: application/json' \
+  -d '{"question":"what happened on host 10.0.0.1?","provider":"groq","model":"llama-3.3-70b-versatile"}'
+```
+
+Connect via gRPC REPL:
 
 ```bash
 red connect 127.0.0.1:50051
-```
-
-`red connect` is for gRPC servers. For HTTP servers, use the REST endpoints directly.
-
-## Embedded like SQLite
-
-If you want RedDB inside your process, use it directly from Rust.
-
-Builder-first API:
-
-```rust
-use reddb::RedDB;
-use reddb::storage::schema::Value;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db = RedDB::open("./data/reddb.rdb")?;
-
-    db.row("users", vec![
-        ("name", Value::Text("Alice".into())),
-        ("active", Value::Boolean(true)),
-    ]).save()?;
-
-    let results = db.query()
-        .collection("users")
-        .where_prop("active", true)
-        .limit(10)
-        .execute()?;
-
-    println!("matched {}", results.len());
-    db.flush()?;
-    Ok(())
-}
-```
-
-Runtime/use-case API with SQL-style execution:
-
-```rust
-use reddb::application::{CreateRowInput, ExecuteQueryInput};
-use reddb::storage::schema::Value;
-use reddb::{EntityUseCases, QueryUseCases, RedDBOptions, RedDBRuntime};
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let rt = RedDBRuntime::with_options(
-        RedDBOptions::persistent("./data/reddb.rdb")
-    )?;
-
-    EntityUseCases::new(&rt).create_row(CreateRowInput {
-        collection: "users".into(),
-        fields: vec![
-            ("name".into(), Value::Text("Alice".into())),
-            ("age".into(), Value::Integer(30)),
-        ],
-        metadata: vec![],
-        node_links: vec![],
-        vector_links: vec![],
-    })?;
-
-    let result = QueryUseCases::new(&rt).execute(ExecuteQueryInput {
-        query: "SELECT * FROM users".into(),
-    })?;
-
-    println!("rows = {}", result.result.records.len());
-    Ok(())
-}
 ```
 
 ## Start here
@@ -171,12 +156,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     <h4>Installation</h4>
     <p>Install from GitHub Releases, npx, or source.</p>
   </a>
-  <a href="#/getting-started/connect" class="card">
-    <h4>Connect</h4>
-    <p>Choose HTTP, gRPC, CLI, or embedded access.</p>
+  <a href="#/query/search-commands" class="card">
+    <h4>ASK & Search</h4>
+    <p>Ask questions, semantic search, and context retrieval.</p>
   </a>
-  <a href="#/api/embedded" class="card">
-    <h4>Embedded</h4>
-    <p>Run RedDB in-process, like SQLite, but multi-model.</p>
+  <a href="#/api/http" class="card">
+    <h4>AI Providers</h4>
+    <p>Configure OpenAI, Groq, Anthropic, Ollama, and more.</p>
   </a>
 </div>

@@ -5,12 +5,12 @@
   - [Connect](/getting-started/connect.md)
   - [Configuration](/getting-started/configuration.md)
 
-- **Data Models**
-  - [Tables & Rows](/data-models/tables.md)
-  - [Documents](/data-models/documents.md)
-  - [Key-Value](/data-models/key-value.md)
-  - [Graphs](/data-models/graphs.md)
-  - [Vectors & Embeddings](/data-models/vectors.md)
+- **AI & LLM**
+  - [ASK Command](/query/search-commands.md#ask)
+  - [Context Search](/query/search-commands.md#search-context)
+  - [Semantic Search](/query/search-commands.md#search-similar)
+  - [Auto Embedding](/query/insert.md#with-auto-embed)
+  - [AI Providers](/api/http.md#ai)
 
 - **Query Language (RQL)**
   - [SELECT](/query/select.md)
@@ -22,6 +22,13 @@
   - [Graph Commands](/query/graph-commands.md)
   - [Search Commands](/query/search-commands.md)
   - [Multi-Mode (Gremlin, SPARQL, NL)](/query/multi-mode.md)
+
+- **Data Models**
+  - [Tables & Rows](/data-models/tables.md)
+  - [Documents](/data-models/documents.md)
+  - [Key-Value](/data-models/key-value.md)
+  - [Graphs](/data-models/graphs.md)
+  - [Vectors & Embeddings](/data-models/vectors.md)
 
 - **APIs**
   - [gRPC API](/api/grpc.md)

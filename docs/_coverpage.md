@@ -1,13 +1,13 @@
 # RedDB
 
-> Unified Multi-Model Database Engine
+> The AI-First Multi-Model Database
 
-**One engine** · **Every data shape** · **tables · docs · graphs · vectors · KV**
+**ASK questions. SEARCH everything. One engine for tables, docs, graphs, vectors, and KV.**
 
-Built in Rust. Embedded, Server, or Serverless.
+Built in Rust. 11 AI providers. 6 query languages. 48 data types.
 
-```bash
-red server --path ./data/reddb.rdb --grpc-bind 127.0.0.1:50051 --http-bind 127.0.0.1:8080
+```sql
+ASK 'who owns this CPF and what services do they use?' USING groq
 ```
 
 [Get Started](/getting-started/quick-start.md)
