@@ -104,6 +104,7 @@ service RedDb {
   rpc BulkCreateEdges(JsonBulkCreateRequest) returns (BulkEntityReply);
   rpc BulkCreateVectors(JsonBulkCreateRequest) returns (BulkEntityReply);
   rpc BulkCreateDocuments(JsonBulkCreateRequest) returns (BulkEntityReply);
+  rpc Ask(JsonPayloadRequest) returns (PayloadReply);
   rpc Embeddings(JsonPayloadRequest) returns (PayloadReply);
   rpc AiPrompt(JsonPayloadRequest) returns (PayloadReply);
   rpc AiCredentials(JsonPayloadRequest) returns (PayloadReply);

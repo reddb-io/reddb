@@ -184,6 +184,68 @@ impl RedDBRuntime {
             inserted_count += 1;
         }
 
+        // Auto-embed pipeline: generate embeddings for specified fields
+        if let Some(ref embed_config) = query.auto_embed {
+            let store = self.inner.db.store();
+            let provider = crate::ai::parse_provider(&embed_config.provider)?;
+            let api_key = crate::ai::resolve_api_key_from_runtime(provider, None, self)?;
+            let model = embed_config.model.clone().unwrap_or_else(|| {
+                std::env::var("REDDB_OPENAI_EMBEDDING_MODEL")
+                    .ok()
+                    .unwrap_or_else(|| crate::ai::DEFAULT_OPENAI_EMBEDDING_MODEL.to_string())
+            });
+            let api_base = provider.resolve_api_base();
+
+            // Collect texts from the last inserted rows
+            let manager = store
+                .get_collection(&query.table)
+                .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
+            let entities = manager.query_all(|_| true);
+            let recent: Vec<_> = entities
+                .into_iter()
+                .rev()
+                .take(query.values.len())
+                .collect();
+
+            for entity in &recent {
+                let mut texts = Vec::new();
+                if let EntityData::Row(ref row) = entity.data {
+                    if let Some(ref named) = row.named {
+                        for field in &embed_config.fields {
+                            if let Some(Value::Text(text)) = named.get(field) {
+                                if !text.is_empty() {
+                                    texts.push(text.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                if texts.is_empty() {
+                    continue;
+                }
+
+                let combined = texts.join(" ");
+                let response = crate::ai::openai_embeddings(crate::ai::OpenAiEmbeddingRequest {
+                    api_key: api_key.clone(),
+                    model: model.clone(),
+                    inputs: vec![combined.clone()],
+                    dimensions: None,
+                    api_base: api_base.clone(),
+                })?;
+
+                if let Some(dense) = response.embeddings.into_iter().next() {
+                    self.create_vector(CreateVectorInput {
+                        collection: query.table.clone(),
+                        dense,
+                        content: Some(combined),
+                        metadata: Vec::new(),
+                        link_row: None,
+                        link_node: None,
+                    })?;
+                }
+            }
+        }
+
         Ok(RuntimeQueryResult::dml_result(
             raw_query.to_string(),
             inserted_count,

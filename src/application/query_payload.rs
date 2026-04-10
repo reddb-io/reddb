@@ -120,11 +120,32 @@ pub(crate) fn parse_similar_search_input(
     if collection.trim().is_empty() {
         return Err(RedDBError::Query("collection cannot be empty".to_string()));
     }
+
+    let text = payload
+        .get("text")
+        .and_then(JsonValue::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let provider = payload
+        .get("provider")
+        .and_then(JsonValue::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    // Either vector or text must be provided
+    let vector = if text.is_some() {
+        Vec::new() // will be generated from text at runtime
+    } else {
+        json_vector_field(payload, "vector")?
+    };
+
     Ok(SearchSimilarInput {
         collection,
-        vector: json_vector_field(payload, "vector")?,
+        vector,
         k: json_usize_field(payload, "k").unwrap_or(10).max(1),
         min_score: json_f32_field(payload, "min_score").unwrap_or(0.0),
+        text,
+        provider,
     })
 }
 

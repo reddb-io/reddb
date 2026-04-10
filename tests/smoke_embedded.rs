@@ -94,6 +94,8 @@ fn smoke_vector_insert_and_search() {
         vector: vec![1.0, 0.0, 0.0],
         k: 3,
         min_score: 0.0,
+        text: None,
+        provider: None,
     });
     assert!(
         results.is_ok(),
@@ -345,6 +347,8 @@ fn smoke_vector_hnsw_search() {
         vector: vec![1.0, 0.0, 0.0],
         k: 5,
         min_score: 0.0,
+        text: None,
+        provider: None,
     });
     assert!(
         results.is_ok(),

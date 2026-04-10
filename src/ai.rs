@@ -669,6 +669,186 @@ mod tests {
 }
 
 // ============================================================================
+// Provider & Credential Resolution (shared between HTTP, gRPC, and runtime)
+// ============================================================================
+
+/// AI provider identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AiProvider {
+    OpenAi,
+    Anthropic,
+}
+
+impl AiProvider {
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::OpenAi => "openai",
+            Self::Anthropic => "anthropic",
+        }
+    }
+
+    pub fn default_prompt_model(self) -> &'static str {
+        match self {
+            Self::OpenAi => DEFAULT_OPENAI_PROMPT_MODEL,
+            Self::Anthropic => DEFAULT_ANTHROPIC_PROMPT_MODEL,
+        }
+    }
+
+    pub fn prompt_model_env_name(self) -> &'static str {
+        match self {
+            Self::OpenAi => "REDDB_OPENAI_PROMPT_MODEL",
+            Self::Anthropic => "REDDB_ANTHROPIC_PROMPT_MODEL",
+        }
+    }
+
+    pub fn default_embedding_model(self) -> &'static str {
+        DEFAULT_OPENAI_EMBEDDING_MODEL
+    }
+
+    pub fn default_api_base(self) -> &'static str {
+        match self {
+            Self::OpenAi => DEFAULT_OPENAI_API_BASE,
+            Self::Anthropic => DEFAULT_ANTHROPIC_API_BASE,
+        }
+    }
+
+    pub fn api_base_env_name(self) -> &'static str {
+        match self {
+            Self::OpenAi => "REDDB_OPENAI_API_BASE",
+            Self::Anthropic => "REDDB_ANTHROPIC_API_BASE",
+        }
+    }
+
+    pub fn default_key_env_name(self) -> &'static str {
+        match self {
+            Self::OpenAi => "REDDB_OPENAI_API_KEY",
+            Self::Anthropic => "REDDB_ANTHROPIC_API_KEY",
+        }
+    }
+
+    pub fn alias_key_env_name(self, alias: &str) -> String {
+        let normalized = normalize_alias_token(alias);
+        match self {
+            Self::OpenAi => format!("REDDB_OPENAI_API_KEY_{normalized}"),
+            Self::Anthropic => format!("REDDB_ANTHROPIC_API_KEY_{normalized}"),
+        }
+    }
+
+    pub fn resolve_api_base(self) -> String {
+        std::env::var(self.api_base_env_name())
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| self.default_api_base().to_string())
+    }
+}
+
+/// Parse a provider string ("openai", "anthropic") into AiProvider.
+pub fn parse_provider(name: &str) -> crate::RedDBResult<AiProvider> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "openai" => Ok(AiProvider::OpenAi),
+        "anthropic" => Ok(AiProvider::Anthropic),
+        other => Err(crate::RedDBError::Query(format!(
+            "unsupported AI provider '{other}'; expected 'openai' or 'anthropic'"
+        ))),
+    }
+}
+
+/// Resolve an API key for a provider. Uses the chain:
+/// 1. Environment variable with alias: `REDDB_OPENAI_API_KEY_{ALIAS}`
+/// 2. KV store lookup via `kv_getter` closure
+/// 3. Default environment variable: `REDDB_OPENAI_API_KEY`
+///
+/// `kv_getter` receives a key string like "openai/prod" and returns the value if found.
+pub fn resolve_api_key<F>(
+    provider: AiProvider,
+    credential_alias: Option<&str>,
+    kv_getter: F,
+) -> crate::RedDBResult<String>
+where
+    F: Fn(&str) -> crate::RedDBResult<Option<String>>,
+{
+    if let Some(alias) = credential_alias.map(str::trim).filter(|a| !a.is_empty()) {
+        // Try env var with alias
+        if let Some(key) = resolve_key_from_env_alias(provider, alias) {
+            return Ok(key);
+        }
+        // Try KV store
+        let kv_key = format!("{}/{}", provider.token(), alias);
+        if let Some(key) = kv_getter(&kv_key)? {
+            if !key.trim().is_empty() {
+                return Ok(key);
+            }
+        }
+        return Err(crate::RedDBError::Query(format!(
+            "credential '{alias}' not found for {}. Set env {} or store in __ai_credentials",
+            provider.token(),
+            provider.alias_key_env_name(alias)
+        )));
+    }
+
+    // Default env var
+    if let Ok(value) = std::env::var(provider.default_key_env_name()) {
+        let value = value.trim().to_string();
+        if !value.is_empty() {
+            return Ok(value);
+        }
+    }
+
+    // Default KV
+    let kv_key = format!("{}/default", provider.token());
+    if let Some(key) = kv_getter(&kv_key)? {
+        if !key.trim().is_empty() {
+            return Ok(key);
+        }
+    }
+
+    Err(crate::RedDBError::Query(format!(
+        "missing {} API key. Set {} or provide credential alias",
+        provider.token(),
+        provider.default_key_env_name()
+    )))
+}
+
+fn resolve_key_from_env_alias(provider: AiProvider, alias: &str) -> Option<String> {
+    let env_name = provider.alias_key_env_name(alias);
+    std::env::var(env_name)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn normalize_alias_token(alias: &str) -> String {
+    let mut out = String::with_capacity(alias.len());
+    for character in alias.chars() {
+        if character.is_ascii_alphanumeric() {
+            out.push(character.to_ascii_uppercase());
+        } else {
+            out.push('_');
+        }
+    }
+    while out.contains("__") {
+        out = out.replace("__", "_");
+    }
+    out.trim_matches('_').to_string()
+}
+
+/// Convenience: resolve API key using a RedDBRuntime's KV store.
+pub fn resolve_api_key_from_runtime(
+    provider: AiProvider,
+    credential_alias: Option<&str>,
+    runtime: &crate::runtime::RedDBRuntime,
+) -> crate::RedDBResult<String> {
+    use crate::application::ports::RuntimeEntityPort;
+    resolve_api_key(provider, credential_alias, |kv_key| {
+        match runtime.get_kv("__ai_credentials", kv_key)? {
+            Some((crate::storage::schema::Value::Text(secret), _)) => Ok(Some(secret)),
+            Some(_) => Ok(None),
+            None => Ok(None),
+        }
+    })
+}
+
+// ============================================================================
 // gRPC stubs — delegate to the same logic as HTTP handlers
 // ============================================================================
 

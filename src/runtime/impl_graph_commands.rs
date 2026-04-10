@@ -280,11 +280,36 @@ impl RedDBRuntime {
         match cmd {
             SearchCommand::Similar {
                 vector,
+                text,
+                provider,
                 collection,
                 limit,
                 min_score,
             } => {
-                let results = self.search_similar(collection, vector, *limit, *min_score)?;
+                // If text provided, generate embedding first (semantic search)
+                let search_vector = if let Some(query_text) = text {
+                    let provider =
+                        crate::ai::parse_provider(provider.as_deref().unwrap_or("openai"))?;
+                    let api_key = crate::ai::resolve_api_key_from_runtime(provider, None, self)?;
+                    let model = std::env::var("REDDB_OPENAI_EMBEDDING_MODEL")
+                        .ok()
+                        .unwrap_or_else(|| crate::ai::DEFAULT_OPENAI_EMBEDDING_MODEL.to_string());
+                    let response =
+                        crate::ai::openai_embeddings(crate::ai::OpenAiEmbeddingRequest {
+                            api_key,
+                            model,
+                            inputs: vec![query_text.clone()],
+                            dimensions: None,
+                            api_base: provider.resolve_api_base(),
+                        })?;
+                    response.embeddings.into_iter().next().ok_or_else(|| {
+                        RedDBError::Query("embedding API returned no vectors".to_string())
+                    })?
+                } else {
+                    vector.clone()
+                };
+                let results =
+                    self.search_similar(collection, &search_vector, *limit, *min_score)?;
                 let mut result =
                     UnifiedResult::with_columns(vec!["entity_id".into(), "score".into()]);
                 for sr in &results {

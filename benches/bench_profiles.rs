@@ -92,6 +92,8 @@ fn bench_embedded_vector_cycle(c: &mut Criterion) {
                     vector: query_vec.clone(),
                     k: 5,
                     min_score: 0.0,
+                    text: None,
+                    provider: None,
                 })
                 .unwrap();
         })

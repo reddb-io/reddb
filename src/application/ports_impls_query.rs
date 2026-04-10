@@ -129,4 +129,8 @@ impl RuntimeQueryPort for RedDBRuntime {
     ) -> RedDBResult<crate::runtime::ContextSearchResult> {
         RedDBRuntime::search_context(self, input)
     }
+
+    fn resolve_semantic_api_key(&self, provider: crate::ai::AiProvider) -> RedDBResult<String> {
+        crate::ai::resolve_api_key_from_runtime(provider, None, self)
+    }
 }

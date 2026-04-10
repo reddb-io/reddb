@@ -239,6 +239,8 @@ impl RedDBRuntime {
             QueryExpr::GraphCommand(ref cmd) => self.execute_graph_command(query, cmd),
             // Search commands
             QueryExpr::SearchCommand(ref cmd) => self.execute_search_command(query, cmd),
+            // ASK: RAG query with LLM synthesis
+            QueryExpr::Ask(ref ask) => self.execute_ask(query, ask),
         }
     }
 }

@@ -250,10 +250,11 @@ impl<'a> Parser<'a> {
             Token::Alter => self.parse_alter_table_query(),
             Token::Graph => self.parse_graph_command(),
             Token::Search => self.parse_search_command(),
+            Token::Ident(ref name) if name.eq_ignore_ascii_case("ASK") => self.parse_ask_query(),
             other => Err(ParseError::expected(
                 vec![
                     "SELECT", "MATCH", "PATH", "FROM", "VECTOR", "HYBRID", "INSERT", "UPDATE",
-                    "DELETE", "CREATE", "DROP", "ALTER", "GRAPH", "SEARCH",
+                    "DELETE", "CREATE", "DROP", "ALTER", "GRAPH", "SEARCH", "ASK",
                 ],
                 other,
                 self.position(),

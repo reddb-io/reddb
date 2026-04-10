@@ -765,6 +765,8 @@ fn test_vector_create_and_search() {
         vector: vec![1.0, 0.0, 0.0],
         k: 5,
         min_score: 0.0,
+        text: None,
+        provider: None,
     });
     assert!(
         results.is_ok(),
@@ -1212,6 +1214,8 @@ fn test_search_similar() {
             vector: vec![1.0, 0.0, 0.0],
             k: 3,
             min_score: 0.0,
+            text: None,
+            provider: None,
         })
         .expect("search_similar should succeed");
 
@@ -1230,6 +1234,8 @@ fn test_search_similar() {
             vector: vec![1.0, 0.0, 0.0],
             k: 10,
             min_score: 0.8,
+            text: None,
+            provider: None,
         })
         .expect("search_similar with min_score should succeed");
 

@@ -2037,6 +2037,38 @@ async fn bulk_create_documents(
     Ok(Response::new(bulk_create_reply(self, request, create_document_reply)?))
 }
 
+async fn ask(
+    &self,
+    request: Request<JsonPayloadRequest>,
+) -> Result<Response<PayloadReply>, Status> {
+    self.authorize_read(request.metadata())?;
+    let payload = parse_json_payload(&request.into_inner().payload_json)?;
+    let question = payload
+        .get("question")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| Status::invalid_argument("field 'question' must be a string"))?;
+
+    let ask_query = crate::storage::query::ast::AskQuery {
+        question: question.to_string(),
+        provider: payload.get("provider").and_then(|v| v.as_str()).map(String::from),
+        model: payload.get("model").and_then(|v| v.as_str()).map(String::from),
+        depth: payload.get("depth").and_then(|v| v.as_u64()).map(|v| v as usize),
+        limit: payload.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize),
+        collection: payload.get("collection").and_then(|v| v.as_str()).map(String::from),
+    };
+
+    let result = self.runtime.execute_ask("ASK via gRPC", &ask_query).map_err(to_status)?;
+    let mut object = crate::json::Map::new();
+    // Extract answer from first record
+    if let Some(record) = result.result.records.first() {
+        if let Some(crate::storage::schema::Value::Text(answer)) = record.values.get("answer") {
+            object.insert("ok".to_string(), crate::json::Value::Bool(true));
+            object.insert("answer".to_string(), crate::json::Value::String(answer.clone()));
+        }
+    }
+    Ok(Response::new(json_payload_reply(crate::json::Value::Object(object))))
+}
+
 async fn context_search(
     &self,
     request: Request<JsonPayloadRequest>,

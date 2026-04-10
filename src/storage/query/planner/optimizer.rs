@@ -283,7 +283,8 @@ impl JoinReorderingPass {
             | QueryExpr::DropTable(_)
             | QueryExpr::AlterTable(_)
             | QueryExpr::GraphCommand(_)
-            | QueryExpr::SearchCommand(_) => 1.0,
+            | QueryExpr::SearchCommand(_)
+            | QueryExpr::Ask(_) => 1.0,
         }
     }
 }

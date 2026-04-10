@@ -37,6 +37,19 @@ pub enum QueryExpr {
     GraphCommand(GraphCommand),
     /// SEARCH subcommand (SIMILAR, TEXT, HYBRID)
     SearchCommand(SearchCommand),
+    /// ASK 'question' — RAG query with LLM synthesis
+    Ask(AskQuery),
+}
+
+/// ASK 'question' [USING provider] [MODEL 'model'] [DEPTH n] [LIMIT n] [COLLECTION col]
+#[derive(Debug, Clone)]
+pub struct AskQuery {
+    pub question: String,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub depth: Option<usize>,
+    pub limit: Option<usize>,
+    pub collection: Option<String>,
 }
 
 impl QueryExpr {
@@ -747,6 +760,19 @@ pub struct InsertQuery {
     pub expires_at_ms: Option<u64>,
     /// Optional metadata key-value pairs (from WITH METADATA clause)
     pub with_metadata: Vec<(String, Value)>,
+    /// Auto-embed fields on insert (from WITH AUTO EMBED clause)
+    pub auto_embed: Option<AutoEmbedConfig>,
+}
+
+/// Configuration for automatic embedding generation on INSERT.
+#[derive(Debug, Clone)]
+pub struct AutoEmbedConfig {
+    /// Fields to extract text from for embedding
+    pub fields: Vec<String>,
+    /// AI provider (e.g. "openai")
+    pub provider: String,
+    /// Optional model override
+    pub model: Option<String>,
 }
 
 /// UPDATE table SET col=val, ... WHERE filter [WITH TTL duration] [WITH METADATA (...)]
@@ -1053,9 +1079,11 @@ pub enum GraphCommand {
 /// Search command issued via SQL-like syntax
 #[derive(Debug, Clone)]
 pub enum SearchCommand {
-    /// SEARCH SIMILAR [v1, v2, ...] [COLLECTION col] [LIMIT n] [MIN_SCORE f]
+    /// SEARCH SIMILAR [v1, v2, ...] | TEXT 'query' [COLLECTION col] [LIMIT n] [MIN_SCORE f] [USING provider]
     Similar {
         vector: Vec<f32>,
+        text: Option<String>,
+        provider: Option<String>,
         collection: String,
         limit: usize,
         min_score: f32,

@@ -239,7 +239,8 @@ impl JoinQueryBuilder {
             | QueryExpr::DropTable(_)
             | QueryExpr::AlterTable(_)
             | QueryExpr::GraphCommand(_)
-            | QueryExpr::SearchCommand(_) => {}
+            | QueryExpr::SearchCommand(_)
+            | QueryExpr::Ask(_) => {}
         }
         self
     }

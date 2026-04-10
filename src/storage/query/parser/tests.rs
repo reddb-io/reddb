@@ -1364,6 +1364,8 @@ fn test_parse_search_similar() {
         collection,
         limit,
         min_score,
+        text: _,
+        provider: _,
     }) = query
     {
         assert_eq!(vector.len(), 3);

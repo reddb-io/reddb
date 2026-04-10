@@ -608,6 +608,8 @@ impl McpServer {
                 vector,
                 k,
                 min_score,
+                text: None,
+                provider: None,
             })
             .map_err(|e| format!("{}", e))?;
 

@@ -389,6 +389,8 @@ fn bench_vector_search_brute(c: &mut Criterion) {
                     vector: query_vec.clone(),
                     k: 10,
                     min_score: 0.0,
+                    text: None,
+                    provider: None,
                 })
                 .unwrap();
         })
@@ -427,6 +429,8 @@ fn bench_vector_search_hnsw(c: &mut Criterion) {
                     vector: query_vec.clone(),
                     k: 10,
                     min_score: 0.0,
+                    text: None,
+                    provider: None,
                 })
                 .unwrap();
         })

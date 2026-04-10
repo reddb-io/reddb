@@ -1,7 +1,7 @@
 //! DML SQL Parser: INSERT, UPDATE, DELETE
 
 use super::super::ast::{
-    DeleteQuery, Filter, InsertEntityType, InsertQuery, QueryExpr, UpdateQuery,
+    AskQuery, DeleteQuery, Filter, InsertEntityType, InsertQuery, QueryExpr, UpdateQuery,
 };
 use super::super::lexer::Token;
 use super::error::ParseError;
@@ -61,7 +61,7 @@ impl<'a> Parser<'a> {
         let returning = self.consume(&Token::Returning)?;
 
         // Parse optional WITH clauses
-        let (ttl_ms, expires_at_ms, with_metadata) = self.parse_with_clauses()?;
+        let (ttl_ms, expires_at_ms, with_metadata, auto_embed) = self.parse_with_clauses()?;
 
         Ok(QueryExpr::Insert(InsertQuery {
             table,
@@ -72,6 +72,7 @@ impl<'a> Parser<'a> {
             ttl_ms,
             expires_at_ms,
             with_metadata,
+            auto_embed,
         }))
     }
 
@@ -105,35 +106,70 @@ impl<'a> Parser<'a> {
         Ok((ttl_value * multiplier_ms) as u64)
     }
 
-    /// Parse WITH clauses: WITH TTL <duration> | WITH EXPIRES AT <timestamp> | WITH METADATA (k=v)
-    /// Returns (ttl_ms, expires_at_ms, metadata)
+    /// Parse WITH clauses: WITH TTL | EXPIRES AT | METADATA | AUTO EMBED
+    /// Returns (ttl_ms, expires_at_ms, metadata, auto_embed)
     pub fn parse_with_clauses(
         &mut self,
-    ) -> Result<(Option<u64>, Option<u64>, Vec<(String, Value)>), ParseError> {
+    ) -> Result<
+        (
+            Option<u64>,
+            Option<u64>,
+            Vec<(String, Value)>,
+            Option<crate::storage::query::ast::AutoEmbedConfig>,
+        ),
+        ParseError,
+    > {
         let mut ttl_ms = None;
         let mut expires_at_ms = None;
         let mut with_metadata = Vec::new();
+        let mut auto_embed = None;
 
         while self.consume(&Token::With)? {
             if self.consume_ident_ci("TTL")? {
                 ttl_ms = Some(self.parse_ttl_duration()?);
             } else if self.consume_ident_ci("EXPIRES")? {
-                // WITH EXPIRES AT <timestamp>
                 self.expect_ident_ci("AT")?;
                 let ts = self.parse_expires_at_value()?;
                 expires_at_ms = Some(ts);
             } else if self.consume(&Token::Metadata)? || self.consume_ident_ci("METADATA")? {
                 with_metadata = self.parse_with_metadata_pairs()?;
+            } else if self.consume_ident_ci("AUTO")? {
+                // WITH AUTO EMBED (field1, field2) [USING provider] [MODEL 'model']
+                self.consume_ident_ci("EMBED")?;
+                self.expect(Token::LParen)?;
+                let mut fields = Vec::new();
+                loop {
+                    fields.push(self.expect_ident()?);
+                    if !self.consume(&Token::Comma)? {
+                        break;
+                    }
+                }
+                self.expect(Token::RParen)?;
+                let provider = if self.consume_ident_ci("USING")? {
+                    self.expect_ident()?
+                } else {
+                    "openai".to_string()
+                };
+                let model = if self.consume_ident_ci("MODEL")? {
+                    Some(self.parse_string()?)
+                } else {
+                    None
+                };
+                auto_embed = Some(crate::storage::query::ast::AutoEmbedConfig {
+                    fields,
+                    provider,
+                    model,
+                });
             } else {
                 return Err(ParseError::expected(
-                    vec!["TTL", "EXPIRES AT", "METADATA"],
+                    vec!["TTL", "EXPIRES AT", "METADATA", "AUTO EMBED"],
                     self.peek(),
                     self.position(),
                 ));
             }
         }
 
-        Ok((ttl_ms, expires_at_ms, with_metadata))
+        Ok((ttl_ms, expires_at_ms, with_metadata, auto_embed))
     }
 
     /// Expect a case-insensitive identifier (error if not found)
@@ -217,7 +253,7 @@ impl<'a> Parser<'a> {
             None
         };
 
-        let (ttl_ms, expires_at_ms, with_metadata) = self.parse_with_clauses()?;
+        let (ttl_ms, expires_at_ms, with_metadata, _auto_embed) = self.parse_with_clauses()?;
 
         Ok(QueryExpr::Update(UpdateQuery {
             table,
@@ -242,6 +278,45 @@ impl<'a> Parser<'a> {
         };
 
         Ok(QueryExpr::Delete(DeleteQuery { table, filter }))
+    }
+
+    /// Parse: ASK 'question' [USING provider] [MODEL 'model'] [DEPTH n] [LIMIT n] [COLLECTION col]
+    pub fn parse_ask_query(&mut self) -> Result<QueryExpr, ParseError> {
+        self.advance()?; // consume ASK
+
+        let question = self.parse_string()?;
+
+        let mut provider = None;
+        let mut model = None;
+        let mut depth = None;
+        let mut limit = None;
+        let mut collection = None;
+
+        // Parse optional clauses in any order
+        for _ in 0..5 {
+            if self.consume_ident_ci("USING")? {
+                provider = Some(self.expect_ident()?);
+            } else if self.consume_ident_ci("MODEL")? {
+                model = Some(self.parse_string()?);
+            } else if self.consume(&Token::Depth)? {
+                depth = Some(self.parse_integer()? as usize);
+            } else if self.consume(&Token::Limit)? {
+                limit = Some(self.parse_integer()? as usize);
+            } else if self.consume(&Token::Collection)? {
+                collection = Some(self.expect_ident()?);
+            } else {
+                break;
+            }
+        }
+
+        Ok(QueryExpr::Ask(AskQuery {
+            question,
+            provider,
+            model,
+            depth,
+            limit,
+            collection,
+        }))
     }
 
     /// Parse comma-separated identifiers (accepts keywords as column names in DML context)

@@ -134,7 +134,8 @@ impl UnifiedExecutor {
             | QueryExpr::DropTable(_)
             | QueryExpr::AlterTable(_)
             | QueryExpr::GraphCommand(_)
-            | QueryExpr::SearchCommand(_) => Err(ExecutionError::new(
+            | QueryExpr::SearchCommand(_)
+            | QueryExpr::Ask(_) => Err(ExecutionError::new(
                 "DML/DDL/Command statements are not supported in UnifiedExecutor",
             )),
         }
@@ -309,7 +310,8 @@ impl UnifiedExecutor {
             | QueryExpr::DropTable(_)
             | QueryExpr::AlterTable(_)
             | QueryExpr::GraphCommand(_)
-            | QueryExpr::SearchCommand(_) => Err(ExecutionError::new(
+            | QueryExpr::SearchCommand(_)
+            | QueryExpr::Ask(_) => Err(ExecutionError::new(
                 "DML/DDL/Command statements are not supported in UnifiedExecutor",
             )),
         }

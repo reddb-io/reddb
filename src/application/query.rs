@@ -30,6 +30,10 @@ pub struct SearchSimilarInput {
     pub vector: Vec<f32>,
     pub k: usize,
     pub min_score: f32,
+    /// Optional text for semantic search (generates embedding on-the-fly)
+    pub text: Option<String>,
+    /// AI provider for semantic search (default: "openai")
+    pub provider: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -131,7 +135,28 @@ impl<'a, P: RuntimeQueryPort + ?Sized> QueryUseCases<'a, P> {
         )
     }
 
-    pub fn search_similar(&self, input: SearchSimilarInput) -> RedDBResult<Vec<SimilarResult>> {
+    pub fn search_similar(&self, mut input: SearchSimilarInput) -> RedDBResult<Vec<SimilarResult>> {
+        // Semantic search: if text provided, generate embedding on-the-fly
+        if let Some(text) = input.text.take() {
+            if input.vector.is_empty() {
+                let provider =
+                    crate::ai::parse_provider(input.provider.as_deref().unwrap_or("openai"))?;
+                let api_key = self.runtime.resolve_semantic_api_key(provider)?;
+                let model = std::env::var("REDDB_OPENAI_EMBEDDING_MODEL")
+                    .ok()
+                    .unwrap_or_else(|| crate::ai::DEFAULT_OPENAI_EMBEDDING_MODEL.to_string());
+                let response = crate::ai::openai_embeddings(crate::ai::OpenAiEmbeddingRequest {
+                    api_key,
+                    model,
+                    inputs: vec![text],
+                    dimensions: None,
+                    api_base: provider.resolve_api_base(),
+                })?;
+                input.vector = response.embeddings.into_iter().next().ok_or_else(|| {
+                    crate::RedDBError::Query("embedding API returned no vectors".to_string())
+                })?;
+            }
+        }
         self.runtime
             .search_similar(&input.collection, &input.vector, input.k, input.min_score)
     }

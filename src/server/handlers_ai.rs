@@ -10,62 +10,7 @@ enum AiQuerySourceMode {
     Result,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AiProvider {
-    OpenAi,
-    Anthropic,
-}
-
-impl AiProvider {
-    fn token(self) -> &'static str {
-        match self {
-            Self::OpenAi => "openai",
-            Self::Anthropic => "anthropic",
-        }
-    }
-
-    fn default_prompt_model(self) -> &'static str {
-        match self {
-            Self::OpenAi => crate::ai::DEFAULT_OPENAI_PROMPT_MODEL,
-            Self::Anthropic => crate::ai::DEFAULT_ANTHROPIC_PROMPT_MODEL,
-        }
-    }
-
-    fn prompt_model_env_name(self) -> &'static str {
-        match self {
-            Self::OpenAi => "REDDB_OPENAI_PROMPT_MODEL",
-            Self::Anthropic => "REDDB_ANTHROPIC_PROMPT_MODEL",
-        }
-    }
-
-    fn default_api_base(self) -> &'static str {
-        match self {
-            Self::OpenAi => crate::ai::DEFAULT_OPENAI_API_BASE,
-            Self::Anthropic => crate::ai::DEFAULT_ANTHROPIC_API_BASE,
-        }
-    }
-
-    fn api_base_env_name(self) -> &'static str {
-        match self {
-            Self::OpenAi => "REDDB_OPENAI_API_BASE",
-            Self::Anthropic => "REDDB_ANTHROPIC_API_BASE",
-        }
-    }
-
-    fn default_key_env_name(self) -> &'static str {
-        match self {
-            Self::OpenAi => "REDDB_OPENAI_API_KEY",
-            Self::Anthropic => "REDDB_ANTHROPIC_API_KEY",
-        }
-    }
-
-    fn alias_key_env_name(self, alias: &str) -> String {
-        match self {
-            Self::OpenAi => format!("REDDB_OPENAI_API_KEY_{}", normalize_alias_token(alias)),
-            Self::Anthropic => format!("REDDB_ANTHROPIC_API_KEY_{}", normalize_alias_token(alias)),
-        }
-    }
-}
+use crate::ai::AiProvider;
 
 #[derive(Debug, Clone)]
 struct AiEmbeddingSaveOptions {
@@ -83,6 +28,134 @@ struct AiPromptSaveOptions {
 }
 
 impl RedDBServer {
+    pub(crate) fn handle_ai_ask(&self, body: Vec<u8>) -> HttpResponse {
+        let payload = match parse_json_body(&body) {
+            Ok(payload) => payload,
+            Err(response) => return response,
+        };
+
+        let question = match payload.get("question").and_then(JsonValue::as_str) {
+            Some(q) if !q.trim().is_empty() => q.trim().to_string(),
+            _ => return json_error(400, "field 'question' must be a non-empty string"),
+        };
+
+        let provider_str =
+            json_string_field(&payload, "provider").unwrap_or_else(|| "openai".to_string());
+        let provider = match crate::ai::parse_provider(&provider_str) {
+            Ok(p) => p,
+            Err(err) => return json_error(400, err.to_string()),
+        };
+        let credential = json_string_field(&payload, "credential");
+        let api_key = match self.resolve_provider_api_key(provider, credential.as_deref()) {
+            Ok(key) => key,
+            Err(err) => return json_error(400, err),
+        };
+
+        // Search context
+        let context_input = crate::application::SearchContextInput {
+            query: question.clone(),
+            field: json_string_field(&payload, "field"),
+            vector: None,
+            collections: crate::application::json_input::json_string_list_field(
+                &payload,
+                "collections",
+            ),
+            graph_depth: json_usize_field(&payload, "depth"),
+            graph_max_edges: None,
+            max_cross_refs: None,
+            follow_cross_refs: None,
+            expand_graph: None,
+            global_scan: None,
+            reindex: None,
+            limit: json_usize_field(&payload, "limit"),
+            min_score: None,
+        };
+
+        let context_result = match self.query_use_cases().search_context(context_input) {
+            Ok(r) => r,
+            Err(err) => return json_error(400, err.to_string()),
+        };
+
+        // Build context for LLM
+        let context_json =
+            crate::presentation::query_json::context_search_result_json(&context_result);
+        let context_str =
+            crate::json::to_string(&context_json).unwrap_or_else(|_| "{}".to_string());
+
+        let model = json_string_field(&payload, "model").unwrap_or_else(|| {
+            std::env::var(provider.prompt_model_env_name())
+                .ok()
+                .unwrap_or_else(|| provider.default_prompt_model().to_string())
+        });
+        let api_base = provider.resolve_api_base();
+
+        let system_prompt = format!(
+            "You are an AI assistant answering questions based on data from a multi-modal database. \
+             Use the following context to answer the user's question. \
+             If the context does not contain enough information, say so. \
+             Always cite which collections and entity types your answer is based on.\n\n\
+             Database context:\n{context_str}"
+        );
+        let full_prompt = format!("{system_prompt}\n\nQuestion: {question}");
+
+        let (answer, prompt_tokens, completion_tokens) = match provider {
+            AiProvider::OpenAi => {
+                match crate::ai::openai_prompt(crate::ai::OpenAiPromptRequest {
+                    api_key,
+                    model: model.clone(),
+                    prompt: full_prompt,
+                    temperature: Some(0.3),
+                    max_output_tokens: Some(2048),
+                    api_base,
+                }) {
+                    Ok(resp) => (
+                        resp.output_text,
+                        resp.prompt_tokens.unwrap_or(0),
+                        resp.completion_tokens.unwrap_or(0),
+                    ),
+                    Err(err) => return json_error(502, err.to_string()),
+                }
+            }
+            AiProvider::Anthropic => {
+                match crate::ai::anthropic_prompt(crate::ai::AnthropicPromptRequest {
+                    api_key,
+                    model: model.clone(),
+                    prompt: full_prompt,
+                    temperature: Some(0.3),
+                    max_output_tokens: Some(2048),
+                    api_base,
+                    anthropic_version: crate::ai::DEFAULT_ANTHROPIC_VERSION.to_string(),
+                }) {
+                    Ok(resp) => (
+                        resp.output_text,
+                        resp.prompt_tokens.unwrap_or(0),
+                        resp.completion_tokens.unwrap_or(0),
+                    ),
+                    Err(err) => return json_error(502, err.to_string()),
+                }
+            }
+        };
+
+        let mut object = Map::new();
+        object.insert("ok".to_string(), JsonValue::Bool(true));
+        object.insert("answer".to_string(), JsonValue::String(answer));
+        object.insert(
+            "provider".to_string(),
+            JsonValue::String(provider.token().to_string()),
+        );
+        object.insert("model".to_string(), JsonValue::String(model));
+        object.insert(
+            "prompt_tokens".to_string(),
+            JsonValue::Number(prompt_tokens as f64),
+        );
+        object.insert(
+            "completion_tokens".to_string(),
+            JsonValue::Number(completion_tokens as f64),
+        );
+        object.insert("sources".to_string(), context_json);
+        json_response(200, JsonValue::Object(object))
+    }
+
     pub(crate) fn handle_ai_embeddings(&self, body: Vec<u8>) -> HttpResponse {
         let payload = match parse_json_body_allow_empty(&body) {
             Ok(payload) => payload,
@@ -783,85 +856,28 @@ impl RedDBServer {
         provider: AiProvider,
         credential_alias: Option<&str>,
     ) -> Result<String, String> {
-        if let Some(alias) = credential_alias
-            .map(str::trim)
-            .filter(|alias| !alias.is_empty())
-        {
-            if let Some(key) = resolve_provider_api_key_from_env_alias(provider, alias) {
-                return Ok(key);
+        crate::ai::resolve_api_key(provider, credential_alias, |kv_key| {
+            match self
+                .entity_use_cases()
+                .get_kv(AI_CREDENTIALS_COLLECTION, kv_key)
+            {
+                Ok(Some((Value::Text(secret), _))) => Ok(Some(secret)),
+                Ok(_) => Ok(None),
+                Err(err) => Err(crate::RedDBError::Query(format!(
+                    "failed to read AI credential store: {err}"
+                ))),
             }
-            if let Some(key) = self.resolve_provider_api_key_from_kv(provider, alias)? {
-                return Ok(key);
-            }
-            return Err(format!(
-                "credential '{alias}' not found. Set env {} or store key '{}/{}' in collection '{AI_CREDENTIALS_COLLECTION}'",
-                provider.alias_key_env_name(alias),
-                provider.token(),
-                alias
-            ));
-        }
-
-        if let Ok(value) = std::env::var(provider.default_key_env_name()) {
-            let value = value.trim().to_string();
-            if !value.is_empty() {
-                return Ok(value);
-            }
-        }
-
-        if let Some(key) = self.resolve_provider_api_key_from_kv(provider, "default")? {
-            return Ok(key);
-        }
-
-        Err(format!(
-            "missing {} API key. Set {} or provide credential alias backed by env/KV",
-            provider.token(),
-            provider.default_key_env_name()
-        ))
-    }
-
-    fn resolve_provider_api_key_from_kv(
-        &self,
-        provider: AiProvider,
-        alias: &str,
-    ) -> Result<Option<String>, String> {
-        let key_name = format!("{}/{}", provider.token(), alias);
-        let value = self
-            .entity_use_cases()
-            .get_kv(AI_CREDENTIALS_COLLECTION, &key_name)
-            .map_err(|err| format!("failed to read AI credential store: {err}"))?;
-
-        let Some((value, _)) = value else {
-            return Ok(None);
-        };
-        match value {
-            Value::Text(secret) => {
-                if secret.trim().is_empty() {
-                    Ok(None)
-                } else {
-                    Ok(Some(secret))
-                }
-            }
-            _ => Err(format!(
-                "credential '{key_name}' in '{AI_CREDENTIALS_COLLECTION}' must be a Text value"
-            )),
-        }
+        })
+        .map_err(|e| e.to_string())
     }
 }
 
 fn parse_ai_provider(payload: &JsonValue) -> Result<AiProvider, String> {
     let provider = json_string_field(payload, "provider")
         .or_else(|| std::env::var("REDDB_AI_PROVIDER").ok())
-        .unwrap_or_else(|| "openai".to_string())
-        .trim()
-        .to_ascii_lowercase();
+        .unwrap_or_else(|| "openai".to_string());
 
-    match provider.as_str() {
-        "openai" => Ok(AiProvider::OpenAi),
-        "anthropic" => Ok(AiProvider::Anthropic),
-        _ => Err(format!(
-            "unsupported provider '{provider}'; expected 'openai' or 'anthropic'"
-        )),
-    }
+    crate::ai::parse_provider(&provider).map_err(|e| e.to_string())
 }
 
 fn parse_source_mode(payload: &JsonValue) -> Result<AiQuerySourceMode, String> {
@@ -1014,32 +1030,6 @@ fn parse_metadata_entries(
     Ok(entries)
 }
 
-fn normalize_alias_token(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for character in input.chars() {
-        if character.is_ascii_alphanumeric() {
-            out.push(character.to_ascii_uppercase());
-        } else {
-            out.push('_');
-        }
-    }
-    while out.contains("__") {
-        out = out.replace("__", "_");
-    }
-    out.trim_matches('_').to_string()
-}
-
-fn resolve_provider_api_key_from_env_alias(provider: AiProvider, alias: &str) -> Option<String> {
-    let env_name = provider.alias_key_env_name(alias);
-    let value = std::env::var(env_name).ok()?;
-    let value = value.trim().to_string();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
-    }
-}
-
 fn render_prompt_template<F>(template: &str, mut resolver: F) -> String
 where
     F: FnMut(&str) -> Option<String>,
@@ -1073,13 +1063,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn normalize_alias_token_preserves_alnum_and_uppercases() {
-        assert_eq!(normalize_alias_token("openai_prod"), "OPENAI_PROD");
-        assert_eq!(normalize_alias_token("prod-eu/west"), "PROD_EU_WEST");
-        assert_eq!(normalize_alias_token("  custom key  "), "CUSTOM_KEY");
-    }
 
     #[test]
     fn parse_source_mode_defaults_to_row() {

@@ -993,4 +993,129 @@ impl RedDBRuntime {
             },
         })
     }
+
+    /// Execute an ASK query: search context + LLM synthesis.
+    pub fn execute_ask(
+        &self,
+        raw_query: &str,
+        ask: &crate::storage::query::ast::AskQuery,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        use crate::ai::{
+            anthropic_prompt, openai_prompt, parse_provider, resolve_api_key_from_runtime,
+            AiProvider, AnthropicPromptRequest, OpenAiPromptRequest,
+        };
+
+        // Step 1: Search context to find relevant entities
+        let context_result = self.search_context(SearchContextInput {
+            query: ask.question.clone(),
+            field: None,
+            vector: None,
+            collections: ask.collection.as_ref().map(|c| vec![c.clone()]),
+            graph_depth: ask.depth,
+            graph_max_edges: None,
+            max_cross_refs: None,
+            follow_cross_refs: None,
+            expand_graph: None,
+            global_scan: None,
+            reindex: None,
+            limit: ask.limit,
+            min_score: None,
+        })?;
+
+        // Step 2: Build context string from search results
+        let context_json =
+            crate::presentation::query_json::context_search_result_json(&context_result);
+        let context_str =
+            crate::json::to_string(&context_json).unwrap_or_else(|_| "{}".to_string());
+
+        let system_prompt = format!(
+            "You are an AI assistant answering questions based on data from a multi-modal database. \
+             Use the following context to answer the user's question. \
+             If the context does not contain enough information, say so. \
+             Always cite which collections and entity types your answer is based on.\n\n\
+             Database context:\n{context_str}"
+        );
+
+        let full_prompt = format!("{system_prompt}\n\nQuestion: {}", ask.question);
+
+        // Step 3: Call LLM
+        let provider = parse_provider(ask.provider.as_deref().unwrap_or("openai"))?;
+        let api_key = resolve_api_key_from_runtime(provider, None, self)?;
+        let model = ask.model.clone().unwrap_or_else(|| {
+            std::env::var(provider.prompt_model_env_name())
+                .ok()
+                .unwrap_or_else(|| provider.default_prompt_model().to_string())
+        });
+        let api_base = provider.resolve_api_base();
+
+        let response = match provider {
+            AiProvider::OpenAi => {
+                let resp = openai_prompt(OpenAiPromptRequest {
+                    api_key,
+                    model: model.clone(),
+                    prompt: full_prompt,
+                    temperature: Some(0.3),
+                    max_output_tokens: Some(1024),
+                    api_base,
+                })?;
+                (
+                    resp.output_text,
+                    resp.prompt_tokens.unwrap_or(0),
+                    resp.completion_tokens.unwrap_or(0),
+                )
+            }
+            AiProvider::Anthropic => {
+                let resp = anthropic_prompt(AnthropicPromptRequest {
+                    api_key,
+                    model: model.clone(),
+                    prompt: full_prompt,
+                    temperature: Some(0.3),
+                    max_output_tokens: Some(1024),
+                    api_base,
+                    anthropic_version: crate::ai::DEFAULT_ANTHROPIC_VERSION.to_string(),
+                })?;
+                (
+                    resp.output_text,
+                    resp.prompt_tokens.unwrap_or(0),
+                    resp.completion_tokens.unwrap_or(0),
+                )
+            }
+        };
+
+        let (answer, prompt_tokens, completion_tokens) = response;
+
+        // Step 4: Build result
+        let mut result = UnifiedResult::with_columns(vec![
+            "answer".into(),
+            "provider".into(),
+            "model".into(),
+            "prompt_tokens".into(),
+            "completion_tokens".into(),
+            "sources_count".into(),
+        ]);
+        let mut record = UnifiedRecord::new();
+        record.set("answer", Value::Text(answer));
+        record.set("provider", Value::Text(provider.token().to_string()));
+        record.set("model", Value::Text(model));
+        record.set("prompt_tokens", Value::Integer(prompt_tokens as i64));
+        record.set(
+            "completion_tokens",
+            Value::Integer(completion_tokens as i64),
+        );
+        record.set(
+            "sources_count",
+            Value::Integer(context_result.summary.total_entities as i64),
+        );
+        result.push(record);
+
+        Ok(RuntimeQueryResult {
+            query: raw_query.to_string(),
+            mode: QueryMode::Sql,
+            statement: "ask",
+            engine: "runtime-ai",
+            result,
+            affected_rows: 0,
+            statement_type: "select",
+        })
+    }
 }

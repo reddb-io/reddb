@@ -436,7 +436,8 @@ pub(super) fn runtime_join_table_context(
         | QueryExpr::DropTable(_)
         | QueryExpr::AlterTable(_)
         | QueryExpr::GraphCommand(_)
-        | QueryExpr::SearchCommand(_) => (None, None),
+        | QueryExpr::SearchCommand(_)
+        | QueryExpr::Ask(_) => (None, None),
     };
 
     (

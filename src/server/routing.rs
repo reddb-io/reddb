@@ -23,6 +23,7 @@ impl RedDBServer {
             ("POST", "/auth/api-keys") => self.handle_auth_create_api_key(body),
             ("POST", "/auth/change-password") => self.handle_auth_change_password(body),
             ("GET", "/auth/whoami") => self.handle_auth_whoami(&headers),
+            ("POST", "/ai/ask") => self.handle_ai_ask(body),
             ("POST", "/ai/embeddings") => self.handle_ai_embeddings(body),
             ("POST", "/ai/prompt") => self.handle_ai_prompt(body),
             ("POST", "/ai/credentials") => self.handle_ai_credentials(body),

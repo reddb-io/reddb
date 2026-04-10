@@ -36,12 +36,19 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse: SEARCH SIMILAR [0.1, 0.2, 0.3] COLLECTION col [LIMIT n] [MIN_SCORE f]
+    /// Parse: SEARCH SIMILAR ([v1, v2] | TEXT 'query') COLLECTION col [LIMIT n] [MIN_SCORE f] [USING provider]
     fn parse_search_similar(&mut self) -> Result<QueryExpr, ParseError> {
         self.advance()?; // consume SIMILAR
 
-        // Parse vector literal
-        let vector = self.parse_vector_literal()?;
+        // Parse vector literal OR text for semantic search
+        let (vector, text) = if self.consume(&Token::Text)? {
+            // SEARCH SIMILAR TEXT 'query' — semantic search
+            let query_text = self.parse_string()?;
+            (Vec::new(), Some(query_text))
+        } else {
+            // SEARCH SIMILAR [0.1, 0.2] — classic vector search
+            (self.parse_vector_literal()?, None)
+        };
 
         // Parse COLLECTION
         self.expect(Token::Collection)?;
@@ -61,8 +68,17 @@ impl<'a> Parser<'a> {
             0.0
         };
 
+        // Optional USING provider
+        let provider = if self.consume_search_ident("USING")? {
+            Some(self.expect_ident()?)
+        } else {
+            None
+        };
+
         Ok(QueryExpr::SearchCommand(SearchCommand::Similar {
             vector,
+            text,
+            provider,
             collection,
             limit,
             min_score,
