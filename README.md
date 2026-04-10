@@ -252,6 +252,20 @@ Same storage format across all three. Start embedded, scale to server, expose to
 
 ---
 
+## Performance
+
+RedDB uses multiple optimization techniques for fast queries at scale:
+
+- **Hash Join** -- O(n+m) joins instead of O(n*m), auto-selected for large datasets
+- **Parallel Segment Scanning** -- sealed segments scanned in parallel via rayon
+- **Lazy Graph Materialization** -- only loads reachable nodes instead of full graph
+- **Pre-filtered Vector Search** -- metadata filters applied before HNSW indexing
+- **Index-Assisted Scans** -- bloom filter + hash index hints for WHERE clauses
+- **Column Projection Pushdown** -- only materializes SELECT columns
+- **Query Plan Caching** -- LRU cache with 1h TTL for repeated queries
+
+---
+
 ## Quick Start
 
 ```bash

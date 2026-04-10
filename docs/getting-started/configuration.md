@@ -225,6 +225,20 @@ For any setting, RedDB checks in order:
 | `red.query.connection_pool.max_idle` | `16` | Max idle connections |
 | `red.query.max_recursion_depth` | `1000` | Max CTE recursion depth |
 
+## Performance Tuning
+
+The keys most relevant to query performance are spread across the storage and query sections above. Here they are in one place for quick reference:
+
+| Key | Default | Description |
+|:----|:--------|:------------|
+| `red.storage.hnsw.ef_search` | `50` | HNSW query-time precision (higher = more accurate, slower) |
+| `red.storage.hnsw.m` | `16` | HNSW max connections (higher = better recall, more memory) |
+| `red.storage.segment.max_entities` | `100000` | Entities per segment before sealing |
+| `red.query.connection_pool.max_connections` | `64` | Max concurrent query connections |
+
+> [!TIP]
+> RedDB automatically selects hash joins for large datasets (>10K cross-product) and parallel segment scanning for multi-segment collections. No configuration needed -- these optimizations kick in when the query planner detects they will help.
+
 ## Feature Flags (Compile-Time)
 
 When using RedDB as a Rust crate, you control features at compile time:
