@@ -435,9 +435,10 @@ impl SegmentManager {
             results.extend(growing.iter().filter(|e| filter(e)).cloned());
         }
 
-        // Query sealed segments — parallel when multiple exist
+        // Query sealed segments — parallel when multiple exist AND multi-core
         let sealed = self.sealed.read().unwrap();
-        if sealed.len() > 1 {
+        let use_parallel = sealed.len() > 1 && crate::runtime::SystemInfo::should_parallelize();
+        if use_parallel {
             let filter_ref = &filter;
             let segment_results: Vec<Vec<UnifiedEntity>> = std::thread::scope(|s| {
                 sealed

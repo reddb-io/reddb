@@ -96,7 +96,8 @@ pub(super) fn materialize_graph_lazy(
     // Phase 2: BFS — load neighbors on demand
     // Collect edges from all collections in parallel
     let collections = store.list_collections();
-    let all_edges: Vec<UnifiedEntity> = if collections.len() > 1 {
+    let use_parallel = collections.len() > 1 && crate::runtime::SystemInfo::should_parallelize();
+    let all_edges: Vec<UnifiedEntity> = if use_parallel {
         let store_ref = &store;
         let edge_batches: Vec<Vec<UnifiedEntity>> = std::thread::scope(|s| {
             collections

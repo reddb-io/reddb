@@ -506,8 +506,8 @@ impl RedDBServer {
         if let Some(save) = save_options {
             let embedding_count = response.embeddings.len();
 
-            if embedding_count > 10 {
-                // Parallel persistence for large batches
+            if embedding_count > 10 && crate::runtime::SystemInfo::should_parallelize() {
+                // Parallel persistence for large batches on multi-core systems
                 let save_ref = &save;
                 let response_ref = &response;
                 let credential_ref = &credential;

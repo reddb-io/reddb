@@ -560,7 +560,8 @@ impl UnifiedStore {
         let collections = self.collections.read().unwrap_or_else(|e| e.into_inner());
         let pairs: Vec<_> = collections.iter().collect();
 
-        if pairs.len() <= 1 {
+        let use_parallel = pairs.len() > 1 && crate::runtime::SystemInfo::should_parallelize();
+        if !use_parallel {
             // Single collection — no parallelism overhead
             return pairs
                 .into_iter()

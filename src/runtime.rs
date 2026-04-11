@@ -98,6 +98,14 @@ pub struct SystemInfo {
 }
 
 impl SystemInfo {
+    /// Whether the system has enough cores to benefit from parallelism.
+    /// Returns false on single-core machines where thread overhead > gains.
+    pub fn should_parallelize() -> bool {
+        std::thread::available_parallelism()
+            .map(|p| p.get() > 1)
+            .unwrap_or(false)
+    }
+
     pub fn collect() -> Self {
         Self {
             pid: std::process::id(),
