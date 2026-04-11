@@ -64,9 +64,7 @@ impl CuckooFilter {
         for _ in 0..MAX_KICKS {
             // Pick a random slot to evict
             let slot = (evicted_fp as usize) % BUCKET_SIZE;
-            let old_fp = self.buckets[idx][slot];
-            self.buckets[idx][slot] = evicted_fp;
-            evicted_fp = old_fp;
+            std::mem::swap(&mut self.buckets[idx][slot], &mut evicted_fp);
 
             // Find alternate bucket for evicted fingerprint
             idx = self.index2(idx, evicted_fp);
@@ -143,8 +141,8 @@ impl CuckooFilter {
             h ^= byte as u32;
             h = h.wrapping_mul(0x01000193);
         }
-        let fp = (h % 255) as u8 + 1; // 1-255, never 0
-        fp
+        // 1-255, never 0
+        (h % 255) as u8 + 1
     }
 
     /// Primary index from key
@@ -182,7 +180,7 @@ impl CuckooFilter {
 
     /// Check if a bucket contains a fingerprint
     fn bucket_contains(&self, idx: usize, fp: u8) -> bool {
-        self.buckets[idx].iter().any(|&slot| slot == fp)
+        self.buckets[idx].contains(&fp)
     }
 
     /// Remove a fingerprint from a bucket. Returns true if found and removed.

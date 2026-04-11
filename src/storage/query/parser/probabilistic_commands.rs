@@ -29,11 +29,8 @@ impl<'a> Parser<'a> {
             Token::Count => {
                 self.advance()?;
                 let mut names = Vec::new();
-                loop {
-                    match self.peek() {
-                        Token::Ident(_) => names.push(self.expect_ident()?),
-                        _ => break,
-                    }
+                while let Token::Ident(_) = self.peek() {
+                    names.push(self.expect_ident()?);
                 }
                 Ok(QueryExpr::ProbabilisticCommand(
                     ProbabilisticCommand::HllCount { names },
@@ -43,11 +40,8 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 let dest = self.expect_ident()?;
                 let mut sources = Vec::new();
-                loop {
-                    match self.peek() {
-                        Token::Ident(_) => sources.push(self.expect_ident()?),
-                        _ => break,
-                    }
+                while let Token::Ident(_) = self.peek() {
+                    sources.push(self.expect_ident()?);
                 }
                 Ok(QueryExpr::ProbabilisticCommand(
                     ProbabilisticCommand::HllMerge { dest, sources },
@@ -102,11 +96,8 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 let dest = self.expect_ident()?;
                 let mut sources = Vec::new();
-                loop {
-                    match self.peek() {
-                        Token::Ident(_) => sources.push(self.expect_ident()?),
-                        _ => break,
-                    }
+                while let Token::Ident(_) = self.peek() {
+                    sources.push(self.expect_ident()?);
                 }
                 Ok(QueryExpr::ProbabilisticCommand(
                     ProbabilisticCommand::SketchMerge { dest, sources },

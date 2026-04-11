@@ -45,8 +45,8 @@ pub fn delta_decode_timestamps(encoded: &[i64]) -> Vec<u64> {
     let mut prev_delta = encoded[1];
     decoded.push((encoded[0] + prev_delta) as u64); // second value
 
-    for i in 2..encoded.len() {
-        let delta = prev_delta + encoded[i];
+    for val in encoded.iter().skip(2) {
+        let delta = prev_delta + val;
         let value = *decoded.last().unwrap() as i64 + delta;
         decoded.push(value as u64);
         prev_delta = delta;

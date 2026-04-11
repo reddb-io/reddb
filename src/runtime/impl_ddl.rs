@@ -214,7 +214,7 @@ impl RedDBRuntime {
                 query.unique,
                 &entity_fields,
             )
-            .map_err(|e| RedDBError::Internal(e))?;
+            .map_err(RedDBError::Internal)?;
 
         // Register metadata
         self.inner

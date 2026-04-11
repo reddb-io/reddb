@@ -149,31 +149,19 @@ impl UnifiedStore {
         Ok(id)
     }
 
-    /// Bulk insert entities — optimized fast path.
+    /// Turbo bulk insert — optimized fast path.
     ///
-    /// Acquires locks ONCE for the entire batch, skips per-entity context indexing
-    /// and cross-ref indexing. ~10-20x faster than calling insert_auto in a loop.
+    /// Single lock for the entire batch. Skips bloom filter, memtable,
+    /// context index, and cross-ref indexing. B-tree writes are batched.
     pub fn bulk_insert(
         &self,
         collection: &str,
-        mut entities: Vec<UnifiedEntity>,
+        entities: Vec<UnifiedEntity>,
     ) -> Result<Vec<EntityId>, StoreError> {
         let manager = self.get_or_create_collection(collection);
 
-        // Pre-allocate all entity IDs at once
-        for entity in &mut entities {
-            if entity.id.raw() == 0 {
-                entity.id = self.next_entity_id();
-            }
-        }
-
-        // Batch insert into segment (single lock acquisition)
-        let mut ids = Vec::with_capacity(entities.len());
-        for entity in entities {
-            let id = entity.id;
-            manager.insert(entity)?;
-            ids.push(id);
-        }
+        // Single lock bulk insert (skips bloom/memtable/cross-refs)
+        let ids = manager.bulk_insert(entities)?;
 
         // Batch B-tree writes if pager is active
         if let Some(pager) = &self.pager {

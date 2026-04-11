@@ -139,18 +139,21 @@ pub(crate) fn bulk_create_rows_fast(
         return Err(Status::invalid_argument("payload_json cannot be empty"));
     }
 
-    let collection = &request.collection;
+    let collection = request.collection;
+    let n = request.payload_json.len();
 
-    // Phase 1: Parse all JSONs (no locks needed)
-    let mut entities = Vec::with_capacity(request.payload_json.len());
-    for payload_json in &request.payload_json {
-        let payload = parse_json_payload(payload_json)?;
-        let fields = payload
-            .get("fields")
-            .and_then(|f| f.as_object())
-            .ok_or_else(|| Status::invalid_argument("missing 'fields' object"))?;
+    // Phase 1: Parse all JSONs in bulk (no locks needed)
+    let mut entities = Vec::with_capacity(n);
+    for payload_json in request.payload_json {
+        // Fast JSON parse — avoid double-allocation from parse_json_payload
+        let payload: crate::json::Value = crate::json::from_str(&payload_json)
+            .map_err(|e| Status::invalid_argument(format!("invalid JSON: {e}")))?;
+        let fields = match payload.get("fields").and_then(|f| f.as_object()) {
+            Some(f) => f,
+            None => return Err(Status::invalid_argument("missing 'fields' object")),
+        };
 
-        let mut named = std::collections::HashMap::new();
+        let mut named = std::collections::HashMap::with_capacity(fields.len());
         for (key, val) in fields {
             let value = match val {
                 crate::json::Value::String(s) => Value::Text(s.clone()),
@@ -163,7 +166,7 @@ pub(crate) fn bulk_create_rows_fast(
                 }
                 crate::json::Value::Bool(b) => Value::Boolean(*b),
                 crate::json::Value::Null => Value::Null,
-                other => Value::Text(format!("{other}")),
+                _ => continue, // skip complex types for speed
             };
             named.insert(key.clone(), value);
         }
@@ -184,7 +187,7 @@ pub(crate) fn bulk_create_rows_fast(
     // Phase 2: Batch insert (single lock acquisition)
     let store = runtime.runtime.db().store();
     let ids = store
-        .bulk_insert(collection, entities)
+        .bulk_insert(&collection, entities)
         .map_err(|e| Status::internal(e.to_string()))?;
 
     // Phase 3: Build response

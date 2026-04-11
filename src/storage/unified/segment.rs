@@ -420,6 +420,45 @@ impl GrowingSegment {
             .as_secs();
         now.saturating_sub(self.last_write_at)
     }
+
+    /// Turbo bulk insert — skips bloom, memtable, cross-refs, memory tracking.
+    /// Only assigns sequence IDs and inserts into HashMap + kind_index.
+    pub fn bulk_insert(
+        &mut self,
+        entities: Vec<UnifiedEntity>,
+    ) -> Result<Vec<EntityId>, SegmentError> {
+        if !self.state.is_writable() {
+            return Err(SegmentError::NotWritable);
+        }
+
+        self.entities.reserve(entities.len());
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let mut ids = Vec::with_capacity(entities.len());
+        for mut entity in entities {
+            if self.entities.contains_key(&entity.id) {
+                continue;
+            }
+            entity.sequence_id = self.sequence.fetch_add(1, Ordering::Relaxed);
+
+            let kind_key = entity.kind.storage_type().to_string();
+            self.kind_index
+                .entry(kind_key)
+                .or_default()
+                .insert(entity.id);
+
+            let id = entity.id;
+            self.entities.insert(id, entity);
+            ids.push(id);
+        }
+
+        self.last_write_at = now;
+        Ok(ids)
+    }
 }
 
 impl UnifiedSegment for GrowingSegment {

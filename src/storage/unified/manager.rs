@@ -206,7 +206,7 @@ impl SegmentManager {
         Ok(entity_id)
     }
 
-    /// Insert multiple entities (batch)
+    /// Insert multiple entities (batch) — sequential, one lock per item.
     pub fn insert_batch(
         &self,
         entities: Vec<UnifiedEntity>,
@@ -215,6 +215,44 @@ impl SegmentManager {
         for entity in entities {
             ids.push(self.insert(entity)?);
         }
+        Ok(ids)
+    }
+
+    /// Turbo bulk insert — single lock acquisition for the entire batch.
+    /// Skips bloom filter, memtable, and cross-ref indexing for maximum speed.
+    pub fn bulk_insert(
+        &self,
+        mut entities: Vec<UnifiedEntity>,
+    ) -> Result<Vec<EntityId>, SegmentError> {
+        // Assign IDs
+        for entity in &mut entities {
+            if entity.id.raw() == 0 {
+                entity.id = self.next_entity_id();
+            }
+        }
+
+        let segment_arc = self.get_or_create_growing();
+        let mut segment = segment_arc.write().unwrap();
+        let segment_id = segment.id();
+
+        // Single call to GrowingSegment.bulk_insert (one lock, no bloom/memtable)
+        let ids = segment.bulk_insert(entities)?;
+
+        // Batch update entity-segment mapping
+        {
+            let mut map = self.entity_segment.write().unwrap();
+            map.reserve(ids.len());
+            for &id in &ids {
+                map.insert(id, segment_id);
+            }
+        }
+
+        // Batch update stats
+        {
+            let mut stats = self.stats.write().unwrap();
+            stats.total_entities += ids.len();
+        }
+
         Ok(ids)
     }
 

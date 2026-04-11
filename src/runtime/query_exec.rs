@@ -43,7 +43,7 @@ pub(super) fn execute_runtime_canonical_table_node(
     match node.operator.as_str() {
         "table_scan" | "index_seek" | "entity_scan" | "document_path_index_seek" => {
             // Try index-assisted lookup via IndexHint from optimizer
-            if let Some(ref hint) = context
+            if let Some(hint) = context
                 .query
                 .expand
                 .as_ref()
@@ -59,7 +59,7 @@ pub(super) fn execute_runtime_canonical_table_node(
                         let records = entity_ids
                             .into_iter()
                             .filter_map(|id| store.get(&context.query.table, id))
-                            .filter_map(|e| runtime_table_record_from_entity(e))
+                            .filter_map(runtime_table_record_from_entity)
                             .collect();
                         return Ok(records);
                     }

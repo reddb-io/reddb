@@ -354,15 +354,15 @@ impl IndexSelectionPass {
                 })
             }
             // Range predicates → B-tree candidate
-            crate::storage::query::ast::Filter::Compare { field, op, .. }
-                if matches!(
-                    op,
+            crate::storage::query::ast::Filter::Compare {
+                field,
+                op:
                     crate::storage::query::ast::CompareOp::Lt
-                        | crate::storage::query::ast::CompareOp::Le
-                        | crate::storage::query::ast::CompareOp::Gt
-                        | crate::storage::query::ast::CompareOp::Ge
-                ) =>
-            {
+                    | crate::storage::query::ast::CompareOp::Le
+                    | crate::storage::query::ast::CompareOp::Gt
+                    | crate::storage::query::ast::CompareOp::Ge,
+                ..
+            } => {
                 let col = Self::field_name(field);
                 Some(IndexHint {
                     method: IndexHintMethod::BTree,
