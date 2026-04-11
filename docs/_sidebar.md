@@ -102,6 +102,8 @@
   - [Remote Backends (S3, R2, Turso, D1)](/deployment/backends.md)
 
 - **Guides**
+  - [Ask Your Database (AI Tutorial)](/guides/ask-your-database.md)
+  - [Multi-Model Queries](/guides/multi-model-queries.md)
   - [Local Dev with Docker](/guides/local-dev-docker.md)
   - [Read Replica Tutorial](/guides/read-replica-tutorial.md)
   - [Building a REST API](/guides/rest-api.md)

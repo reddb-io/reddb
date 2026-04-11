@@ -296,10 +296,11 @@ impl RedDB {
 
     pub(crate) fn with_initialized_metadata(self) -> Result<Self, Box<dyn std::error::Error>> {
         if self.options.mode == StorageMode::Persistent && !self.options.read_only {
-            if self.load_or_bootstrap_physical_metadata(true).is_err() {
-                self.persist_metadata()?;
-            }
-            let _ = self.repair_native_header_from_metadata();
+            // Load metadata without persisting (avoids blocking catalog snapshot on boot)
+            let _ = self.load_or_bootstrap_physical_metadata(false);
+            // Skip repair on boot — deferred to first explicit persist_metadata() call.
+            // This avoids the recursive catalog_model_snapshot → physical_metadata loop
+            // that caused stack overflow / 12-second hang on startup.
         }
         self.load_collection_ttl_defaults_from_metadata();
         Ok(self)

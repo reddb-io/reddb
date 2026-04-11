@@ -318,7 +318,7 @@ pub(crate) fn bulk_insert_binary(
         let next_id = store.next_entity_id().raw();
         let mut writer = PageBulkWriter::new(pager.clone(), next_id);
 
-        // Convert proto → values → page DIRECTLY (no entity intermediary)
+        // Convert proto → values → page DIRECTLY (no entity, no HashMap)
         for row in request.rows {
             let values: Vec<Value> = row
                 .values
@@ -334,7 +334,9 @@ pub(crate) fn bulk_insert_binary(
                 })
                 .collect();
 
-            writer.write_row(&values).map_err(|e| Status::internal(e))?;
+            writer
+                .write_row_direct(&values)
+                .map_err(|e| Status::internal(e))?;
         }
 
         let result = writer.finish().map_err(|e| Status::internal(e))?;

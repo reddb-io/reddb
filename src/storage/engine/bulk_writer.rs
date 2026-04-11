@@ -276,12 +276,12 @@ impl PageBulkWriter {
             data[HEADER_SIZE + 4..HEADER_SIZE + 8].copy_from_slice(&next.to_le_bytes());
         }
 
-        // Write all pages to pager in batch
+        // Write all pages to pager — skip per-page checksum for speed
         let first_page_id = page_ids[0];
         let total_pages = self.pages.len();
         for (page_id, page) in self.pages {
             self.pager
-                .write_page(page_id, page)
+                .write_page_no_checksum(page_id, page)
                 .map_err(|e| format!("pager write: {e}"))?;
         }
 
