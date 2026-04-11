@@ -419,6 +419,8 @@ pub struct UnifiedStore {
     btree_indices: RwLock<HashMap<String, BTree>>,
     /// Cross-structure context index for unified search
     context_index: ContextIndex,
+    /// Hot entity cache — LRU for frequently accessed entities by ID
+    entity_cache: RwLock<HashMap<u64, (String, UnifiedEntity)>>,
 }
 
 mod builder;

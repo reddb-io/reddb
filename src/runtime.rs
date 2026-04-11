@@ -552,6 +552,7 @@ struct RuntimeInner {
     cdc: crate::replication::cdc::CdcBuffer,
     backup_scheduler: crate::replication::scheduler::BackupScheduler,
     query_cache: std::sync::RwLock<crate::storage::query::planner::cache::PlanCache>,
+    result_cache: std::sync::RwLock<HashMap<String, (RuntimeQueryResult, std::time::Instant)>>,
 }
 
 #[derive(Clone)]

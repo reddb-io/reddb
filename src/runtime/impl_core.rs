@@ -40,6 +40,7 @@ impl RedDBRuntime {
                 query_cache: std::sync::RwLock::new(
                     crate::storage::query::planner::cache::PlanCache::new(1000),
                 ),
+                result_cache: std::sync::RwLock::new(HashMap::new()),
             }),
         };
 
@@ -402,6 +403,17 @@ impl RedDBRuntime {
 
     #[inline(never)]
     pub fn execute_query(&self, query: &str) -> RedDBResult<RuntimeQueryResult> {
+        // Result cache check — return cached result for identical SELECT queries
+        {
+            if let Ok(cache) = self.inner.result_cache.read() {
+                if let Some((result, cached_at)) = cache.get(query) {
+                    if cached_at.elapsed().as_secs() < 30 {
+                        return Ok(result.clone());
+                    }
+                }
+            }
+        }
+
         let mode = detect_mode(query);
         if matches!(mode, QueryMode::Unknown) {
             return Err(RedDBError::Query("unable to detect query mode".to_string()));
@@ -410,7 +422,7 @@ impl RedDBRuntime {
         let expr = parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?;
         let statement = query_expr_name(&expr);
 
-        match expr {
+        let query_result = match expr {
             QueryExpr::Graph(_) | QueryExpr::Path(_) => {
                 let graph = materialize_graph(self.inner.db.store().as_ref())?;
                 let node_properties =
@@ -564,6 +576,37 @@ impl RedDBRuntime {
                     statement_type: "select",
                 })
             }
+        };
+
+        // Cache SELECT results for 30s
+        if let Ok(ref result) = query_result {
+            if result.statement_type == "select" {
+                if let Ok(mut cache) = self.inner.result_cache.write() {
+                    cache.insert(
+                        query.to_string(),
+                        (result.clone(), std::time::Instant::now()),
+                    );
+                    // Evict if too many cached
+                    if cache.len() > 1000 {
+                        if let Some(oldest_key) = cache
+                            .iter()
+                            .min_by_key(|(_, (_, t))| *t)
+                            .map(|(k, _)| k.clone())
+                        {
+                            cache.remove(&oldest_key);
+                        }
+                    }
+                }
+            }
+        }
+
+        query_result
+    }
+
+    /// Invalidate the result cache (call after any write operation).
+    pub fn invalidate_result_cache(&self) {
+        if let Ok(mut cache) = self.inner.result_cache.write() {
+            cache.clear();
         }
     }
 }

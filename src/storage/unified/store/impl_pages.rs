@@ -18,6 +18,7 @@ impl UnifiedStore {
             db_path: None,
             btree_indices: RwLock::new(HashMap::new()),
             context_index: ContextIndex::new(),
+            entity_cache: RwLock::new(HashMap::new()),
         }
     }
 
@@ -55,6 +56,7 @@ impl UnifiedStore {
             db_path: Some(path.to_path_buf()),
             btree_indices: RwLock::new(HashMap::new()),
             context_index: ContextIndex::new(),
+            entity_cache: RwLock::new(HashMap::new()),
         };
 
         // Load existing data from pages if database exists

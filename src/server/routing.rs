@@ -640,7 +640,7 @@ impl RedDBServer {
                         );
                     }
                     if let Some(collection) = collection_from_action_path(&path, "bulk/rows") {
-                        return self.handle_bulk_create(collection, body, Self::handle_create_row);
+                        return self.handle_bulk_create_rows_fast(collection, body);
                     }
                     if let Some(collection) = collection_from_action_path(&path, "bulk/nodes") {
                         return self.handle_bulk_create(collection, body, Self::handle_create_node);

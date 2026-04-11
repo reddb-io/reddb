@@ -256,10 +256,29 @@ impl UnifiedStore {
 
     /// Get an entity from any collection
     pub fn get_any(&self, id: EntityId) -> Option<(String, UnifiedEntity)> {
+        // Check entity cache first
+        if let Ok(cache) = self.entity_cache.read() {
+            if let Some(cached) = cache.get(&id.raw()) {
+                return Some(cached.clone());
+            }
+        }
+
+        // Full collection scan
         let collections = self.collections.read().unwrap_or_else(|e| e.into_inner());
         for (name, manager) in collections.iter() {
             if let Some(entity) = manager.get(id) {
-                return Some((name.clone(), entity));
+                let result = (name.clone(), entity);
+                // Cache the result
+                if let Ok(mut cache) = self.entity_cache.write() {
+                    cache.insert(id.raw(), result.clone());
+                    // Evict if too large
+                    if cache.len() > 10_000 {
+                        if let Some(&oldest_key) = cache.keys().next() {
+                            cache.remove(&oldest_key);
+                        }
+                    }
+                }
+                return Some(result);
             }
         }
         None
@@ -267,6 +286,10 @@ impl UnifiedStore {
 
     /// Delete an entity
     pub fn delete(&self, collection: &str, id: EntityId) -> Result<bool, StoreError> {
+        // Invalidate entity cache
+        if let Ok(mut cache) = self.entity_cache.write() {
+            cache.remove(&id.raw());
+        }
         let manager = self
             .get_collection(collection)
             .ok_or_else(|| StoreError::CollectionNotFound(collection.to_string()))?;

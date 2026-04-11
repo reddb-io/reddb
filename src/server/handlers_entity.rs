@@ -149,6 +149,121 @@ impl RedDBServer {
         json_response(200, JsonValue::Object(object))
     }
 
+    /// Fast bulk insert for rows — uses page-based writer when pager available.
+    pub(crate) fn handle_bulk_create_rows_fast(
+        &self,
+        collection: &str,
+        body: Vec<u8>,
+    ) -> HttpResponse {
+        use crate::storage::schema::Value;
+
+        let payload = match parse_json_body_allow_empty(&body) {
+            Ok(payload) => payload,
+            Err(response) => return response,
+        };
+        let Some(items) = payload.get("items").and_then(JsonValue::as_array) else {
+            return json_error(400, "JSON body must contain an array field named 'items'");
+        };
+        if items.is_empty() {
+            return json_error(400, "field 'items' cannot be empty");
+        }
+
+        // Parse all items into entities
+        let mut entities = Vec::with_capacity(items.len());
+        for item in items {
+            let fields = match item.get("fields").and_then(|f| f.as_object()) {
+                Some(f) => f,
+                None => return json_error(400, "each item must have a 'fields' object"),
+            };
+            let mut named = std::collections::HashMap::with_capacity(fields.len());
+            for (key, val) in fields {
+                let value = match val {
+                    JsonValue::String(s) => Value::Text(s.clone()),
+                    JsonValue::Number(n) => {
+                        if n.fract().abs() < f64::EPSILON {
+                            Value::Integer(*n as i64)
+                        } else {
+                            Value::Float(*n)
+                        }
+                    }
+                    JsonValue::Bool(b) => Value::Boolean(*b),
+                    JsonValue::Null => Value::Null,
+                    _ => Value::Text(format!("{val}")),
+                };
+                named.insert(key.clone(), value);
+            }
+            entities.push(crate::storage::UnifiedEntity::new(
+                crate::storage::EntityId::new(0),
+                crate::storage::EntityKind::TableRow {
+                    table: collection.to_string(),
+                    row_id: 0,
+                },
+                crate::storage::EntityData::Row(crate::storage::RowData {
+                    columns: Vec::new(),
+                    named: Some(named),
+                }),
+            ));
+        }
+
+        // Use page-based writer if pager available, otherwise in-memory bulk
+        let store = self.runtime.db().store();
+        let count = entities.len();
+
+        if let Some(pager) = store.pager() {
+            use crate::storage::engine::bulk_writer::PageBulkWriter;
+
+            let next_id = store.next_entity_id().raw();
+            let mut writer = PageBulkWriter::new(pager.clone(), next_id);
+
+            // Extract field names from first entity
+            let field_names: Vec<String> = if let Some(ref entity) = entities.first() {
+                if let crate::storage::EntityData::Row(ref row) = entity.data {
+                    row.named
+                        .as_ref()
+                        .map(|n| n.keys().cloned().collect())
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            };
+
+            for entity in &entities {
+                if let crate::storage::EntityData::Row(ref row) = entity.data {
+                    let values: Vec<Value> = if let Some(ref named) = row.named {
+                        field_names
+                            .iter()
+                            .map(|f| named.get(f).cloned().unwrap_or(Value::Null))
+                            .collect()
+                    } else {
+                        row.columns.clone()
+                    };
+                    if let Err(e) = writer.write_row(&values) {
+                        return json_error(500, format!("page write error: {e}"));
+                    }
+                }
+            }
+
+            if let Err(e) = writer.finish() {
+                return json_error(500, format!("page finish error: {e}"));
+            }
+
+            // Also insert in-memory for queryability
+            let _ = store.bulk_insert(collection, entities);
+        } else {
+            // In-memory only
+            if let Err(e) = store.bulk_insert(collection, entities) {
+                return json_error(500, format!("bulk insert error: {e}"));
+            }
+        }
+
+        let mut object = Map::new();
+        object.insert("ok".to_string(), JsonValue::Bool(true));
+        object.insert("count".to_string(), JsonValue::Number(count as f64));
+        json_response(200, JsonValue::Object(object))
+    }
+
     pub(crate) fn handle_create_vector(&self, collection: &str, body: Vec<u8>) -> HttpResponse {
         let payload = match parse_json_body_allow_empty(&body) {
             Ok(payload) => payload,

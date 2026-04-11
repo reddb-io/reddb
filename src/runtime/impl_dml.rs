@@ -26,6 +26,7 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &InsertQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        self.invalidate_result_cache();
         let mut inserted_count: u64 = 0;
 
         // Ensure the collection exists (auto-create on first insert).
@@ -263,6 +264,7 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &UpdateQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        self.invalidate_result_cache();
         let store = self.inner.db.store();
         let manager = store
             .get_collection(&query.table)
@@ -368,6 +370,7 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &DeleteQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        self.invalidate_result_cache();
         let store = self.inner.db.store();
         let manager = store
             .get_collection(&query.table)
