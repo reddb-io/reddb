@@ -134,20 +134,6 @@ pub(crate) enum GrpcServerlessWarmupScope {
     NativeArtifacts,
 }
 
-#[derive(Debug, Default)]
-pub(crate) struct GrpcServerlessAnalyticsWarmupTarget {
-    pub(crate) kind: String,
-    pub(crate) projection: Option<String>,
-}
-
-#[derive(Debug, Default)]
-pub(crate) struct GrpcServerlessWarmupPlan {
-    pub(crate) indexes: Vec<String>,
-    pub(crate) graph_projections: Vec<String>,
-    pub(crate) analytics_jobs: Vec<GrpcServerlessAnalyticsWarmupTarget>,
-    pub(crate) includes_native_artifacts: bool,
-}
-
 pub(crate) fn grpc_parse_serverless_readiness_requirements(
     payload: &JsonValue,
 ) -> Result<Vec<String>, String> {

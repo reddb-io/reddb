@@ -109,40 +109,6 @@ pub(crate) fn unified_result_json_with_records(
     JsonValue::Object(object)
 }
 
-pub(crate) fn unified_result_values_only_json_with_records(
-    result: &UnifiedResult,
-    records: &[UnifiedRecord],
-    selection: JsonValue,
-) -> JsonValue {
-    let mut object = Map::new();
-    object.insert(
-        "columns".to_string(),
-        JsonValue::Array(
-            result
-                .columns
-                .iter()
-                .cloned()
-                .map(JsonValue::String)
-                .collect(),
-        ),
-    );
-    object.insert(
-        "record_count".to_string(),
-        JsonValue::Number(records.len() as f64),
-    );
-    object.insert("selection".to_string(), selection);
-    object.insert(
-        "records".to_string(),
-        JsonValue::Array(
-            records
-                .iter()
-                .map(unified_record_values_only_json)
-                .collect(),
-        ),
-    );
-    JsonValue::Object(object)
-}
-
 pub(crate) fn query_stats_json(stats: &QueryStats) -> JsonValue {
     let mut object = Map::new();
     object.insert(
@@ -315,21 +281,6 @@ fn unified_record_json(record: &UnifiedRecord) -> JsonValue {
         ),
     );
     JsonValue::Object(object)
-}
-
-fn unified_record_values_only_json(record: &UnifiedRecord) -> JsonValue {
-    JsonValue::Object(
-        record
-            .values
-            .iter()
-            .map(|(key, value)| {
-                (
-                    key.clone(),
-                    crate::presentation::entity_json::storage_value_to_json(value),
-                )
-            })
-            .collect(),
-    )
 }
 
 fn matched_node_json(node: &MatchedNode) -> JsonValue {

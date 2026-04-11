@@ -20,8 +20,6 @@ pub const DIRECTION_CLIENT_TO_SERVER: u8 = 0;
 pub const DIRECTION_SERVER_TO_CLIENT: u8 = 1;
 
 /// Protocol constants
-pub const PROTOCOL_TCP: u8 = 0;
-pub const PROTOCOL_UDP: u8 = 1;
 pub const PROTOCOL_TLS: u8 = 2;
 
 // ============================================================================

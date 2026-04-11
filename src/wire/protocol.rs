@@ -123,13 +123,3 @@ pub fn encode_column_name(buf: &mut Vec<u8>, name: &str) {
     buf.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
     buf.extend_from_slice(bytes);
 }
-
-/// Decode a column name from wire bytes.
-#[inline]
-pub fn decode_column_name(data: &[u8], pos: &mut usize) -> String {
-    let len = u16::from_le_bytes(data[*pos..*pos + 2].try_into().unwrap_or([0; 2])) as usize;
-    *pos += 2;
-    let s = String::from_utf8_lossy(&data[*pos..*pos + len]).to_string();
-    *pos += len;
-    s
-}

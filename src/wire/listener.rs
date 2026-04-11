@@ -442,19 +442,6 @@ fn encode_result(result: &crate::runtime::RuntimeQueryResult) -> Vec<u8> {
     resp
 }
 
-/// Encode a result directly from entities (turbo path — no UnifiedRecord).
-pub fn encode_result_from_entities(runtime: &RedDBRuntime, sql: &str) -> Vec<u8> {
-    match runtime.execute_query(sql) {
-        Ok(result) => {
-            // If we have pre-serialized JSON, we need to return the binary equivalent
-            // For the wire protocol, we want binary rows, not JSON
-            // Fall through to the standard encoding
-            encode_result(&result)
-        }
-        Err(e) => make_error(e.to_string().as_bytes()),
-    }
-}
-
 /// Binary bulk insert — zero JSON parsing. Values come as typed wire bytes.
 /// Format: [coll_len:u16][coll][ncols:u16][col_names...][nrows:u32][row_values...]
 fn handle_bulk_insert_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {

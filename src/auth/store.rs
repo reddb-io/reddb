@@ -483,14 +483,6 @@ impl AuthStore {
         Ok(session)
     }
 
-    /// Access the active keypair (if bootstrap has completed with vault).
-    pub fn keypair(&self) -> Option<KeyPair> {
-        self.keypair.read().ok().and_then(|g| {
-            g.as_ref()
-                .map(|kp| KeyPair::from_master_secret(kp.master_secret.clone()))
-        })
-    }
-
     // -----------------------------------------------------------------
     // Token validation
     // -----------------------------------------------------------------

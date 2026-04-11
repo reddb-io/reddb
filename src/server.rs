@@ -127,20 +127,6 @@ enum DeploymentProfile {
     Serverless,
 }
 
-#[derive(Debug, Default)]
-struct ServerlessAnalyticsWarmupTarget {
-    kind: String,
-    projection: Option<String>,
-}
-
-#[derive(Debug, Default)]
-struct ServerlessWarmupPlan {
-    indexes: Vec<String>,
-    graph_projections: Vec<String>,
-    analytics_jobs: Vec<ServerlessAnalyticsWarmupTarget>,
-    includes_native_artifacts: bool,
-}
-
 #[derive(Debug, Clone)]
 struct ParsedQueryRequest {
     query: String,

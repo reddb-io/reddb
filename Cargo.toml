@@ -48,10 +48,6 @@ rcgen = "0.13"
 
 [features]
 default = []
-query-vector = []
-query-graph = []
-query-fulltext = []
-encryption = []
 backend-s3 = []
 backend-turso = []
 backend-d1 = []

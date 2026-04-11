@@ -51,13 +51,6 @@ impl CachedPlan {
     }
 }
 
-/// LRU node for the cache
-struct LruNode {
-    key: String,
-    prev: Option<String>,
-    next: Option<String>,
-}
-
 /// LRU cache for query plans
 pub struct PlanCache {
     /// Cached plans by key

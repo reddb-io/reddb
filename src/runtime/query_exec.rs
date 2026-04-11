@@ -888,13 +888,6 @@ pub(super) struct RuntimeTableExecutionContext<'a> {
     table_alias: &'a str,
 }
 
-pub(super) fn execute_runtime_canonical_table_query(
-    db: &RedDB,
-    query: &TableQuery,
-) -> RedDBResult<Vec<UnifiedRecord>> {
-    execute_runtime_canonical_table_query_indexed(db, query, None)
-}
-
 fn execute_runtime_canonical_table_query_indexed(
     db: &RedDB,
     query: &TableQuery,
@@ -2328,37 +2321,6 @@ fn extract_bloom_key_for_pk(filter: &crate::storage::query::ast::Filter) -> Opti
         Filter::And(left, right) => {
             extract_bloom_key_for_pk(left).or_else(|| extract_bloom_key_for_pk(right))
         }
-        _ => None,
-    }
-}
-
-/// Extract equality value for a specific column from a WHERE filter.
-/// Used for index-assisted lookups when the optimizer suggests a hash index.
-fn extract_equality_value_for_column(
-    filter: &Option<crate::storage::query::ast::Filter>,
-    column: &str,
-) -> Option<Vec<u8>> {
-    use crate::storage::query::ast::{CompareOp, FieldRef, Filter};
-    let filter = filter.as_ref()?;
-    match filter {
-        Filter::Compare { field, op, value } if *op == CompareOp::Eq => {
-            let field_name = match field {
-                FieldRef::TableColumn { column: col, .. } => col.as_str(),
-                FieldRef::NodeProperty { property, .. } => property.as_str(),
-                _ => return None,
-            };
-            if field_name != column {
-                return None;
-            }
-            match value {
-                Value::Text(s) => Some(s.as_bytes().to_vec()),
-                Value::Integer(n) => Some(n.to_le_bytes().to_vec()),
-                Value::UnsignedInteger(n) => Some(n.to_le_bytes().to_vec()),
-                _ => None,
-            }
-        }
-        Filter::And(left, right) => extract_equality_value_for_column(&Some(*left.clone()), column)
-            .or_else(|| extract_equality_value_for_column(&Some(*right.clone()), column)),
         _ => None,
     }
 }

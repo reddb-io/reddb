@@ -675,9 +675,6 @@ impl std::fmt::Debug for Page {
     }
 }
 
-/// Type alias for page-based cache
-pub type BufferPool = PageCache<PageId, Page>;
-
 #[cfg(test)]
 mod tests {
     use super::*;
