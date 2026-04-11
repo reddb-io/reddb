@@ -11,6 +11,38 @@
 """
 import json, time, random, subprocess, os, sys
 
+def get_process_stats(pid):
+    """Get CPU%, RSS (MB), and VMS (MB) for a process."""
+    try:
+        stat = open(f"/proc/{pid}/status").read()
+        rss_kb = int(stat.split("VmRSS:")[1].split()[0])
+        vms_kb = int(stat.split("VmSize:")[1].split()[0])
+        # CPU: read /proc/stat for total, /proc/pid/stat for process
+        with open(f"/proc/{pid}/stat") as f:
+            parts = f.read().split()
+            utime = int(parts[13])
+            stime = int(parts[14])
+            cpu_ticks = utime + stime
+        return {"rss_mb": rss_kb // 1024, "vms_mb": vms_kb // 1024, "cpu_ticks": cpu_ticks}
+    except:
+        return {"rss_mb": 0, "vms_mb": 0, "cpu_ticks": 0}
+
+def measure_cpu_during(pid, fn):
+    """Run fn() and measure CPU usage of pid during execution."""
+    before = get_process_stats(pid)
+    t0 = time.perf_counter()
+    fn()
+    elapsed = time.perf_counter() - t0
+    after = get_process_stats(pid)
+    cpu_delta = (after["cpu_ticks"] - before["cpu_ticks"]) / os.sysconf("SC_CLK_TCK")
+    cpu_pct = (cpu_delta / elapsed * 100) if elapsed > 0 else 0
+    return elapsed * 1000, cpu_pct, after["rss_mb"]
+
+def dir_size_mb(path):
+    if not os.path.exists(path): return 0
+    total = sum(os.path.getsize(os.path.join(dp,f)) for dp,_,fns in os.walk(path) for f in fns)
+    return round(total / 1024 / 1024, 1)
+
 # ─── Configuration ───
 N = 1_000_000
 CHUNK = 50_000
@@ -100,13 +132,14 @@ def run_reddb():
     conn.execute("CREATE INDEX idx_city ON users (city) USING HASH")
     conn.execute("CREATE INDEX idx_age ON users (age) USING BTREE")
 
-    # Memory
-    try:
-        pid = subprocess.getoutput('pgrep -f "red server"').strip().split('\n')[0]
-        rss = int(open(f"/proc/{pid}/status").read().split("VmRSS:")[1].split()[0]) // 1024
-        print(f"     memory:           {rss:>8} MB")
-        results["r_memory"] = rss
-    except: pass
+    # ── RESOURCE STATS: after insert ──
+    pid = subprocess.getoutput('pgrep -f "red server"').strip().split('\n')[0]
+    stats_post_insert = get_process_stats(pid)
+    disk_post_insert = dir_size_mb("/tmp/br")
+    print(f"     ram (post-insert): {stats_post_insert['rss_mb']:>6} MB")
+    print(f"     disk (post-insert):{disk_post_insert:>6} MB")
+    results["r_ram_post_insert"] = stats_post_insert["rss_mb"]
+    results["r_disk_post_insert"] = disk_post_insert
 
     # ── 4. UPDATE single row ──
     uids = [random.randint(1, N) for _ in range(UPDATE_SINGLE_N)]
@@ -170,6 +203,22 @@ def run_reddb():
     ms = bench(lambda: [wc.query_raw("SELECT city, COUNT(*), AVG(age) FROM users GROUP BY city") for _ in range(AGG_N)])
     print(f" 16. agg_group_by:     {fmt(ops(AGG_N, ms))} ops/sec")
     results["r_agg_groupby"] = ops(AGG_N, ms)
+
+    # ── RESOURCE STATS: peak (after all operations) ──
+    stats_peak = get_process_stats(pid)
+    disk_peak = dir_size_mb("/tmp/br")
+    print(f"     ram (peak):        {stats_peak['rss_mb']:>6} MB")
+    print(f"     disk (peak):       {disk_peak:>6} MB")
+    results["r_ram_peak"] = stats_peak["rss_mb"]
+    results["r_disk_peak"] = disk_peak
+
+    # ── CPU% during sustained query workload ──
+    ms_cpu, cpu_pct, _ = measure_cpu_during(pid, lambda: [
+        wc.query_raw(f"SELECT * FROM users WHERE _entity_id = {random.randint(1,N)}")
+        for _ in range(2000)
+    ])
+    print(f"     cpu (2K queries):  {cpu_pct:>6.1f} % ({ms_cpu:.0f}ms)")
+    results["r_cpu_query"] = round(cpu_pct, 1)
 
     # ── 2. REBOOT ──
     conn.close(); wc.close()
@@ -236,6 +285,18 @@ def run_postgresql():
     cur.execute("CREATE INDEX idx_age ON users(age)")
     cur.execute("CREATE INDEX idx_city_age ON users(city, age)")
 
+    # Resource stats
+    cur.execute("SELECT pg_total_relation_size('users')")
+    pg_disk_post = cur.fetchone()[0] // 1024 // 1024
+    # PG memory: get container stats
+    try:
+        pg_mem = subprocess.getoutput("docker stats pg-bench --no-stream --format '{{.MemUsage}}'").split("/")[0].strip()
+        print(f"     ram (post-insert): {pg_mem}")
+        results["p_ram_post_insert"] = pg_mem
+    except: pass
+    print(f"     disk (post-insert):{pg_disk_post:>6} MB")
+    results["p_disk_post_insert"] = pg_disk_post
+
     # Update single
     uids = [random.randint(1,N) for _ in range(UPDATE_SINGLE_N)]
     ms = bench(lambda: [cur.execute("UPDATE users SET age=99 WHERE id=%s",(uid,)) for uid in uids])
@@ -298,6 +359,21 @@ def run_postgresql():
     ms = bench(lambda: [cur.execute("SELECT city, COUNT(*), AVG(age) FROM users GROUP BY city") or cur.fetchall() for _ in range(AGG_N)])
     print(f" 16. agg_group_by:     {fmt(ops(AGG_N, ms))} ops/sec")
     results["p_agg_groupby"] = ops(AGG_N, ms)
+
+    # Peak resource stats
+    try:
+        pg_mem_peak = subprocess.getoutput("docker stats pg-bench --no-stream --format '{{.MemUsage}}'").split("/")[0].strip()
+        pg_cpu = subprocess.getoutput("docker stats pg-bench --no-stream --format '{{.CPUPerc}}'").strip()
+        cur.execute("SELECT pg_total_relation_size('users')")
+        pg_disk_peak = cur.fetchone()[0] // 1024 // 1024
+        print(f"     ram (peak):        {pg_mem_peak}")
+        print(f"     cpu:               {pg_cpu}")
+        print(f"     disk (peak):       {pg_disk_peak:>6} MB")
+        results["p_ram_peak"] = pg_mem_peak
+        results["p_cpu"] = pg_cpu
+        results["p_disk_peak"] = pg_disk_peak
+    except Exception as e:
+        print(f"     stats error: {e}")
 
     # Reboot
     cur.close(); conn.close()
@@ -364,6 +440,14 @@ print(f"| 13 | agg AVG | {results.get('r_agg_avg',0):,} | {results.get('p_agg_av
 print(f"| 14 | agg MIN/MAX | {results.get('r_agg_minmax',0):,} | {results.get('p_agg_minmax',0):,} | {ratio('r_agg_minmax','p_agg_minmax')} |")
 print(f"| 15 | agg SUM | {results.get('r_agg_sum',0):,} | {results.get('p_agg_sum',0):,} | {ratio('r_agg_sum','p_agg_sum')} |")
 print(f"| 16 | agg GROUP BY | {results.get('r_agg_groupby',0):,} | {results.get('p_agg_groupby',0):,} | {ratio('r_agg_groupby','p_agg_groupby')} |")
-print(f"| 17 | memory | {results.get('r_memory',0)} MB | — | — |")
+print()
+print("### Resource Usage\n")
+print("| Resource | RedDB | PostgreSQL |")
+print("|----------|-------|-----------|")
+print(f"| RAM (post-insert) | {results.get('r_ram_post_insert',0)} MB | {results.get('p_ram_post_insert','?')} |")
+print(f"| RAM (peak) | {results.get('r_ram_peak',0)} MB | {results.get('p_ram_peak','?')} |")
+print(f"| CPU (during queries) | {results.get('r_cpu_query',0)}% | {results.get('p_cpu','?')} |")
+print(f"| Disk (post-insert) | {results.get('r_disk_post_insert',0)} MB | {results.get('p_disk_post_insert',0)} MB |")
+print(f"| Disk (peak) | {results.get('r_disk_peak',0)} MB | {results.get('p_disk_peak',0)} MB |")
 print()
 print("*ops/sec — higher is better. **bold** = RedDB wins.*")
