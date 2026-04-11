@@ -100,6 +100,8 @@ service RedDb {
   rpc CreateDocument(JsonCreateRequest) returns (EntityReply);
   rpc CreateKv(JsonCreateRequest) returns (EntityReply);
   rpc BulkCreateRows(JsonBulkCreateRequest) returns (BulkEntityReply);
+  // Binary bulk insert — zero JSON, zero parse. Like PostgreSQL COPY FROM.
+  rpc BulkInsertBinary(BinaryBulkInsertRequest) returns (BulkInsertReply);
   rpc BulkCreateNodes(JsonBulkCreateRequest) returns (BulkEntityReply);
   rpc BulkCreateEdges(JsonBulkCreateRequest) returns (BulkEntityReply);
   rpc BulkCreateVectors(JsonBulkCreateRequest) returns (BulkEntityReply);
@@ -278,4 +280,33 @@ message PayloadReply {
 message OperationReply {
   bool ok = 1;
   string message = 2;
+}
+
+// Binary bulk insert — zero JSON overhead. Each BinaryRow has typed values
+// sent as protobuf native types (no string serialization/parsing).
+message BinaryBulkInsertRequest {
+  string collection = 1;
+  repeated string field_names = 2;  // column names (sent once for all rows)
+  repeated BinaryRow rows = 3;
+}
+
+message BinaryRow {
+  repeated BinaryValue values = 1;
+}
+
+message BinaryValue {
+  oneof kind {
+    string text_value = 1;
+    int64 int_value = 2;
+    double float_value = 3;
+    bool bool_value = 4;
+    bytes blob_value = 5;
+  }
+  // absence of any field = null
+}
+
+message BulkInsertReply {
+  bool ok = 1;
+  uint64 count = 2;
+  uint64 first_id = 3;
 }

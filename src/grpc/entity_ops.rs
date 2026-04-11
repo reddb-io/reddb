@@ -283,3 +283,77 @@ pub(crate) fn parse_json_payload(payload_json: &str) -> Result<JsonValue, Status
     json_from_str::<JsonValue>(payload_json)
         .map_err(|err| Status::invalid_argument(format!("invalid payload_json: {err}")))
 }
+
+/// Binary bulk insert — ZERO JSON. Converts protobuf typed values directly to RedDB Values.
+pub(crate) fn bulk_insert_binary(
+    runtime: &GrpcRuntime,
+    request: super::proto::BinaryBulkInsertRequest,
+) -> Result<super::proto::BulkInsertReply, Status> {
+    use crate::storage::schema::Value;
+    use crate::storage::unified::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
+
+    let collection = request.collection;
+    let field_names = &request.field_names;
+    let n = request.rows.len();
+
+    if n == 0 {
+        return Ok(super::proto::BulkInsertReply {
+            ok: true,
+            count: 0,
+            first_id: 0,
+        });
+    }
+
+    // Convert proto rows directly to entities — NO JSON at any point
+    let mut entities = Vec::with_capacity(n);
+    for row in &request.rows {
+        let mut named = std::collections::HashMap::with_capacity(field_names.len());
+        for (i, bval) in row.values.iter().enumerate() {
+            if let Some(field_name) = field_names.get(i) {
+                if field_name.is_empty() {
+                    continue;
+                }
+                let value = if let Some(ref kind) = bval.kind {
+                    match kind {
+                        super::proto::binary_value::Kind::TextValue(s) => Value::Text(s.clone()),
+                        super::proto::binary_value::Kind::IntValue(n) => Value::Integer(*n),
+                        super::proto::binary_value::Kind::FloatValue(f) => Value::Float(*f),
+                        super::proto::binary_value::Kind::BoolValue(b) => Value::Boolean(*b),
+                        super::proto::binary_value::Kind::BlobValue(bytes) => {
+                            Value::Blob(bytes.clone())
+                        }
+                    }
+                } else {
+                    Value::Null
+                };
+                named.insert(field_name.clone(), value);
+            }
+        }
+
+        entities.push(UnifiedEntity::new(
+            EntityId::new(0),
+            EntityKind::TableRow {
+                table: collection.clone(),
+                row_id: 0,
+            },
+            EntityData::Row(RowData {
+                columns: Vec::new(),
+                named: Some(named),
+            }),
+        ));
+    }
+
+    // Turbo bulk insert — single lock, no bloom/memtable
+    let store = runtime.runtime.db().store();
+    let ids = store
+        .bulk_insert(&collection, entities)
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+    let first_id = ids.first().map(|id| id.raw()).unwrap_or(0);
+
+    Ok(super::proto::BulkInsertReply {
+        ok: true,
+        count: ids.len() as u64,
+        first_id,
+    })
+}

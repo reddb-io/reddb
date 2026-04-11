@@ -2001,6 +2001,15 @@ async fn bulk_create_rows(
     Ok(Response::new(bulk_create_rows_fast(self, request)?))
 }
 
+async fn bulk_insert_binary(
+    &self,
+    request: Request<proto::BinaryBulkInsertRequest>,
+) -> Result<Response<proto::BulkInsertReply>, Status> {
+    self.authorize_write(request.metadata())?;
+    let request = request.into_inner();
+    Ok(Response::new(bulk_insert_binary(self, request)?))
+}
+
 async fn bulk_create_nodes(
     &self,
     request: Request<JsonBulkCreateRequest>,
