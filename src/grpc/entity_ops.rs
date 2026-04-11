@@ -180,6 +180,7 @@ pub(crate) fn bulk_create_rows_fast(
             EntityData::Row(RowData {
                 columns: Vec::new(),
                 named: Some(named),
+                schema: None,
             }),
         ));
     }
@@ -362,6 +363,7 @@ pub(crate) fn bulk_insert_binary(
             crate::storage::unified::EntityData::Row(crate::storage::unified::RowData {
                 columns: Vec::new(),
                 named: Some(named),
+                schema: None,
             }),
         ));
     }

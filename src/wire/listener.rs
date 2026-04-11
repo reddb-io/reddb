@@ -381,6 +381,7 @@ fn handle_bulk_insert(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
             EntityData::Row(crate::storage::unified::RowData {
                 columns: Vec::new(),
                 named: Some(named),
+                schema: None,
             }),
         ));
     }
@@ -507,6 +508,7 @@ fn handle_bulk_insert_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> 
             EntityData::Row(crate::storage::unified::RowData {
                 columns: Vec::new(),
                 named: Some(named),
+                schema: None,
             }),
         ));
     }

@@ -220,6 +220,7 @@ impl JsonlImporter {
             let row_data = RowData {
                 columns: Vec::new(),
                 named: Some(named),
+                schema: None,
             };
             UnifiedEntity::new(
                 entity_id,

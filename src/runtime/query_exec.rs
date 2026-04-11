@@ -89,16 +89,16 @@ fn write_entity_json_bytes(buf: &mut Vec<u8>, entity: &UnifiedEntity) {
         write_u64(buf, *row_id);
     }
 
-    // User fields
+    // User fields (handles both named HashMap and columnar schema)
     if let EntityData::Row(ref row) = entity.data {
-        if let Some(ref named) = row.named {
-            for (key, value) in named {
-                buf.push(b',');
-                write_json_bytes(buf, key.as_bytes());
-                buf.push(b':');
-                write_value_bytes(buf, value);
-            }
-        } else {
+        for (key, value) in row.iter_fields() {
+            buf.push(b',');
+            write_json_bytes(buf, key.as_bytes());
+            buf.push(b':');
+            write_value_bytes(buf, value);
+        }
+        if false {
+            // Dead code kept for compiler — positional fallback no longer needed
             for (i, value) in row.columns.iter().enumerate() {
                 buf.push(b',');
                 buf.push(b'"');
@@ -292,8 +292,8 @@ fn execute_indexed_scan_to_json(
             write_u64(&mut buf, *row_id);
         }
         if let EntityData::Row(ref row) = entity.data {
-            if let Some(ref named) = row.named {
-                for (key, value) in named {
+            {
+                for (key, value) in row.iter_fields() {
                     buf.push(b',');
                     write_json_bytes(&mut buf, key.as_bytes());
                     buf.push(b':');
@@ -457,8 +457,8 @@ fn execute_scan_with_candidates_to_json(
             write_u64(&mut buf, *row_id);
         }
         if let EntityData::Row(ref row) = entity.data {
-            if let Some(ref named) = row.named {
-                for (key, value) in named {
+            {
+                for (key, value) in row.iter_fields() {
                     buf.push(b',');
                     write_json_bytes(&mut buf, key.as_bytes());
                     buf.push(b':');
@@ -564,8 +564,8 @@ fn build_indexed_result_json(
             write_u64(&mut buf, *row_id);
         }
         if let EntityData::Row(ref row) = entity.data {
-            if let Some(ref named) = row.named {
-                for (key, value) in named {
+            {
+                for (key, value) in row.iter_fields() {
                     buf.push(b',');
                     write_json_bytes(&mut buf, key.as_bytes());
                     buf.push(b':');
@@ -672,13 +672,9 @@ fn execute_filtered_scan_to_json(
         // Fast pre-filter: direct HashMap lookup for equality condition
         if let Some((ref col, ref val)) = eq_prefilter {
             if let EntityData::Row(ref row) = entity.data {
-                if let Some(ref named) = row.named {
-                    match named.get(col.as_str()) {
-                        Some(v) if v == val => {}
-                        _ => return true,
-                    }
-                } else {
-                    return true;
+                match row.get_field(col.as_str()) {
+                    Some(v) if v == val => {}
+                    _ => return true,
                 }
             }
         }
@@ -704,29 +700,26 @@ fn execute_filtered_scan_to_json(
             write_u64(&mut buf, *row_id);
         }
         if let EntityData::Row(ref row) = entity.data {
-            if let Some(ref named) = row.named {
-                // Build field key cache on first entity (pre-encode JSON key prefixes)
-                if field_keys_cache.is_none() {
-                    let mut cache = Vec::with_capacity(named.len());
-                    for key in named.keys() {
-                        let mut encoded = Vec::with_capacity(key.len() + 4);
-                        encoded.push(b',');
-                        write_json_bytes(&mut encoded, key.as_bytes());
-                        encoded.push(b':');
-                        cache.push((key.clone(), encoded));
-                    }
-                    field_keys_cache = Some(cache);
+            // Build field key cache on first entity (pre-encode JSON key prefixes)
+            if field_keys_cache.is_none() {
+                let mut cache = Vec::new();
+                for (key, _) in row.iter_fields() {
+                    let mut encoded = Vec::with_capacity(key.len() + 4);
+                    encoded.push(b',');
+                    write_json_bytes(&mut encoded, key.as_bytes());
+                    encoded.push(b':');
+                    cache.push((key.to_string(), encoded));
                 }
+                field_keys_cache = Some(cache);
+            }
 
-                // Use pre-encoded keys (memcpy instead of per-char escape check)
-                if let Some(ref cache) = field_keys_cache {
-                    for (key, encoded_prefix) in cache {
-                        buf.extend_from_slice(encoded_prefix);
-                        if let Some(value) = named.get(key) {
-                            write_value_bytes(&mut buf, value);
-                        } else {
-                            buf.extend_from_slice(b"null");
-                        }
+            if let Some(ref cache) = field_keys_cache {
+                for (key, encoded_prefix) in cache {
+                    buf.extend_from_slice(encoded_prefix);
+                    if let Some(value) = row.get_field(key) {
+                        write_value_bytes(&mut buf, value);
+                    } else {
+                        buf.extend_from_slice(b"null");
                     }
                 }
             }
@@ -2361,12 +2354,10 @@ fn resolve_entity_field<'a>(
         _ => {}
     }
 
-    // User fields — accessed from row.named HashMap (zero-copy borrow)
+    // User fields — uses get_field() which handles both named HashMap and columnar schema
     let row = entity.data.as_row()?;
-    if let Some(named) = row.named.as_ref() {
-        if let Some(value) = named.get(column) {
-            return Some(Cow::Borrowed(value));
-        }
+    if let Some(value) = row.get_field(column) {
+        return Some(Cow::Borrowed(value));
     }
 
     // Positional column fallback (c0, c1, ...)

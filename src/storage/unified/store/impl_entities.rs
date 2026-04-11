@@ -73,6 +73,7 @@ impl UnifiedStore {
                         .into_iter()
                         .collect(),
                     ),
+                    schema: None,
                 }),
             );
             if self.insert_auto("red_config", entity).is_ok() {

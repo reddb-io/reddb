@@ -370,6 +370,7 @@ impl UnifiedStore {
                 EntityData::Row(RowData {
                     columns: Vec::new(),
                     named: Some(named),
+                    schema: None,
                 })
             }
             _ => return Err(format!("Unknown EntityData type: {}", data_type).into()),

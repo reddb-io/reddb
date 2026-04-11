@@ -97,6 +97,11 @@ pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<
         for (key, value) in named {
             record.set(&key, value);
         }
+    } else if let Some(ref schema) = row.schema {
+        // Columnar storage: use shared schema for field names
+        for (name, value) in schema.iter().zip(row.columns.into_iter()) {
+            record.set(name, value);
+        }
     } else {
         for (index, value) in row.columns.into_iter().enumerate() {
             record.set(&format!("c{index}"), value);

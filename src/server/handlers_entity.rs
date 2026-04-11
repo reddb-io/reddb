@@ -201,6 +201,7 @@ impl RedDBServer {
                 crate::storage::EntityData::Row(crate::storage::RowData {
                     columns: Vec::new(),
                     named: Some(named),
+                    schema: None,
                 }),
             ));
         }

@@ -223,6 +223,7 @@ impl ParquetReader {
                 let row_data = RowData {
                     columns: Vec::new(),
                     named: Some(named),
+                    schema: None,
                 };
 
                 let entity = UnifiedEntity::new(

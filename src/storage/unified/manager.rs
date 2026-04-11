@@ -104,6 +104,9 @@ pub struct SegmentManager {
     archived: RwLock<Vec<SegmentId>>,
     /// Entity to segment mapping (for fast lookups)
     entity_segment: RwLock<HashMap<EntityId, SegmentId>>,
+    /// Shared column schema: column_name → index in Vec<Value>.
+    /// Populated on first bulk_insert. Enables columnar storage (Vec instead of HashMap per row).
+    column_schema: RwLock<Option<Arc<Vec<String>>>>,
     /// Statistics
     stats: RwLock<ManagerStats>,
     /// Event listeners (simplified - would be channels in production)
@@ -127,9 +130,32 @@ impl SegmentManager {
             sealed: RwLock::new(Vec::new()),
             archived: RwLock::new(Vec::new()),
             entity_segment: RwLock::new(HashMap::new()),
+            column_schema: RwLock::new(None),
             stats: RwLock::new(ManagerStats::default()),
             events: RwLock::new(Vec::new()),
         }
+    }
+
+    /// Get or create the shared column schema from first row's named fields.
+    pub fn get_or_init_schema(
+        &self,
+        named: &HashMap<String, crate::storage::schema::Value>,
+    ) -> Arc<Vec<String>> {
+        {
+            let schema = self.column_schema.read().unwrap();
+            if let Some(ref s) = *schema {
+                return Arc::clone(s);
+            }
+        }
+        let cols: Vec<String> = named.keys().cloned().collect();
+        let arc = Arc::new(cols);
+        *self.column_schema.write().unwrap() = Some(Arc::clone(&arc));
+        arc
+    }
+
+    /// Get the column schema if it exists.
+    pub fn column_schema(&self) -> Option<Arc<Vec<String>>> {
+        self.column_schema.read().unwrap().clone()
     }
 
     /// Get collection name
@@ -228,6 +254,33 @@ impl SegmentManager {
         for entity in &mut entities {
             if entity.id.raw() == 0 {
                 entity.id = self.next_entity_id();
+            }
+        }
+
+        // Convert named HashMap → positional Vec (compact memory representation)
+        // The schema (column order) is shared across all rows in the collection.
+        if let Some(first_row) = entities.first() {
+            if let super::entity::EntityData::Row(ref row) = first_row.data {
+                if let Some(ref named) = row.named {
+                    let schema = self.get_or_init_schema(named);
+                    for entity in &mut entities {
+                        if let super::entity::EntityData::Row(ref mut row) = entity.data {
+                            if let Some(named) = row.named.take() {
+                                let mut cols = Vec::with_capacity(schema.len());
+                                for col_name in schema.iter() {
+                                    cols.push(
+                                        named
+                                            .get(col_name)
+                                            .cloned()
+                                            .unwrap_or(crate::storage::schema::Value::Null),
+                                    );
+                                }
+                                row.columns = cols;
+                                row.schema = Some(Arc::clone(&schema));
+                            }
+                        }
+                    }
+                }
             }
         }
 

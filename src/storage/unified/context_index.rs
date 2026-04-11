@@ -619,6 +619,7 @@ mod tests {
             EntityData::Row(RowData {
                 columns: Vec::new(),
                 named: Some(named),
+                schema: None,
             }),
         )
     }
