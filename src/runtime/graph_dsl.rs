@@ -19,10 +19,10 @@ pub(super) fn materialize_graph_with_projection(
     let mut allowed_nodes = HashSet::new();
 
     for (_, entity) in &entities {
-        if let EntityKind::GraphNode { label, node_type } = &entity.kind {
+        if let EntityKind::GraphNode(ref node) = &entity.kind {
             if !matches_graph_node_projection(
-                label,
-                node_type,
+                &node.label,
+                &node.node_type,
                 node_label_filters.as_ref(),
                 node_type_filters.as_ref(),
             ) {
@@ -31,8 +31,8 @@ pub(super) fn materialize_graph_with_projection(
             graph
                 .add_node(
                     &entity.id.raw().to_string(),
-                    label,
-                    graph_node_type(node_type),
+                    &node.label,
+                    graph_node_type(&node.node_type),
                 )
                 .map_err(|err| RedDBError::Query(err.to_string()))?;
             allowed_nodes.insert(entity.id.raw().to_string());
@@ -40,26 +40,25 @@ pub(super) fn materialize_graph_with_projection(
     }
 
     for (_, entity) in &entities {
-        if let EntityKind::GraphEdge {
-            label,
-            from_node,
-            to_node,
-            weight,
-        } = &entity.kind
-        {
-            if !allowed_nodes.contains(from_node) || !allowed_nodes.contains(to_node) {
+        if let EntityKind::GraphEdge(ref edge) = &entity.kind {
+            if !allowed_nodes.contains(&edge.from_node) || !allowed_nodes.contains(&edge.to_node) {
                 continue;
             }
-            if !matches_graph_edge_projection(label, edge_label_filters.as_ref()) {
+            if !matches_graph_edge_projection(&edge.label, edge_label_filters.as_ref()) {
                 continue;
             }
             let resolved_weight = match &entity.data {
-                EntityData::Edge(edge) => edge.weight,
-                _ => *weight as f32 / 1000.0,
+                EntityData::Edge(e) => e.weight,
+                _ => edge.weight as f32 / 1000.0,
             };
 
             graph
-                .add_edge(from_node, to_node, graph_edge_type(label), resolved_weight)
+                .add_edge(
+                    &edge.from_node,
+                    &edge.to_node,
+                    graph_edge_type(&edge.label),
+                    resolved_weight,
+                )
                 .map_err(|err| RedDBError::Query(err.to_string()))?;
         }
     }
@@ -85,8 +84,8 @@ pub(super) fn materialize_graph_lazy(
             continue;
         }
         if let Some((_, entity)) = store.get_any(EntityId::new(id)) {
-            if let EntityKind::GraphNode { label, node_type } = &entity.kind {
-                let _ = graph.add_node(&id_str, label, graph_node_type(node_type));
+            if let EntityKind::GraphNode(ref node) = &entity.kind {
+                let _ = graph.add_node(&id_str, &node.label, graph_node_type(&node.node_type));
                 visited_nodes.insert(id_str.clone());
                 queue.push_back((id_str, 0));
             }
@@ -106,9 +105,7 @@ pub(super) fn materialize_graph_lazy(
                     s.spawn(move || {
                         store_ref
                             .get_collection(col)
-                            .map(|m| {
-                                m.query_all(|e| matches!(e.kind, EntityKind::GraphEdge { .. }))
-                            })
+                            .map(|m| m.query_all(|e| matches!(e.kind, EntityKind::GraphEdge(_))))
                             .unwrap_or_default()
                     })
                 })
@@ -124,7 +121,7 @@ pub(super) fn materialize_graph_lazy(
             .flat_map(|col| {
                 store
                     .get_collection(col)
-                    .map(|m| m.query_all(|e| matches!(e.kind, EntityKind::GraphEdge { .. })))
+                    .map(|m| m.query_all(|e| matches!(e.kind, EntityKind::GraphEdge(_))))
                     .unwrap_or_default()
             })
             .collect()
@@ -133,26 +130,20 @@ pub(super) fn materialize_graph_lazy(
     // Build adjacency from edges
     let mut adjacency: HashMap<String, Vec<(String, String, String, f32)>> = HashMap::new();
     for entity in &all_edges {
-        if let EntityKind::GraphEdge {
-            label,
-            from_node,
-            to_node,
-            weight,
-        } = &entity.kind
-        {
+        if let EntityKind::GraphEdge(ref edge) = &entity.kind {
             let w = match &entity.data {
                 EntityData::Edge(e) => e.weight,
-                _ => *weight as f32 / 1000.0,
+                _ => edge.weight as f32 / 1000.0,
             };
-            adjacency.entry(from_node.clone()).or_default().push((
-                to_node.clone(),
-                label.clone(),
+            adjacency.entry(edge.from_node.clone()).or_default().push((
+                edge.to_node.clone(),
+                edge.label.clone(),
                 entity.id.raw().to_string(),
                 w,
             ));
-            adjacency.entry(to_node.clone()).or_default().push((
-                from_node.clone(),
-                label.clone(),
+            adjacency.entry(edge.to_node.clone()).or_default().push((
+                edge.from_node.clone(),
+                edge.label.clone(),
                 entity.id.raw().to_string(),
                 w,
             ));
@@ -169,15 +160,11 @@ pub(super) fn materialize_graph_lazy(
                 if !visited_nodes.contains(neighbor_id) {
                     if let Ok(parsed) = neighbor_id.parse::<u64>() {
                         if let Some((_, entity)) = store.get_any(EntityId::new(parsed)) {
-                            if let EntityKind::GraphNode {
-                                label: n_label,
-                                node_type,
-                            } = &entity.kind
-                            {
+                            if let EntityKind::GraphNode(ref node) = &entity.kind {
                                 let _ = graph.add_node(
                                     neighbor_id,
-                                    n_label,
-                                    graph_node_type(node_type),
+                                    &node.label,
+                                    graph_node_type(&node.node_type),
                                 );
                                 visited_nodes.insert(neighbor_id.clone());
                                 queue.push_back((neighbor_id.clone(), depth + 1));
@@ -202,8 +189,7 @@ pub(super) fn materialize_graph_node_properties(
     let mut node_properties = HashMap::new();
 
     for (_, entity) in store.query_all(|_| true) {
-        if let (EntityKind::GraphNode { .. }, EntityData::Node(node)) = (&entity.kind, &entity.data)
-        {
+        if let (EntityKind::GraphNode(_), EntityData::Node(node)) = (&entity.kind, &entity.data) {
             node_properties.insert(entity.id.raw().to_string(), node.properties.clone());
         }
     }

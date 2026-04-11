@@ -316,8 +316,8 @@ pub(crate) fn cross_modal_entity_reference_tokens(entity: &UnifiedEntity) -> Vec
         }
     }
 
-    if let EntityKind::GraphNode { label, .. } = &entity.kind {
-        let label = label.trim();
+    if let EntityKind::GraphNode(ref node) = &entity.kind {
+        let label = node.label.trim();
         let normalized = cross_modal_normalize_token(label);
         if !normalized.is_empty() && seen.insert(normalized) {
             tokens.push(label.to_string());
@@ -354,14 +354,12 @@ pub(crate) fn cross_modal_entity_reference_tokens(entity: &UnifiedEntity) -> Vec
             }
         }
         EntityData::Edge(edge) => {
-            if let EntityKind::GraphEdge {
-                label,
-                from_node,
-                to_node,
-                ..
-            } = &entity.kind
-            {
-                for token in [label.trim(), from_node.trim(), to_node.trim()] {
+            if let EntityKind::GraphEdge(ref edge) = &entity.kind {
+                for token in [
+                    edge.label.trim(),
+                    edge.from_node.trim(),
+                    edge.to_node.trim(),
+                ] {
                     let normalized = cross_modal_normalize_token(token);
                     if !normalized.is_empty() && seen.insert(normalized) {
                         tokens.push(token.to_string());
@@ -421,7 +419,7 @@ pub(crate) fn cross_modal_value_matches_entity(
 }
 
 pub(crate) fn cross_modal_graph_node_matches_ref(entity: &UnifiedEntity, node_ref: &str) -> bool {
-    if !matches!(entity.kind, EntityKind::GraphNode { .. }) {
+    if !matches!(entity.kind, EntityKind::GraphNode(_)) {
         return false;
     }
 
@@ -467,7 +465,7 @@ pub(crate) fn cross_modal_lookup_graph_nodes_by_ref(
         };
 
         for entity in
-            manager.query_all(|candidate| matches!(&candidate.kind, EntityKind::GraphNode { .. }))
+            manager.query_all(|candidate| matches!(&candidate.kind, EntityKind::GraphNode(_)))
         {
             if cross_modal_graph_node_matches_ref(&entity, node_ref) && seen.insert(entity.id) {
                 nodes.push(entity);
@@ -496,44 +494,38 @@ pub(crate) fn cross_modal_graph_neighbors(
         };
 
         for entity in
-            manager.query_all(|candidate| matches!(&candidate.kind, EntityKind::GraphEdge { .. }))
+            manager.query_all(|candidate| matches!(&candidate.kind, EntityKind::GraphEdge(_)))
         {
-            let EntityKind::GraphEdge {
-                label,
-                from_node,
-                to_node,
-                ..
-            } = &entity.kind
-            else {
+            let EntityKind::GraphEdge(ref edge) = &entity.kind else {
                 continue;
             };
 
             if edge_label.is_some_and(|requested| {
-                cross_modal_normalize_token(requested) != cross_modal_normalize_token(label)
+                cross_modal_normalize_token(requested) != cross_modal_normalize_token(&edge.label)
             }) {
                 continue;
             }
 
             let neighbor_ref = match direction {
                 TraversalDirection::Out
-                    if cross_modal_graph_node_matches_ref(&current_node, from_node) =>
+                    if cross_modal_graph_node_matches_ref(&current_node, &edge.from_node) =>
                 {
-                    Some(to_node.as_str())
+                    Some(edge.to_node.as_str())
                 }
                 TraversalDirection::In
-                    if cross_modal_graph_node_matches_ref(&current_node, to_node) =>
+                    if cross_modal_graph_node_matches_ref(&current_node, &edge.to_node) =>
                 {
-                    Some(from_node.as_str())
+                    Some(edge.from_node.as_str())
                 }
                 TraversalDirection::Both
-                    if cross_modal_graph_node_matches_ref(&current_node, from_node) =>
+                    if cross_modal_graph_node_matches_ref(&current_node, &edge.from_node) =>
                 {
-                    Some(to_node.as_str())
+                    Some(edge.to_node.as_str())
                 }
                 TraversalDirection::Both
-                    if cross_modal_graph_node_matches_ref(&current_node, to_node) =>
+                    if cross_modal_graph_node_matches_ref(&current_node, &edge.to_node) =>
                 {
-                    Some(from_node.as_str())
+                    Some(edge.from_node.as_str())
                 }
                 _ => None,
             };

@@ -133,8 +133,8 @@ impl Preprocessor for ContentHasher {
     fn process(&self, entity: &mut UnifiedEntity) {
         // Extract label from EntityKind for nodes
         let kind_label = match &entity.kind {
-            EntityKind::GraphNode { label, .. } => Some(label.as_str()),
-            EntityKind::GraphEdge { label, .. } => Some(label.as_str()),
+            EntityKind::GraphNode(ref node) => Some(node.label.as_str()),
+            EntityKind::GraphEdge(ref edge) => Some(edge.label.as_str()),
             _ => None,
         };
 
@@ -201,8 +201,8 @@ impl Preprocessor for KeywordExtractor {
     fn process(&self, entity: &mut UnifiedEntity) {
         // Extract label from EntityKind for nodes
         let kind_label = match &entity.kind {
-            EntityKind::GraphNode { label, .. } => Some(label.clone()),
-            EntityKind::GraphEdge { label, .. } => Some(label.clone()),
+            EntityKind::GraphNode(ref node) => Some(node.label.clone()),
+            EntityKind::GraphEdge(ref edge) => Some(edge.label.clone()),
             _ => None,
         };
 

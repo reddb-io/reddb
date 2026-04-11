@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::super::{
-    CrossRef, EdgeData, EntityData, EntityId, EntityKind, Metadata, MetadataValue, NodeData,
-    RefType, RowData, UnifiedEntity, UnifiedStore, VectorData,
+    CrossRef, EdgeData, EntityData, EntityId, EntityKind, GraphEdgeKind, GraphNodeKind, Metadata,
+    MetadataValue, NodeData, RefType, RowData, UnifiedEntity, UnifiedStore, VectorData,
 };
 use super::error::DevXError;
 use super::refs::{NodeRef, TableRef, VectorRef};
@@ -135,10 +135,10 @@ impl NodeBuilder {
     /// Save the node and return its ID
     pub fn save(self) -> Result<EntityId, DevXError> {
         // Create the node entity
-        let kind = EntityKind::GraphNode {
+        let kind = EntityKind::GraphNode(Box::new(GraphNodeKind {
             label: self.label,
             node_type: self.node_type,
-        };
+        }));
 
         let data = EntityData::Node(NodeData::with_properties(self.properties));
 
@@ -171,12 +171,12 @@ impl NodeBuilder {
 
         // Create edges for links
         for (target, edge_label, weight) in self.links {
-            let edge_kind = EntityKind::GraphEdge {
+            let edge_kind = EntityKind::GraphEdge(Box::new(GraphEdgeKind {
                 label: edge_label,
                 from_node: id.0.to_string(),
                 to_node: target.0.to_string(),
                 weight: (weight * 1000.0) as u32,
-            };
+            }));
 
             let edge_data = EntityData::Edge(EdgeData::new(weight));
             let edge_id = self.store.next_entity_id();
@@ -286,12 +286,12 @@ impl EdgeBuilder {
             .to_node
             .ok_or_else(|| DevXError::Validation("Edge requires 'to' node".into()))?;
 
-        let kind = EntityKind::GraphEdge {
+        let kind = EntityKind::GraphEdge(Box::new(GraphEdgeKind {
             label: self.label,
             from_node: from.0.to_string(),
             to_node: to.0.to_string(),
             weight: (self.weight * 1000.0) as u32,
-        };
+        }));
 
         let mut edge_data = EdgeData::new(self.weight);
         edge_data.properties = self.properties;

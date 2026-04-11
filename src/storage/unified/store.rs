@@ -27,8 +27,8 @@ use std::sync::{Arc, RwLock};
 
 use super::context_index::ContextIndex;
 use super::entity::{
-    CrossRef, EdgeData, EmbeddingSlot, EntityData, EntityId, EntityKind, NodeData, RefType,
-    RowData, UnifiedEntity, VectorData,
+    CrossRef, EdgeData, EmbeddingSlot, EntityData, EntityId, EntityKind, GraphEdgeKind,
+    GraphNodeKind, NodeData, RefType, RowData, TimeSeriesPointKind, UnifiedEntity, VectorData,
 };
 use super::manager::{ManagerConfig, ManagerStats, SegmentManager};
 use super::metadata::{Metadata, MetadataFilter, MetadataValue};

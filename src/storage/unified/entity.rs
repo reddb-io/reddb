@@ -40,23 +40,38 @@ impl From<u64> for EntityId {
 /// The kind of entity (what storage type it belongs to)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum EntityKind {
-    /// A row in a structured table
+    /// A row in a structured table (hot path — kept inline for cache performance)
     TableRow { table: Arc<str>, row_id: u64 },
-    /// A node in the graph
-    GraphNode { label: String, node_type: String },
-    /// An edge in the graph
-    GraphEdge {
-        label: String,
-        from_node: String,
-        to_node: String,
-        weight: u32, // Fixed-point weight (x1000)
-    },
+    /// A node in the graph (boxed — saves ~56 bytes per entity for table rows)
+    GraphNode(Box<GraphNodeKind>),
+    /// An edge in the graph (boxed)
+    GraphEdge(Box<GraphEdgeKind>),
     /// A vector in a collection
     Vector { collection: String },
-    /// A time-series data point
-    TimeSeriesPoint { series: String, metric: String },
+    /// A time-series data point (boxed)
+    TimeSeriesPoint(Box<TimeSeriesPointKind>),
     /// A queue message
     QueueMessage { queue: String, position: u64 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GraphNodeKind {
+    pub label: String,
+    pub node_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GraphEdgeKind {
+    pub label: String,
+    pub from_node: String,
+    pub to_node: String,
+    pub weight: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TimeSeriesPointKind {
+    pub series: String,
+    pub metric: String,
 }
 
 impl EntityKind {
@@ -64,10 +79,10 @@ impl EntityKind {
     pub fn storage_type(&self) -> &'static str {
         match self {
             Self::TableRow { .. } => "table",
-            Self::GraphNode { .. } => "graph_node",
-            Self::GraphEdge { .. } => "graph_edge",
+            Self::GraphNode(_) => "graph_node",
+            Self::GraphEdge(_) => "graph_edge",
             Self::Vector { .. } => "vector",
-            Self::TimeSeriesPoint { .. } => "timeseries",
+            Self::TimeSeriesPoint(_) => "timeseries",
             Self::QueueMessage { .. } => "queue",
         }
     }
@@ -76,10 +91,10 @@ impl EntityKind {
     pub fn collection(&self) -> &str {
         match self {
             Self::TableRow { table, .. } => table,
-            Self::GraphNode { label, .. } => label,
-            Self::GraphEdge { label, .. } => label,
+            Self::GraphNode(n) => &n.label,
+            Self::GraphEdge(e) => &e.label,
             Self::Vector { collection } => collection,
-            Self::TimeSeriesPoint { series, .. } => series,
+            Self::TimeSeriesPoint(ts) => &ts.series,
             Self::QueueMessage { queue, .. } => queue,
         }
     }
@@ -586,10 +601,10 @@ impl UnifiedEntity {
     ) -> Self {
         Self::new(
             id,
-            EntityKind::GraphNode {
+            EntityKind::GraphNode(Box::new(GraphNodeKind {
                 label: label.into(),
                 node_type: node_type.into(),
-            },
+            })),
             EntityData::Node(NodeData::with_properties(properties)),
         )
     }
@@ -605,12 +620,12 @@ impl UnifiedEntity {
     ) -> Self {
         Self::new(
             id,
-            EntityKind::GraphEdge {
+            EntityKind::GraphEdge(Box::new(GraphEdgeKind {
                 label: label.into(),
                 from_node: from.into(),
                 to_node: to.into(),
                 weight: (weight * 1000.0) as u32,
-            },
+            })),
             EntityData::Edge(EdgeData::with_properties(weight, properties)),
         )
     }

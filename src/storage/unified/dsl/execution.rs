@@ -201,8 +201,8 @@ pub fn execute_graph_query(
                 if let Some(manager) = store.get_collection(&col) {
                     for entity in manager.query_all(|_| true) {
                         scanned += 1;
-                        if let EntityKind::GraphNode { label: l, .. } = &entity.kind {
-                            if l == label {
+                        if let EntityKind::GraphNode(ref node) = &entity.kind {
+                            if &node.label == label {
                                 found.push(entity);
                             }
                         }
@@ -218,8 +218,8 @@ pub fn execute_graph_query(
                     for entity in manager.query_all(|_| true) {
                         scanned += 1;
                         let matches_pattern = match &entity.kind {
-                            EntityKind::GraphNode { label, .. } => {
-                                pattern.labels.is_empty() || pattern.labels.contains(label)
+                            EntityKind::GraphNode(ref node) => {
+                                pattern.labels.is_empty() || pattern.labels.contains(&node.label)
                             }
                             _ => false,
                         };
@@ -508,15 +508,9 @@ pub fn execute_hybrid_query(
                 let entities = manager.query_all(|_| true);
                 for entity in entities {
                     let matches = match (&entity.kind, &pattern.node_label, &pattern.node_type) {
-                        (
-                            EntityKind::GraphNode {
-                                label, node_type, ..
-                            },
-                            label_filter,
-                            type_filter,
-                        ) => {
-                            label_filter.as_ref().is_none_or(|l| label == l)
-                                && type_filter.as_ref().is_none_or(|t| node_type == t)
+                        (EntityKind::GraphNode(ref node), label_filter, type_filter) => {
+                            label_filter.as_ref().is_none_or(|l| &node.label == l)
+                                && type_filter.as_ref().is_none_or(|t| &node.node_type == t)
                         }
                         _ => false,
                     };
@@ -700,9 +694,7 @@ pub fn execute_three_way_join(
 
                             let frontier_is_graph_node = store
                                 .get_any(frontier_id)
-                                .map(|(_, entity)| {
-                                    matches!(entity.kind, EntityKind::GraphNode { .. })
-                                })
+                                .map(|(_, entity)| matches!(entity.kind, EntityKind::GraphNode(_)))
                                 .unwrap_or(false);
 
                             if frontier_is_graph_node {

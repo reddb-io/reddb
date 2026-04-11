@@ -375,9 +375,9 @@ fn infer_model(entities: &[UnifiedEntity]) -> CollectionModel {
     for entity in entities {
         match &entity.kind {
             EntityKind::TableRow { .. } => has_table = true,
-            EntityKind::GraphNode { .. } | EntityKind::GraphEdge { .. } => has_graph = true,
+            EntityKind::GraphNode(_) | EntityKind::GraphEdge(_) => has_graph = true,
             EntityKind::Vector { .. } => has_vector = true,
-            EntityKind::TimeSeriesPoint { .. } | EntityKind::QueueMessage { .. } => {}
+            EntityKind::TimeSeriesPoint(_) | EntityKind::QueueMessage { .. } => {}
         }
     }
 

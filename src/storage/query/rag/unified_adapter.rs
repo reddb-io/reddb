@@ -443,13 +443,14 @@ impl UnifiedStoreAdapter {
             let entities = manager.query_all(|_| true);
             for entity in entities {
                 let is_match = match (&entity.kind, &pattern.node_pattern) {
-                    (EntityKind::GraphNode { label, node_type }, Some(pat)) => {
-                        let label_match = pat.label.as_ref().is_none_or(|l| label == l);
-                        let type_match = pat.node_type.as_ref().is_none_or(|t| node_type == t);
+                    (EntityKind::GraphNode(ref node), Some(pat)) => {
+                        let label_match = pat.label.as_ref().is_none_or(|l| &node.label == l);
+                        let type_match =
+                            pat.node_type.as_ref().is_none_or(|t| &node.node_type == t);
                         label_match && type_match
                     }
-                    (EntityKind::GraphEdge { label, .. }, Some(pat)) => {
-                        pat.label.as_ref() == Some(label)
+                    (EntityKind::GraphEdge(ref edge), Some(pat)) => {
+                        pat.label.as_ref() == Some(&edge.label)
                     }
                     (_, None) => true,
                     _ => false,
@@ -710,10 +711,10 @@ fn entity_to_chunk(entity: &UnifiedEntity, collection: &str, score: f32) -> Cont
             ChunkSource::Table(table.to_string()),
             Some(super::EntityType::Unknown), // Generic table row
         ),
-        EntityKind::GraphNode { node_type, .. } => (
+        EntityKind::GraphNode(ref node) => (
             ChunkSource::Graph,
             // Try to map node_type to EntityType
-            Some(match node_type.to_lowercase().as_str() {
+            Some(match node.node_type.to_lowercase().as_str() {
                 "host" => super::EntityType::Host,
                 "service" => super::EntityType::Service,
                 "port" => super::EntityType::Port,
@@ -728,7 +729,7 @@ fn entity_to_chunk(entity: &UnifiedEntity, collection: &str, score: f32) -> Cont
                 _ => super::EntityType::Unknown,
             }),
         ),
-        EntityKind::GraphEdge { .. } => (
+        EntityKind::GraphEdge(_) => (
             ChunkSource::Graph,
             Some(super::EntityType::Unknown), // Edges don't have a direct type mapping
         ),
@@ -736,8 +737,8 @@ fn entity_to_chunk(entity: &UnifiedEntity, collection: &str, score: f32) -> Cont
             ChunkSource::Vector(col.clone()),
             Some(super::EntityType::Unknown), // Vectors don't have a direct type mapping
         ),
-        EntityKind::TimeSeriesPoint { series, .. } => (
-            ChunkSource::Table(series.clone()),
+        EntityKind::TimeSeriesPoint(ref ts) => (
+            ChunkSource::Table(ts.series.clone()),
             Some(super::EntityType::Unknown),
         ),
         EntityKind::QueueMessage { queue, .. } => (

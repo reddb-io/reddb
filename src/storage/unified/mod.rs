@@ -90,8 +90,9 @@ pub use devx::{
     VectorRef,
 };
 pub use entity::{
-    CrossRef, EdgeData, EmbeddingSlot, EntityData, EntityId, EntityKind, NodeData, RefType,
-    RowData, SparseVector, UnifiedEntity, VectorData,
+    CrossRef, EdgeData, EmbeddingSlot, EntityData, EntityId, EntityKind, GraphEdgeKind,
+    GraphNodeKind, NodeData, RefType, RowData, SparseVector, TimeSeriesPointKind, UnifiedEntity,
+    VectorData,
 };
 pub use hash_index::{
     HashIndex, HashIndexConfig, HashIndexError, HashIndexManager, HashIndexStats,

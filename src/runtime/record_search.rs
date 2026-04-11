@@ -171,12 +171,12 @@ pub(super) fn runtime_any_record_from_entity(entity: UnifiedEntity) -> Option<Un
             }
             (entity_type, capabilities, record)
         }
-        (EntityKind::GraphNode { label, node_type }, EntityData::Node(node)) => {
+        (EntityKind::GraphNode(node), EntityData::Node(node_data)) => {
             let mut record = UnifiedRecord::new();
             record.set("id", Value::UnsignedInteger(entity_id));
-            record.set("label", Value::Text(label));
-            record.set("node_type", Value::Text(node_type));
-            for (key, value) in node.properties {
+            record.set("label", Value::Text(node.label));
+            record.set("node_type", Value::Text(node.node_type));
+            for (key, value) in node_data.properties {
                 record.set(&key, value);
             }
             (
@@ -185,19 +185,11 @@ pub(super) fn runtime_any_record_from_entity(entity: UnifiedEntity) -> Option<Un
                 record,
             )
         }
-        (
-            EntityKind::GraphEdge {
-                label,
-                from_node,
-                to_node,
-                ..
-            },
-            EntityData::Edge(edge),
-        ) => {
+        (EntityKind::GraphEdge(edge_kind), EntityData::Edge(edge)) => {
             let mut record = UnifiedRecord::new();
-            record.set("label", Value::Text(label));
-            record.set("from", Value::NodeRef(from_node));
-            record.set("to", Value::NodeRef(to_node));
+            record.set("label", Value::Text(edge_kind.label));
+            record.set("from", Value::NodeRef(edge_kind.from_node));
+            record.set("to", Value::NodeRef(edge_kind.to_node));
             record.set("weight", Value::Float(edge.weight as f64));
             for (key, value) in edge.properties {
                 record.set(&key, value);
@@ -400,11 +392,11 @@ pub(super) fn runtime_entity_type_and_capabilities(
         (EntityKind::TableRow { .. }, EntityData::Row(row)) => {
             (runtime_row_entity_type(row), runtime_row_capabilities(row))
         }
-        (EntityKind::GraphNode { .. }, EntityData::Node(_)) => (
+        (EntityKind::GraphNode(_), EntityData::Node(_)) => (
             "graph_node",
             runtime_record_capability_list(["graph", "graph_node"]),
         ),
-        (EntityKind::GraphEdge { .. }, EntityData::Edge(_)) => (
+        (EntityKind::GraphEdge(_), EntityData::Edge(_)) => (
             "graph_edge",
             runtime_record_capability_list(["graph", "graph_edge"]),
         ),

@@ -269,7 +269,7 @@ impl UnifiedStore {
                 let node_type_len = Self::read_varu32_safe(buf, pos)?;
                 let node_type = String::from_utf8(buf[*pos..*pos + node_type_len].to_vec())?;
                 *pos += node_type_len;
-                EntityKind::GraphNode { label, node_type }
+                EntityKind::GraphNode(Box::new(GraphNodeKind { label, node_type }))
             }
             2 => {
                 // GraphEdge
@@ -285,12 +285,12 @@ impl UnifiedStore {
                 let weight =
                     u32::from_le_bytes([buf[*pos], buf[*pos + 1], buf[*pos + 2], buf[*pos + 3]]);
                 *pos += 4;
-                EntityKind::GraphEdge {
+                EntityKind::GraphEdge(Box::new(GraphEdgeKind {
                     label,
                     from_node,
                     to_node,
                     weight,
-                }
+                }))
             }
             3 => {
                 // Vector
@@ -482,39 +482,34 @@ impl UnifiedStore {
                 buf.extend_from_slice(table.as_bytes());
                 write_varu64(buf, *row_id);
             }
-            EntityKind::GraphNode { label, node_type } => {
+            EntityKind::GraphNode(ref node) => {
                 buf.push(1);
-                write_varu32(buf, label.len() as u32);
-                buf.extend_from_slice(label.as_bytes());
-                write_varu32(buf, node_type.len() as u32);
-                buf.extend_from_slice(node_type.as_bytes());
+                write_varu32(buf, node.label.len() as u32);
+                buf.extend_from_slice(node.label.as_bytes());
+                write_varu32(buf, node.node_type.len() as u32);
+                buf.extend_from_slice(node.node_type.as_bytes());
             }
-            EntityKind::GraphEdge {
-                label,
-                from_node,
-                to_node,
-                weight,
-            } => {
+            EntityKind::GraphEdge(ref edge) => {
                 buf.push(2);
-                write_varu32(buf, label.len() as u32);
-                buf.extend_from_slice(label.as_bytes());
-                write_varu32(buf, from_node.len() as u32);
-                buf.extend_from_slice(from_node.as_bytes());
-                write_varu32(buf, to_node.len() as u32);
-                buf.extend_from_slice(to_node.as_bytes());
-                buf.extend_from_slice(&weight.to_le_bytes());
+                write_varu32(buf, edge.label.len() as u32);
+                buf.extend_from_slice(edge.label.as_bytes());
+                write_varu32(buf, edge.from_node.len() as u32);
+                buf.extend_from_slice(edge.from_node.as_bytes());
+                write_varu32(buf, edge.to_node.len() as u32);
+                buf.extend_from_slice(edge.to_node.as_bytes());
+                buf.extend_from_slice(&edge.weight.to_le_bytes());
             }
             EntityKind::Vector { collection } => {
                 buf.push(3);
                 write_varu32(buf, collection.len() as u32);
                 buf.extend_from_slice(collection.as_bytes());
             }
-            EntityKind::TimeSeriesPoint { series, metric } => {
+            EntityKind::TimeSeriesPoint(ref ts) => {
                 buf.push(4);
-                write_varu32(buf, series.len() as u32);
-                buf.extend_from_slice(series.as_bytes());
-                write_varu32(buf, metric.len() as u32);
-                buf.extend_from_slice(metric.as_bytes());
+                write_varu32(buf, ts.series.len() as u32);
+                buf.extend_from_slice(ts.series.as_bytes());
+                write_varu32(buf, ts.metric.len() as u32);
+                buf.extend_from_slice(ts.metric.as_bytes());
             }
             EntityKind::QueueMessage { queue, position } => {
                 buf.push(5);

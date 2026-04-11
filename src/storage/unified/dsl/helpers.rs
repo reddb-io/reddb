@@ -137,12 +137,12 @@ pub fn extract_searchable_text(entity: &UnifiedEntity) -> String {
 
     // Add kind info
     match &entity.kind {
-        EntityKind::GraphNode { label, node_type } => {
-            parts.push(label.clone());
-            parts.push(node_type.clone());
+        EntityKind::GraphNode(ref node) => {
+            parts.push(node.label.clone());
+            parts.push(node.node_type.clone());
         }
-        EntityKind::GraphEdge { label, .. } => {
-            parts.push(label.clone());
+        EntityKind::GraphEdge(ref edge) => {
+            parts.push(edge.label.clone());
         }
         EntityKind::TableRow { table, .. } => {
             parts.push(table.to_string());
@@ -150,9 +150,9 @@ pub fn extract_searchable_text(entity: &UnifiedEntity) -> String {
         EntityKind::Vector { collection } => {
             parts.push(collection.clone());
         }
-        EntityKind::TimeSeriesPoint { series, metric } => {
-            parts.push(series.clone());
-            parts.push(metric.clone());
+        EntityKind::TimeSeriesPoint(ref ts) => {
+            parts.push(ts.series.clone());
+            parts.push(ts.metric.clone());
         }
         EntityKind::QueueMessage { queue, .. } => {
             parts.push(queue.clone());

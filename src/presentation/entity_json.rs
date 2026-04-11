@@ -284,8 +284,8 @@ fn entity_type(entity: &UnifiedEntity) -> &'static str {
     match (&entity.kind, &entity.data) {
         (EntityKind::TableRow { .. }, EntityData::Row(row)) if row_is_kv(row) => "kv",
         (EntityKind::TableRow { .. }, EntityData::Row(_)) => "table",
-        (EntityKind::GraphNode { .. }, EntityData::Node(_)) => "graph_node",
-        (EntityKind::GraphEdge { .. }, EntityData::Edge(_)) => "graph_edge",
+        (EntityKind::GraphNode(_), EntityData::Node(_)) => "graph_node",
+        (EntityKind::GraphEdge(_), EntityData::Edge(_)) => "graph_edge",
         (EntityKind::Vector { .. }, EntityData::Vector(_)) => "vector",
         _ => "unknown",
     }
@@ -309,10 +309,10 @@ fn entity_capabilities(entity: &UnifiedEntity) -> Vec<String> {
             }
             values
         }
-        (EntityKind::GraphNode { .. }, EntityData::Node(_)) => {
+        (EntityKind::GraphNode(_), EntityData::Node(_)) => {
             BTreeSet::from(["graph".to_string(), "graph_node".to_string()])
         }
-        (EntityKind::GraphEdge { .. }, EntityData::Edge(_)) => {
+        (EntityKind::GraphEdge(_), EntityData::Edge(_)) => {
             BTreeSet::from(["graph".to_string(), "graph_edge".to_string()])
         }
         (EntityKind::Vector { .. }, EntityData::Vector(_)) => BTreeSet::from([
@@ -350,26 +350,24 @@ fn entity_kind_json(kind: &EntityKind) -> JsonValue {
             object.insert("table".to_string(), JsonValue::String(table.to_string()));
             object.insert("row_id".to_string(), JsonValue::Number(*row_id as f64));
         }
-        EntityKind::GraphNode { label, node_type } => {
-            object.insert("label".to_string(), JsonValue::String(label.clone()));
+        EntityKind::GraphNode(ref node) => {
+            object.insert("label".to_string(), JsonValue::String(node.label.clone()));
             object.insert(
                 "node_type".to_string(),
-                JsonValue::String(node_type.clone()),
+                JsonValue::String(node.node_type.clone()),
             );
         }
-        EntityKind::GraphEdge {
-            label,
-            from_node,
-            to_node,
-            weight,
-        } => {
-            object.insert("label".to_string(), JsonValue::String(label.clone()));
+        EntityKind::GraphEdge(ref edge) => {
+            object.insert("label".to_string(), JsonValue::String(edge.label.clone()));
             object.insert(
                 "from_node".to_string(),
-                JsonValue::String(from_node.clone()),
+                JsonValue::String(edge.from_node.clone()),
             );
-            object.insert("to_node".to_string(), JsonValue::String(to_node.clone()));
-            object.insert("weight".to_string(), JsonValue::Number(*weight as f64));
+            object.insert(
+                "to_node".to_string(),
+                JsonValue::String(edge.to_node.clone()),
+            );
+            object.insert("weight".to_string(), JsonValue::Number(edge.weight as f64));
         }
         EntityKind::Vector { collection } => {
             object.insert(
@@ -377,9 +375,9 @@ fn entity_kind_json(kind: &EntityKind) -> JsonValue {
                 JsonValue::String(collection.clone()),
             );
         }
-        EntityKind::TimeSeriesPoint { series, metric } => {
-            object.insert("series".to_string(), JsonValue::String(series.clone()));
-            object.insert("metric".to_string(), JsonValue::String(metric.clone()));
+        EntityKind::TimeSeriesPoint(ref ts) => {
+            object.insert("series".to_string(), JsonValue::String(ts.series.clone()));
+            object.insert("metric".to_string(), JsonValue::String(ts.metric.clone()));
         }
         EntityKind::QueueMessage { queue, position } => {
             object.insert("queue".to_string(), JsonValue::String(queue.clone()));

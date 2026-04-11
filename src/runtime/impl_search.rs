@@ -212,9 +212,12 @@ impl RedDBRuntime {
                 return true;
             };
             match &entity.kind {
-                EntityKind::GraphNode { label, node_type } => {
-                    pattern.node_label.as_ref().is_none_or(|n| label == n)
-                        && pattern.node_type.as_ref().is_none_or(|t| node_type == t)
+                EntityKind::GraphNode(ref node) => {
+                    pattern.node_label.as_ref().is_none_or(|n| &node.label == n)
+                        && pattern
+                            .node_type
+                            .as_ref()
+                            .is_none_or(|t| &node.node_type == t)
                 }
                 _ => false,
             }
@@ -785,7 +788,7 @@ impl RedDBRuntime {
             let seed_node_ids: Vec<(u64, String, f32)> = scored
                 .values()
                 .filter_map(|(entity, score, _, _)| {
-                    if matches!(entity.kind, EntityKind::GraphNode { .. }) {
+                    if matches!(entity.kind, EntityKind::GraphNode(_)) {
                         Some((entity.id.raw(), entity.id.raw().to_string(), *score))
                     } else {
                         None
@@ -900,11 +903,10 @@ impl RedDBRuntime {
                     });
                 }
             }
-            if let EntityKind::GraphEdge {
-                from_node, to_node, ..
-            } = &entity.kind
-            {
-                if let (Ok(from), Ok(to)) = (from_node.parse::<u64>(), to_node.parse::<u64>()) {
+            if let EntityKind::GraphEdge(ref edge) = &entity.kind {
+                if let (Ok(from), Ok(to)) =
+                    (edge.from_node.parse::<u64>(), edge.to_node.parse::<u64>())
+                {
                     if found_ids.contains(&from) || found_ids.contains(&to) {
                         connections.push(ContextConnection {
                             from_id: from,
@@ -1052,14 +1054,11 @@ impl RedDBRuntime {
             schema_lines.push(String::new());
             schema_lines.push("Graph relationships found:".to_string());
             for edge in &context_result.graph.edges {
-                if let EntityKind::GraphEdge {
-                    label,
-                    from_node,
-                    to_node,
-                    ..
-                } = &edge.entity.kind
-                {
-                    schema_lines.push(format!("- Edge '{label}': {from_node} → {to_node}"));
+                if let EntityKind::GraphEdge(ref ek) = &edge.entity.kind {
+                    schema_lines.push(format!(
+                        "- Edge '{}': {} → {}",
+                        ek.label, ek.from_node, ek.to_node
+                    ));
                 }
             }
         }

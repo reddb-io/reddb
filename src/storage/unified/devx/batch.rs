@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::super::{
-    EntityData, EntityId, EntityKind, Metadata, MetadataValue, NodeData, UnifiedEntity,
-    UnifiedStore, VectorData,
+    EntityData, EntityId, EntityKind, GraphNodeKind, Metadata, MetadataValue, NodeData,
+    UnifiedEntity, UnifiedStore, VectorData,
 };
 use super::error::DevXError;
 use crate::storage::schema::Value;
@@ -45,10 +45,10 @@ impl BatchBuilder {
 
         let id = self.store.next_entity_id();
 
-        let kind = EntityKind::GraphNode {
+        let kind = EntityKind::GraphNode(Box::new(GraphNodeKind {
             label: label_str.clone(),
             node_type: label_str,
-        };
+        }));
 
         let entity = UnifiedEntity::new(
             id,

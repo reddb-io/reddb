@@ -562,10 +562,10 @@ impl UnifiedSegment for GrowingSegment {
         for entity in self.entities.values() {
             match &entity.kind {
                 EntityKind::TableRow { .. } => stats.row_count += 1,
-                EntityKind::GraphNode { .. } => stats.node_count += 1,
-                EntityKind::GraphEdge { .. } => stats.edge_count += 1,
+                EntityKind::GraphNode(_) => stats.node_count += 1,
+                EntityKind::GraphEdge(_) => stats.edge_count += 1,
                 EntityKind::Vector { .. } => stats.vector_count += 1,
-                EntityKind::TimeSeriesPoint { .. } => stats.row_count += 1,
+                EntityKind::TimeSeriesPoint(_) => stats.row_count += 1,
                 EntityKind::QueueMessage { .. } => stats.row_count += 1,
             }
             stats.cross_ref_count += entity.cross_refs().len();

@@ -330,10 +330,10 @@ fn entity_capability_profile(entity: &UnifiedEntity) -> (String, String) {
 
             (entity_type.to_string(), capabilities.join(","))
         }
-        (crate::storage::EntityKind::GraphNode { .. }, crate::storage::EntityData::Node(_)) => {
+        (crate::storage::EntityKind::GraphNode(_), crate::storage::EntityData::Node(_)) => {
             ("graph_node".to_string(), "graph,graph_node".to_string())
         }
-        (crate::storage::EntityKind::GraphEdge { .. }, crate::storage::EntityData::Edge(_)) => {
+        (crate::storage::EntityKind::GraphEdge(_), crate::storage::EntityData::Edge(_)) => {
             ("graph_edge".to_string(), "graph,graph_edge".to_string())
         }
         (crate::storage::EntityKind::Vector { .. }, crate::storage::EntityData::Vector(_)) => (

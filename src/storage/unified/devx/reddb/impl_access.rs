@@ -130,14 +130,14 @@ impl RedDB {
                         }
                     }
                     EntityData::Edge(edge) => {
-                        if let EntityKind::GraphEdge {
-                            label,
-                            from_node,
-                            to_node,
-                            ..
-                        } = entity.kind
-                        {
-                            graph_edges.push((entity.id, from_node, to_node, label, edge.weight));
+                        if let EntityKind::GraphEdge(edge_kind) = entity.kind {
+                            graph_edges.push((
+                                entity.id,
+                                edge_kind.from_node,
+                                edge_kind.to_node,
+                                edge_kind.label,
+                                edge.weight,
+                            ));
                         }
                     }
                     data => {

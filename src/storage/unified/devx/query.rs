@@ -238,7 +238,7 @@ impl QueryBuilder {
             if let Some(entity) = self.store.get(&collection, target_id) {
                 // Check if edge matches label
                 let matches = match &entity.kind {
-                    EntityKind::GraphEdge { label, .. } => label == edge_label,
+                    EntityKind::GraphEdge(ref edge) => edge.label == edge_label,
                     _ => true, // Include non-edge entities
                 };
 

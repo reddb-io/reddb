@@ -400,26 +400,21 @@ fn extract_entity_tokens(entity: &UnifiedEntity) -> Vec<(String, String)> {
                 }
             }
         }
-        EntityKind::GraphNode { label, node_type } => {
+        EntityKind::GraphNode(ref node) => {
             let mut kind_tokens = BTreeSet::new();
-            push_text_tokens(&mut kind_tokens, label, false);
-            push_text_tokens(&mut kind_tokens, node_type, false);
+            push_text_tokens(&mut kind_tokens, &node.label, false);
+            push_text_tokens(&mut kind_tokens, &node.node_type, false);
             for t in &kind_tokens {
                 if tokens.insert(t.clone()) {
                     token_fields.push((t.clone(), "_label".to_string()));
                 }
             }
         }
-        EntityKind::GraphEdge {
-            label,
-            from_node,
-            to_node,
-            ..
-        } => {
+        EntityKind::GraphEdge(ref edge) => {
             let mut kind_tokens = BTreeSet::new();
-            push_text_tokens(&mut kind_tokens, label, false);
-            push_text_tokens(&mut kind_tokens, from_node, false);
-            push_text_tokens(&mut kind_tokens, to_node, false);
+            push_text_tokens(&mut kind_tokens, &edge.label, false);
+            push_text_tokens(&mut kind_tokens, &edge.from_node, false);
+            push_text_tokens(&mut kind_tokens, &edge.to_node, false);
             for t in &kind_tokens {
                 if tokens.insert(t.clone()) {
                     token_fields.push((t.clone(), "_edge".to_string()));
@@ -435,7 +430,7 @@ fn extract_entity_tokens(entity: &UnifiedEntity) -> Vec<(String, String)> {
                 }
             }
         }
-        EntityKind::TimeSeriesPoint { .. } | EntityKind::QueueMessage { .. } => {}
+        EntityKind::TimeSeriesPoint(_) | EntityKind::QueueMessage { .. } => {}
     }
 
     // Data field tokens
