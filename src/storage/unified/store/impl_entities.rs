@@ -183,10 +183,10 @@ impl UnifiedStore {
                 }
             }
 
-            // Sync dirty pages to disk (flush + fsync)
-            if let Err(e) = pager.sync() {
-                eprintln!("bulk_insert pager sync error: {e}");
-            }
+            // Flush to OS page cache (no fsync — deferred for speed).
+            // Data is durable against process crash. Full fsync runs on
+            // graceful shutdown or background checkpoint.
+            let _ = pager.flush();
         }
 
         Ok(ids)
