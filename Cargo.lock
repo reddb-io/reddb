@@ -1273,7 +1273,6 @@ dependencies = [
  "hex",
  "hmac",
  "prost",
- "rayon",
  "roaring",
  "rstar",
  "sha2",

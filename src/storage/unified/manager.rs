@@ -421,30 +421,50 @@ impl SegmentManager {
         }
     }
 
-    /// Query across all segments
+    /// Query across all segments. Uses parallel scanning for sealed segments
+    /// when more than one sealed segment exists.
     pub fn query_all<F>(&self, filter: F) -> Vec<UnifiedEntity>
     where
-        F: Fn(&UnifiedEntity) -> bool,
+        F: Fn(&UnifiedEntity) -> bool + Sync,
     {
         let mut results = Vec::new();
 
-        // Query growing segment
+        // Query growing segment (single, in-memory, fast)
         if let Some(growing_arc) = self.growing.read().unwrap().as_ref() {
             let growing = growing_arc.read().unwrap();
-            for entity in growing.iter() {
-                if filter(entity) {
-                    results.push(entity.clone());
-                }
-            }
+            results.extend(growing.iter().filter(|e| filter(e)).cloned());
         }
 
-        // Query sealed segments
+        // Query sealed segments — parallel when multiple exist
         let sealed = self.sealed.read().unwrap();
-        for segment in sealed.iter() {
-            for entity in segment.iter() {
-                if filter(entity) {
-                    results.push(entity.clone());
-                }
+        if sealed.len() > 1 {
+            let filter_ref = &filter;
+            let segment_results: Vec<Vec<UnifiedEntity>> = std::thread::scope(|s| {
+                sealed
+                    .iter()
+                    .map(|segment| {
+                        s.spawn(move || {
+                            segment
+                                .read()
+                                .unwrap()
+                                .iter()
+                                .filter(|e| filter_ref(e))
+                                .cloned()
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .map(|handle| handle.join().unwrap_or_default())
+                    .collect()
+            });
+            for batch in segment_results {
+                results.extend(batch);
+            }
+        } else {
+            for segment in sealed.iter() {
+                let seg = segment.read().unwrap();
+                results.extend(seg.iter().filter(|e| filter(e)).cloned());
             }
         }
 

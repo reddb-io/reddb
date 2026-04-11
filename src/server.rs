@@ -235,7 +235,11 @@ impl RedDBServer {
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
-                    let _ = self.handle_connection(stream);
+                    // Spawn a thread per connection for concurrent request handling
+                    let server = self.clone();
+                    thread::spawn(move || {
+                        let _ = server.handle_connection(stream);
+                    });
                 }
                 Err(err) => return Err(err),
             }

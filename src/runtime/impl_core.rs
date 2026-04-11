@@ -37,9 +37,9 @@ impl RedDBRuntime {
                 index_store: super::index_store::IndexStore::new(),
                 cdc: crate::replication::cdc::CdcBuffer::new(100_000),
                 backup_scheduler: crate::replication::scheduler::BackupScheduler::new(3600),
-                query_cache: Mutex::new(crate::storage::query::planner::cache::PlanCache::new(
-                    1000,
-                )),
+                query_cache: std::sync::RwLock::new(
+                    crate::storage::query::planner::cache::PlanCache::new(1000),
+                ),
             }),
         };
 
@@ -219,6 +219,19 @@ impl RedDBRuntime {
                     }),
                 );
             }
+        }
+
+        // Start background maintenance thread
+        {
+            let rt = runtime.clone();
+            std::thread::Builder::new()
+                .name("reddb-maintenance".into())
+                .spawn(move || loop {
+                    std::thread::sleep(std::time::Duration::from_secs(60));
+                    // Context index stats refresh
+                    let _stats = rt.inner.db.store().context_index().stats();
+                })
+                .ok();
         }
 
         Ok(runtime)
