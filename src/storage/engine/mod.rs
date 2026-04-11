@@ -27,6 +27,7 @@
 
 pub mod algorithms;
 pub mod btree;
+pub mod bulk_writer;
 pub mod crc32;
 pub mod database;
 pub mod distance;
