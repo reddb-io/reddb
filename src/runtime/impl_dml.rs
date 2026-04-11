@@ -299,41 +299,40 @@ impl RedDBRuntime {
             .get_collection(&query.table)
             .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
 
-        // Full scan for complex WHERE filters
-        let mut affected: u64 = 0;
-        let mut entities_to_update = Vec::new();
+        // Collect matching entity IDs using fast entity-level filter (no UnifiedRecord)
+        let mut ids_to_update = Vec::new();
+        let table_name = query.table.as_str();
 
         manager.for_each_entity(|entity| {
-            let record = match record_search::runtime_any_record_from_entity(entity.clone()) {
-                Some(r) => r,
-                None => return true,
-            };
+            if !entity.data.is_row() {
+                return true;
+            }
             let matches = match &query.filter {
-                Some(filter) => join_filter::evaluate_runtime_filter(
-                    &record,
-                    filter,
-                    Some(&query.table),
-                    Some(&query.table),
-                ),
+                Some(filter) => {
+                    query_exec::evaluate_entity_filter(entity, filter, table_name, table_name)
+                }
                 None => true,
             };
             if matches {
-                entities_to_update.push(entity.clone());
+                ids_to_update.push(entity.id);
             }
             true
         });
 
-        for entity in entities_to_update {
-            let operations = self.build_update_operations(query)?;
+        // Apply updates in batch — build operations once, apply to each entity
+        let mut affected: u64 = 0;
+        let operations_template = self.build_update_operations(query)?;
+
+        for id in ids_to_update {
             let input = PatchEntityInput {
                 collection: query.table.clone(),
-                id: entity.id,
+                id,
                 payload: crate::json::Value::Null,
-                operations,
+                operations: operations_template.clone(),
             };
-
-            self.patch_entity(input)?;
-            affected += 1;
+            if self.patch_entity(input).is_ok() {
+                affected += 1;
+            }
         }
 
         Ok(RuntimeQueryResult::dml_result(
@@ -434,18 +433,15 @@ impl RedDBRuntime {
 
         let mut ids_to_delete = Vec::new();
 
+        let table_name = query.table.as_str();
         manager.for_each_entity(|entity| {
-            let record = match record_search::runtime_any_record_from_entity(entity.clone()) {
-                Some(r) => r,
-                None => return true,
-            };
+            if !entity.data.is_row() {
+                return true;
+            }
             let matches = match &query.filter {
-                Some(filter) => join_filter::evaluate_runtime_filter(
-                    &record,
-                    filter,
-                    Some(&query.table),
-                    Some(&query.table),
-                ),
+                Some(filter) => {
+                    query_exec::evaluate_entity_filter(entity, filter, table_name, table_name)
+                }
                 None => true,
             };
             if matches {

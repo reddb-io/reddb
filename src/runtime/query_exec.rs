@@ -10,6 +10,19 @@ pub(super) fn execute_runtime_table_query(
         return execute_aggregate_query(db, query);
     }
 
+    // ── TURBO PATH: Unfiltered SELECT * LIMIT N — bypass planner ──
+    if query.filter.is_none()
+        && query.order_by.is_empty()
+        && query.group_by.is_empty()
+        && query.having.is_none()
+        && query.expand.is_none()
+        && !is_universal_query_source(&query.table)
+    {
+        if let Some(result) = execute_unfiltered_scan_to_json(db, query)? {
+            return Ok(result);
+        }
+    }
+
     // ── TURBO PATH: Build JSON directly, bypassing UnifiedRecord entirely ──
     if query.filter.is_some()
         && query.order_by.is_empty()
@@ -625,6 +638,112 @@ fn extract_index_candidate_from_filter(filter: &Filter) -> Option<(String, Vec<u
             .or_else(|| extract_index_candidate_from_filter(right)),
         _ => None,
     }
+}
+
+/// Turbo path for SELECT * FROM table [LIMIT N] — no WHERE clause.
+fn execute_unfiltered_scan_to_json(
+    db: &RedDB,
+    query: &TableQuery,
+) -> RedDBResult<Option<UnifiedResult>> {
+    let manager = match db.store().get_collection(query.table.as_str()) {
+        Some(m) => m,
+        None => return Ok(None),
+    };
+
+    let table_name = query.table.as_str();
+    let limit = query.limit.unwrap_or(10000) as usize;
+    let offset = query.offset.unwrap_or(0) as usize;
+
+    let mut sys_prefix = Vec::with_capacity(128);
+    sys_prefix.extend_from_slice(b",\"_collection\":");
+    write_json_bytes(&mut sys_prefix, table_name.as_bytes());
+    sys_prefix.extend_from_slice(
+        b",\"_kind\":\"table\",\"_entity_type\":\"table\",\"_capabilities\":\"structured,table\"",
+    );
+
+    let mut buf = Vec::with_capacity(256 + limit.min(1000) * 200);
+    buf.extend_from_slice(b"{\"columns\":[],\"record_count\":");
+    let count_pos = buf.len();
+    buf.extend_from_slice(b"0,\"selection\":{\"scope\":\"any\"},\"records\":[");
+
+    let mut count: u64 = 0;
+    let mut skipped: u64 = 0;
+    let mut field_keys_cache: Option<Vec<(String, Vec<u8>)>> = None;
+
+    manager.for_each_entity(|entity| {
+        if count as usize >= limit {
+            return false;
+        }
+        if !entity.data.is_row() {
+            return true;
+        }
+        if (skipped as usize) < offset {
+            skipped += 1;
+            return true;
+        }
+
+        if count > 0 {
+            buf.push(b',');
+        }
+        buf.extend_from_slice(b"{\"_entity_id\":");
+        write_u64(&mut buf, entity.id.raw());
+        buf.extend_from_slice(&sys_prefix);
+        buf.extend_from_slice(b",\"_created_at\":");
+        write_u64(&mut buf, entity.created_at);
+        buf.extend_from_slice(b",\"_updated_at\":");
+        write_u64(&mut buf, entity.updated_at);
+        buf.extend_from_slice(b",\"_sequence_id\":");
+        write_u64(&mut buf, entity.sequence_id);
+        if let EntityKind::TableRow { row_id, .. } = &entity.kind {
+            buf.extend_from_slice(b",\"row_id\":");
+            write_u64(&mut buf, *row_id);
+        }
+        if let EntityData::Row(ref row) = entity.data {
+            if field_keys_cache.is_none() {
+                let mut cache = Vec::new();
+                for (key, _) in row.iter_fields() {
+                    let mut encoded = Vec::with_capacity(key.len() + 4);
+                    encoded.push(b',');
+                    write_json_bytes(&mut encoded, key.as_bytes());
+                    encoded.push(b':');
+                    cache.push((key.to_string(), encoded));
+                }
+                field_keys_cache = Some(cache);
+            }
+            if let Some(ref cache) = field_keys_cache {
+                for (key, encoded_prefix) in cache {
+                    buf.extend_from_slice(encoded_prefix);
+                    if let Some(value) = row.get_field(key) {
+                        write_value_bytes(&mut buf, value);
+                    } else {
+                        buf.extend_from_slice(b"null");
+                    }
+                }
+            }
+        }
+        buf.push(b'}');
+        count += 1;
+        true
+    });
+
+    buf.extend_from_slice(b"]}");
+    let mut count_buf = itoa::Buffer::new();
+    let count_str = count_buf.format(count);
+    buf.splice(
+        count_pos..count_pos + 1,
+        count_str.as_bytes().iter().copied(),
+    );
+
+    let json_string = unsafe { String::from_utf8_unchecked(buf) };
+    Ok(Some(UnifiedResult {
+        columns: Vec::new(),
+        records: Vec::new(),
+        stats: crate::storage::query::unified::QueryStats {
+            rows_scanned: count,
+            ..Default::default()
+        },
+        pre_serialized_json: Some(json_string),
+    }))
 }
 
 fn execute_filtered_scan_to_json(
