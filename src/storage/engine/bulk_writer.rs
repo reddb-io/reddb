@@ -141,6 +141,105 @@ impl PageBulkWriter {
         Ok(id)
     }
 
+    /// Write a row DIRECTLY into page buffer — zero intermediate Vec allocation.
+    /// Serializes values inline into the current page's byte array.
+    #[inline]
+    pub fn write_row_direct(&mut self, values: &[Value]) -> Result<u64, String> {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        // Estimate cell size (overestimate is fine — we check bounds)
+        let estimated_size = 4 + 8 + 1 + values.len() * 12; // key_len+val_len+key+header+worst_case
+        if self.current.is_none() || self.offset + estimated_size > PAGE_SIZE {
+            self.seal_current_page()?;
+            self.allocate_new_page()?;
+        }
+
+        let page = self.current.as_mut().unwrap();
+        let data = page.as_bytes_mut();
+
+        // Reserve space for cell header [key_len:u16][val_len:u16]
+        let header_pos = self.offset;
+        let key_start = header_pos + 4;
+
+        // Write key (entity ID as u64 LE)
+        data[key_start..key_start + 8].copy_from_slice(&id.to_le_bytes());
+        let mut pos = key_start + 8;
+
+        // Write value count
+        data[pos] = values.len() as u8;
+        pos += 1;
+
+        // Serialize each value DIRECTLY into page buffer
+        for val in values {
+            if pos >= PAGE_SIZE - 16 {
+                // Not enough space — fall back to next page
+                // (This shouldn't happen with proper estimation, but safety first)
+                self.offset = header_pos; // rewind
+                self.seal_current_page()?;
+                self.allocate_new_page()?;
+                // Retry via the Vec-based path
+                return self.write_row(values);
+            }
+            match val {
+                Value::Null => {
+                    data[pos] = 0;
+                    pos += 1;
+                }
+                Value::Text(s) => {
+                    let b = s.as_bytes();
+                    data[pos] = 1;
+                    pos += 1;
+                    data[pos..pos + 2].copy_from_slice(&(b.len() as u16).to_le_bytes());
+                    pos += 2;
+                    if pos + b.len() < PAGE_SIZE {
+                        data[pos..pos + b.len()].copy_from_slice(b);
+                        pos += b.len();
+                    }
+                }
+                Value::Integer(n) => {
+                    data[pos] = 2;
+                    pos += 1;
+                    data[pos..pos + 8].copy_from_slice(&n.to_le_bytes());
+                    pos += 8;
+                }
+                Value::Float(f) => {
+                    data[pos] = 3;
+                    pos += 1;
+                    data[pos..pos + 8].copy_from_slice(&f.to_le_bytes());
+                    pos += 8;
+                }
+                Value::Boolean(b) => {
+                    data[pos] = 4;
+                    pos += 1;
+                    data[pos] = *b as u8;
+                    pos += 1;
+                }
+                Value::UnsignedInteger(n) => {
+                    data[pos] = 5;
+                    pos += 1;
+                    data[pos..pos + 8].copy_from_slice(&n.to_le_bytes());
+                    pos += 8;
+                }
+                _ => {
+                    data[pos] = 0;
+                    pos += 1; // null for unsupported types in direct mode
+                }
+            }
+        }
+
+        // Write cell header retroactively
+        let val_len = (pos - key_start - 8) as u16;
+        data[header_pos..header_pos + 2].copy_from_slice(&8u16.to_le_bytes()); // key_len = 8
+        data[header_pos + 2..header_pos + 4].copy_from_slice(&val_len.to_le_bytes());
+
+        self.offset = pos;
+        self.cell_count += 1;
+        self.total_rows += 1;
+
+        Ok(id)
+    }
+
     /// Write many rows at once.
     pub fn write_rows(&mut self, rows: &[Vec<Value>]) -> Result<Vec<u64>, String> {
         let mut ids = Vec::with_capacity(rows.len());

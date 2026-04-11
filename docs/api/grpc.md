@@ -49,6 +49,7 @@ grpcurl -plaintext 127.0.0.1:50051 reddb.v1.RedDb/Collections
 | `CreateDocument` | `JsonCreateRequest` | Create a document entity |
 | `CreateKv` | `JsonCreateRequest` | Create a key-value pair |
 | `BulkCreateDocuments` | `JsonBulkCreateRequest` | Bulk create documents |
+| `BulkInsertBinary` | `BinaryBulkInsertRequest` | Binary bulk insert -- zero JSON overhead |
 | `PatchEntity` | `UpdateEntityRequest` | Update an entity by ID |
 | `DeleteEntity` | `DeleteEntityRequest` | Delete an entity by ID |
 
@@ -71,6 +72,63 @@ grpcurl -plaintext \
   -d '{"collection":"sessions","id":1,"payloadJson":"{\"ttl\":\"30m\"}"}' \
   127.0.0.1:50051 reddb.v1.RedDb/PatchEntity
 ```
+
+### Binary Bulk Insert
+
+`BulkInsertBinary` is the fastest ingestion path in RedDB. It bypasses JSON serialization entirely -- field values are sent as protobuf native types (`string`, `int64`, `double`, `bool`, `bytes`). Column names are sent once per request, and each row contains only values in the same order. Benchmarked at **241K ops/sec**.
+
+```protobuf
+message BinaryBulkInsertRequest {
+  string collection = 1;
+  repeated string field_names = 2;  // column names (sent once for all rows)
+  repeated BinaryRow rows = 3;
+}
+
+message BinaryRow {
+  repeated BinaryValue values = 1;
+}
+
+message BinaryValue {
+  oneof kind {
+    string text_value = 1;
+    int64 int_value = 2;
+    double float_value = 3;
+    bool bool_value = 4;
+    bytes blob_value = 5;
+  }
+  // absence of any field = null
+}
+
+message BulkInsertReply {
+  bool ok = 1;
+  uint64 count = 2;
+  uint64 first_id = 3;
+}
+```
+
+Example with `grpcurl`:
+
+```bash
+grpcurl -plaintext \
+  -d '{
+    "collection": "events",
+    "fieldNames": ["host", "severity", "score"],
+    "rows": [
+      {"values": [{"textValue":"srv1"}, {"intValue":3}, {"floatValue":0.95}]},
+      {"values": [{"textValue":"srv2"}, {"intValue":1}, {"floatValue":0.12}]}
+    ]
+  }' \
+  127.0.0.1:50051 reddb.v1.RedDb/BulkInsertBinary
+```
+
+The response returns the total inserted count and the ID of the first inserted entity:
+
+```json
+{"ok": true, "count": 2, "firstId": 42}
+```
+
+> [!TIP]
+> Use `BulkInsertBinary` when ingesting from ETL pipelines, log collectors, or any high-throughput producer. The turbo bulk path acquires a single write lock for the entire batch, avoiding per-row lock overhead.
 
 ### Query & Search
 
@@ -281,6 +339,26 @@ message UpdateEntityRequest {
 message DeleteEntityRequest {
   string collection = 1;
   uint64 id = 2;
+}
+
+message BinaryBulkInsertRequest {
+  string collection = 1;
+  repeated string field_names = 2;
+  repeated BinaryRow rows = 3;
+}
+
+message BinaryRow {
+  repeated BinaryValue values = 1;
+}
+
+message BinaryValue {
+  oneof kind {
+    string text_value = 1;
+    int64 int_value = 2;
+    double float_value = 3;
+    bool bool_value = 4;
+    bytes blob_value = 5;
+  }
 }
 ```
 

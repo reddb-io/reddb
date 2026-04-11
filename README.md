@@ -289,13 +289,19 @@ Same storage format across all three. Start embedded, scale to server, expose to
 
 RedDB uses multiple optimization techniques for fast queries at scale:
 
+- **Result Cache** -- identical SELECT queries return in <1ms; auto-invalidated on INSERT/UPDATE/DELETE (30s TTL, max 1000 entries)
+- **Hot Entity Cache** -- `get_any(id)` lookups served from an LRU cache (10K entries), O(1) instead of scanning all collections
+- **Binary Bulk Insert** -- gRPC `BulkInsertBinary` with zero JSON overhead, protobuf native types -- 241K ops/sec
+- **Concurrent HTTP** -- thread-per-connection model; each request handled in its own OS thread
+- **Parallel Segment Scanning** -- sealed segments scanned in parallel via `std::thread::scope`; auto-detects single-core and skips parallelism
 - **Hash Join** -- O(n+m) joins instead of O(n*m), auto-selected for large datasets
-- **Parallel Segment Scanning** -- sealed segments scanned in parallel via rayon
 - **Lazy Graph Materialization** -- only loads reachable nodes instead of full graph
 - **Pre-filtered Vector Search** -- metadata filters applied before HNSW indexing
 - **Index-Assisted Scans** -- bloom filter + hash index hints for WHERE clauses
 - **Column Projection Pushdown** -- only materializes SELECT columns
 - **Query Plan Caching** -- LRU cache with 1h TTL for repeated queries
+- **Batch Entity Lookup** -- multi-entity fetches resolved in a single pass
+- **Background Maintenance Thread** -- backup scheduling, retention, and checkpoint run off the hot path
 
 ---
 

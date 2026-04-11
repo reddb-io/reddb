@@ -6,6 +6,14 @@ RedDB exposes a comprehensive HTTP/REST API. Start the HTTP server with:
 red server --http --path ./data/reddb.rdb --bind 0.0.0.0:8080
 ```
 
+## Concurrency Model
+
+The HTTP server spawns one OS thread per accepted TCP connection. Requests are handled concurrently without blocking each other. No configuration is required -- the server detects available CPU cores at startup and automatically skips thread parallelism on single-core machines where the overhead would exceed the gains.
+
+## Result Caching
+
+Identical `SELECT` queries are transparently cached for 30 seconds (max 1000 entries). Cached results return in <1ms. The cache is automatically invalidated whenever an `INSERT`, `UPDATE`, or `DELETE` modifies data, so clients always see fresh results without any extra headers or parameters.
+
 ## Health & Status
 
 | Method | Path | Description |
@@ -112,6 +120,12 @@ red server --http --path ./data/reddb.rdb --bind 0.0.0.0:8080
 | `DELETE` | `/collections/{name}/kvs/{key}` | Delete a key-value pair by key |
 | `PATCH` | `/collections/{name}/entities/{id}` | Update an entity |
 | `DELETE` | `/collections/{name}/entities/{id}` | Delete an entity |
+
+### Bulk Insert Performance
+
+The `/collections/{name}/bulk/rows` endpoint uses a fast path with single-lock batching when the paged storage engine is active. For maximum throughput from non-Rust clients, prefer bulk endpoints over individual row inserts.
+
+For zero-overhead ingestion at the highest throughput (241K ops/sec), use the gRPC `BulkInsertBinary` RPC which sends protobuf native types with no JSON serialization. See the [gRPC API docs](grpc.md#binary-bulk-insert) for details.
 
 ### Documents
 

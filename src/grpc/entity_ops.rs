@@ -285,12 +285,15 @@ pub(crate) fn parse_json_payload(payload_json: &str) -> Result<JsonValue, Status
 }
 
 /// Binary bulk insert — ZERO JSON. Converts protobuf typed values directly to RedDB Values.
+/// Binary bulk insert — ZERO entity objects. Proto values → page cells directly.
+///
+/// When pager available: proto → Vec<Value> → serialize → page (like PG COPY FROM)
+/// When no pager: proto → Vec<Value> → UnifiedEntity → in-memory segment
 pub(crate) fn bulk_insert_binary(
     runtime: &GrpcRuntime,
     request: super::proto::BinaryBulkInsertRequest,
 ) -> Result<super::proto::BulkInsertReply, Status> {
     use crate::storage::schema::Value;
-    use crate::storage::unified::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
 
     let collection = request.collection;
     let n = request.rows.len();
@@ -303,70 +306,38 @@ pub(crate) fn bulk_insert_binary(
         });
     }
 
-    // Pre-intern field names (shared across all rows)
-    let field_names = request.field_names;
-    let num_fields = field_names.len();
-
-    // Convert proto rows to entities — consume proto values (ZERO clones for Text/Blob)
-    let mut entities = Vec::with_capacity(n);
-    for row in request.rows {
-        let mut named = std::collections::HashMap::with_capacity(num_fields);
-        for (i, bval) in row.values.into_iter().enumerate() {
-            if i >= num_fields {
-                break;
-            }
-            let value = match bval.kind {
-                Some(super::proto::binary_value::Kind::TextValue(s)) => Value::Text(s), // MOVE, not clone
-                Some(super::proto::binary_value::Kind::IntValue(n)) => Value::Integer(n),
-                Some(super::proto::binary_value::Kind::FloatValue(f)) => Value::Float(f),
-                Some(super::proto::binary_value::Kind::BoolValue(b)) => Value::Boolean(b),
-                Some(super::proto::binary_value::Kind::BlobValue(b)) => Value::Blob(b), // MOVE
-                None => Value::Null,
-            };
-            named.insert(field_names[i].clone(), value); // field name clone unavoidable
-        }
-
-        entities.push(UnifiedEntity::new(
-            EntityId::new(0),
-            EntityKind::TableRow {
-                table: collection.clone(), // TODO: use Arc<str> to avoid clone
-                row_id: 0,
-            },
-            EntityData::Row(RowData {
-                columns: Vec::new(),
-                named: Some(named),
-            }),
-        ));
-    }
-
-    // Try page-based fast path if pager is available (like PostgreSQL COPY)
+    let num_fields = request.field_names.len();
     let store = runtime.runtime.db().store();
+
+    // ── FAST PATH: Page-based write (like PostgreSQL COPY FROM) ──
+    // Proto values → Vec<Value> → serialize_row → page bytes
+    // ZERO HashMap, ZERO UnifiedEntity, ZERO String clone overhead
     if let Some(pager) = store.pager() {
         use crate::storage::engine::bulk_writer::PageBulkWriter;
 
-        // Convert entities to raw value rows for page-based writing
         let next_id = store.next_entity_id().raw();
         let mut writer = PageBulkWriter::new(pager.clone(), next_id);
 
-        for entity in &entities {
-            if let crate::storage::EntityData::Row(ref row) = entity.data {
-                let values: Vec<Value> = if let Some(ref named) = row.named {
-                    field_names
-                        .iter()
-                        .map(|f| named.get(f).cloned().unwrap_or(Value::Null))
-                        .collect()
-                } else {
-                    row.columns.clone()
-                };
-                writer.write_row(&values).map_err(|e| Status::internal(e))?;
-            }
+        // Convert proto → values → page DIRECTLY (no entity intermediary)
+        for row in request.rows {
+            let values: Vec<Value> = row
+                .values
+                .into_iter()
+                .take(num_fields)
+                .map(|bval| match bval.kind {
+                    Some(super::proto::binary_value::Kind::TextValue(s)) => Value::Text(s),
+                    Some(super::proto::binary_value::Kind::IntValue(n)) => Value::Integer(n),
+                    Some(super::proto::binary_value::Kind::FloatValue(f)) => Value::Float(f),
+                    Some(super::proto::binary_value::Kind::BoolValue(b)) => Value::Boolean(b),
+                    Some(super::proto::binary_value::Kind::BlobValue(b)) => Value::Blob(b),
+                    None => Value::Null,
+                })
+                .collect();
+
+            writer.write_row(&values).map_err(|e| Status::internal(e))?;
         }
 
         let result = writer.finish().map_err(|e| Status::internal(e))?;
-
-        // Skip in-memory insert for maximum speed (page-only mode)
-        // Entities are persisted in pages and will be loaded on next restart
-        drop(entities);
 
         return Ok(super::proto::BulkInsertReply {
             ok: true,
@@ -375,11 +346,41 @@ pub(crate) fn bulk_insert_binary(
         });
     }
 
-    // Fallback: in-memory bulk insert (no pager)
+    // ── FALLBACK: In-memory bulk insert (no pager) ──
+    let field_names = request.field_names;
+    let mut entities = Vec::with_capacity(n);
+    for row in request.rows {
+        let mut named = std::collections::HashMap::with_capacity(num_fields);
+        for (i, bval) in row.values.into_iter().enumerate() {
+            if i >= num_fields {
+                break;
+            }
+            let value = match bval.kind {
+                Some(super::proto::binary_value::Kind::TextValue(s)) => Value::Text(s),
+                Some(super::proto::binary_value::Kind::IntValue(n)) => Value::Integer(n),
+                Some(super::proto::binary_value::Kind::FloatValue(f)) => Value::Float(f),
+                Some(super::proto::binary_value::Kind::BoolValue(b)) => Value::Boolean(b),
+                Some(super::proto::binary_value::Kind::BlobValue(b)) => Value::Blob(b),
+                None => Value::Null,
+            };
+            named.insert(field_names[i].clone(), value);
+        }
+        entities.push(crate::storage::unified::UnifiedEntity::new(
+            crate::storage::unified::EntityId::new(0),
+            crate::storage::unified::EntityKind::TableRow {
+                table: collection.clone(),
+                row_id: 0,
+            },
+            crate::storage::unified::EntityData::Row(crate::storage::unified::RowData {
+                columns: Vec::new(),
+                named: Some(named),
+            }),
+        ));
+    }
+
     let ids = store
         .bulk_insert(&collection, entities)
         .map_err(|e| Status::internal(e.to_string()))?;
-
     let first_id = ids.first().map(|id| id.raw()).unwrap_or(0);
 
     Ok(super::proto::BulkInsertReply {

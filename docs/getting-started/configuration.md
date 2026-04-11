@@ -270,8 +270,21 @@ The keys most relevant to query performance are spread across the storage and qu
 | `red.storage.segment.max_entities` | `100000` | Entities per segment before sealing |
 | `red.query.connection_pool.max_connections` | `64` | Max concurrent query connections |
 
+### Automatic Optimizations
+
+The following caches and runtime behaviors are enabled by default and require no configuration. They adapt automatically to workload and hardware.
+
+| Feature | Default | Description |
+|:--------|:--------|:------------|
+| Result cache | 30s TTL, 1000 max entries | Identical SELECT queries return in <1ms; auto-invalidated on any write |
+| Entity cache | 10K entries (LRU) | `get_any(id)` lookups cached -- O(1) instead of scanning all collections |
+| CPU auto-detect | automatic | Parallel segment/collection scanning only on multi-core machines; single-core skips thread overhead |
+| Hash join | automatic | O(n+m) join selected when cross-product exceeds 10K rows |
+| Parallel segment scan | automatic | Sealed segments scanned concurrently via `std::thread::scope` |
+| Background maintenance | automatic | Backup scheduling, retention, and WAL checkpoint run in a dedicated thread |
+
 > [!TIP]
-> RedDB automatically selects hash joins for large datasets (>10K cross-product) and parallel segment scanning for multi-segment collections. No configuration needed -- these optimizations kick in when the query planner detects they will help.
+> These optimizations kick in when the query planner or runtime detects they will help. No configuration needed.
 
 ## Feature Flags (Compile-Time)
 
