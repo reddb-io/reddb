@@ -1,3 +1,4 @@
 .study
 target/
 PLAN.md
+drivers/python/.venv/
