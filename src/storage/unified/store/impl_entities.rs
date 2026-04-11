@@ -157,15 +157,41 @@ impl UnifiedStore {
     pub fn bulk_insert(
         &self,
         collection: &str,
-        entities: Vec<UnifiedEntity>,
+        mut entities: Vec<UnifiedEntity>,
     ) -> Result<Vec<EntityId>, StoreError> {
         let manager = self.get_or_create_collection(collection);
 
-        // Single lock bulk insert (skips bloom/memtable/cross-refs)
+        // Assign IDs before serialization (manager.bulk_insert also assigns,
+        // but we need IDs for B-tree keys)
+        for entity in &mut entities {
+            if entity.id.raw() == 0 {
+                entity.id = manager.next_entity_id();
+            }
+        }
+
+        // Pre-serialize for B-tree while we still have references
+        let serialized: Option<Vec<(Vec<u8>, Vec<u8>)>> = if self.pager.is_some() {
+            let fv = self.format_version();
+            Some(
+                entities
+                    .iter()
+                    .map(|e| {
+                        (
+                            e.id.raw().to_le_bytes().to_vec(),
+                            Self::serialize_entity(e, fv),
+                        )
+                    })
+                    .collect(),
+            )
+        } else {
+            None
+        };
+
+        // Move entities into segment
         let ids = manager.bulk_insert(entities)?;
 
-        // Batch B-tree persistence — one lock, serialize all, batch write
-        if let Some(pager) = &self.pager {
+        // Batch B-tree write from pre-serialized data (zero re-fetch)
+        if let (Some(pager), Some(batch)) = (&self.pager, serialized) {
             let mut btree_indices = self
                 .btree_indices
                 .write()
@@ -174,18 +200,10 @@ impl UnifiedStore {
                 .entry(collection.to_string())
                 .or_insert_with(|| BTree::new(Arc::clone(pager)));
 
-            let format_version = self.format_version();
-            for id in &ids {
-                if let Some(entity) = manager.get(*id) {
-                    let key = id.raw().to_le_bytes();
-                    let value = Self::serialize_entity(&entity, format_version);
-                    let _ = btree.insert(&key, &value);
-                }
+            for (key, value) in &batch {
+                let _ = btree.insert(key, value);
             }
 
-            // Flush to OS page cache (no fsync — deferred for speed).
-            // Data is durable against process crash. Full fsync runs on
-            // graceful shutdown or background checkpoint.
             let _ = pager.flush();
         }
 
