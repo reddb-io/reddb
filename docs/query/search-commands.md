@@ -160,6 +160,24 @@ Results are grouped by structure type. The response includes a `connections` lis
 }
 ```
 
+### Response Structure
+
+Each field in the response carries a specific role:
+
+| Field | Type | Description |
+|:------|:-----|:------------|
+| `tables` | array | Table rows that matched the query. Each entry contains the row fields, entity ID, collection name, relevance score, and how it was discovered (indexed lookup, global scan, or graph traversal). |
+| `graph.nodes` | array | Graph nodes found during the search or added during graph expansion. Includes node label, type, properties, and the collection they belong to. |
+| `graph.edges` | array | Edges that connect found nodes. Each edge carries its label (e.g. `REPORTS_TO`), source and target node IDs, weight, and any edge properties. |
+| `vectors` | array | Vector entries whose content or metadata matched the query. Includes the similarity score when discovered via vector search. |
+| `documents` | array | Document entities that matched by content or metadata fields. |
+| `key_values` | array | Key-value pairs where the key or value matched the search term. |
+| `connections` | array | Links between found entities across structures. Each connection has a `from_id`, `to_id`, a `connection_type` (`CrossRef`, `GraphEdge`, or `VectorSimilarity`), and a `weight` indicating relevance. |
+| `summary` | object | Aggregated hit counts and execution metadata. Contains `total_entities`, `direct_matches`, `expanded_via_graph`, `expanded_via_cross_refs`, `expanded_via_vector_query`, `collections_searched`, `execution_time_us`, `tiers_used` (which search tiers fired: `index`, `token`, `scan`), and `entities_reindexed`. |
+
+> [!TIP]
+> The `summary.tiers_used` array tells you which search strategies contributed results. A result found via `index` is the fastest path; `scan` means RedDB fell through to a global scan. Use `FIELD` to target an indexed field and avoid full scans on large datasets.
+
 ## ASK
 
 Ask natural-language questions against your data. RedDB retrieves relevant context from all collections and generates an answer using the configured LLM provider.
@@ -199,6 +217,33 @@ ASK 'explain the network topology' USING ollama MODEL 'llama3' DEPTH 3 LIMIT 100
 
 > [!TIP]
 > `ASK` performs a context search behind the scenes, so it benefits from the same indexes and graph traversals used by `SEARCH CONTEXT`.
+
+### How ASK Works
+
+ASK executes a three-phase pipeline:
+
+1. **Search Context** — Runs `SEARCH CONTEXT` with your question as the query. Finds all related entities across tables, graphs, vectors, documents, and key-values.
+
+2. **Build LLM Context** — Serializes the search results into a structured prompt. Includes:
+   - Database schema (collection names and entity counts)
+   - Matched entities grouped by type
+   - Graph edges and cross-references between found entities
+
+3. **LLM Synthesis** — Sends the context + your question to the configured AI provider. The LLM generates a natural language answer citing which collections and entities its answer is based on.
+
+If no provider is configured, ASK returns an error. Configure one with:
+
+```bash
+curl -X POST http://127.0.0.1:8080/ai/credentials \
+  -H 'content-type: application/json' \
+  -d '{"provider":"groq","api_key":"gsk_xxx","default":true}'
+```
+
+> [!NOTE]
+> ASK always searches ALL collections unless you specify `COLLECTION`. To limit scope:
+> ```sql
+> ASK 'question' COLLECTION incidents DEPTH 1 LIMIT 10
+> ```
 
 ## SET CONFIG / SHOW CONFIG
 
