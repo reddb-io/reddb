@@ -165,7 +165,7 @@ fn execute_kv_query(
 
             let id = store.next_entity_id();
             let kind = EntityKind::TableRow {
-                table: query.collection.clone(),
+                table: Arc::from(query.collection.as_str()),
                 row_id: id.0,
             };
             let key_val = Value::Text(key.clone());

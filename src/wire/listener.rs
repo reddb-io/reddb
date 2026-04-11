@@ -375,7 +375,7 @@ fn handle_bulk_insert(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
         entities.push(crate::storage::unified::UnifiedEntity::new(
             EntityId::new(0),
             EntityKind::TableRow {
-                table: collection.clone(),
+                table: Arc::from(collection.as_str()),
                 row_id: 0,
             },
             EntityData::Row(crate::storage::unified::RowData {
@@ -502,7 +502,7 @@ fn handle_bulk_insert_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> 
         entities.push(crate::storage::unified::UnifiedEntity::new(
             EntityId::new(0),
             EntityKind::TableRow {
-                table: collection.clone(),
+                table: Arc::from(collection.as_str()),
                 row_id: 0,
             },
             EntityData::Row(crate::storage::unified::RowData {

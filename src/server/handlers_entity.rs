@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Arc;
 
 impl RedDBServer {
     pub(crate) fn handle_scan(
@@ -195,7 +196,7 @@ impl RedDBServer {
             entities.push(crate::storage::UnifiedEntity::new(
                 crate::storage::EntityId::new(0),
                 crate::storage::EntityKind::TableRow {
-                    table: collection.to_string(),
+                    table: Arc::from(collection),
                     row_id: 0,
                 },
                 crate::storage::EntityData::Row(crate::storage::RowData {

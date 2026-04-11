@@ -542,7 +542,7 @@ impl RowBuilder {
         let id = self.store.next_entity_id();
 
         let kind = EntityKind::TableRow {
-            table: self.table.clone(),
+            table: Arc::from(self.table.as_str()),
             row_id: id.0,
         };
 
@@ -691,7 +691,7 @@ impl DocumentBuilder {
         let id = self.store.next_entity_id();
 
         let kind = EntityKind::TableRow {
-            table: self.collection.clone(),
+            table: Arc::from(self.collection.as_str()),
             row_id: id.0,
         };
 

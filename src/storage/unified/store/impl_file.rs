@@ -256,7 +256,10 @@ impl UnifiedStore {
                 let table = String::from_utf8(buf[*pos..*pos + table_len].to_vec())?;
                 *pos += table_len;
                 let row_id = Self::read_varu64_safe(buf, pos)?;
-                EntityKind::TableRow { table, row_id }
+                EntityKind::TableRow {
+                    table: table.into(),
+                    row_id,
+                }
             }
             1 => {
                 // GraphNode

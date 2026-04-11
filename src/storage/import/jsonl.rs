@@ -29,6 +29,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
+use std::sync::Arc;
 
 /// JSONL import configuration
 #[derive(Debug, Clone)]
@@ -225,7 +226,7 @@ impl JsonlImporter {
             UnifiedEntity::new(
                 entity_id,
                 EntityKind::TableRow {
-                    table: self.config.collection.clone(),
+                    table: Arc::from(self.config.collection.as_str()),
                     row_id,
                 },
                 EntityData::Row(row_data),

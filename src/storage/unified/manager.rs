@@ -291,14 +291,8 @@ impl SegmentManager {
         // Single call to GrowingSegment.bulk_insert (one lock, no bloom/memtable)
         let ids = segment.bulk_insert(entities)?;
 
-        // Batch update entity-segment mapping
-        {
-            let mut map = self.entity_segment.write().unwrap();
-            map.reserve(ids.len());
-            for &id in &ids {
-                map.insert(id, segment_id);
-            }
-        }
+        // Skip entity-segment mapping for bulk inserts (saves ~56 bytes/entity).
+        // The get() method scans growing+sealed segments directly.
 
         // Batch update stats
         {
@@ -309,31 +303,26 @@ impl SegmentManager {
         Ok(ids)
     }
 
-    /// Get an entity by ID
+    /// Get an entity by ID — scans growing then sealed segments.
     pub fn get(&self, id: EntityId) -> Option<UnifiedEntity> {
-        // Check entity-segment mapping
-        let segment_id = self.entity_segment.read().unwrap().get(&id).copied();
-
-        if let Some(seg_id) = segment_id {
-            // Try growing segment first
-            if let Some(growing_arc) = self.growing.read().unwrap().as_ref() {
-                let growing = growing_arc.read().unwrap();
-                if growing.id() == seg_id {
-                    return growing.get(id).cloned();
-                }
-            }
-
-            // Try sealed segments
-            let sealed = self.sealed.read().unwrap();
-            for segment in sealed.iter() {
-                if segment.id() == seg_id {
-                    return segment.get(id).cloned();
-                }
+        // Growing segment first (most likely for recent inserts)
+        if let Some(growing_arc) = self.growing.read().unwrap().as_ref() {
+            let growing = growing_arc.read().unwrap();
+            if let Some(entity) = growing.get(id) {
+                return Some(entity.clone());
             }
         }
 
-        // Fall back to scanning all segments
-        self.scan_for_entity(id)
+        // Then sealed segments
+        let sealed = self.sealed.read().unwrap();
+        for segment in sealed.iter() {
+            let seg = segment.read().unwrap();
+            if let Some(entity) = seg.get(id) {
+                return Some(entity.clone());
+            }
+        }
+
+        None
     }
 
     /// Scan all segments for an entity

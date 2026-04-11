@@ -60,7 +60,7 @@ impl UnifiedStore {
             let entity = UnifiedEntity::new(
                 EntityId::new(0),
                 EntityKind::TableRow {
-                    table: "red_config".to_string(),
+                    table: Arc::from("red_config"),
                     row_id: 0,
                 },
                 EntityData::Row(RowData {

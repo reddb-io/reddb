@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Arc;
 
 pub(crate) fn analytics_job_json(job: &crate::PhysicalAnalyticsJob) -> JsonValue {
     crate::presentation::admin_json::analytics_job_json(job)
@@ -174,7 +175,7 @@ pub(crate) fn bulk_create_rows_fast(
         entities.push(UnifiedEntity::new(
             EntityId::new(0),
             EntityKind::TableRow {
-                table: collection.clone(),
+                table: Arc::from(collection.as_str()),
                 row_id: 0,
             },
             EntityData::Row(RowData {
@@ -357,7 +358,7 @@ pub(crate) fn bulk_insert_binary(
         entities.push(crate::storage::unified::UnifiedEntity::new(
             crate::storage::unified::EntityId::new(0),
             crate::storage::unified::EntityKind::TableRow {
-                table: collection.clone(),
+                table: Arc::from(collection.as_str()),
                 row_id: 0,
             },
             crate::storage::unified::EntityData::Row(crate::storage::unified::RowData {

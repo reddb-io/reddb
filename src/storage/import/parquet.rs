@@ -26,6 +26,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::Arc;
 
 /// Parquet magic bytes: "PAR1"
 const PARQUET_MAGIC: [u8; 4] = [b'P', b'A', b'R', b'1'];
@@ -229,7 +230,7 @@ impl ParquetReader {
                 let entity = UnifiedEntity::new(
                     entity_id,
                     EntityKind::TableRow {
-                        table: self.config.collection.clone(),
+                        table: Arc::from(self.config.collection.as_str()),
                         row_id,
                     },
                     EntityData::Row(row_data),

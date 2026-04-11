@@ -100,7 +100,7 @@ pub(crate) fn storage_value_to_json(value: &Value) -> JsonValue {
         }
         Value::RowRef(table, row_id) => {
             let mut object = Map::new();
-            object.insert("table".to_string(), JsonValue::String(table.clone()));
+            object.insert("table".to_string(), JsonValue::String(table.to_string()));
             object.insert("row_id".to_string(), JsonValue::Number(*row_id as f64));
             JsonValue::Object(object)
         }
@@ -347,7 +347,7 @@ fn entity_kind_json(kind: &EntityKind) -> JsonValue {
     let mut object = Map::new();
     match kind {
         EntityKind::TableRow { table, row_id } => {
-            object.insert("table".to_string(), JsonValue::String(table.clone()));
+            object.insert("table".to_string(), JsonValue::String(table.to_string()));
             object.insert("row_id".to_string(), JsonValue::Number(*row_id as f64));
         }
         EntityKind::GraphNode { label, node_type } => {

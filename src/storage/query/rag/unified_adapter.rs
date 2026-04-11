@@ -707,7 +707,7 @@ fn entity_to_chunk(entity: &UnifiedEntity, collection: &str, score: f32) -> Cont
 
     let (source, entity_type) = match &entity.kind {
         EntityKind::TableRow { table, .. } => (
-            ChunkSource::Table(table.clone()),
+            ChunkSource::Table(table.to_string()),
             Some(super::EntityType::Unknown), // Generic table row
         ),
         EntityKind::GraphNode { node_type, .. } => (

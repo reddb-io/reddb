@@ -145,7 +145,7 @@ pub fn extract_searchable_text(entity: &UnifiedEntity) -> String {
             parts.push(label.clone());
         }
         EntityKind::TableRow { table, .. } => {
-            parts.push(table.clone());
+            parts.push(table.to_string());
         }
         EntityKind::Vector { collection } => {
             parts.push(collection.clone());

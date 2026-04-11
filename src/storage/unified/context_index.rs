@@ -613,7 +613,7 @@ mod tests {
         UnifiedEntity::new(
             EntityId::new(id),
             EntityKind::TableRow {
-                table: table.to_string(),
+                table: std::sync::Arc::from(table),
                 row_id: id,
             },
             EntityData::Row(RowData {

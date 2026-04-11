@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 
 use crate::storage::schema::Value;
 
@@ -40,7 +41,7 @@ impl From<u64> for EntityId {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum EntityKind {
     /// A row in a structured table
-    TableRow { table: String, row_id: u64 },
+    TableRow { table: Arc<str>, row_id: u64 },
     /// A node in the graph
     GraphNode { label: String, node_type: String },
     /// An edge in the graph
@@ -522,7 +523,7 @@ impl UnifiedEntity {
     /// Create a table row entity
     pub fn table_row(
         id: EntityId,
-        table: impl Into<String>,
+        table: impl Into<Arc<str>>,
         row_id: u64,
         columns: Vec<Value>,
     ) -> Self {
