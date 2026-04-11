@@ -66,10 +66,7 @@ pub fn check_permission(
             if requires_admin {
                 return Err("admin authentication required".into());
             }
-            if requires_write {
-                return Err("write permission requires authentication".into());
-            }
-            // Anonymous users can only read
+            // When auth is disabled, anonymous can read AND write
             Ok(())
         }
         AuthResult::Denied(reason) => Err(reason.clone()),
