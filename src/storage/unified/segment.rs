@@ -216,8 +216,15 @@ pub struct GrowingSegment {
     /// Last write timestamp
     last_write_at: u64,
 
-    /// Entity storage
+    /// Entity storage (HashMap for random access)
     entities: HashMap<EntityId, UnifiedEntity>,
+    /// Flat entity storage for bulk inserts (no HashMap overhead, O(1) by offset)
+    /// Used when entity IDs are sequential from base_entity_id
+    flat_entities: Vec<UnifiedEntity>,
+    /// Base entity ID for flat_entities (flat_entities[0].id == base_entity_id)
+    base_entity_id: u64,
+    /// Whether flat storage is active (bulk insert mode)
+    use_flat: bool,
     /// Deleted entity IDs (tombstones)
     deleted: HashSet<EntityId>,
     /// Metadata storage (type-aware)
@@ -251,14 +258,21 @@ impl GrowingSegment {
     where
         F: FnMut(&UnifiedEntity) -> bool,
     {
+        // Use flat_entities when in flat mode (sequential Vec, better cache locality)
+        let iter: Box<dyn Iterator<Item = &UnifiedEntity>> = if self.use_flat {
+            Box::new(self.flat_entities.iter())
+        } else {
+            Box::new(self.entities.values())
+        };
+
         if self.deleted.is_empty() {
-            for entity in self.entities.values() {
+            for entity in iter {
                 if !f(entity) {
                     return false;
                 }
             }
         } else {
-            for entity in self.entities.values() {
+            for entity in iter {
                 if self.deleted.contains(&entity.id) {
                     continue;
                 }
@@ -284,6 +298,9 @@ impl GrowingSegment {
             created_at: now,
             last_write_at: now,
             entities: HashMap::new(),
+            flat_entities: Vec::new(),
+            base_entity_id: 0,
+            use_flat: false,
             deleted: HashSet::new(),
             metadata: MetadataStorage::new(),
             pk_index: BTreeMap::new(),
@@ -466,16 +483,14 @@ impl GrowingSegment {
         }
 
         let n = entities.len();
-        self.entities.reserve(n);
 
-        // Compute kind_key ONCE (all entities in a bulk are the same kind)
+        // Compute kind_key ONCE
         let kind_key = if let Some(first) = entities.first() {
             first.kind.storage_type().to_string()
         } else {
             return Ok(Vec::new());
         };
 
-        // Pre-allocate kind_index set
         let kind_set = self.kind_index.entry(kind_key).or_default();
         kind_set.reserve(n);
 
@@ -484,21 +499,39 @@ impl GrowingSegment {
             .unwrap()
             .as_secs();
 
-        // Base sequence for the batch — single atomic add
         let base_seq = self.sequence.fetch_add(n as u64, Ordering::Relaxed);
 
-        // Collect IDs and batch-prepare entities
         let mut ids = Vec::with_capacity(n);
-        let mut pairs = Vec::with_capacity(n);
-        for (i, mut entity) in entities.into_iter().enumerate() {
-            entity.sequence_id = base_seq + i as u64;
-            let id = entity.id;
-            kind_set.insert(id);
-            ids.push(id);
-            pairs.push((id, entity));
+
+        // Use flat storage (Vec) instead of HashMap — saves ~80 bytes/entity overhead
+        if self.flat_entities.is_empty() && self.entities.is_empty() {
+            // First bulk insert: initialize flat storage
+            self.base_entity_id = entities.first().map(|e| e.id.raw()).unwrap_or(0);
+            self.use_flat = true;
         }
-        // Batch insert into HashMap (extend is faster than individual inserts)
-        self.entities.extend(pairs);
+
+        if self.use_flat {
+            self.flat_entities.reserve(n);
+            for (i, mut entity) in entities.into_iter().enumerate() {
+                entity.sequence_id = base_seq + i as u64;
+                let id = entity.id;
+                kind_set.insert(id);
+                ids.push(id);
+                self.flat_entities.push(entity);
+            }
+        } else {
+            // Fallback to HashMap for non-sequential inserts
+            self.entities.reserve(n);
+            let mut pairs = Vec::with_capacity(n);
+            for (i, mut entity) in entities.into_iter().enumerate() {
+                entity.sequence_id = base_seq + i as u64;
+                let id = entity.id;
+                kind_set.insert(id);
+                ids.push(id);
+                pairs.push((id, entity));
+            }
+            self.entities.extend(pairs);
+        }
 
         self.last_write_at = now;
         Ok(ids)
@@ -542,25 +575,48 @@ impl UnifiedSegment for GrowingSegment {
     }
 
     fn entity_count(&self) -> usize {
-        self.entities.len().saturating_sub(self.deleted.len())
+        let total = if self.use_flat {
+            self.flat_entities.len()
+        } else {
+            self.entities.len()
+        };
+        total.saturating_sub(self.deleted.len())
     }
 
     fn contains(&self, id: EntityId) -> bool {
-        self.entities.contains_key(&id) && !self.deleted.contains(&id)
+        if self.deleted.contains(&id) {
+            return false;
+        }
+        if self.use_flat {
+            let idx = id.raw().wrapping_sub(self.base_entity_id) as usize;
+            idx < self.flat_entities.len()
+        } else {
+            self.entities.contains_key(&id)
+        }
     }
 
     fn get(&self, id: EntityId) -> Option<&UnifiedEntity> {
         if self.deleted.contains(&id) {
             return None;
         }
-        self.entities.get(&id)
+        if self.use_flat {
+            let idx = id.raw().wrapping_sub(self.base_entity_id) as usize;
+            self.flat_entities.get(idx)
+        } else {
+            self.entities.get(&id)
+        }
     }
 
     fn get_mut(&mut self, id: EntityId) -> Option<&mut UnifiedEntity> {
         if self.deleted.contains(&id) || !self.state.is_writable() {
             return None;
         }
-        self.entities.get_mut(&id)
+        if self.use_flat {
+            let idx = id.raw().wrapping_sub(self.base_entity_id) as usize;
+            self.flat_entities.get_mut(idx)
+        } else {
+            self.entities.get_mut(&id)
+        }
     }
 
     fn insert(&mut self, mut entity: UnifiedEntity) -> Result<EntityId, SegmentError> {
@@ -723,14 +779,15 @@ impl UnifiedSegment for GrowingSegment {
     }
 
     fn iter(&self) -> Box<dyn Iterator<Item = &UnifiedEntity> + '_> {
-        if self.deleted.is_empty() {
-            Box::new(self.entities.values())
+        let base: Box<dyn Iterator<Item = &UnifiedEntity>> = if self.use_flat {
+            Box::new(self.flat_entities.iter())
         } else {
-            Box::new(
-                self.entities
-                    .values()
-                    .filter(|e| !self.deleted.contains(&e.id)),
-            )
+            Box::new(self.entities.values())
+        };
+        if self.deleted.is_empty() {
+            base
+        } else {
+            Box::new(base.filter(|e| !self.deleted.contains(&e.id)))
         }
     }
 
