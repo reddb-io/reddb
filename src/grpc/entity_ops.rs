@@ -309,50 +309,25 @@ pub(crate) fn bulk_insert_binary(
     let num_fields = request.field_names.len();
     let store = runtime.runtime.db().store();
 
-    // ── FAST PATH: Page-based write (like PostgreSQL COPY FROM) ──
-    // Proto values → Vec<Value> → serialize_row → page bytes
-    // ZERO HashMap, ZERO UnifiedEntity, ZERO String clone overhead
-    if let Some(pager) = store.pager() {
+    // Build entities for memory AND optionally write to pages
+    let field_names: Vec<String> = request.field_names;
+    let has_pager = store.pager().is_some();
+
+    // Optional page writer
+    let mut page_writer = if has_pager {
         use crate::storage::engine::bulk_writer::PageBulkWriter;
-
         let next_id = store.next_entity_id().raw();
-        let mut writer = PageBulkWriter::new(pager.clone(), next_id);
+        Some(PageBulkWriter::new(store.pager().unwrap().clone(), next_id))
+    } else {
+        None
+    };
 
-        // Convert proto → values → page DIRECTLY (no entity, no HashMap)
-        for row in request.rows {
-            let values: Vec<Value> = row
-                .values
-                .into_iter()
-                .take(num_fields)
-                .map(|bval| match bval.kind {
-                    Some(super::proto::binary_value::Kind::TextValue(s)) => Value::Text(s),
-                    Some(super::proto::binary_value::Kind::IntValue(n)) => Value::Integer(n),
-                    Some(super::proto::binary_value::Kind::FloatValue(f)) => Value::Float(f),
-                    Some(super::proto::binary_value::Kind::BoolValue(b)) => Value::Boolean(b),
-                    Some(super::proto::binary_value::Kind::BlobValue(b)) => Value::Blob(b),
-                    None => Value::Null,
-                })
-                .collect();
-
-            writer
-                .write_row_direct(&values)
-                .map_err(|e| Status::internal(e))?;
-        }
-
-        let result = writer.finish().map_err(|e| Status::internal(e))?;
-
-        return Ok(super::proto::BulkInsertReply {
-            ok: true,
-            count: result.total_rows,
-            first_id: result.first_entity_id,
-        });
-    }
-
-    // ── FALLBACK: In-memory bulk insert (no pager) ──
-    let field_names = request.field_names;
+    // Single pass: proto → entities for memory + page write
     let mut entities = Vec::with_capacity(n);
     for row in request.rows {
         let mut named = std::collections::HashMap::with_capacity(num_fields);
+        let mut values_for_page: Vec<Value> = Vec::with_capacity(num_fields);
+
         for (i, bval) in row.values.into_iter().enumerate() {
             if i >= num_fields {
                 break;
@@ -365,8 +340,19 @@ pub(crate) fn bulk_insert_binary(
                 Some(super::proto::binary_value::Kind::BlobValue(b)) => Value::Blob(b),
                 None => Value::Null,
             };
+            if page_writer.is_some() {
+                values_for_page.push(value.clone());
+            }
             named.insert(field_names[i].clone(), value);
         }
+
+        // Write to page (fast persistence)
+        if let Some(ref mut writer) = page_writer {
+            writer
+                .write_row_direct(&values_for_page)
+                .map_err(|e| Status::internal(e))?;
+        }
+
         entities.push(crate::storage::unified::UnifiedEntity::new(
             crate::storage::unified::EntityId::new(0),
             crate::storage::unified::EntityKind::TableRow {
@@ -380,6 +366,12 @@ pub(crate) fn bulk_insert_binary(
         ));
     }
 
+    // Finish page writes
+    if let Some(writer) = page_writer {
+        let _ = writer.finish();
+    }
+
+    // Insert into memory (for queryability)
     let ids = store
         .bulk_insert(&collection, entities)
         .map_err(|e| Status::internal(e.to_string()))?;
