@@ -293,7 +293,6 @@ pub(crate) fn bulk_insert_binary(
     use crate::storage::unified::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
 
     let collection = request.collection;
-    let field_names = &request.field_names;
     let n = request.rows.len();
 
     if n == 0 {
@@ -304,36 +303,33 @@ pub(crate) fn bulk_insert_binary(
         });
     }
 
-    // Convert proto rows directly to entities — NO JSON at any point
+    // Pre-intern field names (shared across all rows)
+    let field_names = request.field_names;
+    let num_fields = field_names.len();
+
+    // Convert proto rows to entities — consume proto values (ZERO clones for Text/Blob)
     let mut entities = Vec::with_capacity(n);
-    for row in &request.rows {
-        let mut named = std::collections::HashMap::with_capacity(field_names.len());
-        for (i, bval) in row.values.iter().enumerate() {
-            if let Some(field_name) = field_names.get(i) {
-                if field_name.is_empty() {
-                    continue;
-                }
-                let value = if let Some(ref kind) = bval.kind {
-                    match kind {
-                        super::proto::binary_value::Kind::TextValue(s) => Value::Text(s.clone()),
-                        super::proto::binary_value::Kind::IntValue(n) => Value::Integer(*n),
-                        super::proto::binary_value::Kind::FloatValue(f) => Value::Float(*f),
-                        super::proto::binary_value::Kind::BoolValue(b) => Value::Boolean(*b),
-                        super::proto::binary_value::Kind::BlobValue(bytes) => {
-                            Value::Blob(bytes.clone())
-                        }
-                    }
-                } else {
-                    Value::Null
-                };
-                named.insert(field_name.clone(), value);
+    for row in request.rows {
+        let mut named = std::collections::HashMap::with_capacity(num_fields);
+        for (i, bval) in row.values.into_iter().enumerate() {
+            if i >= num_fields {
+                break;
             }
+            let value = match bval.kind {
+                Some(super::proto::binary_value::Kind::TextValue(s)) => Value::Text(s), // MOVE, not clone
+                Some(super::proto::binary_value::Kind::IntValue(n)) => Value::Integer(n),
+                Some(super::proto::binary_value::Kind::FloatValue(f)) => Value::Float(f),
+                Some(super::proto::binary_value::Kind::BoolValue(b)) => Value::Boolean(b),
+                Some(super::proto::binary_value::Kind::BlobValue(b)) => Value::Blob(b), // MOVE
+                None => Value::Null,
+            };
+            named.insert(field_names[i].clone(), value); // field name clone unavoidable
         }
 
         entities.push(UnifiedEntity::new(
             EntityId::new(0),
             EntityKind::TableRow {
-                table: collection.clone(),
+                table: collection.clone(), // TODO: use Arc<str> to avoid clone
                 row_id: 0,
             },
             EntityData::Row(RowData {

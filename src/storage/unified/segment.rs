@@ -421,8 +421,14 @@ impl GrowingSegment {
         now.saturating_sub(self.last_write_at)
     }
 
-    /// Turbo bulk insert — skips bloom, memtable, cross-refs, memory tracking.
-    /// Only assigns sequence IDs and inserts into HashMap + kind_index.
+    /// Turbo bulk insert — minimal allocations per entity.
+    ///
+    /// Optimizations vs normal insert:
+    /// - Skips bloom filter, memtable, cross-refs, memory tracking
+    /// - Computes kind_key ONCE (not per entity)
+    /// - Pre-allocates kind_index HashSet
+    /// - Skips contains_key check (caller guarantees unique IDs)
+    /// - Uses Relaxed ordering for sequence counter
     pub fn bulk_insert(
         &mut self,
         entities: Vec<UnifiedEntity>,
@@ -431,30 +437,40 @@ impl GrowingSegment {
             return Err(SegmentError::NotWritable);
         }
 
-        self.entities.reserve(entities.len());
+        let n = entities.len();
+        self.entities.reserve(n);
+
+        // Compute kind_key ONCE (all entities in a bulk are the same kind)
+        let kind_key = if let Some(first) = entities.first() {
+            first.kind.storage_type().to_string()
+        } else {
+            return Ok(Vec::new());
+        };
+
+        // Pre-allocate kind_index set
+        let kind_set = self.kind_index.entry(kind_key).or_default();
+        kind_set.reserve(n);
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
 
-        let mut ids = Vec::with_capacity(entities.len());
-        for mut entity in entities {
-            if self.entities.contains_key(&entity.id) {
-                continue;
-            }
-            entity.sequence_id = self.sequence.fetch_add(1, Ordering::Relaxed);
+        // Base sequence for the batch — single atomic add
+        let base_seq = self.sequence.fetch_add(n as u64, Ordering::Relaxed);
 
-            let kind_key = entity.kind.storage_type().to_string();
-            self.kind_index
-                .entry(kind_key)
-                .or_default()
-                .insert(entity.id);
-
+        // Collect IDs and batch-prepare entities
+        let mut ids = Vec::with_capacity(n);
+        let mut pairs = Vec::with_capacity(n);
+        for (i, mut entity) in entities.into_iter().enumerate() {
+            entity.sequence_id = base_seq + i as u64;
             let id = entity.id;
-            self.entities.insert(id, entity);
+            kind_set.insert(id);
             ids.push(id);
+            pairs.push((id, entity));
         }
+        // Batch insert into HashMap (extend is faster than individual inserts)
+        self.entities.extend(pairs);
 
         self.last_write_at = now;
         Ok(ids)
