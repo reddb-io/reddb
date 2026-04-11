@@ -201,19 +201,20 @@ fn execute_indexed_scan_to_json(
         None => return Ok(None),
     };
 
-    // Extract equality column from the filter (works for AND too)
+    // Try sorted index for range/between queries first
+    if let Some(entity_ids) = try_sorted_index_lookup(filter, &query.table, idx_store) {
+        return build_indexed_result_json(db, query, filter, entity_ids);
+    }
+
+    // Try hash index for equality queries
     let (eq_col, eq_val_bytes) = match extract_index_candidate_from_filter(filter) {
         Some(pair) => pair,
-        None => return Ok(None), // no equality condition → can't use index
+        None => return Ok(None),
     };
-
-    // Check if an index exists for this column
     let reg_idx = match idx_store.find_index_for_column(&query.table, &eq_col) {
         Some(idx) => idx,
-        None => return Ok(None), // no index → fall through to full scan
+        None => return Ok(None),
     };
-
-    // Hash index lookup — O(1) to get candidate entity IDs
     let entity_ids = idx_store.hash_lookup(&query.table, &reg_idx.name, &eq_val_bytes);
     if entity_ids.is_empty() {
         let json = r#"{"columns":[],"record_count":0,"selection":{"scope":"any"},"records":[]}"#
@@ -319,6 +320,172 @@ fn execute_indexed_scan_to_json(
 
 /// Extract a (column_name, value_bytes) from the first equality condition in a filter.
 /// Used to find hash index candidates.
+/// Try to use a sorted (BTree) index for BETWEEN / > / < conditions.
+fn try_sorted_index_lookup(
+    filter: &Filter,
+    table: &str,
+    idx_store: &super::index_store::IndexStore,
+) -> Option<Vec<EntityId>> {
+    match filter {
+        Filter::Between { field, low, high } => {
+            let col = match field {
+                FieldRef::TableColumn { column, .. } => column.as_str(),
+                _ => return None,
+            };
+            if !idx_store.sorted.has_index(table, col) {
+                return None;
+            }
+            let lo = value_to_i64_for_index(low)?;
+            let hi = value_to_i64_for_index(high)?;
+            let ids = idx_store.sorted.range_lookup(table, col, lo, hi);
+            // If too many results, full scan is faster than N individual get() calls
+            if ids.len() > 2000 {
+                return None;
+            }
+            Some(ids)
+        }
+        Filter::Compare { field, op, value } if *op == CompareOp::Gt || *op == CompareOp::Ge => {
+            let col = match field {
+                FieldRef::TableColumn { column, .. } => column.as_str(),
+                _ => return None,
+            };
+            if !idx_store.sorted.has_index(table, col) {
+                return None;
+            }
+            let threshold = value_to_i64_for_index(value)?;
+            let adjusted = if *op == CompareOp::Gt {
+                threshold
+            } else {
+                threshold - 1
+            };
+            let ids = idx_store.sorted.gt_lookup(table, col, adjusted);
+            if ids.len() > 2000 {
+                return None;
+            }
+            Some(ids)
+        }
+        Filter::And(_left, _right) => {
+            // For AND filters, don't use sorted index — the hash index path
+            // handles the equality part, and the remaining filter is evaluated
+            // on the candidates. Using sorted index here returns too many results.
+            None
+        }
+        _ => None,
+    }
+}
+
+fn value_to_i64_for_index(val: &Value) -> Option<i64> {
+    match val {
+        Value::Integer(n) => Some(*n),
+        Value::UnsignedInteger(n) => Some(*n as i64),
+        Value::Float(f) => Some(*f as i64),
+        _ => None,
+    }
+}
+
+/// Build the JSON result from a set of entity IDs (from index lookup).
+fn build_indexed_result_json(
+    db: &RedDB,
+    query: &TableQuery,
+    filter: &Filter,
+    entity_ids: Vec<EntityId>,
+) -> RedDBResult<Option<UnifiedResult>> {
+    if entity_ids.is_empty() {
+        let json = r#"{"columns":[],"record_count":0,"selection":{"scope":"any"},"records":[]}"#
+            .to_string();
+        return Ok(Some(UnifiedResult {
+            columns: Vec::new(),
+            records: Vec::new(),
+            stats: crate::storage::query::unified::QueryStats::default(),
+            pre_serialized_json: Some(json),
+        }));
+    }
+
+    let store = db.store();
+    let table_name = query.table.as_str();
+    let table_alias = query.alias.as_deref().unwrap_or(table_name);
+    let limit = query.limit.unwrap_or(10000) as usize;
+
+    let mut sys_prefix = Vec::with_capacity(128);
+    sys_prefix.extend_from_slice(b",\"_collection\":");
+    write_json_bytes(&mut sys_prefix, table_name.as_bytes());
+    sys_prefix.extend_from_slice(
+        b",\"_kind\":\"table\",\"_entity_type\":\"table\",\"_capabilities\":\"structured,table\"",
+    );
+
+    let mut buf = Vec::with_capacity(256 + entity_ids.len().min(limit) * 200);
+    buf.extend_from_slice(b"{\"columns\":[],\"record_count\":");
+    let count_pos = buf.len();
+    buf.extend_from_slice(b"0,\"selection\":{\"scope\":\"any\"},\"records\":[");
+
+    let mut count: u64 = 0;
+
+    for eid in &entity_ids {
+        if count as usize >= limit {
+            break;
+        }
+        let entity = match store.get(&query.table, *eid) {
+            Some(e) => e,
+            None => continue,
+        };
+        if !entity.data.is_row() {
+            continue;
+        }
+        // Evaluate the FULL filter (index only handled one predicate)
+        if !evaluate_entity_filter(&entity, filter, table_name, table_alias) {
+            continue;
+        }
+
+        if count > 0 {
+            buf.push(b',');
+        }
+        buf.extend_from_slice(b"{\"_entity_id\":");
+        write_u64(&mut buf, entity.id.raw());
+        buf.extend_from_slice(&sys_prefix);
+        buf.extend_from_slice(b",\"_created_at\":");
+        write_u64(&mut buf, entity.created_at);
+        buf.extend_from_slice(b",\"_updated_at\":");
+        write_u64(&mut buf, entity.updated_at);
+        buf.extend_from_slice(b",\"_sequence_id\":");
+        write_u64(&mut buf, entity.sequence_id);
+        if let EntityKind::TableRow { row_id, .. } = &entity.kind {
+            buf.extend_from_slice(b",\"row_id\":");
+            write_u64(&mut buf, *row_id);
+        }
+        if let EntityData::Row(ref row) = entity.data {
+            if let Some(ref named) = row.named {
+                for (key, value) in named {
+                    buf.push(b',');
+                    write_json_bytes(&mut buf, key.as_bytes());
+                    buf.push(b':');
+                    write_value_bytes(&mut buf, value);
+                }
+            }
+        }
+        buf.push(b'}');
+        count += 1;
+    }
+
+    buf.extend_from_slice(b"]}");
+    let mut count_buf = itoa::Buffer::new();
+    let count_str = count_buf.format(count);
+    buf.splice(
+        count_pos..count_pos + 1,
+        count_str.as_bytes().iter().copied(),
+    );
+
+    let json_string = unsafe { String::from_utf8_unchecked(buf) };
+    Ok(Some(UnifiedResult {
+        columns: Vec::new(),
+        records: Vec::new(),
+        stats: crate::storage::query::unified::QueryStats {
+            rows_scanned: count,
+            ..Default::default()
+        },
+        pre_serialized_json: Some(json_string),
+    }))
+}
+
 fn extract_index_candidate_from_filter(filter: &Filter) -> Option<(String, Vec<u8>)> {
     use crate::storage::query::ast::{CompareOp, FieldRef};
     match filter {

@@ -6,7 +6,7 @@
 //! The executor calls `lookup()` with a collection, column, and value —
 //! the IndexStore finds the right index and returns matching entity IDs.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::RwLock;
 
 use crate::storage::schema::Value;
@@ -14,6 +14,134 @@ use crate::storage::unified::bitmap_index::BitmapIndexManager;
 use crate::storage::unified::entity::EntityId;
 use crate::storage::unified::hash_index::{HashIndexConfig, HashIndexManager};
 use crate::storage::unified::spatial_index::SpatialIndexManager;
+
+/// In-memory sorted index for range scans. BTreeMap<i64, Vec<EntityId>>.
+/// Supports BETWEEN, >, <, >=, <= queries in O(log N + K).
+pub struct SortedColumnIndex {
+    /// Sorted entries: numeric key → entity IDs
+    entries: BTreeMap<i64, Vec<EntityId>>,
+}
+
+impl SortedColumnIndex {
+    pub fn new() -> Self {
+        Self {
+            entries: BTreeMap::new(),
+        }
+    }
+
+    pub fn insert(&mut self, key: i64, entity_id: EntityId) {
+        self.entries.entry(key).or_default().push(entity_id);
+    }
+
+    /// Range scan: returns all entity IDs where key is in [low, high].
+    pub fn range(&self, low: i64, high: i64) -> Vec<EntityId> {
+        if low > high {
+            return Vec::new();
+        }
+        let mut result = Vec::new();
+        for (_key, ids) in self.entries.range(low..=high) {
+            result.extend_from_slice(ids);
+        }
+        result
+    }
+
+    /// Greater than: returns all entity IDs where key > threshold.
+    pub fn greater_than(&self, threshold: i64) -> Vec<EntityId> {
+        use std::ops::RangeFrom;
+        let mut result = Vec::new();
+        for (key, ids) in self.entries.range(RangeFrom {
+            start: threshold + 1,
+        }) {
+            let _ = key;
+            result.extend_from_slice(ids);
+        }
+        result
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.values().map(|v| v.len()).sum()
+    }
+}
+
+/// Manages sorted column indices per (collection, column).
+pub struct SortedIndexManager {
+    indices: RwLock<HashMap<(String, String), SortedColumnIndex>>,
+}
+
+impl SortedIndexManager {
+    pub fn new() -> Self {
+        Self {
+            indices: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Build a sorted index from existing entities.
+    pub fn build_index(
+        &self,
+        collection: &str,
+        column: &str,
+        entities: &[(EntityId, Vec<(String, Value)>)],
+    ) -> usize {
+        let mut index = SortedColumnIndex::new();
+        let mut count = 0;
+        for (eid, fields) in entities {
+            for (col, val) in fields {
+                if col == column {
+                    if let Some(key) = value_to_i64(val) {
+                        index.insert(key, *eid);
+                        count += 1;
+                    }
+                }
+            }
+        }
+        self.indices
+            .write()
+            .unwrap()
+            .insert((collection.to_string(), column.to_string()), index);
+        count
+    }
+
+    /// Range lookup.
+    pub fn range_lookup(
+        &self,
+        collection: &str,
+        column: &str,
+        low: i64,
+        high: i64,
+    ) -> Vec<EntityId> {
+        let indices = self.indices.read().unwrap();
+        let key = (collection.to_string(), column.to_string());
+        match indices.get(&key) {
+            Some(index) => index.range(low, high),
+            None => Vec::new(),
+        }
+    }
+
+    /// Greater-than lookup.
+    pub fn gt_lookup(&self, collection: &str, column: &str, threshold: i64) -> Vec<EntityId> {
+        let indices = self.indices.read().unwrap();
+        let key = (collection.to_string(), column.to_string());
+        match indices.get(&key) {
+            Some(index) => index.greater_than(threshold),
+            None => Vec::new(),
+        }
+    }
+
+    /// Check if a sorted index exists for a column.
+    pub fn has_index(&self, collection: &str, column: &str) -> bool {
+        let indices = self.indices.read().unwrap();
+        indices.contains_key(&(collection.to_string(), column.to_string()))
+    }
+}
+
+fn value_to_i64(val: &Value) -> Option<i64> {
+    match val {
+        Value::Integer(n) => Some(*n),
+        Value::UnsignedInteger(n) => Some(*n as i64),
+        Value::Float(f) => Some(*f as i64),
+        _ => None,
+    }
+}
 
 /// Metadata about a registered index
 #[derive(Debug, Clone)]
@@ -38,6 +166,7 @@ pub struct IndexStore {
     pub hash: HashIndexManager,
     pub bitmap: BitmapIndexManager,
     pub spatial: SpatialIndexManager,
+    pub sorted: SortedIndexManager,
     /// Registry of all created indices: (collection, index_name) → metadata
     registry: RwLock<HashMap<(String, String), RegisteredIndex>>,
 }
@@ -48,6 +177,7 @@ impl IndexStore {
             hash: HashIndexManager::new(),
             bitmap: BitmapIndexManager::new(),
             spatial: SpatialIndexManager::new(),
+            sorted: SortedIndexManager::new(),
             registry: RwLock::new(HashMap::new()),
         }
     }
@@ -109,8 +239,25 @@ impl IndexStore {
                 Ok(0)
             }
             IndexMethodKind::BTree => {
-                // B-tree is the default, handled by the segment system
-                Ok(entities.len())
+                // Build sorted in-memory index for range scans
+                let count = self.sorted.build_index(collection, col, entities);
+                // Also build hash index for equality lookups on same column
+                let _ = self.hash.create_index(&HashIndexConfig {
+                    name: format!("{name}_hash"),
+                    collection: collection.to_string(),
+                    columns: columns.to_vec(),
+                    unique: false,
+                });
+                for (entity_id, fields) in entities {
+                    for (field_name, value) in fields {
+                        if field_name == col {
+                            let key = value_to_bytes(value);
+                            self.hash
+                                .insert(collection, &format!("{name}_hash"), key, *entity_id);
+                        }
+                    }
+                }
+                Ok(count)
             }
         }
     }
