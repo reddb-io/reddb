@@ -492,12 +492,53 @@ pub struct UnifiedEntity {
     pub updated_at: u64,
     /// The actual data content
     pub data: EntityData,
+    /// Sequence ID for ordering/versioning
+    pub sequence_id: u64,
+    /// Optional auxiliary data (embeddings, cross-refs).
+    /// None for most table rows — saves 40 bytes/entity.
+    aux: Option<Box<EntityAux>>,
+}
+
+/// Auxiliary entity data — only allocated when needed.
+#[derive(Debug, Clone, Default)]
+pub struct EntityAux {
     /// Embedding slots (for multi-vector support)
     pub embeddings: Vec<EmbeddingSlot>,
     /// Cross-references to other entities
     pub cross_refs: Vec<CrossRef>,
-    /// Sequence ID for ordering/versioning
-    pub sequence_id: u64,
+}
+
+impl UnifiedEntity {
+    /// Access embeddings (returns empty slice if no aux data).
+    pub fn embeddings(&self) -> &[EmbeddingSlot] {
+        self.aux
+            .as_ref()
+            .map(|a| a.embeddings.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Access cross-references (returns empty slice if no aux data).
+    pub fn cross_refs(&self) -> &[CrossRef] {
+        self.aux
+            .as_ref()
+            .map(|a| a.cross_refs.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Get mutable embeddings (allocates aux if needed).
+    pub fn embeddings_mut(&mut self) -> &mut Vec<EmbeddingSlot> {
+        &mut self.aux.get_or_insert_with(Default::default).embeddings
+    }
+
+    /// Get mutable cross-refs (allocates aux if needed).
+    pub fn cross_refs_mut(&mut self) -> &mut Vec<CrossRef> {
+        &mut self.aux.get_or_insert_with(Default::default).cross_refs
+    }
+
+    /// Check if entity has any auxiliary data.
+    pub fn has_aux(&self) -> bool {
+        self.aux.is_some()
+    }
 }
 
 impl UnifiedEntity {
@@ -514,9 +555,8 @@ impl UnifiedEntity {
             created_at: now,
             updated_at: now,
             data,
-            embeddings: Vec::new(),
-            cross_refs: Vec::new(),
             sequence_id: 0,
+            aux: None,
         }
     }
 
@@ -588,19 +628,19 @@ impl UnifiedEntity {
 
     /// Add an embedding to this entity
     pub fn add_embedding(&mut self, slot: EmbeddingSlot) {
-        self.embeddings.push(slot);
+        self.embeddings_mut().push(slot);
         self.touch();
     }
 
     /// Add a cross-reference
     pub fn add_cross_ref(&mut self, cross_ref: CrossRef) {
-        self.cross_refs.push(cross_ref);
+        self.cross_refs_mut().push(cross_ref);
         self.touch();
     }
 
     /// Get embedding by slot name
     pub fn get_embedding(&self, name: &str) -> Option<&EmbeddingSlot> {
-        self.embeddings.iter().find(|e| e.name == name)
+        self.embeddings().iter().find(|e| e.name == name)
     }
 
     /// Update timestamp
@@ -892,7 +932,7 @@ mod tests {
             "text-embedding-3-small",
         ));
 
-        assert_eq!(entity.embeddings.len(), 1);
+        assert_eq!(entity.embeddings().len(), 1);
         assert!(entity.get_embedding("content").is_some());
         assert!(entity.get_embedding("summary").is_none());
     }

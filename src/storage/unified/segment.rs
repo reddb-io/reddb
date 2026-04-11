@@ -341,12 +341,12 @@ impl GrowingSegment {
         };
 
         // Add embeddings
-        for emb in &entity.embeddings {
+        for emb in entity.embeddings() {
             size += emb.vector.len() * 4 + emb.name.len() + emb.model.len();
         }
 
         // Add cross-refs
-        size += entity.cross_refs.len() * std::mem::size_of::<CrossRef>();
+        size += entity.cross_refs().len() * std::mem::size_of::<CrossRef>();
 
         size
     }
@@ -376,7 +376,7 @@ impl GrowingSegment {
         }
 
         // Cross-reference indices
-        for cross_ref in &entity.cross_refs {
+        for cross_ref in entity.cross_refs() {
             self.cross_ref_forward
                 .entry(cross_ref.source)
                 .or_default()
@@ -568,7 +568,7 @@ impl UnifiedSegment for GrowingSegment {
                 EntityKind::TimeSeriesPoint { .. } => stats.row_count += 1,
                 EntityKind::QueueMessage { .. } => stats.row_count += 1,
             }
-            stats.cross_ref_count += entity.cross_refs.len();
+            stats.cross_ref_count += entity.cross_refs().len();
         }
 
         stats

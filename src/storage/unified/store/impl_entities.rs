@@ -384,7 +384,7 @@ impl UnifiedStore {
         }
 
         if let Some(mut entity) = source_manager.get(source_id) {
-            if !entity.cross_refs.iter().any(|xref| {
+            if !entity.cross_refs().iter().any(|xref| {
                 xref.target == target_id
                     && xref.ref_type == ref_type
                     && xref.target_collection == target_collection
@@ -488,7 +488,7 @@ impl UnifiedStore {
         entity: &UnifiedEntity,
         collection: &str,
     ) -> Result<(), StoreError> {
-        for cross_ref in &entity.cross_refs {
+        for cross_ref in entity.cross_refs() {
             if cross_ref.target_collection.is_empty() {
                 continue;
             }

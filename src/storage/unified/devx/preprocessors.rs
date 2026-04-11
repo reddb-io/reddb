@@ -95,7 +95,7 @@ impl Preprocessor for VectorNormalizer {
         }
 
         // Normalize embeddings
-        for embedding in &mut entity.embeddings {
+        for embedding in entity.embeddings_mut() {
             let norm: f32 = embedding.vector.iter().map(|x| x * x).sum::<f32>().sqrt();
             if norm > 0.0 {
                 for v in &mut embedding.vector {

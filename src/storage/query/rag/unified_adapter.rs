@@ -162,7 +162,7 @@ impl UnifiedStoreAdapter {
                 }
 
                 // Also check embeddings in any entity type
-                for slot in &entity.embeddings {
+                for slot in entity.embeddings() {
                     let similarity = cosine_similarity(query_vector, &slot.vector);
                     if similarity > 0.5 {
                         result.push(MatchedEntity::new(
@@ -366,8 +366,8 @@ impl UnifiedStoreAdapter {
         }
 
         // If the entity has embeddings, find similar vectors
-        if !entity.embeddings.is_empty() && config.expand_cross_refs {
-            let primary_vec = &entity.embeddings[0].vector;
+        if !entity.embeddings().is_empty() && config.expand_cross_refs {
+            let primary_vec = &entity.embeddings()[0].vector;
             let similar = self.vector_search(primary_vec, None, 5, None)?;
             for matched in similar.entities {
                 if matched.entity.id != entity_id {

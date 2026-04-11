@@ -201,7 +201,10 @@ pub fn snapshot_store_with_declarations(
     for collection_name in store.list_collections() {
         let entities = grouped.remove(&collection_name).unwrap_or_default();
         let model = infer_model(&entities);
-        let cross_refs = entities.iter().map(|entity| entity.cross_refs.len()).sum();
+        let cross_refs = entities
+            .iter()
+            .map(|entity| entity.cross_refs().len())
+            .sum();
         let entity_count = entities.len();
         let manager_stats = store
             .get_collection(&collection_name)

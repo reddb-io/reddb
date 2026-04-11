@@ -88,7 +88,7 @@ pub fn calculate_entity_similarity(
     let mut best_similarity = 0.0f32;
 
     // Check entity embeddings
-    for emb in &entity.embeddings {
+    for emb in entity.embeddings() {
         if let Some(ref slot_name) = slot {
             if &emb.name != slot_name {
                 continue;

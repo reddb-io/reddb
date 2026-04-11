@@ -511,7 +511,7 @@ fn extract_entity_tokens(entity: &UnifiedEntity) -> Vec<(String, String)> {
     }
 
     // Cross-reference tokens
-    for xref in &entity.cross_refs {
+    for xref in entity.cross_refs() {
         let mut xref_tokens = BTreeSet::new();
         push_text_tokens(&mut xref_tokens, &xref.target.raw().to_string(), false);
         push_text_tokens(&mut xref_tokens, &xref.target.to_string(), false);

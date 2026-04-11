@@ -1044,8 +1044,8 @@ impl RedDB {
                 fnv1a_hash_value(&mut root, &entity.updated_at);
                 fnv1a_hash_value(&mut root, &entity.data);
                 fnv1a_hash_value(&mut root, &entity.sequence_id);
-                fnv1a_hash_value(&mut root, &entity.embeddings.len());
-                fnv1a_hash_value(&mut root, &entity.cross_refs.len());
+                fnv1a_hash_value(&mut root, &entity.embeddings().len());
+                fnv1a_hash_value(&mut root, &entity.cross_refs().len());
             }
 
             roots.insert(name, root);
@@ -1126,7 +1126,7 @@ impl RedDB {
                 let score = match &e.data {
                     EntityData::Vector(v) => cosine_similarity(vector, &v.dense),
                     _ => e
-                        .embeddings
+                        .embeddings()
                         .iter()
                         .map(|emb| cosine_similarity(vector, &emb.vector))
                         .fold(0.0f32, f32::max),

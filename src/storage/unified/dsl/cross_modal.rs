@@ -555,7 +555,7 @@ pub(crate) fn cross_modal_graph_neighbors(
 
 pub(crate) fn cross_modal_entity_vectors(entity: &UnifiedEntity) -> Vec<Vec<f32>> {
     let mut vectors = entity
-        .embeddings
+        .embeddings()
         .iter()
         .filter_map(|embedding| {
             if embedding.vector.is_empty() {

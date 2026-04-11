@@ -253,13 +253,13 @@ impl UnifiedStore {
                             .push((target_id, ref_type, target_collection.clone()));
 
                         if let Some((collection, mut entity)) = self.get_any(source_id) {
-                            let exists = entity.cross_refs.iter().any(|xref| {
+                            let exists = entity.cross_refs().iter().any(|xref| {
                                 xref.target == target_id
                                     && xref.ref_type == ref_type
                                     && xref.target_collection == target_collection
                             });
                             if !exists {
-                                entity.cross_refs.push(CrossRef::new(
+                                entity.cross_refs_mut().push(CrossRef::new(
                                     source_id,
                                     target_id,
                                     target_collection.clone(),

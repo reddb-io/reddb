@@ -147,7 +147,7 @@ impl QueryBuilder {
                     let sim = match &entity.data {
                         EntityData::Vector(v) => cosine_similarity(query_vec, &v.dense),
                         _ => entity
-                            .embeddings
+                            .embeddings()
                             .iter()
                             .map(|e| cosine_similarity(query_vec, &e.vector))
                             .fold(0.0f32, f32::max),

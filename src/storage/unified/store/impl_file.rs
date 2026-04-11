@@ -441,16 +441,14 @@ impl UnifiedStore {
         // Sequence ID
         let sequence_id = Self::read_varu64_safe(buf, pos)?;
 
-        let entity = UnifiedEntity {
-            id: EntityId::new(id),
-            kind,
-            created_at,
-            updated_at,
-            data,
-            embeddings,
-            cross_refs,
-            sequence_id,
-        };
+        let mut entity = UnifiedEntity::new(EntityId::new(id), kind, data);
+        entity.created_at = created_at;
+        entity.updated_at = updated_at;
+        entity.sequence_id = sequence_id;
+        if !embeddings.is_empty() || !cross_refs.is_empty() {
+            entity.embeddings_mut().extend(embeddings);
+            entity.cross_refs_mut().extend(cross_refs);
+        }
 
         Ok(entity)
     }
@@ -592,8 +590,8 @@ impl UnifiedStore {
         write_varu64(buf, entity.updated_at);
 
         // Embeddings
-        write_varu32(buf, entity.embeddings.len() as u32);
-        for emb in &entity.embeddings {
+        write_varu32(buf, entity.embeddings().len() as u32);
+        for emb in entity.embeddings() {
             write_varu32(buf, emb.name.len() as u32);
             buf.extend_from_slice(emb.name.as_bytes());
             write_varu32(buf, emb.vector.len() as u32);
@@ -605,8 +603,8 @@ impl UnifiedStore {
         }
 
         // Cross-refs
-        write_varu32(buf, entity.cross_refs.len() as u32);
-        for cross_ref in &entity.cross_refs {
+        write_varu32(buf, entity.cross_refs().len() as u32);
+        for cross_ref in entity.cross_refs() {
             write_varu64(buf, cross_ref.source.raw());
             write_varu64(buf, cross_ref.target.raw());
             buf.push(cross_ref.ref_type.to_byte());

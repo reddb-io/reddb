@@ -650,7 +650,7 @@ impl RedDB {
                 let cross_refs = manager
                     .query_all(|_| true)
                     .iter()
-                    .map(|entity| entity.cross_refs.len())
+                    .map(|entity| entity.cross_refs().len())
                     .sum();
                 stats_by_collection.insert(
                     name,

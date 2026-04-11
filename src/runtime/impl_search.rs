@@ -746,8 +746,10 @@ impl RedDBRuntime {
         if follow_cross_refs {
             let seed: Vec<(u64, f32, Vec<crate::storage::CrossRef>)> = scored
                 .values()
-                .filter(|(entity, _, _, _)| !entity.cross_refs.is_empty())
-                .map(|(entity, score, _, _)| (entity.id.raw(), *score, entity.cross_refs.clone()))
+                .filter(|(entity, _, _, _)| !entity.cross_refs().is_empty())
+                .map(|(entity, score, _, _)| {
+                    (entity.id.raw(), *score, entity.cross_refs().to_vec())
+                })
                 .collect();
 
             for (source_id, source_score, cross_refs) in seed {
@@ -885,7 +887,7 @@ impl RedDBRuntime {
         let mut connections: Vec<ContextConnection> = Vec::new();
         let found_ids: HashSet<u64> = scored.keys().copied().collect();
         for (entity, _, _, _) in scored.values() {
-            for xref in &entity.cross_refs {
+            for xref in entity.cross_refs() {
                 if found_ids.contains(&xref.target.raw()) {
                     connections.push(ContextConnection {
                         from_id: entity.id.raw(),

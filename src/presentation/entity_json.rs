@@ -50,7 +50,7 @@ pub(crate) fn entity_json(entity: &UnifiedEntity) -> JsonValue {
     object.insert("data".to_string(), entity_data_json(&entity.data));
     object.insert(
         "cross_refs".to_string(),
-        JsonValue::Array(entity.cross_refs.iter().map(cross_ref_json).collect()),
+        JsonValue::Array(entity.cross_refs().iter().map(cross_ref_json).collect()),
     );
     JsonValue::Object(object)
 }

@@ -723,7 +723,7 @@ pub(super) fn runtime_identity_fragment(value: &Value) -> Option<String> {
 }
 
 pub(super) fn apply_runtime_identity_hints(record: &mut UnifiedRecord, entity: &UnifiedEntity) {
-    for cross_ref in &entity.cross_refs {
+    for cross_ref in entity.cross_refs() {
         let value = match cross_ref.ref_type {
             RefType::VectorToRow | RefType::NodeToRow => Some(Value::RowRef(
                 cross_ref.target_collection.clone(),
@@ -862,7 +862,7 @@ pub(super) fn runtime_ref_target_string(target: &RefTarget) -> String {
 pub(super) fn runtime_entity_vector_similarity(entity: &UnifiedEntity, query: &[f32]) -> f32 {
     let mut best_similarity = 0.0f32;
 
-    for emb in &entity.embeddings {
+    for emb in entity.embeddings() {
         best_similarity = best_similarity.max(cosine_similarity(query, &emb.vector));
     }
 
