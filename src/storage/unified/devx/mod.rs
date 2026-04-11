@@ -47,11 +47,42 @@ mod builders;
 mod conversions;
 mod error;
 mod helpers;
-mod preprocessors;
 mod query;
 mod reddb;
 pub(crate) mod refs;
 mod types;
+
+use crate::storage::unified::entity::UnifiedEntity;
+
+/// Preprocessing hook applied to entities before storage.
+pub trait Preprocessor: Send + Sync {
+    fn process(&self, entity: &mut UnifiedEntity);
+    fn name(&self) -> &str {
+        "unnamed"
+    }
+}
+
+/// Index configuration for the storage engine.
+#[derive(Debug, Clone)]
+pub struct IndexConfig {
+    pub hnsw_enabled: bool,
+    pub hnsw_m: usize,
+    pub hnsw_ef_construction: usize,
+    pub btree_enabled: bool,
+    pub inverted_index_enabled: bool,
+}
+
+impl Default for IndexConfig {
+    fn default() -> Self {
+        Self {
+            hnsw_enabled: true,
+            hnsw_m: 16,
+            hnsw_ef_construction: 200,
+            btree_enabled: true,
+            inverted_index_enabled: true,
+        }
+    }
+}
 
 // Re-export all public types
 pub use batch::{BatchBuilder, BatchResult};
@@ -60,10 +91,6 @@ pub use builders::{
 };
 pub use error::DevXError;
 pub use helpers::cosine_similarity;
-pub use preprocessors::{
-    ContentHasher, IndexConfig, KeywordExtractor, Preprocessor, PreprocessorPipeline,
-    TimestampPreprocessor, VectorNormalizer,
-};
 pub use query::{
     ExpandedEntity, MetadataFilter, PropertyFilter, QueryBuilder, QueryResult, QueryResultItem,
 };

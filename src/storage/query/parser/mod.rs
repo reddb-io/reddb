@@ -42,7 +42,6 @@ mod error;
 mod filter;
 mod graph;
 mod graph_commands;
-mod helpers;
 mod hybrid;
 mod index_ddl;
 mod join;

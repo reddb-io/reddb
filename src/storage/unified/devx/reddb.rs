@@ -22,10 +22,10 @@ use super::builders::{
     DocumentBuilder, EdgeBuilder, KvBuilder, NodeBuilder, RowBuilder, VectorBuilder,
 };
 use super::helpers::cosine_similarity;
-use super::preprocessors::{IndexConfig, Preprocessor};
 use super::query::QueryBuilder;
 use super::refs::{NodeRef, TableRef, VectorRef};
 use super::types::{LinkedEntity, SimilarResult};
+use super::{IndexConfig, Preprocessor};
 use crate::api::{Capability, CatalogSnapshot, CollectionStats, RedDBOptions, StorageMode};
 use crate::catalog::{
     consistency_report, snapshot_store_with_declarations, CatalogConsistencyReport,

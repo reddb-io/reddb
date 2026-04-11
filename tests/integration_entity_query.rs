@@ -1381,7 +1381,7 @@ fn test_node_with_embedding() {
     assert!(item.data.is_node(), "entity should be a node");
 
     assert!(
-        !item.embeddings.is_empty(),
+        !item.embeddings().is_empty(),
         "node should have at least one embedding slot"
     );
 }
