@@ -348,19 +348,23 @@ impl SegmentManager {
 
     /// Update an entity
     pub fn update(&self, entity: UnifiedEntity) -> Result<(), SegmentError> {
-        let segment_id = self.entity_segment.read().unwrap().get(&entity.id).copied();
+        // Try growing segment directly (covers bulk-inserted entities without entity_segment map)
+        if let Some(growing_arc) = self.growing.read().unwrap().as_ref() {
+            let mut growing = growing_arc.write().unwrap();
+            if growing.contains(entity.id) && growing.state().is_writable() {
+                return growing.update(entity);
+            }
+        }
 
+        // Try entity_segment mapping for individually inserted entities
+        let segment_id = self.entity_segment.read().unwrap().get(&entity.id).copied();
         if let Some(seg_id) = segment_id {
-            // Try growing segment
             if let Some(growing_arc) = self.growing.read().unwrap().as_ref() {
                 let mut growing = growing_arc.write().unwrap();
                 if growing.id() == seg_id && growing.state().is_writable() {
                     return growing.update(entity);
                 }
             }
-
-            // For sealed segments, we need to delete + re-insert
-            // This is a simplification; production would use MVCC
             return Err(SegmentError::NotWritable);
         }
 

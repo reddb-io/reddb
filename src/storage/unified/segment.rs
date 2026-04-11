@@ -672,8 +672,25 @@ impl UnifiedSegment for GrowingSegment {
             return Err(SegmentError::NotWritable);
         }
 
-        // Remove old entity (also unindexes)
-        let old = self.entities.remove(&entity.id);
+        // Remove/replace old entity
+        let old = if self.use_flat {
+            let raw = entity.id.raw();
+            if raw >= self.base_entity_id {
+                let idx = (raw - self.base_entity_id) as usize;
+                if idx < self.flat_entities.len() && self.flat_entities[idx].id == entity.id {
+                    Some(std::mem::replace(
+                        &mut self.flat_entities[idx],
+                        entity.clone(),
+                    ))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            self.entities.remove(&entity.id)
+        };
         if old.is_none() {
             return Err(SegmentError::NotFound(entity.id));
         }
@@ -686,8 +703,10 @@ impl UnifiedSegment for GrowingSegment {
         // Index new entity
         self.index_entity(&entity);
 
-        // Insert new version
-        self.entities.insert(entity.id, entity);
+        // Insert new version (skip for flat storage — already replaced in-place)
+        if !self.use_flat {
+            self.entities.insert(entity.id, entity);
+        }
 
         self.last_write_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -702,7 +721,20 @@ impl UnifiedSegment for GrowingSegment {
             return Err(SegmentError::NotWritable);
         }
 
-        // Remove entity
+        // For flat storage, use tombstone (don't remove from Vec to keep indices valid)
+        if self.use_flat {
+            let raw = id.raw();
+            if raw >= self.base_entity_id {
+                let idx = (raw - self.base_entity_id) as usize;
+                if idx < self.flat_entities.len() && self.flat_entities[idx].id == id {
+                    self.deleted.insert(id);
+                    return Ok(true);
+                }
+            }
+            return Ok(false);
+        }
+
+        // Remove entity from HashMap
         let entity = self.entities.remove(&id);
         if entity.is_none() {
             return Ok(false);
