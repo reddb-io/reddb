@@ -588,7 +588,11 @@ impl UnifiedSegment for GrowingSegment {
             return false;
         }
         if self.use_flat {
-            let idx = id.raw().wrapping_sub(self.base_entity_id) as usize;
+            let raw = id.raw();
+            if raw < self.base_entity_id {
+                return false;
+            }
+            let idx = (raw - self.base_entity_id) as usize;
             idx < self.flat_entities.len()
         } else {
             self.entities.contains_key(&id)
@@ -600,8 +604,12 @@ impl UnifiedSegment for GrowingSegment {
             return None;
         }
         if self.use_flat {
-            let idx = id.raw().wrapping_sub(self.base_entity_id) as usize;
-            self.flat_entities.get(idx)
+            let raw = id.raw();
+            if raw < self.base_entity_id {
+                return None;
+            }
+            let idx = (raw - self.base_entity_id) as usize;
+            self.flat_entities.get(idx).filter(|e| e.id == id)
         } else {
             self.entities.get(&id)
         }
@@ -612,8 +620,12 @@ impl UnifiedSegment for GrowingSegment {
             return None;
         }
         if self.use_flat {
-            let idx = id.raw().wrapping_sub(self.base_entity_id) as usize;
-            self.flat_entities.get_mut(idx)
+            let raw = id.raw();
+            if raw < self.base_entity_id {
+                return None;
+            }
+            let idx = (raw - self.base_entity_id) as usize;
+            self.flat_entities.get_mut(idx).filter(|e| e.id == id)
         } else {
             self.entities.get_mut(&id)
         }
