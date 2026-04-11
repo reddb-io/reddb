@@ -1,5 +1,5 @@
-use pyo3::prelude::*;
 use pyo3::exceptions::PyRuntimeError;
+use pyo3::prelude::*;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
@@ -154,7 +154,7 @@ fn connect(addr: &str) -> PyResult<Connection> {
         Ok::<_, PyErr>(
             RedDbClient::new(channel)
                 .max_decoding_message_size(256 * 1024 * 1024)
-                .max_encoding_message_size(256 * 1024 * 1024)
+                .max_encoding_message_size(256 * 1024 * 1024),
         )
     })?;
     Ok(Connection {
@@ -180,16 +180,25 @@ enum TlsOrPlain {
 
 impl Read for TlsOrPlain {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match self { TlsOrPlain::Plain(s) => s.read(buf), TlsOrPlain::Tls(s) => s.read(buf) }
+        match self {
+            TlsOrPlain::Plain(s) => s.read(buf),
+            TlsOrPlain::Tls(s) => s.read(buf),
+        }
     }
 }
 
 impl Write for TlsOrPlain {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        match self { TlsOrPlain::Plain(s) => s.write(buf), TlsOrPlain::Tls(s) => s.write(buf) }
+        match self {
+            TlsOrPlain::Plain(s) => s.write(buf),
+            TlsOrPlain::Tls(s) => s.write(buf),
+        }
     }
     fn flush(&mut self) -> io::Result<()> {
-        match self { TlsOrPlain::Plain(s) => s.flush(), TlsOrPlain::Tls(s) => s.flush() }
+        match self {
+            TlsOrPlain::Plain(s) => s.flush(),
+            TlsOrPlain::Tls(s) => s.flush(),
+        }
     }
 }
 
@@ -201,10 +210,16 @@ struct WireConnection {
 }
 
 impl WireConnection {
-    fn send_and_recv(stream: &mut TlsOrPlain, msg_type: u8, payload: &[u8]) -> Result<(u8, Vec<u8>), String> {
+    fn send_and_recv(
+        stream: &mut TlsOrPlain,
+        msg_type: u8,
+        payload: &[u8],
+    ) -> Result<(u8, Vec<u8>), String> {
         // Send: [total_len:u32 LE][msg_type:u8][payload...]
         let total_len = (1 + payload.len()) as u32;
-        stream.write_all(&total_len.to_le_bytes()).map_err(|e| e.to_string())?;
+        stream
+            .write_all(&total_len.to_le_bytes())
+            .map_err(|e| e.to_string())?;
         stream.write_all(&[msg_type]).map_err(|e| e.to_string())?;
         stream.write_all(payload).map_err(|e| e.to_string())?;
         stream.flush().map_err(|e| e.to_string())?;
@@ -217,7 +232,9 @@ impl WireConnection {
         let payload_len = resp_len.saturating_sub(1);
         let mut resp_payload = vec![0u8; payload_len];
         if payload_len > 0 {
-            stream.read_exact(&mut resp_payload).map_err(|e| e.to_string())?;
+            stream
+                .read_exact(&mut resp_payload)
+                .map_err(|e| e.to_string())?;
         }
         Ok((resp_type, resp_payload))
     }
@@ -227,7 +244,10 @@ impl WireConnection {
 impl WireConnection {
     /// Execute a SQL query. Returns the result JSON string.
     fn query(&self, sql: &str) -> PyResult<String> {
-        let mut stream = self.stream.lock().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let mut stream = self
+            .stream
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let (resp_type, payload) = Self::send_and_recv(&mut stream, WIRE_MSG_QUERY, sql.as_bytes())
             .map_err(|e| PyRuntimeError::new_err(e))?;
 
@@ -242,11 +262,16 @@ impl WireConnection {
 
     /// Execute a SQL query, return raw bytes (for benchmarking — skip Python dict creation).
     fn query_raw(&self, sql: &str) -> PyResult<usize> {
-        let mut stream = self.stream.lock().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let mut stream = self
+            .stream
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let (resp_type, payload) = Self::send_and_recv(&mut stream, WIRE_MSG_QUERY, sql.as_bytes())
             .map_err(|e| PyRuntimeError::new_err(e))?;
         if resp_type == WIRE_MSG_ERROR {
-            return Err(PyRuntimeError::new_err(String::from_utf8_lossy(&payload).to_string()));
+            return Err(PyRuntimeError::new_err(
+                String::from_utf8_lossy(&payload).to_string(),
+            ));
         }
         // Return number of bytes received (skip decoding for max throughput measurement)
         Ok(payload.len())
@@ -255,11 +280,16 @@ impl WireConnection {
     /// Execute a SQL query with BINARY result encoding (zero JSON).
     /// Returns number of bytes received (for benchmarking).
     fn query_binary_raw(&self, sql: &str) -> PyResult<usize> {
-        let mut stream = self.stream.lock().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let mut stream = self
+            .stream
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let (resp_type, payload) = Self::send_and_recv(&mut stream, 0x07, sql.as_bytes())
             .map_err(|e| PyRuntimeError::new_err(e))?;
         if resp_type == 0x03 {
-            return Err(PyRuntimeError::new_err(String::from_utf8_lossy(&payload).to_string()));
+            return Err(PyRuntimeError::new_err(
+                String::from_utf8_lossy(&payload).to_string(),
+            ));
         }
         Ok(payload.len())
     }
@@ -276,12 +306,17 @@ impl WireConnection {
             buf.extend_from_slice(p.as_bytes());
         }
 
-        let mut stream = self.stream.lock().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let mut stream = self
+            .stream
+            .lock()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let (resp_type, payload) = Self::send_and_recv(&mut stream, WIRE_MSG_BULK_INSERT, &buf)
             .map_err(|e| PyRuntimeError::new_err(e))?;
 
         if resp_type == WIRE_MSG_ERROR {
-            return Err(PyRuntimeError::new_err(String::from_utf8_lossy(&payload).to_string()));
+            return Err(PyRuntimeError::new_err(
+                String::from_utf8_lossy(&payload).to_string(),
+            ));
         }
         if payload.len() >= 8 {
             Ok(u64::from_le_bytes(payload[0..8].try_into().unwrap()))
@@ -293,11 +328,17 @@ impl WireConnection {
     /// Binary bulk insert — sends typed values directly, zero JSON parsing on server.
     /// columns: list of column names
     /// rows: list of tuples/lists of values (str, int, float, bool, None)
-    fn bulk_insert_binary(&self, collection: &str, columns: Vec<String>, rows: Vec<Vec<PyObject>>) -> PyResult<u64> {
+    fn bulk_insert_binary(
+        &self,
+        collection: &str,
+        columns: Vec<String>,
+        rows: Vec<Vec<PyObject>>,
+    ) -> PyResult<u64> {
         Python::with_gil(|py| {
             let ncols = columns.len();
             let nrows = rows.len();
-            let mut buf = Vec::with_capacity(collection.len() + 6 + ncols * 20 + nrows * ncols * 12);
+            let mut buf =
+                Vec::with_capacity(collection.len() + 6 + ncols * 20 + nrows * ncols * 12);
 
             // [coll_len:u16][coll][ncols:u16][col_names...][nrows:u32]
             buf.extend_from_slice(&(collection.len() as u16).to_le_bytes());
@@ -314,11 +355,14 @@ impl WireConnection {
                     if val.is_none(py) {
                         buf.push(0); // NULL
                     } else if let Ok(v) = val.extract::<bool>(py) {
-                        buf.push(4); buf.push(v as u8);
+                        buf.push(4);
+                        buf.push(v as u8);
                     } else if let Ok(v) = val.extract::<i64>(py) {
-                        buf.push(1); buf.extend_from_slice(&v.to_le_bytes());
+                        buf.push(1);
+                        buf.extend_from_slice(&v.to_le_bytes());
                     } else if let Ok(v) = val.extract::<f64>(py) {
-                        buf.push(2); buf.extend_from_slice(&v.to_le_bytes());
+                        buf.push(2);
+                        buf.extend_from_slice(&v.to_le_bytes());
                     } else if let Ok(v) = val.extract::<String>(py) {
                         buf.push(3);
                         buf.extend_from_slice(&(v.len() as u32).to_le_bytes());
@@ -329,12 +373,17 @@ impl WireConnection {
                 }
             }
 
-            let mut stream = self.stream.lock().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            let mut stream = self
+                .stream
+                .lock()
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
             let (resp_type, payload) = Self::send_and_recv(&mut stream, 0x06, &buf)
                 .map_err(|e| PyRuntimeError::new_err(e))?;
 
             if resp_type == 0x03 {
-                return Err(PyRuntimeError::new_err(String::from_utf8_lossy(&payload).to_string()));
+                return Err(PyRuntimeError::new_err(
+                    String::from_utf8_lossy(&payload).to_string(),
+                ));
             }
             if payload.len() >= 8 {
                 Ok(u64::from_le_bytes(payload[0..8].try_into().unwrap()))
@@ -381,39 +430,51 @@ fn decode_wire_result_to_py(py: Python<'_>, data: &[u8]) -> PyResult<PyObject> {
     for _ in 0..nrows {
         let dict = PyDict::new_bound(py);
         for col in &col_names {
-            if pos >= data.len() { break; }
+            if pos >= data.len() {
+                break;
+            }
             let tag = data[pos];
             pos += 1;
             match tag {
-                0 => { dict.set_item(col, py.None())?; }
-                1 => { // i64
-                    let v = i64::from_le_bytes(data[pos..pos+8].try_into().unwrap_or([0;8]));
+                0 => {
+                    dict.set_item(col, py.None())?;
+                }
+                1 => {
+                    // i64
+                    let v = i64::from_le_bytes(data[pos..pos + 8].try_into().unwrap_or([0; 8]));
                     pos += 8;
                     dict.set_item(col, v)?;
                 }
-                2 => { // f64
-                    let v = f64::from_le_bytes(data[pos..pos+8].try_into().unwrap_or([0;8]));
+                2 => {
+                    // f64
+                    let v = f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap_or([0; 8]));
                     pos += 8;
                     dict.set_item(col, v)?;
                 }
-                3 => { // text
-                    let len = u32::from_le_bytes(data[pos..pos+4].try_into().unwrap_or([0;4])) as usize;
+                3 => {
+                    // text
+                    let len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap_or([0; 4]))
+                        as usize;
                     pos += 4;
-                    let s = String::from_utf8_lossy(&data[pos..pos+len]);
+                    let s = String::from_utf8_lossy(&data[pos..pos + len]);
                     pos += len;
                     dict.set_item(col, s.as_ref())?;
                 }
-                4 => { // bool
+                4 => {
+                    // bool
                     let v = data[pos] != 0;
                     pos += 1;
                     dict.set_item(col, v)?;
                 }
-                5 => { // u64
-                    let v = u64::from_le_bytes(data[pos..pos+8].try_into().unwrap_or([0;8]));
+                5 => {
+                    // u64
+                    let v = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap_or([0; 8]));
                     pos += 8;
                     dict.set_item(col, v)?;
                 }
-                _ => { dict.set_item(col, py.None())?; }
+                _ => {
+                    dict.set_item(col, py.None())?;
+                }
             }
         }
         rows.append(dict)?;
@@ -431,7 +492,8 @@ fn decode_wire_result_to_py(py: Python<'_>, data: &[u8]) -> PyResult<PyObject> {
 fn wire_connect(addr: &str) -> PyResult<WireConnection> {
     let stream = TcpStream::connect(addr)
         .map_err(|e| PyRuntimeError::new_err(format!("wire connect failed: {e}")))?;
-    stream.set_nodelay(true)
+    stream
+        .set_nodelay(true)
         .map_err(|e| PyRuntimeError::new_err(format!("set_nodelay: {e}")))?;
     Ok(WireConnection {
         stream: std::sync::Mutex::new(TlsOrPlain::Plain(stream)),
@@ -445,7 +507,11 @@ fn wire_connect(addr: &str) -> PyResult<WireConnection> {
 ///   conn = reddb_python.wire_connect_tls("127.0.0.1:50053", ca_cert="/path/to/cert.pem")
 #[pyfunction]
 #[pyo3(signature = (addr, ca_cert=None, accept_invalid_certs=false))]
-fn wire_connect_tls(addr: &str, ca_cert: Option<&str>, accept_invalid_certs: bool) -> PyResult<WireConnection> {
+fn wire_connect_tls(
+    addr: &str,
+    ca_cert: Option<&str>,
+    accept_invalid_certs: bool,
+) -> PyResult<WireConnection> {
     use rustls::ClientConfig;
     use std::io::BufReader;
 
@@ -462,7 +528,8 @@ fn wire_connect_tls(addr: &str, ca_cert: Option<&str>, accept_invalid_certs: boo
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| PyRuntimeError::new_err(format!("parse CA cert: {e}")))?;
         for cert in certs {
-            root_store.add(cert)
+            root_store
+                .add(cert)
                 .map_err(|e| PyRuntimeError::new_err(format!("add CA cert: {e}")))?;
         }
     }
@@ -482,13 +549,14 @@ fn wire_connect_tls(addr: &str, ca_cert: Option<&str>, accept_invalid_certs: boo
     let connector = std::sync::Arc::new(config);
 
     // Parse host:port
-    let (host, _port) = addr.rsplit_once(':')
+    let (host, _port) = addr
+        .rsplit_once(':')
         .ok_or_else(|| PyRuntimeError::new_err("addr must be host:port"))?;
     let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
         .map_err(|e| PyRuntimeError::new_err(format!("invalid server name: {e}")))?;
 
-    let tcp = TcpStream::connect(addr)
-        .map_err(|e| PyRuntimeError::new_err(format!("connect: {e}")))?;
+    let tcp =
+        TcpStream::connect(addr).map_err(|e| PyRuntimeError::new_err(format!("connect: {e}")))?;
     tcp.set_nodelay(true)
         .map_err(|e| PyRuntimeError::new_err(format!("nodelay: {e}")))?;
 

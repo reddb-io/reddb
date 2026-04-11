@@ -5,6 +5,11 @@ pub(super) fn execute_runtime_table_query(
     query: &TableQuery,
     index_store: Option<&super::index_store::IndexStore>,
 ) -> RedDBResult<UnifiedResult> {
+    // ── AGGREGATE PATH: COUNT, AVG, SUM, MIN, MAX, GROUP BY ──
+    if has_aggregate_projections(&query.columns) {
+        return execute_aggregate_query(db, query);
+    }
+
     // ── TURBO PATH: Build JSON directly, bypassing UnifiedRecord entirely ──
     if query.filter.is_some()
         && query.order_by.is_empty()
@@ -2443,5 +2448,235 @@ pub(crate) fn evaluate_entity_filter(
                 .and_then(|v| runtime_value_text(v.as_ref()))
                 .is_some_and(|value| value.contains(substring))
         }
+    }
+}
+
+/// Check if any projection is an aggregate function.
+fn has_aggregate_projections(projections: &[Projection]) -> bool {
+    projections.iter().any(|p| matches!(p, Projection::Function(name, _) if matches!(name.as_str(), "COUNT" | "AVG" | "SUM" | "MIN" | "MAX")))
+}
+
+/// Execute a query with aggregate functions (COUNT, AVG, SUM, MIN, MAX, GROUP BY).
+fn execute_aggregate_query(db: &RedDB, query: &TableQuery) -> RedDBResult<UnifiedResult> {
+    let manager = db
+        .store()
+        .get_collection(query.table.as_str())
+        .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
+
+    let filter = query.filter.as_ref();
+    let table_name = query.table.as_str();
+    let table_alias = query.alias.as_deref().unwrap_or(table_name);
+    let has_group_by = !query.group_by.is_empty();
+
+    // Accumulators per group (empty string key = no grouping)
+    let mut groups: std::collections::HashMap<String, AggState> = std::collections::HashMap::new();
+
+    manager.for_each_entity(|entity| {
+        if !entity.data.is_row() {
+            return true;
+        }
+        if let Some(f) = filter {
+            if !evaluate_entity_filter(entity, f, table_name, table_alias) {
+                return true;
+            }
+        }
+
+        let row = match entity.data.as_row() {
+            Some(r) => r,
+            None => return true,
+        };
+
+        // Determine group key
+        let group_key = if has_group_by {
+            query
+                .group_by
+                .iter()
+                .filter_map(|col| row.get_field(col))
+                .map(|v| format!("{v:?}"))
+                .collect::<Vec<_>>()
+                .join("|")
+        } else {
+            String::new()
+        };
+
+        let state = groups.entry(group_key).or_default();
+        state.count += 1;
+
+        // Accumulate values for each aggregate projection
+        for proj in &query.columns {
+            if let Projection::Function(func, args) = proj {
+                let col_name = match args.first() {
+                    Some(Projection::Column(c)) => c.as_str(),
+                    Some(Projection::All) => "_count",
+                    _ => continue,
+                };
+                if col_name == "_count" {
+                    continue;
+                } // COUNT(*) just needs count
+
+                let val = match row.get_field(col_name) {
+                    Some(v) => v,
+                    None => continue,
+                };
+                let num = value_to_f64(val);
+
+                match func.as_str() {
+                    "SUM" | "AVG" => {
+                        if let Some(n) = num {
+                            *state.sums.entry(col_name.to_string()).or_insert(0.0) += n;
+                        }
+                    }
+                    "MIN" => {
+                        if let Some(n) = num {
+                            let entry = state.mins.entry(col_name.to_string()).or_insert(f64::MAX);
+                            if n < *entry {
+                                *entry = n;
+                            }
+                        }
+                    }
+                    "MAX" => {
+                        if let Some(n) = num {
+                            let entry = state.maxs.entry(col_name.to_string()).or_insert(f64::MIN);
+                            if n > *entry {
+                                *entry = n;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        true
+    });
+
+    // Build result records from accumulated groups
+    let mut records = Vec::with_capacity(groups.len().max(1));
+    let mut columns = Vec::new();
+
+    for (group_key, state) in &groups {
+        let mut record = UnifiedRecord::new();
+
+        // Add GROUP BY columns
+        if has_group_by {
+            let parts: Vec<&str> = group_key.split('|').collect();
+            for (i, col) in query.group_by.iter().enumerate() {
+                if columns.is_empty() || !columns.contains(col) {
+                    columns.push(col.clone());
+                }
+                let val_str = parts.get(i).unwrap_or(&"").trim_matches('"');
+                // Try to parse back — simplified
+                let val_str = val_str
+                    .strip_prefix("Text(\"")
+                    .and_then(|s| s.strip_suffix("\")"))
+                    .unwrap_or(val_str);
+                let val_str = val_str
+                    .strip_prefix("Integer(")
+                    .and_then(|s| s.strip_suffix(")"))
+                    .unwrap_or(val_str);
+                record.set(col, Value::Text(val_str.to_string()));
+            }
+        }
+
+        // Add aggregate results
+        for proj in &query.columns {
+            if let Projection::Function(func, args) = proj {
+                let col_name = match args.first() {
+                    Some(Projection::Column(c)) => c.as_str(),
+                    Some(Projection::All) => "*",
+                    _ => continue,
+                };
+                let result_name = if col_name == "*" {
+                    format!("{}(*)", func.to_lowercase())
+                } else {
+                    format!("{}({})", func.to_lowercase(), col_name)
+                };
+
+                if !columns.contains(&result_name) {
+                    columns.push(result_name.clone());
+                }
+
+                let result_val = match func.as_str() {
+                    "COUNT" => Value::Integer(state.count as i64),
+                    "SUM" => {
+                        let s = state.sums.get(col_name).copied().unwrap_or(0.0);
+                        Value::Float(s)
+                    }
+                    "AVG" => {
+                        let s = state.sums.get(col_name).copied().unwrap_or(0.0);
+                        Value::Float(if state.count > 0 {
+                            s / state.count as f64
+                        } else {
+                            0.0
+                        })
+                    }
+                    "MIN" => {
+                        let m = state.mins.get(col_name).copied().unwrap_or(0.0);
+                        Value::Float(m)
+                    }
+                    "MAX" => {
+                        let m = state.maxs.get(col_name).copied().unwrap_or(0.0);
+                        Value::Float(m)
+                    }
+                    _ => Value::Null,
+                };
+                record.set(&result_name, result_val);
+            }
+        }
+
+        records.push(record);
+    }
+
+    // If no groups matched, return a single row with zeros
+    if records.is_empty() && !has_group_by {
+        let mut record = UnifiedRecord::new();
+        for proj in &query.columns {
+            if let Projection::Function(func, args) = proj {
+                let col_name = match args.first() {
+                    Some(Projection::Column(c)) => c.as_str(),
+                    Some(Projection::All) => "*",
+                    _ => continue,
+                };
+                let name = if col_name == "*" {
+                    format!("{}(*)", func.to_lowercase())
+                } else {
+                    format!("{}({})", func.to_lowercase(), col_name)
+                };
+                if !columns.contains(&name) {
+                    columns.push(name.clone());
+                }
+                record.set(
+                    &name,
+                    match func.as_str() {
+                        "COUNT" => Value::Integer(0),
+                        _ => Value::Float(0.0),
+                    },
+                );
+            }
+        }
+        records.push(record);
+    }
+
+    Ok(UnifiedResult {
+        columns,
+        records,
+        stats: Default::default(),
+        pre_serialized_json: None,
+    })
+}
+
+#[derive(Default)]
+struct AggState {
+    count: u64,
+    sums: std::collections::HashMap<String, f64>,
+    mins: std::collections::HashMap<String, f64>,
+    maxs: std::collections::HashMap<String, f64>,
+}
+
+fn value_to_f64(val: &Value) -> Option<f64> {
+    match val {
+        Value::Integer(n) => Some(*n as f64),
+        Value::UnsignedInteger(n) => Some(*n as f64),
+        Value::Float(f) => Some(*f),
+        _ => None,
     }
 }

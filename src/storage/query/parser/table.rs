@@ -94,8 +94,30 @@ impl<'a> Parser<'a> {
         Ok(projections)
     }
 
-    /// Parse a single projection
+    /// Parse a single projection — supports columns and aggregate functions
     fn parse_projection(&mut self) -> Result<Projection, ParseError> {
+        // Check for aggregate functions: COUNT(*), AVG(col), SUM(col), MIN(col), MAX(col)
+        let is_agg = matches!(
+            self.peek(),
+            Token::Count | Token::Sum | Token::Avg | Token::Min | Token::Max
+        );
+        if is_agg {
+            let func_name = self.advance()?.to_string().to_uppercase();
+            self.expect(Token::LParen)?;
+            let args = if self.consume(&Token::Star)? {
+                vec![Projection::All]
+            } else {
+                let col = self.expect_ident_or_keyword()?;
+                vec![Projection::Column(col)]
+            };
+            self.expect(Token::RParen)?;
+            // Optional alias: COUNT(*) AS cnt
+            if self.consume(&Token::As)? {
+                let _alias = self.expect_ident()?;
+            }
+            return Ok(Projection::Function(func_name, args));
+        }
+
         let field = self.parse_field_ref()?;
         let alias = if self.consume(&Token::As)? {
             Some(self.expect_ident()?)
