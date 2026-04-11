@@ -40,6 +40,8 @@ pub struct UnifiedResult {
     pub records: Vec<UnifiedRecord>,
     /// Query statistics
     pub stats: QueryStats,
+    /// Pre-serialized JSON for fast-path queries (bypasses record-to-JSON conversion)
+    pub pre_serialized_json: Option<String>,
 }
 
 impl UnifiedResult {
@@ -54,6 +56,7 @@ impl UnifiedResult {
             columns,
             records: Vec::new(),
             stats: QueryStats::default(),
+            pre_serialized_json: None,
         }
     }
 
@@ -92,6 +95,19 @@ impl UnifiedRecord {
     /// Create an empty record
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create a record with pre-allocated capacity for the values HashMap.
+    /// Use this when you know approximately how many fields will be inserted
+    /// to avoid repeated HashMap resizing.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            values: HashMap::with_capacity(capacity),
+            nodes: HashMap::new(),
+            edges: HashMap::new(),
+            paths: Vec::new(),
+            vector_results: Vec::new(),
+        }
     }
 
     /// Set a column value

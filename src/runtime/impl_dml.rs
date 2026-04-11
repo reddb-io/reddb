@@ -264,22 +264,50 @@ impl RedDBRuntime {
         query: &UpdateQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         let store = self.inner.db.store();
+
+        // ── FAST PATH: UPDATE ... WHERE _entity_id = N ──
+        // Direct entity lookup instead of full collection scan.
+        if let Some(entity_id) = query_exec::extract_entity_id_from_filter(&query.filter) {
+            let manager = store
+                .get_collection(&query.table)
+                .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
+            if let Some(entity) = manager.get(EntityId::new(entity_id)) {
+                let operations = self.build_update_operations(query)?;
+                let input = PatchEntityInput {
+                    collection: query.table.clone(),
+                    id: entity.id,
+                    payload: crate::json::Value::Null,
+                    operations,
+                };
+                self.patch_entity(input)?;
+                return Ok(RuntimeQueryResult::dml_result(
+                    raw_query.to_string(),
+                    1,
+                    "update",
+                    "runtime-dml",
+                ));
+            }
+            return Ok(RuntimeQueryResult::dml_result(
+                raw_query.to_string(),
+                0,
+                "update",
+                "runtime-dml",
+            ));
+        }
+
         let manager = store
             .get_collection(&query.table)
             .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
 
-        // Scan all entities and convert to runtime records for filter evaluation.
-        let entities = manager.query_all(|_| true);
+        // Full scan for complex WHERE filters
         let mut affected: u64 = 0;
+        let mut entities_to_update = Vec::new();
 
-        for entity in entities {
-            // UPDATE must work across every resource kind stored in the collection.
+        manager.for_each_entity(|entity| {
             let record = match record_search::runtime_any_record_from_entity(entity.clone()) {
                 Some(r) => r,
-                None => continue,
+                None => return true,
             };
-
-            // Evaluate WHERE filter.
             let matches = match &query.filter {
                 Some(filter) => join_filter::evaluate_runtime_filter(
                     &record,
@@ -287,64 +315,21 @@ impl RedDBRuntime {
                     Some(&query.table),
                     Some(&query.table),
                 ),
-                None => true, // No filter means update all rows.
+                None => true,
             };
-
-            if !matches {
-                continue;
+            if matches {
+                entities_to_update.push(entity.clone());
             }
+            true
+        });
 
-            let operations: Vec<PatchEntityOperation> = query
-                .assignments
-                .iter()
-                .map(|(col, val)| {
-                    if let Some(metadata_key) = resolve_sql_ttl_metadata_key(col) {
-                        let metadata_value = sql_literal_to_metadata_value(metadata_key, val)?;
-                        Ok(PatchEntityOperation {
-                            op: PatchEntityOperationType::Set,
-                            path: vec!["metadata".to_string(), metadata_key.to_string()],
-                            value: Some(metadata_value_to_json(&metadata_value)),
-                        })
-                    } else {
-                        let json_val = storage_value_to_json(val);
-                        Ok(PatchEntityOperation {
-                            op: PatchEntityOperationType::Set,
-                            path: vec!["fields".to_string(), col.clone()],
-                            value: Some(json_val),
-                        })
-                    }
-                })
-                .collect::<RedDBResult<Vec<_>>>()?;
-
-            // Merge WITH TTL / EXPIRES AT / METADATA into patch operations
-            let mut all_operations = operations;
-            if let Some(ttl_ms) = query.ttl_ms {
-                all_operations.push(PatchEntityOperation {
-                    op: PatchEntityOperationType::Set,
-                    path: vec!["metadata".to_string(), "_ttl_ms".to_string()],
-                    value: Some(crate::json::Value::Number(ttl_ms as f64)),
-                });
-            }
-            if let Some(expires_at_ms) = query.expires_at_ms {
-                all_operations.push(PatchEntityOperation {
-                    op: PatchEntityOperationType::Set,
-                    path: vec!["metadata".to_string(), "_expires_at".to_string()],
-                    value: Some(crate::json::Value::Number(expires_at_ms as f64)),
-                });
-            }
-            for (key, val) in &query.with_metadata {
-                all_operations.push(PatchEntityOperation {
-                    op: PatchEntityOperationType::Set,
-                    path: vec!["metadata".to_string(), key.clone()],
-                    value: Some(storage_value_to_json(val)),
-                });
-            }
-
+        for entity in entities_to_update {
+            let operations = self.build_update_operations(query)?;
             let input = PatchEntityInput {
                 collection: query.table.clone(),
                 id: entity.id,
                 payload: crate::json::Value::Null,
-                operations: all_operations,
+                operations,
             };
 
             self.patch_entity(input)?;
@@ -359,32 +344,101 @@ impl RedDBRuntime {
         ))
     }
 
+    /// Build patch operations from an UPDATE query's assignments.
+    fn build_update_operations(
+        &self,
+        query: &UpdateQuery,
+    ) -> RedDBResult<Vec<PatchEntityOperation>> {
+        let mut operations: Vec<PatchEntityOperation> = query
+            .assignments
+            .iter()
+            .map(|(col, val)| {
+                if let Some(metadata_key) = resolve_sql_ttl_metadata_key(col) {
+                    let metadata_value = sql_literal_to_metadata_value(metadata_key, val)?;
+                    Ok(PatchEntityOperation {
+                        op: PatchEntityOperationType::Set,
+                        path: vec!["metadata".to_string(), metadata_key.to_string()],
+                        value: Some(metadata_value_to_json(&metadata_value)),
+                    })
+                } else {
+                    let json_val = storage_value_to_json(val);
+                    Ok(PatchEntityOperation {
+                        op: PatchEntityOperationType::Set,
+                        path: vec!["fields".to_string(), col.clone()],
+                        value: Some(json_val),
+                    })
+                }
+            })
+            .collect::<RedDBResult<Vec<_>>>()?;
+
+        if let Some(ttl_ms) = query.ttl_ms {
+            operations.push(PatchEntityOperation {
+                op: PatchEntityOperationType::Set,
+                path: vec!["metadata".to_string(), "_ttl_ms".to_string()],
+                value: Some(crate::json::Value::Number(ttl_ms as f64)),
+            });
+        }
+        if let Some(expires_at_ms) = query.expires_at_ms {
+            operations.push(PatchEntityOperation {
+                op: PatchEntityOperationType::Set,
+                path: vec!["metadata".to_string(), "_expires_at".to_string()],
+                value: Some(crate::json::Value::Number(expires_at_ms as f64)),
+            });
+        }
+        for (key, val) in &query.with_metadata {
+            operations.push(PatchEntityOperation {
+                op: PatchEntityOperationType::Set,
+                path: vec!["metadata".to_string(), key.clone()],
+                value: Some(storage_value_to_json(val)),
+            });
+        }
+        Ok(operations)
+    }
+
     /// Execute DELETE FROM table WHERE filter
-    ///
-    /// Scans the target collection, evaluates the WHERE filter against each
-    /// record, and deletes every matching entity.
     pub fn execute_delete(
         &self,
         raw_query: &str,
         query: &DeleteQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         let store = self.inner.db.store();
+
+        // ── FAST PATH: DELETE ... WHERE _entity_id = N ──
+        if let Some(entity_id) = query_exec::extract_entity_id_from_filter(&query.filter) {
+            let manager = store
+                .get_collection(&query.table)
+                .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
+            if manager.get(EntityId::new(entity_id)).is_some() {
+                self.delete_entity(DeleteEntityInput {
+                    collection: query.table.clone(),
+                    id: EntityId::new(entity_id),
+                })?;
+                return Ok(RuntimeQueryResult::dml_result(
+                    raw_query.to_string(),
+                    1,
+                    "delete",
+                    "runtime-dml",
+                ));
+            }
+            return Ok(RuntimeQueryResult::dml_result(
+                raw_query.to_string(),
+                0,
+                "delete",
+                "runtime-dml",
+            ));
+        }
+
         let manager = store
             .get_collection(&query.table)
             .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
 
-        let entities = manager.query_all(|_| true);
-        let mut affected: u64 = 0;
-
-        // Collect IDs to delete first to avoid borrowing issues.
         let mut ids_to_delete = Vec::new();
 
-        for entity in entities {
+        manager.for_each_entity(|entity| {
             let record = match record_search::runtime_any_record_from_entity(entity.clone()) {
                 Some(r) => r,
-                None => continue,
+                None => return true,
             };
-
             let matches = match &query.filter {
                 Some(filter) => join_filter::evaluate_runtime_filter(
                     &record,
@@ -392,20 +446,20 @@ impl RedDBRuntime {
                     Some(&query.table),
                     Some(&query.table),
                 ),
-                None => true, // No filter means delete all rows.
+                None => true,
             };
-
             if matches {
                 ids_to_delete.push(entity.id);
             }
-        }
+            true
+        });
 
+        let mut affected: u64 = 0;
         for id in ids_to_delete {
-            let input = DeleteEntityInput {
+            self.delete_entity(DeleteEntityInput {
                 collection: query.table.clone(),
                 id,
-            };
-            self.delete_entity(input)?;
+            })?;
             affected += 1;
         }
 

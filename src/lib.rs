@@ -36,6 +36,7 @@ pub mod server;
 pub mod service_cli;
 pub mod storage;
 pub mod utils;
+pub mod wire;
 
 pub mod prelude {
     pub use crate::api::{

@@ -245,6 +245,31 @@ pub struct GrowingSegment {
 }
 
 impl GrowingSegment {
+    /// Direct iteration without Box<dyn> trait dispatch. Returns false to stop early.
+    #[inline]
+    pub fn for_each_fast<F>(&self, mut f: F) -> bool
+    where
+        F: FnMut(&UnifiedEntity) -> bool,
+    {
+        if self.deleted.is_empty() {
+            for entity in self.entities.values() {
+                if !f(entity) {
+                    return false;
+                }
+            }
+        } else {
+            for entity in self.entities.values() {
+                if self.deleted.contains(&entity.id) {
+                    continue;
+                }
+                if !f(entity) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     /// Create a new growing segment
     pub fn new(id: SegmentId, collection: impl Into<String>) -> Self {
         let now = SystemTime::now()

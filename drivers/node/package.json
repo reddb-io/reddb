@@ -1,0 +1,10 @@
+{
+  "name": "@reddb/client",
+  "version": "0.1.0",
+  "description": "RedDB wire protocol client for Node.js — zero dependencies, pure TCP",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "MIT",
+  "keywords": ["reddb", "database", "client", "wire-protocol", "tcp"],
+  "engines": { "node": ">=18" }
+}

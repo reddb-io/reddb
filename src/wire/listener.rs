@@ -89,7 +89,9 @@ where
         // Process message
         let response = match msg_type {
             MSG_QUERY => handle_query(&runtime, &payload),
+            MSG_QUERY_BINARY => handle_query_binary(&runtime, &payload),
             MSG_BULK_INSERT => handle_bulk_insert(&runtime, &payload),
+            MSG_BULK_INSERT_BINARY => handle_bulk_insert_binary(&runtime, &payload),
             _ => {
                 let mut resp = Vec::new();
                 let err = b"unknown message type";
@@ -125,6 +127,185 @@ fn handle_query(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
         }
         Err(e) => make_error(e.to_string().as_bytes()),
     }
+}
+
+/// Handle query with BINARY result encoding — zero JSON.
+/// Parses SQL, scans entities, encodes directly to wire binary.
+fn handle_query_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
+    let sql = match std::str::from_utf8(payload) {
+        Ok(s) => s,
+        Err(_) => return make_error(b"invalid UTF-8"),
+    };
+
+    // Parse SQL to get table query
+    let expr = match crate::storage::query::modes::parse_multi(sql) {
+        Ok(e) => e,
+        Err(e) => return make_error(format!("parse: {e}").as_bytes()),
+    };
+
+    let table_query = match &expr {
+        crate::storage::query::ast::QueryExpr::Table(tq) => tq,
+        // For non-table queries (UPDATE/DELETE etc), fall back to JSON path
+        _ => return handle_query(runtime, payload),
+    };
+
+    let db = runtime.db();
+    let store = db.store();
+
+    // Entity_id point lookup — single entity binary
+    if let Some(entity_id) =
+        crate::runtime::query_exec::extract_entity_id_from_filter(&table_query.filter)
+    {
+        return match store.get(&table_query.table, EntityId::new(entity_id)) {
+            Some(entity) => encode_entity_binary(&entity),
+            None => encode_empty_result(),
+        };
+    }
+
+    // Filtered scan — encode matching entities to binary directly
+    let manager = match store.get_collection(&table_query.table) {
+        Some(m) => m,
+        None => return make_error(b"collection not found"),
+    };
+
+    let filter = table_query.filter.as_ref();
+    let table_name = table_query.table.as_str();
+    let table_alias = table_query.alias.as_deref().unwrap_or(table_name);
+    let limit = table_query.limit.unwrap_or(10000) as usize;
+
+    // First entity determines column schema
+    let mut col_names: Option<Vec<String>> = None;
+    let mut row_bufs: Vec<Vec<u8>> = Vec::new();
+    let mut count = 0usize;
+
+    manager.for_each_entity(|entity| {
+        if count >= limit {
+            return false;
+        }
+        if !entity.data.is_row() {
+            return true;
+        }
+
+        if let Some(f) = filter {
+            if !crate::runtime::query_exec::evaluate_entity_filter(
+                entity,
+                f,
+                table_name,
+                table_alias,
+            ) {
+                return true;
+            }
+        }
+
+        // Initialize columns from first entity
+        if col_names.is_none() {
+            let mut cols = vec![
+                "_entity_id".into(),
+                "_created_at".into(),
+                "_updated_at".into(),
+            ];
+            if let EntityData::Row(ref row) = entity.data {
+                if let Some(ref named) = row.named {
+                    cols.extend(named.keys().cloned());
+                }
+            }
+            col_names = Some(cols);
+        }
+
+        let cols = col_names.as_ref().unwrap();
+        let mut row = Vec::with_capacity(cols.len() * 10);
+        for col in cols {
+            let val = match col.as_str() {
+                "_entity_id" => Value::UnsignedInteger(entity.id.raw()),
+                "_created_at" => Value::UnsignedInteger(entity.created_at),
+                "_updated_at" => Value::UnsignedInteger(entity.updated_at),
+                other => {
+                    if let EntityData::Row(ref r) = entity.data {
+                        r.named
+                            .as_ref()
+                            .and_then(|n| n.get(other))
+                            .cloned()
+                            .unwrap_or(Value::Null)
+                    } else {
+                        Value::Null
+                    }
+                }
+            };
+            encode_value(&mut row, &val);
+        }
+        row_bufs.push(row);
+        count += 1;
+        true
+    });
+
+    // Build response frame
+    let cols = col_names.unwrap_or_default();
+    let mut body = Vec::with_capacity(256 + count * 64);
+    body.extend_from_slice(&(cols.len() as u16).to_le_bytes());
+    for col in &cols {
+        encode_column_name(&mut body, col);
+    }
+    body.extend_from_slice(&(count as u32).to_le_bytes());
+    for row in &row_bufs {
+        body.extend_from_slice(row);
+    }
+
+    let mut resp = Vec::with_capacity(5 + body.len());
+    write_frame_header(&mut resp, MSG_RESULT, body.len() as u32);
+    resp.extend_from_slice(&body);
+    resp
+}
+
+fn encode_entity_binary(entity: &crate::storage::unified::UnifiedEntity) -> Vec<u8> {
+    let mut cols: Vec<String> = vec![
+        "_entity_id".into(),
+        "_created_at".into(),
+        "_updated_at".into(),
+    ];
+    if let EntityData::Row(ref row) = entity.data {
+        if let Some(ref named) = row.named {
+            cols.extend(named.keys().cloned());
+        }
+    }
+
+    let mut body = Vec::with_capacity(256);
+    body.extend_from_slice(&(cols.len() as u16).to_le_bytes());
+    for col in &cols {
+        encode_column_name(&mut body, col);
+    }
+    body.extend_from_slice(&1u32.to_le_bytes());
+    for col in &cols {
+        let val = match col.as_str() {
+            "_entity_id" => Value::UnsignedInteger(entity.id.raw()),
+            "_created_at" => Value::UnsignedInteger(entity.created_at),
+            "_updated_at" => Value::UnsignedInteger(entity.updated_at),
+            other => {
+                if let EntityData::Row(ref r) = entity.data {
+                    r.named
+                        .as_ref()
+                        .and_then(|n| n.get(other))
+                        .cloned()
+                        .unwrap_or(Value::Null)
+                } else {
+                    Value::Null
+                }
+            }
+        };
+        encode_value(&mut body, &val);
+    }
+
+    let mut resp = Vec::with_capacity(5 + body.len());
+    write_frame_header(&mut resp, MSG_RESULT, body.len() as u32);
+    resp.extend_from_slice(&body);
+    resp
+}
+
+fn encode_empty_result() -> Vec<u8> {
+    let body = [0u8, 0, 0, 0, 0, 0]; // ncols=0, nrows=0
+    let mut resp = Vec::with_capacity(11);
+    write_frame_header(&mut resp, MSG_RESULT, body.len() as u32);
+    resp.extend_from_slice(&body);
+    resp
 }
 
 fn handle_bulk_insert(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
@@ -270,6 +451,77 @@ pub fn encode_result_from_entities(runtime: &RedDBRuntime, sql: &str) -> Vec<u8>
             encode_result(&result)
         }
         Err(e) => make_error(e.to_string().as_bytes()),
+    }
+}
+
+/// Binary bulk insert — zero JSON parsing. Values come as typed wire bytes.
+/// Format: [coll_len:u16][coll][ncols:u16][col_names...][nrows:u32][row_values...]
+fn handle_bulk_insert_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
+    let mut pos = 0;
+
+    if payload.len() < 6 {
+        return make_error(b"binary bulk: payload too short");
+    }
+
+    // Collection name
+    let coll_len = u16::from_le_bytes(payload[pos..pos + 2].try_into().unwrap()) as usize;
+    pos += 2;
+    let collection = match std::str::from_utf8(&payload[pos..pos + coll_len]) {
+        Ok(s) => s.to_string(),
+        Err(_) => return make_error(b"invalid collection name"),
+    };
+    pos += coll_len;
+
+    // Column names
+    let ncols = u16::from_le_bytes(payload[pos..pos + 2].try_into().unwrap()) as usize;
+    pos += 2;
+    let mut col_names = Vec::with_capacity(ncols);
+    for _ in 0..ncols {
+        let name_len = u16::from_le_bytes(payload[pos..pos + 2].try_into().unwrap()) as usize;
+        pos += 2;
+        let name = std::str::from_utf8(&payload[pos..pos + name_len])
+            .unwrap_or("?")
+            .to_string();
+        pos += name_len;
+        col_names.push(name);
+    }
+
+    // Number of rows
+    let nrows = u32::from_le_bytes(payload[pos..pos + 4].try_into().unwrap()) as usize;
+    pos += 4;
+
+    // Decode rows into entities
+    let mut entities = Vec::with_capacity(nrows);
+    for _ in 0..nrows {
+        let mut named = std::collections::HashMap::with_capacity(ncols);
+        for col in &col_names {
+            let value = decode_value(payload, &mut pos);
+            named.insert(col.clone(), value);
+        }
+        entities.push(crate::storage::unified::UnifiedEntity::new(
+            EntityId::new(0),
+            EntityKind::TableRow {
+                table: collection.clone(),
+                row_id: 0,
+            },
+            EntityData::Row(crate::storage::unified::RowData {
+                columns: Vec::new(),
+                named: Some(named),
+            }),
+        ));
+    }
+
+    // Bulk insert
+    let store = runtime.db().store();
+    match store.bulk_insert(&collection, entities) {
+        Ok(ids) => {
+            let count = ids.len() as u64;
+            let mut resp = Vec::with_capacity(13);
+            write_frame_header(&mut resp, MSG_BULK_OK, 8);
+            resp.extend_from_slice(&count.to_le_bytes());
+            resp
+        }
+        Err(e) => make_error(format!("bulk insert: {e}").as_bytes()),
     }
 }
 

@@ -581,7 +581,7 @@ mod impl_timeseries;
 mod index_store;
 mod join_filter;
 mod probabilistic_store;
-mod query_exec;
+pub(crate) mod query_exec;
 mod record_search;
 
 pub use self::graph_dsl::*;

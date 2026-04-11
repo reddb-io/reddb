@@ -1,0 +1,21 @@
+[package]
+name = "reddb-python"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "reddb_python"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"] }
+tonic = "0.12"
+prost = "0.13"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+serde_json = "1"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pemfile = "2"
+webpki-roots = "0.26"
+
+[build-dependencies]
+tonic-build = "0.12"

@@ -32,6 +32,13 @@ pub(super) fn execute_runtime_table_query(
             return Ok(UnifiedResult::default());
         }
 
+        // Index-assisted path: use hash index for equality column if available
+        if let Some(idx) = index_store {
+            if let Some(result) = execute_indexed_scan_to_json(db, query, idx)? {
+                return Ok(result);
+            }
+        }
+
         // Filtered scan — serialize matching entities directly
         if let Some(json) = execute_filtered_scan_to_json(db, query)? {
             return Ok(json);
@@ -182,6 +189,161 @@ pub(super) fn execute_runtime_serialize_single_entity(entity: &UnifiedEntity) ->
     unsafe { String::from_utf8_unchecked(buf) }
 }
 
+/// Index-assisted filtered scan: use hash index for equality column, then evaluate
+/// remaining predicates only on matching entities. Turns O(N) scan into O(K) lookup.
+fn execute_indexed_scan_to_json(
+    db: &RedDB,
+    query: &TableQuery,
+    idx_store: &super::index_store::IndexStore,
+) -> RedDBResult<Option<UnifiedResult>> {
+    let filter = match &query.filter {
+        Some(f) => f,
+        None => return Ok(None),
+    };
+
+    // Extract equality column from the filter (works for AND too)
+    let (eq_col, eq_val_bytes) = match extract_index_candidate_from_filter(filter) {
+        Some(pair) => pair,
+        None => return Ok(None), // no equality condition → can't use index
+    };
+
+    // Check if an index exists for this column
+    let reg_idx = match idx_store.find_index_for_column(&query.table, &eq_col) {
+        Some(idx) => idx,
+        None => return Ok(None), // no index → fall through to full scan
+    };
+
+    // Hash index lookup — O(1) to get candidate entity IDs
+    let entity_ids = idx_store.hash_lookup(&query.table, &reg_idx.name, &eq_val_bytes);
+    if entity_ids.is_empty() {
+        let json = r#"{"columns":[],"record_count":0,"selection":{"scope":"any"},"records":[]}"#
+            .to_string();
+        return Ok(Some(UnifiedResult {
+            columns: Vec::new(),
+            records: Vec::new(),
+            stats: crate::storage::query::unified::QueryStats::default(),
+            pre_serialized_json: Some(json),
+        }));
+    }
+
+    let store = db.store();
+    let table_name = query.table.as_str();
+    let table_alias = query.alias.as_deref().unwrap_or(table_name);
+    let limit = query.limit.unwrap_or(10000) as usize;
+
+    // Pre-compute JSON prefix
+    let mut sys_prefix = Vec::with_capacity(128);
+    sys_prefix.extend_from_slice(b",\"_collection\":");
+    write_json_bytes(&mut sys_prefix, table_name.as_bytes());
+    sys_prefix.extend_from_slice(
+        b",\"_kind\":\"table\",\"_entity_type\":\"table\",\"_capabilities\":\"structured,table\"",
+    );
+
+    let mut buf = Vec::with_capacity(256 + entity_ids.len().min(limit) * 200);
+    buf.extend_from_slice(b"{\"columns\":[],\"record_count\":");
+    let count_pos = buf.len();
+    buf.extend_from_slice(b"0,\"selection\":{\"scope\":\"any\"},\"records\":[");
+
+    let mut count: u64 = 0;
+
+    // Only fetch & check entities returned by the index
+    for eid in &entity_ids {
+        if count as usize >= limit {
+            break;
+        }
+
+        let entity = match store.get(&query.table, *eid) {
+            Some(e) => e,
+            None => continue,
+        };
+
+        if !entity.data.is_row() {
+            continue;
+        }
+
+        // Evaluate the FULL filter (the index only handled the equality part)
+        if !evaluate_entity_filter(&entity, filter, table_name, table_alias) {
+            continue;
+        }
+
+        if count > 0 {
+            buf.push(b',');
+        }
+        buf.extend_from_slice(b"{\"_entity_id\":");
+        write_u64(&mut buf, entity.id.raw());
+        buf.extend_from_slice(&sys_prefix);
+        buf.extend_from_slice(b",\"_created_at\":");
+        write_u64(&mut buf, entity.created_at);
+        buf.extend_from_slice(b",\"_updated_at\":");
+        write_u64(&mut buf, entity.updated_at);
+        buf.extend_from_slice(b",\"_sequence_id\":");
+        write_u64(&mut buf, entity.sequence_id);
+        if let EntityKind::TableRow { row_id, .. } = &entity.kind {
+            buf.extend_from_slice(b",\"row_id\":");
+            write_u64(&mut buf, *row_id);
+        }
+        if let EntityData::Row(ref row) = entity.data {
+            if let Some(ref named) = row.named {
+                for (key, value) in named {
+                    buf.push(b',');
+                    write_json_bytes(&mut buf, key.as_bytes());
+                    buf.push(b':');
+                    write_value_bytes(&mut buf, value);
+                }
+            }
+        }
+        buf.push(b'}');
+        count += 1;
+    }
+
+    buf.extend_from_slice(b"]}");
+
+    let mut count_buf = itoa::Buffer::new();
+    let count_str = count_buf.format(count);
+    buf.splice(
+        count_pos..count_pos + 1,
+        count_str.as_bytes().iter().copied(),
+    );
+
+    let json_string = unsafe { String::from_utf8_unchecked(buf) };
+    Ok(Some(UnifiedResult {
+        columns: Vec::new(),
+        records: Vec::new(),
+        stats: crate::storage::query::unified::QueryStats {
+            rows_scanned: count,
+            ..Default::default()
+        },
+        pre_serialized_json: Some(json_string),
+    }))
+}
+
+/// Extract a (column_name, value_bytes) from the first equality condition in a filter.
+/// Used to find hash index candidates.
+fn extract_index_candidate_from_filter(filter: &Filter) -> Option<(String, Vec<u8>)> {
+    use crate::storage::query::ast::{CompareOp, FieldRef};
+    match filter {
+        Filter::Compare { field, op, value } if *op == CompareOp::Eq => {
+            let col = match field {
+                FieldRef::TableColumn { column, .. } => column.clone(),
+                _ => return None,
+            };
+            if col.starts_with('_') {
+                return None;
+            }
+            let bytes = match value {
+                Value::Text(s) => s.as_bytes().to_vec(),
+                Value::Integer(n) => n.to_le_bytes().to_vec(),
+                Value::UnsignedInteger(n) => n.to_le_bytes().to_vec(),
+                _ => return None,
+            };
+            Some((col, bytes))
+        }
+        Filter::And(left, right) => extract_index_candidate_from_filter(left)
+            .or_else(|| extract_index_candidate_from_filter(right)),
+        _ => None,
+    }
+}
+
 fn execute_filtered_scan_to_json(
     db: &RedDB,
     query: &TableQuery,
@@ -215,6 +377,11 @@ fn execute_filtered_scan_to_json(
     let mut count: u64 = 0;
     let mut hit_limit = false;
 
+    // Pre-extract equality column/value for fast pre-filter on AND conditions.
+    // For WHERE city = 'NYC' AND age > 30, we first check city='NYC' with a
+    // direct HashMap lookup (skipping resolve_entity_field overhead).
+    let eq_prefilter = extract_equality_prefilter(filter);
+
     manager.for_each_entity(|entity| {
         if hit_limit {
             return false;
@@ -222,6 +389,21 @@ fn execute_filtered_scan_to_json(
         if !entity.data.is_row() {
             return true;
         }
+
+        // Fast pre-filter: direct HashMap lookup for equality condition
+        if let Some((ref col, ref val)) = eq_prefilter {
+            if let EntityData::Row(ref row) = entity.data {
+                if let Some(ref named) = row.named {
+                    match named.get(col.as_str()) {
+                        Some(v) if v == val => {} // pass — continue to full filter
+                        _ => return true,         // skip — doesn't match equality
+                    }
+                } else {
+                    return true;
+                }
+            }
+        }
+
         if !evaluate_entity_filter(entity, filter, table_name, table_alias) {
             return true;
         }
@@ -1654,8 +1836,32 @@ pub(super) fn execute_runtime_canonical_hybrid_fusion(
         .collect())
 }
 
+/// Extract the first equality condition from an AND filter for fast pre-filtering.
+/// For `WHERE city = 'NYC' AND age > 30`, returns Some(("city", Value::Text("NYC"))).
+/// This lets us do a direct HashMap lookup before the full filter evaluation.
+fn extract_equality_prefilter(filter: &Filter) -> Option<(String, Value)> {
+    use crate::storage::query::ast::{CompareOp, FieldRef};
+    match filter {
+        Filter::Compare { field, op, value } if *op == CompareOp::Eq => {
+            let col = match field {
+                FieldRef::TableColumn { column, .. } => column.clone(),
+                _ => return None,
+            };
+            // Skip system fields (they're not in named HashMap)
+            if col.starts_with('_') {
+                return None;
+            }
+            Some((col, value.clone()))
+        }
+        Filter::And(left, right) => {
+            extract_equality_prefilter(left).or_else(|| extract_equality_prefilter(right))
+        }
+        _ => None,
+    }
+}
+
 /// Extract entity_id from `WHERE _entity_id = N` for O(1) direct lookup.
-fn extract_entity_id_from_filter(
+pub(crate) fn extract_entity_id_from_filter(
     filter: &Option<crate::storage::query::ast::Filter>,
 ) -> Option<u64> {
     use crate::storage::query::ast::{CompareOp, FieldRef, Filter};

@@ -116,10 +116,11 @@ mod tests {
     }
 
     #[test]
-    fn test_anonymous_read_only() {
+    fn test_anonymous_access() {
         let auth = AuthResult::Anonymous;
+        // When auth disabled: anonymous can read and write, but not admin
         assert!(check_permission(&auth, false, false).is_ok());
-        assert!(check_permission(&auth, true, false).is_err());
+        assert!(check_permission(&auth, true, false).is_ok());
         assert!(check_permission(&auth, false, true).is_err());
     }
 

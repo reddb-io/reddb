@@ -80,6 +80,21 @@ async fn query(&self, request: Request<QueryRequest>) -> Result<Response<QueryRe
     )))
 }
 
+async fn batch_query(&self, request: Request<BatchQueryRequest>) -> Result<Response<BatchQueryReply>, Status> {
+    self.authorize_read(request.metadata())?;
+    let queries = request.into_inner().queries;
+    let no_filter: Option<Vec<String>> = None;
+    let mut results = Vec::with_capacity(queries.len());
+    for sql in queries {
+        let result = self
+            .query_use_cases()
+            .execute(ExecuteQueryInput { query: sql })
+            .map_err(to_status)?;
+        results.push(query_reply(result, &no_filter, &no_filter));
+    }
+    Ok(Response::new(BatchQueryReply { results }))
+}
+
 async fn explain_query(
     &self,
     request: Request<QueryRequest>,

@@ -18,6 +18,8 @@ pub const MSG_RESULT: u8 = 0x02;
 pub const MSG_ERROR: u8 = 0x03;
 pub const MSG_BULK_INSERT: u8 = 0x04;
 pub const MSG_BULK_OK: u8 = 0x05;
+pub const MSG_BULK_INSERT_BINARY: u8 = 0x06;
+pub const MSG_QUERY_BINARY: u8 = 0x07;
 
 // --- Value type tags ---
 pub const VAL_NULL: u8 = 0;

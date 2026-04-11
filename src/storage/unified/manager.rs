@@ -459,6 +459,33 @@ impl SegmentManager {
         }
     }
 
+    /// Iterate over all entities in-place without collecting into a Vec.
+    ///
+    /// The callback receives a reference to each entity. Return `true` to
+    /// continue iteration, `false` to stop early (e.g. when a LIMIT is reached).
+    /// This avoids the allocation and cloning overhead of `query_all`.
+    pub fn for_each_entity<F>(&self, mut callback: F)
+    where
+        F: FnMut(&UnifiedEntity) -> bool,
+    {
+        // Growing segment — direct iteration (no Box<dyn>)
+        if let Some(growing_arc) = self.growing.read().unwrap().as_ref() {
+            let growing = growing_arc.read().unwrap();
+            if !growing.for_each_fast(&mut callback) {
+                return;
+            }
+        }
+
+        // Sealed segments
+        let sealed = self.sealed.read().unwrap();
+        for segment_arc in sealed.iter() {
+            let segment = segment_arc.read().unwrap();
+            if !segment.for_each_fast(&mut callback) {
+                return;
+            }
+        }
+    }
+
     /// Query across all segments. Uses parallel scanning for sealed segments
     /// when more than one sealed segment exists.
     pub fn query_all<F>(&self, filter: F) -> Vec<UnifiedEntity>
@@ -676,6 +703,10 @@ impl UnifiedSegment for Arc<RwLock<GrowingSegment>> {
 
     fn stats(&self) -> SegmentStats {
         self.read().unwrap().stats()
+    }
+
+    fn entity_count(&self) -> usize {
+        self.read().unwrap().entity_count()
     }
 
     fn contains(&self, id: EntityId) -> bool {

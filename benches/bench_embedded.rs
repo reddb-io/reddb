@@ -453,6 +453,109 @@ criterion_group!(
     bench_vector_insert,
 );
 
+fn bench_query_5k_point(c: &mut Criterion) {
+    let rt = RedDBRuntime::in_memory().unwrap();
+    let uc_entity = EntityUseCases::new(&rt);
+    let uc_query = QueryUseCases::new(&rt);
+    for i in 0..5000 {
+        uc_entity
+            .create_row(CreateRowInput {
+                collection: "users5k".into(),
+                fields: vec![
+                    ("name".into(), Value::Text(format!("User_{i}"))),
+                    ("age".into(), Value::Integer(18 + (i % 63) as i64)),
+                    (
+                        "city".into(),
+                        Value::Text(["NYC", "London", "Tokyo", "Paris", "Berlin"][i % 5].into()),
+                    ),
+                    ("email".into(), Value::Text(format!("u{i}@t.com"))),
+                    ("score".into(), Value::Float(i as f64 * 0.02)),
+                ],
+                metadata: vec![],
+                node_links: vec![],
+                vector_links: vec![],
+            })
+            .unwrap();
+    }
+    c.bench_function("query_5k_point_lookup", |b| {
+        let mut id = 1u64;
+        b.iter(|| {
+            uc_query
+                .execute(ExecuteQueryInput {
+                    query: format!("SELECT * FROM users5k WHERE _entity_id = {id}"),
+                })
+                .unwrap();
+            id = (id % 5000) + 1;
+        })
+    });
+}
+
+fn bench_query_5k_range(c: &mut Criterion) {
+    let rt = RedDBRuntime::in_memory().unwrap();
+    let uc_entity = EntityUseCases::new(&rt);
+    let uc_query = QueryUseCases::new(&rt);
+    for i in 0..5000 {
+        uc_entity
+            .create_row(CreateRowInput {
+                collection: "users5kr".into(),
+                fields: vec![
+                    ("name".into(), Value::Text(format!("User_{i}"))),
+                    ("age".into(), Value::Integer(18 + (i % 63) as i64)),
+                    (
+                        "city".into(),
+                        Value::Text(["NYC", "London", "Tokyo", "Paris", "Berlin"][i % 5].into()),
+                    ),
+                ],
+                metadata: vec![],
+                node_links: vec![],
+                vector_links: vec![],
+            })
+            .unwrap();
+    }
+    c.bench_function("query_5k_range", |b| {
+        b.iter(|| {
+            uc_query
+                .execute(ExecuteQueryInput {
+                    query: "SELECT * FROM users5kr WHERE age BETWEEN 25 AND 55".into(),
+                })
+                .unwrap();
+        })
+    });
+}
+
+fn bench_query_5k_filtered(c: &mut Criterion) {
+    let rt = RedDBRuntime::in_memory().unwrap();
+    let uc_entity = EntityUseCases::new(&rt);
+    let uc_query = QueryUseCases::new(&rt);
+    for i in 0..5000 {
+        uc_entity
+            .create_row(CreateRowInput {
+                collection: "users5kf".into(),
+                fields: vec![
+                    ("name".into(), Value::Text(format!("User_{i}"))),
+                    ("age".into(), Value::Integer(18 + (i % 63) as i64)),
+                    (
+                        "city".into(),
+                        Value::Text(["NYC", "London", "Tokyo", "Paris", "Berlin"][i % 5].into()),
+                    ),
+                ],
+                metadata: vec![],
+                node_links: vec![],
+                vector_links: vec![],
+            })
+            .unwrap();
+    }
+    c.bench_function("query_5k_filtered", |b| {
+        b.iter(|| {
+            uc_query
+                .execute(ExecuteQueryInput {
+                    query: "SELECT * FROM users5kf WHERE city = 'NYC' AND age > 30".into(),
+                })
+                .unwrap();
+        })
+    });
+}
+
 criterion_group!(
     query_benches,
     bench_query_select,
@@ -460,6 +563,9 @@ criterion_group!(
     bench_query_universal,
     bench_vector_search_brute,
     bench_vector_search_hnsw,
+    bench_query_5k_point,
+    bench_query_5k_range,
+    bench_query_5k_filtered,
 );
 
 criterion_main!(entity_benches, query_benches);
