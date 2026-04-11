@@ -35,6 +35,7 @@
 use super::freelist::FreeList;
 use super::page::{Page, PageError, PageType, DB_VERSION, HEADER_SIZE, MAGIC_BYTES, PAGE_SIZE};
 use super::page_cache::PageCache;
+use fs2::FileExt;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -109,6 +110,8 @@ pub struct PagerConfig {
     pub create: bool,
     /// Whether to verify checksums on read
     pub verify_checksums: bool,
+    /// Enable double-write buffer for torn page protection
+    pub double_write: bool,
 }
 
 impl Default for PagerConfig {
@@ -118,6 +121,7 @@ impl Default for PagerConfig {
             read_only: false,
             create: true,
             verify_checksums: true,
+            double_write: true,
         }
     }
 }
@@ -137,6 +141,10 @@ pub struct DatabaseHeader {
     pub schema_version: u32,
     /// Last checkpoint LSN
     pub checkpoint_lsn: u64,
+    /// Whether a checkpoint is currently in progress (two-phase)
+    pub checkpoint_in_progress: bool,
+    /// Target LSN for the in-progress checkpoint
+    pub checkpoint_target_lsn: u64,
     /// Physical layout header mirrored into page 0
     pub physical: PhysicalFileHeader,
 }
@@ -183,6 +191,8 @@ impl Default for DatabaseHeader {
             freelist_head: 0,
             schema_version: 0,
             checkpoint_lsn: 0,
+            checkpoint_in_progress: false,
+            checkpoint_target_lsn: 0,
             physical: PhysicalFileHeader::default(),
         }
     }
@@ -196,6 +206,10 @@ pub struct Pager {
     path: PathBuf,
     /// File handle
     file: Mutex<File>,
+    /// Exclusive file lock (held for lifetime, released on drop)
+    _lock_file: Option<File>,
+    /// Double-write buffer file (.rdb-dwb)
+    dwb_file: Option<Mutex<File>>,
     /// Page cache
     cache: PageCache,
     /// Free page list
@@ -233,6 +247,16 @@ mod tests {
 
     fn cleanup(path: &Path) {
         let _ = fs::remove_file(path);
+        // Clean up companion files
+        let mut hdr = path.to_path_buf().into_os_string();
+        hdr.push("-hdr");
+        let _ = fs::remove_file(&hdr);
+        let mut meta = path.to_path_buf().into_os_string();
+        meta.push("-meta");
+        let _ = fs::remove_file(&meta);
+        let mut dwb = path.to_path_buf().into_os_string();
+        dwb.push("-dwb");
+        let _ = fs::remove_file(&dwb);
     }
 
     #[test]

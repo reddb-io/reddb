@@ -30,6 +30,8 @@ path = "src/bin/red.rs"
 [dependencies]
 aes-gcm = "0.10"
 hmac = "0.12"
+itoa = "1"
+ryu = "1"
 sha2 = "0.10"
 hex = "0.4"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
@@ -38,6 +40,11 @@ prost = "0.13"
 ureq = { version = "2.10", default-features = false, features = ["tls"] }
 roaring = "0.10"
 rstar = "0.12"
+fs2 = "0.4"
+tokio-rustls = "0.26"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pemfile = "2"
+rcgen = "0.13"
 
 [features]
 default = []

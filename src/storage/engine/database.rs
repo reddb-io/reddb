@@ -178,6 +178,7 @@ impl Database {
             read_only: config.read_only,
             create: config.create,
             verify_checksums: config.verify_checksums,
+            double_write: true,
         };
 
         // Open pager

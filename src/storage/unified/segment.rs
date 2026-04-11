@@ -157,6 +157,9 @@ pub trait UnifiedSegment: Send + Sync {
     /// Get statistics
     fn stats(&self) -> SegmentStats;
 
+    /// O(1) live entity count (entities minus tombstones)
+    fn entity_count(&self) -> usize;
+
     /// Check if entity exists
     fn contains(&self, id: EntityId) -> bool;
 
@@ -513,6 +516,10 @@ impl UnifiedSegment for GrowingSegment {
         stats
     }
 
+    fn entity_count(&self) -> usize {
+        self.entities.len().saturating_sub(self.deleted.len())
+    }
+
     fn contains(&self, id: EntityId) -> bool {
         self.entities.contains_key(&id) && !self.deleted.contains(&id)
     }
@@ -691,11 +698,15 @@ impl UnifiedSegment for GrowingSegment {
     }
 
     fn iter(&self) -> Box<dyn Iterator<Item = &UnifiedEntity> + '_> {
-        Box::new(
-            self.entities
-                .values()
-                .filter(|e| !self.deleted.contains(&e.id)),
-        )
+        if self.deleted.is_empty() {
+            Box::new(self.entities.values())
+        } else {
+            Box::new(
+                self.entities
+                    .values()
+                    .filter(|e| !self.deleted.contains(&e.id)),
+            )
+        }
     }
 
     fn iter_kind(&self, kind_filter: &str) -> Box<dyn Iterator<Item = &UnifiedEntity> + '_> {

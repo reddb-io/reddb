@@ -39,6 +39,7 @@ pub struct RuntimeConfig {
 pub enum ServerTransport {
     Grpc,
     Http,
+    Wire,
 }
 
 impl ServerTransport {
@@ -46,6 +47,7 @@ impl ServerTransport {
         match self {
             Self::Grpc => "gRPC",
             Self::Http => "HTTP",
+            Self::Wire => "wire",
         }
     }
 
@@ -53,6 +55,7 @@ impl ServerTransport {
         match self {
             Self::Grpc => "127.0.0.1:50051",
             Self::Http => "127.0.0.1:8080",
+            Self::Wire => "127.0.0.1:50052",
         }
     }
 }
@@ -62,6 +65,13 @@ pub struct ServerCommandConfig {
     pub path: Option<PathBuf>,
     pub grpc_bind_addr: Option<String>,
     pub http_bind_addr: Option<String>,
+    pub wire_bind_addr: Option<String>,
+    /// TLS-encrypted wire protocol bind address
+    pub wire_tls_bind_addr: Option<String>,
+    /// Path to TLS cert PEM (if None + wire_tls_bind, auto-generate)
+    pub wire_tls_cert: Option<PathBuf>,
+    /// Path to TLS key PEM
+    pub wire_tls_key: Option<PathBuf>,
     pub create_if_missing: bool,
     pub read_only: bool,
     pub role: String,
@@ -131,12 +141,15 @@ impl ServerCommandConfig {
     }
 
     pub fn enabled_transports(&self) -> Vec<ServerTransport> {
-        let mut transports = Vec::with_capacity(2);
+        let mut transports = Vec::with_capacity(3);
         if self.grpc_bind_addr.is_some() {
             transports.push(ServerTransport::Grpc);
         }
         if self.http_bind_addr.is_some() {
             transports.push(ServerTransport::Http);
+        }
+        if self.wire_bind_addr.is_some() {
+            transports.push(ServerTransport::Wire);
         }
         transports
     }
@@ -318,6 +331,12 @@ fn run_command<const N: usize>(program: &str, args: [&str; N]) -> Result<(), Str
 }
 
 pub fn run_server_with_large_stack(config: ServerCommandConfig) -> Result<(), String> {
+    let has_any = config.grpc_bind_addr.is_some()
+        || config.http_bind_addr.is_some()
+        || config.wire_bind_addr.is_some();
+    if !has_any {
+        return Err("at least one server bind address must be configured".into());
+    }
     let thread_name = match (
         config.grpc_bind_addr.is_some(),
         config.http_bind_addr.is_some(),
@@ -325,7 +344,7 @@ pub fn run_server_with_large_stack(config: ServerCommandConfig) -> Result<(), St
         (true, true) => "red-server-dual",
         (true, false) => "red-server-grpc",
         (false, true) => "red-server-http",
-        (false, false) => return Err("at least one server bind address must be configured".into()),
+        (false, false) => "red-server-wire",
     };
 
     let handle = thread::Builder::new()
@@ -379,8 +398,91 @@ fn run_configured_servers(config: ServerCommandConfig) -> Result<(), String> {
         }
         (Some(grpc_bind_addr), None) => run_grpc_server(config, grpc_bind_addr),
         (None, Some(http_bind_addr)) => run_http_server(config, http_bind_addr),
-        (None, None) => Err("at least one server bind address must be configured".to_string()),
+        (None, None) => {
+            // Wire-only mode
+            if let Some(wire_addr) = config.wire_bind_addr.clone() {
+                run_wire_only_server(config, wire_addr)
+            } else {
+                Err("at least one server bind address must be configured".to_string())
+            }
+        }
     }
+}
+
+/// Spawn wire protocol listeners (plaintext + TLS) as background tokio tasks.
+fn spawn_wire_listeners(config: &ServerCommandConfig, runtime: &RedDBRuntime) {
+    // Plaintext wire
+    if let Some(wire_addr) = config.wire_bind_addr.clone() {
+        let wire_rt = Arc::new(runtime.clone());
+        tokio::spawn(async move {
+            if let Err(e) = crate::wire::start_wire_listener(&wire_addr, wire_rt).await {
+                eprintln!("wire listener error: {e}");
+            }
+        });
+    }
+
+    // TLS wire
+    if let Some(wire_tls_addr) = config.wire_tls_bind_addr.clone() {
+        let tls_config = resolve_wire_tls_config(config);
+        match tls_config {
+            Ok(tls_cfg) => {
+                let wire_rt = Arc::new(runtime.clone());
+                tokio::spawn(async move {
+                    if let Err(e) =
+                        crate::wire::start_wire_tls_listener(&wire_tls_addr, wire_rt, &tls_cfg)
+                            .await
+                    {
+                        eprintln!("wire+tls listener error: {e}");
+                    }
+                });
+            }
+            Err(e) => eprintln!("wire TLS config error: {e}"),
+        }
+    }
+}
+
+/// Resolve TLS config: use provided cert/key or auto-generate.
+fn resolve_wire_tls_config(
+    config: &ServerCommandConfig,
+) -> Result<crate::wire::WireTlsConfig, String> {
+    match (&config.wire_tls_cert, &config.wire_tls_key) {
+        (Some(cert), Some(key)) => Ok(crate::wire::WireTlsConfig {
+            cert_path: cert.clone(),
+            key_path: key.clone(),
+        }),
+        _ => {
+            // Auto-generate self-signed cert
+            let dir = config
+                .path
+                .as_ref()
+                .and_then(|p| p.parent())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
+            crate::wire::tls::auto_generate_cert(&dir).map_err(|e| e.to_string())
+        }
+    }
+}
+
+#[inline(never)]
+fn run_wire_only_server(config: ServerCommandConfig, wire_addr: String) -> Result<(), String> {
+    let rt_config = detect_runtime_config();
+    let workers = config.workers.unwrap_or(rt_config.suggested_workers);
+    let db_options = config.to_db_options();
+
+    let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(workers)
+        .thread_stack_size(rt_config.stack_size)
+        .build()
+        .map_err(|err| format!("tokio runtime: {err}"))?;
+
+    tokio_runtime.block_on(async move {
+        let (runtime, _auth_store) = build_runtime_and_auth_store(db_options)?;
+        let wire_rt = Arc::new(runtime);
+        crate::wire::start_wire_listener(&wire_addr, wire_rt)
+            .await
+            .map_err(|e| e.to_string())
+    })
 }
 
 #[inline(never)]
@@ -445,6 +547,10 @@ fn run_grpc_server(config: ServerCommandConfig, bind_addr: String) -> Result<(),
 
     runtime.block_on(async move {
         let (runtime, auth_store) = build_runtime_and_auth_store(db_options)?;
+
+        // Start wire protocol listeners (plaintext + TLS)
+        spawn_wire_listeners(&config, &runtime);
+
         let server = RedDBGrpcServer::with_options(
             runtime,
             GrpcServerOptions {
@@ -468,6 +574,7 @@ fn run_dual_server(
     http_bind_addr: String,
 ) -> Result<(), String> {
     let workers = config.workers;
+    let wire_bind_addr = config.wire_bind_addr.clone();
     let db_options = config.to_db_options();
     let rt_config = detect_runtime_config();
     let worker_threads = workers.unwrap_or(rt_config.suggested_workers);
@@ -494,6 +601,9 @@ fn run_dual_server(
         .map_err(|err| format!("tokio runtime: {err}"))?;
 
     tokio_runtime.block_on(async move {
+        // Start wire protocol listeners (plaintext + TLS)
+        spawn_wire_listeners(&config, &runtime);
+
         let server = RedDBGrpcServer::with_options(
             runtime,
             GrpcServerOptions {

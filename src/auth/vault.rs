@@ -701,7 +701,11 @@ mod tests {
 
     /// Helper to create a temporary pager for testing.
     fn temp_pager() -> (Pager, std::path::PathBuf) {
-        let tmp_dir = std::env::temp_dir().join(format!("reddb_vault_test_{}", now_ms()));
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp_dir =
+            std::env::temp_dir().join(format!("reddb_vault_test_{}_{}", std::process::id(), id));
         std::fs::create_dir_all(&tmp_dir).unwrap();
         let db_path = tmp_dir.join("test.rdb");
         let pager = Pager::open(&db_path, PagerConfig::default()).unwrap();

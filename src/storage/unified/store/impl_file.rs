@@ -64,8 +64,28 @@ impl UnifiedStore {
         // Version check
         let version = u32::from_le_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]]);
         pos += 4;
-        if version != STORE_VERSION_V1 && version != STORE_VERSION_V2 {
+        if version != STORE_VERSION_V1 && version != STORE_VERSION_V2 && version != STORE_VERSION_V3
+        {
             return Err(format!("Unsupported version: {}", version).into());
+        }
+
+        // V3+ has CRC32 footer — verify integrity before parsing
+        if version >= STORE_VERSION_V3 {
+            if buf.len() < 12 {
+                return Err("File too small for CRC32 verification".into());
+            }
+            let stored_crc = u32::from_le_bytes([
+                buf[buf.len() - 4],
+                buf[buf.len() - 3],
+                buf[buf.len() - 2],
+                buf[buf.len() - 1],
+            ]);
+            let computed_crc = crate::storage::engine::crc32::crc32(&buf[..buf.len() - 4]);
+            if stored_crc != computed_crc {
+                return Err("Binary store CRC32 mismatch — file corrupted".into());
+            }
+            // Trim the CRC footer so parsing doesn't read into it
+            buf.truncate(buf.len() - 4);
         }
 
         let store = Self::with_config(UnifiedStoreConfig::default());
@@ -140,15 +160,17 @@ impl UnifiedStore {
     /// Uses compact binary encoding with varint for efficient storage.
     /// No JSON - pure binary with pages and indices.
     pub fn save_to_file(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        let file = File::create(path)?;
+        // Write to temp file first, then atomic rename
+        let tmp_path = path.with_extension("rdb-tmp");
+        let file = File::create(&tmp_path)?;
         let mut writer = BufWriter::new(file);
         let mut buf = Vec::new();
 
         // Magic bytes "RDST"
         buf.extend_from_slice(STORE_MAGIC);
 
-        // Version (2)
-        buf.extend_from_slice(&STORE_VERSION_V2.to_le_bytes());
+        // Version (3 — includes CRC32 footer)
+        buf.extend_from_slice(&STORE_VERSION_V3.to_le_bytes());
 
         // Get all collections
         let collections = self
@@ -189,10 +211,26 @@ impl UnifiedStore {
             }
         }
 
-        self.set_format_version(STORE_VERSION_V2);
+        self.set_format_version(STORE_VERSION_V3);
+
+        // Append CRC32 footer over entire content
+        let checksum = crate::storage::engine::crc32::crc32(&buf);
+        buf.extend_from_slice(&checksum.to_le_bytes());
 
         writer.write_all(&buf)?;
         writer.flush()?;
+        writer.get_ref().sync_all()?;
+        drop(writer);
+
+        // Atomic rename: tmp → final
+        std::fs::rename(&tmp_path, path)?;
+
+        // fsync parent directory for rename durability
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
 
         Ok(())
     }
@@ -317,6 +355,22 @@ impl UnifiedStore {
                     dense.push(f32::from_le_bytes(bytes));
                 }
                 EntityData::Vector(VectorData::new(dense))
+            }
+            6 => {
+                // Row with named HashMap
+                let field_count = Self::read_varu32_safe(buf, pos)?;
+                let mut named = HashMap::with_capacity(field_count);
+                for _ in 0..field_count {
+                    let key_len = Self::read_varu32_safe(buf, pos)?;
+                    let key = String::from_utf8(buf[*pos..*pos + key_len].to_vec())?;
+                    *pos += key_len;
+                    let value = Self::read_value_binary(buf, pos)?;
+                    named.insert(key, value);
+                }
+                EntityData::Row(RowData {
+                    columns: Vec::new(),
+                    named: Some(named),
+                })
             }
             _ => return Err(format!("Unknown EntityData type: {}", data_type).into()),
         };
@@ -471,10 +525,21 @@ impl UnifiedStore {
         // EntityData
         match &entity.data {
             EntityData::Row(row) => {
-                buf.push(0);
-                write_varu32(buf, row.columns.len() as u32);
-                for col in &row.columns {
-                    Self::write_value_binary(buf, col);
+                if let Some(ref named) = row.named {
+                    // Named row: type 6 = Row with named HashMap
+                    buf.push(6);
+                    write_varu32(buf, named.len() as u32);
+                    for (key, value) in named {
+                        write_varu32(buf, key.len() as u32);
+                        buf.extend_from_slice(key.as_bytes());
+                        Self::write_value_binary(buf, value);
+                    }
+                } else {
+                    buf.push(0);
+                    write_varu32(buf, row.columns.len() as u32);
+                    for col in &row.columns {
+                        Self::write_value_binary(buf, col);
+                    }
                 }
             }
             EntityData::Node(node) => {

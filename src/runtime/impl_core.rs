@@ -253,6 +253,8 @@ impl RedDBRuntime {
         self.inner
             .cdc
             .emit(operation, collection, entity_id, entity_kind);
+        // Every write invalidates the result cache
+        self.invalidate_result_cache();
     }
 
     /// Poll CDC events since a given LSN.
@@ -403,13 +405,16 @@ impl RedDBRuntime {
 
     #[inline(never)]
     pub fn execute_query(&self, query: &str) -> RedDBResult<RuntimeQueryResult> {
-        // Result cache check — return cached result for identical SELECT queries
-        {
-            if let Ok(cache) = self.inner.result_cache.read() {
-                if let Some((result, cached_at)) = cache.get(query) {
-                    if cached_at.elapsed().as_secs() < 30 {
-                        return Ok(result.clone());
-                    }
+        // ── TURBO: bypass SQL parse for SELECT * FROM x WHERE _entity_id = N ──
+        if let Some(result) = self.try_fast_entity_lookup(query) {
+            return result;
+        }
+
+        // ── Result cache: return cached result if still fresh (30s TTL) ──
+        if let Ok(cache) = self.inner.result_cache.read() {
+            if let Some((result, cached_at)) = cache.get(query) {
+                if cached_at.elapsed().as_secs() < 30 {
+                    return Ok(result.clone());
                 }
             }
         }
@@ -419,7 +424,31 @@ impl RedDBRuntime {
             return Err(RedDBError::Query("unable to detect query mode".to_string()));
         }
 
-        let expr = parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?;
+        // ── Plan cache: skip parse if we already have a cached plan ──
+        let expr = if let Ok(mut plan_cache) = self.inner.query_cache.write() {
+            if let Some(cached) = plan_cache.get(query) {
+                cached.plan.optimized.clone()
+            } else {
+                drop(plan_cache);
+                let parsed =
+                    parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?;
+                // Store in plan cache for next time
+                if let Ok(mut pc) = self.inner.query_cache.write() {
+                    let plan = crate::storage::query::planner::QueryPlan::new(
+                        parsed.clone(),
+                        parsed.clone(),
+                        Default::default(),
+                    );
+                    pc.insert(
+                        query.to_string(),
+                        crate::storage::query::planner::CachedPlan::new(plan),
+                    );
+                }
+                parsed
+            }
+        } else {
+            parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?
+        };
         let statement = query_expr_name(&expr);
 
         let query_result = match expr {
@@ -450,7 +479,11 @@ impl RedDBRuntime {
                 mode,
                 statement,
                 engine: "runtime-table",
-                result: execute_runtime_table_query(&self.inner.db, &table)?,
+                result: execute_runtime_table_query(
+                    &self.inner.db,
+                    &table,
+                    Some(&self.inner.index_store),
+                )?,
                 affected_rows: 0,
                 statement_type: "select",
             }),
@@ -578,15 +611,14 @@ impl RedDBRuntime {
             }
         };
 
-        // Cache SELECT results for 30s
+        // Cache SELECT results for 30s (skip caching pre-serialized results to avoid large clones)
         if let Ok(ref result) = query_result {
-            if result.statement_type == "select" {
+            if result.statement_type == "select" && result.result.pre_serialized_json.is_none() {
                 if let Ok(mut cache) = self.inner.result_cache.write() {
                     cache.insert(
                         query.to_string(),
                         (result.clone(), std::time::Instant::now()),
                     );
-                    // Evict if too many cached
                     if cache.len() > 1000 {
                         if let Some(oldest_key) = cache
                             .iter()
@@ -601,6 +633,71 @@ impl RedDBRuntime {
         }
 
         query_result
+    }
+
+    /// Ultra-fast path: detect `SELECT * FROM table WHERE _entity_id = N` by string pattern
+    /// and execute it without SQL parsing or planning. Returns None if pattern doesn't match.
+    fn try_fast_entity_lookup(&self, query: &str) -> Option<RedDBResult<RuntimeQueryResult>> {
+        // Pattern: "SELECT * FROM <table> WHERE _entity_id = <id>"
+        // or "SELECT * FROM <table> WHERE _entity_id =<id>"
+        let q = query.trim();
+        if !q.starts_with("SELECT") && !q.starts_with("select") {
+            return None;
+        }
+
+        // Find "WHERE _entity_id = " or "WHERE _entity_id ="
+        let where_pos = q
+            .find("WHERE _entity_id")
+            .or_else(|| q.find("where _entity_id"))?;
+        let after_field = &q[where_pos + 16..].trim_start(); // skip "WHERE _entity_id"
+        let after_eq = after_field.strip_prefix('=')?.trim_start();
+
+        // Parse the entity ID number
+        let id_str = after_eq.trim();
+        let entity_id: u64 = id_str.parse().ok()?;
+
+        // Extract table name: between "FROM " and " WHERE"
+        let from_pos = q.find("FROM ").or_else(|| q.find("from "))? + 5;
+        let table = q[from_pos..where_pos].trim();
+        if table.is_empty()
+            || table.contains(' ') && !table.contains(" AS ") && !table.contains(" as ")
+        {
+            return None; // complex query, fall through
+        }
+        let table_name = table.split_whitespace().next()?;
+
+        // Direct entity lookup
+        let store = self.inner.db.store();
+        let entity = store.get(
+            table_name,
+            crate::storage::unified::EntityId::new(entity_id),
+        );
+
+        let json = match entity {
+            Some(ref e) => execute_runtime_serialize_single_entity(e),
+            None => r#"{"columns":[],"record_count":0,"selection":{"scope":"any"},"records":[]}"#
+                .to_string(),
+        };
+
+        let count = if entity.is_some() { 1u64 } else { 0 };
+
+        Some(Ok(RuntimeQueryResult {
+            query: query.to_string(),
+            mode: crate::storage::query::modes::QueryMode::Sql,
+            statement: "select",
+            engine: "fast-entity-lookup",
+            result: crate::storage::query::unified::UnifiedResult {
+                columns: Vec::new(),
+                records: Vec::new(),
+                stats: crate::storage::query::unified::QueryStats {
+                    rows_scanned: count,
+                    ..Default::default()
+                },
+                pre_serialized_json: Some(json),
+            },
+            affected_rows: 0,
+            statement_type: "select",
+        }))
     }
 
     /// Invalidate the result cache (call after any write operation).

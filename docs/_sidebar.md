@@ -62,6 +62,7 @@
   - [R-Tree (Spatial)](/engine/rtree.md)
   - [Bloom Filter](/engine/bloom-filter.md)
   - [Memtable & Skip List](/engine/memtable.md)
+  - [File Format Anatomy](/engine/file-format.md)
   - [WAL & Recovery](/engine/wal.md)
   - [SIEVE Cache](/engine/cache.md)
   - [Encryption at Rest](/engine/encryption.md)

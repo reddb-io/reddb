@@ -46,17 +46,18 @@ pub mod proto {
 
 use proto::red_db_server::{RedDb, RedDbServer};
 use proto::{
-    BulkEntityReply, CollectionRequest, CollectionsReply, DeleteEntityRequest,
-    DeploymentProfileRequest, Empty, EntityReply, ExportRequest, GraphProjectionUpsertRequest,
-    HealthReply, IndexNameRequest, IndexToggleRequest, JsonBulkCreateRequest, JsonCreateRequest,
-    JsonPayloadRequest, ManifestRequest, OperationReply, PayloadReply, QueryReply, QueryRequest,
-    ScanEntity, ScanReply, ScanRequest, StatsReply, UpdateEntityRequest,
+    BatchQueryReply, BatchQueryRequest, BulkEntityReply, CollectionRequest, CollectionsReply,
+    DeleteEntityRequest, DeploymentProfileRequest, Empty, EntityReply, ExportRequest,
+    GraphProjectionUpsertRequest, HealthReply, IndexNameRequest, IndexToggleRequest,
+    JsonBulkCreateRequest, JsonCreateRequest, JsonPayloadRequest, ManifestRequest, OperationReply,
+    PayloadReply, QueryReply, QueryRequest, ScanEntity, ScanReply, ScanRequest, StatsReply,
+    UpdateEntityRequest,
 };
 
 mod control_support;
 mod entity_ops;
 mod input_support;
-mod scan_json;
+pub(crate) mod scan_json;
 
 use self::control_support::*;
 use self::entity_ops::*;
@@ -143,10 +144,14 @@ impl RedDBGrpcServer {
     pub async fn serve(&self) -> Result<(), Box<dyn std::error::Error>> {
         let addr = self.options.bind_addr.parse()?;
         tonic::transport::Server::builder()
-            .add_service(RedDbServer::new(GrpcRuntime {
-                runtime: self.runtime.clone(),
-                auth_store: self.auth_store.clone(),
-            }))
+            .add_service(
+                RedDbServer::new(GrpcRuntime {
+                    runtime: self.runtime.clone(),
+                    auth_store: self.auth_store.clone(),
+                })
+                .max_decoding_message_size(256 * 1024 * 1024)
+                .max_encoding_message_size(256 * 1024 * 1024),
+            )
             .serve(addr)
             .await?;
         Ok(())

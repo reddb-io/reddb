@@ -210,7 +210,14 @@ impl Checkpointer {
             }
         }
 
-        // Phase 4: Apply committed pages to Pager
+        // Phase 4 (PREPARE): Mark checkpoint in progress in header
+        if !latest_writes.is_empty() {
+            pager
+                .set_checkpoint_in_progress(true, last_lsn)
+                .map_err(|e| CheckpointError::Pager(e.to_string()))?;
+        }
+
+        // Phase 5 (APPLY): Write committed pages to Pager
         let mut pages_checkpointed: u64 = 0;
 
         for (page_id, data) in &latest_writes {
@@ -236,12 +243,19 @@ impl Checkpointer {
             pages_checkpointed += 1;
         }
 
-        // Phase 5: Sync Pager to disk
+        // Phase 6: Sync Pager to disk
         pager
             .sync()
             .map_err(|e| CheckpointError::Pager(e.to_string()))?;
 
-        // Phase 6: Truncate WAL if requested
+        // Phase 7 (COMPLETE): Clear in-progress flag and update checkpoint LSN
+        if !latest_writes.is_empty() {
+            pager
+                .complete_checkpoint(last_lsn)
+                .map_err(|e| CheckpointError::Pager(e.to_string()))?;
+        }
+
+        // Phase 8: Truncate WAL if requested
         let wal_truncated = matches!(
             self.mode,
             CheckpointMode::Restart | CheckpointMode::Truncate
@@ -269,7 +283,8 @@ impl Checkpointer {
     /// Perform crash recovery
     ///
     /// Called on database open to apply any committed transactions from the WAL
-    /// that weren't checkpointed before the crash.
+    /// that weren't checkpointed before the crash. If a checkpoint was interrupted
+    /// (checkpoint_in_progress flag set), re-applies all WAL records from scratch.
     ///
     /// # Arguments
     ///
@@ -280,6 +295,14 @@ impl Checkpointer {
     ///
     /// Recovery statistics or error
     pub fn recover(pager: &Pager, wal_path: &Path) -> Result<CheckpointResult, CheckpointError> {
+        // Check if a checkpoint was interrupted
+        if let Ok(header) = pager.header() {
+            if header.checkpoint_in_progress {
+                // Previous checkpoint was interrupted — re-apply everything from WAL
+                // This is safe because page writes are idempotent (last-write-wins)
+                let _ = pager.set_checkpoint_in_progress(false, 0);
+            }
+        }
         let checkpointer = Self::new(CheckpointMode::Truncate);
         checkpointer.checkpoint(pager, wal_path)
     }

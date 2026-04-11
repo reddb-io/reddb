@@ -276,7 +276,9 @@ impl RedDBRuntime {
         self.inner
             .db
             .enforce_retention_policy()
-            .map_err(|err| RedDBError::Internal(err.to_string()))
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        self.invalidate_result_cache();
+        Ok(())
     }
 
     pub fn indexes(&self) -> Vec<crate::PhysicalIndexState> {

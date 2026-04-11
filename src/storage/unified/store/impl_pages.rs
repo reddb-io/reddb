@@ -87,8 +87,11 @@ impl UnifiedStore {
         }
 
         // Read metadata from page 1 (collections registry)
-        // Format: [collection_count: u32][names...][root_page_ids...]
-        if let Ok(meta_page) = pager.read_page(1) {
+        // Falls back to metadata shadow if page 1 is corrupted
+        let meta_page_result = pager
+            .read_page(1)
+            .or_else(|_| pager.recover_meta_from_shadow());
+        if let Ok(meta_page) = meta_page_result {
             let data = meta_page.as_bytes();
             // Skip header (32 bytes), read content area
             let content = &data[crate::storage::engine::HEADER_SIZE..];
@@ -420,14 +423,19 @@ impl UnifiedStore {
         let copy_len = meta_data.len().min(page_data.len() - content_start);
         page_data[content_start..content_start + copy_len].copy_from_slice(&meta_data[..copy_len]);
 
+        // Write metadata shadow FIRST (intact copy in case main write fails)
+        pager
+            .write_meta_shadow(&meta_page)
+            .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+
         // Write page
         pager
             .write_page(1, meta_page)
             .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
 
-        // Flush all pages to disk
+        // Flush and fsync all pages to disk
         pager
-            .flush()
+            .sync()
             .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
 
         Ok(())

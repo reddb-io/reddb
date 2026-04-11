@@ -3,15 +3,288 @@ use super::*;
 pub(super) fn execute_runtime_table_query(
     db: &RedDB,
     query: &TableQuery,
+    index_store: Option<&super::index_store::IndexStore>,
 ) -> RedDBResult<UnifiedResult> {
-    let records = execute_runtime_canonical_table_query(db, query)?;
+    // ── TURBO PATH: Build JSON directly, bypassing UnifiedRecord entirely ──
+    if query.filter.is_some()
+        && query.order_by.is_empty()
+        && query.group_by.is_empty()
+        && query.having.is_none()
+        && query.expand.is_none()
+        && query.offset.is_none()
+        && !is_universal_query_source(&query.table)
+    {
+        // Entity_id point lookup — serialize single entity directly
+        if let Some(entity_id) = extract_entity_id_from_filter(&query.filter) {
+            let store = db.store();
+            if let Some(entity) = store.get(&query.table, EntityId::new(entity_id)) {
+                let json = execute_runtime_serialize_single_entity(&entity);
+                return Ok(UnifiedResult {
+                    columns: Vec::new(),
+                    records: Vec::new(),
+                    stats: crate::storage::query::unified::QueryStats {
+                        rows_scanned: 1,
+                        ..Default::default()
+                    },
+                    pre_serialized_json: Some(json),
+                });
+            }
+            return Ok(UnifiedResult::default());
+        }
+
+        // Filtered scan — serialize matching entities directly
+        if let Some(json) = execute_filtered_scan_to_json(db, query)? {
+            return Ok(json);
+        }
+    }
+
+    let records = execute_runtime_canonical_table_query_indexed(db, query, index_store)?;
     let columns = projected_columns(&records, &query.columns);
 
     Ok(UnifiedResult {
         columns,
         records,
         stats: Default::default(),
+        pre_serialized_json: None,
     })
+}
+
+/// Execute a filtered scan and serialize matching entities directly to JSON.
+/// Returns None if the collection doesn't exist (falls through to normal path).
+/// Write a u64 as decimal digits.
+#[inline(always)]
+fn write_u64(buf: &mut Vec<u8>, n: u64) {
+    let mut b = itoa::Buffer::new();
+    let s = b.format(n);
+    buf.extend_from_slice(s.as_bytes());
+}
+
+/// Write an entity's fields as JSON bytes into a Vec<u8> buffer.
+#[inline(always)]
+fn write_entity_json_bytes(buf: &mut Vec<u8>, entity: &UnifiedEntity) {
+    buf.push(b'{');
+    buf.extend_from_slice(b"\"_entity_id\":");
+    write_u64(buf, entity.id.raw());
+    buf.extend_from_slice(b",\"_collection\":");
+    write_json_bytes(buf, entity.kind.collection().as_bytes());
+    buf.extend_from_slice(b",\"_kind\":");
+    write_json_bytes(buf, entity.kind.storage_type().as_bytes());
+    buf.extend_from_slice(b",\"_created_at\":");
+    write_u64(buf, entity.created_at);
+    buf.extend_from_slice(b",\"_updated_at\":");
+    write_u64(buf, entity.updated_at);
+    buf.extend_from_slice(b",\"_sequence_id\":");
+    write_u64(buf, entity.sequence_id);
+    buf.extend_from_slice(b",\"_entity_type\":\"table\",\"_capabilities\":\"structured,table\"");
+
+    if let EntityKind::TableRow { row_id, .. } = &entity.kind {
+        buf.extend_from_slice(b",\"row_id\":");
+        write_u64(buf, *row_id);
+    }
+
+    // User fields
+    if let EntityData::Row(ref row) = entity.data {
+        if let Some(ref named) = row.named {
+            for (key, value) in named {
+                buf.push(b',');
+                write_json_bytes(buf, key.as_bytes());
+                buf.push(b':');
+                write_value_bytes(buf, value);
+            }
+        } else {
+            for (i, value) in row.columns.iter().enumerate() {
+                buf.push(b',');
+                buf.push(b'"');
+                buf.push(b'c');
+                itoa::Buffer::new()
+                    .format(i)
+                    .as_bytes()
+                    .iter()
+                    .for_each(|b| buf.push(*b));
+                buf.extend_from_slice(b"\":");
+                write_value_bytes(buf, value);
+            }
+        }
+    }
+    buf.push(b'}');
+}
+
+/// Write a JSON-quoted string to bytes. Assumes most strings are ASCII-safe.
+#[inline(always)]
+fn write_json_bytes(buf: &mut Vec<u8>, s: &[u8]) {
+    buf.push(b'"');
+    for &b in s {
+        match b {
+            b'"' => buf.extend_from_slice(b"\\\""),
+            b'\\' => buf.extend_from_slice(b"\\\\"),
+            b'\n' => buf.extend_from_slice(b"\\n"),
+            b'\r' => buf.extend_from_slice(b"\\r"),
+            b'\t' => buf.extend_from_slice(b"\\t"),
+            b if b < 0x20 => {
+                // \u00XX escape for control characters
+                buf.extend_from_slice(b"\\u00");
+                let hi = b >> 4;
+                let lo = b & 0xf;
+                buf.push(if hi < 10 { b'0' + hi } else { b'a' + hi - 10 });
+                buf.push(if lo < 10 { b'0' + lo } else { b'a' + lo - 10 });
+            }
+            _ => buf.push(b),
+        }
+    }
+    buf.push(b'"');
+}
+
+/// Write a Value as JSON bytes.
+#[inline(always)]
+fn write_value_bytes(buf: &mut Vec<u8>, value: &Value) {
+    match value {
+        Value::Null => buf.extend_from_slice(b"null"),
+        Value::Boolean(true) => buf.extend_from_slice(b"true"),
+        Value::Boolean(false) => buf.extend_from_slice(b"false"),
+        Value::Integer(n) => {
+            let mut b = itoa::Buffer::new();
+            let s = b.format(*n);
+            buf.extend_from_slice(s.as_bytes());
+        }
+        Value::UnsignedInteger(n) => {
+            let mut b = itoa::Buffer::new();
+            let s = b.format(*n);
+            buf.extend_from_slice(s.as_bytes());
+        }
+        Value::Float(f) => {
+            if f.is_finite() {
+                let mut b = ryu::Buffer::new();
+                let s = b.format(*f);
+                buf.extend_from_slice(s.as_bytes());
+            } else {
+                buf.extend_from_slice(b"null");
+            }
+        }
+        Value::Text(s) => write_json_bytes(buf, s.as_bytes()),
+        Value::Timestamp(t) => {
+            let mut b = itoa::Buffer::new();
+            let s = b.format(*t);
+            buf.extend_from_slice(s.as_bytes());
+        }
+        _ => buf.extend_from_slice(b"null"),
+    }
+}
+
+/// Serialize a single entity to the full result JSON wrapper.
+pub(super) fn execute_runtime_serialize_single_entity(entity: &UnifiedEntity) -> String {
+    let mut buf = Vec::with_capacity(512);
+    buf.extend_from_slice(
+        b"{\"columns\":[],\"record_count\":1,\"selection\":{\"scope\":\"any\"},\"records\":[",
+    );
+    write_entity_json_bytes(&mut buf, entity);
+    buf.extend_from_slice(b"]}");
+    // SAFETY: we only wrote valid UTF-8 bytes
+    unsafe { String::from_utf8_unchecked(buf) }
+}
+
+fn execute_filtered_scan_to_json(
+    db: &RedDB,
+    query: &TableQuery,
+) -> RedDBResult<Option<UnifiedResult>> {
+    let manager = match db.store().get_collection(query.table.as_str()) {
+        Some(m) => m,
+        None => return Ok(None),
+    };
+
+    let filter = query.filter.as_ref().unwrap();
+    let table_name = query.table.as_str();
+    let table_alias = query.alias.as_deref().unwrap_or(table_name);
+    let limit = query.limit.unwrap_or(10000) as usize;
+
+    // Pre-compute the collection-level JSON prefix that's the same for every entity
+    // This avoids re-encoding _collection, _kind, _entity_type, _capabilities per row
+    let mut sys_prefix = Vec::with_capacity(128);
+    sys_prefix.extend_from_slice(b",\"_collection\":");
+    write_json_bytes(&mut sys_prefix, table_name.as_bytes());
+    sys_prefix.extend_from_slice(
+        b",\"_kind\":\"table\",\"_entity_type\":\"table\",\"_capabilities\":\"structured,table\"",
+    );
+    let sys_prefix = sys_prefix; // freeze
+
+    // Build JSON as raw bytes
+    let mut buf = Vec::with_capacity(256 + limit * 200);
+    buf.extend_from_slice(b"{\"columns\":[],\"record_count\":");
+    let count_pos = buf.len();
+    buf.extend_from_slice(b"0,\"selection\":{\"scope\":\"any\"},\"records\":[");
+
+    let mut count: u64 = 0;
+    let mut hit_limit = false;
+
+    manager.for_each_entity(|entity| {
+        if hit_limit {
+            return false;
+        }
+        if !entity.data.is_row() {
+            return true;
+        }
+        if !evaluate_entity_filter(entity, filter, table_name, table_alias) {
+            return true;
+        }
+
+        if count > 0 {
+            buf.push(b',');
+        }
+        // Inline entity serialization with pre-computed prefix
+        buf.extend_from_slice(b"{\"_entity_id\":");
+        write_u64(&mut buf, entity.id.raw());
+        buf.extend_from_slice(&sys_prefix); // pre-computed collection/kind/type
+        buf.extend_from_slice(b",\"_created_at\":");
+        write_u64(&mut buf, entity.created_at);
+        buf.extend_from_slice(b",\"_updated_at\":");
+        write_u64(&mut buf, entity.updated_at);
+        buf.extend_from_slice(b",\"_sequence_id\":");
+        write_u64(&mut buf, entity.sequence_id);
+        if let EntityKind::TableRow { row_id, .. } = &entity.kind {
+            buf.extend_from_slice(b",\"row_id\":");
+            write_u64(&mut buf, *row_id);
+        }
+        if let EntityData::Row(ref row) = entity.data {
+            if let Some(ref named) = row.named {
+                for (key, value) in named {
+                    buf.push(b',');
+                    write_json_bytes(&mut buf, key.as_bytes());
+                    buf.push(b':');
+                    write_value_bytes(&mut buf, value);
+                }
+            }
+        }
+        buf.push(b'}');
+        count += 1;
+
+        if count as usize >= limit {
+            hit_limit = true;
+            return false;
+        }
+        true
+    });
+
+    buf.extend_from_slice(b"]}");
+
+    // Patch record_count
+    let mut count_buf = itoa::Buffer::new();
+    let count_str = count_buf.format(count);
+    buf.splice(
+        count_pos..count_pos + 1,
+        count_str.as_bytes().iter().copied(),
+    );
+
+    // SAFETY: we only wrote valid UTF-8 bytes (ASCII JSON)
+    let json_string = unsafe { String::from_utf8_unchecked(buf) };
+
+    Ok(Some(UnifiedResult {
+        columns: Vec::new(),
+        records: Vec::new(),
+        stats: crate::storage::query::unified::QueryStats {
+            rows_scanned: count,
+            ..Default::default()
+        },
+        pre_serialized_json: Some(json_string),
+    }))
 }
 
 pub(super) struct RuntimeTableExecutionContext<'a> {
@@ -24,6 +297,159 @@ pub(super) fn execute_runtime_canonical_table_query(
     db: &RedDB,
     query: &TableQuery,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
+    execute_runtime_canonical_table_query_indexed(db, query, None)
+}
+
+fn execute_runtime_canonical_table_query_indexed(
+    db: &RedDB,
+    query: &TableQuery,
+    index_store: Option<&super::index_store::IndexStore>,
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    // ── ULTRA-FAST PATH: entity_id lookup bypasses planner entirely ──
+    if let Some(entity_id) = extract_entity_id_from_filter(&query.filter) {
+        let store = db.store();
+        if let Some(entity) = store.get(&query.table, EntityId::new(entity_id)) {
+            return Ok(runtime_table_record_from_entity(entity)
+                .into_iter()
+                .collect());
+        }
+        return Ok(Vec::new());
+    }
+
+    // ── INDEX-ASSISTED PATH: use hash index for O(1) equality lookups ──
+    if let (Some(idx_store), Some(ref filter)) = (index_store, &query.filter) {
+        if let Some((column, value_bytes)) = extract_index_candidate(filter) {
+            if let Some(idx) = idx_store.find_index_for_column(&query.table, &column) {
+                let entity_ids = idx_store.hash_lookup(&query.table, &idx.name, &value_bytes);
+                if !entity_ids.is_empty() {
+                    let store = db.store();
+                    let mut records = Vec::new();
+                    for eid in entity_ids {
+                        if let Some(entity) = store.get(&query.table, eid) {
+                            if let Some(record) = runtime_table_record_from_entity(entity) {
+                                records.push(record);
+                            }
+                        }
+                    }
+                    return Ok(records);
+                }
+            }
+        }
+    }
+
+    // ── FAST PATH: Simple filtered scan — bypass planner for basic WHERE queries ──
+    // Evaluates the filter directly on raw entity data to avoid materializing
+    // UnifiedRecord for every entity in the collection.
+    // Excludes universal entity sources (e.g. "any") which span all collections.
+    if query.filter.is_some()
+        && query.group_by.is_empty()
+        && query.having.is_none()
+        && query.expand.is_none()
+        && !is_universal_query_source(&query.table)
+    {
+        let manager = db
+            .store()
+            .get_collection(query.table.as_str())
+            .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
+
+        let filter = query.filter.as_ref().unwrap();
+        let table_name = query.table.as_str();
+        let table_alias = query.alias.as_deref().unwrap_or(table_name);
+        let limit = query.limit.unwrap_or(10000) as usize;
+
+        // Bloom filter: extract PK key for segment pruning
+        let bloom_key = extract_bloom_key_for_pk(filter);
+        if let Some(ref key) = bloom_key {
+            let (entities, _pruned) = manager.query_with_bloom_hint(Some(key), |e| e.data.is_row());
+            if entities.is_empty() {
+                return Ok(Vec::new());
+            }
+        }
+
+        // Extract explicit column names for projection pushdown
+        let select_cols = extract_select_column_names(&query.columns);
+
+        // Pre-filter at entity level, only materialize records that pass
+        let mut records: Vec<UnifiedRecord> = Vec::new();
+        manager.for_each_entity(|entity| {
+            if records.len() >= limit {
+                return false; // stop iteration
+            }
+            if !entity.data.is_row() {
+                return true; // skip non-row entities, continue
+            }
+            if evaluate_entity_filter(entity, filter, table_name, table_alias) {
+                let record = if select_cols.is_empty() {
+                    runtime_table_record_from_entity(entity.clone())
+                } else {
+                    runtime_table_record_from_entity_projected(entity.clone(), &select_cols)
+                };
+                if let Some(record) = record {
+                    records.push(record);
+                }
+            }
+            true // continue
+        });
+
+        // Apply ORDER BY if present
+        if !query.order_by.is_empty() {
+            let order_by = &query.order_by;
+            records.sort_by(|left, right| {
+                compare_runtime_order(left, right, order_by, Some(table_name), Some(table_alias))
+            });
+        }
+
+        // Apply OFFSET
+        if let Some(offset) = query.offset {
+            let offset = offset as usize;
+            if offset < records.len() {
+                records = records.into_iter().skip(offset).collect();
+            } else {
+                records.clear();
+            }
+        }
+
+        return Ok(records);
+    }
+
+    // ── FAST PATH: Unfiltered scan — bypass planner for simple SELECT * ──
+    if query.filter.is_none()
+        && query.group_by.is_empty()
+        && query.having.is_none()
+        && query.expand.is_none()
+    {
+        let mut records = scan_runtime_table_source_records(db, query.table.as_str())?;
+        let table_name = query.table.as_str();
+        let table_alias = query.alias.as_deref().unwrap_or(table_name);
+
+        if !query.order_by.is_empty() {
+            records.sort_by(|left, right| {
+                compare_runtime_order(
+                    left,
+                    right,
+                    &query.order_by,
+                    Some(table_name),
+                    Some(table_alias),
+                )
+            });
+        }
+
+        if let Some(offset) = query.offset {
+            let offset = offset as usize;
+            if offset < records.len() {
+                records = records.into_iter().skip(offset).collect();
+            } else {
+                records.clear();
+            }
+        }
+
+        if let Some(limit) = query.limit {
+            records.truncate(limit as usize);
+        }
+
+        return Ok(records);
+    }
+
     let plan = CanonicalPlanner::new(db).build(&QueryExpr::Table(query.clone()));
     let table_name = query.table.as_str();
     let table_alias = query.alias.as_deref().unwrap_or(table_name);
@@ -42,47 +468,73 @@ pub(super) fn execute_runtime_canonical_table_node(
 ) -> RedDBResult<Vec<UnifiedRecord>> {
     match node.operator.as_str() {
         "table_scan" | "index_seek" | "entity_scan" | "document_path_index_seek" => {
-            // Try index-assisted lookup via IndexHint from optimizer
-            if let Some(hint) = context
-                .query
-                .expand
-                .as_ref()
-                .and_then(|e| e.index_hint.as_ref())
-            {
-                if let Some(filter_value) =
-                    extract_equality_value_for_column(&context.query.filter, &hint.column)
-                {
-                    // Index lookup framework — falls through to scan if no index registered
-                    let entity_ids: Vec<EntityId> = Vec::new();
-                    let store = db.store();
-                    if !entity_ids.is_empty() {
-                        let records = entity_ids
-                            .into_iter()
-                            .filter_map(|id| store.get(&context.query.table, id))
-                            .filter_map(runtime_table_record_from_entity)
-                            .collect();
-                        return Ok(records);
-                    }
+            // ── FAST PATH 1: Direct entity_id lookup (O(1) instead of full scan) ──
+            if let Some(entity_id) = extract_entity_id_from_filter(&context.query.filter) {
+                let store = db.store();
+                if let Some(entity) = store.get(&context.query.table, EntityId::new(entity_id)) {
+                    return Ok(runtime_table_record_from_entity(entity)
+                        .into_iter()
+                        .collect());
                 }
+                return Ok(Vec::new());
             }
 
-            // Bloom filter hint is only safe for primary key / entity ID lookups.
-            // For arbitrary WHERE columns, bloom may incorrectly prune segments
-            // because only entity IDs and first-column values are indexed in bloom.
-            let bloom_key: Option<Vec<u8>> = None; // Disabled: use full scan for safety
+            // ── FAST PATH 2: Filtered scan with entity-level pre-filter ──
+            // Evaluates the WHERE clause directly on raw entity data, only
+            // creating UnifiedRecord for entities that match the filter.
+            // Skip for universal sources ("any") which need cross-collection scanning.
+            if context.query.filter.is_some()
+                && !is_universal_query_source(context.query.table.as_str())
+            {
+                let manager = db
+                    .store()
+                    .get_collection(context.query.table.as_str())
+                    .ok_or_else(|| RedDBError::NotFound(context.query.table.clone()))?;
 
-            if let Some(ref key_bytes) = bloom_key {
-                let (records, _pruned) = scan_runtime_table_with_bloom_hint(
-                    db,
-                    context.query.table.as_str(),
-                    Some(key_bytes),
-                )?;
-                Ok(records)
-            } else {
-                scan_runtime_table_source_records(db, context.query.table.as_str())
+                let filter = context.query.filter.as_ref().unwrap();
+                let table_name = context.table_name;
+                let table_alias = context.table_alias;
+                let limit = context.query.limit.unwrap_or(10000) as usize;
+
+                let select_cols = extract_select_column_names(&context.query.columns);
+                let mut records: Vec<UnifiedRecord> = Vec::new();
+                manager.for_each_entity(|entity| {
+                    if records.len() >= limit {
+                        return false;
+                    }
+                    if !entity.data.is_row() {
+                        return true;
+                    }
+                    if evaluate_entity_filter(entity, filter, table_name, table_alias) {
+                        let record = if select_cols.is_empty() {
+                            runtime_table_record_from_entity(entity.clone())
+                        } else {
+                            runtime_table_record_from_entity_projected(entity.clone(), &select_cols)
+                        };
+                        if let Some(record) = record {
+                            records.push(record);
+                        }
+                    }
+                    true
+                });
+                return Ok(records);
             }
+
+            // ── DEFAULT: Full scan ──
+            scan_runtime_table_source_records(db, context.query.table.as_str())
         }
         "filter" | "entity_filter" => {
+            // ── FAST PATH: Direct entity_id lookup (O(1)) ──
+            if let Some(entity_id) = extract_entity_id_from_filter(&context.query.filter) {
+                let store = db.store();
+                if let Some(entity) = store.get(&context.query.table, EntityId::new(entity_id)) {
+                    return Ok(runtime_table_record_from_entity(entity)
+                        .into_iter()
+                        .collect());
+                }
+                return Ok(Vec::new());
+            }
+
             let mut records = execute_runtime_canonical_table_child(db, node, context)?;
             if let Some(filter) = context.query.filter.as_ref() {
                 records.retain(|record| {
@@ -259,6 +711,7 @@ pub(super) fn execute_runtime_join_query(
         columns,
         records,
         stats: Default::default(),
+        pre_serialized_json: None,
     })
 }
 
@@ -876,6 +1329,7 @@ pub(super) fn execute_runtime_vector_query(
         columns: collect_visible_columns(&records),
         records,
         stats: Default::default(),
+        pre_serialized_json: None,
     })
 }
 
@@ -1022,6 +1476,7 @@ pub(super) fn execute_runtime_hybrid_query(
         columns: collect_visible_columns(&records),
         records,
         stats: Default::default(),
+        pre_serialized_json: None,
     })
 }
 
@@ -1199,14 +1654,50 @@ pub(super) fn execute_runtime_canonical_hybrid_fusion(
         .collect())
 }
 
-/// Extract a bloom filter key hint from a simple equality filter.
-///
-/// For `WHERE col = 'value'`, returns the value bytes so the bloom filter
-/// can skip segments that definitely don't contain it.
-fn extract_bloom_key_from_filter(filter: &crate::storage::query::ast::Filter) -> Option<Vec<u8>> {
-    use crate::storage::query::ast::{CompareOp, Filter};
+/// Extract entity_id from `WHERE _entity_id = N` for O(1) direct lookup.
+fn extract_entity_id_from_filter(
+    filter: &Option<crate::storage::query::ast::Filter>,
+) -> Option<u64> {
+    use crate::storage::query::ast::{CompareOp, FieldRef, Filter};
+    let filter = filter.as_ref()?;
     match filter {
-        Filter::Compare { op, value, .. } if *op == CompareOp::Eq => {
+        Filter::Compare { field, op, value } if *op == CompareOp::Eq => {
+            let field_name = match field {
+                FieldRef::TableColumn { column, .. } => column.as_str(),
+                _ => return None,
+            };
+            if field_name != "_entity_id" && field_name != "entity_id" {
+                return None;
+            }
+            match value {
+                Value::Integer(n) => Some(*n as u64),
+                Value::UnsignedInteger(n) => Some(*n),
+                _ => None,
+            }
+        }
+        Filter::And(left, right) => extract_entity_id_from_filter(&Some(*left.clone()))
+            .or_else(|| extract_entity_id_from_filter(&Some(*right.clone()))),
+        _ => None,
+    }
+}
+
+/// Extract a bloom filter key hint from a PK/ID equality filter ONLY.
+///
+/// Bloom filters only index entity IDs and primary keys. Using them for
+/// general column values causes incorrect pruning (false negatives).
+/// Restricted to: _entity_id, row_id, id, key.
+fn extract_bloom_key_for_pk(filter: &crate::storage::query::ast::Filter) -> Option<Vec<u8>> {
+    use crate::storage::query::ast::{CompareOp, FieldRef, Filter};
+    match filter {
+        Filter::Compare { field, op, value } if *op == CompareOp::Eq => {
+            // Only use bloom for PK/ID fields
+            let field_name = match field {
+                FieldRef::TableColumn { column, .. } => column.as_str(),
+                _ => return None,
+            };
+            if !matches!(field_name, "_entity_id" | "row_id" | "id" | "key") {
+                return None;
+            }
             let key = match value {
                 Value::Text(s) => s.as_bytes().to_vec(),
                 Value::Integer(n) => n.to_le_bytes().to_vec(),
@@ -1215,7 +1706,9 @@ fn extract_bloom_key_from_filter(filter: &crate::storage::query::ast::Filter) ->
             };
             Some(key)
         }
-        Filter::And(left, _right) => extract_bloom_key_from_filter(left),
+        Filter::And(left, right) => {
+            extract_bloom_key_for_pk(left).or_else(|| extract_bloom_key_for_pk(right))
+        }
         _ => None,
     }
 }
@@ -1248,5 +1741,214 @@ fn extract_equality_value_for_column(
         Filter::And(left, right) => extract_equality_value_for_column(&Some(*left.clone()), column)
             .or_else(|| extract_equality_value_for_column(&Some(*right.clone()), column)),
         _ => None,
+    }
+}
+
+/// Extract a (column_name, value_bytes) from a simple equality filter for index lookup.
+fn extract_index_candidate(
+    filter: &crate::storage::query::ast::Filter,
+) -> Option<(String, Vec<u8>)> {
+    use crate::storage::query::ast::{CompareOp, FieldRef, Filter};
+    match filter {
+        Filter::Compare { field, op, value } if *op == CompareOp::Eq => {
+            let column = match field {
+                FieldRef::TableColumn { column, .. } => column.clone(),
+                _ => return None,
+            };
+            let bytes = match value {
+                Value::Text(s) => s.as_bytes().to_vec(),
+                Value::Integer(n) => n.to_le_bytes().to_vec(),
+                Value::UnsignedInteger(n) => n.to_le_bytes().to_vec(),
+                _ => return None,
+            };
+            Some((column, bytes))
+        }
+        Filter::And(left, right) => {
+            extract_index_candidate(left).or_else(|| extract_index_candidate(right))
+        }
+        _ => None,
+    }
+}
+
+/// Extract simple column names from SELECT projections for projection pushdown.
+/// Returns empty Vec for SELECT * or when projections contain expressions/functions.
+fn extract_select_column_names(projections: &[Projection]) -> Vec<String> {
+    if projections.is_empty() || projections.iter().any(|p| matches!(p, Projection::All)) {
+        return Vec::new();
+    }
+    projections
+        .iter()
+        .filter_map(|p| match p {
+            Projection::Column(c) | Projection::Alias(c, _) => Some(c.clone()),
+            Projection::Field(FieldRef::TableColumn { column: c, .. }, _) => Some(c.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Entity-level filter evaluation
+// ─────────────────────────────────────────────────────────────────────────────
+// These functions evaluate SQL WHERE clauses directly against raw UnifiedEntity
+// data, avoiding the expensive intermediate step of creating a UnifiedRecord
+// (which allocates a HashMap and copies ~10 system fields + all user fields).
+//
+// For a 5000-row table with a filter matching ~100 rows, this avoids creating
+// ~4900 throwaway UnifiedRecords.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Resolve a field reference directly from an entity, without creating a UnifiedRecord.
+/// Returns a borrowed Value when possible, or an owned Value for computed fields.
+fn resolve_entity_field<'a>(
+    entity: &'a crate::storage::unified::entity::UnifiedEntity,
+    field: &FieldRef,
+    table_name: &str,
+    table_alias: &str,
+) -> Option<std::borrow::Cow<'a, Value>> {
+    use std::borrow::Cow;
+
+    let column = match field {
+        FieldRef::TableColumn { table, column } => {
+            // If table qualifier is present, verify it matches
+            if !table.is_empty()
+                && !runtime_table_context_matches(
+                    table.as_str(),
+                    Some(table_name),
+                    Some(table_alias),
+                )
+            {
+                return None;
+            }
+            column.as_str()
+        }
+        _ => return None,
+    };
+
+    // System fields — accessed directly from entity struct fields
+    match column {
+        "_entity_id" | "entity_id" => {
+            return Some(Cow::Owned(Value::UnsignedInteger(entity.id.raw())));
+        }
+        "_created_at" => {
+            return Some(Cow::Owned(Value::UnsignedInteger(entity.created_at)));
+        }
+        "_updated_at" => {
+            return Some(Cow::Owned(Value::UnsignedInteger(entity.updated_at)));
+        }
+        "_sequence_id" => {
+            return Some(Cow::Owned(Value::UnsignedInteger(entity.sequence_id)));
+        }
+        "_collection" => {
+            return Some(Cow::Owned(Value::Text(
+                entity.kind.collection().to_string(),
+            )));
+        }
+        "_kind" => {
+            return Some(Cow::Owned(Value::Text(
+                entity.kind.storage_type().to_string(),
+            )));
+        }
+        "row_id" => {
+            if let crate::storage::unified::entity::EntityKind::TableRow { row_id, .. } =
+                &entity.kind
+            {
+                return Some(Cow::Owned(Value::UnsignedInteger(*row_id)));
+            }
+            return None;
+        }
+        _ => {}
+    }
+
+    // User fields — accessed from row.named HashMap (zero-copy borrow)
+    let row = entity.data.as_row()?;
+    if let Some(named) = row.named.as_ref() {
+        if let Some(value) = named.get(column) {
+            return Some(Cow::Borrowed(value));
+        }
+    }
+
+    // Positional column fallback (c0, c1, ...)
+    if column.starts_with('c') {
+        if let Ok(index) = column[1..].parse::<usize>() {
+            if let Some(value) = row.columns.get(index) {
+                return Some(Cow::Borrowed(value));
+            }
+        }
+    }
+
+    None
+}
+
+/// Evaluate a SQL Filter directly against a UnifiedEntity without creating a
+/// UnifiedRecord. This is the main performance optimization for filtered scans.
+pub(crate) fn evaluate_entity_filter(
+    entity: &crate::storage::unified::entity::UnifiedEntity,
+    filter: &Filter,
+    table_name: &str,
+    table_alias: &str,
+) -> bool {
+    match filter {
+        Filter::Compare { field, op, value } => {
+            resolve_entity_field(entity, field, table_name, table_alias)
+                .as_ref()
+                .map(|candidate| compare_runtime_values(candidate.as_ref(), value, *op))
+                .unwrap_or(false)
+        }
+        Filter::And(left, right) => {
+            evaluate_entity_filter(entity, left, table_name, table_alias)
+                && evaluate_entity_filter(entity, right, table_name, table_alias)
+        }
+        Filter::Or(left, right) => {
+            evaluate_entity_filter(entity, left, table_name, table_alias)
+                || evaluate_entity_filter(entity, right, table_name, table_alias)
+        }
+        Filter::Not(inner) => !evaluate_entity_filter(entity, inner, table_name, table_alias),
+        Filter::IsNull(field) => resolve_entity_field(entity, field, table_name, table_alias)
+            .map(|value| value.as_ref() == &Value::Null)
+            .unwrap_or(true),
+        Filter::IsNotNull(field) => resolve_entity_field(entity, field, table_name, table_alias)
+            .map(|value| value.as_ref() != &Value::Null)
+            .unwrap_or(false),
+        Filter::In { field, values } => {
+            resolve_entity_field(entity, field, table_name, table_alias)
+                .as_ref()
+                .is_some_and(|candidate| {
+                    values.iter().any(|value| {
+                        compare_runtime_values(candidate.as_ref(), value, CompareOp::Eq)
+                    })
+                })
+        }
+        Filter::Between { field, low, high } => {
+            resolve_entity_field(entity, field, table_name, table_alias)
+                .as_ref()
+                .is_some_and(|candidate| {
+                    compare_runtime_values(candidate.as_ref(), low, CompareOp::Ge)
+                        && compare_runtime_values(candidate.as_ref(), high, CompareOp::Le)
+                })
+        }
+        Filter::Like { field, pattern } => {
+            resolve_entity_field(entity, field, table_name, table_alias)
+                .as_ref()
+                .and_then(|v| runtime_value_text(v.as_ref()))
+                .is_some_and(|value| like_matches(&value, pattern))
+        }
+        Filter::StartsWith { field, prefix } => {
+            resolve_entity_field(entity, field, table_name, table_alias)
+                .as_ref()
+                .and_then(|v| runtime_value_text(v.as_ref()))
+                .is_some_and(|value| value.starts_with(prefix))
+        }
+        Filter::EndsWith { field, suffix } => {
+            resolve_entity_field(entity, field, table_name, table_alias)
+                .as_ref()
+                .and_then(|v| runtime_value_text(v.as_ref()))
+                .is_some_and(|value| value.ends_with(suffix))
+        }
+        Filter::Contains { field, substring } => {
+            resolve_entity_field(entity, field, table_name, table_alias)
+                .as_ref()
+                .and_then(|v| runtime_value_text(v.as_ref()))
+                .is_some_and(|value| value.contains(substring))
+        }
     }
 }

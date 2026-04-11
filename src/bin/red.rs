@@ -680,6 +680,14 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                     .with_description("Explicit gRPC bind address (host:port)"),
                 cli::types::FlagSchema::new("http-bind")
                     .with_description("Explicit HTTP bind address (host:port)"),
+                cli::types::FlagSchema::new("wire-bind")
+                    .with_description("Wire protocol TCP bind address (host:port)"),
+                cli::types::FlagSchema::new("wire-tls-bind")
+                    .with_description("Wire protocol TLS bind address (host:port)"),
+                cli::types::FlagSchema::new("wire-tls-cert")
+                    .with_description("Path to TLS certificate PEM (auto-generated if omitted)"),
+                cli::types::FlagSchema::new("wire-tls-key")
+                    .with_description("Path to TLS private key PEM"),
                 cli::types::FlagSchema::new("role")
                     .with_short('r')
                     .with_description("Server role")
@@ -716,6 +724,8 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                     .with_description("Explicit gRPC bind address (host:port)"),
                 cli::types::FlagSchema::new("http-bind")
                     .with_description("Explicit HTTP bind address (host:port)"),
+                cli::types::FlagSchema::new("wire-bind")
+                    .with_description("Wire protocol TCP bind address (host:port)"),
                 cli::types::FlagSchema::boolean("vault")
                     .with_description("Enable the encrypted auth vault"),
             ]);
@@ -846,10 +856,23 @@ fn build_server_config(
 
     let workers = flag_string(flags, "workers").and_then(|v| v.parse::<usize>().ok());
 
+    let wire_bind_addr = flag_string(flags, "wire-bind").filter(|v| !v.is_empty());
+    let wire_tls_bind_addr = flag_string(flags, "wire-tls-bind").filter(|v| !v.is_empty());
+    let wire_tls_cert = flag_string(flags, "wire-tls-cert")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    let wire_tls_key = flag_string(flags, "wire-tls-key")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+
     Ok(ServerCommandConfig {
         path,
         grpc_bind_addr,
         http_bind_addr,
+        wire_bind_addr,
+        wire_tls_bind_addr,
+        wire_tls_cert,
+        wire_tls_key,
         create_if_missing: !flag_bool(flags, "no-create-if-missing"),
         read_only: flag_bool(flags, "read-only"),
         role,

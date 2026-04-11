@@ -1,5 +1,8 @@
 use super::*;
 
+/// DWB file magic: "RDDW"
+const DWB_MAGIC: [u8; 4] = [0x52, 0x44, 0x44, 0x57];
+
 impl Pager {
     /// Open or create a database file
     pub fn open<P: AsRef<Path>>(path: P, config: PagerConfig) -> Result<Self, PagerError> {
@@ -26,9 +29,37 @@ impl Pager {
             .create(config.create && !config.read_only)
             .open(&path)?;
 
+        // Acquire file lock (exclusive for writes, shared for read-only)
+        let lock_file = if !config.read_only {
+            let lf = OpenOptions::new().read(true).write(true).open(&path)?;
+            lf.try_lock_exclusive().map_err(|_| PagerError::Locked)?;
+            Some(lf)
+        } else {
+            let lf = OpenOptions::new().read(true).open(&path)?;
+            match lf.try_lock_shared() {
+                Ok(_) => Some(lf),
+                Err(_) => None,
+            }
+        };
+
+        // Open double-write buffer file
+        let dwb_file = if config.double_write && !config.read_only {
+            let dwb_path = Self::dwb_path(&path);
+            let f = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open(&dwb_path)?;
+            Some(Mutex::new(f))
+        } else {
+            None
+        };
+
         let pager = Self {
             path,
             file: Mutex::new(file),
+            _lock_file: lock_file,
+            dwb_file,
             cache: PageCache::new(config.cache_size),
             freelist: RwLock::new(FreeList::new()),
             header: RwLock::new(DatabaseHeader::default()),
@@ -37,7 +68,9 @@ impl Pager {
         };
 
         if exists {
-            // Load existing database
+            // Recover from double-write buffer if needed
+            pager.recover_from_dwb()?;
+            // Load existing database (with header shadow fallback)
             pager.load_header()?;
         } else {
             // Initialize new database
@@ -97,19 +130,22 @@ impl Pager {
             .map_err(|_| PagerError::LockPoisoned)
     }
 
-    /// Load database header from page 0
+    /// Load database header from page 0 (with shadow fallback)
     fn load_header(&self) -> Result<(), PagerError> {
-        // Read page 0
-        let header_page = self.read_page_raw(0)?;
-
-        // Verify magic bytes
-        let magic = &header_page.as_bytes()[HEADER_SIZE..HEADER_SIZE + 4];
-        if magic != MAGIC_BYTES {
-            return Err(PagerError::InvalidDatabase(format!(
-                "Invalid magic bytes: {:02X?}",
-                magic
-            )));
-        }
+        // Read page 0 — fall back to shadow if corrupted
+        let header_page = match self.read_page_raw(0) {
+            Ok(page) => {
+                // Verify magic bytes
+                let magic = &page.as_bytes()[HEADER_SIZE..HEADER_SIZE + 4];
+                if magic == MAGIC_BYTES {
+                    page
+                } else {
+                    // Page 0 corrupted — try shadow
+                    self.recover_header_from_shadow()?
+                }
+            }
+            Err(_) => self.recover_header_from_shadow()?,
+        };
 
         // Read header fields
         let data = header_page.as_bytes();
@@ -382,6 +418,19 @@ impl Pager {
             data[HEADER_SIZE + 191],
         ]);
 
+        // Two-phase checkpoint fields (offset 192-200)
+        let checkpoint_in_progress = data[HEADER_SIZE + 192] != 0;
+        let checkpoint_target_lsn = u64::from_le_bytes([
+            data[HEADER_SIZE + 193],
+            data[HEADER_SIZE + 194],
+            data[HEADER_SIZE + 195],
+            data[HEADER_SIZE + 196],
+            data[HEADER_SIZE + 197],
+            data[HEADER_SIZE + 198],
+            data[HEADER_SIZE + 199],
+            data[HEADER_SIZE + 200],
+        ]);
+
         // Update header
         {
             let mut header = self.header_write()?;
@@ -391,6 +440,8 @@ impl Pager {
             header.freelist_head = freelist_head;
             header.schema_version = schema_version;
             header.checkpoint_lsn = checkpoint_lsn;
+            header.checkpoint_in_progress = checkpoint_in_progress;
+            header.checkpoint_target_lsn = checkpoint_target_lsn;
             header.physical = PhysicalFileHeader {
                 format_version: physical_format_version,
                 sequence: physical_sequence,
@@ -533,7 +584,15 @@ impl Pager {
         data[HEADER_SIZE + 184..HEADER_SIZE + 192]
             .copy_from_slice(&header.physical.vector_artifact_checksum.to_le_bytes());
 
+        // Two-phase checkpoint fields (offset 192-200)
+        data[HEADER_SIZE + 192] = if header.checkpoint_in_progress { 1 } else { 0 };
+        data[HEADER_SIZE + 193..HEADER_SIZE + 201]
+            .copy_from_slice(&header.checkpoint_target_lsn.to_le_bytes());
+
         page.update_checksum();
+
+        // Write header shadow FIRST (so it's intact if main write is interrupted)
+        self.write_header_shadow(&page)?;
 
         self.write_page_raw(0, &page)?;
         *self.header_dirty_lock()? = false;
@@ -553,8 +612,8 @@ impl Pager {
 
         let page = Page::from_bytes(buf);
 
-        // Verify checksum if configured
-        if self.config.verify_checksums && page_id != 0 {
+        // Verify checksum if configured (including page 0)
+        if self.config.verify_checksums {
             page.verify_checksum()?;
         }
 
@@ -788,10 +847,10 @@ impl Pager {
             self.cache.mark_dirty(page_id);
         }
 
-        // Flush dirty pages from cache
+        // Flush dirty pages from cache (through DWB if enabled)
         let dirty_pages = self.cache.flush_dirty();
-        for (page_id, page) in dirty_pages {
-            self.write_page_raw(page_id, &page)?;
+        if !dirty_pages.is_empty() {
+            self.write_pages_through_dwb(&dirty_pages)?;
         }
 
         // Write header if dirty
@@ -831,5 +890,273 @@ impl Pager {
     pub fn file_size(&self) -> Result<u64, PagerError> {
         let file = self.file_lock()?;
         Ok(file.metadata()?.len())
+    }
+
+    // ── Corruption defense helpers ──────────────────────────────────
+
+    /// Path for the header shadow file
+    fn shadow_path(db_path: &Path) -> PathBuf {
+        let mut p = db_path.to_path_buf().into_os_string();
+        p.push("-hdr");
+        PathBuf::from(p)
+    }
+
+    /// Path for the metadata shadow file
+    fn meta_shadow_path(db_path: &Path) -> PathBuf {
+        let mut p = db_path.to_path_buf().into_os_string();
+        p.push("-meta");
+        PathBuf::from(p)
+    }
+
+    /// Path for the double-write buffer file
+    fn dwb_path(db_path: &Path) -> PathBuf {
+        let mut p = db_path.to_path_buf().into_os_string();
+        p.push("-dwb");
+        PathBuf::from(p)
+    }
+
+    /// Write a shadow copy of the header page to .rdb-hdr
+    fn write_header_shadow(&self, page: &Page) -> Result<(), PagerError> {
+        if self.config.read_only {
+            return Ok(());
+        }
+        let shadow = Self::shadow_path(&self.path);
+        let mut f = File::create(&shadow)?;
+        f.write_all(page.as_bytes())?;
+        f.sync_all()?;
+        Ok(())
+    }
+
+    /// Recover header from shadow file when page 0 is corrupted
+    fn recover_header_from_shadow(&self) -> Result<Page, PagerError> {
+        let shadow = Self::shadow_path(&self.path);
+        if !shadow.exists() {
+            return Err(PagerError::InvalidDatabase(
+                "Page 0 corrupted and no header shadow found".into(),
+            ));
+        }
+        let mut f = File::open(&shadow)?;
+        let mut buf = [0u8; PAGE_SIZE];
+        f.read_exact(&mut buf)?;
+        let page = Page::from_bytes(buf);
+
+        // Verify shadow is valid
+        let magic = &page.as_bytes()[HEADER_SIZE..HEADER_SIZE + 4];
+        if magic != MAGIC_BYTES {
+            return Err(PagerError::InvalidDatabase(
+                "Header shadow also corrupted".into(),
+            ));
+        }
+
+        // Restore page 0 from shadow
+        if !self.config.read_only {
+            self.write_page_raw(0, &page)?;
+            let file = self.file_lock()?;
+            file.sync_all()?;
+        }
+
+        Ok(page)
+    }
+
+    /// Write a shadow copy of the metadata page to .rdb-meta
+    pub fn write_meta_shadow(&self, page: &Page) -> Result<(), PagerError> {
+        if self.config.read_only {
+            return Ok(());
+        }
+        let shadow = Self::meta_shadow_path(&self.path);
+        let mut f = File::create(&shadow)?;
+        f.write_all(page.as_bytes())?;
+        f.sync_all()?;
+        Ok(())
+    }
+
+    /// Recover metadata page from shadow file when page 1 is corrupted
+    pub fn recover_meta_from_shadow(&self) -> Result<Page, PagerError> {
+        let shadow = Self::meta_shadow_path(&self.path);
+        if !shadow.exists() {
+            return Err(PagerError::InvalidDatabase(
+                "Page 1 corrupted and no metadata shadow found".into(),
+            ));
+        }
+        let mut f = File::open(&shadow)?;
+        let mut buf = [0u8; PAGE_SIZE];
+        f.read_exact(&mut buf)?;
+        let page = Page::from_bytes(buf);
+
+        // Restore page 1 from shadow
+        if !self.config.read_only {
+            self.write_page_raw(1, &page)?;
+            let file = self.file_lock()?;
+            file.sync_all()?;
+        }
+
+        Ok(page)
+    }
+
+    /// Write pages through the double-write buffer for torn page protection.
+    ///
+    /// 1. Write all pages to the DWB file with a header (magic + count + checksum)
+    /// 2. fsync the DWB
+    /// 3. Write all pages to their final locations in the .rdb file
+    /// 4. Truncate the DWB (marks as consumed)
+    fn write_pages_through_dwb(&self, pages: &[(u32, Page)]) -> Result<(), PagerError> {
+        if let Some(dwb_mutex) = &self.dwb_file {
+            let mut dwb = dwb_mutex.lock().map_err(|_| PagerError::LockPoisoned)?;
+
+            // Build DWB content: [magic:4][count:u32][checksum:u32][pages...]
+            // Each page entry: [page_id:u32][page_data:4096]
+            let entry_size = 4 + PAGE_SIZE; // page_id + data
+            let header_len = 4 + 4 + 4; // magic + count + checksum
+            let total = header_len + pages.len() * entry_size;
+            let mut buf = Vec::with_capacity(total);
+
+            // Header
+            buf.extend_from_slice(&DWB_MAGIC);
+            buf.extend_from_slice(&(pages.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&[0u8; 4]); // placeholder for checksum
+
+            // Page entries
+            for (page_id, page) in pages {
+                buf.extend_from_slice(&page_id.to_le_bytes());
+                buf.extend_from_slice(page.as_bytes());
+            }
+
+            // Compute and write checksum over all data after the header
+            let checksum = super::super::crc32::crc32(&buf[header_len..]);
+            buf[8..12].copy_from_slice(&checksum.to_le_bytes());
+
+            // Write DWB and fsync
+            dwb.seek(SeekFrom::Start(0))?;
+            dwb.write_all(&buf)?;
+            dwb.sync_all()?;
+
+            // Now write pages to their final locations
+            for (page_id, page) in pages {
+                self.write_page_raw(*page_id, page)?;
+            }
+
+            // Truncate DWB to mark as consumed
+            dwb.set_len(0)?;
+            dwb.sync_all()?;
+
+            Ok(())
+        } else {
+            // DWB disabled — write directly
+            for (page_id, page) in pages {
+                self.write_page_raw(*page_id, page)?;
+            }
+            Ok(())
+        }
+    }
+
+    /// Recover from double-write buffer after a crash.
+    ///
+    /// If the DWB file contains valid pages, they were written before the crash
+    /// interrupted writing to the main file. Re-apply them.
+    fn recover_from_dwb(&self) -> Result<(), PagerError> {
+        let dwb_path = Self::dwb_path(&self.path);
+        if !dwb_path.exists() {
+            return Ok(());
+        }
+
+        let mut f = File::open(&dwb_path)?;
+        let len = f.metadata()?.len();
+        if len < 12 {
+            // Too small or empty — nothing to recover
+            return Ok(());
+        }
+
+        let mut buf = vec![0u8; len as usize];
+        f.read_exact(&mut buf)?;
+        drop(f);
+
+        // Verify magic
+        if buf[0..4] != DWB_MAGIC {
+            // Not a valid DWB — clean up
+            let _ = std::fs::remove_file(&dwb_path);
+            return Ok(());
+        }
+
+        let count = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]) as usize;
+        let stored_checksum = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
+
+        let header_len = 12;
+        let entry_size = 4 + PAGE_SIZE;
+        let expected_len = header_len + count * entry_size;
+
+        if buf.len() < expected_len {
+            // Incomplete DWB write — discard
+            let _ = std::fs::remove_file(&dwb_path);
+            return Ok(());
+        }
+
+        // Verify checksum
+        let computed = super::super::crc32::crc32(&buf[header_len..expected_len]);
+        if computed != stored_checksum {
+            // Corrupted DWB — discard
+            let _ = std::fs::remove_file(&dwb_path);
+            return Ok(());
+        }
+
+        // DWB is valid — re-apply pages to main file
+        let mut offset = header_len;
+        for _ in 0..count {
+            let page_id = u32::from_le_bytes([
+                buf[offset],
+                buf[offset + 1],
+                buf[offset + 2],
+                buf[offset + 3],
+            ]);
+            offset += 4;
+
+            let mut page_data = [0u8; PAGE_SIZE];
+            page_data.copy_from_slice(&buf[offset..offset + PAGE_SIZE]);
+            offset += PAGE_SIZE;
+
+            let page = Page::from_bytes(page_data);
+            self.write_page_raw(page_id, &page)?;
+        }
+
+        // Sync and clean up
+        {
+            let file = self.file_lock()?;
+            file.sync_all()?;
+        }
+        let _ = std::fs::remove_file(&dwb_path);
+
+        Ok(())
+    }
+
+    /// Write header and sync to disk (public for checkpointer).
+    pub fn write_header_and_sync(&self) -> Result<(), PagerError> {
+        self.write_header()?;
+        let file = self.file_lock()?;
+        file.sync_all()?;
+        Ok(())
+    }
+
+    /// Set the checkpoint_in_progress flag in the header.
+    pub fn set_checkpoint_in_progress(
+        &self,
+        in_progress: bool,
+        target_lsn: u64,
+    ) -> Result<(), PagerError> {
+        let mut header = self.header_write()?;
+        header.checkpoint_in_progress = in_progress;
+        header.checkpoint_target_lsn = target_lsn;
+        *self.header_dirty_lock()? = true;
+        drop(header);
+        self.write_header_and_sync()
+    }
+
+    /// Update the checkpoint LSN and clear the in-progress flag.
+    pub fn complete_checkpoint(&self, lsn: u64) -> Result<(), PagerError> {
+        let mut header = self.header_write()?;
+        header.checkpoint_lsn = lsn;
+        header.checkpoint_in_progress = false;
+        header.checkpoint_target_lsn = 0;
+        *self.header_dirty_lock()? = true;
+        drop(header);
+        self.write_header_and_sync()
     }
 }

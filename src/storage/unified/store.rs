@@ -42,6 +42,7 @@ use crate::storage::schema::types::Value;
 const STORE_MAGIC: &[u8; 4] = b"RDST";
 const STORE_VERSION_V1: u32 = 1;
 const STORE_VERSION_V2: u32 = 2;
+const STORE_VERSION_V3: u32 = 3;
 const METADATA_MAGIC: &[u8; 4] = b"RDM2";
 const NATIVE_COLLECTION_ROOTS_MAGIC: &[u8; 4] = b"RDRT";
 const NATIVE_MANIFEST_MAGIC: &[u8; 4] = b"RDMF";

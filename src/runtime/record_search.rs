@@ -19,11 +19,19 @@ pub(super) fn scan_runtime_table_source_records(
         .get_collection(table)
         .ok_or_else(|| RedDBError::NotFound(table.to_string()))?;
 
-    Ok(manager
-        .query_all(|_| true)
-        .into_iter()
-        .filter_map(runtime_table_record_from_entity)
-        .collect())
+    // Use for_each_entity to avoid the intermediate Vec<UnifiedEntity> allocation.
+    // Each entity is cloned only once (for record creation) instead of being
+    // first collected into a Vec then consumed.
+    let mut records = Vec::new();
+    manager.for_each_entity(|entity| {
+        if entity.data.is_row() {
+            if let Some(record) = runtime_table_record_from_entity(entity.clone()) {
+                records.push(record);
+            }
+        }
+        true // continue
+    });
+    Ok(records)
 }
 
 /// Scan with bloom filter optimization: when we know the exact key we're looking for,
@@ -57,7 +65,13 @@ pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<
         _ => return None,
     };
 
-    let mut record = UnifiedRecord::new();
+    // Pre-allocate: ~9 system fields + user fields
+    let user_field_count = row
+        .named
+        .as_ref()
+        .map(|n| n.len())
+        .unwrap_or(row.columns.len());
+    let mut record = UnifiedRecord::with_capacity(9 + user_field_count);
 
     if let EntityKind::TableRow { row_id, .. } = &entity.kind {
         record.set("row_id", Value::UnsignedInteger(*row_id));
@@ -72,7 +86,12 @@ pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<
     record.set("_created_at", Value::UnsignedInteger(entity.created_at));
     record.set("_updated_at", Value::UnsignedInteger(entity.updated_at));
     record.set("_sequence_id", Value::UnsignedInteger(entity.sequence_id));
-    set_runtime_entity_metadata(&mut record, "table", runtime_row_capabilities(&row));
+
+    // Use fast capability string to avoid BTreeSet allocation
+    let entity_type = runtime_row_entity_type(&row);
+    let capabilities_str = runtime_row_capabilities_str(&row);
+    record.set("_entity_type", Value::Text(entity_type.to_string()));
+    record.set("_capabilities", Value::Text(capabilities_str.to_string()));
 
     if let Some(named) = row.named {
         for (key, value) in named {
@@ -240,6 +259,19 @@ pub(super) fn runtime_row_capabilities(row: &crate::storage::RowData) -> BTreeSe
         capabilities.insert("document".to_string());
     }
     capabilities
+}
+
+/// Fast capability string for table rows — avoids BTreeSet allocation.
+/// Returns a pre-computed comma-separated capabilities string.
+pub(super) fn runtime_row_capabilities_str(row: &crate::storage::RowData) -> &'static str {
+    let is_kv = runtime_row_is_kv(row);
+    let is_doc = runtime_row_has_document_capability(row);
+    match (is_kv, is_doc) {
+        (false, false) => "structured,table",
+        (true, false) => "kv,structured,table",
+        (false, true) => "document,structured,table",
+        (true, true) => "document,kv,structured,table",
+    }
 }
 
 pub(super) fn runtime_row_entity_type(row: &crate::storage::RowData) -> &'static str {
