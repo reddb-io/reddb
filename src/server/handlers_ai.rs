@@ -504,49 +504,119 @@ impl RedDBServer {
 
         let mut saved = Vec::new();
         if let Some(save) = save_options {
-            for (index, embedding) in response.embeddings.iter().cloned().enumerate() {
-                let mut metadata = save.metadata.clone();
-                metadata.push((
-                    "_ai_provider".to_string(),
-                    MetadataValue::String(response.provider.to_string()),
-                ));
-                metadata.push((
-                    "_ai_model".to_string(),
-                    MetadataValue::String(response.model.clone()),
-                ));
-                if let Some(ref credential) = credential {
-                    metadata.push((
-                        "_ai_credential".to_string(),
-                        MetadataValue::String(credential.clone()),
-                    ));
-                }
+            let embedding_count = response.embeddings.len();
 
-                let create_result = self.entity_use_cases().create_vector(CreateVectorInput {
-                    collection: save.collection.clone(),
-                    dense: embedding,
-                    content: if save.include_content {
-                        Some(inputs[index].clone())
-                    } else {
-                        None
-                    },
-                    metadata,
-                    link_row: None,
-                    link_node: None,
+            if embedding_count > 10 {
+                // Parallel persistence for large batches
+                let save_ref = &save;
+                let response_ref = &response;
+                let credential_ref = &credential;
+                let inputs_ref = &inputs;
+                let runtime = &self.runtime;
+
+                let results: Vec<Result<(usize, u64), String>> = std::thread::scope(|s| {
+                    response_ref
+                        .embeddings
+                        .iter()
+                        .enumerate()
+                        .map(|(index, embedding)| {
+                            s.spawn(move || {
+                                let mut metadata = save_ref.metadata.clone();
+                                metadata.push((
+                                    "_ai_provider".to_string(),
+                                    MetadataValue::String(response_ref.provider.to_string()),
+                                ));
+                                metadata.push((
+                                    "_ai_model".to_string(),
+                                    MetadataValue::String(response_ref.model.clone()),
+                                ));
+                                if let Some(ref cred) = credential_ref {
+                                    metadata.push((
+                                        "_ai_credential".to_string(),
+                                        MetadataValue::String(cred.clone()),
+                                    ));
+                                }
+                                let uc = crate::application::EntityUseCases::new(runtime);
+                                let output = uc
+                                    .create_vector(CreateVectorInput {
+                                        collection: save_ref.collection.clone(),
+                                        dense: embedding.clone(),
+                                        content: if save_ref.include_content {
+                                            Some(inputs_ref[index].clone())
+                                        } else {
+                                            None
+                                        },
+                                        metadata,
+                                        link_row: None,
+                                        link_node: None,
+                                    })
+                                    .map_err(|e| format!("index {index}: {e}"))?;
+                                Ok((index, output.id.raw()))
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .map(|h| h.join().unwrap_or(Err("thread panic".to_string())))
+                        .collect()
                 });
-                let output = match create_result {
-                    Ok(output) => output,
-                    Err(err) => {
-                        return json_error(
-                            400,
-                            format!("failed to persist embedding at index {index}: {err}"),
-                        )
-                    }
-                };
 
-                let mut item = Map::new();
-                item.insert("index".to_string(), JsonValue::Number(index as f64));
-                item.insert("id".to_string(), JsonValue::Number(output.id.raw() as f64));
-                saved.push(JsonValue::Object(item));
+                for result in results {
+                    match result {
+                        Ok((index, id)) => {
+                            let mut item = Map::new();
+                            item.insert("index".to_string(), JsonValue::Number(index as f64));
+                            item.insert("id".to_string(), JsonValue::Number(id as f64));
+                            saved.push(JsonValue::Object(item));
+                        }
+                        Err(err) => {
+                            return json_error(400, format!("failed to persist embedding: {err}"));
+                        }
+                    }
+                }
+            } else {
+                // Sequential for small batches (less overhead)
+                for (index, embedding) in response.embeddings.iter().cloned().enumerate() {
+                    let mut metadata = save.metadata.clone();
+                    metadata.push((
+                        "_ai_provider".to_string(),
+                        MetadataValue::String(response.provider.to_string()),
+                    ));
+                    metadata.push((
+                        "_ai_model".to_string(),
+                        MetadataValue::String(response.model.clone()),
+                    ));
+                    if let Some(ref credential) = credential {
+                        metadata.push((
+                            "_ai_credential".to_string(),
+                            MetadataValue::String(credential.clone()),
+                        ));
+                    }
+                    let create_result = self.entity_use_cases().create_vector(CreateVectorInput {
+                        collection: save.collection.clone(),
+                        dense: embedding,
+                        content: if save.include_content {
+                            Some(inputs[index].clone())
+                        } else {
+                            None
+                        },
+                        metadata,
+                        link_row: None,
+                        link_node: None,
+                    });
+                    let output = match create_result {
+                        Ok(output) => output,
+                        Err(err) => {
+                            return json_error(
+                                400,
+                                format!("failed to persist embedding at index {index}: {err}"),
+                            );
+                        }
+                    };
+                    let mut item = Map::new();
+                    item.insert("index".to_string(), JsonValue::Number(index as f64));
+                    item.insert("id".to_string(), JsonValue::Number(output.id.raw() as f64));
+                    saved.push(JsonValue::Object(item));
+                }
             }
         }
 

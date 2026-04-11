@@ -94,17 +94,40 @@ pub(super) fn materialize_graph_lazy(
     }
 
     // Phase 2: BFS — load neighbors on demand
-    // We need edges to traverse, so scan graph edges once but only add relevant ones
-    let all_edges: Vec<_> = store
-        .list_collections()
-        .iter()
-        .flat_map(|col| {
-            store
-                .get_collection(col)
-                .map(|m| m.query_all(|e| matches!(e.kind, EntityKind::GraphEdge { .. })))
-                .unwrap_or_default()
-        })
-        .collect();
+    // Collect edges from all collections in parallel
+    let collections = store.list_collections();
+    let all_edges: Vec<UnifiedEntity> = if collections.len() > 1 {
+        let store_ref = &store;
+        let edge_batches: Vec<Vec<UnifiedEntity>> = std::thread::scope(|s| {
+            collections
+                .iter()
+                .map(|col| {
+                    s.spawn(move || {
+                        store_ref
+                            .get_collection(col)
+                            .map(|m| {
+                                m.query_all(|e| matches!(e.kind, EntityKind::GraphEdge { .. }))
+                            })
+                            .unwrap_or_default()
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|h| h.join().unwrap_or_default())
+                .collect()
+        });
+        edge_batches.into_iter().flatten().collect()
+    } else {
+        collections
+            .iter()
+            .flat_map(|col| {
+                store
+                    .get_collection(col)
+                    .map(|m| m.query_all(|e| matches!(e.kind, EntityKind::GraphEdge { .. })))
+                    .unwrap_or_default()
+            })
+            .collect()
+    };
 
     // Build adjacency from edges
     let mut adjacency: HashMap<String, Vec<(String, String, String, f32)>> = HashMap::new();
