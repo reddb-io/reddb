@@ -206,7 +206,7 @@ fn execute_indexed_scan_to_json(
         return build_indexed_result_json(db, query, filter, entity_ids);
     }
 
-    // Try hash index for equality queries
+    // Try hash index for equality queries — scan with candidate set
     let (eq_col, eq_val_bytes) = match extract_index_candidate_from_filter(filter) {
         Some(pair) => pair,
         None => return Ok(None),
@@ -216,6 +216,14 @@ fn execute_indexed_scan_to_json(
         None => return Ok(None),
     };
     let entity_ids = idx_store.hash_lookup(&query.table, &reg_idx.name, &eq_val_bytes);
+
+    // For AND queries with hash index: scan with candidate set (avoids individual store.get())
+    // This is faster than N individual get() calls because it iterates the HashMap sequentially
+    if !entity_ids.is_empty() && entity_ids.len() < 5000 {
+        let candidate_set: std::collections::HashSet<EntityId> =
+            entity_ids.iter().copied().collect();
+        return execute_scan_with_candidates_to_json(db, query, filter, &candidate_set);
+    }
     if entity_ids.is_empty() {
         let json = r#"{"columns":[],"record_count":0,"selection":{"scope":"any"},"records":[]}"#
             .to_string();
@@ -384,6 +392,109 @@ fn value_to_i64_for_index(val: &Value) -> Option<i64> {
 }
 
 /// Build the JSON result from a set of entity IDs (from index lookup).
+/// Scan entities sequentially but only process those in the candidate set (from hash index).
+/// Faster than individual store.get() because HashMap iteration is sequential/cache-friendly.
+fn execute_scan_with_candidates_to_json(
+    db: &RedDB,
+    query: &TableQuery,
+    filter: &Filter,
+    candidates: &std::collections::HashSet<EntityId>,
+) -> RedDBResult<Option<UnifiedResult>> {
+    let manager = match db.store().get_collection(query.table.as_str()) {
+        Some(m) => m,
+        None => return Ok(None),
+    };
+
+    let table_name = query.table.as_str();
+    let table_alias = query.alias.as_deref().unwrap_or(table_name);
+    let limit = query.limit.unwrap_or(10000) as usize;
+
+    let mut sys_prefix = Vec::with_capacity(128);
+    sys_prefix.extend_from_slice(b",\"_collection\":");
+    write_json_bytes(&mut sys_prefix, table_name.as_bytes());
+    sys_prefix.extend_from_slice(
+        b",\"_kind\":\"table\",\"_entity_type\":\"table\",\"_capabilities\":\"structured,table\"",
+    );
+
+    let mut buf = Vec::with_capacity(256 + candidates.len().min(limit) * 200);
+    buf.extend_from_slice(b"{\"columns\":[],\"record_count\":");
+    let count_pos = buf.len();
+    buf.extend_from_slice(b"0,\"selection\":{\"scope\":\"any\"},\"records\":[");
+
+    let mut count: u64 = 0;
+    let mut hit_limit = false;
+
+    manager.for_each_entity(|entity| {
+        if hit_limit {
+            return false;
+        }
+        // Skip entities not in the candidate set (from hash index)
+        if !candidates.contains(&entity.id) {
+            return true;
+        }
+        if !entity.data.is_row() {
+            return true;
+        }
+        // Evaluate the FULL filter (hash index only handled equality part)
+        if !evaluate_entity_filter(entity, filter, table_name, table_alias) {
+            return true;
+        }
+
+        if count > 0 {
+            buf.push(b',');
+        }
+        buf.extend_from_slice(b"{\"_entity_id\":");
+        write_u64(&mut buf, entity.id.raw());
+        buf.extend_from_slice(&sys_prefix);
+        buf.extend_from_slice(b",\"_created_at\":");
+        write_u64(&mut buf, entity.created_at);
+        buf.extend_from_slice(b",\"_updated_at\":");
+        write_u64(&mut buf, entity.updated_at);
+        buf.extend_from_slice(b",\"_sequence_id\":");
+        write_u64(&mut buf, entity.sequence_id);
+        if let EntityKind::TableRow { row_id, .. } = &entity.kind {
+            buf.extend_from_slice(b",\"row_id\":");
+            write_u64(&mut buf, *row_id);
+        }
+        if let EntityData::Row(ref row) = entity.data {
+            if let Some(ref named) = row.named {
+                for (key, value) in named {
+                    buf.push(b',');
+                    write_json_bytes(&mut buf, key.as_bytes());
+                    buf.push(b':');
+                    write_value_bytes(&mut buf, value);
+                }
+            }
+        }
+        buf.push(b'}');
+        count += 1;
+        if count as usize >= limit {
+            hit_limit = true;
+            return false;
+        }
+        true
+    });
+
+    buf.extend_from_slice(b"]}");
+    let mut count_buf = itoa::Buffer::new();
+    let count_str = count_buf.format(count);
+    buf.splice(
+        count_pos..count_pos + 1,
+        count_str.as_bytes().iter().copied(),
+    );
+
+    let json_string = unsafe { String::from_utf8_unchecked(buf) };
+    Ok(Some(UnifiedResult {
+        columns: Vec::new(),
+        records: Vec::new(),
+        stats: crate::storage::query::unified::QueryStats {
+            rows_scanned: count,
+            ..Default::default()
+        },
+        pre_serialized_json: Some(json_string),
+    }))
+}
+
 fn build_indexed_result_json(
     db: &RedDB,
     query: &TableQuery,
@@ -544,10 +655,11 @@ fn execute_filtered_scan_to_json(
     let mut count: u64 = 0;
     let mut hit_limit = false;
 
-    // Pre-extract equality column/value for fast pre-filter on AND conditions.
-    // For WHERE city = 'NYC' AND age > 30, we first check city='NYC' with a
-    // direct HashMap lookup (skipping resolve_entity_field overhead).
     let eq_prefilter = extract_equality_prefilter(filter);
+
+    // Pre-encoded field name cache: populated on first matching entity.
+    // Each entry is the JSON-encoded key prefix: ,\"name\":
+    let mut field_keys_cache: Option<Vec<(String, Vec<u8>)>> = None;
 
     manager.for_each_entity(|entity| {
         if hit_limit {
@@ -562,8 +674,8 @@ fn execute_filtered_scan_to_json(
             if let EntityData::Row(ref row) = entity.data {
                 if let Some(ref named) = row.named {
                     match named.get(col.as_str()) {
-                        Some(v) if v == val => {} // pass — continue to full filter
-                        _ => return true,         // skip — doesn't match equality
+                        Some(v) if v == val => {}
+                        _ => return true,
                     }
                 } else {
                     return true;
@@ -578,10 +690,9 @@ fn execute_filtered_scan_to_json(
         if count > 0 {
             buf.push(b',');
         }
-        // Inline entity serialization with pre-computed prefix
         buf.extend_from_slice(b"{\"_entity_id\":");
         write_u64(&mut buf, entity.id.raw());
-        buf.extend_from_slice(&sys_prefix); // pre-computed collection/kind/type
+        buf.extend_from_slice(&sys_prefix);
         buf.extend_from_slice(b",\"_created_at\":");
         write_u64(&mut buf, entity.created_at);
         buf.extend_from_slice(b",\"_updated_at\":");
@@ -594,11 +705,29 @@ fn execute_filtered_scan_to_json(
         }
         if let EntityData::Row(ref row) = entity.data {
             if let Some(ref named) = row.named {
-                for (key, value) in named {
-                    buf.push(b',');
-                    write_json_bytes(&mut buf, key.as_bytes());
-                    buf.push(b':');
-                    write_value_bytes(&mut buf, value);
+                // Build field key cache on first entity (pre-encode JSON key prefixes)
+                if field_keys_cache.is_none() {
+                    let mut cache = Vec::with_capacity(named.len());
+                    for key in named.keys() {
+                        let mut encoded = Vec::with_capacity(key.len() + 4);
+                        encoded.push(b',');
+                        write_json_bytes(&mut encoded, key.as_bytes());
+                        encoded.push(b':');
+                        cache.push((key.clone(), encoded));
+                    }
+                    field_keys_cache = Some(cache);
+                }
+
+                // Use pre-encoded keys (memcpy instead of per-char escape check)
+                if let Some(ref cache) = field_keys_cache {
+                    for (key, encoded_prefix) in cache {
+                        buf.extend_from_slice(encoded_prefix);
+                        if let Some(value) = named.get(key) {
+                            write_value_bytes(&mut buf, value);
+                        } else {
+                            buf.extend_from_slice(b"null");
+                        }
+                    }
                 }
             }
         }
