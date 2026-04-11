@@ -117,4 +117,3 @@
   - [Artifact Lifecycle](/reference/artifacts.md)
   - [Health & Observability](/reference/health.md)
   - [Limitations](/reference/limitations.md)
-  - [Release Notes](/reference/release-notes.md)
