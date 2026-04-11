@@ -1,6 +1,68 @@
 # Release Notes
 
-## v0.1.0 (Current)
+## v0.1.2 (Current)
+
+### Corruption Defense (7 layers)
+
+- **File lock** -- exclusive `flock` via `fs2` prevents concurrent writes to the same `.rdb` file
+- **Double-write buffer** -- `.rdb-dwb` companion file protects against torn pages on power loss
+- **Header shadow** -- `.rdb-hdr` auto-recovers corrupted database header (page 0)
+- **Metadata shadow** -- `.rdb-meta` auto-recovers corrupted collection registry (page 1)
+- **fsync discipline** -- `persist()` and `save_to_file()` now call `sync_all()`, not just `flush()`
+- **Two-phase checkpoint** -- crash-safe WAL application with `checkpoint_in_progress` flag in header
+- **Binary store V3** -- CRC32 footer + atomic write-to-temp-then-rename pattern
+
+### Read Optimizations (6 new)
+
+- **Result cache** -- identical SELECT queries return in <0.1ms; 30s TTL, 1000 entry limit, auto-invalidated on all writes via `cdc_emit()`
+- **Plan cache** -- parsed query plans cached (1000 capacity, 1h TTL) to skip re-parsing
+- **Index-assisted lookups** -- `find_index_for_column()` + `hash_lookup()` wired into the query executor for O(1) equality lookups
+- **Bloom filter (PK only)** -- bloom filter hints restricted to `_entity_id`, `row_id`, `id`, `key` fields to prevent false negatives on general columns
+- **Column projection pushdown** -- `runtime_table_record_from_entity_projected()` wired into filtered scan paths; only materializes requested columns
+- **Segment entity_count() O(1)** -- direct `len() - deleted.len()` without constructing full SegmentStats
+
+### Bulk Insert Performance
+
+- **Binary bulk insert** via gRPC -- 241K-380K ops/sec with protobuf native types
+- **Flat Vec storage** for segments -- eliminates HashMap overhead during bulk inserts
+- **Columnar row storage** -- 62% memory reduction (3.2GB to 1.2GB for 1M rows)
+
+### AI & LLM Features
+
+- **ASK command** -- full RAG pipeline: SEARCH CONTEXT + schema enrichment + LLM synthesis
+- **SEARCH CONTEXT** -- 3-tier search (field-value index, token index, global scan) with cross-ref expansion
+- **11 AI providers** -- OpenAI, Anthropic, Groq, OpenRouter, Together, Venice, Ollama, DeepSeek, HuggingFace, Local (Candle), Custom
+- **Auto embedding** -- `INSERT ... WITH AUTO EMBED` for automatic vector generation
+- **ContextIndex** -- dedicated inverted index with token + field-value posting lists
+
+### Replication & Backup
+
+- **CDC (Change Data Capture)** -- circular buffer emitting ChangeEvents on all entity CRUD
+- **Backup scheduler** -- configurable background thread for automated backups
+- **WAL archiving** -- archive WAL segments to remote backend before truncation
+- **Point-in-time recovery** -- framework for restoring to specific timestamps
+
+### Configuration System
+
+- **red_config** -- KV store with dot-notation keys (`red.ai.default.provider`)
+- **GET/POST /config** -- HTTP API for reading and writing configuration
+- **JSON import/export** -- bidirectional conversion between flat KV and nested JSON
+
+### Wire Protocol (TCP)
+
+- Binary wire protocol for high-throughput client connections
+- TLS support with auto-generated self-signed certificates for development
+- Custom framing with message types for queries, bulk inserts, and results
+
+### Documentation
+
+- Complete `.rdb` file format specification (48 value types, page structure, WAL format)
+- End-to-end tutorials for ASK, CONTEXT, multi-model queries
+- File format anatomy with byte-level layout
+
+---
+
+## v0.1.0
 
 Initial public release of RedDB.
 

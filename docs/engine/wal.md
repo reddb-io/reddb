@@ -63,12 +63,64 @@ data/
   reddb.rdb.wal   # Write-ahead log
 ```
 
+## Two-Phase Checkpoint Protocol
+
+The checkpoint process is crash-safe via a two-phase protocol with a flag stored in the database header (page 0, offset 192):
+
+```mermaid
+sequenceDiagram
+    participant Header
+    participant WAL
+    participant DB
+
+    Note over Header: Phase 1: PREPARE
+    Header->>Header: checkpoint_in_progress = true
+    Header->>Header: checkpoint_target_lsn = last_lsn
+    Header->>Header: fsync
+
+    Note over WAL,DB: Phase 2: APPLY
+    WAL->>DB: Write committed pages
+    DB->>DB: fsync
+
+    Note over Header: Phase 3: COMPLETE
+    Header->>Header: checkpoint_in_progress = false
+    Header->>Header: checkpoint_lsn = last_lsn
+    Header->>Header: fsync
+
+    Note over WAL: Phase 4: TRUNCATE
+    WAL->>WAL: Truncate + write checkpoint marker
+```
+
+### Crash Recovery Scenarios
+
+| Crash point | On recovery |
+|:------------|:------------|
+| Before PREPARE completes | Flag not set; WAL replayed normally |
+| Between PREPARE and COMPLETE | Flag detected; WAL replayed from scratch (idempotent) |
+| After COMPLETE, before TRUNCATE | checkpoint_lsn updated; WAL replayed and truncated |
+| After TRUNCATE | Clean state, nothing to recover |
+
+The key insight: page writes are **idempotent** (last-write-wins), so replaying the WAL after a partially-applied checkpoint is always safe.
+
+---
+
 ## Durability Guarantees
 
 | Mode | Durability | Performance |
 |:-----|:-----------|:------------|
-| WAL-based (default) | Best-effort -- all ACKed writes survive crash | High throughput |
+| WAL-based (default) | All ACKed writes survive crash | High throughput |
 | In-memory (no path) | None -- data lost on exit | Maximum performance |
 
-> [!NOTE]
-> RedDB currently provides WAL-based best-effort durability. Full ACID transactions with cross-entity atomicity are planned for a future release.
+### 7-Layer Defense
+
+RedDB uses 7 layers of corruption defense:
+
+1. **File lock** -- exclusive `flock` prevents concurrent writers
+2. **Double-write buffer** -- `.rdb-dwb` protects against torn pages
+3. **Header shadow** -- `.rdb-hdr` recovers corrupted page 0
+4. **Metadata shadow** -- `.rdb-meta` recovers corrupted page 1
+5. **fsync discipline** -- all critical writes followed by `sync_all()`
+6. **Two-phase checkpoint** -- crash-safe WAL application (described above)
+7. **Binary store CRC32** -- V3 files have integrity footer + atomic rename
+
+See [File Format Specification](/engine/file-format.md) for byte-level details.

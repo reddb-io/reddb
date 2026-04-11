@@ -305,6 +305,24 @@ RedDB uses multiple optimization techniques for fast queries at scale:
 
 ---
 
+## Durability & Corruption Defense
+
+RedDB uses 7 layers of protection to keep your data safe:
+
+| Layer | What it does |
+|:------|:-------------|
+| **File Lock** | Exclusive `flock` prevents two processes from writing the same `.rdb` file |
+| **Double-Write Buffer** | Pages written to `.rdb-dwb` first; survives torn writes on power loss |
+| **Header Shadow** | Copy of page 0 in `.rdb-hdr`; auto-recovers if header corrupts |
+| **Metadata Shadow** | Copy of page 1 in `.rdb-meta`; auto-recovers collection registry |
+| **fsync Discipline** | All critical writes followed by `sync_all()` (not just flush) |
+| **Two-Phase Checkpoint** | Crash-safe WAL→DB transfer with `checkpoint_in_progress` flag |
+| **Binary Store CRC32** | V3 files have CRC32 footer + atomic write-to-temp-then-rename |
+
+Every page has a CRC32 checksum (verified on read). Every WAL record has a CRC32 checksum. The binary store format (V3) includes a full-file CRC32 footer.
+
+---
+
 ## Quick Start
 
 ```bash
