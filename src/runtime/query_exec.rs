@@ -2541,7 +2541,19 @@ pub(crate) fn evaluate_entity_filter(
 
 /// Check if any projection is an aggregate function.
 fn has_aggregate_projections(projections: &[Projection]) -> bool {
-    projections.iter().any(|p| matches!(p, Projection::Function(name, _) if matches!(name.as_str(), "COUNT" | "AVG" | "SUM" | "MIN" | "MAX")))
+    projections.iter().any(|p| {
+        matches!(
+            p,
+            Projection::Function(name, _)
+                if matches!(
+                    name.as_str(),
+                    "COUNT" | "AVG" | "SUM" | "MIN" | "MAX"
+                    | "STDDEV" | "VARIANCE" | "MEDIAN" | "PERCENTILE"
+                    | "GROUP_CONCAT" | "FIRST" | "LAST" | "ARRAY_AGG"
+                    | "COUNT_DISTINCT"
+                )
+        )
+    })
 }
 
 /// Execute a query with aggregate functions (COUNT, AVG, SUM, MIN, MAX, GROUP BY).
@@ -2630,6 +2642,57 @@ fn execute_aggregate_query(db: &RedDB, query: &TableQuery) -> RedDBResult<Unifie
                             }
                         }
                     }
+                    "STDDEV" | "VARIANCE" => {
+                        if let Some(n) = num {
+                            *state.sums.entry(col_name.to_string()).or_insert(0.0) += n;
+                            *state.sum_squares.entry(col_name.to_string()).or_insert(0.0) += n * n;
+                            *state.agg_counts.entry(col_name.to_string()).or_insert(0) += 1;
+                        }
+                    }
+                    "MEDIAN" | "PERCENTILE" => {
+                        if let Some(n) = num {
+                            state
+                                .all_values
+                                .entry(col_name.to_string())
+                                .or_default()
+                                .push(n);
+                        }
+                    }
+                    "GROUP_CONCAT" => {
+                        let text = match val {
+                            Value::Text(s) => s.clone(),
+                            other => format!("{:?}", other),
+                        };
+                        state
+                            .concat_values
+                            .entry(col_name.to_string())
+                            .or_default()
+                            .push(text);
+                    }
+                    "FIRST" => {
+                        state
+                            .first_values
+                            .entry(col_name.to_string())
+                            .or_insert_with(|| val.clone());
+                    }
+                    "LAST" => {
+                        state.last_values.insert(col_name.to_string(), val.clone());
+                    }
+                    "ARRAY_AGG" => {
+                        state
+                            .array_values
+                            .entry(col_name.to_string())
+                            .or_default()
+                            .push(val.clone());
+                    }
+                    "COUNT_DISTINCT" => {
+                        let key = format!("{:?}", val);
+                        state
+                            .distinct_sets
+                            .entry(col_name.to_string())
+                            .or_default()
+                            .insert(key);
+                    }
                     _ => {}
                 }
             }
@@ -2705,6 +2768,99 @@ fn execute_aggregate_query(db: &RedDB, query: &TableQuery) -> RedDBResult<Unifie
                         let m = state.maxs.get(col_name).copied().unwrap_or(0.0);
                         Value::Float(m)
                     }
+                    "VARIANCE" => {
+                        let n = state.agg_counts.get(col_name).copied().unwrap_or(0) as f64;
+                        if n > 0.0 {
+                            let sum = state.sums.get(col_name).copied().unwrap_or(0.0);
+                            let sum_sq = state.sum_squares.get(col_name).copied().unwrap_or(0.0);
+                            Value::Float(sum_sq / n - (sum / n).powi(2))
+                        } else {
+                            Value::Float(0.0)
+                        }
+                    }
+                    "STDDEV" => {
+                        let n = state.agg_counts.get(col_name).copied().unwrap_or(0) as f64;
+                        if n > 0.0 {
+                            let sum = state.sums.get(col_name).copied().unwrap_or(0.0);
+                            let sum_sq = state.sum_squares.get(col_name).copied().unwrap_or(0.0);
+                            let variance = sum_sq / n - (sum / n).powi(2);
+                            Value::Float(variance.max(0.0).sqrt())
+                        } else {
+                            Value::Float(0.0)
+                        }
+                    }
+                    "MEDIAN" => {
+                        let mut vals = state.all_values.get(col_name).cloned().unwrap_or_default();
+                        if vals.is_empty() {
+                            Value::Float(0.0)
+                        } else {
+                            vals.sort_by(|a, b| {
+                                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                            let mid = vals.len() / 2;
+                            if vals.len() % 2 == 0 {
+                                Value::Float((vals[mid - 1] + vals[mid]) / 2.0)
+                            } else {
+                                Value::Float(vals[mid])
+                            }
+                        }
+                    }
+                    "PERCENTILE" => {
+                        let pct = args
+                            .get(1)
+                            .and_then(|a| match a {
+                                Projection::Column(c) => {
+                                    c.strip_prefix("LIT:").and_then(|s| s.parse::<f64>().ok())
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or(0.5);
+                        let mut vals = state.all_values.get(col_name).cloned().unwrap_or_default();
+                        if vals.is_empty() {
+                            Value::Float(0.0)
+                        } else {
+                            vals.sort_by(|a, b| {
+                                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                            let idx = ((pct * (vals.len() as f64 - 1.0)).round() as usize)
+                                .min(vals.len() - 1);
+                            Value::Float(vals[idx])
+                        }
+                    }
+                    "GROUP_CONCAT" => {
+                        let vals = state
+                            .concat_values
+                            .get(col_name)
+                            .cloned()
+                            .unwrap_or_default();
+                        Value::Text(vals.join(", "))
+                    }
+                    "FIRST" => state
+                        .first_values
+                        .get(col_name)
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                    "LAST" => state
+                        .last_values
+                        .get(col_name)
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                    "ARRAY_AGG" => {
+                        let vals = state
+                            .array_values
+                            .get(col_name)
+                            .cloned()
+                            .unwrap_or_default();
+                        Value::Array(vals)
+                    }
+                    "COUNT_DISTINCT" => {
+                        let set = state
+                            .distinct_sets
+                            .get(col_name)
+                            .map(|s| s.len())
+                            .unwrap_or(0);
+                        Value::Integer(set as i64)
+                    }
                     _ => Value::Null,
                 };
                 record.set(&result_name, result_val);
@@ -2758,6 +2914,20 @@ struct AggState {
     sums: std::collections::HashMap<String, f64>,
     mins: std::collections::HashMap<String, f64>,
     maxs: std::collections::HashMap<String, f64>,
+    // For STDDEV/VARIANCE: collect sum of squares
+    sum_squares: std::collections::HashMap<String, f64>,
+    agg_counts: std::collections::HashMap<String, u64>,
+    // For MEDIAN/PERCENTILE: collect all values
+    all_values: std::collections::HashMap<String, Vec<f64>>,
+    // For GROUP_CONCAT: collect strings
+    concat_values: std::collections::HashMap<String, Vec<String>>,
+    // For FIRST/LAST: track first and last seen values
+    first_values: std::collections::HashMap<String, Value>,
+    last_values: std::collections::HashMap<String, Value>,
+    // For ARRAY_AGG: collect all values
+    array_values: std::collections::HashMap<String, Vec<Value>>,
+    // For COUNT(DISTINCT): collect unique values
+    distinct_sets: std::collections::HashMap<String, std::collections::HashSet<String>>,
 }
 
 fn value_to_f64(val: &Value) -> Option<f64> {

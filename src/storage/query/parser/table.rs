@@ -19,6 +19,15 @@ fn is_scalar_function(name: &str) -> bool {
             | "ABS"
             | "ROUND"
             | "COALESCE"
+            | "STDDEV"
+            | "VARIANCE"
+            | "MEDIAN"
+            | "PERCENTILE"
+            | "GROUP_CONCAT"
+            | "FIRST"
+            | "LAST"
+            | "ARRAY_AGG"
+            | "COUNT_DISTINCT"
     )
 }
 use super::Parser;
