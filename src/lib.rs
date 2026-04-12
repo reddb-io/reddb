@@ -22,6 +22,7 @@ pub mod config;
 pub mod crypto;
 pub mod ec;
 pub mod engine;
+pub mod geo;
 pub mod grpc;
 pub mod health;
 pub mod index;

@@ -24,24 +24,10 @@ fn make_entry(lat: f64, lon: f64, entity_id: EntityId) -> SpatialEntry {
     GeomWithData::new([lon, lat], entity_id)
 }
 
-/// Earth radius in kilometers
-const EARTH_RADIUS_KM: f64 = 6371.0;
+pub use crate::geo::haversine_km;
 
-/// Haversine distance between two points in degrees, returns km
-pub fn haversine_km(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
-    let dlat = (lat2 - lat1).to_radians();
-    let dlon = (lon2 - lon1).to_radians();
-    let lat1_r = lat1.to_radians();
-    let lat2_r = lat2.to_radians();
-
-    let a = (dlat / 2.0).sin().powi(2) + lat1_r.cos() * lat2_r.cos() * (dlon / 2.0).sin().powi(2);
-    let c = 2.0 * a.sqrt().asin();
-    EARTH_RADIUS_KM * c
-}
-
-/// Convert a radius in km to approximate degrees (for bounding box pre-filter)
 fn km_to_approx_degrees(km: f64) -> f64 {
-    km / 111.32 // 1 degree ≈ 111.32 km at equator
+    km / 111.32
 }
 
 /// Result of a spatial search

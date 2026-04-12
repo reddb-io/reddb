@@ -33,6 +33,13 @@ impl RedDBServer {
             // Eventual Consistency endpoints
             ("GET", "/ec/status") => handlers_ec::handle_ec_global_status(&self.runtime),
 
+            // Geo endpoints
+            ("POST", "/geo/distance") => handlers_geo::handle_geo_distance(body),
+            ("POST", "/geo/bearing") => handlers_geo::handle_geo_bearing(body),
+            ("POST", "/geo/midpoint") => handlers_geo::handle_geo_midpoint(body),
+            ("POST", "/geo/destination") => handlers_geo::handle_geo_destination(body),
+            ("POST", "/geo/bounding-box") => handlers_geo::handle_geo_bounding_box(body),
+
             // CDC & Backup endpoints
             ("GET", "/changes") => self.handle_cdc_poll(&query),
             ("GET", "/backup/status") => self.handle_backup_status(),
