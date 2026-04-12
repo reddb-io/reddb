@@ -348,6 +348,59 @@ See the [Eventual Consistency Guide](https://forattini-dev.github.io/reddb/#/gui
 
 ---
 
+## Geographic Operations
+
+Built-in geo functions with no external dependencies. Supports both spherical (Haversine) and ellipsoidal (Vincenty/WGS-84) models.
+
+```sql
+-- Distance from each store to a point (in km)
+SELECT name, GEO_DISTANCE(location, POINT(-23.55, -46.63)) AS dist
+FROM stores ORDER BY dist
+
+-- Vincenty for sub-millimeter accuracy
+SELECT name, GEO_DISTANCE_VINCENTY(location, POINT(40.71, -74.00)) AS dist
+FROM airports
+```
+
+```bash
+# HTTP API
+curl -X POST localhost:8080/geo/distance -d '{
+  "from": {"lat": -23.55, "lon": -46.63},
+  "to": {"lat": -22.91, "lon": -43.17}
+}'
+```
+
+| Function | What it computes |
+|:---------|:-----------------|
+| `GEO_DISTANCE` | Haversine distance (km) |
+| `GEO_DISTANCE_VINCENTY` | WGS-84 geodesic distance (km) |
+| `GEO_BEARING` | Compass direction (degrees) |
+| `GEO_MIDPOINT` | Great-circle midpoint |
+
+Also available: destination point, bounding box, polygon area, spatial search (RADIUS, BBOX, NEAREST). See the [Geo Operations Guide](https://forattini-dev.github.io/reddb/#/guides/geo-operations).
+
+---
+
+## Vector Clustering
+
+Standalone K-Means and DBSCAN clustering on vector collections, with SIMD-accelerated distance computation and automatic parallelization.
+
+```bash
+# K-Means: group products into 5 clusters
+curl -X POST localhost:8080/vectors/cluster -d '{
+  "collection": "products", "algorithm": "kmeans", "k": 5
+}'
+
+# DBSCAN: discover clusters automatically (no K needed)
+curl -X POST localhost:8080/vectors/cluster -d '{
+  "collection": "products", "algorithm": "dbscan", "eps": 0.5, "min_points": 3
+}'
+```
+
+K-Means uses parallel assignment (multi-threaded for datasets > 1K vectors). DBSCAN labels unreachable points as noise (-1), useful for outlier detection. See the [Vector Clustering Guide](https://forattini-dev.github.io/reddb/#/guides/vector-clustering).
+
+---
+
 ## Quick Start
 
 ```bash

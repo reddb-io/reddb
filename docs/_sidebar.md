@@ -23,6 +23,7 @@
   - [Graph Commands](/query/graph-commands.md)
   - [Search Commands](/query/search-commands.md)
   - [Spatial Search](/query/spatial-search.md)
+  - [Scalar Functions](/query/scalar-functions.md)
   - [Probabilistic Commands](/query/probabilistic-commands.md)
   - [Multi-Mode (Gremlin, SPARQL, NL)](/query/multi-mode.md)
 
@@ -112,6 +113,8 @@
   - [Graph Analytics](/guides/graph-analytics.md)
   - [Using with AI Agents (MCP)](/guides/mcp-agents.md)
   - [Eventual Consistency](/guides/eventual-consistency.md)
+  - [Geographic Operations](/guides/geo-operations.md)
+  - [Vector Clustering](/guides/vector-clustering.md)
 
 - **Reference**
   - [Schema Definition](/reference/schema.md)
