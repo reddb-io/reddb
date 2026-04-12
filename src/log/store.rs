@@ -15,6 +15,8 @@ pub enum LogRetention {
     Days(u64),
     /// Keep at most N entries (oldest evicted first).
     MaxEntries(u64),
+    /// Keep total size under N bytes (oldest evicted first).
+    MaxBytes(u64),
     /// Keep forever (no automatic cleanup).
     Forever,
 }
@@ -281,6 +283,59 @@ impl LogCollection {
                 }
                 deleted
             }
+            LogRetention::MaxBytes(max_bytes) => {
+                let manager = match self.store.get_collection(&self.config.name) {
+                    Some(m) => m,
+                    None => return 0,
+                };
+
+                // Collect (log_id, entity_id, approx_size) sorted by time
+                let mut entries: Vec<(u64, EntityId, u64)> = Vec::new();
+                manager.for_each_entity(|entity| {
+                    if let Some(row) = entity.data.as_row() {
+                        let log_id = row
+                            .get_field("id")
+                            .and_then(|v| match v {
+                                Value::UnsignedInteger(n) => Some(*n),
+                                _ => None,
+                            })
+                            .unwrap_or(0);
+
+                        // Approximate entry size: 8 bytes per field + value sizes
+                        let mut size = 8u64; // id field
+                        for (key, value) in row.iter_fields() {
+                            size += key.len() as u64 + estimate_value_size(value);
+                        }
+                        entries.push((log_id, entity.id, size));
+                    }
+                    true
+                });
+
+                entries.sort_by_key(|(log_id, _, _)| *log_id);
+
+                let total_size: u64 = entries.iter().map(|(_, _, s)| s).sum();
+                if total_size <= *max_bytes {
+                    return 0;
+                }
+
+                // Delete oldest entries until under budget
+                let mut to_free = total_size - max_bytes;
+                let mut deleted = 0u64;
+                for (_, entity_id, size) in &entries {
+                    if to_free == 0 {
+                        break;
+                    }
+                    if self
+                        .store
+                        .delete(&self.config.name, *entity_id)
+                        .unwrap_or(false)
+                    {
+                        deleted += 1;
+                        to_free = to_free.saturating_sub(*size);
+                    }
+                }
+                deleted
+            }
         }
     }
 
@@ -327,6 +382,19 @@ impl LogCollection {
     /// Config reference.
     pub fn config(&self) -> &LogCollectionConfig {
         &self.config
+    }
+}
+
+fn estimate_value_size(value: &Value) -> u64 {
+    match value {
+        Value::Null => 1,
+        Value::Boolean(_) => 1,
+        Value::Integer(_) | Value::UnsignedInteger(_) | Value::Float(_) => 8,
+        Value::Text(s) => s.len() as u64,
+        Value::Blob(b) => b.len() as u64,
+        Value::Vector(v) => v.len() as u64 * 4,
+        Value::Array(a) => a.iter().map(estimate_value_size).sum::<u64>() + 8,
+        _ => 16, // conservative default for other types
     }
 }
 
@@ -383,6 +451,31 @@ mod tests {
         let deleted = log.apply_retention();
         assert_eq!(deleted, 2);
         assert_eq!(log.len(), 3);
+    }
+
+    #[test]
+    fn test_retention_max_bytes() {
+        let store = test_store();
+        let mut config = LogCollectionConfig::new("bytes_retention_test");
+        config.retention = LogRetention::MaxBytes(200);
+        config.batch_size = 1;
+
+        let log = LogCollection::new(store, config);
+
+        // Insert entries with known sizes (~30-50 bytes each)
+        for i in 0..10 {
+            log.append_fields(vec![("msg", Value::Text(format!("entry-{}", i)))]);
+        }
+
+        let before = log.len();
+        assert_eq!(before, 10);
+
+        let deleted = log.apply_retention();
+        assert!(
+            deleted > 0,
+            "should delete some entries to fit under 200 bytes"
+        );
+        assert!(log.len() < 10, "should have fewer entries after retention");
     }
 
     #[test]
