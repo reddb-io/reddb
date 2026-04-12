@@ -294,19 +294,36 @@ Log collections are built on top of the same UnifiedStore as regular tables. The
 
 ## Example: Application Logging
 
+RedDB's native types make log schemas more expressive and type-safe than plain text fields:
+
+```sql
+-- Schema (planned CREATE LOG syntax)
+CREATE LOG app (
+  level     TEXT,
+  service   TEXT,
+  method    TEXT,
+  path      URL,
+  status    PORT,
+  latency   DECIMAL,
+  trace_id  UUID,
+  client_ip IPV4
+) RETENTION 7 DAYS
+```
+
 ```bash
-# Structured application logs
+# Structured application logs with native types
 curl -X POST localhost:8080/logs/app/append -d '{
   "level": "info",
   "service": "api-gateway",
   "method": "GET",
-  "path": "/users/42",
+  "path": "https://api.example.com/users/42",
   "status": 200,
-  "latency_ms": 12,
-  "trace_id": "tr-abc-123"
+  "latency": 12.5,
+  "trace_id": "550e8400-e29b-41d4-a716-446655440000",
+  "client_ip": "10.0.1.5"
 }'
 
-# Error with stack trace
+# Error with context
 curl -X POST localhost:8080/logs/app/append -d '{
   "level": "error",
   "service": "auth-service",
@@ -315,27 +332,70 @@ curl -X POST localhost:8080/logs/app/append -d '{
   "user_id": 42
 }'
 
-# Query errors from the last hour
+# Query recent logs
 curl "localhost:8080/logs/app/query?limit=50"
 ```
 
 ## Example: Audit Trail
 
+```sql
+CREATE LOG audit (
+  actor    EMAIL,
+  action   TEXT,
+  resource URL,
+  ip       IPV4,
+  country  COUNTRY2
+) RETENTION 365 DAYS
+```
+
 ```bash
-# Record every data change
 curl -X POST localhost:8080/logs/audit/append -d '{
-  "actor": "user:admin",
+  "actor": "admin@company.com",
   "action": "update",
-  "resource": "users/42",
-  "changes": {"role": "admin"},
-  "ip": "10.0.1.5"
+  "resource": "https://app.example.com/users/42",
+  "ip": "10.0.1.5",
+  "country": "BR"
 }'
 
-# Query audit trail for a specific resource
 curl "localhost:8080/logs/audit/query?limit=100"
 ```
 
+## Example: Access Log
+
+```sql
+CREATE LOG access (
+  ip      IPV4,
+  path    TEXT,
+  status  PORT,
+  method  TEXT,
+  latency DECIMAL,
+  country COUNTRY2,
+  lang    LANG2
+) RETENTION MAX 500 MB
+```
+
+```bash
+curl -X POST localhost:8080/logs/access/append -d '{
+  "ip": "192.168.1.100",
+  "path": "/api/products",
+  "status": 200,
+  "method": "GET",
+  "latency": 8.3,
+  "country": "US",
+  "lang": "en"
+}'
+```
+
 ## Example: Metrics Collection
+
+```sql
+CREATE LOG metrics (
+  host    TEXT,
+  metric  TEXT,
+  value   DECIMAL,
+  region  COUNTRY2
+) RETENTION MAX 1000000 ENTRIES
+```
 
 ```bash
 # High-frequency metric ingestion
@@ -343,7 +403,8 @@ for i in $(seq 1 1000); do
   curl -s -X POST localhost:8080/logs/metrics/append -d "{
     \"host\": \"srv-1\",
     \"metric\": \"cpu.idle\",
-    \"value\": $(( RANDOM % 100 ))
+    \"value\": $(( RANDOM % 100 )),
+    \"region\": \"BR\"
   }" &
 done
 wait
