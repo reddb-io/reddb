@@ -503,6 +503,19 @@ fn build_runtime_and_auth_store(
             Arc::new(AuthStore::new(db_options.auth.clone()))
         };
     auth_store.bootstrap_from_env();
+
+    // Background session purge (every 5 minutes)
+    {
+        let store = Arc::clone(&auth_store);
+        std::thread::Builder::new()
+            .name("reddb-session-purge".into())
+            .spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_secs(300));
+                store.purge_expired_sessions();
+            })
+            .ok();
+    }
+
     Ok((runtime, auth_store))
 }
 

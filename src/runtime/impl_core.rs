@@ -222,17 +222,56 @@ impl RedDBRuntime {
             }
         }
 
-        // Start background maintenance thread
+        // Start background maintenance thread (context index refresh + session purge)
         {
             let rt = runtime.clone();
             std::thread::Builder::new()
                 .name("reddb-maintenance".into())
                 .spawn(move || loop {
                     std::thread::sleep(std::time::Duration::from_secs(60));
-                    // Context index stats refresh
                     let _stats = rt.inner.db.store().context_index().stats();
                 })
                 .ok();
+        }
+
+        // Start backup scheduler if enabled via red_config
+        {
+            let store = runtime.inner.db.store();
+            let mut backup_enabled = false;
+            let mut backup_interval = 3600u64;
+
+            if let Some(manager) = store.get_collection("red_config") {
+                manager.for_each_entity(|entity| {
+                    if let Some(row) = entity.data.as_row() {
+                        let key = row.get_field("key").and_then(|v| match v {
+                            crate::storage::schema::Value::Text(s) => Some(s.as_str()),
+                            _ => None,
+                        });
+                        let val = row.get_field("value");
+                        if key == Some("red.backup.enabled") {
+                            backup_enabled = match val {
+                                Some(crate::storage::schema::Value::Boolean(true)) => true,
+                                Some(crate::storage::schema::Value::Text(s)) => s == "true",
+                                _ => false,
+                            };
+                        } else if key == Some("red.backup.interval_secs") {
+                            if let Some(crate::storage::schema::Value::Integer(n)) = val {
+                                backup_interval = *n as u64;
+                            }
+                        }
+                    }
+                    true
+                });
+            }
+
+            if backup_enabled {
+                runtime.inner.backup_scheduler.set_interval(backup_interval);
+                let rt = runtime.clone();
+                runtime
+                    .inner
+                    .backup_scheduler
+                    .start(move || rt.trigger_backup().map_err(|e| format!("{}", e)));
+            }
         }
 
         Ok(runtime)
@@ -242,7 +281,7 @@ impl RedDBRuntime {
         Arc::clone(&self.inner.db)
     }
 
-    /// Emit a CDC change event.
+    /// Emit a CDC change event and replicate to WAL buffer.
     pub fn cdc_emit(
         &self,
         operation: crate::replication::cdc::ChangeOperation,
@@ -253,8 +292,19 @@ impl RedDBRuntime {
         self.inner
             .cdc
             .emit(operation, collection, entity_id, entity_kind);
-        // Every write invalidates the result cache
         self.invalidate_result_cache();
+
+        // Append to WAL replication buffer (if primary mode)
+        if let Some(ref primary) = self.inner.db.replication {
+            let record = format!(
+                "{}:{}:{}:{}",
+                operation.as_str(),
+                collection,
+                entity_id,
+                entity_kind
+            );
+            primary.wal_buffer.append(record.into_bytes());
+        }
     }
 
     /// Poll CDC events since a given LSN.
