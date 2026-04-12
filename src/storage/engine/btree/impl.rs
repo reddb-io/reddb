@@ -108,6 +108,74 @@ impl BTree {
         Ok(())
     }
 
+    /// Bulk insert for sorted key-value pairs.
+    ///
+    /// Optimized for monotonically increasing keys (e.g. entity IDs):
+    /// - Walks to the target leaf ONCE, then appends many entries
+    ///   before re-walking.
+    /// - Writes each leaf only once per batch (amortized over many inserts).
+    ///
+    /// Falls back to per-entity `insert` on splits.
+    pub fn bulk_insert_sorted(&self, items: &[(Vec<u8>, Vec<u8>)]) -> BTreeResult<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        for (key, value) in items {
+            if key.len() > MAX_KEY_SIZE {
+                return Err(BTreeError::KeyTooLarge(key.len()));
+            }
+            if value.len() > MAX_VALUE_SIZE {
+                return Err(BTreeError::ValueTooLarge(value.len()));
+            }
+        }
+
+        let mut i = 0;
+        while i < items.len() {
+            let root_id = self.root_page_id();
+            if root_id == 0 {
+                // Empty tree — use single insert to create root
+                let (k, v) = &items[i];
+                self.insert(k, v)?;
+                i += 1;
+                continue;
+            }
+
+            // Walk to the leaf for the current key, load once.
+            let (leaf_id, _path) = self.find_leaf(root_id, &items[i].0)?;
+            let mut page = self.pager.read_page(leaf_id)?;
+
+            // Insert as many sorted items into this leaf as will fit.
+            let mut inserted = 0usize;
+            while i + inserted < items.len() {
+                let (key, value) = &items[i + inserted];
+
+                if !can_insert_leaf(&page, key, value) {
+                    break;
+                }
+                // Duplicate check
+                if let SearchResult::Found(_) = search_leaf(&page, key)? {
+                    return Err(BTreeError::DuplicateKey);
+                }
+                insert_into_leaf(&mut page, key, value)?;
+                inserted += 1;
+            }
+
+            if inserted > 0 {
+                page.update_checksum();
+                self.pager.write_page(leaf_id, page)?;
+                i += inserted;
+            } else {
+                // Couldn't fit even one entry — fall back to the full
+                // insert path which handles splitting and parent updates.
+                let (k, v) = &items[i];
+                self.insert(k, v)?;
+                i += 1;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Delete a key
     pub fn delete(&self, key: &[u8]) -> BTreeResult<bool> {
         let root_id = self.root_page_id();

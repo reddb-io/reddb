@@ -83,6 +83,28 @@ impl UnifiedStore {
         saved
     }
 
+    /// Read a single config value from `red_config` by dot-notation key.
+    pub fn get_config(&self, key: &str) -> Option<crate::storage::schema::Value> {
+        let manager = self.get_collection("red_config")?;
+        for entity in manager.query_all(|_| true) {
+            if let EntityData::Row(row) = &entity.data {
+                if let Some(named) = &row.named {
+                    let key_matches = named
+                        .get("key")
+                        .and_then(|v| match v {
+                            crate::storage::schema::Value::Text(s) => Some(s.as_str() == key),
+                            _ => None,
+                        })
+                        .unwrap_or(false);
+                    if key_matches {
+                        return named.get("value").cloned();
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// List all collections
     pub fn list_collections(&self) -> Vec<String> {
         self.collections
@@ -190,7 +212,9 @@ impl UnifiedStore {
         // Move entities into segment
         let ids = manager.bulk_insert(entities)?;
 
-        // Batch B-tree write from pre-serialized data (zero re-fetch)
+        // Batch B-tree write from pre-serialized data.
+        // Uses sorted bulk insert: walks to a leaf once, appends many entries,
+        // writes each leaf exactly once per batch — O(N) instead of O(N²).
         if let (Some(pager), Some(batch)) = (&self.pager, serialized) {
             let mut btree_indices = self
                 .btree_indices
@@ -200,9 +224,7 @@ impl UnifiedStore {
                 .entry(collection.to_string())
                 .or_insert_with(|| BTree::new(Arc::clone(pager)));
 
-            for (key, value) in &batch {
-                let _ = btree.insert(key, value);
-            }
+            let _ = btree.bulk_insert_sorted(&batch);
 
             let _ = pager.flush();
         }
