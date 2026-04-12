@@ -552,7 +552,10 @@ struct RuntimeInner {
     cdc: crate::replication::cdc::CdcBuffer,
     backup_scheduler: crate::replication::scheduler::BackupScheduler,
     query_cache: std::sync::RwLock<crate::storage::query::planner::cache::PlanCache>,
-    result_cache: std::sync::RwLock<HashMap<String, (RuntimeQueryResult, std::time::Instant)>>,
+    result_cache: std::sync::RwLock<(
+        HashMap<String, (RuntimeQueryResult, std::time::Instant)>,
+        std::collections::VecDeque<String>,
+    )>,
     ec_registry: Arc<crate::ec::config::EcRegistry>,
     ec_worker: crate::ec::worker::EcWorker,
 }

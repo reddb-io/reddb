@@ -40,7 +40,10 @@ impl RedDBRuntime {
                 query_cache: std::sync::RwLock::new(
                     crate::storage::query::planner::cache::PlanCache::new(1000),
                 ),
-                result_cache: std::sync::RwLock::new(HashMap::new()),
+                result_cache: std::sync::RwLock::new((
+                    HashMap::new(),
+                    std::collections::VecDeque::new(),
+                )),
                 ec_registry: Arc::new(crate::ec::config::EcRegistry::new()),
                 ec_worker: crate::ec::worker::EcWorker::new(),
             }),
@@ -478,7 +481,7 @@ impl RedDBRuntime {
 
         // ── Result cache: return cached result if still fresh (30s TTL) ──
         if let Ok(cache) = self.inner.result_cache.read() {
-            if let Some((result, cached_at)) = cache.get(query) {
+            if let Some((result, cached_at)) = cache.0.get(query) {
                 if cached_at.elapsed().as_secs() < 30 {
                     return Ok(result.clone());
                 }
@@ -681,17 +684,19 @@ impl RedDBRuntime {
         if let Ok(ref result) = query_result {
             if result.statement_type == "select" && result.result.pre_serialized_json.is_none() {
                 if let Ok(mut cache) = self.inner.result_cache.write() {
-                    cache.insert(
+                    let (ref mut map, ref mut order) = *cache;
+                    if !map.contains_key(query) {
+                        order.push_back(query.to_string());
+                    }
+                    map.insert(
                         query.to_string(),
                         (result.clone(), std::time::Instant::now()),
                     );
-                    if cache.len() > 1000 {
-                        if let Some(oldest_key) = cache
-                            .iter()
-                            .min_by_key(|(_, (_, t))| *t)
-                            .map(|(k, _)| k.clone())
-                        {
-                            cache.remove(&oldest_key);
+                    while map.len() > 1000 {
+                        if let Some(oldest) = order.pop_front() {
+                            map.remove(&oldest);
+                        } else {
+                            break;
                         }
                     }
                 }
@@ -769,7 +774,8 @@ impl RedDBRuntime {
     /// Invalidate the result cache (call after any write operation).
     pub fn invalidate_result_cache(&self) {
         if let Ok(mut cache) = self.inner.result_cache.write() {
-            cache.clear();
+            cache.0.clear();
+            cache.1.clear();
         }
     }
 }
