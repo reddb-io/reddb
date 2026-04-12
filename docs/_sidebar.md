@@ -111,6 +111,7 @@
   - [Vector Search App](/guides/vector-search.md)
   - [Graph Analytics](/guides/graph-analytics.md)
   - [Using with AI Agents (MCP)](/guides/mcp-agents.md)
+  - [Eventual Consistency](/guides/eventual-consistency.md)
 
 - **Reference**
   - [Schema Definition](/reference/schema.md)

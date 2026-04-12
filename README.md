@@ -323,6 +323,31 @@ Every page has a CRC32 checksum (verified on read). Every WAL record has a CRC32
 
 ---
 
+## Eventual Consistency
+
+RedDB supports per-field eventual consistency via an append-only transaction log with periodic consolidation. Inspired by CRDT principles (commutative, associative reducers), it enables high-throughput write patterns while guaranteeing convergence.
+
+```bash
+# Track clicks with async consolidation (returns instantly)
+curl -X POST localhost:8080/ec/urls/clicks/add -d '{"id": 1, "value": 1}'
+
+# Check consolidated + pending value
+curl localhost:8080/ec/urls/clicks/status?id=1
+```
+
+| Feature | Description |
+|:--------|:------------|
+| **6 reducers** | Sum, Max, Min, Count, Average, Last (last-write-wins) |
+| **Sync mode** | Consolidates immediately (strong consistency) |
+| **Async mode** | Background worker consolidates periodically (high throughput) |
+| **Transaction log** | Immutable append-only audit trail per field |
+| **SET checkpoint** | Resets base value, discards prior operations |
+| **All modes** | Works in server, embedded (Rust API), and serverless |
+
+See the [Eventual Consistency Guide](https://forattini-dev.github.io/reddb/#/guides/eventual-consistency) for the theory (CAP theorem, CRDTs, convergence) and full API reference.
+
+---
+
 ## Quick Start
 
 ```bash
