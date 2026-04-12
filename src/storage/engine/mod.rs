@@ -28,6 +28,7 @@
 pub mod algorithms;
 pub mod btree;
 pub mod bulk_writer;
+pub mod clustering;
 pub mod crc32;
 pub mod database;
 pub mod distance;

@@ -62,6 +62,7 @@ mod handlers_graph;
 mod handlers_ops;
 mod handlers_query;
 mod handlers_replication;
+mod handlers_vector;
 mod patch_support;
 mod request_body;
 mod routing;

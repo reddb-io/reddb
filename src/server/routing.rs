@@ -40,6 +40,11 @@ impl RedDBServer {
             ("POST", "/geo/destination") => handlers_geo::handle_geo_destination(body),
             ("POST", "/geo/bounding-box") => handlers_geo::handle_geo_bounding_box(body),
 
+            // Vector clustering
+            ("POST", "/vectors/cluster") => {
+                handlers_vector::handle_vector_cluster(&self.runtime, body)
+            }
+
             // CDC & Backup endpoints
             ("GET", "/changes") => self.handle_cdc_poll(&query),
             ("GET", "/backup/status") => self.handle_backup_status(),
