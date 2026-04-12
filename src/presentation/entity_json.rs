@@ -178,6 +178,12 @@ pub(crate) fn storage_value_to_json(value: &Value) -> JsonValue {
         }
         Value::TableRef(name) => JsonValue::String(name.clone()),
         Value::PageRef(page_id) => JsonValue::Number(*page_id as f64),
+        // Secrets and passwords are always masked in JSON output.
+        // SELECT decryption (if the vault is unsealed) happens earlier
+        // in the query pipeline and replaces Value::Secret with
+        // Value::Text before serialization.
+        Value::Secret(_) => JsonValue::String("***".to_string()),
+        Value::Password(_) => JsonValue::String("***".to_string()),
     }
 }
 

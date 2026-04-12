@@ -54,6 +54,11 @@ When a field has domain semantics, switch from plain `Text` to a native type.
 - `Email`, `Url`, `Phone`, `Semver`
 - `Color`, `ColorAlpha`
 
+### Security-native
+
+- `Secret` — transparently encrypted with AES-256-GCM using the vault's master key. Reads return `***` when the vault is sealed and the plaintext only when unsealed.
+- `Password` — stored as an argon2id hash. Never round-tripped as plaintext; compare with `VERIFY_PASSWORD(column, 'candidate')`.
+
 ### Cross-model references
 
 - `NodeRef`, `EdgeRef`, `VectorRef`, `RowRef`

@@ -1135,6 +1135,7 @@ pub(super) fn runtime_value_text(value: &Value) -> Option<String> {
         Value::DocRef(col, id) => Some(format!("{}#{}", col, id)),
         Value::TableRef(name) => Some(name.clone()),
         Value::PageRef(page_id) => Some(format!("page:{}", page_id)),
+        Value::Secret(_) | Value::Password(_) => Some("***".to_string()),
     }
 }
 

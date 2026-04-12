@@ -142,6 +142,8 @@ fn value_type_tag(v: &Value) -> u8 {
         Value::DocRef(_, _) => 45,
         Value::TableRef(_) => 46,
         Value::PageRef(_) => 47,
+        Value::Secret(_) => 48,
+        Value::Password(_) => 49,
     }
 }
 

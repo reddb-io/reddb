@@ -528,6 +528,14 @@ where
                 47u8.hash(hasher);
                 page_id.hash(hasher);
             }
+            Value::Secret(bytes) => {
+                48u8.hash(hasher);
+                bytes.hash(hasher);
+            }
+            Value::Password(hash) => {
+                49u8.hash(hasher);
+                hash.hash(hasher);
+            }
         }
     }
 }

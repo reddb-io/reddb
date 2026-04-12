@@ -1036,6 +1036,18 @@ impl UnifiedStore {
                 *pos += 4;
                 Value::PageRef(val)
             }
+            48 => {
+                let len = Self::read_varu32_safe(buf, pos)?;
+                let bytes = buf[*pos..*pos + len].to_vec();
+                *pos += len;
+                Value::Secret(bytes)
+            }
+            49 => {
+                let len = Self::read_varu32_safe(buf, pos)?;
+                let hash = String::from_utf8(buf[*pos..*pos + len].to_vec())?;
+                *pos += len;
+                Value::Password(hash)
+            }
             _ => return Err(format!("Unknown Value type: {}", type_byte).into()),
         })
     }
@@ -1271,6 +1283,16 @@ impl UnifiedStore {
             Value::PageRef(page_id) => {
                 buf.push(47);
                 buf.extend_from_slice(&page_id.to_le_bytes());
+            }
+            Value::Secret(bytes) => {
+                buf.push(48);
+                write_varu32(buf, bytes.len() as u32);
+                buf.extend_from_slice(bytes);
+            }
+            Value::Password(hash) => {
+                buf.push(49);
+                write_varu32(buf, hash.len() as u32);
+                buf.extend_from_slice(hash.as_bytes());
             }
         }
     }

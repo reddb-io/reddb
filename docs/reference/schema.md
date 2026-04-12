@@ -34,7 +34,7 @@ Each column has:
 | Property | Required | Description |
 |:---------|:---------|:------------|
 | Name | Yes | Column identifier |
-| Type | Yes | One of the 48 data types |
+| Type | Yes | One of the 50 data types |
 | `NOT NULL` | No | Reject null values |
 | `DEFAULT` | No | Default value for missing fields |
 

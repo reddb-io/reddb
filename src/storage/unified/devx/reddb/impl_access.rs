@@ -676,6 +676,7 @@ impl RedDB {
             Value::DocRef(col, id) => Some(format!("{}#{}", col, id)),
             Value::TableRef(name) => Some(name.clone()),
             Value::PageRef(page_id) => Some(format!("page:{}", page_id)),
+            Value::Secret(_) | Value::Password(_) => None,
         }
     }
 

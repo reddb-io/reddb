@@ -142,3 +142,60 @@ Alias for signed 64-bit integer, used for large numeric values.
 ```rust
 Value::BigInt(9999999999999)
 ```
+
+## Secret
+
+Sensitive payloads (API keys, tokens, connection strings) that must live in the database but never leak in plaintext. Values are encrypted with **AES-256-GCM** using the AES key stored inside the vault (`red.secret.aes_key`, generated on first boot).
+
+```sql
+CREATE TABLE integrations (
+  name Text NOT NULL,
+  api_key Secret NOT NULL
+)
+
+INSERT INTO integrations (name, api_key) VALUES ('stripe', 'sk_live_abc123');
+-- api_key is encrypted transparently using the vault key
+
+SELECT name, api_key FROM integrations;
+-- If the vault is unsealed, api_key is returned as plaintext 'sk_live_abc123'.
+-- If the vault is sealed, api_key is returned as '***'.
+```
+
+```rust
+// Internal representation: ciphertext bytes (nonce + ciphertext + tag)
+Value::Secret(ciphertext_bytes)
+```
+
+Notes:
+- Requires the vault to be bootstrapped (the AES key is generated automatically on first boot if missing).
+- `Secret` fields are never indexed, ordered, or exposed by aggregates — the plaintext is inaccessible to the planner.
+- JSON responses always render sealed secrets as `"***"`.
+
+## Password
+
+Secrets designed for credential verification. Stored as an **argon2id** hash; the plaintext is never retrievable.
+
+```sql
+CREATE TABLE users (
+  username Text NOT NULL,
+  password Password NOT NULL
+)
+
+INSERT INTO users (username, password) VALUES ('alice', 'MyP@ss123');
+-- password is hashed with argon2id before storage
+
+SELECT * FROM users WHERE VERIFY_PASSWORD(password, 'MyP@ss123');
+-- Scalar function that runs argon2id verify against the stored hash
+
+SELECT username, password FROM users;
+-- password column is always returned as '***' — the hash is never exposed
+```
+
+```rust
+// Internal representation: argon2id hash string
+Value::Password(hash_string)
+```
+
+Notes:
+- `VERIFY_PASSWORD(column, candidate)` is the only way to match a plaintext password against stored credentials.
+- Unlike `Secret`, the vault seal state does not matter — passwords are one-way hashed, not encrypted.

@@ -58,6 +58,8 @@ This returns the admin user and an initial API key.
 - **RBAC**: Role-based access control (admin, write, read)
 - **API Keys**: Persistent tokens for service accounts
 - **Session Tokens**: Time-limited tokens from login
-- **Encrypted Vault**: Auth data stored in encrypted pages
+- **Encrypted Vault**: Auth data and arbitrary `red.secret.*` KV pairs stored in encrypted pages
 - **Encryption at Rest**: AES-256-GCM page-level encryption
 - **Password Hashing**: Secure password storage
+- **`Secret` column type**: Transparent AES-256-GCM field-level encryption, keyed by the vault
+- **`Password` column type**: argon2id hashing with `VERIFY_PASSWORD()` comparator

@@ -111,6 +111,10 @@ pub enum DataType {
     TableRef = 47,
     /// Reference to a physical storage page
     PageRef = 48,
+    /// Encrypted secret (AES-256-GCM ciphertext, keyed by vault AES key)
+    Secret = 49,
+    /// Argon2id password hash
+    Password = 50,
 }
 
 impl DataType {
@@ -170,6 +174,8 @@ impl DataType {
             46 => Some(DataType::DocRef),
             47 => Some(DataType::TableRef),
             48 => Some(DataType::PageRef),
+            49 => Some(DataType::Secret),
+            50 => Some(DataType::Password),
             _ => None,
         }
     }
@@ -227,6 +233,8 @@ impl DataType {
             DataType::DocRef => None,         // variable-length (collection + u64)
             DataType::TableRef => None,       // variable-length (table name)
             DataType::PageRef => Some(4),     // u32
+            DataType::Secret => None,         // variable-length ciphertext
+            DataType::Password => None,       // variable-length hash string
         }
     }
 
@@ -347,6 +355,8 @@ impl fmt::Display for DataType {
             DataType::DocRef => write!(f, "DOC_REF"),
             DataType::TableRef => write!(f, "TABLE_REF"),
             DataType::PageRef => write!(f, "PAGE_REF"),
+            DataType::Secret => write!(f, "SECRET"),
+            DataType::Password => write!(f, "PASSWORD"),
         }
     }
 }
@@ -450,6 +460,10 @@ pub enum Value {
     TableRef(String),
     /// Reference to a physical storage page (page_id)
     PageRef(u32),
+    /// Encrypted secret (AES-256-GCM ciphertext bytes: nonce + ciphertext + tag)
+    Secret(Vec<u8>),
+    /// Argon2id password hash string
+    Password(String),
 }
 
 impl Value {
@@ -504,6 +518,8 @@ impl Value {
             Value::DocRef(..) => DataType::DocRef,
             Value::TableRef(..) => DataType::TableRef,
             Value::PageRef(..) => DataType::PageRef,
+            Value::Secret(..) => DataType::Secret,
+            Value::Password(..) => DataType::Password,
         }
     }
 
@@ -755,6 +771,17 @@ impl Value {
             Value::PageRef(page_id) => {
                 buf.push(DataType::PageRef.to_byte());
                 buf.extend_from_slice(&page_id.to_le_bytes());
+            }
+            Value::Secret(bytes) => {
+                buf.push(DataType::Secret.to_byte());
+                write_varint(&mut buf, bytes.len() as u64);
+                buf.extend_from_slice(bytes);
+            }
+            Value::Password(hash) => {
+                buf.push(DataType::Password.to_byte());
+                let bytes = hash.as_bytes();
+                write_varint(&mut buf, bytes.len() as u64);
+                buf.extend_from_slice(bytes);
             }
         }
 
@@ -1237,6 +1264,27 @@ impl Value {
                 offset += 4;
                 Value::PageRef(page_id)
             }
+            DataType::Secret => {
+                let (len, varint_size) = read_varint(&data[offset..])?;
+                offset += varint_size;
+                if data.len() < offset + len as usize {
+                    return Err(ValueError::TruncatedData);
+                }
+                let bytes = data[offset..offset + len as usize].to_vec();
+                offset += len as usize;
+                Value::Secret(bytes)
+            }
+            DataType::Password => {
+                let (len, varint_size) = read_varint(&data[offset..])?;
+                offset += varint_size;
+                if data.len() < offset + len as usize {
+                    return Err(ValueError::TruncatedData);
+                }
+                let hash = String::from_utf8(data[offset..offset + len as usize].to_vec())
+                    .map_err(|_| ValueError::InvalidUtf8)?;
+                offset += len as usize;
+                Value::Password(hash)
+            }
             DataType::Nullable => {
                 // Nullable without inner type means null
                 Value::Null
@@ -1569,6 +1617,8 @@ impl fmt::Display for Value {
             Value::DocRef(c, id) => write!(f, "doc_ref:{}#{}", c, id),
             Value::TableRef(t) => write!(f, "table_ref:{}", t),
             Value::PageRef(p) => write!(f, "page_ref:{}", p),
+            Value::Secret(b) => write!(f, "<secret {} bytes>", b.len()),
+            Value::Password(_) => write!(f, "***"),
         }
     }
 }
