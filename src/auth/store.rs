@@ -54,6 +54,9 @@ pub struct AuthStore {
     /// Certificate-based keypair for token signing and vault seal.
     /// Populated after bootstrap or after restoring from a sealed vault.
     keypair: RwLock<Option<KeyPair>>,
+    /// Encrypted key-value store for arbitrary secrets.
+    /// Persisted to vault alongside users/api_keys.
+    vault_kv: RwLock<HashMap<String, String>>,
 }
 
 // Use fast-but-safe Argon2id params for auth hashing (smaller than the
@@ -82,6 +85,7 @@ impl AuthStore {
             vault: RwLock::new(None),
             pager: None,
             keypair: RwLock::new(None),
+            vault_kv: RwLock::new(HashMap::new()),
         }
     }
 
@@ -181,6 +185,8 @@ impl AuthStore {
             if let Ok(mut vault_guard) = self.vault.write() {
                 *vault_guard = Some(new_vault);
             }
+            // Generate the AES-256 secret key for Value::Secret encryption.
+            self.ensure_vault_secret_key();
             self.persist_to_vault();
 
             Some(cert_hex)
@@ -251,6 +257,69 @@ impl AuthStore {
         }
     }
 
+    // -----------------------------------------------------------------
+    // Vault KV — encrypted key-value store for arbitrary secrets
+    // -----------------------------------------------------------------
+
+    /// Read a value from the vault KV store. Returns `None` if not set.
+    pub fn vault_kv_get(&self, key: &str) -> Option<String> {
+        self.vault_kv
+            .read()
+            .ok()
+            .and_then(|kv| kv.get(key).cloned())
+    }
+
+    /// Write a value to the vault KV store, persisting to disk.
+    pub fn vault_kv_set(&self, key: String, value: String) {
+        if let Ok(mut kv) = self.vault_kv.write() {
+            kv.insert(key, value);
+        }
+        self.persist_to_vault();
+    }
+
+    /// Delete a value from the vault KV store. Returns true if it existed.
+    pub fn vault_kv_delete(&self, key: &str) -> bool {
+        let existed = self
+            .vault_kv
+            .write()
+            .map(|mut kv| kv.remove(key).is_some())
+            .unwrap_or(false);
+        if existed {
+            self.persist_to_vault();
+        }
+        existed
+    }
+
+    /// List all keys in the vault KV store.
+    pub fn vault_kv_keys(&self) -> Vec<String> {
+        self.vault_kv
+            .read()
+            .map(|kv| kv.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Convenience: get the 32-byte secret key for Value::Secret encryption.
+    /// Generated on first boot and stored at `red.vault.secret_key`.
+    pub fn vault_secret_key(&self) -> Option<[u8; 32]> {
+        let hex_str = self.vault_kv_get("red.vault.secret_key")?;
+        let bytes = hex::decode(hex_str).ok()?;
+        if bytes.len() == 32 {
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&bytes);
+            Some(key)
+        } else {
+            None
+        }
+    }
+
+    /// Generate and store the AES-256 secret key on first boot if not present.
+    pub fn ensure_vault_secret_key(&self) {
+        if self.vault_kv_get("red.vault.secret_key").is_none() {
+            let key = random_bytes(32);
+            self.vault_kv_set("red.vault.secret_key".to_string(), hex::encode(key));
+        }
+    }
+
     /// Take a snapshot of the current auth state for vault serialization.
     fn snapshot(&self) -> VaultState {
         let users_guard = self.users.read().unwrap_or_else(|e| e.into_inner());
@@ -271,11 +340,14 @@ impl AuthStore {
             .ok()
             .and_then(|guard| guard.as_ref().map(|kp| kp.master_secret.clone()));
 
+        let kv = self.vault_kv.read().map(|m| m.clone()).unwrap_or_default();
+
         VaultState {
             users,
             api_keys,
             bootstrapped: self.bootstrapped.load(Ordering::Acquire),
             master_secret,
+            kv,
         }
     }
 
@@ -292,6 +364,11 @@ impl AuthStore {
             if let Ok(mut guard) = self.keypair.write() {
                 *guard = Some(kp);
             }
+        }
+
+        // Restore KV store.
+        if let Ok(mut kv) = self.vault_kv.write() {
+            *kv = state.kv;
         }
 
         // Restore users.

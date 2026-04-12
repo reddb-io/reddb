@@ -182,7 +182,8 @@ impl From<VaultError> for AuthError {
 // ---------------------------------------------------------------------------
 
 /// Serializable snapshot of all auth state (users, api keys, bootstrap seal,
-/// and the master secret for the certificate-based seal).
+/// the master secret for the certificate-based seal, and a key-value store
+/// for arbitrary encrypted secrets).
 pub struct VaultState {
     pub users: Vec<User>,
     /// `(owner_username, api_key)` pairs.
@@ -192,6 +193,22 @@ pub struct VaultState {
     /// Present after bootstrap; `None` for legacy vaults that pre-date
     /// the certificate seal system.
     pub master_secret: Option<Vec<u8>>,
+    /// Arbitrary encrypted key-value store for secrets.
+    /// Keys use dot-notation (e.g., "red.vault.secret_key", "stripe.api_key").
+    /// Values are hex-encoded bytes or UTF-8 strings.
+    pub kv: std::collections::HashMap<String, String>,
+}
+
+impl Default for VaultState {
+    fn default() -> Self {
+        Self {
+            users: Vec::new(),
+            api_keys: Vec::new(),
+            bootstrapped: false,
+            master_secret: None,
+            kv: std::collections::HashMap::new(),
+        }
+    }
 }
 
 impl VaultState {
@@ -232,6 +249,11 @@ impl VaultState {
             ));
         }
 
+        // KV entries (hex-encoded values to avoid newline/tab collisions).
+        for (k, v) in &self.kv {
+            out.push_str(&format!("KV:{}\t{}\n", k, hex::encode(v.as_bytes())));
+        }
+
         out.into_bytes()
     }
 
@@ -244,6 +266,7 @@ impl VaultState {
         let mut api_keys: Vec<(String, ApiKey)> = Vec::new();
         let mut bootstrapped = false;
         let mut master_secret: Option<Vec<u8>> = None;
+        let mut kv: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
         for line in text.lines() {
             if line.is_empty() {
@@ -307,6 +330,15 @@ impl VaultState {
                         created_at,
                     },
                 ));
+            } else if let Some(rest) = line.strip_prefix("KV:") {
+                let parts: Vec<&str> = rest.splitn(2, '\t').collect();
+                if parts.len() == 2 {
+                    if let Ok(bytes) = hex::decode(parts[1]) {
+                        if let Ok(value) = String::from_utf8(bytes) {
+                            kv.insert(parts[0].to_string(), value);
+                        }
+                    }
+                }
             } else {
                 // Unknown line prefix -- skip gracefully for forward compat.
             }
@@ -324,6 +356,7 @@ impl VaultState {
             api_keys,
             bootstrapped,
             master_secret,
+            kv,
         })
     }
 }
@@ -696,6 +729,7 @@ mod tests {
             )],
             bootstrapped: true,
             master_secret: None,
+            kv: std::collections::HashMap::new(),
         }
     }
 
@@ -758,6 +792,7 @@ mod tests {
             api_keys: vec![],
             bootstrapped: false,
             master_secret: None,
+            kv: std::collections::HashMap::new(),
         };
         let serialized = state.serialize();
         let restored = VaultState::deserialize(&serialized).unwrap();
@@ -844,6 +879,7 @@ mod tests {
             api_keys: vec![],
             bootstrapped: true,
             master_secret: None,
+            kv: std::collections::HashMap::new(),
         };
         vault.save(&pager, &state).unwrap();
 
@@ -894,6 +930,7 @@ mod tests {
             api_keys: vec![],
             bootstrapped: false,
             master_secret: None,
+            kv: std::collections::HashMap::new(),
         };
         vault.save(&pager, &state).unwrap();
 
@@ -960,6 +997,7 @@ mod tests {
             api_keys: vec![],
             bootstrapped: true,
             master_secret: Some(kp.master_secret.clone()),
+            kv: std::collections::HashMap::new(),
         };
         vault.save(&pager, &state).unwrap();
 
@@ -989,6 +1027,7 @@ mod tests {
             api_keys: vec![],
             bootstrapped: true,
             master_secret: Some(kp.master_secret.clone()),
+            kv: std::collections::HashMap::new(),
         };
         vault.save(&pager, &state).unwrap();
 
@@ -1010,6 +1049,7 @@ mod tests {
             api_keys: vec![],
             bootstrapped: true,
             master_secret: Some(secret.clone()),
+            kv: std::collections::HashMap::new(),
         };
         let serialized = state.serialize();
         let text = std::str::from_utf8(&serialized).unwrap();
