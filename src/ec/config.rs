@@ -102,7 +102,7 @@ impl EcFieldConfig {
     }
 
     pub fn tx_collection_name(&self) -> String {
-        format!("_ec_tx_{}_{}", self.collection, self.field)
+        format!("red_ec_tx_{}_{}", self.collection, self.field)
     }
 }
 

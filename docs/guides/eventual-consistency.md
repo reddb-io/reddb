@@ -53,7 +53,7 @@ This is similar to how event sourcing works. The transaction log is the source o
                            │
                            ▼
 ┌────────────────────────────────────────────────────────────────┐
-│  Transaction Log (_ec_tx_wallets_balance collection)            │
+│  Transaction Log (red_ec_tx_wallets_balance collection)            │
 │  ┌──────────────────────────────────────────────────────────┐  │
 │  │ tx-1: target=42, op=Add, value=100, ts=1001, applied=F  │  │
 │  │ tx-2: target=42, op=Add, value=50,  ts=1002, applied=F  │  │
@@ -75,7 +75,7 @@ This is similar to how event sourcing works. The transaction log is the source o
 
 ### Transaction log
 
-Every EC mutation creates an immutable transaction record stored in an internal collection named `_ec_tx_{collection}_{field}`. Each transaction contains:
+Every EC mutation creates an immutable transaction record stored in an internal collection named `red_ec_tx_{collection}_{field}`. Each transaction contains:
 
 | Field | Type | Description |
 |:------|:-----|:------------|
@@ -320,7 +320,7 @@ EC transactions are stored as regular RedDB entities in internal collections. Th
 - **Persistence**: Transactions survive restarts (paged storage or binary file)
 - **CDC**: Transaction creation emits CDC events
 - **WAL replication**: Transactions replicate to primary's WAL buffer automatically
-- **Backup**: Snapshots include `_ec_tx_*` collections
+- **Backup**: Snapshots include `red_ec_tx_*` collections
 - **Indexing**: Transaction collections participate in context index
 
 ### Cohort bucketing
