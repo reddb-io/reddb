@@ -115,6 +115,7 @@
   - [Eventual Consistency](/guides/eventual-consistency.md)
   - [Geographic Operations](/guides/geo-operations.md)
   - [Vector Clustering](/guides/vector-clustering.md)
+  - [Log Collections](/guides/log-collections.md)
 
 - **Reference**
   - [Schema Definition](/reference/schema.md)
