@@ -45,6 +45,8 @@ impl RedDBServer {
                 handlers_vector::handle_vector_cluster(&self.runtime, body)
             }
 
+            // Log endpoints (handled dynamically below for /logs/{name}/...)
+
             // CDC & Backup endpoints
             ("GET", "/changes") => self.handle_cdc_poll(&query),
             ("GET", "/backup/status") => self.handle_backup_status(),
@@ -592,6 +594,27 @@ impl RedDBServer {
             ("POST", "/graph/jobs/stale") => self.handle_analytics_job_stale(body),
             ("POST", "/graph/jobs/fail") => self.handle_analytics_job_fail(body),
             _ => {
+                // Log dynamic routes: /logs/{name}/append, /logs/{name}/query, /logs/{name}/retention
+                if path.starts_with("/logs/") {
+                    let parts: Vec<&str> = path[6..].split('/').collect();
+                    if parts.len() >= 2 {
+                        let log_name = parts[0];
+                        let action = parts[1];
+                        return match (method.as_str(), action) {
+                            ("POST", "append") => {
+                                handlers_log::handle_log_append(&self.runtime, log_name, body)
+                            }
+                            ("GET", "query") => {
+                                handlers_log::handle_log_query(&self.runtime, log_name, &query)
+                            }
+                            ("POST", "retention") => {
+                                handlers_log::handle_log_retention(&self.runtime, log_name)
+                            }
+                            _ => json_error(405, "method not allowed for log endpoint"),
+                        };
+                    }
+                }
+
                 // EC dynamic routes: /ec/{collection}/{field}/{action}
                 if path.starts_with("/ec/") {
                     let parts: Vec<&str> = path[4..].split('/').collect();

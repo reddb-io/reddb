@@ -27,6 +27,7 @@ pub mod grpc;
 pub mod health;
 pub mod index;
 pub mod json;
+pub mod log;
 pub mod mcp;
 pub mod modules;
 pub mod physical;
