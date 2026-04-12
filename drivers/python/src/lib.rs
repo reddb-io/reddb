@@ -486,7 +486,7 @@ fn decode_wire_result_to_py(py: Python<'_>, data: &[u8]) -> PyResult<PyObject> {
 /// Connect to RedDB wire protocol (raw TCP). Ultra-fast, zero overhead.
 ///
 /// Usage:
-///   conn = reddb_python.wire_connect("127.0.0.1:50052")
+///   conn = reddb_python.wire_connect("127.0.0.1:5050")
 ///   rows = conn.query("SELECT * FROM users WHERE _entity_id = 1")
 #[pyfunction]
 fn wire_connect(addr: &str) -> PyResult<WireConnection> {

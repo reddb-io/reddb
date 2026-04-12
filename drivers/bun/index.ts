@@ -6,7 +6,7 @@
  *
  * Usage:
  *   import { connect } from '@reddb/client-bun'
- *   const conn = await connect('127.0.0.1:50052')
+ *   const conn = await connect('127.0.0.1:5050')
  *   const result = await conn.query('SELECT * FROM users WHERE _entity_id = 1')
  *   conn.close()
  */

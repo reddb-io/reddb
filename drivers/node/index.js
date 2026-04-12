@@ -6,7 +6,7 @@
  *
  * Usage:
  *   const { connect } = require('@reddb/client')
- *   const conn = await connect('127.0.0.1:50052')
+ *   const conn = await connect('127.0.0.1:5050')
  *   const result = await conn.query('SELECT * FROM users WHERE _entity_id = 1')
  *   await conn.bulkInsert('users', [{fields: {name: 'Alice', age: 30}}])
  *   conn.close()
@@ -140,7 +140,7 @@ class RedDBConnection {
 
 /**
  * Connect to a RedDB server via wire protocol.
- * @param {string} addr - Host:port (e.g. "127.0.0.1:50052")
+ * @param {string} addr - Host:port (e.g. "127.0.0.1:5050")
  * @returns {Promise<RedDBConnection>}
  */
 function connect(addr) {

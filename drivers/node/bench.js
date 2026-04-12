@@ -5,7 +5,7 @@
  */
 const { connect } = require('./index')
 
-const ADDR = process.argv[2] || '127.0.0.1:50052'
+const ADDR = process.argv[2] || '127.0.0.1:5050'
 const N = 5000
 const POINT_LOOKUPS = 200
 const RANGE_QUERIES = 50

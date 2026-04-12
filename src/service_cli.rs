@@ -55,7 +55,7 @@ impl ServerTransport {
         match self {
             Self::Grpc => "127.0.0.1:50051",
             Self::Http => "127.0.0.1:8080",
-            Self::Wire => "127.0.0.1:50052",
+            Self::Wire => "127.0.0.1:5050",
         }
     }
 }
