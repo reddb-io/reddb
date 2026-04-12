@@ -163,6 +163,11 @@ impl UnifiedStore {
                                     {
                                         if let Some(m) = &manager {
                                             let id = entity.id;
+                                            if let EntityKind::TableRow { row_id, .. } =
+                                                &entity.kind
+                                            {
+                                                m.register_row_id(*row_id);
+                                            }
                                             self.context_index.index_entity(&name, &entity);
                                             let _ = m.insert(entity.clone());
                                             self.register_entity_id(id);

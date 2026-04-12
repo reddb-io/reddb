@@ -141,6 +141,14 @@ impl UnifiedStore {
         } else {
             self.register_entity_id(entity.id);
         }
+        // Assign per-table sequential row_id if not set
+        if let EntityKind::TableRow { ref mut row_id, .. } = entity.kind {
+            if *row_id == 0 {
+                *row_id = manager.next_row_id();
+            } else {
+                manager.register_row_id(*row_id);
+            }
+        }
         let id = manager.insert(entity)?;
         self.register_entity_id(id);
 
@@ -244,6 +252,14 @@ impl UnifiedStore {
             entity.id = self.next_entity_id();
         } else {
             self.register_entity_id(entity.id);
+        }
+        // Assign per-table sequential row_id if not set
+        if let EntityKind::TableRow { ref mut row_id, .. } = entity.kind {
+            if *row_id == 0 {
+                *row_id = manager.next_row_id();
+            } else {
+                manager.register_row_id(*row_id);
+            }
         }
 
         // Index into context index before consuming the entity

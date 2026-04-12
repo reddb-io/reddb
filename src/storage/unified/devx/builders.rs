@@ -541,9 +541,16 @@ impl RowBuilder {
     pub fn save(self) -> Result<EntityId, DevXError> {
         let id = self.store.next_entity_id();
 
+        // Per-table sequential row_id (1, 2, 3... per collection)
+        let row_id = self
+            .store
+            .get_collection(&self.table)
+            .map(|m| m.next_row_id())
+            .unwrap_or(id.0);
+
         let kind = EntityKind::TableRow {
             table: Arc::from(self.table.as_str()),
-            row_id: id.0,
+            row_id,
         };
 
         let mut row_data = RowData::new(self.columns);

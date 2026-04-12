@@ -96,6 +96,8 @@ pub struct SegmentManager {
     next_segment_id: AtomicU64,
     /// Next entity ID counter
     next_entity_id: AtomicU64,
+    /// Per-table auto-increment row ID (1, 2, 3... per collection)
+    next_row_id: AtomicU64,
     /// Currently active growing segment
     growing: RwLock<Option<Arc<RwLock<GrowingSegment>>>>,
     /// Sealed segments (immutable, queryable)
@@ -126,6 +128,7 @@ impl SegmentManager {
             config,
             next_segment_id: AtomicU64::new(1),
             next_entity_id: AtomicU64::new(1),
+            next_row_id: AtomicU64::new(1),
             growing: RwLock::new(None),
             sealed: RwLock::new(Vec::new()),
             archived: RwLock::new(Vec::new()),
@@ -176,6 +179,29 @@ impl SegmentManager {
     /// Generate a new entity ID
     pub fn next_entity_id(&self) -> EntityId {
         EntityId::new(self.next_entity_id.fetch_add(1, Ordering::SeqCst))
+    }
+
+    /// Generate a per-table sequential row ID (1, 2, 3... per collection)
+    pub fn next_row_id(&self) -> u64 {
+        self.next_row_id.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Advance the per-table row_id counter to at least `id + 1`.
+    /// Called during load to restore the counter from existing data.
+    pub fn register_row_id(&self, id: u64) {
+        let candidate = id.saturating_add(1);
+        let mut current = self.next_row_id.load(Ordering::SeqCst);
+        while candidate > current {
+            match self.next_row_id.compare_exchange(
+                current,
+                candidate,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(updated) => current = updated,
+            }
+        }
     }
 
     /// Get or create the active growing segment
