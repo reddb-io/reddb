@@ -24,6 +24,11 @@ impl RuntimeQueryPort for RedDBRuntime {
         k: usize,
         min_score: f32,
     ) -> RedDBResult<Vec<SimilarResult>> {
+        super::ensure_collection_model_read(
+            &self.db(),
+            collection,
+            crate::catalog::CollectionModel::Vector,
+        )?;
         RedDBRuntime::search_similar(self, collection, vector, k, min_score)
     }
 
@@ -35,6 +40,11 @@ impl RuntimeQueryPort for RedDBRuntime {
         n_lists: usize,
         n_probes: Option<usize>,
     ) -> RedDBResult<RuntimeIvfSearchResult> {
+        super::ensure_collection_model_read(
+            &self.db(),
+            collection,
+            crate::catalog::CollectionModel::Vector,
+        )?;
         RedDBRuntime::search_ivf(self, collection, vector, k, n_lists, n_probes)
     }
 

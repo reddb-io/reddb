@@ -2749,6 +2749,15 @@ async fn describe_collection(
             )),
         );
     }
+    if let Some(contract) = self.runtime.db().collection_contract(collection) {
+        map.insert("contract_present".into(), JsonValue::Bool(true));
+        map.insert(
+            "contract".into(),
+            crate::presentation::catalog_json::collection_contract_json(&contract),
+        );
+    } else {
+        map.insert("contract_present".into(), JsonValue::Bool(false));
+    }
     Ok(Response::new(json_payload_reply(JsonValue::Object(map))))
 }
 }

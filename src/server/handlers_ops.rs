@@ -651,6 +651,15 @@ impl RedDBServer {
                         JsonValue::String(format_ttl_ms(default_ttl_ms)),
                     );
                 }
+                if let Some(contract) = self.runtime.db().collection_contract(name) {
+                    object.insert("contract_present".to_string(), JsonValue::Bool(true));
+                    object.insert(
+                        "contract".to_string(),
+                        crate::presentation::catalog_json::collection_contract_json(&contract),
+                    );
+                } else {
+                    object.insert("contract_present".to_string(), JsonValue::Bool(false));
+                }
                 json_response(200, JsonValue::Object(object))
             }
             None => json_error(404, format!("collection '{}' not found", name)),

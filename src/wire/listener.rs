@@ -340,9 +340,17 @@ fn handle_bulk_insert(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
         json_payloads.push(json_str);
     }
 
-    // Execute bulk insert via existing gRPC path
+    // Execute bulk insert via existing gRPC path.
+    //
+    // Optimization: build the columnar `RowData` representation with a
+    // SHARED schema taken from the first row. All subsequent rows reuse
+    // the same `Arc<Vec<String>>` and a shared `Arc<str>` for the table
+    // name — no per-row HashMap, no per-cell string clones. Rows whose
+    // keyset differs from the first are skipped to preserve the shape.
     let store = runtime.db().store();
     let mut entities = Vec::with_capacity(nrows);
+    let table: Arc<str> = Arc::from(collection.as_str());
+    let mut schema_arc: Option<Arc<Vec<String>>> = None;
 
     for json_str in &json_payloads {
         let parsed: crate::json::Value = match crate::json::from_str(json_str) {
@@ -354,8 +362,26 @@ fn handle_bulk_insert(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
             None => return make_error(b"missing 'fields' object"),
         };
 
-        let mut named = std::collections::HashMap::with_capacity(fields.len());
-        for (key, val) in fields {
+        // On the first row, freeze the column order as the schema.
+        let schema = match &schema_arc {
+            Some(s) => Arc::clone(s),
+            None => {
+                let names: Vec<String> = fields.keys().cloned().collect();
+                let arc = Arc::new(names);
+                schema_arc = Some(Arc::clone(&arc));
+                arc
+            }
+        };
+
+        let mut columns = Vec::with_capacity(schema.len());
+        for name in schema.iter() {
+            let val = match fields.get(name) {
+                Some(v) => v,
+                None => {
+                    columns.push(Value::Null);
+                    continue;
+                }
+            };
             let value = match val {
                 crate::json::Value::String(s) => Value::Text(s.clone()),
                 crate::json::Value::Number(n) => {
@@ -367,21 +393,21 @@ fn handle_bulk_insert(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
                 }
                 crate::json::Value::Bool(b) => Value::Boolean(*b),
                 crate::json::Value::Null => Value::Null,
-                _ => continue,
+                _ => Value::Null,
             };
-            named.insert(key.clone(), value);
+            columns.push(value);
         }
 
         entities.push(crate::storage::unified::UnifiedEntity::new(
             EntityId::new(0),
             EntityKind::TableRow {
-                table: Arc::from(collection.as_str()),
+                table: Arc::clone(&table),
                 row_id: 0,
             },
             EntityData::Row(crate::storage::unified::RowData {
-                columns: Vec::new(),
-                named: Some(named),
-                schema: None,
+                columns,
+                named: None,
+                schema: Some(schema),
             }),
         ));
     }
@@ -478,24 +504,28 @@ fn handle_bulk_insert_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> 
     let nrows = u32::from_le_bytes(payload[pos..pos + 4].try_into().unwrap()) as usize;
     pos += 4;
 
-    // Decode rows into entities
+    // Decode rows into entities using the columnar `RowData` path:
+    // one shared `Arc<Vec<String>>` for column names, one shared
+    // `Arc<str>` for the table, and `Vec<Value>` per row — zero
+    // HashMap allocations, zero per-cell string clones.
+    let table: Arc<str> = Arc::from(collection.as_str());
+    let schema: Arc<Vec<String>> = Arc::new(col_names);
     let mut entities = Vec::with_capacity(nrows);
     for _ in 0..nrows {
-        let mut named = std::collections::HashMap::with_capacity(ncols);
-        for col in &col_names {
-            let value = decode_value(payload, &mut pos);
-            named.insert(col.clone(), value);
+        let mut columns = Vec::with_capacity(ncols);
+        for _ in 0..ncols {
+            columns.push(decode_value(payload, &mut pos));
         }
         entities.push(crate::storage::unified::UnifiedEntity::new(
             EntityId::new(0),
             EntityKind::TableRow {
-                table: Arc::from(collection.as_str()),
+                table: Arc::clone(&table),
                 row_id: 0,
             },
             EntityData::Row(crate::storage::unified::RowData {
-                columns: Vec::new(),
-                named: Some(named),
-                schema: None,
+                columns,
+                named: None,
+                schema: Some(Arc::clone(&schema)),
             }),
         ));
     }

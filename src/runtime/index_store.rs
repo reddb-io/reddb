@@ -252,8 +252,12 @@ impl IndexStore {
                     for (field_name, value) in fields {
                         if field_name == col {
                             let key = value_to_bytes(value);
-                            self.hash
-                                .insert(collection, &format!("{name}_hash"), key, *entity_id);
+                            let _ = self.hash.insert(
+                                collection,
+                                &format!("{name}_hash"),
+                                key,
+                                *entity_id,
+                            );
                         }
                     }
                 }

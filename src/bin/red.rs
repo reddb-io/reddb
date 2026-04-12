@@ -531,10 +531,7 @@ fn main() {
             }
             let collection = &remaining[0];
             let id = &remaining[1];
-            // BETWEEN sidesteps the `= <entity_id>` fast-path in
-            // the planner, which has a known issue returning empty
-            // results for persistent collections.
-            let sql = format!("SELECT * FROM {collection} WHERE _entity_id BETWEEN {id} AND {id}");
+            let sql = format!("SELECT * FROM {collection} WHERE _entity_id = {id}");
             let rt = open_local_runtime(&result.flags).unwrap_or_else(|err| {
                 if json_mode {
                     json_error("get", &err);
@@ -575,7 +572,7 @@ fn main() {
             }
             let collection = &remaining[0];
             let id = &remaining[1];
-            let sql = format!("DELETE FROM {collection} WHERE _entity_id BETWEEN {id} AND {id}");
+            let sql = format!("DELETE FROM {collection} WHERE _entity_id = {id}");
             let rt = open_local_runtime(&result.flags).unwrap_or_else(|err| {
                 if json_mode {
                     json_error("delete", &err);

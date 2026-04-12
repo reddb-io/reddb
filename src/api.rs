@@ -23,12 +23,11 @@ pub const REDDB_FORMAT_VERSION: u32 = 2;
 
 pub type RedDBResult<T> = Result<T, RedDBError>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum StorageMode {
     /// Durable, file-backed database with WAL + checkpointing.
+    #[default]
     Persistent,
-    /// Ephemeral, process-memory execution (no WAL or checkpoints).
-    InMemory,
 }
 
 impl StorageMode {
@@ -203,10 +202,26 @@ impl RedDBOptions {
         }
     }
 
+    /// Ephemeral, tempfile-backed database.
+    ///
+    /// The underlying storage is a real persistent file placed under the system
+    /// temp directory with a unique name — there is no longer a true in-memory
+    /// execution mode. Prefer [`RedDBOptions::persistent`] when the data should
+    /// outlive the process.
     pub fn in_memory() -> Self {
+        let now_nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!(
+            "reddb-ephemeral-{}-{}.rdb",
+            std::process::id(),
+            now_nanos
+        ));
+        let _ = std::fs::remove_file(&path);
         Self {
-            mode: StorageMode::InMemory,
-            data_path: None,
+            mode: StorageMode::Persistent,
+            data_path: Some(path),
             auto_checkpoint_pages: 0,
             cache_pages: 2_000,
             snapshot_retention: DEFAULT_SNAPSHOT_RETENTION,

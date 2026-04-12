@@ -982,6 +982,7 @@ impl RedDB {
             self.store.as_ref(),
             Some(&catalog),
             None, // No declarations — breaks the recursive cycle
+            None, // No contracts — avoids pulling physical metadata during bootstrap
         );
         let mut metrics_by_name = std::collections::BTreeMap::new();
         for metric in &snapshot.indices {

@@ -6,6 +6,7 @@
 //! rigid constraints.
 
 use super::*;
+use crate::storage::query::CreateColumnDef;
 
 impl RedDBRuntime {
     /// Execute CREATE TABLE
@@ -48,6 +49,10 @@ impl RedDBRuntime {
         }
         self.inner
             .db
+            .save_collection_contract(collection_contract_from_create_table(query)?)
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        self.inner
+            .db
             .persist_metadata()
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
 
@@ -88,10 +93,27 @@ impl RedDBRuntime {
             )));
         }
 
+        let orphaned_indices: Vec<String> = self
+            .inner
+            .index_store
+            .list_indices(&query.name)
+            .into_iter()
+            .map(|index| index.name)
+            .collect();
+        for name in &orphaned_indices {
+            self.inner.index_store.drop_index(name, &query.name);
+        }
+
         store
             .drop_collection(&query.name)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        self.inner.db.invalidate_vector_index(&query.name);
         self.inner.db.clear_collection_default_ttl_ms(&query.name);
+        self.inner
+            .db
+            .remove_collection_contract(&query.name)
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        self.invalidate_result_cache();
         self.inner
             .db
             .persist_metadata()
@@ -141,6 +163,19 @@ impl RedDBRuntime {
             }
         }
 
+        let mut contract = self
+            .inner
+            .db
+            .collection_contract(&query.name)
+            .unwrap_or_else(|| default_collection_contract_for_existing_table(&query.name));
+        apply_alter_operations_to_contract(&mut contract, &query.operations);
+        contract.version = contract.version.saturating_add(1);
+        contract.updated_at_unix_ms = current_unix_ms();
+        self.inner
+            .db
+            .save_collection_contract(contract)
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+
         let message = if messages.is_empty() {
             format!("table '{}' altered (no operations)", query.name)
         } else {
@@ -177,7 +212,15 @@ impl RedDBRuntime {
             IndexMethod::RTree => super::index_store::IndexMethodKind::Spatial,
         };
 
-        // Extract fields from existing entities for indexing
+        // Extract fields from existing entities for indexing. Row
+        // entities may arrive in either the "named" HashMap layout
+        // (gRPC `BulkInsertBinary` path) OR the columnar layout
+        // (HTTP `POST /collections/X/bulk/rows` fast path, which uses
+        // `schema: Some(Arc<Vec<String>>)` + `columns: Vec<Value>` and
+        // leaves `named == None`). Prior to this commit the columnar
+        // branch returned an empty field list, so `CREATE INDEX` built
+        // a zero-entity index over HTTP-inserted data even though the
+        // data was queryable via `SELECT`.
         let entities = manager.query_all(|_| true);
         let entity_fields: Vec<(crate::storage::unified::EntityId, Vec<(String, Value)>)> =
             entities
@@ -187,6 +230,15 @@ impl RedDBRuntime {
                         crate::storage::EntityData::Row(row) => {
                             if let Some(ref named) = row.named {
                                 named.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+                            } else if let Some(ref schema) = row.schema {
+                                // Columnar layout — pair each column
+                                // with its positional name from the
+                                // shared schema Arc.
+                                schema
+                                    .iter()
+                                    .zip(row.columns.iter())
+                                    .map(|(k, v)| (k.clone(), v.clone()))
+                                    .collect()
                             } else {
                                 Vec::new()
                             }
@@ -275,4 +327,333 @@ impl RedDBRuntime {
             "drop",
         ))
     }
+}
+
+fn collection_contract_from_create_table(
+    query: &CreateTableQuery,
+) -> RedDBResult<crate::physical::CollectionContract> {
+    let now = current_unix_ms();
+    Ok(crate::physical::CollectionContract {
+        name: query.name.clone(),
+        declared_model: crate::catalog::CollectionModel::Table,
+        schema_mode: crate::catalog::SchemaMode::SemiStructured,
+        origin: crate::physical::ContractOrigin::Explicit,
+        version: 1,
+        created_at_unix_ms: now,
+        updated_at_unix_ms: now,
+        default_ttl_ms: query.default_ttl_ms,
+        context_index_fields: query.context_index_fields.clone(),
+        declared_columns: query
+            .columns
+            .iter()
+            .map(declared_column_contract_from_ddl)
+            .collect(),
+        table_def: Some(build_table_def_from_create_table(query)?),
+    })
+}
+
+fn default_collection_contract_for_existing_table(
+    name: &str,
+) -> crate::physical::CollectionContract {
+    let now = current_unix_ms();
+    crate::physical::CollectionContract {
+        name: name.to_string(),
+        declared_model: crate::catalog::CollectionModel::Table,
+        schema_mode: crate::catalog::SchemaMode::SemiStructured,
+        origin: crate::physical::ContractOrigin::Explicit,
+        version: 0,
+        created_at_unix_ms: now,
+        updated_at_unix_ms: now,
+        default_ttl_ms: None,
+        context_index_fields: Vec::new(),
+        declared_columns: Vec::new(),
+        table_def: Some(crate::storage::schema::TableDef::new(name.to_string())),
+    }
+}
+
+fn declared_column_contract_from_ddl(
+    column: &CreateColumnDef,
+) -> crate::physical::DeclaredColumnContract {
+    crate::physical::DeclaredColumnContract {
+        name: column.name.clone(),
+        data_type: column.data_type.clone(),
+        not_null: column.not_null,
+        default: column.default.clone(),
+        compress: column.compress,
+        unique: column.unique,
+        primary_key: column.primary_key,
+        enum_variants: column.enum_variants.clone(),
+        array_element: column.array_element.clone(),
+        decimal_precision: column.decimal_precision,
+    }
+}
+
+fn apply_alter_operations_to_contract(
+    contract: &mut crate::physical::CollectionContract,
+    operations: &[AlterOperation],
+) {
+    if contract.table_def.is_none() {
+        contract.table_def = Some(crate::storage::schema::TableDef::new(contract.name.clone()));
+    }
+    for operation in operations {
+        match operation {
+            AlterOperation::AddColumn(column) => {
+                if !contract
+                    .declared_columns
+                    .iter()
+                    .any(|existing| existing.name == column.name)
+                {
+                    contract
+                        .declared_columns
+                        .push(declared_column_contract_from_ddl(column));
+                }
+                if let Some(table_def) = contract.table_def.as_mut() {
+                    if table_def.get_column(&column.name).is_none() {
+                        if let Ok(column_def) = column_def_from_ddl(column) {
+                            if column.primary_key {
+                                table_def.primary_key.push(column.name.clone());
+                                table_def.constraints.push(
+                                    crate::storage::schema::Constraint::new(
+                                        format!("pk_{}", column.name),
+                                        crate::storage::schema::ConstraintType::PrimaryKey,
+                                    )
+                                    .on_columns(vec![column.name.clone()]),
+                                );
+                            }
+                            if column.unique {
+                                table_def.constraints.push(
+                                    crate::storage::schema::Constraint::new(
+                                        format!("uniq_{}", column.name),
+                                        crate::storage::schema::ConstraintType::Unique,
+                                    )
+                                    .on_columns(vec![column.name.clone()]),
+                                );
+                            }
+                            if column.not_null {
+                                table_def.constraints.push(
+                                    crate::storage::schema::Constraint::new(
+                                        format!("not_null_{}", column.name),
+                                        crate::storage::schema::ConstraintType::NotNull,
+                                    )
+                                    .on_columns(vec![column.name.clone()]),
+                                );
+                            }
+                            table_def.columns.push(column_def);
+                        }
+                    }
+                }
+            }
+            AlterOperation::DropColumn(name) => {
+                contract
+                    .declared_columns
+                    .retain(|column| column.name != *name);
+                if let Some(table_def) = contract.table_def.as_mut() {
+                    if let Some(index) = table_def.column_index(name) {
+                        table_def.columns.remove(index);
+                    }
+                    table_def.primary_key.retain(|column| column != name);
+                    table_def.constraints.retain(|constraint| {
+                        !constraint.columns.iter().any(|column| column == name)
+                    });
+                    table_def
+                        .indexes
+                        .retain(|index| !index.columns.iter().any(|column| column == name));
+                }
+            }
+            AlterOperation::RenameColumn { from, to } => {
+                if contract
+                    .declared_columns
+                    .iter()
+                    .any(|column| column.name == *to)
+                {
+                    continue;
+                }
+                if let Some(column) = contract
+                    .declared_columns
+                    .iter_mut()
+                    .find(|column| column.name == *from)
+                {
+                    column.name = to.clone();
+                }
+                if let Some(table_def) = contract.table_def.as_mut() {
+                    if let Some(column) = table_def
+                        .columns
+                        .iter_mut()
+                        .find(|column| column.name == *from)
+                    {
+                        column.name = to.clone();
+                    }
+                    for primary_key in &mut table_def.primary_key {
+                        if *primary_key == *from {
+                            *primary_key = to.clone();
+                        }
+                    }
+                    for constraint in &mut table_def.constraints {
+                        for column in &mut constraint.columns {
+                            if *column == *from {
+                                *column = to.clone();
+                            }
+                        }
+                        if let Some(ref_columns) = constraint.ref_columns.as_mut() {
+                            for column in ref_columns {
+                                if *column == *from {
+                                    *column = to.clone();
+                                }
+                            }
+                        }
+                    }
+                    for index in &mut table_def.indexes {
+                        for column in &mut index.columns {
+                            if *column == *from {
+                                *column = to.clone();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn build_table_def_from_create_table(
+    query: &CreateTableQuery,
+) -> RedDBResult<crate::storage::schema::TableDef> {
+    let mut table = crate::storage::schema::TableDef::new(query.name.clone());
+    for column in &query.columns {
+        if column.primary_key {
+            table.primary_key.push(column.name.clone());
+            table.constraints.push(
+                crate::storage::schema::Constraint::new(
+                    format!("pk_{}", column.name),
+                    crate::storage::schema::ConstraintType::PrimaryKey,
+                )
+                .on_columns(vec![column.name.clone()]),
+            );
+        }
+        if column.unique {
+            table.constraints.push(
+                crate::storage::schema::Constraint::new(
+                    format!("uniq_{}", column.name),
+                    crate::storage::schema::ConstraintType::Unique,
+                )
+                .on_columns(vec![column.name.clone()]),
+            );
+        }
+        if column.not_null {
+            table.constraints.push(
+                crate::storage::schema::Constraint::new(
+                    format!("not_null_{}", column.name),
+                    crate::storage::schema::ConstraintType::NotNull,
+                )
+                .on_columns(vec![column.name.clone()]),
+            );
+        }
+        table.columns.push(column_def_from_ddl(column)?);
+    }
+    table
+        .validate()
+        .map_err(|err| RedDBError::Query(format!("invalid table definition: {err}")))?;
+    Ok(table)
+}
+
+fn column_def_from_ddl(column: &CreateColumnDef) -> RedDBResult<crate::storage::schema::ColumnDef> {
+    let data_type = parse_schema_data_type(&column.data_type)?;
+    let mut column_def = crate::storage::schema::ColumnDef::new(column.name.clone(), data_type);
+    if column.not_null {
+        column_def = column_def.not_null();
+    }
+    if let Some(default) = &column.default {
+        column_def = column_def.with_default(default.as_bytes().to_vec());
+    }
+    if column.compress.unwrap_or(0) > 0 {
+        column_def = column_def.compressed();
+    }
+    if !column.enum_variants.is_empty() {
+        column_def = column_def.with_variants(column.enum_variants.clone());
+    }
+    if let Some(precision) = column.decimal_precision {
+        column_def = column_def.with_precision(precision);
+    }
+    if let Some(element_type) = &column.array_element {
+        column_def = column_def.with_element_type(parse_schema_data_type(element_type)?);
+    }
+    column_def = column_def.with_metadata("ddl_data_type", column.data_type.clone());
+    if column.unique {
+        column_def = column_def.with_metadata("unique", "true");
+    }
+    if column.primary_key {
+        column_def = column_def.with_metadata("primary_key", "true");
+    }
+    Ok(column_def)
+}
+
+fn parse_schema_data_type(value: &str) -> RedDBResult<crate::storage::schema::DataType> {
+    let normalized = value.trim().to_ascii_lowercase();
+    let data_type = match normalized.as_str() {
+        "integer" | "int" => crate::storage::schema::DataType::Integer,
+        "unsignedinteger" | "unsigned_integer" | "uint" => {
+            crate::storage::schema::DataType::UnsignedInteger
+        }
+        "float" | "double" | "real" => crate::storage::schema::DataType::Float,
+        "text" | "string" => crate::storage::schema::DataType::Text,
+        "blob" => crate::storage::schema::DataType::Blob,
+        "boolean" | "bool" => crate::storage::schema::DataType::Boolean,
+        "timestamp" => crate::storage::schema::DataType::Timestamp,
+        "duration" => crate::storage::schema::DataType::Duration,
+        "ipaddr" | "ip" => crate::storage::schema::DataType::IpAddr,
+        "macaddr" => crate::storage::schema::DataType::MacAddr,
+        "vector" => crate::storage::schema::DataType::Vector,
+        "json" => crate::storage::schema::DataType::Json,
+        "uuid" => crate::storage::schema::DataType::Uuid,
+        "noderef" => crate::storage::schema::DataType::NodeRef,
+        "edgeref" => crate::storage::schema::DataType::EdgeRef,
+        "vectorref" => crate::storage::schema::DataType::VectorRef,
+        "rowref" => crate::storage::schema::DataType::RowRef,
+        "color" => crate::storage::schema::DataType::Color,
+        "email" => crate::storage::schema::DataType::Email,
+        "url" => crate::storage::schema::DataType::Url,
+        "phone" => crate::storage::schema::DataType::Phone,
+        "semver" => crate::storage::schema::DataType::Semver,
+        "cidr" => crate::storage::schema::DataType::Cidr,
+        "date" => crate::storage::schema::DataType::Date,
+        "time" => crate::storage::schema::DataType::Time,
+        "decimal" => crate::storage::schema::DataType::Decimal,
+        "enum" => crate::storage::schema::DataType::Enum,
+        "array" => crate::storage::schema::DataType::Array,
+        "timestampms" | "timestamp_ms" => crate::storage::schema::DataType::TimestampMs,
+        "ipv4" => crate::storage::schema::DataType::Ipv4,
+        "ipv6" => crate::storage::schema::DataType::Ipv6,
+        "subnet" => crate::storage::schema::DataType::Subnet,
+        "port" => crate::storage::schema::DataType::Port,
+        "latitude" => crate::storage::schema::DataType::Latitude,
+        "longitude" => crate::storage::schema::DataType::Longitude,
+        "geopoint" | "geo_point" => crate::storage::schema::DataType::GeoPoint,
+        "country2" => crate::storage::schema::DataType::Country2,
+        "country3" => crate::storage::schema::DataType::Country3,
+        "lang2" => crate::storage::schema::DataType::Lang2,
+        "lang5" => crate::storage::schema::DataType::Lang5,
+        "currency" => crate::storage::schema::DataType::Currency,
+        "coloralpha" | "color_alpha" => crate::storage::schema::DataType::ColorAlpha,
+        "bigint" | "big_int" => crate::storage::schema::DataType::BigInt,
+        "keyref" => crate::storage::schema::DataType::KeyRef,
+        "docref" => crate::storage::schema::DataType::DocRef,
+        "tableref" => crate::storage::schema::DataType::TableRef,
+        "pageref" => crate::storage::schema::DataType::PageRef,
+        "secret" => crate::storage::schema::DataType::Secret,
+        "password" => crate::storage::schema::DataType::Password,
+        other => {
+            return Err(RedDBError::Query(format!(
+                "unsupported declared data type '{}'",
+                other
+            )))
+        }
+    };
+    Ok(data_type)
+}
+
+fn current_unix_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
 }

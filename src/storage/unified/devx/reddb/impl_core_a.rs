@@ -1,21 +1,13 @@
 use super::*;
 
 impl RedDB {
+    /// Construct an ephemeral RedDB instance backed by a unique tempfile.
+    ///
+    /// There is no longer a true in-memory execution mode — this simply opens
+    /// a persistent database at a temp path so all code paths run through the
+    /// same storage pipeline.
     pub fn new() -> Self {
-        Self {
-            store: Arc::new(UnifiedStore::new()),
-            preprocessors: Vec::new(),
-            index_config: IndexConfig::default(),
-            path: None,
-            options: RedDBOptions::in_memory(),
-            paged_mode: false,
-            vector_indexes: RwLock::new(HashMap::new()),
-            collection_ttl_defaults_ms: RwLock::new(HashMap::new()),
-            remote_backend: None,
-            remote_key: None,
-            replication: None,
-            ec_registry: std::sync::Arc::new(crate::ec::config::EcRegistry::new()),
-        }
+        Self::open_with_options(&RedDBOptions::in_memory()).expect("failed to open ephemeral RedDB")
     }
 
     /// Open or create a RedDB instance with persistence
@@ -46,35 +38,26 @@ impl RedDB {
             }
         }
 
-        let (store, path, paged_mode) = match options.mode {
-            StorageMode::InMemory => (
-                UnifiedStore::with_config(UnifiedStoreConfig::default()),
-                None,
-                false,
-            ),
-            StorageMode::Persistent => {
-                let path_buf = options.resolved_path("data.rdb");
-                if path_buf.exists() {
-                    if Self::is_binary_dump(&path_buf)? {
-                        (
-                            UnifiedStore::load_from_file(&path_buf)?,
-                            Some(path_buf),
-                            false,
-                        )
-                    } else {
-                        (UnifiedStore::open(&path_buf)?, Some(path_buf), true)
-                    }
-                } else {
-                    if !options.create_if_missing {
-                        return Err(format!(
-                            "database path does not exist and create_if_missing is false: {}",
-                            path_buf.display()
-                        )
-                        .into());
-                    }
-                    (UnifiedStore::open(&path_buf)?, Some(path_buf), true)
-                }
+        let path_buf = options.resolved_path("data.rdb");
+        let (store, path, paged_mode) = if path_buf.exists() {
+            if Self::is_binary_dump(&path_buf)? {
+                (
+                    UnifiedStore::load_from_file(&path_buf)?,
+                    Some(path_buf),
+                    false,
+                )
+            } else {
+                (UnifiedStore::open(&path_buf)?, Some(path_buf), true)
             }
+        } else {
+            if !options.create_if_missing {
+                return Err(format!(
+                    "database path does not exist and create_if_missing is false: {}",
+                    path_buf.display()
+                )
+                .into());
+            }
+            (UnifiedStore::open(&path_buf)?, Some(path_buf), true)
         };
 
         // Take ownership of the remote backend from options (it is not Clone).
@@ -102,24 +85,6 @@ impl RedDB {
             ec_registry: std::sync::Arc::new(crate::ec::config::EcRegistry::new()),
         }
         .with_initialized_metadata()
-    }
-
-    /// Create with custom store
-    pub fn with_store(store: Arc<UnifiedStore>) -> Self {
-        Self {
-            store,
-            preprocessors: Vec::new(),
-            index_config: IndexConfig::default(),
-            path: None,
-            options: RedDBOptions::in_memory(),
-            paged_mode: false,
-            vector_indexes: RwLock::new(HashMap::new()),
-            collection_ttl_defaults_ms: RwLock::new(HashMap::new()),
-            remote_backend: None,
-            remote_key: None,
-            replication: None,
-            ec_registry: std::sync::Arc::new(crate::ec::config::EcRegistry::new()),
-        }
     }
 
     /// Flush changes to disk (if persistence is enabled).
@@ -687,6 +652,7 @@ impl RedDB {
     /// Full logical catalog snapshot including inferred collection models and indices.
     pub fn catalog_model_snapshot(&self) -> CatalogModelSnapshot {
         let catalog = self.runtime_index_catalog();
+        let contracts = self.collection_contracts();
         let declarations = self
             .physical_metadata()
             .map(|metadata| CatalogDeclarations {
@@ -702,6 +668,7 @@ impl RedDB {
             self.store.as_ref(),
             Some(&catalog),
             declarations.as_ref(),
+            Some(contracts.as_slice()),
         )
     }
 

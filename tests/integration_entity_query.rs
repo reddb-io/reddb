@@ -2044,3 +2044,315 @@ fn test_secret_encrypt_and_decrypt() {
         other => panic!("expected Value::Secret when auto_decrypt is off, got {other:?}"),
     }
 }
+
+#[test]
+fn test_fast_entity_id_lookup_persistent() {
+    // Regression: WHERE _entity_id = N on a persistent collection
+    // used to return 0 rows because the fast path hit the B-tree
+    // index with a stale snapshot.
+    let tmp = std::env::temp_dir().join(format!(
+        "reddb_fast_id_{}.rdb",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let path_str = tmp.to_string_lossy().to_string();
+    let _ = std::fs::remove_file(&tmp);
+
+    let rt = reddb::RedDBRuntime::with_options(reddb::api::RedDBOptions::persistent(&path_str))
+        .expect("open persistent runtime");
+    let q = QueryUseCases::new(&rt);
+
+    q.execute(ExecuteQueryInput {
+        query: "INSERT INTO fastid (name) VALUES ('alice')".into(),
+    })
+    .expect("insert should succeed");
+
+    let all = q
+        .execute(ExecuteQueryInput {
+            query: "SELECT * FROM fastid".into(),
+        })
+        .expect("select all should succeed");
+    let eid = match all
+        .result
+        .records
+        .first()
+        .expect("at least one row")
+        .values
+        .get("_entity_id")
+        .expect("_entity_id present")
+    {
+        Value::UnsignedInteger(n) => *n,
+        other => panic!("_entity_id was not UnsignedInteger: {other:?}"),
+    };
+
+    let eq_sql = format!("SELECT * FROM fastid WHERE _entity_id = {eid}");
+    let by_eq = q
+        .execute(ExecuteQueryInput { query: eq_sql })
+        .expect("fast-path select should succeed");
+    assert_eq!(
+        by_eq.result.records.len(),
+        1,
+        "fast path `_entity_id = {eid}` must return the inserted row"
+    );
+
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[test]
+fn test_drop_table_cleans_contract_and_indices() {
+    let rt = rt();
+    let query = QueryUseCases::new(&rt);
+    let entity = EntityUseCases::new(&rt);
+
+    query
+        .execute(ExecuteQueryInput {
+            query: "CREATE TABLE drop_cleanup (id TEXT PRIMARY KEY, name TEXT)".into(),
+        })
+        .expect("CREATE TABLE must succeed");
+
+    query
+        .execute(ExecuteQueryInput {
+            query: "CREATE INDEX idx_name ON drop_cleanup (name) USING HASH".into(),
+        })
+        .expect("CREATE INDEX must succeed");
+
+    entity
+        .create_row(CreateRowInput {
+            collection: "drop_cleanup".into(),
+            fields: vec![
+                ("id".into(), Value::Text("u-1".into())),
+                ("name".into(), Value::Text("alice".into())),
+            ],
+            metadata: vec![],
+            node_links: vec![],
+            vector_links: vec![],
+        })
+        .expect("insert must succeed");
+
+    query
+        .execute(ExecuteQueryInput {
+            query: "DROP TABLE drop_cleanup".into(),
+        })
+        .expect("DROP TABLE must succeed");
+
+    query
+        .execute(ExecuteQueryInput {
+            query: "CREATE TABLE drop_cleanup (id TEXT, email TEXT UNIQUE)".into(),
+        })
+        .expect("re-creating same-named table after drop must succeed");
+
+    entity
+        .create_row(CreateRowInput {
+            collection: "drop_cleanup".into(),
+            fields: vec![
+                ("id".into(), Value::Text("u-1".into())),
+                ("email".into(), Value::Text("a@x.com".into())),
+            ],
+            metadata: vec![],
+            node_links: vec![],
+            vector_links: vec![],
+        })
+        .expect(
+            "insert on fresh table must succeed — PK constraint from old schema must not apply",
+        );
+
+    let dup = entity.create_row(CreateRowInput {
+        collection: "drop_cleanup".into(),
+        fields: vec![
+            ("id".into(), Value::Text("u-2".into())),
+            ("email".into(), Value::Text("a@x.com".into())),
+        ],
+        metadata: vec![],
+        node_links: vec![],
+        vector_links: vec![],
+    });
+    assert!(
+        dup.is_err(),
+        "new UNIQUE constraint must be enforced on the recreated table"
+    );
+}
+
+#[test]
+fn test_primary_key_enforcement_rejects_duplicates() {
+    let rt = rt();
+    let entity = EntityUseCases::new(&rt);
+    let query = QueryUseCases::new(&rt);
+
+    query
+        .execute(ExecuteQueryInput {
+            query: "CREATE TABLE pk_users (id TEXT PRIMARY KEY, name TEXT)".into(),
+        })
+        .expect("CREATE TABLE with PRIMARY KEY must succeed");
+
+    entity
+        .create_row(CreateRowInput {
+            collection: "pk_users".into(),
+            fields: vec![
+                ("id".into(), Value::Text("u-1".into())),
+                ("name".into(), Value::Text("alice".into())),
+            ],
+            metadata: vec![],
+            node_links: vec![],
+            vector_links: vec![],
+        })
+        .expect("first insert with unique PK must succeed");
+
+    let dup = entity.create_row(CreateRowInput {
+        collection: "pk_users".into(),
+        fields: vec![
+            ("id".into(), Value::Text("u-1".into())),
+            ("name".into(), Value::Text("alice-again".into())),
+        ],
+        metadata: vec![],
+        node_links: vec![],
+        vector_links: vec![],
+    });
+    let err = dup.expect_err("duplicate PK must be rejected");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("primary key") && msg.contains("pk_users"),
+        "error should mention primary key violation, got: {msg}"
+    );
+}
+
+#[test]
+fn test_unique_constraint_rejects_duplicates_allows_null() {
+    let rt = rt();
+    let entity = EntityUseCases::new(&rt);
+    let query = QueryUseCases::new(&rt);
+
+    query
+        .execute(ExecuteQueryInput {
+            query: "CREATE TABLE uq_users (id TEXT, email TEXT UNIQUE)".into(),
+        })
+        .expect("CREATE TABLE with UNIQUE must succeed");
+
+    entity
+        .create_row(CreateRowInput {
+            collection: "uq_users".into(),
+            fields: vec![
+                ("id".into(), Value::Text("u-1".into())),
+                ("email".into(), Value::Text("a@x.com".into())),
+            ],
+            metadata: vec![],
+            node_links: vec![],
+            vector_links: vec![],
+        })
+        .expect("first insert must succeed");
+
+    let dup = entity.create_row(CreateRowInput {
+        collection: "uq_users".into(),
+        fields: vec![
+            ("id".into(), Value::Text("u-2".into())),
+            ("email".into(), Value::Text("a@x.com".into())),
+        ],
+        metadata: vec![],
+        node_links: vec![],
+        vector_links: vec![],
+    });
+    let err = dup.expect_err("duplicate UNIQUE value must be rejected");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("unique") && msg.contains("uq_users"),
+        "error should mention unique constraint violation, got: {msg}"
+    );
+
+    entity
+        .create_row(CreateRowInput {
+            collection: "uq_users".into(),
+            fields: vec![
+                ("id".into(), Value::Text("u-3".into())),
+                ("email".into(), Value::Null),
+            ],
+            metadata: vec![],
+            node_links: vec![],
+            vector_links: vec![],
+        })
+        .expect("NULL values must not collide with UNIQUE (SQL semantics)");
+    entity
+        .create_row(CreateRowInput {
+            collection: "uq_users".into(),
+            fields: vec![
+                ("id".into(), Value::Text("u-4".into())),
+                ("email".into(), Value::Null),
+            ],
+            metadata: vec![],
+            node_links: vec![],
+            vector_links: vec![],
+        })
+        .expect("second NULL in UNIQUE column must be accepted");
+}
+
+#[test]
+fn test_patch_respects_unique_but_allows_self_update() {
+    let rt = rt();
+    let entity = EntityUseCases::new(&rt);
+    let query = QueryUseCases::new(&rt);
+
+    query
+        .execute(ExecuteQueryInput {
+            query: "CREATE TABLE patch_uq (id TEXT, email TEXT UNIQUE)".into(),
+        })
+        .expect("CREATE TABLE must succeed");
+
+    let first = entity
+        .create_row(CreateRowInput {
+            collection: "patch_uq".into(),
+            fields: vec![
+                ("id".into(), Value::Text("u-1".into())),
+                ("email".into(), Value::Text("a@x.com".into())),
+            ],
+            metadata: vec![],
+            node_links: vec![],
+            vector_links: vec![],
+        })
+        .expect("first insert must succeed");
+
+    entity
+        .create_row(CreateRowInput {
+            collection: "patch_uq".into(),
+            fields: vec![
+                ("id".into(), Value::Text("u-2".into())),
+                ("email".into(), Value::Text("b@x.com".into())),
+            ],
+            metadata: vec![],
+            node_links: vec![],
+            vector_links: vec![],
+        })
+        .expect("second insert must succeed");
+
+    let self_update = entity.patch(PatchEntityInput {
+        collection: "patch_uq".into(),
+        id: first.id,
+        payload: JsonValue::Object(Default::default()),
+        operations: vec![PatchEntityOperation {
+            op: PatchEntityOperationType::Set,
+            path: vec!["fields".into(), "email".into()],
+            value: Some(JsonValue::String("a@x.com".into())),
+        }],
+    });
+    assert!(
+        self_update.is_ok(),
+        "self-update with same value must succeed: {:?}",
+        self_update.err()
+    );
+
+    let collision = entity.patch(PatchEntityInput {
+        collection: "patch_uq".into(),
+        id: first.id,
+        payload: JsonValue::Object(Default::default()),
+        operations: vec![PatchEntityOperation {
+            op: PatchEntityOperationType::Set,
+            path: vec!["fields".into(), "email".into()],
+            value: Some(JsonValue::String("b@x.com".into())),
+        }],
+    });
+    let err = collision.expect_err("patching to another row's UNIQUE value must fail");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("unique") && msg.contains("patch_uq"),
+        "error should mention unique violation, got: {msg}"
+    );
+}

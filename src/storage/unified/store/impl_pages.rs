@@ -41,7 +41,20 @@ impl UnifiedStore {
     /// ```
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref();
-        let pager_config = PagerConfig::default();
+        let mut pager_config = PagerConfig::default();
+        // Tunables via env — experimental, used by the benchmark harness
+        // to compare durability profiles head-to-head with Postgres.
+        // REDDB_DOUBLE_WRITE=0 disables the double-write buffer, which
+        // otherwise adds two fsyncs per pager flush (one on DWB, one
+        // on the main file). With DWB off the pager behaves more like
+        // Postgres + full_page_writes=off — we trade torn-page
+        // protection for ingest throughput.
+        if matches!(
+            std::env::var("REDDB_DOUBLE_WRITE").ok().as_deref(),
+            Some("0") | Some("false") | Some("off")
+        ) {
+            pager_config.double_write = false;
+        }
         let pager = Pager::open(path, pager_config)
             .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
 
@@ -356,7 +369,7 @@ impl UnifiedStore {
 
             // Insert all entities into the B-tree
             for entity in manager.query_all(|_| true) {
-                let key = entity.id.raw().to_le_bytes();
+                let key = entity.id.raw().to_be_bytes();
                 let value = Self::serialize_entity(&entity, self.format_version());
 
                 // Ignore errors if key already exists (update scenario)

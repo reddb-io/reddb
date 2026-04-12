@@ -166,6 +166,52 @@ pub struct SnapshotDescriptor {
     pub total_entities: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContractOrigin {
+    Explicit,
+    Implicit,
+    Migrated,
+}
+
+impl ContractOrigin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit",
+            Self::Implicit => "implicit",
+            Self::Migrated => "migrated",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DeclaredColumnContract {
+    pub name: String,
+    pub data_type: String,
+    pub not_null: bool,
+    pub default: Option<String>,
+    pub compress: Option<u8>,
+    pub unique: bool,
+    pub primary_key: bool,
+    pub enum_variants: Vec<String>,
+    pub array_element: Option<String>,
+    pub decimal_precision: Option<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CollectionContract {
+    pub name: String,
+    pub declared_model: crate::catalog::CollectionModel,
+    pub schema_mode: crate::catalog::SchemaMode,
+    pub origin: ContractOrigin,
+    pub version: u32,
+    pub created_at_unix_ms: u128,
+    pub updated_at_unix_ms: u128,
+    pub default_ttl_ms: Option<u64>,
+    pub context_index_fields: Vec<String>,
+    pub declared_columns: Vec<DeclaredColumnContract>,
+    pub table_def: Option<crate::storage::schema::TableDef>,
+}
+
 /// Canonical artifact lifecycle states.
 ///
 /// State machine transitions:
@@ -324,6 +370,7 @@ pub struct PhysicalMetadataFile {
     pub graph_projections: Vec<PhysicalGraphProjection>,
     pub analytics_jobs: Vec<PhysicalAnalyticsJob>,
     pub collection_ttl_defaults_ms: BTreeMap<String, u64>,
+    pub collection_contracts: Vec<CollectionContract>,
     pub exports: Vec<ExportDescriptor>,
     pub superblock: SuperblockHeader,
     pub snapshots: Vec<SnapshotDescriptor>,

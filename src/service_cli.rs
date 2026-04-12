@@ -112,11 +112,7 @@ impl ServerCommandConfig {
             None => RedDBOptions::in_memory(),
         };
 
-        options.mode = if self.path.is_some() {
-            StorageMode::Persistent
-        } else {
-            StorageMode::InMemory
-        };
+        options.mode = StorageMode::Persistent;
         options.create_if_missing = self.create_if_missing;
         options.read_only = self.read_only;
 

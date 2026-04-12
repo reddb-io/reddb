@@ -421,7 +421,26 @@ impl RedDB {
                 let Some(native_state) = native_state else {
                     return Err(err.into());
                 };
-                if !Self::native_state_is_bootstrap_complete(&native_state) {
+                // Accept the bootstrap when the native state is either
+                // (a) fully populated and consistent (the original
+                // contract), or (b) trivially empty — a freshly created
+                // database with no collections written yet. Without (b)
+                // a brand-new data file can never reach
+                // `readiness_for_query = true`, because the bootstrap
+                // refuses to run until the registry/catalog/recovery
+                // structures are "complete", which they never become
+                // until the bootstrap has already run once.
+                //
+                // The emptiness check is conservative: header.sequence
+                // must still be at its initial value AND all three
+                // physical state summaries must be absent. Anything
+                // else falls through to the original error so we never
+                // paper over partially corrupted files.
+                let is_fresh_empty = native_state.header.sequence == 0
+                    && native_state.registry.is_none()
+                    && native_state.catalog.is_none()
+                    && native_state.recovery.is_none();
+                if !is_fresh_empty && !Self::native_state_is_bootstrap_complete(&native_state) {
                     return Err(err.into());
                 }
                 let metadata = self.metadata_from_native_state(&native_state, None);
@@ -675,6 +694,9 @@ impl RedDB {
             manifest_events,
             collection_ttl_defaults_ms: previous
                 .map(|metadata| metadata.collection_ttl_defaults_ms.clone())
+                .unwrap_or_default(),
+            collection_contracts: previous
+                .map(|metadata| metadata.collection_contracts.clone())
                 .unwrap_or_default(),
             indexes,
             graph_projections,

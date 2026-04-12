@@ -20,6 +20,81 @@ impl RedDB {
         }
     }
 
+    pub fn collection_contracts(&self) -> Vec<crate::physical::CollectionContract> {
+        self.physical_metadata()
+            .map(|metadata| metadata.collection_contracts)
+            .unwrap_or_default()
+    }
+
+    pub fn collection_contract(
+        &self,
+        collection: &str,
+    ) -> Option<crate::physical::CollectionContract> {
+        self.collection_contracts()
+            .into_iter()
+            .find(|contract| contract.name == collection)
+    }
+
+    pub fn save_collection_contract(
+        &self,
+        contract: crate::physical::CollectionContract,
+    ) -> Result<crate::physical::CollectionContract, Box<dyn std::error::Error>> {
+        if let Ok(mut defaults) = self.collection_ttl_defaults_ms.write() {
+            if let Some(ttl_ms) = contract.default_ttl_ms {
+                defaults.insert(contract.name.clone(), ttl_ms);
+            } else {
+                defaults.remove(&contract.name);
+            }
+        }
+
+        self.update_physical_metadata(|metadata| {
+            if let Some(existing) = metadata
+                .collection_contracts
+                .iter_mut()
+                .find(|existing| existing.name == contract.name)
+            {
+                *existing = contract.clone();
+            } else {
+                metadata.collection_contracts.push(contract.clone());
+            }
+            metadata
+                .collection_contracts
+                .sort_by(|left, right| left.name.cmp(&right.name));
+
+            if let Some(ttl_ms) = contract.default_ttl_ms {
+                metadata
+                    .collection_ttl_defaults_ms
+                    .insert(contract.name.clone(), ttl_ms);
+            } else {
+                metadata.collection_ttl_defaults_ms.remove(&contract.name);
+            }
+
+            contract.clone()
+        })
+    }
+
+    pub fn remove_collection_contract(
+        &self,
+        collection: &str,
+    ) -> Result<Option<crate::physical::CollectionContract>, Box<dyn std::error::Error>> {
+        if let Ok(mut defaults) = self.collection_ttl_defaults_ms.write() {
+            defaults.remove(collection);
+        }
+
+        self.update_physical_metadata(|metadata| {
+            let removed = metadata
+                .collection_contracts
+                .iter()
+                .position(|contract| contract.name == collection)
+                .map(|index| metadata.collection_contracts.remove(index));
+            metadata.collection_ttl_defaults_ms.remove(collection);
+            metadata
+                .indexes
+                .retain(|index| index.collection.as_deref() != Some(collection));
+            removed
+        })
+    }
+
     pub(crate) fn collection_ttl_defaults_snapshot(&self) -> BTreeMap<String, u64> {
         self.collection_ttl_defaults_ms
             .read()

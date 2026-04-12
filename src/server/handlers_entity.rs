@@ -169,15 +169,38 @@ impl RedDBServer {
             return json_error(400, "field 'items' cannot be empty");
         }
 
-        // Parse all items into entities
+        // Parse all items into entities using the columnar RowData
+        // path: one shared `Arc<Vec<String>>` schema taken from the
+        // first row, one shared `Arc<str>` table name, `Vec<Value>`
+        // per row. This skips `items.len()` HashMap allocations and
+        // `items.len() * ncols` string clones relative to the
+        // named-only representation.
+        let table: Arc<str> = Arc::from(collection);
+        let mut schema_arc: Option<Arc<Vec<String>>> = None;
         let mut entities = Vec::with_capacity(items.len());
         for item in items {
             let fields = match item.get("fields").and_then(|f| f.as_object()) {
                 Some(f) => f,
                 None => return json_error(400, "each item must have a 'fields' object"),
             };
-            let mut named = std::collections::HashMap::with_capacity(fields.len());
-            for (key, val) in fields {
+            let schema = match &schema_arc {
+                Some(s) => Arc::clone(s),
+                None => {
+                    let names: Vec<String> = fields.keys().cloned().collect();
+                    let arc = Arc::new(names);
+                    schema_arc = Some(Arc::clone(&arc));
+                    arc
+                }
+            };
+            let mut columns = Vec::with_capacity(schema.len());
+            for name in schema.iter() {
+                let val = match fields.get(name) {
+                    Some(v) => v,
+                    None => {
+                        columns.push(Value::Null);
+                        continue;
+                    }
+                };
                 let value = match val {
                     JsonValue::String(s) => Value::Text(s.clone()),
                     JsonValue::Number(n) => {
@@ -191,18 +214,18 @@ impl RedDBServer {
                     JsonValue::Null => Value::Null,
                     _ => Value::Text(format!("{val}")),
                 };
-                named.insert(key.clone(), value);
+                columns.push(value);
             }
             entities.push(crate::storage::UnifiedEntity::new(
                 crate::storage::EntityId::new(0),
                 crate::storage::EntityKind::TableRow {
-                    table: Arc::from(collection),
+                    table: Arc::clone(&table),
                     row_id: 0,
                 },
                 crate::storage::EntityData::Row(crate::storage::RowData {
-                    columns: Vec::new(),
-                    named: Some(named),
-                    schema: None,
+                    columns,
+                    named: None,
+                    schema: Some(schema),
                 }),
             ));
         }
@@ -217,31 +240,12 @@ impl RedDBServer {
             let next_id = store.next_entity_id().raw();
             let mut writer = PageBulkWriter::new(pager.clone(), next_id);
 
-            // Extract field names from first entity
-            let field_names: Vec<String> = if let Some(ref entity) = entities.first() {
-                if let crate::storage::EntityData::Row(ref row) = entity.data {
-                    row.named
-                        .as_ref()
-                        .map(|n| n.keys().cloned().collect())
-                        .unwrap_or_default()
-                } else {
-                    Vec::new()
-                }
-            } else {
-                Vec::new()
-            };
-
+            // All entities now share the same `schema`, so field names
+            // are just the shared Arc<Vec<String>> set above. Each row
+            // is already columnar — no lookup needed.
             for entity in &entities {
                 if let crate::storage::EntityData::Row(ref row) = entity.data {
-                    let values: Vec<Value> = if let Some(ref named) = row.named {
-                        field_names
-                            .iter()
-                            .map(|f| named.get(f).cloned().unwrap_or(Value::Null))
-                            .collect()
-                    } else {
-                        row.columns.clone()
-                    };
-                    if let Err(e) = writer.write_row(&values) {
+                    if let Err(e) = writer.write_row(&row.columns) {
                         return json_error(500, format!("page write error: {e}"));
                     }
                 }

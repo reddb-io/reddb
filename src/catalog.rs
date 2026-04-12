@@ -5,7 +5,9 @@ use std::time::SystemTime;
 
 use crate::api::{CatalogSnapshot, CollectionStats};
 use crate::index::{IndexCatalog, IndexCatalogSnapshot, IndexKind};
-use crate::physical::{PhysicalAnalyticsJob, PhysicalGraphProjection, PhysicalIndexState};
+use crate::physical::{
+    CollectionContract, PhysicalAnalyticsJob, PhysicalGraphProjection, PhysicalIndexState,
+};
 use crate::storage::unified::UnifiedStore;
 use crate::storage::{EntityKind, UnifiedEntity};
 
@@ -32,6 +34,12 @@ pub struct CollectionDescriptor {
     pub name: String,
     pub model: CollectionModel,
     pub schema_mode: SchemaMode,
+    pub contract_present: bool,
+    pub contract_origin: Option<crate::physical::ContractOrigin>,
+    pub declared_model: Option<CollectionModel>,
+    pub observed_model: CollectionModel,
+    pub declared_schema_mode: Option<SchemaMode>,
+    pub observed_schema_mode: SchemaMode,
     pub entities: usize,
     pub cross_refs: usize,
     pub segments: usize,
@@ -177,7 +185,7 @@ pub fn snapshot_store(
     store: &UnifiedStore,
     index_catalog: Option<&IndexCatalog>,
 ) -> CatalogModelSnapshot {
-    snapshot_store_with_declarations(name, store, index_catalog, None)
+    snapshot_store_with_declarations(name, store, index_catalog, None, None)
 }
 
 pub fn snapshot_store_with_declarations(
@@ -185,6 +193,7 @@ pub fn snapshot_store_with_declarations(
     store: &UnifiedStore,
     index_catalog: Option<&IndexCatalog>,
     declarations: Option<&CatalogDeclarations>,
+    contracts: Option<&[CollectionContract]>,
 ) -> CatalogModelSnapshot {
     let index_statuses = index_statuses(declarations);
     let graph_projection_statuses = graph_projection_statuses(declarations);
@@ -200,7 +209,12 @@ pub fn snapshot_store_with_declarations(
 
     for collection_name in store.list_collections() {
         let entities = grouped.remove(&collection_name).unwrap_or_default();
-        let model = infer_model(&entities);
+        let inferred_model = infer_model(&entities);
+        let inferred_schema_mode = infer_schema_mode(inferred_model);
+        let contract = collection_contract(&collection_name, contracts);
+        let model = contract
+            .map(|contract| contract.declared_model)
+            .unwrap_or(inferred_model);
         let cross_refs = entities
             .iter()
             .map(|entity| entity.cross_refs().len())
@@ -277,7 +291,15 @@ pub fn snapshot_store_with_declarations(
         collections.push(CollectionDescriptor {
             name: collection_name.clone(),
             model,
-            schema_mode: infer_schema_mode(model),
+            schema_mode: contract
+                .map(|contract| contract.schema_mode)
+                .unwrap_or(inferred_schema_mode),
+            contract_present: contract.is_some(),
+            contract_origin: contract.map(|contract| contract.origin),
+            declared_model: contract.map(|contract| contract.declared_model),
+            observed_model: inferred_model,
+            declared_schema_mode: contract.map(|contract| contract.schema_mode),
+            observed_schema_mode: inferred_schema_mode,
             entities: entity_count,
             cross_refs,
             segments,
@@ -365,6 +387,17 @@ pub fn snapshot_store_with_declarations(
         graph_projection_statuses,
         analytics_job_statuses,
     }
+}
+
+fn collection_contract<'a>(
+    collection_name: &str,
+    contracts: Option<&'a [CollectionContract]>,
+) -> Option<&'a CollectionContract> {
+    contracts.and_then(|contracts| {
+        contracts
+            .iter()
+            .find(|contract| contract.name == collection_name)
+    })
 }
 
 fn infer_model(entities: &[UnifiedEntity]) -> CollectionModel {

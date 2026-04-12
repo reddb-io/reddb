@@ -537,6 +537,39 @@ pub(crate) fn collection_readiness_json(descriptor: &CollectionDescriptor) -> Js
         JsonValue::String(collection_model_str(descriptor.model).to_string()),
     );
     object.insert(
+        "contract_present".to_string(),
+        JsonValue::Bool(descriptor.contract_present),
+    );
+    object.insert(
+        "contract_origin".to_string(),
+        descriptor
+            .contract_origin
+            .map(|origin| JsonValue::String(contract_origin_str(origin).to_string()))
+            .unwrap_or(JsonValue::Null),
+    );
+    object.insert(
+        "declared_model".to_string(),
+        descriptor
+            .declared_model
+            .map(|model| JsonValue::String(collection_model_str(model).to_string()))
+            .unwrap_or(JsonValue::Null),
+    );
+    object.insert(
+        "observed_model".to_string(),
+        JsonValue::String(collection_model_str(descriptor.observed_model).to_string()),
+    );
+    object.insert(
+        "declared_schema_mode".to_string(),
+        descriptor
+            .declared_schema_mode
+            .map(|mode| JsonValue::String(schema_mode_str(mode).to_string()))
+            .unwrap_or(JsonValue::Null),
+    );
+    object.insert(
+        "observed_schema_mode".to_string(),
+        JsonValue::String(schema_mode_str(descriptor.observed_schema_mode).to_string()),
+    );
+    object.insert(
         "resources_in_sync".to_string(),
         JsonValue::Bool(descriptor.resources_in_sync),
     );
@@ -617,6 +650,39 @@ pub(crate) fn collection_descriptor_json(descriptor: &CollectionDescriptor) -> J
     object.insert(
         "schema_mode".to_string(),
         JsonValue::String(schema_mode_str(descriptor.schema_mode).to_string()),
+    );
+    object.insert(
+        "contract_present".to_string(),
+        JsonValue::Bool(descriptor.contract_present),
+    );
+    object.insert(
+        "contract_origin".to_string(),
+        descriptor
+            .contract_origin
+            .map(|origin| JsonValue::String(contract_origin_str(origin).to_string()))
+            .unwrap_or(JsonValue::Null),
+    );
+    object.insert(
+        "declared_model".to_string(),
+        descriptor
+            .declared_model
+            .map(|model| JsonValue::String(collection_model_str(model).to_string()))
+            .unwrap_or(JsonValue::Null),
+    );
+    object.insert(
+        "observed_model".to_string(),
+        JsonValue::String(collection_model_str(descriptor.observed_model).to_string()),
+    );
+    object.insert(
+        "declared_schema_mode".to_string(),
+        descriptor
+            .declared_schema_mode
+            .map(|mode| JsonValue::String(schema_mode_str(mode).to_string()))
+            .unwrap_or(JsonValue::Null),
+    );
+    object.insert(
+        "observed_schema_mode".to_string(),
+        JsonValue::String(schema_mode_str(descriptor.observed_schema_mode).to_string()),
     );
     object.insert(
         "entities".to_string(),
@@ -724,6 +790,243 @@ pub(crate) fn collection_descriptor_json(descriptor: &CollectionDescriptor) -> J
     JsonValue::Object(object)
 }
 
+pub(crate) fn collection_contract_json(
+    contract: &crate::physical::CollectionContract,
+) -> JsonValue {
+    let mut object = Map::new();
+    object.insert("name".to_string(), JsonValue::String(contract.name.clone()));
+    object.insert(
+        "origin".to_string(),
+        JsonValue::String(contract_origin_str(contract.origin).to_string()),
+    );
+    object.insert(
+        "declared_model".to_string(),
+        JsonValue::String(collection_model_str(contract.declared_model).to_string()),
+    );
+    object.insert(
+        "schema_mode".to_string(),
+        JsonValue::String(schema_mode_str(contract.schema_mode).to_string()),
+    );
+    object.insert(
+        "version".to_string(),
+        JsonValue::Number(contract.version as f64),
+    );
+    object.insert(
+        "created_at_unix_ms".to_string(),
+        JsonValue::Number(contract.created_at_unix_ms as f64),
+    );
+    object.insert(
+        "updated_at_unix_ms".to_string(),
+        JsonValue::Number(contract.updated_at_unix_ms as f64),
+    );
+    object.insert(
+        "default_ttl_ms".to_string(),
+        contract
+            .default_ttl_ms
+            .map(|ttl_ms| JsonValue::Number(ttl_ms as f64))
+            .unwrap_or(JsonValue::Null),
+    );
+    object.insert(
+        "context_index_fields".to_string(),
+        JsonValue::Array(
+            contract
+                .context_index_fields
+                .iter()
+                .cloned()
+                .map(JsonValue::String)
+                .collect(),
+        ),
+    );
+    object.insert(
+        "columns".to_string(),
+        JsonValue::Array(contract_columns_json(contract)),
+    );
+    object.insert(
+        "table_def".to_string(),
+        contract
+            .table_def
+            .as_ref()
+            .map(table_def_json)
+            .unwrap_or(JsonValue::Null),
+    );
+    JsonValue::Object(object)
+}
+
+fn contract_columns_json(contract: &crate::physical::CollectionContract) -> Vec<JsonValue> {
+    if let Some(table_def) = &contract.table_def {
+        return table_def
+            .columns
+            .iter()
+            .map(|column| {
+                let mut object = Map::new();
+                object.insert("name".to_string(), JsonValue::String(column.name.clone()));
+                object.insert(
+                    "data_type".to_string(),
+                    JsonValue::String(
+                        column
+                            .metadata
+                            .get("ddl_data_type")
+                            .cloned()
+                            .unwrap_or_else(|| schema_data_type_str(column.data_type).to_string()),
+                    ),
+                );
+                object.insert("not_null".to_string(), JsonValue::Bool(!column.nullable));
+                object.insert(
+                    "default".to_string(),
+                    column
+                        .default
+                        .as_ref()
+                        .map(|default| {
+                            JsonValue::String(String::from_utf8_lossy(default).to_string())
+                        })
+                        .unwrap_or(JsonValue::Null),
+                );
+                object.insert("compress".to_string(), JsonValue::Bool(column.compress));
+                object.insert(
+                    "unique".to_string(),
+                    JsonValue::Bool(
+                        column
+                            .metadata
+                            .get("unique")
+                            .map(|value| value == "true")
+                            .unwrap_or(false),
+                    ),
+                );
+                object.insert(
+                    "primary_key".to_string(),
+                    JsonValue::Bool(
+                        column
+                            .metadata
+                            .get("primary_key")
+                            .map(|value| value == "true")
+                            .unwrap_or_else(|| {
+                                table_def.primary_key.iter().any(|key| key == &column.name)
+                            }),
+                    ),
+                );
+                object.insert(
+                    "enum_variants".to_string(),
+                    JsonValue::Array(
+                        column
+                            .enum_variants
+                            .iter()
+                            .cloned()
+                            .map(JsonValue::String)
+                            .collect(),
+                    ),
+                );
+                object.insert(
+                    "decimal_precision".to_string(),
+                    JsonValue::Number(column.decimal_precision as f64),
+                );
+                object.insert(
+                    "array_element".to_string(),
+                    column
+                        .element_type
+                        .map(|data_type| {
+                            JsonValue::String(schema_data_type_str(data_type).to_string())
+                        })
+                        .unwrap_or(JsonValue::Null),
+                );
+                JsonValue::Object(object)
+            })
+            .collect();
+    }
+
+    contract
+        .declared_columns
+        .iter()
+        .map(|column| {
+            let mut object = Map::new();
+            object.insert("name".to_string(), JsonValue::String(column.name.clone()));
+            object.insert(
+                "data_type".to_string(),
+                JsonValue::String(column.data_type.clone()),
+            );
+            object.insert("not_null".to_string(), JsonValue::Bool(column.not_null));
+            object.insert(
+                "default".to_string(),
+                column
+                    .default
+                    .clone()
+                    .map(JsonValue::String)
+                    .unwrap_or(JsonValue::Null),
+            );
+            object.insert(
+                "compress".to_string(),
+                column
+                    .compress
+                    .map(|value| JsonValue::Number(value as f64))
+                    .unwrap_or(JsonValue::Null),
+            );
+            object.insert("unique".to_string(), JsonValue::Bool(column.unique));
+            object.insert(
+                "primary_key".to_string(),
+                JsonValue::Bool(column.primary_key),
+            );
+            object.insert(
+                "enum_variants".to_string(),
+                JsonValue::Array(
+                    column
+                        .enum_variants
+                        .iter()
+                        .cloned()
+                        .map(JsonValue::String)
+                        .collect(),
+                ),
+            );
+            object.insert(
+                "decimal_precision".to_string(),
+                column
+                    .decimal_precision
+                    .map(|value| JsonValue::Number(value as f64))
+                    .unwrap_or(JsonValue::Null),
+            );
+            object.insert(
+                "array_element".to_string(),
+                column
+                    .array_element
+                    .clone()
+                    .map(JsonValue::String)
+                    .unwrap_or(JsonValue::Null),
+            );
+            JsonValue::Object(object)
+        })
+        .collect()
+}
+
+fn table_def_json(table_def: &crate::storage::schema::TableDef) -> JsonValue {
+    let mut object = Map::new();
+    object.insert(
+        "name".to_string(),
+        JsonValue::String(table_def.name.clone()),
+    );
+    object.insert(
+        "primary_key".to_string(),
+        JsonValue::Array(
+            table_def
+                .primary_key
+                .iter()
+                .cloned()
+                .map(JsonValue::String)
+                .collect(),
+        ),
+    );
+    object.insert(
+        "column_count".to_string(),
+        JsonValue::Number(table_def.columns.len() as f64),
+    );
+    object.insert(
+        "index_count".to_string(),
+        JsonValue::Number(table_def.indexes.len() as f64),
+    );
+    object.insert(
+        "constraint_count".to_string(),
+        JsonValue::Number(table_def.constraints.len() as f64),
+    );
+    JsonValue::Object(object)
+}
+
 fn collection_model_str(model: CollectionModel) -> &'static str {
     match model {
         CollectionModel::Table => "table",
@@ -741,6 +1044,69 @@ fn schema_mode_str(mode: SchemaMode) -> &'static str {
         SchemaMode::Strict => "strict",
         SchemaMode::SemiStructured => "semi_structured",
         SchemaMode::Dynamic => "dynamic",
+    }
+}
+
+fn contract_origin_str(origin: crate::physical::ContractOrigin) -> &'static str {
+    match origin {
+        crate::physical::ContractOrigin::Explicit => "explicit",
+        crate::physical::ContractOrigin::Implicit => "implicit",
+        crate::physical::ContractOrigin::Migrated => "migrated",
+    }
+}
+
+fn schema_data_type_str(data_type: crate::storage::schema::DataType) -> &'static str {
+    match data_type {
+        crate::storage::schema::DataType::Integer => "integer",
+        crate::storage::schema::DataType::UnsignedInteger => "unsigned_integer",
+        crate::storage::schema::DataType::Float => "float",
+        crate::storage::schema::DataType::Text => "text",
+        crate::storage::schema::DataType::Blob => "blob",
+        crate::storage::schema::DataType::Boolean => "boolean",
+        crate::storage::schema::DataType::Timestamp => "timestamp",
+        crate::storage::schema::DataType::Duration => "duration",
+        crate::storage::schema::DataType::IpAddr => "ipaddr",
+        crate::storage::schema::DataType::MacAddr => "macaddr",
+        crate::storage::schema::DataType::Vector => "vector",
+        crate::storage::schema::DataType::Nullable => "nullable",
+        crate::storage::schema::DataType::Json => "json",
+        crate::storage::schema::DataType::Uuid => "uuid",
+        crate::storage::schema::DataType::NodeRef => "noderef",
+        crate::storage::schema::DataType::EdgeRef => "edgeref",
+        crate::storage::schema::DataType::VectorRef => "vectorref",
+        crate::storage::schema::DataType::RowRef => "rowref",
+        crate::storage::schema::DataType::Color => "color",
+        crate::storage::schema::DataType::Email => "email",
+        crate::storage::schema::DataType::Url => "url",
+        crate::storage::schema::DataType::Phone => "phone",
+        crate::storage::schema::DataType::Semver => "semver",
+        crate::storage::schema::DataType::Cidr => "cidr",
+        crate::storage::schema::DataType::Date => "date",
+        crate::storage::schema::DataType::Time => "time",
+        crate::storage::schema::DataType::Decimal => "decimal",
+        crate::storage::schema::DataType::Enum => "enum",
+        crate::storage::schema::DataType::Array => "array",
+        crate::storage::schema::DataType::TimestampMs => "timestamp_ms",
+        crate::storage::schema::DataType::Ipv4 => "ipv4",
+        crate::storage::schema::DataType::Ipv6 => "ipv6",
+        crate::storage::schema::DataType::Subnet => "subnet",
+        crate::storage::schema::DataType::Port => "port",
+        crate::storage::schema::DataType::Latitude => "latitude",
+        crate::storage::schema::DataType::Longitude => "longitude",
+        crate::storage::schema::DataType::GeoPoint => "geopoint",
+        crate::storage::schema::DataType::Country2 => "country2",
+        crate::storage::schema::DataType::Country3 => "country3",
+        crate::storage::schema::DataType::Lang2 => "lang2",
+        crate::storage::schema::DataType::Lang5 => "lang5",
+        crate::storage::schema::DataType::Currency => "currency",
+        crate::storage::schema::DataType::ColorAlpha => "color_alpha",
+        crate::storage::schema::DataType::BigInt => "bigint",
+        crate::storage::schema::DataType::KeyRef => "keyref",
+        crate::storage::schema::DataType::DocRef => "docref",
+        crate::storage::schema::DataType::TableRef => "tableref",
+        crate::storage::schema::DataType::PageRef => "pageref",
+        crate::storage::schema::DataType::Secret => "secret",
+        crate::storage::schema::DataType::Password => "password",
     }
 }
 

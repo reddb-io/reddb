@@ -59,19 +59,16 @@ impl RedDBEngine {
             options.has_capability(crate::api::Capability::Graph),
         );
 
-        let db = match options.mode {
-            StorageMode::InMemory => None,
-            Persistent => {
-                let path = options.resolved_path("data.rdb");
-                let config = storage::engine::DatabaseConfig {
-                    read_only: options.read_only,
-                    create: options.create_if_missing,
-                    verify_checksums: options.verify_checksums,
-                    auto_checkpoint_threshold: options.auto_checkpoint_pages,
-                    ..Default::default()
-                };
-                Some(storage::engine::Database::open_with_config(path, config)?)
-            }
+        let db = {
+            let path = options.resolved_path("data.rdb");
+            let config = storage::engine::DatabaseConfig {
+                read_only: options.read_only,
+                create: options.create_if_missing,
+                verify_checksums: options.verify_checksums,
+                auto_checkpoint_threshold: options.auto_checkpoint_pages,
+                ..Default::default()
+            };
+            Some(storage::engine::Database::open_with_config(path, config)?)
         };
 
         Ok(Self {

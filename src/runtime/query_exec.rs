@@ -11,6 +11,13 @@ pub(super) fn execute_runtime_table_query(
     }
 
     // ── FAST ENTITY-ID PATH: O(1) lookup for WHERE _entity_id = N ──
+    //
+    // Previously this path emitted only `pre_serialized_json` and
+    // left `records` empty, which broke every consumer that walks
+    // `result.records` (including the embedded runtime API, the
+    // Secret decryption post-pass, and the CLI).  We now materialize
+    // a `UnifiedRecord` as well — JSON callers still get the fast
+    // pre-serialized blob, but non-HTTP callers see the row too.
     if query.filter.is_some()
         && query.order_by.is_empty()
         && query.group_by.is_empty()
@@ -23,9 +30,13 @@ pub(super) fn execute_runtime_table_query(
             let store = db.store();
             if let Some(entity) = store.get(&query.table, EntityId::new(entity_id)) {
                 let json = execute_runtime_serialize_single_entity(&entity);
+                let records: Vec<UnifiedRecord> = runtime_table_record_from_entity(entity)
+                    .into_iter()
+                    .collect();
+                let columns = projected_columns(&records, &query.columns);
                 return Ok(UnifiedResult {
-                    columns: Vec::new(),
-                    records: Vec::new(),
+                    columns,
+                    records,
                     stats: crate::storage::query::unified::QueryStats {
                         rows_scanned: 1,
                         ..Default::default()
@@ -339,7 +350,7 @@ fn try_sorted_index_lookup(
             let hi = value_to_i64_for_index(high)?;
             let ids = idx_store.sorted.range_lookup(table, col, lo, hi);
             // If too many results, full scan is faster than N individual get() calls
-            if ids.len() > 2000 {
+            if ids.len() > 5000 {
                 return None;
             }
             Some(ids)
@@ -359,7 +370,7 @@ fn try_sorted_index_lookup(
                 threshold - 1
             };
             let ids = idx_store.sorted.gt_lookup(table, col, adjusted);
-            if ids.len() > 2000 {
+            if ids.len() > 5000 {
                 return None;
             }
             Some(ids)
@@ -876,6 +887,38 @@ fn execute_runtime_canonical_table_query_indexed(
                 .collect());
         }
         return Ok(Vec::new());
+    }
+
+    // ── INDEX-ASSISTED PATH: sorted (BTREE) index for BETWEEN / >/>= ──
+    //
+    // Piggy-backs on `try_sorted_index_lookup`, which already knows how
+    // to walk a `SortedIndexManager` for range predicates. Previously
+    // the main execution path only looked at hash (equality) indices,
+    // so `WHERE age BETWEEN 30 AND 40` always fell through to a full
+    // scan even when a BTREE index on `age` existed.
+    if let (Some(idx_store), Some(ref filter)) = (index_store, &query.filter) {
+        let trace = std::env::var("REDDB_INDEX_TRACE").ok().as_deref() == Some("1");
+        let sorted_res = try_sorted_index_lookup(filter, &query.table, idx_store);
+        if trace {
+            eprintln!(
+                "sorted_index_lookup table={} filter={:?} result={:?}",
+                query.table,
+                filter,
+                sorted_res.as_ref().map(|v| v.len())
+            );
+        }
+        if let Some(entity_ids) = sorted_res {
+            let store = db.store();
+            let mut records = Vec::with_capacity(entity_ids.len());
+            for eid in entity_ids {
+                if let Some(entity) = store.get(&query.table, eid) {
+                    if let Some(record) = runtime_table_record_from_entity(entity) {
+                        records.push(record);
+                    }
+                }
+            }
+            return Ok(records);
+        }
     }
 
     // ── INDEX-ASSISTED PATH: use hash index for O(1) equality lookups ──

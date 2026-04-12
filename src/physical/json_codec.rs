@@ -6,7 +6,6 @@ pub(super) fn manifest_to_json(manifest: &SchemaManifest) -> JsonValue {
         "mode".to_string(),
         JsonValue::String(match manifest.options.mode {
             StorageMode::Persistent => "persistent".to_string(),
-            StorageMode::InMemory => "in_memory".to_string(),
         }),
     );
     options.insert(
@@ -98,8 +97,7 @@ pub(super) fn manifest_from_json(value: &JsonValue) -> io::Result<SchemaManifest
     let options_object = expect_object(json_required(object, "options")?, "manifest.options")?;
     let mut options = RedDBOptions {
         mode: match json_string_required(options_object, "mode")?.as_str() {
-            "persistent" => StorageMode::Persistent,
-            "in_memory" => StorageMode::InMemory,
+            "persistent" | "in_memory" => StorageMode::Persistent,
             other => {
                 return Err(invalid_data(format!(
                     "unsupported storage mode in manifest: {other}"
@@ -243,6 +241,296 @@ pub(super) fn catalog_from_json(value: &JsonValue) -> io::Result<CatalogSnapshot
                     .unwrap_or(u64::MAX),
             ),
     })
+}
+
+pub(super) fn collection_contract_to_json(contract: &CollectionContract) -> JsonValue {
+    let mut object = Map::new();
+    object.insert("name".to_string(), JsonValue::String(contract.name.clone()));
+    object.insert(
+        "declared_model".to_string(),
+        JsonValue::String(collection_model_as_str(contract.declared_model).to_string()),
+    );
+    object.insert(
+        "schema_mode".to_string(),
+        JsonValue::String(schema_mode_as_str(contract.schema_mode).to_string()),
+    );
+    object.insert(
+        "origin".to_string(),
+        JsonValue::String(contract.origin.as_str().to_string()),
+    );
+    object.insert(
+        "version".to_string(),
+        JsonValue::Number(contract.version as f64),
+    );
+    object.insert(
+        "created_at_unix_ms".to_string(),
+        json_u128(contract.created_at_unix_ms),
+    );
+    object.insert(
+        "updated_at_unix_ms".to_string(),
+        json_u128(contract.updated_at_unix_ms),
+    );
+    object.insert(
+        "default_ttl_ms".to_string(),
+        contract
+            .default_ttl_ms
+            .map(json_u64)
+            .unwrap_or(JsonValue::Null),
+    );
+    object.insert(
+        "context_index_fields".to_string(),
+        JsonValue::Array(
+            contract
+                .context_index_fields
+                .iter()
+                .map(|field| JsonValue::String(field.clone()))
+                .collect(),
+        ),
+    );
+    object.insert(
+        "declared_columns".to_string(),
+        JsonValue::Array(
+            contract
+                .declared_columns
+                .iter()
+                .map(declared_column_contract_to_json)
+                .collect(),
+        ),
+    );
+    object.insert(
+        "table_def".to_string(),
+        contract
+            .table_def
+            .as_ref()
+            .map(|table_def| JsonValue::String(hex::encode(table_def.to_bytes())))
+            .unwrap_or(JsonValue::Null),
+    );
+    JsonValue::Object(object)
+}
+
+pub(super) fn collection_contract_from_json(value: &JsonValue) -> io::Result<CollectionContract> {
+    let object = expect_object(value, "collection_contract")?;
+    let table_def = match object.get("table_def") {
+        Some(JsonValue::String(encoded)) => {
+            let bytes = hex::decode(encoded).map_err(|err| {
+                invalid_data(format!("invalid collection contract table_def hex: {err}"))
+            })?;
+            Some(
+                crate::storage::schema::TableDef::from_bytes(&bytes).map_err(|err| {
+                    invalid_data(format!(
+                        "invalid collection contract table_def payload: {err}"
+                    ))
+                })?,
+            )
+        }
+        Some(JsonValue::Null) | None => None,
+        Some(_) => {
+            return Err(invalid_data(
+                "collection_contract.table_def must be a hex string or null".to_string(),
+            ))
+        }
+    };
+
+    Ok(CollectionContract {
+        name: json_string_required(object, "name")?,
+        declared_model: collection_model_from_str(&json_string_required(
+            object,
+            "declared_model",
+        )?)?,
+        schema_mode: schema_mode_from_str(&json_string_required(object, "schema_mode")?)?,
+        origin: contract_origin_from_str(&json_string_required(object, "origin")?)?,
+        version: json_u32_required(object, "version")?,
+        created_at_unix_ms: json_u128_required(object, "created_at_unix_ms")?,
+        updated_at_unix_ms: json_u128_required(object, "updated_at_unix_ms")?,
+        default_ttl_ms: match object.get("default_ttl_ms") {
+            Some(JsonValue::Null) | None => None,
+            Some(value) => Some(json_u64_value(value)?),
+        },
+        context_index_fields: object
+            .get("context_index_fields")
+            .and_then(JsonValue::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| value.as_str().map(|value| value.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        declared_columns: object
+            .get("declared_columns")
+            .and_then(JsonValue::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .map(declared_column_contract_from_json)
+                    .collect::<io::Result<Vec<_>>>()
+            })
+            .transpose()?
+            .unwrap_or_default(),
+        table_def,
+    })
+}
+
+fn declared_column_contract_to_json(column: &DeclaredColumnContract) -> JsonValue {
+    let mut object = Map::new();
+    object.insert("name".to_string(), JsonValue::String(column.name.clone()));
+    object.insert(
+        "data_type".to_string(),
+        JsonValue::String(column.data_type.clone()),
+    );
+    object.insert("not_null".to_string(), JsonValue::Bool(column.not_null));
+    object.insert(
+        "default".to_string(),
+        column
+            .default
+            .clone()
+            .map(JsonValue::String)
+            .unwrap_or(JsonValue::Null),
+    );
+    object.insert(
+        "compress".to_string(),
+        column
+            .compress
+            .map(|value| JsonValue::Number(value as f64))
+            .unwrap_or(JsonValue::Null),
+    );
+    object.insert("unique".to_string(), JsonValue::Bool(column.unique));
+    object.insert(
+        "primary_key".to_string(),
+        JsonValue::Bool(column.primary_key),
+    );
+    object.insert(
+        "enum_variants".to_string(),
+        JsonValue::Array(
+            column
+                .enum_variants
+                .iter()
+                .map(|variant| JsonValue::String(variant.clone()))
+                .collect(),
+        ),
+    );
+    object.insert(
+        "array_element".to_string(),
+        column
+            .array_element
+            .clone()
+            .map(JsonValue::String)
+            .unwrap_or(JsonValue::Null),
+    );
+    object.insert(
+        "decimal_precision".to_string(),
+        column
+            .decimal_precision
+            .map(|value| JsonValue::Number(value as f64))
+            .unwrap_or(JsonValue::Null),
+    );
+    JsonValue::Object(object)
+}
+
+fn declared_column_contract_from_json(value: &JsonValue) -> io::Result<DeclaredColumnContract> {
+    let object = expect_object(value, "declared_column_contract")?;
+    Ok(DeclaredColumnContract {
+        name: json_string_required(object, "name")?,
+        data_type: json_string_required(object, "data_type")?,
+        not_null: json_bool_required(object, "not_null")?,
+        default: object
+            .get("default")
+            .and_then(JsonValue::as_str)
+            .map(|value| value.to_string()),
+        compress: match object.get("compress") {
+            None | Some(JsonValue::Null) => None,
+            Some(value) => Some(json_u8_field_value(value)?),
+        },
+        unique: json_bool_required(object, "unique")?,
+        primary_key: json_bool_required(object, "primary_key")?,
+        enum_variants: object
+            .get("enum_variants")
+            .and_then(JsonValue::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| value.as_str().map(|value| value.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        array_element: object
+            .get("array_element")
+            .and_then(JsonValue::as_str)
+            .map(|value| value.to_string()),
+        decimal_precision: match object.get("decimal_precision") {
+            None | Some(JsonValue::Null) => None,
+            Some(value) => Some(json_u8_field_value(value)?),
+        },
+    })
+}
+
+fn json_u8_field_value(value: &JsonValue) -> io::Result<u8> {
+    let number = value
+        .as_f64()
+        .ok_or_else(|| invalid_data("expected numeric u8 field value".to_string()))?;
+    if !(0.0..=(u8::MAX as f64)).contains(&number) {
+        return Err(invalid_data(format!(
+            "u8 field value out of range: {number}"
+        )));
+    }
+    Ok(number as u8)
+}
+
+fn collection_model_as_str(model: crate::catalog::CollectionModel) -> &'static str {
+    match model {
+        crate::catalog::CollectionModel::Table => "table",
+        crate::catalog::CollectionModel::Document => "document",
+        crate::catalog::CollectionModel::Graph => "graph",
+        crate::catalog::CollectionModel::Vector => "vector",
+        crate::catalog::CollectionModel::Mixed => "mixed",
+        crate::catalog::CollectionModel::TimeSeries => "timeseries",
+        crate::catalog::CollectionModel::Queue => "queue",
+    }
+}
+
+fn collection_model_from_str(value: &str) -> io::Result<crate::catalog::CollectionModel> {
+    match value {
+        "table" => Ok(crate::catalog::CollectionModel::Table),
+        "document" => Ok(crate::catalog::CollectionModel::Document),
+        "graph" => Ok(crate::catalog::CollectionModel::Graph),
+        "vector" => Ok(crate::catalog::CollectionModel::Vector),
+        "mixed" => Ok(crate::catalog::CollectionModel::Mixed),
+        "timeseries" => Ok(crate::catalog::CollectionModel::TimeSeries),
+        "queue" => Ok(crate::catalog::CollectionModel::Queue),
+        other => Err(invalid_data(format!(
+            "unsupported collection contract model: {other}"
+        ))),
+    }
+}
+
+fn schema_mode_as_str(mode: crate::catalog::SchemaMode) -> &'static str {
+    match mode {
+        crate::catalog::SchemaMode::Strict => "strict",
+        crate::catalog::SchemaMode::SemiStructured => "semi_structured",
+        crate::catalog::SchemaMode::Dynamic => "dynamic",
+    }
+}
+
+fn schema_mode_from_str(value: &str) -> io::Result<crate::catalog::SchemaMode> {
+    match value {
+        "strict" => Ok(crate::catalog::SchemaMode::Strict),
+        "semi_structured" => Ok(crate::catalog::SchemaMode::SemiStructured),
+        "dynamic" => Ok(crate::catalog::SchemaMode::Dynamic),
+        other => Err(invalid_data(format!(
+            "unsupported collection contract schema mode: {other}"
+        ))),
+    }
+}
+
+fn contract_origin_from_str(value: &str) -> io::Result<ContractOrigin> {
+    match value {
+        "explicit" => Ok(ContractOrigin::Explicit),
+        "implicit" => Ok(ContractOrigin::Implicit),
+        "migrated" => Ok(ContractOrigin::Migrated),
+        other => Err(invalid_data(format!(
+            "unsupported collection contract origin: {other}"
+        ))),
+    }
 }
 
 pub(super) fn superblock_to_json(superblock: &SuperblockHeader) -> JsonValue {

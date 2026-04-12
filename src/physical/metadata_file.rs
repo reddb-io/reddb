@@ -71,6 +71,9 @@ impl PhysicalMetadataFile {
             collection_ttl_defaults_ms: previous
                 .map(|previous| previous.collection_ttl_defaults_ms.clone())
                 .unwrap_or_default(),
+            collection_contracts: previous
+                .map(|previous| previous.collection_contracts.clone())
+                .unwrap_or_default(),
             exports: previous
                 .map(|previous| previous.exports.clone())
                 .unwrap_or_default(),
@@ -335,6 +338,15 @@ impl PhysicalMetadataFile {
             ),
         );
         root.insert(
+            "collection_contracts".to_string(),
+            JsonValue::Array(
+                self.collection_contracts
+                    .iter()
+                    .map(collection_contract_to_json)
+                    .collect(),
+            ),
+        );
+        root.insert(
             "exports".to_string(),
             JsonValue::Array(self.exports.iter().map(export_descriptor_to_json).collect()),
         );
@@ -426,6 +438,17 @@ impl PhysicalMetadataFile {
                         })
                         .collect()
                 })
+                .unwrap_or_default(),
+            collection_contracts: object
+                .get("collection_contracts")
+                .and_then(JsonValue::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .map(collection_contract_from_json)
+                        .collect::<io::Result<Vec<_>>>()
+                })
+                .transpose()?
                 .unwrap_or_default(),
             exports: object
                 .get("exports")

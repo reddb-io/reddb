@@ -129,45 +129,114 @@ impl BTree {
             }
         }
 
+        // Callers are expected to supply lex-sorted keys. This is the
+        // case for the entity-insert path in `impl_entities.rs`, which
+        // encodes u64 IDs as big-endian bytes — so sequential IDs are
+        // monotonically increasing in lex order too, and the tail-append
+        // fast path below triggers naturally.
+        //
+        // If a caller ever passes out-of-order keys, the fast path will
+        // simply bail out on the first violation and delegate to the
+        // generic slow path for that item.
+        let items: Vec<(&[u8], &[u8])> = items
+            .iter()
+            .map(|(k, v)| (k.as_slice(), v.as_slice()))
+            .collect();
+
         let mut i = 0;
         while i < items.len() {
             let root_id = self.root_page_id();
             if root_id == 0 {
                 // Empty tree — use single insert to create root
-                let (k, v) = &items[i];
+                let (k, v) = items[i];
                 self.insert(k, v)?;
                 i += 1;
                 continue;
             }
 
             // Walk to the leaf for the current key, load once.
-            let (leaf_id, _path) = self.find_leaf(root_id, &items[i].0)?;
+            let (leaf_id, _path) = self.find_leaf(root_id, items[i].0)?;
             let mut page = self.pager.read_page(leaf_id)?;
 
-            // Insert as many sorted items into this leaf as will fit.
+            // Compute the leaf's current fill state in a SINGLE O(M)
+            // pass: total used bytes + the last cell's key. We'll use
+            // these to drive the tail-append fast path below without
+            // ever having to re-read existing cells.
+            let (mut used_bytes, mut last_key_in_leaf) = {
+                let data = page.as_bytes();
+                let cell_count = page.cell_count() as usize;
+                let mut offset = LEAF_DATA_OFFSET;
+                let mut last_key_off = 0usize;
+                let mut last_key_len = 0usize;
+                for _ in 0..cell_count {
+                    let key_len = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
+                    let val_len = u16::from_le_bytes([data[offset + 2], data[offset + 3]]) as usize;
+                    last_key_off = offset + 4;
+                    last_key_len = key_len;
+                    offset += 4 + key_len + val_len;
+                }
+                let last_key = if cell_count > 0 {
+                    Some(data[last_key_off..last_key_off + last_key_len].to_vec())
+                } else {
+                    None
+                };
+                (offset - LEAF_DATA_OFFSET, last_key)
+            };
+
+            // Fast path: write new cells directly at the tail of the
+            // leaf data area. Relies on (a) the input being lex-sorted
+            // (guaranteed by the sort above) and (b) every key being
+            // strictly greater than the leaf's current last key (which
+            // is the common case for append-only ID workloads). On any
+            // violation we break out and let the slow path handle it.
             let mut inserted = 0usize;
             while i + inserted < items.len() {
-                let (key, value) = &items[i + inserted];
+                let (key, value) = items[i + inserted];
 
-                if !can_insert_leaf(&page, key, value) {
+                // Strictly-ascending check, which doubles as duplicate
+                // detection without a leaf binary search. Comparing
+                // against last_key_in_leaf is O(key.len()) — cheap.
+                if let Some(lk) = &last_key_in_leaf {
+                    match key.cmp(lk.as_slice()) {
+                        Ordering::Greater => {}
+                        Ordering::Equal => return Err(BTreeError::DuplicateKey),
+                        Ordering::Less => break,
+                    }
+                }
+
+                let cell_size = 4 + key.len() + value.len();
+                if LEAF_DATA_OFFSET + used_bytes + cell_size > PAGE_SIZE {
+                    // Leaf is full — stop and let the outer loop move
+                    // to the next leaf (or the slow split path).
                     break;
                 }
-                // Duplicate check
-                if let SearchResult::Found(_) = search_leaf(&page, key)? {
-                    return Err(BTreeError::DuplicateKey);
-                }
-                insert_into_leaf(&mut page, key, value)?;
+
+                // Write the cell in place: [key_len:u16][val_len:u16][key][value]
+                let data = page.as_bytes_mut();
+                let off = LEAF_DATA_OFFSET + used_bytes;
+                data[off..off + 2].copy_from_slice(&(key.len() as u16).to_le_bytes());
+                data[off + 2..off + 4].copy_from_slice(&(value.len() as u16).to_le_bytes());
+                data[off + 4..off + 4 + key.len()].copy_from_slice(key);
+                data[off + 4 + key.len()..off + cell_size].copy_from_slice(value);
+
+                used_bytes += cell_size;
+                last_key_in_leaf = Some(key.to_vec());
                 inserted += 1;
             }
 
             if inserted > 0 {
+                let new_count = page.cell_count() as usize + inserted;
+                page.set_cell_count(new_count as u16);
                 page.update_checksum();
                 self.pager.write_page(leaf_id, page)?;
                 i += inserted;
             } else {
-                // Couldn't fit even one entry — fall back to the full
-                // insert path which handles splitting and parent updates.
-                let (k, v) = &items[i];
+                // Couldn't fit even one entry via the fast path —
+                // either the leaf is full, or the next key belongs
+                // in the middle of the leaf. Delegate to the generic
+                // insert path which handles both splitting and
+                // mid-leaf positioning.
+                let (k, v) = items[i];
                 self.insert(k, v)?;
                 i += 1;
             }
