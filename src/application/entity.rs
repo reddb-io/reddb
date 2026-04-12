@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use crate::application::ports::RuntimeEntityPort;
 use crate::json::{parse_json, to_vec as json_to_vec, Map, Value as JsonValue};
+use crate::presentation::entity_json::storage_value_to_json;
 use crate::storage::schema::Value;
 use crate::storage::unified::devx::refs::{NodeRef, TableRef, VectorRef};
 use crate::storage::unified::{Metadata, MetadataValue, RefTarget, SparseVector, VectorData};
@@ -413,127 +414,6 @@ pub(crate) fn metadata_from_json(payload: &JsonValue) -> RedDBResult<Metadata> {
         metadata.set(key.clone(), metadata_value_from_json(value)?);
     }
     Ok(metadata)
-}
-
-fn storage_value_to_json(value: &Value) -> JsonValue {
-    match value {
-        Value::Null => JsonValue::Null,
-        Value::Integer(value) => JsonValue::Number(*value as f64),
-        Value::UnsignedInteger(value) => JsonValue::Number(*value as f64),
-        Value::Float(value) => JsonValue::Number(*value),
-        Value::Text(value) => JsonValue::String(value.clone()),
-        Value::Blob(value) => JsonValue::String(hex::encode(value)),
-        Value::Boolean(value) => JsonValue::Bool(*value),
-        Value::Timestamp(value) => JsonValue::Number(*value as f64),
-        Value::Duration(value) => JsonValue::Number(*value as f64),
-        Value::IpAddr(value) => JsonValue::String(value.to_string()),
-        Value::MacAddr(value) => JsonValue::String(format_mac(value)),
-        Value::Vector(value) => JsonValue::Array(
-            value
-                .iter()
-                .map(|entry| JsonValue::Number(*entry as f64))
-                .collect(),
-        ),
-        Value::Json(value) => {
-            let text = String::from_utf8_lossy(value);
-            match parse_json(&text) {
-                Ok(parsed) => JsonValue::from(parsed),
-                Err(_) => JsonValue::String(hex::encode(value)),
-            }
-        }
-        Value::Uuid(value) => JsonValue::String(hex::encode(value)),
-        Value::NodeRef(value) => JsonValue::String(value.clone()),
-        Value::EdgeRef(value) => JsonValue::String(value.clone()),
-        Value::VectorRef(collection, id) => {
-            let mut object = Map::new();
-            object.insert(
-                "collection".to_string(),
-                JsonValue::String(collection.clone()),
-            );
-            object.insert("id".to_string(), JsonValue::Number(*id as f64));
-            JsonValue::Object(object)
-        }
-        Value::RowRef(table, row_id) => {
-            let mut object = Map::new();
-            object.insert("table".to_string(), JsonValue::String(table.clone()));
-            object.insert("row_id".to_string(), JsonValue::Number(*row_id as f64));
-            JsonValue::Object(object)
-        }
-        Value::Color([r, g, b]) => JsonValue::String(format!("#{:02X}{:02X}{:02X}", r, g, b)),
-        Value::Email(s) => JsonValue::String(s.clone()),
-        Value::Url(s) => JsonValue::String(s.clone()),
-        Value::Phone(n) => JsonValue::Number(*n as f64),
-        Value::Semver(packed) => JsonValue::String(format!(
-            "{}.{}.{}",
-            packed / 1_000_000,
-            (packed / 1_000) % 1_000,
-            packed % 1_000
-        )),
-        Value::Cidr(ip, prefix) => JsonValue::String(format!(
-            "{}.{}.{}.{}/{}",
-            (ip >> 24) & 0xFF,
-            (ip >> 16) & 0xFF,
-            (ip >> 8) & 0xFF,
-            ip & 0xFF,
-            prefix
-        )),
-        Value::Date(days) => JsonValue::Number(*days as f64),
-        Value::Time(ms) => JsonValue::Number(*ms as f64),
-        Value::Decimal(v) => JsonValue::Number(*v as f64 / 10_000.0),
-        Value::EnumValue(i) => JsonValue::Number(*i as f64),
-        Value::Array(elems) => JsonValue::Array(elems.iter().map(storage_value_to_json).collect()),
-        Value::TimestampMs(ms) => JsonValue::Number(*ms as f64),
-        Value::Ipv4(ip) => JsonValue::String(format!(
-            "{}.{}.{}.{}",
-            (ip >> 24) & 0xFF,
-            (ip >> 16) & 0xFF,
-            (ip >> 8) & 0xFF,
-            ip & 0xFF
-        )),
-        Value::Ipv6(bytes) => JsonValue::String(format!("{}", std::net::Ipv6Addr::from(*bytes))),
-        Value::Subnet(ip, mask) => {
-            let prefix = mask.leading_ones();
-            JsonValue::String(format!(
-                "{}.{}.{}.{}/{}",
-                (ip >> 24) & 0xFF,
-                (ip >> 16) & 0xFF,
-                (ip >> 8) & 0xFF,
-                ip & 0xFF,
-                prefix
-            ))
-        }
-        Value::Port(p) => JsonValue::Number(*p as f64),
-        Value::Latitude(micro) => JsonValue::Number(*micro as f64 / 1_000_000.0),
-        Value::Longitude(micro) => JsonValue::Number(*micro as f64 / 1_000_000.0),
-        Value::GeoPoint(lat, lon) => JsonValue::String(format!(
-            "{:.6},{:.6}",
-            *lat as f64 / 1_000_000.0,
-            *lon as f64 / 1_000_000.0
-        )),
-        Value::Country2(c) => JsonValue::String(String::from_utf8_lossy(c).to_string()),
-        Value::Country3(c) => JsonValue::String(String::from_utf8_lossy(c).to_string()),
-        Value::Lang2(c) => JsonValue::String(String::from_utf8_lossy(c).to_string()),
-        Value::Lang5(c) => JsonValue::String(String::from_utf8_lossy(c).to_string()),
-        Value::Currency(c) => JsonValue::String(String::from_utf8_lossy(c).to_string()),
-        Value::ColorAlpha([r, g, b, a]) => {
-            JsonValue::String(format!("#{:02X}{:02X}{:02X}{:02X}", r, g, b, a))
-        }
-        Value::BigInt(v) => JsonValue::Number(*v as f64),
-        Value::KeyRef(col, key) => {
-            let mut object = Map::new();
-            object.insert("collection".to_string(), JsonValue::String(col.clone()));
-            object.insert("key".to_string(), JsonValue::String(key.clone()));
-            JsonValue::Object(object)
-        }
-        Value::DocRef(col, id) => {
-            let mut object = Map::new();
-            object.insert("collection".to_string(), JsonValue::String(col.clone()));
-            object.insert("id".to_string(), JsonValue::Number(*id as f64));
-            JsonValue::Object(object)
-        }
-        Value::TableRef(name) => JsonValue::String(name.clone()),
-        Value::PageRef(page_id) => JsonValue::Number(*page_id as f64),
-    }
 }
 
 fn metadata_value_to_json(value: &MetadataValue) -> JsonValue {

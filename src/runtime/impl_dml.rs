@@ -12,6 +12,7 @@ use crate::application::entity::{
     PatchEntityOperationType,
 };
 use crate::application::ports::RuntimeEntityPort;
+use crate::presentation::entity_json::storage_value_to_json;
 use crate::storage::unified::MetadataValue;
 
 use super::*;
@@ -807,25 +808,5 @@ fn metadata_u64_to_value(value: u64) -> MetadataValue {
         MetadataValue::Int(value as i64)
     } else {
         MetadataValue::Timestamp(value)
-    }
-}
-
-/// Convert a storage [`Value`] to a JSON [`crate::json::Value`] for patch
-/// operations.  The mapping is straightforward for scalars; blobs are
-/// hex-encoded and JSON byte slices are re-parsed.
-fn storage_value_to_json(val: &Value) -> crate::json::Value {
-    use crate::json::Value as JV;
-    match val {
-        Value::Null => JV::Null,
-        Value::Boolean(b) => JV::Bool(*b),
-        Value::Integer(i) => JV::Number(*i as f64),
-        Value::Float(f) => JV::Number(*f),
-        Value::Text(s) => JV::String(s.clone()),
-        Value::Blob(bytes) => JV::String(hex::encode(bytes)),
-        Value::Json(bytes) => {
-            let s = std::str::from_utf8(bytes).unwrap_or("null");
-            crate::json::from_str(s).unwrap_or(JV::Null)
-        }
-        _ => JV::Null,
     }
 }

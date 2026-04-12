@@ -17,6 +17,7 @@ use crate::json::{
 };
 use crate::mcp::{protocol, tools};
 use crate::presentation::entity_json::created_entity_output_json;
+use crate::presentation::entity_json::storage_value_to_json;
 use crate::presentation::query_result_json::{runtime_query_json, runtime_stats_json};
 use crate::runtime::{
     RedDBRuntime, RuntimeGraphCentralityAlgorithm, RuntimeGraphCommunityAlgorithm,
@@ -501,7 +502,7 @@ impl McpServer {
                 let mut obj = Map::new();
                 obj.insert("found".to_string(), JsonValue::Bool(true));
                 obj.insert("key".to_string(), JsonValue::String(key.to_string()));
-                obj.insert("value".to_string(), storage_value_to_json_local(&value));
+                obj.insert("value".to_string(), storage_value_to_json(&value));
                 obj.insert(
                     "entity_id".to_string(),
                     JsonValue::Number(entity_id.raw() as f64),
@@ -1085,17 +1086,6 @@ fn parse_metadata_arg(
 }
 
 /// Convert a storage Value to JSON (local helper to avoid visibility issues).
-fn storage_value_to_json_local(value: &Value) -> JsonValue {
-    match value {
-        Value::Null => JsonValue::Null,
-        Value::Integer(v) => JsonValue::Number(*v as f64),
-        Value::UnsignedInteger(v) => JsonValue::Number(*v as f64),
-        Value::Float(v) => JsonValue::Number(*v),
-        Value::Text(v) => JsonValue::String(v.clone()),
-        Value::Boolean(v) => JsonValue::Bool(*v),
-        _ => JsonValue::String(format!("{:?}", value)),
-    }
-}
 
 fn get_str_field<'a>(args: &'a JsonValue, field: &str) -> Result<&'a str, String> {
     args.get(field)
