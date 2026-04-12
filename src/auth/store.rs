@@ -299,9 +299,9 @@ impl AuthStore {
     }
 
     /// Convenience: get the 32-byte secret key for Value::Secret encryption.
-    /// Generated on first boot and stored at `red.vault.secret_key`.
+    /// Generated on first boot and stored at `red.secret.aes_key`.
     pub fn vault_secret_key(&self) -> Option<[u8; 32]> {
-        let hex_str = self.vault_kv_get("red.vault.secret_key")?;
+        let hex_str = self.vault_kv_get("red.secret.aes_key")?;
         let bytes = hex::decode(hex_str).ok()?;
         if bytes.len() == 32 {
             let mut key = [0u8; 32];
@@ -314,9 +314,9 @@ impl AuthStore {
 
     /// Generate and store the AES-256 secret key on first boot if not present.
     pub fn ensure_vault_secret_key(&self) {
-        if self.vault_kv_get("red.vault.secret_key").is_none() {
+        if self.vault_kv_get("red.secret.aes_key").is_none() {
             let key = random_bytes(32);
-            self.vault_kv_set("red.vault.secret_key".to_string(), hex::encode(key));
+            self.vault_kv_set("red.secret.aes_key".to_string(), hex::encode(key));
         }
     }
 

@@ -1,9 +1,9 @@
 //! Backup Scheduler — automatic periodic snapshots with optional remote upload.
 //!
 //! Runs as a background thread, configurable via `red_config`:
-//! - `red.backup.enabled` — enable/disable
-//! - `red.backup.interval_secs` — backup interval (default 3600 = 1 hour)
-//! - `red.backup.retention_count` — snapshots to keep
+//! - `red.config.backup.enabled` — enable/disable
+//! - `red.config.backup.interval_secs` — backup interval (default 3600 = 1 hour)
+//! - `red.config.backup.retention_count` — snapshots to keep
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};

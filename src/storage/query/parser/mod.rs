@@ -346,7 +346,7 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 if self.consume_ident_ci("CONFIG")? {
                     let key = self.expect_ident()?;
-                    // Allow dotted keys: red.ai.default.provider
+                    // Allow dotted keys: red.config.ai.default.provider
                     let mut full_key = key;
                     while self.consume(&Token::Dot)? {
                         let next = self.expect_ident_or_keyword()?;

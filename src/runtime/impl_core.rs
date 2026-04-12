@@ -253,13 +253,13 @@ impl RedDBRuntime {
                             _ => None,
                         });
                         let val = row.get_field("value");
-                        if key == Some("red.backup.enabled") {
+                        if key == Some("red.config.backup.enabled") {
                             backup_enabled = match val {
                                 Some(crate::storage::schema::Value::Boolean(true)) => true,
                                 Some(crate::storage::schema::Value::Text(s)) => s == "true",
                                 _ => false,
                             };
-                        } else if key == Some("red.backup.interval_secs") {
+                        } else if key == Some("red.config.backup.interval_secs") {
                             if let Some(crate::storage::schema::Value::Integer(n)) = val {
                                 backup_interval = *n as u64;
                             }

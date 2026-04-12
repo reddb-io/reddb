@@ -78,7 +78,7 @@ impl PointInTimeRecovery {
 
         Err(BackendError::Internal(
             "PITR restore requires backup backend configuration. \
-             Set red.backup.backend and ensure snapshots and WAL segments are archived."
+             Set red.config.backup.backend and ensure snapshots and WAL segments are archived."
                 .to_string(),
         ))
     }

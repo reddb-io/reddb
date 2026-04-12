@@ -194,7 +194,7 @@ pub struct VaultState {
     /// the certificate seal system.
     pub master_secret: Option<Vec<u8>>,
     /// Arbitrary encrypted key-value store for secrets.
-    /// Keys use dot-notation (e.g., "red.vault.secret_key", "stripe.api_key").
+    /// Keys use dot-notation with `red.secret.*` prefix (e.g., "red.secret.aes_key").
     /// Values are hex-encoded bytes or UTF-8 strings.
     pub kv: std::collections::HashMap<String, String>,
 }

@@ -916,7 +916,7 @@ impl RedDBServer {
 
         // Save API key
         if let Some(api_key) = &api_key {
-            let key_name = format!("red.ai.{}.{}.key", provider.token(), alias);
+            let key_name = format!("red.config.ai.{}.{}.key", provider.token(), alias);
             let _ = self
                 .entity_use_cases()
                 .delete_kv(RED_CONFIG_COLLECTION, &key_name);
@@ -933,7 +933,7 @@ impl RedDBServer {
 
         // Save API base URL
         if let Some(api_base) = &api_base {
-            let base_key = format!("red.ai.{}.{}.base_url", provider.token(), alias);
+            let base_key = format!("red.config.ai.{}.{}.base_url", provider.token(), alias);
             let _ = self
                 .entity_use_cases()
                 .delete_kv(RED_CONFIG_COLLECTION, &base_key);
@@ -981,10 +981,10 @@ impl RedDBServer {
         if is_default {
             let _ = self
                 .entity_use_cases()
-                .delete_kv(RED_CONFIG_COLLECTION, "red.ai.default.provider");
+                .delete_kv(RED_CONFIG_COLLECTION, "red.config.ai.default.provider");
             let _ = self.entity_use_cases().create_kv(CreateKvInput {
                 collection: RED_CONFIG_COLLECTION.to_string(),
-                key: "red.ai.default.provider".to_string(),
+                key: "red.config.ai.default.provider".to_string(),
                 value: Value::Text(provider.token().to_string()),
                 metadata: Vec::new(),
             });
@@ -993,10 +993,10 @@ impl RedDBServer {
                 .unwrap_or_else(|| provider.default_prompt_model().to_string());
             let _ = self
                 .entity_use_cases()
-                .delete_kv(RED_CONFIG_COLLECTION, "red.ai.default.model");
+                .delete_kv(RED_CONFIG_COLLECTION, "red.config.ai.default.model");
             let _ = self.entity_use_cases().create_kv(CreateKvInput {
                 collection: RED_CONFIG_COLLECTION.to_string(),
-                key: "red.ai.default.model".to_string(),
+                key: "red.config.ai.default.model".to_string(),
                 value: Value::Text(model.clone()),
                 metadata: Vec::new(),
             });

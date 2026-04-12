@@ -174,7 +174,7 @@ impl EcRegistry {
                     _ => None,
                 });
                 if let Some(k) = key {
-                    if let Some(rest) = k.strip_prefix("red.ec.") {
+                    if let Some(rest) = k.strip_prefix("red.config.ec.") {
                         if let Some(val) = row.get_field("value") {
                             if rest.ends_with(".fields") {
                                 let collection = rest.trim_end_matches(".fields");
@@ -205,7 +205,7 @@ impl EcRegistry {
                 let mut config = EcFieldConfig::new(&collection, &field);
 
                 // Load per-field overrides from red_config
-                let prefix = format!("red.ec.{}.{}", collection, field);
+                let prefix = format!("red.config.ec.{}.{}", collection, field);
                 manager.for_each_entity(|entity| {
                     if let Some(row) = entity.data.as_row() {
                         let key = row.get_field("key").and_then(|v| match v {
