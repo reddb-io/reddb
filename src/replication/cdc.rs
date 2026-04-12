@@ -42,20 +42,27 @@ pub struct ChangeEvent {
     pub entity_kind: String,
 }
 
+/// Internal state protected by a single lock (prevents lock-ordering deadlocks).
+struct CdcState {
+    current_lsn: u64,
+    events: VecDeque<ChangeEvent>,
+}
+
 /// CDC event buffer — circular buffer of change events.
 pub struct CdcBuffer {
-    events: RwLock<VecDeque<ChangeEvent>>,
+    state: RwLock<CdcState>,
     max_size: usize,
-    current_lsn: RwLock<u64>,
 }
 
 impl CdcBuffer {
     /// Create a new CDC buffer with maximum capacity.
     pub fn new(max_size: usize) -> Self {
         Self {
-            events: RwLock::new(VecDeque::with_capacity(max_size.min(10_000))),
+            state: RwLock::new(CdcState {
+                current_lsn: 0,
+                events: VecDeque::with_capacity(max_size.min(10_000)),
+            }),
             max_size,
-            current_lsn: RwLock::new(0),
         }
     }
 
@@ -67,9 +74,9 @@ impl CdcBuffer {
         entity_id: u64,
         entity_kind: &str,
     ) -> u64 {
-        let mut lsn = self.current_lsn.write().unwrap_or_else(|e| e.into_inner());
-        *lsn += 1;
-        let event_lsn = *lsn;
+        let mut state = self.state.write().unwrap_or_else(|e| e.into_inner());
+        state.current_lsn += 1;
+        let event_lsn = state.current_lsn;
 
         let event = ChangeEvent {
             lsn: event_lsn,
@@ -83,20 +90,19 @@ impl CdcBuffer {
             entity_kind: entity_kind.to_string(),
         };
 
-        let mut events = self.events.write().unwrap_or_else(|e| e.into_inner());
-        if events.len() >= self.max_size {
-            events.pop_front();
+        if state.events.len() >= self.max_size {
+            state.events.pop_front();
         }
-        events.push_back(event);
+        state.events.push_back(event);
 
         event_lsn
     }
 
     /// Poll for events since a given LSN.
-    /// Returns events with LSN > since_lsn, up to max_count.
     pub fn poll(&self, since_lsn: u64, max_count: usize) -> Vec<ChangeEvent> {
-        let events = self.events.read().unwrap_or_else(|e| e.into_inner());
-        events
+        let state = self.state.read().unwrap_or_else(|e| e.into_inner());
+        state
+            .events
             .iter()
             .filter(|e| e.lsn > since_lsn)
             .take(max_count)
@@ -106,23 +112,26 @@ impl CdcBuffer {
 
     /// Get the current (latest) LSN.
     pub fn current_lsn(&self) -> u64 {
-        *self.current_lsn.read().unwrap_or_else(|e| e.into_inner())
+        self.state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .current_lsn
     }
 
     /// Get the oldest available LSN (or None if empty).
     pub fn oldest_lsn(&self) -> Option<u64> {
-        let events = self.events.read().unwrap_or_else(|e| e.into_inner());
-        events.front().map(|e| e.lsn)
+        let state = self.state.read().unwrap_or_else(|e| e.into_inner());
+        state.events.front().map(|e| e.lsn)
     }
 
-    /// Get buffer stats.
+    /// Get buffer stats (single lock acquisition — no deadlock risk).
     pub fn stats(&self) -> CdcStats {
-        let events = self.events.read().unwrap_or_else(|e| e.into_inner());
+        let state = self.state.read().unwrap_or_else(|e| e.into_inner());
         CdcStats {
-            buffered_events: events.len(),
-            current_lsn: *self.current_lsn.read().unwrap_or_else(|e| e.into_inner()),
-            oldest_lsn: events.front().map(|e| e.lsn),
-            newest_lsn: events.back().map(|e| e.lsn),
+            buffered_events: state.events.len(),
+            current_lsn: state.current_lsn,
+            oldest_lsn: state.events.front().map(|e| e.lsn),
+            newest_lsn: state.events.back().map(|e| e.lsn),
         }
     }
 }

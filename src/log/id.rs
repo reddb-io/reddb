@@ -19,58 +19,56 @@ const SEQ_BITS: u64 = 12;
 const SEQ_MASK: u64 = (1 << SEQ_BITS) - 1; // 0xFFF
 
 /// Generator for timestamp-based log IDs.
+/// Uses a single AtomicU64 packing (timestamp << 12 | seq) so the entire
+/// state transitions atomically via fetch_add or compare_exchange.
 pub struct LogIdGenerator {
-    last_ts: AtomicU64,
-    seq: AtomicU64,
+    last_id: AtomicU64,
 }
 
 impl LogIdGenerator {
     pub fn new() -> Self {
         Self {
-            last_ts: AtomicU64::new(0),
-            seq: AtomicU64::new(0),
+            last_id: AtomicU64::new(0),
         }
     }
 
     /// Generate the next log ID. Monotonically increasing, thread-safe.
+    /// Single atomic operation — no TOCTOU race possible.
     pub fn next(&self) -> LogId {
-        let now_ns = now_micros();
+        let now = now_micros();
+        let candidate = now << SEQ_BITS;
 
-        let prev_ts = self.last_ts.load(Ordering::SeqCst);
-
-        if now_ns > prev_ts {
-            self.last_ts.store(now_ns, Ordering::SeqCst);
-            self.seq.store(0, Ordering::SeqCst);
-            LogId((now_ns << SEQ_BITS) | 0)
-        } else {
-            let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
-            if seq > SEQ_MASK {
-                // Overflow: advance timestamp by 1 to guarantee monotonicity
-                let advanced = prev_ts + 1;
-                self.last_ts.store(advanced, Ordering::SeqCst);
-                self.seq.store(0, Ordering::SeqCst);
-                LogId((advanced << SEQ_BITS) | 0)
+        loop {
+            let prev = self.last_id.load(Ordering::SeqCst);
+            let next = if candidate > prev {
+                candidate
             } else {
-                LogId((prev_ts << SEQ_BITS) | seq)
+                prev + 1
+            };
+
+            match self
+                .last_id
+                .compare_exchange(prev, next, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                Ok(_) => return LogId(next),
+                Err(_) => continue,
             }
         }
     }
 
     /// Restore generator state from the highest existing ID (for reload).
     pub fn restore(&self, max_id: u64) {
-        let ts = max_id >> SEQ_BITS;
-        let seq = max_id & SEQ_MASK;
-        let mut current = self.last_ts.load(Ordering::SeqCst);
-        while ts >= current {
+        loop {
+            let current = self.last_id.load(Ordering::SeqCst);
+            if max_id <= current {
+                break;
+            }
             match self
-                .last_ts
-                .compare_exchange(current, ts, Ordering::SeqCst, Ordering::SeqCst)
+                .last_id
+                .compare_exchange(current, max_id, Ordering::SeqCst, Ordering::SeqCst)
             {
-                Ok(_) => {
-                    self.seq.store(seq + 1, Ordering::SeqCst);
-                    break;
-                }
-                Err(updated) => current = updated,
+                Ok(_) => break,
+                Err(_) => continue,
             }
         }
     }
@@ -188,5 +186,38 @@ mod tests {
         for i in 1..ids.len() {
             assert!(ids[i] > ids[i - 1], "monotonic at index {}", i);
         }
+    }
+
+    #[test]
+    fn test_concurrent_no_collision() {
+        let gen = std::sync::Arc::new(LogIdGenerator::new());
+        let mut all_ids = Vec::new();
+
+        std::thread::scope(|s| {
+            let mut handles = Vec::new();
+            for _ in 0..10 {
+                let g = std::sync::Arc::clone(&gen);
+                handles.push(s.spawn(move || {
+                    let mut ids = Vec::with_capacity(1000);
+                    for _ in 0..1000 {
+                        ids.push(g.next().raw());
+                    }
+                    ids
+                }));
+            }
+            for h in handles {
+                all_ids.extend(h.join().unwrap());
+            }
+        });
+
+        assert_eq!(all_ids.len(), 10_000);
+        let mut deduped = all_ids.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(
+            all_ids.len(),
+            deduped.len(),
+            "no collisions across 10 threads × 1000 IDs"
+        );
     }
 }

@@ -36,13 +36,16 @@ pub fn consolidate(
     let mut result = ConsolidationResult::default();
 
     for (tid, transactions) in groups {
+        // Mark applied FIRST — if crash occurs after this but before write,
+        // transactions won't be re-processed (no double-counting).
+        // The value update is idempotent and will be recomputed on next consolidation.
+        let applied_ids: Vec<EntityId> = transactions.iter().map(|(eid, _)| *eid).collect();
+        mark_transactions_applied(store, &tx_collection, &applied_ids);
+
         match consolidate_record(store, config, tid, &transactions) {
             Ok(applied_count) => {
                 result.records_consolidated += 1;
                 result.transactions_applied += applied_count;
-
-                let applied_ids: Vec<EntityId> = transactions.iter().map(|(eid, _)| *eid).collect();
-                mark_transactions_applied(store, &tx_collection, &applied_ids);
             }
             Err(_) => {
                 result.errors += 1;
