@@ -44,7 +44,8 @@ impl RedDBRuntime {
 
             match query.entity_type {
                 InsertEntityType::Row => {
-                    let (fields, mut metadata) = split_insert_metadata(&query.columns, row_values)?;
+                    let (fields, mut metadata) =
+                        split_insert_metadata(self, &query.columns, row_values)?;
                     merge_with_clauses(
                         &mut metadata,
                         query.ttl_ms,
@@ -62,7 +63,7 @@ impl RedDBRuntime {
                 }
                 InsertEntityType::Node => {
                     let (node_values, mut metadata) =
-                        split_insert_metadata(&query.columns, row_values)?;
+                        split_insert_metadata(self, &query.columns, row_values)?;
                     merge_with_clauses(
                         &mut metadata,
                         query.ttl_ms,
@@ -88,7 +89,7 @@ impl RedDBRuntime {
                 }
                 InsertEntityType::Edge => {
                     let (edge_values, mut metadata) =
-                        split_insert_metadata(&query.columns, row_values)?;
+                        split_insert_metadata(self, &query.columns, row_values)?;
                     merge_with_clauses(
                         &mut metadata,
                         query.ttl_ms,
@@ -118,7 +119,7 @@ impl RedDBRuntime {
                 }
                 InsertEntityType::Vector => {
                     let (vector_values, mut metadata) =
-                        split_insert_metadata(&query.columns, row_values)?;
+                        split_insert_metadata(self, &query.columns, row_values)?;
                     merge_with_clauses(
                         &mut metadata,
                         query.ttl_ms,
@@ -140,7 +141,7 @@ impl RedDBRuntime {
                 }
                 InsertEntityType::Document => {
                     let (document_values, mut metadata) =
-                        split_insert_metadata(&query.columns, row_values)?;
+                        split_insert_metadata(self, &query.columns, row_values)?;
                     merge_with_clauses(
                         &mut metadata,
                         query.ttl_ms,
@@ -162,7 +163,7 @@ impl RedDBRuntime {
                 }
                 InsertEntityType::Kv => {
                     let (kv_values, mut metadata) =
-                        split_insert_metadata(&query.columns, row_values)?;
+                        split_insert_metadata(self, &query.columns, row_values)?;
                     merge_with_clauses(
                         &mut metadata,
                         query.ttl_ms,
@@ -484,40 +485,78 @@ fn resolve_sql_ttl_metadata_key(column: &str) -> Option<&'static str> {
 /// Sentinel prefix produced by the parser for `PASSWORD('...')` and
 /// `SECRET('...')` literals. The runtime strips this marker and
 /// applies the actual crypto transform during INSERT execution.
-const PLAINTEXT_SENTINEL: &str = "@@plain@@";
+pub(crate) const PLAINTEXT_SENTINEL: &str = "@@plain@@";
 
-/// Apply the argon2id hash / AES-256-GCM encrypt transform to any
-/// values carrying the plaintext sentinel. For `Secret`, encryption
-/// is deferred to a follow-up commit that wires the vault AES key
-/// into the runtime — for now, sentinel-marked `Secret` values pass
-/// through unchanged so the ciphertext is NOT written to disk.
-fn resolve_crypto_sentinels(value: Value) -> RedDBResult<Value> {
-    match value {
-        Value::Password(marked) => {
-            if let Some(plain) = marked.strip_prefix(PLAINTEXT_SENTINEL) {
-                Ok(Value::Password(crate::auth::store::hash_password(plain)))
-            } else {
-                Ok(Value::Password(marked))
+impl RedDBRuntime {
+    /// Strip the plaintext sentinel from a `Value::Password` or
+    /// `Value::Secret` produced by the parser and apply the real
+    /// crypto transform. `Password` is always hashed with argon2id.
+    /// `Secret` is encrypted with AES-256-GCM keyed by the vault
+    /// when `red.config.secret.auto_encrypt = true` (default).
+    pub(crate) fn resolve_crypto_sentinel(&self, value: Value) -> RedDBResult<Value> {
+        match value {
+            Value::Password(marked) => {
+                if let Some(plain) = marked.strip_prefix(PLAINTEXT_SENTINEL) {
+                    Ok(Value::Password(crate::auth::store::hash_password(plain)))
+                } else {
+                    Ok(Value::Password(marked))
+                }
             }
-        }
-        Value::Secret(bytes) => {
-            if bytes.starts_with(PLAINTEXT_SENTINEL.as_bytes()) {
-                // Vault-backed encryption lands in a follow-up.
-                Err(RedDBError::Query(
-                    "SECRET() column encryption requires the vault to be \
-                     wired into the runtime (not yet implemented). Insert \
-                     pre-encrypted bytes instead."
-                        .to_string(),
-                ))
-            } else {
-                Ok(Value::Secret(bytes))
+            Value::Secret(bytes) => {
+                if bytes.starts_with(PLAINTEXT_SENTINEL.as_bytes()) {
+                    if !self.secret_auto_encrypt() {
+                        return Err(RedDBError::Query(
+                            "SECRET() literal rejected: red.config.secret.auto_encrypt \
+                             is false. Insert pre-encrypted bytes directly instead."
+                                .to_string(),
+                        ));
+                    }
+                    let key = self.secret_aes_key().ok_or_else(|| {
+                        RedDBError::Query(
+                            "SECRET() column encryption requires a bootstrapped \
+                             vault (red.secret.aes_key is missing). Start the server \
+                             with --vault to enable."
+                                .to_string(),
+                        )
+                    })?;
+                    let plain = &bytes[PLAINTEXT_SENTINEL.len()..];
+                    Ok(Value::Secret(encrypt_secret_payload(&key, plain)))
+                } else {
+                    Ok(Value::Secret(bytes))
+                }
             }
+            other => Ok(other),
         }
-        other => Ok(other),
     }
 }
 
+/// Encode an AES-256-GCM ciphertext as `[12-byte nonce][ciphertext||tag]`.
+/// This is the on-disk representation of `Value::Secret`.
+fn encrypt_secret_payload(key: &[u8; 32], plaintext: &[u8]) -> Vec<u8> {
+    let nonce_bytes = crate::auth::store::random_bytes(12);
+    let mut nonce = [0u8; 12];
+    nonce.copy_from_slice(&nonce_bytes[..12]);
+    let ct = crate::crypto::aes_gcm::aes256_gcm_encrypt(key, &nonce, b"reddb.secret", plaintext);
+    let mut out = Vec::with_capacity(12 + ct.len());
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&ct);
+    out
+}
+
+/// Decode a `Value::Secret` payload back to plaintext. Returns
+/// `None` when the payload is too short or AES-GCM authentication
+/// fails (tampered or wrong key).
+pub(crate) fn decrypt_secret_payload(key: &[u8; 32], payload: &[u8]) -> Option<Vec<u8>> {
+    if payload.len() < 12 {
+        return None;
+    }
+    let mut nonce = [0u8; 12];
+    nonce.copy_from_slice(&payload[..12]);
+    crate::crypto::aes_gcm::aes256_gcm_decrypt(key, &nonce, b"reddb.secret", &payload[12..]).ok()
+}
+
 fn split_insert_metadata(
+    runtime: &RedDBRuntime,
     columns: &[String],
     values: &[Value],
 ) -> RedDBResult<(Vec<(String, Value)>, Vec<(String, MetadataValue)>)> {
@@ -533,7 +572,10 @@ fn split_insert_metadata(
             ));
             continue;
         }
-        fields.push((column.clone(), resolve_crypto_sentinels(value.clone())?));
+        fields.push((
+            column.clone(),
+            runtime.resolve_crypto_sentinel(value.clone())?,
+        ));
     }
 
     Ok((fields, metadata))

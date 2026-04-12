@@ -46,6 +46,7 @@ impl RedDBRuntime {
                 )),
                 ec_registry: Arc::new(crate::ec::config::EcRegistry::new()),
                 ec_worker: crate::ec::worker::EcWorker::new(),
+                auth_store: std::sync::RwLock::new(None),
             }),
         };
 
@@ -224,6 +225,13 @@ impl RedDBRuntime {
                         "buffer_size": 100000
                     }),
                 );
+                store.set_config_tree(
+                    "red.config.secret",
+                    &crate::json!({
+                        "auto_encrypt": true,
+                        "auto_decrypt": true
+                    }),
+                );
             }
         }
 
@@ -298,6 +306,102 @@ impl RedDBRuntime {
 
     pub fn db(&self) -> Arc<RedDB> {
         Arc::clone(&self.inner.db)
+    }
+
+    /// Inject an AuthStore into the runtime. Called by server boot
+    /// after the vault has been bootstrapped, so that `Value::Secret`
+    /// auto-encrypt/decrypt can reach the vault AES key.
+    pub fn set_auth_store(&self, store: Arc<crate::auth::store::AuthStore>) {
+        if let Ok(mut slot) = self.inner.auth_store.write() {
+            *slot = Some(store);
+        }
+    }
+
+    /// Returns the vault AES key (`red.secret.aes_key`) if an auth
+    /// store is wired and a key has been generated. Used by the
+    /// `Value::Secret` encrypt/decrypt pipeline.
+    pub(crate) fn secret_aes_key(&self) -> Option<[u8; 32]> {
+        let guard = self.inner.auth_store.read().ok()?;
+        guard.as_ref().and_then(|s| s.vault_secret_key())
+    }
+
+    /// Resolve a boolean flag from `red_config`. Defaults to `default`
+    /// when the key is missing or not coercible. If the same key has
+    /// been written multiple times (SET CONFIG appends new rows), the
+    /// most recent entity wins.
+    pub(crate) fn config_bool(&self, key: &str, default: bool) -> bool {
+        let store = self.inner.db.store();
+        let Some(manager) = store.get_collection("red_config") else {
+            return default;
+        };
+        let mut result = default;
+        let mut latest_id: u64 = 0;
+        manager.for_each_entity(|entity| {
+            if let Some(row) = entity.data.as_row() {
+                let entry_key = row.get_field("key").and_then(|v| match v {
+                    crate::storage::schema::Value::Text(s) => Some(s.as_str()),
+                    _ => None,
+                });
+                if entry_key == Some(key) {
+                    let id = entity.id.raw();
+                    if id >= latest_id {
+                        latest_id = id;
+                        result = match row.get_field("value") {
+                            Some(crate::storage::schema::Value::Boolean(b)) => *b,
+                            Some(crate::storage::schema::Value::Text(s)) => {
+                                matches!(s.as_str(), "true" | "TRUE" | "True" | "1")
+                            }
+                            Some(crate::storage::schema::Value::Integer(n)) => *n != 0,
+                            _ => default,
+                        };
+                    }
+                }
+            }
+            true
+        });
+        result
+    }
+
+    /// Whether `SECRET('...')` literals should be encrypted with the
+    /// vault AES key on INSERT. Default `true`.
+    pub(crate) fn secret_auto_encrypt(&self) -> bool {
+        self.config_bool("red.config.secret.auto_encrypt", true)
+    }
+
+    /// Whether `Value::Secret` columns should be decrypted back to
+    /// plaintext on SELECT when the vault is unsealed. Default `true`.
+    /// Turning this off keeps secrets masked as `***` even while the
+    /// vault is open — useful for audit trails or read-only exports.
+    pub(crate) fn secret_auto_decrypt(&self) -> bool {
+        self.config_bool("red.config.secret.auto_decrypt", true)
+    }
+
+    /// Walk every record in `result` and swap `Value::Secret(bytes)`
+    /// for the decrypted plaintext when the runtime has the vault
+    /// AES key AND `red.config.secret.auto_decrypt = true`. If the
+    /// key is missing, the vault is sealed, or auto_decrypt is off,
+    /// secrets are left as `Value::Secret` which every formatter
+    /// (Display, JSON) already masks as `***`.
+    pub(crate) fn apply_secret_decryption(&self, result: &mut RuntimeQueryResult) {
+        if !self.secret_auto_decrypt() {
+            return;
+        }
+        let Some(key) = self.secret_aes_key() else {
+            return;
+        };
+        for record in result.result.records.iter_mut() {
+            for value in record.values.values_mut() {
+                if let Value::Secret(ref bytes) = value {
+                    if let Some(plain) =
+                        super::impl_dml::decrypt_secret_payload(&key, bytes.as_slice())
+                    {
+                        if let Ok(text) = String::from_utf8(plain) {
+                            *value = Value::Text(text);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Emit a CDC change event and replicate to WAL buffer.
@@ -620,6 +724,11 @@ impl RedDBRuntime {
                     _ => crate::serde_json::Value::String(value.to_string()),
                 };
                 store.set_config_tree(key, &json_val);
+                // Config changes can flip runtime behavior mid-session
+                // (auto_decrypt, auto_encrypt, etc.) — invalidate the
+                // result cache so subsequent reads re-execute against
+                // the new config.
+                self.invalidate_result_cache();
                 Ok(RuntimeQueryResult::ok_message(
                     query.to_string(),
                     &format!("config set: {key}"),
@@ -679,6 +788,16 @@ impl RedDBRuntime {
                 })
             }
         };
+
+        // Decrypt Value::Secret columns in-place before caching, so
+        // cached results match the post-decrypt shape and repeat
+        // queries skip the per-row AES-GCM pass.
+        let mut query_result = query_result;
+        if let Ok(ref mut result) = query_result {
+            if result.statement_type == "select" {
+                self.apply_secret_decryption(result);
+            }
+        }
 
         // Cache SELECT results for 30s (skip caching pre-serialized results to avoid large clones)
         if let Ok(ref result) = query_result {

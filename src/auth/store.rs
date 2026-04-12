@@ -752,7 +752,7 @@ fn random_hex(n: usize) -> String {
 
 /// Generate `n` cryptographically random bytes using the OS CSPRNG,
 /// then mix with SHA-256 for domain separation.
-fn random_bytes(n: usize) -> Vec<u8> {
+pub(crate) fn random_bytes(n: usize) -> Vec<u8> {
     let mut buf = vec![0u8; n.max(32)];
     if os_random::fill_bytes(&mut buf).is_err() {
         // Fallback: use system time and pointers as entropy (best-effort).

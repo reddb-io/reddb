@@ -558,6 +558,11 @@ struct RuntimeInner {
     )>,
     ec_registry: Arc<crate::ec::config::EcRegistry>,
     ec_worker: crate::ec::worker::EcWorker,
+    /// Optional AuthStore — injected by server boot when auth is
+    /// enabled. Required for `Value::Secret` auto-encrypt/decrypt
+    /// because the AES key lives in the vault KV under the
+    /// `red.secret.aes_key` entry.
+    auth_store: std::sync::RwLock<Option<Arc<crate::auth::store::AuthStore>>>,
 }
 
 #[derive(Clone)]

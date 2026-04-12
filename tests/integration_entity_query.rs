@@ -1974,3 +1974,73 @@ fn test_password_hash_and_verify() {
         assert_eq!(format!("{pw_value}"), "***");
     }
 }
+
+#[test]
+fn test_secret_encrypt_and_decrypt() {
+    use std::sync::Arc;
+
+    let rt = rt();
+
+    // Without an AuthStore wired into the runtime, `SECRET('...')`
+    // in INSERT must fail with a clear error — the AES key lives in
+    // the vault and is inaccessible here.
+    let without_vault = QueryUseCases::new(&rt).execute(ExecuteQueryInput {
+        query: "INSERT INTO creds (name, token) VALUES ('stripe', SECRET('sk_live_abc'))".into(),
+    });
+    assert!(without_vault.is_err(), "SECRET() without a vault must fail");
+
+    // Wire a bootstrapped AuthStore with an auto-generated AES key.
+    let auth = Arc::new(reddb::prelude::AuthStore::new(
+        reddb::prelude::AuthConfig::default(),
+    ));
+    auth.ensure_vault_secret_key();
+    rt.set_auth_store(Arc::clone(&auth));
+
+    let query = QueryUseCases::new(&rt);
+
+    // Happy path: INSERT encrypts, SELECT decrypts (auto_decrypt=true default).
+    query
+        .execute(ExecuteQueryInput {
+            query: "INSERT INTO creds (name, token) VALUES ('stripe', SECRET('sk_live_abc'))"
+                .into(),
+        })
+        .expect("INSERT with SECRET() must succeed once the vault is wired");
+
+    let decrypted = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT name, token FROM creds".into(),
+        })
+        .expect("SELECT should succeed");
+    let row = decrypted.result.records.first().expect("at least one row");
+    let tok_val = row.values.get("token").expect("token column present");
+    assert_eq!(
+        tok_val,
+        &Value::Text("sk_live_abc".to_string()),
+        "auto_decrypt=true should surface plaintext, got {tok_val:?}"
+    );
+
+    // Flip auto_decrypt off: SELECT should return the raw Value::Secret
+    // (bytes) which formatters mask.
+    query
+        .execute(ExecuteQueryInput {
+            query: "SET CONFIG red.config.secret.auto_decrypt = false".into(),
+        })
+        .expect("SET CONFIG should succeed");
+
+    let masked = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT name, token FROM creds".into(),
+        })
+        .expect("SELECT with auto_decrypt=false should succeed");
+    let row = masked.result.records.first().expect("at least one row");
+    let tok_val = row.values.get("token").expect("token column present");
+    match tok_val {
+        Value::Secret(bytes) => {
+            assert!(
+                !String::from_utf8_lossy(bytes).contains("sk_live_abc"),
+                "ciphertext must not reveal plaintext"
+            );
+        }
+        other => panic!("expected Value::Secret when auto_decrypt is off, got {other:?}"),
+    }
+}

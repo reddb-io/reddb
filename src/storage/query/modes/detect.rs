@@ -62,6 +62,8 @@ pub fn detect_mode(input: &str) -> QueryMode {
         || lower.starts_with("alter ")
         || lower.starts_with("graph ")
         || lower.starts_with("search ")
+        || lower.starts_with("set config ")
+        || lower.starts_with("show config")
     {
         // But check if it's SPARQL-style SELECT with ?variable
         if lower.starts_with("select ") && lower.contains(" ?") {
