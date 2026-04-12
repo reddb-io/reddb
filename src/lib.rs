@@ -20,6 +20,7 @@ pub mod cli;
 pub mod client;
 pub mod config;
 pub mod crypto;
+pub mod ec;
 pub mod engine;
 pub mod grpc;
 pub mod health;

@@ -30,6 +30,9 @@ impl RedDBServer {
             ("POST", "/ai/prompt") => self.handle_ai_prompt(body),
             ("POST", "/ai/credentials") => self.handle_ai_credentials(body),
 
+            // Eventual Consistency endpoints
+            ("GET", "/ec/status") => handlers_ec::handle_ec_global_status(&self.runtime),
+
             // CDC & Backup endpoints
             ("GET", "/changes") => self.handle_cdc_poll(&query),
             ("GET", "/backup/status") => self.handle_backup_status(),
@@ -577,6 +580,51 @@ impl RedDBServer {
             ("POST", "/graph/jobs/stale") => self.handle_analytics_job_stale(body),
             ("POST", "/graph/jobs/fail") => self.handle_analytics_job_fail(body),
             _ => {
+                // EC dynamic routes: /ec/{collection}/{field}/{action}
+                if path.starts_with("/ec/") {
+                    let parts: Vec<&str> = path[4..].split('/').collect();
+                    if parts.len() >= 3 {
+                        let ec_collection = parts[0];
+                        let ec_field = parts[1];
+                        let ec_action = parts[2];
+                        return match (method.as_str(), ec_action) {
+                            ("POST", "add") => handlers_ec::handle_ec_mutate(
+                                &self.runtime,
+                                ec_collection,
+                                ec_field,
+                                "add",
+                                body,
+                            ),
+                            ("POST", "sub") => handlers_ec::handle_ec_mutate(
+                                &self.runtime,
+                                ec_collection,
+                                ec_field,
+                                "sub",
+                                body,
+                            ),
+                            ("POST", "set") => handlers_ec::handle_ec_mutate(
+                                &self.runtime,
+                                ec_collection,
+                                ec_field,
+                                "set",
+                                body,
+                            ),
+                            ("POST", "consolidate") => handlers_ec::handle_ec_consolidate(
+                                &self.runtime,
+                                ec_collection,
+                                ec_field,
+                            ),
+                            ("GET", "status") => handlers_ec::handle_ec_status(
+                                &self.runtime,
+                                ec_collection,
+                                ec_field,
+                                &query,
+                            ),
+                            _ => json_error(405, "method not allowed for EC endpoint"),
+                        };
+                    }
+                }
+
                 if method == "GET" {
                     if let Some(collection) = collection_from_schema_path(&path) {
                         return self.handle_describe_collection(collection);

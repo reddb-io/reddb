@@ -41,6 +41,8 @@ impl RedDBRuntime {
                     crate::storage::query::planner::cache::PlanCache::new(1000),
                 ),
                 result_cache: std::sync::RwLock::new(HashMap::new()),
+                ec_registry: Arc::new(crate::ec::config::EcRegistry::new()),
+                ec_worker: crate::ec::worker::EcWorker::new(),
             }),
         };
 
@@ -271,6 +273,20 @@ impl RedDBRuntime {
                     .inner
                     .backup_scheduler
                     .start(move || rt.trigger_backup().map_err(|e| format!("{}", e)));
+            }
+        }
+
+        // Load EC registry from red_config and start worker
+        {
+            runtime
+                .inner
+                .ec_registry
+                .load_from_config_store(runtime.inner.db.store().as_ref());
+            if !runtime.inner.ec_registry.async_configs().is_empty() {
+                runtime.inner.ec_worker.start(
+                    Arc::clone(&runtime.inner.ec_registry),
+                    Arc::clone(&runtime.inner.db.store()),
+                );
             }
         }
 

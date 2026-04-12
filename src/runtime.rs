@@ -553,6 +553,8 @@ struct RuntimeInner {
     backup_scheduler: crate::replication::scheduler::BackupScheduler,
     query_cache: std::sync::RwLock<crate::storage::query::planner::cache::PlanCache>,
     result_cache: std::sync::RwLock<HashMap<String, (RuntimeQueryResult, std::time::Instant)>>,
+    ec_registry: Arc<crate::ec::config::EcRegistry>,
+    ec_worker: crate::ec::worker::EcWorker,
 }
 
 #[derive(Clone)]
@@ -570,6 +572,7 @@ mod health_connection;
 mod impl_core;
 mod impl_ddl;
 mod impl_dml;
+mod impl_ec;
 mod impl_graph;
 mod impl_graph_commands;
 mod impl_native;
