@@ -692,7 +692,7 @@ impl AuthStore {
 /// Hash a password using Argon2id.
 ///
 /// Format: `argon2id$<salt_hex>$<hash_hex>`
-fn hash_password(password: &str) -> String {
+pub(crate) fn hash_password(password: &str) -> String {
     let salt = random_bytes(16);
     let params = auth_argon2_params();
     let hash = derive_key(password.as_bytes(), &salt, &params);
@@ -700,7 +700,7 @@ fn hash_password(password: &str) -> String {
 }
 
 /// Verify a password against a stored `argon2id$<salt>$<hash>` string.
-fn verify_password(password: &str, stored_hash: &str) -> bool {
+pub(crate) fn verify_password(password: &str, stored_hash: &str) -> bool {
     let parts: Vec<&str> = stored_hash.splitn(3, '$').collect();
     if parts.len() != 3 || parts[0] != "argon2id" {
         return false;

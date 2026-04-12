@@ -975,10 +975,18 @@ fn execute_runtime_canonical_table_query_indexed(
     }
 
     // ── FAST PATH: Unfiltered scan — bypass planner for simple SELECT * ──
+    // Skipped when the projection list contains scalar function calls
+    // (e.g. VERIFY_PASSWORD(...), UPPER(...)), since the fast path
+    // returns raw records without running project_runtime_record.
+    let has_scalar_function = query
+        .columns
+        .iter()
+        .any(|p| matches!(p, Projection::Function(_, _) | Projection::Expression(_, _)));
     if query.filter.is_none()
         && query.group_by.is_empty()
         && query.having.is_none()
         && query.expand.is_none()
+        && !has_scalar_function
     {
         let mut records = scan_runtime_table_source_records(db, query.table.as_str())?;
         let table_name = query.table.as_str();

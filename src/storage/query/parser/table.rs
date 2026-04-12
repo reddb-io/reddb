@@ -28,6 +28,7 @@ fn is_scalar_function(name: &str) -> bool {
             | "LAST"
             | "ARRAY_AGG"
             | "COUNT_DISTINCT"
+            | "VERIFY_PASSWORD"
     )
 }
 use super::Parser;

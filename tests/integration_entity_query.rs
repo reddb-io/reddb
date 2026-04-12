@@ -1883,3 +1883,94 @@ fn test_create_table_with_ttl_applies_default_to_api_insert() {
         "default table TTL should be applied to inserted rows"
     );
 }
+
+#[test]
+fn test_password_hash_and_verify() {
+    let rt = rt();
+    let query = QueryUseCases::new(&rt);
+
+    // INSERT with PASSWORD('plaintext') literal should store an
+    // argon2id hash, not the plaintext.
+    let insert = query.execute(ExecuteQueryInput {
+        query: "INSERT INTO accounts (username, pw) VALUES ('alice', PASSWORD('MyP@ss123'))".into(),
+    });
+    assert!(
+        insert.is_ok(),
+        "INSERT with PASSWORD() literal should succeed: {:?}",
+        insert.err()
+    );
+
+    // VERIFY_PASSWORD is exposed as a projection (scalar function).
+    // Correct candidate → true; wrong candidate → false.
+    let matching = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT VERIFY_PASSWORD(pw, 'MyP@ss123') AS ok FROM accounts".into(),
+        })
+        .expect("VERIFY_PASSWORD SELECT should succeed");
+    let row = matching
+        .result
+        .records
+        .first()
+        .expect("at least one row for matching candidate");
+    let ok = row
+        .values
+        .get("ok")
+        .cloned()
+        .unwrap_or(Value::Boolean(false));
+    assert_eq!(
+        ok,
+        Value::Boolean(true),
+        "correct password must return Boolean(true), got {ok:?}"
+    );
+
+    let non_matching = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT VERIFY_PASSWORD(pw, 'wrong') AS ok FROM accounts".into(),
+        })
+        .expect("VERIFY_PASSWORD SELECT (wrong candidate) should succeed");
+    let row = non_matching
+        .result
+        .records
+        .first()
+        .expect("at least one row for wrong candidate");
+    let ok = row
+        .values
+        .get("ok")
+        .cloned()
+        .unwrap_or(Value::Boolean(true));
+    assert_eq!(
+        ok,
+        Value::Boolean(false),
+        "wrong password must return Boolean(false), got {ok:?}"
+    );
+
+    // Raw SELECT of the password column must never surface the
+    // plaintext — the stored hash is wrapped in Value::Password and
+    // the Display impl masks it. The hash itself still lives in the
+    // record so VERIFY_PASSWORD can compare against it internally.
+    let raw = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT pw FROM accounts".into(),
+        })
+        .expect("raw SELECT of password should succeed");
+    let row = raw.result.records.first().expect("at least one row");
+    if let Some(pw_value) = row.values.get("pw") {
+        // The value must be wrapped in Value::Password (not raw Text
+        // that would leak the hash or plaintext through formatters).
+        match pw_value {
+            Value::Password(h) => {
+                assert!(
+                    h.starts_with("argon2id$"),
+                    "stored password must be an argon2id hash, got: {h}"
+                );
+                assert!(
+                    !h.contains("MyP@ss123"),
+                    "plaintext must not be in the stored hash"
+                );
+            }
+            other => panic!("expected Value::Password, got {other:?}"),
+        }
+        // Display must mask the value.
+        assert_eq!(format!("{pw_value}"), "***");
+    }
+}

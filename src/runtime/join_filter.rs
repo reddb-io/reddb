@@ -631,7 +631,17 @@ pub(super) fn projection_name(projection: &Projection) -> String {
         Projection::All => "*".to_string(),
         Projection::Column(column) => column.clone(),
         Projection::Alias(_, alias) => alias.clone(),
-        Projection::Function(name, _) => name.clone(),
+        // Scalar function projections encode `FUNC(...) AS alias`
+        // as `"FUNC:alias"` in the first tuple field. If an alias
+        // is present, expose it as the output column name; otherwise
+        // fall back to the function name.
+        Projection::Function(name, _) => {
+            if let Some((_, alias)) = name.split_once(':') {
+                alias.to_string()
+            } else {
+                name.clone()
+            }
+        }
         Projection::Expression(_, alias) => alias.clone().unwrap_or_else(|| "expr".to_string()),
         Projection::Field(field, alias) => alias.clone().unwrap_or_else(|| field_ref_name(field)),
     }
@@ -1470,6 +1480,25 @@ fn evaluate_scalar_function(
                 }
             }
             Some(Value::Null)
+        }
+        "VERIFY_PASSWORD" => {
+            // VERIFY_PASSWORD(column, 'candidate') — compares a
+            // plaintext candidate against the argon2id hash stored in
+            // a Value::Password column. Returns a boolean.
+            let stored = resolve_scalar_arg(args, 0, source)?;
+            let candidate = resolve_scalar_arg(args, 1, source)?;
+            let hash = match stored {
+                Value::Password(h) => h,
+                Value::Text(h) => h,
+                _ => return Some(Value::Boolean(false)),
+            };
+            let plain = match candidate {
+                Value::Text(s) => s,
+                _ => return Some(Value::Boolean(false)),
+            };
+            Some(Value::Boolean(crate::auth::store::verify_password(
+                &plain, &hash,
+            )))
         }
         _ => Some(Value::Null),
     }

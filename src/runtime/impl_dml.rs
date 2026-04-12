@@ -481,6 +481,42 @@ fn resolve_sql_ttl_metadata_key(column: &str) -> Option<&'static str> {
     }
 }
 
+/// Sentinel prefix produced by the parser for `PASSWORD('...')` and
+/// `SECRET('...')` literals. The runtime strips this marker and
+/// applies the actual crypto transform during INSERT execution.
+const PLAINTEXT_SENTINEL: &str = "@@plain@@";
+
+/// Apply the argon2id hash / AES-256-GCM encrypt transform to any
+/// values carrying the plaintext sentinel. For `Secret`, encryption
+/// is deferred to a follow-up commit that wires the vault AES key
+/// into the runtime — for now, sentinel-marked `Secret` values pass
+/// through unchanged so the ciphertext is NOT written to disk.
+fn resolve_crypto_sentinels(value: Value) -> RedDBResult<Value> {
+    match value {
+        Value::Password(marked) => {
+            if let Some(plain) = marked.strip_prefix(PLAINTEXT_SENTINEL) {
+                Ok(Value::Password(crate::auth::store::hash_password(plain)))
+            } else {
+                Ok(Value::Password(marked))
+            }
+        }
+        Value::Secret(bytes) => {
+            if bytes.starts_with(PLAINTEXT_SENTINEL.as_bytes()) {
+                // Vault-backed encryption lands in a follow-up.
+                Err(RedDBError::Query(
+                    "SECRET() column encryption requires the vault to be \
+                     wired into the runtime (not yet implemented). Insert \
+                     pre-encrypted bytes instead."
+                        .to_string(),
+                ))
+            } else {
+                Ok(Value::Secret(bytes))
+            }
+        }
+        other => Ok(other),
+    }
+}
+
 fn split_insert_metadata(
     columns: &[String],
     values: &[Value],
@@ -497,7 +533,7 @@ fn split_insert_metadata(
             ));
             continue;
         }
-        fields.push((column.clone(), value.clone()));
+        fields.push((column.clone(), resolve_crypto_sentinels(value.clone())?));
     }
 
     Ok((fields, metadata))

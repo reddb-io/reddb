@@ -345,6 +345,27 @@ impl<'a> Parser<'a> {
 
     /// Parse a single literal value (string, number, true, false, null, array)
     pub(crate) fn parse_literal_value(&mut self) -> Result<Value, ParseError> {
+        // Recognize PASSWORD('plaintext') and SECRET('plaintext') as
+        // typed literal constructors. The parser stores them as
+        // sentinel-prefixed values so that the INSERT executor can
+        // apply the crypto transform (argon2id hash / AES-256-GCM
+        // encrypt) without the parser depending on auth or crypto
+        // subsystems.
+        if let Token::Ident(name) = self.peek().clone() {
+            let upper = name.to_uppercase();
+            if upper == "PASSWORD" || upper == "SECRET" {
+                self.advance()?; // consume ident
+                self.expect(Token::LParen)?;
+                let plaintext = self.parse_string()?;
+                self.expect(Token::RParen)?;
+                return Ok(match upper.as_str() {
+                    "PASSWORD" => Value::Password(format!("@@plain@@{plaintext}")),
+                    "SECRET" => Value::Secret(format!("@@plain@@{plaintext}").into_bytes()),
+                    _ => unreachable!(),
+                });
+            }
+        }
+
         match self.peek().clone() {
             Token::String(s) => {
                 let s = s.clone();
