@@ -66,11 +66,6 @@ pub use client::{
     QueryManager,
 };
 pub use keyring::{clear_keyring, has_keyring_password, resolve_password, save_to_keyring};
-pub use records::{
-    PortScanRecord, PortStatus, ProxyConnectionRecord, ProxyHttpRequestRecord,
-    ProxyHttpResponseRecord, ProxyWebSocketRecord, SubdomainRecord, SubdomainSource, TlsCertRecord,
-    WhoisRecord,
-};
 pub use service::{PartitionKey, PartitionMetadata, StorageService};
 pub use session::{SessionFile, SessionMetadata};
 pub use unified::RedDB;

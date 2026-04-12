@@ -164,7 +164,14 @@ impl LogCollection {
             None => return Vec::new(),
         };
 
-        let mut entries = Vec::new();
+        // Phase 1: collect top-k log IDs + entity IDs using a bounded min-heap.
+        // Only stores (log_id, entity_id) — no field cloning until phase 2.
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
+
+        let mut heap: BinaryHeap<Reverse<(u64, crate::storage::unified::entity::EntityId)>> =
+            BinaryHeap::with_capacity(limit + 1);
+
         manager.for_each_entity(|entity| {
             if let Some(row) = entity.data.as_row() {
                 let id_val = row
@@ -175,24 +182,43 @@ impl LogCollection {
                     })
                     .unwrap_or(0);
 
+                if heap.len() < limit {
+                    heap.push(Reverse((id_val, entity.id)));
+                } else if let Some(&Reverse((min_id, _))) = heap.peek() {
+                    if id_val > min_id {
+                        heap.pop();
+                        heap.push(Reverse((id_val, entity.id)));
+                    }
+                }
+            }
+            true
+        });
+
+        // Phase 2: fetch full entities only for top-k (avoids cloning all fields)
+        let mut top_ids: Vec<(u64, crate::storage::unified::entity::EntityId)> = heap
+            .into_vec()
+            .into_iter()
+            .map(|Reverse(pair)| pair)
+            .collect();
+        top_ids.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
+
+        top_ids
+            .into_iter()
+            .filter_map(|(log_id, entity_id)| {
+                let entity = manager.get(entity_id)?;
+                let row = entity.data.as_row()?;
                 let mut fields = HashMap::new();
                 for (key, value) in row.iter_fields() {
                     if key != "id" {
                         fields.insert(key.to_string(), value.clone());
                     }
                 }
-
-                entries.push(LogEntry {
-                    id: LogId(id_val),
+                Some(LogEntry {
+                    id: LogId(log_id),
                     fields,
-                });
-            }
-            true
-        });
-
-        entries.sort_by(|a, b| b.id.cmp(&a.id));
-        entries.truncate(limit);
-        entries
+                })
+            })
+            .collect()
     }
 
     /// Query entries within a time range (by ID boundaries).
