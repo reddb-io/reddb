@@ -122,6 +122,9 @@ impl RedDBGrpcServer {
         options: GrpcServerOptions,
         auth_store: Arc<AuthStore>,
     ) -> Self {
+        // Inject the auth store into the runtime so that Value::Secret
+        // auto-encrypt/decrypt can read the vault AES key.
+        runtime.set_auth_store(Arc::clone(&auth_store));
         Self {
             runtime,
             options,

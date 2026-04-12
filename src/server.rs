@@ -175,7 +175,10 @@ impl RedDBServer {
     }
 
     /// Attach an `AuthStore` for HTTP-layer authentication.
+    /// Also injects the store into the runtime so that `Value::Secret`
+    /// auto-encrypt/decrypt can reach the vault AES key.
     pub fn with_auth(mut self, auth_store: Arc<AuthStore>) -> Self {
+        self.runtime.set_auth_store(Arc::clone(&auth_store));
         self.auth_store = Some(auth_store);
         self
     }

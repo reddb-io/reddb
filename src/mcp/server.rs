@@ -45,6 +45,7 @@ impl McpServer {
             ..Default::default()
         }));
         auth_store.bootstrap_from_env();
+        runtime.set_auth_store(Arc::clone(&auth_store));
         Self {
             runtime,
             auth_store,
