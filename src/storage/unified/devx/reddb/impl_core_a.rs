@@ -14,6 +14,7 @@ impl RedDB {
             remote_backend: None,
             remote_key: None,
             replication: None,
+            ec_registry: std::sync::Arc::new(crate::ec::config::EcRegistry::new()),
         }
     }
 
@@ -98,6 +99,7 @@ impl RedDB {
             remote_backend: None,
             remote_key,
             replication,
+            ec_registry: std::sync::Arc::new(crate::ec::config::EcRegistry::new()),
         }
         .with_initialized_metadata()
     }
@@ -116,11 +118,16 @@ impl RedDB {
             remote_backend: None,
             remote_key: None,
             replication: None,
+            ec_registry: std::sync::Arc::new(crate::ec::config::EcRegistry::new()),
         }
     }
 
-    /// Flush changes to disk (if persistence is enabled)
+    /// Flush changes to disk (if persistence is enabled).
+    /// Consolidates all pending EC transactions before persisting.
     pub fn flush(&self) -> Result<(), Box<dyn std::error::Error>> {
+        // Consolidate all EC fields before persisting
+        let _ = self.ec_consolidate_all();
+
         if let Some(path) = &self.path {
             if self.paged_mode {
                 self.store.persist()?;

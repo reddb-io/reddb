@@ -77,6 +77,8 @@ pub struct RedDB {
     pub(crate) remote_key: Option<String>,
     /// Primary replication state (only present when role is Primary).
     pub(crate) replication: Option<Arc<PrimaryReplication>>,
+    /// Eventual consistency registry (embedded mode support).
+    pub(crate) ec_registry: Arc<crate::ec::config::EcRegistry>,
 }
 
 /// A cached HNSW index together with the entity count at build time.
@@ -166,6 +168,7 @@ pub struct NativeVectorArtifactBatchInspection {
 mod impl_access;
 mod impl_core_a;
 mod impl_core_b;
+mod impl_ec;
 mod impl_metadata;
 mod impl_registry;
 

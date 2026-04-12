@@ -473,6 +473,25 @@ async fn serverless_reclaim(
                         failures.push(format!("{operation}: {}", err));
                     }
                 },
+                "ec_consolidate" => {
+                    match self.runtime.db().ec_consolidate_all() {
+                        Ok(applied) => {
+                            result.insert("ok".to_string(), JsonValue::Bool(true));
+                            result.insert(
+                                "transactions_applied".to_string(),
+                                JsonValue::Number(applied as f64),
+                            );
+                        }
+                        Err(err) => {
+                            result.insert("ok".to_string(), JsonValue::Bool(false));
+                            result.insert(
+                                "error".to_string(),
+                                JsonValue::String(err.to_string()),
+                            );
+                            failures.push(format!("{operation}: {}", err));
+                        }
+                    }
+                },
                 _ => {}
             }
             executed.push(JsonValue::Object(result));

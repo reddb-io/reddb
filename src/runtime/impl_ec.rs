@@ -155,6 +155,24 @@ impl RedDBRuntime {
         statuses
     }
 
+    /// Graceful EC shutdown: consolidate all pending, stop worker, flush.
+    /// Call during serverless reclaim or application shutdown.
+    pub fn ec_shutdown(&self) -> RedDBResult<u64> {
+        self.inner.ec_worker.stop();
+
+        // Consolidate all async fields
+        let configs = self.inner.ec_registry.all_configs();
+        let mut total = 0u64;
+        for config in configs {
+            if let Ok(result) =
+                consolidation::consolidate(self.inner.db.store().as_ref(), &config, None)
+            {
+                total += result.transactions_applied;
+            }
+        }
+        Ok(total)
+    }
+
     fn ec_config_or_default(&self, collection: &str, field: &str) -> EcFieldConfig {
         self.inner
             .ec_registry
