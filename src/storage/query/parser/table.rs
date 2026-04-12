@@ -3,6 +3,24 @@
 use super::super::ast::{OrderByClause, Projection, QueryExpr, TableQuery};
 use super::super::lexer::Token;
 use super::error::ParseError;
+
+fn is_scalar_function(name: &str) -> bool {
+    matches!(
+        name,
+        "GEO_DISTANCE"
+            | "GEO_DISTANCE_VINCENTY"
+            | "GEO_BEARING"
+            | "GEO_MIDPOINT"
+            | "HAVERSINE"
+            | "VINCENTY"
+            | "UPPER"
+            | "LOWER"
+            | "LENGTH"
+            | "ABS"
+            | "ROUND"
+            | "COALESCE"
+    )
+}
 use super::Parser;
 
 impl<'a> Parser<'a> {
@@ -94,7 +112,7 @@ impl<'a> Parser<'a> {
         Ok(projections)
     }
 
-    /// Parse a single projection — supports columns and aggregate functions
+    /// Parse a single projection — supports columns, aggregate functions, and scalar functions
     fn parse_projection(&mut self) -> Result<Projection, ParseError> {
         // Check for aggregate functions: COUNT(*), AVG(col), SUM(col), MIN(col), MAX(col)
         let is_agg = matches!(
@@ -111,11 +129,31 @@ impl<'a> Parser<'a> {
                 vec![Projection::Column(col)]
             };
             self.expect(Token::RParen)?;
-            // Optional alias: COUNT(*) AS cnt
             if self.consume(&Token::As)? {
                 let _alias = self.expect_ident()?;
             }
             return Ok(Projection::Function(func_name, args));
+        }
+
+        // Check for scalar function: IDENT(args) — e.g. GEO_DISTANCE(col, POINT(x,y))
+        if let Token::Ident(ref name) = self.peek() {
+            let upper = name.to_uppercase();
+            if is_scalar_function(&upper) {
+                self.advance()?; // consume function name
+                self.expect(Token::LParen)?;
+                let args = self.parse_function_args()?;
+                self.expect(Token::RParen)?;
+                let alias = if self.consume(&Token::As)? {
+                    Some(self.expect_ident()?)
+                } else {
+                    None
+                };
+                return Ok(if let Some(a) = alias {
+                    Projection::Function(format!("{}:{}", upper, a), args)
+                } else {
+                    Projection::Function(upper, args)
+                });
+            }
         }
 
         let field = self.parse_field_ref()?;
@@ -125,6 +163,69 @@ impl<'a> Parser<'a> {
             None
         };
         Ok(Projection::Field(field, alias))
+    }
+
+    /// Parse comma-separated function arguments (columns, literals, POINT())
+    fn parse_function_args(&mut self) -> Result<Vec<Projection>, ParseError> {
+        let mut args = Vec::new();
+        if self.peek() == &Token::RParen {
+            return Ok(args);
+        }
+        loop {
+            // POINT(lat, lon) → encoded as Column("POINT:lat:lon")
+            if let Token::Ident(ref name) = self.peek() {
+                if name.eq_ignore_ascii_case("POINT") {
+                    self.advance()?; // consume POINT
+                    self.expect(Token::LParen)?;
+                    let lat = self.parse_numeric_literal()?;
+                    self.expect(Token::Comma)?;
+                    let lon = self.parse_numeric_literal()?;
+                    self.expect(Token::RParen)?;
+                    args.push(Projection::Column(format!("POINT:{}:{}", lat, lon)));
+                    if !self.consume(&Token::Comma)? {
+                        break;
+                    }
+                    continue;
+                }
+            }
+            // Numeric literal
+            if matches!(self.peek(), Token::Float(_)) || self.peek() == &Token::Minus {
+                let val = self.parse_numeric_literal()?;
+                args.push(Projection::Column(format!("LIT:{}", val)));
+                if !self.consume(&Token::Comma)? {
+                    break;
+                }
+                continue;
+            }
+            // String literal
+            if let Token::String(s) = self.peek().clone() {
+                self.advance()?;
+                args.push(Projection::Column(format!("LIT:{}", s)));
+                if !self.consume(&Token::Comma)? {
+                    break;
+                }
+                continue;
+            }
+            // Column reference
+            let col = self.expect_ident_or_keyword()?;
+            args.push(Projection::Column(col));
+            if !self.consume(&Token::Comma)? {
+                break;
+            }
+        }
+        Ok(args)
+    }
+
+    /// Parse a numeric literal (float, positive or negative)
+    fn parse_numeric_literal(&mut self) -> Result<f64, ParseError> {
+        let negative = self.consume(&Token::Minus)?;
+        match self.advance()? {
+            Token::Float(n) => Ok(if negative { -n } else { n }),
+            other => Err(ParseError::new(
+                format!("expected number, got {}", other),
+                self.position(),
+            )),
+        }
     }
 
     /// Parse table query clauses (WHERE, GROUP BY, HAVING, ORDER BY, LIMIT, OFFSET)

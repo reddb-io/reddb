@@ -553,7 +553,9 @@ pub(super) fn project_runtime_record(
                 table_name,
                 table_alias,
             ))),
-            Projection::Function(_, _) => Some(Value::Null),
+            Projection::Function(ref name, ref args) => {
+                evaluate_scalar_function(name, args, source)
+            }
             Projection::All => None,
         };
 
@@ -1383,5 +1385,168 @@ mod tests {
             resolve_runtime_field(&record, &field, None, None),
             Some(Value::Text("1.22.1".to_string()))
         );
+    }
+}
+
+/// Evaluate a scalar function on a record's values.
+fn evaluate_scalar_function(
+    name: &str,
+    args: &[Projection],
+    source: &UnifiedRecord,
+) -> Option<Value> {
+    // Strip alias suffix if present (e.g. "GEO_DISTANCE:dist_km" → "GEO_DISTANCE")
+    let func_name = name.split(':').next().unwrap_or(name);
+
+    match func_name {
+        "GEO_DISTANCE" | "HAVERSINE" => {
+            let (lat1, lon1, lat2, lon2) = resolve_two_geo_points(args, source)?;
+            Some(Value::Float(crate::geo::haversine_km(
+                lat1, lon1, lat2, lon2,
+            )))
+        }
+        "GEO_DISTANCE_VINCENTY" | "VINCENTY" => {
+            let (lat1, lon1, lat2, lon2) = resolve_two_geo_points(args, source)?;
+            Some(Value::Float(crate::geo::vincenty_km(
+                lat1, lon1, lat2, lon2,
+            )))
+        }
+        "GEO_BEARING" => {
+            let (lat1, lon1, lat2, lon2) = resolve_two_geo_points(args, source)?;
+            Some(Value::Float(crate::geo::bearing(lat1, lon1, lat2, lon2)))
+        }
+        "GEO_MIDPOINT" => {
+            let (lat1, lon1, lat2, lon2) = resolve_two_geo_points(args, source)?;
+            let (lat, lon) = crate::geo::midpoint(lat1, lon1, lat2, lon2);
+            Some(Value::GeoPoint(
+                crate::geo::deg_to_micro(lat),
+                crate::geo::deg_to_micro(lon),
+            ))
+        }
+        "UPPER" => {
+            let val = resolve_scalar_arg(args, 0, source)?;
+            match val {
+                Value::Text(s) => Some(Value::Text(s.to_uppercase())),
+                _ => Some(val),
+            }
+        }
+        "LOWER" => {
+            let val = resolve_scalar_arg(args, 0, source)?;
+            match val {
+                Value::Text(s) => Some(Value::Text(s.to_lowercase())),
+                _ => Some(val),
+            }
+        }
+        "LENGTH" => {
+            let val = resolve_scalar_arg(args, 0, source)?;
+            match val {
+                Value::Text(s) => Some(Value::Integer(s.len() as i64)),
+                Value::Blob(b) => Some(Value::Integer(b.len() as i64)),
+                Value::Array(a) => Some(Value::Integer(a.len() as i64)),
+                _ => Some(Value::Null),
+            }
+        }
+        "ABS" => {
+            let val = resolve_scalar_arg(args, 0, source)?;
+            match val {
+                Value::Float(f) => Some(Value::Float(f.abs())),
+                Value::Integer(n) => Some(Value::Integer(n.abs())),
+                _ => Some(Value::Null),
+            }
+        }
+        "ROUND" => {
+            let val = resolve_scalar_arg(args, 0, source)?;
+            match val {
+                Value::Float(f) => Some(Value::Float(f.round())),
+                other => Some(other),
+            }
+        }
+        "COALESCE" => {
+            for (i, _) in args.iter().enumerate() {
+                if let Some(val) = resolve_scalar_arg(args, i, source) {
+                    if val != Value::Null {
+                        return Some(val);
+                    }
+                }
+            }
+            Some(Value::Null)
+        }
+        _ => Some(Value::Null),
+    }
+}
+
+/// Resolve a single scalar argument from a function's arg list.
+fn resolve_scalar_arg(args: &[Projection], index: usize, source: &UnifiedRecord) -> Option<Value> {
+    let arg = args.get(index)?;
+    match arg {
+        Projection::Column(col) => {
+            if let Some(lit_val) = col.strip_prefix("LIT:") {
+                if let Ok(n) = lit_val.parse::<f64>() {
+                    return Some(Value::Float(n));
+                }
+                return Some(Value::Text(lit_val.to_string()));
+            }
+            source.values.get(col).cloned()
+        }
+        _ => None,
+    }
+}
+
+/// Resolve two geographic points from function arguments.
+/// Supports: (column, POINT(lat, lon)) or (col1, col2)
+fn resolve_two_geo_points(
+    args: &[Projection],
+    source: &UnifiedRecord,
+) -> Option<(f64, f64, f64, f64)> {
+    if args.len() < 2 {
+        return None;
+    }
+
+    let (lat1, lon1) = resolve_geo_arg(&args[0], source)?;
+    let (lat2, lon2) = resolve_geo_arg(&args[1], source)?;
+    Some((lat1, lon1, lat2, lon2))
+}
+
+/// Resolve a single geo argument — either a column (GeoPoint/Latitude/Longitude) or POINT literal.
+fn resolve_geo_arg(arg: &Projection, source: &UnifiedRecord) -> Option<(f64, f64)> {
+    match arg {
+        Projection::Column(col) => {
+            // POINT:lat:lon literal
+            if let Some(rest) = col.strip_prefix("POINT:") {
+                let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                if parts.len() == 2 {
+                    let lat: f64 = parts[0].parse().ok()?;
+                    let lon: f64 = parts[1].parse().ok()?;
+                    return Some((lat, lon));
+                }
+            }
+            // Column reference → look up in record values
+            let val = source.values.get(col)?;
+            match val {
+                Value::GeoPoint(lat_micro, lon_micro) => Some((
+                    crate::geo::micro_to_deg(*lat_micro),
+                    crate::geo::micro_to_deg(*lon_micro),
+                )),
+                Value::Float(f) => {
+                    // Could be a lat or lon — check for "lat"/"lon" sibling columns
+                    let lat_keys = ["lat", "latitude"];
+                    let lon_keys = ["lon", "longitude", "lng"];
+                    if lat_keys.contains(&col.as_str()) {
+                        let lon = lon_keys
+                            .iter()
+                            .find_map(|k| source.values.get(*k))
+                            .and_then(|v| match v {
+                                Value::Float(f) => Some(*f),
+                                Value::Integer(n) => Some(*n as f64),
+                                _ => None,
+                            })?;
+                        Some((*f, lon))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        }
+        _ => None,
     }
 }
