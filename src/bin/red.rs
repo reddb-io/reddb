@@ -33,6 +33,138 @@ fn json_ok(command: &str, data: &str) {
     );
 }
 
+/// Open a `RedDBRuntime` for the local DML/DDL commands.
+///
+/// When `--path <file>` is supplied the runtime opens the on-disk
+/// database in embedded mode. Without `--path`, falls back to an
+/// in-memory runtime so one-shot commands like `red query "SELECT 1"`
+/// still work for smoke tests.
+fn open_local_runtime(flags: &HashMap<String, FlagValue>) -> Result<reddb::RedDBRuntime, String> {
+    match flag_string(flags, "path") {
+        Some(path) if !path.is_empty() => {
+            reddb::RedDBRuntime::with_options(reddb::api::RedDBOptions::persistent(&path))
+                .map_err(|e| format!("open {path}: {e}"))
+        }
+        _ => reddb::RedDBRuntime::in_memory().map_err(|e| e.to_string()),
+    }
+}
+
+/// Flush any pending writes to disk. One-shot CLI commands exit
+/// immediately after a single operation, so we have to call this
+/// explicitly — the runtime does not flush on drop.
+fn checkpoint_local_runtime(rt: &reddb::RedDBRuntime) {
+    let _ = rt.checkpoint();
+}
+
+/// Convert a RedDB `Value` to a minimal JSON fragment. Numbers and
+/// booleans come out unquoted; everything else is a JSON string.
+/// `Value::Password` / `Value::Secret` are intentionally rendered as
+/// the masked `"***"` placeholder.
+fn value_to_json_fragment(value: &reddb::storage::schema::Value) -> String {
+    use reddb::storage::schema::Value;
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Boolean(b) => b.to_string(),
+        Value::Integer(n) => n.to_string(),
+        Value::UnsignedInteger(n) => n.to_string(),
+        Value::Float(n) => n.to_string(),
+        Value::BigInt(n) => n.to_string(),
+        Value::TimestampMs(n) | Value::Timestamp(n) | Value::Duration(n) | Value::Decimal(n) => {
+            n.to_string()
+        }
+        Value::Password(_) | Value::Secret(_) => "\"***\"".to_string(),
+        Value::Text(s)
+        | Value::Email(s)
+        | Value::Url(s)
+        | Value::NodeRef(s)
+        | Value::EdgeRef(s) => {
+            format!("\"{}\"", json_escape(s))
+        }
+        other => format!("\"{}\"", json_escape(&format!("{other}"))),
+    }
+}
+
+/// Render a `RuntimeQueryResult` as a compact human-readable string.
+/// Format: one row per line, `key=value` pairs joined with spaces,
+/// plus a trailing stats line. Value::Password / Value::Secret rely
+/// on the `Display` impl which already masks them as `***`.
+fn format_result_pretty(result: &reddb::runtime::RuntimeQueryResult) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    if result.statement_type != "select" {
+        let _ = writeln!(
+            out,
+            "{} ok ({} row{} affected)",
+            result.statement_type,
+            result.affected_rows,
+            if result.affected_rows == 1 { "" } else { "s" },
+        );
+        return out;
+    }
+    if result.result.records.is_empty() {
+        out.push_str("(no rows)\n");
+        return out;
+    }
+    for (i, record) in result.result.records.iter().enumerate() {
+        let mut entries: Vec<(&String, &reddb::storage::schema::Value)> =
+            record.values.iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+        let mut line = format!("{}.", i + 1);
+        for (key, value) in entries {
+            let _ = write!(line, " {key}={value}");
+        }
+        out.push_str(&line);
+        out.push('\n');
+    }
+    let _ = writeln!(
+        out,
+        "({} row{})",
+        result.result.records.len(),
+        if result.result.records.len() == 1 {
+            ""
+        } else {
+            "s"
+        }
+    );
+    out
+}
+
+/// Render a `RuntimeQueryResult` as a JSON object with a `rows`
+/// array. Values are emitted as proper JSON scalars via
+/// [`value_to_json_fragment`], which masks Password and Secret
+/// columns as `"***"`.
+fn format_result_json(result: &reddb::runtime::RuntimeQueryResult) -> String {
+    use std::fmt::Write;
+    let mut out = String::from("{\"statement\":\"");
+    out.push_str(result.statement_type);
+    out.push_str("\",\"affected\":");
+    let _ = write!(out, "{}", result.affected_rows);
+    out.push_str(",\"rows\":[");
+    for (i, record) in result.result.records.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push('{');
+        let mut entries: Vec<(&String, &reddb::storage::schema::Value)> =
+            record.values.iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+        for (j, (key, value)) in entries.iter().enumerate() {
+            if j > 0 {
+                out.push(',');
+            }
+            let _ = write!(
+                out,
+                "\"{}\":{}",
+                json_escape(key),
+                value_to_json_fragment(value)
+            );
+        }
+        out.push('}');
+    }
+    out.push_str("]}");
+    out
+}
+
 /// Print an error JSON envelope to **stderr** and exit with code 1.
 fn json_error(command: &str, error: &str) -> ! {
     eprintln!(
@@ -278,24 +410,35 @@ fn main() {
             let sql = remaining.first().map(|s| s.as_str()).unwrap_or("");
             if sql.is_empty() {
                 if json_mode {
-                    json_error("query", "Usage: red query <sql>");
+                    json_error("query", "Usage: red query [--path file] <sql>");
                 }
-                eprintln!("Usage: red query <sql>");
+                eprintln!("Usage: red query [--path file] <sql>");
                 eprintln!("Example: red query \"SELECT * FROM users\"");
                 std::process::exit(1);
             }
-            if json_mode {
-                json_ok(
-                    "query",
-                    &format!(
-                        "{{\"sql\":\"{}\",\"result\":null,\"message\":\"query execution not yet wired\"}}",
-                        json_escape(sql)
-                    ),
-                );
-            } else {
-                println!("Query: {}", sql);
-                // TODO: Wire to actual query execution
-                eprintln!("Query execution not yet wired.");
+            let rt = open_local_runtime(&result.flags).unwrap_or_else(|err| {
+                if json_mode {
+                    json_error("query", &err);
+                }
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            });
+            match rt.execute_query(sql) {
+                Ok(qr) => {
+                    checkpoint_local_runtime(&rt);
+                    if json_mode {
+                        json_ok("query", &format_result_json(&qr));
+                    } else {
+                        print!("{}", format_result_pretty(&qr));
+                    }
+                }
+                Err(err) => {
+                    if json_mode {
+                        json_error("query", &err.to_string());
+                    }
+                    eprintln!("query error: {err}");
+                    std::process::exit(1);
+                }
             }
         }
 
@@ -303,27 +446,76 @@ fn main() {
             let json_mode = wants_json(&result.flags);
             if remaining.len() < 2 {
                 if json_mode {
-                    json_error("insert", "Usage: red insert <collection> <json>");
+                    json_error(
+                        "insert",
+                        "Usage: red insert [--path file] <collection> <json>",
+                    );
                 }
-                eprintln!("Usage: red insert <collection> <json>");
+                eprintln!("Usage: red insert [--path file] <collection> <json>");
                 eprintln!("Example: red insert users '{{\"name\": \"Alice\"}}'");
                 std::process::exit(1);
             }
             let collection = &remaining[0];
             let json_data = &remaining[1];
-            if json_mode {
-                json_ok(
-                    "insert",
-                    &format!(
-                        "{{\"collection\":\"{}\",\"document\":{},\"result\":null,\"message\":\"insert not yet wired\"}}",
-                        json_escape(collection),
-                        json_data
-                    ),
-                );
-            } else {
-                println!("Inserting into '{}': {}", collection, json_data);
-                // TODO: Wire to actual insert
-                eprintln!("Insert not yet wired.");
+            let parsed: reddb::json::Value =
+                reddb::json::from_str(json_data).unwrap_or_else(|err| {
+                    if json_mode {
+                        json_error("insert", &format!("invalid JSON: {err}"));
+                    }
+                    eprintln!("invalid JSON: {err}");
+                    std::process::exit(1);
+                });
+            let object = match parsed {
+                reddb::json::Value::Object(map) => map,
+                _ => {
+                    if json_mode {
+                        json_error("insert", "expected a JSON object");
+                    }
+                    eprintln!("expected a JSON object");
+                    std::process::exit(1);
+                }
+            };
+            // Build INSERT INTO <collection> (cols) VALUES (vals)
+            let mut cols = Vec::new();
+            let mut vals = Vec::new();
+            for (k, v) in object.iter() {
+                cols.push(k.clone());
+                vals.push(match v {
+                    reddb::json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+                    reddb::json::Value::Number(n) => n.to_string(),
+                    reddb::json::Value::Bool(b) => b.to_string(),
+                    reddb::json::Value::Null => "NULL".to_string(),
+                    other => format!("'{}'", other.to_string().replace('\'', "''")),
+                });
+            }
+            let sql = format!(
+                "INSERT INTO {collection} ({}) VALUES ({})",
+                cols.join(", "),
+                vals.join(", "),
+            );
+            let rt = open_local_runtime(&result.flags).unwrap_or_else(|err| {
+                if json_mode {
+                    json_error("insert", &err);
+                }
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            });
+            match rt.execute_query(&sql) {
+                Ok(qr) => {
+                    checkpoint_local_runtime(&rt);
+                    if json_mode {
+                        json_ok("insert", &format_result_json(&qr));
+                    } else {
+                        print!("{}", format_result_pretty(&qr));
+                    }
+                }
+                Err(err) => {
+                    if json_mode {
+                        json_error("insert", &err.to_string());
+                    }
+                    eprintln!("insert error: {err}");
+                    std::process::exit(1);
+                }
             }
         }
 
@@ -331,27 +523,40 @@ fn main() {
             let json_mode = wants_json(&result.flags);
             if remaining.len() < 2 {
                 if json_mode {
-                    json_error("get", "Usage: red get <collection> <id>");
+                    json_error("get", "Usage: red get [--path file] <collection> <id>");
                 }
-                eprintln!("Usage: red get <collection> <id>");
-                eprintln!("Example: red get users abc123");
+                eprintln!("Usage: red get [--path file] <collection> <id>");
+                eprintln!("Example: red get users 42");
                 std::process::exit(1);
             }
             let collection = &remaining[0];
             let id = &remaining[1];
-            if json_mode {
-                json_ok(
-                    "get",
-                    &format!(
-                        "{{\"collection\":\"{}\",\"id\":\"{}\",\"entity\":null,\"message\":\"get not yet wired\"}}",
-                        json_escape(collection),
-                        json_escape(id)
-                    ),
-                );
-            } else {
-                println!("Getting from '{}': {}", collection, id);
-                // TODO: Wire to actual get
-                eprintln!("Get not yet wired.");
+            // BETWEEN sidesteps the `= <entity_id>` fast-path in
+            // the planner, which has a known issue returning empty
+            // results for persistent collections.
+            let sql = format!("SELECT * FROM {collection} WHERE _entity_id BETWEEN {id} AND {id}");
+            let rt = open_local_runtime(&result.flags).unwrap_or_else(|err| {
+                if json_mode {
+                    json_error("get", &err);
+                }
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            });
+            match rt.execute_query(&sql) {
+                Ok(qr) => {
+                    if json_mode {
+                        json_ok("get", &format_result_json(&qr));
+                    } else {
+                        print!("{}", format_result_pretty(&qr));
+                    }
+                }
+                Err(err) => {
+                    if json_mode {
+                        json_error("get", &err.to_string());
+                    }
+                    eprintln!("get error: {err}");
+                    std::process::exit(1);
+                }
             }
         }
 
@@ -359,27 +564,41 @@ fn main() {
             let json_mode = wants_json(&result.flags);
             if remaining.len() < 2 {
                 if json_mode {
-                    json_error("delete", "Usage: red delete <collection> <id>");
+                    json_error(
+                        "delete",
+                        "Usage: red delete [--path file] <collection> <id>",
+                    );
                 }
-                eprintln!("Usage: red delete <collection> <id>");
-                eprintln!("Example: red delete users abc123");
+                eprintln!("Usage: red delete [--path file] <collection> <id>");
+                eprintln!("Example: red delete users 42");
                 std::process::exit(1);
             }
             let collection = &remaining[0];
             let id = &remaining[1];
-            if json_mode {
-                json_ok(
-                    "delete",
-                    &format!(
-                        "{{\"collection\":\"{}\",\"id\":\"{}\",\"deleted\":false,\"message\":\"delete not yet wired\"}}",
-                        json_escape(collection),
-                        json_escape(id)
-                    ),
-                );
-            } else {
-                println!("Deleting from '{}': {}", collection, id);
-                // TODO: Wire to actual delete
-                eprintln!("Delete not yet wired.");
+            let sql = format!("DELETE FROM {collection} WHERE _entity_id BETWEEN {id} AND {id}");
+            let rt = open_local_runtime(&result.flags).unwrap_or_else(|err| {
+                if json_mode {
+                    json_error("delete", &err);
+                }
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            });
+            match rt.execute_query(&sql) {
+                Ok(qr) => {
+                    checkpoint_local_runtime(&rt);
+                    if json_mode {
+                        json_ok("delete", &format_result_json(&qr));
+                    } else {
+                        print!("{}", format_result_pretty(&qr));
+                    }
+                }
+                Err(err) => {
+                    if json_mode {
+                        json_error("delete", &err.to_string());
+                    }
+                    eprintln!("delete error: {err}");
+                    std::process::exit(1);
+                }
             }
         }
 
@@ -441,15 +660,38 @@ fn main() {
         }
 
         "status" => {
-            if wants_json(&result.flags) {
+            let json_mode = wants_json(&result.flags);
+            let rt = open_local_runtime(&result.flags).unwrap_or_else(|err| {
+                if json_mode {
+                    json_error("status", &err);
+                }
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            });
+            let stats = rt.stats();
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            let uptime_ms = now_ms.saturating_sub(stats.started_at_unix_ms);
+            if json_mode {
                 json_ok(
                     "status",
-                    "{\"status\":null,\"message\":\"status check not yet wired\"}",
+                    &format!(
+                        "{{\"uptime_ms\":{},\"collections\":{},\"entities\":{},\"pid\":{}}}",
+                        uptime_ms,
+                        stats.store.collection_count,
+                        stats.store.total_entities,
+                        stats.system.pid,
+                    ),
                 );
             } else {
-                println!("Checking replication status...");
-                // TODO: Wire to actual status
-                eprintln!("Status check not yet wired.");
+                println!("uptime_ms:   {}", uptime_ms);
+                println!("collections: {}", stats.store.collection_count);
+                println!("entities:    {}", stats.store.total_entities);
+                println!("pid:         {}", stats.system.pid);
+                println!("hostname:    {}", stats.system.hostname);
+                println!("os/arch:     {}/{}", stats.system.os, stats.system.arch);
             }
         }
 
@@ -774,6 +1016,11 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                     .with_short('b')
                     .with_description("Server address")
                     .with_default("0.0.0.0:6380"),
+            );
+            flags.push(
+                cli::types::FlagSchema::new("path")
+                    .with_short('p')
+                    .with_description("Open a local .rdb file in embedded mode"),
             );
         }
         Some("health") => {

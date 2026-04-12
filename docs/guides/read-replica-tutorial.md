@@ -1,5 +1,13 @@
 # Read Replica Tutorial
 
+> [!WARNING]
+> **Work in progress.** Replica-side WAL consumption is not yet
+> wired — a replica started via `red replica` will accept reads
+> but will not automatically ingest primary WAL segments. The
+> steps below describe the target workflow. For change propagation
+> today, poll `GET /changes?since=<lsn>` on the primary and apply
+> events on the replica side, or use scheduled snapshots.
+
 This guide shows the smallest useful primary + replica setup for RedDB.
 
 Goal:

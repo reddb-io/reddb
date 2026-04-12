@@ -1,5 +1,16 @@
 # Replication
 
+> [!WARNING]
+> **Work in progress.** Primary-side WAL buffering and CDC streaming
+> are implemented and stable. **Replica-side WAL consumption is not
+> yet wired** — replicas will start but they will not automatically
+> replay primary WAL segments. For live change propagation today,
+> use the CDC polling endpoint (`GET /changes?since=<lsn>`) and
+> apply the events on the replica side yourself, or take scheduled
+> snapshots via the backup scheduler. This page documents the
+> target architecture; follow the release notes for when the
+> streaming replay path lands.
+
 RedDB supports primary-replica replication for read scaling and high availability.
 
 ## Architecture
