@@ -304,9 +304,6 @@ impl RedDBRuntime {
         let table_name = query.table.as_str();
 
         manager.for_each_entity(|entity| {
-            if !entity.data.is_row() {
-                return true;
-            }
             let matches = match &query.filter {
                 Some(filter) => {
                     query_exec::evaluate_entity_filter(entity, filter, table_name, table_name)
@@ -435,9 +432,6 @@ impl RedDBRuntime {
 
         let table_name = query.table.as_str();
         manager.for_each_entity(|entity| {
-            if !entity.data.is_row() {
-                return true;
-            }
             let matches = match &query.filter {
                 Some(filter) => {
                     query_exec::evaluate_entity_filter(entity, filter, table_name, table_name)

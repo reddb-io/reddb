@@ -10,20 +10,7 @@ pub(super) fn execute_runtime_table_query(
         return execute_aggregate_query(db, query);
     }
 
-    // ── TURBO PATH: Unfiltered SELECT * LIMIT N — bypass planner ──
-    if query.filter.is_none()
-        && query.order_by.is_empty()
-        && query.group_by.is_empty()
-        && query.having.is_none()
-        && query.expand.is_none()
-        && !is_universal_query_source(&query.table)
-    {
-        if let Some(result) = execute_unfiltered_scan_to_json(db, query)? {
-            return Ok(result);
-        }
-    }
-
-    // ── TURBO PATH: Build JSON directly, bypassing UnifiedRecord entirely ──
+    // ── FAST ENTITY-ID PATH: O(1) lookup for WHERE _entity_id = N ──
     if query.filter.is_some()
         && query.order_by.is_empty()
         && query.group_by.is_empty()
@@ -32,7 +19,6 @@ pub(super) fn execute_runtime_table_query(
         && query.offset.is_none()
         && !is_universal_query_source(&query.table)
     {
-        // Entity_id point lookup — serialize single entity directly
         if let Some(entity_id) = extract_entity_id_from_filter(&query.filter) {
             let store = db.store();
             if let Some(entity) = store.get(&query.table, EntityId::new(entity_id)) {
@@ -48,18 +34,6 @@ pub(super) fn execute_runtime_table_query(
                 });
             }
             return Ok(UnifiedResult::default());
-        }
-
-        // Index-assisted path: use hash index for equality column if available
-        if let Some(idx) = index_store {
-            if let Some(result) = execute_indexed_scan_to_json(db, query, idx)? {
-                return Ok(result);
-            }
-        }
-
-        // Filtered scan — serialize matching entities directly
-        if let Some(json) = execute_filtered_scan_to_json(db, query)? {
-            return Ok(json);
         }
     }
 
@@ -2440,19 +2414,52 @@ fn resolve_entity_field<'a>(
         _ => {}
     }
 
-    // User fields — uses get_field() which handles both named HashMap and columnar schema
-    let row = entity.data.as_row()?;
-    if let Some(value) = row.get_field(column) {
-        return Some(Cow::Borrowed(value));
-    }
-
-    // Positional column fallback (c0, c1, ...)
-    if column.starts_with('c') {
-        if let Ok(index) = column[1..].parse::<usize>() {
-            if let Some(value) = row.columns.get(index) {
-                return Some(Cow::Borrowed(value));
+    // User fields — row data (named HashMap or columnar schema)
+    if let Some(row) = entity.data.as_row() {
+        if let Some(value) = row.get_field(column) {
+            return Some(Cow::Borrowed(value));
+        }
+        // Positional column fallback (c0, c1, ...)
+        if column.starts_with('c') {
+            if let Ok(index) = column[1..].parse::<usize>() {
+                if let Some(value) = row.columns.get(index) {
+                    return Some(Cow::Borrowed(value));
+                }
             }
         }
+    }
+
+    // Node properties
+    if let EntityData::Node(ref node) = entity.data {
+        if let Some(value) = node.properties.get(column) {
+            return Some(Cow::Borrowed(value));
+        }
+    }
+
+    // Edge properties
+    if let EntityData::Edge(ref edge) = entity.data {
+        if column == "weight" {
+            return Some(Cow::Owned(Value::Float(edge.weight as f64)));
+        }
+        if let Some(value) = edge.properties.get(column) {
+            return Some(Cow::Borrowed(value));
+        }
+    }
+
+    // EntityKind fields (label, node_type, from_node, to_node)
+    match &entity.kind {
+        EntityKind::GraphNode(ref gn) => match column {
+            "label" => return Some(Cow::Owned(Value::Text(gn.label.to_string()))),
+            "node_type" => return Some(Cow::Owned(Value::Text(gn.node_type.to_string()))),
+            _ => {}
+        },
+        EntityKind::GraphEdge(ref ge) => match column {
+            "label" => return Some(Cow::Owned(Value::Text(ge.label.to_string()))),
+            "from_node" => return Some(Cow::Owned(Value::Text(ge.from_node.to_string()))),
+            "to_node" => return Some(Cow::Owned(Value::Text(ge.to_node.to_string()))),
+            _ => {}
+        },
+        _ => {}
     }
 
     None
