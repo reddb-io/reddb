@@ -52,6 +52,8 @@ mod reddb;
 pub(crate) mod refs;
 mod types;
 
+use std::sync::{Arc, RwLock};
+
 use crate::storage::unified::entity::UnifiedEntity;
 
 /// Preprocessing hook applied to entities before storage.
@@ -60,6 +62,23 @@ pub trait Preprocessor: Send + Sync {
     fn name(&self) -> &str {
         "unnamed"
     }
+}
+
+pub(crate) type SharedPreprocessors = Arc<RwLock<Vec<Arc<dyn Preprocessor>>>>;
+
+pub(crate) fn run_preprocessors(
+    preprocessors: &SharedPreprocessors,
+    entity: &mut UnifiedEntity,
+) -> Result<(), error::DevXError> {
+    let preprocessors = preprocessors.read().map_err(|_| {
+        error::DevXError::Storage("preprocessor registry lock poisoned".to_string())
+    })?;
+
+    for preprocessor in preprocessors.iter() {
+        preprocessor.process(entity);
+    }
+
+    Ok(())
 }
 
 /// Index configuration for the storage engine.
@@ -104,6 +123,32 @@ pub use types::{LinkedEntity, SimilarResult};
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    use crate::storage::schema::Value;
+    use crate::storage::unified::EntityData;
+
+    struct TestPreprocessor;
+
+    impl Preprocessor for TestPreprocessor {
+        fn process(&self, entity: &mut UnifiedEntity) {
+            match &mut entity.data {
+                EntityData::Node(node) => {
+                    node.set("preprocessed", Value::Boolean(true));
+                }
+                EntityData::Row(row) => {
+                    if let Some(named) = row.named.as_mut() {
+                        named.insert("status".to_string(), Value::Text("normalized".to_string()));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        fn name(&self) -> &str {
+            "test-preprocessor"
+        }
+    }
 
     #[test]
     fn test_create_node() {
@@ -192,5 +237,52 @@ mod tests {
             .save();
 
         assert!(host.is_ok());
+    }
+
+    #[test]
+    fn test_preprocessor_runs_for_row_save() {
+        let mut db = RedDB::new();
+        db.add_preprocessor(Box::new(TestPreprocessor));
+
+        let row_id = db
+            .row("scans", vec![("status", Value::Text("raw".to_string()))])
+            .save()
+            .expect("row save should succeed");
+
+        let entity = db.get(row_id).expect("saved row should be retrievable");
+        match entity.data {
+            EntityData::Row(row) => {
+                assert_eq!(
+                    row.get_field("status"),
+                    Some(&Value::Text("normalized".to_string()))
+                );
+            }
+            other => panic!("expected row entity, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_preprocessor_runs_for_batch_node_insert() {
+        let mut db = RedDB::new();
+        db.add_preprocessor(Box::new(TestPreprocessor));
+
+        let mut properties = HashMap::new();
+        properties.insert("ip".to_string(), Value::Text("10.0.0.1".to_string()));
+
+        let batch = db
+            .batch()
+            .add_node("hosts", "Host", properties, HashMap::new())
+            .execute()
+            .expect("batch execution should succeed");
+
+        let entity = db
+            .get(batch.nodes[0])
+            .expect("batch-inserted node should be retrievable");
+        match entity.data {
+            EntityData::Node(node) => {
+                assert_eq!(node.get("preprocessed"), Some(&Value::Boolean(true)));
+            }
+            other => panic!("expected node entity, got {other:?}"),
+        }
     }
 }
