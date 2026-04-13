@@ -41,7 +41,12 @@ jobs:
           version: '28.x'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --locked --verbose
+      - name: Run default test layer
+        run: cargo test --locked --verbose
+      - name: Run persistent multimodel layer
+        env:
+          CARGO_TARGET_DIR: target/persistent-tests
+        run: cargo test --locked --test integration_persistent_multimodel -- --ignored
 
   containers:
     name: Container Stack
