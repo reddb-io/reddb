@@ -98,8 +98,7 @@ mod tests {
 
     #[test]
     fn test_secure_key_zeroing() {
-        let mut key = SecureKey::new(b"secret");
-        let ptr = key.data.as_ptr();
+        let key = SecureKey::new(b"secret");
         drop(key);
         // Can't easily check memory after drop safely in Rust tests without UB,
         // but we trust the implementation logic.
