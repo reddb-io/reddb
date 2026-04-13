@@ -11,7 +11,7 @@ fn test_filter_value_from_impls() {
     let i: FilterValue = 42i32.into();
     assert!(matches!(i, FilterValue::Int(42)));
 
-    let f: FilterValue = 3.14f64.into();
+    let f: FilterValue = 2.5f64.into();
     assert!(matches!(f, FilterValue::Float(_)));
 }
 
