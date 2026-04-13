@@ -7,6 +7,13 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+fn current_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 /// Session file for tracking scan progress
 pub struct SessionFile {
     path: PathBuf,
@@ -28,10 +35,7 @@ impl SessionFile {
         let filename = format!("{}{}", identifier, Self::EXTENSION);
         let path = PathBuf::from(&filename);
 
-        let created_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let created_at = current_unix_secs();
 
         let session = Self {
             path,
@@ -101,10 +105,7 @@ impl SessionFile {
             .open(&self.path)
             .map_err(|e| format!("Failed to open session file: {}", e))?;
 
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let timestamp = current_unix_secs();
 
         let entry = format!(
             "{} | {} | {} | {} | {}\n",
@@ -152,10 +153,7 @@ impl SessionFile {
             .open(&self.path)
             .map_err(|e| format!("Failed to open session file: {}", e))?;
 
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let timestamp = current_unix_secs();
 
         let footer = format!(
             "\n# Scan completed\n\
@@ -318,12 +316,8 @@ impl SessionMetadata {
 
     /// Get age in seconds
     pub fn age_secs(&self) -> u64 {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        now - self.created_at
+        let now = current_unix_secs();
+        now.saturating_sub(self.created_at)
     }
 }
 
