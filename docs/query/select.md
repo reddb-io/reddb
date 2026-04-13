@@ -1,6 +1,7 @@
 # SELECT
 
-The `SELECT` statement retrieves rows from a table with optional filtering, sorting, and pagination.
+The `SELECT` statement retrieves records from a collection with optional filtering, sorting,
+grouping, and pagination.
 
 ## Syntax
 
@@ -144,6 +145,24 @@ SELECT dept FROM employees GROUP BY dept HAVING dept > 5 ORDER BY dept
 ```
 
 `HAVING` applies its condition **after** grouping, so it filters entire groups rather than individual rows.
+
+### Time-Series Grouping with `time_bucket()`
+
+For native time-series collections, you can group samples into fixed windows directly in SQL:
+
+```sql
+SELECT time_bucket(5m) AS bucket,
+       avg(value) AS avg_value,
+       count(*) AS samples
+FROM cpu_metrics
+WHERE metric = 'cpu.idle'
+GROUP BY time_bucket(5m)
+ORDER BY bucket ASC
+```
+
+Time-series records expose `metric`, `value`, `timestamp_ns`, and the aliases `timestamp` / `time`,
+plus `tags` as a JSON object. `time_bucket(5m)` uses the record timestamp automatically. If you need
+an explicit column, use `time_bucket(5m, timestamp_ns)`.
 
 ## WITH EXPAND
 
