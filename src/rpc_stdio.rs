@@ -71,7 +71,25 @@ pub mod error_code {
     pub const TX_REPLAY_FAILED: &str = "TX_REPLAY_FAILED";
     /// Transactions over the remote gRPC proxy are not supported yet.
     pub const TX_NOT_SUPPORTED_REMOTE: &str = "TX_NOT_SUPPORTED_REMOTE";
+    /// `query.next` / `query.close` referenced an unknown cursor id.
+    /// Either the cursor was never opened, already closed, or was
+    /// automatically dropped when its rows were exhausted.
+    pub const CURSOR_NOT_FOUND: &str = "CURSOR_NOT_FOUND";
+    /// Too many concurrent cursors open in a single session.
+    pub const CURSOR_LIMIT_EXCEEDED: &str = "CURSOR_LIMIT_EXCEEDED";
 }
+
+/// Maximum number of cursors a single stdio session may hold open
+/// simultaneously. Serves as a memory-pressure guard against runaway
+/// clients that `query.open` without ever closing.
+pub(crate) const MAX_CURSORS_PER_SESSION: usize = 64;
+/// Default batch size for `query.next` when the client does not specify
+/// one explicitly. Tuned for small-to-medium rows; large-row clients
+/// should set a smaller value.
+pub(crate) const DEFAULT_CURSOR_BATCH_SIZE: usize = 100;
+/// Hard upper bound on `query.next` batch size. Prevents a single call
+/// from stalling the stdio loop with a multi-megabyte line.
+pub(crate) const MAX_CURSOR_BATCH_SIZE: usize = 10_000;
 
 // ---------------------------------------------------------------------------
 // Session state (transaction buffer)
@@ -91,10 +109,13 @@ pub mod error_code {
 // commits. Strict atomicity requires funnelling every write through a
 // single session.
 
-/// Per-connection session that tracks the currently open transaction.
+/// Per-connection session that tracks the currently open transaction
+/// and any active streaming cursors.
 pub(crate) struct Session {
     next_tx_id: u64,
     current_tx: Option<OpenTx>,
+    next_cursor_id: u64,
+    cursors: std::collections::HashMap<u64, Cursor>,
 }
 
 impl Session {
@@ -102,6 +123,8 @@ impl Session {
         Self {
             next_tx_id: 1,
             current_tx: None,
+            next_cursor_id: 1,
+            cursors: std::collections::HashMap::new(),
         }
     }
 
@@ -129,8 +152,42 @@ impl Session {
         self.current_tx.as_mut()
     }
 
+    #[allow(dead_code)]
     fn has_tx(&self) -> bool {
         self.current_tx.is_some()
+    }
+
+    /// Register a freshly materialised cursor and return its id.
+    /// Enforces [`MAX_CURSORS_PER_SESSION`] before allocating.
+    fn insert_cursor(&mut self, cursor: Cursor) -> Result<u64, (&'static str, String)> {
+        if self.cursors.len() >= MAX_CURSORS_PER_SESSION {
+            return Err((
+                error_code::CURSOR_LIMIT_EXCEEDED,
+                format!(
+                    "session already holds {} cursors (max {}) — close some before opening new ones",
+                    self.cursors.len(),
+                    MAX_CURSORS_PER_SESSION
+                ),
+            ));
+        }
+        let id = self.next_cursor_id;
+        self.next_cursor_id = self.next_cursor_id.saturating_add(1);
+        let mut cursor = cursor;
+        cursor.cursor_id = id;
+        self.cursors.insert(id, cursor);
+        Ok(id)
+    }
+
+    fn cursor_mut(&mut self, id: u64) -> Option<&mut Cursor> {
+        self.cursors.get_mut(&id)
+    }
+
+    fn drop_cursor(&mut self, id: u64) -> Option<Cursor> {
+        self.cursors.remove(&id)
+    }
+
+    fn clear_cursors(&mut self) {
+        self.cursors.clear();
     }
 }
 
@@ -161,6 +218,56 @@ impl PendingSql {
         match self {
             PendingSql::Insert(s) | PendingSql::Delete(s) | PendingSql::Update(s) => s,
         }
+    }
+}
+
+/// An open streaming cursor over a materialised query result.
+///
+/// MVP model: the underlying [`RuntimeQueryResult`] has already been
+/// fully executed at `query.open` time and lives inside the cursor.
+/// Each `query.next` call slices off `batch_size` rows from the tail and
+/// advances `position`. This pays normal memory cost but lets the client
+/// consume the result in chunks, abort mid-stream, or pipeline the next
+/// batch request while processing the previous one.
+///
+/// A future iteration can swap the rows field for a lazy iterator pulled
+/// from the execution engine without changing the wire protocol.
+pub(crate) struct Cursor {
+    cursor_id: u64,
+    columns: Vec<String>,
+    rows: Vec<UnifiedRecord>,
+    position: usize,
+}
+
+impl Cursor {
+    fn new(columns: Vec<String>, rows: Vec<UnifiedRecord>) -> Self {
+        Self {
+            cursor_id: 0, // overwritten by Session::insert_cursor
+            columns,
+            rows,
+            position: 0,
+        }
+    }
+
+    fn total(&self) -> usize {
+        self.rows.len()
+    }
+
+    fn remaining(&self) -> usize {
+        self.rows.len().saturating_sub(self.position)
+    }
+
+    fn is_exhausted(&self) -> bool {
+        self.position >= self.rows.len()
+    }
+
+    /// Extract up to `batch_size` rows from the current position forward.
+    /// Advances the position to the end of the returned slice.
+    fn take_batch(&mut self, batch_size: usize) -> &[UnifiedRecord] {
+        let end = (self.position + batch_size).min(self.rows.len());
+        let slice = &self.rows[self.position..end];
+        self.position = end;
+        slice
     }
 }
 
@@ -276,7 +383,15 @@ fn handle_line(backend: &Backend<'_>, session: &mut Session, line: &str) -> Stri
             // each call independently — there is no place to park a tx
             // handle across gRPC hops yet. Surface a clear error so
             // drivers can fall back to per-call auto-commit.
-            if matches!(method.as_str(), "tx.begin" | "tx.commit" | "tx.rollback") {
+            if matches!(
+                method.as_str(),
+                "tx.begin"
+                    | "tx.commit"
+                    | "tx.rollback"
+                    | "query.open"
+                    | "query.next"
+                    | "query.close"
+            ) {
                 Err((
                     error_code::TX_NOT_SUPPORTED_REMOTE,
                     format!("{method} is not supported over remote gRPC yet"),
@@ -358,6 +473,119 @@ fn dispatch_method(
                     ),
                 )),
             }
+        }
+
+        "query.open" => {
+            let sql = params.get("sql").and_then(Value::as_str).ok_or((
+                error_code::INVALID_PARAMS,
+                "missing 'sql' string".to_string(),
+            ))?;
+            let qr = runtime
+                .execute_query(sql)
+                .map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
+
+            // Extract the column list from the first record. Consistent
+            // with query_result_to_json which uses the first row's keys
+            // as schema.
+            let columns: Vec<String> = qr
+                .result
+                .records
+                .first()
+                .map(|first| {
+                    let mut keys: Vec<&String> = first.values.keys().collect();
+                    keys.sort();
+                    keys.into_iter().cloned().collect()
+                })
+                .unwrap_or_default();
+
+            let cursor = Cursor::new(columns.clone(), qr.result.records);
+            let total = cursor.total();
+            let cursor_id = session.insert_cursor(cursor)?;
+
+            Ok(Value::Object(
+                [
+                    ("cursor_id".to_string(), Value::Number(cursor_id as f64)),
+                    (
+                        "columns".to_string(),
+                        Value::Array(columns.into_iter().map(Value::String).collect()),
+                    ),
+                    ("total_rows".to_string(), Value::Number(total as f64)),
+                ]
+                .into_iter()
+                .collect(),
+            ))
+        }
+
+        "query.next" => {
+            let cursor_id = params
+                .get("cursor_id")
+                .and_then(|v| v.as_f64())
+                .map(|n| n as u64)
+                .ok_or((
+                    error_code::INVALID_PARAMS,
+                    "missing 'cursor_id' number".to_string(),
+                ))?;
+            let batch_size = params
+                .get("batch_size")
+                .and_then(|v| v.as_f64())
+                .map(|n| n as usize)
+                .unwrap_or(DEFAULT_CURSOR_BATCH_SIZE)
+                .clamp(1, MAX_CURSOR_BATCH_SIZE);
+
+            // Extract the batch inside a bounded borrow so we can
+            // drop the cursor afterwards without borrow-conflict.
+            let (rows, done, remaining) = {
+                let cursor = session.cursor_mut(cursor_id).ok_or((
+                    error_code::CURSOR_NOT_FOUND,
+                    format!("cursor {cursor_id} not found"),
+                ))?;
+                let batch = cursor.take_batch(batch_size);
+                let rows_json: Vec<Value> = batch.iter().map(record_to_json_object).collect();
+                (rows_json, cursor.is_exhausted(), cursor.remaining())
+            };
+
+            if done {
+                // Auto-drop exhausted cursors so long-lived sessions
+                // don't accumulate dead state.
+                let _ = session.drop_cursor(cursor_id);
+            }
+
+            Ok(Value::Object(
+                [
+                    ("cursor_id".to_string(), Value::Number(cursor_id as f64)),
+                    ("rows".to_string(), Value::Array(rows)),
+                    ("done".to_string(), Value::Bool(done)),
+                    ("remaining".to_string(), Value::Number(remaining as f64)),
+                ]
+                .into_iter()
+                .collect(),
+            ))
+        }
+
+        "query.close" => {
+            let cursor_id = params
+                .get("cursor_id")
+                .and_then(|v| v.as_f64())
+                .map(|n| n as u64)
+                .ok_or((
+                    error_code::INVALID_PARAMS,
+                    "missing 'cursor_id' number".to_string(),
+                ))?;
+            let existed = session.drop_cursor(cursor_id).is_some();
+            if !existed {
+                return Err((
+                    error_code::CURSOR_NOT_FOUND,
+                    format!("cursor {cursor_id} not found"),
+                ));
+            }
+            Ok(Value::Object(
+                [
+                    ("cursor_id".to_string(), Value::Number(cursor_id as f64)),
+                    ("closed".to_string(), Value::Bool(true)),
+                ]
+                .into_iter()
+                .collect(),
+            ))
         }
 
         "tx.rollback" => {
@@ -550,10 +778,12 @@ fn dispatch_method(
         }
 
         "close" => {
-            // Silently drop any open transaction on close. The client
-            // explicitly asked to terminate; surfacing an error here
-            // would leak state across what is effectively a reset.
+            // Silently drop any open transaction and cursors on close.
+            // The client explicitly asked to terminate; surfacing an
+            // error here would leak state across what is effectively a
+            // reset.
             let _ = session.take_tx();
+            session.clear_cursors();
             let _ = runtime.checkpoint();
             Ok(Value::Null)
         }
@@ -1227,6 +1457,183 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":9,"method":"query","params":{"sql":"SELECT * FROM u5"}}"#,
         );
         assert!(!resp.contains("\"ghost\""));
+    }
+
+    // -----------------------------------------------------------------
+    // Cursor streaming tests
+    // -----------------------------------------------------------------
+
+    fn seed_numbers_table(rt: &RedDBRuntime, table: &str, count: u32) {
+        let _ = handle(
+            rt,
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"query","params":{{"sql":"CREATE TABLE {table} (n INTEGER)"}}}}"#,
+            ),
+        );
+        for i in 0..count {
+            let _ = handle(
+                rt,
+                &format!(
+                    r#"{{"jsonrpc":"2.0","id":2,"method":"query","params":{{"sql":"INSERT INTO {table} (n) VALUES ({i})"}}}}"#,
+                ),
+            );
+        }
+    }
+
+    #[test]
+    fn cursor_open_returns_id_columns_and_total() {
+        let rt = make_runtime();
+        seed_numbers_table(&rt, "nums1", 3);
+        with_session(&rt, |call, _| {
+            let resp = call(
+                r#"{"jsonrpc":"2.0","id":1,"method":"query.open","params":{"sql":"SELECT n FROM nums1"}}"#,
+            );
+            assert!(resp.contains("\"cursor_id\":1"));
+            assert!(resp.contains("\"total_rows\":3"));
+            assert!(resp.contains("\"columns\""));
+            assert!(!resp.contains("\"error\""));
+        });
+    }
+
+    #[test]
+    fn cursor_next_chunks_rows_and_signals_done() {
+        let rt = make_runtime();
+        seed_numbers_table(&rt, "nums2", 5);
+        with_session(&rt, |call, _| {
+            let _ = call(
+                r#"{"jsonrpc":"2.0","id":1,"method":"query.open","params":{"sql":"SELECT n FROM nums2"}}"#,
+            );
+            let first = call(
+                r#"{"jsonrpc":"2.0","id":2,"method":"query.next","params":{"cursor_id":1,"batch_size":2}}"#,
+            );
+            assert!(first.contains("\"done\":false"));
+            assert!(first.contains("\"remaining\":3"));
+
+            let second = call(
+                r#"{"jsonrpc":"2.0","id":3,"method":"query.next","params":{"cursor_id":1,"batch_size":2}}"#,
+            );
+            assert!(second.contains("\"done\":false"));
+            assert!(second.contains("\"remaining\":1"));
+
+            let third = call(
+                r#"{"jsonrpc":"2.0","id":4,"method":"query.next","params":{"cursor_id":1,"batch_size":2}}"#,
+            );
+            assert!(third.contains("\"done\":true"));
+            assert!(third.contains("\"remaining\":0"));
+        });
+    }
+
+    #[test]
+    fn cursor_auto_drops_when_exhausted() {
+        let rt = make_runtime();
+        seed_numbers_table(&rt, "nums3", 2);
+        with_session(&rt, |call, _| {
+            let _ = call(
+                r#"{"jsonrpc":"2.0","id":1,"method":"query.open","params":{"sql":"SELECT n FROM nums3"}}"#,
+            );
+            let _ = call(
+                r#"{"jsonrpc":"2.0","id":2,"method":"query.next","params":{"cursor_id":1,"batch_size":100}}"#,
+            );
+            // Cursor was auto-dropped after done=true; subsequent next
+            // must error with CURSOR_NOT_FOUND.
+            let resp = call(
+                r#"{"jsonrpc":"2.0","id":3,"method":"query.next","params":{"cursor_id":1,"batch_size":100}}"#,
+            );
+            assert!(resp.contains("\"code\":\"CURSOR_NOT_FOUND\""));
+        });
+    }
+
+    #[test]
+    fn cursor_close_removes_it() {
+        let rt = make_runtime();
+        seed_numbers_table(&rt, "nums4", 3);
+        with_session(&rt, |call, _| {
+            let _ = call(
+                r#"{"jsonrpc":"2.0","id":1,"method":"query.open","params":{"sql":"SELECT n FROM nums4"}}"#,
+            );
+            let close =
+                call(r#"{"jsonrpc":"2.0","id":2,"method":"query.close","params":{"cursor_id":1}}"#);
+            assert!(close.contains("\"closed\":true"));
+            let after = call(
+                r#"{"jsonrpc":"2.0","id":3,"method":"query.next","params":{"cursor_id":1,"batch_size":10}}"#,
+            );
+            assert!(after.contains("\"code\":\"CURSOR_NOT_FOUND\""));
+        });
+    }
+
+    #[test]
+    fn cursor_close_unknown_errors() {
+        let rt = make_runtime();
+        with_session(&rt, |call, _| {
+            let resp = call(
+                r#"{"jsonrpc":"2.0","id":1,"method":"query.close","params":{"cursor_id":9999}}"#,
+            );
+            assert!(resp.contains("\"code\":\"CURSOR_NOT_FOUND\""));
+        });
+    }
+
+    #[test]
+    fn cursor_next_without_cursor_id_errors() {
+        let rt = make_runtime();
+        with_session(&rt, |call, _| {
+            let resp = call(r#"{"jsonrpc":"2.0","id":1,"method":"query.next","params":{}}"#);
+            assert!(resp.contains("\"code\":\"INVALID_PARAMS\""));
+        });
+    }
+
+    #[test]
+    fn cursor_default_batch_size_returns_all_when_smaller_than_default() {
+        let rt = make_runtime();
+        seed_numbers_table(&rt, "nums5", 7);
+        with_session(&rt, |call, _| {
+            let _ = call(
+                r#"{"jsonrpc":"2.0","id":1,"method":"query.open","params":{"sql":"SELECT n FROM nums5"}}"#,
+            );
+            // No batch_size → default 100, table has 7 rows, all in one call.
+            let resp =
+                call(r#"{"jsonrpc":"2.0","id":2,"method":"query.next","params":{"cursor_id":1}}"#);
+            assert!(resp.contains("\"done\":true"));
+            assert!(resp.contains("\"remaining\":0"));
+        });
+    }
+
+    #[test]
+    fn close_method_drops_open_cursors() {
+        let rt = make_runtime();
+        seed_numbers_table(&rt, "nums6", 3);
+        // Single session: open a cursor, call close, verify cursor is gone by reopening
+        // fresh session and attempting to use cursor_id 1.
+        with_session(&rt, |call, _| {
+            let _ = call(
+                r#"{"jsonrpc":"2.0","id":1,"method":"query.open","params":{"sql":"SELECT n FROM nums6"}}"#,
+            );
+            let close = call(r#"{"jsonrpc":"2.0","id":2,"method":"close","params":null}"#);
+            assert!(close.contains("\"__close__\":true"));
+            // Cursor must be gone after close within the same session.
+            let after = call(
+                r#"{"jsonrpc":"2.0","id":3,"method":"query.next","params":{"cursor_id":1,"batch_size":10}}"#,
+            );
+            assert!(after.contains("\"code\":\"CURSOR_NOT_FOUND\""));
+        });
+    }
+
+    #[test]
+    fn cursor_independent_of_transaction_state() {
+        let rt = make_runtime();
+        seed_numbers_table(&rt, "nums7", 4);
+        with_session(&rt, |call, _| {
+            // Open cursor, begin tx, commit tx — cursor survives.
+            let _ = call(
+                r#"{"jsonrpc":"2.0","id":1,"method":"query.open","params":{"sql":"SELECT n FROM nums7"}}"#,
+            );
+            let _ = call(r#"{"jsonrpc":"2.0","id":2,"method":"tx.begin","params":null}"#);
+            let _ = call(r#"{"jsonrpc":"2.0","id":3,"method":"tx.commit","params":null}"#);
+            let resp = call(
+                r#"{"jsonrpc":"2.0","id":4,"method":"query.next","params":{"cursor_id":1,"batch_size":10}}"#,
+            );
+            assert!(resp.contains("\"done\":true"));
+            assert!(!resp.contains("\"error\""));
+        });
     }
 
     #[test]
