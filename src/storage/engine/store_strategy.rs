@@ -564,18 +564,34 @@ impl TripleStore {
         let indexes = strategy_read(&self.indexes);
 
         if let Some(index) = indexes.get(&index_type) {
-            // Use appropriate lookup based on pattern
+            // Use appropriate lookup based on pattern.
+            //
+            // `PatternType::from_bounds(s, p, o)` encodes which of the three
+            // triple positions are bound. Every `.expect()` below asserts
+            // the invariant that its caller already encoded via the variant
+            // name: `Sub*` means `subject.is_some()`, `*Pre*` means
+            // `predicate.is_some()`, `*Obj` means `object.is_some()`.
             match pattern {
                 PatternType::SubPreObj => {
-                    // Exact match
+                    // Exact match — all three bound.
+                    let s = subject.expect("invariant: PatternType::SubPreObj => subject set");
+                    let p = predicate.expect("invariant: PatternType::SubPreObj => predicate set");
+                    let o = object.expect("invariant: PatternType::SubPreObj => object set");
                     index
-                        .lookup(subject.unwrap(), Some(predicate.unwrap()))
+                        .lookup(s, Some(p))
                         .into_iter()
-                        .filter(|(_, _, o)| o == object.unwrap())
+                        .filter(|(_, _, triple_o)| triple_o == o)
                         .collect()
                 }
-                PatternType::SubPre => index.lookup(subject.unwrap(), Some(predicate.unwrap())),
-                PatternType::Sub => index.lookup(subject.unwrap(), None),
+                PatternType::SubPre => {
+                    let s = subject.expect("invariant: PatternType::SubPre => subject set");
+                    let p = predicate.expect("invariant: PatternType::SubPre => predicate set");
+                    index.lookup(s, Some(p))
+                }
+                PatternType::Sub => {
+                    let s = subject.expect("invariant: PatternType::Sub => subject set");
+                    index.lookup(s, None)
+                }
                 _ => {
                     // Fall back to scan with filter
                     index
