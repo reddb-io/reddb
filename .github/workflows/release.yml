@@ -343,3 +343,71 @@ jobs:
           provenance: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # ===========================================================================
+  # publish-python — Build and upload reddb wheels to PyPI.
+  #
+  # ⚠ DISABLED until the PYPI_API_TOKEN secret is created.
+  #    See PLAN_DRIVERS.md Phase 4. To enable:
+  #      1. Verify `reddb` is available on PyPI (or fall back to `reddb-client`
+  #         in drivers/python/pyproject.toml).
+  #      2. Create a PyPI account, generate a project-scoped API token.
+  #      3. Add it as a repo secret named `PYPI_API_TOKEN`.
+  #      4. Replace `if: false` below with the same conditional the other
+  #         publish jobs use:
+  #         if: needs.plan.outputs.should_skip != 'true'
+  # ===========================================================================
+  publish-python-wheels:
+    name: Build PyPI wheel (${{ matrix.target }})
+    needs: [plan, build]
+    if: false  # TODO: enable after creating PYPI_API_TOKEN secret
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu,  manylinux: '2014' }
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu, manylinux: '2014' }
+          - { os: macos-14,      target: aarch64-apple-darwin,      manylinux: 'auto' }
+          - { os: macos-13,      target: x86_64-apple-darwin,       manylinux: 'auto' }
+          - { os: windows-latest,target: x86_64-pc-windows-msvc,    manylinux: 'auto' }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Sync version
+        shell: bash
+        run: |
+          VERSION="${{ needs.plan.outputs.package_version }}"
+          # drivers/python/pyproject.toml + Cargo.toml share the same version.
+          sed -i.bak "s/^version = \".*\"/version = \"${VERSION}\"/" drivers/python/Cargo.toml drivers/python/pyproject.toml
+          rm -f drivers/python/Cargo.toml.bak drivers/python/pyproject.toml.bak
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: drivers/python
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: --release --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reddb-wheel-${{ matrix.target }}
+          path: drivers/python/dist/*
+
+  publish-python-upload:
+    name: Upload wheels to PyPI
+    needs: [plan, publish-python-wheels]
+    if: false  # TODO: enable after creating PYPI_API_TOKEN secret
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: reddb-wheel-*
+          merge-multiple: true
+          path: dist
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: upload
+          args: --skip-existing dist/*
+        env:
+          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
