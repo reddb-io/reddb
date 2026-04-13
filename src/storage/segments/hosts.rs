@@ -5,6 +5,30 @@ use std::sync::Arc;
 use crate::storage::primitives::encoding::{read_varu32, write_varu32, DecodeError, IpKey};
 use crate::storage::records::HostIntelRecord;
 
+fn read_fixed<const N: usize>(
+    bytes: &[u8],
+    offset: usize,
+    what: &'static str,
+) -> Result<[u8; N], DecodeError> {
+    let end = offset + N;
+    let slice = bytes.get(offset..end).ok_or(DecodeError(what))?;
+    let mut raw = [0u8; N];
+    raw.copy_from_slice(slice);
+    Ok(raw)
+}
+
+fn read_u16_le(bytes: &[u8], offset: usize, what: &'static str) -> Result<u16, DecodeError> {
+    Ok(u16::from_le_bytes(read_fixed::<2>(bytes, offset, what)?))
+}
+
+fn read_u64_le(bytes: &[u8], offset: usize, what: &'static str) -> Result<u64, DecodeError> {
+    Ok(u64::from_le_bytes(read_fixed::<8>(bytes, offset, what)?))
+}
+
+fn read_u32_le(bytes: &[u8], offset: usize, what: &'static str) -> Result<u32, DecodeError> {
+    Ok(u32::from_le_bytes(read_fixed::<4>(bytes, offset, what)?))
+}
+
 #[derive(Debug, Clone, Copy)]
 struct HostDirEntry {
     key: IpKey,
@@ -36,9 +60,10 @@ impl HostDirEntry {
             let mut raw = [0u8; 16];
             raw.copy_from_slice(&bytes[offset..offset + 16]);
             offset += 16;
-            let payload_offset = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+            let payload_offset =
+                read_u64_le(bytes, offset, "host directory truncated (payload offset)")?;
             offset += 8;
-            let payload_len = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+            let payload_len = read_u64_le(bytes, offset, "host directory truncated (payload len)")?;
             offset += 8;
             entries.push(Self {
                 key: IpKey { bytes: raw, len },
@@ -78,13 +103,13 @@ impl HostSegmentHeader {
         if bytes[0..4] != Self::MAGIC {
             return Err(DecodeError("invalid host segment magic"));
         }
-        let version = u16::from_le_bytes(bytes[4..6].try_into().unwrap());
+        let version = read_u16_le(bytes, 4, "host header truncated (version)")?;
         if version != Self::VERSION {
             return Err(DecodeError("unsupported host segment version"));
         }
-        let record_count = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-        let directory_len = u64::from_le_bytes(bytes[12..20].try_into().unwrap());
-        let payload_len = u64::from_le_bytes(bytes[20..28].try_into().unwrap());
+        let record_count = read_u32_le(bytes, 8, "host header truncated (record count)")?;
+        let directory_len = read_u64_le(bytes, 12, "host header truncated (directory len)")?;
+        let payload_len = read_u64_le(bytes, 20, "host header truncated (payload len)")?;
         Ok(Self {
             record_count,
             directory_len,
@@ -408,5 +433,11 @@ mod tests {
             HostSegmentView::from_arc(Arc::clone(&data), 0, data.len()).expect("view loaded");
         let record = view.get("203.0.113.1".parse().unwrap()).expect("result");
         assert!(record.is_some());
+    }
+
+    #[test]
+    fn host_segment_header_rejects_truncated_bytes() {
+        let truncated = vec![0u8; HostSegmentHeader::SIZE - 1];
+        assert!(HostSegmentHeader::read(&truncated).is_err());
     }
 }
