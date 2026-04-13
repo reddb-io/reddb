@@ -1113,12 +1113,12 @@ mod tests {
 
     #[test]
     fn test_numbers() {
-        let tokens = tokenize("42 3.14 1e10 2.5e-3");
+        let tokens = tokenize("42 2.5 1e10 2.5e-3");
         assert_eq!(
             tokens,
             vec![
                 Token::Integer(42),
-                Token::Float(3.14),
+                Token::Float(2.5),
                 Token::Float(1e10),
                 Token::Float(2.5e-3),
                 Token::Eof
