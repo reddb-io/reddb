@@ -622,6 +622,37 @@ fn test_parse_vector_query_with_text() {
 }
 
 #[test]
+fn test_parse_vector_query_with_subquery() {
+    let query = parse(
+        "VECTOR SEARCH embeddings \
+         SIMILAR TO (VECTOR SEARCH seeds SIMILAR TO [1.0, 0.0] LIMIT 1) \
+         LIMIT 3",
+    )
+    .unwrap();
+
+    if let QueryExpr::Vector(vq) = query {
+        assert_eq!(vq.collection, "embeddings");
+        assert_eq!(vq.k, 3);
+        match vq.query_vector {
+            VectorSource::Subquery(expr) => match *expr {
+                QueryExpr::Vector(inner) => {
+                    assert_eq!(inner.collection, "seeds");
+                    assert_eq!(inner.k, 1);
+                    match inner.query_vector {
+                        VectorSource::Literal(vector) => assert_eq!(vector, vec![1.0, 0.0]),
+                        other => panic!("expected literal inner vector, got {other:?}"),
+                    }
+                }
+                other => panic!("expected inner vector query, got {other:?}"),
+            },
+            other => panic!("expected subquery source, got {other:?}"),
+        }
+    } else {
+        panic!("Expected VectorQuery");
+    }
+}
+
+#[test]
 fn test_parse_vector_query_with_filter() {
     let query =
         parse("VECTOR SEARCH docs SIMILAR TO [0.5, 0.5] WHERE source = 'nmap' LIMIT 20").unwrap();
@@ -1696,6 +1727,55 @@ fn test_parse_group_by_with_limit() {
         assert_eq!(tq.table, "logs");
         assert_eq!(tq.group_by, vec!["level".to_string()]);
         assert_eq!(tq.limit, Some(10));
+    } else {
+        panic!("Expected TableQuery");
+    }
+}
+
+#[test]
+fn test_parse_group_by_time_bucket() {
+    let query = parse(
+        "SELECT time_bucket(5m) AS bucket, avg(value) AS avg_value FROM cpu_metrics GROUP BY time_bucket(5m)",
+    )
+    .unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "cpu_metrics");
+        assert_eq!(tq.group_by, vec!["TIME_BUCKET(5m)".to_string()]);
+        assert_eq!(tq.columns.len(), 2);
+        assert_eq!(
+            tq.columns[0],
+            Projection::Function(
+                "TIME_BUCKET:bucket".to_string(),
+                vec![Projection::Column("LIT:5m".to_string())]
+            )
+        );
+        assert_eq!(
+            tq.columns[1],
+            Projection::Function(
+                "AVG:avg_value".to_string(),
+                vec![Projection::Column("value".to_string())]
+            )
+        );
+    } else {
+        panic!("Expected TableQuery");
+    }
+}
+
+#[test]
+fn test_parse_keyword_field_reference_in_where() {
+    let query = parse("SELECT metric FROM cpu_metrics WHERE metric = 'cpu.usage'").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "cpu_metrics");
+        match tq.filter {
+            Some(Filter::Compare { field, .. }) => match field {
+                FieldRef::TableColumn { table, column } => {
+                    assert!(table.is_empty());
+                    assert_eq!(column, "metric");
+                }
+                other => panic!("expected table-column field ref, got {other:?}"),
+            },
+            other => panic!("expected compare filter, got {other:?}"),
+        }
     } else {
         panic!("Expected TableQuery");
     }
