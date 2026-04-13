@@ -167,7 +167,7 @@ impl BloomSegment {
         let num_hashes = bytes[1];
         let bit_size = u32::from_be_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]);
         let inserted = u32::from_be_bytes([bytes[6], bytes[7], bytes[8], bytes[9]]);
-        let byte_len = (bit_size as usize + 7) / 8;
+        let byte_len = (bit_size as usize).div_ceil(8);
         let total = HEADER_LEN + byte_len;
         if bytes.len() < total {
             return Err(BloomSegmentError::LengthMismatch);
