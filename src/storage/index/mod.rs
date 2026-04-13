@@ -21,10 +21,12 @@
 //! traits, not concrete types.
 
 pub mod bloom_segment;
+pub mod registry;
 pub mod stats;
 pub mod zone_map;
 
 pub use bloom_segment::{BloomSegment, BloomSegmentBuilder, HasBloom};
+pub use registry::{IndexRegistry, IndexScope, SharedIndex};
 pub use stats::{IndexKind, IndexStats};
 pub use zone_map::{ZoneDecision, ZoneMap, ZonePredicate};
 
