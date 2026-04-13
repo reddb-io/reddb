@@ -9,7 +9,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Bound::{Excluded, Included, Unbounded};
-use std::sync::RwLock;
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::storage::schema::Value;
 use crate::storage::unified::bitmap_index::BitmapIndexManager;
@@ -61,6 +61,14 @@ enum SortedNumericValue {
     Exact(SortedNumericKey),
     Inexact,
     Unsupported,
+}
+
+fn read_unpoisoned<'a, T>(lock: &'a RwLock<T>) -> RwLockReadGuard<'a, T> {
+    lock.read().unwrap_or_else(|poison| poison.into_inner())
+}
+
+fn write_unpoisoned<'a, T>(lock: &'a RwLock<T>) -> RwLockWriteGuard<'a, T> {
+    lock.write().unwrap_or_else(|poison| poison.into_inner())
 }
 
 /// In-memory sorted index for exact integral range scans.
@@ -181,10 +189,7 @@ impl SortedIndexManager {
                 }
             }
         }
-        self.indices
-            .write()
-            .unwrap()
-            .insert((collection.to_string(), column.to_string()), index);
+        write_unpoisoned(&self.indices).insert((collection.to_string(), column.to_string()), index);
         count
     }
 
@@ -196,7 +201,7 @@ impl SortedIndexManager {
         low: SortedNumericKey,
         high: SortedNumericKey,
     ) -> Option<Vec<EntityId>> {
-        let indices = self.indices.read().unwrap();
+        let indices = read_unpoisoned(&self.indices);
         let key = (collection.to_string(), column.to_string());
         match indices.get(&key) {
             Some(index) => index.range(low, high),
@@ -211,7 +216,7 @@ impl SortedIndexManager {
         column: &str,
         threshold: SortedNumericKey,
     ) -> Option<Vec<EntityId>> {
-        let indices = self.indices.read().unwrap();
+        let indices = read_unpoisoned(&self.indices);
         let key = (collection.to_string(), column.to_string());
         match indices.get(&key) {
             Some(index) => index.greater_than(threshold),
@@ -225,7 +230,7 @@ impl SortedIndexManager {
         column: &str,
         threshold: SortedNumericKey,
     ) -> Option<Vec<EntityId>> {
-        let indices = self.indices.read().unwrap();
+        let indices = read_unpoisoned(&self.indices);
         let key = (collection.to_string(), column.to_string());
         match indices.get(&key) {
             Some(index) => index.greater_equal(threshold),
@@ -239,7 +244,7 @@ impl SortedIndexManager {
         column: &str,
         threshold: SortedNumericKey,
     ) -> Option<Vec<EntityId>> {
-        let indices = self.indices.read().unwrap();
+        let indices = read_unpoisoned(&self.indices);
         let key = (collection.to_string(), column.to_string());
         match indices.get(&key) {
             Some(index) => index.less_than(threshold),
@@ -253,7 +258,7 @@ impl SortedIndexManager {
         column: &str,
         threshold: SortedNumericKey,
     ) -> Option<Vec<EntityId>> {
-        let indices = self.indices.read().unwrap();
+        let indices = read_unpoisoned(&self.indices);
         let key = (collection.to_string(), column.to_string());
         match indices.get(&key) {
             Some(index) => index.less_equal(threshold),
@@ -263,7 +268,7 @@ impl SortedIndexManager {
 
     /// Check if a sorted index exists for a column.
     pub fn has_index(&self, collection: &str, column: &str) -> bool {
-        let indices = self.indices.read().unwrap();
+        let indices = read_unpoisoned(&self.indices);
         indices.contains_key(&(collection.to_string(), column.to_string()))
     }
 
@@ -278,14 +283,13 @@ impl SortedIndexManager {
         value: &Value,
         entity_id: EntityId,
     ) {
-        if let Ok(mut indices) = self.indices.write() {
-            let k = (collection.to_string(), column.to_string());
-            if let Some(index) = indices.get_mut(&k) {
-                match classify_sorted_numeric_value(value) {
-                    SortedNumericValue::Exact(key) => index.insert(key, entity_id),
-                    SortedNumericValue::Inexact => index.mark_inexact_numeric_values(),
-                    SortedNumericValue::Unsupported => {}
-                }
+        let mut indices = write_unpoisoned(&self.indices);
+        let k = (collection.to_string(), column.to_string());
+        if let Some(index) = indices.get_mut(&k) {
+            match classify_sorted_numeric_value(value) {
+                SortedNumericValue::Exact(key) => index.insert(key, entity_id),
+                SortedNumericValue::Inexact => index.mark_inexact_numeric_values(),
+                SortedNumericValue::Unsupported => {}
             }
         }
     }
@@ -300,17 +304,16 @@ impl SortedIndexManager {
         value: &Value,
         entity_id: EntityId,
     ) {
-        if let Ok(mut indices) = self.indices.write() {
-            let k = (collection.to_string(), column.to_string());
-            if let Some(index) = indices.get_mut(&k) {
-                let Some(key) = value_to_sorted_numeric_key(value) else {
-                    return;
-                };
-                if let Some(bucket) = index.entries.get_mut(&key) {
-                    bucket.retain(|id| *id != entity_id);
-                    if bucket.is_empty() {
-                        index.entries.remove(&key);
-                    }
+        let mut indices = write_unpoisoned(&self.indices);
+        let k = (collection.to_string(), column.to_string());
+        if let Some(index) = indices.get_mut(&k) {
+            let Some(key) = value_to_sorted_numeric_key(value) else {
+                return;
+            };
+            if let Some(bucket) = index.entries.get_mut(&key) {
+                bucket.retain(|id| *id != entity_id);
+                if bucket.is_empty() {
+                    index.entries.remove(&key);
                 }
             }
         }
@@ -461,7 +464,7 @@ impl IndexStore {
 
     /// Drop an index
     pub fn drop_index(&self, name: &str, collection: &str) -> bool {
-        let mut registry = self.registry.write().unwrap();
+        let mut registry = write_unpoisoned(&self.registry);
         let key = (collection.to_string(), name.to_string());
         if let Some(info) = registry.remove(&key) {
             match info.method {
@@ -484,7 +487,7 @@ impl IndexStore {
 
     /// Register index metadata
     pub fn register(&self, info: RegisteredIndex) {
-        let mut registry = self.registry.write().unwrap();
+        let mut registry = write_unpoisoned(&self.registry);
         registry.insert((info.collection.clone(), info.name.clone()), info);
     }
 
@@ -505,7 +508,7 @@ impl IndexStore {
 
     /// Find which index (if any) covers a collection + column
     pub fn find_index_for_column(&self, collection: &str, column: &str) -> Option<RegisteredIndex> {
-        let registry = self.registry.read().unwrap();
+        let registry = read_unpoisoned(&self.registry);
         registry
             .values()
             .find(|idx| idx.collection == collection && idx.columns.contains(&column.to_string()))
@@ -514,7 +517,7 @@ impl IndexStore {
 
     /// List all indices for a collection
     pub fn list_indices(&self, collection: &str) -> Vec<RegisteredIndex> {
-        let registry = self.registry.read().unwrap();
+        let registry = read_unpoisoned(&self.registry);
         registry
             .values()
             .filter(|idx| idx.collection == collection)
@@ -525,15 +528,18 @@ impl IndexStore {
     /// Insert one entity's relevant column values into every index
     /// registered on its collection. Called from the entity insert
     /// pipeline so that CREATE INDEX can land before or after the
-    /// data without losing new rows. Silently tolerates missing
-    /// index structures (e.g. if create_index hasn't run yet).
+    /// data without losing new rows. Missing backing structures are
+    /// surfaced as errors instead of being silently ignored.
     pub fn index_entity_insert(
         &self,
         collection: &str,
         entity_id: EntityId,
         fields: &[(String, Value)],
     ) -> Result<(), String> {
-        let registry = self.registry.read().unwrap();
+        let registry = self
+            .registry
+            .read()
+            .map_err(|err| format!("index registry lock poisoned: {err}"))?;
         for idx in registry.values() {
             if idx.collection != collection {
                 continue;
