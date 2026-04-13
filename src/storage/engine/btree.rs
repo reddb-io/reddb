@@ -50,8 +50,25 @@ const LEAF_PREV_OFFSET: usize = HEADER_SIZE;
 /// Offset of next_leaf in leaf page
 const LEAF_NEXT_OFFSET: usize = HEADER_SIZE + 4;
 
-/// Start of cell data in leaf pages
-const LEAF_DATA_OFFSET: usize = HEADER_SIZE + 8;
+/// Start of the slot array in leaf pages.
+///
+/// Slotted-page layout:
+/// ```text
+/// [PageHeader 32B][prev u32 | next u32 | 8B]
+/// [slot 0: u16][slot 1: u16]...[slot N-1: u16]  ← grows forward
+/// ... free space ...
+/// [cell N-1][cell N-2]...[cell 0]               ← grows backward from free_end
+/// ```
+/// Each cell is laid out as `[key_len:u16][val_len:u16][key][val]`.
+/// `page.cell_count()` is N; `page.free_end()` is the offset of the
+/// lowest (most recently written) cell. The slot array lives right
+/// after the leaf-chain links and each u16 slot is the absolute page
+/// offset of its cell.
+const LEAF_SLOT_ARRAY_OFFSET: usize = HEADER_SIZE + 8;
+
+/// Kept for source-compat with older code paths (e.g. interior-node
+/// helpers); equivalent to `LEAF_SLOT_ARRAY_OFFSET` for leaves.
+const LEAF_DATA_OFFSET: usize = LEAF_SLOT_ARRAY_OFFSET;
 
 /// Start of cell data in interior pages (right_child is in header)
 const INTERIOR_DATA_OFFSET: usize = HEADER_SIZE;
@@ -247,12 +264,63 @@ fn interior_min_bytes() -> usize {
     (PAGE_SIZE - INTERIOR_DATA_OFFSET) * MIN_FILL_FACTOR / 100
 }
 
+/// Bytes consumed by one leaf entry in the slotted layout: one u16
+/// slot in the pointer array plus the cell itself (`[key_len:u16]
+/// [val_len:u16][key][val]`).
 fn leaf_entry_size(entry: &(Vec<u8>, Vec<u8>)) -> usize {
-    4 + entry.0.len() + entry.1.len()
+    2 + 4 + entry.0.len() + entry.1.len()
 }
 
 fn leaf_entries_size(entries: &[(Vec<u8>, Vec<u8>)]) -> usize {
     entries.iter().map(leaf_entry_size).sum()
+}
+
+#[inline]
+fn leaf_slot_offset_for(index: usize) -> usize {
+    LEAF_SLOT_ARRAY_OFFSET + index * 2
+}
+
+#[inline]
+fn leaf_read_slot(page: &Page, index: usize) -> BTreeResult<usize> {
+    let data = page.as_bytes();
+    let slot_pos = leaf_slot_offset_for(index);
+    if slot_pos + 2 > PAGE_SIZE {
+        return Err(BTreeError::Corrupted("slot array overflows page".into()));
+    }
+    Ok(u16::from_le_bytes([data[slot_pos], data[slot_pos + 1]]) as usize)
+}
+
+#[inline]
+fn leaf_write_slot(page: &mut Page, index: usize, cell_offset: u16) -> BTreeResult<()> {
+    let data = page.as_bytes_mut();
+    let slot_pos = leaf_slot_offset_for(index);
+    if slot_pos + 2 > PAGE_SIZE {
+        return Err(BTreeError::Corrupted("slot array overflows page".into()));
+    }
+    data[slot_pos..slot_pos + 2].copy_from_slice(&cell_offset.to_le_bytes());
+    Ok(())
+}
+
+#[inline]
+fn leaf_slots_end(page: &Page) -> usize {
+    LEAF_SLOT_ARRAY_OFFSET + (page.cell_count() as usize) * 2
+}
+
+#[inline]
+fn leaf_cells_start(page: &Page) -> usize {
+    let end = page.free_end() as usize;
+    if end == 0 {
+        PAGE_SIZE
+    } else {
+        end
+    }
+}
+
+#[inline]
+fn leaf_free_bytes(page: &Page) -> usize {
+    let slot_end = leaf_slots_end(page);
+    let cells = leaf_cells_start(page);
+    cells.saturating_sub(slot_end)
 }
 
 fn interior_key_size(key: &[u8]) -> usize {
@@ -265,51 +333,28 @@ fn interior_entries_size(keys: &[Vec<u8>]) -> usize {
 
 // ==================== Leaf Page Helpers ====================
 
+/// Read the cell at slot `index` in O(1). Follows the u16 slot pointer
+/// into the cell data area; the cell header is `[key_len:u16][val_len:u16]`
+/// followed by the raw key and value bytes.
 fn read_leaf_cell(page: &Page, index: usize) -> BTreeResult<(Vec<u8>, Vec<u8>)> {
-    let data = page.as_bytes();
     let cell_count = page.cell_count() as usize;
-
     if index >= cell_count {
         return Err(BTreeError::Corrupted("Cell index out of range".into()));
     }
-
-    // Find cell offset by scanning from start
-    let mut offset = LEAF_DATA_OFFSET;
-    for _ in 0..index {
-        let key_len = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
-        let val_len = u16::from_le_bytes([data[offset + 2], data[offset + 3]]) as usize;
-        offset += 4 + key_len + val_len;
+    let offset = leaf_read_slot(page, index)?;
+    let data = page.as_bytes();
+    if offset + 4 > PAGE_SIZE {
+        return Err(BTreeError::Corrupted("cell header out of range".into()));
     }
-
     let key_len = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
     let val_len = u16::from_le_bytes([data[offset + 2], data[offset + 3]]) as usize;
-
-    let key = data[offset + 4..offset + 4 + key_len].to_vec();
-    let value = data[offset + 4 + key_len..offset + 4 + key_len + val_len].to_vec();
-
-    Ok((key, value))
-}
-
-fn write_leaf_cell(page: &mut Page, index: usize, key: &[u8], value: &[u8]) -> BTreeResult<()> {
-    let data = page.as_bytes_mut();
-
-    // Find cell offset by scanning from start
-    let mut offset = LEAF_DATA_OFFSET;
-    for _ in 0..index {
-        let key_len = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
-        let val_len = u16::from_le_bytes([data[offset + 2], data[offset + 3]]) as usize;
-        offset += 4 + key_len + val_len;
+    let end = offset + 4 + key_len + val_len;
+    if end > PAGE_SIZE {
+        return Err(BTreeError::Corrupted("cell body out of range".into()));
     }
-
-    // Write lengths
-    data[offset..offset + 2].copy_from_slice(&(key.len() as u16).to_le_bytes());
-    data[offset + 2..offset + 4].copy_from_slice(&(value.len() as u16).to_le_bytes());
-
-    // Write key and value
-    data[offset + 4..offset + 4 + key.len()].copy_from_slice(key);
-    data[offset + 4 + key.len()..offset + 4 + key.len() + value.len()].copy_from_slice(value);
-
-    Ok(())
+    let key = data[offset + 4..offset + 4 + key_len].to_vec();
+    let value = data[offset + 4 + key_len..end].to_vec();
+    Ok((key, value))
 }
 
 fn read_leaf_entries(page: &Page) -> BTreeResult<Vec<(Vec<u8>, Vec<u8>)>> {
@@ -321,81 +366,138 @@ fn read_leaf_entries(page: &Page) -> BTreeResult<Vec<(Vec<u8>, Vec<u8>)>> {
     Ok(entries)
 }
 
+/// Wipe and re-lay an entire leaf in slotted form. Used by the split
+/// path (which hands us a pre-sorted `entries` vector) and by
+/// `clear_leaf_cells` under the hood. Entries are appended at the end
+/// of the free area so the highest-index slot ends up at the lowest
+/// offset — same shape the single-key insert path produces.
 fn write_leaf_entries(page: &mut Page, entries: &[(Vec<u8>, Vec<u8>)]) -> BTreeResult<()> {
     clear_leaf_cells(page);
     for (i, (k, v)) in entries.iter().enumerate() {
-        write_leaf_cell(page, i, k, v)?;
+        let cell_size = 4 + k.len() + v.len();
+        let cells_start = leaf_cells_start(page);
+        let slot_end = LEAF_SLOT_ARRAY_OFFSET + (i + 1) * 2;
+        if slot_end + cell_size > cells_start {
+            return Err(BTreeError::Corrupted("leaf rebuild overflowed page".into()));
+        }
+        let cell_offset = cells_start - cell_size;
+        {
+            let data = page.as_bytes_mut();
+            data[cell_offset..cell_offset + 2].copy_from_slice(&(k.len() as u16).to_le_bytes());
+            data[cell_offset + 2..cell_offset + 4].copy_from_slice(&(v.len() as u16).to_le_bytes());
+            data[cell_offset + 4..cell_offset + 4 + k.len()].copy_from_slice(k);
+            data[cell_offset + 4 + k.len()..cell_offset + 4 + k.len() + v.len()].copy_from_slice(v);
+        }
+        page.set_free_end(cell_offset as u16);
+        leaf_write_slot(page, i, cell_offset as u16)?;
     }
     page.set_cell_count(entries.len() as u16);
+    page.set_free_start((LEAF_SLOT_ARRAY_OFFSET + entries.len() * 2) as u16);
     Ok(())
 }
 
 fn can_insert_leaf(page: &Page, key: &[u8], value: &[u8]) -> bool {
-    let data = page.as_bytes();
-    let cell_count = page.cell_count() as usize;
-
-    // Calculate current used space
-    let mut offset = LEAF_DATA_OFFSET;
-    for _ in 0..cell_count {
-        let key_len = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
-        let val_len = u16::from_le_bytes([data[offset + 2], data[offset + 3]]) as usize;
-        offset += 4 + key_len + val_len;
-    }
-
-    // Check if new cell fits
-    let needed = 4 + key.len() + value.len();
-    offset + needed <= PAGE_SIZE
+    let needed = 2 + 4 + key.len() + value.len();
+    leaf_free_bytes(page) >= needed
 }
 
+/// Insert `(key, value)` into the slotted leaf in O(log M) search +
+/// O(M) slot-array memmove. Cell data is appended at the tail of the
+/// free area (backward from `free_end`); the slot pointer is inserted
+/// at the sorted position.
 fn insert_into_leaf(page: &mut Page, key: &[u8], value: &[u8]) -> BTreeResult<()> {
+    // 1. Binary search the slot array to find the insertion index.
     let cell_count = page.cell_count() as usize;
-
-    // Find insertion position
-    let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(cell_count + 1);
-    for i in 0..cell_count {
-        entries.push(read_leaf_cell(page, i)?);
-    }
-
-    let insert_pos = entries.partition_point(|(k, _)| k.as_slice() < key);
-    entries.insert(insert_pos, (key.to_vec(), value.to_vec()));
-
-    // Rewrite all cells
-    clear_leaf_cells(page);
-    for (i, (k, v)) in entries.iter().enumerate() {
-        write_leaf_cell(page, i, k, v)?;
-    }
-    page.set_cell_count(entries.len() as u16);
-
-    Ok(())
-}
-
-fn delete_from_leaf(page: &mut Page, index: usize) -> BTreeResult<()> {
-    let cell_count = page.cell_count() as usize;
-
-    // Read all cells except the deleted one
-    let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(cell_count - 1);
-    for i in 0..cell_count {
-        if i != index {
-            entries.push(read_leaf_cell(page, i)?);
+    let mut low = 0;
+    let mut high = cell_count;
+    while low < high {
+        let mid = (low + high) / 2;
+        let (cell_key, _) = read_leaf_cell(page, mid)?;
+        match cell_key.as_slice().cmp(key) {
+            Ordering::Less => low = mid + 1,
+            Ordering::Greater => high = mid,
+            Ordering::Equal => {
+                // Duplicate keys are tolerated by the B-tree (caller
+                // decides semantics); append after the existing run.
+                low = mid + 1;
+                break;
+            }
         }
     }
+    let insert_pos = low;
 
-    // Rewrite cells
-    clear_leaf_cells(page);
-    for (i, (k, v)) in entries.iter().enumerate() {
-        write_leaf_cell(page, i, k, v)?;
+    // 2. Reserve the cell at the tail of the free area.
+    let cell_size = 4 + key.len() + value.len();
+    let slot_end_after = LEAF_SLOT_ARRAY_OFFSET + (cell_count + 1) * 2;
+    let cells_start = leaf_cells_start(page);
+    if slot_end_after + cell_size > cells_start {
+        return Err(BTreeError::Corrupted("leaf page full".into()));
     }
-    page.set_cell_count(entries.len() as u16);
+    let cell_offset = cells_start - cell_size;
+    {
+        let data = page.as_bytes_mut();
+        data[cell_offset..cell_offset + 2].copy_from_slice(&(key.len() as u16).to_le_bytes());
+        data[cell_offset + 2..cell_offset + 4].copy_from_slice(&(value.len() as u16).to_le_bytes());
+        data[cell_offset + 4..cell_offset + 4 + key.len()].copy_from_slice(key);
+        data[cell_offset + 4 + key.len()..cell_offset + 4 + key.len() + value.len()]
+            .copy_from_slice(value);
+    }
+    page.set_free_end(cell_offset as u16);
 
+    // 3. Shift the slot-array tail right by one slot, then write the
+    //    new pointer into the freed slot. This is a single memmove on
+    //    a couple dozen u16s — far cheaper than the O(M²) rebuild.
+    {
+        let shift_from = leaf_slot_offset_for(insert_pos);
+        let shift_to = shift_from + 2;
+        let shift_len = (cell_count - insert_pos) * 2;
+        if shift_len > 0 {
+            let data = page.as_bytes_mut();
+            data.copy_within(shift_from..shift_from + shift_len, shift_to);
+        }
+    }
+    leaf_write_slot(page, insert_pos, cell_offset as u16)?;
+
+    // 4. Bump counters.
+    page.set_cell_count((cell_count + 1) as u16);
+    page.set_free_start((LEAF_SLOT_ARRAY_OFFSET + (cell_count + 1) * 2) as u16);
     Ok(())
 }
 
-fn clear_leaf_cells(page: &mut Page) {
-    let data = page.as_bytes_mut();
-    // Zero out cell data area
-    for byte in &mut data[LEAF_DATA_OFFSET..] {
-        *byte = 0;
+/// Remove the slot at `index`. Cell bytes are left in place (lazy
+/// compaction); the slot-array tail is shifted left to close the gap.
+/// The caller is expected to call `clear_leaf_cells` + rebuild if the
+/// page wants its free space reclaimed.
+fn delete_from_leaf(page: &mut Page, index: usize) -> BTreeResult<()> {
+    let cell_count = page.cell_count() as usize;
+    if index >= cell_count {
+        return Err(BTreeError::Corrupted("delete index out of range".into()));
     }
+    if index + 1 < cell_count {
+        let shift_from = leaf_slot_offset_for(index + 1);
+        let shift_to = leaf_slot_offset_for(index);
+        let shift_len = (cell_count - index - 1) * 2;
+        let data = page.as_bytes_mut();
+        data.copy_within(shift_from..shift_from + shift_len, shift_to);
+    }
+    page.set_cell_count((cell_count - 1) as u16);
+    page.set_free_start((LEAF_SLOT_ARRAY_OFFSET + (cell_count - 1) * 2) as u16);
+    Ok(())
+}
+
+/// Reset the leaf to an empty slotted state — cell count 0, free
+/// cursors at the extremes. Zeroes the slot array + cell data area so
+/// stale bytes never leak through a corrupted read.
+fn clear_leaf_cells(page: &mut Page) {
+    {
+        let data = page.as_bytes_mut();
+        for byte in &mut data[LEAF_SLOT_ARRAY_OFFSET..] {
+            *byte = 0;
+        }
+    }
+    page.set_cell_count(0);
+    page.set_free_start(LEAF_SLOT_ARRAY_OFFSET as u16);
+    page.set_free_end(PAGE_SIZE as u16);
 }
 
 fn init_leaf_links(page: &mut Page, prev: u32, next: u32) {

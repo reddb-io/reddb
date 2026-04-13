@@ -66,8 +66,8 @@ impl BTree {
         // Empty tree - create root leaf
         if root_id == 0 {
             let mut page = self.pager.allocate_page(PageType::BTreeLeaf)?;
-            write_leaf_cell(&mut page, 0, key, value)?;
-            page.set_cell_count(1);
+            clear_leaf_cells(&mut page);
+            insert_into_leaf(&mut page, key, value)?;
             init_leaf_links(&mut page, 0, 0);
             page.update_checksum();
             let new_root = page.page_id();
@@ -158,44 +158,30 @@ impl BTree {
             let (leaf_id, _path) = self.find_leaf(root_id, items[i].0)?;
             let mut page = self.pager.read_page(leaf_id)?;
 
-            // Compute the leaf's current fill state in a SINGLE O(M)
-            // pass: total used bytes + the last cell's key. We'll use
-            // these to drive the tail-append fast path below without
-            // ever having to re-read existing cells.
-            let (mut used_bytes, mut last_key_in_leaf) = {
-                let data = page.as_bytes();
+            // Snapshot the leaf's last key (via the O(1) slot lookup)
+            // and current free bytes. Both drive the append fast path
+            // below. The old O(M) forward-walk that this block used to
+            // do was made redundant by the slotted layout.
+            let mut last_key_in_leaf: Option<Vec<u8>> = {
                 let cell_count = page.cell_count() as usize;
-                let mut offset = LEAF_DATA_OFFSET;
-                let mut last_key_off = 0usize;
-                let mut last_key_len = 0usize;
-                for _ in 0..cell_count {
-                    let key_len = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
-                    let val_len = u16::from_le_bytes([data[offset + 2], data[offset + 3]]) as usize;
-                    last_key_off = offset + 4;
-                    last_key_len = key_len;
-                    offset += 4 + key_len + val_len;
-                }
-                let last_key = if cell_count > 0 {
-                    Some(data[last_key_off..last_key_off + last_key_len].to_vec())
-                } else {
+                if cell_count == 0 {
                     None
-                };
-                (offset - LEAF_DATA_OFFSET, last_key)
+                } else {
+                    Some(read_leaf_cell(&page, cell_count - 1)?.0)
+                }
             };
 
-            // Fast path: write new cells directly at the tail of the
-            // leaf data area. Relies on (a) the input being lex-sorted
-            // (guaranteed by the sort above) and (b) every key being
-            // strictly greater than the leaf's current last key (which
-            // is the common case for append-only ID workloads). On any
-            // violation we break out and let the slow path handle it.
+            // Fast path for monotonically-ascending keys: append new
+            // cells at the tail of the cell-data area and push new
+            // slot pointers onto the slot array. Every key must be
+            // strictly greater than `last_key_in_leaf` and must still
+            // fit in the leaf's free bytes.
             let mut inserted = 0usize;
             while i + inserted < items.len() {
                 let (key, value) = items[i + inserted];
 
-                // Strictly-ascending check, which doubles as duplicate
-                // detection without a leaf binary search. Comparing
-                // against last_key_in_leaf is O(key.len()) — cheap.
+                // Strictly-ascending check, doubles as duplicate
+                // detection without a leaf binary search.
                 if let Some(lk) = &last_key_in_leaf {
                     match key.cmp(lk.as_slice()) {
                         Ordering::Greater => {}
@@ -204,22 +190,39 @@ impl BTree {
                     }
                 }
 
+                // Free-space check: needs one u16 slot + the cell body.
                 let cell_size = 4 + key.len() + value.len();
-                if LEAF_DATA_OFFSET + used_bytes + cell_size > PAGE_SIZE {
-                    // Leaf is full — stop and let the outer loop move
-                    // to the next leaf (or the slow split path).
+                let needed = 2 + cell_size;
+                if leaf_free_bytes(&page) < needed {
                     break;
                 }
 
-                // Write the cell in place: [key_len:u16][val_len:u16][key][value]
-                let data = page.as_bytes_mut();
-                let off = LEAF_DATA_OFFSET + used_bytes;
-                data[off..off + 2].copy_from_slice(&(key.len() as u16).to_le_bytes());
-                data[off + 2..off + 4].copy_from_slice(&(value.len() as u16).to_le_bytes());
-                data[off + 4..off + 4 + key.len()].copy_from_slice(key);
-                data[off + 4 + key.len()..off + cell_size].copy_from_slice(value);
+                // Append the cell at the tail of the cell-data area
+                // and push a new slot pointer. `page.cell_count()`
+                // still reflects the state before this inserted batch,
+                // so the new slot index is `cell_count + inserted`.
+                let cells_start = leaf_cells_start(&page);
+                let cell_offset = cells_start - cell_size;
+                {
+                    let data = page.as_bytes_mut();
+                    data[cell_offset..cell_offset + 2]
+                        .copy_from_slice(&(key.len() as u16).to_le_bytes());
+                    data[cell_offset + 2..cell_offset + 4]
+                        .copy_from_slice(&(value.len() as u16).to_le_bytes());
+                    data[cell_offset + 4..cell_offset + 4 + key.len()].copy_from_slice(key);
+                    data[cell_offset + 4 + key.len()..cell_offset + cell_size]
+                        .copy_from_slice(value);
+                }
+                page.set_free_end(cell_offset as u16);
 
-                used_bytes += cell_size;
+                let new_slot_index = page.cell_count() as usize + inserted;
+                let slot_pos = leaf_slot_offset_for(new_slot_index);
+                {
+                    let data = page.as_bytes_mut();
+                    data[slot_pos..slot_pos + 2]
+                        .copy_from_slice(&(cell_offset as u16).to_le_bytes());
+                }
+
                 last_key_in_leaf = Some(key.to_vec());
                 inserted += 1;
             }
@@ -227,6 +230,7 @@ impl BTree {
             if inserted > 0 {
                 let new_count = page.cell_count() as usize + inserted;
                 page.set_cell_count(new_count as u16);
+                page.set_free_start((LEAF_SLOT_ARRAY_OFFSET + new_count * 2) as u16);
                 page.update_checksum();
                 self.pager.write_page(leaf_id, page)?;
                 i += inserted;
@@ -435,18 +439,10 @@ impl BTree {
         init_leaf_links(&mut new_page, page.page_id(), old_next);
         set_next_leaf(page, new_page.page_id());
 
-        // Write entries to old page
-        clear_leaf_cells(page);
-        for (i, (k, v)) in entries[..mid].iter().enumerate() {
-            write_leaf_cell(page, i, k, v)?;
-        }
-        page.set_cell_count(mid as u16);
-
-        // Write entries to new page
-        for (i, (k, v)) in entries[mid..].iter().enumerate() {
-            write_leaf_cell(&mut new_page, i, k, v)?;
-        }
-        new_page.set_cell_count((entries.len() - mid) as u16);
+        // Rebuild both halves through the slotted layout so their
+        // cell_count, free_start and free_end headers are consistent.
+        write_leaf_entries(page, &entries[..mid])?;
+        write_leaf_entries(&mut new_page, &entries[mid..])?;
 
         // Separator is first key of new leaf
         let separator = entries[mid].0.clone();
