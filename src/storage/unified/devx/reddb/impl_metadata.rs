@@ -176,7 +176,12 @@ impl RedDB {
     ///     .save()?;
     /// ```
     pub fn node(&self, collection: impl Into<String>, label: impl Into<String>) -> NodeBuilder {
-        NodeBuilder::new(self.store.clone(), collection, label)
+        NodeBuilder::new(
+            self.store.clone(),
+            self.preprocessors.clone(),
+            collection,
+            label,
+        )
     }
 
     /// Start building a graph edge
@@ -191,7 +196,12 @@ impl RedDB {
     ///     .save()?;
     /// ```
     pub fn edge(&self, collection: impl Into<String>, label: impl Into<String>) -> EdgeBuilder {
-        EdgeBuilder::new(self.store.clone(), collection, label)
+        EdgeBuilder::new(
+            self.store.clone(),
+            self.preprocessors.clone(),
+            collection,
+            label,
+        )
     }
 
     /// Start building a vector entry
@@ -205,7 +215,7 @@ impl RedDB {
     ///     .save()?;
     /// ```
     pub fn vector(&self, collection: impl Into<String>) -> VectorBuilder {
-        VectorBuilder::new(self.store.clone(), collection)
+        VectorBuilder::new(self.store.clone(), self.preprocessors.clone(), collection)
     }
 
     /// Start building a table row
@@ -219,7 +229,12 @@ impl RedDB {
     /// ]).save()?;
     /// ```
     pub fn row(&self, table: impl Into<String>, columns: Vec<(&str, Value)>) -> RowBuilder {
-        RowBuilder::new(self.store.clone(), table, columns)
+        RowBuilder::new(
+            self.store.clone(),
+            self.preprocessors.clone(),
+            table,
+            columns,
+        )
     }
 
     /// Start building a document
@@ -236,7 +251,7 @@ impl RedDB {
     ///     .save()?;
     /// ```
     pub fn doc(&self, collection: impl Into<String>) -> DocumentBuilder {
-        DocumentBuilder::new(self.store.clone(), collection)
+        DocumentBuilder::new(self.store.clone(), self.preprocessors.clone(), collection)
     }
 
     /// Start building a key-value pair
@@ -255,7 +270,13 @@ impl RedDB {
         key: impl Into<String>,
         value: Value,
     ) -> KvBuilder {
-        KvBuilder::new(self.store.clone(), collection, key, value)
+        KvBuilder::new(
+            self.store.clone(),
+            self.preprocessors.clone(),
+            collection,
+            key,
+            value,
+        )
     }
 
     /// Get a key-value pair by key, returning the value and entity id
