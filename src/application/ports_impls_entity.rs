@@ -1,4 +1,4 @@
-use crate::application::entity::{CreateDocumentInput, CreateKvInput};
+use crate::application::entity::{CreateDocumentInput, CreateKvInput, CreateTimeSeriesPointInput};
 use crate::application::ttl_payload::{
     has_internal_ttl_metadata, normalize_ttl_patch_operations, parse_top_level_ttl_metadata_entries,
 };
@@ -1079,6 +1079,62 @@ impl RuntimeEntityPort for RedDBRuntime {
             vector_links: Vec::new(),
         };
         self.create_row(row_input)
+    }
+
+    fn create_timeseries_point(
+        &self,
+        input: CreateTimeSeriesPointInput,
+    ) -> RedDBResult<CreateEntityOutput> {
+        let db = self.db();
+        ensure_collection_model_contract(
+            &db,
+            &input.collection,
+            crate::catalog::CollectionModel::TimeSeries,
+        )?;
+
+        let mut fields = vec![
+            (
+                "metric".to_string(),
+                crate::storage::schema::Value::Text(input.metric),
+            ),
+            (
+                "value".to_string(),
+                crate::storage::schema::Value::Float(input.value),
+            ),
+        ];
+
+        if let Some(timestamp_ns) = input.timestamp_ns {
+            fields.push((
+                "timestamp".to_string(),
+                crate::storage::schema::Value::UnsignedInteger(timestamp_ns),
+            ));
+        }
+
+        if !input.tags.is_empty() {
+            let tags_json = JsonValue::Object(
+                input
+                    .tags
+                    .into_iter()
+                    .map(|(key, value)| (key, JsonValue::String(value)))
+                    .collect(),
+            );
+            let tags_bytes = json_to_vec(&tags_json).map_err(|err| {
+                crate::RedDBError::Query(format!("failed to serialize timeseries tags: {err}"))
+            })?;
+            fields.push((
+                "tags".to_string(),
+                crate::storage::schema::Value::Json(tags_bytes),
+            ));
+        }
+
+        let collection = input.collection;
+        let id = self.insert_timeseries_point(&collection, fields, input.metadata)?;
+        refresh_context_index(&db, &collection, id)?;
+
+        Ok(CreateEntityOutput {
+            id,
+            entity: db.get(id),
+        })
     }
 
     fn get_kv(
