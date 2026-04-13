@@ -1299,7 +1299,7 @@ impl RedDB {
 
     /// Start a batch operation for bulk inserts
     pub fn batch(&self) -> BatchBuilder {
-        BatchBuilder::new(self.store.clone())
+        BatchBuilder::new(self.store.clone(), self.preprocessors.clone())
     }
 
     // ========================================================================
@@ -1308,15 +1308,11 @@ impl RedDB {
 
     /// Add a preprocessor hook
     pub fn add_preprocessor(&mut self, preprocessor: Box<dyn Preprocessor>) {
-        self.preprocessors.push(preprocessor);
-    }
-
-    /// Run preprocessors on an entity
-    #[allow(dead_code)]
-    fn preprocess(&self, entity: &mut UnifiedEntity) {
-        for preprocessor in &self.preprocessors {
-            preprocessor.process(entity);
-        }
+        let mut preprocessors = self
+            .preprocessors
+            .write()
+            .expect("preprocessor registry lock poisoned");
+        preprocessors.push(Arc::from(preprocessor));
     }
 
     // ========================================================================
