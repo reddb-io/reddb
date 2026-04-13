@@ -7,7 +7,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Transaction ID type
@@ -18,6 +18,72 @@ pub type Lsn = u64;
 
 /// Timestamp type
 pub type Timestamp = u64;
+
+fn read_bytes<'a>(
+    data: &'a [u8],
+    offset: &mut usize,
+    len: usize,
+    context: &'static str,
+) -> io::Result<&'a [u8]> {
+    let end = offset.saturating_add(len);
+    if end > data.len() {
+        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, context));
+    }
+    let bytes = &data[*offset..end];
+    *offset = end;
+    Ok(bytes)
+}
+
+fn read_array<const N: usize>(
+    data: &[u8],
+    offset: &mut usize,
+    context: &'static str,
+) -> io::Result<[u8; N]> {
+    let bytes = read_bytes(data, offset, N, context)?;
+    let mut array = [0u8; N];
+    array.copy_from_slice(bytes);
+    Ok(array)
+}
+
+fn read_u32(data: &[u8], offset: &mut usize, context: &'static str) -> io::Result<u32> {
+    Ok(u32::from_le_bytes(read_array::<4>(data, offset, context)?))
+}
+
+fn read_u64(data: &[u8], offset: &mut usize, context: &'static str) -> io::Result<u64> {
+    Ok(u64::from_le_bytes(read_array::<8>(data, offset, context)?))
+}
+
+fn io_lock_error(context: &'static str) -> io::Error {
+    io::Error::other(format!("{context} lock poisoned"))
+}
+
+fn io_read_guard<'a, T>(
+    lock: &'a RwLock<T>,
+    context: &'static str,
+) -> io::Result<RwLockReadGuard<'a, T>> {
+    lock.read().map_err(|_| io_lock_error(context))
+}
+
+fn io_write_guard<'a, T>(
+    lock: &'a RwLock<T>,
+    context: &'static str,
+) -> io::Result<RwLockWriteGuard<'a, T>> {
+    lock.write().map_err(|_| io_lock_error(context))
+}
+
+fn io_mutex_guard<'a, T>(
+    lock: &'a Mutex<T>,
+    context: &'static str,
+) -> io::Result<MutexGuard<'a, T>> {
+    lock.lock().map_err(|_| io_lock_error(context))
+}
+
+fn recover_read_guard<'a, T>(lock: &'a RwLock<T>) -> RwLockReadGuard<'a, T> {
+    match lock.read() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
 
 /// Log entry types
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,8 +206,7 @@ impl LogEntryType {
         }
 
         let mut offset = 0;
-        let tag = data[offset];
-        offset += 1;
+        let tag = read_bytes(data, &mut offset, 1, "Missing log entry tag")?[0];
 
         let entry = match tag {
             0 => LogEntryType::Begin,
@@ -150,34 +215,31 @@ impl LogEntryType {
             3 => {
                 // Insert
                 let key_len =
-                    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
-                offset += 4;
-                let key = data[offset..offset + key_len].to_vec();
-                offset += key_len;
+                    read_u32(data, &mut offset, "Missing WAL insert key length")? as usize;
+                let key =
+                    read_bytes(data, &mut offset, key_len, "Truncated WAL insert key")?.to_vec();
                 let value_len =
-                    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
-                offset += 4;
-                let value = data[offset..offset + value_len].to_vec();
-                offset += value_len;
+                    read_u32(data, &mut offset, "Missing WAL insert value length")? as usize;
+                let value = read_bytes(data, &mut offset, value_len, "Truncated WAL insert value")?
+                    .to_vec();
                 LogEntryType::Insert { key, value }
             }
             4 => {
                 // Update
                 let key_len =
-                    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
-                offset += 4;
-                let key = data[offset..offset + key_len].to_vec();
-                offset += key_len;
+                    read_u32(data, &mut offset, "Missing WAL update key length")? as usize;
+                let key =
+                    read_bytes(data, &mut offset, key_len, "Truncated WAL update key")?.to_vec();
                 let old_len =
-                    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
-                offset += 4;
-                let old_value = data[offset..offset + old_len].to_vec();
-                offset += old_len;
+                    read_u32(data, &mut offset, "Missing WAL update old value length")? as usize;
+                let old_value =
+                    read_bytes(data, &mut offset, old_len, "Truncated WAL update old value")?
+                        .to_vec();
                 let new_len =
-                    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
-                offset += 4;
-                let new_value = data[offset..offset + new_len].to_vec();
-                offset += new_len;
+                    read_u32(data, &mut offset, "Missing WAL update new value length")? as usize;
+                let new_value =
+                    read_bytes(data, &mut offset, new_len, "Truncated WAL update new value")?
+                        .to_vec();
                 LogEntryType::Update {
                     key,
                     old_value,
@@ -187,26 +249,24 @@ impl LogEntryType {
             5 => {
                 // Delete
                 let key_len =
-                    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
-                offset += 4;
-                let key = data[offset..offset + key_len].to_vec();
-                offset += key_len;
+                    read_u32(data, &mut offset, "Missing WAL delete key length")? as usize;
+                let key =
+                    read_bytes(data, &mut offset, key_len, "Truncated WAL delete key")?.to_vec();
                 let old_len =
-                    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
-                offset += 4;
-                let old_value = data[offset..offset + old_len].to_vec();
-                offset += old_len;
+                    read_u32(data, &mut offset, "Missing WAL delete old value length")? as usize;
+                let old_value =
+                    read_bytes(data, &mut offset, old_len, "Truncated WAL delete old value")?
+                        .to_vec();
                 LogEntryType::Delete { key, old_value }
             }
             6 => {
                 // Checkpoint
                 let count =
-                    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
-                offset += 4;
+                    read_u32(data, &mut offset, "Missing WAL checkpoint txn count")? as usize;
                 let mut active_txns = Vec::with_capacity(count);
                 for _ in 0..count {
-                    let txn = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
-                    offset += 8;
+                    let txn =
+                        read_u64(data, &mut offset, "Truncated WAL checkpoint transaction id")?;
                     active_txns.push(txn);
                 }
                 LogEntryType::Checkpoint { active_txns }
@@ -214,25 +274,36 @@ impl LogEntryType {
             7 => {
                 // Savepoint
                 let name_len =
-                    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
-                offset += 4;
-                let name = String::from_utf8_lossy(&data[offset..offset + name_len]).to_string();
-                offset += name_len;
+                    read_u32(data, &mut offset, "Missing WAL savepoint name length")? as usize;
+                let name = String::from_utf8_lossy(read_bytes(
+                    data,
+                    &mut offset,
+                    name_len,
+                    "Truncated WAL savepoint name",
+                )?)
+                .to_string();
                 LogEntryType::Savepoint { name }
             }
             8 => {
                 // RollbackToSavepoint
-                let name_len =
-                    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
-                offset += 4;
-                let name = String::from_utf8_lossy(&data[offset..offset + name_len]).to_string();
-                offset += name_len;
+                let name_len = read_u32(
+                    data,
+                    &mut offset,
+                    "Missing WAL rollback-to-savepoint name length",
+                )? as usize;
+                let name = String::from_utf8_lossy(read_bytes(
+                    data,
+                    &mut offset,
+                    name_len,
+                    "Truncated WAL rollback-to-savepoint name",
+                )?)
+                .to_string();
                 LogEntryType::RollbackToSavepoint { name }
             }
             9 => {
                 // Compensate
-                let original_lsn = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
-                offset += 8;
+                let original_lsn =
+                    read_u64(data, &mut offset, "Truncated WAL compensate original LSN")?;
                 LogEntryType::Compensate { original_lsn }
             }
             10 => LogEntryType::End,
@@ -302,22 +373,36 @@ impl LogEntry {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "Too short"));
         }
 
-        let lsn = u64::from_le_bytes(data[0..8].try_into().unwrap());
-        let txn_id = u64::from_le_bytes(data[8..16].try_into().unwrap());
-        let prev_lsn_raw = u64::from_le_bytes(data[16..24].try_into().unwrap());
+        let mut offset = 0;
+        let lsn = read_u64(data, &mut offset, "Missing WAL entry LSN")?;
+        let txn_id = read_u64(data, &mut offset, "Missing WAL entry txn id")?;
+        let prev_lsn_raw = read_u64(data, &mut offset, "Missing WAL entry prev_lsn")?;
         let prev_lsn = if prev_lsn_raw == 0 {
             None
         } else {
             Some(prev_lsn_raw)
         };
-        let timestamp = u64::from_le_bytes(data[24..32].try_into().unwrap());
-        let type_len = u32::from_le_bytes(data[32..36].try_into().unwrap()) as usize;
-
-        let (entry_type, _) = LogEntryType::from_bytes(&data[36..36 + type_len])?;
+        let timestamp = read_u64(data, &mut offset, "Missing WAL entry timestamp")?;
+        let type_len = read_u32(data, &mut offset, "Missing WAL entry type length")? as usize;
+        let entry_type_bytes = read_bytes(
+            data,
+            &mut offset,
+            type_len,
+            "Truncated WAL entry type bytes",
+        )?;
+        let (entry_type, consumed) = LogEntryType::from_bytes(entry_type_bytes)?;
+        if consumed != entry_type_bytes.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "WAL entry type length mismatch",
+            ));
+        }
 
         // Verify checksum
-        let stored_checksum = data[36 + type_len];
-        let computed: u8 = data[..36 + type_len].iter().fold(0, |acc, &b| acc ^ b);
+        let stored_checksum = *data.get(offset).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::UnexpectedEof, "Missing WAL entry checksum")
+        })?;
+        let computed: u8 = data[..offset].iter().fold(0, |acc, &b| acc ^ b);
         if stored_checksum != computed {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -459,7 +544,7 @@ impl TransactionLog {
 
         // Update prev_lsn tracking
         {
-            let mut prev_lsns = self.txn_prev_lsn.write().unwrap();
+            let mut prev_lsns = io_write_guard(&self.txn_prev_lsn, "wal prev_lsn map")?;
             entry.prev_lsn = prev_lsns.get(&entry.txn_id).copied();
             prev_lsns.insert(entry.txn_id, lsn);
         }
@@ -468,7 +553,7 @@ impl TransactionLog {
 
         // Write to file if available
         if let Some(ref file) = self.file {
-            let mut writer = file.lock().unwrap();
+            let mut writer = io_mutex_guard(file, "wal file")?;
             // Write length prefix
             writer.write_all(&(bytes.len() as u32).to_le_bytes())?;
             writer.write_all(&bytes)?;
@@ -478,14 +563,14 @@ impl TransactionLog {
                 writer.flush()?;
                 writer.get_mut().sync_all()?;
 
-                let mut stats = self.stats.write().unwrap();
+                let mut stats = io_write_guard(&self.stats, "wal stats")?;
                 stats.syncs += 1;
             }
         }
 
         // Store in buffer
         {
-            let mut buffer = self.buffer.write().unwrap();
+            let mut buffer = io_write_guard(&self.buffer, "wal buffer")?;
             buffer.push_back(entry);
 
             // Limit buffer size
@@ -496,7 +581,7 @@ impl TransactionLog {
 
         // Update stats
         {
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = io_write_guard(&self.stats, "wal stats")?;
             stats.entries_written += 1;
             stats.bytes_written += bytes.len() as u64 + 4;
             stats.file_size += bytes.len() as u64 + 4;
@@ -516,7 +601,7 @@ impl TransactionLog {
 
         // Clean up prev_lsn tracking
         {
-            let mut prev_lsns = self.txn_prev_lsn.write().unwrap();
+            let mut prev_lsns = io_write_guard(&self.txn_prev_lsn, "wal prev_lsn map")?;
             prev_lsns.remove(&txn_id);
         }
 
@@ -529,7 +614,7 @@ impl TransactionLog {
 
         // Clean up prev_lsn tracking
         {
-            let mut prev_lsns = self.txn_prev_lsn.write().unwrap();
+            let mut prev_lsns = io_write_guard(&self.txn_prev_lsn, "wal prev_lsn map")?;
             prev_lsns.remove(&txn_id);
         }
 
@@ -592,7 +677,7 @@ impl TransactionLog {
 
         // Force sync
         if let Some(ref file) = self.file {
-            let mut writer = file.lock().unwrap();
+            let mut writer = io_mutex_guard(file, "wal file")?;
             writer.flush()?;
             writer.get_mut().sync_all()?;
         }
@@ -600,7 +685,7 @@ impl TransactionLog {
         self.last_checkpoint_lsn.store(lsn, Ordering::SeqCst);
 
         {
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = io_write_guard(&self.stats, "wal stats")?;
             stats.checkpoints += 1;
         }
 
@@ -610,7 +695,7 @@ impl TransactionLog {
     /// Flush buffer to disk
     pub fn flush(&self) -> io::Result<()> {
         if let Some(ref file) = self.file {
-            let mut writer = file.lock().unwrap();
+            let mut writer = io_mutex_guard(file, "wal file")?;
             writer.flush()?;
             writer.get_mut().sync_all()?;
         }
@@ -619,7 +704,7 @@ impl TransactionLog {
 
     /// Get entries for a transaction (for undo)
     pub fn get_txn_entries(&self, txn_id: TxnId) -> Vec<LogEntry> {
-        let buffer = self.buffer.read().unwrap();
+        let buffer = recover_read_guard(&self.buffer);
         buffer
             .iter()
             .filter(|e| e.txn_id == txn_id)
@@ -629,7 +714,7 @@ impl TransactionLog {
 
     /// Get entries since LSN
     pub fn get_entries_since(&self, lsn: Lsn) -> Vec<LogEntry> {
-        let buffer = self.buffer.read().unwrap();
+        let buffer = recover_read_guard(&self.buffer);
         buffer.iter().filter(|e| e.lsn >= lsn).cloned().collect()
     }
 
@@ -645,7 +730,7 @@ impl TransactionLog {
 
     /// Get statistics
     pub fn stats(&self) -> WalStats {
-        self.stats.read().unwrap().clone()
+        recover_read_guard(&self.stats).clone()
     }
 
     /// Get configuration
@@ -797,5 +882,32 @@ mod tests {
         assert_eq!(entries[0].prev_lsn, None);
         assert_eq!(entries[1].prev_lsn, Some(1));
         assert_eq!(entries[2].prev_lsn, Some(2));
+    }
+
+    #[test]
+    fn test_log_entry_type_rejects_truncated_insert() {
+        let err = LogEntryType::from_bytes(&[3, 4, 0, 0, 0, b'k'])
+            .expect_err("truncated insert should fail");
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn test_log_entry_rejects_truncated_type_payload() {
+        let entry = LogEntry {
+            lsn: 7,
+            txn_id: 9,
+            prev_lsn: Some(3),
+            timestamp: 42,
+            entry_type: LogEntryType::Insert {
+                key: b"hello".to_vec(),
+                value: b"world".to_vec(),
+            },
+        };
+
+        let mut bytes = entry.to_bytes();
+        bytes.truncate(bytes.len() - 2);
+
+        let err = LogEntry::from_bytes(&bytes).expect_err("truncated entry should fail");
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
     }
 }
