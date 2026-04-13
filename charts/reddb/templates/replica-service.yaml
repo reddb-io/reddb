@@ -1,0 +1,53 @@
+{{- if eq .Values.mode "primary-replica" -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "reddb.replica.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "reddb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: replica
+  {{- with .Values.replica.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.replica.service.type }}
+  ports:
+    - name: grpc
+      port: {{ .Values.replica.service.grpcPort }}
+      targetPort: grpc
+      protocol: TCP
+      appProtocol: grpc
+    - name: http
+      port: {{ .Values.replica.service.httpPort }}
+      targetPort: http
+      protocol: TCP
+      appProtocol: http
+  selector:
+    {{- include "reddb.replica.selectorLabels" . | nindent 4 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "reddb.replica.headless" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "reddb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: replica
+spec:
+  type: ClusterIP
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: grpc
+      protocol: TCP
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "reddb.replica.selectorLabels" . | nindent 4 }}
+{{- end }}
