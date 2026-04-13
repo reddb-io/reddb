@@ -238,10 +238,22 @@ where
     }
 
     /// Borrow from left sibling
+    ///
+    /// # Invariant
+    ///
+    /// Caller must have verified that `left.keys.len() > MIN_KEYS` before
+    /// invoking this function (see rebalance logic in `tree.rs`). Otherwise
+    /// borrowing would violate the B-tree invariant on the sibling.
     pub fn borrow_from_left(&mut self, left: &mut Self, parent_key: &K) -> K {
         // Get rightmost key from left sibling
-        let borrowed_key = left.keys.pop().unwrap();
-        let borrowed_child = left.children.pop().unwrap();
+        let borrowed_key = left
+            .keys
+            .pop()
+            .expect("invariant: borrow_from_left requires left.keys non-empty");
+        let borrowed_child = left
+            .children
+            .pop()
+            .expect("invariant: internal node has children.len() == keys.len() + 1");
 
         // Parent key comes down
         self.keys.insert(0, parent_key.clone());
@@ -431,9 +443,21 @@ where
     }
 
     /// Borrow from left sibling
+    ///
+    /// # Invariant
+    ///
+    /// Caller must have verified that `left.keys.len() > MIN_KEYS` before
+    /// invoking this function. In leaf nodes `keys.len() == entries.len()`
+    /// always, so one invariant check covers both pops.
     pub fn borrow_from_left(&mut self, left: &mut Self) -> K {
-        let borrowed_key = left.keys.pop().unwrap();
-        let borrowed_entry = left.entries.pop().unwrap();
+        let borrowed_key = left
+            .keys
+            .pop()
+            .expect("invariant: borrow_from_left requires left.keys non-empty");
+        let borrowed_entry = left
+            .entries
+            .pop()
+            .expect("invariant: leaf node has keys.len() == entries.len()");
 
         self.keys.insert(0, borrowed_key.clone());
         self.entries.insert(0, borrowed_entry);
