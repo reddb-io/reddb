@@ -6,7 +6,7 @@ impl HealthProvider for RedDBRuntime {
             .inner
             .pool
             .lock()
-            .expect("health: connection pool lock poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut report = self.inner.db.health();
         let (readiness_for_query, readiness_for_write, readiness_for_repair) =
             self.inner.db.readiness_flags_from_health(&report);
@@ -58,7 +58,7 @@ impl Drop for RuntimeConnection {
             .inner
             .pool
             .lock()
-            .expect("drop RuntimeConnection: connection pool lock poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         pool.active = pool.active.saturating_sub(1);
         if pool.idle.len() < self.inner.pool_config.max_idle {
             pool.idle.push(self.id);
