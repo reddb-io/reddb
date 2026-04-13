@@ -1,0 +1,38 @@
+[package]
+name = "reddb-client"
+version = "0.1.2"
+edition = "2021"
+authors = ["RedBlue Team"]
+description = "Official Rust client for RedDB — embedded engine and (eventually) gRPC remote, behind one connection-string API."
+license = "MIT"
+homepage = "https://github.com/forattini-dev/reddb"
+repository = "https://github.com/forattini-dev/reddb"
+documentation = "https://docs.rs/reddb-client"
+readme = "README.md"
+keywords = ["reddb", "database", "client", "embedded"]
+categories = ["database", "api-bindings"]
+
+[features]
+# `embedded` is the only fully wired feature today. It pulls the entire
+# RedDB engine in-process, which is the fastest possible path. Disable
+# the default features if you only want the (forthcoming) gRPC client to
+# avoid compiling the engine.
+default = ["embedded"]
+
+embedded = ["dep:reddb"]
+# `grpc` is reserved for the remote tonic-based client. Today it
+# compiles to a clear "not implemented" stub. See PLAN_DRIVERS.md.
+grpc = []
+
+[dependencies]
+# Engine — only compiled in when the `embedded` feature is on.
+reddb = { version = "0.1", path = "../..", optional = true }
+
+# Connection-string parsing.
+url = "2"
+
+# We deliberately avoid pulling serde here; the API is JSON-string-in,
+# JSON-string-out. Users that want serde integration can wrap easily.
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
