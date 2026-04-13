@@ -16,6 +16,10 @@ RedDB includes a dedicated time-series data model optimized for high-volume, tim
 CREATE TIMESERIES cpu_metrics RETENTION 90 d
 ```
 
+`CREATE TIMESERIES` is not just documentation. It persists the collection contract as a native
+time-series model, and that is what makes `INSERT INTO cpu_metrics (...)` validate and store native
+time-series points instead of generic table rows.
+
 With downsampling policies:
 
 ```sql
@@ -34,10 +38,24 @@ Parameters:
 
 ## Inserting Data Points
 
+Supported SQL columns for native point inserts:
+
+| Column | Required | Notes |
+|:-------|:---------|:------|
+| `metric` | Yes | Metric / series name, such as `cpu.idle` |
+| `value` | Yes | Numeric sample value |
+| `tags` | No | JSON object, either inline (`{host: 'srv1'}`) or JSON text |
+| `timestamp` | No | Unix timestamp in nanoseconds |
+| `timestamp_ns` | No | Same as `timestamp` |
+| `time` | No | Alias for `timestamp` |
+
+If you omit the timestamp column, RedDB assigns the current Unix time in nanoseconds.
+Exactly one of `timestamp`, `timestamp_ns`, or `time` may be provided.
+
 ```sql
 -- Timestamp auto-generated if omitted
 INSERT INTO cpu_metrics (metric, value, tags)
-  VALUES ('cpu.idle', 95.2, '{"host":"srv1","region":"us-east"}')
+  VALUES ('cpu.idle', 95.2, {host: 'srv1', region: 'us-east'})
 
 -- Explicit timestamp (nanoseconds since epoch)
 INSERT INTO cpu_metrics (metric, value, tags, timestamp)
@@ -55,13 +73,24 @@ INSERT INTO cpu_metrics (metric, value, tags)
 
 ## Querying Time-Series Data
 
+Native time-series records expose these query columns:
+
+| Column | Meaning |
+|:-------|:--------|
+| `metric` | Metric / series name |
+| `value` | Sample value |
+| `timestamp_ns` | Native Unix timestamp in nanoseconds |
+| `timestamp` | Alias for `timestamp_ns` |
+| `time` | Alias for `timestamp_ns` |
+| `tags` | JSON object with tag key/value pairs |
+
 ### Range Query
 
 ```sql
 SELECT metric, value, timestamp FROM cpu_metrics
   WHERE metric = 'cpu.idle'
-    AND time BETWEEN '2024-01-01' AND '2024-01-02'
-  ORDER BY time ASC
+    AND timestamp BETWEEN 1704067200000000000 AND 1704153600000000000
+  ORDER BY timestamp ASC
   LIMIT 1000
 ```
 
@@ -70,13 +99,20 @@ SELECT metric, value, timestamp FROM cpu_metrics
 Group data into time windows with `time_bucket()`:
 
 ```sql
-SELECT time_bucket(5m) AS bucket, avg(value), max(value), min(value)
+SELECT time_bucket(5m) AS bucket,
+       avg(value) AS avg_value,
+       max(value) AS max_value,
+       min(value) AS min_value,
+       count(*) AS samples
   FROM cpu_metrics
   WHERE metric = 'cpu.idle'
-    AND tags.host = 'srv1'
-    AND time BETWEEN '2024-01-01' AND '2024-01-02'
+    AND timestamp BETWEEN 1704067200000000000 AND 1704153600000000000
   GROUP BY time_bucket(5m)
+  ORDER BY bucket ASC
 ```
+
+`time_bucket(5m)` uses the record timestamp automatically. If you need to point it at an explicit
+timestamp column, use `time_bucket(5m, timestamp_ns)`.
 
 Supported aggregation functions:
 
@@ -90,20 +126,13 @@ Supported aggregation functions:
 | `first(value)` | First value in the bucket |
 | `last(value)` | Last value in the bucket |
 
-### Downsampled Query
-
-```sql
-SELECT downsample(value, '1h', 'avg') FROM cpu_metrics
-  WHERE metric = 'cpu.idle'
-```
-
 ### Tag Filtering
 
 ```sql
 SELECT * FROM cpu_metrics
   WHERE metric = 'memory.used'
     AND tags.host IN ('srv1', 'srv2')
-    AND time > now() - 1h
+    AND timestamp > 1704063600000000000
 ```
 
 ## Storage Architecture
@@ -125,6 +154,11 @@ CREATE TIMESERIES sensor_data RETENTION 365 d
 Duration units: `ms`, `s`, `m`, `h`, `d`
 
 Data older than the retention period is automatically deleted during the maintenance cycle.
+
+> [!TIP]
+> If you skip `CREATE TIMESERIES` and insert into a brand-new collection directly, RedDB will
+> auto-create a regular row collection. Use `CREATE TIMESERIES` whenever you want native point
+> validation, retention metadata, and time-series query semantics.
 
 ## See Also
 
