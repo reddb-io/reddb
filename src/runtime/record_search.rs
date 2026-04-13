@@ -518,13 +518,169 @@ pub(super) fn resolve_runtime_vector_source(
                 ))),
             }
         }
-        VectorSource::Text(_) => Err(RedDBError::Query(
-            "text-to-embedding vector queries are parsed but not yet wired into /query".to_string(),
-        )),
-        VectorSource::Subquery(_) => Err(RedDBError::Query(
-            "subquery vector sources are parsed but not yet wired into /query".to_string(),
-        )),
+        VectorSource::Text(text) => embed_runtime_vector_text(db, text),
+        VectorSource::Subquery(expr) => resolve_runtime_vector_subquery(db, expr.as_ref()),
     }
+}
+
+fn embed_runtime_vector_text(db: &RedDB, text: &str) -> RedDBResult<Vec<f32>> {
+    let kv_getter = |key: &str| -> RedDBResult<Option<String>> {
+        match db.get_kv("red_config", key) {
+            Some((Value::Text(value), _)) => Ok(Some(value)),
+            Some(_) => Ok(None),
+            None => Ok(None),
+        }
+    };
+
+    let provider = crate::ai::resolve_default_provider(&kv_getter);
+    let model = crate::ai::resolve_default_model(&provider, &kv_getter);
+    let api_key = crate::ai::resolve_api_key(&provider, None, kv_getter)?;
+    let response = crate::ai::openai_embeddings(crate::ai::OpenAiEmbeddingRequest {
+        api_key,
+        model,
+        inputs: vec![text.to_string()],
+        dimensions: None,
+        api_base: provider.resolve_api_base(),
+    })?;
+
+    response
+        .embeddings
+        .into_iter()
+        .next()
+        .ok_or_else(|| RedDBError::Query("embedding API returned no vectors".to_string()))
+}
+
+fn resolve_runtime_vector_subquery(db: &RedDB, expr: &QueryExpr) -> RedDBResult<Vec<f32>> {
+    let records = execute_runtime_vector_subquery_records(db, expr)?;
+    let record = records
+        .first()
+        .ok_or_else(|| RedDBError::Query("vector source subquery returned no rows".to_string()))?;
+
+    extract_runtime_vector_from_record(db, record)?.ok_or_else(|| {
+        RedDBError::Query(
+            "vector source subquery must return a vector value, vector reference, or vector entity id"
+                .to_string(),
+        )
+    })
+}
+
+fn execute_runtime_vector_subquery_records(
+    db: &RedDB,
+    expr: &QueryExpr,
+) -> RedDBResult<Vec<UnifiedRecord>> {
+    match expr {
+        QueryExpr::Table(query) => Ok(execute_runtime_table_query(db, query, None)?.records),
+        QueryExpr::Graph(_) | QueryExpr::Path(_) => {
+            let plan = CanonicalPlanner::new(db).build(expr);
+            execute_runtime_canonical_expr_node(db, &plan.root, expr)
+        }
+        QueryExpr::Join(query) => Ok(execute_runtime_join_query(db, query)?.records),
+        QueryExpr::Vector(query) => Ok(execute_runtime_vector_query(db, query)?.records),
+        QueryExpr::Hybrid(query) => Ok(execute_runtime_hybrid_query(db, query)?.records),
+        other => Err(RedDBError::Query(format!(
+            "vector source subqueries do not support {} statements",
+            query_expr_name(other)
+        ))),
+    }
+}
+
+fn extract_runtime_vector_from_record(
+    db: &RedDB,
+    record: &UnifiedRecord,
+) -> RedDBResult<Option<Vec<f32>>> {
+    for key in ["dense", "vector", "embedding", "query_vector"] {
+        if let Some(value) = record.get(key) {
+            if let Some(vector) = resolve_runtime_vector_value(db, value)? {
+                return Ok(Some(vector));
+            }
+        }
+    }
+
+    for key in ["red_entity_id", "entity_id", "vector_id", "id"] {
+        if let Some(value) = record.get(key) {
+            if let Some(vector) = resolve_runtime_vector_entity_value(db, value)? {
+                return Ok(Some(vector));
+            }
+        }
+    }
+
+    if record.values.len() == 1 {
+        if let Some(value) = record.values.values().next() {
+            if let Some(vector) = resolve_runtime_vector_value(db, value)? {
+                return Ok(Some(vector));
+            }
+        }
+    }
+
+    for value in record.values.values() {
+        match value {
+            Value::Vector(vector) => return Ok(Some(vector.clone())),
+            Value::VectorRef(_, vector_id) => {
+                if let Some(vector) = runtime_vector_entity_by_id(db, *vector_id)? {
+                    return Ok(Some(vector));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(None)
+}
+
+fn resolve_runtime_vector_value(db: &RedDB, value: &Value) -> RedDBResult<Option<Vec<f32>>> {
+    match value {
+        Value::Vector(vector) => Ok(Some(vector.clone())),
+        Value::Array(values) => Ok(Some(runtime_value_array_to_vector(values)?)),
+        Value::Json(bytes) => Ok(Some(runtime_json_bytes_to_vector(bytes)?)),
+        Value::VectorRef(_, vector_id) => runtime_vector_entity_by_id(db, *vector_id),
+        Value::UnsignedInteger(vector_id) => runtime_vector_entity_by_id(db, *vector_id),
+        Value::Integer(vector_id) if *vector_id >= 0 => {
+            runtime_vector_entity_by_id(db, *vector_id as u64)
+        }
+        _ => Ok(None),
+    }
+}
+
+fn resolve_runtime_vector_entity_value(db: &RedDB, value: &Value) -> RedDBResult<Option<Vec<f32>>> {
+    match value {
+        Value::UnsignedInteger(vector_id) => runtime_vector_entity_by_id(db, *vector_id),
+        Value::Integer(vector_id) if *vector_id >= 0 => {
+            runtime_vector_entity_by_id(db, *vector_id as u64)
+        }
+        Value::VectorRef(_, vector_id) => runtime_vector_entity_by_id(db, *vector_id),
+        _ => Ok(None),
+    }
+}
+
+fn runtime_vector_entity_by_id(db: &RedDB, vector_id: u64) -> RedDBResult<Option<Vec<f32>>> {
+    let Some(entity) = db.get(EntityId::new(vector_id)) else {
+        return Ok(None);
+    };
+
+    match entity.data {
+        EntityData::Vector(vector) => Ok(Some(vector.dense)),
+        _ => Ok(None),
+    }
+}
+
+fn runtime_value_array_to_vector(values: &[Value]) -> RedDBResult<Vec<f32>> {
+    values
+        .iter()
+        .map(|value| match value {
+            Value::Float(number) => Ok(*number as f32),
+            Value::Integer(number) => Ok(*number as f32),
+            Value::UnsignedInteger(number) => Ok(*number as f32),
+            other => Err(RedDBError::Query(format!(
+                "vector arrays accept only numeric values, got {other:?}"
+            ))),
+        })
+        .collect()
+}
+
+fn runtime_json_bytes_to_vector(bytes: &[u8]) -> RedDBResult<Vec<f32>> {
+    crate::json::from_slice(bytes).map_err(|err| {
+        RedDBError::Query(format!("vector JSON source must be a numeric array: {err}"))
+    })
 }
 
 pub(super) fn runtime_vector_record_from_match(item: SimilarResult) -> UnifiedRecord {
