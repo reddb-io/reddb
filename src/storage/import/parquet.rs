@@ -547,7 +547,7 @@ mod tests {
     #[test]
     fn test_decode_float() {
         let reader = ParquetReader::with_defaults();
-        let val: f32 = 3.14;
+        let val: f32 = 2.5;
         let data = val.to_le_bytes().to_vec();
         let col = ColumnMeta {
             name: "test".to_string(),
@@ -560,7 +560,7 @@ mod tests {
         let values = reader.decode_column(&data, &col, 1).unwrap();
         assert_eq!(values.len(), 1);
         if let Value::Float(f) = values[0] {
-            assert!((f - 3.14).abs() < 0.001);
+            assert!((f - 2.5).abs() < 0.001);
         } else {
             panic!("Expected float");
         }
