@@ -3,7 +3,15 @@
 //! Collects and maintains statistics for query optimization.
 
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+
+fn read_unpoisoned<'a, T>(lock: &'a RwLock<T>) -> RwLockReadGuard<'a, T> {
+    lock.read().unwrap_or_else(|poison| poison.into_inner())
+}
+
+fn write_unpoisoned<'a, T>(lock: &'a RwLock<T>) -> RwLockWriteGuard<'a, T> {
+    lock.write().unwrap_or_else(|poison| poison.into_inner())
+}
 
 /// Column statistics
 #[derive(Debug, Clone)]
@@ -306,31 +314,31 @@ impl StatsRegistry {
 
     /// Register table statistics
     pub fn register(&self, stats: TableStats) {
-        let mut tables = self.tables.write().unwrap();
+        let mut tables = write_unpoisoned(&self.tables);
         tables.insert(stats.name.clone(), stats);
     }
 
     /// Get table statistics
     pub fn get(&self, table_name: &str) -> Option<TableStats> {
-        let tables = self.tables.read().unwrap();
+        let tables = read_unpoisoned(&self.tables);
         tables.get(table_name).cloned()
     }
 
     /// Remove table statistics
     pub fn remove(&self, table_name: &str) -> Option<TableStats> {
-        let mut tables = self.tables.write().unwrap();
+        let mut tables = write_unpoisoned(&self.tables);
         tables.remove(table_name)
     }
 
     /// List all tables with statistics
     pub fn list(&self) -> Vec<String> {
-        let tables = self.tables.read().unwrap();
+        let tables = read_unpoisoned(&self.tables);
         tables.keys().cloned().collect()
     }
 
     /// Clear all statistics
     pub fn clear(&self) {
-        let mut tables = self.tables.write().unwrap();
+        let mut tables = write_unpoisoned(&self.tables);
         tables.clear();
     }
 }
