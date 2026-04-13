@@ -439,16 +439,21 @@ fn try_sorted_index_lookup(
             if !idx_store.sorted.has_index(table, col) {
                 return None;
             }
-            let lo = value_to_i64_for_index(low)?;
-            let hi = value_to_i64_for_index(high)?;
-            let ids = idx_store.sorted.range_lookup(table, col, lo, hi);
+            let lo = super::index_store::value_to_sorted_numeric_key(low)?;
+            let hi = super::index_store::value_to_sorted_numeric_key(high)?;
+            let ids = idx_store.sorted.range_lookup(table, col, lo, hi)?;
             // If too many results, full scan is faster than N individual get() calls
             if ids.len() > 5000 {
                 return None;
             }
             Some(ids)
         }
-        Filter::Compare { field, op, value } if *op == CompareOp::Gt || *op == CompareOp::Ge => {
+        Filter::Compare { field, op, value }
+            if matches!(
+                *op,
+                CompareOp::Lt | CompareOp::Le | CompareOp::Gt | CompareOp::Ge
+            ) =>
+        {
             let col = match field {
                 FieldRef::TableColumn { column, .. } => column.as_str(),
                 _ => return None,
@@ -456,13 +461,14 @@ fn try_sorted_index_lookup(
             if !idx_store.sorted.has_index(table, col) {
                 return None;
             }
-            let threshold = value_to_i64_for_index(value)?;
-            let adjusted = if *op == CompareOp::Gt {
-                threshold
-            } else {
-                threshold - 1
+            let threshold = super::index_store::value_to_sorted_numeric_key(value)?;
+            let ids = match *op {
+                CompareOp::Lt => idx_store.sorted.lt_lookup(table, col, threshold)?,
+                CompareOp::Le => idx_store.sorted.le_lookup(table, col, threshold)?,
+                CompareOp::Gt => idx_store.sorted.gt_lookup(table, col, threshold)?,
+                CompareOp::Ge => idx_store.sorted.ge_lookup(table, col, threshold)?,
+                _ => unreachable!("non-range compare op guarded above"),
             };
-            let ids = idx_store.sorted.gt_lookup(table, col, adjusted);
             if ids.len() > 5000 {
                 return None;
             }
@@ -474,15 +480,6 @@ fn try_sorted_index_lookup(
             // on the candidates. Using sorted index here returns too many results.
             None
         }
-        _ => None,
-    }
-}
-
-fn value_to_i64_for_index(val: &Value) -> Option<i64> {
-    match val {
-        Value::Integer(n) => Some(*n),
-        Value::UnsignedInteger(n) => Some(*n as i64),
-        Value::Float(f) => Some(*f as i64),
         _ => None,
     }
 }
@@ -651,7 +648,7 @@ fn build_indexed_result_json(
         write_u64(&mut buf, entity.id.raw());
         buf.extend_from_slice(&sys_prefix);
         buf.push(b',');
-        write_timestamp_fields_json(&mut buf, &entity);
+        write_timestamp_fields_json(&mut buf, entity);
         buf.extend_from_slice(b",\"red_sequence_id\":");
         write_u64(&mut buf, entity.sequence_id);
         if let EntityKind::TableRow { row_id, .. } = &entity.kind {
@@ -2504,7 +2501,7 @@ fn resolve_entity_field<'a>(
 ) -> Option<std::borrow::Cow<'a, Value>> {
     use std::borrow::Cow;
 
-    let column = match field {
+    let (column, document_path) = match field {
         FieldRef::TableColumn { table, column } => {
             // If table qualifier is present, verify it matches
             if !table.is_empty()
@@ -2514,9 +2511,11 @@ fn resolve_entity_field<'a>(
                     Some(table_alias),
                 )
             {
-                return None;
+                return resolve_entity_document_path(entity, &format!("{table}.{column}"))
+                    .map(Cow::Owned);
             }
-            column.as_str()
+            let document_path = column.contains('.').then_some(column.as_str());
+            (column.as_str(), document_path)
         }
         _ => return None,
     };
@@ -2562,11 +2561,12 @@ fn resolve_entity_field<'a>(
             return Some(Cow::Borrowed(value));
         }
         // Positional column fallback (c0, c1, ...)
-        if column.starts_with('c') {
-            if let Ok(index) = column[1..].parse::<usize>() {
-                if let Some(value) = row.columns.get(index) {
-                    return Some(Cow::Borrowed(value));
-                }
+        if let Some(index) = column
+            .strip_prefix('c')
+            .and_then(|index| index.parse::<usize>().ok())
+        {
+            if let Some(value) = row.columns.get(index) {
+                return Some(Cow::Borrowed(value));
             }
         }
     }
@@ -2603,6 +2603,12 @@ fn resolve_entity_field<'a>(
         }
     }
 
+    if let Some(path) = document_path {
+        if let Some(value) = resolve_entity_document_path(entity, path) {
+            return Some(Cow::Owned(value));
+        }
+    }
+
     // EntityKind fields (label, node_type, from_node, to_node)
     match &entity.kind {
         EntityKind::GraphNode(ref gn) => match column {
@@ -2617,6 +2623,54 @@ fn resolve_entity_field<'a>(
             _ => {}
         },
         _ => {}
+    }
+
+    None
+}
+
+fn resolve_entity_document_path(
+    entity: &crate::storage::unified::entity::UnifiedEntity,
+    path: &str,
+) -> Option<Value> {
+    let segments = parse_runtime_document_path(path);
+    let (root, tail) = segments.split_first()?;
+
+    if let Some(row) = entity.data.as_row() {
+        if let Some(value) = row.get_field(root) {
+            if tail.is_empty() {
+                return Some(value.clone());
+            }
+            return resolve_runtime_document_path_from_value(value, tail);
+        }
+    }
+
+    if let EntityData::Node(ref node) = entity.data {
+        if let Some(value) = node.properties.get(root) {
+            if tail.is_empty() {
+                return Some(value.clone());
+            }
+            return resolve_runtime_document_path_from_value(value, tail);
+        }
+    }
+
+    if let EntityData::Edge(ref edge) = entity.data {
+        if let Some(value) = edge.properties.get(root) {
+            if tail.is_empty() {
+                return Some(value.clone());
+            }
+            return resolve_runtime_document_path_from_value(value, tail);
+        }
+    }
+
+    if let EntityData::TimeSeries(ref ts) = entity.data {
+        let root_value = match root.as_str() {
+            "tags" => Some(timeseries_tags_json_value(&ts.tags)),
+            _ => None,
+        }?;
+        if tail.is_empty() {
+            return Some(root_value);
+        }
+        return resolve_runtime_document_path_from_value(&root_value, tail);
     }
 
     None
@@ -3320,5 +3374,134 @@ fn value_to_f64(val: &Value) -> Option<f64> {
         Value::UnsignedInteger(n) => Some(*n as f64),
         Value::Float(f) => Some(*f),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sort_ids(ids: Vec<EntityId>) -> Vec<u64> {
+        let mut ids: Vec<u64> = ids.into_iter().map(|id| id.raw()).collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    fn value_for_column<'a>(fields: &'a [(String, Value)], column: &str) -> Option<&'a Value> {
+        fields
+            .iter()
+            .find(|(field, _)| field == column)
+            .map(|(_, value)| value)
+    }
+
+    fn expected_ids(
+        entities: &[(EntityId, Vec<(String, Value)>)],
+        filter: &Filter,
+        column: &str,
+    ) -> Vec<EntityId> {
+        entities
+            .iter()
+            .filter_map(|(entity_id, fields)| {
+                let candidate = value_for_column(fields, column)?;
+                let matches = match filter {
+                    Filter::Compare { op, value, .. } => {
+                        compare_runtime_values(candidate, value, *op)
+                    }
+                    Filter::Between { low, high, .. } => {
+                        compare_runtime_values(candidate, low, CompareOp::Ge)
+                            && compare_runtime_values(candidate, high, CompareOp::Le)
+                    }
+                    _ => false,
+                };
+                matches.then_some(*entity_id)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_try_sorted_index_lookup_matches_full_scan_for_integral_boundaries() {
+        let idx_store = super::super::index_store::IndexStore::new();
+        let entities = vec![
+            (
+                EntityId::new(1),
+                vec![("n".to_string(), Value::Integer(i64::MIN))],
+            ),
+            (
+                EntityId::new(2),
+                vec![("n".to_string(), Value::Integer(-1))],
+            ),
+            (
+                EntityId::new(3),
+                vec![("n".to_string(), Value::Integer(i64::MAX))],
+            ),
+            (
+                EntityId::new(4),
+                vec![("n".to_string(), Value::UnsignedInteger(i64::MAX as u64 + 1))],
+            ),
+            (
+                EntityId::new(5),
+                vec![("n".to_string(), Value::UnsignedInteger(u64::MAX))],
+            ),
+        ];
+        idx_store.sorted.build_index("numbers", "n", &entities);
+
+        let filters = vec![
+            Filter::Compare {
+                field: FieldRef::column("numbers", "n"),
+                op: CompareOp::Le,
+                value: Value::Integer(i64::MIN),
+            },
+            Filter::Compare {
+                field: FieldRef::column("numbers", "n"),
+                op: CompareOp::Lt,
+                value: Value::UnsignedInteger(0),
+            },
+            Filter::Compare {
+                field: FieldRef::column("numbers", "n"),
+                op: CompareOp::Gt,
+                value: Value::Integer(i64::MAX),
+            },
+            Filter::Compare {
+                field: FieldRef::column("numbers", "n"),
+                op: CompareOp::Ge,
+                value: Value::UnsignedInteger(i64::MAX as u64 + 1),
+            },
+            Filter::Between {
+                field: FieldRef::column("numbers", "n"),
+                low: Value::Integer(i64::MAX),
+                high: Value::UnsignedInteger(i64::MAX as u64 + 1),
+            },
+        ];
+
+        for filter in filters {
+            let indexed = try_sorted_index_lookup(&filter, "numbers", &idx_store)
+                .expect("lookup should use sorted index");
+            let expected = expected_ids(&entities, &filter, "n");
+            assert_eq!(sort_ids(indexed), sort_ids(expected), "filter={filter:?}");
+        }
+    }
+
+    #[test]
+    fn test_try_sorted_index_lookup_falls_back_when_float_values_are_present() {
+        let idx_store = super::super::index_store::IndexStore::new();
+        let entities = vec![
+            (
+                EntityId::new(1),
+                vec![("score".to_string(), Value::Integer(10))],
+            ),
+            (
+                EntityId::new(2),
+                vec![("score".to_string(), Value::Float(10.5))],
+            ),
+        ];
+        idx_store.sorted.build_index("metrics", "score", &entities);
+
+        let filter = Filter::Compare {
+            field: FieldRef::column("metrics", "score"),
+            op: CompareOp::Ge,
+            value: Value::Integer(10),
+        };
+
+        assert!(try_sorted_index_lookup(&filter, "metrics", &idx_store).is_none());
     }
 }
