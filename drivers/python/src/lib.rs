@@ -402,7 +402,7 @@ fn decode_wire_result_to_py(py: Python<'_>, data: &[u8]) -> PyResult<PyObject> {
     use pyo3::types::{PyDict, PyList};
 
     if data.len() < 2 {
-        return Ok(PyList::empty_bound(py).into());
+        return Ok(PyList::empty(py).into());
     }
 
     let mut pos = 0;
@@ -426,9 +426,9 @@ fn decode_wire_result_to_py(py: Python<'_>, data: &[u8]) -> PyResult<PyObject> {
     pos += 4;
 
     // Rows
-    let rows = PyList::empty_bound(py);
+    let rows = PyList::empty(py);
     for _ in 0..nrows {
-        let dict = PyDict::new_bound(py);
+        let dict = PyDict::new(py);
         for col in &col_names {
             if pos >= data.len() {
                 break;
