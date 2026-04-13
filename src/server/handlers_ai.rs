@@ -1467,6 +1467,44 @@ where
     output
 }
 
+/// Insert a value into a nested Map following dot-separated path segments.
+fn insert_nested(root: &mut Map<String, JsonValue>, parts: &[&str], value: JsonValue) {
+    if parts.is_empty() {
+        return;
+    }
+    if parts.len() == 1 {
+        root.insert(parts[0].to_string(), value);
+        return;
+    }
+    let child = root
+        .entry(parts[0].to_string())
+        .or_insert_with(|| JsonValue::Object(Map::new()));
+    if let JsonValue::Object(ref mut map) = child {
+        insert_nested(map, &parts[1..], value);
+    }
+}
+
+/// Flatten a nested JSON object into dot-notation key-value pairs.
+fn flatten_json(prefix: &str, value: &JsonValue, out: &mut Vec<(String, JsonValue)>) {
+    match value {
+        JsonValue::Object(map) => {
+            for (k, v) in map {
+                let key = if prefix.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{prefix}.{k}")
+                };
+                flatten_json(&key, v, out);
+            }
+        }
+        _ => {
+            if !prefix.is_empty() {
+                out.push((prefix.to_string(), value.clone()));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1520,43 +1558,5 @@ mod tests {
                 }
             });
         assert_eq!(rendered, "Summarize host 10.0.0.4 seen on port 443");
-    }
-}
-
-/// Insert a value into a nested Map following dot-separated path segments.
-fn insert_nested(root: &mut Map<String, JsonValue>, parts: &[&str], value: JsonValue) {
-    if parts.is_empty() {
-        return;
-    }
-    if parts.len() == 1 {
-        root.insert(parts[0].to_string(), value);
-        return;
-    }
-    let child = root
-        .entry(parts[0].to_string())
-        .or_insert_with(|| JsonValue::Object(Map::new()));
-    if let JsonValue::Object(ref mut map) = child {
-        insert_nested(map, &parts[1..], value);
-    }
-}
-
-/// Flatten a nested JSON object into dot-notation key-value pairs.
-fn flatten_json(prefix: &str, value: &JsonValue, out: &mut Vec<(String, JsonValue)>) {
-    match value {
-        JsonValue::Object(map) => {
-            for (k, v) in map {
-                let key = if prefix.is_empty() {
-                    k.clone()
-                } else {
-                    format!("{prefix}.{k}")
-                };
-                flatten_json(&key, v, out);
-            }
-        }
-        _ => {
-            if !prefix.is_empty() {
-                out.push((prefix.to_string(), value.clone()));
-            }
-        }
     }
 }
