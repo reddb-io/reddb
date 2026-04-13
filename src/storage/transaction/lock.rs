@@ -3,11 +3,45 @@
 //! Provides pessimistic concurrency control with deadlock detection.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Condvar, Mutex, RwLock};
+use std::sync::{
+    Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard, WaitTimeoutResult,
+};
 use std::time::{Duration, Instant};
 
 /// Transaction ID type
 pub type TxnId = u64;
+
+fn read_unpoisoned<'a, T>(lock: &'a RwLock<T>) -> RwLockReadGuard<'a, T> {
+    match lock.read() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn write_unpoisoned<'a, T>(lock: &'a RwLock<T>) -> RwLockWriteGuard<'a, T> {
+    match lock.write() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn mutex_unpoisoned<'a, T>(lock: &'a Mutex<T>) -> MutexGuard<'a, T> {
+    match lock.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn wait_timeout_unpoisoned<'a, T>(
+    condvar: &Condvar,
+    guard: MutexGuard<'a, T>,
+    timeout: Duration,
+) -> (MutexGuard<'a, T>, WaitTimeoutResult) {
+    match condvar.wait_timeout(guard, timeout) {
+        Ok(result) => result,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
 
 /// Lock modes
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -173,9 +207,10 @@ impl Lock {
         while i < self.waiters.len() {
             let waiter = &self.waiters[i];
             if self.can_grant(waiter.txn_id, waiter.mode) {
-                let waiter = self.waiters.remove(i).unwrap();
-                self.grant(waiter.txn_id, waiter.mode);
-                granted.push(waiter.txn_id);
+                if let Some(waiter) = self.waiters.remove(i) {
+                    self.grant(waiter.txn_id, waiter.mode);
+                    granted.push(waiter.txn_id);
+                }
             } else {
                 i += 1;
             }
@@ -280,7 +315,7 @@ impl LockManager {
     ) -> LockResult {
         // Update stats
         {
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = write_unpoisoned(&self.stats);
             stats.requests += 1;
         }
 
@@ -288,7 +323,7 @@ impl LockManager {
 
         // Check lock limit
         {
-            let txn_locks = self.txn_locks.read().unwrap();
+            let txn_locks = read_unpoisoned(&self.txn_locks);
             if let Some(locks) = txn_locks.get(&txn_id) {
                 if locks.len() >= self.config.max_locks_per_txn && !locks.contains(&resource_key) {
                     return LockResult::LockLimitExceeded;
@@ -298,7 +333,7 @@ impl LockManager {
 
         // Try to acquire immediately
         {
-            let mut locks = self.locks.write().unwrap();
+            let mut locks = write_unpoisoned(&self.locks);
             let lock = locks
                 .entry(resource_key.clone())
                 .or_insert_with(|| Lock::new(resource_key.clone()));
@@ -308,10 +343,10 @@ impl LockManager {
                 lock.grant(txn_id, mode);
 
                 // Track in txn_locks
-                let mut txn_locks = self.txn_locks.write().unwrap();
+                let mut txn_locks = write_unpoisoned(&self.txn_locks);
                 txn_locks.entry(txn_id).or_default().insert(resource_key);
 
-                let mut stats = self.stats.write().unwrap();
+                let mut stats = write_unpoisoned(&self.stats);
                 stats.granted += 1;
                 stats.active_locks = locks.values().map(|l| l.holders.len() as u64).sum();
 
@@ -334,12 +369,12 @@ impl LockManager {
 
                 if self.detect_deadlock_inner(txn_id, &wait_graph) {
                     let cycle: Vec<TxnId> = waiting_for.iter().copied().collect();
-                    let mut stats = self.stats.write().unwrap();
+                    let mut stats = write_unpoisoned(&self.stats);
                     stats.deadlocks += 1;
                     return LockResult::Deadlock(cycle);
                 }
 
-                *self.wait_graph.write().unwrap() = wait_graph;
+                *write_unpoisoned(&self.wait_graph) = wait_graph;
             }
 
             // Add to wait queue
@@ -347,7 +382,7 @@ impl LockManager {
                 lock.add_waiter(LockWaiter::new(txn_id, mode, timeout));
             }
 
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = write_unpoisoned(&self.stats);
             stats.waited += 1;
             stats.waiting += 1;
         }
@@ -356,24 +391,22 @@ impl LockManager {
         let start = Instant::now();
         loop {
             // Wait on condition variable
-            let guard = self.waiter_mutex.lock().unwrap();
-            let (_guard, _wait_result) = self
-                .waiter_cv
-                .wait_timeout(guard, Duration::from_millis(10))
-                .unwrap();
+            let guard = mutex_unpoisoned(&self.waiter_mutex);
+            let (_guard, _wait_result) =
+                wait_timeout_unpoisoned(&self.waiter_cv, guard, Duration::from_millis(10));
 
             // Check if we got the lock
             let holders: Option<HashSet<TxnId>> = {
-                let locks = self.locks.read().unwrap();
+                let locks = read_unpoisoned(&self.locks);
                 if let Some(lock) = locks.get(&resource_key) {
                     if lock.holders.contains_key(&txn_id) {
                         // Remove from wait graph
                         if self.config.deadlock_detection {
-                            let mut wait_graph = self.wait_graph.write().unwrap();
+                            let mut wait_graph = write_unpoisoned(&self.wait_graph);
                             wait_graph.remove(&txn_id);
                         }
 
-                        let mut stats = self.stats.write().unwrap();
+                        let mut stats = write_unpoisoned(&self.stats);
                         stats.waiting -= 1;
 
                         return LockResult::Granted;
@@ -386,25 +419,25 @@ impl LockManager {
             };
 
             if self.config.deadlock_detection {
-                let locks = self.locks.read().unwrap();
+                let locks = read_unpoisoned(&self.locks);
                 let wait_graph = Self::build_wait_graph_from_locks(&locks);
                 drop(locks);
 
                 if self.detect_deadlock_inner(txn_id, &wait_graph) {
-                    let mut stats = self.stats.write().unwrap();
+                    let mut stats = write_unpoisoned(&self.stats);
                     stats.deadlocks += 1;
                     stats.waiting -= 1;
                     return LockResult::Deadlock(holders.unwrap_or_default().into_iter().collect());
                 }
 
-                *self.wait_graph.write().unwrap() = wait_graph;
+                *write_unpoisoned(&self.wait_graph) = wait_graph;
             }
 
             // Check timeout
             if start.elapsed() > timeout {
                 // Remove from wait queue
                 {
-                    let mut locks = self.locks.write().unwrap();
+                    let mut locks = write_unpoisoned(&self.locks);
                     if let Some(lock) = locks.get_mut(&resource_key) {
                         lock.waiters.retain(|w| w.txn_id != txn_id);
                     }
@@ -412,11 +445,11 @@ impl LockManager {
 
                 // Remove from wait graph
                 if self.config.deadlock_detection {
-                    let mut wait_graph = self.wait_graph.write().unwrap();
+                    let mut wait_graph = write_unpoisoned(&self.wait_graph);
                     wait_graph.remove(&txn_id);
                 }
 
-                let mut stats = self.stats.write().unwrap();
+                let mut stats = write_unpoisoned(&self.stats);
                 stats.timeouts += 1;
                 stats.waiting -= 1;
 
@@ -430,12 +463,12 @@ impl LockManager {
         let resource_key = resource.to_vec();
 
         let granted = {
-            let mut locks = self.locks.write().unwrap();
+            let mut locks = write_unpoisoned(&self.locks);
 
             if let Some(lock) = locks.get_mut(&resource_key) {
                 if lock.release(txn_id).is_some() {
                     // Remove from txn_locks
-                    let mut txn_locks = self.txn_locks.write().unwrap();
+                    let mut txn_locks = write_unpoisoned(&self.txn_locks);
                     if let Some(resources) = txn_locks.get_mut(&txn_id) {
                         resources.remove(&resource_key);
                     }
@@ -445,7 +478,7 @@ impl LockManager {
 
                     // Update wait graph for granted transactions
                     if self.config.deadlock_detection && !granted.is_empty() {
-                        let mut wait_graph = self.wait_graph.write().unwrap();
+                        let mut wait_graph = write_unpoisoned(&self.wait_graph);
                         for txn in &granted {
                             wait_graph.remove(txn);
                         }
@@ -472,7 +505,7 @@ impl LockManager {
     /// Release all locks for a transaction
     pub fn release_all(&self, txn_id: TxnId) -> usize {
         let resources: Vec<Vec<u8>> = {
-            let txn_locks = self.txn_locks.read().unwrap();
+            let txn_locks = read_unpoisoned(&self.txn_locks);
             txn_locks
                 .get(&txn_id)
                 .map(|r| r.iter().cloned().collect())
@@ -487,13 +520,13 @@ impl LockManager {
 
         // Clean up txn_locks entry
         {
-            let mut txn_locks = self.txn_locks.write().unwrap();
+            let mut txn_locks = write_unpoisoned(&self.txn_locks);
             txn_locks.remove(&txn_id);
         }
 
         // Clean up wait graph
         if self.config.deadlock_detection {
-            let mut wait_graph = self.wait_graph.write().unwrap();
+            let mut wait_graph = write_unpoisoned(&self.wait_graph);
             wait_graph.remove(&txn_id);
         }
 
@@ -502,7 +535,7 @@ impl LockManager {
 
     /// Check if transaction holds lock on resource
     pub fn holds_lock(&self, txn_id: TxnId, resource: &[u8]) -> Option<LockMode> {
-        let locks = self.locks.read().unwrap();
+        let locks = read_unpoisoned(&self.locks);
         locks
             .get(resource)
             .and_then(|lock| lock.holders.get(&txn_id).copied())
@@ -510,8 +543,8 @@ impl LockManager {
 
     /// Get all locks held by transaction
     pub fn get_locks(&self, txn_id: TxnId) -> Vec<(Vec<u8>, LockMode)> {
-        let txn_locks = self.txn_locks.read().unwrap();
-        let locks = self.locks.read().unwrap();
+        let txn_locks = read_unpoisoned(&self.txn_locks);
+        let locks = read_unpoisoned(&self.locks);
 
         txn_locks
             .get(&txn_id)
@@ -591,7 +624,7 @@ impl LockManager {
 
     /// Get statistics
     pub fn stats(&self) -> LockStats {
-        self.stats.read().unwrap().clone()
+        read_unpoisoned(&self.stats).clone()
     }
 
     /// Get configuration
