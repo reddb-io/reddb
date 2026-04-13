@@ -223,6 +223,10 @@ impl RedDBServer {
 
     pub fn serve(&self) -> io::Result<()> {
         let listener = TcpListener::bind(&self.options.bind_addr)?;
+        self.serve_on(listener)
+    }
+
+    pub fn serve_on(&self, listener: TcpListener) -> io::Result<()> {
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
@@ -241,6 +245,14 @@ impl RedDBServer {
     pub fn serve_in_background(&self) -> thread::JoinHandle<io::Result<()>> {
         let server = self.clone();
         thread::spawn(move || server.serve())
+    }
+
+    pub fn serve_in_background_on(
+        &self,
+        listener: TcpListener,
+    ) -> thread::JoinHandle<io::Result<()>> {
+        let server = self.clone();
+        thread::spawn(move || server.serve_on(listener))
     }
 
     fn handle_connection(&self, mut stream: TcpStream) -> io::Result<()> {
