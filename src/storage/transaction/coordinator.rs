@@ -7,7 +7,7 @@ use super::log::{TransactionLog, WalConfig};
 use super::savepoint::TxnSavepoints;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
 /// Transaction ID
@@ -15,6 +15,38 @@ pub type TxnId = u64;
 
 /// Timestamp
 pub type Timestamp = u64;
+
+fn tx_lock_error(context: &'static str) -> TxnError {
+    TxnError::Internal(format!("{context} lock poisoned"))
+}
+
+fn read_guard_or_err<'a, T>(
+    lock: &'a RwLock<T>,
+    context: &'static str,
+) -> Result<RwLockReadGuard<'a, T>, TxnError> {
+    lock.read().map_err(|_| tx_lock_error(context))
+}
+
+fn write_guard_or_err<'a, T>(
+    lock: &'a RwLock<T>,
+    context: &'static str,
+) -> Result<RwLockWriteGuard<'a, T>, TxnError> {
+    lock.write().map_err(|_| tx_lock_error(context))
+}
+
+fn recover_read_guard<'a, T>(lock: &'a RwLock<T>) -> RwLockReadGuard<'a, T> {
+    match lock.read() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn recover_write_guard<'a, T>(lock: &'a RwLock<T>) -> RwLockWriteGuard<'a, T> {
+    match lock.write() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
 
 /// Transaction error types
 #[derive(Debug, Clone)]
@@ -363,7 +395,7 @@ impl TransactionManager {
             let _ = log.log_begin(id);
         }
 
-        self.transactions.write().unwrap().insert(id, state);
+        recover_write_guard(&self.transactions).insert(id, state);
 
         handle
     }
@@ -379,7 +411,7 @@ impl TransactionManager {
 
     /// Record a read operation
     pub fn record_read(&self, txn_id: TxnId, key: &[u8], read_ts: Timestamp) {
-        let mut txns = self.transactions.write().unwrap();
+        let mut txns = recover_write_guard(&self.transactions);
         if let Some(state) = txns.get_mut(&txn_id) {
             if state.state == TxnState::Active {
                 state.read_set.push((key.to_vec(), read_ts));
@@ -397,7 +429,7 @@ impl TransactionManager {
     ) {
         let timestamp = self.next_timestamp();
 
-        let mut txns = self.transactions.write().unwrap();
+        let mut txns = recover_write_guard(&self.transactions);
         if let Some(state) = txns.get_mut(&txn_id) {
             if state.state == TxnState::Active {
                 let entry = WriteEntry {
@@ -430,7 +462,7 @@ impl TransactionManager {
     pub fn acquire_lock(&self, txn_id: TxnId, key: &[u8], mode: LockMode) -> Result<(), TxnError> {
         // Check transaction is active
         {
-            let txns = self.transactions.read().unwrap();
+            let txns = read_guard_or_err(&self.transactions, "transaction manager state")?;
             let state = txns.get(&txn_id).ok_or(TxnError::NotFound(txn_id))?;
             if state.state != TxnState::Active {
                 return Err(TxnError::AlreadyAborted(txn_id));
@@ -444,7 +476,7 @@ impl TransactionManager {
         {
             LockResult::Granted | LockResult::Upgraded | LockResult::AlreadyHeld => {
                 // Record lock (even if already held - idempotent)
-                let mut txns = self.transactions.write().unwrap();
+                let mut txns = write_guard_or_err(&self.transactions, "transaction manager state")?;
                 if let Some(state) = txns.get_mut(&txn_id) {
                     if !state.locks_held.contains(&key.to_vec()) {
                         state.locks_held.push(key.to_vec());
@@ -473,7 +505,7 @@ impl TransactionManager {
     /// Release all locks for transaction
     fn release_locks(&self, txn_id: TxnId) {
         let locks = {
-            let txns = self.transactions.read().unwrap();
+            let txns = recover_read_guard(&self.transactions);
             txns.get(&txn_id)
                 .map(|s| s.locks_held.clone())
                 .unwrap_or_default()
@@ -486,14 +518,14 @@ impl TransactionManager {
 
     /// Validate transaction (optimistic concurrency check)
     fn validate(&self, txn_id: TxnId) -> Result<(), TxnError> {
-        let txns = self.transactions.read().unwrap();
+        let txns = read_guard_or_err(&self.transactions, "transaction manager state")?;
         let state = txns.get(&txn_id).ok_or(TxnError::NotFound(txn_id))?;
 
         if !self.config.optimistic {
             return Ok(());
         }
 
-        let committed = self.committed_ts.read().unwrap();
+        let committed = read_guard_or_err(&self.committed_ts, "transaction manager committed_ts")?;
 
         // Check read set: no key was modified since we read it
         for (key, read_ts) in &state.read_set {
@@ -520,7 +552,7 @@ impl TransactionManager {
 
         // Update state to committed
         {
-            let mut txns = self.transactions.write().unwrap();
+            let mut txns = write_guard_or_err(&self.transactions, "transaction manager state")?;
             let state = txns.get_mut(&txn_id).ok_or(TxnError::NotFound(txn_id))?;
 
             match state.state {
@@ -532,7 +564,8 @@ impl TransactionManager {
             }
 
             // Update committed timestamps for written keys
-            let mut committed = self.committed_ts.write().unwrap();
+            let mut committed =
+                write_guard_or_err(&self.committed_ts, "transaction manager committed_ts")?;
             for entry in &state.write_set {
                 committed.insert(entry.key.clone(), commit_ts);
             }
@@ -558,7 +591,7 @@ impl TransactionManager {
     pub fn abort(&self, txn_id: TxnId) -> Result<(), TxnError> {
         // Update state to aborted
         {
-            let mut txns = self.transactions.write().unwrap();
+            let mut txns = write_guard_or_err(&self.transactions, "transaction manager state")?;
             let state = txns.get_mut(&txn_id).ok_or(TxnError::NotFound(txn_id))?;
 
             match state.state {
@@ -583,7 +616,7 @@ impl TransactionManager {
 
     /// Create savepoint
     pub fn create_savepoint(&self, txn_id: TxnId, name: &str) -> Result<(), TxnError> {
-        let mut txns = self.transactions.write().unwrap();
+        let mut txns = write_guard_or_err(&self.transactions, "transaction manager state")?;
         let state = txns.get_mut(&txn_id).ok_or(TxnError::NotFound(txn_id))?;
 
         if state.state != TxnState::Active {
@@ -602,7 +635,7 @@ impl TransactionManager {
 
     /// Rollback to savepoint
     pub fn rollback_to_savepoint(&self, txn_id: TxnId, name: &str) -> Result<(), TxnError> {
-        let mut txns = self.transactions.write().unwrap();
+        let mut txns = write_guard_or_err(&self.transactions, "transaction manager state")?;
         let state = txns.get_mut(&txn_id).ok_or(TxnError::NotFound(txn_id))?;
 
         if state.state != TxnState::Active {
@@ -627,7 +660,7 @@ impl TransactionManager {
     pub fn get_state(&self, txn_id: TxnId) -> Option<TxnState> {
         self.transactions
             .read()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&txn_id)
             .map(|s| s.state)
     }
@@ -641,7 +674,7 @@ impl TransactionManager {
     pub fn active_count(&self) -> usize {
         self.transactions
             .read()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .values()
             .filter(|s| s.state == TxnState::Active)
             .count()
@@ -651,7 +684,7 @@ impl TransactionManager {
     pub fn oldest_active_ts(&self) -> Option<Timestamp> {
         self.transactions
             .read()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .values()
             .filter(|s| s.state == TxnState::Active)
             .map(|s| s.handle.start_ts)
@@ -660,7 +693,7 @@ impl TransactionManager {
 
     /// Cleanup finished transactions
     pub fn cleanup(&self, max_age: Duration) {
-        let mut txns = self.transactions.write().unwrap();
+        let mut txns = recover_write_guard(&self.transactions);
         let now = Instant::now();
 
         txns.retain(|_, state| {
