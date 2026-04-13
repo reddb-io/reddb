@@ -89,7 +89,9 @@ where
             Err(e) => return Err(e.into()),
         }
 
-        let total_len = u32::from_le_bytes(header_buf[0..4].try_into().unwrap()) as usize;
+        let total_len =
+            u32::from_le_bytes([header_buf[0], header_buf[1], header_buf[2], header_buf[3]])
+                as usize;
         let msg_type = header_buf[4];
         let payload_len = total_len.saturating_sub(1);
 
@@ -225,7 +227,9 @@ fn handle_query_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
             col_names = Some(cols);
         }
 
-        let cols = col_names.as_ref().unwrap();
+        let Some(cols) = col_names.as_ref() else {
+            return true;
+        };
         let mut row = Vec::with_capacity(cols.len() * 10);
         for col in cols {
             let val = match col.as_str() {
@@ -328,28 +332,44 @@ fn handle_bulk_insert(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
     if payload.len() < 2 {
         return make_error(b"bulk insert: payload too short");
     }
-    let coll_len = u16::from_le_bytes(payload[pos..pos + 2].try_into().unwrap()) as usize;
-    pos += 2;
-    let collection = match std::str::from_utf8(&payload[pos..pos + coll_len]) {
-        Ok(s) => s.to_string(),
-        Err(_) => return make_error(b"invalid collection name"),
+    let coll_len = match read_u16(payload, &mut pos, "bulk insert: missing collection length") {
+        Ok(len) => len as usize,
+        Err(msg) => return make_error(msg.as_bytes()),
     };
-    pos += coll_len;
+    let collection = match read_string(
+        payload,
+        &mut pos,
+        coll_len,
+        "bulk insert: truncated collection name",
+        "bulk insert: invalid collection name",
+    ) {
+        Ok(s) => s,
+        Err(msg) => return make_error(msg.as_bytes()),
+    };
 
     // Number of rows
-    let nrows = u32::from_le_bytes(payload[pos..pos + 4].try_into().unwrap()) as usize;
-    pos += 4;
+    let nrows = match read_u32(payload, &mut pos, "bulk insert: missing row count") {
+        Ok(rows) => rows as usize,
+        Err(msg) => return make_error(msg.as_bytes()),
+    };
 
     // Parse JSON payloads
     let mut json_payloads = Vec::with_capacity(nrows);
     for _ in 0..nrows {
-        let json_len = u32::from_le_bytes(payload[pos..pos + 4].try_into().unwrap()) as usize;
-        pos += 4;
-        let json_str = match std::str::from_utf8(&payload[pos..pos + json_len]) {
-            Ok(s) => s.to_string(),
-            Err(_) => return make_error(b"invalid JSON payload"),
+        let json_len = match read_u32(payload, &mut pos, "bulk insert: missing JSON length") {
+            Ok(len) => len as usize,
+            Err(msg) => return make_error(msg.as_bytes()),
         };
-        pos += json_len;
+        let json_str = match read_string(
+            payload,
+            &mut pos,
+            json_len,
+            "bulk insert: truncated JSON payload",
+            "bulk insert: invalid JSON payload",
+        ) {
+            Ok(s) => s,
+            Err(msg) => return make_error(msg.as_bytes()),
+        };
         json_payloads.push(json_str);
     }
 
@@ -491,31 +511,51 @@ fn handle_bulk_insert_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> 
     }
 
     // Collection name
-    let coll_len = u16::from_le_bytes(payload[pos..pos + 2].try_into().unwrap()) as usize;
-    pos += 2;
-    let collection = match std::str::from_utf8(&payload[pos..pos + coll_len]) {
-        Ok(s) => s.to_string(),
-        Err(_) => return make_error(b"invalid collection name"),
+    let coll_len = match read_u16(payload, &mut pos, "binary bulk: missing collection length") {
+        Ok(len) => len as usize,
+        Err(msg) => return make_error(msg.as_bytes()),
     };
-    pos += coll_len;
+    let collection = match read_string(
+        payload,
+        &mut pos,
+        coll_len,
+        "binary bulk: truncated collection name",
+        "binary bulk: invalid collection name",
+    ) {
+        Ok(s) => s,
+        Err(msg) => return make_error(msg.as_bytes()),
+    };
 
     // Column names
-    let ncols = u16::from_le_bytes(payload[pos..pos + 2].try_into().unwrap()) as usize;
-    pos += 2;
+    let ncols = match read_u16(payload, &mut pos, "binary bulk: missing column count") {
+        Ok(cols) => cols as usize,
+        Err(msg) => return make_error(msg.as_bytes()),
+    };
     let mut col_names = Vec::with_capacity(ncols);
     for _ in 0..ncols {
-        let name_len = u16::from_le_bytes(payload[pos..pos + 2].try_into().unwrap()) as usize;
-        pos += 2;
-        let name = std::str::from_utf8(&payload[pos..pos + name_len])
-            .unwrap_or("?")
-            .to_string();
-        pos += name_len;
+        let name_len = match read_u16(payload, &mut pos, "binary bulk: missing column name length")
+        {
+            Ok(len) => len as usize,
+            Err(msg) => return make_error(msg.as_bytes()),
+        };
+        let name = match read_string(
+            payload,
+            &mut pos,
+            name_len,
+            "binary bulk: truncated column name",
+            "binary bulk: invalid column name",
+        ) {
+            Ok(s) => s,
+            Err(msg) => return make_error(msg.as_bytes()),
+        };
         col_names.push(name);
     }
 
     // Number of rows
-    let nrows = u32::from_le_bytes(payload[pos..pos + 4].try_into().unwrap()) as usize;
-    pos += 4;
+    let nrows = match read_u32(payload, &mut pos, "binary bulk: missing row count") {
+        Ok(rows) => rows as usize,
+        Err(msg) => return make_error(msg.as_bytes()),
+    };
 
     // Decode rows into entities using the columnar `RowData` path:
     // one shared `Arc<Vec<String>>` for column names, one shared
@@ -527,7 +567,11 @@ fn handle_bulk_insert_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> 
     for _ in 0..nrows {
         let mut columns = Vec::with_capacity(ncols);
         for _ in 0..ncols {
-            columns.push(decode_value(payload, &mut pos));
+            let value = match try_decode_value(payload, &mut pos) {
+                Ok(value) => value,
+                Err(err) => return make_error(format!("binary bulk: {err}").as_bytes()),
+            };
+            columns.push(value);
         }
         entities.push(crate::storage::unified::UnifiedEntity::new(
             EntityId::new(0),
@@ -562,4 +606,106 @@ fn make_error(msg: &[u8]) -> Vec<u8> {
     write_frame_header(&mut resp, MSG_ERROR, msg.len() as u32);
     resp.extend_from_slice(msg);
     resp
+}
+
+fn read_u16(payload: &[u8], pos: &mut usize, err: &'static str) -> Result<u16, &'static str> {
+    let bytes = read_bytes(payload, pos, 2, err)?;
+    Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
+}
+
+fn read_u32(payload: &[u8], pos: &mut usize, err: &'static str) -> Result<u32, &'static str> {
+    let bytes = read_bytes(payload, pos, 4, err)?;
+    Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+fn read_string(
+    payload: &[u8],
+    pos: &mut usize,
+    len: usize,
+    truncated_err: &'static str,
+    utf8_err: &'static str,
+) -> Result<String, &'static str> {
+    let bytes = read_bytes(payload, pos, len, truncated_err)?;
+    std::str::from_utf8(bytes)
+        .map(str::to_owned)
+        .map_err(|_| utf8_err)
+}
+
+fn read_bytes<'a>(
+    payload: &'a [u8],
+    pos: &mut usize,
+    len: usize,
+    err: &'static str,
+) -> Result<&'a [u8], &'static str> {
+    let end = pos.saturating_add(len);
+    if end > payload.len() {
+        return Err(err);
+    }
+    let bytes = &payload[*pos..end];
+    *pos = end;
+    Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_runtime() -> RedDBRuntime {
+        RedDBRuntime::in_memory().expect("failed to create in-memory runtime")
+    }
+
+    fn decode_error_message(response: &[u8]) -> String {
+        assert_eq!(response.get(4), Some(&MSG_ERROR));
+        String::from_utf8(response[5..].to_vec()).expect("wire error should be utf-8")
+    }
+
+    #[test]
+    fn bulk_insert_rejects_truncated_json_payload() {
+        let runtime = create_runtime();
+        let payload = vec![
+            1, 0, b't', // collection "t"
+            1, 0, 0, 0, // one row
+            5, 0, 0, 0, b'{', b'}', // declares len 5 but only 2 bytes
+        ];
+
+        let response = handle_bulk_insert(&runtime, &payload);
+        assert_eq!(
+            decode_error_message(&response),
+            "bulk insert: truncated JSON payload"
+        );
+    }
+
+    #[test]
+    fn binary_bulk_rejects_invalid_collection_name() {
+        let runtime = create_runtime();
+        let payload = vec![
+            1, 0, 0xff, // invalid utf-8 collection
+            0, 0, // ncols
+            0, 0, 0, 0, // nrows
+        ];
+
+        let response = handle_bulk_insert_binary(&runtime, &payload);
+        assert_eq!(
+            decode_error_message(&response),
+            "binary bulk: invalid collection name"
+        );
+    }
+
+    #[test]
+    fn binary_bulk_rejects_truncated_value_payload() {
+        let runtime = create_runtime();
+        let payload = vec![
+            1, 0, b't', // collection "t"
+            1, 0, // ncols = 1
+            1, 0, b'x', // column "x"
+            1, 0, 0, 0,       // nrows = 1
+            VAL_I64, // truncated i64, missing 8-byte payload
+        ];
+
+        let response = handle_bulk_insert_binary(&runtime, &payload);
+        assert_eq!(
+            decode_error_message(&response),
+            "binary bulk: truncated i64 value"
+        );
+    }
 }
