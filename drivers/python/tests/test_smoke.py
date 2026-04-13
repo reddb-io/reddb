@@ -78,11 +78,14 @@ def test_unsupported_scheme_raises():
         raise AssertionError("expected ValueError")
 
 
-def test_grpc_uri_returns_feature_disabled_for_now():
+def test_grpc_uri_fails_when_no_server_is_running():
+    # grpc:// is now supported by the high-level Python driver (Phase 1.5),
+    # but we don't have a running gRPC server in the smoke test suite.
+    # Connecting to an unreachable port should raise ValueError with IO_ERROR.
     try:
-        reddb.connect("grpc://localhost:50051")
+        reddb.connect("grpc://127.0.0.1:1")
     except ValueError as e:
-        assert "FEATURE_DISABLED" in str(e)
+        assert "IO_ERROR" in str(e) or "grpc connect failed" in str(e)
     else:
         raise AssertionError("expected ValueError")
 
@@ -128,7 +131,7 @@ if __name__ == "__main__":
         ("bulk_insert_returns_total_affected", test_bulk_insert_returns_total_affected),
         ("query_error_raises_value_error", test_query_error_raises_value_error),
         ("unsupported_scheme_raises", test_unsupported_scheme_raises),
-        ("grpc_uri_returns_feature_disabled_for_now", test_grpc_uri_returns_feature_disabled_for_now),
+        ("grpc_uri_fails_when_no_server_is_running", test_grpc_uri_fails_when_no_server_is_running),
         ("calls_after_close_raise_client_closed", test_calls_after_close_raise_client_closed),
         ("field_value_types_are_validated", test_field_value_types_are_validated),
         ("legacy_classes_are_still_exported", test_legacy_classes_are_still_exported),
