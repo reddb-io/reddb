@@ -269,7 +269,7 @@ impl RedDBRuntime {
         ))
     }
 
-    fn insert_timeseries_point(
+    pub(crate) fn insert_timeseries_point(
         &self,
         collection: &str,
         fields: Vec<(String, Value)>,
