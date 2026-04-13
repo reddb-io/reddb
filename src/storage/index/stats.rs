@@ -38,6 +38,8 @@ pub enum IndexKind {
     ZoneMap,
     /// Cross-structure unified reference index.
     UnifiedRef,
+    /// Count-min sketch heavy-hitters (top-k frequency estimate).
+    HeavyHitters,
 }
 
 impl IndexKind {
