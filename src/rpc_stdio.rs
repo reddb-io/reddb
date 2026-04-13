@@ -59,6 +59,109 @@ pub mod error_code {
     pub const QUERY_ERROR: &str = "QUERY_ERROR";
     pub const NOT_FOUND: &str = "NOT_FOUND";
     pub const INTERNAL_ERROR: &str = "INTERNAL_ERROR";
+    /// `tx.begin` was called while a transaction was already open in the
+    /// same session.
+    pub const TX_ALREADY_OPEN: &str = "TX_ALREADY_OPEN";
+    /// `tx.commit` / `tx.rollback` was called without a matching
+    /// `tx.begin`.
+    pub const NO_TX_OPEN: &str = "NO_TX_OPEN";
+    /// A buffered statement failed during `tx.commit` replay. The error
+    /// message carries the index of the failing op and the number of
+    /// operations that successfully applied before the failure.
+    pub const TX_REPLAY_FAILED: &str = "TX_REPLAY_FAILED";
+    /// Transactions over the remote gRPC proxy are not supported yet.
+    pub const TX_NOT_SUPPORTED_REMOTE: &str = "TX_NOT_SUPPORTED_REMOTE";
+}
+
+// ---------------------------------------------------------------------------
+// Session state (transaction buffer)
+// ---------------------------------------------------------------------------
+//
+// Transactions in the stdio protocol are scoped to a single connection —
+// one process = one session = at most one open transaction. The state
+// lives in the stack of `run_backend` so nothing leaks between
+// connections, and there is no cross-session visibility of buffered
+// writes.
+//
+// Isolation model: `read_committed_deferred`. Reads inside a transaction
+// observe the latest *committed* state; they do **not** see writes the
+// same session has buffered via `insert` / `delete` / `bulk_insert`.
+// Atomicity is best-effort — a global commit lock serializes replays, but
+// auto-committed writes from other sessions may interleave between
+// commits. Strict atomicity requires funnelling every write through a
+// single session.
+
+/// Per-connection session that tracks the currently open transaction.
+pub(crate) struct Session {
+    next_tx_id: u64,
+    current_tx: Option<OpenTx>,
+}
+
+impl Session {
+    pub(crate) fn new() -> Self {
+        Self {
+            next_tx_id: 1,
+            current_tx: None,
+        }
+    }
+
+    fn open_tx(&mut self) -> Result<u64, (&'static str, String)> {
+        if let Some(tx) = &self.current_tx {
+            return Err((
+                error_code::TX_ALREADY_OPEN,
+                format!("transaction {} already open in this session", tx.tx_id),
+            ));
+        }
+        let tx_id = self.next_tx_id;
+        self.next_tx_id = self.next_tx_id.saturating_add(1);
+        self.current_tx = Some(OpenTx {
+            tx_id,
+            write_set: Vec::new(),
+        });
+        Ok(tx_id)
+    }
+
+    fn take_tx(&mut self) -> Option<OpenTx> {
+        self.current_tx.take()
+    }
+
+    fn current_tx_mut(&mut self) -> Option<&mut OpenTx> {
+        self.current_tx.as_mut()
+    }
+
+    fn has_tx(&self) -> bool {
+        self.current_tx.is_some()
+    }
+}
+
+impl Default for Session {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// An in-flight transaction for a single stdio session.
+struct OpenTx {
+    tx_id: u64,
+    write_set: Vec<PendingSql>,
+}
+
+/// A buffered mutation waiting for `tx.commit`. Each variant carries a
+/// ready-to-execute SQL string so the replay loop is a straight
+/// `execute_query` call.
+enum PendingSql {
+    Insert(String),
+    Delete(String),
+    #[allow(dead_code)] // reserved for future query()-in-tx routing
+    Update(String),
+}
+
+impl PendingSql {
+    fn sql(&self) -> &str {
+        match self {
+            PendingSql::Insert(s) | PendingSql::Delete(s) | PendingSql::Update(s) => s,
+        }
+    }
 }
 
 /// Run the stdio JSON-RPC loop against a local in-process runtime.
@@ -108,6 +211,7 @@ pub fn run_with_io<W: Write>(runtime: &RedDBRuntime, stdin: Stdin, stdout: &mut 
 
 fn run_backend<W: Write>(backend: &Backend<'_>, stdin: Stdin, stdout: &mut W) -> i32 {
     let reader = BufReader::new(stdin.lock());
+    let mut session = Session::new();
     for line_result in reader.lines() {
         let line = match line_result {
             Ok(l) => l,
@@ -124,7 +228,7 @@ fn run_backend<W: Write>(backend: &Backend<'_>, stdin: Stdin, stdout: &mut W) ->
         if line.trim().is_empty() {
             continue;
         }
-        let response = handle_line(backend, &line);
+        let response = handle_line(backend, &mut session, &line);
         if writeln!(stdout, "{}", response).is_err() || stdout.flush().is_err() {
             return 1;
         }
@@ -132,13 +236,17 @@ fn run_backend<W: Write>(backend: &Backend<'_>, stdin: Stdin, stdout: &mut W) ->
             return 0;
         }
     }
+    // EOF: silently drop any open transaction — atomicity is preserved
+    // (nothing was ever applied to the store) and no error is surfaced to
+    // the caller because EOF may be graceful client disconnect.
+    let _ = session.take_tx();
     0
 }
 
 /// Parse one input line and dispatch. Always returns a single-line
 /// JSON string suitable for direct write to stdout. Never panics
 /// (panics inside handlers are caught and reported).
-fn handle_line(backend: &Backend<'_>, line: &str) -> String {
+fn handle_line(backend: &Backend<'_>, session: &mut Session, line: &str) -> String {
     let parsed: Value = match json::from_str(line) {
         Ok(v) => v,
         Err(err) => {
@@ -162,9 +270,20 @@ fn handle_line(backend: &Backend<'_>, line: &str) -> String {
     let params = parsed.get("params").cloned().unwrap_or(Value::Null);
 
     let dispatch = std::panic::catch_unwind(AssertUnwindSafe(|| match backend {
-        Backend::Local(rt) => dispatch_method(rt, &method, &params),
+        Backend::Local(rt) => dispatch_method(rt, session, &method, &params),
         Backend::Remote(remote) => {
-            dispatch_method_remote(&remote.client, remote.tokio_rt, &method, &params)
+            // Transactions are session-local and the remote path forwards
+            // each call independently — there is no place to park a tx
+            // handle across gRPC hops yet. Surface a clear error so
+            // drivers can fall back to per-call auto-commit.
+            if matches!(method.as_str(), "tx.begin" | "tx.commit" | "tx.rollback") {
+                Err((
+                    error_code::TX_NOT_SUPPORTED_REMOTE,
+                    format!("{method} is not supported over remote gRPC yet"),
+                ))
+            } else {
+                dispatch_method_remote(&remote.client, remote.tokio_rt, &method, &params)
+            }
         }
     }));
 
@@ -179,10 +298,87 @@ fn handle_line(backend: &Backend<'_>, line: &str) -> String {
 /// success or `(error_code, message)` on failure.
 fn dispatch_method(
     runtime: &RedDBRuntime,
+    session: &mut Session,
     method: &str,
     params: &Value,
 ) -> Result<Value, (&'static str, String)> {
     match method {
+        "tx.begin" => {
+            let tx_id = session.open_tx()?;
+            Ok(Value::Object(
+                [
+                    ("tx_id".to_string(), Value::Number(tx_id as f64)),
+                    (
+                        "isolation".to_string(),
+                        Value::String("read_committed_deferred".to_string()),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            ))
+        }
+
+        "tx.commit" => {
+            let tx = session.take_tx().ok_or((
+                error_code::NO_TX_OPEN,
+                "no transaction is open in this session".to_string(),
+            ))?;
+            let tx_id = tx.tx_id;
+            let op_count = tx.write_set.len();
+
+            // Hold the global commit lock for the full replay so
+            // concurrent commits serialize. Reads and plain
+            // auto-committed writes keep running in parallel.
+            let replay = runtime.with_commit_lock(|| -> Result<(u64, usize), (usize, String)> {
+                let mut total_affected: u64 = 0;
+                for (idx, op) in tx.write_set.iter().enumerate() {
+                    match runtime.execute_query(op.sql()) {
+                        Ok(qr) => total_affected += qr.affected_rows,
+                        Err(e) => return Err((idx, e.to_string())),
+                    }
+                }
+                Ok((total_affected, op_count))
+            });
+
+            match replay {
+                Ok((affected, replayed)) => Ok(Value::Object(
+                    [
+                        ("tx_id".to_string(), Value::Number(tx_id as f64)),
+                        ("ops_replayed".to_string(), Value::Number(replayed as f64)),
+                        ("affected".to_string(), Value::Number(affected as f64)),
+                    ]
+                    .into_iter()
+                    .collect(),
+                )),
+                Err((failed_idx, msg)) => Err((
+                    error_code::TX_REPLAY_FAILED,
+                    format!(
+                        "tx {tx_id} replay failed at op {failed_idx}/{op_count}: {msg} \
+                         (ops 0..{failed_idx} already applied and are NOT rolled back)"
+                    ),
+                )),
+            }
+        }
+
+        "tx.rollback" => {
+            let tx = session.take_tx().ok_or((
+                error_code::NO_TX_OPEN,
+                "no transaction is open in this session".to_string(),
+            ))?;
+            let ops_discarded = tx.write_set.len();
+            Ok(Value::Object(
+                [
+                    ("tx_id".to_string(), Value::Number(tx.tx_id as f64)),
+                    (
+                        "ops_discarded".to_string(),
+                        Value::Number(ops_discarded as f64),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            ))
+        }
+
         "version" => Ok(Value::Object(
             [
                 (
@@ -235,6 +431,12 @@ fn dispatch_method(
                 "'payload' must be a JSON object".to_string(),
             ))?;
             let sql = build_insert_sql(collection, payload_obj.iter());
+
+            if let Some(tx) = session.current_tx_mut() {
+                tx.write_set.push(PendingSql::Insert(sql));
+                return Ok(pending_tx_response(tx.tx_id));
+            }
+
             let qr = runtime
                 .execute_query(&sql)
                 .map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
@@ -250,6 +452,31 @@ fn dispatch_method(
                 error_code::INVALID_PARAMS,
                 "missing 'payloads' array".to_string(),
             ))?;
+
+            if let Some(tx) = session.current_tx_mut() {
+                let mut buffered: u64 = 0;
+                for entry in payloads {
+                    let obj = entry.as_object().ok_or((
+                        error_code::INVALID_PARAMS,
+                        "each payload must be a JSON object".to_string(),
+                    ))?;
+                    let sql = build_insert_sql(collection, obj.iter());
+                    tx.write_set.push(PendingSql::Insert(sql));
+                    buffered += 1;
+                }
+                let tx_id = tx.tx_id;
+                return Ok(Value::Object(
+                    [
+                        ("affected".to_string(), Value::Number(0.0)),
+                        ("buffered".to_string(), Value::Number(buffered as f64)),
+                        ("pending".to_string(), Value::Bool(true)),
+                        ("tx_id".to_string(), Value::Number(tx_id as f64)),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ));
+            }
+
             let mut total_affected: u64 = 0;
             for entry in payloads {
                 let obj = entry.as_object().ok_or((
@@ -303,6 +530,12 @@ fn dispatch_method(
                 "missing 'id' string".to_string(),
             ))?;
             let sql = format!("DELETE FROM {collection} WHERE _entity_id = {id}");
+
+            if let Some(tx) = session.current_tx_mut() {
+                tx.write_set.push(PendingSql::Delete(sql));
+                return Ok(pending_tx_response(tx.tx_id));
+            }
+
             let qr = runtime
                 .execute_query(&sql)
                 .map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
@@ -317,6 +550,10 @@ fn dispatch_method(
         }
 
         "close" => {
+            // Silently drop any open transaction on close. The client
+            // explicitly asked to terminate; surfacing an error here
+            // would leak state across what is effectively a reset.
+            let _ = session.take_tx();
             let _ = runtime.checkpoint();
             Ok(Value::Null)
         }
@@ -363,6 +600,20 @@ fn error_response(id: &Value, code: &str, message: &str) -> String {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Envelope returned by `insert` and `delete` when the call was buffered
+/// into an open transaction instead of being auto-committed.
+fn pending_tx_response(tx_id: u64) -> Value {
+    Value::Object(
+        [
+            ("affected".to_string(), Value::Number(0.0)),
+            ("pending".to_string(), Value::Bool(true)),
+            ("tx_id".to_string(), Value::Number(tx_id as f64)),
+        ]
+        .into_iter()
+        .collect(),
+    )
+}
 
 fn build_insert_sql<'a, I>(collection: &str, fields: I) -> String
 where
@@ -697,7 +948,22 @@ mod tests {
     }
 
     fn handle(rt: &RedDBRuntime, line: &str) -> String {
-        handle_line(&Backend::Local(rt), line)
+        let mut session = Session::new();
+        handle_line(&Backend::Local(rt), &mut session, line)
+    }
+
+    /// Stateful helper: keeps the same `Session` across multiple calls so
+    /// tests can exercise multi-step transaction flows in a single closure.
+    fn with_session<F>(rt: &RedDBRuntime, f: F)
+    where
+        F: FnOnce(&dyn Fn(&str) -> String, &RedDBRuntime),
+    {
+        let session = std::cell::RefCell::new(Session::new());
+        let call = |line: &str| -> String {
+            let mut s = session.borrow_mut();
+            handle_line(&Backend::Local(rt), &mut s, line)
+        };
+        f(&call, rt);
     }
 
     #[test]
@@ -776,5 +1042,211 @@ mod tests {
         );
         assert!(resp.contains("\"result\""));
         assert!(!resp.contains("\"error\""));
+    }
+
+    // -----------------------------------------------------------------
+    // Transaction tests
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn tx_begin_returns_tx_id_and_isolation() {
+        let rt = make_runtime();
+        with_session(&rt, |call, _| {
+            let resp = call(r#"{"jsonrpc":"2.0","id":1,"method":"tx.begin","params":null}"#);
+            assert!(resp.contains("\"tx_id\":1"));
+            assert!(resp.contains("\"isolation\":\"read_committed_deferred\""));
+            assert!(!resp.contains("\"error\""));
+        });
+    }
+
+    #[test]
+    fn tx_begin_twice_returns_already_open() {
+        let rt = make_runtime();
+        with_session(&rt, |call, _| {
+            let _ = call(r#"{"jsonrpc":"2.0","id":1,"method":"tx.begin","params":null}"#);
+            let resp = call(r#"{"jsonrpc":"2.0","id":2,"method":"tx.begin","params":null}"#);
+            assert!(resp.contains("\"code\":\"TX_ALREADY_OPEN\""));
+        });
+    }
+
+    #[test]
+    fn tx_commit_without_begin_returns_no_tx_open() {
+        let rt = make_runtime();
+        with_session(&rt, |call, _| {
+            let resp = call(r#"{"jsonrpc":"2.0","id":1,"method":"tx.commit","params":null}"#);
+            assert!(resp.contains("\"code\":\"NO_TX_OPEN\""));
+        });
+    }
+
+    #[test]
+    fn tx_rollback_without_begin_returns_no_tx_open() {
+        let rt = make_runtime();
+        with_session(&rt, |call, _| {
+            let resp = call(r#"{"jsonrpc":"2.0","id":1,"method":"tx.rollback","params":null}"#);
+            assert!(resp.contains("\"code\":\"NO_TX_OPEN\""));
+        });
+    }
+
+    #[test]
+    fn insert_inside_tx_returns_pending_envelope() {
+        let rt = make_runtime();
+        // Create the collection first (outside any tx).
+        let _ = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":1,"method":"query","params":{"sql":"CREATE TABLE users (name TEXT)"}}"#,
+        );
+        with_session(&rt, |call, _| {
+            let _ = call(r#"{"jsonrpc":"2.0","id":1,"method":"tx.begin","params":null}"#);
+            let resp = call(
+                r#"{"jsonrpc":"2.0","id":2,"method":"insert","params":{"collection":"users","payload":{"name":"alice"}}}"#,
+            );
+            assert!(resp.contains("\"pending\":true"));
+            assert!(resp.contains("\"tx_id\":1"));
+            assert!(resp.contains("\"affected\":0"));
+        });
+    }
+
+    #[test]
+    fn begin_insert_rollback_does_not_persist() {
+        let rt = make_runtime();
+        let _ = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":1,"method":"query","params":{"sql":"CREATE TABLE u (name TEXT)"}}"#,
+        );
+        with_session(&rt, |call, _| {
+            let _ = call(r#"{"jsonrpc":"2.0","id":1,"method":"tx.begin","params":null}"#);
+            let _ = call(
+                r#"{"jsonrpc":"2.0","id":2,"method":"insert","params":{"collection":"u","payload":{"name":"ghost"}}}"#,
+            );
+            let rollback = call(r#"{"jsonrpc":"2.0","id":3,"method":"tx.rollback","params":null}"#);
+            assert!(rollback.contains("\"ops_discarded\":1"));
+            assert!(rollback.contains("\"tx_id\":1"));
+        });
+        // After rollback, the row must not be visible to a fresh query.
+        let resp = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":9,"method":"query","params":{"sql":"SELECT * FROM u"}}"#,
+        );
+        assert!(!resp.contains("\"ghost\""));
+    }
+
+    #[test]
+    fn begin_insert_commit_persists() {
+        let rt = make_runtime();
+        let _ = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":1,"method":"query","params":{"sql":"CREATE TABLE u2 (name TEXT)"}}"#,
+        );
+        with_session(&rt, |call, _| {
+            let _ = call(r#"{"jsonrpc":"2.0","id":1,"method":"tx.begin","params":null}"#);
+            let _ = call(
+                r#"{"jsonrpc":"2.0","id":2,"method":"insert","params":{"collection":"u2","payload":{"name":"alice"}}}"#,
+            );
+            let _ = call(
+                r#"{"jsonrpc":"2.0","id":3,"method":"insert","params":{"collection":"u2","payload":{"name":"bob"}}}"#,
+            );
+            let commit = call(r#"{"jsonrpc":"2.0","id":4,"method":"tx.commit","params":null}"#);
+            assert!(commit.contains("\"ops_replayed\":2"));
+            assert!(!commit.contains("\"error\""));
+        });
+        let resp = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":9,"method":"query","params":{"sql":"SELECT * FROM u2"}}"#,
+        );
+        assert!(resp.contains("\"alice\""));
+        assert!(resp.contains("\"bob\""));
+    }
+
+    #[test]
+    fn bulk_insert_inside_tx_buffers_everything() {
+        let rt = make_runtime();
+        let _ = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":1,"method":"query","params":{"sql":"CREATE TABLE u3 (name TEXT)"}}"#,
+        );
+        with_session(&rt, |call, _| {
+            let _ = call(r#"{"jsonrpc":"2.0","id":1,"method":"tx.begin","params":null}"#);
+            let resp = call(
+                r#"{"jsonrpc":"2.0","id":2,"method":"bulk_insert","params":{"collection":"u3","payloads":[{"name":"a"},{"name":"b"},{"name":"c"}]}}"#,
+            );
+            assert!(resp.contains("\"buffered\":3"));
+            assert!(resp.contains("\"pending\":true"));
+            assert!(resp.contains("\"affected\":0"));
+
+            let commit = call(r#"{"jsonrpc":"2.0","id":3,"method":"tx.commit","params":null}"#);
+            assert!(commit.contains("\"ops_replayed\":3"));
+        });
+    }
+
+    #[test]
+    fn delete_inside_tx_is_buffered() {
+        let rt = make_runtime();
+        // Seed two rows outside any tx.
+        let _ = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":1,"method":"query","params":{"sql":"CREATE TABLE u4 (name TEXT)"}}"#,
+        );
+        let _ = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":2,"method":"query","params":{"sql":"INSERT INTO u4 (name) VALUES ('keep')"}}"#,
+        );
+        with_session(&rt, |call, _| {
+            let _ = call(r#"{"jsonrpc":"2.0","id":1,"method":"tx.begin","params":null}"#);
+            let resp = call(
+                r#"{"jsonrpc":"2.0","id":2,"method":"delete","params":{"collection":"u4","id":"1"}}"#,
+            );
+            assert!(resp.contains("\"pending\":true"));
+            let _ = call(r#"{"jsonrpc":"2.0","id":3,"method":"tx.rollback","params":null}"#);
+        });
+        // Row should still be present after rollback of the delete.
+        let resp = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":9,"method":"query","params":{"sql":"SELECT * FROM u4"}}"#,
+        );
+        assert!(resp.contains("\"keep\""));
+    }
+
+    #[test]
+    fn close_with_open_tx_auto_rollbacks() {
+        let rt = make_runtime();
+        let _ = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":1,"method":"query","params":{"sql":"CREATE TABLE u5 (name TEXT)"}}"#,
+        );
+        with_session(&rt, |call, _| {
+            let _ = call(r#"{"jsonrpc":"2.0","id":1,"method":"tx.begin","params":null}"#);
+            let _ = call(
+                r#"{"jsonrpc":"2.0","id":2,"method":"insert","params":{"collection":"u5","payload":{"name":"ghost"}}}"#,
+            );
+            let close = call(r#"{"jsonrpc":"2.0","id":3,"method":"close","params":null}"#);
+            assert!(close.contains("\"__close__\":true"));
+            assert!(!close.contains("\"error\""));
+        });
+        let resp = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":9,"method":"query","params":{"sql":"SELECT * FROM u5"}}"#,
+        );
+        assert!(!resp.contains("\"ghost\""));
+    }
+
+    #[test]
+    fn second_tx_after_commit_gets_fresh_id() {
+        let rt = make_runtime();
+        let _ = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":1,"method":"query","params":{"sql":"CREATE TABLE u6 (name TEXT)"}}"#,
+        );
+        with_session(&rt, |call, _| {
+            let first = call(r#"{"jsonrpc":"2.0","id":1,"method":"tx.begin","params":null}"#);
+            assert!(first.contains("\"tx_id\":1"));
+            let _ = call(
+                r#"{"jsonrpc":"2.0","id":2,"method":"insert","params":{"collection":"u6","payload":{"name":"x"}}}"#,
+            );
+            let _ = call(r#"{"jsonrpc":"2.0","id":3,"method":"tx.commit","params":null}"#);
+
+            let second = call(r#"{"jsonrpc":"2.0","id":4,"method":"tx.begin","params":null}"#);
+            assert!(second.contains("\"tx_id\":2"));
+            let _ = call(r#"{"jsonrpc":"2.0","id":5,"method":"tx.rollback","params":null}"#);
+        });
     }
 }

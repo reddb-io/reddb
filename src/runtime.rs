@@ -589,6 +589,12 @@ struct RuntimeInner {
     /// because the AES key lives in the vault KV under the
     /// `red.secret.aes_key` entry.
     auth_store: std::sync::RwLock<Option<Arc<crate::auth::store::AuthStore>>>,
+    /// Global serialization point for transactional commits initiated via
+    /// the stdio JSON-RPC `tx.commit` path. Held only for the duration of
+    /// the write-set replay so concurrent auto-committed writes can still
+    /// make progress between commits. Remote/gRPC commits use a separate
+    /// server-side serialization mechanism and do not touch this lock.
+    commit_lock: Mutex<()>,
 }
 
 #[derive(Clone)]

@@ -55,6 +55,7 @@ impl RedDBRuntime {
                 ec_registry: Arc::new(crate::ec::config::EcRegistry::new()),
                 ec_worker: crate::ec::worker::EcWorker::new(),
                 auth_store: std::sync::RwLock::new(None),
+                commit_lock: Mutex::new(()),
             }),
         };
 
@@ -340,6 +341,26 @@ impl RedDBRuntime {
 
     pub fn db(&self) -> Arc<RedDB> {
         Arc::clone(&self.inner.db)
+    }
+
+    /// Execute `f` holding the runtime-wide commit lock.
+    ///
+    /// Used by the stdio `tx.commit` path to serialize write-set replays
+    /// so concurrent transactional commits do not interleave their
+    /// buffered operations. Auto-committed writes (outside any `tx.begin`
+    /// session) bypass this lock entirely and keep their current
+    /// throughput.
+    ///
+    /// The lock is held for the full closure — any I/O or long-running
+    /// work inside `f` blocks other commit attempts, so callers should
+    /// keep the critical section tight (just the replay loop).
+    pub fn with_commit_lock<T>(&self, f: impl FnOnce() -> T) -> T {
+        let _guard = self
+            .inner
+            .commit_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        f()
     }
 
     /// Direct access to the runtime's secondary-index store.
