@@ -13,6 +13,7 @@ impl<'a> Parser<'a> {
 
         let mut retention_ms = None;
         let mut chunk_size = None;
+        let mut downsample_policies = Vec::new();
 
         // Parse optional clauses in any order
         loop {
@@ -22,6 +23,11 @@ impl<'a> Parser<'a> {
                 retention_ms = Some((value * unit) as u64);
             } else if self.consume_ident_ci("CHUNK_SIZE")? || self.consume_ident_ci("CHUNKSIZE")? {
                 chunk_size = Some(self.parse_integer()? as usize);
+            } else if self.consume_ident_ci("DOWNSAMPLE")? {
+                downsample_policies.push(self.parse_downsample_policy_spec()?);
+                while self.consume(&Token::Comma)? {
+                    downsample_policies.push(self.parse_downsample_policy_spec()?);
+                }
             } else {
                 break;
             }
@@ -31,6 +37,7 @@ impl<'a> Parser<'a> {
             name,
             retention_ms,
             chunk_size,
+            downsample_policies,
             if_not_exists,
         }))
     }
@@ -66,6 +73,49 @@ impl<'a> Parser<'a> {
                 Ok(mult)
             }
             _ => Ok(1_000.0), // default: seconds
+        }
+    }
+
+    fn parse_downsample_policy_spec(&mut self) -> Result<String, ParseError> {
+        let target = self.parse_resolution_spec()?;
+        self.expect(Token::Colon)?;
+        let source = self.parse_resolution_spec()?;
+        let aggregation = if self.consume(&Token::Colon)? {
+            self.expect_ident_or_keyword()?
+        } else {
+            "avg".to_string()
+        };
+        Ok(format!("{target}:{source}:{aggregation}"))
+    }
+
+    fn parse_resolution_spec(&mut self) -> Result<String, ParseError> {
+        match self.peek().clone() {
+            Token::Ident(value) if value.eq_ignore_ascii_case("raw") => {
+                self.advance()?;
+                Ok(value)
+            }
+            Token::Integer(value) => {
+                self.advance()?;
+                let unit = self.expect_ident_or_keyword()?;
+                Ok(format!("{value}{unit}"))
+            }
+            Token::Float(value) => {
+                self.advance()?;
+                let unit = self.expect_ident_or_keyword()?;
+                let number = if value.fract().abs() < f64::EPSILON {
+                    format!("{}", value as i64)
+                } else {
+                    value.to_string()
+                };
+                Ok(format!("{number}{unit}"))
+            }
+            other => Err(ParseError::new(
+                format!(
+                    "expected duration literal for downsample policy, got {}",
+                    other
+                ),
+                self.position(),
+            )),
         }
     }
 }

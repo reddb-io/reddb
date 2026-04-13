@@ -426,7 +426,7 @@ fn extract_entity_tokens(entity: &UnifiedEntity) -> Vec<(String, String)> {
             push_text_tokens(&mut kind_tokens, collection, false);
             for t in &kind_tokens {
                 if tokens.insert(t.clone()) {
-                    token_fields.push((t.clone(), "_collection".to_string()));
+                    token_fields.push((t.clone(), "red_collection".to_string()));
                 }
             }
         }

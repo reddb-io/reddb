@@ -73,19 +73,21 @@ fn write_u64(buf: &mut Vec<u8>, n: u64) {
 #[inline(always)]
 fn write_entity_json_bytes(buf: &mut Vec<u8>, entity: &UnifiedEntity) {
     buf.push(b'{');
-    buf.extend_from_slice(b"\"_entity_id\":");
+    buf.extend_from_slice(b"\"red_entity_id\":");
     write_u64(buf, entity.id.raw());
-    buf.extend_from_slice(b",\"_collection\":");
+    buf.extend_from_slice(b",\"red_collection\":");
     write_json_bytes(buf, entity.kind.collection().as_bytes());
-    buf.extend_from_slice(b",\"_kind\":");
+    buf.extend_from_slice(b",\"red_kind\":");
     write_json_bytes(buf, entity.kind.storage_type().as_bytes());
-    buf.extend_from_slice(b",\"_created_at\":");
+    buf.extend_from_slice(b",\"red_created_at\":");
     write_u64(buf, entity.created_at);
-    buf.extend_from_slice(b",\"_updated_at\":");
+    buf.extend_from_slice(b",\"red_updated_at\":");
     write_u64(buf, entity.updated_at);
-    buf.extend_from_slice(b",\"_sequence_id\":");
+    buf.extend_from_slice(b",\"red_sequence_id\":");
     write_u64(buf, entity.sequence_id);
-    buf.extend_from_slice(b",\"_entity_type\":\"table\",\"_capabilities\":\"structured,table\"");
+    buf.extend_from_slice(
+        b",\"red_entity_type\":\"table\",\"red_capabilities\":\"structured,table\"",
+    );
 
     if let EntityKind::TableRow { row_id, .. } = &entity.kind {
         buf.extend_from_slice(b",\"row_id\":");
@@ -245,10 +247,10 @@ fn execute_indexed_scan_to_json(
 
     // Pre-compute JSON prefix
     let mut sys_prefix = Vec::with_capacity(128);
-    sys_prefix.extend_from_slice(b",\"_collection\":");
+    sys_prefix.extend_from_slice(b",\"red_collection\":");
     write_json_bytes(&mut sys_prefix, table_name.as_bytes());
     sys_prefix.extend_from_slice(
-        b",\"_kind\":\"table\",\"_entity_type\":\"table\",\"_capabilities\":\"structured,table\"",
+        b",\"red_kind\":\"table\",\"red_entity_type\":\"table\",\"red_capabilities\":\"structured,table\"",
     );
 
     let mut buf = Vec::with_capacity(256 + entity_ids.len().min(limit) * 200);
@@ -281,14 +283,14 @@ fn execute_indexed_scan_to_json(
         if count > 0 {
             buf.push(b',');
         }
-        buf.extend_from_slice(b"{\"_entity_id\":");
+        buf.extend_from_slice(b"{\"red_entity_id\":");
         write_u64(&mut buf, entity.id.raw());
         buf.extend_from_slice(&sys_prefix);
-        buf.extend_from_slice(b",\"_created_at\":");
+        buf.extend_from_slice(b",\"red_created_at\":");
         write_u64(&mut buf, entity.created_at);
-        buf.extend_from_slice(b",\"_updated_at\":");
+        buf.extend_from_slice(b",\"red_updated_at\":");
         write_u64(&mut buf, entity.updated_at);
-        buf.extend_from_slice(b",\"_sequence_id\":");
+        buf.extend_from_slice(b",\"red_sequence_id\":");
         write_u64(&mut buf, entity.sequence_id);
         if let EntityKind::TableRow { row_id, .. } = &entity.kind {
             buf.extend_from_slice(b",\"row_id\":");
@@ -413,10 +415,10 @@ fn execute_scan_with_candidates_to_json(
     let limit = query.limit.unwrap_or(10000) as usize;
 
     let mut sys_prefix = Vec::with_capacity(128);
-    sys_prefix.extend_from_slice(b",\"_collection\":");
+    sys_prefix.extend_from_slice(b",\"red_collection\":");
     write_json_bytes(&mut sys_prefix, table_name.as_bytes());
     sys_prefix.extend_from_slice(
-        b",\"_kind\":\"table\",\"_entity_type\":\"table\",\"_capabilities\":\"structured,table\"",
+        b",\"red_kind\":\"table\",\"red_entity_type\":\"table\",\"red_capabilities\":\"structured,table\"",
     );
 
     let mut buf = Vec::with_capacity(256 + candidates.len().min(limit) * 200);
@@ -446,14 +448,14 @@ fn execute_scan_with_candidates_to_json(
         if count > 0 {
             buf.push(b',');
         }
-        buf.extend_from_slice(b"{\"_entity_id\":");
+        buf.extend_from_slice(b"{\"red_entity_id\":");
         write_u64(&mut buf, entity.id.raw());
         buf.extend_from_slice(&sys_prefix);
-        buf.extend_from_slice(b",\"_created_at\":");
+        buf.extend_from_slice(b",\"red_created_at\":");
         write_u64(&mut buf, entity.created_at);
-        buf.extend_from_slice(b",\"_updated_at\":");
+        buf.extend_from_slice(b",\"red_updated_at\":");
         write_u64(&mut buf, entity.updated_at);
-        buf.extend_from_slice(b",\"_sequence_id\":");
+        buf.extend_from_slice(b",\"red_sequence_id\":");
         write_u64(&mut buf, entity.sequence_id);
         if let EntityKind::TableRow { row_id, .. } = &entity.kind {
             buf.extend_from_slice(b",\"row_id\":");
@@ -521,10 +523,10 @@ fn build_indexed_result_json(
     let limit = query.limit.unwrap_or(10000) as usize;
 
     let mut sys_prefix = Vec::with_capacity(128);
-    sys_prefix.extend_from_slice(b",\"_collection\":");
+    sys_prefix.extend_from_slice(b",\"red_collection\":");
     write_json_bytes(&mut sys_prefix, table_name.as_bytes());
     sys_prefix.extend_from_slice(
-        b",\"_kind\":\"table\",\"_entity_type\":\"table\",\"_capabilities\":\"structured,table\"",
+        b",\"red_kind\":\"table\",\"red_entity_type\":\"table\",\"red_capabilities\":\"structured,table\"",
     );
 
     let mut buf = Vec::with_capacity(256 + entity_ids.len().min(limit) * 200);
@@ -553,14 +555,14 @@ fn build_indexed_result_json(
         if count > 0 {
             buf.push(b',');
         }
-        buf.extend_from_slice(b"{\"_entity_id\":");
+        buf.extend_from_slice(b"{\"red_entity_id\":");
         write_u64(&mut buf, entity.id.raw());
         buf.extend_from_slice(&sys_prefix);
-        buf.extend_from_slice(b",\"_created_at\":");
+        buf.extend_from_slice(b",\"red_created_at\":");
         write_u64(&mut buf, entity.created_at);
-        buf.extend_from_slice(b",\"_updated_at\":");
+        buf.extend_from_slice(b",\"red_updated_at\":");
         write_u64(&mut buf, entity.updated_at);
-        buf.extend_from_slice(b",\"_sequence_id\":");
+        buf.extend_from_slice(b",\"red_sequence_id\":");
         write_u64(&mut buf, entity.sequence_id);
         if let EntityKind::TableRow { row_id, .. } = &entity.kind {
             buf.extend_from_slice(b",\"row_id\":");
@@ -640,10 +642,10 @@ fn execute_unfiltered_scan_to_json(
     let offset = query.offset.unwrap_or(0) as usize;
 
     let mut sys_prefix = Vec::with_capacity(128);
-    sys_prefix.extend_from_slice(b",\"_collection\":");
+    sys_prefix.extend_from_slice(b",\"red_collection\":");
     write_json_bytes(&mut sys_prefix, table_name.as_bytes());
     sys_prefix.extend_from_slice(
-        b",\"_kind\":\"table\",\"_entity_type\":\"table\",\"_capabilities\":\"structured,table\"",
+        b",\"red_kind\":\"table\",\"red_entity_type\":\"table\",\"red_capabilities\":\"structured,table\"",
     );
 
     let mut buf = Vec::with_capacity(256 + limit.min(1000) * 200);
@@ -670,14 +672,14 @@ fn execute_unfiltered_scan_to_json(
         if count > 0 {
             buf.push(b',');
         }
-        buf.extend_from_slice(b"{\"_entity_id\":");
+        buf.extend_from_slice(b"{\"red_entity_id\":");
         write_u64(&mut buf, entity.id.raw());
         buf.extend_from_slice(&sys_prefix);
-        buf.extend_from_slice(b",\"_created_at\":");
+        buf.extend_from_slice(b",\"red_created_at\":");
         write_u64(&mut buf, entity.created_at);
-        buf.extend_from_slice(b",\"_updated_at\":");
+        buf.extend_from_slice(b",\"red_updated_at\":");
         write_u64(&mut buf, entity.updated_at);
-        buf.extend_from_slice(b",\"_sequence_id\":");
+        buf.extend_from_slice(b",\"red_sequence_id\":");
         write_u64(&mut buf, entity.sequence_id);
         if let EntityKind::TableRow { row_id, .. } = &entity.kind {
             buf.extend_from_slice(b",\"row_id\":");
@@ -748,10 +750,10 @@ fn execute_filtered_scan_to_json(
     // Pre-compute the collection-level JSON prefix that's the same for every entity
     // This avoids re-encoding _collection, _kind, _entity_type, _capabilities per row
     let mut sys_prefix = Vec::with_capacity(128);
-    sys_prefix.extend_from_slice(b",\"_collection\":");
+    sys_prefix.extend_from_slice(b",\"red_collection\":");
     write_json_bytes(&mut sys_prefix, table_name.as_bytes());
     sys_prefix.extend_from_slice(
-        b",\"_kind\":\"table\",\"_entity_type\":\"table\",\"_capabilities\":\"structured,table\"",
+        b",\"red_kind\":\"table\",\"red_entity_type\":\"table\",\"red_capabilities\":\"structured,table\"",
     );
     let sys_prefix = sys_prefix; // freeze
 
@@ -795,14 +797,14 @@ fn execute_filtered_scan_to_json(
         if count > 0 {
             buf.push(b',');
         }
-        buf.extend_from_slice(b"{\"_entity_id\":");
+        buf.extend_from_slice(b"{\"red_entity_id\":");
         write_u64(&mut buf, entity.id.raw());
         buf.extend_from_slice(&sys_prefix);
-        buf.extend_from_slice(b",\"_created_at\":");
+        buf.extend_from_slice(b",\"red_created_at\":");
         write_u64(&mut buf, entity.created_at);
-        buf.extend_from_slice(b",\"_updated_at\":");
+        buf.extend_from_slice(b",\"red_updated_at\":");
         write_u64(&mut buf, entity.updated_at);
-        buf.extend_from_slice(b",\"_sequence_id\":");
+        buf.extend_from_slice(b",\"red_sequence_id\":");
         write_u64(&mut buf, entity.sequence_id);
         if let EntityKind::TableRow { row_id, .. } = &entity.kind {
             buf.extend_from_slice(b",\"row_id\":");
@@ -1261,7 +1263,7 @@ pub(super) fn execute_runtime_canonical_table_child(
 pub(super) fn runtime_record_has_document_capability(record: &UnifiedRecord) -> bool {
     record
         .values
-        .get("_capabilities")
+        .get("red_capabilities")
         .and_then(|value| match value {
             crate::storage::schema::Value::Text(value) => Some(value),
             _ => None,
@@ -2056,7 +2058,7 @@ pub(super) fn runtime_vector_record_matches_filter(
     let entity_id = record
         .values
         .get("entity_id")
-        .or_else(|| record.values.get("_entity_id"))
+        .or_else(|| record.values.get("red_entity_id"))
         .and_then(|value| match value {
             Value::UnsignedInteger(value) => Some(EntityId::new(*value)),
             Value::Integer(value) if *value >= 0 => Some(EntityId::new(*value as u64)),
@@ -2303,7 +2305,7 @@ pub(crate) fn extract_entity_id_from_filter(
                 FieldRef::TableColumn { column, .. } => column.as_str(),
                 _ => return None,
             };
-            if field_name != "_entity_id" && field_name != "entity_id" {
+            if field_name != "red_entity_id" && field_name != "entity_id" {
                 return None;
             }
             match value {
@@ -2332,7 +2334,7 @@ fn extract_bloom_key_for_pk(filter: &crate::storage::query::ast::Filter) -> Opti
                 FieldRef::TableColumn { column, .. } => column.as_str(),
                 _ => return None,
             };
-            if !matches!(field_name, "_entity_id" | "row_id" | "id" | "key") {
+            if !matches!(field_name, "red_entity_id" | "row_id" | "id" | "key") {
                 return None;
             }
             let key = match value {
@@ -2432,24 +2434,24 @@ fn resolve_entity_field<'a>(
 
     // System fields — accessed directly from entity struct fields
     match column {
-        "_entity_id" | "entity_id" => {
+        "red_entity_id" | "entity_id" => {
             return Some(Cow::Owned(Value::UnsignedInteger(entity.id.raw())));
         }
-        "_created_at" => {
+        "red_created_at" => {
             return Some(Cow::Owned(Value::UnsignedInteger(entity.created_at)));
         }
-        "_updated_at" => {
+        "red_updated_at" => {
             return Some(Cow::Owned(Value::UnsignedInteger(entity.updated_at)));
         }
-        "_sequence_id" => {
+        "red_sequence_id" => {
             return Some(Cow::Owned(Value::UnsignedInteger(entity.sequence_id)));
         }
-        "_collection" => {
+        "red_collection" => {
             return Some(Cow::Owned(Value::Text(
                 entity.kind.collection().to_string(),
             )));
         }
-        "_kind" => {
+        "red_kind" => {
             return Some(Cow::Owned(Value::Text(
                 entity.kind.storage_type().to_string(),
             )));

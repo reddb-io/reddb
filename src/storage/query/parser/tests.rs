@@ -1940,6 +1940,22 @@ fn test_parse_create_timeseries() {
     if let QueryExpr::CreateTimeSeries(ts) = query {
         assert_eq!(ts.name, "cpu_metrics");
         assert_eq!(ts.retention_ms, Some(90 * 86_400_000));
+        assert!(ts.downsample_policies.is_empty());
+    } else {
+        panic!("Expected CreateTimeSeriesQuery");
+    }
+}
+
+#[test]
+fn test_parse_create_timeseries_with_downsample() {
+    let query =
+        parse("CREATE TIMESERIES cpu_metrics RETENTION 90 d DOWNSAMPLE 1h:5m:avg, 1d:1h:max")
+            .unwrap();
+    if let QueryExpr::CreateTimeSeries(ts) = query {
+        assert_eq!(
+            ts.downsample_policies,
+            vec!["1h:5m:avg".to_string(), "1d:1h:max".to_string()]
+        );
     } else {
         panic!("Expected CreateTimeSeriesQuery");
     }
@@ -1952,6 +1968,20 @@ fn test_parse_create_queue() {
         assert_eq!(q.name, "tasks");
         assert_eq!(q.max_size, Some(1000));
         assert!(q.priority);
+        assert_eq!(q.max_attempts, 3);
+        assert_eq!(q.dlq, None);
+    } else {
+        panic!("Expected CreateQueueQuery");
+    }
+}
+
+#[test]
+fn test_parse_create_queue_with_dlq_and_attempts() {
+    let query = parse("CREATE QUEUE tasks WITH DLQ failed_tasks MAX_ATTEMPTS 5").unwrap();
+    if let QueryExpr::CreateQueue(q) = query {
+        assert_eq!(q.name, "tasks");
+        assert_eq!(q.dlq.as_deref(), Some("failed_tasks"));
+        assert_eq!(q.max_attempts, 5);
     } else {
         panic!("Expected CreateQueueQuery");
     }
@@ -1976,6 +2006,36 @@ fn test_parse_queue_pop() {
         assert_eq!(count, 1);
     } else {
         panic!("Expected QueueCommand::Pop");
+    }
+}
+
+#[test]
+fn test_parse_queue_pending() {
+    let query = parse("QUEUE PENDING tasks GROUP workers").unwrap();
+    if let QueryExpr::QueueCommand(QueueCommand::Pending { queue, group }) = query {
+        assert_eq!(queue, "tasks");
+        assert_eq!(group, "workers");
+    } else {
+        panic!("Expected QueueCommand::Pending");
+    }
+}
+
+#[test]
+fn test_parse_queue_claim() {
+    let query = parse("QUEUE CLAIM tasks GROUP workers CONSUMER worker2 MIN_IDLE 60000").unwrap();
+    if let QueryExpr::QueueCommand(QueueCommand::Claim {
+        queue,
+        group,
+        consumer,
+        min_idle_ms,
+    }) = query
+    {
+        assert_eq!(queue, "tasks");
+        assert_eq!(group, "workers");
+        assert_eq!(consumer, "worker2");
+        assert_eq!(min_idle_ms, 60000);
+    } else {
+        panic!("Expected QueueCommand::Claim");
     }
 }
 

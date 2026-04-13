@@ -77,21 +77,30 @@ pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<
         record.set("row_id", Value::UnsignedInteger(*row_id));
     }
 
-    record.set("_entity_id", Value::UnsignedInteger(entity.id.raw()));
+    record.set("red_entity_id", Value::UnsignedInteger(entity.id.raw()));
     record.set(
-        "_collection",
+        "red_collection",
         Value::Text(entity.kind.collection().to_string()),
     );
-    record.set("_kind", Value::Text(entity.kind.storage_type().to_string()));
-    record.set("_created_at", Value::UnsignedInteger(entity.created_at));
-    record.set("_updated_at", Value::UnsignedInteger(entity.updated_at));
-    record.set("_sequence_id", Value::UnsignedInteger(entity.sequence_id));
+    record.set(
+        "red_kind",
+        Value::Text(entity.kind.storage_type().to_string()),
+    );
+    record.set("red_created_at", Value::UnsignedInteger(entity.created_at));
+    record.set("red_updated_at", Value::UnsignedInteger(entity.updated_at));
+    record.set(
+        "red_sequence_id",
+        Value::UnsignedInteger(entity.sequence_id),
+    );
 
     // Use fast capability string to avoid BTreeSet allocation
     let entity_type = runtime_row_entity_type(&row);
     let capabilities_str = runtime_row_capabilities_str(&row);
-    record.set("_entity_type", Value::Text(entity_type.to_string()));
-    record.set("_capabilities", Value::Text(capabilities_str.to_string()));
+    record.set("red_entity_type", Value::Text(entity_type.to_string()));
+    record.set(
+        "red_capabilities",
+        Value::Text(capabilities_str.to_string()),
+    );
 
     if let Some(named) = row.named {
         for (key, value) in named {
@@ -130,7 +139,7 @@ pub(super) fn runtime_table_record_from_entity_projected(
     let mut record = UnifiedRecord::new();
 
     // Always include system fields needed for filtering
-    record.set("_entity_id", Value::UnsignedInteger(entity.id.raw()));
+    record.set("red_entity_id", Value::UnsignedInteger(entity.id.raw()));
 
     if let Some(named) = row.named {
         for col in columns {
@@ -218,12 +227,12 @@ pub(super) fn runtime_any_record_from_entity(entity: UnifiedEntity) -> Option<Un
         _ => return None,
     };
 
-    record.set("_entity_id", Value::UnsignedInteger(entity_id));
-    record.set("_collection", Value::Text(collection));
-    record.set("_kind", Value::Text(storage_type));
-    record.set("_created_at", Value::UnsignedInteger(created_at));
-    record.set("_updated_at", Value::UnsignedInteger(updated_at));
-    record.set("_sequence_id", Value::UnsignedInteger(sequence_id));
+    record.set("red_entity_id", Value::UnsignedInteger(entity_id));
+    record.set("red_collection", Value::Text(collection));
+    record.set("red_kind", Value::Text(storage_type));
+    record.set("red_created_at", Value::UnsignedInteger(created_at));
+    record.set("red_updated_at", Value::UnsignedInteger(updated_at));
+    record.set("red_sequence_id", Value::UnsignedInteger(sequence_id));
     set_runtime_entity_metadata(&mut record, entity_type, capabilities);
     apply_runtime_identity_hints(&mut record, &identity_entity);
 
@@ -237,8 +246,8 @@ pub(super) fn set_runtime_entity_metadata(
     capabilities: BTreeSet<String>,
 ) {
     let capabilities_text = capabilities.into_iter().collect::<Vec<_>>().join(",");
-    record.set("_entity_type", Value::Text(entity_type.to_string()));
-    record.set("_capabilities", Value::Text(capabilities_text));
+    record.set("red_entity_type", Value::Text(entity_type.to_string()));
+    record.set("red_capabilities", Value::Text(capabilities_text));
 }
 
 pub(super) fn runtime_record_capability_list<const N: usize>(
@@ -441,7 +450,10 @@ pub(super) fn runtime_vector_record_from_match(item: SimilarResult) -> UnifiedRe
     let mut record = UnifiedRecord::new();
     let (entity_type, capabilities) = runtime_entity_type_and_capabilities(&item.entity);
     record.set("entity_id", Value::UnsignedInteger(item.entity_id.raw()));
-    record.set("_entity_id", Value::UnsignedInteger(item.entity_id.raw()));
+    record.set(
+        "red_entity_id",
+        Value::UnsignedInteger(item.entity_id.raw()),
+    );
     record.set("score", Value::Float(item.score as f64));
     record.set("_score", Value::Float(item.score as f64));
     record.set("final_score", Value::Float(item.score as f64));
@@ -455,23 +467,23 @@ pub(super) fn runtime_vector_record_from_match(item: SimilarResult) -> UnifiedRe
         Value::Text(item.entity.kind.collection().to_string()),
     );
     record.set(
-        "_collection",
+        "red_collection",
         Value::Text(item.entity.kind.collection().to_string()),
     );
     record.set(
-        "_kind",
+        "red_kind",
         Value::Text(item.entity.kind.storage_type().to_string()),
     );
     record.set(
-        "_created_at",
+        "red_created_at",
         Value::UnsignedInteger(item.entity.created_at),
     );
     record.set(
-        "_updated_at",
+        "red_updated_at",
         Value::UnsignedInteger(item.entity.updated_at),
     );
     record.set(
-        "_sequence_id",
+        "red_sequence_id",
         Value::UnsignedInteger(item.entity.sequence_id),
     );
     set_runtime_entity_metadata(&mut record, entity_type, capabilities);
@@ -564,7 +576,7 @@ pub(super) fn runtime_record_identity_key(record: &UnifiedRecord) -> String {
     if let Some(value) = record
         .values
         .get("entity_id")
-        .or_else(|| record.values.get("_entity_id"))
+        .or_else(|| record.values.get("red_entity_id"))
     {
         if let Some(fragment) = runtime_identity_fragment(value) {
             return format!("entity:{fragment}");
@@ -574,7 +586,7 @@ pub(super) fn runtime_record_identity_key(record: &UnifiedRecord) -> String {
     if let (Some(collection), Some(row_id)) = (
         record
             .values
-            .get("_collection")
+            .get("red_collection")
             .and_then(runtime_value_text),
         record
             .values

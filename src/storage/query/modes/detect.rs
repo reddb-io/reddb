@@ -61,6 +61,7 @@ pub fn detect_mode(input: &str) -> QueryMode {
         || lower.starts_with("drop ")
         || lower.starts_with("alter ")
         || lower.starts_with("graph ")
+        || lower.starts_with("queue ")
         || lower.starts_with("search ")
         || lower.starts_with("set config ")
         || lower.starts_with("show config")

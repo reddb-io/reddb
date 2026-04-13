@@ -329,7 +329,7 @@ fn vector_search_result_json(result: &VectorSearchResult) -> JsonValue {
     object.insert("id".to_string(), JsonValue::Number(result.id as f64));
     object.insert("entity_id".to_string(), JsonValue::Number(result.id as f64));
     object.insert(
-        "_entity_id".to_string(),
+        "red_entity_id".to_string(),
         JsonValue::Number(result.id as f64),
     );
     object.insert(
@@ -337,16 +337,19 @@ fn vector_search_result_json(result: &VectorSearchResult) -> JsonValue {
         JsonValue::String(result.collection.clone()),
     );
     object.insert(
-        "_collection".to_string(),
+        "red_collection".to_string(),
         JsonValue::String(result.collection.clone()),
     );
-    object.insert("_kind".to_string(), JsonValue::String("vector".to_string()));
     object.insert(
-        "_entity_type".to_string(),
+        "red_kind".to_string(),
         JsonValue::String("vector".to_string()),
     );
     object.insert(
-        "_capabilities".to_string(),
+        "red_entity_type".to_string(),
+        JsonValue::String("vector".to_string()),
+    );
+    object.insert(
+        "red_capabilities".to_string(),
         JsonValue::String("vector,similarity,embedding".to_string()),
     );
     object.insert("_score".to_string(), JsonValue::Number(score as f64));

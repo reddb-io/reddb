@@ -35,7 +35,7 @@ where
                         JsonValue::Number(result.entity_id.raw() as f64),
                     );
                     item.insert(
-                        "_entity_id".to_string(),
+                        "red_entity_id".to_string(),
                         JsonValue::Number(result.entity_id.raw() as f64),
                     );
                     item.insert("score".to_string(), JsonValue::Number(result.score as f64));
@@ -57,12 +57,21 @@ where
                         JsonValue::Number(result.distance as f64),
                     );
                     item.insert(
-                        "_collection".to_string(),
+                        "red_collection".to_string(),
                         JsonValue::String(collection.to_string()),
                     );
-                    item.insert("_kind".to_string(), JsonValue::String("vector".to_string()));
-                    item.insert("_entity_type".to_string(), JsonValue::String(entity_type));
-                    item.insert("_capabilities".to_string(), JsonValue::String(capabilities));
+                    item.insert(
+                        "red_kind".to_string(),
+                        JsonValue::String("vector".to_string()),
+                    );
+                    item.insert(
+                        "red_entity_type".to_string(),
+                        JsonValue::String(entity_type),
+                    );
+                    item.insert(
+                        "red_capabilities".to_string(),
+                        JsonValue::String(capabilities),
+                    );
                     item.insert("entity".to_string(), entity_to_json(&result.entity));
                     JsonValue::Object(item)
                 })
@@ -136,7 +145,7 @@ where
                         JsonValue::Number(item.entity_id as f64),
                     );
                     entry.insert(
-                        "_entity_id".to_string(),
+                        "red_entity_id".to_string(),
                         JsonValue::Number(item.entity_id as f64),
                     );
                     entry.insert(
@@ -155,16 +164,19 @@ where
                     entry.insert("score".to_string(), JsonValue::Number(score as f64));
                     entry.insert("final_score".to_string(), JsonValue::Number(score as f64));
                     entry.insert(
-                        "_collection".to_string(),
+                        "red_collection".to_string(),
                         JsonValue::String(result.collection.clone()),
                     );
-                    entry.insert("_kind".to_string(), JsonValue::String("vector".to_string()));
                     entry.insert(
-                        "_entity_type".to_string(),
+                        "red_kind".to_string(),
                         JsonValue::String("vector".to_string()),
                     );
                     entry.insert(
-                        "_capabilities".to_string(),
+                        "red_entity_type".to_string(),
+                        JsonValue::String("vector".to_string()),
+                    );
+                    entry.insert(
+                        "red_capabilities".to_string(),
                         JsonValue::String("vector,similarity,embedding".to_string()),
                     );
                     entry.insert(
@@ -254,29 +266,35 @@ where
         JsonValue::Number(item.entity.id.raw() as f64),
     );
     object.insert(
-        "_entity_id".to_string(),
+        "red_entity_id".to_string(),
         JsonValue::Number(item.entity.id.raw() as f64),
     );
     object.insert(
-        "_collection".to_string(),
+        "red_collection".to_string(),
         JsonValue::String(item.entity.kind.collection().to_string()),
     );
     object.insert(
-        "_kind".to_string(),
+        "red_kind".to_string(),
         JsonValue::String(item.entity.kind.storage_type().to_string()),
     );
-    object.insert("_entity_type".to_string(), JsonValue::String(entity_type));
-    object.insert("_capabilities".to_string(), JsonValue::String(capabilities));
     object.insert(
-        "_created_at".to_string(),
+        "red_entity_type".to_string(),
+        JsonValue::String(entity_type),
+    );
+    object.insert(
+        "red_capabilities".to_string(),
+        JsonValue::String(capabilities),
+    );
+    object.insert(
+        "red_created_at".to_string(),
         JsonValue::Number(item.entity.created_at as f64),
     );
     object.insert(
-        "_updated_at".to_string(),
+        "red_updated_at".to_string(),
         JsonValue::Number(item.entity.updated_at as f64),
     );
     object.insert(
-        "_sequence_id".to_string(),
+        "red_sequence_id".to_string(),
         JsonValue::Number(item.entity.sequence_id as f64),
     );
     object.insert(
@@ -443,11 +461,11 @@ pub(crate) fn context_search_result_json(
         );
         obj.insert("score".to_string(), JsonValue::Number(item.score as f64));
         obj.insert(
-            "_entity_type".to_string(),
+            "red_entity_type".to_string(),
             JsonValue::String(entity_type.to_string()),
         );
         obj.insert(
-            "_capabilities".to_string(),
+            "red_capabilities".to_string(),
             JsonValue::Array(capabilities.into_iter().map(JsonValue::String).collect()),
         );
         obj.insert(

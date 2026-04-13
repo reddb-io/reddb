@@ -332,7 +332,7 @@ pub(crate) fn cross_modal_entity_reference_tokens(entity: &UnifiedEntity) -> Vec
                     "_id",
                     "row_id",
                     "entity_id",
-                    "_entity_id",
+                    "red_entity_id",
                     "node_id",
                     "edge_id",
                     "from",
@@ -347,7 +347,7 @@ pub(crate) fn cross_modal_entity_reference_tokens(entity: &UnifiedEntity) -> Vec
             }
         }
         EntityData::Node(node) => {
-            for key in ["id", "_id", "node_id", "entity_id", "_entity_id"] {
+            for key in ["id", "_id", "node_id", "entity_id", "red_entity_id"] {
                 if let Some(value) = node.properties.get(key) {
                     cross_modal_extend_reference_tokens(&mut tokens, &mut seen, value);
                 }
@@ -371,7 +371,7 @@ pub(crate) fn cross_modal_entity_reference_tokens(entity: &UnifiedEntity) -> Vec
                 "_id",
                 "edge_id",
                 "entity_id",
-                "_entity_id",
+                "red_entity_id",
                 "from",
                 "to",
                 "from_node",
@@ -438,7 +438,7 @@ pub(crate) fn cross_modal_graph_node_matches_ref(entity: &UnifiedEntity, node_re
             .or_else(|| node.properties.get("_id"))
             .or_else(|| node.properties.get("node_id"))
             .or_else(|| node.properties.get("entity_id"))
-            .or_else(|| node.properties.get("_entity_id"))
+            .or_else(|| node.properties.get("red_entity_id"))
             .is_some_and(|value| cross_modal_value_matches_token(value, node_ref)),
         _ => false,
     }

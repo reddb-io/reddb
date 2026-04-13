@@ -14,6 +14,8 @@ impl<'a> Parser<'a> {
         let mut priority = false;
         let mut max_size = None;
         let mut ttl_ms = None;
+        let mut dlq = None;
+        let mut max_attempts = 3u32;
 
         // Parse optional clauses in any order
         loop {
@@ -21,12 +23,17 @@ impl<'a> Parser<'a> {
                 priority = true;
             } else if self.consume_ident_ci("MAX_SIZE")? || self.consume_ident_ci("MAXSIZE")? {
                 max_size = Some(self.parse_integer()? as usize);
+            } else if self.consume_ident_ci("MAX_ATTEMPTS")?
+                || self.consume_ident_ci("MAXATTEMPTS")?
+            {
+                max_attempts = self.parse_integer()?.max(1) as u32;
             } else if self.consume(&Token::With)? {
-                // WITH TTL <duration>
                 if self.consume_ident_ci("TTL")? {
                     let value = self.parse_float()?;
                     let unit = self.parse_queue_duration_unit()?;
                     ttl_ms = Some((value * unit) as u64);
+                } else if self.consume_ident_ci("DLQ")? {
+                    dlq = Some(self.expect_ident()?);
                 }
             } else {
                 break;
@@ -38,6 +45,8 @@ impl<'a> Parser<'a> {
             priority,
             max_size,
             ttl_ms,
+            dlq,
+            max_attempts,
             if_not_exists,
         }))
     }
@@ -154,6 +163,44 @@ impl<'a> Parser<'a> {
                     count,
                 }))
             }
+            Token::Ident(ref name) if name.eq_ignore_ascii_case("PENDING") => {
+                self.advance()?;
+                let queue = self.expect_ident()?;
+                self.expect(Token::Group)?;
+                let group = self.expect_ident()?;
+                Ok(QueryExpr::QueueCommand(QueueCommand::Pending {
+                    queue,
+                    group,
+                }))
+            }
+            Token::Ident(ref name) if name.eq_ignore_ascii_case("CLAIM") => {
+                self.advance()?;
+                let queue = self.expect_ident()?;
+                self.expect(Token::Group)?;
+                let group = self.expect_ident()?;
+                if !self.consume_ident_ci("CONSUMER")? {
+                    return Err(ParseError::expected(
+                        vec!["CONSUMER"],
+                        self.peek(),
+                        self.position(),
+                    ));
+                }
+                let consumer = self.expect_ident()?;
+                if !self.consume_ident_ci("MIN_IDLE")? {
+                    return Err(ParseError::expected(
+                        vec!["MIN_IDLE"],
+                        self.peek(),
+                        self.position(),
+                    ));
+                }
+                let min_idle_ms = self.parse_integer()?.max(0) as u64;
+                Ok(QueryExpr::QueueCommand(QueueCommand::Claim {
+                    queue,
+                    group,
+                    consumer,
+                    min_idle_ms,
+                }))
+            }
             Token::Ack => {
                 self.advance()?;
                 let queue = self.expect_ident()?;
@@ -181,7 +228,7 @@ impl<'a> Parser<'a> {
             _ => Err(ParseError::expected(
                 vec![
                     "PUSH", "POP", "PEEK", "LEN", "PURGE", "GROUP", "READ", "ACK", "NACK", "LPUSH",
-                    "RPOP",
+                    "RPOP", "PENDING", "CLAIM",
                 ],
                 self.peek(),
                 self.position(),

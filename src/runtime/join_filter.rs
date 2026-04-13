@@ -1163,8 +1163,8 @@ pub(super) fn evaluate_metadata_field_compare(
     value: &Value,
 ) -> Option<bool> {
     let column = table_column_name(field)?;
-    if !column.eq_ignore_ascii_case("_capabilities") {
-        if column.eq_ignore_ascii_case("_entity_type") {
+    if !column.eq_ignore_ascii_case("red_capabilities") {
+        if column.eq_ignore_ascii_case("red_entity_type") {
             let candidate = runtime_value_text(candidate).map(|item| item.to_ascii_lowercase())?;
             let value = runtime_value_text(value).map(|item| item.to_ascii_lowercase())?;
             return Some(match op {
@@ -1199,8 +1199,8 @@ pub(super) fn evaluate_metadata_field_in(
     values: &[Value],
 ) -> Option<bool> {
     let column = table_column_name(field)?;
-    if !column.eq_ignore_ascii_case("_capabilities") {
-        if !column.eq_ignore_ascii_case("_entity_type") {
+    if !column.eq_ignore_ascii_case("red_capabilities") {
+        if !column.eq_ignore_ascii_case("red_entity_type") {
             return None;
         }
 
@@ -1300,7 +1300,7 @@ mod tests {
     fn test_evaluate_metadata_field_compare_entity_type_is_case_insensitive() {
         let field = FieldRef::TableColumn {
             table: "any".to_string(),
-            column: "_entity_type".to_string(),
+            column: "red_entity_type".to_string(),
         };
 
         assert_eq!(
@@ -1328,7 +1328,7 @@ mod tests {
     fn test_evaluate_metadata_field_in_entity_type_is_case_insensitive() {
         let field = FieldRef::TableColumn {
             table: "any".to_string(),
-            column: "_entity_type".to_string(),
+            column: "red_entity_type".to_string(),
         };
 
         assert_eq!(
@@ -1361,7 +1361,7 @@ mod tests {
     fn test_evaluate_metadata_field_compare_entity_type_unsupported_op_is_false() {
         let field = FieldRef::TableColumn {
             table: "any".to_string(),
-            column: "_entity_type".to_string(),
+            column: "red_entity_type".to_string(),
         };
 
         assert_eq!(

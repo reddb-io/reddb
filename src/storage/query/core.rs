@@ -1305,12 +1305,13 @@ pub enum SearchCommand {
 // Time-Series DDL
 // ============================================================================
 
-/// CREATE TIMESERIES name [RETENTION duration] [CHUNK_SIZE n]
+/// CREATE TIMESERIES name [RETENTION duration] [CHUNK_SIZE n] [DOWNSAMPLE spec[, spec...]]
 #[derive(Debug, Clone)]
 pub struct CreateTimeSeriesQuery {
     pub name: String,
     pub retention_ms: Option<u64>,
     pub chunk_size: Option<usize>,
+    pub downsample_policies: Vec<String>,
     pub if_not_exists: bool,
 }
 
@@ -1325,13 +1326,15 @@ pub struct DropTimeSeriesQuery {
 // Queue DDL & Commands
 // ============================================================================
 
-/// CREATE QUEUE name [MAX_SIZE n] [PRIORITY] [WITH TTL duration]
+/// CREATE QUEUE name [MAX_SIZE n] [PRIORITY] [WITH TTL duration] [WITH DLQ name] [MAX_ATTEMPTS n]
 #[derive(Debug, Clone)]
 pub struct CreateQueueQuery {
     pub name: String,
     pub priority: bool,
     pub max_size: Option<usize>,
     pub ttl_ms: Option<u64>,
+    pub dlq: Option<String>,
+    pub max_attempts: u32,
     pub if_not_exists: bool,
 }
 
@@ -1382,6 +1385,16 @@ pub enum QueueCommand {
         group: String,
         consumer: String,
         count: usize,
+    },
+    Pending {
+        queue: String,
+        group: String,
+    },
+    Claim {
+        queue: String,
+        group: String,
+        consumer: String,
+        min_idle_ms: u64,
     },
     Ack {
         queue: String,

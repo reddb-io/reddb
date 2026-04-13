@@ -199,11 +199,11 @@ fn base_entity_object(entity: &UnifiedEntity) -> Map<String, JsonValue> {
         JsonValue::String(entity.kind.collection().to_string()),
     );
     object.insert(
-        "_entity_type".to_string(),
+        "red_entity_type".to_string(),
         JsonValue::String(entity_type(entity).to_string()),
     );
     object.insert(
-        "_capabilities".to_string(),
+        "red_capabilities".to_string(),
         JsonValue::Array(
             entity_capabilities(entity)
                 .into_iter()

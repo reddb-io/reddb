@@ -1050,9 +1050,9 @@ fn test_select_universal_with_filter() {
             .expect("create row in univ_b");
     }
 
-    // In universal queries, the collection field is stored as "_collection"
+    // In universal queries, the collection field is stored as "red_collection"
     let result = query.execute(ExecuteQueryInput {
-        query: "SELECT * FROM any WHERE _collection = 'univ_a'".into(),
+        query: "SELECT * FROM any WHERE red_collection = 'univ_a'".into(),
     });
     assert!(
         result.is_ok(),
@@ -2080,21 +2080,21 @@ fn test_fast_entity_id_lookup_persistent() {
         .first()
         .expect("at least one row")
         .values
-        .get("_entity_id")
+        .get("red_entity_id")
         .expect("_entity_id present")
     {
         Value::UnsignedInteger(n) => *n,
         other => panic!("_entity_id was not UnsignedInteger: {other:?}"),
     };
 
-    let eq_sql = format!("SELECT * FROM fastid WHERE _entity_id = {eid}");
+    let eq_sql = format!("SELECT * FROM fastid WHERE red_entity_id = {eid}");
     let by_eq = q
         .execute(ExecuteQueryInput { query: eq_sql })
         .expect("fast-path select should succeed");
     assert_eq!(
         by_eq.result.records.len(),
         1,
-        "fast path `_entity_id = {eid}` must return the inserted row"
+        "fast path `red_entity_id = {eid}` must return the inserted row"
     );
 
     let _ = std::fs::remove_file(&tmp);

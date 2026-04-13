@@ -82,12 +82,12 @@ pub(crate) fn filter_query_records(
         .filter(|record| {
             let entity_type = record
                 .values
-                .get("_entity_type")
+                .get("red_entity_type")
                 .and_then(Value::as_text)
                 .unwrap_or_else(|| {
                     record
                         .values
-                        .get("_kind")
+                        .get("red_kind")
                         .and_then(Value::as_text)
                         .unwrap_or("")
                 })
@@ -95,7 +95,7 @@ pub(crate) fn filter_query_records(
 
             let entity_capabilities = record
                 .values
-                .get("_capabilities")
+                .get("red_capabilities")
                 .and_then(Value::as_text)
                 .map(record_capability_tokens)
                 .unwrap_or_default();
