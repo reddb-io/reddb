@@ -476,10 +476,7 @@ commands:
             config.get_command_flag("recon", "domain", "subdomains", "threads"),
             Some("50".to_string())
         );
-        assert_eq!(
-            config.has_command_flag("recon", "domain", "subdomains", "passive_only"),
-            true
-        );
+        assert!(config.has_command_flag("recon", "domain", "subdomains", "passive_only"));
         assert_eq!(
             config.get_command_flag("web", "fuzz", "run", "rate_limit"),
             Some("10".to_string())
