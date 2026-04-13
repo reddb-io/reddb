@@ -595,9 +595,158 @@ fn column_name_for_table<'a>(field: &'a FieldRef, table: &str) -> Option<&'a str
 
 #[cfg(test)]
 mod tests {
+    use super::super::stats_provider::StaticProvider;
     use super::*;
+    use crate::storage::index::{IndexKind, IndexStats};
     use crate::storage::query::ast::{FieldRef, Projection};
     use crate::storage::schema::Value;
+
+    fn eq_filter(table: &str, column: &str, value: i64) -> AstFilter {
+        AstFilter::Compare {
+            field: FieldRef::column(table, column),
+            op: CompareOp::Eq,
+            value: Value::Integer(value),
+        }
+    }
+
+    fn table_query(name: &str, filter: Option<AstFilter>) -> TableQuery {
+        TableQuery {
+            table: name.to_string(),
+            alias: None,
+            columns: vec![Projection::All],
+            filter,
+            group_by: Vec::new(),
+            having: None,
+            order_by: vec![],
+            limit: None,
+            offset: None,
+            expand: None,
+        }
+    }
+
+    #[test]
+    fn injected_row_count_overrides_default() {
+        let provider = Arc::new(StaticProvider::new().with_table(
+            "users",
+            TableStats {
+                row_count: 50_000,
+                avg_row_size: 256,
+                page_count: 500,
+                columns: vec![],
+            },
+        ));
+        let estimator = CostEstimator::with_stats(provider);
+        let q = table_query("users", None);
+        let card = estimator.estimate_table_cardinality(&q);
+        // Default would be 1000; provider says 50_000.
+        assert_eq!(card.rows, 50_000.0);
+    }
+
+    #[test]
+    fn stats_aware_eq_selectivity_beats_default() {
+        let provider = Arc::new(
+            StaticProvider::new()
+                .with_table(
+                    "users",
+                    TableStats {
+                        row_count: 1_000_000,
+                        avg_row_size: 256,
+                        page_count: 10_000,
+                        columns: vec![],
+                    },
+                )
+                .with_index(
+                    "users",
+                    "email",
+                    IndexStats {
+                        entries: 1_000_000,
+                        distinct_keys: 1_000_000,
+                        approx_bytes: 0,
+                        kind: IndexKind::Hash,
+                        has_bloom: true,
+                    },
+                ),
+        );
+        let estimator = CostEstimator::with_stats(provider);
+        let q = table_query("users", Some(eq_filter("users", "email", 0)));
+        let card = estimator.estimate_table_cardinality(&q);
+        // 1M rows × (1 / 1M distinct) ≈ 1 row
+        assert!(card.rows < 2.0, "expected ~1 row, got {}", card.rows);
+    }
+
+    #[test]
+    fn fallback_when_no_index_stats() {
+        let provider = Arc::new(StaticProvider::new().with_table(
+            "users",
+            TableStats {
+                row_count: 1_000_000,
+                avg_row_size: 256,
+                page_count: 10_000,
+                columns: vec![],
+            },
+        ));
+        let estimator = CostEstimator::with_stats(provider);
+        let q = table_query("users", Some(eq_filter("users", "email", 0)));
+        let card = estimator.estimate_table_cardinality(&q);
+        // Heuristic 0.01 on 1M rows = 10_000
+        assert!((card.rows - 10_000.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn null_provider_keeps_legacy_behaviour() {
+        let estimator = CostEstimator::new();
+        let q = table_query("whatever", Some(eq_filter("whatever", "id", 1)));
+        let card = estimator.estimate_table_cardinality(&q);
+        // Default 1000 rows × 0.01 eq selectivity = 10
+        assert!((card.rows - 10.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn and_combines_stats_selectivities() {
+        let provider = Arc::new(
+            StaticProvider::new()
+                .with_table(
+                    "t",
+                    TableStats {
+                        row_count: 100_000,
+                        avg_row_size: 64,
+                        page_count: 100,
+                        columns: vec![],
+                    },
+                )
+                .with_index(
+                    "t",
+                    "a",
+                    IndexStats {
+                        entries: 100_000,
+                        distinct_keys: 10,
+                        approx_bytes: 0,
+                        kind: IndexKind::BTree,
+                        has_bloom: false,
+                    },
+                )
+                .with_index(
+                    "t",
+                    "b",
+                    IndexStats {
+                        entries: 100_000,
+                        distinct_keys: 1000,
+                        approx_bytes: 0,
+                        kind: IndexKind::BTree,
+                        has_bloom: false,
+                    },
+                ),
+        );
+        let estimator = CostEstimator::with_stats(provider);
+        let filter = AstFilter::And(
+            Box::new(eq_filter("t", "a", 1)),
+            Box::new(eq_filter("t", "b", 1)),
+        );
+        let q = table_query("t", Some(filter));
+        let card = estimator.estimate_table_cardinality(&q);
+        // 100_000 × (1/10) × (1/1000) = 10
+        assert!(card.rows < 15.0, "got {}", card.rows);
+    }
 
     #[test]
     fn test_table_cost_estimation() {
