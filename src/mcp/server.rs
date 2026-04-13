@@ -1088,8 +1088,7 @@ fn parse_metadata_arg(
     }
 }
 
-/// Convert a storage Value to JSON (local helper to avoid visibility issues).
-
+// Convert a storage Value to JSON (local helper to avoid visibility issues).
 fn get_str_field<'a>(args: &'a JsonValue, field: &str) -> Result<&'a str, String> {
     args.get(field)
         .and_then(|v| v.as_str())
