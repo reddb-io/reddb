@@ -2,8 +2,6 @@
 //!
 //! Utility functions for DevX operations.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 /// Calculate cosine similarity between two vectors
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
@@ -26,13 +24,4 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     } else {
         0.0
     }
-}
-
-/// Get current timestamp in seconds since epoch
-#[allow(dead_code)]
-pub fn now_timestamp() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
