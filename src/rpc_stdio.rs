@@ -17,7 +17,8 @@
 
 use std::io::{BufRead, BufReader, Stdin, Write};
 use std::panic::AssertUnwindSafe;
-use std::sync::Mutex;
+
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::client::RedDBClient;
 use crate::json::{self as json, Value};
@@ -27,14 +28,24 @@ use crate::storage::schema::Value as SchemaValue;
 
 /// Which backend the stdio loop is wrapping.
 ///
-/// Local = the in-process engine (embedded). Remote = a tonic client
-/// to a standalone `red server` talking gRPC.
+/// `Local` = the in-process engine (embedded). `Remote` = a tonic client
+/// to a standalone `red server` talking gRPC. The remote variant is
+/// boxed because `RedDBClient` + a `tokio::Runtime` reference is ~248
+/// bytes against `Local`'s ~8 bytes (clippy::large_enum_variant).
+///
+/// The mutex uses `tokio::sync::Mutex` instead of `std::sync::Mutex`
+/// because `dispatch_method_remote` holds the guard across `.await`
+/// points inside `tokio_rt.block_on(...)` — holding a sync mutex
+/// across an await would be a correctness bug in more complex
+/// runtimes.
 enum Backend<'a> {
     Local(&'a RedDBRuntime),
-    Remote {
-        client: Mutex<RedDBClient>,
-        tokio_rt: &'a tokio::runtime::Runtime,
-    },
+    Remote(Box<RemoteBackend<'a>>),
+}
+
+struct RemoteBackend<'a> {
+    client: AsyncMutex<RedDBClient>,
+    tokio_rt: &'a tokio::runtime::Runtime,
 }
 
 /// Protocol version reported by the `version` method.
@@ -83,10 +94,10 @@ pub fn run_remote(endpoint: &str, token: Option<String>) -> i32 {
             return 1;
         }
     };
-    let backend = Backend::Remote {
-        client: Mutex::new(client),
+    let backend = Backend::Remote(Box::new(RemoteBackend {
+        client: AsyncMutex::new(client),
         tokio_rt: &tokio_rt,
-    };
+    }));
     run_backend(&backend, std::io::stdin(), &mut std::io::stdout())
 }
 
@@ -152,8 +163,8 @@ fn handle_line(backend: &Backend<'_>, line: &str) -> String {
 
     let dispatch = std::panic::catch_unwind(AssertUnwindSafe(|| match backend {
         Backend::Local(rt) => dispatch_method(rt, &method, &params),
-        Backend::Remote { client, tokio_rt } => {
-            dispatch_method_remote(client, tokio_rt, &method, &params)
+        Backend::Remote(remote) => {
+            dispatch_method_remote(&remote.client, remote.tokio_rt, &method, &params)
         }
     }));
 
@@ -478,7 +489,7 @@ fn schema_value_to_json(v: &SchemaValue) -> Value {
 /// adapter between the JSON-RPC framing the drivers speak and the
 /// gRPC protobuf framing the server speaks.
 fn dispatch_method_remote(
-    client: &Mutex<RedDBClient>,
+    client: &AsyncMutex<RedDBClient>,
     tokio_rt: &tokio::runtime::Runtime,
     method: &str,
     params: &Value,
@@ -501,7 +512,7 @@ fn dispatch_method_remote(
 
         "health" => {
             let result = tokio_rt.block_on(async {
-                let mut guard = client.lock().expect("client poisoned");
+                let mut guard = client.lock().await;
                 guard.health().await
             });
             match result {
@@ -527,7 +538,7 @@ fn dispatch_method_remote(
             ))?;
             let json_str = tokio_rt
                 .block_on(async {
-                    let mut guard = client.lock().expect("client poisoned");
+                    let mut guard = client.lock().await;
                     guard.query(sql).await
                 })
                 .map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
@@ -558,7 +569,7 @@ fn dispatch_method_remote(
             let payload_json = payload.to_string_compact();
             let reply_str = tokio_rt
                 .block_on(async {
-                    let mut guard = client.lock().expect("client poisoned");
+                    let mut guard = client.lock().await;
                     guard.create_row(collection, &payload_json).await
                 })
                 .map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
@@ -596,7 +607,7 @@ fn dispatch_method_remote(
                 let payload_json = entry.to_string_compact();
                 tokio_rt
                     .block_on(async {
-                        let mut guard = client.lock().expect("client poisoned");
+                        let mut guard = client.lock().await;
                         guard.create_row(collection, &payload_json).await
                     })
                     .map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
@@ -621,7 +632,7 @@ fn dispatch_method_remote(
             let sql = format!("SELECT * FROM {collection} WHERE _entity_id = {id} LIMIT 1");
             let json_str = tokio_rt
                 .block_on(async {
-                    let mut guard = client.lock().expect("client poisoned");
+                    let mut guard = client.lock().await;
                     guard.query(&sql).await
                 })
                 .map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
@@ -651,7 +662,7 @@ fn dispatch_method_remote(
             let sql = format!("DELETE FROM {collection} WHERE _entity_id = {id}");
             let json_str = tokio_rt
                 .block_on(async {
-                    let mut guard = client.lock().expect("client poisoned");
+                    let mut guard = client.lock().await;
                     guard.query(&sql).await
                 })
                 .map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
