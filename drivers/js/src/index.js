@@ -64,11 +64,10 @@ export function uriToArgs(uri) {
     return ['rpc', '--stdio', '--path', path]
   }
   if (uri.startsWith('grpc://')) {
-    throw new RedDBError(
-      'UNSUPPORTED_SCHEME',
-      `grpc:// URIs are not yet supported by the JS driver. ` +
-        `Use 'file://' or 'memory://' for now. Tracking: PLAN_DRIVERS.md Phase 2.`,
-    )
+    // The driver hands the full URI back to the binary, which will
+    // open a tonic client and proxy every JSON-RPC call. No extra
+    // translation here so server-side routing stays the source of truth.
+    return ['rpc', '--stdio', '--connect', uri]
   }
   throw new RedDBError(
     'UNSUPPORTED_SCHEME',
