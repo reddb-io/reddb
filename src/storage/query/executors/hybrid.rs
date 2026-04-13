@@ -14,6 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::thread;
 
 use crate::storage::engine::graph_store::GraphStore;
 use crate::storage::engine::graph_table_index::GraphTableIndex;
@@ -258,10 +259,43 @@ impl HybridExecutor {
 
     /// RRF: Reciprocal Rank Fusion
     /// Combines rankings using: RRF(d) = Σ(1 / (k + rank(d)))
+    /// Execute structured and vector arms concurrently via
+    /// [`std::thread::scope`].
+    ///
+    /// Used by fusion strategies that always run both arms to completion
+    /// (RRF, Intersection, Union). Short-circuiting strategies (Rerank,
+    /// FilterThenSearch, SearchThenFilter) keep serial execution because
+    /// they check for early-exit conditions on the first arm before
+    /// deciding whether to run the second.
+    ///
+    /// Worst-case total latency collapses from `structured + vector` to
+    /// `max(structured, vector)` — the planner's pessimistic estimate for
+    /// hybrid queries is now tight when both arms dominate.
+    fn execute_structured_and_vector_parallel(
+        &self,
+        query: &HybridQuery,
+    ) -> Result<(UnifiedResult, UnifiedResult), ExecutionError> {
+        thread::scope(|s| {
+            let structured_handle = s.spawn(|| self.unified.execute(&query.structured));
+            let vector_handle = s.spawn(|| self.vector.execute(&query.vector));
+
+            // `join` returns `Result<T, Box<dyn Any + Send>>`; a panic in
+            // either arm is surfaced as an `ExecutionError` so callers
+            // don't see a raw thread panic.
+            let structured = structured_handle
+                .join()
+                .map_err(|_| ExecutionError::new("hybrid: structured arm panicked"))??;
+            let vector = vector_handle
+                .join()
+                .map_err(|_| ExecutionError::new("hybrid: vector arm panicked"))??;
+            Ok((structured, vector))
+        })
+    }
+
     fn execute_rrf(&self, query: &HybridQuery, k: u32) -> Result<UnifiedResult, ExecutionError> {
-        // 1. Execute both queries
-        let structured_result = self.unified.execute(&query.structured)?;
-        let vector_result = self.vector.execute(&query.vector)?;
+        // 1. Execute both queries in parallel — RRF always consumes both.
+        let (structured_result, vector_result) =
+            self.execute_structured_and_vector_parallel(query)?;
 
         // 2. Build rank maps (lower rank = better, starting from 1)
         let mut structured_ranks: HashMap<String, u32> = HashMap::new();
@@ -348,9 +382,10 @@ impl HybridExecutor {
 
     /// Intersection: Only return results present in both
     fn execute_intersection(&self, query: &HybridQuery) -> Result<UnifiedResult, ExecutionError> {
-        // 1. Execute both queries
-        let structured_result = self.unified.execute(&query.structured)?;
-        let vector_result = self.vector.execute(&query.vector)?;
+        // 1. Execute both queries in parallel — intersection needs both
+        //    result sets before it can filter.
+        let (structured_result, vector_result) =
+            self.execute_structured_and_vector_parallel(query)?;
 
         // 2. Build key sets
         let structured_keys: HashSet<String> = structured_result
@@ -380,9 +415,10 @@ impl HybridExecutor {
         struct_weight: f32,
         vector_weight: f32,
     ) -> Result<UnifiedResult, ExecutionError> {
-        // 1. Execute both queries
-        let structured_result = self.unified.execute(&query.structured)?;
-        let vector_result = self.vector.execute(&query.vector)?;
+        // 1. Execute both queries in parallel — union merges both result
+        //    sets with weighted scores, so neither arm can be skipped.
+        let (structured_result, vector_result) =
+            self.execute_structured_and_vector_parallel(query)?;
 
         // 2. Score and collect all records
         let mut scored_records: HashMap<String, (UnifiedRecord, f32)> = HashMap::new();
