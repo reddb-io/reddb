@@ -1008,6 +1008,10 @@ pub(super) fn compare_runtime_values(left: &Value, right: &Value, op: CompareOp)
 }
 
 pub(super) fn runtime_values_equal(left: &Value, right: &Value) -> bool {
+    if let Some(ordering) = runtime_exact_integer_cmp(left, right) {
+        return ordering == Ordering::Equal;
+    }
+
     if let (Some(left), Some(right)) = (runtime_value_number(left), runtime_value_number(right)) {
         return left == right;
     }
@@ -1024,6 +1028,10 @@ pub(super) fn runtime_values_equal(left: &Value, right: &Value) -> bool {
 }
 
 pub(super) fn runtime_partial_cmp(left: &Value, right: &Value) -> Option<Ordering> {
+    if let Some(ordering) = runtime_exact_integer_cmp(left, right) {
+        return Some(ordering);
+    }
+
     if let (Some(left), Some(right)) = (runtime_value_number(left), runtime_value_number(right)) {
         return left.partial_cmp(&right);
     }
@@ -1034,6 +1042,24 @@ pub(super) fn runtime_partial_cmp(left: &Value, right: &Value) -> Option<Orderin
 
     match (left, right) {
         (Value::Boolean(left), Value::Boolean(right)) => Some(left.cmp(right)),
+        _ => None,
+    }
+}
+
+fn runtime_exact_integer_cmp(left: &Value, right: &Value) -> Option<Ordering> {
+    match (left, right) {
+        (Value::Integer(left), Value::Integer(right)) => Some(left.cmp(right)),
+        (Value::UnsignedInteger(left), Value::UnsignedInteger(right)) => Some(left.cmp(right)),
+        (Value::Integer(left), Value::UnsignedInteger(right)) => Some(if *left < 0 {
+            Ordering::Less
+        } else {
+            (*left as u64).cmp(right)
+        }),
+        (Value::UnsignedInteger(left), Value::Integer(right)) => Some(if *right < 0 {
+            Ordering::Greater
+        } else {
+            left.cmp(&(*right as u64))
+        }),
         _ => None,
     }
 }
@@ -1397,6 +1423,39 @@ mod tests {
             Some(Value::Text("1.22.1".to_string()))
         );
     }
+
+    #[test]
+    fn test_compare_runtime_values_preserves_integer_unsigned_boundaries() {
+        let above_i64_max = Value::UnsignedInteger(i64::MAX as u64 + 1);
+        let max_i64 = Value::Integer(i64::MAX);
+
+        assert!(compare_runtime_values(
+            &above_i64_max,
+            &max_i64,
+            CompareOp::Gt
+        ));
+        assert!(compare_runtime_values(
+            &above_i64_max,
+            &max_i64,
+            CompareOp::Ge
+        ));
+        assert!(!compare_runtime_values(
+            &above_i64_max,
+            &max_i64,
+            CompareOp::Eq
+        ));
+
+        assert!(compare_runtime_values(
+            &Value::Integer(-1),
+            &Value::UnsignedInteger(0),
+            CompareOp::Lt
+        ));
+        assert!(compare_runtime_values(
+            &Value::UnsignedInteger(0),
+            &Value::Integer(-1),
+            CompareOp::Gt
+        ));
+    }
 }
 
 /// Evaluate a scalar function on a record's values.
@@ -1414,6 +1473,16 @@ fn evaluate_scalar_function(
             Some(Value::Float(crate::geo::haversine_km(
                 lat1, lon1, lat2, lon2,
             )))
+        }
+        "TIME_BUCKET" => {
+            let bucket_ns = resolve_time_bucket_duration(args, 0)?;
+            let timestamp_ns = resolve_time_bucket_timestamp(args, source)?;
+            let bucket_start = if bucket_ns == 0 {
+                timestamp_ns
+            } else {
+                (timestamp_ns / bucket_ns) * bucket_ns
+            };
+            Some(Value::UnsignedInteger(bucket_start))
         }
         "GEO_DISTANCE_VINCENTY" | "VINCENTY" => {
             let (lat1, lon1, lat2, lon2) = resolve_two_geo_points(args, source)?;
@@ -1517,6 +1586,48 @@ fn resolve_scalar_arg(args: &[Projection], index: usize, source: &UnifiedRecord)
             }
             source.values.get(col).cloned()
         }
+        _ => None,
+    }
+}
+
+fn resolve_time_bucket_duration(args: &[Projection], index: usize) -> Option<u64> {
+    let Projection::Column(column) = args.get(index)? else {
+        return None;
+    };
+    let literal = column.strip_prefix("LIT:")?;
+    crate::storage::timeseries::retention::parse_duration_ns(literal)
+}
+
+fn resolve_time_bucket_timestamp(args: &[Projection], source: &UnifiedRecord) -> Option<u64> {
+    if let Some(value) = args
+        .get(1)
+        .and_then(|_| resolve_scalar_arg(args, 1, source))
+    {
+        return value_to_bucket_timestamp_ns(&value);
+    }
+
+    source
+        .get("timestamp_ns")
+        .and_then(value_to_bucket_timestamp_ns)
+        .or_else(|| {
+            source
+                .get("timestamp_ms")
+                .and_then(value_to_bucket_timestamp_ns)
+        })
+        .or_else(|| {
+            source
+                .get("timestamp")
+                .and_then(value_to_bucket_timestamp_ns)
+        })
+}
+
+fn value_to_bucket_timestamp_ns(value: &Value) -> Option<u64> {
+    match value {
+        Value::UnsignedInteger(v) => Some(*v),
+        Value::Integer(v) if *v >= 0 => Some(*v as u64),
+        Value::Float(v) if *v >= 0.0 => Some(*v as u64),
+        Value::Timestamp(v) if *v >= 0 => Some((*v as u64) * 1_000_000_000),
+        Value::TimestampMs(v) if *v >= 0 => Some((*v as u64) * 1_000_000),
         _ => None,
     }
 }
