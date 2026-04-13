@@ -1,4 +1,4 @@
-.PHONY: help build release test clean run run-grpc install fmt lint check link unlink dev which patch minor major docs publish publish-dry-run
+.PHONY: help build release test test-fast test-persistent clean run run-grpc install fmt lint check link unlink dev which patch minor major docs publish publish-dry-run
 
 # Paths
 LOCAL_BIN := $(HOME)/.local/bin
@@ -12,7 +12,9 @@ help:
 	@echo "Core:"
 	@echo "  make build         - Build debug version"
 	@echo "  make release       - Build optimized release version"
-	@echo "  make test          - Run full test suite"
+	@echo "  make test          - Run the default local test layer"
+	@echo "  make test-fast     - Run the default local test layer"
+	@echo "  make test-persistent - Run the persistent multimodel integration layer"
 	@echo "  make clean         - Clean build artifacts"
 	@echo "  make run           - Run HTTP server (ARGS='--path ... --bind ...')"
 	@echo "  make run-grpc      - Run gRPC server (ARGS='--path ... --bind ...')"
@@ -40,7 +42,13 @@ release:
 
 # Run tests
 test:
+	$(MAKE) test-fast
+
+test-fast:
 	cargo test --locked
+
+test-persistent:
+	CARGO_TARGET_DIR=$${CARGO_TARGET_DIR:-target/persistent-tests} cargo test --locked --test integration_persistent_multimodel -- --ignored
 
 # Clean artifacts
 clean:
