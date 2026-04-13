@@ -140,9 +140,9 @@ impl<'a> Parser<'a> {
 
     /// Parse field reference (table.column or just column)
     pub fn parse_field_ref(&mut self) -> Result<FieldRef, ParseError> {
-        let mut segments = vec![self.expect_ident()?];
+        let mut segments = vec![self.parse_field_ref_segment()?];
         while self.consume(&Token::Dot)? {
-            segments.push(self.expect_ident()?);
+            segments.push(self.parse_field_ref_segment()?);
         }
 
         match segments.len() {
@@ -155,6 +155,45 @@ impl<'a> Parser<'a> {
                 table: segments.remove(0),
                 column: segments.join("."),
             }),
+        }
+    }
+
+    fn parse_field_ref_segment(&mut self) -> Result<String, ParseError> {
+        match &self.current.token {
+            Token::Ident(name) => {
+                let name = name.clone();
+                self.advance()?;
+                Ok(name)
+            }
+            Token::Eof
+            | Token::LParen
+            | Token::RParen
+            | Token::LBracket
+            | Token::RBracket
+            | Token::Comma
+            | Token::Dot
+            | Token::Eq
+            | Token::Lt
+            | Token::Gt
+            | Token::Le
+            | Token::Ge
+            | Token::Arrow
+            | Token::ArrowLeft
+            | Token::Dash
+            | Token::Colon
+            | Token::Semi
+            | Token::Star
+            | Token::Plus
+            | Token::Slash => Err(ParseError::expected(
+                vec!["identifier or field name"],
+                &self.current.token,
+                self.position(),
+            )),
+            other => {
+                let name = other.to_string().to_ascii_lowercase();
+                self.advance()?;
+                Ok(name)
+            }
         }
     }
 }
