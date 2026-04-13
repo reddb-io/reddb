@@ -22,7 +22,7 @@ impl BTree {
         *self
             .root_page_id
             .read()
-            .expect("btree root_page_id RwLock poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Check if tree is empty
