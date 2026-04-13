@@ -11,6 +11,7 @@
 //! Every function is visible to the parent `query_exec` module as
 //! `pub(crate)` so submodules can cross-reference if needed.
 
+use super::json_writers::timeseries_tags_json_value;
 use super::*;
 
 /// Extract the first equality condition from an AND filter for fast pre-filtering.
