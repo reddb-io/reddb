@@ -355,7 +355,11 @@ impl SecurityQueries {
         let mut paths = self.attack_paths(query)?;
 
         // Sort by difficulty (ascending)
-        paths.sort_by(|a, b| a.difficulty.partial_cmp(&b.difficulty).unwrap());
+        paths.sort_by(|a, b| {
+            a.difficulty
+                .partial_cmp(&b.difficulty)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         Ok(paths.into_iter().next())
     }
@@ -379,7 +383,11 @@ impl SecurityQueries {
         }
 
         // Sort by risk score (descending)
-        all_paths.sort_by(|a, b| b.risk_score.partial_cmp(&a.risk_score).unwrap());
+        all_paths.sort_by(|a, b| {
+            b.risk_score
+                .partial_cmp(&a.risk_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         Ok(all_paths)
     }
