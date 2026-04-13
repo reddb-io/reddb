@@ -706,31 +706,10 @@ impl SparqlExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::engine::graph_store::GraphNodeType;
+    use crate::storage::query::test_support::service_graph_with_user;
 
     fn create_test_graph() -> Arc<GraphStore> {
-        let graph = GraphStore::new();
-
-        // Add test nodes
-        graph.add_node("host:10.0.0.1", "webserver", GraphNodeType::Host);
-        graph.add_node("host:10.0.0.2", "database", GraphNodeType::Host);
-        graph.add_node("svc:ssh", "SSH", GraphNodeType::Service);
-        graph.add_node("svc:http", "HTTP", GraphNodeType::Service);
-        graph.add_node("user:admin", "admin", GraphNodeType::User);
-
-        // Add edges
-        graph.add_edge("host:10.0.0.1", "svc:ssh", GraphEdgeType::HasService, 1.0);
-        graph.add_edge("host:10.0.0.1", "svc:http", GraphEdgeType::HasService, 1.0);
-        graph.add_edge(
-            "host:10.0.0.1",
-            "host:10.0.0.2",
-            GraphEdgeType::ConnectsTo,
-            1.0,
-        );
-        graph.add_edge("host:10.0.0.2", "svc:ssh", GraphEdgeType::HasService, 1.0);
-        graph.add_edge("host:10.0.0.1", "user:admin", GraphEdgeType::HasUser, 1.0);
-
-        Arc::new(graph)
+        service_graph_with_user()
     }
 
     #[test]
