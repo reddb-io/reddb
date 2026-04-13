@@ -81,12 +81,12 @@ impl RedDBRuntime {
             operation,
             source,
         )
-        .map_err(|e| RedDBError::Internal(e))?;
+        .map_err(RedDBError::Internal)?;
 
         // Sync mode: consolidate immediately
         if config.mode == EcMode::Sync {
             consolidation::consolidate(self.inner.db.store().as_ref(), &config, Some(target_id))
-                .map_err(|e| RedDBError::Internal(e))?;
+                .map_err(RedDBError::Internal)?;
         }
 
         Ok(id.raw())
@@ -100,7 +100,7 @@ impl RedDBRuntime {
     ) -> RedDBResult<consolidation::ConsolidationResult> {
         let config = self.ec_config_or_default(collection, field);
         consolidation::consolidate(self.inner.db.store().as_ref(), &config, target_id)
-            .map_err(|e| RedDBError::Internal(e))
+            .map_err(RedDBError::Internal)
     }
 
     pub fn ec_status(
