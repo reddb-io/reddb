@@ -3,10 +3,37 @@ requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "reddb-python"
-version = "0.1.0"
-description = "Native Python driver for RedDB (compiled Rust, like psycopg2)"
+name = "reddb"
+version = "0.1.2"
+description = "Official Python driver for RedDB — embedded engine and gRPC remote in one package."
+readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.8"
+keywords = ["reddb", "database", "client", "embedded", "vector", "graph", "document", "key-value"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: Rust",
+  "Topic :: Database",
+  "Topic :: Database :: Database Engines/Servers",
+]
+
+[project.urls]
+Homepage = "https://github.com/forattini-dev/reddb"
+Repository = "https://github.com/forattini-dev/reddb"
+Issues = "https://github.com/forattini-dev/reddb/issues"
 
 [tool.maturin]
-features = ["pyo3/extension-module"]
+features = ["pyo3/extension-module", "embedded"]
+module-name = "reddb"
