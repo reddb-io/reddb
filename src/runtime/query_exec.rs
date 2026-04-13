@@ -540,7 +540,7 @@ fn execute_scan_with_candidates_to_json(
         write_u64(&mut buf, entity.id.raw());
         buf.extend_from_slice(&sys_prefix);
         buf.push(b',');
-        write_timestamp_fields_json(&mut buf, &entity);
+        write_timestamp_fields_json(&mut buf, entity);
         buf.extend_from_slice(b",\"red_sequence_id\":");
         write_u64(&mut buf, entity.sequence_id);
         if let EntityKind::TableRow { row_id, .. } = &entity.kind {
@@ -648,7 +648,7 @@ fn build_indexed_result_json(
         write_u64(&mut buf, entity.id.raw());
         buf.extend_from_slice(&sys_prefix);
         buf.push(b',');
-        write_timestamp_fields_json(&mut buf, entity);
+        write_timestamp_fields_json(&mut buf, &entity);
         buf.extend_from_slice(b",\"red_sequence_id\":");
         write_u64(&mut buf, entity.sequence_id);
         if let EntityKind::TableRow { row_id, .. } = &entity.kind {
@@ -766,7 +766,7 @@ fn execute_unfiltered_scan_to_json(
         write_u64(&mut buf, entity.id.raw());
         buf.extend_from_slice(&sys_prefix);
         buf.push(b',');
-        write_timestamp_fields_json(&mut buf, &entity);
+        write_timestamp_fields_json(&mut buf, entity);
         buf.extend_from_slice(b",\"red_sequence_id\":");
         write_u64(&mut buf, entity.sequence_id);
         if let EntityKind::TableRow { row_id, .. } = &entity.kind {
@@ -892,7 +892,7 @@ fn execute_filtered_scan_to_json(
         write_u64(&mut buf, entity.id.raw());
         buf.extend_from_slice(&sys_prefix);
         buf.push(b',');
-        write_timestamp_fields_json(&mut buf, &entity);
+        write_timestamp_fields_json(&mut buf, entity);
         buf.extend_from_slice(b",\"red_sequence_id\":");
         write_u64(&mut buf, entity.sequence_id);
         if let EntityKind::TableRow { row_id, .. } = &entity.kind {
