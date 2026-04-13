@@ -22,9 +22,11 @@
 
 pub mod bloom_segment;
 pub mod stats;
+pub mod zone_map;
 
 pub use bloom_segment::{BloomSegment, BloomSegmentBuilder, HasBloom};
 pub use stats::{IndexKind, IndexStats};
+pub use zone_map::{ZoneDecision, ZoneMap, ZonePredicate};
 
 use std::fmt;
 
