@@ -19,9 +19,22 @@
 //! - "SIEVE is Simpler than LRU" (NSDI '24)
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use super::page::Page;
+
+fn cache_read<'a, T>(lock: &'a RwLock<T>) -> RwLockReadGuard<'a, T> {
+    lock.read().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn cache_write<'a, T>(lock: &'a RwLock<T>) -> RwLockWriteGuard<'a, T> {
+    lock.write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn cache_lock<'a, T>(lock: &'a Mutex<T>) -> MutexGuard<'a, T> {
+    lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Default cache capacity (number of pages)
 /// Turso uses 100,000 pages (~400MB for 4KB pages)
@@ -121,7 +134,7 @@ impl PageCache {
 
     /// Get the current number of cached pages
     pub fn len(&self) -> usize {
-        self.index.read().unwrap().len()
+        cache_read(&self.index).len()
     }
 
     /// Check if cache is empty
@@ -136,12 +149,12 @@ impl PageCache {
 
     /// Get cache statistics
     pub fn stats(&self) -> CacheStats {
-        self.stats.lock().unwrap().clone()
+        cache_lock(&self.stats).clone()
     }
 
     /// Reset statistics
     pub fn reset_stats(&self) {
-        *self.stats.lock().unwrap() = CacheStats::default();
+        *cache_lock(&self.stats) = CacheStats::default();
     }
 
     /// Get a page from cache
@@ -150,20 +163,20 @@ impl PageCache {
     /// On hit, marks the page as visited (SIEVE).
     pub fn get(&self, page_id: u32) -> Option<Page> {
         // Check if page is in cache
-        let index = self.index.read().unwrap();
+        let index = cache_read(&self.index);
         let slot = match index.get(&page_id) {
             Some(&s) => s,
             None => {
                 drop(index);
                 // Cache miss
-                self.stats.lock().unwrap().misses += 1;
+                cache_lock(&self.stats).misses += 1;
                 return None;
             }
         };
         drop(index);
 
         // Get entry and mark as visited
-        let entries = self.entries.read().unwrap();
+        let entries = cache_read(&self.entries);
         if let Some(entry) = entries.get(slot).and_then(|e| e.as_ref()) {
             // Mark as visited (SIEVE)
             // Note: In a truly concurrent implementation, this would use atomics
@@ -171,17 +184,17 @@ impl PageCache {
             drop(entries);
 
             // Update visited bit
-            let mut entries = self.entries.write().unwrap();
+            let mut entries = cache_write(&self.entries);
             if let Some(Some(entry)) = entries.get_mut(slot) {
                 entry.visited = true;
             }
 
             // Update stats
-            self.stats.lock().unwrap().hits += 1;
+            cache_lock(&self.stats).hits += 1;
 
             Some(page)
         } else {
-            self.stats.lock().unwrap().misses += 1;
+            cache_lock(&self.stats).misses += 1;
             None
         }
     }
@@ -193,12 +206,12 @@ impl PageCache {
     pub fn insert(&self, page_id: u32, page: Page) -> Option<Page> {
         // Check if already in cache
         {
-            let index = self.index.read().unwrap();
+            let index = cache_read(&self.index);
             if let Some(&slot) = index.get(&page_id) {
                 drop(index);
 
                 // Update existing entry
-                let mut entries = self.entries.write().unwrap();
+                let mut entries = cache_write(&self.entries);
                 if let Some(Some(entry)) = entries.get_mut(slot) {
                     entry.page = page;
                     entry.visited = true;
@@ -219,13 +232,13 @@ impl PageCache {
 
         // Find or create a slot
         let slot = {
-            let mut free_slots = self.free_slots.lock().unwrap();
+            let mut free_slots = cache_lock(&self.free_slots);
             if let Some(slot) = free_slots.pop() {
                 slot
             } else {
                 drop(free_slots);
                 // Add a new slot
-                let mut entries = self.entries.write().unwrap();
+                let mut entries = cache_write(&self.entries);
                 let slot = entries.len();
                 entries.push(None);
                 slot
@@ -234,7 +247,7 @@ impl PageCache {
 
         // Insert entry
         {
-            let mut entries = self.entries.write().unwrap();
+            let mut entries = cache_write(&self.entries);
 
             // Ensure slot exists
             while entries.len() <= slot {
@@ -246,13 +259,13 @@ impl PageCache {
 
         // Update index
         {
-            let mut index = self.index.write().unwrap();
+            let mut index = cache_write(&self.index);
             index.insert(page_id, slot);
         }
 
         // Add to FIFO
         {
-            let mut fifo = self.fifo.lock().unwrap();
+            let mut fifo = cache_lock(&self.fifo);
             fifo.push_back(page_id);
         }
 
@@ -263,8 +276,8 @@ impl PageCache {
     ///
     /// Returns the evicted page if it was dirty.
     fn evict(&self) -> Option<Page> {
-        let mut fifo = self.fifo.lock().unwrap();
-        let mut hand = self.hand.lock().unwrap();
+        let mut fifo = cache_lock(&self.fifo);
+        let mut hand = cache_lock(&self.hand);
 
         if fifo.is_empty() {
             return None;
@@ -290,7 +303,7 @@ impl PageCache {
 
             // Get entry slot
             let slot = {
-                let index = self.index.read().unwrap();
+                let index = cache_read(&self.index);
                 match index.get(&page_id) {
                     Some(&s) => s,
                     None => {
@@ -303,7 +316,7 @@ impl PageCache {
 
             // Check entry
             let (should_evict, dirty) = {
-                let entries = self.entries.read().unwrap();
+                let entries = cache_read(&self.entries);
                 match entries.get(slot).and_then(|e| e.as_ref()) {
                     Some(entry) => {
                         if entry.pin_count > 0 {
@@ -326,7 +339,7 @@ impl PageCache {
 
             if !should_evict {
                 // Clear visited bit
-                let mut entries = self.entries.write().unwrap();
+                let mut entries = cache_write(&self.entries);
                 if let Some(Some(entry)) = entries.get_mut(slot) {
                     entry.visited = false;
                 }
@@ -336,14 +349,14 @@ impl PageCache {
 
             // Evict this entry
             let evicted_page = {
-                let mut entries = self.entries.write().unwrap();
+                let mut entries = cache_write(&self.entries);
                 let entry = entries[slot].take();
                 entry.map(|e| e.page)
             };
 
             // Remove from index
             {
-                let mut index = self.index.write().unwrap();
+                let mut index = cache_write(&self.index);
                 index.remove(&page_id);
             }
 
@@ -352,13 +365,13 @@ impl PageCache {
 
             // Add slot to free list
             {
-                let mut free_slots = self.free_slots.lock().unwrap();
+                let mut free_slots = cache_lock(&self.free_slots);
                 free_slots.push(slot);
             }
 
             // Update stats
             {
-                let mut stats = self.stats.lock().unwrap();
+                let mut stats = cache_lock(&self.stats);
                 stats.evictions += 1;
                 if dirty {
                     stats.writebacks += 1;
@@ -376,11 +389,11 @@ impl PageCache {
 
     /// Mark a page as dirty
     pub fn mark_dirty(&self, page_id: u32) {
-        let index = self.index.read().unwrap();
+        let index = cache_read(&self.index);
         if let Some(&slot) = index.get(&page_id) {
             drop(index);
 
-            let mut entries = self.entries.write().unwrap();
+            let mut entries = cache_write(&self.entries);
             if let Some(Some(entry)) = entries.get_mut(slot) {
                 entry.dirty = true;
             }
@@ -389,11 +402,11 @@ impl PageCache {
 
     /// Mark a page as clean
     pub fn mark_clean(&self, page_id: u32) {
-        let index = self.index.read().unwrap();
+        let index = cache_read(&self.index);
         if let Some(&slot) = index.get(&page_id) {
             drop(index);
 
-            let mut entries = self.entries.write().unwrap();
+            let mut entries = cache_write(&self.entries);
             if let Some(Some(entry)) = entries.get_mut(slot) {
                 entry.dirty = false;
             }
@@ -402,11 +415,11 @@ impl PageCache {
 
     /// Pin a page (prevent eviction)
     pub fn pin(&self, page_id: u32) -> bool {
-        let index = self.index.read().unwrap();
+        let index = cache_read(&self.index);
         if let Some(&slot) = index.get(&page_id) {
             drop(index);
 
-            let mut entries = self.entries.write().unwrap();
+            let mut entries = cache_write(&self.entries);
             if let Some(Some(entry)) = entries.get_mut(slot) {
                 entry.pin_count += 1;
                 return true;
@@ -417,11 +430,11 @@ impl PageCache {
 
     /// Unpin a page
     pub fn unpin(&self, page_id: u32) -> bool {
-        let index = self.index.read().unwrap();
+        let index = cache_read(&self.index);
         if let Some(&slot) = index.get(&page_id) {
             drop(index);
 
-            let mut entries = self.entries.write().unwrap();
+            let mut entries = cache_write(&self.entries);
             if let Some(Some(entry)) = entries.get_mut(slot) {
                 if entry.pin_count > 0 {
                     entry.pin_count -= 1;
@@ -436,25 +449,25 @@ impl PageCache {
     pub fn remove(&self, page_id: u32) -> Option<Page> {
         // Get and remove from index
         let slot = {
-            let mut index = self.index.write().unwrap();
+            let mut index = cache_write(&self.index);
             index.remove(&page_id)?
         };
 
         // Remove entry
         let entry = {
-            let mut entries = self.entries.write().unwrap();
+            let mut entries = cache_write(&self.entries);
             entries.get_mut(slot).and_then(|e| e.take())
         };
 
         // Remove from FIFO
         {
-            let mut fifo = self.fifo.lock().unwrap();
+            let mut fifo = cache_lock(&self.fifo);
             fifo.retain(|&id| id != page_id);
         }
 
         // Add slot to free list
         {
-            let mut free_slots = self.free_slots.lock().unwrap();
+            let mut free_slots = cache_lock(&self.free_slots);
             free_slots.push(slot);
         }
 
@@ -467,8 +480,8 @@ impl PageCache {
     pub fn flush_dirty(&self) -> Vec<(u32, Page)> {
         let mut dirty_pages = Vec::new();
 
-        let index = self.index.read().unwrap();
-        let entries = self.entries.read().unwrap();
+        let index = cache_read(&self.index);
+        let entries = cache_read(&self.entries);
 
         for (&page_id, &slot) in index.iter() {
             if let Some(Some(entry)) = entries.get(slot) {
@@ -487,33 +500,33 @@ impl PageCache {
         }
 
         let count = dirty_pages.len();
-        self.stats.lock().unwrap().writebacks += count as u64;
+        cache_lock(&self.stats).writebacks += count as u64;
 
         dirty_pages
     }
 
     /// Clear all entries from cache
     pub fn clear(&self) {
-        let mut index = self.index.write().unwrap();
-        let mut entries = self.entries.write().unwrap();
-        let mut fifo = self.fifo.lock().unwrap();
-        let mut free_slots = self.free_slots.lock().unwrap();
+        let mut index = cache_write(&self.index);
+        let mut entries = cache_write(&self.entries);
+        let mut fifo = cache_lock(&self.fifo);
+        let mut free_slots = cache_lock(&self.free_slots);
 
         index.clear();
         entries.clear();
         fifo.clear();
         free_slots.clear();
-        *self.hand.lock().unwrap() = 0;
+        *cache_lock(&self.hand) = 0;
     }
 
     /// Check if a page is in cache
     pub fn contains(&self, page_id: u32) -> bool {
-        self.index.read().unwrap().contains_key(&page_id)
+        cache_read(&self.index).contains_key(&page_id)
     }
 
     /// Get all cached page IDs
     pub fn page_ids(&self) -> Vec<u32> {
-        self.index.read().unwrap().keys().copied().collect()
+        cache_read(&self.index).keys().copied().collect()
     }
 }
 
@@ -691,5 +704,42 @@ mod tests {
         // Should have updated value
         let retrieved = cache.get(1).unwrap();
         assert_eq!(retrieved.as_bytes()[100], 0xBB);
+    }
+
+    #[test]
+    fn test_cache_recovers_after_index_lock_poisoning() {
+        let cache = std::sync::Arc::new(PageCache::new(8));
+        let poison_target = std::sync::Arc::clone(&cache);
+        let _ = std::thread::spawn(move || {
+            let _guard = poison_target
+                .index
+                .write()
+                .expect("index lock should be acquired");
+            panic!("poison index lock");
+        })
+        .join();
+
+        cache.insert(1, make_page(1));
+        assert!(cache.contains(1));
+        assert!(cache.get(1).is_some());
+    }
+
+    #[test]
+    fn test_cache_recovers_after_stats_lock_poisoning() {
+        let cache = std::sync::Arc::new(PageCache::new(8));
+        let poison_target = std::sync::Arc::clone(&cache);
+        let _ = std::thread::spawn(move || {
+            let _guard = poison_target
+                .stats
+                .lock()
+                .expect("stats lock should be acquired");
+            panic!("poison stats lock");
+        })
+        .join();
+
+        assert!(cache.get(999).is_none());
+        assert_eq!(cache.stats().misses, 1);
+        cache.reset_stats();
+        assert_eq!(cache.stats().misses, 0);
     }
 }
