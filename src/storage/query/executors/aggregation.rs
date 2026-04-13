@@ -21,6 +21,7 @@
 use std::collections::HashMap;
 
 use super::super::engine::binding::{Binding, Value, Var};
+use super::value_compare::total_compare_values;
 
 // ============================================================================
 // Aggregator Trait
@@ -287,7 +288,7 @@ impl Aggregator for MinAggregator {
             match &self.min {
                 None => self.min = Some(v.clone()),
                 Some(current) => {
-                    if compare_values(v, current) == std::cmp::Ordering::Less {
+                    if total_compare_values(v, current) == std::cmp::Ordering::Less {
                         self.min = Some(v.clone());
                     }
                 }
@@ -337,7 +338,7 @@ impl Aggregator for MaxAggregator {
             match &self.max {
                 None => self.max = Some(v.clone()),
                 Some(current) => {
-                    if compare_values(v, current) == std::cmp::Ordering::Greater {
+                    if total_compare_values(v, current) == std::cmp::Ordering::Greater {
                         self.max = Some(v.clone());
                     }
                 }
@@ -737,21 +738,6 @@ fn value_to_number(value: &Value) -> Option<f64> {
         Value::Float(f) => Some(*f),
         Value::String(s) => s.parse().ok(),
         _ => None,
-    }
-}
-
-fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
-    match (a, b) {
-        (Value::Integer(a), Value::Integer(b)) => a.cmp(b),
-        (Value::Float(a), Value::Float(b)) => a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
-        (Value::String(a), Value::String(b)) => a.cmp(b),
-        (Value::Integer(a), Value::Float(b)) => (*a as f64)
-            .partial_cmp(b)
-            .unwrap_or(std::cmp::Ordering::Equal),
-        (Value::Float(a), Value::Integer(b)) => a
-            .partial_cmp(&(*b as f64))
-            .unwrap_or(std::cmp::Ordering::Equal),
-        _ => std::cmp::Ordering::Equal,
     }
 }
 
