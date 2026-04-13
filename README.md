@@ -401,6 +401,57 @@ K-Means uses parallel assignment (multi-threaded for datasets > 1K vectors). DBS
 
 ---
 
+## Native Drivers
+
+One connection-string API, four languages. Every driver accepts the same
+`connect(uri)` contract so application code ports across runtimes with zero
+ceremony.
+
+| Language          | Package          | Install                        | Backends                            |
+|-------------------|------------------|--------------------------------|-------------------------------------|
+| Rust              | `reddb-client`   | `cargo add reddb-client`       | embedded ✅ · gRPC ⏳              |
+| Node / Bun / Deno | `reddb` (npm)    | `pnpm add reddb`               | stdio subprocess ✅                 |
+| Python            | `reddb` (PyPI)   | `pip install reddb` *(soon)*   | embedded ✅ · gRPC ⏳              |
+
+All drivers accept the same URIs:
+
+```
+memory://                   ephemeral in-memory
+file:///absolute/path       embedded engine on disk
+grpc://host:port            remote server (planned — tracked in PLAN_DRIVERS.md)
+```
+
+Example — the same app in three languages:
+
+```rust
+// Rust
+let db = reddb_client::Reddb::connect("memory://").await?;
+db.insert("users", &JsonValue::object([("name", JsonValue::string("Alice"))])).await?;
+let rows = db.query("SELECT * FROM users").await?;
+```
+
+```js
+// Node, Bun, Deno
+import { connect } from 'reddb'
+const db = await connect('memory://')
+await db.insert('users', { name: 'Alice' })
+const rows = await db.query('SELECT * FROM users')
+```
+
+```python
+# Python
+import reddb
+with reddb.connect("memory://") as db:
+    db.insert("users", {"name": "Alice"})
+    print(db.query("SELECT * FROM users"))
+```
+
+Driver docs live in `drivers/rust/README.md`, `drivers/js/README.md`, and
+`drivers/python/README.md`. The full protocol spec and roadmap are in
+[`PLAN_DRIVERS.md`](./PLAN_DRIVERS.md).
+
+---
+
 ## Quick Start
 
 ```bash
