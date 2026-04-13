@@ -17,11 +17,25 @@
 
 use std::io::{BufRead, BufReader, Stdin, Write};
 use std::panic::AssertUnwindSafe;
+use std::sync::Mutex;
 
+use crate::client::RedDBClient;
 use crate::json::{self as json, Value};
 use crate::runtime::{RedDBRuntime, RuntimeQueryResult};
 use crate::storage::query::unified::UnifiedRecord;
 use crate::storage::schema::Value as SchemaValue;
+
+/// Which backend the stdio loop is wrapping.
+///
+/// Local = the in-process engine (embedded). Remote = a tonic client
+/// to a standalone `red server` talking gRPC.
+enum Backend<'a> {
+    Local(&'a RedDBRuntime),
+    Remote {
+        client: Mutex<RedDBClient>,
+        tokio_rt: &'a tokio::runtime::Runtime,
+    },
+}
 
 /// Protocol version reported by the `version` method.
 pub const PROTOCOL_VERSION: &str = "1.0";
@@ -36,17 +50,52 @@ pub mod error_code {
     pub const INTERNAL_ERROR: &str = "INTERNAL_ERROR";
 }
 
-/// Run the stdio JSON-RPC loop against the provided runtime.
+/// Run the stdio JSON-RPC loop against a local in-process runtime.
 ///
-/// Returns the process exit code. Returns `0` on normal shutdown
-/// (EOF or explicit `close`). Returns non-zero only on a fatal I/O
-/// error reading stdin or writing stdout.
+/// Returns the process exit code. `0` on normal shutdown (EOF or
+/// explicit `close`). Non-zero only on fatal I/O errors reading
+/// stdin or writing stdout.
 pub fn run(runtime: &RedDBRuntime) -> i32 {
     run_with_io(runtime, std::io::stdin(), &mut std::io::stdout())
 }
 
+/// Run the stdio JSON-RPC loop as a proxy to a remote gRPC server.
+///
+/// Every method is forwarded via tonic. This is what
+/// `red rpc --stdio --connect grpc://host:port` uses, and it is also
+/// what the JS and Python drivers spawn when the user calls
+/// `connect("grpc://...")`.
+pub fn run_remote(endpoint: &str, token: Option<String>) -> i32 {
+    let tokio_rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("rpc: failed to build tokio runtime: {e}");
+            return 1;
+        }
+    };
+    let client = match tokio_rt.block_on(RedDBClient::connect(endpoint, token)) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("rpc: failed to connect to {endpoint}: {e}");
+            return 1;
+        }
+    };
+    let backend = Backend::Remote {
+        client: Mutex::new(client),
+        tokio_rt: &tokio_rt,
+    };
+    run_backend(&backend, std::io::stdin(), &mut std::io::stdout())
+}
+
 /// Same as [`run`] but takes explicit I/O handles. Used by tests.
 pub fn run_with_io<W: Write>(runtime: &RedDBRuntime, stdin: Stdin, stdout: &mut W) -> i32 {
+    run_backend(&Backend::Local(runtime), stdin, stdout)
+}
+
+fn run_backend<W: Write>(backend: &Backend<'_>, stdin: Stdin, stdout: &mut W) -> i32 {
     let reader = BufReader::new(stdin.lock());
     for line_result in reader.lines() {
         let line = match line_result {
@@ -64,11 +113,10 @@ pub fn run_with_io<W: Write>(runtime: &RedDBRuntime, stdin: Stdin, stdout: &mut 
         if line.trim().is_empty() {
             continue;
         }
-        let response = handle_line(runtime, &line);
+        let response = handle_line(backend, &line);
         if writeln!(stdout, "{}", response).is_err() || stdout.flush().is_err() {
             return 1;
         }
-        // `close` is special: respond, then exit cleanly.
         if response.contains("\"__close__\":true") {
             return 0;
         }
@@ -79,7 +127,7 @@ pub fn run_with_io<W: Write>(runtime: &RedDBRuntime, stdin: Stdin, stdout: &mut 
 /// Parse one input line and dispatch. Always returns a single-line
 /// JSON string suitable for direct write to stdout. Never panics
 /// (panics inside handlers are caught and reported).
-fn handle_line(runtime: &RedDBRuntime, line: &str) -> String {
+fn handle_line(backend: &Backend<'_>, line: &str) -> String {
     let parsed: Value = match json::from_str(line) {
         Ok(v) => v,
         Err(err) => {
@@ -102,8 +150,11 @@ fn handle_line(runtime: &RedDBRuntime, line: &str) -> String {
 
     let params = parsed.get("params").cloned().unwrap_or(Value::Null);
 
-    let dispatch = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        dispatch_method(runtime, &method, &params)
+    let dispatch = std::panic::catch_unwind(AssertUnwindSafe(|| match backend {
+        Backend::Local(rt) => dispatch_method(rt, &method, &params),
+        Backend::Remote { client, tokio_rt } => {
+            dispatch_method_remote(client, tokio_rt, &method, &params)
+        }
     }));
 
     match dispatch {
@@ -417,6 +468,215 @@ fn schema_value_to_json(v: &SchemaValue) -> Value {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Remote dispatch (grpc://)
+// ---------------------------------------------------------------------------
+
+/// Dispatch a parsed JSON-RPC call over gRPC. Mirrors `dispatch_method`
+/// but every operation goes through the tonic client. The server's
+/// own `RedDBRuntime` does the actual work — we are just a wire
+/// adapter between the JSON-RPC framing the drivers speak and the
+/// gRPC protobuf framing the server speaks.
+fn dispatch_method_remote(
+    client: &Mutex<RedDBClient>,
+    tokio_rt: &tokio::runtime::Runtime,
+    method: &str,
+    params: &Value,
+) -> Result<Value, (&'static str, String)> {
+    match method {
+        "version" => Ok(Value::Object(
+            [
+                (
+                    "version".to_string(),
+                    Value::String(env!("CARGO_PKG_VERSION").to_string()),
+                ),
+                (
+                    "protocol".to_string(),
+                    Value::String(PROTOCOL_VERSION.to_string()),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        )),
+
+        "health" => {
+            let result = tokio_rt.block_on(async {
+                let mut guard = client.lock().expect("client poisoned");
+                guard.health().await
+            });
+            match result {
+                Ok(_state) => Ok(Value::Object(
+                    [
+                        ("ok".to_string(), Value::Bool(true)),
+                        (
+                            "version".to_string(),
+                            Value::String(env!("CARGO_PKG_VERSION").to_string()),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                )),
+                Err(e) => Err((error_code::INTERNAL_ERROR, e.to_string())),
+            }
+        }
+
+        "query" => {
+            let sql = params.get("sql").and_then(Value::as_str).ok_or((
+                error_code::INVALID_PARAMS,
+                "missing 'sql' string".to_string(),
+            ))?;
+            let json_str = tokio_rt
+                .block_on(async {
+                    let mut guard = client.lock().expect("client poisoned");
+                    guard.query(sql).await
+                })
+                .map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
+            // Server returned its own QueryReply.result_json. Parse and
+            // repackage into the stdio-protocol shape. If parsing fails,
+            // hand the raw server JSON back under a sentinel key so the
+            // caller still gets something useful.
+            let parsed = json::from_str::<Value>(&json_str)
+                .map_err(|e| (error_code::INTERNAL_ERROR, format!("bad server JSON: {e}")))?;
+            Ok(parsed)
+        }
+
+        "insert" => {
+            let collection = params.get("collection").and_then(Value::as_str).ok_or((
+                error_code::INVALID_PARAMS,
+                "missing 'collection' string".to_string(),
+            ))?;
+            let payload = params.get("payload").ok_or((
+                error_code::INVALID_PARAMS,
+                "missing 'payload' object".to_string(),
+            ))?;
+            if payload.as_object().is_none() {
+                return Err((
+                    error_code::INVALID_PARAMS,
+                    "'payload' must be a JSON object".to_string(),
+                ));
+            }
+            let payload_json = payload.to_string_compact();
+            let reply_str = tokio_rt
+                .block_on(async {
+                    let mut guard = client.lock().expect("client poisoned");
+                    guard.create_row(collection, &payload_json).await
+                })
+                .map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
+            // `create_row()` returns "id: N, entity: {..}". We normalize
+            // to the canonical stdio shape.
+            let id = reply_str
+                .split_once("id: ")
+                .and_then(|(_, rest)| rest.split_once(','))
+                .map(|(id, _)| id.trim().to_string());
+            let mut out = json::Map::new();
+            out.insert("affected".to_string(), Value::Number(1.0));
+            if let Some(id) = id {
+                out.insert("id".to_string(), Value::String(id));
+            }
+            Ok(Value::Object(out))
+        }
+
+        "bulk_insert" => {
+            let collection = params.get("collection").and_then(Value::as_str).ok_or((
+                error_code::INVALID_PARAMS,
+                "missing 'collection' string".to_string(),
+            ))?;
+            let payloads = params.get("payloads").and_then(Value::as_array).ok_or((
+                error_code::INVALID_PARAMS,
+                "missing 'payloads' array".to_string(),
+            ))?;
+            let mut total: u64 = 0;
+            for entry in payloads {
+                if entry.as_object().is_none() {
+                    return Err((
+                        error_code::INVALID_PARAMS,
+                        "each payload must be a JSON object".to_string(),
+                    ));
+                }
+                let payload_json = entry.to_string_compact();
+                tokio_rt
+                    .block_on(async {
+                        let mut guard = client.lock().expect("client poisoned");
+                        guard.create_row(collection, &payload_json).await
+                    })
+                    .map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
+                total += 1;
+            }
+            Ok(Value::Object(
+                [("affected".to_string(), Value::Number(total as f64))]
+                    .into_iter()
+                    .collect(),
+            ))
+        }
+
+        "get" => {
+            let collection = params.get("collection").and_then(Value::as_str).ok_or((
+                error_code::INVALID_PARAMS,
+                "missing 'collection' string".to_string(),
+            ))?;
+            let id = params.get("id").and_then(Value::as_str).ok_or((
+                error_code::INVALID_PARAMS,
+                "missing 'id' string".to_string(),
+            ))?;
+            let sql = format!("SELECT * FROM {collection} WHERE _entity_id = {id} LIMIT 1");
+            let json_str = tokio_rt
+                .block_on(async {
+                    let mut guard = client.lock().expect("client poisoned");
+                    guard.query(&sql).await
+                })
+                .map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
+            let parsed = json::from_str::<Value>(&json_str)
+                .map_err(|e| (error_code::INTERNAL_ERROR, format!("bad server JSON: {e}")))?;
+            // Server response shape: {"rows":[{...}], ...}. Extract
+            // the first row (if any) as `entity`.
+            let entity = parsed
+                .get("rows")
+                .and_then(Value::as_array)
+                .and_then(|rows| rows.first().cloned())
+                .unwrap_or(Value::Null);
+            Ok(Value::Object(
+                [("entity".to_string(), entity)].into_iter().collect(),
+            ))
+        }
+
+        "delete" => {
+            let collection = params.get("collection").and_then(Value::as_str).ok_or((
+                error_code::INVALID_PARAMS,
+                "missing 'collection' string".to_string(),
+            ))?;
+            let id = params.get("id").and_then(Value::as_str).ok_or((
+                error_code::INVALID_PARAMS,
+                "missing 'id' string".to_string(),
+            ))?;
+            let sql = format!("DELETE FROM {collection} WHERE _entity_id = {id}");
+            let json_str = tokio_rt
+                .block_on(async {
+                    let mut guard = client.lock().expect("client poisoned");
+                    guard.query(&sql).await
+                })
+                .map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
+            let parsed = json::from_str::<Value>(&json_str)
+                .map_err(|e| (error_code::INTERNAL_ERROR, format!("bad server JSON: {e}")))?;
+            let affected = parsed
+                .get("affected")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+            Ok(Value::Object(
+                [("affected".to_string(), Value::Number(affected))]
+                    .into_iter()
+                    .collect(),
+            ))
+        }
+
+        "close" => Ok(Value::Null),
+
+        other => Err((
+            error_code::INVALID_REQUEST,
+            format!("unknown method: {other}"),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,11 +685,15 @@ mod tests {
         RedDBRuntime::in_memory().expect("in-memory runtime")
     }
 
+    fn handle(rt: &RedDBRuntime, line: &str) -> String {
+        handle_line(&Backend::Local(rt), line)
+    }
+
     #[test]
     fn version_method_returns_version_and_protocol() {
         let rt = make_runtime();
         let line = r#"{"jsonrpc":"2.0","id":1,"method":"version","params":{}}"#;
-        let resp = handle_line(&rt, line);
+        let resp = handle(&rt, line);
         assert!(resp.contains("\"id\":1"));
         assert!(resp.contains("\"protocol\":\"1.0\""));
         assert!(resp.contains("\"version\""));
@@ -438,7 +702,7 @@ mod tests {
     #[test]
     fn health_method_returns_ok_true() {
         let rt = make_runtime();
-        let resp = handle_line(
+        let resp = handle(
             &rt,
             r#"{"jsonrpc":"2.0","id":"abc","method":"health","params":{}}"#,
         );
@@ -449,7 +713,7 @@ mod tests {
     #[test]
     fn parse_error_for_invalid_json() {
         let rt = make_runtime();
-        let resp = handle_line(&rt, "not json {");
+        let resp = handle(&rt, "not json {");
         assert!(resp.contains("\"code\":\"PARSE_ERROR\""));
         assert!(resp.contains("\"id\":null"));
     }
@@ -457,14 +721,14 @@ mod tests {
     #[test]
     fn invalid_request_when_method_missing() {
         let rt = make_runtime();
-        let resp = handle_line(&rt, r#"{"jsonrpc":"2.0","id":1,"params":{}}"#);
+        let resp = handle(&rt, r#"{"jsonrpc":"2.0","id":1,"params":{}}"#);
         assert!(resp.contains("\"code\":\"INVALID_REQUEST\""));
     }
 
     #[test]
     fn unknown_method_is_invalid_request() {
         let rt = make_runtime();
-        let resp = handle_line(
+        let resp = handle(
             &rt,
             r#"{"jsonrpc":"2.0","id":1,"method":"frobnicate","params":{}}"#,
         );
@@ -475,7 +739,7 @@ mod tests {
     #[test]
     fn invalid_params_when_query_sql_missing() {
         let rt = make_runtime();
-        let resp = handle_line(
+        let resp = handle(
             &rt,
             r#"{"jsonrpc":"2.0","id":1,"method":"query","params":{}}"#,
         );
@@ -485,7 +749,7 @@ mod tests {
     #[test]
     fn close_method_marks_response_for_shutdown() {
         let rt = make_runtime();
-        let resp = handle_line(
+        let resp = handle(
             &rt,
             r#"{"jsonrpc":"2.0","id":1,"method":"close","params":{}}"#,
         );
@@ -495,7 +759,7 @@ mod tests {
     #[test]
     fn query_select_one_returns_rows() {
         let rt = make_runtime();
-        let resp = handle_line(
+        let resp = handle(
             &rt,
             r#"{"jsonrpc":"2.0","id":1,"method":"query","params":{"sql":"SELECT 1 AS one"}}"#,
         );
