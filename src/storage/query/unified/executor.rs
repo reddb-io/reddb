@@ -932,7 +932,9 @@ impl UnifiedExecutor {
         visited.insert(start.to_string());
 
         while let Some(current_path) = queue.pop_front() {
-            let current_node = current_path.nodes.last().unwrap();
+            let Some(current_node) = current_path.nodes.last() else {
+                continue;
+            };
 
             // Check if we've reached a target
             if targets.contains(current_node) && !current_path.is_empty() {
