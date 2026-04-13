@@ -1,0 +1,58 @@
+{{- include "reddb.validateMode" . -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "reddb.primary.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "reddb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: primary
+  {{- with .Values.primary.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.primary.service.type }}
+  ports:
+    - name: grpc
+      port: {{ .Values.primary.service.grpcPort }}
+      targetPort: grpc
+      protocol: TCP
+      appProtocol: grpc
+      {{- if and (eq .Values.primary.service.type "NodePort") (.Values.primary.service.grpcNodePort) }}
+      nodePort: {{ .Values.primary.service.grpcNodePort }}
+      {{- end }}
+    - name: http
+      port: {{ .Values.primary.service.httpPort }}
+      targetPort: http
+      protocol: TCP
+      appProtocol: http
+      {{- if and (eq .Values.primary.service.type "NodePort") (.Values.primary.service.httpNodePort) }}
+      nodePort: {{ .Values.primary.service.httpNodePort }}
+      {{- end }}
+  selector:
+    {{- include "reddb.primary.selectorLabels" . | nindent 4 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "reddb.primary.headless" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "reddb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: primary
+spec:
+  type: ClusterIP
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: grpc
+      protocol: TCP
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "reddb.primary.selectorLabels" . | nindent 4 }}
