@@ -492,8 +492,15 @@ impl IndexStore {
     }
 
     /// Lookup entity IDs via hash index for a collection.column = value
-    pub fn hash_lookup(&self, collection: &str, index_name: &str, key: &[u8]) -> Vec<EntityId> {
-        self.hash.lookup(collection, index_name, key)
+    pub fn hash_lookup(
+        &self,
+        collection: &str,
+        index_name: &str,
+        key: &[u8],
+    ) -> Result<Vec<EntityId>, String> {
+        self.hash
+            .lookup(collection, index_name, key)
+            .map_err(|err| err.to_string())
     }
 
     /// Lookup entity IDs via bitmap index for a collection.column = value
