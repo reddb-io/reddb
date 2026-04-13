@@ -120,7 +120,7 @@ fn test_parse_select_any_with_alias_where_order_limit() {
         assert_eq!(tq.alias.as_deref(), Some("u"));
         assert!(tq.filter.is_some());
         assert_eq!(tq.order_by.len(), 1);
-        assert_eq!(tq.order_by[0].ascending, false);
+        assert!(!tq.order_by[0].ascending);
         assert_eq!(tq.limit, Some(10));
     } else {
         panic!("Expected TableQuery");
@@ -186,7 +186,7 @@ fn test_parse_select_all_with_where() {
 }
 
 #[test]
-fn test_parse_select_ALL_keyword_with_where() {
+fn test_parse_select_all_keyword_with_where() {
     let query = parse("SELECT * FROM ALL WHERE _entity_type = 'vector'").unwrap();
     if let QueryExpr::Table(tq) = query {
         assert_eq!(tq.table, "all");
@@ -450,7 +450,7 @@ fn test_parse_join_with_universal_right_alias() {
 }
 
 #[test]
-fn test_parse_join_with_ALL_keyword() {
+fn test_parse_join_with_all_keyword() {
     let query = parse(
         "FROM docs d JOIN ALL a ON d.id = a._entity_id WHERE a._entity_type = 'vector' LIMIT 2",
     )
