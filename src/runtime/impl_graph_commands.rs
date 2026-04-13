@@ -583,7 +583,7 @@ impl RedDBRuntime {
                         }
                     }
                 }
-                hits.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+                hits.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
                 hits.truncate(*limit);
 
                 let mut result =
@@ -668,7 +668,7 @@ impl RedDBRuntime {
                         hits.push((entity.id.raw(), dist));
                     }
                 }
-                hits.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+                hits.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
                 hits.truncate(*k);
 
                 let mut result =
