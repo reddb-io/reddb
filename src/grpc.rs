@@ -37,6 +37,7 @@ use crate::storage::schema::Value;
 use crate::storage::unified::devx::refs::{NodeRef, TableRef};
 use crate::storage::unified::{Metadata, MetadataValue};
 use crate::storage::{EntityData, EntityId, UnifiedEntity};
+use tokio_stream::wrappers::TcpListenerStream;
 use tonic::metadata::MetadataMap;
 use tonic::{Request, Response, Status};
 
@@ -156,6 +157,27 @@ impl RedDBGrpcServer {
                 .max_encoding_message_size(256 * 1024 * 1024),
             )
             .serve(addr)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn serve_on(
+        &self,
+        listener: std::net::TcpListener,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        listener.set_nonblocking(true)?;
+        let listener = tokio::net::TcpListener::from_std(listener)?;
+        let incoming = TcpListenerStream::new(listener);
+        tonic::transport::Server::builder()
+            .add_service(
+                RedDbServer::new(GrpcRuntime {
+                    runtime: self.runtime.clone(),
+                    auth_store: self.auth_store.clone(),
+                })
+                .max_decoding_message_size(256 * 1024 * 1024)
+                .max_encoding_message_size(256 * 1024 * 1024),
+            )
+            .serve_with_incoming(incoming)
             .await?;
         Ok(())
     }
