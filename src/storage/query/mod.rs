@@ -65,11 +65,12 @@ pub(crate) mod value_compare;
 
 // Re-export common types
 pub use ast::{
-    AlterOperation, AlterTableQuery, CompareOp, CreateColumnDef, CreateTableQuery, CteDefinition,
-    CteQueryBuilder, DeleteQuery, DropTableQuery, EdgeDirection, EdgePattern, FieldRef,
-    Filter as AstFilter, GraphCommand, GraphPattern, GraphQuery, InsertEntityType, InsertQuery,
-    JoinCondition, JoinQuery, JoinType, NodePattern, NodeSelector, OrderByClause, PathQuery,
-    Projection, QueryExpr, QueryWithCte, SearchCommand, TableQuery, UpdateQuery, WithClause,
+    AlterOperation, AlterTableQuery, CompareOp, CreateColumnDef, CreateTableQuery,
+    CreateTimeSeriesQuery, CteDefinition, CteQueryBuilder, DeleteQuery, DropTableQuery,
+    DropTimeSeriesQuery, EdgeDirection, EdgePattern, FieldRef, Filter as AstFilter, GraphCommand,
+    GraphPattern, GraphQuery, InsertEntityType, InsertQuery, JoinCondition, JoinQuery, JoinType,
+    NodePattern, NodeSelector, OrderByClause, PathQuery, Projection, QueryExpr, QueryWithCte,
+    SearchCommand, TableQuery, UpdateQuery, WithClause,
 };
 pub use engine::{
     Binding, BindingBuilder, BindingIterator, Op, OpBGP, OpDisjunction, OpDistinct, OpExtend,
