@@ -204,7 +204,8 @@ fn normalize_row_fields_for_contract_with_mode(
         .collect();
     let unknown_fields: Vec<String> = fields
         .iter()
-        .filter_map(|(name, _)| (!declared_names.contains(name)).then(|| name.clone()))
+        .filter(|(name, _)| !declared_names.contains(name))
+        .map(|(name, _)| name.clone())
         .collect();
     if matches!(contract.schema_mode, crate::catalog::SchemaMode::Strict)
         && !unknown_fields.is_empty()
