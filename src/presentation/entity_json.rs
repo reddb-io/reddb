@@ -293,6 +293,7 @@ fn entity_type(entity: &UnifiedEntity) -> &'static str {
         (EntityKind::GraphNode(_), EntityData::Node(_)) => "graph_node",
         (EntityKind::GraphEdge(_), EntityData::Edge(_)) => "graph_edge",
         (EntityKind::Vector { .. }, EntityData::Vector(_)) => "vector",
+        (EntityKind::TimeSeriesPoint(_), EntityData::TimeSeries(_)) => "timeseries",
         _ => "unknown",
     }
 }
@@ -325,6 +326,12 @@ fn entity_capabilities(entity: &UnifiedEntity) -> Vec<String> {
             "vector".to_string(),
             "similarity".to_string(),
             "embedding".to_string(),
+        ]),
+        (EntityKind::TimeSeriesPoint(_), EntityData::TimeSeries(_)) => BTreeSet::from([
+            "document".to_string(),
+            "timeseries".to_string(),
+            "metric".to_string(),
+            "temporal".to_string(),
         ]),
         _ => BTreeSet::new(),
     };
