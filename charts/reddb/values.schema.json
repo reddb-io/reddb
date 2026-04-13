@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RedDB Helm chart values",
+  "type": "object",
+  "required": ["mode", "image", "primary", "replica"],
+  "properties": {
+    "mode": {
+      "type": "string",
+      "enum": ["standalone", "primary-replica"],
+      "description": "Deployment topology"
+    },
+    "nameOverride": { "type": "string" },
+    "fullnameOverride": { "type": "string" },
+    "image": {
+      "type": "object",
+      "required": ["repository"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string" },
+        "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] },
+        "pullSecrets": { "type": "array" }
+      }
+    },
+    "auth": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "username": { "type": "string" },
+        "password": { "type": "string" },
+        "existingSecret": { "type": "string" }
+      }
+    },
+    "config": {
+      "type": "object",
+      "properties": {
+        "logLevel": { "type": "string" },
+        "vault": { "type": "boolean" },
+        "extraEnv": { "type": "array" },
+        "extraArgs": { "type": "array" }
+      }
+    },
+    "serviceAccount": { "type": "object" },
+    "podAnnotations": { "type": "object" },
+    "podLabels": { "type": "object" },
+    "podSecurityContext": { "type": "object" },
+    "securityContext": { "type": "object" },
+    "primary": {
+      "type": "object",
+      "required": ["resources", "persistence", "service"],
+      "properties": {
+        "replicaCount": { "type": "integer", "const": 1 },
+        "resources": { "type": "object" },
+        "persistence": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "storageClass": { "type": "string" },
+            "accessModes": { "type": "array", "items": { "type": "string" } },
+            "size": { "type": "string" },
+            "annotations": { "type": "object" }
+          }
+        },
+        "service": {
+          "type": "object",
+          "properties": {
+            "type": { "type": "string", "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
+            "annotations": { "type": "object" },
+            "grpcPort": { "type": "integer" },
+            "httpPort": { "type": "integer" },
+            "grpcNodePort": { "type": ["integer", "string"] },
+            "httpNodePort": { "type": ["integer", "string"] }
+          }
+        },
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
+        "affinity": { "type": "object" },
+        "topologySpreadConstraints": { "type": "array" },
+        "priorityClassName": { "type": "string" },
+        "terminationGracePeriodSeconds": { "type": "integer", "minimum": 0 },
+        "updateStrategy": { "type": "object" }
+      }
+    },
+    "replica": {
+      "type": "object",
+      "required": ["replicaCount", "resources", "persistence", "service"],
+      "properties": {
+        "replicaCount": { "type": "integer", "minimum": 0 },
+        "resources": { "type": "object" },
+        "persistence": { "type": "object" },
+        "service": { "type": "object" },
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
+        "affinity": { "type": "object" },
+        "topologySpreadConstraints": { "type": "array" },
+        "priorityClassName": { "type": "string" },
+        "terminationGracePeriodSeconds": { "type": "integer", "minimum": 0 },
+        "updateStrategy": { "type": "object" }
+      }
+    },
+    "probes": { "type": "object" },
+    "pdb": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "minAvailable": { "type": ["integer", "string"] },
+        "maxUnavailable": { "type": ["integer", "string"] }
+      }
+    },
+    "networkPolicy": { "type": "object" },
+    "ingress": { "type": "object" },
+    "metrics": { "type": "object" }
+  }
+}
