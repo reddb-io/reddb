@@ -596,8 +596,8 @@ impl RedDBServer {
             ("POST", "/graph/jobs/fail") => self.handle_analytics_job_fail(body),
             _ => {
                 // Log dynamic routes: /logs/{name}/append, /logs/{name}/query, /logs/{name}/retention
-                if path.starts_with("/logs/") {
-                    let parts: Vec<&str> = path[6..].split('/').collect();
+                if let Some(rest) = path.strip_prefix("/logs/") {
+                    let parts: Vec<&str> = rest.split('/').collect();
                     if parts.len() >= 2 {
                         let log_name = parts[0];
                         let action = parts[1];
@@ -617,8 +617,8 @@ impl RedDBServer {
                 }
 
                 // EC dynamic routes: /ec/{collection}/{field}/{action}
-                if path.starts_with("/ec/") {
-                    let parts: Vec<&str> = path[4..].split('/').collect();
+                if let Some(rest) = path.strip_prefix("/ec/") {
+                    let parts: Vec<&str> = rest.split('/').collect();
                     if parts.len() >= 3 {
                         let ec_collection = parts[0];
                         let ec_field = parts[1];
