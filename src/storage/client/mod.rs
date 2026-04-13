@@ -670,6 +670,6 @@ mod tests {
 
     #[test]
     fn test_dummy() {
-        assert!(true);
+        let _guard = CLIENT_TEST_LOCK.lock().expect("client test lock");
     }
 }
