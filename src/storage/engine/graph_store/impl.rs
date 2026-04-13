@@ -13,6 +13,7 @@ impl GraphStore {
         Self {
             node_index: ShardedIndex::new(SHARD_COUNT),
             edge_index: EdgeIndex::new(SHARD_COUNT),
+            node_secondary: NodeSecondaryIndex::new(8192),
             node_pages: RwLock::new(vec![initial_node_page]),
             edge_pages: RwLock::new(vec![initial_edge_page]),
             current_node_page: AtomicU32::new(0),
@@ -60,16 +61,11 @@ impl GraphStore {
         let page = &mut pages[current_page_id as usize];
 
         // Try to insert into current page
-        match page.insert_cell(id.as_bytes(), &encoded) {
-            Ok(slot) => {
-                let location = RecordLocation {
-                    page_id: current_page_id,
-                    slot: slot as u16,
-                };
-                self.node_index.insert(id.to_string(), location);
-                self.node_count.fetch_add(1, Ordering::Relaxed);
-                Ok(location)
-            }
+        let location = match page.insert_cell(id.as_bytes(), &encoded) {
+            Ok(slot) => RecordLocation {
+                page_id: current_page_id,
+                slot: slot as u16,
+            },
             Err(_) => {
                 // Page full, allocate new page
                 let new_page_id = pages.len() as u32;
@@ -82,15 +78,17 @@ impl GraphStore {
                 pages.push(new_page);
                 self.current_node_page.store(new_page_id, Ordering::Release);
 
-                let location = RecordLocation {
+                RecordLocation {
                     page_id: new_page_id,
                     slot: slot as u16,
-                };
-                self.node_index.insert(id.to_string(), location);
-                self.node_count.fetch_add(1, Ordering::Relaxed);
-                Ok(location)
+                }
             }
-        }
+        };
+
+        self.node_index.insert(id.to_string(), location);
+        self.node_secondary.insert(id, node_type, label);
+        self.node_count.fetch_add(1, Ordering::Relaxed);
+        Ok(location)
     }
 
     /// Add a node linked to a table row (for unified queries)
@@ -132,16 +130,11 @@ impl GraphStore {
         let page = &mut pages[current_page_id as usize];
 
         // Try to insert into current page
-        match page.insert_cell(id.as_bytes(), &encoded) {
-            Ok(slot) => {
-                let location = RecordLocation {
-                    page_id: current_page_id,
-                    slot: slot as u16,
-                };
-                self.node_index.insert(id.to_string(), location);
-                self.node_count.fetch_add(1, Ordering::Relaxed);
-                Ok(location)
-            }
+        let location = match page.insert_cell(id.as_bytes(), &encoded) {
+            Ok(slot) => RecordLocation {
+                page_id: current_page_id,
+                slot: slot as u16,
+            },
             Err(_) => {
                 // Page full, allocate new page
                 let new_page_id = pages.len() as u32;
@@ -154,15 +147,17 @@ impl GraphStore {
                 pages.push(new_page);
                 self.current_node_page.store(new_page_id, Ordering::Release);
 
-                let location = RecordLocation {
+                RecordLocation {
                     page_id: new_page_id,
                     slot: slot as u16,
-                };
-                self.node_index.insert(id.to_string(), location);
-                self.node_count.fetch_add(1, Ordering::Relaxed);
-                Ok(location)
+                }
             }
-        }
+        };
+
+        self.node_index.insert(id.to_string(), location);
+        self.node_secondary.insert(id, node_type, label);
+        self.node_count.fetch_add(1, Ordering::Relaxed);
+        Ok(location)
     }
 
     /// Get table reference for a node (if linked)
@@ -326,11 +321,39 @@ impl GraphStore {
         edges
     }
 
-    /// Get nodes of a specific type
+    /// Get nodes of a specific type.
+    ///
+    /// Uses the secondary index to avoid a full page scan: O(k) where k is
+    /// the bucket size, plus one node fetch per id.
     pub fn nodes_of_type(&self, node_type: GraphNodeType) -> Vec<StoredNode> {
-        self.iter_nodes()
-            .filter(|n| n.node_type == node_type)
+        self.node_secondary
+            .nodes_by_type(node_type)
+            .into_iter()
+            .filter_map(|id| self.get_node(&id))
             .collect()
+    }
+
+    /// Get nodes with a given label. Backed by the secondary inverted index
+    /// (`label → node_id set`) with a bloom-filter pre-check for absent
+    /// labels.
+    pub fn nodes_by_label(&self, label: &str) -> Vec<StoredNode> {
+        self.node_secondary
+            .nodes_by_label(label)
+            .into_iter()
+            .filter_map(|id| self.get_node(&id))
+            .collect()
+    }
+
+    /// Returns `true` iff the label is *possibly* present. Bloom-backed
+    /// fast path for planners that want to skip a traversal without paying
+    /// the set lookup cost.
+    pub fn may_contain_label(&self, label: &str) -> bool {
+        self.node_secondary.may_contain_label(label)
+    }
+
+    /// Read-only handle to the secondary index (for planner/diagnostics).
+    pub fn node_secondary_index(&self) -> &NodeSecondaryIndex {
+        &self.node_secondary
     }
 
     /// Get statistics
@@ -451,6 +474,7 @@ impl GraphStore {
         let store = Self {
             node_index: ShardedIndex::new(16),
             edge_index: EdgeIndex::new(16),
+            node_secondary: NodeSecondaryIndex::new(8192),
             node_pages: RwLock::new(node_pages),
             edge_pages: RwLock::new(edge_pages),
             current_node_page: AtomicU32::new(0),
@@ -467,7 +491,8 @@ impl GraphStore {
 
     /// Rebuild indexes from pages (used after deserialization)
     fn rebuild_indexes(&self) -> Result<(), GraphStoreError> {
-        // Rebuild node index
+        // Rebuild node + secondary index
+        self.node_secondary.clear();
         if let Ok(pages) = self.node_pages.read() {
             for (page_idx, page) in pages.iter().enumerate() {
                 let cell_count = page.cell_count() as usize;
@@ -475,12 +500,17 @@ impl GraphStore {
                     if let Ok((key, value)) = page.read_cell(cell_idx) {
                         let id = String::from_utf8_lossy(&key).to_string();
                         self.node_index.insert(
-                            id,
+                            id.clone(),
                             RecordLocation {
                                 page_id: page_idx as u32,
                                 slot: cell_idx as u16,
                             },
                         );
+                        if let Some(node) =
+                            StoredNode::decode(&value, page_idx as u32, cell_idx as u16)
+                        {
+                            self.node_secondary.insert(&id, node.node_type, &node.label);
+                        }
                     }
                 }
             }
