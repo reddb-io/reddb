@@ -477,6 +477,13 @@ pub struct EmbeddingSlot {
     pub generated_at: u64,
 }
 
+fn current_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 impl EmbeddingSlot {
     /// Create a new embedding slot
     pub fn new(name: impl Into<String>, vector: Vec<f32>, model: impl Into<String>) -> Self {
@@ -486,10 +493,7 @@ impl EmbeddingSlot {
             vector,
             model: model.into(),
             dimension,
-            generated_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            generated_at: current_unix_secs(),
         }
     }
 }
@@ -559,10 +563,7 @@ impl UnifiedEntity {
 impl UnifiedEntity {
     /// Create a new unified entity
     pub fn new(id: EntityId, kind: EntityKind, data: EntityData) -> Self {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = current_unix_secs();
 
         Self {
             id,
@@ -660,18 +661,12 @@ impl UnifiedEntity {
 
     /// Update timestamp
     fn touch(&mut self) {
-        self.updated_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        self.updated_at = current_unix_secs();
     }
 
     /// Check if entity is stale (not updated in given seconds)
     pub fn is_stale(&self, max_age_secs: u64) -> bool {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = current_unix_secs();
         now.saturating_sub(self.updated_at) > max_age_secs
     }
 }
@@ -707,10 +702,7 @@ impl CrossRef {
             target_collection: target_collection.into(),
             ref_type,
             weight: 1.0,
-            created_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            created_at: current_unix_secs(),
         }
     }
 
