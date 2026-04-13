@@ -409,10 +409,24 @@ fn main() {
         "rpc" => {
             let stdio = result.flags.get("stdio").is_some_and(|v| v.is_truthy());
             if !stdio {
-                eprintln!("Usage: red rpc --stdio [--path file]");
+                eprintln!("Usage: red rpc --stdio [--path file | --connect grpc://host:port]");
                 eprintln!("Only --stdio mode is currently implemented.");
                 std::process::exit(1);
             }
+            // Remote mode: --connect grpc://host:port forwards every
+            // JSON-RPC call via tonic. No local engine is opened.
+            if let Some(connect) = flag_string(&result.flags, "connect") {
+                if !connect.is_empty() {
+                    let token = flag_string(&result.flags, "token").filter(|s| !s.is_empty());
+                    let endpoint = connect
+                        .strip_prefix("grpc://")
+                        .map(|rest| format!("http://{rest}"))
+                        .unwrap_or_else(|| connect.clone());
+                    let code = reddb::rpc_stdio::run_remote(&endpoint, token);
+                    std::process::exit(code);
+                }
+            }
+            // Local mode: open the engine in-process (path or memory).
             let rt = open_local_runtime(&result.flags).unwrap_or_else(|err| {
                 eprintln!("rpc: {err}");
                 std::process::exit(1);
@@ -1079,6 +1093,12 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                 cli::types::FlagSchema::new("path")
                     .with_short('d')
                     .with_description("Persistent database file path (omit for in-memory)"),
+                cli::types::FlagSchema::new("connect")
+                    .with_short('c')
+                    .with_description("Proxy to a remote gRPC server (e.g. grpc://host:50051)"),
+                cli::types::FlagSchema::new("token")
+                    .with_short('t')
+                    .with_description("Auth token forwarded to the remote server"),
             ]);
         }
         Some("connect") => {
