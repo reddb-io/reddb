@@ -344,9 +344,10 @@ fn main() {
                         json_ok(
                             "service.install",
                             &format!(
-                                "{{\"unit\":\"{}\",\"path\":\"{}\",\"grpc_bind\":{},\"http_bind\":{}}}",
+                                "{{\"unit\":\"{}\",\"path\":\"{}\",\"router_bind\":{},\"grpc_bind\":{},\"http_bind\":{}}}",
                                 json_escape(&unit_name),
                                 json_escape(&config.unit_path().display().to_string()),
+                                json_optional_string(config.router_bind_addr.as_deref()),
                                 json_optional_string(config.grpc_bind_addr.as_deref()),
                                 json_optional_string(config.http_bind_addr.as_deref())
                             ),
@@ -373,7 +374,7 @@ fn main() {
                     }
                 }
                 _ => {
-                    let help = "Usage: red service <install|print-unit> [flags]\n\nExamples:\n  sudo red service install --binary /usr/local/bin/red --grpc-bind 0.0.0.0:50051 --http-bind 0.0.0.0:8080 --path /var/lib/reddb/data.rdb\n  red service print-unit --http --path /var/lib/reddb/data.rdb --bind 127.0.0.1:8080\n";
+                    let help = "Usage: red service <install|print-unit> [flags]\n\nExamples:\n  sudo red service install --binary /usr/local/bin/red --bind 0.0.0.0:5050 --path /var/lib/reddb/data.rdb\n  red service print-unit --http --path /var/lib/reddb/data.rdb --bind 127.0.0.1:8080\n";
                     if json_mode {
                         json_ok("service", "{\"subcommands\":[\"install\",\"print-unit\"]}");
                     } else {
@@ -601,6 +602,8 @@ fn main() {
 
         "health" => {
             let json_mode = wants_json(&result.flags);
+            let explicit_transport =
+                result.flags.contains_key("grpc") || result.flags.contains_key("http");
             let transport = select_transport(&result.flags).unwrap_or_else(|err| {
                 if json_mode {
                     json_error("health", &err);
@@ -608,8 +611,18 @@ fn main() {
                 eprintln!("error: {err}");
                 std::process::exit(1);
             });
-            let bind_addr = flag_string(&result.flags, "bind")
-                .unwrap_or_else(|| transport.default_bind_addr().to_string());
+            let bind_addr = flag_string(&result.flags, "bind").unwrap_or_else(|| {
+                if explicit_transport {
+                    transport.default_bind_addr().to_string()
+                } else {
+                    reddb::service_cli::DEFAULT_ROUTER_BIND_ADDR.to_string()
+                }
+            });
+            let transport_label = if explicit_transport {
+                transport.as_str()
+            } else {
+                "router"
+            };
             let ok = probe_listener(&bind_addr, Duration::from_secs(1));
             if json_mode {
                 json_ok(
@@ -617,7 +630,7 @@ fn main() {
                     &format!(
                         "{{\"healthy\":{},\"transport\":\"{}\",\"address\":\"{}\"}}",
                         ok,
-                        json_escape(transport.as_str()),
+                        json_escape(transport_label),
                         json_escape(&bind_addr)
                     ),
                 );
@@ -625,9 +638,9 @@ fn main() {
                     std::process::exit(1);
                 }
             } else if ok {
-                println!("ok {} {}", transport.as_str(), bind_addr);
+                println!("ok {} {}", transport_label, bind_addr);
             } else {
-                eprintln!("unreachable {} {}", transport.as_str(), bind_addr);
+                eprintln!("unreachable {} {}", transport_label, bind_addr);
                 std::process::exit(1);
             }
         }
@@ -912,7 +925,7 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                     .with_default("./data/reddb.rdb"),
                 cli::types::FlagSchema::new("bind")
                     .with_short('b')
-                    .with_description("Bind address (host:port) for legacy single-transport mode"),
+                    .with_description("Bind address (host:port) for the default routed front-door or legacy single-transport mode"),
                 cli::types::FlagSchema::boolean("grpc").with_description("Enable the gRPC API"),
                 cli::types::FlagSchema::boolean("http").with_description("Serve the HTTP API"),
                 cli::types::FlagSchema::new("grpc-bind")
@@ -953,7 +966,7 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                     .with_default("./data/reddb.rdb"),
                 cli::types::FlagSchema::new("bind")
                     .with_short('b')
-                    .with_description("Bind address (host:port) for legacy single-transport mode"),
+                    .with_description("Bind address (host:port) for the default routed front-door or legacy single-transport mode"),
                 cli::types::FlagSchema::new("primary-addr")
                     .with_short('p')
                     .with_description("Primary gRPC address for replication"),
@@ -989,7 +1002,7 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                     .with_default("/var/lib/reddb/data.rdb"),
                 cli::types::FlagSchema::new("bind")
                     .with_short('b')
-                    .with_description("Bind address (host:port) for legacy single-transport mode"),
+                    .with_description("Bind address (host:port) for the default routed front-door or legacy single-transport mode"),
                 cli::types::FlagSchema::boolean("grpc")
                     .with_description("Enable the gRPC API in the service"),
                 cli::types::FlagSchema::boolean("http").with_description("Install an HTTP service"),
@@ -1024,7 +1037,7 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
             flags.extend(vec![
                 cli::types::FlagSchema::new("bind")
                     .with_short('b')
-                    .with_description("Server bind address; defaults by transport"),
+                    .with_description("Server bind address; defaults to the router on 127.0.0.1:5050 when no transport is selected"),
                 cli::types::FlagSchema::boolean("grpc")
                     .with_description("Probe a gRPC listener (default transport)"),
                 cli::types::FlagSchema::boolean("http").with_description("Probe an HTTP listener"),
@@ -1089,7 +1102,33 @@ fn build_server_config(
     flags: &HashMap<String, FlagValue>,
     forced_role: Option<&str>,
 ) -> Result<ServerCommandConfig, String> {
-    let (grpc_bind_addr, http_bind_addr) = resolve_server_binds(flags)?;
+    let grpc_flag = flag_bool(flags, "grpc");
+    let http_flag = flag_bool(flags, "http");
+    let legacy_bind = flag_string(flags, "bind").filter(|value| !value.is_empty());
+    let wire_bind_addr = flag_string(flags, "wire-bind").filter(|v| !v.is_empty());
+    let wire_tls_bind_addr = flag_string(flags, "wire-tls-bind").filter(|v| !v.is_empty());
+    let explicit_grpc_bind = flag_string(flags, "grpc-bind").filter(|value| !value.is_empty());
+    let explicit_http_bind = flag_string(flags, "http-bind").filter(|value| !value.is_empty());
+    let router_bind_addr = if explicit_grpc_bind.is_none()
+        && explicit_http_bind.is_none()
+        && wire_bind_addr.is_none()
+        && wire_tls_bind_addr.is_none()
+        && !grpc_flag
+        && !http_flag
+    {
+        Some(
+            legacy_bind
+                .clone()
+                .unwrap_or_else(|| reddb::service_cli::DEFAULT_ROUTER_BIND_ADDR.to_string()),
+        )
+    } else {
+        None
+    };
+    let (grpc_bind_addr, http_bind_addr) = if router_bind_addr.is_some() {
+        (None, None)
+    } else {
+        resolve_server_binds(flags)?
+    };
     let path = flag_string(flags, "path")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
@@ -1100,8 +1139,6 @@ fn build_server_config(
 
     let workers = flag_string(flags, "workers").and_then(|v| v.parse::<usize>().ok());
 
-    let wire_bind_addr = flag_string(flags, "wire-bind").filter(|v| !v.is_empty());
-    let wire_tls_bind_addr = flag_string(flags, "wire-tls-bind").filter(|v| !v.is_empty());
     let wire_tls_cert = flag_string(flags, "wire-tls-cert")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from);
@@ -1111,6 +1148,7 @@ fn build_server_config(
 
     Ok(ServerCommandConfig {
         path,
+        router_bind_addr,
         grpc_bind_addr,
         http_bind_addr,
         wire_bind_addr,
@@ -1129,7 +1167,27 @@ fn build_server_config(
 fn build_systemd_service_config(
     flags: &HashMap<String, FlagValue>,
 ) -> Result<SystemdServiceConfig, String> {
-    let (grpc_bind_addr, http_bind_addr) = resolve_server_binds(flags)?;
+    let grpc_flag = flag_bool(flags, "grpc");
+    let http_flag = flag_bool(flags, "http");
+    let legacy_bind = flag_string(flags, "bind").filter(|value| !value.is_empty());
+    let explicit_grpc_bind = flag_string(flags, "grpc-bind").filter(|value| !value.is_empty());
+    let explicit_http_bind = flag_string(flags, "http-bind").filter(|value| !value.is_empty());
+    let router_bind_addr =
+        if explicit_grpc_bind.is_none() && explicit_http_bind.is_none() && !grpc_flag && !http_flag
+        {
+            Some(
+                legacy_bind
+                    .clone()
+                    .unwrap_or_else(|| reddb::service_cli::DEFAULT_ROUTER_BIND_ADDR.to_string()),
+            )
+        } else {
+            None
+        };
+    let (grpc_bind_addr, http_bind_addr) = if router_bind_addr.is_some() {
+        (None, None)
+    } else {
+        resolve_server_binds(flags)?
+    };
     let binary_path = flag_string(flags, "binary")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
@@ -1151,6 +1209,7 @@ fn build_systemd_service_config(
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "reddb".to_string()),
         data_path,
+        router_bind_addr,
         grpc_bind_addr,
         http_bind_addr,
     })
@@ -1226,10 +1285,12 @@ fn json_optional_string(value: Option<&str>) -> String {
 
 fn server_command_json(command: &str, config: &ServerCommandConfig) -> String {
     format!(
-        "{{\"ok\":true,\"command\":\"{}\",\"data\":{{\"grpc_bind\":{},\"http_bind\":{}}}}}",
+        "{{\"ok\":true,\"command\":\"{}\",\"data\":{{\"router_bind\":{},\"grpc_bind\":{},\"http_bind\":{},\"wire_bind\":{}}}}}",
         json_escape(command),
+        json_optional_string(config.router_bind_addr.as_deref()),
         json_optional_string(config.grpc_bind_addr.as_deref()),
         json_optional_string(config.http_bind_addr.as_deref()),
+        json_optional_string(config.wire_bind_addr.as_deref()),
     )
 }
 
@@ -1372,5 +1433,48 @@ mod tests {
         let (grpc_bind, http_bind) = resolve_server_binds(&flags).unwrap();
         assert_eq!(grpc_bind.as_deref(), Some("0.0.0.0:50051"));
         assert_eq!(http_bind.as_deref(), Some("0.0.0.0:8080"));
+    }
+
+    #[test]
+    fn build_server_config_defaults_to_router_on_5050() {
+        let flags = HashMap::new();
+        let config = build_server_config(&flags, None).unwrap();
+        assert_eq!(
+            config.router_bind_addr.as_deref(),
+            Some(reddb::service_cli::DEFAULT_ROUTER_BIND_ADDR)
+        );
+        assert_eq!(config.grpc_bind_addr, None);
+        assert_eq!(config.http_bind_addr, None);
+        assert_eq!(config.wire_bind_addr, None);
+    }
+
+    #[test]
+    fn build_server_config_maps_legacy_bind_to_router_when_no_transport_is_selected() {
+        let flags = HashMap::from([("bind".to_string(), str_flag("0.0.0.0:5050"))]);
+        let config = build_server_config(&flags, None).unwrap();
+        assert_eq!(config.router_bind_addr.as_deref(), Some("0.0.0.0:5050"));
+        assert_eq!(config.grpc_bind_addr, None);
+        assert_eq!(config.http_bind_addr, None);
+    }
+
+    #[test]
+    fn build_systemd_service_config_defaults_to_router_on_5050() {
+        let flags = HashMap::new();
+        let config = build_systemd_service_config(&flags).unwrap();
+        assert_eq!(
+            config.router_bind_addr.as_deref(),
+            Some(reddb::service_cli::DEFAULT_ROUTER_BIND_ADDR)
+        );
+        assert_eq!(config.grpc_bind_addr, None);
+        assert_eq!(config.http_bind_addr, None);
+    }
+
+    #[test]
+    fn build_systemd_service_config_keeps_explicit_http_bind() {
+        let flags = HashMap::from([("http-bind".to_string(), str_flag("0.0.0.0:8080"))]);
+        let config = build_systemd_service_config(&flags).unwrap();
+        assert_eq!(config.router_bind_addr, None);
+        assert_eq!(config.grpc_bind_addr, None);
+        assert_eq!(config.http_bind_addr.as_deref(), Some("0.0.0.0:8080"));
     }
 }
