@@ -9,7 +9,7 @@ use crate::storage::unified::entity::{EntityData, EntityId, EntityKind, RowData,
 use crate::storage::unified::store::UnifiedStore;
 
 /// Retention policy for log collections.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum LogRetention {
     /// Keep entries for N days, then auto-delete.
     Days(u64),
@@ -18,13 +18,8 @@ pub enum LogRetention {
     /// Keep total size under N bytes (oldest evicted first).
     MaxBytes(u64),
     /// Keep forever (no automatic cleanup).
+    #[default]
     Forever,
-}
-
-impl Default for LogRetention {
-    fn default() -> Self {
-        Self::Forever
-    }
 }
 
 /// Configuration for a log collection.
