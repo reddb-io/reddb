@@ -34,9 +34,7 @@ fn smoke_health_report() {
 fn smoke_catalog_snapshot() {
     let rt = rt();
     let native = NativeUseCases::new(&rt);
-    let report = native.health();
-    // Should have no issues with a fresh empty database
-    assert!(report.issues.is_empty() || true, "minimal issues expected");
+    let _report = native.health();
 }
 
 // ---------------------------------------------------------------------------
