@@ -22,7 +22,16 @@
 //! - Jena `StoreStrategy` for index selection
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+
+fn strategy_read<'a, T>(lock: &'a RwLock<T>) -> RwLockReadGuard<'a, T> {
+    lock.read().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn strategy_write<'a, T>(lock: &'a RwLock<T>) -> RwLockWriteGuard<'a, T> {
+    lock.write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Pattern type for triple queries
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -242,12 +251,12 @@ impl LazyStoreStrategy {
 
     /// Check if index is materialized
     pub fn is_materialized(&self, index: IndexType) -> bool {
-        self.materialized.read().unwrap().contains(&index)
+        strategy_read(&self.materialized).contains(&index)
     }
 
     /// Mark index as materialized
     pub fn mark_materialized(&self, index: IndexType) {
-        let mut mat = self.materialized.write().unwrap();
+        let mut mat = strategy_write(&self.materialized);
         if !mat.contains(&index) {
             mat.push(index);
         }
@@ -407,20 +416,20 @@ impl TripleIndex {
         let (k1, k2, v) = self.order_triple(subject, predicate, object);
         let key = (k1.to_string(), k2.to_string());
 
-        let mut data = self.data.write().unwrap();
+        let mut data = strategy_write(&self.data);
         data.entry(key).or_default().push(v.to_string());
 
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = strategy_write(&self.stats);
         stats.inserts += 1;
         stats.entries += 1;
     }
 
     /// Lookup with prefix
     pub fn lookup(&self, first: &str, second: Option<&str>) -> Vec<(String, String, String)> {
-        let data = self.data.read().unwrap();
+        let data = strategy_read(&self.data);
         let mut results = Vec::new();
 
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = strategy_write(&self.stats);
         stats.lookups += 1;
 
         for ((k1, k2), values) in data.iter() {
@@ -444,10 +453,10 @@ impl TripleIndex {
 
     /// Scan all entries
     pub fn scan(&self) -> Vec<(String, String, String)> {
-        let data = self.data.read().unwrap();
+        let data = strategy_read(&self.data);
         let mut results = Vec::new();
 
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = strategy_write(&self.stats);
         stats.scans += 1;
 
         for ((k1, k2), values) in data.iter() {
@@ -461,7 +470,7 @@ impl TripleIndex {
 
     /// Get statistics
     pub fn stats(&self) -> IndexStats {
-        self.stats.read().unwrap().clone()
+        strategy_read(&self.stats).clone()
     }
 
     /// Order triple according to index type
@@ -528,13 +537,13 @@ impl TripleStore {
     /// Add triple
     pub fn add(&self, subject: &str, predicate: &str, object: &str) {
         if self.strategy.index_on_add() {
-            let indexes = self.indexes.read().unwrap();
+            let indexes = strategy_read(&self.indexes);
             for index in indexes.values() {
                 index.insert(subject, predicate, object);
             }
         } else {
             // Lazy: only update primary index
-            let indexes = self.indexes.read().unwrap();
+            let indexes = strategy_read(&self.indexes);
             if let Some(primary) = indexes.values().next() {
                 primary.insert(subject, predicate, object);
             }
@@ -552,7 +561,7 @@ impl TripleStore {
             PatternType::from_bounds(subject.is_some(), predicate.is_some(), object.is_some());
 
         let index_type = self.strategy.select_index(pattern);
-        let indexes = self.indexes.read().unwrap();
+        let indexes = strategy_read(&self.indexes);
 
         if let Some(index) = indexes.get(&index_type) {
             // Use appropriate lookup based on pattern
@@ -592,7 +601,7 @@ impl TripleStore {
 
     /// Get index statistics
     pub fn index_stats(&self) -> HashMap<IndexType, IndexStats> {
-        let indexes = self.indexes.read().unwrap();
+        let indexes = strategy_read(&self.indexes);
         indexes.iter().map(|(&k, v)| (k, v.stats())).collect()
     }
 }
@@ -690,5 +699,41 @@ mod tests {
     fn test_pattern_selectivity() {
         assert!(PatternType::SubPreObj.selectivity() < PatternType::Sub.selectivity());
         assert!(PatternType::Sub.selectivity() < PatternType::Any.selectivity());
+    }
+
+    #[test]
+    fn test_lazy_strategy_recovers_after_materialized_lock_poisoning() {
+        let strategy = Arc::new(LazyStoreStrategy::new());
+        let poison_target = Arc::clone(&strategy);
+        let _ = std::thread::spawn(move || {
+            let _guard = poison_target
+                .materialized
+                .write()
+                .expect("materialized lock should be acquired");
+            panic!("poison materialized lock");
+        })
+        .join();
+
+        strategy.mark_materialized(IndexType::POS);
+        assert!(strategy.is_materialized(IndexType::POS));
+    }
+
+    #[test]
+    fn test_triple_store_recovers_after_indexes_lock_poisoning() {
+        let store = Arc::new(TripleStore::eager());
+        let poison_target = Arc::clone(&store);
+        let _ = std::thread::spawn(move || {
+            let _guard = poison_target
+                .indexes
+                .write()
+                .expect("indexes lock should be acquired");
+            panic!("poison indexes lock");
+        })
+        .join();
+
+        store.add("alice", "knows", "bob");
+        let results = store.query(Some("alice"), Some("knows"), Some("bob"));
+        assert_eq!(results.len(), 1);
+        assert!(!store.index_stats().is_empty());
     }
 }
