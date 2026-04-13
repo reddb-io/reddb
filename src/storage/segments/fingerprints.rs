@@ -6,6 +6,30 @@ use crate::storage::primitives::encoding::{
 };
 use crate::storage::records::FingerprintRecord;
 
+fn read_fixed<const N: usize>(
+    bytes: &[u8],
+    offset: usize,
+    what: &'static str,
+) -> Result<[u8; N], DecodeError> {
+    let end = offset + N;
+    let slice = bytes.get(offset..end).ok_or(DecodeError(what))?;
+    let mut raw = [0u8; N];
+    raw.copy_from_slice(slice);
+    Ok(raw)
+}
+
+fn read_u16_le(bytes: &[u8], offset: usize, what: &'static str) -> Result<u16, DecodeError> {
+    Ok(u16::from_le_bytes(read_fixed::<2>(bytes, offset, what)?))
+}
+
+fn read_u32_le(bytes: &[u8], offset: usize, what: &'static str) -> Result<u32, DecodeError> {
+    Ok(u32::from_le_bytes(read_fixed::<4>(bytes, offset, what)?))
+}
+
+fn read_u64_le(bytes: &[u8], offset: usize, what: &'static str) -> Result<u64, DecodeError> {
+    Ok(u64::from_le_bytes(read_fixed::<8>(bytes, offset, what)?))
+}
+
 #[derive(Debug, Clone)]
 struct FingerprintDirEntry {
     host_hash: u64, // Use hash for fixed size directory entries? Or length prefixed string?
@@ -74,14 +98,14 @@ impl FingerprintSegmentHeader {
         if bytes[0..4] != Self::MAGIC {
             return Err(DecodeError("invalid fingerprint segment magic"));
         }
-        let version = u16::from_le_bytes(bytes[4..6].try_into().unwrap());
+        let version = read_u16_le(bytes, 4, "fingerprint header truncated (version)")?;
         if version != Self::VERSION {
             return Err(DecodeError("unsupported fingerprint segment version"));
         }
-        let host_count = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-        let record_count = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
-        let directory_len = u64::from_le_bytes(bytes[16..24].try_into().unwrap());
-        let payload_len = u64::from_le_bytes(bytes[24..32].try_into().unwrap());
+        let host_count = read_u32_le(bytes, 8, "fingerprint header truncated (host count)")?;
+        let record_count = read_u32_le(bytes, 12, "fingerprint header truncated (record count)")?;
+        let directory_len = read_u64_le(bytes, 16, "fingerprint header truncated (directory len)")?;
+        let payload_len = read_u64_le(bytes, 24, "fingerprint header truncated (payload len)")?;
 
         Ok(Self {
             host_count,
@@ -205,11 +229,19 @@ impl FingerprintSegment {
                 return Err(DecodeError("directory truncated"));
             }
 
-            let count = u32::from_le_bytes(dir_bytes[dir_pos..dir_pos + 4].try_into().unwrap());
+            let count = read_u32_le(
+                dir_bytes,
+                dir_pos,
+                "fingerprint directory truncated (count)",
+            )?;
             dir_pos += 4;
-            let offset = u64::from_le_bytes(dir_bytes[dir_pos..dir_pos + 8].try_into().unwrap());
+            let offset = read_u64_le(
+                dir_bytes,
+                dir_pos,
+                "fingerprint directory truncated (offset)",
+            )?;
             dir_pos += 8;
-            let len = u64::from_le_bytes(dir_bytes[dir_pos..dir_pos + 8].try_into().unwrap());
+            let len = read_u64_le(dir_bytes, dir_pos, "fingerprint directory truncated (len)")?;
             dir_pos += 8;
 
             let mut host_indices = Vec::with_capacity(count as usize);
@@ -274,11 +306,19 @@ impl FingerprintSegmentView {
 
         for _ in 0..header.host_count {
             let host = read_string(dir_bytes, &mut pos)?.to_string();
-            let count = u32::from_le_bytes(dir_bytes[pos..pos + 4].try_into().unwrap());
+            let count = read_u32_le(
+                dir_bytes,
+                pos,
+                "fingerprint view directory truncated (count)",
+            )?;
             pos += 4;
-            let p_offset = u64::from_le_bytes(dir_bytes[pos..pos + 8].try_into().unwrap());
+            let p_offset = read_u64_le(
+                dir_bytes,
+                pos,
+                "fingerprint view directory truncated (offset)",
+            )?;
             pos += 8;
-            let p_len = u64::from_le_bytes(dir_bytes[pos..pos + 8].try_into().unwrap());
+            let p_len = read_u64_le(dir_bytes, pos, "fingerprint view directory truncated (len)")?;
             pos += 8;
 
             directory.insert(host, (p_offset, p_len, count));
@@ -318,5 +358,16 @@ impl FingerprintSegmentView {
         } else {
             Ok(Vec::new())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fingerprint_segment_header_rejects_truncated_bytes() {
+        let truncated = vec![0u8; FingerprintSegmentHeader::SIZE - 1];
+        assert!(FingerprintSegmentHeader::read(&truncated).is_err());
     }
 }
