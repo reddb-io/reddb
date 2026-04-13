@@ -688,7 +688,7 @@ where
 
     fn node_min_key(nodes: &HashMap<NodeId, Arc<RwLock<Node<K, V>>>>, node_id: NodeId) -> K {
         let node = nodes.get(&node_id).expect("node missing");
-        let node = node.read().expect("node lock failed");
+        let node = recover_read_guard(node);
         match &*node {
             Node::Leaf(leaf) => leaf.keys.first().expect("leaf empty").clone(),
             Node::Internal(internal) => {
