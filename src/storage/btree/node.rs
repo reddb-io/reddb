@@ -553,7 +553,7 @@ mod tests {
 
         // Median goes up
         assert!(node.keys.len() < 6);
-        assert!(right.keys.len() > 0);
+        assert!(!right.keys.is_empty());
     }
 
     #[test]
@@ -613,7 +613,7 @@ mod tests {
 
         // Keys are split
         assert!(node.keys.len() < 6);
-        assert!(right.keys.len() > 0);
+        assert!(!right.keys.is_empty());
 
         // Separator is first key of right
         assert_eq!(separator, right.keys[0]);
