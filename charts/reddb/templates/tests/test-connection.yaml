@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "reddb.fullname" . }}-test-connection
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "reddb.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+  containers:
+    - name: health
+      image: {{ include "reddb.image" . }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      command:
+        - /usr/local/bin/red
+        - health
+        - --http
+        - --bind
+        - {{ include "reddb.primary.fullname" . }}:{{ .Values.primary.service.httpPort }}
