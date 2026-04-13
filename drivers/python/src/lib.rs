@@ -17,7 +17,7 @@ use proto::red_db_client::RedDbClient;
 use proto::*;
 
 /// Shared tokio runtime for all connections
-fn get_runtime() -> &'static tokio::runtime::Runtime {
+pub(crate) fn get_runtime() -> &'static tokio::runtime::Runtime {
     use std::sync::OnceLock;
     static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
     RT.get_or_init(|| {
