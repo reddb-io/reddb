@@ -8,7 +8,7 @@
 //! Unique constraint is enforced at insert time when `unique = true`.
 
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use super::entity::EntityId;
 
@@ -161,6 +161,24 @@ pub struct HashIndexManager {
     indices: RwLock<HashMap<(String, String), HashIndex>>,
 }
 
+fn recover_read_guard<'a, T>(
+    result: Result<RwLockReadGuard<'a, T>, PoisonError<RwLockReadGuard<'a, T>>>,
+) -> RwLockReadGuard<'a, T> {
+    match result {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn recover_write_guard<'a, T>(
+    result: Result<RwLockWriteGuard<'a, T>, PoisonError<RwLockWriteGuard<'a, T>>>,
+) -> RwLockWriteGuard<'a, T> {
+    match result {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 impl HashIndexManager {
     /// Create a new manager
     pub fn new() -> Self {
@@ -171,7 +189,7 @@ impl HashIndexManager {
 
     /// Create a new hash index
     pub fn create_index(&self, config: &HashIndexConfig) -> Result<(), HashIndexError> {
-        let mut indices = self.indices.write().unwrap();
+        let mut indices = recover_write_guard(self.indices.write());
         let key = (config.collection.clone(), config.name.clone());
         indices.insert(key, HashIndex::new(config.unique));
         Ok(())
@@ -179,7 +197,7 @@ impl HashIndexManager {
 
     /// Drop a hash index
     pub fn drop_index(&self, collection: &str, name: &str) -> bool {
-        let mut indices = self.indices.write().unwrap();
+        let mut indices = recover_write_guard(self.indices.write());
         indices
             .remove(&(collection.to_string(), name.to_string()))
             .is_some()
@@ -193,7 +211,7 @@ impl HashIndexManager {
         key: Vec<u8>,
         entity_id: EntityId,
     ) -> Result<(), HashIndexError> {
-        let mut indices = self.indices.write().unwrap();
+        let mut indices = recover_write_guard(self.indices.write());
         if let Some(index) = indices.get_mut(&(collection.to_string(), index_name.to_string())) {
             index.insert(key, entity_id)
         } else {
@@ -205,12 +223,20 @@ impl HashIndexManager {
     }
 
     /// Lookup in a named index
-    pub fn lookup(&self, collection: &str, index_name: &str, key: &[u8]) -> Vec<EntityId> {
-        let indices = self.indices.read().unwrap();
+    pub fn lookup(
+        &self,
+        collection: &str,
+        index_name: &str,
+        key: &[u8],
+    ) -> Result<Vec<EntityId>, HashIndexError> {
+        let indices = recover_read_guard(self.indices.read());
         if let Some(index) = indices.get(&(collection.to_string(), index_name.to_string())) {
-            index.get(key).to_vec()
+            Ok(index.get(key).to_vec())
         } else {
-            Vec::new()
+            Err(HashIndexError::MissingIndex {
+                collection: collection.to_string(),
+                name: index_name.to_string(),
+            })
         }
     }
 
@@ -222,7 +248,7 @@ impl HashIndexManager {
         key: &[u8],
         entity_id: EntityId,
     ) -> Result<bool, HashIndexError> {
-        let mut indices = self.indices.write().unwrap();
+        let mut indices = recover_write_guard(self.indices.write());
         if let Some(index) = indices.get_mut(&(collection.to_string(), index_name.to_string())) {
             Ok(index.remove(key, entity_id))
         } else {
@@ -235,7 +261,7 @@ impl HashIndexManager {
 
     /// List all indices for a collection
     pub fn list_indices(&self, collection: &str) -> Vec<String> {
-        let indices = self.indices.read().unwrap();
+        let indices = recover_read_guard(self.indices.read());
         indices
             .keys()
             .filter(|(coll, _)| coll == collection)
@@ -245,7 +271,7 @@ impl HashIndexManager {
 
     /// Get stats for a specific index
     pub fn index_stats(&self, collection: &str, name: &str) -> Option<HashIndexStats> {
-        let indices = self.indices.read().unwrap();
+        let indices = recover_read_guard(self.indices.read());
         indices
             .get(&(collection.to_string(), name.to_string()))
             .map(|idx| HashIndexStats {
@@ -367,11 +393,58 @@ mod tests {
         )
         .unwrap();
 
-        let results = mgr.lookup("users", "idx_email", b"alice@test.com");
+        let results = mgr.lookup("users", "idx_email", b"alice@test.com").unwrap();
         assert_eq!(results, vec![EntityId::new(1)]);
 
         let stats = mgr.index_stats("users", "idx_email").unwrap();
         assert_eq!(stats.distinct_keys, 2);
         assert!(stats.unique);
+    }
+
+    #[test]
+    fn test_hash_index_manager_recovers_from_poisoned_lock() {
+        let mgr = HashIndexManager::new();
+        mgr.create_index(&HashIndexConfig {
+            name: "idx_email".to_string(),
+            collection: "users".to_string(),
+            columns: vec!["email".to_string()],
+            unique: false,
+        })
+        .unwrap();
+
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = mgr.indices.write().unwrap();
+            panic!("poison hash index manager");
+        }));
+
+        mgr.insert(
+            "users",
+            "idx_email",
+            b"alice@test.com".to_vec(),
+            EntityId::new(1),
+        )
+        .unwrap();
+
+        assert_eq!(
+            mgr.lookup("users", "idx_email", b"alice@test.com").unwrap(),
+            vec![EntityId::new(1)]
+        );
+    }
+
+    #[test]
+    fn test_hash_index_manager_lookup_missing_index_returns_error() {
+        let mgr = HashIndexManager::new();
+
+        let err = mgr
+            .lookup("users", "idx_missing", b"alice@test.com")
+            .expect_err("lookup should fail when the index does not exist");
+
+        assert_eq!(
+            err,
+            HashIndexError::MissingIndex {
+                collection: "users".to_string(),
+                name: "idx_missing".to_string(),
+            }
+        );
     }
 }
