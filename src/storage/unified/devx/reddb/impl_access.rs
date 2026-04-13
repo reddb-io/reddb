@@ -1311,7 +1311,7 @@ impl RedDB {
         let mut preprocessors = self
             .preprocessors
             .write()
-            .expect("preprocessor registry lock poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         preprocessors.push(Arc::from(preprocessor));
     }
 
