@@ -851,7 +851,7 @@ fn extract_remaining_properties(
 fn validate_timeseries_insert_columns(columns: &[String]) -> RedDBResult<()> {
     let mut invalid = Vec::new();
     for column in columns {
-        if !is_timeseries_insert_column(column) && !resolve_sql_ttl_metadata_key(column).is_some() {
+        if !is_timeseries_insert_column(column) && resolve_sql_ttl_metadata_key(column).is_none() {
             invalid.push(column.clone());
         }
     }
