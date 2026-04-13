@@ -42,14 +42,20 @@ async fn main() -> reddb_client::Result<()> {
 
 ## Connection URIs
 
-| URI                       | Backend                          | Status        |
-|---------------------------|----------------------------------|---------------|
-| `memory://`               | Ephemeral in-memory              | ✅            |
-| `file:///absolute/path`   | Embedded engine on disk          | ✅            |
-| `grpc://host:port`        | Remote tonic client              | ⚠ planned     |
+| URI                       | Backend                          | Status                           |
+|---------------------------|----------------------------------|----------------------------------|
+| `memory://`               | Ephemeral in-memory              | ✅ `embedded` feature            |
+| `file:///absolute/path`   | Embedded engine on disk          | ✅ `embedded` feature            |
+| `grpc://host:port`        | Remote tonic client              | ✅ `grpc` feature                |
 
-`grpc://` returns `ErrorCode::FeatureDisabled` today. The remote client lands
-in **PLAN_DRIVERS.md Phase 3.5** — see the repo root.
+Enable the `grpc` feature to connect to a remote server:
+
+```toml
+reddb-client = { version = "0.1", features = ["embedded", "grpc"] }
+```
+
+Today both features pull the full engine crate for code sharing. A truly thin
+client that compiles only the tonic stack is tracked in `PLAN_DRIVERS.md`.
 
 ## Cargo features
 
