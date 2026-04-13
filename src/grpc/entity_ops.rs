@@ -286,11 +286,22 @@ pub(crate) fn parse_json_payload(payload_json: &str) -> Result<JsonValue, Status
         .map_err(|err| Status::invalid_argument(format!("invalid payload_json: {err}")))
 }
 
-/// Binary bulk insert — ZERO JSON. Converts protobuf typed values directly to RedDB Values.
-/// Binary bulk insert — ZERO entity objects. Proto values → page cells directly.
+/// Binary bulk insert — ZERO JSON. Converts protobuf typed values
+/// directly into `UnifiedEntity`s and drops them into
+/// `store.bulk_insert`, which owns the full write path (segment
+/// manager + persistent B-tree + index maintenance).
 ///
-/// When pager available: proto → Vec<Value> → serialize → page (like PG COPY FROM)
-/// When no pager: proto → Vec<Value> → UnifiedEntity → in-memory segment
+/// History: this used to run through a `PageBulkWriter` fast path as
+/// well, writing every row's cells directly to a disconnected chain
+/// of B-tree leaf pages AND to the segment manager. That double
+/// write did twice the serialization work, twice the flush work, and
+/// produced a stretch of orphaned pages on disk that no index
+/// pointed at — so queries never saw them. BASELINE.md Finding #2
+/// called it out as "the current design pays for both and gets the
+/// benefit of neither". We now commit to the single
+/// `store.bulk_insert` path: O(M) slotted leaf inserts keep it fast,
+/// and every row is immediately visible to the query engine via
+/// the segment manager.
 pub(crate) fn bulk_insert_binary(
     runtime: &GrpcRuntime,
     request: super::proto::BinaryBulkInsertRequest,
@@ -310,26 +321,18 @@ pub(crate) fn bulk_insert_binary(
 
     let num_fields = request.field_names.len();
     let store = runtime.runtime.db().store();
-
-    // Build entities for memory AND optionally write to pages
     let field_names: Vec<String> = request.field_names;
-    let has_pager = store.pager().is_some();
 
-    // Optional page writer
-    let mut page_writer = if has_pager {
-        use crate::storage::engine::bulk_writer::PageBulkWriter;
-        let next_id = store.next_entity_id().raw();
-        Some(PageBulkWriter::new(store.pager().unwrap().clone(), next_id))
-    } else {
-        None
-    };
-
-    // Single pass: proto → entities for memory + page write
+    // Single pass: proto values → UnifiedEntity. No parallel
+    // `PageBulkWriter` chain. `store.bulk_insert` handles segment
+    // + B-tree together. We also remember a flattened `Vec<(name,
+    // value)>` per row so we can push each inserted entity through
+    // the secondary-index maintenance pipeline after its ID is known.
     let mut entities = Vec::with_capacity(n);
+    let mut indexed_fields: Vec<Vec<(String, Value)>> = Vec::with_capacity(n);
     for row in request.rows {
         let mut named = std::collections::HashMap::with_capacity(num_fields);
-        let mut values_for_page: Vec<Value> = Vec::with_capacity(num_fields);
-
+        let mut field_snapshot: Vec<(String, Value)> = Vec::with_capacity(num_fields);
         for (i, bval) in row.values.into_iter().enumerate() {
             if i >= num_fields {
                 break;
@@ -342,18 +345,10 @@ pub(crate) fn bulk_insert_binary(
                 Some(super::proto::binary_value::Kind::BlobValue(b)) => Value::Blob(b),
                 None => Value::Null,
             };
-            if page_writer.is_some() {
-                values_for_page.push(value.clone());
-            }
+            field_snapshot.push((field_names[i].clone(), value.clone()));
             named.insert(field_names[i].clone(), value);
         }
-
-        // Write to page (fast persistence)
-        if let Some(ref mut writer) = page_writer {
-            writer
-                .write_row_direct(&values_for_page)
-                .map_err(|e| Status::internal(e))?;
-        }
+        indexed_fields.push(field_snapshot);
 
         entities.push(crate::storage::unified::UnifiedEntity::new(
             crate::storage::unified::EntityId::new(0),
@@ -369,16 +364,21 @@ pub(crate) fn bulk_insert_binary(
         ));
     }
 
-    // Finish page writes
-    if let Some(writer) = page_writer {
-        let _ = writer.finish();
-    }
-
-    // Insert into memory (for queryability)
     let ids = store
         .bulk_insert(&collection, entities)
         .map_err(|e| Status::internal(e.to_string()))?;
     let first_id = ids.first().map(|id| id.raw()).unwrap_or(0);
+
+    // Feed every inserted row to the secondary-index maintenance
+    // hook so that indexes registered BEFORE this bulk insert
+    // observe the new rows. Indexes created AFTER this call will
+    // pick them up via `CREATE INDEX`'s full scan.
+    for (id, fields) in ids.iter().zip(indexed_fields.iter()) {
+        runtime
+            .runtime
+            .index_store_ref()
+            .index_entity_insert(&collection, *id, fields);
+    }
 
     Ok(super::proto::BulkInsertReply {
         ok: true,

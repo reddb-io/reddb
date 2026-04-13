@@ -230,38 +230,16 @@ impl RedDBServer {
             ));
         }
 
-        // Use page-based writer if pager available, otherwise in-memory bulk
+        // Single write path: `store.bulk_insert` drives the segment
+        // manager + persistent B-tree together, and the slotted leaf
+        // layout keeps it O(M) per entry. The old `PageBulkWriter`
+        // fast path wrote an orphaned page chain that no index
+        // pointed at, while still calling `store.bulk_insert` for
+        // queryability — BASELINE.md Finding #2 doubly paid.
         let store = self.runtime.db().store();
         let count = entities.len();
-
-        if let Some(pager) = store.pager() {
-            use crate::storage::engine::bulk_writer::PageBulkWriter;
-
-            let next_id = store.next_entity_id().raw();
-            let mut writer = PageBulkWriter::new(pager.clone(), next_id);
-
-            // All entities now share the same `schema`, so field names
-            // are just the shared Arc<Vec<String>> set above. Each row
-            // is already columnar — no lookup needed.
-            for entity in &entities {
-                if let crate::storage::EntityData::Row(ref row) = entity.data {
-                    if let Err(e) = writer.write_row(&row.columns) {
-                        return json_error(500, format!("page write error: {e}"));
-                    }
-                }
-            }
-
-            if let Err(e) = writer.finish() {
-                return json_error(500, format!("page finish error: {e}"));
-            }
-
-            // Also insert in-memory for queryability
-            let _ = store.bulk_insert(collection, entities);
-        } else {
-            // In-memory only
-            if let Err(e) = store.bulk_insert(collection, entities) {
-                return json_error(500, format!("bulk insert error: {e}"));
-            }
+        if let Err(e) = store.bulk_insert(collection, entities) {
+            return json_error(500, format!("bulk insert error: {e}"));
         }
 
         let mut object = Map::new();

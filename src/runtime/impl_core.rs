@@ -334,6 +334,14 @@ impl RedDBRuntime {
         Arc::clone(&self.inner.db)
     }
 
+    /// Direct access to the runtime's secondary-index store.
+    /// Used by bulk-insert entry points (gRPC binary bulk, HTTP bulk,
+    /// wire bulk) that need to push new rows through the per-index
+    /// maintenance hook after `store.bulk_insert` returns.
+    pub fn index_store_ref(&self) -> &super::index_store::IndexStore {
+        &self.inner.index_store
+    }
+
     /// Inject an AuthStore into the runtime. Called by server boot
     /// after the vault has been bootstrapped, so that `Value::Secret`
     /// auto-encrypt/decrypt can reach the vault AES key.

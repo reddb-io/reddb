@@ -132,6 +132,36 @@ impl SortedIndexManager {
         let indices = self.indices.read().unwrap();
         indices.contains_key(&(collection.to_string(), column.to_string()))
     }
+
+    /// Insert one (key, entity_id) pair into an existing sorted index.
+    /// No-op if the index hasn't been created yet — the next
+    /// `build_index` or `create_index` call will pick up the entity on
+    /// its full scan.
+    pub fn insert_one(&self, collection: &str, column: &str, key: i64, entity_id: EntityId) {
+        if let Ok(mut indices) = self.indices.write() {
+            let k = (collection.to_string(), column.to_string());
+            if let Some(index) = indices.get_mut(&k) {
+                index.insert(key, entity_id);
+            }
+        }
+    }
+
+    /// Remove a single `entity_id` from the index. Linear in the
+    /// number of entries at that key — fine for the benchmark's low
+    /// per-key cardinality (age has ~200 buckets, city ~50).
+    pub fn delete_one(&self, collection: &str, column: &str, key: i64, entity_id: EntityId) {
+        if let Ok(mut indices) = self.indices.write() {
+            let k = (collection.to_string(), column.to_string());
+            if let Some(index) = indices.get_mut(&k) {
+                if let Some(bucket) = index.entries.get_mut(&key) {
+                    bucket.retain(|id| *id != entity_id);
+                    if bucket.is_empty() {
+                        index.entries.remove(&key);
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn value_to_i64(val: &Value) -> Option<i64> {
@@ -329,7 +359,11 @@ impl IndexStore {
             .collect()
     }
 
-    /// Insert a value into all relevant indices for a collection
+    /// Insert one entity's relevant column values into every index
+    /// registered on its collection. Called from the entity insert
+    /// pipeline so that CREATE INDEX can land before or after the
+    /// data without losing new rows. Silently tolerates missing
+    /// index structures (e.g. if create_index hasn't run yet).
     pub fn index_entity_insert(
         &self,
         collection: &str,
@@ -352,7 +386,18 @@ impl IndexStore {
                         IndexMethodKind::Bitmap => {
                             self.bitmap.insert(collection, col, entity_id, &key);
                         }
-                        _ => {}
+                        IndexMethodKind::BTree => {
+                            if let Some(numeric) = value_to_i64(value) {
+                                self.sorted.insert_one(collection, col, numeric, entity_id);
+                            }
+                            let _ = self.hash.insert(
+                                collection,
+                                &format!("{}_hash", idx.name),
+                                key,
+                                entity_id,
+                            );
+                        }
+                        IndexMethodKind::Spatial => {}
                     }
                 }
             }

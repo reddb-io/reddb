@@ -847,6 +847,15 @@ impl RuntimeEntityPort for RedDBRuntime {
 
         let id = builder.save()?;
         refresh_context_index(&db, &collection, id)?;
+        // Maintain secondary indexes that were created before this row
+        // landed. Previous implementation of `index_entity_insert` only
+        // wrote Hash + Bitmap and silently skipped BTree; Finding #4
+        // in BASELINE.md was the symptom — `CREATE INDEX` built once
+        // and never grew, so `WHERE age BETWEEN …` fell through to a
+        // full scan for every new row. The BTree arm of
+        // `index_entity_insert` is now wired to the sorted manager.
+        self.index_store_ref()
+            .index_entity_insert(&collection, id, &fields);
         self.cdc_emit(
             crate::replication::cdc::ChangeOperation::Insert,
             &collection,
