@@ -2,7 +2,7 @@ use super::*;
 use crate::storage::schema::Value;
 
 #[cfg(test)]
-mod tests {
+mod query_tests {
     use super::*;
 
     #[test]
