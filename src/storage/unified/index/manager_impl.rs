@@ -487,18 +487,4 @@ impl IntegratedIndexManager {
             .map(|d| d.as_secs())
             .unwrap_or(0)
     }
-
-    /// Compare two metadata values for ordering
-    #[allow(dead_code)]
-    fn compare_values(a: &MetadataValue, b: &MetadataValue) -> i32 {
-        match (a, b) {
-            (MetadataValue::Int(a), MetadataValue::Int(b)) => a.cmp(b) as i32,
-            (MetadataValue::Float(a), MetadataValue::Float(b)) => {
-                a.partial_cmp(b).map_or(0, |o| o as i32)
-            }
-            (MetadataValue::String(a), MetadataValue::String(b)) => a.cmp(b) as i32,
-            (MetadataValue::Timestamp(a), MetadataValue::Timestamp(b)) => a.cmp(b) as i32,
-            _ => 0,
-        }
-    }
 }
