@@ -60,9 +60,12 @@ pub fn detect_mode(input: &str) -> QueryMode {
         || lower.starts_with("create ")
         || lower.starts_with("drop ")
         || lower.starts_with("alter ")
+        || lower.starts_with("vector ")
+        || lower.starts_with("hybrid ")
         || lower.starts_with("graph ")
         || lower.starts_with("queue ")
         || lower.starts_with("search ")
+        || lower.starts_with("ask ")
         || lower.starts_with("set config ")
         || lower.starts_with("show config")
     {
@@ -176,6 +179,22 @@ mod tests {
         );
         assert_eq!(
             detect_mode("DELETE FROM logs WHERE age > 30"),
+            QueryMode::Sql
+        );
+        assert_eq!(
+            detect_mode("QUEUE GROUP CREATE tasks workers"),
+            QueryMode::Sql
+        );
+        assert_eq!(
+            detect_mode("VECTOR SEARCH embeddings SIMILAR TO [1.0, 0.0] LIMIT 5"),
+            QueryMode::Sql
+        );
+        assert_eq!(
+            detect_mode("HYBRID FROM hosts VECTOR SEARCH embeddings SIMILAR TO [1.0, 0.0] LIMIT 5"),
+            QueryMode::Sql
+        );
+        assert_eq!(
+            detect_mode("ASK 'what happened on host 10.0.0.1?' USING groq"),
             QueryMode::Sql
         );
     }
