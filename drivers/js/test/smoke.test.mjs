@@ -69,14 +69,13 @@ await test('uriToArgs file:///abs', async () => {
   )
 })
 
-await test('uriToArgs grpc:// throws RedDBError', async () => {
-  try {
-    uriToArgs('grpc://localhost:50051')
-    throw new Error('expected throw')
-  } catch (err) {
-    assert(err instanceof RedDBError, 'expected RedDBError')
-    assertEqual(err.code, 'UNSUPPORTED_SCHEME', 'error code')
-  }
+await test('uriToArgs grpc:// forwards --connect to the binary', async () => {
+  const args = uriToArgs('grpc://localhost:50051')
+  assert(
+    JSON.stringify(args) ===
+      JSON.stringify(['rpc', '--stdio', '--connect', 'grpc://localhost:50051']),
+    `got ${JSON.stringify(args)}`,
+  )
 })
 
 await test('uriToArgs unknown scheme throws', async () => {
