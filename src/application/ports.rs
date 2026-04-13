@@ -4,8 +4,12 @@ use crate::application::entity::{
     apply_patch_operations_to_json, apply_patch_operations_to_storage_map,
     apply_patch_operations_to_vector_fields, json_to_metadata_value, json_to_storage_value,
     metadata_from_json, metadata_to_json, CreateDocumentInput, CreateEdgeInput, CreateEntityOutput,
-    CreateKvInput, CreateNodeInput, CreateRowInput, CreateVectorInput, DeleteEntityInput,
-    DeleteEntityOutput, PatchEntityInput, PatchEntityOperation, PatchEntityOperationType,
+    CreateKvInput, CreateNodeInput, CreateRowInput, CreateTimeSeriesPointInput, CreateVectorInput,
+    DeleteEntityInput, DeleteEntityOutput, PatchEntityInput, PatchEntityOperation,
+    PatchEntityOperationType,
+};
+use crate::application::schema::{
+    CreateTableInput, CreateTimeSeriesInput, DropTableInput, DropTimeSeriesInput,
 };
 use crate::catalog::{
     CatalogAnalyticsJobStatus, CatalogAttentionSummary, CatalogConsistencyReport,
@@ -117,6 +121,10 @@ pub trait RuntimeEntityPort {
     fn create_vector(&self, input: CreateVectorInput) -> RedDBResult<CreateEntityOutput>;
     fn create_document(&self, input: CreateDocumentInput) -> RedDBResult<CreateEntityOutput>;
     fn create_kv(&self, input: CreateKvInput) -> RedDBResult<CreateEntityOutput>;
+    fn create_timeseries_point(
+        &self,
+        input: CreateTimeSeriesPointInput,
+    ) -> RedDBResult<CreateEntityOutput>;
     fn get_kv(
         &self,
         collection: &str,
@@ -125,6 +133,13 @@ pub trait RuntimeEntityPort {
     fn delete_kv(&self, collection: &str, key: &str) -> RedDBResult<bool>;
     fn patch_entity(&self, input: PatchEntityInput) -> RedDBResult<CreateEntityOutput>;
     fn delete_entity(&self, input: DeleteEntityInput) -> RedDBResult<DeleteEntityOutput>;
+}
+
+pub trait RuntimeSchemaPort {
+    fn create_table(&self, input: CreateTableInput) -> RedDBResult<RuntimeQueryResult>;
+    fn drop_table(&self, input: DropTableInput) -> RedDBResult<RuntimeQueryResult>;
+    fn create_timeseries(&self, input: CreateTimeSeriesInput) -> RedDBResult<RuntimeQueryResult>;
+    fn drop_timeseries(&self, input: DropTimeSeriesInput) -> RedDBResult<RuntimeQueryResult>;
 }
 
 pub trait RuntimeAdminPort {
