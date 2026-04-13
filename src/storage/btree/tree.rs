@@ -6,7 +6,21 @@ use super::node::{InternalNode, LeafEntry, LeafNode, Node, NodeId, NodeType};
 use super::version::{next_timestamp, ActiveTransaction, Snapshot, Timestamp, TxnId};
 use std::collections::HashMap;
 use std::fmt::Debug;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+
+fn recover_read_guard<'a, T>(lock: &'a RwLock<T>) -> RwLockReadGuard<'a, T> {
+    match lock.read() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn recover_write_guard<'a, T>(lock: &'a RwLock<T>) -> RwLockWriteGuard<'a, T> {
+    match lock.write() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
 
 /// B+ Tree configuration
 #[derive(Debug, Clone)]
@@ -127,17 +141,17 @@ where
 
     /// Get statistics
     pub fn stats(&self) -> BTreeStats {
-        self.stats.read().unwrap().clone()
+        recover_read_guard(&self.stats).clone()
     }
 
     /// Check if tree is empty
     pub fn is_empty(&self) -> bool {
-        self.root.read().unwrap().is_none()
+        recover_read_guard(&self.root).is_none()
     }
 
     /// Get number of entries
     pub fn len(&self) -> usize {
-        self.stats.read().unwrap().entries as usize
+        recover_read_guard(&self.stats).entries as usize
     }
 
     // =========================================
@@ -146,26 +160,26 @@ where
 
     /// Begin a new transaction
     pub fn begin_transaction(&self) -> TxnId {
-        let mut next_id = self.next_txn_id.write().unwrap();
+        let mut next_id = recover_write_guard(&self.next_txn_id);
         let txn_id = *next_id;
         *next_id += 1;
 
         // Get list of active transactions
-        let active_txns = self.active_txns.read().unwrap();
+        let active_txns = recover_read_guard(&self.active_txns);
         let active_list: Vec<TxnId> = active_txns.keys().copied().collect();
         drop(active_txns);
 
         // Create new transaction
         let txn = ActiveTransaction::new(txn_id, active_list);
 
-        self.active_txns.write().unwrap().insert(txn_id, txn);
+        recover_write_guard(&self.active_txns).insert(txn_id, txn);
 
         txn_id
     }
 
     /// Commit a transaction
     pub fn commit_transaction(&self, txn_id: TxnId) -> bool {
-        let mut active = self.active_txns.write().unwrap();
+        let mut active = recover_write_guard(&self.active_txns);
         if let Some(mut txn) = active.remove(&txn_id) {
             txn.commit();
             true
@@ -176,7 +190,7 @@ where
 
     /// Abort a transaction
     pub fn abort_transaction(&self, txn_id: TxnId) -> bool {
-        let mut active = self.active_txns.write().unwrap();
+        let mut active = recover_write_guard(&self.active_txns);
         if let Some(mut txn) = active.remove(&txn_id) {
             txn.abort();
             true
@@ -187,7 +201,7 @@ where
 
     /// Get snapshot for transaction
     pub fn get_snapshot(&self, txn_id: TxnId) -> Option<Snapshot> {
-        let active = self.active_txns.read().unwrap();
+        let active = recover_read_guard(&self.active_txns);
         active.get(&txn_id).map(|txn| txn.snapshot.clone())
     }
 
@@ -202,18 +216,19 @@ where
 
     /// Get node by ID
     pub(crate) fn get_node(&self, id: NodeId) -> Option<Arc<RwLock<Node<K, V>>>> {
-        self.nodes.read().unwrap().get(&id).cloned()
+        recover_read_guard(&self.nodes).get(&id).cloned()
     }
 
     /// Store node
     fn store_node(&self, node: Node<K, V>) -> NodeId {
         let id = node.id();
         let arc = Arc::new(RwLock::new(node));
-        self.nodes.write().unwrap().insert(id, arc);
+        let node_type = recover_read_guard(&arc).node_type();
+        recover_write_guard(&self.nodes).insert(id, Arc::clone(&arc));
 
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = recover_write_guard(&self.stats);
         stats.nodes += 1;
-        match self.get_node(id).unwrap().read().unwrap().node_type() {
+        match node_type {
             NodeType::Internal => stats.internal_nodes += 1,
             NodeType::Leaf => stats.leaf_nodes += 1,
         }
@@ -223,10 +238,10 @@ where
 
     /// Remove node
     fn remove_node(&self, id: NodeId) {
-        if let Some(node) = self.nodes.write().unwrap().remove(&id) {
-            let mut stats = self.stats.write().unwrap();
+        if let Some(node) = recover_write_guard(&self.nodes).remove(&id) {
+            let mut stats = recover_write_guard(&self.stats);
             stats.nodes -= 1;
-            match node.read().unwrap().node_type() {
+            match recover_read_guard(&node).node_type() {
                 NodeType::Internal => stats.internal_nodes -= 1,
                 NodeType::Leaf => stats.leaf_nodes -= 1,
             }
@@ -239,9 +254,9 @@ where
 
     /// Get value for key
     pub fn get(&self, key: &K, snapshot: &Snapshot) -> Option<V> {
-        self.stats.write().unwrap().gets += 1;
+        recover_write_guard(&self.stats).gets += 1;
 
-        let root_id = *self.root.read().unwrap();
+        let root_id = *recover_read_guard(&self.root);
         let root_id = root_id?;
 
         self.get_from_node(root_id, key, snapshot)
@@ -250,7 +265,7 @@ where
     /// Get value starting from node
     fn get_from_node(&self, node_id: NodeId, key: &K, snapshot: &Snapshot) -> Option<V> {
         let node = self.get_node(node_id)?;
-        let node = node.read().unwrap();
+        let node = recover_read_guard(&node);
 
         match &*node {
             Node::Internal(internal) => {
@@ -269,7 +284,7 @@ where
 
     /// Get range of values
     pub fn range(&self, start: Option<&K>, end: Option<&K>, snapshot: &Snapshot) -> Vec<(K, V)> {
-        self.stats.write().unwrap().range_scans += 1;
+        recover_write_guard(&self.stats).range_scans += 1;
 
         let mut results = Vec::new();
 
@@ -277,7 +292,7 @@ where
         let start_leaf_id = if let Some(start_key) = start {
             self.find_leaf(start_key)
         } else {
-            *self.first_leaf.read().unwrap()
+            *recover_read_guard(&self.first_leaf)
         };
 
         let Some(mut leaf_id) = start_leaf_id else {
@@ -291,7 +306,7 @@ where
                 None => break,
             };
 
-            let node = node.read().unwrap();
+            let node = recover_read_guard(&node);
             let leaf = match &*node {
                 Node::Leaf(l) => l,
                 _ => break,
@@ -320,7 +335,7 @@ where
 
     /// Find leaf node for key
     fn find_leaf(&self, key: &K) -> Option<NodeId> {
-        let root_id = *self.root.read().unwrap();
+        let root_id = *recover_read_guard(&self.root);
         let root_id = root_id?;
 
         self.find_leaf_from_node(root_id, key)
@@ -329,7 +344,7 @@ where
     /// Find leaf starting from node
     fn find_leaf_from_node(&self, node_id: NodeId, key: &K) -> Option<NodeId> {
         let node = self.get_node(node_id)?;
-        let node = node.read().unwrap();
+        let node = recover_read_guard(&node);
 
         match &*node {
             Node::Internal(internal) => {
@@ -353,7 +368,7 @@ where
 
     /// Insert with explicit timestamp
     fn insert_with_timestamp(&self, key: K, value: V, txn_id: TxnId, timestamp: Timestamp) -> bool {
-        let mut root_lock = self.root.write().unwrap();
+        let mut root_lock = recover_write_guard(&self.root);
 
         if root_lock.is_none() {
             // Create first leaf
@@ -361,9 +376,9 @@ where
             leaf.insert(key, value, txn_id, timestamp);
             let leaf_id = self.store_node(Node::Leaf(leaf));
             *root_lock = Some(leaf_id);
-            *self.first_leaf.write().unwrap() = Some(leaf_id);
+            *recover_write_guard(&self.first_leaf) = Some(leaf_id);
 
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = recover_write_guard(&self.stats);
             stats.entries += 1;
             stats.inserts += 1;
             stats.height = 1;
@@ -371,13 +386,15 @@ where
             return true;
         }
 
-        let root_id = root_lock.unwrap();
+        let Some(root_id) = *root_lock else {
+            return false;
+        };
         drop(root_lock);
 
         // Insert into tree
         match self.insert_recursive(root_id, key.clone(), value, txn_id, timestamp) {
             InsertResult::Done(is_new) => {
-                let mut stats = self.stats.write().unwrap();
+                let mut stats = recover_write_guard(&self.stats);
                 if is_new {
                     stats.entries += 1;
                     stats.inserts += 1;
@@ -393,9 +410,9 @@ where
                 new_root.insert(median, right_id);
 
                 let new_root_id = self.store_node(Node::Internal(new_root));
-                *self.root.write().unwrap() = Some(new_root_id);
+                *recover_write_guard(&self.root) = Some(new_root_id);
 
-                let mut stats = self.stats.write().unwrap();
+                let mut stats = recover_write_guard(&self.stats);
                 stats.entries += 1;
                 stats.inserts += 1;
                 stats.height += 1;
@@ -414,8 +431,10 @@ where
         txn_id: TxnId,
         timestamp: Timestamp,
     ) -> InsertResult<K> {
-        let node = self.get_node(node_id).unwrap();
-        let mut node = node.write().unwrap();
+        let Some(node) = self.get_node(node_id) else {
+            return InsertResult::Done(false);
+        };
+        let mut node = recover_write_guard(&node);
 
         match &mut *node {
             Node::Internal(internal) => {
@@ -426,9 +445,14 @@ where
                 match self.insert_recursive(child_id, key, value, txn_id, timestamp) {
                     InsertResult::Done(is_new) => InsertResult::Done(is_new),
                     InsertResult::Split(median, right_child) => {
-                        let node = self.get_node(node_id).unwrap();
-                        let mut node = node.write().unwrap();
-                        let internal = node.as_internal_mut().unwrap();
+                        let Some(node) = self.get_node(node_id) else {
+                            return InsertResult::Done(false);
+                        };
+                        let mut node = recover_write_guard(&node);
+                        let internal = match &mut *node {
+                            Node::Internal(internal) => internal,
+                            Node::Leaf(_) => return InsertResult::Done(false),
+                        };
 
                         internal.insert(median, right_child);
 
@@ -466,7 +490,7 @@ where
 
     /// Delete with explicit timestamp
     fn delete_with_timestamp(&self, key: &K, txn_id: TxnId, timestamp: Timestamp) -> bool {
-        let root_id = match *self.root.read().unwrap() {
+        let root_id = match *recover_read_guard(&self.root) {
             Some(id) => id,
             None => return false,
         };
@@ -478,12 +502,14 @@ where
         };
 
         // Mark as deleted (MVCC soft delete)
-        let node = self.get_node(leaf_id).unwrap();
-        let mut node = node.write().unwrap();
+        let Some(node) = self.get_node(leaf_id) else {
+            return false;
+        };
+        let mut node = recover_write_guard(&node);
 
         if let Node::Leaf(leaf) = &mut *node {
             if leaf.delete(key, txn_id, timestamp) {
-                self.stats.write().unwrap().deletes += 1;
+                recover_write_guard(&self.stats).deletes += 1;
                 return true;
             }
         }
@@ -499,13 +525,13 @@ where
         let mut kept_entries: Vec<LeafEntry<K, V>> = Vec::new();
         let mut removed = 0usize;
 
-        let mut leaf_id = *self.first_leaf.read().unwrap();
+        let mut leaf_id = *recover_read_guard(&self.first_leaf);
         while let Some(id) = leaf_id {
             let node = match self.get_node(id) {
                 Some(node) => node,
                 None => break,
             };
-            let node = node.read().unwrap();
+            let node = recover_read_guard(&node);
             if let Node::Leaf(leaf) = &*node {
                 for entry in &leaf.entries {
                     if Self::entry_purgeable(entry, watermark) {
@@ -601,17 +627,17 @@ where
 
         let root_id = current_level.first().copied();
 
-        *self.root.write().unwrap() = root_id;
-        *self.first_leaf.write().unwrap() = root_id.and_then(|id| {
+        *recover_write_guard(&self.root) = root_id;
+        *recover_write_guard(&self.first_leaf) = root_id.and_then(|id| {
             let node = new_nodes.get(&id)?;
-            let node = node.read().ok()?;
+            let node = recover_read_guard(node);
             match &*node {
                 Node::Leaf(_) => Some(id),
                 Node::Internal(_) => {
                     let mut current = id;
                     loop {
                         let node = new_nodes.get(&current)?;
-                        let node = node.read().ok()?;
+                        let node = recover_read_guard(node);
                         match &*node {
                             Node::Leaf(_) => return Some(current),
                             Node::Internal(internal) => {
@@ -627,16 +653,16 @@ where
             }
         });
 
-        *self.nodes.write().unwrap() = new_nodes;
+        *recover_write_guard(&self.nodes) = new_nodes;
 
-        let leaf_count = if let Some(first_leaf) = *self.first_leaf.read().unwrap() {
-            let nodes = self.nodes.read().unwrap();
+        let leaf_count = if let Some(first_leaf) = *recover_read_guard(&self.first_leaf) {
+            let nodes = recover_read_guard(&self.nodes);
             let mut count = 0u64;
             let mut leaf_id = Some(first_leaf);
             while let Some(id) = leaf_id {
                 let node = nodes.get(&id).cloned();
                 if let Some(node) = node {
-                    let node = node.read().unwrap();
+                    let node = recover_read_guard(&node);
                     if let Node::Leaf(leaf) = &*node {
                         count += 1;
                         leaf_id = leaf.next;
@@ -652,9 +678,9 @@ where
             0
         };
 
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = recover_write_guard(&self.stats);
         stats.entries = entries.len() as u64;
-        stats.nodes = self.nodes.read().unwrap().len() as u64;
+        stats.nodes = recover_read_guard(&self.nodes).len() as u64;
         stats.leaf_nodes = leaf_count;
         stats.internal_nodes = stats.nodes.saturating_sub(leaf_count);
         stats.height = height as u32;
@@ -675,15 +701,15 @@ where
 
     /// Clear all entries
     pub fn clear(&self) {
-        *self.root.write().unwrap() = None;
-        *self.first_leaf.write().unwrap() = None;
-        self.nodes.write().unwrap().clear();
-        *self.stats.write().unwrap() = BTreeStats::default();
+        *recover_write_guard(&self.root) = None;
+        *recover_write_guard(&self.first_leaf) = None;
+        recover_write_guard(&self.nodes).clear();
+        *recover_write_guard(&self.stats) = BTreeStats::default();
     }
 
     /// Get tree height
     pub fn height(&self) -> u32 {
-        let root_id = match *self.root.read().unwrap() {
+        let root_id = match *recover_read_guard(&self.root) {
             Some(id) => id,
             None => return 0,
         };
@@ -698,7 +724,7 @@ where
             None => return 0,
         };
 
-        let node = node.read().unwrap();
+        let node = recover_read_guard(&node);
 
         match &*node {
             Node::Leaf(_) => 1,
