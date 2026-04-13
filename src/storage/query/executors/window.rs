@@ -41,6 +41,7 @@ use std::collections::HashMap;
 
 use super::super::engine::binding::{Binding, Value, Var};
 use super::aggregation::create_aggregator;
+use super::value_compare::{total_compare_values, values_equal};
 
 // ============================================================================
 // Window Function Types
@@ -450,7 +451,7 @@ impl WindowExecutor {
                         NullsOrder::First => Ordering::Greater,
                         NullsOrder::Last => Ordering::Less,
                     },
-                    (Some(a), Some(b)) => compare_values(a, b),
+                    (Some(a), Some(b)) => total_compare_values(a, b),
                 };
 
                 if cmp != Ordering::Equal {
@@ -812,40 +813,6 @@ impl WindowExecutor {
             start.min(partition_size),
             end.min(partition_size).max(start),
         )
-    }
-}
-
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
-fn compare_values(a: &Value, b: &Value) -> Ordering {
-    match (a, b) {
-        (Value::Integer(a), Value::Integer(b)) => a.cmp(b),
-        (Value::Float(a), Value::Float(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
-        (Value::String(a), Value::String(b)) => a.cmp(b),
-        (Value::Integer(a), Value::Float(b)) => {
-            (*a as f64).partial_cmp(b).unwrap_or(Ordering::Equal)
-        }
-        (Value::Float(a), Value::Integer(b)) => {
-            a.partial_cmp(&(*b as f64)).unwrap_or(Ordering::Equal)
-        }
-        (Value::Boolean(a), Value::Boolean(b)) => a.cmp(b),
-        _ => Ordering::Equal,
-    }
-}
-
-fn values_equal(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::Integer(a), Value::Integer(b)) => a == b,
-        (Value::Float(a), Value::Float(b)) => (a - b).abs() < f64::EPSILON,
-        (Value::String(a), Value::String(b)) => a == b,
-        (Value::Boolean(a), Value::Boolean(b)) => a == b,
-        (Value::Integer(a), Value::Float(b)) | (Value::Float(b), Value::Integer(a)) => {
-            (*a as f64 - b).abs() < f64::EPSILON
-        }
-        (Value::Null, Value::Null) => true,
-        _ => false,
     }
 }
 
