@@ -58,7 +58,10 @@ pub mod security;
 pub mod similarity;
 pub mod sort;
 pub mod step;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod unified;
+pub(crate) mod value_compare;
 
 // Re-export common types
 pub use ast::{
