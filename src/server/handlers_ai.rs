@@ -146,7 +146,11 @@ impl RedDBServer {
         obj.insert("ok".to_string(), JsonValue::Bool(true));
         obj.insert("key".to_string(), JsonValue::String(prefix.to_string()));
         if subtree.len() == 1 && subtree.contains_key("_value") {
-            obj.insert("value".to_string(), subtree.remove("_value").unwrap());
+            if let Some(value) = subtree.remove("_value") {
+                obj.insert("value".to_string(), value);
+            } else {
+                obj.insert("value".to_string(), JsonValue::Object(subtree));
+            }
         } else {
             obj.insert("value".to_string(), JsonValue::Object(subtree));
         }
