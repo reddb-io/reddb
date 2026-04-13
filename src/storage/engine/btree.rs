@@ -527,23 +527,84 @@ fn set_next_leaf(page: &mut Page, next: u32) {
 }
 
 // ==================== Interior Page Helpers ====================
+//
+// Slotted-page layout mirroring the leaf format:
+//
+// ```text
+// [PageHeader 32B]
+// [slot 0: u16][slot 1: u16]...[slot N-1: u16]  ← grows forward
+// ... free space ...
+// [cell N-1][cell N-2]...[cell 0]               ← grows backward from free_end
+// ```
+//
+// Each cell is `[key_len:u16][key][child:u32]`. The right-most child
+// pointer lives in `PageHeader.right_child` exactly as before.
+
+#[inline]
+fn interior_slot_offset_for(index: usize) -> usize {
+    INTERIOR_DATA_OFFSET + index * 2
+}
+
+#[inline]
+fn interior_read_slot(page: &Page, index: usize) -> BTreeResult<usize> {
+    let data = page.as_bytes();
+    let slot_pos = interior_slot_offset_for(index);
+    if slot_pos + 2 > PAGE_SIZE {
+        return Err(BTreeError::Corrupted(
+            "interior slot array overflows page".into(),
+        ));
+    }
+    Ok(u16::from_le_bytes([data[slot_pos], data[slot_pos + 1]]) as usize)
+}
+
+#[inline]
+fn interior_write_slot(page: &mut Page, index: usize, cell_offset: u16) -> BTreeResult<()> {
+    let data = page.as_bytes_mut();
+    let slot_pos = interior_slot_offset_for(index);
+    if slot_pos + 2 > PAGE_SIZE {
+        return Err(BTreeError::Corrupted(
+            "interior slot array overflows page".into(),
+        ));
+    }
+    data[slot_pos..slot_pos + 2].copy_from_slice(&cell_offset.to_le_bytes());
+    Ok(())
+}
+
+#[inline]
+fn interior_cells_start(page: &Page) -> usize {
+    let end = page.free_end() as usize;
+    if end == 0 {
+        PAGE_SIZE
+    } else {
+        end
+    }
+}
+
+#[inline]
+fn interior_free_bytes(page: &Page) -> usize {
+    let slot_end = INTERIOR_DATA_OFFSET + (page.cell_count() as usize) * 2;
+    interior_cells_start(page).saturating_sub(slot_end)
+}
 
 fn read_interior_cell(page: &Page, index: usize) -> BTreeResult<(Vec<u8>, u32)> {
-    let data = page.as_bytes();
     let cell_count = page.cell_count() as usize;
-
     if index >= cell_count {
         return Err(BTreeError::Corrupted("Cell index out of range".into()));
     }
-
-    // Find cell offset by scanning from start
-    let mut offset = INTERIOR_DATA_OFFSET;
-    for _ in 0..index {
-        let key_len = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
-        offset += 2 + key_len + 4; // key_len + key + child
+    let offset = interior_read_slot(page, index)?;
+    let data = page.as_bytes();
+    if offset + 2 > PAGE_SIZE {
+        return Err(BTreeError::Corrupted(
+            "interior cell header out of range".into(),
+        ));
     }
-
     let key_len = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
+    let end = offset + 2 + key_len + 4;
+    if end > PAGE_SIZE {
+        return Err(BTreeError::Corrupted(
+            "interior cell body out of range".into(),
+        ));
+    }
     let key = data[offset + 2..offset + 2 + key_len].to_vec();
     let child = u32::from_le_bytes([
         data[offset + 2 + key_len],
@@ -551,7 +612,6 @@ fn read_interior_cell(page: &Page, index: usize) -> BTreeResult<(Vec<u8>, u32)> 
         data[offset + 2 + key_len + 2],
         data[offset + 2 + key_len + 3],
     ]);
-
     Ok((key, child))
 }
 
@@ -578,6 +638,10 @@ fn read_interior_keys_children(page: &Page) -> BTreeResult<(Vec<Vec<u8>>, Vec<u3
     Ok((keys, children))
 }
 
+/// Bulk-write an interior page from scratch in slotted form. Used by
+/// the split path. `keys` and `children` follow the B+ tree contract:
+/// `children.len() == keys.len() + 1`, with the last child landing in
+/// `PageHeader.right_child` (as before).
 fn write_interior_entries(page: &mut Page, keys: &[Vec<u8>], children: &[u32]) -> BTreeResult<()> {
     if !keys.is_empty() && children.len() != keys.len() + 1 {
         return Err(BTreeError::Corrupted(
@@ -587,103 +651,127 @@ fn write_interior_entries(page: &mut Page, keys: &[Vec<u8>], children: &[u32]) -
 
     clear_interior_cells(page);
     if keys.is_empty() {
-        page.set_cell_count(0);
         let right_child = children.first().copied().unwrap_or(0);
         page.set_right_child(right_child);
         return Ok(());
     }
 
     for (i, key) in keys.iter().enumerate() {
-        write_interior_cell(page, i, key, children[i])?;
+        let cell_size = 2 + key.len() + 4;
+        let cells_start = interior_cells_start(page);
+        let slot_end = INTERIOR_DATA_OFFSET + (i + 1) * 2;
+        if slot_end + cell_size > cells_start {
+            return Err(BTreeError::Corrupted(
+                "interior rebuild overflowed page".into(),
+            ));
+        }
+        let cell_offset = cells_start - cell_size;
+        {
+            let data = page.as_bytes_mut();
+            data[cell_offset..cell_offset + 2].copy_from_slice(&(key.len() as u16).to_le_bytes());
+            data[cell_offset + 2..cell_offset + 2 + key.len()].copy_from_slice(key);
+            data[cell_offset + 2 + key.len()..cell_offset + 2 + key.len() + 4]
+                .copy_from_slice(&children[i].to_le_bytes());
+        }
+        page.set_free_end(cell_offset as u16);
+        interior_write_slot(page, i, cell_offset as u16)?;
     }
     page.set_cell_count(keys.len() as u16);
+    page.set_free_start((INTERIOR_DATA_OFFSET + keys.len() * 2) as u16);
     page.set_right_child(*children.last().ok_or_else(|| {
         BTreeError::Corrupted("write_interior_entries: children empty with non-empty keys".into())
     })?);
     Ok(())
 }
 
-fn write_interior_cell(page: &mut Page, index: usize, key: &[u8], child: u32) -> BTreeResult<()> {
-    let data = page.as_bytes_mut();
-
-    // Find cell offset by scanning from start
-    let mut offset = INTERIOR_DATA_OFFSET;
-    for _ in 0..index {
-        let key_len = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
-        offset += 2 + key_len + 4;
-    }
-
-    // Write key length
-    data[offset..offset + 2].copy_from_slice(&(key.len() as u16).to_le_bytes());
-
-    // Write key
-    data[offset + 2..offset + 2 + key.len()].copy_from_slice(key);
-
-    // Write child pointer
-    data[offset + 2 + key.len()..offset + 2 + key.len() + 4].copy_from_slice(&child.to_le_bytes());
-
-    Ok(())
-}
-
 fn can_insert_interior(page: &Page, key: &[u8]) -> bool {
-    let data = page.as_bytes();
-    let cell_count = page.cell_count() as usize;
-
-    // Calculate current used space
-    let mut offset = INTERIOR_DATA_OFFSET;
-    for _ in 0..cell_count {
-        let key_len = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
-        offset += 2 + key_len + 4;
-    }
-
-    // Check if new cell fits
-    let needed = 2 + key.len() + 4;
-    offset + needed <= PAGE_SIZE
+    let needed = 2 + 2 + key.len() + 4;
+    interior_free_bytes(page) >= needed
 }
 
+/// Insert a `(key, left_child)` separator into the interior page.
+/// `right_child` replaces whatever child used to sit to the right of
+/// the inserted key (either a middle child's pointer or the page's
+/// `right_child` when the key is the new maximum).
 fn insert_into_interior(
     page: &mut Page,
     key: &[u8],
     left_child: u32,
     right_child: u32,
 ) -> BTreeResult<()> {
+    // 1. Binary search the slot array for the insert position.
     let cell_count = page.cell_count() as usize;
-
-    // Read all cells
-    let mut entries: Vec<(Vec<u8>, u32)> = Vec::with_capacity(cell_count + 1);
-    for i in 0..cell_count {
-        entries.push(read_interior_cell(page, i)?);
+    let mut low = 0;
+    let mut high = cell_count;
+    while low < high {
+        let mid = (low + high) / 2;
+        let (cell_key, _) = read_interior_cell(page, mid)?;
+        match cell_key.as_slice().cmp(key) {
+            Ordering::Less => low = mid + 1,
+            Ordering::Greater | Ordering::Equal => high = mid,
+        }
     }
+    let insert_pos = low;
 
-    // Find insertion position
-    let insert_pos = entries.partition_point(|(k, _)| k.as_slice() < key);
-
-    // Update child pointer for the key we're displacing
-    if insert_pos < entries.len() {
-        entries[insert_pos].1 = right_child;
+    // 2. Redirect the previous owner of the split to `right_child`.
+    //    If the insertion is at the tail, the previous owner was the
+    //    page's right_child pointer; otherwise it was the child slot
+    //    of the cell currently at `insert_pos`.
+    if insert_pos < cell_count {
+        let old_offset = interior_read_slot(page, insert_pos)?;
+        let data = page.as_bytes();
+        let key_len = u16::from_le_bytes([data[old_offset], data[old_offset + 1]]) as usize;
+        let child_pos = old_offset + 2 + key_len;
+        let data = page.as_bytes_mut();
+        data[child_pos..child_pos + 4].copy_from_slice(&right_child.to_le_bytes());
     } else {
-        // New key is largest, update right_child
         page.set_right_child(right_child);
     }
 
-    // Insert new entry
-    entries.insert(insert_pos, (key.to_vec(), left_child));
-
-    // Rewrite all cells
-    clear_interior_cells(page);
-    for (i, (k, c)) in entries.iter().enumerate() {
-        write_interior_cell(page, i, k, *c)?;
+    // 3. Reserve the new cell at the tail of the free area.
+    let cell_size = 2 + key.len() + 4;
+    let slot_end_after = INTERIOR_DATA_OFFSET + (cell_count + 1) * 2;
+    let cells_start = interior_cells_start(page);
+    if slot_end_after + cell_size > cells_start {
+        return Err(BTreeError::Corrupted("interior page full".into()));
     }
-    page.set_cell_count(entries.len() as u16);
+    let cell_offset = cells_start - cell_size;
+    {
+        let data = page.as_bytes_mut();
+        data[cell_offset..cell_offset + 2].copy_from_slice(&(key.len() as u16).to_le_bytes());
+        data[cell_offset + 2..cell_offset + 2 + key.len()].copy_from_slice(key);
+        data[cell_offset + 2 + key.len()..cell_offset + 2 + key.len() + 4]
+            .copy_from_slice(&left_child.to_le_bytes());
+    }
+    page.set_free_end(cell_offset as u16);
 
+    // 4. Shift the slot-array tail right by one slot, write the new
+    //    pointer into the freed slot, bump counters.
+    {
+        let shift_from = interior_slot_offset_for(insert_pos);
+        let shift_to = shift_from + 2;
+        let shift_len = (cell_count - insert_pos) * 2;
+        if shift_len > 0 {
+            let data = page.as_bytes_mut();
+            data.copy_within(shift_from..shift_from + shift_len, shift_to);
+        }
+    }
+    interior_write_slot(page, insert_pos, cell_offset as u16)?;
+    page.set_cell_count((cell_count + 1) as u16);
+    page.set_free_start((INTERIOR_DATA_OFFSET + (cell_count + 1) * 2) as u16);
     Ok(())
 }
 
 fn clear_interior_cells(page: &mut Page) {
-    let data = page.as_bytes_mut();
-    for byte in &mut data[INTERIOR_DATA_OFFSET..] {
-        *byte = 0;
+    {
+        let data = page.as_bytes_mut();
+        for byte in &mut data[INTERIOR_DATA_OFFSET..] {
+            *byte = 0;
+        }
     }
+    page.set_cell_count(0);
+    page.set_free_start(INTERIOR_DATA_OFFSET as u16);
+    page.set_free_end(PAGE_SIZE as u16);
 }
 
 #[cfg(test)]

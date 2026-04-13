@@ -465,13 +465,9 @@ impl BTree {
         // If path is empty, need new root
         if path.is_empty() {
             let mut new_root = self.pager.allocate_page(PageType::BTreeInterior)?;
-
-            // Set right_child in header
-            new_root.set_right_child(right_child);
-
-            // Write the single key/child cell
-            write_interior_cell(&mut new_root, 0, key, left_child)?;
-            new_root.set_cell_count(1);
+            // Single separator with two children — seed the page via the
+            // canonical slotted builder so the header is consistent.
+            write_interior_entries(&mut new_root, &[key.to_vec()], &[left_child, right_child])?;
 
             new_root.update_checksum();
             let new_root_id = new_root.page_id();
@@ -516,44 +512,26 @@ impl BTree {
         left_child: u32,
         right_child: u32,
     ) -> BTreeResult<(Page, Vec<u8>)> {
-        // Collect all entries
-        let mut entries: Vec<(Vec<u8>, u32)> = Vec::new();
-        let cell_count = page.cell_count() as usize;
+        let (mut keys, mut children) = read_interior_keys_children(page)?;
+        let key_insert_pos = keys.partition_point(|key| key.as_slice() < new_key);
+        let child_insert_pos = children
+            .iter()
+            .position(|child| *child == left_child)
+            .unwrap_or(key_insert_pos);
 
-        for i in 0..cell_count {
-            entries.push(read_interior_cell(page, i)?);
-        }
+        keys.insert(key_insert_pos, new_key.to_vec());
+        children.insert(child_insert_pos + 1, right_child);
 
-        // Insert new entry
-        let insert_pos = entries.partition_point(|(k, _)| k.as_slice() < new_key);
-
-        // Update children around insertion point
-        if insert_pos < entries.len() {
-            entries[insert_pos].1 = left_child;
-        }
-        entries.insert(insert_pos, (new_key.to_vec(), left_child));
-
-        // The key at mid goes up, not into either node
-        let mid = entries.len() / 2;
-        let separator = entries[mid].0.clone();
+        // The promoted separator does not stay in either side; each
+        // resulting page is rebuilt through the shared slotted writer.
+        let mid = keys.len() / 2;
+        let separator = keys[mid].clone();
 
         // Create new interior node
         let mut new_page = self.pager.allocate_page(PageType::BTreeInterior)?;
 
-        // Left node gets entries before mid
-        clear_interior_cells(page);
-        for (i, (k, c)) in entries[..mid].iter().enumerate() {
-            write_interior_cell(page, i, k, *c)?;
-        }
-        page.set_cell_count(mid as u16);
-        page.set_right_child(entries[mid].1);
-
-        // Right node gets entries after mid
-        for (i, (k, c)) in entries[mid + 1..].iter().enumerate() {
-            write_interior_cell(&mut new_page, i, k, *c)?;
-        }
-        new_page.set_cell_count((entries.len() - mid - 1) as u16);
-        new_page.set_right_child(right_child);
+        write_interior_entries(page, &keys[..mid], &children[..mid + 1])?;
+        write_interior_entries(&mut new_page, &keys[mid + 1..], &children[mid + 1..])?;
 
         new_page.update_checksum();
         let new_page_id = new_page.page_id();
