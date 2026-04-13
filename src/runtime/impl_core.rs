@@ -1,5 +1,13 @@
 use super::*;
 
+fn runtime_pool_lock(runtime: &RedDBRuntime) -> std::sync::MutexGuard<'_, PoolState> {
+    runtime
+        .inner
+        .pool
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 impl RedDBRuntime {
     pub fn in_memory() -> RedDBResult<Self> {
         Self::with_options(RedDBOptions::in_memory())
@@ -594,11 +602,7 @@ impl RedDBRuntime {
     }
 
     pub fn stats(&self) -> RuntimeStats {
-        let pool = self
-            .inner
-            .pool
-            .lock()
-            .expect("stats: connection pool lock poisoned");
+        let pool = runtime_pool_lock(self);
         RuntimeStats {
             active_connections: pool.active,
             idle_connections: pool.idle.len(),
