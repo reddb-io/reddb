@@ -1,0 +1,58 @@
+{{- if .Values.networkPolicy.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "reddb.primary.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "reddb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: primary
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "reddb.primary.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - port: 50051
+          protocol: TCP
+        - port: 8080
+          protocol: TCP
+      from:
+        {{- if eq .Values.mode "primary-replica" }}
+        - podSelector:
+            matchLabels:
+              {{- include "reddb.replica.selectorLabels" . | nindent 14 }}
+        {{- end }}
+        {{- with .Values.networkPolicy.ingressFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+{{- if eq .Values.mode "primary-replica" }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "reddb.replica.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "reddb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: replica
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "reddb.replica.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - port: 50051
+          protocol: TCP
+        - port: 8080
+          protocol: TCP
+      {{- with .Values.networkPolicy.ingressFrom }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+{{- end }}
