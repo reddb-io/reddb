@@ -77,43 +77,75 @@ pub fn encode_value(buf: &mut Vec<u8>, value: &Value) {
 /// Decode a Value from wire bytes at the given position.
 #[inline]
 pub fn decode_value(data: &[u8], pos: &mut usize) -> Value {
+    try_decode_value(data, pos).unwrap_or(Value::Null)
+}
+
+#[inline]
+pub fn try_decode_value(data: &[u8], pos: &mut usize) -> Result<Value, &'static str> {
     if *pos >= data.len() {
-        return Value::Null;
+        return Err("missing value tag");
     }
+
     let tag = data[*pos];
     *pos += 1;
+
     match tag {
-        VAL_NULL => Value::Null,
-        VAL_I64 => {
-            let v = i64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap_or([0; 8]));
-            *pos += 8;
-            Value::Integer(v)
-        }
-        VAL_U64 => {
-            let v = u64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap_or([0; 8]));
-            *pos += 8;
-            Value::UnsignedInteger(v)
-        }
-        VAL_F64 => {
-            let v = f64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap_or([0; 8]));
-            *pos += 8;
-            Value::Float(v)
-        }
+        VAL_NULL => Ok(Value::Null),
+        VAL_I64 => Ok(Value::Integer(i64::from_le_bytes(read_array::<8>(
+            data,
+            pos,
+            "truncated i64 value",
+        )?))),
+        VAL_U64 => Ok(Value::UnsignedInteger(u64::from_le_bytes(read_array::<8>(
+            data,
+            pos,
+            "truncated u64 value",
+        )?))),
+        VAL_F64 => Ok(Value::Float(f64::from_le_bytes(read_array::<8>(
+            data,
+            pos,
+            "truncated f64 value",
+        )?))),
         VAL_TEXT => {
             let len =
-                u32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap_or([0; 4])) as usize;
-            *pos += 4;
-            let s = String::from_utf8_lossy(&data[*pos..*pos + len]).to_string();
-            *pos += len;
-            Value::Text(s)
+                u32::from_le_bytes(read_array::<4>(data, pos, "truncated text length")?) as usize;
+            let bytes = read_bytes(data, pos, len, "truncated text value")?;
+            Ok(Value::Text(String::from_utf8_lossy(bytes).to_string()))
         }
         VAL_BOOL => {
-            let v = data[*pos] != 0;
-            *pos += 1;
-            Value::Boolean(v)
+            let bytes = read_bytes(data, pos, 1, "truncated bool value")?;
+            Ok(Value::Boolean(bytes[0] != 0))
         }
-        _ => Value::Null,
+        _ => Err("unknown value tag"),
     }
+}
+
+#[inline]
+fn read_bytes<'a>(
+    data: &'a [u8],
+    pos: &mut usize,
+    len: usize,
+    err: &'static str,
+) -> Result<&'a [u8], &'static str> {
+    let end = pos.saturating_add(len);
+    if end > data.len() {
+        return Err(err);
+    }
+    let bytes = &data[*pos..end];
+    *pos = end;
+    Ok(bytes)
+}
+
+#[inline]
+fn read_array<const N: usize>(
+    data: &[u8],
+    pos: &mut usize,
+    err: &'static str,
+) -> Result<[u8; N], &'static str> {
+    let bytes = read_bytes(data, pos, N, err)?;
+    let mut array = [0u8; N];
+    array.copy_from_slice(bytes);
+    Ok(array)
 }
 
 /// Encode a column name to wire format.
