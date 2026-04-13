@@ -556,53 +556,6 @@ pub(crate) fn parse_context_search_input(payload: &JsonValue) -> RedDBResult<Sea
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_entity_type_alias_accepts_kv_shortcuts() {
-        let mut entity_types = Vec::new();
-        let mut capabilities = Vec::new();
-
-        assert!(apply_entity_type_alias("kv", &mut entity_types, &mut capabilities).is_ok());
-        assert_eq!(entity_types, vec!["kv".to_string()]);
-        assert!(capabilities.is_empty());
-    }
-
-    #[test]
-    fn parse_capability_alias_accepts_kv_shortcuts() {
-        let mut capabilities = Vec::new();
-        assert!(normalize_capability_filter("key-value", &mut capabilities).is_ok());
-        assert_eq!(capabilities, vec!["kv".to_string()]);
-    }
-
-    #[test]
-    fn parse_unified_prefers_lookup_payload() {
-        let payload: JsonValue = crate::json::from_str(
-            r#"{"lookup":{"index":"cpf","value":"000.000.000-00"},"mode":"hybrid"}"#,
-        )
-        .expect("valid json");
-        let input = parse_unified_search_input(&payload).expect("lookup should parse");
-        assert!(matches!(input, UnifiedSearchInput::Index(_)));
-    }
-
-    #[test]
-    fn parse_index_payload_supports_top_level_fields() {
-        let payload: JsonValue = crate::json::from_str(
-            r#"{"mode":"index","index":"cpf","value":"000.000.000-00","exact":false}"#,
-        )
-        .expect("valid json");
-        let input = parse_unified_search_input(&payload).expect("index payload should parse");
-        let UnifiedSearchInput::Index(input) = input else {
-            panic!("expected index input");
-        };
-        assert_eq!(input.index, "cpf");
-        assert_eq!(input.value, "000.000.000-00");
-        assert!(!input.exact);
-    }
-}
-
 fn json_vector_field(payload: &JsonValue, field: &str) -> RedDBResult<Vec<f32>> {
     let values = payload
         .get(field)
@@ -752,4 +705,51 @@ fn json_filter_value(value: &JsonValue) -> RedDBResult<RuntimeFilterValue> {
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_entity_type_alias_accepts_kv_shortcuts() {
+        let mut entity_types = Vec::new();
+        let mut capabilities = Vec::new();
+
+        assert!(apply_entity_type_alias("kv", &mut entity_types, &mut capabilities).is_ok());
+        assert_eq!(entity_types, vec!["kv".to_string()]);
+        assert!(capabilities.is_empty());
+    }
+
+    #[test]
+    fn parse_capability_alias_accepts_kv_shortcuts() {
+        let mut capabilities = Vec::new();
+        assert!(normalize_capability_filter("key-value", &mut capabilities).is_ok());
+        assert_eq!(capabilities, vec!["kv".to_string()]);
+    }
+
+    #[test]
+    fn parse_unified_prefers_lookup_payload() {
+        let payload: JsonValue = crate::json::from_str(
+            r#"{"lookup":{"index":"cpf","value":"000.000.000-00"},"mode":"hybrid"}"#,
+        )
+        .expect("valid json");
+        let input = parse_unified_search_input(&payload).expect("lookup should parse");
+        assert!(matches!(input, UnifiedSearchInput::Index(_)));
+    }
+
+    #[test]
+    fn parse_index_payload_supports_top_level_fields() {
+        let payload: JsonValue = crate::json::from_str(
+            r#"{"mode":"index","index":"cpf","value":"000.000.000-00","exact":false}"#,
+        )
+        .expect("valid json");
+        let input = parse_unified_search_input(&payload).expect("index payload should parse");
+        let UnifiedSearchInput::Index(input) = input else {
+            panic!("expected index input");
+        };
+        assert_eq!(input.index, "cpf");
+        assert_eq!(input.value, "000.000.000-00");
+        assert!(!input.exact);
+    }
 }
