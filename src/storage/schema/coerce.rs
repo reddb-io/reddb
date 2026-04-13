@@ -644,7 +644,7 @@ mod tests {
     #[test]
     fn test_coerce_cidr_valid() {
         let val = coerce("10.0.0.0/8", DataType::Cidr, None).unwrap();
-        let expected_ip = (10u32 << 24) | 0;
+        let expected_ip = 10u32 << 24;
         assert_eq!(val, Value::Cidr(expected_ip, 8));
     }
 
@@ -861,8 +861,8 @@ mod tests {
 
     #[test]
     fn test_coerce_float() {
-        let val = coerce("3.14159", DataType::Float, None).unwrap();
-        assert_eq!(val, Value::Float(3.14159));
+        let val = coerce("2.5", DataType::Float, None).unwrap();
+        assert_eq!(val, Value::Float(2.5));
     }
 
     #[test]
