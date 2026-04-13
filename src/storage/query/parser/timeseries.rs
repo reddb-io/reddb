@@ -81,7 +81,7 @@ impl<'a> Parser<'a> {
         self.expect(Token::Colon)?;
         let source = self.parse_resolution_spec()?;
         let aggregation = if self.consume(&Token::Colon)? {
-            self.expect_ident_or_keyword()?
+            self.expect_ident_or_keyword()?.to_ascii_lowercase()
         } else {
             "avg".to_string()
         };
@@ -92,16 +92,16 @@ impl<'a> Parser<'a> {
         match self.peek().clone() {
             Token::Ident(value) if value.eq_ignore_ascii_case("raw") => {
                 self.advance()?;
-                Ok(value)
+                Ok(value.to_ascii_lowercase())
             }
             Token::Integer(value) => {
                 self.advance()?;
-                let unit = self.expect_ident_or_keyword()?;
+                let unit = self.expect_ident_or_keyword()?.to_ascii_lowercase();
                 Ok(format!("{value}{unit}"))
             }
             Token::Float(value) => {
                 self.advance()?;
-                let unit = self.expect_ident_or_keyword()?;
+                let unit = self.expect_ident_or_keyword()?.to_ascii_lowercase();
                 let number = if value.fract().abs() < f64::EPSILON {
                     format!("{}", value as i64)
                 } else {
