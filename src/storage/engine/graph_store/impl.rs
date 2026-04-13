@@ -1,3 +1,7 @@
+use std::sync::Arc;
+
+use crate::storage::index::{IndexRegistry, IndexScope};
+
 use super::*;
 
 impl GraphStore {
@@ -13,7 +17,7 @@ impl GraphStore {
         Self {
             node_index: ShardedIndex::new(SHARD_COUNT),
             edge_index: EdgeIndex::new(SHARD_COUNT),
-            node_secondary: NodeSecondaryIndex::new(8192),
+            node_secondary: Arc::new(NodeSecondaryIndex::new(8192)),
             node_pages: RwLock::new(vec![initial_node_page]),
             edge_pages: RwLock::new(vec![initial_edge_page]),
             current_node_page: AtomicU32::new(0),
@@ -22,6 +26,20 @@ impl GraphStore {
             node_count: AtomicU64::new(0),
             edge_count: AtomicU64::new(0),
         }
+    }
+
+    /// Publish this graph's secondary index into an external
+    /// [`IndexRegistry`]. The registry holds an `Arc` pointing to the same
+    /// live index, so planners consulting the registry see current stats
+    /// without any copy/refresh logic.
+    ///
+    /// Scope: `IndexScope::graph(collection)`. Idempotent — subsequent
+    /// calls replace the previous entry.
+    pub fn publish_indexes(&self, registry: &IndexRegistry, collection: &str) {
+        registry.register(
+            IndexScope::graph(collection),
+            Arc::clone(&self.node_secondary) as Arc<dyn crate::storage::index::IndexBase>,
+        );
     }
 
     /// Add a node to the graph
@@ -474,7 +492,7 @@ impl GraphStore {
         let store = Self {
             node_index: ShardedIndex::new(16),
             edge_index: EdgeIndex::new(16),
-            node_secondary: NodeSecondaryIndex::new(8192),
+            node_secondary: Arc::new(NodeSecondaryIndex::new(8192)),
             node_pages: RwLock::new(node_pages),
             edge_pages: RwLock::new(edge_pages),
             current_node_page: AtomicU32::new(0),
