@@ -1,16 +1,16 @@
-/// RedDB Wire Protocol — binary TCP, zero JSON overhead.
-///
-/// Frame: [total_len: u32 LE][msg_type: u8][payload...]
-///
-/// Message types (client → server):
-///   0x01 Query       [sql_bytes...]
-///   0x04 BulkInsert  [coll_len:u16][coll_bytes][n:u32][json_len:u32 + json_bytes]...
-///
-/// Message types (server → client):
-///   0x02 Result      [ncols:u16][col_name_len:u16 + col_name]...[nrows:u32][row...]
-///                     row = [val_type:u8 + val_data]... per column
-///   0x03 Error       [error_bytes...]
-///   0x05 BulkOk      [count:u64]
+//! RedDB Wire Protocol — binary TCP, zero JSON overhead.
+//!
+//! Frame: [total_len: u32 LE][msg_type: u8][payload...]
+//!
+//! Message types (client → server):
+//!   0x01 Query       [sql_bytes...]
+//!   0x04 BulkInsert  [coll_len:u16][coll_bytes][n:u32][json_len:u32 + json_bytes]...
+//!
+//! Message types (server → client):
+//!   0x02 Result      [ncols:u16][col_name_len:u16 + col_name]...[nrows:u32][row...]
+//!                     row = [val_type:u8 + val_data]... per column
+//!   0x03 Error       [error_bytes...]
+//!   0x05 BulkOk      [count:u64]
 
 // --- Message type constants ---
 pub const MSG_QUERY: u8 = 0x01;
