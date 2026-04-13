@@ -11,6 +11,7 @@ use super::super::{
 };
 use super::error::DevXError;
 use super::refs::{NodeRef, TableRef, VectorRef};
+use super::{run_preprocessors, SharedPreprocessors};
 use crate::json::{to_vec as json_to_vec, Value as JsonValue};
 use crate::storage::schema::Value;
 
@@ -21,6 +22,7 @@ use crate::storage::schema::Value;
 /// Fluent builder for graph nodes
 pub struct NodeBuilder {
     store: Arc<UnifiedStore>,
+    preprocessors: SharedPreprocessors,
     collection: String,
     label: String,
     node_type: String,
@@ -34,12 +36,14 @@ pub struct NodeBuilder {
 impl NodeBuilder {
     pub(crate) fn new(
         store: Arc<UnifiedStore>,
+        preprocessors: SharedPreprocessors,
         collection: impl Into<String>,
         label: impl Into<String>,
     ) -> Self {
         let label_str = label.into();
         Self {
             store,
+            preprocessors,
             collection: collection.into(),
             label: label_str.clone(),
             node_type: label_str,
@@ -153,6 +157,7 @@ impl NodeBuilder {
         for (target, target_collection, ref_type) in self.cross_links {
             entity.add_cross_ref(CrossRef::new(id, target, target_collection, ref_type));
         }
+        run_preprocessors(&self.preprocessors, &mut entity)?;
 
         // Insert the entity
         let id = self
@@ -190,6 +195,7 @@ impl NodeBuilder {
                 RefType::RelatedTo,
             ));
 
+            run_preprocessors(&self.preprocessors, &mut edge_entity)?;
             let _ = self.store.insert_auto(&self.collection, edge_entity);
 
             // Add cross-ref from source node to edge
@@ -214,6 +220,7 @@ impl NodeBuilder {
 /// Fluent builder for graph edges
 pub struct EdgeBuilder {
     store: Arc<UnifiedStore>,
+    preprocessors: SharedPreprocessors,
     collection: String,
     label: String,
     from_node: Option<EntityId>,
@@ -226,11 +233,13 @@ pub struct EdgeBuilder {
 impl EdgeBuilder {
     pub(crate) fn new(
         store: Arc<UnifiedStore>,
+        preprocessors: SharedPreprocessors,
         collection: impl Into<String>,
         label: impl Into<String>,
     ) -> Self {
         Self {
             store,
+            preprocessors,
             collection: collection.into(),
             label: label.into(),
             from_node: None,
@@ -313,6 +322,7 @@ impl EdgeBuilder {
             self.collection.clone(),
             RefType::RelatedTo,
         ));
+        run_preprocessors(&self.preprocessors, &mut entity)?;
 
         let id = self
             .store
@@ -357,6 +367,7 @@ impl EdgeBuilder {
 /// Fluent builder for vectors
 pub struct VectorBuilder {
     store: Arc<UnifiedStore>,
+    preprocessors: SharedPreprocessors,
     collection: String,
     dense: Option<Vec<f32>>,
     sparse: Option<Vec<(u32, f32)>>,
@@ -366,9 +377,14 @@ pub struct VectorBuilder {
 }
 
 impl VectorBuilder {
-    pub(crate) fn new(store: Arc<UnifiedStore>, collection: impl Into<String>) -> Self {
+    pub(crate) fn new(
+        store: Arc<UnifiedStore>,
+        preprocessors: SharedPreprocessors,
+        collection: impl Into<String>,
+    ) -> Self {
         Self {
             store,
+            preprocessors,
             collection: collection.into(),
             dense: None,
             sparse: None,
@@ -459,6 +475,7 @@ impl VectorBuilder {
         for (target, target_collection, ref_type) in self.links {
             entity.add_cross_ref(CrossRef::new(id, target, target_collection, ref_type));
         }
+        run_preprocessors(&self.preprocessors, &mut entity)?;
 
         let id = self
             .store
@@ -483,6 +500,7 @@ impl VectorBuilder {
 /// Fluent builder for table rows
 pub struct RowBuilder {
     store: Arc<UnifiedStore>,
+    preprocessors: SharedPreprocessors,
     table: String,
     columns: Vec<Value>,
     named: HashMap<String, Value>,
@@ -493,6 +511,7 @@ pub struct RowBuilder {
 impl RowBuilder {
     pub(crate) fn new(
         store: Arc<UnifiedStore>,
+        preprocessors: SharedPreprocessors,
         table: impl Into<String>,
         columns: Vec<(&str, Value)>,
     ) -> Self {
@@ -506,6 +525,7 @@ impl RowBuilder {
 
         Self {
             store,
+            preprocessors,
             table: table.into(),
             columns: col_values,
             named,
@@ -562,6 +582,7 @@ impl RowBuilder {
         for (target, target_collection, ref_type) in self.links {
             entity.add_cross_ref(CrossRef::new(id, target, target_collection, ref_type));
         }
+        run_preprocessors(&self.preprocessors, &mut entity)?;
 
         let id = self
             .store
@@ -588,6 +609,7 @@ impl RowBuilder {
 /// Stores KV pairs as table rows with named fields `key` (Text) and `value`.
 pub struct KvBuilder {
     store: Arc<UnifiedStore>,
+    preprocessors: SharedPreprocessors,
     collection: String,
     key: String,
     value: Value,
@@ -597,12 +619,14 @@ pub struct KvBuilder {
 impl KvBuilder {
     pub(crate) fn new(
         store: Arc<UnifiedStore>,
+        preprocessors: SharedPreprocessors,
         collection: impl Into<String>,
         key: impl Into<String>,
         value: Value,
     ) -> Self {
         Self {
             store,
+            preprocessors,
             collection: collection.into(),
             key: key.into(),
             value,
@@ -618,9 +642,18 @@ impl KvBuilder {
 
     /// Save the key-value pair as a table row with named fields `key` and `value`
     pub fn save(self) -> Result<EntityId, DevXError> {
-        let columns = vec![("key", Value::Text(self.key)), ("value", self.value)];
-        let mut builder = RowBuilder::new(self.store, &self.collection, columns);
-        for (k, v) in self.metadata {
+        let Self {
+            store,
+            preprocessors,
+            collection,
+            key,
+            value,
+            metadata,
+        } = self;
+
+        let columns = vec![("key", Value::Text(key)), ("value", value)];
+        let mut builder = RowBuilder::new(store, preprocessors, &collection, columns);
+        for (k, v) in metadata {
             builder = builder.metadata(k, v);
         }
         builder.save()
@@ -647,6 +680,7 @@ impl KvBuilder {
 /// ```
 pub struct DocumentBuilder {
     store: Arc<UnifiedStore>,
+    preprocessors: SharedPreprocessors,
     collection: String,
     body: HashMap<String, JsonValue>,
     metadata: HashMap<String, MetadataValue>,
@@ -654,9 +688,14 @@ pub struct DocumentBuilder {
 }
 
 impl DocumentBuilder {
-    pub(crate) fn new(store: Arc<UnifiedStore>, collection: impl Into<String>) -> Self {
+    pub(crate) fn new(
+        store: Arc<UnifiedStore>,
+        preprocessors: SharedPreprocessors,
+        collection: impl Into<String>,
+    ) -> Self {
         Self {
             store,
+            preprocessors,
             collection: collection.into(),
             body: HashMap::new(),
             metadata: HashMap::new(),
@@ -730,6 +769,7 @@ impl DocumentBuilder {
         for (target, target_collection, ref_type) in self.links {
             entity.add_cross_ref(CrossRef::new(id, target, target_collection, ref_type));
         }
+        run_preprocessors(&self.preprocessors, &mut entity)?;
 
         let id = self
             .store
