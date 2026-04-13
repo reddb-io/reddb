@@ -1,0 +1,35 @@
+{{ include "reddb.validateMode" . }}
+RedDB {{ .Chart.AppVersion }} installed in mode "{{ .Values.mode }}".
+
+Release: {{ .Release.Name }}
+Namespace: {{ .Release.Namespace }}
+
+────────────────────────────────────────────────────────────────────────────
+Endpoints
+────────────────────────────────────────────────────────────────────────────
+Primary (writer):
+  gRPC: {{ include "reddb.primary.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.primary.service.grpcPort }}
+  HTTP: http://{{ include "reddb.primary.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.primary.service.httpPort }}
+{{- if eq .Values.mode "primary-replica" }}
+
+Replicas (readers, {{ .Values.replica.replicaCount }} pod(s)):
+  gRPC: {{ include "reddb.replica.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.replica.service.grpcPort }}
+  HTTP: http://{{ include "reddb.replica.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.replica.service.httpPort }}
+{{- end }}
+
+────────────────────────────────────────────────────────────────────────────
+Quick checks
+────────────────────────────────────────────────────────────────────────────
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+  kubectl -n {{ .Release.Namespace }} exec -it {{ include "reddb.primary.fullname" . }}-0 -- red status
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "reddb.primary.fullname" . }} 8080:{{ .Values.primary.service.httpPort }}
+
+{{- if .Values.auth.enabled }}
+
+Auth bootstrap is ENABLED. Initial admin credentials live in secret:
+  {{ include "reddb.authSecretName" . }}
+{{- end }}
+{{- if not .Values.primary.persistence.enabled }}
+
+⚠  Persistence is DISABLED on the primary — data lives in an emptyDir and is lost on pod restart.
+{{- end }}
