@@ -3,7 +3,7 @@
 //! Enables partial rollback within transactions.
 
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 /// Transaction ID type
 pub type TxnId = u64;
@@ -185,6 +185,20 @@ impl SavepointManager {
         }
     }
 
+    fn txn_savepoints_write(
+        &self,
+    ) -> Result<RwLockWriteGuard<'_, HashMap<TxnId, TxnSavepoints>>, SavepointError> {
+        self.txn_savepoints
+            .write()
+            .map_err(|_| SavepointError::LockPoisoned("savepoint registry"))
+    }
+
+    fn txn_savepoints_read(&self) -> RwLockReadGuard<'_, HashMap<TxnId, TxnSavepoints>> {
+        self.txn_savepoints
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Create a savepoint for a transaction
     pub fn create_savepoint(
         &self,
@@ -194,7 +208,7 @@ impl SavepointManager {
         lock_count: usize,
         write_set_index: usize,
     ) -> Result<Savepoint, SavepointError> {
-        let mut txn_map = self.txn_savepoints.write().unwrap();
+        let mut txn_map = self.txn_savepoints_write()?;
         let txn_sp = txn_map
             .entry(txn_id)
             .or_insert_with(|| TxnSavepoints::new(txn_id));
@@ -211,7 +225,7 @@ impl SavepointManager {
 
     /// Get a savepoint
     pub fn get_savepoint(&self, txn_id: TxnId, name: &str) -> Option<Savepoint> {
-        let txn_map = self.txn_savepoints.read().unwrap();
+        let txn_map = self.txn_savepoints_read();
         txn_map.get(&txn_id).and_then(|sp| sp.get(name).cloned())
     }
 
@@ -221,7 +235,7 @@ impl SavepointManager {
         txn_id: TxnId,
         name: &str,
     ) -> Result<Savepoint, SavepointError> {
-        let mut txn_map = self.txn_savepoints.write().unwrap();
+        let mut txn_map = self.txn_savepoints_write()?;
 
         let txn_sp = txn_map
             .get_mut(&txn_id)
@@ -238,7 +252,7 @@ impl SavepointManager {
         txn_id: TxnId,
         name: &str,
     ) -> Result<(Savepoint, Vec<String>), SavepointError> {
-        let mut txn_map = self.txn_savepoints.write().unwrap();
+        let mut txn_map = self.txn_savepoints_write()?;
 
         let txn_sp = txn_map
             .get_mut(&txn_id)
@@ -251,7 +265,7 @@ impl SavepointManager {
 
     /// Check if savepoint exists
     pub fn savepoint_exists(&self, txn_id: TxnId, name: &str) -> bool {
-        let txn_map = self.txn_savepoints.read().unwrap();
+        let txn_map = self.txn_savepoints_read();
         txn_map
             .get(&txn_id)
             .map(|sp| sp.exists(name))
@@ -260,13 +274,13 @@ impl SavepointManager {
 
     /// Get savepoint depth for transaction
     pub fn savepoint_depth(&self, txn_id: TxnId) -> usize {
-        let txn_map = self.txn_savepoints.read().unwrap();
+        let txn_map = self.txn_savepoints_read();
         txn_map.get(&txn_id).map(|sp| sp.depth()).unwrap_or(0)
     }
 
     /// Get all savepoint names for transaction
     pub fn get_savepoint_names(&self, txn_id: TxnId) -> Vec<String> {
-        let txn_map = self.txn_savepoints.read().unwrap();
+        let txn_map = self.txn_savepoints_read();
         txn_map
             .get(&txn_id)
             .map(|sp| sp.names().to_vec())
@@ -275,13 +289,16 @@ impl SavepointManager {
 
     /// Clean up savepoints for a transaction
     pub fn cleanup_transaction(&self, txn_id: TxnId) {
-        let mut txn_map = self.txn_savepoints.write().unwrap();
+        let mut txn_map = self
+            .txn_savepoints
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         txn_map.remove(&txn_id);
     }
 
     /// Get statistics
     pub fn stats(&self) -> SavepointStats {
-        let txn_map = self.txn_savepoints.read().unwrap();
+        let txn_map = self.txn_savepoints_read();
         SavepointStats {
             active_transactions: txn_map.len(),
             total_savepoints: txn_map.values().map(|sp| sp.depth()).sum(),
@@ -304,6 +321,8 @@ pub enum SavepointError {
     DuplicateName(String),
     /// Transaction not found
     TxnNotFound(TxnId),
+    /// Internal lock was poisoned by a panic
+    LockPoisoned(&'static str),
     /// Savepoint stack corrupted
     StackCorrupted,
 }
@@ -316,6 +335,7 @@ impl std::fmt::Display for SavepointError {
                 write!(f, "Savepoint '{}' already exists", name)
             }
             SavepointError::TxnNotFound(id) => write!(f, "Transaction {} not found", id),
+            SavepointError::LockPoisoned(name) => write!(f, "Lock poisoned: {}", name),
             SavepointError::StackCorrupted => write!(f, "Savepoint stack corrupted"),
         }
     }
@@ -501,5 +521,25 @@ mod tests {
 
         let names = manager.get_savepoint_names(1);
         assert_eq!(names, vec!["first", "second", "third"]);
+    }
+
+    #[test]
+    fn test_create_savepoint_returns_structured_error_when_registry_lock_is_poisoned() {
+        let manager = std::sync::Arc::new(SavepointManager::new());
+        let poison_target = std::sync::Arc::clone(&manager);
+        let _ = std::thread::spawn(move || {
+            let _guard = poison_target
+                .txn_savepoints
+                .write()
+                .expect("savepoint registry lock should be acquired");
+            panic!("poison savepoint registry");
+        })
+        .join();
+
+        let result = manager.create_savepoint(1, "sp1".to_string(), 100, 0, 0);
+        assert!(matches!(
+            result,
+            Err(SavepointError::LockPoisoned("savepoint registry"))
+        ));
     }
 }
