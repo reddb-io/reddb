@@ -6,6 +6,14 @@ use super::node::{Node, NodeId};
 use super::tree::BPlusTree;
 use super::version::Snapshot;
 use std::fmt::Debug;
+use std::sync::{RwLock, RwLockReadGuard};
+
+fn recover_read_guard<'a, T>(lock: &'a RwLock<T>) -> RwLockReadGuard<'a, T> {
+    match lock.read() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
 
 /// Cursor direction
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,7 +125,7 @@ where
     /// Move to first entry
     pub fn first(&mut self) -> bool {
         // Find first leaf
-        let first_leaf = match *self.tree.first_leaf.read().unwrap() {
+        let first_leaf = match *recover_read_guard(&self.tree.first_leaf) {
             Some(id) => id,
             None => {
                 self.state = CursorState::AfterLast;
@@ -135,7 +143,7 @@ where
     /// Move to last entry
     pub fn last(&mut self) -> bool {
         // Find last leaf by traversing from first
-        let mut leaf_id = match *self.tree.first_leaf.read().unwrap() {
+        let mut leaf_id = match *recover_read_guard(&self.tree.first_leaf) {
             Some(id) => id,
             None => {
                 self.state = CursorState::BeforeFirst;
@@ -145,7 +153,7 @@ where
 
         // Walk to last leaf
         while let Some(node) = self.tree.get_node(leaf_id) {
-            let node = node.read().unwrap();
+            let node = recover_read_guard(&node);
             if let Node::Leaf(leaf) = &*node {
                 match leaf.next {
                     Some(next_id) => {
@@ -162,7 +170,7 @@ where
 
         // Set to last entry in leaf
         if let Some(node) = self.tree.get_node(leaf_id) {
-            let node = node.read().unwrap();
+            let node = recover_read_guard(&node);
             if let Node::Leaf(leaf) = &*node {
                 self.current_index = leaf.keys.len().saturating_sub(1);
             }
@@ -187,7 +195,7 @@ where
 
         // Find index in leaf
         if let Some(node) = self.tree.get_node(leaf_id) {
-            let node = node.read().unwrap();
+            let node = recover_read_guard(&node);
             if let Node::Leaf(leaf) = &*node {
                 match leaf.keys.binary_search(key) {
                     Ok(i) => self.current_index = i,
@@ -235,13 +243,13 @@ where
 
     /// Find leaf for key
     fn find_leaf(&self, key: &K) -> Option<NodeId> {
-        let root_id = (*self.tree.root.read().unwrap())?;
+        let root_id = (*recover_read_guard(&self.tree.root))?;
         self.find_leaf_from(root_id, key)
     }
 
     fn find_leaf_from(&self, node_id: NodeId, key: &K) -> Option<NodeId> {
         let node = self.tree.get_node(node_id)?;
-        let node = node.read().unwrap();
+        let node = recover_read_guard(&node);
 
         match &*node {
             Node::Internal(internal) => {
@@ -257,7 +265,7 @@ where
     fn check_bounds(&self) -> bool {
         if let Some(leaf_id) = self.current_leaf {
             if let Some(node) = self.tree.get_node(leaf_id) {
-                let node = node.read().unwrap();
+                let node = recover_read_guard(&node);
                 if let Node::Leaf(leaf) = &*node {
                     return self.current_index < leaf.keys.len();
                 }
@@ -278,7 +286,7 @@ where
         };
 
         if let Some(node) = self.tree.get_node(leaf_id) {
-            let node = node.read().unwrap();
+            let node = recover_read_guard(&node);
             if let Node::Leaf(leaf) = &*node {
                 // Find visible entry starting from current index
                 while self.current_index < leaf.keys.len() {
@@ -309,7 +317,7 @@ where
         };
 
         let next_leaf = if let Some(node) = self.tree.get_node(leaf_id) {
-            let node = node.read().unwrap();
+            let node = recover_read_guard(&node);
             if let Node::Leaf(leaf) = &*node {
                 leaf.next
             } else {
@@ -344,7 +352,7 @@ where
         };
 
         let prev_leaf = if let Some(node) = self.tree.get_node(leaf_id) {
-            let node = node.read().unwrap();
+            let node = recover_read_guard(&node);
             if let Node::Leaf(leaf) = &*node {
                 leaf.prev
             } else {
@@ -359,7 +367,7 @@ where
                 self.current_leaf = Some(prev_id);
                 // Set to last entry in previous leaf
                 if let Some(node) = self.tree.get_node(prev_id) {
-                    let node = node.read().unwrap();
+                    let node = recover_read_guard(&node);
                     if let Node::Leaf(leaf) = &*node {
                         self.current_index = leaf.keys.len().saturating_sub(1);
                     }
