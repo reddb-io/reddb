@@ -24,6 +24,7 @@
 use std::collections::HashSet;
 
 use super::super::engine::binding::{Binding, Value, Var};
+use super::value_compare::{partial_compare_values, values_equal};
 
 // ============================================================================
 // Subquery Types
@@ -455,45 +456,16 @@ fn compare_with_op(left: &Value, right: &Value, op: CompareOp) -> bool {
     match op {
         CompareOp::Eq => values_equal(left, right),
         CompareOp::Ne => !values_equal(left, right),
-        CompareOp::Lt => compare_values(left, right) == std::cmp::Ordering::Less,
+        CompareOp::Lt => partial_compare_values(left, right) == Some(std::cmp::Ordering::Less),
         CompareOp::Le => matches!(
-            compare_values(left, right),
-            std::cmp::Ordering::Less | std::cmp::Ordering::Equal
+            partial_compare_values(left, right),
+            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
         ),
-        CompareOp::Gt => compare_values(left, right) == std::cmp::Ordering::Greater,
+        CompareOp::Gt => partial_compare_values(left, right) == Some(std::cmp::Ordering::Greater),
         CompareOp::Ge => matches!(
-            compare_values(left, right),
-            std::cmp::Ordering::Greater | std::cmp::Ordering::Equal
+            partial_compare_values(left, right),
+            Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
         ),
-    }
-}
-
-fn values_equal(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::Integer(a), Value::Integer(b)) => a == b,
-        (Value::Float(a), Value::Float(b)) => (a - b).abs() < f64::EPSILON,
-        (Value::String(a), Value::String(b)) => a == b,
-        (Value::Boolean(a), Value::Boolean(b)) => a == b,
-        (Value::Integer(a), Value::Float(b)) | (Value::Float(b), Value::Integer(a)) => {
-            (*a as f64 - b).abs() < f64::EPSILON
-        }
-        (Value::Null, Value::Null) => true,
-        _ => false,
-    }
-}
-
-fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
-    match (a, b) {
-        (Value::Integer(a), Value::Integer(b)) => a.cmp(b),
-        (Value::Float(a), Value::Float(b)) => a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
-        (Value::String(a), Value::String(b)) => a.cmp(b),
-        (Value::Integer(a), Value::Float(b)) => (*a as f64)
-            .partial_cmp(b)
-            .unwrap_or(std::cmp::Ordering::Equal),
-        (Value::Float(a), Value::Integer(b)) => a
-            .partial_cmp(&(*b as f64))
-            .unwrap_or(std::cmp::Ordering::Equal),
-        _ => std::cmp::Ordering::Equal,
     }
 }
 
