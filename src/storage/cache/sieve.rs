@@ -17,7 +17,21 @@
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+
+fn recover_read_guard<'a, T>(lock: &'a RwLock<T>) -> RwLockReadGuard<'a, T> {
+    match lock.read() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn recover_write_guard<'a, T>(lock: &'a RwLock<T>) -> RwLockWriteGuard<'a, T> {
+    match lock.write() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
 
 /// Page identifier type
 pub type PageId = u64;
@@ -285,7 +299,7 @@ where
 
     /// Get an entry from cache
     pub fn get(&self, key: &K) -> Option<V> {
-        let entries = self.entries.read().unwrap();
+        let entries = recover_read_guard(&self.entries);
 
         if let Some(entry) = entries.get(key) {
             // Set visited flag (no lock needed - atomic)
@@ -306,14 +320,14 @@ where
 
     /// Check if key exists in cache
     pub fn contains(&self, key: &K) -> bool {
-        self.entries.read().unwrap().contains_key(key)
+        recover_read_guard(&self.entries).contains_key(key)
     }
 
     /// Insert an entry into cache
     pub fn insert(&self, key: K, value: V) -> Option<V> {
         // Check if update first (no locks held while checking)
         {
-            let entries = self.entries.read().unwrap();
+            let entries = recover_read_guard(&self.entries);
             if let Some(entry) = entries.get(&key) {
                 entry.set_visited(true);
                 let old_value = entry.value.clone();
@@ -330,8 +344,8 @@ where
         };
 
         // Now acquire locks in consistent order: entries first, then slots
-        let mut entries = self.entries.write().unwrap();
-        let mut slots = self.slots.write().unwrap();
+        let mut entries = recover_write_guard(&self.entries);
+        let mut slots = recover_write_guard(&self.slots);
 
         // Double-check the key wasn't inserted while we waited
         if entries.contains_key(&key) {
@@ -365,7 +379,7 @@ where
 
     /// Update existing entry (internal)
     fn update_existing(&self, key: K, new_value: V, old_value: V) -> Option<V> {
-        let mut entries = self.entries.write().unwrap();
+        let mut entries = recover_write_guard(&self.entries);
 
         if let Some(old_entry) = entries.get(&key) {
             let index = old_entry.index;
@@ -379,10 +393,10 @@ where
 
     /// Remove an entry from cache
     pub fn remove(&self, key: &K) -> Option<V> {
-        let mut entries = self.entries.write().unwrap();
+        let mut entries = recover_write_guard(&self.entries);
 
         if let Some(entry) = entries.remove(key) {
-            let mut slots = self.slots.write().unwrap();
+            let mut slots = recover_write_guard(&self.slots);
             slots[entry.index] = Slot::Empty;
             self.count.fetch_sub(1, Ordering::SeqCst);
 
@@ -409,8 +423,8 @@ where
             let current_hand = self.hand.load(Ordering::SeqCst);
 
             // Acquire both locks in consistent order: entries first, then slots
-            let mut entries = self.entries.write().unwrap();
-            let mut slots = self.slots.write().unwrap();
+            let mut entries = recover_write_guard(&self.entries);
+            let mut slots = recover_write_guard(&self.slots);
 
             if let Slot::Occupied(ref key) = slots[current_hand] {
                 if let Some(entry) = entries.get(key) {
@@ -422,7 +436,11 @@ where
                     } else {
                         // Evict this entry
                         let key_clone = key.clone();
-                        let entry = entries.remove(&key_clone).unwrap();
+                        let Some(entry) = entries.remove(&key_clone) else {
+                            let next = (current_hand + 1) % capacity;
+                            self.hand.store(next, Ordering::SeqCst);
+                            continue;
+                        };
 
                         // Writeback if dirty
                         if entry.is_dirty() {
@@ -463,7 +481,7 @@ where
 
     /// Pin a page (prevent eviction)
     pub fn pin(&self, key: &K) -> bool {
-        let entries = self.entries.read().unwrap();
+        let entries = recover_read_guard(&self.entries);
         if let Some(entry) = entries.get(key) {
             entry.pin();
             true
@@ -474,7 +492,7 @@ where
 
     /// Unpin a page
     pub fn unpin(&self, key: &K) -> bool {
-        let entries = self.entries.read().unwrap();
+        let entries = recover_read_guard(&self.entries);
         if let Some(entry) = entries.get(key) {
             entry.unpin();
             true
@@ -485,7 +503,7 @@ where
 
     /// Mark a page as dirty
     pub fn mark_dirty(&self, key: &K) -> bool {
-        let entries = self.entries.read().unwrap();
+        let entries = recover_read_guard(&self.entries);
         if let Some(entry) = entries.get(key) {
             entry.mark_dirty();
             true
@@ -496,7 +514,7 @@ where
 
     /// Flush all dirty pages
     pub fn flush(&self) -> std::io::Result<usize> {
-        let entries = self.entries.read().unwrap();
+        let entries = recover_read_guard(&self.entries);
         let mut flushed = 0;
 
         for (key, entry) in entries.iter() {
@@ -521,8 +539,8 @@ where
         // Flush dirty pages first
         let _ = self.flush();
 
-        let mut entries = self.entries.write().unwrap();
-        let mut slots = self.slots.write().unwrap();
+        let mut entries = recover_write_guard(&self.entries);
+        let mut slots = recover_write_guard(&self.slots);
 
         entries.clear();
         for slot in slots.iter_mut() {
@@ -560,14 +578,14 @@ where
 
     /// Get all cached keys
     pub fn keys(&self) -> Vec<K> {
-        self.entries.read().unwrap().keys().cloned().collect()
+        recover_read_guard(&self.entries).keys().cloned().collect()
     }
 
     /// Get dirty page count
     pub fn dirty_count(&self) -> usize {
         self.entries
             .read()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .values()
             .filter(|e| e.is_dirty())
             .count()
@@ -639,8 +657,11 @@ impl Page {
 
     /// Read u32 at offset
     pub fn read_u32(&self, offset: usize) -> Option<u32> {
-        self.read(offset, 4)
-            .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+        self.read(offset, 4).map(|bytes| {
+            let mut array = [0u8; 4];
+            array.copy_from_slice(bytes);
+            u32::from_le_bytes(array)
+        })
     }
 
     /// Write u32 at offset
@@ -650,8 +671,11 @@ impl Page {
 
     /// Read u64 at offset
     pub fn read_u64(&self, offset: usize) -> Option<u64> {
-        self.read(offset, 8)
-            .map(|b| u64::from_le_bytes(b.try_into().unwrap()))
+        self.read(offset, 8).map(|bytes| {
+            let mut array = [0u8; 8];
+            array.copy_from_slice(bytes);
+            u64::from_le_bytes(array)
+        })
     }
 
     /// Write u64 at offset
