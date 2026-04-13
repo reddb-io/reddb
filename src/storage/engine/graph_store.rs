@@ -620,6 +620,9 @@ pub struct GraphStore {
     node_index: ShardedIndex<RecordLocation>,
     /// Edge index: adjacency lists
     edge_index: EdgeIndex,
+    /// Secondary inverted indexes on (type, label) for O(1) non-id lookups.
+    /// Avoids full node-page scans in `nodes_of_type` / `nodes_by_label`.
+    node_secondary: secondary_index::NodeSecondaryIndex,
     /// Node pages (packed node records)
     node_pages: RwLock<Vec<Page>>,
     /// Edge pages (packed edge records)
@@ -636,6 +639,8 @@ pub struct GraphStore {
 
 #[path = "graph_store/impl.rs"]
 mod graph_store_impl;
+pub mod secondary_index;
+pub use secondary_index::NodeSecondaryIndex;
 impl Default for GraphStore {
     fn default() -> Self {
         Self::new()
@@ -861,6 +866,76 @@ mod tests {
         // Query outgoing edges (should be fast with index)
         let edges = store.outgoing_edges("hub");
         assert_eq!(edges.len(), 100);
+    }
+
+    #[test]
+    fn test_nodes_of_type_uses_secondary_index() {
+        let store = GraphStore::new();
+        store
+            .add_node("host:1", "Web Server", GraphNodeType::Host)
+            .unwrap();
+        store
+            .add_node("host:2", "DB Server", GraphNodeType::Host)
+            .unwrap();
+        store
+            .add_node("svc:1", "HTTP", GraphNodeType::Service)
+            .unwrap();
+        store
+            .add_node("vuln:1", "CVE-2024-1", GraphNodeType::Vulnerability)
+            .unwrap();
+
+        let hosts = store.nodes_of_type(GraphNodeType::Host);
+        assert_eq!(hosts.len(), 2);
+        assert!(hosts
+            .iter()
+            .all(|n| matches!(n.node_type, GraphNodeType::Host)));
+
+        let services = store.nodes_of_type(GraphNodeType::Service);
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].id, "svc:1");
+
+        assert_eq!(store.nodes_of_type(GraphNodeType::User).len(), 0);
+    }
+
+    #[test]
+    fn test_nodes_by_label_with_bloom_prune() {
+        let store = GraphStore::new();
+        store
+            .add_node("host:1", "Edge Router", GraphNodeType::Host)
+            .unwrap();
+        store
+            .add_node("host:2", "Edge Router", GraphNodeType::Host)
+            .unwrap();
+        store
+            .add_node("host:3", "Core Switch", GraphNodeType::Host)
+            .unwrap();
+
+        let routers = store.nodes_by_label("Edge Router");
+        assert_eq!(routers.len(), 2);
+
+        let unknown = store.nodes_by_label("Quantum Router 9000");
+        assert!(unknown.is_empty());
+        // Bloom is allowed to false-positive but must never hide real labels.
+        assert!(store.may_contain_label("Edge Router"));
+        assert!(store.may_contain_label("Core Switch"));
+    }
+
+    #[test]
+    fn test_secondary_index_rebuilt_after_deserialize() {
+        let store = GraphStore::new();
+        store
+            .add_node("host:1", "Alpha", GraphNodeType::Host)
+            .unwrap();
+        store
+            .add_node("svc:1", "HTTP", GraphNodeType::Service)
+            .unwrap();
+
+        let bytes = store.serialize();
+        let restored = GraphStore::deserialize(&bytes).unwrap();
+
+        assert_eq!(restored.nodes_of_type(GraphNodeType::Host).len(), 1);
+        assert_eq!(restored.nodes_by_label("HTTP").len(), 1);
+        assert!(restored.may_contain_label("Alpha"));
     }
 
     #[test]
