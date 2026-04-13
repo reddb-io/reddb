@@ -197,11 +197,11 @@ fn test_row_patch_unset() {
 
     // name and email should still exist
     assert!(
-        record.values.get("name").is_some(),
+        record.values.contains_key("name"),
         "name should still exist"
     );
     assert!(
-        record.values.get("email").is_some(),
+        record.values.contains_key("email"),
         "email should still exist"
     );
 }
@@ -598,7 +598,7 @@ fn test_node_create_with_properties() {
     assert!(item.data.is_node(), "entity should be a node");
     let node_data = item.data.as_node().unwrap();
     assert!(
-        node_data.properties.get("hostname").is_some(),
+        node_data.properties.contains_key("hostname"),
         "node should have 'hostname' property"
     );
 }
@@ -1599,8 +1599,7 @@ fn test_sql_insert_edge_ttl_expiration() {
             "INSERT INTO ttl_edges EDGE (label, from, to, weight, _ttl_ms) VALUES ('connects', {}, {}, 0.9, 1)",
             from.id.raw(),
             to.id.raw()
-        )
-        .into(),
+        ),
     });
     assert!(
         inserted.is_ok(),
@@ -2599,33 +2598,30 @@ fn finding_1_select_after_bulk_insert_persistent_reopen() {
     {
         let rt = reddb::RedDBRuntime::with_options(reddb::api::RedDBOptions::persistent(&path_str))
             .expect("open persistent runtime");
-        let query = QueryUseCases::new(&rt);
-        let entity = EntityUseCases::new(&rt);
-        query
-            .execute(ExecuteQueryInput {
-                query: "CREATE TABLE f1_disk (id BIGINT PRIMARY KEY, name TEXT)".into(),
-            })
-            .expect("CREATE TABLE must succeed");
-        for i in 0..N {
-            entity
-                .create_row(CreateRowInput {
-                    collection: "f1_disk".into(),
-                    fields: vec![
-                        ("id".into(), Value::Integer((i as i64) + 1)),
-                        ("name".into(), Value::Text(format!("Row_{i}"))),
-                    ],
-                    metadata: vec![],
-                    node_links: vec![],
-                    vector_links: vec![],
+        {
+            let query = QueryUseCases::new(&rt);
+            let entity = EntityUseCases::new(&rt);
+            query
+                .execute(ExecuteQueryInput {
+                    query: "CREATE TABLE f1_disk (id BIGINT PRIMARY KEY, name TEXT)".into(),
                 })
-                .unwrap_or_else(|e| panic!("insert {i} must succeed: {e:?}"));
+                .expect("CREATE TABLE must succeed");
+            for i in 0..N {
+                entity
+                    .create_row(CreateRowInput {
+                        collection: "f1_disk".into(),
+                        fields: vec![
+                            ("id".into(), Value::Integer((i as i64) + 1)),
+                            ("name".into(), Value::Text(format!("Row_{i}"))),
+                        ],
+                        metadata: vec![],
+                        node_links: vec![],
+                        vector_links: vec![],
+                    })
+                    .unwrap_or_else(|e| panic!("insert {i} must succeed: {e:?}"));
+            }
         }
         rt.checkpoint().expect("checkpoint before drop");
-        // Explicit drop so the order is obvious — rt owns an Arc<Inner>
-        // that keeps the pager (and thus the file lock) alive.
-        drop(query);
-        drop(entity);
-        drop(rt);
     }
 
     // Small settle — some background tasks (backup_scheduler, ec_worker)
