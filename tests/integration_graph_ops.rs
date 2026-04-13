@@ -8,7 +8,7 @@
 use reddb::application::{
     CreateEdgeInput, CreateNodeInput, CreateRowInput, ExecuteQueryInput, GraphCentralityInput,
     GraphClusteringInput, GraphCommunitiesInput, GraphComponentsInput, GraphCyclesInput,
-    GraphNeighborhoodInput, GraphShortestPathInput, GraphTraversalInput,
+    GraphNeighborhoodInput, GraphPropertiesInput, GraphShortestPathInput, GraphTraversalInput,
 };
 use reddb::runtime::{
     RuntimeGraphCentralityAlgorithm, RuntimeGraphCommunityAlgorithm, RuntimeGraphComponentsMode,
@@ -216,6 +216,88 @@ fn test_graph_shortest_path() {
     );
 }
 
+#[test]
+fn test_graph_shortest_path_astar() {
+    let rt = rt();
+    let entity = EntityUseCases::new(&rt);
+    let graph = GraphUseCases::new(&rt);
+
+    let col = "shortest_path_astar_net";
+
+    let a = make_node(&entity, col, "A");
+    let b = make_node(&entity, col, "B");
+    let c = make_node(&entity, col, "C");
+    let d = make_node(&entity, col, "D");
+
+    make_edge(&entity, col, "connects_to", &a, &b, 1.0);
+    make_edge(&entity, col, "connects_to", &b, &d, 1.0);
+    make_edge(&entity, col, "connects_to", &a, &c, 10.0);
+    make_edge(&entity, col, "connects_to", &c, &d, 10.0);
+
+    let result = graph
+        .shortest_path(GraphShortestPathInput {
+            source: a.graph_id.clone(),
+            target: d.graph_id.clone(),
+            direction: RuntimeGraphDirection::Outgoing,
+            algorithm: RuntimeGraphPathAlgorithm::AStar,
+            edge_labels: None,
+            projection: None,
+        })
+        .expect("A* shortest_path should succeed");
+
+    let path = result.path.expect("a path should exist from A to D");
+    assert_eq!(path.hop_count, 2, "A* should keep the 2-hop best path");
+    assert!(
+        path.total_weight <= 2.5,
+        "A* path weight should be ~2.0, got {}",
+        path.total_weight
+    );
+}
+
+#[test]
+fn test_graph_shortest_path_bellman_ford_negative_edges() {
+    let rt = rt();
+    let entity = EntityUseCases::new(&rt);
+    let graph = GraphUseCases::new(&rt);
+
+    let col = "shortest_path_bellman_ford_net";
+
+    // A -> B -> D beats A -> C -> D because B -> D carries a negative edge.
+    let a = make_node(&entity, col, "A");
+    let b = make_node(&entity, col, "B");
+    let c = make_node(&entity, col, "C");
+    let d = make_node(&entity, col, "D");
+
+    make_edge(&entity, col, "connects_to", &a, &b, 2.0);
+    make_edge(&entity, col, "connects_to", &b, &d, -5.0);
+    make_edge(&entity, col, "connects_to", &a, &c, 3.0);
+    make_edge(&entity, col, "connects_to", &c, &d, 3.0);
+
+    let result = graph
+        .shortest_path(GraphShortestPathInput {
+            source: a.graph_id.clone(),
+            target: d.graph_id.clone(),
+            direction: RuntimeGraphDirection::Outgoing,
+            algorithm: RuntimeGraphPathAlgorithm::BellmanFord,
+            edge_labels: None,
+            projection: None,
+        })
+        .expect("Bellman-Ford shortest_path should succeed");
+
+    assert_eq!(
+        result.negative_cycle_detected,
+        Some(false),
+        "Bellman-Ford should report that no negative cycle was found"
+    );
+    let path = result.path.expect("a path should exist from A to D");
+    assert_eq!(path.hop_count, 2, "Bellman-Ford should keep the 2-hop path");
+    assert!(
+        path.total_weight < 0.0,
+        "Bellman-Ford should accept the negative-weight path, got {}",
+        path.total_weight
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 4. Graph Components
 // ---------------------------------------------------------------------------
@@ -404,6 +486,49 @@ fn test_graph_cycles() {
     assert!(
         !result.cycles.is_empty(),
         "should detect at least one cycle in A->B->C->A"
+    );
+}
+
+#[test]
+fn test_graph_properties() {
+    let rt = rt();
+    let entity = EntityUseCases::new(&rt);
+    let graph = GraphUseCases::new(&rt);
+
+    let col = "properties_net";
+
+    // Complete directed triangle with one negative edge.
+    let a = make_node(&entity, col, "A");
+    let b = make_node(&entity, col, "B");
+    let c = make_node(&entity, col, "C");
+
+    make_edge(&entity, col, "connects_to", &a, &b, 1.0);
+    make_edge(&entity, col, "connects_to", &b, &a, 1.0);
+    make_edge(&entity, col, "connects_to", &a, &c, 1.0);
+    make_edge(&entity, col, "connects_to", &c, &a, 1.0);
+    make_edge(&entity, col, "connects_to", &b, &c, -1.0);
+    make_edge(&entity, col, "connects_to", &c, &b, 1.0);
+
+    let result = graph
+        .properties(GraphPropertiesInput { projection: None })
+        .expect("graph properties should succeed");
+
+    assert_eq!(result.node_count, 3, "should report 3 nodes");
+    assert_eq!(result.edge_count, 6, "should report 6 directed edges");
+    assert!(result.is_connected, "triangle should be connected");
+    assert!(
+        result.is_strongly_connected,
+        "bidirectional triangle should be strongly connected"
+    );
+    assert!(result.is_complete, "triangle should be complete");
+    assert!(
+        result.is_complete_directed,
+        "bidirectional triangle should be complete as a digraph"
+    );
+    assert!(result.is_cyclic, "triangle should be cyclic");
+    assert!(
+        result.negative_edge_count >= 1,
+        "triangle should report at least one negative edge"
     );
 }
 

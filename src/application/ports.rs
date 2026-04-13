@@ -19,9 +19,9 @@ use crate::runtime::{
     RuntimeGraphComponentsResult, RuntimeGraphCyclesResult, RuntimeGraphDirection,
     RuntimeGraphHitsResult, RuntimeGraphNeighborhoodResult, RuntimeGraphPathAlgorithm,
     RuntimeGraphPathResult, RuntimeGraphPattern, RuntimeGraphProjection,
-    RuntimeGraphTopologicalSortResult, RuntimeGraphTraversalResult, RuntimeGraphTraversalStrategy,
-    RuntimeIvfSearchResult, RuntimeQueryExplain, RuntimeQueryResult, RuntimeQueryWeights,
-    RuntimeStats, ScanCursor, ScanPage,
+    RuntimeGraphPropertiesResult, RuntimeGraphTopologicalSortResult, RuntimeGraphTraversalResult,
+    RuntimeGraphTraversalStrategy, RuntimeIvfSearchResult, RuntimeQueryExplain, RuntimeQueryResult,
+    RuntimeQueryWeights, RuntimeStats, ScanCursor, ScanPage,
 };
 use crate::storage::engine::PhysicalFileHeader;
 use crate::storage::unified::devx::refs::{NodeRef, TableRef, VectorRef};
@@ -351,6 +351,10 @@ pub trait RuntimeGraphPort {
         &self,
         projection: Option<RuntimeGraphProjection>,
     ) -> RedDBResult<RuntimeGraphTopologicalSortResult>;
+    fn graph_properties(
+        &self,
+        projection: Option<RuntimeGraphProjection>,
+    ) -> RedDBResult<RuntimeGraphPropertiesResult>;
 }
 
 #[path = "ports_impls.rs"]

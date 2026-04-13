@@ -525,7 +525,7 @@ pub(super) fn shortest_path_runtime(
     edge_filters: Option<&BTreeSet<String>>,
 ) -> RedDBResult<RuntimeGraphPathResult> {
     let mut nodes_visited = 0;
-    let path = match algorithm {
+    let (path, negative_cycle_detected) = match algorithm {
         RuntimeGraphPathAlgorithm::Bfs => {
             let mut queue = VecDeque::new();
             let mut visited = HashSet::new();
@@ -549,9 +549,9 @@ pub(super) fn shortest_path_runtime(
                 }
             }
 
-            rebuild_runtime_path(graph, source, target, &previous)
+            (rebuild_runtime_path(graph, source, target, &previous), None)
         }
-        RuntimeGraphPathAlgorithm::Dijkstra => {
+        RuntimeGraphPathAlgorithm::Dijkstra | RuntimeGraphPathAlgorithm::AStar => {
             let mut dist: HashMap<String, f64> = HashMap::new();
             let mut previous: HashMap<String, (String, RuntimeGraphEdge)> = HashMap::new();
             let mut heap = BinaryHeap::new();
@@ -588,7 +588,76 @@ pub(super) fn shortest_path_runtime(
                 }
             }
 
-            rebuild_runtime_path(graph, source, target, &previous)
+            (rebuild_runtime_path(graph, source, target, &previous), None)
+        }
+        RuntimeGraphPathAlgorithm::BellmanFord => {
+            let nodes: Vec<String> = graph.iter_nodes().map(|node| node.id.clone()).collect();
+            let mut dist: HashMap<String, f64> = nodes
+                .iter()
+                .map(|node| (node.clone(), f64::INFINITY))
+                .collect();
+            let mut previous: HashMap<String, (String, RuntimeGraphEdge)> = HashMap::new();
+
+            dist.insert(source.to_string(), 0.0);
+
+            for _ in 0..nodes.len().saturating_sub(1) {
+                let mut changed = false;
+
+                for node in &nodes {
+                    nodes_visited += 1;
+                    let Some(current_dist) = dist.get(node).copied() else {
+                        continue;
+                    };
+                    if !current_dist.is_finite() {
+                        continue;
+                    }
+
+                    let mut adjacent = graph_adjacent_edges(graph, node, direction, edge_filters);
+                    adjacent.sort_by(|left, right| left.0.cmp(&right.0));
+                    for (neighbor, edge) in adjacent {
+                        let next_cost = current_dist + edge.weight as f64;
+                        if dist.get(&neighbor).is_none_or(|best| next_cost < *best) {
+                            dist.insert(neighbor.clone(), next_cost);
+                            previous.insert(neighbor, (node.clone(), edge));
+                            changed = true;
+                        }
+                    }
+                }
+
+                if !changed {
+                    break;
+                }
+            }
+
+            let mut has_negative_cycle = false;
+            for node in &nodes {
+                let Some(current_dist) = dist.get(node).copied() else {
+                    continue;
+                };
+                if !current_dist.is_finite() {
+                    continue;
+                }
+
+                let adjacent = graph_adjacent_edges(graph, node, direction, edge_filters);
+                for (neighbor, edge) in adjacent {
+                    let next_cost = current_dist + edge.weight as f64;
+                    if dist.get(&neighbor).is_none_or(|best| next_cost < *best) {
+                        has_negative_cycle = true;
+                        break;
+                    }
+                }
+
+                if has_negative_cycle {
+                    break;
+                }
+            }
+
+            let path = if has_negative_cycle {
+                None
+            } else {
+                rebuild_runtime_path(graph, source, target, &previous)
+            };
+            (path, Some(has_negative_cycle))
         }
     };
 
@@ -598,6 +667,7 @@ pub(super) fn shortest_path_runtime(
         direction,
         algorithm,
         nodes_visited,
+        negative_cycle_detected,
         path,
     })
 }

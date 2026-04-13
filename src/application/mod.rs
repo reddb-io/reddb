@@ -24,7 +24,8 @@ pub use entity::{
 pub use graph::{
     GraphCentralityInput, GraphClusteringInput, GraphCommunitiesInput, GraphComponentsInput,
     GraphCyclesInput, GraphHitsInput, GraphNeighborhoodInput, GraphPersonalizedPageRankInput,
-    GraphShortestPathInput, GraphTopologicalSortInput, GraphTraversalInput, GraphUseCases,
+    GraphPropertiesInput, GraphShortestPathInput, GraphTopologicalSortInput, GraphTraversalInput,
+    GraphUseCases,
 };
 pub use native::{InspectNativeArtifactInput, NativeUseCases, RuntimeReadiness};
 pub use ports::{

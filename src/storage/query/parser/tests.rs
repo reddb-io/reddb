@@ -1249,6 +1249,34 @@ fn test_parse_graph_shortest_path() {
 }
 
 #[test]
+fn test_parse_graph_shortest_path_astar() {
+    let query = parse("GRAPH SHORTEST_PATH 'a' TO 'b' ALGORITHM astar").unwrap();
+    if let QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::ShortestPath {
+        algorithm,
+        ..
+    }) = query
+    {
+        assert_eq!(algorithm, "astar");
+    } else {
+        panic!("Expected GraphCommand::ShortestPath");
+    }
+}
+
+#[test]
+fn test_parse_graph_shortest_path_bellman_ford() {
+    let query = parse("GRAPH SHORTEST_PATH 'a' TO 'b' ALGORITHM bellman_ford").unwrap();
+    if let QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::ShortestPath {
+        algorithm,
+        ..
+    }) = query
+    {
+        assert_eq!(algorithm, "bellman_ford");
+    } else {
+        panic!("Expected GraphCommand::ShortestPath");
+    }
+}
+
+#[test]
 fn test_parse_graph_traverse() {
     let query = parse("GRAPH TRAVERSE 'root' STRATEGY dfs DEPTH 10 DIRECTION incoming").unwrap();
     if let QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::Traverse {
@@ -1348,6 +1376,15 @@ fn test_parse_graph_topological_sort() {
     assert!(matches!(
         query,
         QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::TopologicalSort)
+    ));
+}
+
+#[test]
+fn test_parse_graph_properties() {
+    let query = parse("GRAPH PROPERTIES").unwrap();
+    assert!(matches!(
+        query,
+        QueryExpr::GraphCommand(crate::storage::query::ast::GraphCommand::Properties)
     ));
 }
 

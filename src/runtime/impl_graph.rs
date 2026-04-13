@@ -162,22 +162,56 @@ impl RedDBRuntime {
 
         let merged_edge_filters = merge_edge_filters(edge_labels, projection.as_ref());
         let path = match (direction, merged_edge_filters.as_ref()) {
-            (RuntimeGraphDirection::Outgoing, None) => {
-                let result = match algorithm {
-                    RuntimeGraphPathAlgorithm::Bfs => BFS::shortest_path(&graph, source, target),
-                    RuntimeGraphPathAlgorithm::Dijkstra => {
-                        Dijkstra::shortest_path(&graph, source, target)
+            (RuntimeGraphDirection::Outgoing, None) => match algorithm {
+                RuntimeGraphPathAlgorithm::Bfs => {
+                    let result = BFS::shortest_path(&graph, source, target);
+                    RuntimeGraphPathResult {
+                        source: source.to_string(),
+                        target: target.to_string(),
+                        direction,
+                        algorithm,
+                        nodes_visited: result.nodes_visited,
+                        negative_cycle_detected: None,
+                        path: result.path.map(|path| path_to_runtime(&graph, &path)),
                     }
-                };
-                RuntimeGraphPathResult {
-                    source: source.to_string(),
-                    target: target.to_string(),
-                    direction,
-                    algorithm,
-                    nodes_visited: result.nodes_visited,
-                    path: result.path.map(|path| path_to_runtime(&graph, &path)),
                 }
-            }
+                RuntimeGraphPathAlgorithm::Dijkstra => {
+                    let result = Dijkstra::shortest_path(&graph, source, target);
+                    RuntimeGraphPathResult {
+                        source: source.to_string(),
+                        target: target.to_string(),
+                        direction,
+                        algorithm,
+                        nodes_visited: result.nodes_visited,
+                        negative_cycle_detected: None,
+                        path: result.path.map(|path| path_to_runtime(&graph, &path)),
+                    }
+                }
+                RuntimeGraphPathAlgorithm::AStar => {
+                    let result = AStar::shortest_path_no_heuristic(&graph, source, target);
+                    RuntimeGraphPathResult {
+                        source: source.to_string(),
+                        target: target.to_string(),
+                        direction,
+                        algorithm,
+                        nodes_visited: result.nodes_visited,
+                        negative_cycle_detected: None,
+                        path: result.path.map(|path| path_to_runtime(&graph, &path)),
+                    }
+                }
+                RuntimeGraphPathAlgorithm::BellmanFord => {
+                    let result = BellmanFord::shortest_path(&graph, source, target);
+                    RuntimeGraphPathResult {
+                        source: source.to_string(),
+                        target: target.to_string(),
+                        direction,
+                        algorithm,
+                        nodes_visited: result.nodes_visited,
+                        negative_cycle_detected: Some(result.has_negative_cycle),
+                        path: result.path.map(|path| path_to_runtime(&graph, &path)),
+                    }
+                }
+            },
             _ => shortest_path_runtime(
                 &graph,
                 source,
@@ -562,6 +596,90 @@ impl RedDBRuntime {
         Ok(RuntimeGraphTopologicalSortResult {
             acyclic: !ordered_nodes.is_empty() || graph.node_count() == 0,
             ordered_nodes,
+        })
+    }
+
+    pub fn graph_properties(
+        &self,
+        projection: Option<RuntimeGraphProjection>,
+    ) -> RedDBResult<RuntimeGraphPropertiesResult> {
+        let graph =
+            materialize_graph_with_projection(self.inner.db.store().as_ref(), projection.as_ref())?;
+        let node_count = graph.node_count() as usize;
+        let edges = graph.iter_all_edges();
+        let edge_count = edges.len();
+
+        let connected = ConnectedComponents::find(&graph);
+        let weak = WeaklyConnectedComponents::find(&graph);
+        let strong = StronglyConnectedComponents::find(&graph);
+        let cycle_result = CycleDetector::new()
+            .max_length(node_count.max(2))
+            .max_cycles(1)
+            .find(&graph);
+
+        let mut self_loop_count = 0usize;
+        let mut negative_edge_count = 0usize;
+        let mut directed_pairs = HashSet::new();
+        let mut undirected_pairs = HashSet::new();
+
+        for edge in &edges {
+            if edge.weight < 0.0 {
+                negative_edge_count += 1;
+            }
+            if edge.source_id == edge.target_id {
+                self_loop_count += 1;
+                continue;
+            }
+
+            directed_pairs.insert((edge.source_id.clone(), edge.target_id.clone()));
+            let (left, right) = if edge.source_id <= edge.target_id {
+                (edge.source_id.clone(), edge.target_id.clone())
+            } else {
+                (edge.target_id.clone(), edge.source_id.clone())
+            };
+            undirected_pairs.insert((left, right));
+        }
+
+        let expected_undirected_pairs = node_count.saturating_mul(node_count.saturating_sub(1)) / 2;
+        let expected_directed_pairs = node_count.saturating_mul(node_count.saturating_sub(1));
+        let density = if expected_undirected_pairs == 0 {
+            0.0
+        } else {
+            undirected_pairs.len() as f64 / expected_undirected_pairs as f64
+        };
+        let density_directed = if expected_directed_pairs == 0 {
+            0.0
+        } else {
+            directed_pairs.len() as f64 / expected_directed_pairs as f64
+        };
+
+        let is_empty = node_count == 0;
+        let is_connected = node_count <= 1 || connected.count == 1;
+        let is_weakly_connected = node_count <= 1 || weak.count == 1;
+        let is_strongly_connected = node_count <= 1 || strong.count == 1;
+        let is_cyclic = !cycle_result.cycles.is_empty();
+
+        Ok(RuntimeGraphPropertiesResult {
+            node_count,
+            edge_count,
+            self_loop_count,
+            negative_edge_count,
+            connected_component_count: connected.count,
+            weak_component_count: weak.count,
+            strong_component_count: strong.count,
+            is_empty,
+            is_connected,
+            is_weakly_connected,
+            is_strongly_connected,
+            is_complete: node_count <= 1 || undirected_pairs.len() == expected_undirected_pairs,
+            is_complete_directed: node_count <= 1
+                || directed_pairs.len() == expected_directed_pairs,
+            is_cyclic,
+            is_circular: is_cyclic,
+            is_acyclic: !is_cyclic,
+            is_tree: node_count > 0 && is_connected && undirected_pairs.len() + 1 == node_count,
+            density,
+            density_directed,
         })
     }
 }

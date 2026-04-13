@@ -58,6 +58,7 @@ impl RedDBRuntime {
                     "source".into(),
                     "target".into(),
                     "nodes_visited".into(),
+                    "negative_cycle_detected".into(),
                     "hop_count".into(),
                     "total_weight".into(),
                 ]);
@@ -65,6 +66,13 @@ impl RedDBRuntime {
                 record.set("source", Value::Text(res.source));
                 record.set("target", Value::Text(res.target));
                 record.set("nodes_visited", Value::Integer(res.nodes_visited as i64));
+                record.set(
+                    "negative_cycle_detected",
+                    match res.negative_cycle_detected {
+                        Some(value) => Value::Boolean(value),
+                        None => Value::Null,
+                    },
+                );
                 if let Some(ref path) = res.path {
                     record.set("hop_count", Value::Integer(path.hop_count as i64));
                     record.set("total_weight", Value::Float(path.total_weight));
@@ -77,6 +85,34 @@ impl RedDBRuntime {
                     query: raw_query.to_string(),
                     mode: QueryMode::Sql,
                     statement: "graph_shortest_path",
+                    engine: "runtime-graph",
+                    result,
+                    affected_rows: 0,
+                    statement_type: "select",
+                })
+            }
+            GraphCommand::Properties => {
+                let res = self.graph_properties(None)?;
+                let mut result = UnifiedResult::with_columns(vec![
+                    "node_count".into(),
+                    "edge_count".into(),
+                    "is_connected".into(),
+                    "is_complete".into(),
+                    "is_cyclic".into(),
+                    "density".into(),
+                ]);
+                let mut record = UnifiedRecord::new();
+                record.set("node_count", Value::Integer(res.node_count as i64));
+                record.set("edge_count", Value::Integer(res.edge_count as i64));
+                record.set("is_connected", Value::Boolean(res.is_connected));
+                record.set("is_complete", Value::Boolean(res.is_complete));
+                record.set("is_cyclic", Value::Boolean(res.is_cyclic));
+                record.set("density", Value::Float(res.density));
+                result.push(record);
+                Ok(RuntimeQueryResult {
+                    query: raw_query.to_string(),
+                    mode: QueryMode::Sql,
+                    statement: "graph_properties",
                     engine: "runtime-graph",
                     result,
                     affected_rows: 0,
@@ -676,8 +712,10 @@ fn parse_path_algorithm(s: &str) -> RedDBResult<RuntimeGraphPathAlgorithm> {
     match s.to_lowercase().as_str() {
         "bfs" => Ok(RuntimeGraphPathAlgorithm::Bfs),
         "dijkstra" => Ok(RuntimeGraphPathAlgorithm::Dijkstra),
+        "astar" | "a*" => Ok(RuntimeGraphPathAlgorithm::AStar),
+        "bellman_ford" | "bellmanford" => Ok(RuntimeGraphPathAlgorithm::BellmanFord),
         _ => Err(RedDBError::Query(format!(
-            "unknown path algorithm: '{s}', expected bfs|dijkstra"
+            "unknown path algorithm: '{s}', expected bfs|dijkstra|astar|bellman_ford"
         ))),
     }
 }

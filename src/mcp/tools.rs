@@ -321,7 +321,12 @@ pub fn all_tools() -> Vec<ToolDef> {
                     ("source", string_field("Source node label")),
                     ("target", string_field("Target node label")),
                     ("direction", string_field("Edge direction: 'outgoing', 'incoming', or 'both' (default 'outgoing')")),
-                    ("algorithm", string_field("Path algorithm: 'bfs' or 'dijkstra' (default 'bfs')")),
+                    (
+                        "algorithm",
+                        string_field(
+                            "Path algorithm: 'bfs', 'dijkstra', 'astar', or 'bellman_ford' (default 'bfs')",
+                        ),
+                    ),
                 ],
                 vec!["source", "target"],
             ),

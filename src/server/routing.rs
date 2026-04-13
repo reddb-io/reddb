@@ -586,6 +586,7 @@ impl RedDBServer {
             ("POST", "/graph/analytics/topological-sort") => {
                 self.handle_graph_topological_sort(body)
             }
+            ("POST", "/graph/analytics/properties") => self.handle_graph_properties(body),
             ("POST", "/graph/projections") => self.handle_graph_projection_upsert(body),
             ("POST", "/graph/jobs") => self.handle_analytics_job_upsert(body),
             ("POST", "/graph/jobs/queue") => self.handle_analytics_job_queue(body),

@@ -4,8 +4,8 @@ use crate::runtime::{
     RuntimeGraphCommunityAlgorithm, RuntimeGraphCommunityResult, RuntimeGraphComponentsMode,
     RuntimeGraphComponentsResult, RuntimeGraphCyclesResult, RuntimeGraphDirection,
     RuntimeGraphHitsResult, RuntimeGraphNeighborhoodResult, RuntimeGraphPathAlgorithm,
-    RuntimeGraphPathResult, RuntimeGraphProjection, RuntimeGraphTopologicalSortResult,
-    RuntimeGraphTraversalResult, RuntimeGraphTraversalStrategy,
+    RuntimeGraphPathResult, RuntimeGraphProjection, RuntimeGraphPropertiesResult,
+    RuntimeGraphTopologicalSortResult, RuntimeGraphTraversalResult, RuntimeGraphTraversalStrategy,
 };
 use crate::RedDBResult;
 
@@ -99,6 +99,11 @@ pub struct GraphCyclesInput {
 
 #[derive(Debug, Clone)]
 pub struct GraphTopologicalSortInput {
+    pub projection: Option<RuntimeGraphProjection>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GraphPropertiesInput {
     pub projection: Option<RuntimeGraphProjection>,
 }
 
@@ -226,6 +231,13 @@ impl<'a, P: RuntimeGraphPort + ?Sized> GraphUseCases<'a, P> {
         input: GraphTopologicalSortInput,
     ) -> RedDBResult<RuntimeGraphTopologicalSortResult> {
         self.runtime.graph_topological_sort(input.projection)
+    }
+
+    pub fn properties(
+        &self,
+        input: GraphPropertiesInput,
+    ) -> RedDBResult<RuntimeGraphPropertiesResult> {
+        self.runtime.graph_properties(input.projection)
     }
 
     pub fn resolve_projection(

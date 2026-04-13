@@ -434,6 +434,51 @@ impl RedDBServer {
         }
     }
 
+    pub(crate) fn handle_graph_properties(&self, body: Vec<u8>) -> HttpResponse {
+        let payload = match parse_json_body_allow_empty(&body) {
+            Ok(payload) => payload,
+            Err(response) => return response,
+        };
+        let projection_name = json_string_field(&payload, "projection_name");
+        let projection = match self.resolve_projection_payload(&payload) {
+            Ok(projection) => projection,
+            Err(response) => return response,
+        };
+        let input = crate::application::graph_payload::parse_graph_properties_input(projection);
+        let metadata = BTreeMap::new();
+        if let Err(response) = self.start_graph_analytics_job(
+            "graph.properties",
+            projection_name.as_deref(),
+            metadata.clone(),
+        ) {
+            return response;
+        }
+
+        match self.graph_use_cases().properties(input) {
+            Ok(result) => {
+                if let Err(response) = self.complete_graph_analytics_job(
+                    "graph.properties",
+                    projection_name.as_deref(),
+                    metadata,
+                ) {
+                    return response;
+                }
+                json_response(
+                    200,
+                    crate::presentation::graph_json::graph_properties_json(&result),
+                )
+            }
+            Err(err) => {
+                let _ = self.fail_graph_analytics_job(
+                    "graph.properties",
+                    projection_name.as_deref(),
+                    metadata,
+                );
+                json_error(400, err.to_string())
+            }
+        }
+    }
+
     pub(crate) fn handle_graph_projection_upsert(&self, body: Vec<u8>) -> HttpResponse {
         let payload = match parse_json_body(&body) {
             Ok(payload) => payload,

@@ -68,13 +68,40 @@ curl -X POST http://127.0.0.1:8080/graph/shortest-path \
   -H 'content-type: application/json' \
   -d '{"source": "alice", "target": "frank", "algorithm": "bfs"}'
 
+# Weighted shortest path
+curl -X POST http://127.0.0.1:8080/graph/shortest-path \
+  -H 'content-type: application/json' \
+  -d '{"source": "alice", "target": "frank", "algorithm": "dijkstra"}'
+
+# Negative-weight shortest path
+curl -X POST http://127.0.0.1:8080/graph/shortest-path \
+  -H 'content-type: application/json' \
+  -d '{"source": "alice", "target": "frank", "algorithm": "bellman_ford"}'
+
 # Explore alice's network
 curl -X POST http://127.0.0.1:8080/graph/traverse \
   -H 'content-type: application/json' \
   -d '{"source": "alice", "strategy": "bfs", "max_depth": 3}'
 ```
 
-## 5. Check for Cycles
+## 5. Inspect Graph Structure
+
+```bash
+curl -X POST http://127.0.0.1:8080/graph/analytics/properties \
+  -H 'content-type: application/json' \
+  -d '{}'
+```
+
+Useful fields in the response:
+
+- `is_connected`
+- `is_strongly_connected`
+- `is_complete`
+- `is_cyclic`
+- `is_tree`
+- `density`
+
+## 6. Check for Cycles
 
 ```bash
 curl -X POST http://127.0.0.1:8080/graph/analytics/cycles \
@@ -82,7 +109,7 @@ curl -X POST http://127.0.0.1:8080/graph/analytics/cycles \
   -d '{"max_length": 5}'
 ```
 
-## 6. Bridge Detection
+## 7. Bridge Detection
 
 Find nodes that bridge different communities:
 
@@ -99,8 +126,9 @@ Nodes with high betweenness centrality are bridges between communities.
 For a complete analytics pipeline:
 
 1. **Build graph**: Insert nodes and edges
-2. **Detect communities**: Run Louvain
-3. **Rank importance**: Run PageRank
-4. **Find bridges**: Run betweenness centrality
-5. **Identify clusters**: Run clustering coefficient
-6. **Export results**: Use snapshots and exports
+2. **Inspect structure**: Run graph properties
+3. **Detect communities**: Run Louvain
+4. **Rank importance**: Run PageRank
+5. **Find bridges**: Run betweenness centrality
+6. **Identify clusters**: Run clustering coefficient
+7. **Export results**: Use snapshots and exports

@@ -8,8 +8,8 @@ use crate::runtime::{
     RuntimeGraphCentralityResult, RuntimeGraphClusteringResult, RuntimeGraphCommunityResult,
     RuntimeGraphComponentsResult, RuntimeGraphCyclesResult, RuntimeGraphEdge,
     RuntimeGraphHitsResult, RuntimeGraphNeighborhoodResult, RuntimeGraphNode, RuntimeGraphPath,
-    RuntimeGraphPathResult, RuntimeGraphTopologicalSortResult, RuntimeGraphTraversalResult,
-    RuntimeGraphVisit,
+    RuntimeGraphPathResult, RuntimeGraphPropertiesResult, RuntimeGraphTopologicalSortResult,
+    RuntimeGraphTraversalResult, RuntimeGraphVisit,
 };
 
 pub(crate) fn graph_neighborhood_json(result: &RuntimeGraphNeighborhoodResult) -> JsonValue {
@@ -87,6 +87,13 @@ pub(crate) fn graph_path_result_json(result: &RuntimeGraphPathResult) -> JsonVal
     object.insert(
         "nodes_visited".to_string(),
         JsonValue::Number(result.nodes_visited as f64),
+    );
+    object.insert(
+        "negative_cycle_detected".to_string(),
+        result
+            .negative_cycle_detected
+            .map(JsonValue::Bool)
+            .unwrap_or(JsonValue::Null),
     );
     object.insert(
         "path".to_string(),
@@ -356,6 +363,72 @@ pub(crate) fn graph_topological_sort_json(result: &RuntimeGraphTopologicalSortRe
     object.insert(
         "ordered_nodes".to_string(),
         JsonValue::Array(result.ordered_nodes.iter().map(graph_node_json).collect()),
+    );
+    JsonValue::Object(object)
+}
+
+pub(crate) fn graph_properties_json(result: &RuntimeGraphPropertiesResult) -> JsonValue {
+    let mut object = Map::new();
+    object.insert(
+        "node_count".to_string(),
+        JsonValue::Number(result.node_count as f64),
+    );
+    object.insert(
+        "edge_count".to_string(),
+        JsonValue::Number(result.edge_count as f64),
+    );
+    object.insert(
+        "self_loop_count".to_string(),
+        JsonValue::Number(result.self_loop_count as f64),
+    );
+    object.insert(
+        "negative_edge_count".to_string(),
+        JsonValue::Number(result.negative_edge_count as f64),
+    );
+    object.insert(
+        "connected_component_count".to_string(),
+        JsonValue::Number(result.connected_component_count as f64),
+    );
+    object.insert(
+        "weak_component_count".to_string(),
+        JsonValue::Number(result.weak_component_count as f64),
+    );
+    object.insert(
+        "strong_component_count".to_string(),
+        JsonValue::Number(result.strong_component_count as f64),
+    );
+    object.insert("is_empty".to_string(), JsonValue::Bool(result.is_empty));
+    object.insert(
+        "is_connected".to_string(),
+        JsonValue::Bool(result.is_connected),
+    );
+    object.insert(
+        "is_weakly_connected".to_string(),
+        JsonValue::Bool(result.is_weakly_connected),
+    );
+    object.insert(
+        "is_strongly_connected".to_string(),
+        JsonValue::Bool(result.is_strongly_connected),
+    );
+    object.insert(
+        "is_complete".to_string(),
+        JsonValue::Bool(result.is_complete),
+    );
+    object.insert(
+        "is_complete_directed".to_string(),
+        JsonValue::Bool(result.is_complete_directed),
+    );
+    object.insert("is_cyclic".to_string(), JsonValue::Bool(result.is_cyclic));
+    object.insert(
+        "is_circular".to_string(),
+        JsonValue::Bool(result.is_circular),
+    );
+    object.insert("is_acyclic".to_string(), JsonValue::Bool(result.is_acyclic));
+    object.insert("is_tree".to_string(), JsonValue::Bool(result.is_tree));
+    object.insert("density".to_string(), JsonValue::Number(result.density));
+    object.insert(
+        "density_directed".to_string(),
+        JsonValue::Number(result.density_directed),
     );
     JsonValue::Object(object)
 }

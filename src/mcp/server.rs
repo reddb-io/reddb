@@ -784,6 +784,8 @@ impl McpServer {
             .ok_or("missing required field 'target'")?;
         let direction = parse_direction(args.get("direction").and_then(|v| v.as_str()));
         let algorithm = match args.get("algorithm").and_then(|v| v.as_str()) {
+            Some("astar") | Some("a*") => RuntimeGraphPathAlgorithm::AStar,
+            Some("bellman_ford") | Some("bellmanford") => RuntimeGraphPathAlgorithm::BellmanFord,
             Some("dijkstra") => RuntimeGraphPathAlgorithm::Dijkstra,
             _ => RuntimeGraphPathAlgorithm::Bfs,
         };

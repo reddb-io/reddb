@@ -17,7 +17,7 @@ use crate::physical::{
     SnapshotDescriptor,
 };
 use crate::serde_json::Value as JsonValue;
-use crate::storage::engine::pathfinding::{Dijkstra, BFS, DFS};
+use crate::storage::engine::pathfinding::{AStar, BellmanFord, Dijkstra, BFS, DFS};
 use crate::storage::engine::{
     BetweennessCentrality, ClosenessCentrality, ClusteringCoefficient, ConnectedComponents,
     CycleDetector, DegreeCentrality, EigenvectorCentrality, GraphEdgeType, GraphNodeType,
@@ -277,6 +277,8 @@ pub enum RuntimeGraphTraversalStrategy {
 pub enum RuntimeGraphPathAlgorithm {
     Bfs,
     Dijkstra,
+    AStar,
+    BellmanFord,
 }
 
 #[derive(Debug, Clone)]
@@ -336,6 +338,7 @@ pub struct RuntimeGraphPathResult {
     pub direction: RuntimeGraphDirection,
     pub algorithm: RuntimeGraphPathAlgorithm,
     pub nodes_visited: usize,
+    pub negative_cycle_detected: Option<bool>,
     pub path: Option<RuntimeGraphPath>,
 }
 
@@ -442,6 +445,29 @@ pub struct RuntimeGraphCyclesResult {
 pub struct RuntimeGraphTopologicalSortResult {
     pub acyclic: bool,
     pub ordered_nodes: Vec<RuntimeGraphNode>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeGraphPropertiesResult {
+    pub node_count: usize,
+    pub edge_count: usize,
+    pub self_loop_count: usize,
+    pub negative_edge_count: usize,
+    pub connected_component_count: usize,
+    pub weak_component_count: usize,
+    pub strong_component_count: usize,
+    pub is_empty: bool,
+    pub is_connected: bool,
+    pub is_weakly_connected: bool,
+    pub is_strongly_connected: bool,
+    pub is_complete: bool,
+    pub is_complete_directed: bool,
+    pub is_cyclic: bool,
+    pub is_circular: bool,
+    pub is_acyclic: bool,
+    pub is_tree: bool,
+    pub density: f64,
+    pub density_directed: f64,
 }
 
 // ============================================================================

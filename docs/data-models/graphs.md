@@ -140,16 +140,24 @@ curl -X POST http://127.0.0.1:8080/graph/shortest-path \
   -d '{
     "source": "alice",
     "target": "charlie",
-    "algorithm": "dijkstra"
+    "algorithm": "bellman_ford"
   }'
 ```
 
-Algorithms: `bfs` (unweighted) or `dijkstra` (weighted).
+Algorithms:
+- `bfs`: menor caminho por saltos
+- `dijkstra`: menor caminho ponderado com pesos não-negativos
+- `astar`: caminho mínimo guiado por heurística
+- `bellman_ford`: caminho mínimo com pesos negativos e detecção de ciclo negativo
 
 SQL form:
 
 ```sql
 GRAPH SHORTEST_PATH FROM 'alice' TO 'charlie' ALGORITHM dijkstra
+```
+
+```sql
+GRAPH SHORTEST_PATH FROM 'alice' TO 'charlie' ALGORITHM bellman_ford
 ```
 
 ```sql
@@ -227,7 +235,22 @@ GRAPH CYCLES MAX_LENGTH 10 MAX_CYCLES 50
 | `POST /graph/analytics/clustering` | Clustering coefficient |
 | `POST /graph/analytics/hits` | HITS (hubs and authorities) |
 | `POST /graph/analytics/topological-sort` | Topological ordering |
+| `POST /graph/analytics/properties` | Connectivity, completeness, cyclicity, density |
 | `POST /graph/analytics/pagerank/personalized` | Personalized PageRank from a source node |
+
+### Graph Properties
+
+```bash
+curl -X POST http://127.0.0.1:8080/graph/analytics/properties \
+  -H 'content-type: application/json' \
+  -d '{}'
+```
+
+SQL form:
+
+```sql
+GRAPH PROPERTIES
+```
 
 ## Graph Projections
 

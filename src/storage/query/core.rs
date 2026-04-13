@@ -1216,6 +1216,8 @@ pub enum GraphCommand {
     Clustering,
     /// GRAPH TOPOLOGICAL_SORT
     TopologicalSort,
+    /// GRAPH PROPERTIES
+    Properties,
 }
 
 // ============================================================================

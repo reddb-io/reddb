@@ -4,7 +4,7 @@ use crate::application::{
     json_input::{json_bool_field, json_f32_field, json_string_list_field, json_usize_field},
     GraphCentralityInput, GraphClusteringInput, GraphCommunitiesInput, GraphComponentsInput,
     GraphCyclesInput, GraphHitsInput, GraphNeighborhoodInput, GraphPersonalizedPageRankInput,
-    GraphShortestPathInput, GraphTopologicalSortInput, GraphTraversalInput,
+    GraphPropertiesInput, GraphShortestPathInput, GraphTopologicalSortInput, GraphTraversalInput,
 };
 use crate::json::Value as JsonValue;
 use crate::runtime::{
@@ -255,6 +255,12 @@ pub(crate) fn parse_graph_topological_sort_input(
     GraphTopologicalSortInput { projection }
 }
 
+pub(crate) fn parse_graph_properties_input(
+    projection: Option<RuntimeGraphProjection>,
+) -> GraphPropertiesInput {
+    GraphPropertiesInput { projection }
+}
+
 pub(crate) fn parse_graph_direction(value: Option<&str>) -> Option<RuntimeGraphDirection> {
     match value.map(normalize_graph_token).as_deref() {
         Some("outgoing") | Some("out") => Some(RuntimeGraphDirection::Outgoing),
@@ -280,6 +286,10 @@ pub(crate) fn parse_graph_path_algorithm(value: Option<&str>) -> Option<RuntimeG
     match value.map(normalize_graph_token).as_deref() {
         Some("bfs") => Some(RuntimeGraphPathAlgorithm::Bfs),
         Some("dijkstra") | Some("weighted") => Some(RuntimeGraphPathAlgorithm::Dijkstra),
+        Some("astar") | Some("a") => Some(RuntimeGraphPathAlgorithm::AStar),
+        Some("bellmanford") | Some("bellman_ford") | Some("negativeweights") => {
+            Some(RuntimeGraphPathAlgorithm::BellmanFord)
+        }
         Some(_) => None,
         None => None,
     }
@@ -345,6 +355,8 @@ pub(crate) fn graph_path_algorithm_to_str(value: RuntimeGraphPathAlgorithm) -> &
     match value {
         RuntimeGraphPathAlgorithm::Bfs => "bfs",
         RuntimeGraphPathAlgorithm::Dijkstra => "dijkstra",
+        RuntimeGraphPathAlgorithm::AStar => "astar",
+        RuntimeGraphPathAlgorithm::BellmanFord => "bellman_ford",
     }
 }
 

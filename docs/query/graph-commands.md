@@ -61,7 +61,11 @@ Find the shortest path between two nodes:
 GRAPH SHORTEST_PATH FROM 'alice' TO 'charlie' ALGORITHM dijkstra
 ```
 
-Algorithms: `bfs` (unweighted) or `dijkstra` (weighted).
+Algorithms:
+- `bfs`: menor caminho por número de saltos
+- `dijkstra`: menor caminho ponderado com pesos não-negativos
+- `astar`: busca guiada por heurística; atualmente usa heurística nula no runtime genérico
+- `bellman_ford`: suporta pesos negativos e detecta ciclos negativos
 
 ## GRAPH CENTRALITY
 
@@ -125,6 +129,16 @@ Compute topological ordering of a DAG:
 GRAPH TOPOLOGICAL_SORT
 ```
 
+## GRAPH PROPERTIES
+
+Compute structural graph properties:
+
+```sql
+GRAPH PROPERTIES
+```
+
+Returns a summary with connectivity, completeness, cyclicity, density, and component counts.
+
 ## PATH Query
 
 Dedicated path queries between two nodes:
@@ -148,9 +162,10 @@ flowchart LR
     A[Graph Command] --> B{Command Type}
     B -->|MATCH| C[Pattern Match Engine]
     B -->|TRAVERSE| D[BFS/DFS Engine]
-    B -->|SHORTEST_PATH| E[Dijkstra/BFS]
+    B -->|SHORTEST_PATH| E[Dijkstra/A*/Bellman-Ford/BFS]
     B -->|CENTRALITY| F[Analytics Engine]
     B -->|COMMUNITY| F
+    B -->|PROPERTIES| F
     C --> G[Result Set]
     D --> G
     E --> G

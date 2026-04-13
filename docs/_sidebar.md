@@ -78,6 +78,7 @@
 - **Graph Engine**
   - [Node & Edge Model](/graph/model.md)
   - [Pathfinding Algorithms](/graph/pathfinding.md)
+  - [Graph Properties](/graph/properties.md)
   - [Centrality](/graph/centrality.md)
   - [Community Detection](/graph/community.md)
   - [Cycle Detection](/graph/cycles.md)

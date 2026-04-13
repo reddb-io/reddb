@@ -19,6 +19,7 @@ impl<'a> Parser<'a> {
             Token::Cycles => self.parse_graph_cycles(),
             Token::Clustering => self.parse_graph_clustering(),
             Token::TopologicalSort => self.parse_graph_topological_sort(),
+            Token::Properties => self.parse_graph_properties(),
             _ => Err(ParseError::expected(
                 vec![
                     "NEIGHBORHOOD",
@@ -30,6 +31,7 @@ impl<'a> Parser<'a> {
                     "CYCLES",
                     "CLUSTERING",
                     "TOPOLOGICAL_SORT",
+                    "PROPERTIES",
                 ],
                 self.peek(),
                 self.position(),
@@ -173,5 +175,11 @@ impl<'a> Parser<'a> {
     fn parse_graph_topological_sort(&mut self) -> Result<QueryExpr, ParseError> {
         self.advance()?; // consume TOPOLOGICAL_SORT
         Ok(QueryExpr::GraphCommand(GraphCommand::TopologicalSort))
+    }
+
+    /// Parse: GRAPH PROPERTIES
+    fn parse_graph_properties(&mut self) -> Result<QueryExpr, ParseError> {
+        self.advance()?; // consume PROPERTIES
+        Ok(QueryExpr::GraphCommand(GraphCommand::Properties))
     }
 }

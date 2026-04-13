@@ -162,4 +162,11 @@ impl RuntimeGraphPort for RedDBRuntime {
     ) -> RedDBResult<RuntimeGraphTopologicalSortResult> {
         RedDBRuntime::graph_topological_sort(self, projection)
     }
+
+    fn graph_properties(
+        &self,
+        projection: Option<RuntimeGraphProjection>,
+    ) -> RedDBResult<RuntimeGraphPropertiesResult> {
+        RedDBRuntime::graph_properties(self, projection)
+    }
 }
