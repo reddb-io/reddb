@@ -74,3 +74,5 @@ mod graph;
 mod native;
 #[path = "ports_impls_query.rs"]
 mod query;
+#[path = "ports_impls_schema.rs"]
+mod schema;
