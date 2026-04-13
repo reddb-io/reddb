@@ -10,11 +10,13 @@ use super::super::{
     UnifiedEntity, UnifiedStore, VectorData,
 };
 use super::error::DevXError;
+use super::{run_preprocessors, SharedPreprocessors};
 use crate::storage::schema::Value;
 
 /// Batch operations for high-performance bulk inserts
 pub struct BatchBuilder {
     store: Arc<UnifiedStore>,
+    preprocessors: SharedPreprocessors,
     nodes: Vec<(String, UnifiedEntity, HashMap<String, MetadataValue>)>,
     edges: Vec<(String, UnifiedEntity, HashMap<String, MetadataValue>)>,
     vectors: Vec<(String, UnifiedEntity, HashMap<String, MetadataValue>)>,
@@ -22,9 +24,10 @@ pub struct BatchBuilder {
 }
 
 impl BatchBuilder {
-    pub(crate) fn new(store: Arc<UnifiedStore>) -> Self {
+    pub(crate) fn new(store: Arc<UnifiedStore>, preprocessors: SharedPreprocessors) -> Self {
         Self {
             store,
+            preprocessors,
             nodes: Vec::new(),
             edges: Vec::new(),
             vectors: Vec::new(),
@@ -91,8 +94,9 @@ impl BatchBuilder {
         let mut inserted_rows = Vec::new();
 
         // Insert nodes
-        for (collection, entity, metadata) in self.nodes {
+        for (collection, mut entity, metadata) in self.nodes {
             let id = entity.id;
+            run_preprocessors(&self.preprocessors, &mut entity)?;
             if self.store.insert_auto(&collection, entity).is_ok() {
                 if !metadata.is_empty() {
                     let _ =
@@ -104,8 +108,9 @@ impl BatchBuilder {
         }
 
         // Insert vectors
-        for (collection, entity, metadata) in self.vectors {
+        for (collection, mut entity, metadata) in self.vectors {
             let id = entity.id;
+            run_preprocessors(&self.preprocessors, &mut entity)?;
             if self.store.insert_auto(&collection, entity).is_ok() {
                 if !metadata.is_empty() {
                     let _ =
@@ -117,8 +122,9 @@ impl BatchBuilder {
         }
 
         // Insert edges
-        for (collection, entity, metadata) in self.edges {
+        for (collection, mut entity, metadata) in self.edges {
             let id = entity.id;
+            run_preprocessors(&self.preprocessors, &mut entity)?;
             if self.store.insert_auto(&collection, entity).is_ok() {
                 if !metadata.is_empty() {
                     let _ =
@@ -130,8 +136,9 @@ impl BatchBuilder {
         }
 
         // Insert rows
-        for (collection, entity, metadata) in self.rows {
+        for (collection, mut entity, metadata) in self.rows {
             let id = entity.id;
+            run_preprocessors(&self.preprocessors, &mut entity)?;
             if self.store.insert_auto(&collection, entity).is_ok() {
                 if !metadata.is_empty() {
                     let _ =
