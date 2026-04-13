@@ -49,7 +49,7 @@ red server [--grpc] [--http] [--grpc-bind 127.0.0.1:50051] [--http-bind 127.0.0.
 | Flag | Short | Default | Description |
 |:-----|:------|:--------|:------------|
 | `--path` | `-d` | `./data/reddb.rdb` | Database file path (omit for in-memory) |
-| `--bind` | `-b` | gRPC `127.0.0.1:50051` | Legacy single-transport bind address |
+| `--bind` | `-b` | router `127.0.0.1:5050` | Routed front-door by default; also works as the legacy single-transport bind address when a transport is selected |
 | `--grpc` | | | Enable gRPC API |
 | `--http` | | | Enable HTTP API |
 | `--grpc-bind` | | | Explicit gRPC bind address |
@@ -63,6 +63,9 @@ red server [--grpc] [--http] [--grpc-bind 127.0.0.1:50051] [--http-bind 127.0.0.
 Examples:
 
 ```bash
+# Default routed front-door for gRPC, HTTP and wire
+red server --path ./data/reddb.rdb
+
 # Local dev with both APIs
 red server --path ./data/reddb.rdb --grpc-bind 127.0.0.1:50051 --http-bind 127.0.0.1:8080
 
@@ -88,7 +91,7 @@ red service <install|print-unit> [--binary /usr/local/bin/red] [--grpc-bind 0.0.
 | `--user` | | `reddb` | Service user |
 | `--group` | | `reddb` | Service group |
 | `--path` | `-d` | `/var/lib/reddb/data.rdb` | Persistent database file path |
-| `--bind` | `-b` | gRPC `127.0.0.1:50051` | Legacy single-transport bind address |
+| `--bind` | `-b` | router `127.0.0.1:5050` | Routed front-door by default; also works as the legacy single-transport bind address when a transport is selected |
 | `--grpc` | | | Enable gRPC API in the service |
 | `--http` | | | Enable HTTP API in the service |
 | `--grpc-bind` | | | Explicit gRPC bind address |
@@ -100,8 +103,7 @@ Examples:
 sudo red service install \
   --binary /usr/local/bin/red \
   --path /var/lib/reddb/data.rdb \
-  --grpc-bind 0.0.0.0:50051 \
-  --http-bind 0.0.0.0:8080
+  --bind 0.0.0.0:5050
 
 red service print-unit \
   --path /var/lib/reddb/data.rdb \
@@ -180,8 +182,8 @@ red health [--bind host:port] [--grpc|--http]
 
 | Flag | Short | Description |
 |:-----|:------|:------------|
-| `--bind` | `-b` | Server address |
-| `--grpc` | | Probe gRPC listener (default) |
+| `--bind` | `-b` | Server address. Defaults to `127.0.0.1:5050` when no transport is selected |
+| `--grpc` | | Probe gRPC listener |
 | `--http` | | Probe HTTP listener |
 
 ## red tick
