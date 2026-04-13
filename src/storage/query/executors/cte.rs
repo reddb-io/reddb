@@ -696,7 +696,7 @@ mod tests {
         record.set("null_val", Value::Null);
         record.set("bool_val", Value::Boolean(true));
         record.set("int_val", Value::Integer(42));
-        record.set("float_val", Value::Float(3.14));
+        record.set("float_val", Value::Float(2.5));
         record.set("text_val", Value::Text("hello".to_string()));
         record.set("blob_val", Value::Blob(vec![1, 2, 3]));
         record.set("timestamp_val", Value::Timestamp(1234567890));
