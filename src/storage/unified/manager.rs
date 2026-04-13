@@ -226,7 +226,11 @@ impl SegmentManager {
             stats.growing_count += 1;
         }
 
-        Arc::clone(growing.as_ref().unwrap())
+        if let Some(segment) = growing.as_ref() {
+            Arc::clone(segment)
+        } else {
+            unreachable!("growing segment must exist after creation");
+        }
     }
 
     /// Insert a new entity
@@ -250,7 +254,7 @@ impl SegmentManager {
         // Track entity location
         self.entity_segment
             .write()
-            .unwrap()
+            .unwrap_or_else(|err| err.into_inner())
             .insert(entity_id, segment_id);
 
         // Update stats
@@ -669,7 +673,7 @@ impl SegmentManager {
                         s.spawn(move || {
                             segment
                                 .read()
-                                .unwrap()
+                                .unwrap_or_else(|err| err.into_inner())
                                 .iter()
                                 .filter(|e| filter_ref(e))
                                 .cloned()
