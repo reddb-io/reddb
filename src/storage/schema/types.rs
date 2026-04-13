@@ -2038,7 +2038,7 @@ mod tests {
 
     #[test]
     fn test_value_semver_roundtrip() {
-        let value = Value::Semver(1 * 1_000_000 + 23 * 1_000 + 456);
+        let value = Value::Semver(1_000_000 + 23 * 1_000 + 456);
         let bytes = value.to_bytes();
         let (recovered, size) = Value::from_bytes(&bytes).unwrap();
         assert_eq!(value, recovered);
@@ -2049,7 +2049,7 @@ mod tests {
     #[test]
     fn test_value_cidr_roundtrip() {
         // 10.0.0.0/8
-        let ip: u32 = (10 << 24) | (0 << 16) | (0 << 8) | 0;
+        let ip: u32 = 10 << 24;
         let value = Value::Cidr(ip, 8);
         let bytes = value.to_bytes();
         let (recovered, size) = Value::from_bytes(&bytes).unwrap();
@@ -2405,7 +2405,7 @@ mod tests {
     fn test_row_with_all_new_types() {
         let row = Row::new(vec![
             Value::TimestampMs(1710510600123),
-            Value::Ipv4((10u32 << 24) | (0 << 16) | (0 << 8) | 1),
+            Value::Ipv4((10u32 << 24) | 1),
             Value::Ipv6([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
             Value::Subnet(10u32 << 24, !0u32 << 16),
             Value::Port(443),
