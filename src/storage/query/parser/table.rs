@@ -13,6 +13,7 @@ fn is_scalar_function(name: &str) -> bool {
             | "GEO_MIDPOINT"
             | "HAVERSINE"
             | "VINCENTY"
+            | "TIME_BUCKET"
             | "UPPER"
             | "LOWER"
             | "LENGTH"
@@ -139,10 +140,16 @@ impl<'a> Parser<'a> {
                 vec![Projection::Column(col)]
             };
             self.expect(Token::RParen)?;
-            if self.consume(&Token::As)? {
-                let _alias = self.expect_ident()?;
-            }
-            return Ok(Projection::Function(func_name, args));
+            let alias = if self.consume(&Token::As)? {
+                Some(self.expect_ident()?)
+            } else {
+                None
+            };
+            return Ok(if let Some(alias) = alias {
+                Projection::Function(format!("{}:{}", func_name, alias), args)
+            } else {
+                Projection::Function(func_name, args)
+            });
         }
 
         // Check for scalar function: IDENT(args) — e.g. GEO_DISTANCE(col, POINT(x,y))
@@ -199,8 +206,11 @@ impl<'a> Parser<'a> {
                 }
             }
             // Numeric literal
-            if matches!(self.peek(), Token::Float(_)) || self.peek() == &Token::Minus {
-                let val = self.parse_numeric_literal()?;
+            if matches!(
+                self.peek(),
+                Token::Integer(_) | Token::Float(_) | Token::Minus
+            ) {
+                let val = self.parse_function_literal_arg()?;
                 args.push(Projection::Column(format!("LIT:{}", val)));
                 if !self.consume(&Token::Comma)? {
                     break;
@@ -230,6 +240,7 @@ impl<'a> Parser<'a> {
     fn parse_numeric_literal(&mut self) -> Result<f64, ParseError> {
         let negative = self.consume(&Token::Minus)?;
         match self.advance()? {
+            Token::Integer(n) => Ok(if negative { -(n as f64) } else { n as f64 }),
             Token::Float(n) => Ok(if negative { -n } else { n }),
             other => Err(ParseError::new(
                 format!("expected number, got {}", other),
@@ -325,7 +336,7 @@ impl<'a> Parser<'a> {
     pub fn parse_group_by_list(&mut self) -> Result<Vec<String>, ParseError> {
         let mut fields = Vec::new();
         loop {
-            fields.push(self.expect_ident()?);
+            fields.push(self.parse_group_by_entry()?);
             if !self.consume(&Token::Comma)? {
                 break;
             }
@@ -367,5 +378,109 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(clauses)
+    }
+
+    fn parse_function_literal_arg(&mut self) -> Result<String, ParseError> {
+        let negative = self.consume(&Token::Minus)?;
+        let mut literal = match self.advance()? {
+            Token::Integer(n) => {
+                if negative {
+                    format!("-{n}")
+                } else {
+                    n.to_string()
+                }
+            }
+            Token::Float(n) => {
+                let value = if negative { -n } else { n };
+                if value.fract().abs() < f64::EPSILON {
+                    format!("{}", value as i64)
+                } else {
+                    value.to_string()
+                }
+            }
+            other => {
+                return Err(ParseError::new(
+                    format!("expected number, got {}", other),
+                    self.position(),
+                ));
+            }
+        };
+
+        if let Token::Ident(unit) = self.peek().clone() {
+            if is_duration_unit(&unit) {
+                self.advance()?;
+                literal.push_str(&unit.to_ascii_lowercase());
+            }
+        }
+
+        Ok(literal)
+    }
+
+    fn parse_group_by_entry(&mut self) -> Result<String, ParseError> {
+        if let Token::Ident(name) = self.peek() {
+            if name.eq_ignore_ascii_case("TIME_BUCKET") {
+                return self.parse_group_by_time_bucket();
+            }
+        }
+        self.expect_ident()
+    }
+
+    fn parse_group_by_time_bucket(&mut self) -> Result<String, ParseError> {
+        self.advance()?; // TIME_BUCKET
+        self.expect(Token::LParen)?;
+        let args = self.parse_function_args()?;
+        self.expect(Token::RParen)?;
+
+        let rendered_args = args
+            .iter()
+            .map(render_group_by_function_arg)
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| {
+                ParseError::new(
+                    "TIME_BUCKET arguments must be literals or column names".to_string(),
+                    self.position(),
+                )
+            })?;
+
+        Ok(format!("TIME_BUCKET({})", rendered_args.join(",")))
+    }
+}
+
+fn is_duration_unit(unit: &str) -> bool {
+    matches!(
+        unit.to_ascii_lowercase().as_str(),
+        "ms" | "msec"
+            | "millisecond"
+            | "milliseconds"
+            | "s"
+            | "sec"
+            | "secs"
+            | "second"
+            | "seconds"
+            | "m"
+            | "min"
+            | "mins"
+            | "minute"
+            | "minutes"
+            | "h"
+            | "hr"
+            | "hrs"
+            | "hour"
+            | "hours"
+            | "d"
+            | "day"
+            | "days"
+    )
+}
+
+fn render_group_by_function_arg(arg: &Projection) -> Option<String> {
+    match arg {
+        Projection::Column(col) => Some(
+            col.strip_prefix("LIT:")
+                .map(str::to_string)
+                .unwrap_or_else(|| col.clone()),
+        ),
+        Projection::All => Some("*".to_string()),
+        _ => None,
     }
 }
