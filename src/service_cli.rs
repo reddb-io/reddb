@@ -8,9 +8,12 @@ use std::time::Duration;
 use crate::auth::store::AuthStore;
 use crate::replication::ReplicationConfig;
 use crate::runtime::RedDBRuntime;
+use crate::service_router::{serve_tcp_router, TcpProtocolRouterConfig};
 use crate::{
     GrpcServerOptions, RedDBGrpcServer, RedDBOptions, RedDBServer, ServerOptions, StorageMode,
 };
+
+pub const DEFAULT_ROUTER_BIND_ADDR: &str = "127.0.0.1:5050";
 
 /// Detect available CPU cores and suggest worker thread count.
 pub fn detect_runtime_config() -> RuntimeConfig {
@@ -63,6 +66,7 @@ impl ServerTransport {
 #[derive(Debug, Clone)]
 pub struct ServerCommandConfig {
     pub path: Option<PathBuf>,
+    pub router_bind_addr: Option<String>,
     pub grpc_bind_addr: Option<String>,
     pub http_bind_addr: Option<String>,
     pub wire_bind_addr: Option<String>,
@@ -88,6 +92,7 @@ pub struct SystemdServiceConfig {
     pub run_user: String,
     pub run_group: String,
     pub data_path: PathBuf,
+    pub router_bind_addr: Option<String>,
     pub grpc_bind_addr: Option<String>,
     pub http_bind_addr: Option<String>,
 }
@@ -138,13 +143,13 @@ impl ServerCommandConfig {
 
     pub fn enabled_transports(&self) -> Vec<ServerTransport> {
         let mut transports = Vec::with_capacity(3);
-        if self.grpc_bind_addr.is_some() {
+        if self.router_bind_addr.is_some() || self.grpc_bind_addr.is_some() {
             transports.push(ServerTransport::Grpc);
         }
-        if self.http_bind_addr.is_some() {
+        if self.router_bind_addr.is_some() || self.http_bind_addr.is_some() {
             transports.push(ServerTransport::Http);
         }
-        if self.wire_bind_addr.is_some() {
+        if self.router_bind_addr.is_some() || self.wire_bind_addr.is_some() {
             transports.push(ServerTransport::Wire);
         }
         transports
@@ -327,20 +332,25 @@ fn run_command<const N: usize>(program: &str, args: [&str; N]) -> Result<(), Str
 }
 
 pub fn run_server_with_large_stack(config: ServerCommandConfig) -> Result<(), String> {
-    let has_any = config.grpc_bind_addr.is_some()
+    let has_any = config.router_bind_addr.is_some()
+        || config.grpc_bind_addr.is_some()
         || config.http_bind_addr.is_some()
         || config.wire_bind_addr.is_some();
     if !has_any {
         return Err("at least one server bind address must be configured".into());
     }
-    let thread_name = match (
-        config.grpc_bind_addr.is_some(),
-        config.http_bind_addr.is_some(),
-    ) {
-        (true, true) => "red-server-dual",
-        (true, false) => "red-server-grpc",
-        (false, true) => "red-server-http",
-        (false, false) => "red-server-wire",
+    let thread_name = if config.router_bind_addr.is_some() {
+        "red-server-router"
+    } else {
+        match (
+            config.grpc_bind_addr.is_some(),
+            config.http_bind_addr.is_some(),
+        ) {
+            (true, true) => "red-server-dual",
+            (true, false) => "red-server-grpc",
+            (false, true) => "red-server-http",
+            (false, false) => "red-server-wire",
+        }
     };
 
     let handle = thread::Builder::new()
@@ -363,7 +373,10 @@ fn render_systemd_exec_start(config: &SystemdServiceConfig) -> String {
         config.data_path.display().to_string(),
     ];
 
-    if let Some(bind_addr) = &config.grpc_bind_addr {
+    if let Some(bind_addr) = &config.router_bind_addr {
+        parts.push("--bind".to_string());
+        parts.push(bind_addr.clone());
+    } else if let Some(bind_addr) = &config.grpc_bind_addr {
         parts.push("--grpc-bind".to_string());
         parts.push(bind_addr.clone());
     }
@@ -388,6 +401,10 @@ pub fn probe_listener(target: &str, timeout: Duration) -> bool {
 
 #[inline(never)]
 fn run_configured_servers(config: ServerCommandConfig) -> Result<(), String> {
+    if let Some(router_bind_addr) = config.router_bind_addr.clone() {
+        return run_routed_server(config, router_bind_addr);
+    }
+
     match (config.grpc_bind_addr.clone(), config.http_bind_addr.clone()) {
         (Some(grpc_bind_addr), Some(http_bind_addr)) => {
             run_dual_server(config, grpc_bind_addr, http_bind_addr)
@@ -403,6 +420,89 @@ fn run_configured_servers(config: ServerCommandConfig) -> Result<(), String> {
             }
         }
     }
+}
+
+#[inline(never)]
+fn run_routed_server(config: ServerCommandConfig, router_bind_addr: String) -> Result<(), String> {
+    let workers = config.workers;
+    let db_options = config.to_db_options();
+    let rt_config = detect_runtime_config();
+    let worker_threads = workers.unwrap_or(rt_config.suggested_workers);
+    let (runtime, auth_store) = build_runtime_and_auth_store(db_options)?;
+
+    let http_listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .map_err(|err| format!("bind internal HTTP listener: {err}"))?;
+    let http_backend = http_listener
+        .local_addr()
+        .map_err(|err| format!("inspect internal HTTP listener: {err}"))?;
+    let http_server = build_http_server(
+        runtime.clone(),
+        auth_store.clone(),
+        http_backend.to_string(),
+    );
+    let http_handle = http_server.serve_in_background_on(http_listener);
+
+    thread::sleep(Duration::from_millis(100));
+    if http_handle.is_finished() {
+        return match http_handle.join() {
+            Ok(Ok(())) => Err("HTTP backend exited unexpectedly".to_string()),
+            Ok(Err(err)) => Err(err.to_string()),
+            Err(_) => Err("HTTP backend thread panicked".to_string()),
+        };
+    }
+
+    let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(worker_threads)
+        .thread_stack_size(rt_config.stack_size)
+        .build()
+        .map_err(|err| format!("tokio runtime: {err}"))?;
+
+    tokio_runtime.block_on(async move {
+        let grpc_listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .map_err(|err| format!("bind internal gRPC listener: {err}"))?;
+        let grpc_backend = grpc_listener
+            .local_addr()
+            .map_err(|err| format!("inspect internal gRPC listener: {err}"))?;
+        let grpc_server = RedDBGrpcServer::with_options(
+            runtime.clone(),
+            GrpcServerOptions {
+                bind_addr: grpc_backend.to_string(),
+            },
+            auth_store,
+        );
+        tokio::spawn(async move {
+            if let Err(err) = grpc_server.serve_on(grpc_listener).await {
+                eprintln!("gRPC backend error: {err}");
+            }
+        });
+
+        let wire_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|err| format!("bind internal wire listener: {err}"))?;
+        let wire_backend = wire_listener
+            .local_addr()
+            .map_err(|err| format!("inspect internal wire listener: {err}"))?;
+        let wire_rt = Arc::new(runtime);
+        tokio::spawn(async move {
+            if let Err(err) = crate::wire::start_wire_listener_on(wire_listener, wire_rt).await {
+                eprintln!("wire backend error: {err}");
+            }
+        });
+
+        eprintln!(
+            "red server (router) bootstrapping on {} [cpus={}, workers={}]",
+            router_bind_addr, rt_config.available_cpus, worker_threads
+        );
+        serve_tcp_router(TcpProtocolRouterConfig {
+            bind_addr: router_bind_addr,
+            grpc_backend,
+            http_backend,
+            wire_backend,
+        })
+        .await
+        .map_err(|err| err.to_string())
+    })
 }
 
 /// Spawn wire protocol listeners (plaintext + TLS) as background tokio tasks.
@@ -642,6 +742,7 @@ mod tests {
             run_user: "reddb".to_string(),
             run_group: "reddb".to_string(),
             data_path: PathBuf::from("/var/lib/reddb/data.rdb"),
+            router_bind_addr: None,
             grpc_bind_addr: Some("0.0.0.0:50051".to_string()),
             http_bind_addr: None,
         };
@@ -659,6 +760,7 @@ mod tests {
             run_user: "reddb".to_string(),
             run_group: "reddb".to_string(),
             data_path: PathBuf::from("/srv/reddb/live/data.rdb"),
+            router_bind_addr: None,
             grpc_bind_addr: None,
             http_bind_addr: Some("127.0.0.1:8080".to_string()),
         };
@@ -678,6 +780,7 @@ mod tests {
             run_user: "reddb".to_string(),
             run_group: "reddb".to_string(),
             data_path: PathBuf::from("/var/lib/reddb/data.rdb"),
+            router_bind_addr: None,
             grpc_bind_addr: Some("0.0.0.0:50051".to_string()),
             http_bind_addr: Some("0.0.0.0:8080".to_string()),
         };
@@ -685,5 +788,24 @@ mod tests {
         let unit = render_systemd_unit(&config);
         assert!(unit.contains("--grpc-bind 0.0.0.0:50051"));
         assert!(unit.contains("--http-bind 0.0.0.0:8080"));
+    }
+
+    #[test]
+    fn render_systemd_unit_supports_router_mode() {
+        let config = SystemdServiceConfig {
+            service_name: "reddb".to_string(),
+            binary_path: PathBuf::from("/usr/local/bin/red"),
+            run_user: "reddb".to_string(),
+            run_group: "reddb".to_string(),
+            data_path: PathBuf::from("/var/lib/reddb/data.rdb"),
+            router_bind_addr: Some(DEFAULT_ROUTER_BIND_ADDR.to_string()),
+            grpc_bind_addr: None,
+            http_bind_addr: None,
+        };
+
+        let unit = render_systemd_unit(&config);
+        assert!(unit.contains("--bind 127.0.0.1:5050"));
+        assert!(!unit.contains("--grpc-bind"));
+        assert!(!unit.contains("--http-bind"));
     }
 }
