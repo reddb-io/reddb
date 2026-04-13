@@ -1,0 +1,8 @@
+mode: primary-replica
+replica:
+  replicaCount: 3
+pdb:
+  enabled: true
+  minAvailable: 1
+networkPolicy:
+  enabled: true
