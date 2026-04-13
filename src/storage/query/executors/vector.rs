@@ -11,7 +11,7 @@ use crate::storage::engine::hnsw::{HnswConfig, HnswIndex};
 use crate::storage::engine::unified_index::UnifiedIndex;
 use crate::storage::engine::vector_metadata::{MetadataFilter, MetadataValue};
 use crate::storage::engine::vector_store::VectorStore;
-use crate::storage::query::ast::{VectorQuery, VectorSource};
+use crate::storage::query::ast::{QueryExpr, VectorQuery, VectorSource};
 use crate::storage::query::unified::{
     ExecutionError, QueryStats, UnifiedRecord, UnifiedResult, VectorSearchResult,
 };
@@ -170,16 +170,13 @@ impl VectorExecutor {
                 collection,
                 vector_id,
             } => {
-                // Try to get the vector from the collection
-                // Ideally VectorStore would have a get_vector_by_id method
-                // For now, we'd need to search with the id filter
                 if let Some(coll) = self.vector_store.get(collection) {
-                    // VectorCollection doesn't expose get_by_id directly yet
-                    // This would require extending the VectorCollection API
-                    Err(ExecutionError::new(format!(
-                        "Reference vector lookup not yet implemented for {}:{} - VectorCollection needs get_by_id API",
-                        collection, vector_id
-                    )))
+                    coll.get(*vector_id).cloned().ok_or_else(|| {
+                        ExecutionError::new(format!(
+                            "Reference vector not found: {}:{}",
+                            collection, vector_id
+                        ))
+                    })
                 } else {
                     Err(ExecutionError::new(format!(
                         "Vector collection not found: {}",
@@ -188,10 +185,25 @@ impl VectorExecutor {
                 }
             }
 
-            VectorSource::Subquery(_) => {
-                // Subquery execution would require recursive query execution
-                Err(ExecutionError::new("Vector subqueries not yet implemented"))
+            VectorSource::Subquery(expr) => self.resolve_subquery_vector(expr.as_ref()),
+        }
+    }
+
+    fn resolve_subquery_vector(&self, expr: &QueryExpr) -> Result<Vec<f32>, ExecutionError> {
+        match expr {
+            QueryExpr::Vector(query) => {
+                let result = self.execute(query)?;
+                let (collection, vector_id) =
+                    vector_subquery_reference(&result.records, &query.collection)?;
+                self.resolve_vector_source(&VectorSource::Reference {
+                    collection,
+                    vector_id,
+                })
             }
+            other => Err(ExecutionError::new(format!(
+                "Vector subqueries currently support only nested VECTOR SEARCH expressions, got {}",
+                query_expr_name(other)
+            ))),
         }
     }
 }
@@ -299,9 +311,7 @@ impl InMemoryVectorExecutor {
                     t
                 )));
             }
-            VectorSource::Subquery(_) => {
-                return Err(ExecutionError::new("Subqueries not implemented"));
-            }
+            VectorSource::Subquery(expr) => self.resolve_subquery_vector(expr.as_ref())?,
         };
 
         let metric = query.metric.unwrap_or(DistanceMetric::L2);
@@ -408,6 +418,24 @@ impl InMemoryVectorExecutor {
         Ok(result)
     }
 
+    fn resolve_subquery_vector(&self, expr: &QueryExpr) -> Result<Vec<f32>, ExecutionError> {
+        match expr {
+            QueryExpr::Vector(query) => {
+                let result = self.execute(query)?;
+                let (collection, vector_id) =
+                    vector_subquery_reference(&result.records, &query.collection)?;
+                self.vectors
+                    .get(&(collection, vector_id))
+                    .cloned()
+                    .ok_or_else(|| ExecutionError::new("Subquery reference vector not found"))
+            }
+            other => Err(ExecutionError::new(format!(
+                "Vector subqueries currently support only nested VECTOR SEARCH expressions, got {}",
+                query_expr_name(other)
+            ))),
+        }
+    }
+
     /// Brute force search when no index is available
     fn brute_force_search(
         &self,
@@ -510,6 +538,62 @@ where
         (Some(MetadataValue::Integer(a)), MetadataValue::Float(b)) => cmp(*a as f64, *b),
         (Some(MetadataValue::Float(a)), MetadataValue::Integer(b)) => cmp(*a, *b as f64),
         _ => false,
+    }
+}
+
+fn vector_subquery_reference(
+    records: &[UnifiedRecord],
+    default_collection: &str,
+) -> Result<(String, u64), ExecutionError> {
+    let record = records
+        .first()
+        .ok_or_else(|| ExecutionError::new("Vector subquery returned no rows"))?;
+
+    let collection = match record.values.get("collection") {
+        Some(Value::Text(collection)) => collection.clone(),
+        _ => default_collection.to_string(),
+    };
+
+    let vector_id = match record.values.get("id") {
+        Some(Value::Integer(id)) if *id >= 0 => *id as u64,
+        Some(Value::UnsignedInteger(id)) => *id,
+        other => {
+            return Err(ExecutionError::new(format!(
+                "Vector subquery must expose an integer id column, got {other:?}"
+            )));
+        }
+    };
+
+    Ok((collection, vector_id))
+}
+
+fn query_expr_name(expr: &QueryExpr) -> &'static str {
+    match expr {
+        QueryExpr::Table(_) => "table",
+        QueryExpr::Graph(_) => "graph",
+        QueryExpr::Join(_) => "join",
+        QueryExpr::Path(_) => "path",
+        QueryExpr::Vector(_) => "vector",
+        QueryExpr::Hybrid(_) => "hybrid",
+        QueryExpr::Insert(_) => "insert",
+        QueryExpr::Update(_) => "update",
+        QueryExpr::Delete(_) => "delete",
+        QueryExpr::CreateTable(_) => "create_table",
+        QueryExpr::DropTable(_) => "drop_table",
+        QueryExpr::AlterTable(_) => "alter_table",
+        QueryExpr::GraphCommand(_) => "graph_command",
+        QueryExpr::SearchCommand(_) => "search_command",
+        QueryExpr::Ask(_) => "ask",
+        QueryExpr::CreateIndex(_) => "create_index",
+        QueryExpr::DropIndex(_) => "drop_index",
+        QueryExpr::ProbabilisticCommand(_) => "probabilistic_command",
+        QueryExpr::CreateTimeSeries(_) => "create_timeseries",
+        QueryExpr::DropTimeSeries(_) => "drop_timeseries",
+        QueryExpr::CreateQueue(_) => "create_queue",
+        QueryExpr::DropQueue(_) => "drop_queue",
+        QueryExpr::QueueCommand(_) => "queue_command",
+        QueryExpr::SetConfig { .. } => "set_config",
+        QueryExpr::ShowConfig { .. } => "show_config",
     }
 }
 
@@ -646,5 +730,69 @@ mod tests {
         let vsr = &result.records[0].vector_results[0];
         assert!(vsr.vector.is_some());
         assert_eq!(vsr.vector.as_ref().unwrap(), &vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn test_vector_executor_reference_source() {
+        let mut store = VectorStore::new();
+        let collection = store.create_collection("refs", 2);
+        let ref_id = collection.insert(vec![1.0, 0.0], None).unwrap();
+        collection.insert(vec![0.0, 1.0], None).unwrap();
+
+        let executor = VectorExecutor::new(Arc::new(store));
+        let query = VectorQuery {
+            alias: None,
+            collection: "refs".to_string(),
+            query_vector: VectorSource::Reference {
+                collection: "refs".to_string(),
+                vector_id: ref_id,
+            },
+            k: 1,
+            filter: None,
+            metric: Some(DistanceMetric::L2),
+            include_vectors: false,
+            include_metadata: false,
+            threshold: None,
+        };
+
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.records[0].values.get("id"), Some(&Value::Integer(0)));
+    }
+
+    #[test]
+    fn test_vector_executor_subquery_source() {
+        let mut store = VectorStore::new();
+        let collection = store.create_collection("refs", 2);
+        collection.insert(vec![1.0, 0.0], None).unwrap();
+        collection.insert(vec![0.0, 1.0], None).unwrap();
+
+        let executor = VectorExecutor::new(Arc::new(store));
+        let inner = VectorQuery {
+            alias: None,
+            collection: "refs".to_string(),
+            query_vector: VectorSource::Literal(vec![1.0, 0.0]),
+            k: 1,
+            filter: None,
+            metric: Some(DistanceMetric::L2),
+            include_vectors: false,
+            include_metadata: false,
+            threshold: None,
+        };
+        let query = VectorQuery {
+            alias: None,
+            collection: "refs".to_string(),
+            query_vector: VectorSource::Subquery(Box::new(QueryExpr::Vector(inner))),
+            k: 1,
+            filter: None,
+            metric: Some(DistanceMetric::L2),
+            include_vectors: false,
+            include_metadata: false,
+            threshold: None,
+        };
+
+        let result = executor.execute(&query).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.records[0].values.get("id"), Some(&Value::Integer(0)));
     }
 }
