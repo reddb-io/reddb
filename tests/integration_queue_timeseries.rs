@@ -2,7 +2,11 @@ use reddb::application::{ExecuteQueryInput, QueryUseCases};
 use reddb::catalog::CollectionModel;
 use reddb::storage::query::UnifiedRecord;
 use reddb::storage::schema::Value;
+use reddb::storage::{
+    EntityData, EntityId, EntityKind, TimeSeriesData, TimeSeriesPointKind, UnifiedEntity,
+};
 use reddb::RedDBRuntime;
+use std::collections::HashMap;
 
 fn rt() -> RedDBRuntime {
     RedDBRuntime::in_memory().expect("failed to create in-memory runtime")
@@ -29,6 +33,15 @@ fn uint(record: &UnifiedRecord, column: &str) -> u64 {
         Some(Value::UnsignedInteger(value)) => *value,
         Some(Value::Integer(value)) if *value >= 0 => *value as u64,
         other => panic!("expected unsigned integer for {column}, got {other:?}"),
+    }
+}
+
+fn float(record: &UnifiedRecord, column: &str) -> f64 {
+    match record.get(column) {
+        Some(Value::Float(value)) => *value,
+        Some(Value::Integer(value)) => *value as f64,
+        Some(Value::UnsignedInteger(value)) => *value as f64,
+        other => panic!("expected numeric value for {column}, got {other:?}"),
     }
 }
 
@@ -202,4 +215,145 @@ fn test_create_timeseries_persists_contract_and_downsample_metadata() {
         }
         other => panic!("expected downsample policy array, got {other:?}"),
     }
+}
+
+#[test]
+fn test_insert_into_timeseries_uses_native_point_entities() {
+    let rt = rt();
+
+    exec(&rt, "CREATE TIMESERIES cpu_metrics RETENTION 7 d");
+
+    let explicit_timestamp = 1_704_067_200_000_000_000u64;
+    exec(
+        &rt,
+        "INSERT INTO cpu_metrics (metric, value, tags, timestamp) VALUES ('cpu.idle', 94.8, {host: 'srv1', region: 'us-east'}, 1704067200000000000)",
+    );
+    exec(
+        &rt,
+        "INSERT INTO cpu_metrics (metric, value, tags) VALUES ('cpu.idle', 95.2, '{\"host\":\"srv2\"}')",
+    );
+
+    let selected = exec(
+        &rt,
+        "SELECT metric, value, timestamp, tags FROM cpu_metrics WHERE metric = 'cpu.idle' ORDER BY timestamp ASC",
+    );
+    assert_eq!(selected.result.records.len(), 2);
+    assert_eq!(text(&selected.result.records[0], "metric"), "cpu.idle");
+    assert_eq!(
+        uint(&selected.result.records[0], "timestamp"),
+        explicit_timestamp
+    );
+    match selected.result.records[0].get("tags") {
+        Some(Value::Json(bytes)) => {
+            let json: reddb::json::Value =
+                reddb::json::from_slice(bytes).expect("tags json should decode");
+            assert_eq!(
+                json.get("host").and_then(reddb::json::Value::as_str),
+                Some("srv1")
+            );
+            assert_eq!(
+                json.get("region").and_then(reddb::json::Value::as_str),
+                Some("us-east")
+            );
+        }
+        other => panic!("expected json tags in query result, got {other:?}"),
+    }
+    assert!(
+        uint(&selected.result.records[1], "timestamp") > explicit_timestamp,
+        "implicit timestamp should be generated at insert time"
+    );
+
+    let tag_filtered = exec(
+        &rt,
+        "SELECT metric, value, tags FROM cpu_metrics WHERE tags.host = 'srv1' ORDER BY timestamp ASC",
+    );
+    assert_eq!(tag_filtered.result.records.len(), 1);
+    assert_eq!(text(&tag_filtered.result.records[0], "metric"), "cpu.idle");
+    assert!((float(&tag_filtered.result.records[0], "value") - 94.8).abs() < 0.0001);
+
+    let store = rt.db().store();
+    let manager = store
+        .get_collection("cpu_metrics")
+        .expect("cpu_metrics collection should exist");
+    let mut entities = manager.query_all(|_| true);
+    assert_eq!(entities.len(), 2);
+    entities.sort_by_key(|entity| entity.id.raw());
+    assert!(entities
+        .iter()
+        .all(|entity| matches!(entity.data, EntityData::TimeSeries(_))));
+
+    match &entities[0].data {
+        EntityData::TimeSeries(ts) => {
+            assert_eq!(ts.metric, "cpu.idle");
+            assert_eq!(ts.timestamp_ns, explicit_timestamp);
+            assert_eq!(ts.value, 94.8);
+            assert_eq!(ts.tags.get("host").map(String::as_str), Some("srv1"));
+            assert_eq!(ts.tags.get("region").map(String::as_str), Some("us-east"));
+        }
+        other => panic!("expected native timeseries entity, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_timeseries_time_bucket_aggregate_query() {
+    let rt = rt();
+
+    exec(&rt, "CREATE TIMESERIES cpu_metrics RETENTION 7 d");
+
+    let store = rt.db().store();
+    let five_minutes_ns = 300_000_000_000u64;
+    let samples = [(0, 10.0), (60_000_000_000, 20.0), (five_minutes_ns, 30.0)];
+
+    for (timestamp_ns, value) in samples {
+        let entity = UnifiedEntity::new(
+            EntityId::new(0),
+            EntityKind::TimeSeriesPoint(Box::new(TimeSeriesPointKind {
+                series: "cpu_metrics".to_string(),
+                metric: "cpu.usage".to_string(),
+            })),
+            EntityData::TimeSeries(TimeSeriesData {
+                metric: "cpu.usage".to_string(),
+                timestamp_ns,
+                value,
+                tags: HashMap::new(),
+            }),
+        );
+        store
+            .insert_auto("cpu_metrics", entity)
+            .expect("timeseries sample insert should succeed");
+    }
+
+    let filtered = exec(
+        &rt,
+        "SELECT metric, value FROM cpu_metrics WHERE metric = 'cpu.usage'",
+    );
+    assert_eq!(
+        filtered.result.records.len(),
+        3,
+        "plain filtered select should include timeseries points"
+    );
+
+    let result = exec(
+        &rt,
+        "SELECT time_bucket(5m) AS bucket, avg(value) AS avg_value, count(*) AS samples FROM cpu_metrics WHERE metric = 'cpu.usage' GROUP BY time_bucket(5m)",
+    );
+
+    assert_eq!(result.result.records.len(), 2, "expected two time buckets");
+
+    let mut rows: Vec<(u64, f64, u64)> = result
+        .result
+        .records
+        .iter()
+        .map(|record| {
+            (
+                uint(record, "bucket"),
+                float(record, "avg_value"),
+                uint(record, "samples"),
+            )
+        })
+        .collect();
+    rows.sort_by_key(|(bucket, _, _)| *bucket);
+
+    assert_eq!(rows[0], (0, 15.0, 2));
+    assert_eq!(rows[1], (five_minutes_ns, 30.0, 1));
 }
