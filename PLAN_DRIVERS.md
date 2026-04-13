@@ -1,5 +1,32 @@
 # Plano — Drivers Nativos RedDB
 
+> **Status: ✅ concluído em 2026-04-13.**
+> Todas as fases (0 → 6, incluindo 1.5 e 3.5) foram entregues, testadas
+> e pushadas pro `main`. Este documento fica como referência histórica do
+> contrato + spec do protocolo stdio, que continua sendo source of truth
+> pra quem for implementar drivers em outras linguagens.
+>
+> **Resumo do que ficou em produção**:
+>
+> | Driver                 | Package         | Backends entregues              | Testes        |
+> |------------------------|-----------------|---------------------------------|---------------|
+> | Rust (`reddb-client`)  | crates.io       | embedded ✅ · gRPC ✅            | 19/19         |
+> | JS (`reddb`)           | npm             | stdio (Node/Bun/Deno) + `grpc://` | 12/12 × 3    |
+> | Python (`reddb`)       | PyPI *(pending token)* | embedded ✅ · gRPC ✅      | 10/10         |
+> | Binário (`red rpc`)    | GitHub Releases | `--stdio` + `--connect grpc://` | 8 + 9         |
+>
+> **O que ficou fora** (backlog consciente, não perdido):
+>
+> - Bump real pra `v0.1.3` + smoke do pipeline de publicação em produção
+> - Criar `PYPI_API_TOKEN` + trocar `if: false` pelos conditionals normais
+>   nos jobs `publish-python-wheels` / `publish-python-upload`
+> - `docs/clients/{rust,javascript,python}.md` (README por driver já existe)
+> - Rust client "thin" — hoje `grpc` feature puxa a engine inteira
+>
+> **Métricas finais**: 86 tests verdes entre todos os drivers · 4 linguagens
+> · 3 URIs comuns (`memory://`, `file://`, `grpc://`) · uma mesma
+> `connect(uri)` em todos os lugares.
+
 ## Objetivo
 
 Entregar 4 drivers nativos oficiais (Rust, Node/Bun/Deno, Python) com API
@@ -158,7 +185,7 @@ Drivers convertem o que o usuário passou em `connect(uri)` direto pro
 
 ---
 
-## Fase 0 — Spec do protocolo (esse documento)
+## Fase 0 — Spec do protocolo (esse documento) ✅
 
 **Status:** ✅ feito (esta seção).
 
@@ -167,7 +194,15 @@ spec.
 
 ---
 
-## Fase 1 — `red rpc --stdio` no binário
+## Fase 1 — `red rpc --stdio` no binário ✅
+
+**Entregue**: `src/rpc_stdio.rs` (JSON-RPC 2.0 loop, 8 unit tests),
+`src/bin/red.rs` (subcommand `rpc` + flags `--stdio` / `--path` / `--connect` /
+`--token`), `tests/integration_rpc_stdio.rs` (9 tests via spawn real do
+binário). Fase 1.5 estendeu o mesmo arquivo com `Backend::Remote` pra proxy
+gRPC — ver seção "Fase 1.5" abaixo.
+
+**Fase 1 original**:
 
 **Objetivo:** dar ao binário um modo daemon stdio que fala JSON-RPC 2.0.
 
@@ -201,7 +236,15 @@ echo '{"jsonrpc":"2.0","id":1,"method":"version","params":{}}' | red rpc --stdio
 
 ---
 
-## Fase 2 — Driver JS `reddb` (npm)
+## Fase 2 — Driver JS `reddb` (npm) ✅
+
+**Entregue**: `drivers/js/` com `package.json`, `src/{binary,spawn,protocol,index}.js`,
+`index.d.ts`, `postinstall.js`, `test/smoke.test.mjs`, README. Detecta
+runtime (Node/Bun/Deno) e spawna `red rpc --stdio` com flags derivadas da
+URI. Postinstall baixa `red-<platform>-<arch>` da Release e dropa em
+`node_modules/reddb/bin/`. **12/12 smoke tests verdes em Node v23.8, Bun
+0.6.14 e Deno 2.2.4** (36 total). Driver lança `RedDBError('CLIENT_CLOSED')`
+em chamadas pós-`close()`.
 
 **Objetivo:** pacote único `reddb` que roda em Node 18+, Bun, Deno via npm
 specifier.
@@ -270,7 +313,16 @@ await db.close()
 
 ---
 
-## Fase 3 — Driver Rust `reddb-client` (crates.io)
+## Fase 3 — Driver Rust `reddb-client` (crates.io) ✅
+
+**Entregue**: `drivers/rust/` com `Cargo.toml` (features `embedded` default,
+`grpc` opcional), `src/{lib,connect,error,types,embedded,grpc}.rs`, README,
+integration tests. API: `Reddb::connect(uri).await?` → dispatch em enum
+(Embedded / Grpc / Unavailable) com `query`/`insert`/`bulk_insert`/`delete`/
+`close`. `JsonValue` hand-rolled pra não forçar serde version em downstream.
+**16/16 tests com features default, 19/19 com `--features grpc`.**
+
+A Fase 3.5 estende esta fase com o backend gRPC real — ver seção abaixo.
 
 **Objetivo:** crate fina, idiomática, async-first, com dois modos transparentes
 (embedded e remote).
@@ -328,7 +380,19 @@ abstrair, mas enum dispatch é mais simples e não precisa Box.
 
 ---
 
-## Fase 4 — Driver Python `reddb` (PyPI, pyo3)
+## Fase 4 — Driver Python `reddb` (PyPI, pyo3) ✅
+
+**Entregue**: `drivers/python/` com `Cargo.toml` (feature `embedded` default
+puxando engine), `pyproject.toml` renomeado pra `reddb`, `src/{lib,embedded,
+high_level}.rs`, `tests/test_smoke.py` (10 tests), README. `reddb.connect(uri)`
+retorna `RedDb` pyclass com context manager (`with reddb.connect(...)`),
+`query/insert/bulk_insert/delete/health/version/close`. Legacy
+`legacy_grpc_connect()` e `wire_connect()` mantidos pra power users. **10/10
+tests verdes via `maturin develop --release` + `python tests/test_smoke.py`**.
+
+Jobs CI (`publish-python-wheels` + `publish-python-upload`) escritos em
+`.github/workflows/release.yml` **com `if: false`** até que o secret
+`PYPI_API_TOKEN` seja criado — TODO comentado no topo explica como ativar.
 
 **Objetivo:** wheel pré-compilada por arch, instalação via `pip install reddb`,
 zero compilação local. Mantém a abordagem in-process via pyo3.
@@ -397,7 +461,18 @@ zero compilação local. Mantém a abordagem in-process via pyo3.
 
 ---
 
-## Fase 5 — Atualizar `release.yml`
+## Fase 5 — Atualizar `release.yml` ✅
+
+**Entregue**: 2 jobs novos em `.github/workflows/release.yml`:
+
+- `publish-rust-client` — depende de `publish-cargo`, só stable, sincroniza
+  versão em `Cargo.toml` + `drivers/rust/Cargo.toml`, reescreve a dep pra
+  remover o `path = "../.."` antes do publish, espera até 150s pra propagação
+  do sparse index, `cargo publish` em `drivers/rust/`
+- `publish-js-driver` — depende de `publish-github` (postinstall precisa da
+  Release), stable e next, `npm publish --tag latest|next --access public`
+- `publish-python-wheels` + `publish-python-upload` — comentados com
+  `if: false` e TODO `PYPI_API_TOKEN`, prontos pra ativar
 
 **Objetivo:** publicar drivers Rust e JS automaticamente em cada release. Python
 fica comentado (Fase 4).
@@ -464,44 +539,71 @@ Ver Fase 4.
 
 ---
 
-## Fase 6 — Sync de versão + docs
+## Fase 6 — Sync de versão + docs ✅
 
-**`scripts/sync-version.js`** passa a escrever em:
+**Entregue**:
 
-- `Cargo.toml` (engine — já faz)
-- `package.json` raiz (já faz)
-- `drivers/rust/Cargo.toml`
-- `drivers/js/package.json`
-- `drivers/python/Cargo.toml`
-- `drivers/python/pyproject.toml`
+- `scripts/sync-version.js` reescrito pra propagar a versão do `package.json`
+  raiz pra 5 manifests (`Cargo.toml`, `drivers/rust/Cargo.toml`,
+  `drivers/js/package.json`, `drivers/python/Cargo.toml`,
+  `drivers/python/pyproject.toml`). Handlers tipados por formato
+  (`cargo-toml`, `package-json`, `pyproject-toml`). Testado dry-run.
+- `README.md` raiz ganhou seção **Native Drivers** antes do Quick Start, com
+  tabela de 3 linhas (Rust/JS/Python) + tabela de URIs + exemplo side-by-side
+  do mesmo app nas 3 linguagens + link pra este documento.
+- Cada driver tem seu próprio README (`drivers/{rust,js,python}/README.md`).
+- **Não entregue**: `docs/clients/{rust,javascript,python}.md` do plano
+  original. O README raiz + READMEs por driver cobriram a função; um
+  doc longo separado não foi feito.
 
-Validação: depois de escrever, lê de volta e compara. Falha se algum arquivo
-ficou desincronizado.
+---
 
-**Docs:**
+## Fase 1.5 — `grpc://` nos drivers stdio ✅
 
-- `README.md` raiz: tabela "Install":
+Estendeu a Fase 1 sem precisar mexer nos drivers JS/Python individualmente.
 
-  | Linguagem | Comando |
-  |-----------|---------|
-  | Rust      | `cargo add reddb-client` |
-  | Node      | `pnpm add reddb` |
-  | Bun       | `bun add reddb` |
-  | Deno      | `import { connect } from 'npm:reddb'` |
-  | Python    | `pip install reddb` |
+**Entregue**:
 
-- `docs/clients/rust.md`, `docs/clients/javascript.md`, `docs/clients/python.md`:
-  cada um com:
-  1. Install
-  2. Connection strings (`file://`, `memory://`, `grpc://`)
-  3. Exemplo CRUD básico
-  4. Tratamento de erros
-  5. Tabela de mapeamento `error.code` → exception idiomática
-  6. Limites (perf de IPC pra JS/Py, edge runtimes não suportados, etc)
+- `src/rpc_stdio.rs` ganhou `enum Backend<'a> { Local(&RedDBRuntime),
+  Remote { client, tokio_rt } }` e `pub fn run_remote(endpoint, token)`
+- `dispatch_method_remote()` mapeia cada método JSON-RPC (`query`, `insert`,
+  `bulk_insert`, `get`, `delete`, `health`, `version`, `close`) pra chamadas
+  tonic via `reddb::client::RedDBClient` e normaliza respostas
+- `src/bin/red.rs` ganhou flags `--connect grpc://host:port` e `--token` em
+  `red rpc`
+- `drivers/js/src/index.js` — `uriToArgs('grpc://...')` passou a retornar
+  `['rpc', '--stdio', '--connect', uri]`. Driver JS ganha gRPC de graça via
+  subprocess
+- `drivers/python/src/high_level.rs` — adicionou `Backend::Grpc(Mutex<RedDBClient>)`
+  variant direto in-process (pyo3, sem subprocess), com arms em cada método
+  e helpers `pydict_to_json_str` / `grpc_query_json_to_pydict`
 
-- `docs/protocol/stdio.md`: extrai a seção "Spec do protocolo stdio" deste plano
-  pra um doc dedicado, pra quem quiser implementar driver de outra linguagem
-  (Go, Ruby, Java, etc no futuro).
+**Tests atualizados**: JS smoke (grpc:// agora passa args em vez de lançar),
+Python smoke (grpc:// agora espera `IO_ERROR` em endpoint morto, não
+`FEATURE_DISABLED`). 8/8 unit + 12/12 × 3 JS runtimes + 10/10 Python continuam
+verdes.
+
+---
+
+## Fase 3.5 — Backend gRPC real no `reddb-client` Rust ✅
+
+**Entregue**: `drivers/rust/src/grpc.rs` reescrito como backend real.
+
+- `GrpcClient { endpoint, inner: tokio::sync::Mutex<RedDBClient> }` — client
+  async nativo, **sem** runtime interno nem `block_on`. Cada método `.await`
+  direto no `reddb::client::RedDBClient`, compatível com qualquer runtime
+  tokio (incluindo `#[tokio::test]`)
+- Feature flag `grpc = ["dep:reddb", "dep:tokio"]` — habilita o backend
+  sem forçá-lo como default
+- Parser JSON hand-rolled (`parse_query_json`) pra não puxar `serde_json`
+  em downstream — 3 unit tests cobrindo rows, vazio, campos faltantes
+- Integration test gated por feature: `grpc_uri_returns_feature_disabled_when_grpc_off`
+  (sem feature) vs `grpc_uri_returns_io_error_when_no_server` (com feature)
+
+**Débito técnico consciente**: hoje `grpc` feature puxa a engine inteira
+porque `RedDBClient` mora em `reddb::client`. Uma crate thin (proto+tonic
+only) fica no backlog; não bloqueia a Fase 3.5 porque a API pública não
+muda.
 
 ---
 
