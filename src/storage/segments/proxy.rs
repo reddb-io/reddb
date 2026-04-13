@@ -699,7 +699,7 @@ mod tests {
         ProxyWebSocketRecord {
             connection_id: conn_id,
             frame_seq: seq,
-            direction: if seq % 2 == 0 {
+            direction: if seq.is_multiple_of(2) {
                 DIRECTION_CLIENT_TO_SERVER
             } else {
                 DIRECTION_SERVER_TO_CLIENT
@@ -712,7 +712,7 @@ mod tests {
 
     #[test]
     fn test_proxy_segment_empty() {
-        let mut segment = ProxySegment::new();
+        let segment = ProxySegment::new();
         assert!(segment.is_empty());
         assert_eq!(segment.connection_count(), 0);
         assert_eq!(segment.request_count(), 0);
