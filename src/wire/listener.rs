@@ -19,7 +19,13 @@ pub async fn start_wire_listener(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(bind_addr).await?;
     eprintln!("red server (wire) listening on {bind_addr}");
+    start_wire_listener_on(listener, runtime).await
+}
 
+pub async fn start_wire_listener_on(
+    listener: TcpListener,
+    runtime: Arc<RedDBRuntime>,
+) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         let (stream, _addr) = listener.accept().await?;
         let rt = runtime.clone();
@@ -40,7 +46,14 @@ pub async fn start_wire_tls_listener(
     let acceptor = super::tls::build_tls_acceptor(tls_config)?;
     let listener = TcpListener::bind(bind_addr).await?;
     eprintln!("red server (wire+tls) listening on {bind_addr}");
+    start_wire_tls_listener_on(listener, runtime, acceptor).await
+}
 
+async fn start_wire_tls_listener_on(
+    listener: TcpListener,
+    runtime: Arc<RedDBRuntime>,
+    acceptor: tokio_rustls::TlsAcceptor,
+) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         let (tcp_stream, _addr) = listener.accept().await?;
         let acceptor = acceptor.clone();
