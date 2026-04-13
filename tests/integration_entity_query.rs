@@ -2358,6 +2358,158 @@ fn test_patch_respects_unique_but_allows_self_update() {
 }
 
 // ===========================================================================
+// WITH timestamps = true — auto-managed created_at / updated_at columns
+// ===========================================================================
+
+fn read_ts_fields(entity: &reddb::storage::UnifiedEntity) -> (u64, u64) {
+    match &entity.data {
+        reddb::storage::EntityData::Row(row) => {
+            let lookup = |key: &str| -> Value {
+                if let Some(named) = &row.named {
+                    if let Some(v) = named.get(key) {
+                        return v.clone();
+                    }
+                }
+                if let Some(schema) = row.schema.as_ref() {
+                    for (idx, name) in schema.iter().enumerate() {
+                        if name == key {
+                            return row.columns[idx].clone();
+                        }
+                    }
+                }
+                panic!("column {key} missing from row");
+            };
+            let created = match lookup("created_at") {
+                Value::UnsignedInteger(n) => n,
+                other => panic!("created_at must be UnsignedInteger, got {other:?}"),
+            };
+            let updated = match lookup("updated_at") {
+                Value::UnsignedInteger(n) => n,
+                other => panic!("updated_at must be UnsignedInteger, got {other:?}"),
+            };
+            (created, updated)
+        }
+        other => panic!("expected Row entity, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_with_timestamps_auto_populates_on_insert_and_update() {
+    let rt = rt();
+    let query = QueryUseCases::new(&rt);
+    let entity = EntityUseCases::new(&rt);
+
+    query
+        .execute(ExecuteQueryInput {
+            query: "CREATE TABLE ts_auto (name TEXT) WITH timestamps = true".into(),
+        })
+        .expect("CREATE TABLE ... WITH timestamps = true must succeed");
+
+    let out = entity
+        .create_row(CreateRowInput {
+            collection: "ts_auto".into(),
+            fields: vec![("name".into(), Value::Text("alice".into()))],
+            metadata: vec![],
+            node_links: vec![],
+            vector_links: vec![],
+        })
+        .expect("insert must succeed without a user-provided created_at/updated_at");
+
+    let inserted = out.entity.expect("insert must return the entity");
+    let (created_ms, updated_ms) = read_ts_fields(&inserted);
+    assert!(
+        created_ms > 0 && (created_ms as i128 - updated_ms as i128).abs() <= 1,
+        "created_at/updated_at should be equal within 1 ms on insert (got {created_ms} vs {updated_ms})"
+    );
+
+    // Sleep long enough that the bump is unambiguous in ms resolution.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    let _patched = entity
+        .patch(PatchEntityInput {
+            collection: "ts_auto".into(),
+            id: out.id,
+            payload: JsonValue::Object(Default::default()),
+            operations: vec![PatchEntityOperation {
+                op: PatchEntityOperationType::Set,
+                path: vec!["fields".into(), "name".into()],
+                value: Some(JsonValue::String("alice_v2".into())),
+            }],
+        })
+        .expect("patch must succeed");
+
+    // Re-fetch via SELECT so the assert reads from the authoritative
+    // column state, not the in-memory entity the patch path echoes back.
+    let select_after = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT * FROM ts_auto".into(),
+        })
+        .expect("SELECT after patch must succeed");
+    let rec_after = select_after
+        .result
+        .records
+        .first()
+        .expect("one row after patch");
+    let created_after = match rec_after
+        .values
+        .get("created_at")
+        .expect("created_at after patch")
+    {
+        Value::UnsignedInteger(n) => *n,
+        Value::Integer(n) if *n >= 0 => *n as u64,
+        other => panic!("created_at after: unexpected type {other:?}"),
+    };
+    let updated_after = match rec_after
+        .values
+        .get("updated_at")
+        .expect("updated_at after patch")
+    {
+        Value::UnsignedInteger(n) => *n,
+        Value::Integer(n) if *n >= 0 => *n as u64,
+        other => panic!("updated_at after: unexpected type {other:?}"),
+    };
+    assert_eq!(
+        created_after, created_ms,
+        "created_at must be immutable across UPDATE"
+    );
+    assert!(
+        updated_after > updated_ms,
+        "updated_at must bump on UPDATE (before={updated_ms}, after={updated_after})"
+    );
+}
+
+#[test]
+fn test_with_timestamps_rejects_user_set_created_at_on_insert() {
+    let rt = rt();
+    let query = QueryUseCases::new(&rt);
+    let entity = EntityUseCases::new(&rt);
+
+    query
+        .execute(ExecuteQueryInput {
+            query: "CREATE TABLE ts_guard (name TEXT) WITH timestamps = true".into(),
+        })
+        .expect("CREATE TABLE must succeed");
+
+    let err = entity
+        .create_row(CreateRowInput {
+            collection: "ts_guard".into(),
+            fields: vec![
+                ("name".into(), Value::Text("bob".into())),
+                ("created_at".into(), Value::UnsignedInteger(0)),
+            ],
+            metadata: vec![],
+            node_links: vec![],
+            vector_links: vec![],
+        })
+        .expect_err("insert with explicit created_at must fail");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("created_at") && msg.contains("automatically"),
+        "error should mention created_at is managed automatically, got: {msg}"
+    );
+}
+
+// ===========================================================================
 // Finding #1 regression suite — query engine must see freshly-inserted data
 //
 // BASELINE.md Finding #1 in the sibling reddb-benchmark repo documents that

@@ -333,6 +333,40 @@ fn collection_contract_from_create_table(
     query: &CreateTableQuery,
 ) -> RedDBResult<crate::physical::CollectionContract> {
     let now = current_unix_ms();
+    let mut declared_columns: Vec<crate::physical::DeclaredColumnContract> = query
+        .columns
+        .iter()
+        .map(declared_column_contract_from_ddl)
+        .collect();
+    if query.timestamps {
+        // Opt-in `WITH timestamps = true` auto-adds two user-visible
+        // columns that the write path populates from
+        // UnifiedEntity::created_at/updated_at. BIGINT unix-ms, NOT NULL.
+        declared_columns.push(crate::physical::DeclaredColumnContract {
+            name: "created_at".to_string(),
+            data_type: "BIGINT".to_string(),
+            not_null: true,
+            default: None,
+            compress: None,
+            unique: false,
+            primary_key: false,
+            enum_variants: Vec::new(),
+            array_element: None,
+            decimal_precision: None,
+        });
+        declared_columns.push(crate::physical::DeclaredColumnContract {
+            name: "updated_at".to_string(),
+            data_type: "BIGINT".to_string(),
+            not_null: true,
+            default: None,
+            compress: None,
+            unique: false,
+            primary_key: false,
+            enum_variants: Vec::new(),
+            array_element: None,
+            decimal_precision: None,
+        });
+    }
     Ok(crate::physical::CollectionContract {
         name: query.name.clone(),
         declared_model: crate::catalog::CollectionModel::Table,
@@ -343,12 +377,9 @@ fn collection_contract_from_create_table(
         updated_at_unix_ms: now,
         default_ttl_ms: query.default_ttl_ms,
         context_index_fields: query.context_index_fields.clone(),
-        declared_columns: query
-            .columns
-            .iter()
-            .map(declared_column_contract_from_ddl)
-            .collect(),
+        declared_columns,
         table_def: Some(build_table_def_from_create_table(query)?),
+        timestamps_enabled: query.timestamps,
     })
 }
 
@@ -368,6 +399,7 @@ fn default_collection_contract_for_existing_table(
         context_index_fields: Vec::new(),
         declared_columns: Vec::new(),
         table_def: Some(crate::storage::schema::TableDef::new(name.to_string())),
+        timestamps_enabled: false,
     }
 }
 
@@ -549,6 +581,40 @@ fn build_table_def_from_create_table(
             );
         }
         table.columns.push(column_def_from_ddl(column)?);
+    }
+    // WITH timestamps = true: append the two runtime-managed columns
+    // to the schema so resolved_contract_columns exposes them to the
+    // normalize/validate path. Declared as UnsignedInteger (unix-ms),
+    // not-nullable; the write path auto-fills them.
+    if query.timestamps {
+        table.columns.push(
+            crate::storage::schema::ColumnDef::new(
+                "created_at".to_string(),
+                crate::storage::schema::DataType::UnsignedInteger,
+            )
+            .not_null(),
+        );
+        table.columns.push(
+            crate::storage::schema::ColumnDef::new(
+                "updated_at".to_string(),
+                crate::storage::schema::DataType::UnsignedInteger,
+            )
+            .not_null(),
+        );
+        table.constraints.push(
+            crate::storage::schema::Constraint::new(
+                "not_null_created_at".to_string(),
+                crate::storage::schema::ConstraintType::NotNull,
+            )
+            .on_columns(vec!["created_at".to_string()]),
+        );
+        table.constraints.push(
+            crate::storage::schema::Constraint::new(
+                "not_null_updated_at".to_string(),
+                crate::storage::schema::ConstraintType::NotNull,
+            )
+            .on_columns(vec!["updated_at".to_string()]),
+        );
     }
     table
         .validate()

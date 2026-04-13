@@ -960,6 +960,12 @@ pub struct CreateTableQuery {
     pub default_ttl_ms: Option<u64>,
     /// Fields to prioritize in the context index (WITH CONTEXT INDEX ON (f1, f2))
     pub context_index_fields: Vec<String>,
+    /// When true, CREATE TABLE implicitly adds two user-visible columns
+    /// `created_at` and `updated_at` (BIGINT unix-ms). The runtime
+    /// populates them from `UnifiedEntity::created_at/updated_at` on
+    /// every write; `created_at` is immutable after insert.
+    /// Enabled via `WITH timestamps = true` in the DDL.
+    pub timestamps: bool,
 }
 
 /// Column definition for CREATE TABLE

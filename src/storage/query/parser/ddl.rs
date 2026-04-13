@@ -29,6 +29,7 @@ impl<'a> Parser<'a> {
 
         let mut default_ttl_ms = None;
         let mut context_index_fields = Vec::new();
+        let mut timestamps = false;
 
         while self.consume(&Token::With)? {
             if self.consume_ident_ci("CONTEXT")? {
@@ -49,6 +50,8 @@ impl<'a> Parser<'a> {
                     }
                 }
                 self.expect(Token::RParen)?;
+            } else if self.consume_ident_ci("TIMESTAMPS")? {
+                timestamps = self.parse_bool_assign()?;
             } else {
                 default_ttl_ms = self.parse_create_table_ttl_clause()?;
             }
@@ -60,6 +63,7 @@ impl<'a> Parser<'a> {
             if_not_exists,
             default_ttl_ms,
             context_index_fields,
+            timestamps,
         }))
     }
 
@@ -88,6 +92,7 @@ impl<'a> Parser<'a> {
 
         let mut default_ttl_ms = None;
         let mut context_index_fields = Vec::new();
+        let mut timestamps = false;
 
         while self.consume(&Token::With)? {
             if self.consume_ident_ci("CONTEXT")? {
@@ -107,6 +112,8 @@ impl<'a> Parser<'a> {
                     }
                 }
                 self.expect(Token::RParen)?;
+            } else if self.consume_ident_ci("TIMESTAMPS")? {
+                timestamps = self.parse_bool_assign()?;
             } else {
                 default_ttl_ms = self.parse_create_table_ttl_clause()?;
             }
@@ -118,6 +125,7 @@ impl<'a> Parser<'a> {
             if_not_exists,
             default_ttl_ms,
             context_index_fields,
+            timestamps,
         }))
     }
 
@@ -297,6 +305,27 @@ impl<'a> Parser<'a> {
 
     fn check_ttl_keyword(&self) -> bool {
         matches!(self.peek(), Token::Ident(name) if name.eq_ignore_ascii_case("ttl"))
+    }
+
+    /// Parse `= true` / `= false` after a `WITH <option>` keyword.
+    /// Used for boolean table options like `WITH TIMESTAMPS = true`.
+    fn parse_bool_assign(&mut self) -> Result<bool, ParseError> {
+        self.expect(Token::Eq)?;
+        match self.peek() {
+            Token::True => {
+                self.advance()?;
+                Ok(true)
+            }
+            Token::False => {
+                self.advance()?;
+                Ok(false)
+            }
+            other => Err(ParseError::expected(
+                vec!["true", "false"],
+                other,
+                self.position(),
+            )),
+        }
     }
 
     fn expect_ident_ci_ddl(&mut self, expected: &str) -> Result<(), ParseError> {

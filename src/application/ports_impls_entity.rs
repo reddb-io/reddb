@@ -79,6 +79,7 @@ fn ensure_collection_model_contract(
         declared_columns: Vec::new(),
         table_def: matches!(requested_model, crate::catalog::CollectionModel::Table)
             .then(|| crate::storage::schema::TableDef::new(collection.to_string())),
+        timestamps_enabled: false,
     })
     .map(|_| ())
     .map_err(|err| crate::RedDBError::Internal(err.to_string()))
@@ -117,10 +118,31 @@ struct UniquenessRule {
     primary_key: bool,
 }
 
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum NormalizeMode {
+    /// First write for this row. Timestamps auto-filled from now on
+    /// both `created_at` and `updated_at`; user attempts to set
+    /// either column are rejected.
+    Insert,
+    /// Update/patch path. `created_at` is preserved from the existing
+    /// row (immutable after insert); `updated_at` is bumped to now.
+    /// User attempts to set either via the patch are rejected.
+    Update,
+}
+
 fn normalize_row_fields_for_contract(
     db: &crate::storage::unified::devx::RedDB,
     collection: &str,
     fields: Vec<(String, Value)>,
+) -> RedDBResult<Vec<(String, Value)>> {
+    normalize_row_fields_for_contract_with_mode(db, collection, fields, NormalizeMode::Insert)
+}
+
+fn normalize_row_fields_for_contract_with_mode(
+    db: &crate::storage::unified::devx::RedDB,
+    collection: &str,
+    fields: Vec<(String, Value)>,
+    mode: NormalizeMode,
 ) -> RedDBResult<Vec<(String, Value)>> {
     let Some(contract) = db.collection_contract(collection) else {
         return Ok(fields);
@@ -135,6 +157,39 @@ fn normalize_row_fields_for_contract(
                 .unwrap_or(true))
     {
         return Ok(fields);
+    }
+
+    // Capture the pre-normalize value of created_at (if present) so
+    // Update mode can preserve it. Also capture updated_at to detect
+    // user attempts to set it via the patch payload.
+    //
+    // Heuristic for Update mode: if fields ALREADY contains a
+    // `created_at` whose value matches the row's on-disk entity, the
+    // caller is the patch pipeline carrying forward an auto-populated
+    // column — not a user mutation. Allow pass-through in that case,
+    // then restore the original value at the end.
+    let existing_created_at = if contract.timestamps_enabled && mode == NormalizeMode::Update {
+        fields
+            .iter()
+            .find(|(n, _)| n == "created_at")
+            .map(|(_, v)| v.clone())
+    } else {
+        None
+    };
+
+    // Reject user attempts to set runtime-managed timestamp columns.
+    // On Insert we reject any mention; on Update we only reject when
+    // the patch pipeline handed us a NEW value (not the one we
+    // auto-populated during the last insert).
+    if contract.timestamps_enabled && mode == NormalizeMode::Insert {
+        for (name, _) in &fields {
+            if name == "created_at" || name == "updated_at" {
+                return Err(crate::RedDBError::Query(format!(
+                    "collection '{}' manages '{}' automatically — do not set it in INSERT",
+                    collection, name
+                )));
+            }
+        }
     }
 
     let mut provided = std::collections::BTreeMap::new();
@@ -161,14 +216,48 @@ fn normalize_row_fields_for_contract(
         )));
     }
     let mut normalized = Vec::new();
+    let now_ms = current_unix_ms_u64();
 
     for column in &resolved_columns {
         match provided.remove(&column.name) {
-            Some(value) => normalized.push((
-                column.name.clone(),
-                normalize_contract_value(collection, column, value)?,
-            )),
+            Some(value) => {
+                // Runtime-managed columns on Update: always overwrite
+                // with the runtime's own value (preserved created_at
+                // or fresh updated_at). User mutations are silently
+                // discarded because we reject them earlier.
+                if contract.timestamps_enabled && mode == NormalizeMode::Update {
+                    match column.name.as_str() {
+                        "created_at" => {
+                            normalized.push((
+                                column.name.clone(),
+                                existing_created_at
+                                    .clone()
+                                    .unwrap_or(Value::UnsignedInteger(now_ms)),
+                            ));
+                            continue;
+                        }
+                        "updated_at" => {
+                            normalized.push((column.name.clone(), Value::UnsignedInteger(now_ms)));
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+                normalized.push((
+                    column.name.clone(),
+                    normalize_contract_value(collection, column, value)?,
+                ));
+            }
             None => {
+                // Runtime-managed timestamp columns: auto-fill with now
+                // when the contract opted in. Both get the same value on
+                // first insert so callers can order by either.
+                if contract.timestamps_enabled
+                    && (column.name == "created_at" || column.name == "updated_at")
+                {
+                    normalized.push((column.name.clone(), Value::UnsignedInteger(now_ms)));
+                    continue;
+                }
                 if let Some(default) = &column.default {
                     normalized.push((
                         column.name.clone(),
@@ -191,6 +280,13 @@ fn normalize_row_fields_for_contract(
     }
 
     Ok(normalized)
+}
+
+fn current_unix_ms_u64() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn enforce_row_uniqueness(
@@ -1045,6 +1141,15 @@ impl RuntimeEntityPort for RedDBRuntime {
         let mut patch_metadata = store.get_metadata(&collection, id).unwrap_or_default();
         let mut metadata_changed = false;
 
+        // Contract-aware guard: if this collection auto-manages
+        // `created_at`/`updated_at`, reject any patch that targets
+        // them directly. The runtime will still bump `updated_at`
+        // on its own inside `normalize_row_fields_for_contract_with_mode`.
+        let row_contract_timestamps = db
+            .collection_contract(&collection)
+            .map(|c| c.timestamps_enabled)
+            .unwrap_or(false);
+
         match &mut entity.data {
             crate::storage::EntityData::Row(row) => {
                 let mut field_ops = Vec::new();
@@ -1063,6 +1168,16 @@ impl RuntimeEntityPort for RedDBRuntime {
                                 return Err(crate::RedDBError::Query(
                                     "patch path 'fields' requires a nested key".to_string(),
                                 ));
+                            }
+                            if row_contract_timestamps {
+                                let leaf = op.path.get(1).map(String::as_str);
+                                if matches!(leaf, Some("created_at") | Some("updated_at")) {
+                                    return Err(crate::RedDBError::Query(format!(
+                                        "collection '{}' manages '{}' automatically — do not set it in UPDATE",
+                                        collection,
+                                        leaf.unwrap_or("")
+                                    )));
+                                }
                             }
                             op.path.remove(0);
                             field_ops.push(op);
@@ -1093,6 +1208,16 @@ impl RuntimeEntityPort for RedDBRuntime {
                     .get("fields")
                     .and_then(crate::json::Value::as_object)
                 {
+                    if row_contract_timestamps {
+                        for key in fields.keys() {
+                            if key == "created_at" || key == "updated_at" {
+                                return Err(crate::RedDBError::Query(format!(
+                                    "collection '{}' manages '{}' automatically — do not set it in UPDATE",
+                                    collection, key
+                                )));
+                            }
+                        }
+                    }
                     let named = row.named.get_or_insert_with(Default::default);
                     for (key, value) in fields {
                         named.insert(key.clone(), json_to_storage_value(value)?);
@@ -1118,8 +1243,12 @@ impl RuntimeEntityPort for RedDBRuntime {
                 } else {
                     Vec::new()
                 };
-                let normalized_fields =
-                    normalize_row_fields_for_contract(&db, &collection, current_fields)?;
+                let normalized_fields = normalize_row_fields_for_contract_with_mode(
+                    &db,
+                    &collection,
+                    current_fields,
+                    NormalizeMode::Update,
+                )?;
                 enforce_row_uniqueness(&db, &collection, &normalized_fields, Some(id))?;
                 row.named = Some(normalized_fields.into_iter().collect());
             }

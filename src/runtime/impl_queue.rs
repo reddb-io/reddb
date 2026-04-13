@@ -1329,6 +1329,7 @@ fn queue_collection_contract(
         context_index_fields,
         declared_columns: Vec::new(),
         table_def: None,
+        timestamps_enabled: false,
     }
 }
 

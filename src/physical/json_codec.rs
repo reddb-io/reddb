@@ -298,6 +298,10 @@ pub(super) fn collection_contract_to_json(contract: &CollectionContract) -> Json
         ),
     );
     object.insert(
+        "timestamps_enabled".to_string(),
+        JsonValue::Bool(contract.timestamps_enabled),
+    );
+    object.insert(
         "table_def".to_string(),
         contract
             .table_def
@@ -368,6 +372,10 @@ pub(super) fn collection_contract_from_json(value: &JsonValue) -> io::Result<Col
             .transpose()?
             .unwrap_or_default(),
         table_def,
+        timestamps_enabled: object
+            .get("timestamps_enabled")
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(false),
     })
 }
 

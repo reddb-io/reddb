@@ -210,6 +210,12 @@ pub struct CollectionContract {
     pub context_index_fields: Vec<String>,
     pub declared_columns: Vec<DeclaredColumnContract>,
     pub table_def: Option<crate::storage::schema::TableDef>,
+    /// Enabled by `CREATE TABLE ... WITH timestamps = true`. When true,
+    /// the runtime auto-populates two user-visible columns
+    /// `created_at` + `updated_at` (BIGINT unix-ms) sourced from the
+    /// `UnifiedEntity::created_at/updated_at` fields. `created_at` is
+    /// immutable after insert; `updated_at` is bumped on every mutation.
+    pub timestamps_enabled: bool,
 }
 
 /// Canonical artifact lifecycle states.
