@@ -109,6 +109,10 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         && query.group_by.is_empty()
         && query.having.is_none()
         && query.expand.is_none()
+        && !query
+            .columns
+            .iter()
+            .any(|p| matches!(p, Projection::Function(_, _) | Projection::Expression(_, _)))
         && !is_universal_query_source(&query.table)
     {
         let manager = db
@@ -255,6 +259,11 @@ pub(crate) fn execute_runtime_canonical_table_node(
             // creating UnifiedRecord for entities that match the filter.
             // Skip for universal sources ("any") which need cross-collection scanning.
             if context.query.filter.is_some()
+                && !context
+                    .query
+                    .columns
+                    .iter()
+                    .any(|p| matches!(p, Projection::Function(_, _) | Projection::Expression(_, _)))
                 && !is_universal_query_source(context.query.table.as_str())
             {
                 let manager = db
