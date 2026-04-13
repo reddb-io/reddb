@@ -44,12 +44,7 @@ impl Pager {
 
         // Open double-write buffer file
         let dwb_file = if config.double_write && !config.read_only {
-            let dwb_path = Self::dwb_path(&path);
-            let f = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .open(&dwb_path)?;
+            let f = Self::open_dwb_file(&path)?;
             Some(Mutex::new(f))
         } else {
             None
@@ -915,6 +910,27 @@ impl Pager {
         PathBuf::from(p)
     }
 
+    /// Open the double-write buffer file without truncating existing content.
+    ///
+    /// The file is intentionally preserved across restarts so recovery can
+    /// consume any crash-leftover pages before the next write cycle clears it.
+    fn open_dwb_file(db_path: &Path) -> Result<File, PagerError> {
+        Ok(OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(Self::dwb_path(db_path))?)
+    }
+
+    /// Clear the DWB in place while preserving the file path and handle.
+    fn clear_dwb_file(file: &mut File) -> Result<(), PagerError> {
+        file.set_len(0)?;
+        file.seek(SeekFrom::Start(0))?;
+        file.sync_all()?;
+        Ok(())
+    }
+
     /// Write a shadow copy of the header page to .rdb-hdr
     fn write_header_shadow(&self, page: &Page) -> Result<(), PagerError> {
         if self.config.read_only {
@@ -1028,6 +1044,7 @@ impl Pager {
             // Write DWB and fsync
             dwb.seek(SeekFrom::Start(0))?;
             dwb.write_all(&buf)?;
+            dwb.set_len(buf.len() as u64)?;
             dwb.sync_all()?;
 
             // Now write pages to their final locations
@@ -1036,8 +1053,7 @@ impl Pager {
             }
 
             // Truncate DWB to mark as consumed
-            dwb.set_len(0)?;
-            dwb.sync_all()?;
+            Self::clear_dwb_file(&mut dwb)?;
 
             Ok(())
         } else {
@@ -1059,22 +1075,30 @@ impl Pager {
             return Ok(());
         }
 
-        let mut f = File::open(&dwb_path)?;
-        let len = f.metadata()?.len();
+        if let Some(dwb_mutex) = &self.dwb_file {
+            let mut file = dwb_mutex.lock().map_err(|_| PagerError::LockPoisoned)?;
+            return self.recover_from_dwb_file(&mut file);
+        }
+
+        let mut file = OpenOptions::new().read(true).write(true).open(&dwb_path)?;
+        self.recover_from_dwb_file(&mut file)
+    }
+
+    fn recover_from_dwb_file(&self, file: &mut File) -> Result<(), PagerError> {
+        file.seek(SeekFrom::Start(0))?;
+        let len = file.metadata()?.len();
         if len < 12 {
-            // Too small or empty — nothing to recover
-            return Ok(());
+            // Empty or incomplete header — keep the DWB file but clear stale bytes.
+            return Self::clear_dwb_file(file);
         }
 
         let mut buf = vec![0u8; len as usize];
-        f.read_exact(&mut buf)?;
-        drop(f);
+        file.read_exact(&mut buf)?;
 
         // Verify magic
         if buf[0..4] != DWB_MAGIC {
-            // Not a valid DWB — clean up
-            let _ = std::fs::remove_file(&dwb_path);
-            return Ok(());
+            // Not a valid DWB — clear it in place so the same file can be reused.
+            return Self::clear_dwb_file(file);
         }
 
         let count = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]) as usize;
@@ -1085,17 +1109,15 @@ impl Pager {
         let expected_len = header_len + count * entry_size;
 
         if buf.len() < expected_len {
-            // Incomplete DWB write — discard
-            let _ = std::fs::remove_file(&dwb_path);
-            return Ok(());
+            // Incomplete DWB write — discard it in place.
+            return Self::clear_dwb_file(file);
         }
 
         // Verify checksum
         let computed = super::super::crc32::crc32(&buf[header_len..expected_len]);
         if computed != stored_checksum {
-            // Corrupted DWB — discard
-            let _ = std::fs::remove_file(&dwb_path);
-            return Ok(());
+            // Corrupted DWB — discard it in place.
+            return Self::clear_dwb_file(file);
         }
 
         // DWB is valid — re-apply pages to main file
@@ -1122,9 +1144,8 @@ impl Pager {
             let file = self.file_lock()?;
             file.sync_all()?;
         }
-        let _ = std::fs::remove_file(&dwb_path);
 
-        Ok(())
+        Self::clear_dwb_file(file)
     }
 
     /// Write header and sync to disk (public for checkpointer).
