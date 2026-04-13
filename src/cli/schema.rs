@@ -335,10 +335,10 @@ impl SchemaParser {
             }
         } else {
             // Boolean flag -- must not have an inline value.
-            if value.is_some() {
+            if let Some(inline_value) = value {
                 errors.push(ParseError::InvalidValue {
                     flag: flag_display,
-                    value: value.as_ref().unwrap().clone(),
+                    value: inline_value.clone(),
                     expected_type: "bool".to_string(),
                     reason: "boolean flags do not accept a value".to_string(),
                 });
