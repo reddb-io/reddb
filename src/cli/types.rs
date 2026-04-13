@@ -238,7 +238,7 @@ mod tests {
         assert_eq!(FlagValue::Bool(false).as_str_value(), "false");
         assert_eq!(FlagValue::Str("hello".into()).as_str_value(), "hello");
         assert_eq!(FlagValue::Int(42).as_str_value(), "42");
-        assert_eq!(FlagValue::Float(3.14).as_str_value(), "3.14");
+        assert_eq!(FlagValue::Float(2.5).as_str_value(), "2.5");
         assert_eq!(FlagValue::Count(3).as_str_value(), "3");
     }
 
