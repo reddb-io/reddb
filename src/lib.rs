@@ -37,6 +37,7 @@ pub mod runtime;
 pub mod serde_json;
 pub mod server;
 pub mod service_cli;
+mod service_router;
 pub mod storage;
 pub mod utils;
 pub mod wire;
