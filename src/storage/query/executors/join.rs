@@ -646,7 +646,7 @@ mod tests {
         let mut result = Binding::one(Var::new(pairs[0].0), Value::String(pairs[0].1.to_string()));
 
         for (k, v) in pairs.iter().skip(1) {
-            let next = Binding::one(Var::new(*k), Value::String(v.to_string()));
+            let next = Binding::one(Var::new(k), Value::String(v.to_string()));
             result = result.merge(&next).unwrap_or(result);
         }
 
