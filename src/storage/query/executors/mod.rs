@@ -19,6 +19,7 @@ pub mod natural;
 pub mod set_ops;
 pub mod sparql;
 pub mod subquery;
+mod value_compare;
 pub mod vector;
 pub mod window;
 
