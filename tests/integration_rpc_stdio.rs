@@ -115,20 +115,17 @@ fn pipelined_requests_keep_order() {
     // Pipeline 3 requests, read 3 responses in order.
     writeln!(
         s.stdin,
-        "{}",
-        r#"{"jsonrpc":"2.0","id":1,"method":"version","params":{}}"#
+        r#"{{"jsonrpc":"2.0","id":1,"method":"version","params":{{}}}}"#
     )
     .unwrap();
     writeln!(
         s.stdin,
-        "{}",
-        r#"{"jsonrpc":"2.0","id":2,"method":"health","params":{}}"#
+        r#"{{"jsonrpc":"2.0","id":2,"method":"health","params":{{}}}}"#
     )
     .unwrap();
     writeln!(
         s.stdin,
-        "{}",
-        r#"{"jsonrpc":"2.0","id":3,"method":"version","params":{}}"#
+        r#"{{"jsonrpc":"2.0","id":3,"method":"version","params":{{}}}}"#
     )
     .unwrap();
     s.stdin.flush().unwrap();
