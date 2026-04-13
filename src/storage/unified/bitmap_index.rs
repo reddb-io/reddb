@@ -259,44 +259,79 @@ impl BitmapIndexManager {
     }
 
     /// Count entities matching a value — O(1)
-    pub fn count(&self, collection: &str, column: &str, value: &[u8]) -> u64 {
+    pub fn count(
+        &self,
+        collection: &str,
+        column: &str,
+        value: &[u8],
+    ) -> Result<u64, BitmapIndexError> {
         let indices = recover_read_guard(self.indices.read());
-        indices
-            .get(&(collection.to_string(), column.to_string()))
-            .map(|idx| idx.count(value))
-            .unwrap_or(0)
+        if let Some(idx) = indices.get(&(collection.to_string(), column.to_string())) {
+            Ok(idx.count(value))
+        } else {
+            Err(BitmapIndexError::MissingIndex {
+                collection: collection.to_string(),
+                column: column.to_string(),
+            })
+        }
     }
 
     /// Get entity IDs matching a value
-    pub fn lookup(&self, collection: &str, column: &str, value: &[u8]) -> Vec<EntityId> {
+    pub fn lookup(
+        &self,
+        collection: &str,
+        column: &str,
+        value: &[u8],
+    ) -> Result<Vec<EntityId>, BitmapIndexError> {
         let indices = recover_read_guard(self.indices.read());
-        indices
-            .get(&(collection.to_string(), column.to_string()))
-            .map(|idx| idx.get(value))
-            .unwrap_or_default()
+        if let Some(idx) = indices.get(&(collection.to_string(), column.to_string())) {
+            Ok(idx.get(value))
+        } else {
+            Err(BitmapIndexError::MissingIndex {
+                collection: collection.to_string(),
+                column: column.to_string(),
+            })
+        }
     }
 
     /// Get value distribution for a column (for GROUP BY optimization)
-    pub fn value_counts(&self, collection: &str, column: &str) -> Vec<(Vec<u8>, u64)> {
+    pub fn value_counts(
+        &self,
+        collection: &str,
+        column: &str,
+    ) -> Result<Vec<(Vec<u8>, u64)>, BitmapIndexError> {
         let indices = recover_read_guard(self.indices.read());
-        indices
-            .get(&(collection.to_string(), column.to_string()))
-            .map(|idx| idx.value_counts())
-            .unwrap_or_default()
+        if let Some(idx) = indices.get(&(collection.to_string(), column.to_string())) {
+            Ok(idx.value_counts())
+        } else {
+            Err(BitmapIndexError::MissingIndex {
+                collection: collection.to_string(),
+                column: column.to_string(),
+            })
+        }
     }
 
     /// Get stats for a specific bitmap index
-    pub fn index_stats(&self, collection: &str, column: &str) -> Option<BitmapIndexStats> {
+    pub fn index_stats(
+        &self,
+        collection: &str,
+        column: &str,
+    ) -> Result<BitmapIndexStats, BitmapIndexError> {
         let indices = recover_read_guard(self.indices.read());
-        indices
-            .get(&(collection.to_string(), column.to_string()))
-            .map(|idx| BitmapIndexStats {
+        if let Some(idx) = indices.get(&(collection.to_string(), column.to_string())) {
+            Ok(BitmapIndexStats {
                 column: column.to_string(),
                 collection: collection.to_string(),
                 cardinality: idx.cardinality(),
                 entity_count: idx.entity_count(),
                 memory_bytes: idx.memory_bytes(),
             })
+        } else {
+            Err(BitmapIndexError::MissingIndex {
+                collection: collection.to_string(),
+                column: column.to_string(),
+            })
+        }
     }
 }
 
@@ -414,10 +449,10 @@ mod tests {
         mgr.insert("users", "status", EntityId::new(3), b"banned")
             .expect("bitmap insert should succeed");
 
-        assert_eq!(mgr.count("users", "status", b"active"), 2);
-        assert_eq!(mgr.count("users", "status", b"banned"), 1);
+        assert_eq!(mgr.count("users", "status", b"active").unwrap(), 2);
+        assert_eq!(mgr.count("users", "status", b"banned").unwrap(), 1);
 
-        let results = mgr.lookup("users", "status", b"active");
+        let results = mgr.lookup("users", "status", b"active").unwrap();
         assert_eq!(results.len(), 2);
 
         let stats = mgr.index_stats("users", "status").unwrap();
@@ -439,8 +474,25 @@ mod tests {
             .expect("bitmap insert should recover after poison");
 
         assert_eq!(
-            mgr.lookup("users", "status", b"active"),
+            mgr.lookup("users", "status", b"active").unwrap(),
             vec![EntityId::new(1)]
+        );
+    }
+
+    #[test]
+    fn test_bitmap_manager_lookup_missing_index_returns_error() {
+        let mgr = BitmapIndexManager::new();
+
+        let err = mgr
+            .lookup("users", "status", b"active")
+            .expect_err("lookup should fail when the bitmap index does not exist");
+
+        assert_eq!(
+            err,
+            BitmapIndexError::MissingIndex {
+                collection: "users".to_string(),
+                column: "status".to_string(),
+            }
         );
     }
 }
