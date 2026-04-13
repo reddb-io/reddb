@@ -163,6 +163,8 @@ pub use unified::{
     TableQueryBuilder,
     TextSearchBuilder,
     TextSearchResult,
+    TimeSeriesData,
+    TimeSeriesPointKind,
     TraversalDirection,
     UnifiedEntity,
     UnifiedEntity as Entity,
