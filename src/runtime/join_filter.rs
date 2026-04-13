@@ -1317,147 +1317,6 @@ pub(super) fn query_expr_name(expr: &QueryExpr) -> &'static str {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::storage::query::unified::MatchedNode;
-
-    #[test]
-    fn test_evaluate_metadata_field_compare_entity_type_is_case_insensitive() {
-        let field = FieldRef::TableColumn {
-            table: "any".to_string(),
-            column: "red_entity_type".to_string(),
-        };
-
-        assert_eq!(
-            evaluate_metadata_field_compare(
-                &field,
-                &Value::Text("table".to_string()),
-                CompareOp::Eq,
-                &Value::Text("TABLE".to_string()),
-            ),
-            Some(true)
-        );
-
-        assert_eq!(
-            evaluate_metadata_field_compare(
-                &field,
-                &Value::Text("graph_node".to_string()),
-                CompareOp::Ne,
-                &Value::Text("GRAPH_NODE".to_string()),
-            ),
-            Some(false)
-        );
-    }
-
-    #[test]
-    fn test_evaluate_metadata_field_in_entity_type_is_case_insensitive() {
-        let field = FieldRef::TableColumn {
-            table: "any".to_string(),
-            column: "red_entity_type".to_string(),
-        };
-
-        assert_eq!(
-            evaluate_metadata_field_in(
-                &field,
-                &Value::Text("vector".to_string()),
-                &[
-                    Value::Text("TABLE".to_string()),
-                    Value::Text("vector".to_string()),
-                    Value::Text("graph_node".to_string()),
-                ],
-            ),
-            Some(true)
-        );
-
-        assert_eq!(
-            evaluate_metadata_field_in(
-                &field,
-                &Value::Text("document".to_string()),
-                &[
-                    Value::Text("TABLE".to_string()),
-                    Value::Text("GRAPH_NODE".to_string()),
-                ],
-            ),
-            Some(false)
-        );
-    }
-
-    #[test]
-    fn test_evaluate_metadata_field_compare_entity_type_unsupported_op_is_false() {
-        let field = FieldRef::TableColumn {
-            table: "any".to_string(),
-            column: "red_entity_type".to_string(),
-        };
-
-        assert_eq!(
-            evaluate_metadata_field_compare(
-                &field,
-                &Value::Text("vector".to_string()),
-                CompareOp::Gt,
-                &Value::Text("vector".to_string()),
-            ),
-            Some(false)
-        );
-    }
-
-    #[test]
-    fn test_resolve_runtime_field_node_property_from_node_properties() {
-        let mut record = UnifiedRecord::new();
-        let mut node_properties = HashMap::new();
-        node_properties.insert(
-            "nginx_version".to_string(),
-            Value::Text("1.22.1".to_string()),
-        );
-        let node = MatchedNode {
-            id: "svc:nginx:80".to_string(),
-            label: "nginx".to_string(),
-            node_type: GraphNodeType::Service,
-            properties: node_properties,
-        };
-        record.set_node("svc", node);
-
-        let field = FieldRef::node_prop("svc", "nginx_version");
-        assert_eq!(
-            resolve_runtime_field(&record, &field, None, None),
-            Some(Value::Text("1.22.1".to_string()))
-        );
-    }
-
-    #[test]
-    fn test_compare_runtime_values_preserves_integer_unsigned_boundaries() {
-        let above_i64_max = Value::UnsignedInteger(i64::MAX as u64 + 1);
-        let max_i64 = Value::Integer(i64::MAX);
-
-        assert!(compare_runtime_values(
-            &above_i64_max,
-            &max_i64,
-            CompareOp::Gt
-        ));
-        assert!(compare_runtime_values(
-            &above_i64_max,
-            &max_i64,
-            CompareOp::Ge
-        ));
-        assert!(!compare_runtime_values(
-            &above_i64_max,
-            &max_i64,
-            CompareOp::Eq
-        ));
-
-        assert!(compare_runtime_values(
-            &Value::Integer(-1),
-            &Value::UnsignedInteger(0),
-            CompareOp::Lt
-        ));
-        assert!(compare_runtime_values(
-            &Value::UnsignedInteger(0),
-            &Value::Integer(-1),
-            CompareOp::Gt
-        ));
-    }
-}
-
 /// Evaluate a scalar function on a record's values.
 fn evaluate_scalar_function(
     name: &str,
@@ -1689,5 +1548,146 @@ fn resolve_geo_arg(arg: &Projection, source: &UnifiedRecord) -> Option<(f64, f64
             }
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::query::unified::MatchedNode;
+
+    #[test]
+    fn test_evaluate_metadata_field_compare_entity_type_is_case_insensitive() {
+        let field = FieldRef::TableColumn {
+            table: "any".to_string(),
+            column: "red_entity_type".to_string(),
+        };
+
+        assert_eq!(
+            evaluate_metadata_field_compare(
+                &field,
+                &Value::Text("table".to_string()),
+                CompareOp::Eq,
+                &Value::Text("TABLE".to_string()),
+            ),
+            Some(true)
+        );
+
+        assert_eq!(
+            evaluate_metadata_field_compare(
+                &field,
+                &Value::Text("graph_node".to_string()),
+                CompareOp::Ne,
+                &Value::Text("GRAPH_NODE".to_string()),
+            ),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn test_evaluate_metadata_field_in_entity_type_is_case_insensitive() {
+        let field = FieldRef::TableColumn {
+            table: "any".to_string(),
+            column: "red_entity_type".to_string(),
+        };
+
+        assert_eq!(
+            evaluate_metadata_field_in(
+                &field,
+                &Value::Text("vector".to_string()),
+                &[
+                    Value::Text("TABLE".to_string()),
+                    Value::Text("vector".to_string()),
+                    Value::Text("graph_node".to_string()),
+                ],
+            ),
+            Some(true)
+        );
+
+        assert_eq!(
+            evaluate_metadata_field_in(
+                &field,
+                &Value::Text("document".to_string()),
+                &[
+                    Value::Text("TABLE".to_string()),
+                    Value::Text("GRAPH_NODE".to_string()),
+                ],
+            ),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn test_evaluate_metadata_field_compare_entity_type_unsupported_op_is_false() {
+        let field = FieldRef::TableColumn {
+            table: "any".to_string(),
+            column: "red_entity_type".to_string(),
+        };
+
+        assert_eq!(
+            evaluate_metadata_field_compare(
+                &field,
+                &Value::Text("vector".to_string()),
+                CompareOp::Gt,
+                &Value::Text("vector".to_string()),
+            ),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn test_resolve_runtime_field_node_property_from_node_properties() {
+        let mut record = UnifiedRecord::new();
+        let mut node_properties = HashMap::new();
+        node_properties.insert(
+            "nginx_version".to_string(),
+            Value::Text("1.22.1".to_string()),
+        );
+        let node = MatchedNode {
+            id: "svc:nginx:80".to_string(),
+            label: "nginx".to_string(),
+            node_type: GraphNodeType::Service,
+            properties: node_properties,
+        };
+        record.set_node("svc", node);
+
+        let field = FieldRef::node_prop("svc", "nginx_version");
+        assert_eq!(
+            resolve_runtime_field(&record, &field, None, None),
+            Some(Value::Text("1.22.1".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_compare_runtime_values_preserves_integer_unsigned_boundaries() {
+        let above_i64_max = Value::UnsignedInteger(i64::MAX as u64 + 1);
+        let max_i64 = Value::Integer(i64::MAX);
+
+        assert!(compare_runtime_values(
+            &above_i64_max,
+            &max_i64,
+            CompareOp::Gt
+        ));
+        assert!(compare_runtime_values(
+            &above_i64_max,
+            &max_i64,
+            CompareOp::Ge
+        ));
+        assert!(!compare_runtime_values(
+            &above_i64_max,
+            &max_i64,
+            CompareOp::Eq
+        ));
+
+        assert!(compare_runtime_values(
+            &Value::Integer(-1),
+            &Value::UnsignedInteger(0),
+            CompareOp::Lt
+        ));
+        assert!(compare_runtime_values(
+            &Value::UnsignedInteger(0),
+            &Value::Integer(-1),
+            CompareOp::Gt
+        ));
     }
 }
