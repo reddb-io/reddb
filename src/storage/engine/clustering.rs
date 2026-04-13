@@ -203,6 +203,9 @@ fn find_nearest_centroid(vector: &[f32], centroids: &[Vec<f32>]) -> usize {
 /// - `eps`: maximum distance between two points to be neighbors (L2)
 /// - `min_points`: minimum neighbors to form a dense region
 pub fn dbscan(vectors: &[Vec<f32>], eps: f32, min_points: usize) -> ClusterResult {
+    const UNVISITED: i32 = -2;
+    const NOISE: i32 = -1;
+
     let n = vectors.len();
     if n == 0 {
         return ClusterResult {
@@ -216,18 +219,21 @@ pub fn dbscan(vectors: &[Vec<f32>], eps: f32, min_points: usize) -> ClusterResul
     }
 
     let eps_sq = eps * eps;
-    let mut assignments = vec![-1i32; n];
+    let mut assignments = vec![UNVISITED; n];
+    let mut visited = vec![false; n];
     let mut cluster_id: i32 = 0;
 
     for i in 0..n {
-        if assignments[i] != -1 {
-            continue; // already assigned
+        if visited[i] {
+            continue;
         }
 
+        visited[i] = true;
         let neighbors = range_query(vectors, i, eps_sq);
 
         if neighbors.len() < min_points {
-            continue; // noise (stays -1)
+            assignments[i] = NOISE;
+            continue;
         }
 
         // Start new cluster
@@ -239,27 +245,33 @@ pub fn dbscan(vectors: &[Vec<f32>], eps: f32, min_points: usize) -> ClusterResul
             let q = seed_set[j];
             j += 1;
 
-            if assignments[q] == -1 {
-                assignments[q] = cluster_id; // was noise, now border
-            }
-            if assignments[q] != -1 && assignments[q] != cluster_id {
-                continue; // already in another cluster — skip for border semantics
-            }
-            assignments[q] = cluster_id;
+            if !visited[q] {
+                visited[q] = true;
 
-            let q_neighbors = range_query(vectors, q, eps_sq);
-            if q_neighbors.len() >= min_points {
-                for &neighbor in &q_neighbors {
-                    if assignments[neighbor] == -1 || assignments[neighbor] == -1 {
-                        if !seed_set.contains(&neighbor) {
+                let q_neighbors = range_query(vectors, q, eps_sq);
+                if q_neighbors.len() >= min_points {
+                    for &neighbor in &q_neighbors {
+                        if matches!(assignments[neighbor], UNVISITED | NOISE)
+                            && !seed_set.contains(&neighbor)
+                        {
                             seed_set.push(neighbor);
                         }
                     }
                 }
             }
+
+            if matches!(assignments[q], UNVISITED | NOISE) {
+                assignments[q] = cluster_id;
+            }
         }
 
         cluster_id += 1;
+    }
+
+    for assignment in &mut assignments {
+        if *assignment == UNVISITED {
+            *assignment = NOISE;
+        }
     }
 
     let k = cluster_id as usize;
@@ -404,5 +416,40 @@ mod tests {
         let result = dbscan(&vectors, 0.15, 2);
         assert_eq!(result.k, 1);
         assert!(result.assignments.iter().all(|&a| a == 0));
+    }
+
+    #[test]
+    fn test_dbscan_relabels_noise_point_when_later_core_expands_cluster() {
+        let vectors = vec![
+            vec![0.0, 0.0],
+            vec![0.08, 0.0],
+            vec![0.16, 0.0],
+            vec![10.0, 10.0],
+        ];
+
+        let result = dbscan(&vectors, 0.09, 3);
+
+        assert_eq!(result.k, 1);
+        assert_eq!(result.assignments[0], 0);
+        assert_eq!(result.assignments[1], 0);
+        assert_eq!(result.assignments[2], 0);
+        assert_eq!(result.assignments[3], -1);
+        assert_eq!(result.cluster_sizes, vec![3]);
+    }
+
+    #[test]
+    fn test_dbscan_expands_density_connected_chain() {
+        let vectors = vec![
+            vec![0.0, 0.0],
+            vec![0.08, 0.0],
+            vec![0.16, 0.0],
+            vec![0.24, 0.0],
+        ];
+
+        let result = dbscan(&vectors, 0.09, 3);
+
+        assert_eq!(result.k, 1);
+        assert!(result.assignments.iter().all(|&assignment| assignment == 0));
+        assert_eq!(result.cluster_sizes, vec![4]);
     }
 }
