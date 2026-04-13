@@ -1,0 +1,50 @@
+{
+  "name": "reddb",
+  "version": "0.1.2",
+  "description": "Official RedDB driver — speaks JSON-RPC 2.0 to a local `red` binary. Works in Node 18+, Bun and Deno.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": {
+      "import": "./src/index.js",
+      "types": "./index.d.ts"
+    }
+  },
+  "types": "./index.d.ts",
+  "files": [
+    "src/",
+    "index.d.ts",
+    "postinstall.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "postinstall": "node postinstall.js",
+    "test": "node test/smoke.test.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "reddb",
+    "database",
+    "client",
+    "driver",
+    "json-rpc",
+    "multi-model",
+    "vector",
+    "graph",
+    "document",
+    "key-value"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/forattini-dev/reddb",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/forattini-dev/reddb.git",
+    "directory": "drivers/js"
+  },
+  "bugs": {
+    "url": "https://github.com/forattini-dev/reddb/issues"
+  }
+}
