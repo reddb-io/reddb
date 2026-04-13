@@ -7,6 +7,30 @@ use crate::storage::primitives::encoding::{
 use crate::storage::records::{HttpHeadersRecord, HttpTlsSnapshot};
 use crate::storage::segments::utils::StringTable;
 
+fn read_fixed<const N: usize>(
+    bytes: &[u8],
+    offset: usize,
+    what: &'static str,
+) -> Result<[u8; N], DecodeError> {
+    let end = offset + N;
+    let slice = bytes.get(offset..end).ok_or(DecodeError(what))?;
+    let mut raw = [0u8; N];
+    raw.copy_from_slice(slice);
+    Ok(raw)
+}
+
+fn read_u16_le(bytes: &[u8], offset: usize, what: &'static str) -> Result<u16, DecodeError> {
+    Ok(u16::from_le_bytes(read_fixed::<2>(bytes, offset, what)?))
+}
+
+fn read_u32_le(bytes: &[u8], offset: usize, what: &'static str) -> Result<u32, DecodeError> {
+    Ok(u32::from_le_bytes(read_fixed::<4>(bytes, offset, what)?))
+}
+
+fn read_u64_le(bytes: &[u8], offset: usize, what: &'static str) -> Result<u64, DecodeError> {
+    Ok(u64::from_le_bytes(read_fixed::<8>(bytes, offset, what)?))
+}
+
 fn encode_string_table(table: &StringTable) -> Vec<u8> {
     let mut buf = Vec::new();
     write_varu32(&mut buf, table.len() as u32);
@@ -120,13 +144,15 @@ impl HttpDirEntry {
         let mut entries = Vec::with_capacity(count);
         let mut offset = 0usize;
         for _ in 0..count {
-            let host_id = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+            let host_id = read_u32_le(bytes, offset, "http directory truncated (host id)")?;
             offset += 4;
-            let record_count = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+            let record_count =
+                read_u32_le(bytes, offset, "http directory truncated (record count)")?;
             offset += 4;
-            let payload_offset = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+            let payload_offset =
+                read_u64_le(bytes, offset, "http directory truncated (payload offset)")?;
             offset += 8;
-            let payload_len = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+            let payload_len = read_u64_le(bytes, offset, "http directory truncated (payload len)")?;
             offset += 8;
             entries.push(Self {
                 host_id,
@@ -172,15 +198,15 @@ impl HttpSegmentHeader {
         if bytes[0..4] != Self::MAGIC {
             return Err(DecodeError("invalid http segment magic"));
         }
-        let version = u16::from_le_bytes(bytes[4..6].try_into().unwrap());
+        let version = read_u16_le(bytes, 4, "http header truncated (version)")?;
         if version != 1 && version != 2 && version != Self::VERSION {
             return Err(DecodeError("unsupported http segment version"));
         }
-        let host_count = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-        let record_count = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
-        let directory_len = u64::from_le_bytes(bytes[16..24].try_into().unwrap());
-        let payload_len = u64::from_le_bytes(bytes[24..32].try_into().unwrap());
-        let strings_len = u64::from_le_bytes(bytes[32..40].try_into().unwrap());
+        let host_count = read_u32_le(bytes, 8, "http header truncated (host count)")?;
+        let record_count = read_u32_le(bytes, 12, "http header truncated (record count)")?;
+        let directory_len = read_u64_le(bytes, 16, "http header truncated (directory len)")?;
+        let payload_len = read_u64_le(bytes, 24, "http header truncated (payload len)")?;
+        let strings_len = read_u64_le(bytes, 32, "http header truncated (strings len)")?;
 
         Ok(Self {
             version,
@@ -1105,5 +1131,11 @@ mod tests {
             Some("0f343b0931126a20f133d67c2b018a3b")
         );
         assert_eq!(tls.certificate_chain_pem.len(), 1);
+    }
+
+    #[test]
+    fn http_segment_header_rejects_truncated_bytes() {
+        let truncated = vec![0u8; HttpSegmentHeader::SIZE - 1];
+        assert!(HttpSegmentHeader::read(&truncated).is_err());
     }
 }
