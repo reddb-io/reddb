@@ -24,6 +24,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::distance::{distance_simd, DistanceMetric};
 use super::hnsw::{HnswConfig, HnswIndex, NodeId};
 use super::vector_metadata::{MetadataEntry, MetadataFilter, MetadataStore};
+use crate::storage::index::{BloomSegment, HasBloom};
 
 /// Unique identifier for a segment
 pub type SegmentId = u64;
@@ -95,10 +96,20 @@ pub struct VectorSegment {
     id_to_hnsw: HashMap<VectorId, NodeId>,
     /// Reverse mapping: hnsw_node_id -> vector_id
     hnsw_to_id: HashMap<NodeId, VectorId>,
+    /// Bloom filter for O(1) negative id lookups. Populated on insert, used
+    /// by `get_vector`/`get_metadata` to skip missing IDs without touching
+    /// the hash map.
+    bloom: BloomSegment,
     /// Creation timestamp
     pub created_at: u64,
     /// Last modified timestamp
     pub updated_at: u64,
+}
+
+impl HasBloom for VectorSegment {
+    fn bloom_segment(&self) -> Option<&BloomSegment> {
+        Some(&self.bloom)
+    }
 }
 
 impl VectorSegment {
@@ -119,6 +130,7 @@ impl VectorSegment {
             hnsw_index: None,
             id_to_hnsw: HashMap::new(),
             hnsw_to_id: HashMap::new(),
+            bloom: BloomSegment::with_capacity(10_000),
             created_at: now,
             updated_at: now,
         }
@@ -157,6 +169,7 @@ impl VectorSegment {
             });
         }
 
+        self.bloom.insert(&id.to_le_bytes());
         self.vectors.insert(id, vector);
         self.metadata.insert(id, metadata);
         self.update_timestamp();
@@ -166,11 +179,17 @@ impl VectorSegment {
 
     /// Get a vector by ID
     pub fn get_vector(&self, id: VectorId) -> Option<&Vec<f32>> {
+        if self.bloom.definitely_absent(&id.to_le_bytes()) {
+            return None;
+        }
         self.vectors.get(&id)
     }
 
     /// Get metadata for a vector
     pub fn get_metadata(&self, id: VectorId) -> Option<&MetadataEntry> {
+        if self.bloom.definitely_absent(&id.to_le_bytes()) {
+            return None;
+        }
         self.metadata.get(id)
     }
 
