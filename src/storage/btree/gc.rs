@@ -7,7 +7,17 @@ use super::tree::BPlusTree;
 use super::version::{current_timestamp, Timestamp};
 use std::fmt::Debug;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
+
+fn gc_read<'a, T>(lock: &'a RwLock<T>) -> RwLockReadGuard<'a, T> {
+    lock.read().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn gc_write<'a, T>(lock: &'a RwLock<T>) -> RwLockWriteGuard<'a, T> {
+    lock.write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// GC Configuration
 #[derive(Debug, Clone)]
@@ -180,7 +190,7 @@ impl GarbageCollector {
         let mut nodes_visited = 0u64;
 
         // Collect from all leaf nodes
-        let first_leaf = *tree.first_leaf.read().unwrap();
+        let first_leaf = *gc_read(&tree.first_leaf);
         let mut current_leaf = first_leaf;
 
         while let Some(leaf_id) = current_leaf {
@@ -188,7 +198,7 @@ impl GarbageCollector {
 
             // Process leaf
             if let Some(node) = tree.get_node(leaf_id) {
-                let mut node = node.write().unwrap();
+                let mut node = gc_write(&node);
                 if let Node::Leaf(leaf) = &mut *node {
                     versions_collected += leaf.gc(watermark) as u64;
 
@@ -258,14 +268,14 @@ impl GarbageCollector {
         let mut nodes_visited = 0;
         let mut versions_collected = 0u64;
 
-        let first = start_leaf.or_else(|| *tree.first_leaf.read().unwrap());
+        let first = start_leaf.or_else(|| *gc_read(&tree.first_leaf));
         let mut current_leaf = first;
 
         while let Some(leaf_id) = current_leaf {
             nodes_visited += 1;
 
             if let Some(node) = tree.get_node(leaf_id) {
-                let mut node = node.write().unwrap();
+                let mut node = gc_write(&node);
                 if let Node::Leaf(leaf) = &mut *node {
                     versions_collected += leaf.gc(watermark) as u64;
                     current_leaf = leaf.next;
@@ -417,5 +427,52 @@ mod tests {
 
         handle.stop();
         assert!(handle.is_stopped());
+    }
+
+    #[test]
+    fn test_gc_run_recovers_after_first_leaf_lock_poisoning() {
+        let gc = GarbageCollector::new(GcConfig::new());
+        let tree: BPlusTree<i32, String> = BPlusTree::with_default_config();
+
+        let poison_target = &tree;
+        std::thread::scope(|scope| {
+            let handle = scope.spawn(|| {
+                let _guard = poison_target
+                    .first_leaf
+                    .write()
+                    .expect("first_leaf lock should be acquired");
+                panic!("poison first_leaf lock");
+            });
+            let _ = handle.join();
+        });
+
+        let stats = gc.run(&tree);
+        assert_eq!(stats.runs, 1);
+    }
+
+    #[test]
+    fn test_gc_run_recovers_after_leaf_node_lock_poisoning() {
+        let gc = GarbageCollector::new(GcConfig::new().with_min_age(Timestamp(0)));
+        let tree: BPlusTree<i32, String> = BPlusTree::new(BTreeConfig::new().with_order(4));
+
+        for i in 1..=4 {
+            tree.insert(i, format!("v{}", i), TxnId(1));
+        }
+
+        let first_leaf = (*gc_read(&tree.first_leaf)).expect("tree should have a first leaf");
+        let leaf = tree.get_node(first_leaf).expect("leaf node should exist");
+        let poison_target = &leaf;
+        std::thread::scope(|scope| {
+            let handle = scope.spawn(|| {
+                let _guard = poison_target
+                    .write()
+                    .expect("leaf node lock should be acquired");
+                panic!("poison leaf node lock");
+            });
+            let _ = handle.join();
+        });
+
+        let stats = gc.run(&tree);
+        assert!(stats.nodes_visited > 0);
     }
 }
