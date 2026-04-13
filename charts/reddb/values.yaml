@@ -1,0 +1,245 @@
+# =============================================================================
+# RedDB Helm chart values
+# =============================================================================
+# Two deployment modes:
+#
+#   mode: standalone        -> single StatefulSet, role=standalone (1 pod)
+#   mode: primary-replica   -> primary StatefulSet (1 pod) + replica StatefulSet (N pods)
+#                              replicas stream from the primary via gRPC
+# =============================================================================
+
+mode: standalone
+
+nameOverride: ""
+fullnameOverride: ""
+
+# -----------------------------------------------------------------------------
+# Image
+# -----------------------------------------------------------------------------
+image:
+  repository: ghcr.io/forattini-dev/reddb
+  # Defaults to .Chart.AppVersion when empty
+  tag: ""
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+# -----------------------------------------------------------------------------
+# Auth bootstrap
+# -----------------------------------------------------------------------------
+# When enabled, REDDB_USERNAME / REDDB_PASSWORD are injected so the server
+# auto-creates the first admin user on startup.
+auth:
+  enabled: false
+  username: admin
+  # Plain password — only used when existingSecret is empty.
+  # Strongly recommend using existingSecret for production.
+  password: ""
+  # Reference an existing Secret. Must contain keys: username, password
+  existingSecret: ""
+
+# -----------------------------------------------------------------------------
+# Common server config
+# -----------------------------------------------------------------------------
+config:
+  # RUST_LOG value (trace|debug|info|warn|error)
+  logLevel: info
+  # Enable encrypted auth vault (reserved pages in main .rdb file)
+  vault: false
+  # Extra environment variables, list of {name, value} or {name, valueFrom}
+  extraEnv: []
+  # Extra CLI args appended to the `red server` / `red replica` command
+  extraArgs: []
+
+# -----------------------------------------------------------------------------
+# RBAC / ServiceAccount
+# -----------------------------------------------------------------------------
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  automountServiceAccountToken: false
+
+# -----------------------------------------------------------------------------
+# Pod metadata + security
+# -----------------------------------------------------------------------------
+podAnnotations: {}
+podLabels: {}
+
+# Matches the non-root reddb user baked into the Dockerfile (uid/gid 10001)
+podSecurityContext:
+  fsGroup: 10001
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  capabilities:
+    drop: ["ALL"]
+
+# -----------------------------------------------------------------------------
+# Primary node
+#   - In `standalone` mode this is the only StatefulSet rendered.
+#   - In `primary-replica` mode this is the single writer.
+# -----------------------------------------------------------------------------
+primary:
+  # Always 1 — RedDB has a single-writer primary by design.
+  replicaCount: 1
+
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+  persistence:
+    enabled: true
+    storageClass: ""
+    accessModes: ["ReadWriteOnce"]
+    size: 10Gi
+    annotations: {}
+
+  service:
+    type: ClusterIP
+    annotations: {}
+    grpcPort: 50051
+    httpPort: 8080
+    # Optional fixed nodePort values (only when type=NodePort)
+    grpcNodePort: ""
+    httpNodePort: ""
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+  priorityClassName: ""
+  terminationGracePeriodSeconds: 60
+
+  updateStrategy:
+    type: RollingUpdate
+
+# -----------------------------------------------------------------------------
+# Read replicas (only rendered when mode=primary-replica)
+# -----------------------------------------------------------------------------
+replica:
+  replicaCount: 2
+
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+  persistence:
+    enabled: true
+    storageClass: ""
+    accessModes: ["ReadWriteOnce"]
+    size: 10Gi
+    annotations: {}
+
+  service:
+    type: ClusterIP
+    annotations: {}
+    grpcPort: 50051
+    httpPort: 8080
+
+  nodeSelector: {}
+  tolerations: []
+  # When empty, a soft pod anti-affinity across hostnames is injected.
+  affinity: {}
+  topologySpreadConstraints: []
+  priorityClassName: ""
+  terminationGracePeriodSeconds: 60
+
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      partition: 0
+
+# -----------------------------------------------------------------------------
+# Probes — exec the local `red health` CLI against the in-pod HTTP port.
+# -----------------------------------------------------------------------------
+probes:
+  startup:
+    enabled: true
+    periodSeconds: 5
+    failureThreshold: 30
+    timeoutSeconds: 3
+  liveness:
+    enabled: true
+    initialDelaySeconds: 15
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 5
+  readiness:
+    enabled: true
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+# -----------------------------------------------------------------------------
+# PodDisruptionBudget — only meaningful for the replica StatefulSet.
+# -----------------------------------------------------------------------------
+pdb:
+  enabled: false
+  minAvailable: 1
+  maxUnavailable: ""
+
+# -----------------------------------------------------------------------------
+# NetworkPolicy
+# -----------------------------------------------------------------------------
+networkPolicy:
+  enabled: false
+  # Allow primary <-> replica traffic automatically (always added when enabled).
+  # Additional ingress sources for client traffic:
+  ingressFrom: []
+  # Example:
+  # ingressFrom:
+  #   - podSelector:
+  #       matchLabels:
+  #         app: my-api
+  #   - namespaceSelector:
+  #       matchLabels:
+  #         kubernetes.io/metadata.name: apps
+
+# -----------------------------------------------------------------------------
+# Ingress (HTTP only)
+# -----------------------------------------------------------------------------
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: reddb.local
+      paths:
+        - path: /
+          pathType: Prefix
+          # Routes to primary HTTP service. Use "primary" or "replica".
+          backend: primary
+  tls: []
+
+# -----------------------------------------------------------------------------
+# Prometheus ServiceMonitor (requires prometheus-operator CRDs)
+# -----------------------------------------------------------------------------
+metrics:
+  serviceMonitor:
+    enabled: false
+    namespace: ""
+    interval: 30s
+    scrapeTimeout: 10s
+    path: /metrics
+    labels: {}
+    relabelings: []
+    metricRelabelings: []
