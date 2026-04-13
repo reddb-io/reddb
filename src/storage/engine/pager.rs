@@ -235,6 +235,7 @@ impl Drop for Pager {
 mod tests {
     use super::*;
     use std::fs;
+    use std::io::Write;
 
     fn temp_db_path() -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -257,6 +258,38 @@ mod tests {
         let mut dwb = path.to_path_buf().into_os_string();
         dwb.push("-dwb");
         let _ = fs::remove_file(&dwb);
+    }
+
+    fn dwb_path_for(path: &Path) -> PathBuf {
+        let mut dwb = path.to_path_buf().into_os_string();
+        dwb.push("-dwb");
+        PathBuf::from(dwb)
+    }
+
+    fn write_dwb_fixture(path: &Path, pages: &[(u32, Page)]) {
+        let entry_size = 4 + PAGE_SIZE;
+        let header_len = 12;
+        let total = header_len + pages.len() * entry_size;
+        let mut buf = Vec::with_capacity(total);
+
+        buf.extend_from_slice(&[0x52, 0x44, 0x44, 0x57]); // "RDDW"
+        buf.extend_from_slice(&(pages.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&[0u8; 4]);
+
+        for (page_id, page) in pages {
+            let mut page = page.clone();
+            page.update_checksum();
+            buf.extend_from_slice(&page_id.to_le_bytes());
+            buf.extend_from_slice(page.as_bytes());
+        }
+
+        let checksum = crate::storage::engine::crc32::crc32(&buf[header_len..]);
+        buf[8..12].copy_from_slice(&checksum.to_le_bytes());
+
+        let dwb_path = dwb_path_for(path);
+        let mut file = fs::File::create(&dwb_path).unwrap();
+        file.write_all(&buf).unwrap();
+        file.sync_all().unwrap();
     }
 
     #[test]
@@ -421,6 +454,55 @@ mod tests {
 
             // Should fail to allocate
             assert!(pager.allocate_page(PageType::BTreeLeaf).is_err());
+        }
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_dwb_recovery_clears_in_place_and_keeps_file_reusable() {
+        let path = temp_db_path();
+        cleanup(&path);
+
+        let config = PagerConfig {
+            double_write: true,
+            ..Default::default()
+        };
+
+        let page_id;
+        {
+            let pager = Pager::open(&path, config.clone()).unwrap();
+            let page = pager.allocate_page(PageType::BTreeLeaf).unwrap();
+            page_id = page.page_id();
+            pager.sync().unwrap();
+        }
+
+        let mut recovered_page = Page::new(PageType::BTreeLeaf, page_id);
+        recovered_page.insert_cell(b"key", b"value").unwrap();
+        write_dwb_fixture(&path, &[(page_id, recovered_page.clone())]);
+
+        let dwb_path = dwb_path_for(&path);
+        assert!(dwb_path.exists());
+        assert!(fs::metadata(&dwb_path).unwrap().len() > 0);
+
+        {
+            let pager = Pager::open(&path, config).unwrap();
+
+            let read_page = pager.read_page(page_id).unwrap();
+            let (key, value) = read_page.read_cell(0).unwrap();
+            assert_eq!(key, b"key");
+            assert_eq!(value, b"value");
+
+            assert!(dwb_path.exists());
+            assert_eq!(fs::metadata(&dwb_path).unwrap().len(), 0);
+
+            let mut updated_page = recovered_page.clone();
+            updated_page.insert_cell(b"key2", b"value2").unwrap();
+            pager.write_page(page_id, updated_page).unwrap();
+            pager.flush().unwrap();
+
+            assert!(dwb_path.exists());
+            assert_eq!(fs::metadata(&dwb_path).unwrap().len(), 0);
         }
 
         cleanup(&path);
