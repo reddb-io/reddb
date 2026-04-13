@@ -122,12 +122,20 @@ impl HashIndex {
 pub enum HashIndexError {
     /// Attempted to insert a duplicate key in a unique index
     DuplicateKey,
+    /// The requested index was not found in the manager registry.
+    MissingIndex { collection: String, name: String },
 }
 
 impl std::fmt::Display for HashIndexError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::DuplicateKey => write!(f, "duplicate key in unique hash index"),
+            Self::MissingIndex { collection, name } => {
+                write!(
+                    f,
+                    "hash index '{name}' was not found for collection '{collection}'"
+                )
+            }
         }
     }
 }
@@ -189,7 +197,10 @@ impl HashIndexManager {
         if let Some(index) = indices.get_mut(&(collection.to_string(), index_name.to_string())) {
             index.insert(key, entity_id)
         } else {
-            Ok(()) // Index doesn't exist, skip silently
+            Err(HashIndexError::MissingIndex {
+                collection: collection.to_string(),
+                name: index_name.to_string(),
+            })
         }
     }
 
@@ -210,12 +221,15 @@ impl HashIndexManager {
         index_name: &str,
         key: &[u8],
         entity_id: EntityId,
-    ) -> bool {
+    ) -> Result<bool, HashIndexError> {
         let mut indices = self.indices.write().unwrap();
         if let Some(index) = indices.get_mut(&(collection.to_string(), index_name.to_string())) {
-            index.remove(key, entity_id)
+            Ok(index.remove(key, entity_id))
         } else {
-            false
+            Err(HashIndexError::MissingIndex {
+                collection: collection.to_string(),
+                name: index_name.to_string(),
+            })
         }
     }
 
