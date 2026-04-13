@@ -11,8 +11,10 @@ pub mod aggregation;
 pub mod chunk;
 pub mod compression;
 pub mod retention;
+pub mod temporal_index;
 
 pub use aggregation::{time_bucket, AggregationType, WindowAggregator};
 pub use chunk::{TimeSeriesChunk, TimeSeriesPoint};
 pub use compression::{delta_decode_timestamps, delta_encode_timestamps};
 pub use retention::RetentionPolicy;
+pub use temporal_index::{ChunkHandle, TemporalIndex};
