@@ -3,6 +3,7 @@
 //! Provides filter operations for querying data including comparison,
 //! logical, and pattern matching operations.
 
+use super::value_compare::partial_compare_values;
 use crate::storage::schema::Value;
 use std::fmt;
 
@@ -243,29 +244,29 @@ impl Predicate {
             (FilterOp::Eq, PredicateValue::Single(v)) => column_value == v,
             (FilterOp::Ne, PredicateValue::Single(v)) => column_value != v,
             (FilterOp::Lt, PredicateValue::Single(v)) => {
-                compare_values(column_value, v) == Some(std::cmp::Ordering::Less)
+                partial_compare_values(column_value, v) == Some(std::cmp::Ordering::Less)
             }
             (FilterOp::Le, PredicateValue::Single(v)) => {
                 matches!(
-                    compare_values(column_value, v),
+                    partial_compare_values(column_value, v),
                     Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
                 )
             }
             (FilterOp::Gt, PredicateValue::Single(v)) => {
-                compare_values(column_value, v) == Some(std::cmp::Ordering::Greater)
+                partial_compare_values(column_value, v) == Some(std::cmp::Ordering::Greater)
             }
             (FilterOp::Ge, PredicateValue::Single(v)) => {
                 matches!(
-                    compare_values(column_value, v),
+                    partial_compare_values(column_value, v),
                     Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
                 )
             }
             (FilterOp::Between, PredicateValue::Range(low, high)) => {
                 matches!(
-                    compare_values(column_value, low),
+                    partial_compare_values(column_value, low),
                     Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
                 ) && matches!(
-                    compare_values(column_value, high),
+                    partial_compare_values(column_value, high),
                     Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
                 )
             }
@@ -295,24 +296,6 @@ impl Predicate {
             },
             _ => false,
         }
-    }
-}
-
-/// Compare two values, returning ordering if comparable
-fn compare_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
-    match (a, b) {
-        (Value::Integer(a), Value::Integer(b)) => Some(a.cmp(b)),
-        (Value::UnsignedInteger(a), Value::UnsignedInteger(b)) => Some(a.cmp(b)),
-        (Value::Float(a), Value::Float(b)) => a.partial_cmp(b),
-        (Value::Text(a), Value::Text(b)) => Some(a.cmp(b)),
-        (Value::Timestamp(a), Value::Timestamp(b)) => Some(a.cmp(b)),
-        (Value::Duration(a), Value::Duration(b)) => Some(a.cmp(b)),
-        // Cross-type numeric comparisons
-        (Value::Integer(a), Value::Float(b)) => (*a as f64).partial_cmp(b),
-        (Value::Float(a), Value::Integer(b)) => a.partial_cmp(&(*b as f64)),
-        (Value::UnsignedInteger(a), Value::Float(b)) => (*a as f64).partial_cmp(b),
-        (Value::Float(a), Value::UnsignedInteger(b)) => a.partial_cmp(&(*b as f64)),
-        _ => None,
     }
 }
 
