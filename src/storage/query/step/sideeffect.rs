@@ -17,7 +17,16 @@ use crate::json;
 use crate::serde_json::Value;
 use std::any::Any;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+
+fn sideeffect_read<'a, T>(lock: &'a RwLock<T>) -> RwLockReadGuard<'a, T> {
+    lock.read().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn sideeffect_write<'a, T>(lock: &'a RwLock<T>) -> RwLockWriteGuard<'a, T> {
+    lock.write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Trait for side effect steps
 pub trait SideEffectStep: Step {
@@ -60,7 +69,7 @@ impl StoreStep {
 
     /// Get stored values
     pub fn values(&self) -> Vec<Value> {
-        self.values.read().unwrap().clone()
+        sideeffect_read(&self.values).clone()
     }
 }
 
@@ -94,7 +103,7 @@ impl Step for StoreStep {
     }
 
     fn reset(&mut self) {
-        self.values.write().unwrap().clear();
+        sideeffect_write(&self.values).clear();
     }
 
     fn clone_step(&self) -> Box<dyn Step> {
@@ -113,7 +122,7 @@ impl Step for StoreStep {
 impl SideEffectStep for StoreStep {
     fn side_effect(&self, traverser: &Traverser) {
         let value = traverser.value().to_json();
-        self.values.write().unwrap().push(value);
+        sideeffect_write(&self.values).push(value);
     }
 }
 
@@ -167,7 +176,7 @@ impl AggregateStep {
 
     /// Get aggregated values
     pub fn values(&self) -> Vec<Value> {
-        self.values.read().unwrap().clone()
+        sideeffect_read(&self.values).clone()
     }
 }
 
@@ -211,7 +220,7 @@ impl Step for AggregateStep {
     }
 
     fn reset(&mut self) {
-        self.values.write().unwrap().clear();
+        sideeffect_write(&self.values).clear();
     }
 
     fn clone_step(&self) -> Box<dyn Step> {
@@ -230,7 +239,7 @@ impl Step for AggregateStep {
 impl SideEffectStep for AggregateStep {
     fn side_effect(&self, traverser: &Traverser) {
         let value = traverser.value().to_json();
-        self.values.write().unwrap().push(value);
+        sideeffect_write(&self.values).push(value);
     }
 }
 
@@ -544,7 +553,7 @@ impl ProfileStep {
 
     /// Get metrics
     pub fn metrics(&self) -> ProfileMetrics {
-        self.metrics.read().unwrap().clone()
+        sideeffect_read(&self.metrics).clone()
     }
 }
 
@@ -583,7 +592,7 @@ impl Step for ProfileStep {
     }
 
     fn reset(&mut self) {
-        *self.metrics.write().unwrap() = ProfileMetrics::default();
+        *sideeffect_write(&self.metrics) = ProfileMetrics::default();
     }
 
     fn clone_step(&self) -> Box<dyn Step> {
@@ -601,7 +610,7 @@ impl Step for ProfileStep {
 
 impl SideEffectStep for ProfileStep {
     fn side_effect(&self, _traverser: &Traverser) {
-        let mut metrics = self.metrics.write().unwrap();
+        let mut metrics = sideeffect_write(&self.metrics);
         metrics.traverser_count += 1;
     }
 }
@@ -671,5 +680,41 @@ mod tests {
 
         let metrics = step.metrics();
         assert_eq!(metrics.traverser_count, 2);
+    }
+
+    #[test]
+    fn test_store_step_recovers_after_values_lock_poisoning() {
+        let step = StoreStep::new("x".to_string());
+        let poison_target = step.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poison_target
+                .values
+                .write()
+                .expect("store values lock should be acquired");
+            panic!("poison store values lock");
+        })
+        .join();
+
+        step.side_effect(&Traverser::new("v1"));
+        let values = step.values();
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0]["id"], json!("v1"));
+    }
+
+    #[test]
+    fn test_profile_step_recovers_after_metrics_lock_poisoning() {
+        let step = ProfileStep::new();
+        let poison_target = step.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poison_target
+                .metrics
+                .write()
+                .expect("profile metrics lock should be acquired");
+            panic!("poison profile metrics lock");
+        })
+        .join();
+
+        step.side_effect(&Traverser::new("v1"));
+        assert_eq!(step.metrics().traverser_count, 1);
     }
 }
