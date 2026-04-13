@@ -6,6 +6,9 @@
 // Low-level primitives (bloom filters, encoding, mmap, serialization)
 pub mod primitives;
 
+// Cross-structure index abstraction (trait + bloom segment helper)
+pub mod index;
+
 pub mod client;
 
 pub mod layout;
