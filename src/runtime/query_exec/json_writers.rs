@@ -8,9 +8,22 @@
 //!
 //! All functions are `pub(super)` so only `query_exec.rs` can reach them.
 
-use super::timeseries_tags_json_value;
 use crate::storage::schema::Value;
 use crate::storage::unified::{EntityData, EntityKind, UnifiedEntity};
+
+/// Wrap a `HashMap<String, String>` tag set as a `Value::Json` blob so it
+/// round-trips through the schema layer unchanged. Used by both the
+/// entity JSON writer above and by the aggregate executor.
+pub(crate) fn timeseries_tags_json_value(
+    tags: &std::collections::HashMap<String, String>,
+) -> Value {
+    let object = tags
+        .iter()
+        .map(|(key, value)| (key.clone(), crate::json::Value::String(value.clone())))
+        .collect();
+    let json = crate::json::Value::Object(object);
+    Value::Json(crate::json::to_vec(&json).unwrap_or_default())
+}
 
 /// Write a u64 as decimal digits.
 #[inline(always)]
