@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use super::record::WalRecord;
 use super::writer::WalWriter;
@@ -57,6 +57,8 @@ pub enum TxError {
     Io(io::Error),
     /// Pager error
     Pager(String),
+    /// Internal lock was poisoned by a panic
+    LockPoisoned(&'static str),
     /// Transaction is not active
     NotActive,
     /// Transaction already committed
@@ -74,6 +76,7 @@ impl std::fmt::Display for TxError {
         match self {
             Self::Io(e) => write!(f, "I/O error: {}", e),
             Self::Pager(msg) => write!(f, "Pager error: {}", msg),
+            Self::LockPoisoned(name) => write!(f, "Lock poisoned: {}", name),
             Self::NotActive => write!(f, "Transaction is not active"),
             Self::AlreadyCommitted => write!(f, "Transaction already committed"),
             Self::AlreadyAborted => write!(f, "Transaction already aborted"),
@@ -185,7 +188,7 @@ impl Transaction {
         }
 
         // Write all buffered pages to WAL
-        let mut wal = self.manager.wal.lock().unwrap();
+        let mut wal = self.manager.wal_writer()?;
 
         for (page_id, buffered) in &self.write_set {
             let record = WalRecord::PageWrite {
@@ -233,7 +236,7 @@ impl Transaction {
         }
 
         // Write rollback record to WAL
-        let mut wal = self.manager.wal.lock().unwrap();
+        let mut wal = self.manager.wal_writer()?;
         let rollback_record = WalRecord::Rollback { tx_id: self.id };
         wal.append(&rollback_record)?;
         wal.sync()?;
@@ -297,20 +300,38 @@ impl TransactionManager {
         })
     }
 
+    fn wal_writer(&self) -> Result<MutexGuard<'_, WalWriter>, TxError> {
+        self.wal
+            .lock()
+            .map_err(|_| TxError::LockPoisoned("wal writer"))
+    }
+
+    fn active_transactions_write(&self) -> RwLockWriteGuard<'_, Vec<u64>> {
+        self.active_transactions
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn active_transactions_read(&self) -> RwLockReadGuard<'_, Vec<u64>> {
+        self.active_transactions
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Begin a new transaction
     pub fn begin(self: &Arc<Self>) -> Result<Transaction, TxError> {
         let tx_id = next_transaction_id();
 
         // Write Begin record to WAL
         {
-            let mut wal = self.wal.lock().unwrap();
+            let mut wal = self.wal_writer()?;
             let begin_record = WalRecord::Begin { tx_id };
             wal.append(&begin_record)?;
         }
 
         // Register transaction
         {
-            let mut active = self.active_transactions.write().unwrap();
+            let mut active = self.active_transactions_write();
             active.push(tx_id);
         }
 
@@ -325,13 +346,13 @@ impl TransactionManager {
 
     /// Unregister a transaction (called on commit/rollback)
     fn unregister_transaction(&self, tx_id: u64) {
-        let mut active = self.active_transactions.write().unwrap();
+        let mut active = self.active_transactions_write();
         active.retain(|&id| id != tx_id);
     }
 
     /// Get list of active transaction IDs
     pub fn active_transactions(&self) -> Vec<u64> {
-        self.active_transactions.read().unwrap().clone()
+        self.active_transactions_read().clone()
     }
 
     /// Get WAL file path
@@ -346,13 +367,16 @@ impl TransactionManager {
 
     /// Sync WAL to disk
     pub fn sync_wal(&self) -> io::Result<()> {
-        let mut wal = self.wal.lock().unwrap();
+        let mut wal = self
+            .wal
+            .lock()
+            .map_err(|_| io::Error::other("transaction WAL lock poisoned"))?;
         wal.sync()
     }
 
     /// Check if there are active transactions
     pub fn has_active_transactions(&self) -> bool {
-        !self.active_transactions.read().unwrap().is_empty()
+        !self.active_transactions_read().is_empty()
     }
 }
 
@@ -586,6 +610,34 @@ mod tests {
         // This test just verifies commit works
         let tx = tm.begin().unwrap();
         tx.commit().unwrap();
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn test_begin_returns_structured_error_when_wal_lock_is_poisoned() {
+        let dir = temp_dir();
+        let _ = fs::create_dir_all(&dir);
+        let db_path = dir.join("test.db");
+        let wal_path = dir.join("test.wal");
+
+        let pager = Arc::new(Pager::open_default(&db_path).unwrap());
+        let tm = Arc::new(TransactionManager::new(Arc::clone(&pager), &wal_path).unwrap());
+
+        let poison_target = Arc::clone(&tm);
+        let _ = std::thread::spawn(move || {
+            let _guard = poison_target
+                .wal
+                .lock()
+                .expect("wal lock should be acquired");
+            panic!("poison wal mutex");
+        })
+        .join();
+
+        match tm.begin() {
+            Ok(_) => panic!("begin should fail after WAL lock poisoning"),
+            Err(err) => assert!(matches!(err, TxError::LockPoisoned("wal writer"))),
+        }
 
         cleanup(&dir);
     }
