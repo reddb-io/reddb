@@ -167,6 +167,20 @@ impl BloomFilter {
         }
     }
 
+    /// Load from raw bytes with an explicit original bit size.
+    ///
+    /// Use this when `from_bytes` would lose the declared size (when the
+    /// original size was not a multiple of 8). The hash functions reduce
+    /// positions modulo `size`, so restoring with a different value would
+    /// produce false negatives.
+    pub fn from_bytes_with_size(bytes: Vec<u8>, num_hashes: u8, size: u32) -> Self {
+        Self {
+            bits: bytes,
+            num_hashes,
+            size,
+        }
+    }
+
     /// Get size in bytes
     pub fn byte_size(&self) -> usize {
         self.bits.len()
