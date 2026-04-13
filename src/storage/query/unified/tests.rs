@@ -3,40 +3,13 @@ use crate::storage::engine::{
     GraphEdgeType, GraphNodeType, GraphStore, GraphTableIndex, StoredNode,
 };
 use crate::storage::query::ast::*;
+use crate::storage::query::test_support::{add_node_or_panic, unified_query_graph};
 use crate::storage::schema::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 fn create_test_graph() -> Arc<GraphStore> {
-    let graph = GraphStore::new();
-
-    // Add some test nodes
-    graph.add_node("host:192.168.1.1", "192.168.1.1", GraphNodeType::Host);
-    graph.add_node("host:192.168.1.2", "192.168.1.2", GraphNodeType::Host);
-    graph.add_node("svc:ssh:22", "SSH", GraphNodeType::Service);
-    graph.add_node("svc:http:80", "HTTP", GraphNodeType::Service);
-
-    // Add some edges
-    graph.add_edge(
-        "host:192.168.1.1",
-        "svc:ssh:22",
-        GraphEdgeType::HasService,
-        1.0,
-    );
-    graph.add_edge(
-        "host:192.168.1.1",
-        "svc:http:80",
-        GraphEdgeType::HasService,
-        1.0,
-    );
-    graph.add_edge(
-        "host:192.168.1.1",
-        "host:192.168.1.2",
-        GraphEdgeType::ConnectsTo,
-        1.0,
-    );
-
-    Arc::new(graph)
+    unified_query_graph()
 }
 
 fn create_test_index() -> Arc<GraphTableIndex> {
@@ -135,9 +108,9 @@ fn test_matched_node() {
 
 #[test]
 fn test_graph_query_filter_custom_node_property() {
-    let mut graph = GraphStore::new();
-    let _ = graph.add_node("host:1", "host-1", GraphNodeType::Host);
-    let _ = graph.add_node("host:2", "host-2", GraphNodeType::Host);
+    let graph = GraphStore::new();
+    add_node_or_panic(&graph, "host:1", "host-1", GraphNodeType::Host);
+    add_node_or_panic(&graph, "host:2", "host-2", GraphNodeType::Host);
 
     let mut node_properties = HashMap::new();
     node_properties.insert(
