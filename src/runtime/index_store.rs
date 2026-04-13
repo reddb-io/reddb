@@ -401,7 +401,9 @@ impl IndexStore {
                     for (field_name, value) in fields {
                         if field_name == col {
                             let key = value_to_bytes(value);
-                            let _ = self.hash.insert(collection, name, key, *entity_id);
+                            self.hash
+                                .insert(collection, name, key, *entity_id)
+                                .map_err(|err| err.to_string())?;
                             count += 1;
                         }
                     }
@@ -416,7 +418,9 @@ impl IndexStore {
                     for (field_name, value) in fields {
                         if field_name == col {
                             let key = value_to_bytes(value);
-                            self.bitmap.insert(collection, col, *entity_id, &key);
+                            self.bitmap
+                                .insert(collection, col, *entity_id, &key)
+                                .map_err(|err| err.to_string())?;
                             count += 1;
                         }
                     }
@@ -432,22 +436,21 @@ impl IndexStore {
                 // Build sorted in-memory index for range scans
                 let count = self.sorted.build_index(collection, col, entities);
                 // Also build hash index for equality lookups on same column
-                let _ = self.hash.create_index(&HashIndexConfig {
-                    name: format!("{name}_hash"),
-                    collection: collection.to_string(),
-                    columns: columns.to_vec(),
-                    unique: false,
-                });
+                self.hash
+                    .create_index(&HashIndexConfig {
+                        name: format!("{name}_hash"),
+                        collection: collection.to_string(),
+                        columns: columns.to_vec(),
+                        unique: false,
+                    })
+                    .map_err(|err| err.to_string())?;
                 for (entity_id, fields) in entities {
                     for (field_name, value) in fields {
                         if field_name == col {
                             let key = value_to_bytes(value);
-                            let _ = self.hash.insert(
-                                collection,
-                                &format!("{name}_hash"),
-                                key,
-                                *entity_id,
-                            );
+                            self.hash
+                                .insert(collection, &format!("{name}_hash"), key, *entity_id)
+                                .map_err(|err| err.to_string())?;
                         }
                     }
                 }
@@ -529,7 +532,7 @@ impl IndexStore {
         collection: &str,
         entity_id: EntityId,
         fields: &[(String, Value)],
-    ) {
+    ) -> Result<(), String> {
         let registry = self.registry.read().unwrap();
         for idx in registry.values() {
             if idx.collection != collection {
@@ -541,25 +544,32 @@ impl IndexStore {
                     let key = value_to_bytes(value);
                     match idx.method {
                         IndexMethodKind::Hash => {
-                            let _ = self.hash.insert(collection, &idx.name, key, entity_id);
+                            self.hash
+                                .insert(collection, &idx.name, key, entity_id)
+                                .map_err(|err| err.to_string())?;
                         }
                         IndexMethodKind::Bitmap => {
-                            self.bitmap.insert(collection, col, entity_id, &key);
+                            self.bitmap
+                                .insert(collection, col, entity_id, &key)
+                                .map_err(|err| err.to_string())?;
                         }
                         IndexMethodKind::BTree => {
+                            if !self.sorted.has_index(collection, col) {
+                                return Err(format!(
+                                    "sorted index for collection '{collection}' column '{col}' was not found"
+                                ));
+                            }
                             self.sorted.insert_one(collection, col, value, entity_id);
-                            let _ = self.hash.insert(
-                                collection,
-                                &format!("{}_hash", idx.name),
-                                key,
-                                entity_id,
-                            );
+                            self.hash
+                                .insert(collection, &format!("{}_hash", idx.name), key, entity_id)
+                                .map_err(|err| err.to_string())?;
                         }
                         IndexMethodKind::Spatial => {}
                     }
                 }
             }
         }
+        Ok(())
     }
 }
 
@@ -648,5 +658,28 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn test_index_entity_insert_errors_when_registered_hash_index_is_missing() {
+        let store = IndexStore::new();
+        store.register(RegisteredIndex {
+            name: "idx_email".to_string(),
+            collection: "users".to_string(),
+            columns: vec!["email".to_string()],
+            method: IndexMethodKind::Hash,
+            unique: false,
+        });
+
+        let err = store
+            .index_entity_insert(
+                "users",
+                EntityId::new(1),
+                &[("email".to_string(), Value::Text("a@b.com".to_string()))],
+            )
+            .expect_err("missing backing hash index should surface as an error");
+
+        assert!(err.contains("idx_email"));
+        assert!(err.contains("users"));
     }
 }
