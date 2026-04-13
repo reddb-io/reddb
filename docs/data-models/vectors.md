@@ -10,6 +10,26 @@ If you want to work with vectors from the query language, RedDB exposes search c
 SEARCH SIMILAR [0.12, 0.91, 0.44] IN embeddings K 5 MIN_SCORE 0.7
 ```
 
+You can also use the canonical vector-query form:
+
+```sql
+VECTOR SEARCH embeddings SIMILAR TO [0.12, 0.91, 0.44] LIMIT 5
+```
+
+Stored-vector reference form:
+
+```sql
+VECTOR SEARCH embeddings SIMILAR TO (embeddings, 42) LIMIT 5
+```
+
+Subquery source form:
+
+```sql
+VECTOR SEARCH embeddings
+SIMILAR TO (VECTOR SEARCH seed_embeddings SIMILAR TO 'remote code execution' LIMIT 1)
+LIMIT 5
+```
+
 ```sql
 SEARCH TEXT 'machine learning basics' IN docs LIMIT 10
 ```
@@ -111,6 +131,18 @@ IN docs
 K 5
 MIN_SCORE 0.7
 ```
+
+Text-to-embedding form:
+
+```sql
+SEARCH SIMILAR TEXT 'machine learning fundamentals' COLLECTION docs LIMIT 5
+VECTOR SEARCH docs SIMILAR TO 'machine learning fundamentals' LIMIT 5
+```
+
+> [!TIP]
+> `SEARCH SIMILAR TEXT ... USING provider` lets you choose the embedding provider per query.
+> `VECTOR SEARCH ... SIMILAR TO 'text'` uses the runtime default embedding provider and model.
+> `VECTOR SEARCH ... SIMILAR TO (<subquery>)` uses the first subquery row and resolves either an inline vector or a vector entity/reference.
 
 ## IVF Search
 
