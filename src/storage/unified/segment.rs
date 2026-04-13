@@ -346,7 +346,7 @@ impl GrowingSegment {
         }
 
         // Add cross-refs
-        size += entity.cross_refs().len() * std::mem::size_of::<CrossRef>();
+        size += std::mem::size_of_val(entity.cross_refs());
 
         size
     }
