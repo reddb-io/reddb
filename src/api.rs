@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::auth::AuthConfig;
@@ -110,7 +111,7 @@ pub struct RedDBOptions {
     pub force_create: bool,
     pub metadata: BTreeMap<String, String>,
     /// Optional remote storage backend for snapshot transport.
-    pub remote_backend: Option<Box<dyn crate::storage::backend::RemoteBackend>>,
+    pub remote_backend: Option<Arc<dyn crate::storage::backend::RemoteBackend>>,
     /// Remote object key used by the remote backend.
     pub remote_key: Option<String>,
     /// Replication configuration.
@@ -158,8 +159,7 @@ impl Clone for RedDBOptions {
             feature_gates: self.feature_gates.clone(),
             force_create: self.force_create,
             metadata: self.metadata.clone(),
-            // Remote backend is not cloneable; clone produces None.
-            remote_backend: None,
+            remote_backend: self.remote_backend.clone(),
             remote_key: self.remote_key.clone(),
             replication: self.replication.clone(),
             auth: self.auth.clone(),
@@ -284,7 +284,7 @@ impl RedDBOptions {
     /// to the remote backend under the same key.
     pub fn with_remote_backend(
         mut self,
-        backend: Box<dyn crate::storage::backend::RemoteBackend>,
+        backend: Arc<dyn crate::storage::backend::RemoteBackend>,
         key: impl Into<String>,
     ) -> Self {
         self.remote_backend = Some(backend);
@@ -306,6 +306,41 @@ impl RedDBOptions {
         self.data_path
             .clone()
             .unwrap_or_else(|| fallback.as_ref().to_path_buf())
+    }
+
+    pub fn remote_namespace_prefix(&self) -> String {
+        let Some(remote_key) = &self.remote_key else {
+            return String::new();
+        };
+        let normalized = remote_key.trim_matches('/');
+        if normalized.is_empty() {
+            return String::new();
+        }
+        match normalized.rsplit_once('/') {
+            Some((parent, _)) if !parent.is_empty() => format!("{parent}/"),
+            _ => String::new(),
+        }
+    }
+
+    pub fn default_backup_head_key(&self) -> String {
+        if let Some(value) = self.metadata.get("red.config.backup.head_key") {
+            return value.clone();
+        }
+        format!("{}manifests/head.json", self.remote_namespace_prefix())
+    }
+
+    pub fn default_snapshot_prefix(&self) -> String {
+        if let Some(value) = self.metadata.get("red.config.backup.snapshot_prefix") {
+            return value.clone();
+        }
+        format!("{}snapshots/", self.remote_namespace_prefix())
+    }
+
+    pub fn default_wal_archive_prefix(&self) -> String {
+        if let Some(value) = self.metadata.get("red.config.wal.archive.prefix") {
+            return value.clone();
+        }
+        format!("{}wal/", self.remote_namespace_prefix())
     }
 
     pub fn has_capability(&self, capability: Capability) -> bool {

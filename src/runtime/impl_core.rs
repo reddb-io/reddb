@@ -1,4 +1,7 @@
 use super::*;
+use crate::application::entity::metadata_to_json;
+use crate::replication::cdc::ChangeRecord;
+use crate::replication::logical::{ApplyMode, LogicalChangeApplier};
 
 fn runtime_pool_lock(runtime: &RedDBRuntime) -> std::sync::MutexGuard<'_, PoolState> {
     runtime
@@ -58,6 +61,24 @@ impl RedDBRuntime {
                 commit_lock: Mutex::new(()),
             }),
         };
+
+        let restored_cdc_lsn = runtime
+            .inner
+            .db
+            .replication
+            .as_ref()
+            .map(|repl| {
+                repl.logical_wal_spool
+                    .as_ref()
+                    .map(|spool| spool.current_lsn())
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0)
+            .max(runtime.config_u64("red.config.timeline.last_archived_lsn", 0));
+        runtime.inner.cdc.set_current_lsn(restored_cdc_lsn);
+        if let Some(repl) = &runtime.inner.db.replication {
+            repl.wal_buffer.set_current_lsn(restored_cdc_lsn);
+        }
 
         // Save system info to red_config on boot
         {
@@ -336,6 +357,16 @@ impl RedDBRuntime {
             }
         }
 
+        if let crate::replication::ReplicationRole::Replica { primary_addr } =
+            runtime.inner.db.options().replication.role.clone()
+        {
+            let rt = runtime.clone();
+            std::thread::Builder::new()
+                .name("reddb-replica".into())
+                .spawn(move || rt.run_replica_loop(primary_addr))
+                .ok();
+        }
+
         Ok(runtime)
     }
 
@@ -425,6 +456,112 @@ impl RedDBRuntime {
         result
     }
 
+    pub(crate) fn config_u64(&self, key: &str, default: u64) -> u64 {
+        let store = self.inner.db.store();
+        let Some(manager) = store.get_collection("red_config") else {
+            return default;
+        };
+        let mut result = default;
+        let mut latest_id: u64 = 0;
+        manager.for_each_entity(|entity| {
+            if let Some(row) = entity.data.as_row() {
+                let entry_key = row.get_field("key").and_then(|v| match v {
+                    crate::storage::schema::Value::Text(s) => Some(s.as_str()),
+                    _ => None,
+                });
+                if entry_key == Some(key) {
+                    let id = entity.id.raw();
+                    if id >= latest_id {
+                        latest_id = id;
+                        result = match row.get_field("value") {
+                            Some(crate::storage::schema::Value::Integer(n)) => *n as u64,
+                            Some(crate::storage::schema::Value::UnsignedInteger(n)) => *n,
+                            Some(crate::storage::schema::Value::Text(s)) => {
+                                s.parse::<u64>().unwrap_or(default)
+                            }
+                            _ => default,
+                        };
+                    }
+                }
+            }
+            true
+        });
+        result
+    }
+
+    pub(crate) fn config_string(&self, key: &str, default: &str) -> String {
+        let store = self.inner.db.store();
+        let Some(manager) = store.get_collection("red_config") else {
+            return default.to_string();
+        };
+        let mut result = default.to_string();
+        let mut latest_id: u64 = 0;
+        manager.for_each_entity(|entity| {
+            if let Some(row) = entity.data.as_row() {
+                let entry_key = row.get_field("key").and_then(|v| match v {
+                    crate::storage::schema::Value::Text(s) => Some(s.as_str()),
+                    _ => None,
+                });
+                if entry_key == Some(key) {
+                    let id = entity.id.raw();
+                    if id >= latest_id {
+                        latest_id = id;
+                        if let Some(crate::storage::schema::Value::Text(value)) =
+                            row.get_field("value")
+                        {
+                            result = value.clone();
+                        }
+                    }
+                }
+            }
+            true
+        });
+        result
+    }
+
+    fn latest_metadata_for(
+        &self,
+        collection: &str,
+        entity_id: u64,
+    ) -> Option<crate::serde_json::Value> {
+        self.inner
+            .db
+            .store()
+            .get_metadata(collection, EntityId::new(entity_id))
+            .map(|metadata| metadata_to_json(&metadata))
+    }
+
+    fn persist_replica_lsn(&self, lsn: u64) {
+        self.inner.db.store().set_config_tree(
+            "red.replication",
+            &crate::json!({
+                "last_applied_lsn": lsn
+            }),
+        );
+    }
+
+    fn persist_replication_health(
+        &self,
+        state: &str,
+        last_error: &str,
+        primary_lsn: Option<u64>,
+        oldest_available_lsn: Option<u64>,
+    ) {
+        self.inner.db.store().set_config_tree(
+            "red.replication",
+            &crate::json!({
+                "state": state,
+                "last_error": last_error,
+                "last_seen_primary_lsn": primary_lsn.unwrap_or(0),
+                "last_seen_oldest_lsn": oldest_available_lsn.unwrap_or(0),
+                "updated_at_unix_ms": SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64
+            }),
+        );
+    }
+
     /// Whether `SECRET('...')` literals should be encrypted with the
     /// vault AES key on INSERT. Default `true`.
     pub(crate) fn secret_auto_encrypt(&self) -> bool {
@@ -475,22 +612,188 @@ impl RedDBRuntime {
         entity_id: u64,
         entity_kind: &str,
     ) {
-        self.inner
+        let lsn = self
+            .inner
             .cdc
             .emit(operation, collection, entity_id, entity_kind);
         self.invalidate_result_cache();
 
-        // Append to WAL replication buffer (if primary mode)
+        // Append to logical WAL replication buffer (if primary mode)
         if let Some(ref primary) = self.inner.db.replication {
-            let record = format!(
-                "{}:{}:{}:{}",
-                operation.as_str(),
-                collection,
+            let store = self.inner.db.store();
+            let entity = if operation == crate::replication::cdc::ChangeOperation::Delete {
+                None
+            } else {
+                store.get(collection, EntityId::new(entity_id))
+            };
+            let record = ChangeRecord {
+                lsn,
+                timestamp: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+                operation,
+                collection: collection.to_string(),
                 entity_id,
-                entity_kind
-            );
-            primary.wal_buffer.append(record.into_bytes());
+                entity_kind: entity_kind.to_string(),
+                entity_bytes: entity
+                    .as_ref()
+                    .map(|entity| UnifiedStore::serialize_entity(entity, store.format_version())),
+                metadata: self.latest_metadata_for(collection, entity_id),
+            };
+            let encoded = record.encode();
+            primary.wal_buffer.append(record.lsn, encoded.clone());
+            if let Some(spool) = &primary.logical_wal_spool {
+                let _ = spool.append(record.lsn, &encoded);
+            }
         }
+    }
+
+    fn run_replica_loop(&self, primary_addr: String) {
+        let endpoint = if primary_addr.starts_with("http") {
+            primary_addr
+        } else {
+            format!("http://{primary_addr}")
+        };
+        let poll_ms = self.inner.db.options().replication.poll_interval_ms;
+        let max_count = self.inner.db.options().replication.max_batch_size;
+        let mut since_lsn = self.config_u64("red.replication.last_applied_lsn", 0);
+
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(_) => return,
+        };
+
+        runtime.block_on(async move {
+            use crate::grpc::proto::red_db_client::RedDbClient;
+            use crate::grpc::proto::JsonPayloadRequest;
+
+            let mut client = loop {
+                match RedDbClient::connect(endpoint.clone()).await {
+                    Ok(client) => {
+                        self.persist_replication_health("connecting", "", None, None);
+                        break client;
+                    }
+                    Err(_) => {
+                        self.persist_replication_health(
+                            "connecting",
+                            "waiting for primary connection",
+                            None,
+                            None,
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(poll_ms.max(250)))
+                    }
+                }
+            };
+
+            loop {
+                let payload = crate::json!({
+                    "since_lsn": since_lsn,
+                    "max_count": max_count
+                });
+                let request = tonic::Request::new(JsonPayloadRequest {
+                    payload_json: crate::json::to_string(&payload)
+                        .unwrap_or_else(|_| "{}".to_string()),
+                });
+
+                if let Ok(response) = client.pull_wal_records(request).await {
+                    if let Ok(value) =
+                        crate::json::from_str::<crate::json::Value>(&response.into_inner().payload)
+                    {
+                        let current_lsn =
+                            value.get("current_lsn").and_then(crate::json::Value::as_u64);
+                        let oldest_available_lsn = value
+                            .get("oldest_available_lsn")
+                            .and_then(crate::json::Value::as_u64);
+                        if since_lsn > 0
+                            && oldest_available_lsn
+                                .map(|oldest| oldest > since_lsn.saturating_add(1))
+                                .unwrap_or(false)
+                        {
+                            self.persist_replication_health(
+                                "stalled_gap",
+                                "replica is behind the oldest logical WAL available on primary; re-bootstrap required",
+                                current_lsn,
+                                oldest_available_lsn,
+                            );
+                            std::thread::sleep(std::time::Duration::from_millis(poll_ms.max(250)));
+                            continue;
+                        }
+                        if let Some(records) =
+                            value.get("records").and_then(crate::json::Value::as_array)
+                        {
+                            for record in records {
+                                let Some(data_hex) =
+                                    record.get("data").and_then(crate::json::Value::as_str)
+                                else {
+                                    continue;
+                                };
+                                let Ok(data) = hex::decode(data_hex) else {
+                                    self.persist_replication_health(
+                                        "apply_error",
+                                        "failed to decode WAL record hex payload",
+                                        current_lsn,
+                                        oldest_available_lsn,
+                                    );
+                                    continue;
+                                };
+                                let Ok(change) = ChangeRecord::decode(&data) else {
+                                    self.persist_replication_health(
+                                        "apply_error",
+                                        "failed to decode logical WAL record",
+                                        current_lsn,
+                                        oldest_available_lsn,
+                                    );
+                                    continue;
+                                };
+                                if LogicalChangeApplier::apply_record(
+                                    self.inner.db.as_ref(),
+                                    &change,
+                                    ApplyMode::Replica,
+                                )
+                                .is_err()
+                                {
+                                    self.persist_replication_health(
+                                        "apply_error",
+                                        "failed to apply logical WAL record on replica",
+                                        current_lsn,
+                                        oldest_available_lsn,
+                                    );
+                                    continue;
+                                }
+                                since_lsn = since_lsn.max(change.lsn);
+                                self.persist_replica_lsn(since_lsn);
+                            }
+                        }
+                        self.persist_replication_health(
+                            "healthy",
+                            "",
+                            current_lsn,
+                            oldest_available_lsn,
+                        );
+                    } else {
+                        self.persist_replication_health(
+                            "apply_error",
+                            "failed to parse pull_wal_records response",
+                            None,
+                            None,
+                        );
+                    }
+                } else {
+                    self.persist_replication_health(
+                        "connecting",
+                        "primary pull_wal_records request failed",
+                        None,
+                        None,
+                    );
+                }
+
+                std::thread::sleep(std::time::Duration::from_millis(poll_ms));
+            }
+        });
     }
 
     /// Poll CDC events since a given LSN.
@@ -511,9 +814,113 @@ impl RedDBRuntime {
     pub fn trigger_backup(&self) -> RedDBResult<crate::replication::scheduler::BackupResult> {
         let started = std::time::Instant::now();
         let snapshot = self.create_snapshot()?;
+        let mut uploaded = false;
+
+        if let (Some(backend), Some(path)) = (&self.inner.db.remote_backend, self.inner.db.path()) {
+            let default_snapshot_prefix = self.inner.db.options().default_snapshot_prefix();
+            let default_wal_prefix = self.inner.db.options().default_wal_archive_prefix();
+            let default_head_key = self.inner.db.options().default_backup_head_key();
+            let snapshot_prefix = self.config_string(
+                "red.config.backup.snapshot_prefix",
+                &default_snapshot_prefix,
+            );
+            let wal_prefix =
+                self.config_string("red.config.wal.archive.prefix", &default_wal_prefix);
+            let head_key = self.config_string("red.config.backup.head_key", &default_head_key);
+            let timeline_id = self.config_string("red.config.timeline.id", "main");
+            let snapshot_key = crate::storage::wal::archive_snapshot(
+                backend.as_ref(),
+                path,
+                snapshot.snapshot_id,
+                &snapshot_prefix,
+            )
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+            let current_lsn = self
+                .inner
+                .db
+                .replication
+                .as_ref()
+                .map(|repl| {
+                    repl.logical_wal_spool
+                        .as_ref()
+                        .map(|spool| spool.current_lsn())
+                        .unwrap_or_else(|| repl.wal_buffer.current_lsn())
+                })
+                .unwrap_or_else(|| self.inner.cdc.current_lsn());
+            let last_archived_lsn = self.config_u64("red.config.timeline.last_archived_lsn", 0);
+            let manifest = crate::storage::wal::SnapshotManifest {
+                timeline_id: timeline_id.clone(),
+                snapshot_key: snapshot_key.clone(),
+                snapshot_id: snapshot.snapshot_id,
+                snapshot_time: snapshot.created_at_unix_ms as u64,
+                base_lsn: current_lsn,
+                schema_version: crate::api::REDDB_FORMAT_VERSION,
+                format_version: crate::api::REDDB_FORMAT_VERSION,
+            };
+            crate::storage::wal::publish_snapshot_manifest(backend.as_ref(), &manifest)
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+
+            let archived_lsn = if let Some(primary) = &self.inner.db.replication {
+                let oldest = primary
+                    .logical_wal_spool
+                    .as_ref()
+                    .and_then(|spool| spool.oldest_lsn().ok().flatten())
+                    .or_else(|| primary.wal_buffer.oldest_lsn())
+                    .unwrap_or(last_archived_lsn);
+                if last_archived_lsn > 0 && last_archived_lsn < oldest.saturating_sub(1) {
+                    return Err(RedDBError::Internal(format!(
+                        "logical WAL gap detected: last_archived_lsn={last_archived_lsn}, oldest_available_lsn={oldest}"
+                    )));
+                }
+                let records = if let Some(spool) = &primary.logical_wal_spool {
+                    spool
+                        .read_since(last_archived_lsn, usize::MAX)
+                        .map_err(|err| RedDBError::Internal(err.to_string()))?
+                } else {
+                    primary.wal_buffer.read_since(last_archived_lsn, usize::MAX)
+                };
+                if let Some(meta) = crate::storage::wal::archive_change_records(
+                    backend.as_ref(),
+                    &wal_prefix,
+                    &records,
+                )
+                .map_err(|err| RedDBError::Internal(err.to_string()))?
+                {
+                    if let Some(spool) = &primary.logical_wal_spool {
+                        let _ = spool.prune_through(meta.lsn_end);
+                    }
+                    meta.lsn_end
+                } else {
+                    last_archived_lsn
+                }
+            } else {
+                last_archived_lsn
+            };
+
+            let head = crate::storage::wal::BackupHead {
+                timeline_id,
+                snapshot_key,
+                snapshot_id: snapshot.snapshot_id,
+                snapshot_time: snapshot.created_at_unix_ms as u64,
+                current_lsn,
+                last_archived_lsn: archived_lsn,
+                wal_prefix,
+            };
+            crate::storage::wal::publish_backup_head(backend.as_ref(), &head_key, &head)
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+            self.inner.db.store().set_config_tree(
+                "red.config.timeline",
+                &crate::json!({
+                    "last_archived_lsn": archived_lsn,
+                    "id": head.timeline_id
+                }),
+            );
+            uploaded = true;
+        }
+
         Ok(crate::replication::scheduler::BackupResult {
             snapshot_id: snapshot.snapshot_id,
-            uploaded: false, // TODO: auto-upload when backend configured
+            uploaded,
             duration_ms: started.elapsed().as_millis() as u64,
             timestamp: snapshot.created_at_unix_ms as u64,
         })

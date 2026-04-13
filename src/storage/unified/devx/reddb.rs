@@ -72,7 +72,7 @@ pub struct RedDB {
     /// Default TTL policy declared at the collection level, in milliseconds.
     collection_ttl_defaults_ms: RwLock<HashMap<String, u64>>,
     /// Optional remote storage backend for snapshot transport.
-    pub(crate) remote_backend: Option<Box<dyn crate::storage::backend::RemoteBackend>>,
+    pub(crate) remote_backend: Option<Arc<dyn crate::storage::backend::RemoteBackend>>,
     /// Remote object key used by the remote backend.
     pub(crate) remote_key: Option<String>,
     /// Primary replication state (only present when role is Primary).

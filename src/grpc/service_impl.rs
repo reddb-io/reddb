@@ -2260,13 +2260,22 @@ async fn replication_status(
         crate::replication::ReplicationRole::Primary => {
             map.insert("role".into(), JsonValue::String("primary".into()));
             if let Some(ref repl) = db.replication {
-                let lsn = repl.wal_buffer.current_lsn();
+                let lsn = repl
+                    .logical_wal_spool
+                    .as_ref()
+                    .map(|spool| spool.current_lsn())
+                    .unwrap_or_else(|| repl.wal_buffer.current_lsn());
                 map.insert("current_lsn".into(), JsonValue::Number(lsn as f64));
                 map.insert(
                     "replica_count".into(),
                     JsonValue::Number(repl.replica_count() as f64),
                 );
-                if let Some(oldest) = repl.wal_buffer.oldest_lsn() {
+                if let Some(oldest) = repl
+                    .logical_wal_spool
+                    .as_ref()
+                    .and_then(|spool| spool.oldest_lsn().ok().flatten())
+                    .or_else(|| repl.wal_buffer.oldest_lsn())
+                {
                     map.insert("oldest_available_lsn".into(), JsonValue::Number(oldest as f64));
                 }
             }
@@ -2274,6 +2283,35 @@ async fn replication_status(
         crate::replication::ReplicationRole::Replica { primary_addr } => {
             map.insert("role".into(), JsonValue::String("replica".into()));
             map.insert("primary_addr".into(), JsonValue::String(primary_addr.clone()));
+            map.insert(
+                "last_applied_lsn".into(),
+                JsonValue::Number(
+                    self.runtime
+                        .config_u64("red.replication.last_applied_lsn", 0) as f64,
+                ),
+            );
+            map.insert(
+                "state".into(),
+                JsonValue::String(self.runtime.config_string("red.replication.state", "idle")),
+            );
+            let last_error = self.runtime.config_string("red.replication.last_error", "");
+            if !last_error.is_empty() {
+                map.insert("last_error".into(), JsonValue::String(last_error));
+            }
+            map.insert(
+                "last_seen_primary_lsn".into(),
+                JsonValue::Number(
+                    self.runtime
+                        .config_u64("red.replication.last_seen_primary_lsn", 0) as f64,
+                ),
+            );
+            map.insert(
+                "last_seen_oldest_lsn".into(),
+                JsonValue::Number(
+                    self.runtime
+                        .config_u64("red.replication.last_seen_oldest_lsn", 0) as f64,
+                ),
+            );
         }
     }
 
@@ -2294,7 +2332,13 @@ async fn pull_wal_records(
     let since_lsn = json_usize_field(&payload, "since_lsn").unwrap_or(0) as u64;
     let max_count = json_usize_field(&payload, "max_count").unwrap_or(1000);
 
-    let records = repl.wal_buffer.read_since(since_lsn, max_count);
+    let records = if let Some(spool) = &repl.logical_wal_spool {
+        spool
+            .read_since(since_lsn, max_count)
+            .map_err(|err| Status::internal(err.to_string()))?
+    } else {
+        repl.wal_buffer.read_since(since_lsn, max_count)
+    };
     let mut entries = Vec::with_capacity(records.len());
     for (lsn, data) in &records {
         let mut entry = crate::json::Map::new();
@@ -2307,8 +2351,21 @@ async fn pull_wal_records(
     map.insert("records".into(), JsonValue::Array(entries));
     map.insert(
         "current_lsn".into(),
-        JsonValue::Number(repl.wal_buffer.current_lsn() as f64),
+        JsonValue::Number(
+            repl.logical_wal_spool
+                .as_ref()
+                .map(|spool| spool.current_lsn())
+                .unwrap_or_else(|| repl.wal_buffer.current_lsn()) as f64,
+        ),
     );
+    if let Some(oldest) = repl
+        .logical_wal_spool
+        .as_ref()
+        .and_then(|spool| spool.oldest_lsn().ok().flatten())
+        .or_else(|| repl.wal_buffer.oldest_lsn())
+    {
+        map.insert("oldest_available_lsn".into(), JsonValue::Number(oldest as f64));
+    }
 
     Ok(Response::new(json_payload_reply(JsonValue::Object(map))))
 }
@@ -2332,6 +2389,8 @@ async fn replication_snapshot(
     let mut map = crate::json::Map::new();
     map.insert("snapshot_available".into(), JsonValue::Bool(true));
     if let Some(path) = db.path() {
+        let bytes = std::fs::read(path).map_err(|e| Status::internal(e.to_string()))?;
+        map.insert("snapshot_hex".into(), JsonValue::String(hex::encode(bytes)));
         map.insert(
             "snapshot_path".into(),
             JsonValue::String(path.display().to_string()),
@@ -2340,7 +2399,12 @@ async fn replication_snapshot(
     if let Some(ref repl) = db.replication {
         map.insert(
             "snapshot_lsn".into(),
-            JsonValue::Number(repl.wal_buffer.current_lsn() as f64),
+            JsonValue::Number(
+                repl.logical_wal_spool
+                    .as_ref()
+                    .map(|spool| spool.current_lsn())
+                    .unwrap_or_else(|| repl.wal_buffer.current_lsn()) as f64,
+            ),
         );
     }
 

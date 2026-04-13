@@ -11,6 +11,7 @@
 FROM rust:1.91-slim-bookworm AS builder
 
 ARG DEBIAN_FRONTEND=noninteractive
+ARG REDDB_CARGO_FEATURES=""
 ENV CARGO_PROFILE_RELEASE_STRIP=symbols
 
 RUN apt-get update \
@@ -27,23 +28,25 @@ COPY proto/ proto/
 RUN mkdir -p src/bin \
     && echo 'fn main() {}' > src/bin/red.rs \
     && echo '' > src/lib.rs \
-    && cargo build --release --locked --bin red 2>/dev/null || true \
+    && cargo build --release --locked --bin red ${REDDB_CARGO_FEATURES:+--features ${REDDB_CARGO_FEATURES}} 2>/dev/null || true \
     && rm -rf src
 
 # Copy full source and build for real
 COPY benches/ benches/
 COPY src/ src/
 
-RUN cargo build --release --locked --bin red
+RUN cargo build --release --locked --bin red ${REDDB_CARGO_FEATURES:+--features ${REDDB_CARGO_FEATURES}}
 
-FROM debian:bookworm-slim AS runtime-prep
+FROM debian:bookworm-slim AS runtime
 
-RUN install -d -o 10001 -g 10001 -m 0750 /data \
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && install -d -o 10001 -g 10001 -m 0750 /data \
     && install -o 10001 -g 10001 -m 0640 /dev/null /data/.keep
 
-FROM gcr.io/distroless/cc-debian12:latest
-
-COPY --from=runtime-prep --chown=10001:10001 /data /data
 COPY --from=builder --chown=10001:10001 /app/target/release/red /usr/local/bin/red
 
 WORKDIR /data

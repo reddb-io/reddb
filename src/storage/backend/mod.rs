@@ -21,7 +21,7 @@
 //! });
 //!
 //! let options = RedDBOptions::persistent("./local-cache")
-//!     .with_remote_backend(Box::new(backend), "databases/mydb.rdb");
+//!     .with_remote_backend(std::sync::Arc::new(backend), "databases/mydb.rdb");
 //! ```
 
 #[cfg(feature = "backend-d1")]
@@ -85,6 +85,9 @@ pub trait RemoteBackend: Send + Sync {
 
     /// Delete a remote object. Returns Ok(()) even if it didn't exist.
     fn delete(&self, remote_key: &str) -> Result<(), BackendError>;
+
+    /// List remote objects matching a prefix.
+    fn list(&self, prefix: &str) -> Result<Vec<String>, BackendError>;
 }
 
 #[cfg(feature = "backend-d1")]

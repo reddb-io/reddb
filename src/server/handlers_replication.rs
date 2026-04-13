@@ -9,52 +9,77 @@ impl RedDBServer {
     pub(crate) fn handle_replication_status(&self) -> HttpResponse {
         let mut object = Map::new();
         object.insert("ok".to_string(), JsonValue::Bool(true));
-
-        match &self.replication {
-            Some(replication) => {
-                let role_str = match &replication.config.role {
-                    crate::replication::ReplicationRole::Standalone => "standalone",
-                    crate::replication::ReplicationRole::Primary => "primary",
-                    crate::replication::ReplicationRole::Replica { .. } => "replica",
-                };
-                object.insert("role".to_string(), JsonValue::String(role_str.to_string()));
-
-                if let Some(ref primary) = replication.primary {
-                    let wal_lsn = primary.wal_buffer.current_lsn();
+        let db = self.runtime.db();
+        match &db.options().replication.role {
+            crate::replication::ReplicationRole::Standalone => {
+                object.insert(
+                    "role".to_string(),
+                    JsonValue::String("standalone".to_string()),
+                );
+            }
+            crate::replication::ReplicationRole::Primary => {
+                object.insert("role".to_string(), JsonValue::String("primary".to_string()));
+                if let Some(ref primary) = db.replication {
+                    let wal_lsn = primary
+                        .logical_wal_spool
+                        .as_ref()
+                        .map(|spool| spool.current_lsn())
+                        .unwrap_or_else(|| primary.wal_buffer.current_lsn());
                     object.insert("wal_lsn".to_string(), JsonValue::Number(wal_lsn as f64));
-
-                    let oldest = primary.wal_buffer.oldest_lsn();
-                    if let Some(oldest_lsn) = oldest {
+                    if let Some(oldest_lsn) = primary
+                        .logical_wal_spool
+                        .as_ref()
+                        .and_then(|spool| spool.oldest_lsn().ok().flatten())
+                        .or_else(|| primary.wal_buffer.oldest_lsn())
+                    {
                         object.insert(
                             "oldest_lsn".to_string(),
                             JsonValue::Number(oldest_lsn as f64),
                         );
                     }
-
-                    let replica_count = primary.replica_count();
                     object.insert(
                         "replica_count".to_string(),
-                        JsonValue::Number(replica_count as f64),
-                    );
-                }
-
-                if let crate::replication::ReplicationRole::Replica { ref primary_addr } =
-                    replication.config.role
-                {
-                    object.insert(
-                        "primary_addr".to_string(),
-                        JsonValue::String(primary_addr.clone()),
+                        JsonValue::Number(primary.replica_count() as f64),
                     );
                 }
             }
-            None => {
+            crate::replication::ReplicationRole::Replica { primary_addr } => {
+                object.insert("role".to_string(), JsonValue::String("replica".to_string()));
                 object.insert(
-                    "role".to_string(),
-                    JsonValue::String("standalone".to_string()),
+                    "primary_addr".to_string(),
+                    JsonValue::String(primary_addr.clone()),
                 );
                 object.insert(
-                    "note".to_string(),
-                    JsonValue::String("replication is not configured".to_string()),
+                    "last_applied_lsn".to_string(),
+                    JsonValue::Number(
+                        self.runtime
+                            .config_u64("red.replication.last_applied_lsn", 0)
+                            as f64,
+                    ),
+                );
+                object.insert(
+                    "state".to_string(),
+                    JsonValue::String(self.runtime.config_string("red.replication.state", "idle")),
+                );
+                let last_error = self.runtime.config_string("red.replication.last_error", "");
+                if !last_error.is_empty() {
+                    object.insert("last_error".to_string(), JsonValue::String(last_error));
+                }
+                object.insert(
+                    "last_seen_primary_lsn".to_string(),
+                    JsonValue::Number(
+                        self.runtime
+                            .config_u64("red.replication.last_seen_primary_lsn", 0)
+                            as f64,
+                    ),
+                );
+                object.insert(
+                    "last_seen_oldest_lsn".to_string(),
+                    JsonValue::Number(
+                        self.runtime
+                            .config_u64("red.replication.last_seen_oldest_lsn", 0)
+                            as f64,
+                    ),
                 );
             }
         }

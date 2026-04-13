@@ -46,4 +46,50 @@ impl RemoteBackend for LocalBackend {
         }
         Ok(())
     }
+
+    fn list(&self, prefix: &str) -> Result<Vec<String>, BackendError> {
+        let prefix_path = Path::new(prefix);
+        let mut results = Vec::new();
+
+        if prefix_path.is_dir() {
+            fn walk(dir: &Path, out: &mut Vec<String>) -> Result<(), BackendError> {
+                for entry in fs::read_dir(dir)
+                    .map_err(|e| BackendError::Transport(format!("read_dir failed: {e}")))?
+                {
+                    let entry = entry
+                        .map_err(|e| BackendError::Transport(format!("dir entry failed: {e}")))?;
+                    let path = entry.path();
+                    if path.is_dir() {
+                        walk(&path, out)?;
+                    } else if path.is_file() {
+                        out.push(path.to_string_lossy().to_string());
+                    }
+                }
+                Ok(())
+            }
+
+            walk(prefix_path, &mut results)?;
+        } else {
+            let parent = prefix_path.parent().unwrap_or_else(|| Path::new("."));
+            let needle = prefix_path.to_string_lossy().to_string();
+            if parent.exists() {
+                for entry in fs::read_dir(parent)
+                    .map_err(|e| BackendError::Transport(format!("read_dir failed: {e}")))?
+                {
+                    let entry = entry
+                        .map_err(|e| BackendError::Transport(format!("dir entry failed: {e}")))?;
+                    let path = entry.path();
+                    if path.is_file() {
+                        let candidate = path.to_string_lossy().to_string();
+                        if candidate.starts_with(&needle) {
+                            results.push(candidate);
+                        }
+                    }
+                }
+            }
+        }
+
+        results.sort();
+        Ok(results)
+    }
 }

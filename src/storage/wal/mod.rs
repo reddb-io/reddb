@@ -16,7 +16,11 @@ pub mod recovery;
 pub mod transaction;
 pub mod writer;
 
-pub use archiver::{WalArchiver, WalSegmentMeta};
+pub use archiver::{
+    archive_change_records, archive_snapshot, load_archived_change_records, load_backup_head,
+    load_snapshot_manifest, publish_backup_head, publish_snapshot_manifest, snapshot_manifest_key,
+    BackupHead, SnapshotManifest, WalArchiver, WalSegmentMeta,
+};
 pub use checkpoint::{CheckpointError, CheckpointMode, CheckpointResult, Checkpointer};
 pub use reader::WalReader;
 pub use record::{RecordType, WalRecord};

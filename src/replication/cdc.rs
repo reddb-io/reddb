@@ -7,6 +7,8 @@ use std::collections::VecDeque;
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::json::{Map, Value as JsonValue};
+
 /// Type of change operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangeOperation {
@@ -16,6 +18,15 @@ pub enum ChangeOperation {
 }
 
 impl ChangeOperation {
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "insert" => Some(Self::Insert),
+            "update" => Some(Self::Update),
+            "delete" => Some(Self::Delete),
+            _ => None,
+        }
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Insert => "insert",
@@ -40,6 +51,104 @@ pub struct ChangeEvent {
     pub entity_id: u64,
     /// Entity kind (table, graph_node, graph_edge, vector, etc.)
     pub entity_kind: String,
+}
+
+/// Structured logical WAL record serialized into the replication buffer and
+/// archived segments.
+#[derive(Debug, Clone)]
+pub struct ChangeRecord {
+    pub lsn: u64,
+    pub timestamp: u64,
+    pub operation: ChangeOperation,
+    pub collection: String,
+    pub entity_id: u64,
+    pub entity_kind: String,
+    pub entity_bytes: Option<Vec<u8>>,
+    pub metadata: Option<JsonValue>,
+}
+
+impl ChangeRecord {
+    pub fn to_json_value(&self) -> JsonValue {
+        let mut object = Map::new();
+        object.insert("lsn".to_string(), JsonValue::Number(self.lsn as f64));
+        object.insert(
+            "timestamp".to_string(),
+            JsonValue::Number(self.timestamp as f64),
+        );
+        object.insert(
+            "operation".to_string(),
+            JsonValue::String(self.operation.as_str().to_string()),
+        );
+        object.insert(
+            "collection".to_string(),
+            JsonValue::String(self.collection.clone()),
+        );
+        object.insert(
+            "entity_id".to_string(),
+            JsonValue::Number(self.entity_id as f64),
+        );
+        object.insert(
+            "entity_kind".to_string(),
+            JsonValue::String(self.entity_kind.clone()),
+        );
+        if let Some(bytes) = &self.entity_bytes {
+            object.insert(
+                "entity_bytes_hex".to_string(),
+                JsonValue::String(hex::encode(bytes)),
+            );
+        }
+        if let Some(metadata) = &self.metadata {
+            object.insert("metadata".to_string(), metadata.clone());
+        }
+        JsonValue::Object(object)
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        crate::json::to_string(&self.to_json_value())
+            .unwrap_or_else(|_| "{}".to_string())
+            .into_bytes()
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
+        let text = std::str::from_utf8(bytes).map_err(|err| err.to_string())?;
+        let value = crate::json::from_str::<JsonValue>(text).map_err(|err| err.to_string())?;
+        let operation = value
+            .get("operation")
+            .and_then(JsonValue::as_str)
+            .and_then(ChangeOperation::from_str)
+            .ok_or_else(|| "invalid replication operation".to_string())?;
+        let entity_bytes = value
+            .get("entity_bytes_hex")
+            .and_then(JsonValue::as_str)
+            .map(hex::decode)
+            .transpose()
+            .map_err(|err| err.to_string())?;
+
+        Ok(Self {
+            lsn: value.get("lsn").and_then(JsonValue::as_u64).unwrap_or(0),
+            timestamp: value
+                .get("timestamp")
+                .and_then(JsonValue::as_u64)
+                .unwrap_or(0),
+            operation,
+            collection: value
+                .get("collection")
+                .and_then(JsonValue::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            entity_id: value
+                .get("entity_id")
+                .and_then(JsonValue::as_u64)
+                .unwrap_or(0),
+            entity_kind: value
+                .get("entity_kind")
+                .and_then(JsonValue::as_str)
+                .unwrap_or("entity")
+                .to_string(),
+            entity_bytes,
+            metadata: value.get("metadata").cloned(),
+        })
+    }
 }
 
 /// Internal state protected by a single lock (prevents lock-ordering deadlocks).
@@ -116,6 +225,12 @@ impl CdcBuffer {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .current_lsn
+    }
+
+    /// Restore the LSN cursor after process restart.
+    pub fn set_current_lsn(&self, lsn: u64) {
+        let mut state = self.state.write().unwrap_or_else(|e| e.into_inner());
+        state.current_lsn = state.current_lsn.max(lsn);
     }
 
     /// Get the oldest available LSN (or None if empty).
@@ -201,5 +316,25 @@ mod tests {
         assert_eq!(stats.current_lsn, 2);
         assert_eq!(stats.oldest_lsn, Some(1));
         assert_eq!(stats.newest_lsn, Some(2));
+    }
+
+    #[test]
+    fn test_change_record_roundtrip() {
+        let record = ChangeRecord {
+            lsn: 7,
+            timestamp: 1234,
+            operation: ChangeOperation::Update,
+            collection: "users".to_string(),
+            entity_id: 42,
+            entity_kind: "row".to_string(),
+            entity_bytes: Some(vec![1, 2, 3]),
+            metadata: Some(crate::json!({"role": "admin"})),
+        };
+
+        let decoded = ChangeRecord::decode(&record.encode()).expect("decode");
+        assert_eq!(decoded.lsn, record.lsn);
+        assert_eq!(decoded.collection, record.collection);
+        assert_eq!(decoded.entity_id, record.entity_id);
+        assert_eq!(decoded.entity_bytes, record.entity_bytes);
     }
 }

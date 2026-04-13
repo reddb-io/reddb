@@ -143,6 +143,16 @@ impl S3Backend {
         object_key: &str,
         body: &[u8],
     ) -> Result<BTreeMap<String, String>, BackendError> {
+        self.build_signed_request_with_query(method, object_key, "", body)
+    }
+
+    fn build_signed_request_with_query(
+        &self,
+        method: &str,
+        object_key: &str,
+        canonical_querystring: &str,
+        body: &[u8],
+    ) -> Result<BTreeMap<String, String>, BackendError> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| BackendError::Internal(format!("clock error: {e}")))?;
@@ -172,6 +182,7 @@ impl S3Backend {
         let auth = sign_s3v4(
             method,
             object_key,
+            canonical_querystring,
             &headers,
             &body_hash,
             &self.config,
@@ -336,6 +347,45 @@ impl RemoteBackend for S3Backend {
             )))
         }
     }
+
+    fn list(&self, prefix: &str) -> Result<Vec<String>, BackendError> {
+        let object_prefix = self.full_key(prefix);
+        let canonical_querystring =
+            format!("list-type=2&prefix={}", uri_encode(&object_prefix, true));
+        let url = format!(
+            "{}/{}?{}",
+            self.config.endpoint, self.config.bucket, canonical_querystring
+        );
+        let headers =
+            self.build_signed_request_with_query("GET", "", &canonical_querystring, &[])?;
+
+        let mut cmd = std::process::Command::new("curl");
+        cmd.arg("-sf");
+        for (k, v) in &headers {
+            cmd.arg("-H").arg(format!("{k}: {v}"));
+        }
+        cmd.arg(&url);
+
+        let output = Self::exec_curl(&mut cmd)?;
+        if !output.status.success() {
+            return Err(BackendError::Transport(format!(
+                "list failed (exit {}): {}",
+                output.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+
+        let xml = String::from_utf8(output.stdout).map_err(|err| {
+            BackendError::Transport(format!("list response was not utf-8: {err}"))
+        })?;
+        Ok(parse_list_objects_keys(&xml)
+            .into_iter()
+            .filter_map(|key| {
+                key.strip_prefix(&self.config.key_prefix)
+                    .map(|k| k.to_string())
+            })
+            .collect())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -346,6 +396,7 @@ impl RemoteBackend for S3Backend {
 fn sign_s3v4(
     method: &str,
     object_key: &str,
+    canonical_querystring: &str,
     headers: &BTreeMap<String, String>,
     body_hash: &str,
     config: &S3Config,
@@ -358,13 +409,14 @@ fn sign_s3v4(
 
     // Canonical URI: /{bucket}/{key} — URI-encode each path component.
     let canonical_uri = format!(
-        "/{}/{}",
+        "/{}{}",
         uri_encode(&config.bucket, false),
-        uri_encode_path(object_key)
+        if object_key.is_empty() {
+            String::new()
+        } else {
+            format!("/{}", uri_encode_path(object_key))
+        }
     );
-
-    // No query string for basic operations.
-    let canonical_querystring = "";
 
     // Canonical headers (sorted, lower-cased keys, trimmed values).
     let mut canonical_headers = String::new();
@@ -419,6 +471,22 @@ fn sign_s3v4(
         "AWS4-HMAC-SHA256 Credential={}/{}, SignedHeaders={}, Signature={}",
         config.access_key, credential_scope, signed_headers, signature
     )
+}
+
+fn parse_list_objects_keys(xml: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut rest = xml;
+    let open = "<Key>";
+    let close = "</Key>";
+    while let Some(start) = rest.find(open) {
+        let after_start = &rest[start + open.len()..];
+        let Some(end) = after_start.find(close) else {
+            break;
+        };
+        keys.push(after_start[..end].to_string());
+        rest = &after_start[end + close.len()..];
+    }
+    keys
 }
 
 // ---------------------------------------------------------------------------

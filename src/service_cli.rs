@@ -138,6 +138,8 @@ impl ServerCommandConfig {
             options.auth.vault_enabled = true;
         }
 
+        configure_remote_backend_from_env(&mut options);
+
         options
     }
 
@@ -154,6 +156,65 @@ impl ServerCommandConfig {
         }
         transports
     }
+}
+
+fn env_nonempty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn configure_remote_backend_from_env(options: &mut RedDBOptions) {
+    let backend = env_nonempty("REDDB_REMOTE_BACKEND")
+        .unwrap_or_else(|| "none".to_string())
+        .to_ascii_lowercase();
+
+    match backend.as_str() {
+        "s3" | "minio" | "r2" => {
+            #[cfg(feature = "backend-s3")]
+            {
+                if let Some(config) = s3_config_from_env() {
+                    let remote_key = env_nonempty("REDDB_REMOTE_KEY")
+                        .unwrap_or_else(|| "clusters/dev/data.rdb".to_string());
+                    options.remote_backend =
+                        Some(Arc::new(crate::storage::backend::S3Backend::new(config)));
+                    options.remote_key = Some(remote_key);
+                }
+            }
+            #[cfg(not(feature = "backend-s3"))]
+            {
+                eprintln!(
+                    "warning: REDDB_REMOTE_BACKEND={} requested but binary was built without backend-s3",
+                    backend
+                );
+            }
+        }
+        "local" => {
+            if let Some(remote_key) = env_nonempty("REDDB_REMOTE_KEY") {
+                options.remote_backend = Some(Arc::new(crate::storage::backend::LocalBackend));
+                options.remote_key = Some(remote_key);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(feature = "backend-s3")]
+fn s3_config_from_env() -> Option<crate::storage::backend::S3Config> {
+    let endpoint = env_nonempty("REDDB_S3_ENDPOINT")?;
+    let bucket = env_nonempty("REDDB_S3_BUCKET")?;
+    let access_key = env_nonempty("REDDB_S3_ACCESS_KEY")?;
+    let secret_key = env_nonempty("REDDB_S3_SECRET_KEY")?;
+    let region = env_nonempty("REDDB_S3_REGION").unwrap_or_else(|| "us-east-1".to_string());
+    let key_prefix = env_nonempty("REDDB_S3_KEY_PREFIX").unwrap_or_default();
+    Some(crate::storage::backend::S3Config {
+        endpoint,
+        bucket,
+        key_prefix,
+        access_key,
+        secret_key,
+        region,
+    })
 }
 
 pub fn render_systemd_unit(config: &SystemdServiceConfig) -> String {

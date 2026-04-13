@@ -1,6 +1,62 @@
 use super::*;
 
 impl RedDB {
+    fn remote_head_key(options: &RedDBOptions) -> String {
+        options.default_backup_head_key()
+    }
+
+    fn resolve_remote_bootstrap_key(
+        options: &RedDBOptions,
+    ) -> Result<Option<String>, crate::storage::backend::BackendError> {
+        let Some(backend) = &options.remote_backend else {
+            return Ok(options.remote_key.clone());
+        };
+        let head_key = Self::remote_head_key(options);
+        if let Some(head) = crate::storage::wal::load_backup_head(backend.as_ref(), &head_key)? {
+            return Ok(Some(head.snapshot_key));
+        }
+        Ok(options.remote_key.clone())
+    }
+
+    fn bootstrap_replica_snapshot(
+        primary_addr: &str,
+        local_path: &Path,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        let endpoint = if primary_addr.starts_with("http") {
+            primary_addr.to_string()
+        } else {
+            format!("http://{primary_addr}")
+        };
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let payload = runtime.block_on(async move {
+            use crate::grpc::proto::red_db_client::RedDbClient;
+            use crate::grpc::proto::Empty;
+            let mut client = RedDbClient::connect(endpoint).await?;
+            let response = client
+                .replication_snapshot(tonic::Request::new(Empty {}))
+                .await?;
+            Ok::<String, Box<dyn std::error::Error>>(response.into_inner().payload)
+        })?;
+
+        let json = crate::json::from_str::<crate::json::Value>(&payload)?;
+        let Some(snapshot_hex) = json
+            .get("snapshot_hex")
+            .and_then(crate::json::Value::as_str)
+        else {
+            return Ok(false);
+        };
+
+        let bytes = hex::decode(snapshot_hex)?;
+        if let Some(parent) = local_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(local_path, bytes)?;
+        Ok(true)
+    }
+
     /// Construct an ephemeral RedDB instance backed by a unique tempfile.
     ///
     /// There is no longer a true in-memory execution mode — this simply opens
@@ -17,22 +73,33 @@ impl RedDB {
 
     /// Open using the crate-level runtime options.
     pub fn open_with_options(options: &RedDBOptions) -> Result<Self, Box<dyn std::error::Error>> {
-        // If remote backend configured, download before opening
-        if let (Some(backend), Some(key)) = (&options.remote_backend, &options.remote_key) {
+        if let ReplicationRole::Replica { primary_addr } = &options.replication.role {
             let local_path = options.resolved_path("data.rdb");
             if !local_path.exists() {
+                let _ = Self::bootstrap_replica_snapshot(primary_addr, &local_path);
+            }
+        }
+
+        // If remote backend configured, download before opening
+        if let Some(backend) = &options.remote_backend {
+            let local_path = options.resolved_path("data.rdb");
+            if !local_path.exists() {
+                let remote_key = Self::resolve_remote_bootstrap_key(options)
+                    .map_err(|e| format!("remote bootstrap key resolution failed: {e}"))?;
                 // Ensure parent directory exists for the download target
                 if let Some(parent) = local_path.parent() {
                     if !parent.exists() {
                         std::fs::create_dir_all(parent)?;
                     }
                 }
-                // Download from remote to local cache
-                match backend.download(key, &local_path) {
-                    Ok(true) => { /* downloaded successfully */ }
-                    Ok(false) => { /* doesn't exist remotely, will create fresh */ }
-                    Err(e) => {
-                        return Err(format!("remote backend download failed: {e}").into());
+                if let Some(key) = remote_key {
+                    // Download from remote to local cache
+                    match backend.download(&key, &local_path) {
+                        Ok(true) => { /* downloaded successfully */ }
+                        Ok(false) => { /* doesn't exist remotely, will create fresh */ }
+                        Err(e) => {
+                            return Err(format!("remote backend download failed: {e}").into());
+                        }
                     }
                 }
             }
@@ -60,13 +127,11 @@ impl RedDB {
             (UnifiedStore::open(&path_buf)?, Some(path_buf), true)
         };
 
-        // Take ownership of the remote backend from options (it is not Clone).
-        // The clone below will set remote_backend to None; we capture the key separately.
         let remote_key = options.remote_key.clone();
 
         // Initialize primary replication state if configured as primary.
         let replication = match &options.replication.role {
-            ReplicationRole::Primary => Some(Arc::new(PrimaryReplication::new())),
+            ReplicationRole::Primary => Some(Arc::new(PrimaryReplication::new(path.as_deref()))),
             _ => None,
         };
 
@@ -79,7 +144,7 @@ impl RedDB {
             paged_mode,
             vector_indexes: RwLock::new(HashMap::new()),
             collection_ttl_defaults_ms: RwLock::new(HashMap::new()),
-            remote_backend: None,
+            remote_backend: options.remote_backend.clone(),
             remote_key,
             replication,
             ec_registry: std::sync::Arc::new(crate::ec::config::EcRegistry::new()),

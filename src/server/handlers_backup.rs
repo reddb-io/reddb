@@ -118,7 +118,103 @@ impl RedDBServer {
     pub(crate) fn handle_restore_points(&self) -> HttpResponse {
         let mut object = Map::new();
         object.insert("ok".to_string(), JsonValue::Bool(true));
-        object.insert("restore_points".to_string(), JsonValue::Array(Vec::new()));
+        let db = self.runtime.db();
+        let options = db.options();
+
+        let Some(backend) = &options.remote_backend else {
+            object.insert("restore_points".to_string(), JsonValue::Array(Vec::new()));
+            return json_response(200, JsonValue::Object(object));
+        };
+
+        let head_key = options.default_backup_head_key();
+        let backup_head = match crate::storage::wal::load_backup_head(backend.as_ref(), &head_key) {
+            Ok(head) => head,
+            Err(err) => return json_error(500, err.to_string()),
+        };
+
+        let default_snapshot_prefix = options.default_snapshot_prefix();
+        let snapshot_prefix = backup_head
+            .as_ref()
+            .and_then(|head| {
+                std::path::Path::new(&head.snapshot_key)
+                    .parent()
+                    .map(|parent| parent.to_string_lossy().trim_end_matches('/').to_string())
+            })
+            .filter(|prefix| !prefix.is_empty())
+            .map(|prefix| format!("{prefix}/"))
+            .unwrap_or(default_snapshot_prefix);
+        let wal_prefix = backup_head
+            .as_ref()
+            .map(|head| head.wal_prefix.clone())
+            .unwrap_or_else(|| options.default_wal_archive_prefix());
+
+        let recovery = crate::storage::wal::PointInTimeRecovery::new(
+            backend.clone(),
+            snapshot_prefix,
+            wal_prefix,
+        );
+        let restore_points = match recovery.list_restore_points() {
+            Ok(points) => points,
+            Err(err) => return json_error(500, err.to_string()),
+        };
+
+        object.insert(
+            "restore_points".to_string(),
+            JsonValue::Array(
+                restore_points
+                    .into_iter()
+                    .map(|point| {
+                        let mut restore_point = Map::new();
+                        restore_point.insert(
+                            "snapshot_id".to_string(),
+                            JsonValue::Number(point.snapshot_id as f64),
+                        );
+                        restore_point.insert(
+                            "snapshot_time".to_string(),
+                            JsonValue::Number(point.snapshot_time as f64),
+                        );
+                        restore_point.insert(
+                            "wal_segment_count".to_string(),
+                            JsonValue::Number(point.wal_segment_count as f64),
+                        );
+                        restore_point.insert(
+                            "latest_recoverable_time".to_string(),
+                            JsonValue::Number(point.latest_recoverable_time as f64),
+                        );
+                        JsonValue::Object(restore_point)
+                    })
+                    .collect(),
+            ),
+        );
+        if let Some(head) = backup_head {
+            let mut head_object = Map::new();
+            head_object.insert(
+                "timeline_id".to_string(),
+                JsonValue::String(head.timeline_id),
+            );
+            head_object.insert(
+                "snapshot_key".to_string(),
+                JsonValue::String(head.snapshot_key),
+            );
+            head_object.insert(
+                "snapshot_id".to_string(),
+                JsonValue::Number(head.snapshot_id as f64),
+            );
+            head_object.insert(
+                "snapshot_time".to_string(),
+                JsonValue::Number(head.snapshot_time as f64),
+            );
+            head_object.insert(
+                "current_lsn".to_string(),
+                JsonValue::Number(head.current_lsn as f64),
+            );
+            head_object.insert(
+                "last_archived_lsn".to_string(),
+                JsonValue::Number(head.last_archived_lsn as f64),
+            );
+            head_object.insert("wal_prefix".to_string(), JsonValue::String(head.wal_prefix));
+            object.insert("head".to_string(), JsonValue::Object(head_object));
+        }
         json_response(200, JsonValue::Object(object))
     }
 }

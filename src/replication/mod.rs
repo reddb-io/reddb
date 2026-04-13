@@ -21,6 +21,7 @@
 //! ```
 
 pub mod cdc;
+pub mod logical;
 pub mod primary;
 pub mod replica;
 pub mod scheduler;

@@ -1,15 +1,11 @@
 # Replication
 
 > [!WARNING]
-> **Work in progress.** Primary-side WAL buffering and CDC streaming
-> are implemented and stable. **Replica-side WAL consumption is not
-> yet wired** — replicas will start but they will not automatically
-> replay primary WAL segments. For live change propagation today,
-> use the CDC polling endpoint (`GET /changes?since=<lsn>`) and
-> apply the events on the replica side yourself, or take scheduled
-> snapshots via the backup scheduler. This page documents the
-> target architecture; follow the release notes for when the
-> streaming replay path lands.
+> Replication is now wired for snapshot bootstrap plus incremental
+> logical WAL replay, but it is still an early implementation.
+> Treat the primary as the only writer, keep snapshot/WAL retention
+> enabled, and validate failover/recovery in staging before calling
+> this production-grade multi-writer infrastructure.
 
 RedDB supports primary-replica replication for read scaling and high availability.
 
@@ -55,10 +51,24 @@ Recommended topology:
 ## How It Works
 
 1. Writes go to the primary
-2. Primary records changes in the WAL
-3. Replicas pull WAL records from the primary
-4. Replicas apply WAL records to their local copy
+2. Primary records changes in the local physical WAL and emits logical WAL records
+3. Replicas bootstrap from a snapshot, then pull logical WAL records from the primary
+4. Replicas apply logical WAL records to their local copy
 5. Reads can be served from any replica
+
+## Persisted Artifacts
+
+The replication path is built around a timeline, not a single file:
+
+- `data.rdb` or versioned snapshots for bootstrap
+- a local logical WAL spool beside the data file, currently `data.rdb.logical.wal`
+- archived logical WAL segments for incremental catch-up
+- replication metadata such as `last_applied_lsn`
+- a remote `head` manifest that points to the latest durable snapshot and WAL frontier
+
+That is the stepping stone toward a more Turso-like design later. The
+current architecture still runs the database locally per instance and
+uses remote storage for snapshot/WAL persistence and replay.
 
 ## Monitoring
 
@@ -71,6 +81,12 @@ curl http://primary:8080/replication/status
 # Via CLI
 red status --bind primary:50051
 ```
+
+Replica status includes operational fields beyond role and LSN:
+
+- `state`: `idle`, `connecting`, `healthy`, `stalled_gap`, or `apply_error`
+- `last_error`: latest replication failure reason, when present
+- `last_seen_primary_lsn` and `last_seen_oldest_lsn`: the last frontier advertised by the primary
 
 ### Replication Snapshot
 

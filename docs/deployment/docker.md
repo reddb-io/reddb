@@ -232,6 +232,7 @@ The repository ships two compose topologies:
 
 - `docker-compose.yml`: primary + one read replica
 - `docker-compose.full.yml`: primary + two read replicas
+- `dev.docker-compose.yml`: primary + replica + MinIO for remote snapshot/WAL archive testing
 
 Typical local-dev loop:
 
@@ -244,6 +245,19 @@ docker compose down -v
 ```
 
 For a step-by-step walkthrough, see [Local Development with Docker](/guides/local-dev-docker.md).
+
+For timeline/backup testing against an S3-compatible backend without cloud infrastructure:
+
+```bash
+docker compose -f dev.docker-compose.yml up -d --build
+docker compose -f dev.docker-compose.yml logs -f
+curl -s http://127.0.0.1:8080/replication/status
+curl -s http://127.0.0.1:8081/replication/status
+docker compose -f dev.docker-compose.yml down -v
+```
+
+The dev topology provisions a local MinIO bucket and builds the RedDB image
+with `backend-s3` enabled so snapshot/WAL archive flows can be exercised end-to-end.
 
 ## Resource Recommendations
 
