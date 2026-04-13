@@ -951,7 +951,7 @@ mod tests {
         index.insert(vec![0.0, 0.0, 1.0]);
 
         // Search for exact match
-        let results = index.search(&vec![1.0, 0.0, 0.0], 1);
+        let results = index.search(&[1.0, 0.0, 0.0], 1);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].distance, 0.0);
     }
@@ -965,7 +965,7 @@ mod tests {
         index.insert_with_id(3, vec![3.0, 0.0]);
 
         // Search for something close to (0.9, 0.0)
-        let results = index.search(&vec![0.9, 0.0], 1);
+        let results = index.search(&[0.9, 0.0], 1);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, 1); // Should find (1.0, 0.0)
     }
@@ -978,7 +978,7 @@ mod tests {
         }
 
         // Search for 3 nearest to (4.5, 0.0)
-        let results = index.search(&vec![4.5, 0.0], 3);
+        let results = index.search(&[4.5, 0.0], 3);
         assert_eq!(results.len(), 3);
 
         // Should find 4, 5, and either 3 or 6
@@ -998,7 +998,7 @@ mod tests {
         let filter: HashSet<NodeId> = [0, 2, 4, 6, 8].iter().copied().collect();
 
         // Search for nearest to (5.0, 0.0) with filter
-        let results = index.search_filtered(&vec![5.0, 0.0], 2, &filter);
+        let results = index.search_filtered(&[5.0, 0.0], 2, &filter);
 
         // Should find 4 and 6 (closest even numbers to 5)
         assert_eq!(results.len(), 2);
@@ -1018,7 +1018,7 @@ mod tests {
         index.insert_with_id(2, vec![0.707, 0.707, 0.0]); // 45 degrees
 
         // Search for something at 45 degrees
-        let results = index.search(&vec![0.707, 0.707, 0.0], 1);
+        let results = index.search(&[0.707, 0.707, 0.0], 1);
         assert_eq!(results[0].id, 2);
     }
 
