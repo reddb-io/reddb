@@ -1,0 +1,5 @@
+mode: standalone
+primary:
+  persistence:
+    enabled: true
+    size: 5Gi
