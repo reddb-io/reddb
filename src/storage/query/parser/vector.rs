@@ -1,6 +1,6 @@
 //! Vector query parsing (VECTOR SEARCH ... SIMILAR TO ...)
 
-use super::super::ast::{QueryExpr, TableQuery, VectorQuery, VectorSource};
+use super::super::ast::{QueryExpr, VectorQuery, VectorSource};
 use super::super::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
@@ -107,41 +107,13 @@ impl<'a> Parser<'a> {
                 let text = self.parse_string()?;
                 Ok(VectorSource::Text(text))
             }
-            // Subquery: (SELECT embedding FROM ...)
+            // Parenthesized source: subquery or (collection, vector_id) reference
             Token::LParen => {
                 self.advance()?;
-                // For now, parse as reference if it's an identifier
-                // Full subquery support would require recursive parsing
-                if let Token::Select = self.peek() {
-                    // Skip the subquery for now - just consume until )
-                    let mut depth = 1;
-                    while depth > 0 {
-                        match self.advance()? {
-                            Token::LParen => depth += 1,
-                            Token::RParen => depth -= 1,
-                            Token::Eof => {
-                                return Err(ParseError::new(
-                                    "Unterminated subquery",
-                                    self.position(),
-                                ));
-                            }
-                            _ => {}
-                        }
-                    }
-                    Ok(VectorSource::Subquery(Box::new(QueryExpr::Table(
-                        TableQuery {
-                            table: "subquery".to_string(),
-                            alias: None,
-                            columns: Vec::new(),
-                            filter: None,
-                            group_by: Vec::new(),
-                            having: None,
-                            order_by: Vec::new(),
-                            limit: None,
-                            offset: None,
-                            expand: None,
-                        },
-                    ))))
+                if self.vector_source_starts_subquery() {
+                    let expr = self.parse_query_expr()?;
+                    self.expect(Token::RParen)?;
+                    Ok(VectorSource::Subquery(Box::new(expr)))
                 } else {
                     // Reference: (collection, vector_id)
                     let collection = self.expect_ident()?;
@@ -176,6 +148,18 @@ impl<'a> Parser<'a> {
                 self.position(),
             )),
         }
+    }
+
+    fn vector_source_starts_subquery(&self) -> bool {
+        matches!(
+            self.peek(),
+            Token::Select
+                | Token::Match
+                | Token::Path
+                | Token::From
+                | Token::Vector
+                | Token::Hybrid
+        )
     }
 
     /// Parse metadata filter for vector queries
