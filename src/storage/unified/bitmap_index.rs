@@ -15,7 +15,7 @@
 //! `WHERE status = 'active' AND role = 'admin'` → `bitmap_and(status_active, role_admin)`
 
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use roaring::RoaringBitmap;
 
@@ -176,6 +176,24 @@ pub struct BitmapIndexManager {
     indices: RwLock<HashMap<(String, String), BitmapColumnIndex>>,
 }
 
+fn recover_read_guard<'a, T>(
+    result: Result<RwLockReadGuard<'a, T>, PoisonError<RwLockReadGuard<'a, T>>>,
+) -> RwLockReadGuard<'a, T> {
+    match result {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn recover_write_guard<'a, T>(
+    result: Result<RwLockWriteGuard<'a, T>, PoisonError<RwLockWriteGuard<'a, T>>>,
+) -> RwLockWriteGuard<'a, T> {
+    match result {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 impl BitmapIndexManager {
     /// Create a new manager
     pub fn new() -> Self {
@@ -186,7 +204,7 @@ impl BitmapIndexManager {
 
     /// Create a bitmap index for a column
     pub fn create_index(&self, collection: &str, column: &str) {
-        let mut indices = self.indices.write().unwrap();
+        let mut indices = recover_write_guard(self.indices.write());
         let key = (collection.to_string(), column.to_string());
         indices
             .entry(key)
@@ -195,7 +213,7 @@ impl BitmapIndexManager {
 
     /// Drop a bitmap index
     pub fn drop_index(&self, collection: &str, column: &str) -> bool {
-        let mut indices = self.indices.write().unwrap();
+        let mut indices = recover_write_guard(self.indices.write());
         indices
             .remove(&(collection.to_string(), column.to_string()))
             .is_some()
@@ -209,7 +227,7 @@ impl BitmapIndexManager {
         entity_id: EntityId,
         value: &[u8],
     ) -> Result<(), BitmapIndexError> {
-        let mut indices = self.indices.write().unwrap();
+        let mut indices = recover_write_guard(self.indices.write());
         if let Some(index) = indices.get_mut(&(collection.to_string(), column.to_string())) {
             index.insert(entity_id, value);
             Ok(())
@@ -228,7 +246,7 @@ impl BitmapIndexManager {
         column: &str,
         entity_id: EntityId,
     ) -> Result<(), BitmapIndexError> {
-        let mut indices = self.indices.write().unwrap();
+        let mut indices = recover_write_guard(self.indices.write());
         if let Some(index) = indices.get_mut(&(collection.to_string(), column.to_string())) {
             index.remove(entity_id);
             Ok(())
@@ -242,7 +260,7 @@ impl BitmapIndexManager {
 
     /// Count entities matching a value — O(1)
     pub fn count(&self, collection: &str, column: &str, value: &[u8]) -> u64 {
-        let indices = self.indices.read().unwrap();
+        let indices = recover_read_guard(self.indices.read());
         indices
             .get(&(collection.to_string(), column.to_string()))
             .map(|idx| idx.count(value))
@@ -251,7 +269,7 @@ impl BitmapIndexManager {
 
     /// Get entity IDs matching a value
     pub fn lookup(&self, collection: &str, column: &str, value: &[u8]) -> Vec<EntityId> {
-        let indices = self.indices.read().unwrap();
+        let indices = recover_read_guard(self.indices.read());
         indices
             .get(&(collection.to_string(), column.to_string()))
             .map(|idx| idx.get(value))
@@ -260,7 +278,7 @@ impl BitmapIndexManager {
 
     /// Get value distribution for a column (for GROUP BY optimization)
     pub fn value_counts(&self, collection: &str, column: &str) -> Vec<(Vec<u8>, u64)> {
-        let indices = self.indices.read().unwrap();
+        let indices = recover_read_guard(self.indices.read());
         indices
             .get(&(collection.to_string(), column.to_string()))
             .map(|idx| idx.value_counts())
@@ -269,7 +287,7 @@ impl BitmapIndexManager {
 
     /// Get stats for a specific bitmap index
     pub fn index_stats(&self, collection: &str, column: &str) -> Option<BitmapIndexStats> {
-        let indices = self.indices.read().unwrap();
+        let indices = recover_read_guard(self.indices.read());
         indices
             .get(&(collection.to_string(), column.to_string()))
             .map(|idx| BitmapIndexStats {
@@ -405,5 +423,24 @@ mod tests {
         let stats = mgr.index_stats("users", "status").unwrap();
         assert_eq!(stats.cardinality, 2);
         assert_eq!(stats.entity_count, 3);
+    }
+
+    #[test]
+    fn test_bitmap_manager_recovers_from_poisoned_lock() {
+        let mgr = BitmapIndexManager::new();
+        mgr.create_index("users", "status");
+
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = mgr.indices.write().unwrap();
+            panic!("poison bitmap index manager");
+        }));
+
+        mgr.insert("users", "status", EntityId::new(1), b"active")
+            .expect("bitmap insert should recover after poison");
+
+        assert_eq!(
+            mgr.lookup("users", "status", b"active"),
+            vec![EntityId::new(1)]
+        );
     }
 }
