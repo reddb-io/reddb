@@ -1,6 +1,7 @@
 # INSERT
 
-The `INSERT` statement adds new entities to a collection. RedDB supports inserting all entity types: rows, nodes, edges, vectors, documents, and KV pairs.
+The `INSERT` statement adds new entities to a collection. RedDB supports inserting rows, native
+time-series points, nodes, edges, vectors, documents, and KV pairs.
 
 ## SQL Syntax
 
@@ -21,6 +22,29 @@ INSERT INTO users (name, email, age) VALUES
   ('Bob', 'bob@example.com', 25),
   ('Charlie', 'charlie@example.com', 35)
 ```
+
+### Insert a Native Time-Series Point
+
+If the target collection was declared with `CREATE TIMESERIES`, a plain `INSERT INTO` writes native
+time-series points instead of table rows.
+
+```sql
+CREATE TIMESERIES cpu_metrics RETENTION 7 d
+
+INSERT INTO cpu_metrics (metric, value, tags, timestamp)
+  VALUES ('cpu.idle', 94.8, {host: 'srv1', region: 'us-east'}, 1704067200000000000)
+```
+
+Supported columns for native time-series inserts:
+
+| Column | Required | Notes |
+|:-------|:---------|:------|
+| `metric` | Yes | Series name |
+| `value` | Yes | Numeric sample |
+| `tags` | No | Inline object literal or JSON object text |
+| `timestamp` / `timestamp_ns` / `time` | No | Unix timestamp in nanoseconds; omit to auto-generate |
+
+Exactly one timestamp alias may be provided per row.
 
 ## API Insert (All Entity Types)
 
@@ -228,4 +252,6 @@ Bulk insert:
 ```
 
 > [!TIP]
-> Collections are created automatically on first insert. No explicit `CREATE TABLE` is needed unless you want to define a schema upfront.
+> Collections are created automatically on first insert for generic row-style data. Model-specific
+> collections such as `CREATE TIMESERIES` and `CREATE QUEUE` should still be declared explicitly so
+> RedDB can enforce the correct native semantics.
