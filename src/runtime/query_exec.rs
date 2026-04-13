@@ -833,7 +833,9 @@ fn execute_filtered_scan_to_json(
         None => return Ok(None),
     };
 
-    let filter = query.filter.as_ref().unwrap();
+    let filter = query.filter.as_ref().ok_or_else(|| {
+        RedDBError::Internal("filtered JSON scan called without a WHERE clause".into())
+    })?;
     let table_name = query.table.as_str();
     let table_alias = query.alias.as_deref().unwrap_or(table_name);
     let limit = query.limit.unwrap_or(10000) as usize;
@@ -1051,7 +1053,9 @@ fn execute_runtime_canonical_table_query_indexed(
             .get_collection(query.table.as_str())
             .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
 
-        let filter = query.filter.as_ref().unwrap();
+        let filter = query.filter.as_ref().ok_or_else(|| {
+            RedDBError::Internal("filtered runtime scan selected without a WHERE clause".into())
+        })?;
         let table_name = query.table.as_str();
         let table_alias = query.alias.as_deref().unwrap_or(table_name);
         let limit = query.limit.unwrap_or(10000) as usize;
@@ -1195,7 +1199,11 @@ pub(super) fn execute_runtime_canonical_table_node(
                     .get_collection(context.query.table.as_str())
                     .ok_or_else(|| RedDBError::NotFound(context.query.table.clone()))?;
 
-                let filter = context.query.filter.as_ref().unwrap();
+                let filter = context.query.filter.as_ref().ok_or_else(|| {
+                    RedDBError::Internal(
+                        "canonical filtered scan selected without a WHERE clause".into(),
+                    )
+                })?;
                 let table_name = context.table_name;
                 let table_alias = context.table_alias;
                 let limit = context.query.limit.unwrap_or(10000) as usize;
