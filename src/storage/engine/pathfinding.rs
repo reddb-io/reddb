@@ -312,6 +312,7 @@ mod all_shortest_impl;
 mod tests {
     use super::*;
     use crate::storage::engine::graph_store::GraphNodeType;
+    use crate::storage::query::test_support::{add_edge_or_panic, add_node_or_panic};
 
     fn create_simple_graph() -> GraphStore {
         let graph = GraphStore::new();
@@ -320,17 +321,17 @@ mod tests {
         // |    |
         // v    v
         // D -> E
-        graph.add_node("A", "Node A", GraphNodeType::Host);
-        graph.add_node("B", "Node B", GraphNodeType::Host);
-        graph.add_node("C", "Node C", GraphNodeType::Host);
-        graph.add_node("D", "Node D", GraphNodeType::Host);
-        graph.add_node("E", "Node E", GraphNodeType::Host);
+        add_node_or_panic(&graph, "A", "Node A", GraphNodeType::Host);
+        add_node_or_panic(&graph, "B", "Node B", GraphNodeType::Host);
+        add_node_or_panic(&graph, "C", "Node C", GraphNodeType::Host);
+        add_node_or_panic(&graph, "D", "Node D", GraphNodeType::Host);
+        add_node_or_panic(&graph, "E", "Node E", GraphNodeType::Host);
 
-        graph.add_edge("A", "B", GraphEdgeType::ConnectsTo, 1.0);
-        graph.add_edge("B", "C", GraphEdgeType::ConnectsTo, 1.0);
-        graph.add_edge("A", "D", GraphEdgeType::ConnectsTo, 1.0);
-        graph.add_edge("B", "E", GraphEdgeType::ConnectsTo, 1.0);
-        graph.add_edge("D", "E", GraphEdgeType::ConnectsTo, 1.0);
+        add_edge_or_panic(&graph, "A", "B", GraphEdgeType::ConnectsTo, 1.0);
+        add_edge_or_panic(&graph, "B", "C", GraphEdgeType::ConnectsTo, 1.0);
+        add_edge_or_panic(&graph, "A", "D", GraphEdgeType::ConnectsTo, 1.0);
+        add_edge_or_panic(&graph, "B", "E", GraphEdgeType::ConnectsTo, 1.0);
+        add_edge_or_panic(&graph, "D", "E", GraphEdgeType::ConnectsTo, 1.0);
 
         graph
     }
@@ -343,17 +344,17 @@ mod tests {
         // (4)        (1)
         // v          |
         // C --(1)--> E
-        graph.add_node("A", "Node A", GraphNodeType::Host);
-        graph.add_node("B", "Node B", GraphNodeType::Host);
-        graph.add_node("C", "Node C", GraphNodeType::Host);
-        graph.add_node("D", "Node D", GraphNodeType::Host);
-        graph.add_node("E", "Node E", GraphNodeType::Host);
+        add_node_or_panic(&graph, "A", "Node A", GraphNodeType::Host);
+        add_node_or_panic(&graph, "B", "Node B", GraphNodeType::Host);
+        add_node_or_panic(&graph, "C", "Node C", GraphNodeType::Host);
+        add_node_or_panic(&graph, "D", "Node D", GraphNodeType::Host);
+        add_node_or_panic(&graph, "E", "Node E", GraphNodeType::Host);
 
-        graph.add_edge("A", "B", GraphEdgeType::ConnectsTo, 1.0);
-        graph.add_edge("A", "C", GraphEdgeType::ConnectsTo, 4.0);
-        graph.add_edge("B", "D", GraphEdgeType::ConnectsTo, 2.0);
-        graph.add_edge("C", "E", GraphEdgeType::ConnectsTo, 1.0);
-        graph.add_edge("E", "B", GraphEdgeType::ConnectsTo, 1.0);
+        add_edge_or_panic(&graph, "A", "B", GraphEdgeType::ConnectsTo, 1.0);
+        add_edge_or_panic(&graph, "A", "C", GraphEdgeType::ConnectsTo, 4.0);
+        add_edge_or_panic(&graph, "B", "D", GraphEdgeType::ConnectsTo, 2.0);
+        add_edge_or_panic(&graph, "C", "E", GraphEdgeType::ConnectsTo, 1.0);
+        add_edge_or_panic(&graph, "E", "B", GraphEdgeType::ConnectsTo, 1.0);
 
         graph
     }
@@ -380,8 +381,8 @@ mod tests {
     #[test]
     fn test_bfs_no_path() {
         let graph = GraphStore::new();
-        graph.add_node("A", "A", GraphNodeType::Host);
-        graph.add_node("B", "B", GraphNodeType::Host);
+        add_node_or_panic(&graph, "A", "A", GraphNodeType::Host);
+        add_node_or_panic(&graph, "B", "B", GraphNodeType::Host);
         // No edge between A and B
 
         let result = BFS::shortest_path(&graph, "A", "B");
@@ -421,11 +422,11 @@ mod tests {
     #[test]
     fn test_dfs_topological_sort() {
         let graph = GraphStore::new();
-        graph.add_node("A", "A", GraphNodeType::Host);
-        graph.add_node("B", "B", GraphNodeType::Host);
-        graph.add_node("C", "C", GraphNodeType::Host);
-        graph.add_edge("A", "B", GraphEdgeType::ConnectsTo, 1.0);
-        graph.add_edge("B", "C", GraphEdgeType::ConnectsTo, 1.0);
+        add_node_or_panic(&graph, "A", "A", GraphNodeType::Host);
+        add_node_or_panic(&graph, "B", "B", GraphNodeType::Host);
+        add_node_or_panic(&graph, "C", "C", GraphNodeType::Host);
+        add_edge_or_panic(&graph, "A", "B", GraphEdgeType::ConnectsTo, 1.0);
+        add_edge_or_panic(&graph, "B", "C", GraphEdgeType::ConnectsTo, 1.0);
 
         let result = DFS::topological_sort(&graph);
         assert!(result.is_some());
