@@ -23,34 +23,42 @@ pub(crate) fn query_reply(
     entity_types: &Option<Vec<String>>,
     capabilities: &Option<Vec<String>>,
 ) -> QueryReply {
+    let RuntimeQueryResult {
+        mode,
+        statement,
+        engine,
+        result,
+        ..
+    } = result;
+
     // Fast path: use pre-serialized JSON if available (move, no clone)
-    if result.result.pre_serialized_json.is_some() {
-        let count = result.result.stats.rows_scanned;
+    if let Some(pre_serialized_json) = result.pre_serialized_json {
+        let count = result.stats.rows_scanned;
         return QueryReply {
             ok: true,
-            mode: format!("{:?}", result.mode).to_lowercase(),
-            statement: result.statement.to_string(),
-            engine: result.engine.to_string(),
-            columns: result.result.columns,
+            mode: format!("{mode:?}").to_lowercase(),
+            statement: statement.to_string(),
+            engine: engine.to_string(),
+            columns: result.columns,
             record_count: count,
-            result_json: result.result.pre_serialized_json.unwrap(),
+            result_json: pre_serialized_json,
         };
     }
 
     let records = crate::presentation::query_view::filter_query_records(
-        &result.result.records,
+        &result.records,
         entity_types,
         capabilities,
     );
     QueryReply {
         ok: true,
-        mode: format!("{:?}", result.mode).to_lowercase(),
-        statement: result.statement.to_string(),
-        engine: result.engine.to_string(),
-        columns: result.result.columns.clone(),
+        mode: format!("{mode:?}").to_lowercase(),
+        statement: statement.to_string(),
+        engine: engine.to_string(),
+        columns: result.columns.clone(),
         record_count: records.len() as u64,
         result_json: unified_result_json_string_with_records(
-            &result.result,
+            &result,
             &records,
             entity_types,
             capabilities,
