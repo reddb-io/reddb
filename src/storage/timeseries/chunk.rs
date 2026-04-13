@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use super::compression::{
     delta_decode_timestamps, delta_encode_timestamps, xor_decode_values, xor_encode_values,
 };
-use crate::storage::index::{BloomSegment, HasBloom};
+use crate::storage::index::{BloomSegment, HasBloom, ZoneDecision, ZoneMap, ZonePredicate};
 
 /// A single time-series data point
 #[derive(Debug, Clone, PartialEq)]
@@ -42,6 +42,11 @@ pub struct TimeSeriesChunk {
     /// Query planners can skip a chunk when a wanted timestamp is definitely
     /// absent, even when it falls inside the chunk's min/max range.
     bloom: BloomSegment,
+    /// Zone map over the chunk's value column (not timestamps — those are
+    /// already ordered). Enables skip-scan for value predicates
+    /// (e.g. "show chunks where cpu > 95%") and surfaces a HyperLogLog
+    /// distinct estimate for the planner.
+    value_zone: ZoneMap,
 }
 
 impl HasBloom for TimeSeriesChunk {
@@ -63,6 +68,7 @@ impl TimeSeriesChunk {
             compressed_timestamps: None,
             compressed_values: None,
             bloom: BloomSegment::with_capacity(1024),
+            value_zone: ZoneMap::with_capacity(1024),
         }
     }
 
@@ -83,6 +89,7 @@ impl TimeSeriesChunk {
             return false;
         }
         self.bloom.insert(&timestamp_ns.to_le_bytes());
+        self.value_zone.observe(&value.to_le_bytes());
         self.timestamps.push(timestamp_ns);
         self.values.push(value);
         true
@@ -94,6 +101,29 @@ impl TimeSeriesChunk {
     /// absent. A `true` response still requires a real lookup.
     pub fn may_contain_timestamp(&self, timestamp_ns: u64) -> bool {
         !self.bloom.definitely_absent(&timestamp_ns.to_le_bytes())
+    }
+
+    /// Value-range planner helper. Answers "can this chunk possibly contain
+    /// a point with value in `[lo, hi]`?" without decoding the chunk.
+    ///
+    /// Values are compared as raw `f64::to_le_bytes()`, which gives correct
+    /// ordering for non-negative finite floats. Callers with negative
+    /// ranges should still read the chunk — this is a best-effort prune.
+    pub fn value_range_skip(&self, lo: f64, hi: f64) -> bool {
+        let lo_b = lo.to_le_bytes();
+        let hi_b = hi.to_le_bytes();
+        matches!(
+            self.value_zone.block_skip(&ZonePredicate::Range {
+                start: Some(&lo_b),
+                end: Some(&hi_b),
+            }),
+            ZoneDecision::Skip
+        )
+    }
+
+    /// Estimated distinct values observed in this chunk (HLL-backed).
+    pub fn distinct_value_estimate(&self) -> u64 {
+        self.value_zone.distinct_estimate()
     }
 
     /// Number of data points
