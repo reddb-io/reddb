@@ -59,20 +59,22 @@ impl GraphEmitter {
     /// Reset the global emitter (useful for testing)
     pub fn reset_global() {
         if let Some(emitter) = GLOBAL_EMITTER.get() {
-            if let Ok(mut graph) = emitter.graph.write() {
-                *graph = GraphStore::new();
-            }
+            *emitter.graph_mut() = GraphStore::new();
         }
     }
 
     /// Get read access to the underlying graph
     pub fn graph(&self) -> std::sync::RwLockReadGuard<'_, GraphStore> {
-        self.graph.read().unwrap()
+        self.graph
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Get write access to the underlying graph
     pub fn graph_mut(&self) -> std::sync::RwLockWriteGuard<'_, GraphStore> {
-        self.graph.write().unwrap()
+        self.graph
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     // ==================== Host Emission ====================
@@ -94,9 +96,8 @@ impl GraphEmitter {
             (None, None) => ip.to_string(),
         };
 
-        if let Ok(graph) = self.graph.write() {
-            let _ = graph.add_node(&node_id, &label, GraphNodeType::Host);
-        }
+        let graph = self.graph_mut();
+        let _ = graph.add_node(&node_id, &label, GraphNodeType::Host);
     }
 
     /// Emit a host with TTL information (useful for OS fingerprinting)
@@ -140,10 +141,9 @@ impl GraphEmitter {
 
         let host_id = format!("host:{}", host_ip);
 
-        if let Ok(graph) = self.graph.write() {
-            let _ = graph.add_node(&node_id, &label, GraphNodeType::Service);
-            let _ = graph.add_edge(&host_id, &node_id, GraphEdgeType::HasService, 1.0);
-        }
+        let graph = self.graph_mut();
+        let _ = graph.add_node(&node_id, &label, GraphNodeType::Service);
+        let _ = graph.add_edge(&host_id, &node_id, GraphEdgeType::HasService, 1.0);
     }
 
     /// Emit a service with banner information
@@ -178,10 +178,9 @@ impl GraphEmitter {
 
         let host_id = format!("host:{}", host_ip);
 
-        if let Ok(graph) = self.graph.write() {
-            let _ = graph.add_node(&node_id, &label, GraphNodeType::Service);
-            let _ = graph.add_edge(&host_id, &node_id, GraphEdgeType::HasService, 1.0);
-        }
+        let graph = self.graph_mut();
+        let _ = graph.add_node(&node_id, &label, GraphNodeType::Service);
+        let _ = graph.add_edge(&host_id, &node_id, GraphEdgeType::HasService, 1.0);
     }
 
     // ==================== Vulnerability Emission ====================
@@ -199,9 +198,8 @@ impl GraphEmitter {
             None => format!("{} (CVSS: {:.1})", cve, cvss),
         };
 
-        if let Ok(graph) = self.graph.write() {
-            let _ = graph.add_node(&node_id, &label, GraphNodeType::Vulnerability);
-        }
+        let graph = self.graph_mut();
+        let _ = graph.add_node(&node_id, &label, GraphNodeType::Vulnerability);
     }
 
     /// Link a vulnerability to a host
@@ -212,9 +210,8 @@ impl GraphEmitter {
         let host_id = format!("host:{}", host_ip);
         let vuln_id = format!("vuln:{}", cve);
 
-        if let Ok(graph) = self.graph.write() {
-            let _ = graph.add_edge(&host_id, &vuln_id, GraphEdgeType::AffectedBy, 1.0);
-        }
+        let graph = self.graph_mut();
+        let _ = graph.add_edge(&host_id, &vuln_id, GraphEdgeType::AffectedBy, 1.0);
     }
 
     /// Link a vulnerability to a service
@@ -224,9 +221,8 @@ impl GraphEmitter {
         let service_id = format!("service:{}:{}:{}", host_ip, port, service_name);
         let vuln_id = format!("vuln:{}", cve);
 
-        if let Ok(graph) = self.graph.write() {
-            let _ = graph.add_edge(&service_id, &vuln_id, GraphEdgeType::AffectedBy, 1.0);
-        }
+        let graph = self.graph_mut();
+        let _ = graph.add_edge(&service_id, &vuln_id, GraphEdgeType::AffectedBy, 1.0);
     }
 
     // ==================== Technology Emission ====================
@@ -257,10 +253,9 @@ impl GraphEmitter {
 
         let host_id = format!("host:{}", host_ip);
 
-        if let Ok(graph) = self.graph.write() {
-            let _ = graph.add_node(&node_id, &label, GraphNodeType::Technology);
-            let _ = graph.add_edge(&host_id, &node_id, GraphEdgeType::UsesTech, 1.0);
-        }
+        let graph = self.graph_mut();
+        let _ = graph.add_node(&node_id, &label, GraphNodeType::Technology);
+        let _ = graph.add_edge(&host_id, &node_id, GraphEdgeType::UsesTech, 1.0);
     }
 
     // ==================== Credential Emission ====================
@@ -286,7 +281,8 @@ impl GraphEmitter {
                 .unwrap_or_default()
         );
 
-        if let Ok(graph) = self.graph.write() {
+        {
+            let graph = self.graph_mut();
             let _ = graph.add_node(&node_id, &label, GraphNodeType::Credential);
         }
 
@@ -294,9 +290,8 @@ impl GraphEmitter {
         if let Some(host) = source_host {
             self.ensure_host(host);
             let host_id = format!("host:{}", host);
-            if let Ok(graph) = self.graph.write() {
-                let _ = graph.add_edge(&host_id, &node_id, GraphEdgeType::HasUser, 1.0);
-            }
+            let graph = self.graph_mut();
+            let _ = graph.add_edge(&host_id, &node_id, GraphEdgeType::HasUser, 1.0);
         }
     }
 
@@ -312,9 +307,8 @@ impl GraphEmitter {
         let cred_id = format!("cred:{}:{}", username, password.unwrap_or(""));
         let host_id = format!("host:{}", target_host);
 
-        if let Ok(graph) = self.graph.write() {
-            let _ = graph.add_edge(&cred_id, &host_id, GraphEdgeType::AuthAccess, 1.0);
-        }
+        let graph = self.graph_mut();
+        let _ = graph.add_edge(&cred_id, &host_id, GraphEdgeType::AuthAccess, 1.0);
     }
 
     // ==================== User Emission ====================
@@ -331,10 +325,9 @@ impl GraphEmitter {
 
         let host_id = format!("host:{}", host_ip);
 
-        if let Ok(graph) = self.graph.write() {
-            let _ = graph.add_node(&node_id, &label, GraphNodeType::User);
-            let _ = graph.add_edge(&host_id, &node_id, GraphEdgeType::HasUser, 1.0);
-        }
+        let graph = self.graph_mut();
+        let _ = graph.add_node(&node_id, &label, GraphNodeType::User);
+        let _ = graph.add_edge(&host_id, &node_id, GraphEdgeType::HasUser, 1.0);
     }
 
     // ==================== Domain Emission ====================
@@ -343,7 +336,8 @@ impl GraphEmitter {
     pub fn emit_domain(&self, domain: &str, parent: Option<&str>) {
         let node_id = format!("domain:{}", domain);
 
-        if let Ok(graph) = self.graph.write() {
+        {
+            let graph = self.graph_mut();
             let _ = graph.add_node(&node_id, domain, GraphNodeType::Domain);
         }
 
@@ -351,9 +345,8 @@ impl GraphEmitter {
         if let Some(parent_domain) = parent {
             self.emit_domain(parent_domain, None);
             let parent_id = format!("domain:{}", parent_domain);
-            if let Ok(graph) = self.graph.write() {
-                let _ = graph.add_edge(&parent_id, &node_id, GraphEdgeType::RelatedTo, 1.0);
-            }
+            let graph = self.graph_mut();
+            let _ = graph.add_edge(&parent_id, &node_id, GraphEdgeType::RelatedTo, 1.0);
         }
     }
 
@@ -365,9 +358,8 @@ impl GraphEmitter {
         let domain_id = format!("domain:{}", domain);
         let host_id = format!("host:{}", host_ip);
 
-        if let Ok(graph) = self.graph.write() {
-            let _ = graph.add_edge(&domain_id, &host_id, GraphEdgeType::RelatedTo, 1.0);
-        }
+        let graph = self.graph_mut();
+        let _ = graph.add_edge(&domain_id, &host_id, GraphEdgeType::RelatedTo, 1.0);
     }
 
     // ==================== Endpoint Emission ====================
@@ -384,10 +376,9 @@ impl GraphEmitter {
 
         let host_id = format!("host:{}", host_ip);
 
-        if let Ok(graph) = self.graph.write() {
-            let _ = graph.add_node(&node_id, &label, GraphNodeType::Endpoint);
-            let _ = graph.add_edge(&host_id, &node_id, GraphEdgeType::RelatedTo, 1.0);
-        }
+        let graph = self.graph_mut();
+        let _ = graph.add_node(&node_id, &label, GraphNodeType::Endpoint);
+        let _ = graph.add_edge(&host_id, &node_id, GraphEdgeType::RelatedTo, 1.0);
     }
 
     // ==================== Certificate Emission ====================
@@ -404,9 +395,8 @@ impl GraphEmitter {
             None => format!("{} [issuer: {}]", subject, issuer),
         };
 
-        if let Ok(graph) = self.graph.write() {
-            let _ = graph.add_node(&node_id, &label, GraphNodeType::Certificate);
-        }
+        let graph = self.graph_mut();
+        let _ = graph.add_node(&node_id, &label, GraphNodeType::Certificate);
     }
 
     /// Link a certificate to a host
@@ -416,9 +406,8 @@ impl GraphEmitter {
         let host_id = format!("host:{}", host_ip);
         let cert_id = format!("cert:{}", subject);
 
-        if let Ok(graph) = self.graph.write() {
-            let _ = graph.add_edge(&host_id, &cert_id, GraphEdgeType::HasCert, 1.0);
-        }
+        let graph = self.graph_mut();
+        let _ = graph.add_edge(&host_id, &cert_id, GraphEdgeType::HasCert, 1.0);
     }
 
     // ==================== Network Topology ====================
@@ -439,9 +428,8 @@ impl GraphEmitter {
             _ => 1.0,
         };
 
-        if let Ok(graph) = self.graph.write() {
-            let _ = graph.add_edge(&from_id, &to_id, GraphEdgeType::ConnectsTo, weight);
-        }
+        let graph = self.graph_mut();
+        let _ = graph.add_edge(&from_id, &to_id, GraphEdgeType::ConnectsTo, weight);
     }
 
     // ==================== Batch Operations ====================
@@ -479,20 +467,24 @@ impl GraphEmitter {
 
     fn ensure_host(&self, ip: &str) {
         let node_id = format!("host:{}", ip);
-        if let Ok(graph) = self.graph.read() {
-            if graph.has_node(&node_id) {
-                return;
-            }
+        let exists = {
+            let graph = self.graph();
+            graph.has_node(&node_id)
+        };
+        if exists {
+            return;
         }
         self.emit_host(ip, None, None);
     }
 
     fn ensure_vuln(&self, cve: &str) {
         let node_id = format!("vuln:{}", cve);
-        if let Ok(graph) = self.graph.read() {
-            if graph.has_node(&node_id) {
-                return;
-            }
+        let exists = {
+            let graph = self.graph();
+            graph.has_node(&node_id)
+        };
+        if exists {
+            return;
         }
         self.emit_vulnerability(cve, 0.0, None);
     }
@@ -501,30 +493,27 @@ impl GraphEmitter {
 
     /// Get current graph statistics
     pub fn stats(&self) -> EmitterStats {
-        if let Ok(graph) = self.graph.read() {
-            let mut stats = EmitterStats::default();
+        let graph = self.graph();
+        let mut stats = EmitterStats::default();
 
-            for node in graph.iter_nodes() {
-                match node.node_type {
-                    GraphNodeType::Host => stats.hosts += 1,
-                    GraphNodeType::Service => stats.services += 1,
-                    GraphNodeType::Vulnerability => stats.vulnerabilities += 1,
-                    GraphNodeType::Credential => stats.credentials += 1,
-                    GraphNodeType::User => stats.users += 1,
-                    GraphNodeType::Technology => stats.technologies += 1,
-                    GraphNodeType::Domain => stats.domains += 1,
-                    GraphNodeType::Endpoint => stats.endpoints += 1,
-                    GraphNodeType::Certificate => stats.certificates += 1,
-                }
+        for node in graph.iter_nodes() {
+            match node.node_type {
+                GraphNodeType::Host => stats.hosts += 1,
+                GraphNodeType::Service => stats.services += 1,
+                GraphNodeType::Vulnerability => stats.vulnerabilities += 1,
+                GraphNodeType::Credential => stats.credentials += 1,
+                GraphNodeType::User => stats.users += 1,
+                GraphNodeType::Technology => stats.technologies += 1,
+                GraphNodeType::Domain => stats.domains += 1,
+                GraphNodeType::Endpoint => stats.endpoints += 1,
+                GraphNodeType::Certificate => stats.certificates += 1,
             }
-
-            stats.total_nodes = graph.node_count() as usize;
-            stats.total_edges = graph.edge_count() as usize;
-
-            stats
-        } else {
-            EmitterStats::default()
         }
+
+        stats.total_nodes = graph.node_count() as usize;
+        stats.total_edges = graph.edge_count() as usize;
+
+        stats
     }
 }
 
@@ -654,5 +643,30 @@ mod tests {
         let stats = emitter.stats();
         assert_eq!(stats.domains, 2);
         assert_eq!(stats.hosts, 1);
+    }
+
+    #[test]
+    fn test_graph_access_recovers_after_lock_poisoning() {
+        let emitter = std::sync::Arc::new(GraphEmitter::new());
+        let poison_target = std::sync::Arc::clone(&emitter);
+        let _ = std::thread::spawn(move || {
+            let _guard = poison_target
+                .graph
+                .write()
+                .expect("graph lock should be acquired");
+            panic!("poison graph lock");
+        })
+        .join();
+
+        {
+            let graph = emitter.graph();
+            assert_eq!(graph.node_count(), 0);
+        }
+
+        {
+            emitter.emit_host("127.0.0.1", None, None);
+        }
+
+        assert_eq!(emitter.stats().hosts, 1);
     }
 }
