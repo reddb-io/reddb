@@ -53,7 +53,7 @@ pub mod prelude {
     pub use crate::application::{
         AdminUseCases, CatalogUseCases, EntityUseCases, GraphUseCases, NativeUseCases,
         QueryUseCases, RuntimeAdminPort, RuntimeCatalogPort, RuntimeEntityPort, RuntimeGraphPort,
-        RuntimeNativePort, RuntimeQueryPort,
+        RuntimeNativePort, RuntimeQueryPort, RuntimeSchemaPort, SchemaUseCases,
     };
     pub use crate::auth::store::AuthStore;
     pub use crate::auth::{AuthConfig, AuthError, Role as AuthRole};
@@ -99,7 +99,7 @@ pub use crate::api::{
 pub use crate::application::{
     AdminUseCases, CatalogUseCases, EntityUseCases, GraphUseCases, NativeUseCases, QueryUseCases,
     RuntimeAdminPort, RuntimeCatalogPort, RuntimeEntityPort, RuntimeGraphPort, RuntimeNativePort,
-    RuntimeQueryPort,
+    RuntimeQueryPort, RuntimeSchemaPort, SchemaUseCases,
 };
 pub use crate::catalog::{
     snapshot_store, CatalogModelSnapshot, CollectionDescriptor, CollectionModel, SchemaMode,
