@@ -406,6 +406,22 @@ fn main() {
             }
         }
 
+        "rpc" => {
+            let stdio = result.flags.get("stdio").is_some_and(|v| v.is_truthy());
+            if !stdio {
+                eprintln!("Usage: red rpc --stdio [--path file]");
+                eprintln!("Only --stdio mode is currently implemented.");
+                std::process::exit(1);
+            }
+            let rt = open_local_runtime(&result.flags).unwrap_or_else(|err| {
+                eprintln!("rpc: {err}");
+                std::process::exit(1);
+            });
+            let code = reddb::rpc_stdio::run(&rt);
+            let _ = rt.checkpoint();
+            std::process::exit(code);
+        }
+
         "query" => {
             let json_mode = wants_json(&result.flags);
             let sql = remaining.first().map(|s| s.as_str()).unwrap_or("");
@@ -1054,6 +1070,15 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                 ),
                 cli::types::FlagSchema::boolean("dry-run")
                     .with_description("Validate operations without applying"),
+            ]);
+        }
+        Some("rpc") => {
+            flags.extend(vec![
+                cli::types::FlagSchema::boolean("stdio")
+                    .with_description("Speak JSON-RPC 2.0 line-delimited over stdin/stdout"),
+                cli::types::FlagSchema::new("path")
+                    .with_short('d')
+                    .with_description("Persistent database file path (omit for in-memory)"),
             ]);
         }
         Some("connect") => {
