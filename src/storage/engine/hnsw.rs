@@ -611,7 +611,7 @@ impl HnswIndex {
             for (layer, layer_count) in layer_counts.iter_mut().enumerate().take(node.max_layer + 1)
             {
                 *layer_count += 1;
-                let conns = node.connections[layer].len();
+                let conns = node.connections.get(layer).map(|c| c.len()).unwrap_or(0);
                 total_connections += conns;
                 max_connections = max_connections.max(conns);
                 if conns > 0 {
@@ -793,7 +793,7 @@ impl HnswIndex {
                 id,
                 HnswNode {
                     id,
-                    max_layer,
+                    max_layer: level,
                     vector,
                     connections,
                 },
