@@ -1411,6 +1411,7 @@ dependencies = [
  "sha2",
  "tokio",
  "tokio-rustls",
+ "tokio-stream",
  "tonic",
  "tonic-build",
  "ureq",
