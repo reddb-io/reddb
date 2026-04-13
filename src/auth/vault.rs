@@ -184,6 +184,7 @@ impl From<VaultError> for AuthError {
 /// Serializable snapshot of all auth state (users, api keys, bootstrap seal,
 /// the master secret for the certificate-based seal, and a key-value store
 /// for arbitrary encrypted secrets).
+#[derive(Default)]
 pub struct VaultState {
     pub users: Vec<User>,
     /// `(owner_username, api_key)` pairs.
@@ -197,18 +198,6 @@ pub struct VaultState {
     /// Keys use dot-notation with `red.secret.*` prefix (e.g., "red.secret.aes_key").
     /// Values are hex-encoded bytes or UTF-8 strings.
     pub kv: std::collections::HashMap<String, String>,
-}
-
-impl Default for VaultState {
-    fn default() -> Self {
-        Self {
-            users: Vec::new(),
-            api_keys: Vec::new(),
-            bootstrapped: false,
-            master_secret: None,
-            kv: std::collections::HashMap::new(),
-        }
-    }
 }
 
 impl VaultState {
