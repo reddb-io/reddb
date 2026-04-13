@@ -143,6 +143,13 @@ impl std::fmt::Display for SegmentError {
 
 impl std::error::Error for SegmentError {}
 
+fn current_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 /// A unified segment that stores all entity types
 pub trait UnifiedSegment: Send + Sync {
     /// Get segment ID
@@ -286,10 +293,7 @@ impl GrowingSegment {
 
     /// Create a new growing segment
     pub fn new(id: SegmentId, collection: impl Into<String>) -> Self {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = current_unix_secs();
 
         Self {
             id,
@@ -450,19 +454,13 @@ impl GrowingSegment {
 
     /// Get age in seconds
     pub fn age_secs(&self) -> u64 {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = current_unix_secs();
         now.saturating_sub(self.created_at)
     }
 
     /// Get time since last write
     pub fn idle_secs(&self) -> u64 {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = current_unix_secs();
         now.saturating_sub(self.last_write_at)
     }
 
@@ -494,10 +492,7 @@ impl GrowingSegment {
         let kind_set = self.kind_index.entry(kind_key).or_default();
         kind_set.reserve(n);
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = current_unix_secs();
 
         let base_seq = self.sequence.fetch_add(n as u64, Ordering::Relaxed);
 
@@ -659,10 +654,7 @@ impl UnifiedSegment for GrowingSegment {
         self.entities.insert(id, entity);
 
         // Update write timestamp
-        self.last_write_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        self.last_write_at = current_unix_secs();
 
         Ok(id)
     }
@@ -708,10 +700,7 @@ impl UnifiedSegment for GrowingSegment {
             self.entities.insert(entity.id, entity);
         }
 
-        self.last_write_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        self.last_write_at = current_unix_secs();
 
         Ok(())
     }
