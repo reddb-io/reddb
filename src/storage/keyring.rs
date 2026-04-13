@@ -489,8 +489,7 @@ mod tests {
         // Should return a path on most systems
         let path = get_keyring_path();
         // This might be None in very restricted environments
-        if path.is_some() {
-            let p = path.unwrap();
+        if let Some(p) = path {
             assert!(p.to_string_lossy().contains("reddb"));
             assert!(p.to_string_lossy().contains("keyring.enc"));
         }
