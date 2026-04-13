@@ -5,7 +5,7 @@ impl RedDB {
         &self,
         metadata: &PhysicalMetadataFile,
     ) -> NativeRegistrySummary {
-        const SAMPLE_LIMIT: usize = 16;
+        const SAMPLE_LIMIT: usize = 32;
 
         let collection_names: Vec<_> = metadata
             .catalog
