@@ -90,7 +90,7 @@ mod tests {
 
     #[test]
     fn test_action_outcome_variants() {
-        let outcomes = vec![
+        let outcomes = [
             ActionOutcome::Success,
             ActionOutcome::Failed {
                 error: "connection refused".into(),
@@ -233,7 +233,10 @@ mod tests {
 
         timing.complete();
         assert!(timing.ended_at >= timing.started_at);
-        assert!(timing.total_ms >= 0);
+        assert_eq!(
+            timing.total_ms,
+            timing.ended_at.saturating_sub(timing.started_at)
+        );
     }
 
     #[test]
