@@ -1,11 +1,24 @@
 [package]
 name = "reddb-python"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2021"
+description = "Native Python driver for RedDB (compiled Rust via pyo3)"
+license = "MIT"
+repository = "https://github.com/forattini-dev/reddb"
 
 [lib]
-name = "reddb_python"
+# IMPORTANT: this is the Python module name. After `pip install reddb`
+# users do `import reddb`. The pymodule function in src/lib.rs MUST be
+# named `reddb` to match.
+name = "reddb"
 crate-type = ["cdylib"]
+
+[features]
+# `embedded` pulls the entire RedDB engine in-process so `connect("file://")`
+# and `connect("memory://")` work without spawning anything. The wheel is
+# bigger but the experience matches the Rust client.
+default = ["embedded"]
+embedded = ["dep:reddb"]
 
 [dependencies]
 pyo3 = { version = "0.24", features = ["extension-module"] }
@@ -16,6 +29,9 @@ serde_json = "1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = "2"
 webpki-roots = "0.26"
+
+# Engine — only compiled in when the `embedded` feature is on.
+reddb = { version = "0.1", path = "../..", optional = true }
 
 [build-dependencies]
 tonic-build = "0.12"
