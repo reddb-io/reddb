@@ -622,7 +622,11 @@ pub struct GraphStore {
     edge_index: EdgeIndex,
     /// Secondary inverted indexes on (type, label) for O(1) non-id lookups.
     /// Avoids full node-page scans in `nodes_of_type` / `nodes_by_label`.
-    node_secondary: secondary_index::NodeSecondaryIndex,
+    ///
+    /// Stored as `Arc` so [`GraphStore::publish_indexes`] can share the
+    /// exact live index with an [`crate::storage::index::IndexRegistry`]
+    /// instead of handing out a frozen snapshot.
+    node_secondary: std::sync::Arc<secondary_index::NodeSecondaryIndex>,
     /// Node pages (packed node records)
     node_pages: RwLock<Vec<Page>>,
     /// Edge pages (packed edge records)
@@ -918,6 +922,35 @@ mod tests {
         // Bloom is allowed to false-positive but must never hide real labels.
         assert!(store.may_contain_label("Edge Router"));
         assert!(store.may_contain_label("Core Switch"));
+    }
+
+    #[test]
+    fn test_publish_indexes_to_registry() {
+        use crate::storage::index::{IndexKind, IndexRegistry, IndexScope};
+
+        let store = GraphStore::new();
+        store.add_node("h:1", "Alpha", GraphNodeType::Host).unwrap();
+        store.add_node("h:2", "Beta", GraphNodeType::Host).unwrap();
+        store
+            .add_node("svc:1", "HTTP", GraphNodeType::Service)
+            .unwrap();
+
+        let registry = IndexRegistry::new();
+        store.publish_indexes(&registry, "infra");
+
+        let shared = registry.get(&IndexScope::graph("infra")).unwrap();
+        let stats = shared.stats();
+        // Two scopes × each insert = by_type + by_label per node
+        // 3 inserts × 2 scopes = 6 entries
+        assert_eq!(stats.entries, 6);
+        assert_eq!(stats.kind, IndexKind::Inverted);
+        assert!(stats.has_bloom);
+
+        // Live updates are visible through the registry since both sides
+        // share the same Arc<NodeSecondaryIndex>.
+        store.add_node("h:3", "Gamma", GraphNodeType::Host).unwrap();
+        let updated = registry.get(&IndexScope::graph("infra")).unwrap().stats();
+        assert_eq!(updated.entries, 8);
     }
 
     #[test]
