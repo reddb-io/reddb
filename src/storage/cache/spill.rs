@@ -60,8 +60,40 @@ use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::RwLock;
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Instant;
+
+fn recover_read_guard<'a, T>(lock: &'a RwLock<T>) -> RwLockReadGuard<'a, T> {
+    match lock.read() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn recover_write_guard<'a, T>(lock: &'a RwLock<T>) -> RwLockWriteGuard<'a, T> {
+    match lock.write() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn spill_lock_error(context: &'static str) -> SpillError {
+    SpillError::Io(io::Error::other(format!("{context} lock poisoned")))
+}
+
+fn read_guard_or_err<'a, T>(
+    lock: &'a RwLock<T>,
+    context: &'static str,
+) -> Result<RwLockReadGuard<'a, T>, SpillError> {
+    lock.read().map_err(|_| spill_lock_error(context))
+}
+
+fn write_guard_or_err<'a, T>(
+    lock: &'a RwLock<T>,
+    context: &'static str,
+) -> Result<RwLockWriteGuard<'a, T>, SpillError> {
+    lock.write().map_err(|_| spill_lock_error(context))
+}
 
 // ============================================================================
 // Configuration
@@ -174,9 +206,7 @@ impl SegmentInfo {
         self.access_count.fetch_add(1, Ordering::Relaxed);
         // Boost score on access
         self.access_score.fetch_add(10, Ordering::Relaxed);
-        if let Ok(mut last) = self.last_access.write() {
-            *last = Instant::now();
-        }
+        *recover_write_guard(&self.last_access) = Instant::now();
     }
 
     fn decay_score(&self, factor: f64) {
@@ -327,7 +357,8 @@ impl SpillManager {
     pub fn register_segment(&self, name: &str, size: usize) {
         let info = SegmentInfo::new(name.to_string(), size);
 
-        if let Ok(mut segments) = self.segments.write() {
+        {
+            let mut segments = recover_write_guard(&self.segments);
             // If replacing, subtract old size
             if let Some(old) = segments.get(name) {
                 let old_size = old.size.load(Ordering::Relaxed);
@@ -343,30 +374,29 @@ impl SpillManager {
 
     /// Unregister a segment
     pub fn unregister_segment(&self, name: &str) {
-        if let Ok(mut segments) = self.segments.write() {
+        {
+            let mut segments = recover_write_guard(&self.segments);
             if let Some(info) = segments.remove(name) {
                 let size = info.size.load(Ordering::Relaxed);
                 self.current_memory.fetch_sub(size, Ordering::Relaxed);
 
                 // Clean up spill file if exists
-                if let Ok(path) = info.spill_path.read() {
-                    if let Some(p) = path.as_ref() {
-                        let _ = fs::remove_file(p);
-                    }
+                let path = recover_read_guard(&info.spill_path);
+                if let Some(p) = path.as_ref() {
+                    let _ = fs::remove_file(p);
                 }
             }
         }
 
-        if let Ok(mut spilled) = self.spilled_segments.write() {
-            spilled.remove(name);
-        }
+        recover_write_guard(&self.spilled_segments).remove(name);
 
         self.update_stats();
     }
 
     /// Update segment size
     pub fn update_size(&self, name: &str, new_size: usize) {
-        if let Ok(segments) = self.segments.read() {
+        {
+            let segments = recover_read_guard(&self.segments);
             if let Some(info) = segments.get(name) {
                 let old_size = info.size.swap(new_size, Ordering::Relaxed);
                 if new_size > old_size {
@@ -383,19 +413,17 @@ impl SpillManager {
 
     /// Record access to a segment
     pub fn access(&self, name: &str) {
-        if let Ok(segments) = self.segments.read() {
-            if let Some(info) = segments.get(name) {
-                info.touch();
-            }
+        let segments = recover_read_guard(&self.segments);
+        if let Some(info) = segments.get(name) {
+            info.touch();
         }
 
         // Update access history
-        if let Ok(mut history) = self.access_history.write() {
-            history.push_back(name.to_string());
-            // Keep limited history
-            while history.len() > 10000 {
-                history.pop_front();
-            }
+        let mut history = recover_write_guard(&self.access_history);
+        history.push_back(name.to_string());
+        // Keep limited history
+        while history.len() > 10000 {
+            history.pop_front();
         }
     }
 
@@ -422,21 +450,20 @@ impl SpillManager {
         // Find coldest segments to spill
         let mut candidates: Vec<(String, u64, usize)> = Vec::new();
 
-        if let Ok(segments) = self.segments.read() {
-            for (name, info) in segments.iter() {
-                // Skip already spilled segments
-                if info.is_spilled.read().map(|g| *g).unwrap_or(false) {
-                    continue;
-                }
-
-                let size = info.size.load(Ordering::Relaxed);
-                if size < self.config.min_spill_size {
-                    continue;
-                }
-
-                let coldness = info.coldness_score();
-                candidates.push((name.clone(), coldness, size));
+        let segments = recover_read_guard(&self.segments);
+        for (name, info) in segments.iter() {
+            // Skip already spilled segments
+            if *recover_read_guard(&info.is_spilled) {
+                continue;
             }
+
+            let size = info.size.load(Ordering::Relaxed);
+            if size < self.config.min_spill_size {
+                continue;
+            }
+
+            let coldness = info.coldness_score();
+            candidates.push((name.clone(), coldness, size));
         }
 
         // Sort by coldness (descending - higher = colder)
@@ -465,17 +492,14 @@ impl SpillManager {
     pub fn spill(&self, name: &str, data: &[u8]) -> Result<PathBuf, SpillError> {
         self.ensure_spill_dir()?;
 
-        let segments = self
-            .segments
-            .read()
-            .map_err(|_| SpillError::Io(io::Error::other("Lock poisoned")))?;
+        let segments = read_guard_or_err(&self.segments, "spill manager segments")?;
 
         let info = segments
             .get(name)
             .ok_or_else(|| SpillError::SegmentNotFound(name.to_string()))?;
 
         // Check if already spilled
-        if *info.is_spilled.read().unwrap() {
+        if *read_guard_or_err(&info.is_spilled, "spill manager segment flag")? {
             return Err(SpillError::AlreadySpilled(name.to_string()));
         }
 
@@ -503,28 +527,27 @@ impl SpillManager {
         // Update segment state
         drop(segments);
 
-        if let Ok(segments) = self.segments.read() {
-            if let Some(info) = segments.get(name) {
-                *info.is_spilled.write().unwrap() = true;
-                *info.spill_path.write().unwrap() = Some(path.clone());
-            }
+        let segments = read_guard_or_err(&self.segments, "spill manager segments")?;
+        if let Some(info) = segments.get(name) {
+            *write_guard_or_err(&info.is_spilled, "spill manager segment flag")? = true;
+            *write_guard_or_err(&info.spill_path, "spill manager segment spill path")? =
+                Some(path.clone());
         }
 
         // Update memory tracking
         self.current_memory.fetch_sub(data.len(), Ordering::Relaxed);
 
         // Track in spilled set
-        if let Ok(mut spilled) = self.spilled_segments.write() {
-            spilled.insert(name.to_string());
-        }
+        write_guard_or_err(&self.spilled_segments, "spill manager spilled set")?
+            .insert(name.to_string());
 
         // Update stats
-        if let Ok(mut stats) = self.stats.write() {
-            stats.spill_operations += 1;
-            stats.bytes_spilled += data.len() as u64;
-            stats.spilled_count += 1;
-            stats.disk_usage += data.len() as u64;
-        }
+        let mut stats = write_guard_or_err(&self.stats, "spill manager stats")?;
+        stats.spill_operations += 1;
+        stats.bytes_spilled += data.len() as u64;
+        stats.spilled_count += 1;
+        stats.disk_usage += data.len() as u64;
+        drop(stats);
 
         self.update_stats();
 
@@ -533,24 +556,21 @@ impl SpillManager {
 
     /// Reload a spilled segment from disk
     pub fn reload(&self, name: &str) -> Result<Option<Vec<u8>>, SpillError> {
-        let segments = self
-            .segments
-            .read()
-            .map_err(|_| SpillError::Io(io::Error::other("Lock poisoned")))?;
+        let segments = read_guard_or_err(&self.segments, "spill manager segments")?;
 
         let info = segments
             .get(name)
             .ok_or_else(|| SpillError::SegmentNotFound(name.to_string()))?;
 
         // Check if actually spilled
-        if !*info.is_spilled.read().unwrap() {
+        if !*read_guard_or_err(&info.is_spilled, "spill manager segment flag")? {
             return Ok(None);
         }
 
         let path = info
             .spill_path
             .read()
-            .unwrap()
+            .map_err(|_| spill_lock_error("spill manager segment spill path"))?
             .clone()
             .ok_or_else(|| SpillError::NotSpilled(name.to_string()))?;
 
@@ -589,31 +609,28 @@ impl SpillManager {
         // Update segment state
         drop(segments);
 
-        if let Ok(segments) = self.segments.read() {
-            if let Some(info) = segments.get(name) {
-                *info.is_spilled.write().unwrap() = false;
-                *info.spill_path.write().unwrap() = None;
-            }
+        let segments = read_guard_or_err(&self.segments, "spill manager segments")?;
+        if let Some(info) = segments.get(name) {
+            *write_guard_or_err(&info.is_spilled, "spill manager segment flag")? = false;
+            *write_guard_or_err(&info.spill_path, "spill manager segment spill path")? = None;
         }
 
         // Update memory tracking
         self.current_memory.fetch_add(data.len(), Ordering::Relaxed);
 
         // Remove from spilled set
-        if let Ok(mut spilled) = self.spilled_segments.write() {
-            spilled.remove(name);
-        }
+        write_guard_or_err(&self.spilled_segments, "spill manager spilled set")?.remove(name);
 
         // Delete spill file
         let _ = fs::remove_file(&path);
 
         // Update stats
-        if let Ok(mut stats) = self.stats.write() {
-            stats.reload_operations += 1;
-            stats.bytes_reloaded += data.len() as u64;
-            stats.spilled_count = stats.spilled_count.saturating_sub(1);
-            stats.disk_usage = stats.disk_usage.saturating_sub(data.len() as u64);
-        }
+        let mut stats = write_guard_or_err(&self.stats, "spill manager stats")?;
+        stats.reload_operations += 1;
+        stats.bytes_reloaded += data.len() as u64;
+        stats.spilled_count = stats.spilled_count.saturating_sub(1);
+        stats.disk_usage = stats.disk_usage.saturating_sub(data.len() as u64);
+        drop(stats);
 
         self.update_stats();
 
@@ -622,16 +639,12 @@ impl SpillManager {
 
     /// Check if a segment is spilled
     pub fn is_spilled(&self, name: &str) -> bool {
-        if let Ok(spilled) = self.spilled_segments.read() {
-            spilled.contains(name)
-        } else {
-            false
-        }
+        recover_read_guard(&self.spilled_segments).contains(name)
     }
 
     /// Get current statistics
     pub fn stats(&self) -> SpillStats {
-        self.stats.read().map(|s| s.clone()).unwrap_or_default()
+        recover_read_guard(&self.stats).clone()
     }
 
     /// Get current memory usage
@@ -651,20 +664,17 @@ impl SpillManager {
 
     /// List all tracked segments
     pub fn list_segments(&self) -> Vec<(String, usize, bool)> {
-        if let Ok(segments) = self.segments.read() {
-            segments
-                .iter()
-                .map(|(name, info)| {
-                    (
-                        name.clone(),
-                        info.size.load(Ordering::Relaxed),
-                        info.is_spilled.read().map(|g| *g).unwrap_or(false),
-                    )
-                })
-                .collect()
-        } else {
-            Vec::new()
-        }
+        let segments = recover_read_guard(&self.segments);
+        segments
+            .iter()
+            .map(|(name, info)| {
+                (
+                    name.clone(),
+                    info.size.load(Ordering::Relaxed),
+                    *recover_read_guard(&info.is_spilled),
+                )
+            })
+            .collect()
     }
 
     /// Clean up all spill files
@@ -680,42 +690,36 @@ impl SpillManager {
         }
 
         // Clear spilled state
-        if let Ok(segments) = self.segments.read() {
-            for info in segments.values() {
-                *info.is_spilled.write().unwrap() = false;
-                *info.spill_path.write().unwrap() = None;
-            }
+        let segments = recover_read_guard(&self.segments);
+        for info in segments.values() {
+            *recover_write_guard(&info.is_spilled) = false;
+            *recover_write_guard(&info.spill_path) = None;
         }
 
-        if let Ok(mut spilled) = self.spilled_segments.write() {
-            spilled.clear();
-        }
+        recover_write_guard(&self.spilled_segments).clear();
 
         Ok(())
     }
 
     /// Decay all segment scores (called periodically)
     fn decay_all_scores(&self) {
-        if let Ok(segments) = self.segments.read() {
-            for info in segments.values() {
-                info.decay_score(self.config.access_decay);
-            }
+        let segments = recover_read_guard(&self.segments);
+        for info in segments.values() {
+            info.decay_score(self.config.access_decay);
         }
     }
 
     /// Update stats from current state
     fn update_stats(&self) {
-        if let Ok(mut stats) = self.stats.write() {
-            stats.current_memory = self.current_memory.load(Ordering::Relaxed);
+        let mut stats = recover_write_guard(&self.stats);
+        stats.current_memory = self.current_memory.load(Ordering::Relaxed);
 
-            if let Ok(segments) = self.segments.read() {
-                stats.segment_count = segments.len();
-            }
+        let segments = recover_read_guard(&self.segments);
+        stats.segment_count = segments.len();
+        drop(segments);
 
-            if let Ok(spilled) = self.spilled_segments.read() {
-                stats.spilled_count = spilled.len();
-            }
-        }
+        let spilled = recover_read_guard(&self.spilled_segments);
+        stats.spilled_count = spilled.len();
     }
 }
 
