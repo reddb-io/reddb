@@ -285,6 +285,83 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish --allow-dirty --token "${CARGO_REGISTRY_TOKEN}"
 
+  publish-rust-client:
+    name: Publish reddb-client to crates.io
+    needs: [plan, publish-cargo]
+    runs-on: ubuntu-latest
+    if: |
+      needs.plan.outputs.should_skip != 'true' &&
+      needs.plan.outputs.release_channel == 'stable'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: '28.x'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Sync versions
+        run: |
+          VERSION="${{ needs.plan.outputs.package_version }}"
+          # Engine Cargo.toml (matches the version just published by publish-cargo).
+          sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml
+          # Client crate Cargo.toml.
+          sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" drivers/rust/Cargo.toml
+          # Point the client at the engine version on crates.io, not the local path.
+          # `cargo publish` already resolves `{ version = "…", path = "…" }` using the
+          # version field, but we rewrite to drop the path entirely to be explicit.
+          sed -i "s|reddb = { version = \"[^\"]*\", path = \"\.\./\.\.\", optional = true }|reddb = { version = \"${VERSION}\", optional = true }|" drivers/rust/Cargo.toml
+          cargo generate-lockfile --manifest-path drivers/rust/Cargo.toml
+          echo "Publishing reddb-client@${VERSION} to crates.io"
+      - name: Wait for reddb index propagation
+        run: |
+          # Give the crates.io sparse index a moment to pick up the engine
+          # version that publish-cargo just pushed. Without this, the client
+          # publish can fail with "no matching package named `reddb` found".
+          for i in 1 2 3 4 5; do
+            if cargo search reddb --limit 1 | grep -q "^reddb = \"${{ needs.plan.outputs.package_version }}\""; then
+              echo "reddb@${{ needs.plan.outputs.package_version }} visible on crates.io"
+              exit 0
+            fi
+            echo "not yet visible, sleeping 30s ($i/5)"
+            sleep 30
+          done
+          echo "warning: reddb not visible after 150s — attempting publish anyway"
+      - name: Publish
+        working-directory: drivers/rust
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --allow-dirty --token "${CARGO_REGISTRY_TOKEN}"
+
+  publish-js-driver:
+    name: Publish reddb (npm)
+    needs: [plan, publish-github]
+    runs-on: ubuntu-latest
+    if: needs.plan.outputs.should_skip != 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Sync version
+        working-directory: drivers/js
+        run: |
+          node -e "
+            const pkg = require('./package.json');
+            pkg.version = '${{ needs.plan.outputs.package_version }}';
+            require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          cat package.json | grep '"version"'
+      - name: Publish
+        working-directory: drivers/js
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          TAG=$([[ "${{ needs.plan.outputs.release_channel }}" == "next" ]] && echo "next" || echo "latest")
+          # The postinstall script pulls the matching `red` binary from the
+          # GitHub Release that `publish-github` just created.
+          npm publish --tag "${TAG}" --access public
+
   publish-docker:
     name: Docker image (GHCR + Docker Hub)
     needs: [plan, build]
