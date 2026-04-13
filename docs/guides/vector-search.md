@@ -70,6 +70,12 @@ curl -X POST http://127.0.0.1:8080/collections/articles/similar \
   }'
 ```
 
+Or do the same flow through the SQL query endpoint:
+
+```sql
+VECTOR SEARCH articles SIMILAR TO 'machine learning and neural networks' LIMIT 5
+```
+
 ## 5. Hybrid Search
 
 Combine vector similarity with text matching:
