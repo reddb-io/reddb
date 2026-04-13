@@ -10,6 +10,26 @@ Find vectors similar to a query vector:
 SEARCH SIMILAR [0.12, 0.91, 0.44] IN embeddings K 5 MIN_SCORE 0.7
 ```
 
+If you are using the canonical vector-query form inside `/query`, the equivalent syntax is:
+
+```sql
+VECTOR SEARCH embeddings SIMILAR TO [0.12, 0.91, 0.44] LIMIT 5
+```
+
+You can also reuse a stored vector directly as the query source:
+
+```sql
+VECTOR SEARCH embeddings SIMILAR TO (embeddings, 42) LIMIT 5
+```
+
+Or derive the query vector from another query. The first subquery row is used, and it must resolve to a vector value, vector reference, or vector entity id:
+
+```sql
+VECTOR SEARCH embeddings
+SIMILAR TO (VECTOR SEARCH seed_embeddings SIMILAR TO 'remote code execution' LIMIT 1)
+LIMIT 5
+```
+
 ### Parameters
 
 | Parameter | Required | Description |
@@ -33,12 +53,24 @@ SEARCH SIMILAR TEXT 'anomaly detected' COLLECTION events USING groq
 SEARCH SIMILAR TEXT 'network scan' COLLECTION logs USING ollama
 ```
 
+The same semantic lookup is also available in vector-query form:
+
+```sql
+VECTOR SEARCH logs SIMILAR TO 'suspicious login attempt' LIMIT 10
+VECTOR SEARCH cves SIMILAR TO 'remote code execution' LIMIT 5
+```
+
 | Parameter | Required | Description |
 |:----------|:---------|:------------|
 | `TEXT 'query'` | Yes | Natural-language query to embed |
 | `COLLECTION col` | Yes | Collection to search |
 | `LIMIT n` | No | Number of results (default 10) |
 | `USING provider` | No | Embedding provider (`openai`, `groq`, `ollama`, `anthropic`) |
+
+> [!TIP]
+> `VECTOR SEARCH ... SIMILAR TO 'text'` uses the runtime's configured default embedding provider
+> and model. Use `SEARCH SIMILAR TEXT ... USING provider` when you want to choose the provider
+> explicitly in the query itself.
 
 ## SEARCH TEXT
 
