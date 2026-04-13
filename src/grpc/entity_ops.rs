@@ -377,7 +377,8 @@ pub(crate) fn bulk_insert_binary(
         runtime
             .runtime
             .index_store_ref()
-            .index_entity_insert(&collection, *id, fields);
+            .index_entity_insert(&collection, *id, fields)
+            .map_err(Status::internal)?;
     }
 
     Ok(super::proto::BulkInsertReply {
