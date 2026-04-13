@@ -1,0 +1,148 @@
+{{- include "reddb.validateMode" . -}}
+{{- if eq .Values.mode "primary-replica" -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "reddb.replica.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "reddb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: replica
+spec:
+  serviceName: {{ include "reddb.replica.headless" . }}
+  replicas: {{ .Values.replica.replicaCount }}
+  podManagementPolicy: Parallel
+  updateStrategy:
+    {{- toYaml .Values.replica.updateStrategy | nindent 4 }}
+  selector:
+    matchLabels:
+      {{- include "reddb.replica.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "reddb.replica.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/auth: {{ include (print $.Template.BasePath "/secret-auth.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "reddb.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.replica.terminationGracePeriodSeconds }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.replica.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.replica.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.replica.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      affinity:
+        {{- if .Values.replica.affinity }}
+        {{- toYaml .Values.replica.affinity | nindent 8 }}
+        {{- else }}
+        {{- include "reddb.replica.defaultAffinity" . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.replica.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        - name: wait-for-primary
+          image: {{ include "reddb.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          command:
+            - /usr/local/bin/red
+            - health
+            - --http
+            - --bind
+            - {{ include "reddb.primary.fullname" . }}:{{ .Values.primary.service.httpPort }}
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+      containers:
+        - name: reddb
+          image: {{ include "reddb.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          args:
+            - replica
+            - --primary-addr
+            - http://{{ include "reddb.primary.fullname" . }}:{{ .Values.primary.service.grpcPort }}
+            - --path
+            - /data/data.rdb
+            - --grpc-bind
+            - 0.0.0.0:50051
+            - --http-bind
+            - 0.0.0.0:8080
+            {{- if .Values.config.vault }}
+            - --vault
+            - "true"
+            {{- end }}
+            {{- with .Values.config.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            {{- include "reddb.commonEnv" . | nindent 12 }}
+            - name: REDDB_PRIMARY_ADDR
+              value: http://{{ include "reddb.primary.fullname" . }}:{{ .Values.primary.service.grpcPort }}
+          ports:
+            - name: grpc
+              containerPort: 50051
+              protocol: TCP
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          {{- include "reddb.probes" . | nindent 10 }}
+          resources:
+            {{- toYaml .Values.replica.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- if not .Values.replica.persistence.enabled }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+  {{- if .Values.replica.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "reddb.replica.selectorLabels" . | nindent 10 }}
+        {{- with .Values.replica.persistence.annotations }}
+        annotations:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+      spec:
+        accessModes:
+          {{- toYaml .Values.replica.persistence.accessModes | nindent 10 }}
+        resources:
+          requests:
+            storage: {{ .Values.replica.persistence.size | quote }}
+        {{- if .Values.replica.persistence.storageClass }}
+        storageClassName: {{ .Values.replica.persistence.storageClass | quote }}
+        {{- end }}
+  {{- end }}
+{{- end }}
