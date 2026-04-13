@@ -95,6 +95,16 @@ pub struct CreateKvInput {
 }
 
 #[derive(Debug, Clone)]
+pub struct CreateTimeSeriesPointInput {
+    pub collection: String,
+    pub metric: String,
+    pub value: f64,
+    pub timestamp_ns: Option<u64>,
+    pub tags: Vec<(String, String)>,
+    pub metadata: Vec<(String, MetadataValue)>,
+}
+
+#[derive(Debug, Clone)]
 pub struct DeleteEntityInput {
     pub collection: String,
     pub id: EntityId,
@@ -159,6 +169,13 @@ impl<'a, P: RuntimeEntityPort + ?Sized> EntityUseCases<'a, P> {
 
     pub fn create_kv(&self, input: CreateKvInput) -> RedDBResult<CreateEntityOutput> {
         self.runtime.create_kv(input)
+    }
+
+    pub fn create_timeseries_point(
+        &self,
+        input: CreateTimeSeriesPointInput,
+    ) -> RedDBResult<CreateEntityOutput> {
+        self.runtime.create_timeseries_point(input)
     }
 
     pub fn get_kv(&self, collection: &str, key: &str) -> RedDBResult<Option<(Value, EntityId)>> {
