@@ -65,8 +65,8 @@ pub use devx::{
 };
 pub use entity::{
     CrossRef, EdgeData, EmbeddingSlot, EntityData, EntityId, EntityKind, GraphEdgeKind,
-    GraphNodeKind, NodeData, RefType, RowData, SparseVector, TimeSeriesPointKind, UnifiedEntity,
-    VectorData,
+    GraphNodeKind, NodeData, RefType, RowData, SparseVector, TimeSeriesData, TimeSeriesPointKind,
+    UnifiedEntity, VectorData,
 };
 pub use hash_index::{
     HashIndex, HashIndexConfig, HashIndexError, HashIndexManager, HashIndexStats,
