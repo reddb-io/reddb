@@ -26,9 +26,10 @@
 //! additive.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use super::cost::{ColumnStats, TableStats};
-use crate::storage::index::IndexStats;
+use crate::storage::index::{IndexRegistry, IndexScope, IndexStats};
 
 /// Read-only interface the planner uses to look up storage statistics.
 ///
@@ -149,6 +150,54 @@ impl StatsProvider for StaticProvider {
     }
 }
 
+/// [`StatsProvider`] backed by an [`IndexRegistry`].
+///
+/// Closes the loop between the index trait layer and the planner stats
+/// surface: storage components publish their indexes into an
+/// `IndexRegistry`, and this adapter surfaces those statistics to the cost
+/// estimator through the trait it already consumes.
+///
+/// Table-level statistics (row counts, page counts) still need an external
+/// source — the registry only knows about *indexes*, not base-table
+/// cardinality. Callers can chain a [`StaticProvider`] via
+/// [`RegistryProvider::with_table_fallback`] when they want both.
+pub struct RegistryProvider {
+    registry: Arc<IndexRegistry>,
+    table_fallback: Option<Arc<dyn StatsProvider>>,
+}
+
+impl RegistryProvider {
+    /// Wrap an existing registry. Without a fallback, `table_stats` always
+    /// returns `None` — only index-level stats are served.
+    pub fn new(registry: Arc<IndexRegistry>) -> Self {
+        Self {
+            registry,
+            table_fallback: None,
+        }
+    }
+
+    /// Attach a secondary provider consulted for table-level stats the
+    /// registry cannot answer.
+    pub fn with_table_fallback(mut self, fallback: Arc<dyn StatsProvider>) -> Self {
+        self.table_fallback = Some(fallback);
+        self
+    }
+}
+
+impl StatsProvider for RegistryProvider {
+    fn table_stats(&self, table: &str) -> Option<TableStats> {
+        self.table_fallback
+            .as_ref()
+            .and_then(|f| f.table_stats(table))
+    }
+
+    fn index_stats(&self, table: &str, column: &str) -> Option<IndexStats> {
+        self.registry
+            .get(&IndexScope::table(table, column))
+            .map(|idx| idx.stats())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,6 +263,67 @@ mod tests {
         let cs = p.column_stats("users", "id").unwrap();
         assert_eq!(cs.distinct_count, 100);
         assert!(cs.has_index);
+    }
+
+    #[test]
+    fn registry_provider_serves_index_stats() {
+        use crate::storage::index::{IndexBase, IndexKind, IndexRegistry, IndexScope};
+        use std::sync::Arc;
+
+        struct StubIndex(IndexStats);
+        impl IndexBase for StubIndex {
+            fn name(&self) -> &str {
+                "stub"
+            }
+            fn kind(&self) -> IndexKind {
+                self.0.kind
+            }
+            fn stats(&self) -> IndexStats {
+                self.0.clone()
+            }
+        }
+
+        let registry = Arc::new(IndexRegistry::new());
+        registry.register(
+            IndexScope::table("users", "email"),
+            Arc::new(StubIndex(IndexStats {
+                entries: 500_000,
+                distinct_keys: 500_000,
+                approx_bytes: 0,
+                kind: IndexKind::Hash,
+                has_bloom: true,
+            })),
+        );
+
+        let provider = RegistryProvider::new(Arc::clone(&registry));
+        let stats = provider.index_stats("users", "email").unwrap();
+        assert_eq!(stats.distinct_keys, 500_000);
+        assert_eq!(stats.kind, IndexKind::Hash);
+        // No table fallback registered.
+        assert!(provider.table_stats("users").is_none());
+    }
+
+    #[test]
+    fn registry_provider_chains_fallback_for_table_stats() {
+        use crate::storage::index::IndexRegistry;
+        use std::sync::Arc;
+
+        let fallback: Arc<dyn StatsProvider> = Arc::new(StaticProvider::new().with_table(
+            "orders",
+            TableStats {
+                row_count: 25_000,
+                avg_row_size: 512,
+                page_count: 50,
+                columns: vec![],
+            },
+        ));
+
+        let registry = Arc::new(IndexRegistry::new());
+        let provider = RegistryProvider::new(registry).with_table_fallback(fallback);
+        let t = provider.table_stats("orders").unwrap();
+        assert_eq!(t.row_count, 25_000);
+        // Registry has no index for this table — None is correct.
+        assert!(provider.index_stats("orders", "id").is_none());
     }
 
     #[test]
