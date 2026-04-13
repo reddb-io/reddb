@@ -652,7 +652,7 @@ mod tests {
     fn test_list_resumable() {
         let mut segment = ScanStateSegment::new();
 
-        let mut running = ScanState::new(
+        let running = ScanState::new(
             "running".to_string(),
             ScanType::DirectoryFuzz,
             "http://a.com".to_string(),
