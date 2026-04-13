@@ -60,6 +60,7 @@ async fn bad_sql_returns_query_error() {
     assert_eq!(err.code, ErrorCode::QueryError);
 }
 
+#[cfg(not(feature = "grpc"))]
 #[tokio::test]
 async fn grpc_uri_returns_feature_disabled_when_grpc_off() {
     // The default feature set is `embedded` only, so grpc:// should
@@ -67,6 +68,16 @@ async fn grpc_uri_returns_feature_disabled_when_grpc_off() {
     let result = Reddb::connect("grpc://localhost:50051").await;
     let err = result.unwrap_err();
     assert_eq!(err.code, ErrorCode::FeatureDisabled);
+}
+
+#[cfg(feature = "grpc")]
+#[tokio::test]
+async fn grpc_uri_returns_io_error_when_no_server() {
+    // With the grpc feature on, connecting to a dead endpoint should
+    // surface as IO_ERROR (not FeatureDisabled).
+    let result = Reddb::connect("grpc://127.0.0.1:1").await;
+    let err = result.unwrap_err();
+    assert_eq!(err.code, ErrorCode::IoError);
 }
 
 #[tokio::test]
