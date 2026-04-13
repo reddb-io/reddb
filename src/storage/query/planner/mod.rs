@@ -13,14 +13,16 @@ pub mod cache;
 pub mod cost;
 pub mod optimizer;
 pub mod rewriter;
+pub mod stats_provider;
 
 mod logical;
 mod types;
 
 pub use cache::{CachedPlan, PlanCache};
-pub use cost::{CardinalityEstimate, CostEstimator, PlanCost};
+pub use cost::{CardinalityEstimate, ColumnStats, CostEstimator, PlanCost, TableStats};
 pub use optimizer::{OptimizationPass, QueryOptimizer};
 pub use rewriter::{QueryRewriter, RewriteContext, RewriteRule};
+pub use stats_provider::{NullProvider, StaticProvider, StatsProvider};
 pub use types::{
     build_canonical_plan, AccessPathDecision, CacheStats, CanonicalLogicalNode,
     CanonicalLogicalPlan, CanonicalPlanner, QueryPlan, QueryPlanner,
