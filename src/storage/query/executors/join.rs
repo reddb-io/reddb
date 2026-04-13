@@ -29,6 +29,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 use super::super::engine::binding::{Binding, Value, Var};
+use super::value_compare::total_compare_values;
 
 // ============================================================================
 // Join Types
@@ -540,7 +541,7 @@ fn compare_by_keys(a: &Binding, b: &Binding, keys: &[Var]) -> std::cmp::Ordering
     for key in keys {
         match (a.get(key), b.get(key)) {
             (Some(av), Some(bv)) => {
-                let cmp = compare_values(av, bv);
+                let cmp = total_compare_values(av, bv);
                 if cmp != std::cmp::Ordering::Equal {
                     return cmp;
                 }
@@ -557,7 +558,7 @@ fn compare_keys(a: &HashKey, b: &HashKey) -> std::cmp::Ordering {
     for (av, bv) in a.0.iter().zip(b.0.iter()) {
         match (av, bv) {
             (Some(av), Some(bv)) => {
-                let cmp = compare_values(av, bv);
+                let cmp = total_compare_values(av, bv);
                 if cmp != std::cmp::Ordering::Equal {
                     return cmp;
                 }
@@ -568,19 +569,6 @@ fn compare_keys(a: &HashKey, b: &HashKey) -> std::cmp::Ordering {
         }
     }
     std::cmp::Ordering::Equal
-}
-
-fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
-    match (a, b) {
-        (Value::Integer(a), Value::Integer(b)) => a.cmp(b),
-        (Value::Float(a), Value::Float(b)) => a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal),
-        (Value::String(a), Value::String(b)) => a.cmp(b),
-        (Value::Uri(a), Value::Uri(b)) => a.cmp(b),
-        (Value::Boolean(a), Value::Boolean(b)) => a.cmp(b),
-        (Value::Node(a), Value::Node(b)) => a.cmp(b),
-        (Value::Edge(a), Value::Edge(b)) => a.cmp(b),
-        _ => std::cmp::Ordering::Equal,
-    }
 }
 
 // ============================================================================
