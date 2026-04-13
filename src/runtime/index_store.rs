@@ -504,13 +504,27 @@ impl IndexStore {
     }
 
     /// Lookup entity IDs via bitmap index for a collection.column = value
-    pub fn bitmap_lookup(&self, collection: &str, column: &str, value: &[u8]) -> Vec<EntityId> {
-        self.bitmap.lookup(collection, column, value)
+    pub fn bitmap_lookup(
+        &self,
+        collection: &str,
+        column: &str,
+        value: &[u8],
+    ) -> Result<Vec<EntityId>, String> {
+        self.bitmap
+            .lookup(collection, column, value)
+            .map_err(|err| err.to_string())
     }
 
     /// Count via bitmap (O(1))
-    pub fn bitmap_count(&self, collection: &str, column: &str, value: &[u8]) -> u64 {
-        self.bitmap.count(collection, column, value)
+    pub fn bitmap_count(
+        &self,
+        collection: &str,
+        column: &str,
+        value: &[u8],
+    ) -> Result<u64, String> {
+        self.bitmap
+            .count(collection, column, value)
+            .map_err(|err| err.to_string())
     }
 
     /// Find which index (if any) covers a collection + column
