@@ -42,7 +42,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use super::{Page, PageType, Pager, PagerConfig};
 use crate::storage::wal::{
@@ -88,6 +88,8 @@ pub enum DatabaseError {
     Io(io::Error),
     /// Pager error
     Pager(String),
+    /// Internal lock was poisoned by a panic
+    LockPoisoned(&'static str),
     /// Transaction error
     Transaction(TxError),
     /// Checkpoint error
@@ -103,6 +105,7 @@ impl std::fmt::Display for DatabaseError {
         match self {
             Self::Io(e) => write!(f, "I/O error: {}", e),
             Self::Pager(msg) => write!(f, "Pager error: {}", msg),
+            Self::LockPoisoned(name) => write!(f, "Lock poisoned: {}", name),
             Self::Transaction(e) => write!(f, "Transaction error: {}", e),
             Self::Checkpoint(e) => write!(f, "Checkpoint error: {}", e),
             Self::ReadOnly => write!(f, "Database is read-only"),
@@ -159,6 +162,30 @@ pub struct Database {
 }
 
 impl Database {
+    fn state_read(&self) -> Result<RwLockReadGuard<'_, DbState>, DatabaseError> {
+        self.state
+            .read()
+            .map_err(|_| DatabaseError::LockPoisoned("database state"))
+    }
+
+    fn state_write(&self) -> Result<RwLockWriteGuard<'_, DbState>, DatabaseError> {
+        self.state
+            .write()
+            .map_err(|_| DatabaseError::LockPoisoned("database state"))
+    }
+
+    fn pages_since_checkpoint_read(&self) -> Result<RwLockReadGuard<'_, u32>, DatabaseError> {
+        self.pages_since_checkpoint
+            .read()
+            .map_err(|_| DatabaseError::LockPoisoned("pages since checkpoint"))
+    }
+
+    fn pages_since_checkpoint_write(&self) -> Result<RwLockWriteGuard<'_, u32>, DatabaseError> {
+        self.pages_since_checkpoint
+            .write()
+            .map_err(|_| DatabaseError::LockPoisoned("pages since checkpoint"))
+    }
+
     /// Open or create a database
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, DatabaseError> {
         Self::open_with_config(path, DatabaseConfig::default())
@@ -216,7 +243,7 @@ impl Database {
 
     /// Check if database is open
     fn check_open(&self) -> Result<(), DatabaseError> {
-        if *self.state.read().unwrap() == DbState::Closed {
+        if *self.state_read()? == DbState::Closed {
             return Err(DatabaseError::Closed);
         }
         Ok(())
@@ -268,7 +295,7 @@ impl Database {
         let result = checkpointer.checkpoint(&self.pager, &self.wal_path)?;
 
         // Reset counter
-        *self.pages_since_checkpoint.write().unwrap() = 0;
+        *self.pages_since_checkpoint_write()? = 0;
 
         Ok(result)
     }
@@ -279,7 +306,7 @@ impl Database {
             return Ok(None);
         }
 
-        let pages = *self.pages_since_checkpoint.read().unwrap();
+        let pages = *self.pages_since_checkpoint_read()?;
         if pages >= self.config.auto_checkpoint_threshold {
             Ok(Some(self.checkpoint()?))
         } else {
@@ -289,7 +316,10 @@ impl Database {
 
     /// Increment pages-since-checkpoint counter
     pub fn increment_page_count(&self, count: u32) {
-        let mut pages = self.pages_since_checkpoint.write().unwrap();
+        let mut pages = self
+            .pages_since_checkpoint
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         *pages = pages.saturating_add(count);
     }
 
@@ -308,7 +338,7 @@ impl Database {
     /// Performs a final checkpoint and syncs all data to disk.
     pub fn close(self) -> Result<(), DatabaseError> {
         // Mark as closed
-        *self.state.write().unwrap() = DbState::Closed;
+        *self.state_write()? = DbState::Closed;
 
         // Wait for active transactions to complete
         if self.tx_manager.has_active_transactions() {
@@ -363,8 +393,18 @@ impl Database {
 impl Drop for Database {
     fn drop(&mut self) {
         // Try to sync on drop
-        if *self.state.read().unwrap() == DbState::Open {
-            *self.state.write().unwrap() = DbState::Closed;
+        let state = self
+            .state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *state == DbState::Open {
+            drop(state);
+            let mut state = self
+                .state
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *state = DbState::Closed;
+            drop(state);
 
             // Best-effort checkpoint and sync
             if !self.config.read_only {
@@ -594,6 +634,34 @@ mod tests {
             let r2 = db.read_page(page2.page_id()).unwrap();
             assert_eq!(r1.as_bytes()[100], 0x11);
             assert_eq!(r2.as_bytes()[100], 0x22);
+        }
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_begin_returns_structured_error_when_state_lock_is_poisoned() {
+        let path = temp_db_path();
+        cleanup(&path);
+
+        {
+            let db = Arc::new(Database::open(&path).unwrap());
+            let poison_target = Arc::clone(&db);
+            let _ = std::thread::spawn(move || {
+                let _guard = poison_target
+                    .state
+                    .write()
+                    .expect("state lock should be acquired");
+                panic!("poison database state");
+            })
+            .join();
+
+            match db.begin() {
+                Ok(_) => panic!("begin should fail after state lock poisoning"),
+                Err(err) => {
+                    assert!(matches!(err, DatabaseError::LockPoisoned("database state")))
+                }
+            }
         }
 
         cleanup(&path);
