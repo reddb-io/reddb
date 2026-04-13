@@ -305,12 +305,16 @@ impl SpatialIndexManager {
         center_lon: f64,
         radius_km: f64,
         limit: usize,
-    ) -> Vec<SpatialSearchResult> {
+    ) -> Result<Vec<SpatialSearchResult>, SpatialIndexError> {
         let indices = recover_read_guard(self.indices.read());
-        indices
-            .get(&(collection.to_string(), column.to_string()))
-            .map(|idx| idx.search_radius(center_lat, center_lon, radius_km, limit))
-            .unwrap_or_default()
+        if let Some(idx) = indices.get(&(collection.to_string(), column.to_string())) {
+            Ok(idx.search_radius(center_lat, center_lon, radius_km, limit))
+        } else {
+            Err(SpatialIndexError::MissingIndex {
+                collection: collection.to_string(),
+                column: column.to_string(),
+            })
+        }
     }
 
     /// Search within a bounding box
@@ -323,12 +327,16 @@ impl SpatialIndexManager {
         max_lat: f64,
         max_lon: f64,
         limit: usize,
-    ) -> Vec<SpatialSearchResult> {
+    ) -> Result<Vec<SpatialSearchResult>, SpatialIndexError> {
         let indices = recover_read_guard(self.indices.read());
-        indices
-            .get(&(collection.to_string(), column.to_string()))
-            .map(|idx| idx.search_bbox(min_lat, min_lon, max_lat, max_lon, limit))
-            .unwrap_or_default()
+        if let Some(idx) = indices.get(&(collection.to_string(), column.to_string())) {
+            Ok(idx.search_bbox(min_lat, min_lon, max_lat, max_lon, limit))
+        } else {
+            Err(SpatialIndexError::MissingIndex {
+                collection: collection.to_string(),
+                column: column.to_string(),
+            })
+        }
     }
 
     /// Find K nearest points
@@ -339,25 +347,38 @@ impl SpatialIndexManager {
         lat: f64,
         lon: f64,
         k: usize,
-    ) -> Vec<SpatialSearchResult> {
+    ) -> Result<Vec<SpatialSearchResult>, SpatialIndexError> {
         let indices = recover_read_guard(self.indices.read());
-        indices
-            .get(&(collection.to_string(), column.to_string()))
-            .map(|idx| idx.search_nearest(lat, lon, k))
-            .unwrap_or_default()
+        if let Some(idx) = indices.get(&(collection.to_string(), column.to_string())) {
+            Ok(idx.search_nearest(lat, lon, k))
+        } else {
+            Err(SpatialIndexError::MissingIndex {
+                collection: collection.to_string(),
+                column: column.to_string(),
+            })
+        }
     }
 
     /// Get stats
-    pub fn index_stats(&self, collection: &str, column: &str) -> Option<SpatialIndexStats> {
+    pub fn index_stats(
+        &self,
+        collection: &str,
+        column: &str,
+    ) -> Result<SpatialIndexStats, SpatialIndexError> {
         let indices = recover_read_guard(self.indices.read());
-        indices
-            .get(&(collection.to_string(), column.to_string()))
-            .map(|idx| SpatialIndexStats {
+        if let Some(idx) = indices.get(&(collection.to_string(), column.to_string())) {
+            Ok(SpatialIndexStats {
                 column: column.to_string(),
                 collection: collection.to_string(),
                 point_count: idx.len(),
                 memory_bytes: idx.memory_bytes(),
             })
+        } else {
+            Err(SpatialIndexError::MissingIndex {
+                collection: collection.to_string(),
+                column: column.to_string(),
+            })
+        }
     }
 }
 
@@ -472,7 +493,9 @@ mod tests {
         mgr.insert("sites", "location", EntityId::new(2), 51.5074, -0.1278)
             .expect("spatial insert should succeed");
 
-        let results = mgr.search_radius("sites", "location", 48.8566, 2.3522, 500.0, 10);
+        let results = mgr
+            .search_radius("sites", "location", 48.8566, 2.3522, 500.0, 10)
+            .unwrap();
         assert!(!results.is_empty());
 
         let stats = mgr.index_stats("sites", "location").unwrap();
@@ -492,8 +515,27 @@ mod tests {
         mgr.insert("sites", "location", EntityId::new(1), 48.8566, 2.3522)
             .expect("spatial insert should recover after poison");
 
-        let results = mgr.search_nearest("sites", "location", 48.8566, 2.3522, 1);
+        let results = mgr
+            .search_nearest("sites", "location", 48.8566, 2.3522, 1)
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].entity_id, EntityId::new(1));
+    }
+
+    #[test]
+    fn test_spatial_manager_lookup_missing_index_returns_error() {
+        let mgr = SpatialIndexManager::new();
+
+        let err = mgr
+            .search_nearest("sites", "location", 48.8566, 2.3522, 1)
+            .expect_err("spatial lookup should fail when the index does not exist");
+
+        assert_eq!(
+            err,
+            SpatialIndexError::MissingIndex {
+                collection: "sites".to_string(),
+                column: "location".to_string(),
+            }
+        );
     }
 }
