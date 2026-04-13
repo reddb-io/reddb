@@ -13,20 +13,21 @@ keywords = ["reddb", "database", "client", "embedded"]
 categories = ["database", "api-bindings"]
 
 [features]
-# `embedded` is the only fully wired feature today. It pulls the entire
-# RedDB engine in-process, which is the fastest possible path. Disable
-# the default features if you only want the (forthcoming) gRPC client to
-# avoid compiling the engine.
+# `embedded` pulls the entire RedDB engine in-process (fastest path).
+# `grpc` pulls the same engine but only uses its tonic client type —
+# today both features flow through `dep:reddb`. A standalone thin client
+# that does not compile the engine is tracked in PLAN_DRIVERS.md.
 default = ["embedded"]
 
 embedded = ["dep:reddb"]
-# `grpc` is reserved for the remote tonic-based client. Today it
-# compiles to a clear "not implemented" stub. See PLAN_DRIVERS.md.
-grpc = []
+grpc = ["dep:reddb", "dep:tokio"]
 
 [dependencies]
-# Engine — only compiled in when the `embedded` feature is on.
+# Engine — only compiled in when the `embedded` or `grpc` feature is on.
 reddb = { version = "0.1", path = "../..", optional = true }
+
+# Only needed by the grpc backend (block_on inside the sync methods).
+tokio = { version = "1", features = ["rt", "rt-multi-thread"], optional = true }
 
 # Connection-string parsing.
 url = "2"
