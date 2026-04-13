@@ -649,7 +649,9 @@ impl AuthStore {
             None => return Err(AuthError::KeyNotFound(key.to_string())),
         };
 
-        let user = users.get_mut(&owner_name).unwrap();
+        let user = users
+            .get_mut(&owner_name)
+            .ok_or_else(|| AuthError::KeyNotFound(key.to_string()))?;
         user.api_keys.retain(|k| k.key != key);
         user.updated_at = now_ms();
 
