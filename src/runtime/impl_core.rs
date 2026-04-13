@@ -235,14 +235,40 @@ impl RedDBRuntime {
             }
         }
 
-        // Start background maintenance thread (context index refresh + session purge)
+        // Start background maintenance thread (context index refresh +
+        // session purge). Held by a WEAK reference to `RuntimeInner`
+        // so dropping the last `RedDBRuntime` handle actually releases
+        // the underlying Arc<Pager> (and its file lock). Polling at
+        // 200ms means shutdown latency is bounded; the real 60-second
+        // work cadence is tracked independently via a `last_work`
+        // timestamp.
+        //
+        // The previous version captured `rt = runtime.clone()` by
+        // strong reference and ran an unterminated `loop`, which held
+        // Arc<RuntimeInner> forever — reopening a persistent database
+        // in the same process failed with "Database is locked" because
+        // the pager could never drop. See the regression test
+        // `finding_1_select_after_bulk_insert_persistent_reopen`.
         {
-            let rt = runtime.clone();
+            let weak = Arc::downgrade(&runtime.inner);
             std::thread::Builder::new()
                 .name("reddb-maintenance".into())
-                .spawn(move || loop {
-                    std::thread::sleep(std::time::Duration::from_secs(60));
-                    let _stats = rt.inner.db.store().context_index().stats();
+                .spawn(move || {
+                    let tick = std::time::Duration::from_millis(200);
+                    let work_interval = std::time::Duration::from_secs(60);
+                    let mut last_work = std::time::Instant::now();
+                    loop {
+                        std::thread::sleep(tick);
+                        let Some(inner) = weak.upgrade() else {
+                            // All strong references dropped — the
+                            // runtime is gone, exit cleanly.
+                            break;
+                        };
+                        if last_work.elapsed() >= work_interval {
+                            let _stats = inner.db.store().context_index().stats();
+                            last_work = std::time::Instant::now();
+                        }
+                    }
                 })
                 .ok();
         }

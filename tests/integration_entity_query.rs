@@ -2356,3 +2356,149 @@ fn test_patch_respects_unique_but_allows_self_update() {
         "error should mention unique violation, got: {msg}"
     );
 }
+
+// ===========================================================================
+// Finding #1 regression suite — query engine must see freshly-inserted data
+//
+// BASELINE.md Finding #1 in the sibling reddb-benchmark repo documents that
+// RedDB's query path is disconnected from the write path: inserts succeed
+// and show up in the segment manager, but SELECT returns zero rows. Two
+// flavours of the bug are reproduced here:
+//
+//   A) in-process: CREATE TABLE + inserts + SELECT in ONE RedDBRuntime
+//   B) cross-process: CREATE TABLE + inserts + checkpoint + REOPEN + SELECT
+//
+// Both tests MUST pass once the fix lands. They are the canonical regression
+// guards for anything that touches the catalog / bootstrap / read path.
+// ===========================================================================
+
+#[test]
+fn finding_1_select_after_bulk_insert_same_process_in_memory() {
+    let rt = rt();
+    let query = QueryUseCases::new(&rt);
+    let entity = EntityUseCases::new(&rt);
+
+    query
+        .execute(ExecuteQueryInput {
+            query: "CREATE TABLE f1_mem (id BIGINT PRIMARY KEY, name TEXT, age INT)".into(),
+        })
+        .expect("CREATE TABLE must succeed");
+
+    const N: usize = 50;
+    for i in 0..N {
+        entity
+            .create_row(CreateRowInput {
+                collection: "f1_mem".into(),
+                fields: vec![
+                    ("id".into(), Value::Integer((i as i64) + 1)),
+                    ("name".into(), Value::Text(format!("User_{i}"))),
+                    ("age".into(), Value::Integer(20 + (i as i64 % 50))),
+                ],
+                metadata: vec![],
+                node_links: vec![],
+                vector_links: vec![],
+            })
+            .unwrap_or_else(|e| panic!("insert {i} must succeed: {e:?}"));
+    }
+
+    let all = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT * FROM f1_mem".into(),
+        })
+        .expect("SELECT must succeed");
+    assert_eq!(
+        all.result.records.len(),
+        N,
+        "SELECT * must return all {N} inserted rows in the same process"
+    );
+
+    // Spot-check: a ranged filter must also produce matching rows. This
+    // catches the second half of Finding #1 where the scan path can
+    // return rows via SELECT * but silently drops them under a WHERE
+    // predicate because the filter runs against a different view.
+    let ranged = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT * FROM f1_mem WHERE age BETWEEN 20 AND 40".into(),
+        })
+        .expect("SELECT WHERE must succeed");
+    assert!(
+        !ranged.result.records.is_empty(),
+        "SELECT … WHERE age BETWEEN … must return at least one of the {N} inserted rows"
+    );
+}
+
+#[test]
+fn finding_1_select_after_bulk_insert_persistent_reopen() {
+    // Persistent flavour: closes and reopens the runtime between the
+    // writes and the read. This catches the case where data lives
+    // in a process-local in-memory segment manager that is never
+    // rehydrated from the persisted B-tree on open.
+    let tmp = std::env::temp_dir().join(format!(
+        "reddb_f1_reopen_{}.rdb",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let path_str = tmp.to_string_lossy().to_string();
+    let _ = std::fs::remove_file(&tmp);
+
+    const N: usize = 25;
+    {
+        let rt = reddb::RedDBRuntime::with_options(reddb::api::RedDBOptions::persistent(&path_str))
+            .expect("open persistent runtime");
+        let query = QueryUseCases::new(&rt);
+        let entity = EntityUseCases::new(&rt);
+        query
+            .execute(ExecuteQueryInput {
+                query: "CREATE TABLE f1_disk (id BIGINT PRIMARY KEY, name TEXT)".into(),
+            })
+            .expect("CREATE TABLE must succeed");
+        for i in 0..N {
+            entity
+                .create_row(CreateRowInput {
+                    collection: "f1_disk".into(),
+                    fields: vec![
+                        ("id".into(), Value::Integer((i as i64) + 1)),
+                        ("name".into(), Value::Text(format!("Row_{i}"))),
+                    ],
+                    metadata: vec![],
+                    node_links: vec![],
+                    vector_links: vec![],
+                })
+                .unwrap_or_else(|e| panic!("insert {i} must succeed: {e:?}"));
+        }
+        rt.checkpoint().expect("checkpoint before drop");
+        // Explicit drop so the order is obvious — rt owns an Arc<Inner>
+        // that keeps the pager (and thus the file lock) alive.
+        drop(query);
+        drop(entity);
+        drop(rt);
+    }
+
+    // Small settle — some background tasks (backup_scheduler, ec_worker)
+    // can hold clones of the store Arc and need a tick to notice the
+    // drop. 50 ms is generous without slowing the suite.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    let rt2 = reddb::RedDBRuntime::with_options(reddb::api::RedDBOptions::persistent(&path_str))
+        .expect("reopen persistent runtime");
+    let query2 = QueryUseCases::new(&rt2);
+    let all = query2
+        .execute(ExecuteQueryInput {
+            query: "SELECT * FROM f1_disk".into(),
+        })
+        .expect("SELECT after reopen must succeed");
+    assert_eq!(
+        all.result.records.len(),
+        N,
+        "SELECT * after reopen must return all {N} previously-inserted rows"
+    );
+
+    drop(rt2);
+    let _ = std::fs::remove_dir_all(&tmp);
+    let _ = std::fs::remove_file(&tmp);
+    let _ = std::fs::remove_file(format!("{path_str}-dwb"));
+    let _ = std::fs::remove_file(format!("{path_str}-hdr"));
+    let _ = std::fs::remove_file(format!("{path_str}-meta"));
+}
