@@ -310,7 +310,9 @@ fn execute_indexed_scan_to_json(
         Some(idx) => idx,
         None => return Ok(None),
     };
-    let entity_ids = idx_store.hash_lookup(&query.table, &reg_idx.name, &eq_val_bytes);
+    let entity_ids = idx_store
+        .hash_lookup(&query.table, &reg_idx.name, &eq_val_bytes)
+        .map_err(|err| RedDBError::Internal(format!("hash index lookup failed: {err}")))?;
 
     // For AND queries with hash index: scan with candidate set (avoids individual store.get())
     // This is faster than N individual get() calls because it iterates the HashMap sequentially
@@ -1021,7 +1023,11 @@ fn execute_runtime_canonical_table_query_indexed(
     if let (Some(idx_store), Some(ref filter)) = (index_store, &query.filter) {
         if let Some((column, value_bytes)) = extract_index_candidate(filter) {
             if let Some(idx) = idx_store.find_index_for_column(&query.table, &column) {
-                let entity_ids = idx_store.hash_lookup(&query.table, &idx.name, &value_bytes);
+                let entity_ids = idx_store
+                    .hash_lookup(&query.table, &idx.name, &value_bytes)
+                    .map_err(|err| {
+                        RedDBError::Internal(format!("hash index lookup failed: {err}"))
+                    })?;
                 if !entity_ids.is_empty() {
                     let store = db.store();
                     let mut records = Vec::new();
