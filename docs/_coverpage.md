@@ -7,7 +7,7 @@
 Built in Rust. 11 AI providers. 6 query languages. 48 data types.
 
 ```sql
-ASK 'who owns this CPF and what services do they use?' USING groq
+ASK 'who owns this passport and what services do they use?' USING groq
 ```
 
 [Get Started](/getting-started/quick-start.md)

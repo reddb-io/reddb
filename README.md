@@ -15,7 +15,7 @@
 ## The Killer Feature: `ASK`
 
 ```sql
-ASK 'who owns CPF 000.000.000-00 and what services do they use?'
+ASK 'who owns passport AB1234567 and what services do they use?'
 ```
 
 One command. RedDB searches across tables, graphs, vectors, documents, and key-value stores -- builds context -- calls an LLM -- returns a natural-language answer. No pipelines. No glue code. No other database does this.
@@ -173,7 +173,7 @@ RedDB extends SQL with `WITH` clauses for operational semantics:
 INSERT INTO sessions (token) VALUES ('abc') WITH TTL 1 h
 
 -- Context indexes for cross-model search
-CREATE TABLE customers (cpf TEXT) WITH CONTEXT INDEX ON (cpf)
+CREATE TABLE customers (passport TEXT) WITH CONTEXT INDEX ON (passport)
 
 -- Graph expansion inline with SELECT
 SELECT * FROM users WITH EXPAND GRAPH DEPTH 2

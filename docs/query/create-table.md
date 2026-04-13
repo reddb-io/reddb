@@ -65,9 +65,9 @@ Use `WITH CONTEXT INDEX ON` to declare which columns are high-value identifiers 
 ```sql
 CREATE TABLE customers (
   name Text,
-  cpf Text,
+  passport Text,
   email Text
-) WITH CONTEXT INDEX ON (cpf, email)
+) WITH CONTEXT INDEX ON (passport, email)
 ```
 
 ### Combine with TTL

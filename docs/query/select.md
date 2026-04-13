@@ -173,7 +173,7 @@ an explicit column, use `time_bucket(5m, timestamp_ns)`.
 Perform a BFS traversal from every entity returned by the query. `DEPTH` controls how many hops to follow.
 
 ```sql
-SELECT * FROM customers WHERE cpf = '000.000.000-00' WITH EXPAND GRAPH DEPTH 2
+SELECT * FROM customers WHERE passport = 'AB1234567' WITH EXPAND GRAPH DEPTH 2
 ```
 
 ### Expand via Cross-References

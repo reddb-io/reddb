@@ -107,7 +107,7 @@ SEARCH IVF [0.12, 0.91, 0.44] IN embeddings K 10 PROBES 3
 Lookup global por chave em tabelas, documentos, key-values, vetores e grafos:
 
 ```sql
-SEARCH MULTIMODAL 'CPF: 000.000.000-00' COLLECTION people LIMIT 20
+SEARCH MULTIMODAL 'passport: AB1234567' COLLECTION people LIMIT 20
 ```
 
 ## SEARCH INDEX
@@ -115,13 +115,13 @@ SEARCH MULTIMODAL 'CPF: 000.000.000-00' COLLECTION people LIMIT 20
 Lookup estruturado por índice global:
 
 ```sql
-SEARCH INDEX cpf VALUE '000.000.000-00' COLLECTION people LIMIT 20
+SEARCH INDEX passport VALUE 'AB1234567' COLLECTION people LIMIT 20
 ```
 
 Por padrão, o lookup é exato. Para modo mais flexível:
 
 ```sql
-SEARCH INDEX cpf VALUE '000.000.000-00' FUZZY LIMIT 20
+SEARCH INDEX passport VALUE 'AB1234567' FUZZY LIMIT 20
 ```
 
 ## SEARCH CONTEXT
@@ -136,7 +136,7 @@ SEARCH CONTEXT '<query>' [FIELD <field>] [COLLECTION <col>] [DEPTH <n>] [LIMIT <
 
 | Parameter | Required | Description |
 |:----------|:---------|:------------|
-| `query` | Yes | Search term — CPF, IP, name, ID, or any value |
+| `query` | Yes | Search term — passport, IP, name, ID, or any value |
 | `FIELD field` | No | Target a specific field for indexed lookup |
 | `COLLECTION col` | No | Scope the search to a specific collection |
 | `DEPTH n` | No | Graph traversal depth (default 1, max 3) |
@@ -144,16 +144,16 @@ SEARCH CONTEXT '<query>' [FIELD <field>] [COLLECTION <col>] [DEPTH <n>] [LIMIT <
 
 ### Examples
 
-Search across everything with a CPF:
+Search across everything with a passport:
 
 ```sql
-SEARCH CONTEXT '000.000.000-00'
+SEARCH CONTEXT 'AB1234567'
 ```
 
 Narrow to a specific indexed field:
 
 ```sql
-SEARCH CONTEXT '000.000.000-00' FIELD cpf
+SEARCH CONTEXT 'AB1234567' FIELD passport
 ```
 
 Scope to a collection with deeper graph expansion:
@@ -235,7 +235,7 @@ ASK 'list all users with admin access' USING ollama MODEL 'llama3'
 
 ```sql
 -- Basic question using a specific provider
-ASK 'who owns CPF 000.000.000-00?' USING groq
+ASK 'who owns passport AB1234567?' USING groq
 
 -- Specify model and depth
 ASK 'summarize all vulnerabilities' USING anthropic MODEL 'claude-sonnet-4-20250514' DEPTH 2
@@ -361,7 +361,7 @@ curl -X POST http://127.0.0.1:8080/hybrid/search \
 curl -X POST http://127.0.0.1:8080/multimodal/search \
   -H 'content-type: application/json' \
   -d '{
-    "query": "CPF: 000.000.000-00",
+    "query": "passport: AB1234567",
     "collections": ["people", "documents", "graph", "vectors"],
     "limit": 20
   }'
@@ -377,8 +377,8 @@ curl -X POST http://127.0.0.1:8080/search \
   -d '{
     "mode": "index",
     "lookup": {
-      "index": "cpf",
-      "value": "000.000.000-00",
+      "index": "passport",
+      "value": "AB1234567",
       "exact": true
     },
     "limit": 20
@@ -393,8 +393,8 @@ curl -X POST http://127.0.0.1:8080/search \
 curl -X POST http://127.0.0.1:8080/context \
   -H 'content-type: application/json' \
   -d '{
-    "query": "000.000.000-00",
-    "field": "cpf"
+    "query": "AB1234567",
+    "field": "passport"
   }'
 ```
 
