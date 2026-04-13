@@ -856,7 +856,8 @@ impl RuntimeEntityPort for RedDBRuntime {
         // full scan for every new row. The BTree arm of
         // `index_entity_insert` is now wired to the sorted manager.
         self.index_store_ref()
-            .index_entity_insert(&collection, id, &fields);
+            .index_entity_insert(&collection, id, &fields)
+            .map_err(crate::RedDBError::Internal)?;
         self.cdc_emit(
             crate::replication::cdc::ChangeOperation::Insert,
             &collection,
