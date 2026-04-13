@@ -13,7 +13,7 @@
 //! - On segment merge/compaction: bloom filters are merged via bitwise OR.
 
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use super::segment::SegmentId;
 use crate::storage::primitives::bloom::BloomFilter;
@@ -85,6 +85,24 @@ pub struct BloomFilterRegistry {
     fp_rate: f64,
 }
 
+fn recover_read_guard<'a, T>(
+    result: Result<RwLockReadGuard<'a, T>, PoisonError<RwLockReadGuard<'a, T>>>,
+) -> RwLockReadGuard<'a, T> {
+    match result {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn recover_write_guard<'a, T>(
+    result: Result<RwLockWriteGuard<'a, T>, PoisonError<RwLockWriteGuard<'a, T>>>,
+) -> RwLockWriteGuard<'a, T> {
+    match result {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 impl BloomFilterRegistry {
     /// Create a new registry with default parameters
     pub fn new() -> Self {
@@ -108,14 +126,14 @@ impl BloomFilterRegistry {
     /// Called when a new GrowingSegment is created.
     pub fn register_segment(&self, collection: &str, segment_id: SegmentId) {
         let bloom = SegmentBloom::new(self.expected_elements, self.fp_rate);
-        let mut blooms = self.blooms.write().unwrap();
+        let mut blooms = recover_write_guard(self.blooms.write());
         blooms.insert((collection.to_string(), segment_id), bloom);
     }
 
     /// Add a key to a segment's bloom filter.
     /// Called on entity insert.
     pub fn add_key(&self, collection: &str, segment_id: SegmentId, key: &[u8]) {
-        let mut blooms = self.blooms.write().unwrap();
+        let mut blooms = recover_write_guard(self.blooms.write());
         if let Some(bloom) = blooms.get_mut(&(collection.to_string(), segment_id)) {
             bloom.add(key);
         }
@@ -124,7 +142,7 @@ impl BloomFilterRegistry {
     /// Return segment IDs that *might* contain the given key.
     /// Segments whose bloom says "definitely not" are excluded.
     pub fn candidate_segments(&self, collection: &str, key: &[u8]) -> Vec<SegmentId> {
-        let blooms = self.blooms.read().unwrap();
+        let blooms = recover_read_guard(self.blooms.read());
         blooms
             .iter()
             .filter_map(|((coll, seg_id), bloom)| {
@@ -140,7 +158,7 @@ impl BloomFilterRegistry {
     /// Check if a specific segment might contain a key.
     /// Returns `true` if no bloom filter exists for the segment (conservative).
     pub fn might_contain(&self, collection: &str, segment_id: SegmentId, key: &[u8]) -> bool {
-        let blooms = self.blooms.read().unwrap();
+        let blooms = recover_read_guard(self.blooms.read());
         match blooms.get(&(collection.to_string(), segment_id)) {
             Some(bloom) => bloom.might_contain(key),
             None => true, // No bloom → conservative, assume it might be there
@@ -149,7 +167,7 @@ impl BloomFilterRegistry {
 
     /// Freeze a segment's bloom filter (called on seal).
     pub fn freeze_segment(&self, collection: &str, segment_id: SegmentId) {
-        let mut blooms = self.blooms.write().unwrap();
+        let mut blooms = recover_write_guard(self.blooms.write());
         if let Some(bloom) = blooms.get_mut(&(collection.to_string(), segment_id)) {
             bloom.freeze();
         }
@@ -157,7 +175,7 @@ impl BloomFilterRegistry {
 
     /// Remove a segment's bloom filter (called on segment drop/archive).
     pub fn remove_segment(&self, collection: &str, segment_id: SegmentId) {
-        let mut blooms = self.blooms.write().unwrap();
+        let mut blooms = recover_write_guard(self.blooms.write());
         blooms.remove(&(collection.to_string(), segment_id));
     }
 
@@ -170,7 +188,7 @@ impl BloomFilterRegistry {
         seg_b: SegmentId,
         new_seg_id: SegmentId,
     ) -> bool {
-        let blooms = self.blooms.read().unwrap();
+        let blooms = recover_read_guard(self.blooms.read());
         let key_a = (collection.to_string(), seg_a);
         let key_b = (collection.to_string(), seg_b);
 
@@ -183,7 +201,7 @@ impl BloomFilterRegistry {
 
         if let Some(merged_filter) = merged {
             let key_count = {
-                let blooms = self.blooms.read().unwrap();
+                let blooms = recover_read_guard(self.blooms.read());
                 let a_count = blooms.get(&key_a).map_or(0, |b| b.key_count);
                 let b_count = blooms.get(&key_b).map_or(0, |b| b.key_count);
                 a_count + b_count
@@ -195,7 +213,7 @@ impl BloomFilterRegistry {
                 frozen: true,
             };
 
-            let mut blooms = self.blooms.write().unwrap();
+            let mut blooms = recover_write_guard(self.blooms.write());
             blooms.insert((collection.to_string(), new_seg_id), bloom);
             true
         } else {
@@ -205,7 +223,7 @@ impl BloomFilterRegistry {
 
     /// Get statistics about the registry
     pub fn stats(&self) -> BloomRegistryStats {
-        let blooms = self.blooms.read().unwrap();
+        let blooms = recover_read_guard(self.blooms.read());
         let mut total_memory = 0;
         let mut total_keys = 0;
         let mut segment_count = 0;
@@ -332,5 +350,19 @@ mod tests {
         assert_eq!(stats.segment_count, 2);
         assert_eq!(stats.total_keys, 3);
         assert!(stats.total_memory_bytes > 0);
+    }
+
+    #[test]
+    fn test_registry_recovers_from_poisoned_lock() {
+        let registry = BloomFilterRegistry::new();
+        registry.register_segment("users", 1);
+
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = registry.blooms.write().unwrap();
+            panic!("poison bloom registry");
+        }));
+
+        registry.add_key("users", 1, b"alice");
+        assert!(registry.might_contain("users", 1, b"alice"));
     }
 }
