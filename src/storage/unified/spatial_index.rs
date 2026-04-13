@@ -15,6 +15,26 @@ use rstar::{primitives::GeomWithData, RTree, AABB};
 
 use super::entity::EntityId;
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum SpatialIndexError {
+    MissingIndex { collection: String, column: String },
+}
+
+impl std::fmt::Display for SpatialIndexError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingIndex { collection, column } => {
+                write!(
+                    f,
+                    "spatial index for column '{column}' was not found in collection '{collection}'"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for SpatialIndexError {}
+
 /// A 2D point in the R-tree, storing (lon, lat) in degrees with an associated EntityId.
 /// Note: rstar uses [x, y] convention, so we store (longitude, latitude).
 type SpatialEntry = GeomWithData<[f64; 2], EntityId>;
@@ -216,18 +236,41 @@ impl SpatialIndexManager {
     }
 
     /// Insert a point
-    pub fn insert(&self, collection: &str, column: &str, entity_id: EntityId, lat: f64, lon: f64) {
+    pub fn insert(
+        &self,
+        collection: &str,
+        column: &str,
+        entity_id: EntityId,
+        lat: f64,
+        lon: f64,
+    ) -> Result<(), SpatialIndexError> {
         let mut indices = self.indices.write().unwrap();
         if let Some(index) = indices.get_mut(&(collection.to_string(), column.to_string())) {
             index.insert(entity_id, lat, lon);
+            Ok(())
+        } else {
+            Err(SpatialIndexError::MissingIndex {
+                collection: collection.to_string(),
+                column: column.to_string(),
+            })
         }
     }
 
     /// Remove a point
-    pub fn remove(&self, collection: &str, column: &str, entity_id: EntityId) {
+    pub fn remove(
+        &self,
+        collection: &str,
+        column: &str,
+        entity_id: EntityId,
+    ) -> Result<bool, SpatialIndexError> {
         let mut indices = self.indices.write().unwrap();
         if let Some(index) = indices.get_mut(&(collection.to_string(), column.to_string())) {
-            index.remove(entity_id);
+            Ok(index.remove(entity_id))
+        } else {
+            Err(SpatialIndexError::MissingIndex {
+                collection: collection.to_string(),
+                column: column.to_string(),
+            })
         }
     }
 
@@ -402,8 +445,10 @@ mod tests {
         let mgr = SpatialIndexManager::new();
         mgr.create_index("sites", "location");
 
-        mgr.insert("sites", "location", EntityId::new(1), 48.8566, 2.3522);
-        mgr.insert("sites", "location", EntityId::new(2), 51.5074, -0.1278);
+        mgr.insert("sites", "location", EntityId::new(1), 48.8566, 2.3522)
+            .expect("spatial insert should succeed");
+        mgr.insert("sites", "location", EntityId::new(2), 51.5074, -0.1278)
+            .expect("spatial insert should succeed");
 
         let results = mgr.search_radius("sites", "location", 48.8566, 2.3522, 500.0, 10);
         assert!(!results.is_empty());
