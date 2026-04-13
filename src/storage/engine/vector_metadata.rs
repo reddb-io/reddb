@@ -570,7 +570,7 @@ mod tests {
         let mut entry = MetadataEntry::new();
         entry.insert("name", MetadataValue::String("test".to_string()));
         entry.insert("count", MetadataValue::Integer(42));
-        entry.insert("score", MetadataValue::Float(3.14));
+        entry.insert("score", MetadataValue::Float(2.5));
         entry.insert("active", MetadataValue::Bool(true));
 
         assert_eq!(
