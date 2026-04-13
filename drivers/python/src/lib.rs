@@ -9,6 +9,10 @@ pub mod proto {
     tonic::include_proto!("reddb.v1");
 }
 
+#[cfg(feature = "embedded")]
+mod embedded;
+mod high_level;
+
 use proto::red_db_client::RedDbClient;
 use proto::*;
 
@@ -139,7 +143,8 @@ impl Connection {
 ///   result = conn.query("SELECT * FROM users WHERE _entity_id = 1")
 ///   conn.bulk_insert("users", ['{"fields":{"name":"Alice"}}'])
 #[pyfunction]
-fn connect(addr: &str) -> PyResult<Connection> {
+#[pyo3(name = "legacy_grpc_connect")]
+fn legacy_grpc_connect(addr: &str) -> PyResult<Connection> {
     let addr = if addr.starts_with("http") {
         addr.to_string()
     } else {
@@ -610,10 +615,27 @@ impl rustls::client::danger::ServerCertVerifier for DangerousVerifier {
     }
 }
 
-/// Python module
+/// Python module — exposed as `reddb` (matches `[lib].name` in Cargo.toml).
+///
+/// High-level API (recommended):
+///     import reddb
+///     db = reddb.connect("memory://")            # or "file:///path", "grpc://host:port"
+///     db.insert("users", {"name": "Alice"})
+///     rows = db.query("SELECT * FROM users")
+///     db.close()
+///
+/// Low-level API (kept for power users):
+///     reddb.legacy_grpc_connect("127.0.0.1:50051")  -> Connection
+///     reddb.wire_connect("127.0.0.1:5050")          -> WireConnection
 #[pymodule]
-fn reddb_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(connect, m)?)?;
+fn reddb(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // High-level: the one users should care about.
+    m.add_function(wrap_pyfunction!(high_level::connect, m)?)?;
+    m.add_class::<high_level::RedDb>()?;
+    m.add_class::<high_level::RedDbError>()?;
+
+    // Legacy: keep the existing classes available for power users.
+    m.add_function(wrap_pyfunction!(legacy_grpc_connect, m)?)?;
     m.add_function(wrap_pyfunction!(wire_connect, m)?)?;
     m.add_function(wrap_pyfunction!(wire_connect_tls, m)?)?;
     m.add_class::<Connection>()?;
