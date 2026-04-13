@@ -1149,11 +1149,23 @@ fn build_server_config(
 ) -> Result<ServerCommandConfig, String> {
     let grpc_flag = flag_bool(flags, "grpc");
     let http_flag = flag_bool(flags, "http");
-    let legacy_bind = flag_string(flags, "bind").filter(|value| !value.is_empty());
+    let explicit_grpc_bind = flag_string(flags, "grpc-bind")
+        .filter(|value| !value.is_empty())
+        .or_else(|| env_string("REDDB_GRPC_BIND_ADDR"));
+    let explicit_http_bind = flag_string(flags, "http-bind")
+        .filter(|value| !value.is_empty())
+        .or_else(|| env_string("REDDB_HTTP_BIND_ADDR"));
+    let legacy_bind = flag_string(flags, "bind")
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            if explicit_grpc_bind.is_none() && explicit_http_bind.is_none() {
+                env_string("REDDB_BIND_ADDR")
+            } else {
+                None
+            }
+        });
     let wire_bind_addr = flag_string(flags, "wire-bind").filter(|v| !v.is_empty());
     let wire_tls_bind_addr = flag_string(flags, "wire-tls-bind").filter(|v| !v.is_empty());
-    let explicit_grpc_bind = flag_string(flags, "grpc-bind").filter(|value| !value.is_empty());
-    let explicit_http_bind = flag_string(flags, "http-bind").filter(|value| !value.is_empty());
     let router_bind_addr = if explicit_grpc_bind.is_none()
         && explicit_http_bind.is_none()
         && wire_bind_addr.is_none()
@@ -1174,9 +1186,7 @@ fn build_server_config(
     } else {
         resolve_server_binds(flags)?
     };
-    let path = flag_string(flags, "path")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from);
+    let path = resolve_server_path(flags).map(PathBuf::from);
     let role = forced_role
         .map(|value| value.to_string())
         .or_else(|| flag_string(flags, "role"))
@@ -1265,9 +1275,21 @@ fn resolve_server_binds(
 ) -> Result<(Option<String>, Option<String>), String> {
     let grpc = flag_bool(flags, "grpc");
     let http = flag_bool(flags, "http");
-    let legacy_bind = flag_string(flags, "bind").filter(|value| !value.is_empty());
-    let mut grpc_bind = flag_string(flags, "grpc-bind").filter(|value| !value.is_empty());
-    let mut http_bind = flag_string(flags, "http-bind").filter(|value| !value.is_empty());
+    let mut grpc_bind = flag_string(flags, "grpc-bind")
+        .filter(|value| !value.is_empty())
+        .or_else(|| env_string("REDDB_GRPC_BIND_ADDR"));
+    let mut http_bind = flag_string(flags, "http-bind")
+        .filter(|value| !value.is_empty())
+        .or_else(|| env_string("REDDB_HTTP_BIND_ADDR"));
+    let legacy_bind = flag_string(flags, "bind")
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            if grpc_bind.is_none() && http_bind.is_none() {
+                env_string("REDDB_BIND_ADDR")
+            } else {
+                None
+            }
+        });
 
     if legacy_bind.is_some() && (grpc_bind.is_some() || http_bind.is_some()) {
         return Err("use either --bind or the explicit --grpc-bind/--http-bind flags".to_string());
@@ -1319,6 +1341,19 @@ fn flag_bool(flags: &HashMap<String, FlagValue>, name: &str) -> bool {
 
 fn flag_string(flags: &HashMap<String, FlagValue>, name: &str) -> Option<String> {
     flags.get(name).map(|value| value.as_str_value())
+}
+
+fn env_string(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+fn resolve_server_path(flags: &HashMap<String, FlagValue>) -> Option<String> {
+    let env_path = env_string("REDDB_DATA_PATH");
+    match flag_string(flags, "path").filter(|value| !value.is_empty()) {
+        Some(path) if path == "./data/reddb.rdb" => env_path.or(Some(path)),
+        Some(path) => Some(path),
+        None => env_path,
+    }
 }
 
 fn json_optional_string(value: Option<&str>) -> String {
@@ -1430,6 +1465,8 @@ fn post_json_to_http(bind_addr: &str, path: &str, payload: &str) -> Result<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+    use std::sync::{Mutex, OnceLock};
 
     fn bool_flag(value: bool) -> FlagValue {
         FlagValue::Bool(value)
@@ -1437,6 +1474,47 @@ mod tests {
 
     fn str_flag(value: &str) -> FlagValue {
         FlagValue::Str(value.to_string())
+    }
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn set(vars: &[(&'static str, &str)]) -> Self {
+            let mut saved = Vec::new();
+            let mut dedup = BTreeMap::new();
+            for (key, value) in vars {
+                dedup.insert(*key, *value);
+            }
+            for (key, value) in dedup {
+                saved.push((key, std::env::var(key).ok()));
+                unsafe {
+                    std::env::set_var(key, value);
+                }
+            }
+            Self { saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.saved.drain(..).rev() {
+                match value {
+                    Some(value) => unsafe {
+                        std::env::set_var(key, value);
+                    },
+                    None => unsafe {
+                        std::env::remove_var(key);
+                    },
+                }
+            }
+        }
     }
 
     #[test]
@@ -1500,6 +1578,76 @@ mod tests {
         assert_eq!(config.router_bind_addr.as_deref(), Some("0.0.0.0:5050"));
         assert_eq!(config.grpc_bind_addr, None);
         assert_eq!(config.http_bind_addr, None);
+    }
+
+    #[test]
+    fn build_server_config_uses_docker_env_defaults() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("REDDB_DATA_PATH", "/data/data.rdb"),
+            ("REDDB_GRPC_BIND_ADDR", "0.0.0.0:50051"),
+            ("REDDB_HTTP_BIND_ADDR", "0.0.0.0:8080"),
+            ("REDDB_BIND_ADDR", "0.0.0.0:50051"),
+        ]);
+
+        let flags = HashMap::from([("path".to_string(), str_flag("./data/reddb.rdb"))]);
+        let config = build_server_config(&flags, None).unwrap();
+
+        assert_eq!(
+            config.path.as_deref(),
+            Some(std::path::Path::new("/data/data.rdb"))
+        );
+        assert_eq!(config.router_bind_addr, None);
+        assert_eq!(config.grpc_bind_addr.as_deref(), Some("0.0.0.0:50051"));
+        assert_eq!(config.http_bind_addr.as_deref(), Some("0.0.0.0:8080"));
+    }
+
+    #[test]
+    fn build_server_config_prefers_cli_flags_over_env_defaults() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("REDDB_DATA_PATH", "/data/data.rdb"),
+            ("REDDB_GRPC_BIND_ADDR", "0.0.0.0:50051"),
+            ("REDDB_HTTP_BIND_ADDR", "0.0.0.0:8080"),
+        ]);
+
+        let flags = HashMap::from([
+            ("path".to_string(), str_flag("/tmp/override.rdb")),
+            ("http-bind".to_string(), str_flag("127.0.0.1:18080")),
+        ]);
+        let config = build_server_config(&flags, None).unwrap();
+
+        assert_eq!(
+            config.path.as_deref(),
+            Some(std::path::Path::new("/tmp/override.rdb"))
+        );
+        assert_eq!(config.grpc_bind_addr.as_deref(), Some("0.0.0.0:50051"));
+        assert_eq!(config.http_bind_addr.as_deref(), Some("127.0.0.1:18080"));
+    }
+
+    #[test]
+    fn parser_default_path_yields_to_docker_env_path() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("REDDB_DATA_PATH", "/data/data.rdb"),
+            ("REDDB_GRPC_BIND_ADDR", "0.0.0.0:50051"),
+            ("REDDB_HTTP_BIND_ADDR", "0.0.0.0:8080"),
+            ("REDDB_BIND_ADDR", "0.0.0.0:50051"),
+        ]);
+
+        let args = vec!["server".to_string()];
+        let tokens = cli::token::tokenize(&args);
+        let parser = cli::schema::SchemaParser::new(build_flags_for_command(Some("server")));
+        let result = parser.parse(&tokens);
+        assert!(result.errors.is_empty());
+
+        let config = build_server_config(&result.flags, None).unwrap();
+        assert_eq!(
+            config.path.as_deref(),
+            Some(std::path::Path::new("/data/data.rdb"))
+        );
+        assert_eq!(config.grpc_bind_addr.as_deref(), Some("0.0.0.0:50051"));
+        assert_eq!(config.http_bind_addr.as_deref(), Some("0.0.0.0:8080"));
     }
 
     #[test]

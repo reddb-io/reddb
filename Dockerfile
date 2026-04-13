@@ -4,7 +4,8 @@
 # RedDB - Multi-stage Docker build
 # ============================================================================
 # Stage 1: Build release binaries with protobuf support
-# Stage 2: Minimal non-root runtime image
+# Stage 2: Prepare owned runtime directories
+# Stage 3: Distroless non-root runtime image
 # ============================================================================
 
 FROM rust:1.91-slim-bookworm AS builder
@@ -35,20 +36,15 @@ COPY src/ src/
 
 RUN cargo build --release --locked --bin red
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim AS runtime-prep
 
-ARG DEBIAN_FRONTEND=noninteractive
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
-    && groupadd --gid 10001 reddb \
-    && useradd --uid 10001 --gid 10001 --no-create-home \
-        --home-dir /nonexistent --shell /usr/sbin/nologin reddb \
-    && install -d -o reddb -g reddb -m 0750 /data \
-    && rm -rf /var/lib/apt/lists/*
+RUN install -d -o 10001 -g 10001 -m 0750 /data \
+    && install -o 10001 -g 10001 -m 0640 /dev/null /data/.keep
 
-COPY --from=builder /app/target/release/red /usr/local/bin/red
-COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod 0555 /usr/local/bin/red /usr/local/bin/docker-entrypoint.sh
+FROM gcr.io/distroless/cc-debian12:latest
+
+COPY --from=runtime-prep --chown=10001:10001 /data /data
+COPY --from=builder --chown=10001:10001 /app/target/release/red /usr/local/bin/red
 
 WORKDIR /data
 VOLUME /data
@@ -66,10 +62,10 @@ ENV RUST_MIN_STACK=8388608
 # ENV REDDB_USERNAME=admin
 # ENV REDDB_PASSWORD=changeme
 
-USER reddb:reddb
+USER 10001:10001
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
     CMD ["/usr/local/bin/red", "health", "--grpc", "--bind", "127.0.0.1:50051"]
 
-ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/red"]
 CMD ["server"]
