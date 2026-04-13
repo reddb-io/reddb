@@ -286,7 +286,7 @@ jobs:
         run: cargo publish --allow-dirty --token "${CARGO_REGISTRY_TOKEN}"
 
   publish-docker:
-    name: Docker image (GHCR)
+    name: Docker image (GHCR + Docker Hub)
     needs: [plan, build]
     runs-on: ubuntu-latest
     permissions:
@@ -309,11 +309,20 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Docker metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: |
+            ghcr.io/${{ github.repository }}
+            docker.io/forattini/reddb
           tags: |
             type=raw,value=${{ needs.plan.outputs.release_tag }}
             type=raw,value=latest,enable=${{ needs.plan.outputs.release_channel == 'stable' }}
@@ -331,5 +340,6 @@ jobs:
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          provenance: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
