@@ -24,10 +24,8 @@ pub(super) fn scan_runtime_table_source_records(
     // first collected into a Vec then consumed.
     let mut records = Vec::new();
     manager.for_each_entity(|entity| {
-        if entity.data.is_row() {
-            if let Some(record) = runtime_table_record_from_entity(entity.clone()) {
-                records.push(record);
-            }
+        if let Some(record) = runtime_table_record_from_entity(entity.clone()) {
+            records.push(record);
         }
         true // continue
     });
@@ -60,64 +58,89 @@ pub(super) fn is_universal_entity_source(table: &str) -> bool {
 
 #[inline(never)]
 pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<UnifiedRecord> {
-    let row = match entity.data {
-        EntityData::Row(row) => row,
-        _ => return None,
-    };
+    match entity.data {
+        EntityData::Row(row) => {
+            // Pre-allocate: ~9 system fields + user fields
+            let user_field_count = row
+                .named
+                .as_ref()
+                .map(|n| n.len())
+                .unwrap_or(row.columns.len());
+            let mut record = UnifiedRecord::with_capacity(9 + user_field_count);
 
-    // Pre-allocate: ~9 system fields + user fields
-    let user_field_count = row
-        .named
-        .as_ref()
-        .map(|n| n.len())
-        .unwrap_or(row.columns.len());
-    let mut record = UnifiedRecord::with_capacity(9 + user_field_count);
+            if let EntityKind::TableRow { row_id, .. } = &entity.kind {
+                record.set("row_id", Value::UnsignedInteger(*row_id));
+            }
 
-    if let EntityKind::TableRow { row_id, .. } = &entity.kind {
-        record.set("row_id", Value::UnsignedInteger(*row_id));
+            record.set("red_entity_id", Value::UnsignedInteger(entity.id.raw()));
+            record.set(
+                "red_collection",
+                Value::Text(entity.kind.collection().to_string()),
+            );
+            record.set(
+                "red_kind",
+                Value::Text(entity.kind.storage_type().to_string()),
+            );
+            record.set("created_at", Value::UnsignedInteger(entity.created_at));
+            record.set("updated_at", Value::UnsignedInteger(entity.updated_at));
+            record.set(
+                "red_sequence_id",
+                Value::UnsignedInteger(entity.sequence_id),
+            );
+
+            // Use fast capability string to avoid BTreeSet allocation
+            let entity_type = runtime_row_entity_type(&row);
+            let capabilities_str = runtime_row_capabilities_str(&row);
+            record.set("red_entity_type", Value::Text(entity_type.to_string()));
+            record.set(
+                "red_capabilities",
+                Value::Text(capabilities_str.to_string()),
+            );
+
+            if let Some(named) = row.named {
+                for (key, value) in named {
+                    record.set(&key, value);
+                }
+            } else if let Some(ref schema) = row.schema {
+                // Columnar storage: use shared schema for field names
+                for (name, value) in schema.iter().zip(row.columns.into_iter()) {
+                    record.set(name, value);
+                }
+            } else {
+                for (index, value) in row.columns.into_iter().enumerate() {
+                    record.set(&format!("c{index}"), value);
+                }
+            }
+
+            Some(record)
+        }
+        EntityData::TimeSeries(ts) => {
+            let mut record = UnifiedRecord::with_capacity(12 + ts.tags.len());
+            record.set("red_entity_id", Value::UnsignedInteger(entity.id.raw()));
+            record.set(
+                "red_collection",
+                Value::Text(entity.kind.collection().to_string()),
+            );
+            record.set(
+                "red_kind",
+                Value::Text(entity.kind.storage_type().to_string()),
+            );
+            record.set("created_at", Value::UnsignedInteger(entity.created_at));
+            record.set("updated_at", Value::UnsignedInteger(entity.updated_at));
+            record.set(
+                "red_sequence_id",
+                Value::UnsignedInteger(entity.sequence_id),
+            );
+            record.set("red_entity_type", Value::Text("timeseries".to_string()));
+            record.set(
+                "red_capabilities",
+                Value::Text("document,timeseries,metric,temporal".to_string()),
+            );
+            append_timeseries_record_fields(&mut record, &ts);
+            Some(record)
+        }
+        _ => None,
     }
-
-    record.set("red_entity_id", Value::UnsignedInteger(entity.id.raw()));
-    record.set(
-        "red_collection",
-        Value::Text(entity.kind.collection().to_string()),
-    );
-    record.set(
-        "red_kind",
-        Value::Text(entity.kind.storage_type().to_string()),
-    );
-    record.set("red_created_at", Value::UnsignedInteger(entity.created_at));
-    record.set("red_updated_at", Value::UnsignedInteger(entity.updated_at));
-    record.set(
-        "red_sequence_id",
-        Value::UnsignedInteger(entity.sequence_id),
-    );
-
-    // Use fast capability string to avoid BTreeSet allocation
-    let entity_type = runtime_row_entity_type(&row);
-    let capabilities_str = runtime_row_capabilities_str(&row);
-    record.set("red_entity_type", Value::Text(entity_type.to_string()));
-    record.set(
-        "red_capabilities",
-        Value::Text(capabilities_str.to_string()),
-    );
-
-    if let Some(named) = row.named {
-        for (key, value) in named {
-            record.set(&key, value);
-        }
-    } else if let Some(ref schema) = row.schema {
-        // Columnar storage: use shared schema for field names
-        for (name, value) in schema.iter().zip(row.columns.into_iter()) {
-            record.set(name, value);
-        }
-    } else {
-        for (index, value) in row.columns.into_iter().enumerate() {
-            record.set(&format!("c{index}"), value);
-        }
-    }
-
-    Some(record)
 }
 
 /// Projected version — only materializes requested columns for better performance.
@@ -131,25 +154,47 @@ pub(super) fn runtime_table_record_from_entity_projected(
         return runtime_table_record_from_entity(entity);
     }
 
-    let row = match entity.data {
-        EntityData::Row(row) => row,
-        _ => return None,
-    };
+    match entity.data {
+        EntityData::Row(row) => {
+            let mut record = UnifiedRecord::new();
 
-    let mut record = UnifiedRecord::new();
+            // Always include system fields needed for filtering
+            record.set("red_entity_id", Value::UnsignedInteger(entity.id.raw()));
 
-    // Always include system fields needed for filtering
-    record.set("red_entity_id", Value::UnsignedInteger(entity.id.raw()));
-
-    if let Some(named) = row.named {
-        for col in columns {
-            if let Some(value) = named.get(col) {
-                record.set(col, value.clone());
+            if let Some(named) = row.named {
+                for col in columns {
+                    if let Some(value) = named.get(col) {
+                        record.set(col, value.clone());
+                    }
+                }
             }
-        }
-    }
 
-    Some(record)
+            Some(record)
+        }
+        EntityData::TimeSeries(ts) => {
+            let mut record = UnifiedRecord::new();
+            record.set("red_entity_id", Value::UnsignedInteger(entity.id.raw()));
+
+            for col in columns {
+                match col.as_str() {
+                    "metric" => record.set("metric", Value::Text(ts.metric.clone())),
+                    "timestamp_ns" => {
+                        record.set("timestamp_ns", Value::UnsignedInteger(ts.timestamp_ns))
+                    }
+                    "timestamp" => record.set("timestamp", Value::UnsignedInteger(ts.timestamp_ns)),
+                    "time" => record.set("time", Value::UnsignedInteger(ts.timestamp_ns)),
+                    "value" => record.set("value", Value::Float(ts.value)),
+                    "tags" if !ts.tags.is_empty() => {
+                        record.set("tags", timeseries_tags_value(&ts.tags));
+                    }
+                    _ => {}
+                }
+            }
+
+            Some(record)
+        }
+        _ => None,
+    }
 }
 
 #[inline(never)]
@@ -224,19 +269,51 @@ pub(super) fn runtime_any_record_from_entity(entity: UnifiedEntity) -> Option<Un
                 record,
             )
         }
+        (EntityKind::TimeSeriesPoint(_), EntityData::TimeSeries(ts)) => {
+            let mut record = UnifiedRecord::new();
+            append_timeseries_record_fields(&mut record, &ts);
+            (
+                "timeseries",
+                runtime_record_capability_list(["document", "timeseries", "metric", "temporal"]),
+                record,
+            )
+        }
         _ => return None,
     };
 
     record.set("red_entity_id", Value::UnsignedInteger(entity_id));
     record.set("red_collection", Value::Text(collection));
     record.set("red_kind", Value::Text(storage_type));
-    record.set("red_created_at", Value::UnsignedInteger(created_at));
-    record.set("red_updated_at", Value::UnsignedInteger(updated_at));
+    record.set("created_at", Value::UnsignedInteger(created_at));
+    record.set("updated_at", Value::UnsignedInteger(updated_at));
     record.set("red_sequence_id", Value::UnsignedInteger(sequence_id));
     set_runtime_entity_metadata(&mut record, entity_type, capabilities);
     apply_runtime_identity_hints(&mut record, &identity_entity);
 
     Some(record)
+}
+
+fn append_timeseries_record_fields(
+    record: &mut UnifiedRecord,
+    ts: &crate::storage::TimeSeriesData,
+) {
+    record.set("metric", Value::Text(ts.metric.clone()));
+    record.set("timestamp_ns", Value::UnsignedInteger(ts.timestamp_ns));
+    record.set("timestamp", Value::UnsignedInteger(ts.timestamp_ns));
+    record.set("time", Value::UnsignedInteger(ts.timestamp_ns));
+    record.set("value", Value::Float(ts.value));
+    if !ts.tags.is_empty() {
+        record.set("tags", timeseries_tags_value(&ts.tags));
+    }
+}
+
+fn timeseries_tags_value(tags: &std::collections::HashMap<String, String>) -> Value {
+    let object = tags
+        .iter()
+        .map(|(key, value)| (key.clone(), crate::json::Value::String(value.clone())))
+        .collect();
+    let json = crate::json::Value::Object(object);
+    Value::Json(crate::json::to_vec(&json).unwrap_or_default())
 }
 
 #[inline(never)]
@@ -413,6 +490,10 @@ pub(super) fn runtime_entity_type_and_capabilities(
             "vector",
             runtime_record_capability_list(["vector", "similarity", "embedding"]),
         ),
+        (EntityKind::TimeSeriesPoint(_), EntityData::TimeSeries(_)) => (
+            "timeseries",
+            runtime_record_capability_list(["document", "timeseries", "metric", "temporal"]),
+        ),
         _ => ("unknown", BTreeSet::new()),
     }
 }
@@ -474,14 +555,8 @@ pub(super) fn runtime_vector_record_from_match(item: SimilarResult) -> UnifiedRe
         "red_kind",
         Value::Text(item.entity.kind.storage_type().to_string()),
     );
-    record.set(
-        "red_created_at",
-        Value::UnsignedInteger(item.entity.created_at),
-    );
-    record.set(
-        "red_updated_at",
-        Value::UnsignedInteger(item.entity.updated_at),
-    );
+    record.set("created_at", Value::UnsignedInteger(item.entity.created_at));
+    record.set("updated_at", Value::UnsignedInteger(item.entity.updated_at));
     record.set(
         "red_sequence_id",
         Value::UnsignedInteger(item.entity.sequence_id),

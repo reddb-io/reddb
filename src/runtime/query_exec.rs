@@ -69,7 +69,52 @@ fn write_u64(buf: &mut Vec<u8>, n: u64) {
     buf.extend_from_slice(s.as_bytes());
 }
 
+/// Emit `"created_at":X,"updated_at":Y` for an entity, preferring the
+/// declared row columns (e.g. from `CREATE TABLE ... WITH timestamps =
+/// true`) over the entity's internal `created_at`/`updated_at` fields.
+///
+/// The caller is responsible for the leading `,` before the block.
+#[inline(always)]
+fn write_timestamp_fields_json(buf: &mut Vec<u8>, entity: &UnifiedEntity) {
+    let (row_created_at, row_updated_at) = match &entity.data {
+        EntityData::Row(row) => {
+            let mut created = None;
+            let mut updated = None;
+            for (key, value) in row.iter_fields() {
+                match key {
+                    "created_at" => created = Some(value.clone()),
+                    "updated_at" => updated = Some(value.clone()),
+                    _ => {}
+                }
+                if created.is_some() && updated.is_some() {
+                    break;
+                }
+            }
+            (created, updated)
+        }
+        _ => (None, None),
+    };
+    buf.extend_from_slice(b"\"created_at\":");
+    if let Some(v) = &row_created_at {
+        write_value_bytes(buf, v);
+    } else {
+        write_u64(buf, entity.created_at);
+    }
+    buf.extend_from_slice(b",\"updated_at\":");
+    if let Some(v) = &row_updated_at {
+        write_value_bytes(buf, v);
+    } else {
+        write_u64(buf, entity.updated_at);
+    }
+}
+
 /// Write an entity's fields as JSON bytes into a Vec<u8> buffer.
+///
+/// `created_at` and `updated_at` are de-duplicated: if the row carries
+/// them as declared user columns (e.g. from `CREATE TABLE ... WITH
+/// timestamps = true`), we emit the row's value and skip the iter
+/// pass for those keys. Otherwise we fall back to the entity's
+/// internal `created_at`/`updated_at` stamps.
 #[inline(always)]
 fn write_entity_json_bytes(buf: &mut Vec<u8>, entity: &UnifiedEntity) {
     buf.push(b'{');
@@ -79,44 +124,72 @@ fn write_entity_json_bytes(buf: &mut Vec<u8>, entity: &UnifiedEntity) {
     write_json_bytes(buf, entity.kind.collection().as_bytes());
     buf.extend_from_slice(b",\"red_kind\":");
     write_json_bytes(buf, entity.kind.storage_type().as_bytes());
-    buf.extend_from_slice(b",\"red_created_at\":");
-    write_u64(buf, entity.created_at);
-    buf.extend_from_slice(b",\"red_updated_at\":");
-    write_u64(buf, entity.updated_at);
+    buf.push(b',');
+    write_timestamp_fields_json(buf, entity);
     buf.extend_from_slice(b",\"red_sequence_id\":");
     write_u64(buf, entity.sequence_id);
-    buf.extend_from_slice(
-        b",\"red_entity_type\":\"table\",\"red_capabilities\":\"structured,table\"",
-    );
+    let (entity_type, capabilities) = match &entity.data {
+        EntityData::Row(_) => ("table", "structured,table"),
+        EntityData::TimeSeries(_) => ("timeseries", "timeseries,metric,temporal"),
+        _ => ("unknown", "unknown"),
+    };
+    buf.extend_from_slice(b",\"red_entity_type\":");
+    write_json_bytes(buf, entity_type.as_bytes());
+    buf.extend_from_slice(b",\"red_capabilities\":");
+    write_json_bytes(buf, capabilities.as_bytes());
 
     if let EntityKind::TableRow { row_id, .. } = &entity.kind {
         buf.extend_from_slice(b",\"row_id\":");
         write_u64(buf, *row_id);
     }
 
-    // User fields (handles both named HashMap and columnar schema)
-    if let EntityData::Row(ref row) = entity.data {
-        for (key, value) in row.iter_fields() {
-            buf.push(b',');
-            write_json_bytes(buf, key.as_bytes());
-            buf.push(b':');
-            write_value_bytes(buf, value);
-        }
-        if false {
-            // Dead code kept for compiler — positional fallback no longer needed
-            for (i, value) in row.columns.iter().enumerate() {
+    match &entity.data {
+        EntityData::Row(row) => {
+            for (key, value) in row.iter_fields() {
+                // Skip the two auto-timestamp columns — already emitted
+                // once at the top of the JSON from either the row value
+                // itself or `entity.created_at/updated_at`.
+                if key == "created_at" || key == "updated_at" {
+                    continue;
+                }
                 buf.push(b',');
-                buf.push(b'"');
-                buf.push(b'c');
-                itoa::Buffer::new()
-                    .format(i)
-                    .as_bytes()
-                    .iter()
-                    .for_each(|b| buf.push(*b));
-                buf.extend_from_slice(b"\":");
+                write_json_bytes(buf, key.as_bytes());
+                buf.push(b':');
                 write_value_bytes(buf, value);
             }
+            if false {
+                // Dead code kept for compiler — positional fallback no longer needed
+                for (i, value) in row.columns.iter().enumerate() {
+                    buf.push(b',');
+                    buf.push(b'"');
+                    buf.push(b'c');
+                    itoa::Buffer::new()
+                        .format(i)
+                        .as_bytes()
+                        .iter()
+                        .for_each(|b| buf.push(*b));
+                    buf.extend_from_slice(b"\":");
+                    write_value_bytes(buf, value);
+                }
+            }
         }
+        EntityData::TimeSeries(ts) => {
+            buf.extend_from_slice(b",\"metric\":");
+            write_json_bytes(buf, ts.metric.as_bytes());
+            buf.extend_from_slice(b",\"timestamp_ns\":");
+            write_u64(buf, ts.timestamp_ns);
+            buf.extend_from_slice(b",\"timestamp\":");
+            write_u64(buf, ts.timestamp_ns);
+            buf.extend_from_slice(b",\"time\":");
+            write_u64(buf, ts.timestamp_ns);
+            buf.extend_from_slice(b",\"value\":");
+            write_value_bytes(buf, &Value::Float(ts.value));
+            if !ts.tags.is_empty() {
+                buf.extend_from_slice(b",\"tags\":");
+                write_value_bytes(buf, &timeseries_tags_json_value(&ts.tags));
+            }
+        }
+        _ => {}
     }
     buf.push(b'}');
 }
@@ -173,6 +246,23 @@ fn write_value_bytes(buf: &mut Vec<u8>, value: &Value) {
             }
         }
         Value::Text(s) => write_json_bytes(buf, s.as_bytes()),
+        Value::Array(values) => {
+            buf.push(b'[');
+            for (index, value) in values.iter().enumerate() {
+                if index > 0 {
+                    buf.push(b',');
+                }
+                write_value_bytes(buf, value);
+            }
+            buf.push(b']');
+        }
+        Value::Json(value) => {
+            if std::str::from_utf8(value).is_ok() {
+                buf.extend_from_slice(value);
+            } else {
+                buf.extend_from_slice(b"null");
+            }
+        }
         Value::Timestamp(t) => {
             let mut b = itoa::Buffer::new();
             let s = b.format(*t);
@@ -286,10 +376,8 @@ fn execute_indexed_scan_to_json(
         buf.extend_from_slice(b"{\"red_entity_id\":");
         write_u64(&mut buf, entity.id.raw());
         buf.extend_from_slice(&sys_prefix);
-        buf.extend_from_slice(b",\"red_created_at\":");
-        write_u64(&mut buf, entity.created_at);
-        buf.extend_from_slice(b",\"red_updated_at\":");
-        write_u64(&mut buf, entity.updated_at);
+        buf.push(b',');
+        write_timestamp_fields_json(&mut buf, &entity);
         buf.extend_from_slice(b",\"red_sequence_id\":");
         write_u64(&mut buf, entity.sequence_id);
         if let EntityKind::TableRow { row_id, .. } = &entity.kind {
@@ -299,6 +387,9 @@ fn execute_indexed_scan_to_json(
         if let EntityData::Row(ref row) = entity.data {
             {
                 for (key, value) in row.iter_fields() {
+                    if key == "created_at" || key == "updated_at" {
+                        continue;
+                    }
                     buf.push(b',');
                     write_json_bytes(&mut buf, key.as_bytes());
                     buf.push(b':');
@@ -451,10 +542,8 @@ fn execute_scan_with_candidates_to_json(
         buf.extend_from_slice(b"{\"red_entity_id\":");
         write_u64(&mut buf, entity.id.raw());
         buf.extend_from_slice(&sys_prefix);
-        buf.extend_from_slice(b",\"red_created_at\":");
-        write_u64(&mut buf, entity.created_at);
-        buf.extend_from_slice(b",\"red_updated_at\":");
-        write_u64(&mut buf, entity.updated_at);
+        buf.push(b',');
+        write_timestamp_fields_json(&mut buf, &entity);
         buf.extend_from_slice(b",\"red_sequence_id\":");
         write_u64(&mut buf, entity.sequence_id);
         if let EntityKind::TableRow { row_id, .. } = &entity.kind {
@@ -464,6 +553,9 @@ fn execute_scan_with_candidates_to_json(
         if let EntityData::Row(ref row) = entity.data {
             {
                 for (key, value) in row.iter_fields() {
+                    if key == "created_at" || key == "updated_at" {
+                        continue;
+                    }
                     buf.push(b',');
                     write_json_bytes(&mut buf, key.as_bytes());
                     buf.push(b':');
@@ -558,10 +650,8 @@ fn build_indexed_result_json(
         buf.extend_from_slice(b"{\"red_entity_id\":");
         write_u64(&mut buf, entity.id.raw());
         buf.extend_from_slice(&sys_prefix);
-        buf.extend_from_slice(b",\"red_created_at\":");
-        write_u64(&mut buf, entity.created_at);
-        buf.extend_from_slice(b",\"red_updated_at\":");
-        write_u64(&mut buf, entity.updated_at);
+        buf.push(b',');
+        write_timestamp_fields_json(&mut buf, &entity);
         buf.extend_from_slice(b",\"red_sequence_id\":");
         write_u64(&mut buf, entity.sequence_id);
         if let EntityKind::TableRow { row_id, .. } = &entity.kind {
@@ -571,6 +661,9 @@ fn build_indexed_result_json(
         if let EntityData::Row(ref row) = entity.data {
             {
                 for (key, value) in row.iter_fields() {
+                    if key == "created_at" || key == "updated_at" {
+                        continue;
+                    }
                     buf.push(b',');
                     write_json_bytes(&mut buf, key.as_bytes());
                     buf.push(b':');
@@ -675,10 +768,8 @@ fn execute_unfiltered_scan_to_json(
         buf.extend_from_slice(b"{\"red_entity_id\":");
         write_u64(&mut buf, entity.id.raw());
         buf.extend_from_slice(&sys_prefix);
-        buf.extend_from_slice(b",\"red_created_at\":");
-        write_u64(&mut buf, entity.created_at);
-        buf.extend_from_slice(b",\"red_updated_at\":");
-        write_u64(&mut buf, entity.updated_at);
+        buf.push(b',');
+        write_timestamp_fields_json(&mut buf, &entity);
         buf.extend_from_slice(b",\"red_sequence_id\":");
         write_u64(&mut buf, entity.sequence_id);
         if let EntityKind::TableRow { row_id, .. } = &entity.kind {
@@ -689,6 +780,9 @@ fn execute_unfiltered_scan_to_json(
             if field_keys_cache.is_none() {
                 let mut cache = Vec::new();
                 for (key, _) in row.iter_fields() {
+                    if key == "created_at" || key == "updated_at" {
+                        continue;
+                    }
                     let mut encoded = Vec::with_capacity(key.len() + 4);
                     encoded.push(b',');
                     write_json_bytes(&mut encoded, key.as_bytes());
@@ -800,10 +894,8 @@ fn execute_filtered_scan_to_json(
         buf.extend_from_slice(b"{\"red_entity_id\":");
         write_u64(&mut buf, entity.id.raw());
         buf.extend_from_slice(&sys_prefix);
-        buf.extend_from_slice(b",\"red_created_at\":");
-        write_u64(&mut buf, entity.created_at);
-        buf.extend_from_slice(b",\"red_updated_at\":");
-        write_u64(&mut buf, entity.updated_at);
+        buf.push(b',');
+        write_timestamp_fields_json(&mut buf, &entity);
         buf.extend_from_slice(b",\"red_sequence_id\":");
         write_u64(&mut buf, entity.sequence_id);
         if let EntityKind::TableRow { row_id, .. } = &entity.kind {
@@ -815,6 +907,9 @@ fn execute_filtered_scan_to_json(
             if field_keys_cache.is_none() {
                 let mut cache = Vec::new();
                 for (key, _) in row.iter_fields() {
+                    if key == "created_at" || key == "updated_at" {
+                        continue;
+                    }
                     let mut encoded = Vec::with_capacity(key.len() + 4);
                     encoded.push(b',');
                     write_json_bytes(&mut encoded, key.as_bytes());
@@ -967,7 +1062,7 @@ fn execute_runtime_canonical_table_query_indexed(
         // Bloom filter: extract PK key for segment pruning
         let bloom_key = extract_bloom_key_for_pk(filter);
         if let Some(ref key) = bloom_key {
-            let (entities, _pruned) = manager.query_with_bloom_hint(Some(key), |e| e.data.is_row());
+            let (entities, _pruned) = manager.query_with_bloom_hint(Some(key), |_| true);
             if entities.is_empty() {
                 return Ok(Vec::new());
             }
@@ -981,9 +1076,6 @@ fn execute_runtime_canonical_table_query_indexed(
         manager.for_each_entity(|entity| {
             if records.len() >= limit {
                 return false; // stop iteration
-            }
-            if !entity.data.is_row() {
-                return true; // skip non-row entities, continue
             }
             if evaluate_entity_filter(entity, filter, table_name, table_alias) {
                 let record = if select_cols.is_empty() {
@@ -1116,9 +1208,6 @@ pub(super) fn execute_runtime_canonical_table_node(
                 manager.for_each_entity(|entity| {
                     if records.len() >= limit {
                         return false;
-                    }
-                    if !entity.data.is_row() {
-                        return true;
                     }
                     if evaluate_entity_filter(entity, filter, table_name, table_alias) {
                         let record = if select_cols.is_empty() {
@@ -2437,10 +2526,10 @@ fn resolve_entity_field<'a>(
         "red_entity_id" | "entity_id" => {
             return Some(Cow::Owned(Value::UnsignedInteger(entity.id.raw())));
         }
-        "red_created_at" => {
+        "created_at" => {
             return Some(Cow::Owned(Value::UnsignedInteger(entity.created_at)));
         }
-        "red_updated_at" => {
+        "updated_at" => {
             return Some(Cow::Owned(Value::UnsignedInteger(entity.updated_at)));
         }
         "red_sequence_id" => {
@@ -2496,6 +2585,21 @@ fn resolve_entity_field<'a>(
         }
         if let Some(value) = edge.properties.get(column) {
             return Some(Cow::Borrowed(value));
+        }
+    }
+
+    if let EntityData::TimeSeries(ref ts) = entity.data {
+        match column {
+            "metric" => return Some(Cow::Owned(Value::Text(ts.metric.clone()))),
+            "timestamp_ns" => return Some(Cow::Owned(Value::UnsignedInteger(ts.timestamp_ns))),
+            "timestamp" | "time" => {
+                return Some(Cow::Owned(Value::UnsignedInteger(ts.timestamp_ns)));
+            }
+            "value" => return Some(Cow::Owned(Value::Float(ts.value))),
+            "tags" => {
+                return Some(Cow::Owned(timeseries_tags_json_value(&ts.tags)));
+            }
+            _ => {}
         }
     }
 
@@ -2598,15 +2702,33 @@ fn has_aggregate_projections(projections: &[Projection]) -> bool {
         matches!(
             p,
             Projection::Function(name, _)
-                if matches!(
-                    name.as_str(),
-                    "COUNT" | "AVG" | "SUM" | "MIN" | "MAX"
-                    | "STDDEV" | "VARIANCE" | "MEDIAN" | "PERCENTILE"
-                    | "GROUP_CONCAT" | "FIRST" | "LAST" | "ARRAY_AGG"
-                    | "COUNT_DISTINCT"
-                )
+                if is_aggregate_function(base_function_name(name))
         )
     })
+}
+
+fn base_function_name(name: &str) -> &str {
+    name.split(':').next().unwrap_or(name)
+}
+
+fn is_aggregate_function(name: &str) -> bool {
+    matches!(
+        name,
+        "COUNT"
+            | "AVG"
+            | "SUM"
+            | "MIN"
+            | "MAX"
+            | "STDDEV"
+            | "VARIANCE"
+            | "MEDIAN"
+            | "PERCENTILE"
+            | "GROUP_CONCAT"
+            | "FIRST"
+            | "LAST"
+            | "ARRAY_AGG"
+            | "COUNT_DISTINCT"
+    )
 }
 
 /// Execute a query with aggregate functions (COUNT, AVG, SUM, MIN, MAX, GROUP BY).
@@ -2622,61 +2744,77 @@ fn execute_aggregate_query(db: &RedDB, query: &TableQuery) -> RedDBResult<Unifie
     let has_group_by = !query.group_by.is_empty();
 
     // Accumulators per group (empty string key = no grouping)
-    let mut groups: std::collections::HashMap<String, AggState> = std::collections::HashMap::new();
+    let mut groups: std::collections::HashMap<String, AggregateGroup> =
+        std::collections::HashMap::new();
 
     manager.for_each_entity(|entity| {
-        if !entity.data.is_row() {
-            return true;
-        }
         if let Some(f) = filter {
             if !evaluate_entity_filter(entity, f, table_name, table_alias) {
                 return true;
             }
         }
 
-        let row = match entity.data.as_row() {
-            Some(r) => r,
+        let record = match runtime_table_record_from_entity(entity.clone()) {
+            Some(record) => record,
             None => return true,
         };
 
-        // Determine group key
+        let group_values = if has_group_by {
+            let mut values = Vec::with_capacity(query.group_by.len());
+            for group_expr in &query.group_by {
+                let Some(value) = resolve_group_by_value(group_expr, &record) else {
+                    return true;
+                };
+                values.push(value);
+            }
+            values
+        } else {
+            Vec::new()
+        };
         let group_key = if has_group_by {
-            query
-                .group_by
+            group_values
                 .iter()
-                .filter_map(|col| row.get_field(col))
-                .map(|v| format!("{v:?}"))
+                .map(group_value_key)
                 .collect::<Vec<_>>()
                 .join("|")
         } else {
             String::new()
         };
 
-        let state = groups.entry(group_key).or_default();
+        let group = groups.entry(group_key).or_insert_with(|| AggregateGroup {
+            group_values: group_values.clone(),
+            state: AggState::default(),
+        });
+        let state = &mut group.state;
         state.count += 1;
 
         // Accumulate values for each aggregate projection
         for proj in &query.columns {
             if let Projection::Function(func, args) = proj {
-                let col_name = match args.first() {
-                    Some(Projection::Column(c)) => c.as_str(),
-                    Some(Projection::All) => "_count",
-                    _ => continue,
+                let func_name = base_function_name(func);
+                if !is_aggregate_function(func_name) {
+                    continue;
+                }
+
+                let col_name = match aggregate_argument_key(args) {
+                    Some(col) => col,
+                    None => continue,
                 };
                 if col_name == "_count" {
                     continue;
                 } // COUNT(*) just needs count
 
-                let val = match row.get_field(col_name) {
+                let val = match resolve_aggregate_argument_value(args.first(), &record) {
                     Some(v) => v,
                     None => continue,
                 };
-                let num = value_to_f64(val);
+                let num = value_to_f64(&val);
 
-                match func.as_str() {
+                match func_name {
                     "SUM" | "AVG" => {
                         if let Some(n) = num {
                             *state.sums.entry(col_name.to_string()).or_insert(0.0) += n;
+                            *state.agg_counts.entry(col_name.to_string()).or_insert(0) += 1;
                         }
                     }
                     "MIN" => {
@@ -2712,7 +2850,7 @@ fn execute_aggregate_query(db: &RedDB, query: &TableQuery) -> RedDBResult<Unifie
                         }
                     }
                     "GROUP_CONCAT" => {
-                        let text = match val {
+                        let text = match &val {
                             Value::Text(s) => s.clone(),
                             other => format!("{:?}", other),
                         };
@@ -2757,85 +2895,86 @@ fn execute_aggregate_query(db: &RedDB, query: &TableQuery) -> RedDBResult<Unifie
     let mut records = Vec::with_capacity(groups.len().max(1));
     let mut columns = Vec::new();
 
-    for (group_key, state) in &groups {
+    for group in groups.values() {
         let mut record = UnifiedRecord::new();
 
         // Add GROUP BY columns
         if has_group_by {
-            let parts: Vec<&str> = group_key.split('|').collect();
-            for (i, col) in query.group_by.iter().enumerate() {
-                if columns.is_empty() || !columns.contains(col) {
-                    columns.push(col.clone());
+            for (index, group_expr) in query.group_by.iter().enumerate() {
+                let Some(value) = group.group_values.get(index).cloned() else {
+                    continue;
+                };
+                let label = group_output_label(query, group_expr);
+                if !columns.contains(&label) {
+                    columns.push(label.clone());
                 }
-                let val_str = parts.get(i).unwrap_or(&"").trim_matches('"');
-                // Try to parse back — simplified
-                let val_str = val_str
-                    .strip_prefix("Text(\"")
-                    .and_then(|s| s.strip_suffix("\")"))
-                    .unwrap_or(val_str);
-                let val_str = val_str
-                    .strip_prefix("Integer(")
-                    .and_then(|s| s.strip_suffix(")"))
-                    .unwrap_or(val_str);
-                record.set(col, Value::Text(val_str.to_string()));
+                record.set(group_expr, value.clone());
+                record.set(&label, value);
             }
         }
 
         // Add aggregate results
         for proj in &query.columns {
             if let Projection::Function(func, args) = proj {
-                let col_name = match args.first() {
-                    Some(Projection::Column(c)) => c.as_str(),
-                    Some(Projection::All) => "*",
-                    _ => continue,
+                let func_name = base_function_name(func);
+                if !is_aggregate_function(func_name) {
+                    continue;
+                }
+
+                let col_name = match aggregate_argument_key(args) {
+                    Some(col_name) => col_name,
+                    None => continue,
                 };
-                let result_name = if col_name == "*" {
-                    format!("{}(*)", func.to_lowercase())
-                } else {
-                    format!("{}({})", func.to_lowercase(), col_name)
-                };
+                let result_name = aggregate_output_name(proj, func_name, col_name);
 
                 if !columns.contains(&result_name) {
                     columns.push(result_name.clone());
                 }
 
-                let result_val = match func.as_str() {
-                    "COUNT" => Value::Integer(state.count as i64),
+                let result_val = match func_name {
+                    "COUNT" => Value::Integer(group.state.count as i64),
                     "SUM" => {
-                        let s = state.sums.get(col_name).copied().unwrap_or(0.0);
+                        let s = group.state.sums.get(col_name).copied().unwrap_or(0.0);
                         Value::Float(s)
                     }
                     "AVG" => {
-                        let s = state.sums.get(col_name).copied().unwrap_or(0.0);
-                        Value::Float(if state.count > 0 {
-                            s / state.count as f64
-                        } else {
-                            0.0
-                        })
+                        let s = group.state.sums.get(col_name).copied().unwrap_or(0.0);
+                        let n = group.state.agg_counts.get(col_name).copied().unwrap_or(0);
+                        Value::Float(if n > 0 { s / n as f64 } else { 0.0 })
                     }
                     "MIN" => {
-                        let m = state.mins.get(col_name).copied().unwrap_or(0.0);
+                        let m = group.state.mins.get(col_name).copied().unwrap_or(0.0);
                         Value::Float(m)
                     }
                     "MAX" => {
-                        let m = state.maxs.get(col_name).copied().unwrap_or(0.0);
+                        let m = group.state.maxs.get(col_name).copied().unwrap_or(0.0);
                         Value::Float(m)
                     }
                     "VARIANCE" => {
-                        let n = state.agg_counts.get(col_name).copied().unwrap_or(0) as f64;
+                        let n = group.state.agg_counts.get(col_name).copied().unwrap_or(0) as f64;
                         if n > 0.0 {
-                            let sum = state.sums.get(col_name).copied().unwrap_or(0.0);
-                            let sum_sq = state.sum_squares.get(col_name).copied().unwrap_or(0.0);
+                            let sum = group.state.sums.get(col_name).copied().unwrap_or(0.0);
+                            let sum_sq = group
+                                .state
+                                .sum_squares
+                                .get(col_name)
+                                .copied()
+                                .unwrap_or(0.0);
                             Value::Float(sum_sq / n - (sum / n).powi(2))
                         } else {
                             Value::Float(0.0)
                         }
                     }
                     "STDDEV" => {
-                        let n = state.agg_counts.get(col_name).copied().unwrap_or(0) as f64;
+                        let n = group.state.agg_counts.get(col_name).copied().unwrap_or(0) as f64;
                         if n > 0.0 {
-                            let sum = state.sums.get(col_name).copied().unwrap_or(0.0);
-                            let sum_sq = state.sum_squares.get(col_name).copied().unwrap_or(0.0);
+                            let sum = group.state.sums.get(col_name).copied().unwrap_or(0.0);
+                            let sum_sq = group
+                                .state
+                                .sum_squares
+                                .get(col_name)
+                                .copied()
+                                .unwrap_or(0.0);
                             let variance = sum_sq / n - (sum / n).powi(2);
                             Value::Float(variance.max(0.0).sqrt())
                         } else {
@@ -2843,7 +2982,12 @@ fn execute_aggregate_query(db: &RedDB, query: &TableQuery) -> RedDBResult<Unifie
                         }
                     }
                     "MEDIAN" => {
-                        let mut vals = state.all_values.get(col_name).cloned().unwrap_or_default();
+                        let mut vals = group
+                            .state
+                            .all_values
+                            .get(col_name)
+                            .cloned()
+                            .unwrap_or_default();
                         if vals.is_empty() {
                             Value::Float(0.0)
                         } else {
@@ -2868,7 +3012,12 @@ fn execute_aggregate_query(db: &RedDB, query: &TableQuery) -> RedDBResult<Unifie
                                 _ => None,
                             })
                             .unwrap_or(0.5);
-                        let mut vals = state.all_values.get(col_name).cloned().unwrap_or_default();
+                        let mut vals = group
+                            .state
+                            .all_values
+                            .get(col_name)
+                            .cloned()
+                            .unwrap_or_default();
                         if vals.is_empty() {
                             Value::Float(0.0)
                         } else {
@@ -2881,25 +3030,29 @@ fn execute_aggregate_query(db: &RedDB, query: &TableQuery) -> RedDBResult<Unifie
                         }
                     }
                     "GROUP_CONCAT" => {
-                        let vals = state
+                        let vals = group
+                            .state
                             .concat_values
                             .get(col_name)
                             .cloned()
                             .unwrap_or_default();
                         Value::Text(vals.join(", "))
                     }
-                    "FIRST" => state
+                    "FIRST" => group
+                        .state
                         .first_values
                         .get(col_name)
                         .cloned()
                         .unwrap_or(Value::Null),
-                    "LAST" => state
+                    "LAST" => group
+                        .state
                         .last_values
                         .get(col_name)
                         .cloned()
                         .unwrap_or(Value::Null),
                     "ARRAY_AGG" => {
-                        let vals = state
+                        let vals = group
+                            .state
                             .array_values
                             .get(col_name)
                             .cloned()
@@ -2907,7 +3060,8 @@ fn execute_aggregate_query(db: &RedDB, query: &TableQuery) -> RedDBResult<Unifie
                         Value::Array(vals)
                     }
                     "COUNT_DISTINCT" => {
-                        let set = state
+                        let set = group
+                            .state
                             .distinct_sets
                             .get(col_name)
                             .map(|s| s.len())
@@ -2928,22 +3082,21 @@ fn execute_aggregate_query(db: &RedDB, query: &TableQuery) -> RedDBResult<Unifie
         let mut record = UnifiedRecord::new();
         for proj in &query.columns {
             if let Projection::Function(func, args) = proj {
-                let col_name = match args.first() {
-                    Some(Projection::Column(c)) => c.as_str(),
-                    Some(Projection::All) => "*",
-                    _ => continue,
+                let func_name = base_function_name(func);
+                if !is_aggregate_function(func_name) {
+                    continue;
+                }
+                let col_name = match aggregate_argument_key(args) {
+                    Some(col_name) => col_name,
+                    None => continue,
                 };
-                let name = if col_name == "*" {
-                    format!("{}(*)", func.to_lowercase())
-                } else {
-                    format!("{}({})", func.to_lowercase(), col_name)
-                };
+                let name = aggregate_output_name(proj, func_name, col_name);
                 if !columns.contains(&name) {
                     columns.push(name.clone());
                 }
                 record.set(
                     &name,
-                    match func.as_str() {
+                    match func_name {
                         "COUNT" => Value::Integer(0),
                         _ => Value::Float(0.0),
                     },
@@ -2959,6 +3112,184 @@ fn execute_aggregate_query(db: &RedDB, query: &TableQuery) -> RedDBResult<Unifie
         stats: Default::default(),
         pre_serialized_json: None,
     })
+}
+
+fn aggregate_argument_key(args: &[Projection]) -> Option<&str> {
+    match args.first() {
+        Some(Projection::Column(column)) => Some(column.as_str()),
+        Some(Projection::All) => Some("*"),
+        _ => None,
+    }
+}
+
+fn resolve_aggregate_argument_value(
+    arg: Option<&Projection>,
+    record: &UnifiedRecord,
+) -> Option<Value> {
+    match arg {
+        Some(Projection::Column(column)) => record.get(column).cloned(),
+        _ => None,
+    }
+}
+
+fn aggregate_output_name(projection: &Projection, func_name: &str, column_name: &str) -> String {
+    if let Projection::Function(name, _) = projection {
+        if let Some((_, alias)) = name.split_once(':') {
+            return alias.to_string();
+        }
+    }
+
+    if column_name == "*" {
+        format!("{}(*)", func_name.to_lowercase())
+    } else {
+        format!("{}({})", func_name.to_lowercase(), column_name)
+    }
+}
+
+fn group_output_label(query: &TableQuery, group_expr: &str) -> String {
+    query
+        .columns
+        .iter()
+        .find_map(|projection| {
+            let key = projection_group_key(projection)?;
+            if key.eq_ignore_ascii_case(group_expr) {
+                Some(projection_name(projection))
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| group_expr.to_string())
+}
+
+fn projection_group_key(projection: &Projection) -> Option<String> {
+    match projection {
+        Projection::Column(column) => Some(column.clone()),
+        Projection::Field(FieldRef::TableColumn { table, column }, _) if table.is_empty() => {
+            Some(column.clone())
+        }
+        Projection::Function(name, args) if base_function_name(name) == "TIME_BUCKET" => {
+            render_time_bucket_group_expr(args)
+        }
+        _ => None,
+    }
+}
+
+fn render_time_bucket_group_expr(args: &[Projection]) -> Option<String> {
+    let rendered = args
+        .iter()
+        .map(render_group_by_argument)
+        .collect::<Option<Vec<_>>>()?;
+    Some(format!("TIME_BUCKET({})", rendered.join(",")))
+}
+
+fn render_group_by_argument(arg: &Projection) -> Option<String> {
+    match arg {
+        Projection::Column(column) => Some(
+            column
+                .strip_prefix("LIT:")
+                .map(str::to_string)
+                .unwrap_or_else(|| column.clone()),
+        ),
+        Projection::All => Some("*".to_string()),
+        _ => None,
+    }
+}
+
+fn resolve_group_by_value(group_expr: &str, record: &UnifiedRecord) -> Option<Value> {
+    if let Some((bucket_ns, timestamp_column)) = parse_time_bucket_group_expr(group_expr) {
+        let timestamp_ns = resolve_bucket_timestamp_ns(record, timestamp_column.as_deref())?;
+        let bucket_start = if bucket_ns == 0 {
+            timestamp_ns
+        } else {
+            (timestamp_ns / bucket_ns) * bucket_ns
+        };
+        return Some(Value::UnsignedInteger(bucket_start));
+    }
+
+    record.get(group_expr).cloned()
+}
+
+fn parse_time_bucket_group_expr(expr: &str) -> Option<(u64, Option<String>)> {
+    const PREFIX: &str = "TIME_BUCKET(";
+
+    if expr.len() <= PREFIX.len()
+        || !expr[..PREFIX.len()].eq_ignore_ascii_case(PREFIX)
+        || !expr.ends_with(')')
+    {
+        return None;
+    }
+
+    let inner = &expr[PREFIX.len()..expr.len() - 1];
+    let parts: Vec<&str> = inner.split(',').map(str::trim).collect();
+    if parts.is_empty() || parts.len() > 2 {
+        return None;
+    }
+
+    let bucket_ns = crate::storage::timeseries::retention::parse_duration_ns(parts[0])?;
+    let timestamp_column = parts
+        .get(1)
+        .filter(|value| !value.is_empty())
+        .map(|value| (*value).to_string());
+
+    Some((bucket_ns, timestamp_column))
+}
+
+fn resolve_bucket_timestamp_ns(record: &UnifiedRecord, column: Option<&str>) -> Option<u64> {
+    if let Some(column) = column {
+        return record.get(column).and_then(value_to_bucket_timestamp_ns);
+    }
+
+    record
+        .get("timestamp_ns")
+        .and_then(value_to_bucket_timestamp_ns)
+        .or_else(|| {
+            record
+                .get("timestamp_ms")
+                .and_then(value_to_bucket_timestamp_ns)
+        })
+        .or_else(|| {
+            record
+                .get("timestamp")
+                .and_then(value_to_bucket_timestamp_ns)
+        })
+}
+
+fn value_to_bucket_timestamp_ns(value: &Value) -> Option<u64> {
+    match value {
+        Value::UnsignedInteger(v) => Some(*v),
+        Value::Integer(v) if *v >= 0 => Some(*v as u64),
+        Value::Float(v) if *v >= 0.0 => Some(*v as u64),
+        Value::Timestamp(v) if *v >= 0 => Some((*v as u64) * 1_000_000_000),
+        Value::TimestampMs(v) if *v >= 0 => Some((*v as u64) * 1_000_000),
+        _ => None,
+    }
+}
+
+fn group_value_key(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Boolean(v) => format!("b:{v}"),
+        Value::Integer(v) => format!("i:{v}"),
+        Value::UnsignedInteger(v) => format!("u:{v}"),
+        Value::Float(v) => format!("f:{:016x}", v.to_bits()),
+        Value::Text(v) => format!("t:{v}"),
+        other => format!("o:{other:?}"),
+    }
+}
+
+fn timeseries_tags_json_value(tags: &std::collections::HashMap<String, String>) -> Value {
+    let object = tags
+        .iter()
+        .map(|(key, value)| (key.clone(), crate::json::Value::String(value.clone())))
+        .collect();
+    let json = crate::json::Value::Object(object);
+    Value::Json(crate::json::to_vec(&json).unwrap_or_default())
+}
+
+#[derive(Default)]
+struct AggregateGroup {
+    group_values: Vec<Value>,
+    state: AggState,
 }
 
 #[derive(Default)]

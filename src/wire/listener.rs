@@ -201,8 +201,8 @@ fn handle_query_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
         if col_names.is_none() {
             let mut cols = vec![
                 "red_entity_id".into(),
-                "red_created_at".into(),
-                "red_updated_at".into(),
+                "created_at".into(),
+                "updated_at".into(),
             ];
             if let EntityData::Row(ref row) = entity.data {
                 if let Some(ref named) = row.named {
@@ -217,8 +217,8 @@ fn handle_query_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
         for col in cols {
             let val = match col.as_str() {
                 "red_entity_id" => Value::UnsignedInteger(entity.id.raw()),
-                "red_created_at" => Value::UnsignedInteger(entity.created_at),
-                "red_updated_at" => Value::UnsignedInteger(entity.updated_at),
+                "created_at" => Value::UnsignedInteger(entity.created_at),
+                "updated_at" => Value::UnsignedInteger(entity.updated_at),
                 other => {
                     if let EntityData::Row(ref r) = entity.data {
                         r.named
@@ -259,8 +259,8 @@ fn handle_query_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
 fn encode_entity_binary(entity: &crate::storage::unified::UnifiedEntity) -> Vec<u8> {
     let mut cols: Vec<String> = vec![
         "red_entity_id".into(),
-        "red_created_at".into(),
-        "red_updated_at".into(),
+        "created_at".into(),
+        "updated_at".into(),
     ];
     if let EntityData::Row(ref row) = entity.data {
         if let Some(ref named) = row.named {
@@ -277,8 +277,8 @@ fn encode_entity_binary(entity: &crate::storage::unified::UnifiedEntity) -> Vec<
     for col in &cols {
         let val = match col.as_str() {
             "red_entity_id" => Value::UnsignedInteger(entity.id.raw()),
-            "red_created_at" => Value::UnsignedInteger(entity.created_at),
-            "red_updated_at" => Value::UnsignedInteger(entity.updated_at),
+            "created_at" => Value::UnsignedInteger(entity.created_at),
+            "updated_at" => Value::UnsignedInteger(entity.updated_at),
             other => {
                 if let EntityData::Row(ref r) = entity.data {
                     r.named

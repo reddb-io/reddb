@@ -12,8 +12,10 @@ use crate::application::entity::{
     PatchEntityOperationType,
 };
 use crate::application::ports::RuntimeEntityPort;
+use crate::application::ttl_payload::has_internal_ttl_metadata;
 use crate::presentation::entity_json::storage_value_to_json;
 use crate::storage::unified::MetadataValue;
+use crate::storage::Metadata;
 
 use super::*;
 
@@ -32,6 +34,10 @@ impl RedDBRuntime {
         // Ensure the collection exists (auto-create on first insert).
         let store = self.inner.db.store();
         let _ = store.get_or_create_collection(&query.table);
+        let declared_model = self
+            .db()
+            .collection_contract(&query.table)
+            .map(|contract| contract.declared_model);
 
         for row_values in &query.values {
             if row_values.len() != query.columns.len() {
@@ -52,14 +58,21 @@ impl RedDBRuntime {
                         query.expires_at_ms,
                         &query.with_metadata,
                     );
-                    let input = CreateRowInput {
-                        collection: query.table.clone(),
-                        fields,
-                        metadata,
-                        node_links: Vec::new(),
-                        vector_links: Vec::new(),
-                    };
-                    self.create_row(input)?;
+                    if matches!(
+                        declared_model,
+                        Some(crate::catalog::CollectionModel::TimeSeries)
+                    ) {
+                        self.insert_timeseries_point(&query.table, fields, metadata)?;
+                    } else {
+                        let input = CreateRowInput {
+                            collection: query.table.clone(),
+                            fields,
+                            metadata,
+                            node_links: Vec::new(),
+                            vector_links: Vec::new(),
+                        };
+                        self.create_row(input)?;
+                    }
                 }
                 InsertEntityType::Node => {
                     let (node_values, mut metadata) =
@@ -254,6 +267,60 @@ impl RedDBRuntime {
             "insert",
             "runtime-dml",
         ))
+    }
+
+    fn insert_timeseries_point(
+        &self,
+        collection: &str,
+        fields: Vec<(String, Value)>,
+        mut metadata: Vec<(String, MetadataValue)>,
+    ) -> RedDBResult<EntityId> {
+        apply_collection_default_ttl_metadata(self, collection, &mut metadata);
+
+        let (columns, values) = pairwise_columns_values(&fields);
+        validate_timeseries_insert_columns(&columns)?;
+
+        let metric = find_column_value_string(&columns, &values, "metric")?;
+        let value = find_column_value_f64(&columns, &values, "value")?;
+        let timestamp_ns =
+            find_timeseries_timestamp_ns(&columns, &values)?.unwrap_or_else(current_unix_ns);
+        let tags = find_timeseries_tags(&columns, &values)?;
+
+        let entity = UnifiedEntity::new(
+            EntityId::new(0),
+            EntityKind::TimeSeriesPoint(Box::new(crate::storage::TimeSeriesPointKind {
+                series: collection.to_string(),
+                metric: metric.clone(),
+            })),
+            EntityData::TimeSeries(crate::storage::TimeSeriesData {
+                metric,
+                timestamp_ns,
+                value,
+                tags,
+            }),
+        );
+
+        let store = self.inner.db.store();
+        let id = store
+            .insert_auto(collection, entity)
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+
+        if !metadata.is_empty() {
+            let _ = store.set_metadata(
+                collection,
+                id,
+                Metadata::with_fields(metadata.into_iter().collect()),
+            );
+        }
+
+        self.cdc_emit(
+            crate::replication::cdc::ChangeOperation::Insert,
+            collection,
+            id.raw(),
+            "timeseries",
+        );
+
+        Ok(id)
     }
 
     /// Execute UPDATE table SET col=val, ... WHERE filter
@@ -613,6 +680,29 @@ fn merge_with_clauses(
     }
 }
 
+fn apply_collection_default_ttl_metadata(
+    runtime: &RedDBRuntime,
+    collection: &str,
+    metadata: &mut Vec<(String, MetadataValue)>,
+) {
+    if has_internal_ttl_metadata(metadata) {
+        return;
+    }
+
+    let Some(default_ttl_ms) = runtime.db().collection_default_ttl_ms(collection) else {
+        return;
+    };
+
+    metadata.push((
+        "_ttl_ms".to_string(),
+        if default_ttl_ms <= i64::MAX as u64 {
+            MetadataValue::Int(default_ttl_ms as i64)
+        } else {
+            MetadataValue::Timestamp(default_ttl_ms)
+        },
+    ));
+}
+
 fn pairwise_columns_values(pairs: &[(String, Value)]) -> (Vec<String>, Vec<Value>) {
     let mut columns = Vec::with_capacity(pairs.len());
     let mut values = Vec::with_capacity(pairs.len());
@@ -650,6 +740,21 @@ fn find_column_value_string(
         Value::Float(n) => Ok(n.to_string()),
         other => Err(RedDBError::Query(format!(
             "column '{name}' expected text, got {other:?}"
+        ))),
+    }
+}
+
+fn find_column_value_f64(columns: &[String], values: &[Value], name: &str) -> RedDBResult<f64> {
+    let val = find_column_value(columns, values, name)?;
+    match val {
+        Value::Float(n) => Ok(n),
+        Value::Integer(n) => Ok(n as f64),
+        Value::UnsignedInteger(n) => Ok(n as f64),
+        Value::Text(s) => s
+            .parse::<f64>()
+            .map_err(|_| RedDBError::Query(format!("column '{name}' expected number, got '{s}'"))),
+        other => Err(RedDBError::Query(format!(
+            "column '{name}' expected number, got {other:?}"
         ))),
     }
 }
@@ -741,6 +846,132 @@ fn extract_remaining_properties(
         .filter(|(col, _)| !exclude.iter().any(|e| col.eq_ignore_ascii_case(e)))
         .map(|(col, val)| (col.clone(), val.clone()))
         .collect()
+}
+
+fn validate_timeseries_insert_columns(columns: &[String]) -> RedDBResult<()> {
+    let mut invalid = Vec::new();
+    for column in columns {
+        if !is_timeseries_insert_column(column) && !resolve_sql_ttl_metadata_key(column).is_some() {
+            invalid.push(column.clone());
+        }
+    }
+
+    if invalid.is_empty() {
+        Ok(())
+    } else {
+        Err(RedDBError::Query(format!(
+            "timeseries INSERT only accepts metric, value, tags, timestamp, timestamp_ns, or time columns; got {}",
+            invalid.join(", ")
+        )))
+    }
+}
+
+fn is_timeseries_insert_column(column: &str) -> bool {
+    matches!(
+        column.to_ascii_lowercase().as_str(),
+        "metric" | "value" | "tags" | "timestamp" | "timestamp_ns" | "time"
+    )
+}
+
+fn find_timeseries_timestamp_ns(columns: &[String], values: &[Value]) -> RedDBResult<Option<u64>> {
+    let mut found = None;
+
+    for alias in ["timestamp_ns", "timestamp", "time"] {
+        for (index, column) in columns.iter().enumerate() {
+            if !column.eq_ignore_ascii_case(alias) {
+                continue;
+            }
+
+            if found.is_some() {
+                return Err(RedDBError::Query(
+                    "timeseries INSERT accepts only one timestamp column".to_string(),
+                ));
+            }
+
+            found = Some(coerce_value_to_non_negative_u64(&values[index], alias)?);
+        }
+    }
+
+    Ok(found)
+}
+
+fn find_timeseries_tags(
+    columns: &[String],
+    values: &[Value],
+) -> RedDBResult<std::collections::HashMap<String, String>> {
+    for (index, column) in columns.iter().enumerate() {
+        if column.eq_ignore_ascii_case("tags") {
+            return parse_timeseries_tags(&values[index]);
+        }
+    }
+    Ok(std::collections::HashMap::new())
+}
+
+fn parse_timeseries_tags(value: &Value) -> RedDBResult<std::collections::HashMap<String, String>> {
+    match value {
+        Value::Null => Ok(std::collections::HashMap::new()),
+        Value::Json(bytes) => parse_timeseries_tags_json(bytes),
+        Value::Text(text) => parse_timeseries_tags_json(text.as_bytes()),
+        other => Err(RedDBError::Query(format!(
+            "timeseries tags must be a JSON object or JSON text, got {other:?}"
+        ))),
+    }
+}
+
+fn parse_timeseries_tags_json(
+    bytes: &[u8],
+) -> RedDBResult<std::collections::HashMap<String, String>> {
+    let json: crate::json::Value = crate::json::from_slice(bytes)
+        .map_err(|err| RedDBError::Query(format!("timeseries tags must be valid JSON: {err}")))?;
+
+    let object = match json {
+        crate::json::Value::Object(object) => object,
+        other => {
+            return Err(RedDBError::Query(format!(
+                "timeseries tags must be a JSON object, got {other:?}"
+            )))
+        }
+    };
+
+    let mut tags = std::collections::HashMap::with_capacity(object.len());
+    for (key, value) in object {
+        tags.insert(key, json_tag_value_to_string(&value));
+    }
+    Ok(tags)
+}
+
+fn json_tag_value_to_string(value: &crate::json::Value) -> String {
+    match value {
+        crate::json::Value::Null => "null".to_string(),
+        crate::json::Value::Bool(value) => value.to_string(),
+        crate::json::Value::Number(value) => value.to_string(),
+        crate::json::Value::String(value) => value.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn coerce_value_to_non_negative_u64(value: &Value, column: &str) -> RedDBResult<u64> {
+    match value {
+        Value::UnsignedInteger(value) => Ok(*value),
+        Value::Integer(value) if *value >= 0 => Ok(*value as u64),
+        Value::Float(value) if *value >= 0.0 => Ok(*value as u64),
+        Value::Text(value) => value.parse::<u64>().map_err(|_| {
+            RedDBError::Query(format!(
+                "column '{column}' expected a non-negative integer timestamp, got '{value}'"
+            ))
+        }),
+        other => Err(RedDBError::Query(format!(
+            "column '{column}' expected a non-negative integer timestamp, got {other:?}"
+        ))),
+    }
+}
+
+fn current_unix_ns() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .min(u128::from(u64::MAX)) as u64
 }
 
 fn metadata_value_to_json(value: &MetadataValue) -> crate::json::Value {

@@ -286,11 +286,11 @@ where
         JsonValue::String(capabilities),
     );
     object.insert(
-        "red_created_at".to_string(),
+        "created_at".to_string(),
         JsonValue::Number(item.entity.created_at as f64),
     );
     object.insert(
-        "red_updated_at".to_string(),
+        "updated_at".to_string(),
         JsonValue::Number(item.entity.updated_at as f64),
     );
     object.insert(
