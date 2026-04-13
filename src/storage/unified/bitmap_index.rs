@@ -21,6 +21,26 @@ use roaring::RoaringBitmap;
 
 use super::entity::EntityId;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BitmapIndexError {
+    MissingIndex { collection: String, column: String },
+}
+
+impl std::fmt::Display for BitmapIndexError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingIndex { collection, column } => {
+                write!(
+                    f,
+                    "bitmap index for column '{column}' was not found in collection '{collection}'"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for BitmapIndexError {}
+
 /// A bitmap index for a single column.
 ///
 /// Maps each distinct value to a `RoaringBitmap` of entity offsets (u32).
@@ -182,18 +202,41 @@ impl BitmapIndexManager {
     }
 
     /// Insert a value into the index
-    pub fn insert(&self, collection: &str, column: &str, entity_id: EntityId, value: &[u8]) {
+    pub fn insert(
+        &self,
+        collection: &str,
+        column: &str,
+        entity_id: EntityId,
+        value: &[u8],
+    ) -> Result<(), BitmapIndexError> {
         let mut indices = self.indices.write().unwrap();
         if let Some(index) = indices.get_mut(&(collection.to_string(), column.to_string())) {
             index.insert(entity_id, value);
+            Ok(())
+        } else {
+            Err(BitmapIndexError::MissingIndex {
+                collection: collection.to_string(),
+                column: column.to_string(),
+            })
         }
     }
 
     /// Remove an entity from the index
-    pub fn remove(&self, collection: &str, column: &str, entity_id: EntityId) {
+    pub fn remove(
+        &self,
+        collection: &str,
+        column: &str,
+        entity_id: EntityId,
+    ) -> Result<(), BitmapIndexError> {
         let mut indices = self.indices.write().unwrap();
         if let Some(index) = indices.get_mut(&(collection.to_string(), column.to_string())) {
             index.remove(entity_id);
+            Ok(())
+        } else {
+            Err(BitmapIndexError::MissingIndex {
+                collection: collection.to_string(),
+                column: column.to_string(),
+            })
         }
     }
 
@@ -346,9 +389,12 @@ mod tests {
         let mgr = BitmapIndexManager::new();
         mgr.create_index("users", "status");
 
-        mgr.insert("users", "status", EntityId::new(1), b"active");
-        mgr.insert("users", "status", EntityId::new(2), b"active");
-        mgr.insert("users", "status", EntityId::new(3), b"banned");
+        mgr.insert("users", "status", EntityId::new(1), b"active")
+            .expect("bitmap insert should succeed");
+        mgr.insert("users", "status", EntityId::new(2), b"active")
+            .expect("bitmap insert should succeed");
+        mgr.insert("users", "status", EntityId::new(3), b"banned")
+            .expect("bitmap insert should succeed");
 
         assert_eq!(mgr.count("users", "status", b"active"), 2);
         assert_eq!(mgr.count("users", "status", b"banned"), 1);
