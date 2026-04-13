@@ -9,9 +9,12 @@
 //! - **Network cost**: For distributed queries
 //! - **Memory cost**: Working memory required
 
+use std::sync::Arc;
+
+use super::stats_provider::{NullProvider, StatsProvider};
 use crate::storage::query::ast::{
-    CompareOp, Filter as AstFilter, GraphQuery, HybridQuery, JoinQuery, JoinType, PathQuery,
-    QueryExpr, TableQuery, VectorQuery,
+    CompareOp, FieldRef, Filter as AstFilter, GraphQuery, HybridQuery, JoinQuery, JoinType,
+    PathQuery, QueryExpr, TableQuery, VectorQuery,
 };
 
 /// Cardinality estimate for a query result
@@ -148,10 +151,16 @@ pub struct CostEstimator {
     nested_loop_cost: f64,
     /// Cost per graph edge traversal
     edge_traversal_cost: f64,
+    /// Optional stats provider. When present, `estimate_table_cardinality`
+    /// and the selectivity computation use real per-table / per-column
+    /// statistics instead of the heuristic constants. `None` preserves the
+    /// legacy behaviour so callers can adopt stats incrementally.
+    stats: Arc<dyn StatsProvider>,
 }
 
 impl CostEstimator {
-    /// Create a new cost estimator with default parameters
+    /// Create a new cost estimator with default parameters and a
+    /// [`NullProvider`] — no real stats, pure heuristic mode.
     pub fn new() -> Self {
         Self {
             default_row_count: 1000.0,
@@ -160,7 +169,25 @@ impl CostEstimator {
             hash_probe_cost: 0.5,
             nested_loop_cost: 2.0,
             edge_traversal_cost: 1.5,
+            stats: Arc::new(NullProvider),
         }
+    }
+
+    /// Create a cost estimator that consults `provider` for real table /
+    /// column / index statistics. Any lookups the provider cannot satisfy
+    /// fall back to the heuristic path automatically.
+    pub fn with_stats(provider: Arc<dyn StatsProvider>) -> Self {
+        Self {
+            stats: provider,
+            ..Self::new()
+        }
+    }
+
+    /// Swap the stats provider on an existing estimator. Useful for tests
+    /// and for planners that build one `CostEstimator` and repoint it at
+    /// per-query snapshots.
+    pub fn set_stats(&mut self, provider: Arc<dyn StatsProvider>) {
+        self.stats = provider;
     }
 
     /// Estimate cost of a query expression
@@ -242,11 +269,20 @@ impl CostEstimator {
     }
 
     fn estimate_table_cardinality(&self, query: &TableQuery) -> CardinalityEstimate {
-        let mut estimate = CardinalityEstimate::full_scan(self.default_row_count);
+        // Prefer real row counts from the stats provider; fall back to the
+        // heuristic `default_row_count` when no stats are registered.
+        let base_rows = self
+            .stats
+            .table_stats(&query.table)
+            .map(|s| s.row_count as f64)
+            .unwrap_or(self.default_row_count);
 
-        // Apply filter selectivity
+        let mut estimate = CardinalityEstimate::full_scan(base_rows);
+
+        // Apply filter selectivity (stats-aware when provider has index
+        // stats on the compared column).
         if let Some(ref filter) = query.filter {
-            let selectivity = Self::estimate_filter_selectivity(filter);
+            let selectivity = self.filter_selectivity(filter, &query.table);
             estimate = estimate.with_filter(selectivity);
         }
 
@@ -256,6 +292,72 @@ impl CostEstimator {
         }
 
         estimate
+    }
+
+    /// Stats-aware selectivity computation. For each leaf comparison, if
+    /// the provider has an index on the referenced column, use
+    /// [`crate::storage::index::IndexStats::point_selectivity`] (or its
+    /// scaled range counterpart) instead of the hardcoded heuristic. All
+    /// non-leaf predicates recurse with the same table context.
+    fn filter_selectivity(&self, filter: &AstFilter, table: &str) -> f64 {
+        match filter {
+            AstFilter::Compare { field, op, .. } => {
+                let column = column_name_for_table(field, table);
+                let stats = column.and_then(|c| self.stats.index_stats(table, c));
+                match op {
+                    CompareOp::Eq => stats
+                        .as_ref()
+                        .map(|s| s.point_selectivity())
+                        .unwrap_or(0.01),
+                    CompareOp::Ne => stats
+                        .as_ref()
+                        .map(|s| 1.0 - s.point_selectivity())
+                        .unwrap_or(0.99),
+                    CompareOp::Lt | CompareOp::Le | CompareOp::Gt | CompareOp::Ge => {
+                        // Range is roughly "half the distinct values" when
+                        // the column is indexed, capped to the old heuristic.
+                        stats
+                            .as_ref()
+                            .map(|s| {
+                                (s.point_selectivity() * (s.distinct_keys as f64 / 2.0)).min(0.3)
+                            })
+                            .unwrap_or(0.3)
+                    }
+                }
+            }
+            AstFilter::Between { field, .. } => {
+                let column = column_name_for_table(field, table);
+                let stats = column.and_then(|c| self.stats.index_stats(table, c));
+                stats
+                    .as_ref()
+                    .map(|s| (s.point_selectivity() * (s.distinct_keys as f64 / 4.0)).min(0.25))
+                    .unwrap_or(0.25)
+            }
+            AstFilter::In { field, values, .. } => {
+                let column = column_name_for_table(field, table);
+                if let Some(c) = column {
+                    if let Some(s) = self.stats.index_stats(table, c) {
+                        return (s.point_selectivity() * values.len() as f64).min(0.5);
+                    }
+                }
+                (values.len() as f64 * 0.01).min(0.5)
+            }
+            AstFilter::Like { .. } => 0.1,
+            AstFilter::StartsWith { .. } => 0.15,
+            AstFilter::EndsWith { .. } => 0.15,
+            AstFilter::Contains { .. } => 0.1,
+            AstFilter::IsNull { .. } => 0.01,
+            AstFilter::IsNotNull { .. } => 0.99,
+            AstFilter::And(left, right) => {
+                self.filter_selectivity(left, table) * self.filter_selectivity(right, table)
+            }
+            AstFilter::Or(left, right) => {
+                let s1 = self.filter_selectivity(left, table);
+                let s2 = self.filter_selectivity(right, table);
+                s1 + s2 - (s1 * s2)
+            }
+            AstFilter::Not(inner) => 1.0 - self.filter_selectivity(inner, table),
+        }
     }
 
     // =========================================================================
@@ -475,6 +577,19 @@ impl CostEstimator {
 impl Default for CostEstimator {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Resolve a `FieldRef` to a bare column name when it refers to `table`.
+/// Returns `None` when the field targets another relation — in that case
+/// the legacy heuristic still applies.
+fn column_name_for_table<'a>(field: &'a FieldRef, table: &str) -> Option<&'a str> {
+    match field {
+        FieldRef::TableColumn { table: t, column } if t == table || t.is_empty() => {
+            Some(column.as_str())
+        }
+        // Node / edge property refs don't map to table-level stats.
+        _ => None,
     }
 }
 
