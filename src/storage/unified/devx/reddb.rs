@@ -25,7 +25,7 @@ use super::helpers::cosine_similarity;
 use super::query::QueryBuilder;
 use super::refs::{NodeRef, TableRef, VectorRef};
 use super::types::{LinkedEntity, SimilarResult};
-use super::{IndexConfig, Preprocessor};
+use super::{IndexConfig, Preprocessor, SharedPreprocessors};
 use crate::api::{Capability, CatalogSnapshot, CollectionStats, RedDBOptions, StorageMode};
 use crate::catalog::{
     consistency_report, snapshot_store_with_declarations, CatalogConsistencyReport,
@@ -57,7 +57,7 @@ use crate::storage::unified::store::{
 pub struct RedDB {
     store: Arc<UnifiedStore>,
     /// Preprocessing hooks
-    preprocessors: Vec<Box<dyn Preprocessor>>,
+    preprocessors: SharedPreprocessors,
     /// Index configuration
     index_config: IndexConfig,
     /// Persistence path
