@@ -72,7 +72,7 @@ impl RedDB {
 
         Self {
             store: Arc::new(store),
-            preprocessors: Vec::new(),
+            preprocessors: Arc::new(RwLock::new(Vec::new())),
             index_config: IndexConfig::default(),
             path,
             options: options.clone(),
