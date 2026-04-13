@@ -3,8 +3,17 @@ use crate::storage::layout::SegmentKind;
 use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{OnceLock, RwLock};
+use std::sync::{OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::SystemTime;
+
+fn service_read<'a, T>(lock: &'a RwLock<T>) -> RwLockReadGuard<'a, T> {
+    lock.read().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn service_write<'a, T>(lock: &'a RwLock<T>) -> RwLockWriteGuard<'a, T> {
+    lock.write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Identifies a logical partition in the storage engine.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -172,7 +181,7 @@ impl StorageService {
         if metadata.last_refreshed.is_none() {
             metadata.last_refreshed = Some(SystemTime::now());
         }
-        let mut guard = self.partitions.write().expect("partition lock poisoned");
+        let mut guard = service_write(&self.partitions);
         guard.upsert(metadata);
     }
 
@@ -185,7 +194,7 @@ impl StorageService {
         if attributes.is_empty() {
             return;
         }
-        let mut guard = self.partitions.write().expect("partition lock poisoned");
+        let mut guard = service_write(&self.partitions);
         guard.merge_attributes(key, attributes);
     }
 
@@ -264,7 +273,7 @@ impl StorageService {
 
     /// Return a cloned snapshot of all known partitions.
     pub fn partitions(&self) -> Vec<PartitionMetadata> {
-        let guard = self.partitions.read().expect("partition lock poisoned");
+        let guard = service_read(&self.partitions);
         guard.snapshot()
     }
 
@@ -273,7 +282,7 @@ impl StorageService {
     where
         F: Fn(&PartitionMetadata) -> bool,
     {
-        let guard = self.partitions.read().expect("partition lock poisoned");
+        let guard = service_read(&self.partitions);
         guard.filter(predicate)
     }
 
@@ -294,7 +303,7 @@ impl StorageService {
 
     /// Look up a partition by key.
     pub fn partition(&self, key: &PartitionKey) -> Option<PartitionMetadata> {
-        let guard = self.partitions.read().expect("partition lock poisoned");
+        let guard = service_read(&self.partitions);
         guard.get(key)
     }
 
@@ -847,6 +856,37 @@ mod tests {
 
         // Should still be none
         assert!(service.partition(&key).is_none());
+    }
+
+    #[test]
+    fn test_storage_service_recovers_after_partitions_lock_poisoning() {
+        let service = std::sync::Arc::new(StorageService::new());
+        let poison_target = std::sync::Arc::clone(&service);
+        let _ = std::thread::spawn(move || {
+            let _guard = poison_target
+                .partitions
+                .write()
+                .expect("partitions lock should be acquired");
+            panic!("poison partitions lock");
+        })
+        .join();
+
+        let key = PartitionKey::Target("poisoned".to_string());
+        service.register_partition(PartitionMetadata::new(
+            key.clone(),
+            "poisoned",
+            "/poisoned/path",
+            vec![SegmentKind::Ports],
+        ));
+
+        assert_eq!(service.partitions().len(), 1);
+        assert_eq!(
+            service
+                .partition(&key)
+                .as_ref()
+                .map(|meta| meta.label.as_str()),
+            Some("poisoned")
+        );
     }
 
     #[test]
