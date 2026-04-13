@@ -10,6 +10,7 @@ pub mod native;
 pub mod ports;
 pub mod query;
 pub(crate) mod query_payload;
+pub mod schema;
 pub(crate) mod serverless_payload;
 pub(crate) mod ttl_payload;
 
@@ -18,8 +19,9 @@ pub use catalog::CatalogUseCases;
 pub use entity::{
     CreateDocumentInput, CreateEdgeInput, CreateEntityOutput, CreateKvInput,
     CreateNodeEmbeddingInput, CreateNodeGraphLinkInput, CreateNodeInput, CreateNodeTableLinkInput,
-    CreateRowInput, CreateVectorInput, DeleteEntityInput, DeleteEntityOutput, EntityUseCases,
-    PatchEntityInput, PatchEntityOperation, PatchEntityOperationType,
+    CreateRowInput, CreateTimeSeriesPointInput, CreateVectorInput, DeleteEntityInput,
+    DeleteEntityOutput, EntityUseCases, PatchEntityInput, PatchEntityOperation,
+    PatchEntityOperationType,
 };
 pub use graph::{
     GraphCentralityInput, GraphClusteringInput, GraphCommunitiesInput, GraphComponentsInput,
@@ -30,10 +32,14 @@ pub use graph::{
 pub use native::{InspectNativeArtifactInput, NativeUseCases, RuntimeReadiness};
 pub use ports::{
     RuntimeAdminPort, RuntimeCatalogPort, RuntimeEntityPort, RuntimeGraphPort, RuntimeNativePort,
-    RuntimeQueryPort,
+    RuntimeQueryPort, RuntimeSchemaPort,
 };
 pub use query::{
     ExecuteQueryInput, ExplainQueryInput, QueryUseCases, ScanCollectionInput, SearchContextInput,
     SearchHybridInput, SearchIndexInput, SearchIvfInput, SearchMultimodalInput, SearchSimilarInput,
     SearchTextInput,
+};
+pub use schema::{
+    CreateTableColumnInput, CreateTableInput, CreateTimeSeriesInput, DropTableInput,
+    DropTimeSeriesInput, SchemaUseCases,
 };
