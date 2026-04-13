@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use super::compression::{
     delta_decode_timestamps, delta_encode_timestamps, xor_decode_values, xor_encode_values,
 };
+use crate::storage::index::{BloomSegment, HasBloom};
 
 /// A single time-series data point
 #[derive(Debug, Clone, PartialEq)]
@@ -37,6 +38,16 @@ pub struct TimeSeriesChunk {
     compressed_timestamps: Option<Vec<i64>>,
     /// Compressed value data (populated on seal)
     compressed_values: Option<Vec<u64>>,
+    /// Bloom filter over timestamps for O(1) negative point lookups.
+    /// Query planners can skip a chunk when a wanted timestamp is definitely
+    /// absent, even when it falls inside the chunk's min/max range.
+    bloom: BloomSegment,
+}
+
+impl HasBloom for TimeSeriesChunk {
+    fn bloom_segment(&self) -> Option<&BloomSegment> {
+        Some(&self.bloom)
+    }
 }
 
 impl TimeSeriesChunk {
@@ -51,6 +62,7 @@ impl TimeSeriesChunk {
             sealed: false,
             compressed_timestamps: None,
             compressed_values: None,
+            bloom: BloomSegment::with_capacity(1024),
         }
     }
 
@@ -70,9 +82,18 @@ impl TimeSeriesChunk {
         if self.sealed || self.timestamps.len() >= self.max_points {
             return false;
         }
+        self.bloom.insert(&timestamp_ns.to_le_bytes());
         self.timestamps.push(timestamp_ns);
         self.values.push(value);
         true
+    }
+
+    /// Fast-path check: might this chunk contain a point at `timestamp_ns`?
+    ///
+    /// Returns `false` only when the bloom filter *proves* the timestamp is
+    /// absent. A `true` response still requires a real lookup.
+    pub fn may_contain_timestamp(&self, timestamp_ns: u64) -> bool {
+        !self.bloom.definitely_absent(&timestamp_ns.to_le_bytes())
     }
 
     /// Number of data points
@@ -259,6 +280,22 @@ mod tests {
         }
         assert!(chunk.is_full());
         assert!(!chunk.append(5, 5.0));
+    }
+
+    #[test]
+    fn test_chunk_bloom_point_lookup() {
+        let mut chunk = TimeSeriesChunk::new("cpu.idle", make_tags("srv1"));
+        for ts in [1000u64, 2000, 3000, 4000] {
+            chunk.append(ts, 1.0);
+        }
+        // Inserted timestamps are always "possibly present".
+        assert!(chunk.may_contain_timestamp(1000));
+        assert!(chunk.may_contain_timestamp(4000));
+        // Unseen timestamp: bloom may prune it. If pruned, range query must
+        // also return empty — which it does either way because it's not in
+        // the data.
+        let _ = chunk.may_contain_timestamp(9999);
+        assert!(chunk.query_range(9999, 9999).is_empty());
     }
 
     #[test]
