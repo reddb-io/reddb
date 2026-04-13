@@ -865,7 +865,7 @@ mod tests {
         let mut result = Binding::one(Var::new(pairs[0].0), pairs[0].1.clone());
 
         for (k, v) in pairs.iter().skip(1) {
-            let next = Binding::one(Var::new(*k), v.clone());
+            let next = Binding::one(Var::new(k), v.clone());
             result = result.merge(&next).unwrap_or(result);
         }
 
