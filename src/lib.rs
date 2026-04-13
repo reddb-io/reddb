@@ -33,6 +33,7 @@ pub mod modules;
 pub mod physical;
 pub(crate) mod presentation;
 pub mod replication;
+pub mod rpc_stdio;
 pub mod runtime;
 pub mod serde_json;
 pub mod server;
