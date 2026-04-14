@@ -46,11 +46,33 @@ use super::error::ParseError;
 use super::Parser;
 use crate::storage::schema::{DataType, Value};
 
+fn keyword_function_name(token: &Token) -> Option<&'static str> {
+    match token {
+        Token::Count => Some("COUNT"),
+        Token::Sum => Some("SUM"),
+        Token::Avg => Some("AVG"),
+        Token::Min => Some("MIN"),
+        Token::Max => Some("MAX"),
+        Token::First => Some("FIRST"),
+        Token::Last => Some("LAST"),
+        Token::Left => Some("LEFT"),
+        Token::Right => Some("RIGHT"),
+        _ => None,
+    }
+}
+
 impl<'a> Parser<'a> {
     /// Parse a complete expression at the lowest precedence level.
     /// Entry point for every caller that wants an `Expr` tree.
     pub fn parse_expr(&mut self) -> Result<Expr, ParseError> {
         self.parse_expr_prec(0)
+    }
+
+    pub(crate) fn parse_expr_with_min_precedence(
+        &mut self,
+        min_prec: u8,
+    ) -> Result<Expr, ParseError> {
+        self.parse_expr_prec(min_prec)
     }
 
     /// Continue parsing an expression after the caller has already
@@ -186,6 +208,13 @@ impl<'a> Parser<'a> {
             });
         }
 
+        if let Some(name) = keyword_function_name(self.peek()) {
+            if matches!(self.peek_next()?, Token::LParen) {
+                self.advance()?; // consume the keyword token
+                return self.parse_function_call_expr_with_name(start, name.to_string());
+            }
+        }
+
         // Identifier-led constructs: function call, CAST, CASE, column.
         //
         // We commit to consuming the identifier immediately and then
@@ -214,74 +243,7 @@ impl<'a> Parser<'a> {
 
             // Function call / CAST: IDENT (
             if matches!(self.peek(), Token::LParen) {
-                self.advance()?; // consume `(`
-                                 // CAST is sugar — args are `expr AS type_name`.
-                if saved_name.eq_ignore_ascii_case("CAST") {
-                    let inner = self.parse_expr_prec(0)?;
-                    self.expect(Token::As)?;
-                    let type_name = self.expect_ident_or_keyword()?;
-                    self.expect(Token::RParen)?;
-                    let end = self.position();
-                    let Some(target) = DataType::from_sql_name(&type_name) else {
-                        return Err(ParseError::new(
-                            format!("unknown type name `{type_name}` in CAST"),
-                            self.position(),
-                        ));
-                    };
-                    return Ok(Expr::Cast {
-                        inner: Box::new(inner),
-                        target,
-                        span: Span::new(start, end),
-                    });
-                }
-                if saved_name.eq_ignore_ascii_case("TRIM") {
-                    let (name, args) = self.parse_trim_expr_args()?;
-                    self.expect(Token::RParen)?;
-                    let end = self.position();
-                    return Ok(Expr::FunctionCall {
-                        name,
-                        args,
-                        span: Span::new(start, end),
-                    });
-                }
-                if saved_name.eq_ignore_ascii_case("POSITION") {
-                    let args = self.parse_position_expr_args()?;
-                    self.expect(Token::RParen)?;
-                    let end = self.position();
-                    return Ok(Expr::FunctionCall {
-                        name: saved_name,
-                        args,
-                        span: Span::new(start, end),
-                    });
-                }
-                if saved_name.eq_ignore_ascii_case("SUBSTRING") {
-                    let args = self.parse_substring_expr_args()?;
-                    self.expect(Token::RParen)?;
-                    let end = self.position();
-                    return Ok(Expr::FunctionCall {
-                        name: saved_name,
-                        args,
-                        span: Span::new(start, end),
-                    });
-                }
-
-                // Generic function call.
-                let mut args = Vec::new();
-                if !self.check(&Token::RParen) {
-                    loop {
-                        args.push(self.parse_expr_prec(0)?);
-                        if !self.consume(&Token::Comma)? {
-                            break;
-                        }
-                    }
-                }
-                self.expect(Token::RParen)?;
-                let end = self.position();
-                return Ok(Expr::FunctionCall {
-                    name: saved_name,
-                    args,
-                    span: Span::new(start, end),
-                });
+                return self.parse_function_call_expr_with_name(start, saved_name);
             }
 
             // Qualified column: IDENT.IDENT[.IDENT …]
@@ -321,6 +283,112 @@ impl<'a> Parser<'a> {
         let end = self.position();
         Ok(Expr::Column {
             field,
+            span: Span::new(start, end),
+        })
+    }
+
+    fn parse_function_call_expr_with_name(
+        &mut self,
+        start: crate::storage::query::lexer::Position,
+        function_name: String,
+    ) -> Result<Expr, ParseError> {
+        self.expect(Token::LParen)?;
+
+        if function_name.eq_ignore_ascii_case("CAST") {
+            let inner = self.parse_expr_prec(0)?;
+            self.expect(Token::As)?;
+            let type_name = self.expect_ident_or_keyword()?;
+            self.expect(Token::RParen)?;
+            let end = self.position();
+            let Some(target) = DataType::from_sql_name(&type_name) else {
+                return Err(ParseError::new(
+                    format!("unknown type name `{type_name}` in CAST"),
+                    self.position(),
+                ));
+            };
+            return Ok(Expr::Cast {
+                inner: Box::new(inner),
+                target,
+                span: Span::new(start, end),
+            });
+        }
+
+        if function_name.eq_ignore_ascii_case("TRIM") {
+            let (name, args) = self.parse_trim_expr_args()?;
+            self.expect(Token::RParen)?;
+            let end = self.position();
+            return Ok(Expr::FunctionCall {
+                name,
+                args,
+                span: Span::new(start, end),
+            });
+        }
+
+        if function_name.eq_ignore_ascii_case("POSITION") {
+            let args = self.parse_position_expr_args()?;
+            self.expect(Token::RParen)?;
+            let end = self.position();
+            return Ok(Expr::FunctionCall {
+                name: function_name,
+                args,
+                span: Span::new(start, end),
+            });
+        }
+
+        if function_name.eq_ignore_ascii_case("SUBSTRING") {
+            let args = self.parse_substring_expr_args()?;
+            self.expect(Token::RParen)?;
+            let end = self.position();
+            return Ok(Expr::FunctionCall {
+                name: function_name,
+                args,
+                span: Span::new(start, end),
+            });
+        }
+
+        if function_name.eq_ignore_ascii_case("COUNT") {
+            if self.consume(&Token::Distinct)? {
+                let arg = self.parse_expr_prec(0)?;
+                self.expect(Token::RParen)?;
+                let end = self.position();
+                return Ok(Expr::FunctionCall {
+                    name: "COUNT_DISTINCT".to_string(),
+                    args: vec![arg],
+                    span: Span::new(start, end),
+                });
+            }
+
+            if self.consume(&Token::Star)? {
+                self.expect(Token::RParen)?;
+                let end = self.position();
+                return Ok(Expr::FunctionCall {
+                    name: function_name,
+                    args: vec![Expr::Column {
+                        field: FieldRef::TableColumn {
+                            table: String::new(),
+                            column: "*".to_string(),
+                        },
+                        span: Span::synthetic(),
+                    }],
+                    span: Span::new(start, end),
+                });
+            }
+        }
+
+        let mut args = Vec::new();
+        if !self.check(&Token::RParen) {
+            loop {
+                args.push(self.parse_expr_prec(0)?);
+                if !self.consume(&Token::Comma)? {
+                    break;
+                }
+            }
+        }
+        self.expect(Token::RParen)?;
+        let end = self.position();
+        Ok(Expr::FunctionCall {
+            name: function_name,
+            args,
             span: Span::new(start, end),
         })
     }

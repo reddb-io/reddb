@@ -42,6 +42,7 @@ fn is_scalar_function(name: &str) -> bool {
             | "MEDIAN"
             | "PERCENTILE"
             | "GROUP_CONCAT"
+            | "STRING_AGG"
             | "FIRST"
             | "LAST"
             | "ARRAY_AGG"
@@ -65,11 +66,33 @@ fn is_aggregate_function(name: &str) -> bool {
             | "MEDIAN"
             | "PERCENTILE"
             | "GROUP_CONCAT"
+            | "STRING_AGG"
             | "FIRST"
             | "LAST"
             | "ARRAY_AGG"
             | "COUNT_DISTINCT"
     )
+}
+
+fn aggregate_token_name(token: &Token) -> Option<&'static str> {
+    match token {
+        Token::Count => Some("COUNT"),
+        Token::Sum => Some("SUM"),
+        Token::Avg => Some("AVG"),
+        Token::Min => Some("MIN"),
+        Token::Max => Some("MAX"),
+        Token::First => Some("FIRST"),
+        Token::Last => Some("LAST"),
+        _ => None,
+    }
+}
+
+fn scalar_token_name(token: &Token) -> Option<&'static str> {
+    match token {
+        Token::Left => Some("LEFT"),
+        Token::Right => Some("RIGHT"),
+        _ => None,
+    }
 }
 use super::Parser;
 
@@ -165,31 +188,35 @@ impl<'a> Parser<'a> {
 
     /// Parse a single projection — supports columns, aggregate functions, and scalar functions
     fn parse_projection(&mut self) -> Result<Projection, ParseError> {
-        // Check for aggregate functions: COUNT(*), AVG(col), SUM(col), MIN(col), MAX(col)
-        let is_agg = matches!(
-            self.peek(),
-            Token::Count | Token::Sum | Token::Avg | Token::Min | Token::Max
-        );
-        if is_agg {
-            let func_name = self.advance()?.to_string().to_uppercase();
-            self.expect(Token::LParen)?;
-            let args = if self.consume(&Token::Star)? {
-                vec![Projection::All]
-            } else {
-                let arg = self.parse_projection_factor()?;
-                vec![self.parse_projection_binop_tail(arg, 0)?]
-            };
-            self.expect(Token::RParen)?;
-            let alias = if self.consume(&Token::As)? {
-                Some(self.expect_ident()?)
-            } else {
-                None
-            };
-            return Ok(if let Some(alias) = alias {
-                Projection::Function(format!("{}:{}", func_name, alias), args)
-            } else {
-                Projection::Function(func_name, args)
-            });
+        // Check for aggregate functions tokenized as keywords.
+        if let Some(func_name) = aggregate_token_name(self.peek()) {
+            if matches!(self.peek_next()?, Token::LParen) {
+                self.advance()?;
+                self.expect(Token::LParen)?;
+                let (resolved_name, args) = if func_name == "COUNT" && self.consume(&Token::Distinct)? {
+                    let arg = self.parse_projection_factor()?;
+                    (
+                        "COUNT_DISTINCT",
+                        vec![self.parse_projection_binop_tail(arg, 0)?],
+                    )
+                } else if self.consume(&Token::Star)? {
+                    (func_name, vec![Projection::All])
+                } else {
+                    let arg = self.parse_projection_factor()?;
+                    (func_name, vec![self.parse_projection_binop_tail(arg, 0)?])
+                };
+                self.expect(Token::RParen)?;
+                let alias = if self.consume(&Token::As)? {
+                    Some(self.expect_ident()?)
+                } else {
+                    None
+                };
+                return Ok(if let Some(alias) = alias {
+                    Projection::Function(format!("{resolved_name}:{alias}"), args)
+                } else {
+                    Projection::Function(resolved_name.to_string(), args)
+                });
+            }
         }
 
         // CAST(expr AS type) — special form because it embeds the AS
@@ -257,6 +284,25 @@ impl<'a> Parser<'a> {
             if name.eq_ignore_ascii_case("SUBSTRING") && matches!(self.peek_next()?, Token::LParen)
             {
                 return self.parse_substring_projection();
+            }
+        }
+
+        if let Some(func_name) = scalar_token_name(self.peek()) {
+            if matches!(self.peek_next()?, Token::LParen) && is_scalar_function(func_name) {
+                self.advance()?;
+                self.expect(Token::LParen)?;
+                let args = self.parse_function_args()?;
+                self.expect(Token::RParen)?;
+                let alias = if self.consume(&Token::As)? {
+                    Some(self.expect_ident()?)
+                } else {
+                    None
+                };
+                return Ok(if let Some(alias) = alias {
+                    Projection::Function(format!("{func_name}:{alias}"), args)
+                } else {
+                    Projection::Function(func_name.to_string(), args)
+                });
             }
         }
 
@@ -346,6 +392,16 @@ impl<'a> Parser<'a> {
             self.expect(Token::RParen)?;
             return Ok(climbed);
         }
+        if let Some(func_name) = aggregate_token_name(self.peek()) {
+            if matches!(self.peek_next()?, Token::LParen) {
+                return Err(ParseError::new(
+                    format!(
+                        "aggregate function `{func_name}` is not valid inside another expression"
+                    ),
+                    self.position(),
+                ));
+            }
+        }
         // Nested CAST inside an arithmetic expression.
         if let Some(name) = match self.peek() {
             Token::Ident(name) => Some(name.clone()),
@@ -399,6 +455,16 @@ impl<'a> Parser<'a> {
                     self.expect(Token::RParen)?;
                     return Ok(Projection::Function(upper, args));
                 }
+            }
+        }
+
+        if let Some(func_name) = scalar_token_name(self.peek()) {
+            if matches!(self.peek_next()?, Token::LParen) && is_scalar_function(func_name) {
+                self.advance()?;
+                self.expect(Token::LParen)?;
+                let args = self.parse_function_args()?;
+                self.expect(Token::RParen)?;
+                return Ok(Projection::Function(func_name.to_string(), args));
             }
         }
         // Numeric / string / null literal.

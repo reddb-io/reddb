@@ -1320,6 +1320,7 @@ dependencies = [
  "itoa",
  "prost",
  "rcgen",
+ "regex",
  "roaring",
  "rstar",
  "rustls",

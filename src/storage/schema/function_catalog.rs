@@ -244,6 +244,20 @@ pub const FUNCTION_CATALOG: &[FunctionEntry] = &[
         FunctionKind::Aggregate,
         false,
     ),
+    entry(
+        "GROUP_CONCAT",
+        ARGS_TWO_TEXT,
+        DataType::Text,
+        FunctionKind::Aggregate,
+        false,
+    ),
+    entry(
+        "STRING_AGG",
+        ARGS_TWO_TEXT,
+        DataType::Text,
+        FunctionKind::Aggregate,
+        false,
+    ),
     // ─────────────────────────────────────────────────────────────
     // Scalar — string
     // ─────────────────────────────────────────────────────────────

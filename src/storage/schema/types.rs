@@ -971,8 +971,8 @@ impl Value {
                 // Stores with `TextZstd` type byte when compression wins;
                 // falls back to plain `Text` for small values or when zstd
                 // doesn't reduce the size (e.g. already-compressed content).
-                if bytes.len() > TOAST_THRESHOLD {
-                    if let Ok(compressed) = zstd::bulk::compress(bytes, TOAST_ZSTD_LEVEL) {
+                if bytes.len() > Self::TOAST_THRESHOLD {
+                    if let Ok(compressed) = zstd::bulk::compress(bytes, Self::TOAST_ZSTD_LEVEL) {
                         if compressed.len() < bytes.len() {
                             buf.push(DataType::TextZstd.to_byte());
                             // original length first (needed to pre-allocate decompression buffer)
@@ -989,8 +989,8 @@ impl Value {
             }
             Value::Blob(data) => {
                 // C3 TOAST: same pattern as Text.
-                if data.len() > TOAST_THRESHOLD {
-                    if let Ok(compressed) = zstd::bulk::compress(data, TOAST_ZSTD_LEVEL) {
+                if data.len() > Self::TOAST_THRESHOLD {
+                    if let Ok(compressed) = zstd::bulk::compress(data, Self::TOAST_ZSTD_LEVEL) {
                         if compressed.len() < data.len() {
                             buf.push(DataType::BlobZstd.to_byte());
                             write_varint(&mut buf, data.len() as u64);

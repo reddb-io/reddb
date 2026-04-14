@@ -728,7 +728,7 @@ pub fn execute_group_by(
 
     // Finalize: emit one output Binding per distinct group.
     let mut results = Vec::with_capacity(groups.len());
-    for (_, (key_binding, mut agg_instances)) in groups {
+    for (_, (key_binding, agg_instances)) in groups {
         let mut result = key_binding;
         for (i, agg_def) in aggregations.iter().enumerate() {
             let agg_result = agg_instances[i].finalize();

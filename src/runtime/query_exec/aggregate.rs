@@ -1,7 +1,7 @@
 //! Aggregate query executor.
 //!
 //! Handles SQL aggregates (`COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `STDDEV`,
-//! `VARIANCE`, `MEDIAN`, `PERCENTILE`, `GROUP_CONCAT`, `FIRST`, `LAST`,
+//! `VARIANCE`, `MEDIAN`, `PERCENTILE`, `GROUP_CONCAT`, `STRING_AGG`, `FIRST`, `LAST`,
 //! `ARRAY_AGG`, `COUNT_DISTINCT`) plus `GROUP BY` (including
 //! `TIME_BUCKET` grouping for time-series rollups).
 //!
@@ -13,7 +13,8 @@
 
 use crate::api::{RedDBError, RedDBResult};
 use crate::runtime::join_filter::{
-    eval_projection_value, field_ref_name, projection_name, runtime_partial_cmp,
+    eval_projection_value, evaluate_runtime_filter, field_ref_name, projection_name,
+    runtime_partial_cmp, sort_records_by_order_by,
 };
 use crate::runtime::runtime_table_record_from_entity;
 use crate::storage::query::ast::{FieldRef, Projection};
@@ -21,7 +22,6 @@ use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
 use crate::storage::schema::Value;
 use crate::RedDB;
 
-use super::evaluate_entity_filter;
 use super::TableQuery;
 
 /// Return `true` when any projection in the query is a known aggregate
@@ -54,6 +54,7 @@ pub(crate) fn is_aggregate_function(name: &str) -> bool {
             | "MEDIAN"
             | "PERCENTILE"
             | "GROUP_CONCAT"
+            | "STRING_AGG"
             | "FIRST"
             | "LAST"
             | "ARRAY_AGG"
@@ -66,6 +67,8 @@ pub(crate) fn execute_aggregate_query(
     db: &RedDB,
     query: &TableQuery,
 ) -> RedDBResult<UnifiedResult> {
+    validate_aggregate_projection_shape(query)?;
+
     let manager = db
         .store()
         .get_collection(query.table.as_str())
@@ -225,7 +228,7 @@ pub(crate) fn execute_aggregate_query(
                                 .push(n);
                         }
                     }
-                    "GROUP_CONCAT" => {
+                    "GROUP_CONCAT" | "STRING_AGG" => {
                         if !matches!(val, Value::Null) {
                             let text = match &val {
                                 Value::Text(s) => s.clone(),
@@ -431,7 +434,7 @@ pub(crate) fn execute_aggregate_query(
                             Value::Float(vals[idx])
                         }
                     }
-                    "GROUP_CONCAT" => {
+                    "GROUP_CONCAT" | "STRING_AGG" => {
                         let vals = group
                             .state
                             .concat_values
@@ -441,7 +444,9 @@ pub(crate) fn execute_aggregate_query(
                         if vals.is_empty() {
                             Value::Null
                         } else {
-                            Value::Text(vals.join(", "))
+                            let separator = resolve_static_projection_text(args.get(1))
+                                .unwrap_or_else(|| ", ".to_string());
+                            Value::Text(vals.join(separator.as_str()))
                         }
                     }
                     "FIRST" => group
@@ -484,11 +489,13 @@ pub(crate) fn execute_aggregate_query(
             }
         }
 
-        records.push(record);
+        if having_matches(query.having.as_ref(), &record) {
+            records.push(record);
+        }
     }
 
-    // If no groups matched, return a single row with zeros
-    if records.is_empty() && !has_group_by {
+    // If no input rows matched, return a single aggregate row.
+    if groups.is_empty() && !has_group_by {
         let mut record = UnifiedRecord::new();
         for proj in &query.columns {
             if let Projection::Function(func, args) = proj {
@@ -513,7 +520,26 @@ pub(crate) fn execute_aggregate_query(
                 );
             }
         }
-        records.push(record);
+        if having_matches(query.having.as_ref(), &record) {
+            records.push(record);
+        }
+    }
+
+    if !query.order_by.is_empty() {
+        sort_records_by_order_by(&mut records, &query.order_by, None, None);
+    }
+
+    if let Some(offset) = query.offset {
+        let offset = offset as usize;
+        if offset < records.len() {
+            records = records.into_iter().skip(offset).collect();
+        } else {
+            records.clear();
+        }
+    }
+
+    if let Some(limit) = query.limit {
+        records.truncate(limit as usize);
     }
 
     Ok(UnifiedResult {
@@ -526,6 +552,16 @@ pub(crate) fn execute_aggregate_query(
 
 fn aggregate_argument_key(args: &[Projection]) -> Option<String> {
     args.first().map(render_aggregate_argument_key)
+}
+
+fn having_matches(
+    having: Option<&crate::storage::query::ast::Filter>,
+    record: &UnifiedRecord,
+) -> bool {
+    match having {
+        Some(filter) => evaluate_runtime_filter(record, filter, None, None),
+        None => true,
+    }
 }
 
 fn resolve_aggregate_argument_value(
@@ -553,6 +589,42 @@ fn aggregate_output_name(projection: &Projection, func_name: &str, column_name: 
     }
 }
 
+fn validate_aggregate_projection_shape(query: &TableQuery) -> RedDBResult<()> {
+    let has_group_by = !query.group_by.is_empty();
+
+    for projection in &query.columns {
+        if matches!(
+            projection,
+            Projection::Function(name, _)
+                if is_aggregate_function(base_function_name(name))
+        ) {
+            continue;
+        }
+
+        if has_group_by
+            && projection_group_key(projection).is_some_and(|group_key| {
+                query.group_by
+                    .iter()
+                    .any(|entry| entry.eq_ignore_ascii_case(&group_key))
+            })
+        {
+            continue;
+        }
+
+        let label = projection_name(projection);
+        let message = if has_group_by {
+            format!("projection `{label}` must appear in GROUP BY or be an aggregate")
+        } else {
+            format!(
+                "projection `{label}` must be an aggregate because the query contains aggregate functions"
+            )
+        };
+        return Err(RedDBError::Query(message));
+    }
+
+    Ok(())
+}
+
 fn render_aggregate_argument_key(arg: &Projection) -> String {
     match arg {
         Projection::Column(column) => column
@@ -578,6 +650,16 @@ fn resolve_static_projection_number(arg: Option<&Projection>) -> Option<f64> {
     let record = UnifiedRecord::new();
     let value = eval_projection_value(arg?, &record)?;
     value_to_f64(&value)
+}
+
+fn resolve_static_projection_text(arg: Option<&Projection>) -> Option<String> {
+    let record = UnifiedRecord::new();
+    let value = eval_projection_value(arg?, &record)?;
+    Some(match value {
+        Value::Null => String::new(),
+        Value::Text(text) => text,
+        other => other.display_string(),
+    })
 }
 
 fn update_extreme_value(

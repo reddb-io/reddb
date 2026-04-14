@@ -1358,7 +1358,7 @@ pub(super) fn runtime_value_text_str(value: &Value) -> Option<&str> {
 /// Like `runtime_value_text` but returns `Cow::Borrowed` when the value
 /// already holds a `String` (Text, Email, Url, ref types) — zero alloc for
 /// the common case in Like/StartsWith/EndsWith/Contains hot-path filters.
-pub(super) fn runtime_value_text_cow(value: &Value) -> Option<std::borrow::Cow<str>> {
+pub(super) fn runtime_value_text_cow(value: &Value) -> Option<std::borrow::Cow<'_, str>> {
     if let Some(s) = runtime_value_text_str(value) {
         return Some(std::borrow::Cow::Borrowed(s));
     }
@@ -1703,11 +1703,10 @@ fn evaluate_scalar_function(
                     let start = value_as_i64(&start_value)?;
                     let count = args
                         .get(2)
-                        .map(|_| {
+                        .and_then(|_| {
                             resolve_scalar_arg(args, 2, source)
                                 .and_then(|value| value_as_i64(&value))
-                        })
-                        .transpose()?;
+                        });
                     Some(Value::Text(substring_text(&text, start, count)?))
                 }
             }

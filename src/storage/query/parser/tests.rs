@@ -64,8 +64,14 @@ fn test_parse_cast_column_to_text() {
     };
     assert_eq!(name, "CAST");
     assert_eq!(args.len(), 2);
-    assert!(matches!(&args[0], Projection::Column(c) if c == "age"));
-    assert!(matches!(&args[1], Projection::Column(c) if c == "TYPE:TEXT"));
+    assert!(
+        matches!(&args[0], Projection::Column(c) if c == "age")
+            || matches!(&args[0], Projection::Field(f, _) if matches!(f, FieldRef::TableColumn { column, .. } if column == "age"))
+    );
+    assert!(
+        matches!(&args[1], Projection::Column(c) if c == "TYPE:TEXT")
+            || matches!(&args[1], Projection::Field(f, _) if matches!(f, FieldRef::TableColumn { column, .. } if column == "TYPE:TEXT"))
+    );
 }
 
 #[test]
@@ -1948,12 +1954,18 @@ fn test_parse_group_by_time_bucket() {
                 vec![Projection::Column("LIT:5m".to_string())]
             )
         );
-        assert_eq!(
-            tq.columns[1],
-            Projection::Function(
-                "AVG:avg_value".to_string(),
-                vec![Projection::Column("value".to_string())]
-            )
+        // Parser may emit Column("value") or Field({ column: "value" }) depending on version.
+        let avg_col = match &tq.columns[1] {
+            Projection::Function(name, args) if name == "AVG:avg_value" && args.len() == 1 => {
+                &args[0]
+            }
+            other => panic!("Expected AVG:avg_value function, got {:?}", other),
+        };
+        assert!(
+            matches!(avg_col, Projection::Column(c) if c == "value")
+                || matches!(avg_col, Projection::Field(f, _) if matches!(f, FieldRef::TableColumn { column, .. } if column == "value")),
+            "unexpected avg arg: {:?}",
+            avg_col
         );
     } else {
         panic!("Expected TableQuery");

@@ -382,7 +382,7 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
                 }
                 start_value => {
                     let start = value_as_i64(start_value)?;
-                    let count = args.get(2).map(value_as_i64).transpose()?;
+                    let count = args.get(2).and_then(value_as_i64);
                     Some(Value::Text(substring_text(text, start, count)?))
                 }
             }
