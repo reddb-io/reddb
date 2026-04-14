@@ -61,6 +61,7 @@ pub mod rag;
 pub mod security;
 pub mod similarity;
 pub mod sort;
+pub mod sql;
 pub mod sql_lowering;
 pub mod step;
 #[cfg(test)]
@@ -129,6 +130,7 @@ pub use security::{
 };
 pub use similarity::{SimilarityQuery, SimilarityResult};
 pub use sort::{Direction, NullsOrder, OrderBy, QueryLimits, SortKey};
+pub use sql::SqlCommand;
 pub use step::{
     AggregateStep, BarrierStep, BasicTraversal, BranchStep, ChooseStep, CollectingBarrierStep,
     DedupStep, Direction as TraversalDirection, EdgeSourceStep, EdgeStep, ExecutionMode,

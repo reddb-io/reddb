@@ -99,18 +99,24 @@ pub struct SegmentManager {
     next_entity_id: AtomicU64,
     /// Per-table auto-increment row ID (1, 2, 3... per collection)
     next_row_id: AtomicU64,
+    /// Hot-path entity counter — lock-free, updated by every insert/delete.
+    /// Replaces stats.total_entities on the write path to eliminate a lock
+    /// acquisition per row (from 4 lock ops per insert → 2).
+    total_entities_atomic: AtomicU64,
     /// Currently active growing segment
     growing: RwLock<Option<Arc<RwLock<GrowingSegment>>>>,
     /// Sealed segments (immutable, queryable)
     sealed: RwLock<Vec<Arc<RwLock<GrowingSegment>>>>,
     /// Archived segment IDs (stored externally)
     archived: RwLock<Vec<SegmentId>>,
-    /// Entity to segment mapping (for fast lookups)
+    /// Entity to segment mapping (for fast lookups by individually-inserted entities).
+    /// Bulk-inserted entities skip this map; their segment is found by sequential scan
+    /// of growing + sealed segments in get()/update()/delete().
     entity_segment: RwLock<HashMap<EntityId, SegmentId>>,
     /// Shared column schema: column_name → index in Vec<Value>.
     /// Populated on first bulk_insert. Enables columnar storage (Vec instead of HashMap per row).
     column_schema: RwLock<Option<Arc<Vec<String>>>>,
-    /// Statistics
+    /// Statistics (slow path — not updated on every insert).
     stats: RwLock<ManagerStats>,
     /// Event listeners (simplified - would be channels in production)
     events: RwLock<Vec<LifecycleEvent>>,
@@ -134,6 +140,7 @@ impl SegmentManager {
             next_segment_id: AtomicU64::new(1),
             next_entity_id: AtomicU64::new(1),
             next_row_id: AtomicU64::new(1),
+            total_entities_atomic: AtomicU64::new(0),
             growing: RwLock::new(None),
             sealed: RwLock::new(Vec::new()),
             archived: RwLock::new(Vec::new()),
@@ -183,9 +190,12 @@ impl SegmentManager {
         &self.config
     }
 
-    /// Get statistics
+    /// Get statistics. total_entities is read from the lock-free atomic;
+    /// other fields come from the slow-path stats struct.
     pub fn stats(&self) -> ManagerStats {
-        self.stats.read().unwrap_or_else(|e| e.into_inner()).clone()
+        let mut s = self.stats.read().unwrap_or_else(|e| e.into_inner()).clone();
+        s.total_entities = self.total_entities_atomic.load(Ordering::Relaxed) as usize;
+        s
     }
 
     /// Generate a new entity ID
@@ -245,8 +255,12 @@ impl SegmentManager {
 
         self.emit(LifecycleEvent::SegmentCreated(id));
 
-        let mut stats = self.stats.write().unwrap_or_else(|e| e.into_inner());
-        stats.growing_count += 1;
+        // Update growing_count in the slow-path stats struct.
+        // This is the rare segment-creation path — locking is fine here.
+        self.stats
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .growing_count += 1;
 
         segment_arc
     }
@@ -269,15 +283,16 @@ impl SegmentManager {
 
         segment.insert(entity)?;
 
-        // Track entity location and update stats under a single lock acquisition each.
-        self.entity_segment
-            .write()
-            .unwrap_or_else(|err| err.into_inner())
-            .insert(entity_id, segment_id);
-        self.stats
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .total_entities += 1;
+        // Lock-free counter update — eliminates the stats write lock on the hot path.
+        self.total_entities_atomic.fetch_add(1, Ordering::Relaxed);
+
+        // entity_segment map is intentionally NOT updated here.
+        // update() and update_hot() first probe the growing segment directly
+        // (growing.contains(entity.id)) before consulting this map, so entities
+        // that were just inserted are found without entity_segment. The map is
+        // only consulted for entities that may have been moved to sealed segments,
+        // which can't be updated anyway (state().is_writable() == false).
+        // Skipping this write removes one exclusive HashMap lock per insert.
 
         self.emit(LifecycleEvent::EntityInserted(entity_id, segment_id));
 
@@ -353,11 +368,9 @@ impl SegmentManager {
         // Skip entity-segment mapping for bulk inserts (saves ~56 bytes/entity).
         // The get() method scans growing+sealed segments directly.
 
-        // Batch update stats
-        {
-            let mut stats = self.stats.write().unwrap_or_else(|e| e.into_inner());
-            stats.total_entities += ids.len();
-        }
+        // Lock-free batch counter update.
+        self.total_entities_atomic
+            .fetch_add(ids.len() as u64, Ordering::Relaxed);
 
         Ok(ids)
     }
@@ -501,6 +514,32 @@ impl SegmentManager {
 
     /// Delete an entity
     pub fn delete(&self, id: EntityId) -> Result<bool, SegmentError> {
+        // Fast path: probe the growing segment directly — covers entities inserted via
+        // insert() which no longer writes to entity_segment, and bulk-inserted entities.
+        if let Some(growing_arc) = self
+            .growing
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            let mut growing = growing_arc.write().unwrap_or_else(|e| e.into_inner());
+            if growing.contains(id) && growing.state().is_writable() {
+                let seg_id = growing.id();
+                let deleted = growing.delete(id)?;
+                if deleted {
+                    self.entity_segment
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&id);
+                    self.total_entities_atomic.fetch_sub(1, Ordering::Relaxed);
+                    self.emit(LifecycleEvent::EntityDeleted(id, seg_id));
+                }
+                return Ok(deleted);
+            }
+        }
+
+        // Fallback: check entity_segment map (populated for older insert() paths
+        // or entities that were in a previous growing segment).
         let segment_id = self
             .entity_segment
             .read()
@@ -509,7 +548,6 @@ impl SegmentManager {
             .copied();
 
         if let Some(seg_id) = segment_id {
-            // Try growing segment
             if let Some(growing_arc) = self
                 .growing
                 .read()
@@ -524,17 +562,12 @@ impl SegmentManager {
                             .write()
                             .unwrap_or_else(|e| e.into_inner())
                             .remove(&id);
-                        {
-                            let mut stats = self.stats.write().unwrap_or_else(|e| e.into_inner());
-                            stats.total_entities = stats.total_entities.saturating_sub(1);
-                        }
+                        self.total_entities_atomic.fetch_sub(1, Ordering::Relaxed);
                         self.emit(LifecycleEvent::EntityDeleted(id, seg_id));
                     }
                     return Ok(deleted);
                 }
             }
-
-            // For sealed segments, add tombstone (not implemented here)
             return Err(SegmentError::NotWritable);
         }
 
@@ -543,6 +576,20 @@ impl SegmentManager {
 
     /// Get metadata for an entity
     pub fn get_metadata(&self, id: EntityId) -> Option<Metadata> {
+        // Fast path: probe growing segment directly (no entity_segment needed).
+        if let Some(growing_arc) = self
+            .growing
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            let growing = growing_arc.read().unwrap_or_else(|e| e.into_inner());
+            if growing.contains(id) {
+                return growing.get_metadata(id);
+            }
+        }
+
+        // Fallback: entity_segment map (for pre-existing or sealed entities)
         let segment_id = self
             .entity_segment
             .read()
@@ -576,6 +623,21 @@ impl SegmentManager {
 
     /// Set metadata for an entity
     pub fn set_metadata(&self, id: EntityId, metadata: Metadata) -> Result<(), SegmentError> {
+        // Fast path: probe growing segment directly — covers entities inserted via
+        // insert() which no longer writes to entity_segment.
+        if let Some(growing_arc) = self
+            .growing
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            let mut growing = growing_arc.write().unwrap_or_else(|e| e.into_inner());
+            if growing.contains(id) && growing.state().is_writable() {
+                return growing.set_metadata(id, metadata);
+            }
+        }
+
+        // Fallback: entity_segment map (sealed or pre-atomic-path entities)
         let segment_id = self
             .entity_segment
             .read()
@@ -962,10 +1024,7 @@ impl SegmentManager {
 
     /// Count entities
     pub fn count(&self) -> usize {
-        self.stats
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .total_entities
+        self.total_entities_atomic.load(Ordering::Relaxed) as usize
     }
 
     /// Get all segment IDs

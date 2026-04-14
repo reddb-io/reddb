@@ -245,134 +245,28 @@ impl<'a> Parser<'a> {
     /// Parse the main query expression (without CTEs)
     pub fn parse_query_expr(&mut self) -> Result<QueryExpr, ParseError> {
         match self.peek() {
-            Token::Select => self.parse_select_query(),
+            Token::Select
+            | Token::From
+            | Token::Insert
+            | Token::Update
+            | Token::Delete
+            | Token::Explain
+            | Token::Create
+            | Token::Drop
+            | Token::Alter
+            | Token::Set => self
+                .parse_sql_command()
+                .map(|command| command.into_query_expr()),
+            Token::Ident(ref name) if name.eq_ignore_ascii_case("SHOW") => self
+                .parse_sql_command()
+                .map(|command| command.into_query_expr()),
             Token::Match => self.parse_match_query(),
             Token::Path => self.parse_path_query(),
-            Token::From => self.parse_from_query(),
             Token::Vector => self.parse_vector_query(),
             Token::Hybrid => self.parse_hybrid_query(),
-            Token::Insert => self.parse_insert_query(),
-            Token::Update => self.parse_update_query(),
-            Token::Delete => self.parse_delete_query(),
-            Token::Explain => self.parse_explain_alter_query(),
-            Token::Create => {
-                let pos = self.position();
-                self.advance()?; // consume CREATE
-                if self.check(&Token::Index) || self.check(&Token::Unique) {
-                    self.parse_create_index_query()
-                } else if self.check(&Token::Table) {
-                    self.expect(Token::Table)?;
-                    self.parse_create_table_body()
-                } else if self.check(&Token::Timeseries) {
-                    self.advance()?;
-                    self.parse_create_timeseries_body()
-                } else if self.check(&Token::Queue) {
-                    self.advance()?;
-                    self.parse_create_queue_body()
-                } else if matches!(self.peek(), Token::Ident(n) if
-                    n.eq_ignore_ascii_case("HLL") ||
-                    n.eq_ignore_ascii_case("SKETCH") ||
-                    n.eq_ignore_ascii_case("FILTER"))
-                {
-                    self.parse_create_probabilistic()
-                } else {
-                    Err(ParseError::expected(
-                        vec![
-                            "TABLE",
-                            "INDEX",
-                            "UNIQUE",
-                            "TIMESERIES",
-                            "QUEUE",
-                            "HLL",
-                            "SKETCH",
-                            "FILTER",
-                        ],
-                        self.peek(),
-                        pos,
-                    ))
-                }
-            }
-            Token::Drop => {
-                let pos = self.position();
-                self.advance()?; // consume DROP
-                if self.check(&Token::Index) {
-                    self.parse_drop_index_query()
-                } else if self.check(&Token::Table) {
-                    self.expect(Token::Table)?;
-                    self.parse_drop_table_body()
-                } else if self.check(&Token::Timeseries) {
-                    self.advance()?;
-                    self.parse_drop_timeseries_body()
-                } else if self.check(&Token::Queue) {
-                    self.advance()?;
-                    self.parse_drop_queue_body()
-                } else if matches!(self.peek(), Token::Ident(n) if
-                    n.eq_ignore_ascii_case("HLL") ||
-                    n.eq_ignore_ascii_case("SKETCH") ||
-                    n.eq_ignore_ascii_case("FILTER"))
-                {
-                    self.parse_drop_probabilistic()
-                } else {
-                    Err(ParseError::expected(
-                        vec![
-                            "TABLE",
-                            "INDEX",
-                            "TIMESERIES",
-                            "QUEUE",
-                            "HLL",
-                            "SKETCH",
-                            "FILTER",
-                        ],
-                        self.peek(),
-                        pos,
-                    ))
-                }
-            }
-            Token::Alter => self.parse_alter_table_query(),
             Token::Graph => self.parse_graph_command(),
             Token::Search => self.parse_search_command(),
             Token::Ident(ref name) if name.eq_ignore_ascii_case("ASK") => self.parse_ask_query(),
-            Token::Ident(ref name) if name.eq_ignore_ascii_case("SHOW") => {
-                self.advance()?;
-                if self.consume_ident_ci("CONFIG")? {
-                    let prefix = if !self.check(&Token::Eof) {
-                        Some(self.expect_ident()?)
-                    } else {
-                        None
-                    };
-                    Ok(QueryExpr::ShowConfig { prefix })
-                } else {
-                    Err(ParseError::expected(
-                        vec!["CONFIG"],
-                        self.peek(),
-                        self.position(),
-                    ))
-                }
-            }
-            Token::Set => {
-                self.advance()?;
-                if self.consume_ident_ci("CONFIG")? {
-                    let key = self.expect_ident()?;
-                    // Allow dotted keys: red.config.ai.default.provider
-                    let mut full_key = key;
-                    while self.consume(&Token::Dot)? {
-                        let next = self.expect_ident_or_keyword()?;
-                        full_key = format!("{full_key}.{next}");
-                    }
-                    self.expect(Token::Eq)?;
-                    let value = self.parse_literal_value()?;
-                    Ok(QueryExpr::SetConfig {
-                        key: full_key,
-                        value,
-                    })
-                } else {
-                    Err(ParseError::expected(
-                        vec!["CONFIG"],
-                        self.peek(),
-                        self.position(),
-                    ))
-                }
-            }
             Token::Queue => self.parse_queue_command(),
             Token::Ident(ref name) if name.eq_ignore_ascii_case("HLL") => self.parse_hll_command(),
             Token::Ident(ref name) if name.eq_ignore_ascii_case("SKETCH") => {
