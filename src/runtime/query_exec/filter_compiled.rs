@@ -359,7 +359,32 @@ impl CompiledEntityFilter {
     /// Evaluate against an entity. Hot path — must stay allocation-free
     /// in the common case.
     pub fn evaluate(&self, entity: &UnifiedEntity) -> bool {
-        let mut stack: Vec<bool> = Vec::with_capacity(8);
+        // Fixed-size bool stack — no heap allocation per row.
+        // 32 slots is enough for any filter tree likely to appear in a real
+        // query (worst case: N binary ops need N+1 operand slots at once).
+        const STACK_CAP: usize = 32;
+        let mut stack = [false; STACK_CAP];
+        let mut sp = 0usize; // stack pointer (next free slot)
+
+        macro_rules! push {
+            ($v:expr) => {
+                if sp < STACK_CAP {
+                    stack[sp] = $v;
+                    sp += 1;
+                }
+            };
+        }
+        macro_rules! pop {
+            ($default:expr) => {{
+                if sp == 0 {
+                    $default
+                } else {
+                    sp -= 1;
+                    stack[sp]
+                }
+            }};
+        }
+
         for op in &self.ops {
             match op {
                 CompiledEntityOp::Compare { kind, op, value } => {
@@ -367,7 +392,7 @@ impl CompiledEntityFilter {
                         .as_ref()
                         .map(|candidate| compare_runtime_values(candidate.as_ref(), value, *op))
                         .unwrap_or(false);
-                    stack.push(result);
+                    push!(result);
                 }
                 CompiledEntityOp::Between { kind, low, high } => {
                     let result = resolve_kind(kind, entity)
@@ -377,7 +402,7 @@ impl CompiledEntityFilter {
                                 && compare_runtime_values(candidate.as_ref(), high, CompareOp::Le)
                         })
                         .unwrap_or(false);
-                    stack.push(result);
+                    push!(result);
                 }
                 CompiledEntityOp::InList { kind, values } => {
                     let result = resolve_kind(kind, entity)
@@ -388,72 +413,73 @@ impl CompiledEntityFilter {
                             })
                         })
                         .unwrap_or(false);
-                    stack.push(result);
+                    push!(result);
                 }
                 CompiledEntityOp::Like { kind, pattern } => {
+                    // runtime_value_text_cow: borrow for Text/Email/Url, owned for others
                     let result = resolve_kind(kind, entity)
                         .as_ref()
-                        .and_then(|v| runtime_value_text(v.as_ref()))
-                        .is_some_and(|s| like_matches(&s, pattern));
-                    stack.push(result);
+                        .and_then(|v| runtime_value_text_cow(v.as_ref()))
+                        .is_some_and(|s| like_matches(s.as_ref(), pattern));
+                    push!(result);
                 }
                 CompiledEntityOp::StartsWith { kind, prefix } => {
                     let result = resolve_kind(kind, entity)
                         .as_ref()
-                        .and_then(|v| runtime_value_text(v.as_ref()))
+                        .and_then(|v| runtime_value_text_cow(v.as_ref()))
                         .is_some_and(|s| s.starts_with(prefix.as_str()));
-                    stack.push(result);
+                    push!(result);
                 }
                 CompiledEntityOp::EndsWith { kind, suffix } => {
                     let result = resolve_kind(kind, entity)
                         .as_ref()
-                        .and_then(|v| runtime_value_text(v.as_ref()))
+                        .and_then(|v| runtime_value_text_cow(v.as_ref()))
                         .is_some_and(|s| s.ends_with(suffix.as_str()));
-                    stack.push(result);
+                    push!(result);
                 }
                 CompiledEntityOp::Contains { kind, substring } => {
                     let result = resolve_kind(kind, entity)
                         .as_ref()
-                        .and_then(|v| runtime_value_text(v.as_ref()))
+                        .and_then(|v| runtime_value_text_cow(v.as_ref()))
                         .is_some_and(|s| s.contains(substring.as_str()));
-                    stack.push(result);
+                    push!(result);
                 }
                 CompiledEntityOp::IsNull { kind } => {
                     let result = resolve_kind(kind, entity)
                         .map(|v| v.as_ref() == &Value::Null)
                         .unwrap_or(true);
-                    stack.push(result);
+                    push!(result);
                 }
                 CompiledEntityOp::IsNotNull { kind } => {
                     let result = resolve_kind(kind, entity)
                         .map(|v| v.as_ref() != &Value::Null)
                         .unwrap_or(false);
-                    stack.push(result);
+                    push!(result);
                 }
                 CompiledEntityOp::And => {
-                    let r = stack.pop().unwrap_or(true);
-                    let l = stack.pop().unwrap_or(true);
-                    stack.push(l && r);
+                    let r = pop!(true);
+                    let l = pop!(true);
+                    push!(l && r);
                 }
                 CompiledEntityOp::Or => {
-                    let r = stack.pop().unwrap_or(false);
-                    let l = stack.pop().unwrap_or(false);
-                    stack.push(l || r);
+                    let r = pop!(false);
+                    let l = pop!(false);
+                    push!(l || r);
                 }
                 CompiledEntityOp::Not => {
-                    let v = stack.pop().unwrap_or(true);
-                    stack.push(!v);
+                    let v = pop!(true);
+                    push!(!v);
                 }
                 CompiledEntityOp::Fallback(filter) => {
                     // Path the compiler couldn't classify: re-enter
                     // the legacy walker for THIS subtree only. Rare.
                     let v =
                         evaluate_entity_filter(entity, filter, &self.table_name, &self.table_alias);
-                    stack.push(v);
+                    push!(v);
                 }
             }
         }
-        stack.pop().unwrap_or(true)
+        pop!(true)
     }
 }
 

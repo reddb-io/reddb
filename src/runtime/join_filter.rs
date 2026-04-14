@@ -1175,9 +1175,18 @@ pub(super) fn runtime_value_number(value: &Value) -> Option<f64> {
     match value {
         Value::Integer(value) => Some(*value as f64),
         Value::UnsignedInteger(value) => Some(*value as f64),
+        Value::BigInt(value) => Some(*value as f64),
         Value::Float(value) => Some(*value),
         Value::Timestamp(value) => Some(*value as f64),
         Value::Duration(value) => Some(*value as f64),
+        _ => None,
+    }
+}
+
+fn value_as_i64(value: &Value) -> Option<i64> {
+    match value {
+        Value::Integer(value) | Value::BigInt(value) => Some(*value),
+        Value::UnsignedInteger(value) => i64::try_from(*value).ok(),
         _ => None,
     }
 }
@@ -1292,6 +1301,16 @@ pub(super) fn runtime_value_text_str(value: &Value) -> Option<&str> {
         Value::Email(s) | Value::Url(s) => Some(s.as_str()),
         _ => None,
     }
+}
+
+/// Like `runtime_value_text` but returns `Cow::Borrowed` when the value
+/// already holds a `String` (Text, Email, Url, ref types) — zero alloc for
+/// the common case in Like/StartsWith/EndsWith/Contains hot-path filters.
+pub(super) fn runtime_value_text_cow(value: &Value) -> Option<std::borrow::Cow<str>> {
+    if let Some(s) = runtime_value_text_str(value) {
+        return Some(std::borrow::Cow::Borrowed(s));
+    }
+    runtime_value_text(value).map(std::borrow::Cow::Owned)
 }
 
 /// Abbreviated sort key for a text slice: first 8 bytes in big-endian as a
@@ -1570,14 +1589,43 @@ fn evaluate_scalar_function(
                 _ => Some(val),
             }
         }
-        "LENGTH" => {
+        "LENGTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH" => {
             let val = resolve_scalar_arg(args, 0, source)?;
             match val {
-                Value::Text(s) => Some(Value::Integer(s.len() as i64)),
+                Value::Text(s) => Some(Value::Integer(s.chars().count() as i64)),
                 Value::Blob(b) => Some(Value::Integer(b.len() as i64)),
                 Value::Array(a) => Some(Value::Integer(a.len() as i64)),
                 _ => Some(Value::Null),
             }
+        }
+        "OCTET_LENGTH" => {
+            let val = resolve_scalar_arg(args, 0, source)?;
+            match val {
+                Value::Text(s) => Some(Value::Integer(s.len() as i64)),
+                Value::Blob(b) => Some(Value::Integer(b.len() as i64)),
+                _ => Some(Value::Null),
+            }
+        }
+        "BIT_LENGTH" => {
+            let val = resolve_scalar_arg(args, 0, source)?;
+            match val {
+                Value::Text(s) => Some(Value::Integer((s.len() * 8) as i64)),
+                Value::Blob(b) => Some(Value::Integer((b.len() * 8) as i64)),
+                _ => Some(Value::Null),
+            }
+        }
+        "SUBSTRING" | "SUBSTR" => {
+            let text = match resolve_scalar_arg(args, 0, source)? {
+                Value::Text(text) => text,
+                _ => return Some(Value::Null),
+            };
+            let start =
+                resolve_scalar_arg(args, 1, source).and_then(|value| value_as_i64(&value))?;
+            let count = args
+                .get(2)
+                .map(|_| resolve_scalar_arg(args, 2, source).and_then(|value| value_as_i64(&value)))
+                .transpose()?;
+            Some(Value::Text(substring_text(&text, start, count)?))
         }
         "ABS" => {
             let val = resolve_scalar_arg(args, 0, source)?;

@@ -480,26 +480,26 @@ pub(crate) fn evaluate_entity_filter(
         Filter::Like { field, pattern } => {
             resolve_entity_field(entity, field, table_name, table_alias)
                 .as_ref()
-                .and_then(|v| runtime_value_text(v.as_ref()))
-                .is_some_and(|value| like_matches(&value, pattern))
+                .and_then(|v| runtime_value_text_cow(v.as_ref()))
+                .is_some_and(|value| like_matches(value.as_ref(), pattern))
         }
         Filter::StartsWith { field, prefix } => {
             resolve_entity_field(entity, field, table_name, table_alias)
                 .as_ref()
-                .and_then(|v| runtime_value_text(v.as_ref()))
-                .is_some_and(|value| value.starts_with(prefix))
+                .and_then(|v| runtime_value_text_cow(v.as_ref()))
+                .is_some_and(|value| value.starts_with(prefix.as_str()))
         }
         Filter::EndsWith { field, suffix } => {
             resolve_entity_field(entity, field, table_name, table_alias)
                 .as_ref()
-                .and_then(|v| runtime_value_text(v.as_ref()))
-                .is_some_and(|value| value.ends_with(suffix))
+                .and_then(|v| runtime_value_text_cow(v.as_ref()))
+                .is_some_and(|value| value.ends_with(suffix.as_str()))
         }
         Filter::Contains { field, substring } => {
             resolve_entity_field(entity, field, table_name, table_alias)
                 .as_ref()
-                .and_then(|v| runtime_value_text(v.as_ref()))
-                .is_some_and(|value| value.contains(substring))
+                .and_then(|v| runtime_value_text_cow(v.as_ref()))
+                .is_some_and(|value| value.contains(substring.as_str()))
         }
     }
 }
