@@ -178,6 +178,15 @@ impl Transaction {
     /// Commit the transaction
     ///
     /// Writes all buffered pages to the WAL, then writes a Commit record.
+    ///
+    /// **Read-only fast path:** when `write_set` is empty, the
+    /// transaction wrote nothing, so there is nothing to make
+    /// durable. We skip the WAL append, the `wal.sync()` (which costs
+    /// ~100 µs of fsync), and the pager apply loop entirely. The
+    /// transaction still transitions to `Committed` and unregisters
+    /// from the manager so subsequent state checks work correctly.
+    /// This mirrors postgres' optimisation in `RecordTransactionCommit`
+    /// (`xact.c`) which skips `XLogFlush` when nothing was written.
     pub fn commit(mut self) -> Result<(), TxError> {
         if self.state != TxState::Active {
             return match self.state {
@@ -185,6 +194,16 @@ impl Transaction {
                 TxState::Aborted => Err(TxError::AlreadyAborted),
                 _ => Err(TxError::NotActive),
             };
+        }
+
+        // ── Read-only fast path ─────────────────────────────────────
+        // No writes → no WAL record → no fsync. Saves ~100 µs per
+        // read-only commit and removes contention on the WAL writer
+        // mutex for read-heavy workloads.
+        if self.write_set.is_empty() {
+            self.state = TxState::Committed;
+            self.manager.unregister_transaction(self.id);
+            return Ok(());
         }
 
         // Write all buffered pages to WAL
@@ -638,6 +657,138 @@ mod tests {
             Ok(_) => panic!("begin should fail after WAL lock poisoning"),
             Err(err) => assert!(matches!(err, TxError::LockPoisoned("wal writer"))),
         }
+
+        cleanup(&dir);
+    }
+
+    // ---------------------------------------------------------------
+    // Perf 1.2: read-only commit fast path
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn read_only_commit_does_not_advance_durable_lsn() {
+        let dir = temp_dir();
+        let _ = fs::create_dir_all(&dir);
+        let db_path = dir.join("ro_durable.db");
+        let wal_path = dir.join("ro_durable.wal");
+
+        let pager = Arc::new(Pager::open_default(&db_path).unwrap());
+        let tm = Arc::new(TransactionManager::new(Arc::clone(&pager), &wal_path).unwrap());
+
+        // Snapshot the WAL durable_lsn BEFORE the txn.
+        let before = {
+            let wal = tm.wal_writer().unwrap();
+            wal.durable_lsn()
+        };
+
+        let tx = tm.begin().unwrap();
+        // Empty write_set on purpose — read-only.
+        tx.commit().unwrap();
+
+        // After RO commit, the WAL durable_lsn must NOT have advanced.
+        // No Begin record, no Commit record, no fsync.
+        let after = {
+            let wal = tm.wal_writer().unwrap();
+            wal.durable_lsn()
+        };
+        assert_eq!(
+            before, after,
+            "read-only commit must not advance durable_lsn (was {} → {})",
+            before, after
+        );
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn read_only_commit_does_not_grow_wal_file() {
+        let dir = temp_dir();
+        let _ = fs::create_dir_all(&dir);
+        let db_path = dir.join("ro_size.db");
+        let wal_path = dir.join("ro_size.wal");
+
+        let pager = Arc::new(Pager::open_default(&db_path).unwrap());
+        let tm = Arc::new(TransactionManager::new(Arc::clone(&pager), &wal_path).unwrap());
+
+        // Snapshot file size after WAL header.
+        let size_before = std::fs::metadata(&wal_path).unwrap().len();
+        assert_eq!(
+            size_before, 8,
+            "fresh WAL must be exactly the 8-byte header"
+        );
+
+        // 100 read-only commits in a loop.
+        for _ in 0..100 {
+            let tx = tm.begin().unwrap();
+            tx.commit().unwrap();
+        }
+
+        let size_after = std::fs::metadata(&wal_path).unwrap().len();
+        assert_eq!(
+            size_after, size_before,
+            "100 read-only commits should not have written any WAL bytes"
+        );
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn read_only_commit_marks_transaction_committed() {
+        let dir = temp_dir();
+        let _ = fs::create_dir_all(&dir);
+        let db_path = dir.join("ro_state.db");
+        let wal_path = dir.join("ro_state.wal");
+
+        let pager = Arc::new(Pager::open_default(&db_path).unwrap());
+        let tm = Arc::new(TransactionManager::new(Arc::clone(&pager), &wal_path).unwrap());
+
+        let tx = tm.begin().unwrap();
+        let id = tx.id();
+        tx.commit().unwrap();
+
+        // Manager must have unregistered this txn — the active list
+        // no longer contains its id.
+        assert!(
+            !tm.active_transactions().contains(&id),
+            "RO-committed txn {id} must no longer be active in the manager"
+        );
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn writing_commit_still_syncs_after_ro_fast_path() {
+        // Sanity: the fast path must NOT short-circuit a transaction
+        // that did write something. Verify the writing commit path
+        // still flushes WAL and the value lands in the pager.
+        let dir = temp_dir();
+        let _ = fs::create_dir_all(&dir);
+        let db_path = dir.join("rw_after_ro.db");
+        let wal_path = dir.join("rw_after_ro.wal");
+
+        let pager = Arc::new(Pager::open_default(&db_path).unwrap());
+        let allocated = pager.allocate_page(PageType::BTreeLeaf).unwrap();
+        let page_id = allocated.page_id();
+        let tm = Arc::new(TransactionManager::new(Arc::clone(&pager), &wal_path).unwrap());
+
+        // First a RO commit (must take the fast path).
+        let ro = tm.begin().unwrap();
+        ro.commit().unwrap();
+
+        // Then a real writing commit.
+        let mut rw = tm.begin().unwrap();
+        let mut page = Page::new(PageType::BTreeLeaf, page_id);
+        page.as_bytes_mut()[42] = 0x77;
+        rw.write_page(page_id, page).unwrap();
+        rw.commit().unwrap();
+
+        // The WAL file must now contain bytes (PageWrite + Commit
+        // records, and the BufWriter has been flushed by sync()).
+        let size = std::fs::metadata(&wal_path).unwrap().len();
+        assert!(size > 8, "writing commit should grow the WAL");
+
+        // The pager cache must reflect the write.
+        let read_back = pager.read_page(page_id).unwrap();
+        assert_eq!(read_back.as_bytes()[42], 0x77);
 
         cleanup(&dir);
     }
