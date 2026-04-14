@@ -603,7 +603,8 @@ fn validate_aggregate_projection_shape(query: &TableQuery) -> RedDBResult<()> {
 
         if has_group_by
             && projection_group_key(projection).is_some_and(|group_key| {
-                query.group_by
+                query
+                    .group_by
                     .iter()
                     .any(|entry| entry.eq_ignore_ascii_case(&group_key))
             })

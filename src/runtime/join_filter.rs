@@ -1701,12 +1701,9 @@ fn evaluate_scalar_function(
                 }
                 start_value => {
                     let start = value_as_i64(&start_value)?;
-                    let count = args
-                        .get(2)
-                        .and_then(|_| {
-                            resolve_scalar_arg(args, 2, source)
-                                .and_then(|value| value_as_i64(&value))
-                        });
+                    let count = args.get(2).and_then(|_| {
+                        resolve_scalar_arg(args, 2, source).and_then(|value| value_as_i64(&value))
+                    });
                     Some(Value::Text(substring_text(&text, start, count)?))
                 }
             }

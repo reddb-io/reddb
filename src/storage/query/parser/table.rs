@@ -193,18 +193,19 @@ impl<'a> Parser<'a> {
             if matches!(self.peek_next()?, Token::LParen) {
                 self.advance()?;
                 self.expect(Token::LParen)?;
-                let (resolved_name, args) = if func_name == "COUNT" && self.consume(&Token::Distinct)? {
-                    let arg = self.parse_projection_factor()?;
-                    (
-                        "COUNT_DISTINCT",
-                        vec![self.parse_projection_binop_tail(arg, 0)?],
-                    )
-                } else if self.consume(&Token::Star)? {
-                    (func_name, vec![Projection::All])
-                } else {
-                    let arg = self.parse_projection_factor()?;
-                    (func_name, vec![self.parse_projection_binop_tail(arg, 0)?])
-                };
+                let (resolved_name, args) =
+                    if func_name == "COUNT" && self.consume(&Token::Distinct)? {
+                        let arg = self.parse_projection_factor()?;
+                        (
+                            "COUNT_DISTINCT",
+                            vec![self.parse_projection_binop_tail(arg, 0)?],
+                        )
+                    } else if self.consume(&Token::Star)? {
+                        (func_name, vec![Projection::All])
+                    } else {
+                        let arg = self.parse_projection_factor()?;
+                        (func_name, vec![self.parse_projection_binop_tail(arg, 0)?])
+                    };
                 self.expect(Token::RParen)?;
                 let alias = if self.consume(&Token::As)? {
                     Some(self.expect_ident()?)

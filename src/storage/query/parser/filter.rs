@@ -6,6 +6,32 @@ use super::error::ParseError;
 use super::Parser;
 use crate::storage::schema::Value;
 
+fn token_can_start_field_ref(token: &Token) -> bool {
+    !matches!(
+        token,
+        Token::Eof
+            | Token::LParen
+            | Token::RParen
+            | Token::LBracket
+            | Token::RBracket
+            | Token::Comma
+            | Token::Dot
+            | Token::Eq
+            | Token::Lt
+            | Token::Gt
+            | Token::Le
+            | Token::Ge
+            | Token::Arrow
+            | Token::ArrowLeft
+            | Token::Dash
+            | Token::Colon
+            | Token::Semi
+            | Token::Star
+            | Token::Plus
+            | Token::Slash
+    )
+}
+
 impl<'a> Parser<'a> {
     /// Parse a filter expression (WHERE condition)
     pub fn parse_filter(&mut self) -> Result<Filter, ParseError> {
@@ -55,88 +81,151 @@ impl<'a> Parser<'a> {
             return Ok(expr);
         }
 
-        // Field-based filter
-        let field = self.parse_field_ref()?;
+        let lhs = self.parse_filter_operand_expr()?;
+        let lhs_field = expr_as_field_ref(&lhs);
 
         // IS NULL / IS NOT NULL
         if self.consume(&Token::Is)? {
             let negated = self.consume(&Token::Not)?;
             self.expect(Token::Null)?;
-            return Ok(if negated {
-                Filter::IsNotNull(field)
+            return Ok(if let Some(field) = lhs_field.clone() {
+                if negated {
+                    Filter::IsNotNull(field)
+                } else {
+                    Filter::IsNull(field)
+                }
             } else {
-                Filter::IsNull(field)
+                Filter::CompareExpr {
+                    lhs: Expr::IsNull {
+                        operand: Box::new(lhs),
+                        negated,
+                        span: Span::synthetic(),
+                    },
+                    op: CompareOp::Eq,
+                    rhs: Expr::Literal {
+                        value: Value::Boolean(true),
+                        span: Span::synthetic(),
+                    },
+                }
             });
         }
 
-        // BETWEEN — accept either literal-low/literal-high (emits
-        // Filter::Between for backwards compat) or column-low/column-
-        // high (decomposes to `field >= low AND field <= high` using
-        // the new Filter::CompareFields variant). Mixed forms are
-        // deferred until Fase 2's Expr AST rewrite.
         if self.consume(&Token::Between)? {
-            let low = self.parse_value_or_field()?;
+            if let Some(field) = lhs_field.clone() {
+                let low = self.parse_value_or_field()?;
+                self.expect(Token::And)?;
+                let high = self.parse_value_or_field()?;
+                return Ok(match (low, high) {
+                    (ValueOrField::Value(low), ValueOrField::Value(high)) => {
+                        Filter::Between { field, low, high }
+                    }
+                    (ValueOrField::Field(low_field), ValueOrField::Field(high_field)) => {
+                        Filter::And(
+                            Box::new(Filter::CompareFields {
+                                left: field.clone(),
+                                op: CompareOp::Ge,
+                                right: low_field,
+                            }),
+                            Box::new(Filter::CompareFields {
+                                left: field,
+                                op: CompareOp::Le,
+                                right: high_field,
+                            }),
+                        )
+                    }
+                    (ValueOrField::Value(low), ValueOrField::Field(high_field)) => Filter::And(
+                        Box::new(Filter::Compare {
+                            field: field.clone(),
+                            op: CompareOp::Ge,
+                            value: low,
+                        }),
+                        Box::new(Filter::CompareFields {
+                            left: field,
+                            op: CompareOp::Le,
+                            right: high_field,
+                        }),
+                    ),
+                    (ValueOrField::Field(low_field), ValueOrField::Value(high)) => Filter::And(
+                        Box::new(Filter::CompareFields {
+                            left: field.clone(),
+                            op: CompareOp::Ge,
+                            right: low_field,
+                        }),
+                        Box::new(Filter::Compare {
+                            field,
+                            op: CompareOp::Le,
+                            value: high,
+                        }),
+                    ),
+                });
+            }
+
+            let low = self.parse_filter_operand_expr()?;
             self.expect(Token::And)?;
-            let high = self.parse_value_or_field()?;
-            return Ok(match (low, high) {
-                (ValueOrField::Value(low), ValueOrField::Value(high)) => {
-                    Filter::Between { field, low, high }
-                }
-                (ValueOrField::Field(low_field), ValueOrField::Field(high_field)) => Filter::And(
-                    Box::new(Filter::CompareFields {
-                        left: field.clone(),
-                        op: CompareOp::Ge,
-                        right: low_field,
-                    }),
-                    Box::new(Filter::CompareFields {
-                        left: field,
-                        op: CompareOp::Le,
-                        right: high_field,
-                    }),
-                ),
-                (ValueOrField::Value(low), ValueOrField::Field(high_field)) => Filter::And(
-                    Box::new(Filter::Compare {
-                        field: field.clone(),
-                        op: CompareOp::Ge,
-                        value: low,
-                    }),
-                    Box::new(Filter::CompareFields {
-                        left: field,
-                        op: CompareOp::Le,
-                        right: high_field,
-                    }),
-                ),
-                (ValueOrField::Field(low_field), ValueOrField::Value(high)) => Filter::And(
-                    Box::new(Filter::CompareFields {
-                        left: field.clone(),
-                        op: CompareOp::Ge,
-                        right: low_field,
-                    }),
-                    Box::new(Filter::Compare {
-                        field,
-                        op: CompareOp::Le,
-                        value: high,
-                    }),
-                ),
+            let high = self.parse_filter_operand_expr()?;
+            return Ok(Filter::CompareExpr {
+                lhs: Expr::Between {
+                    target: Box::new(lhs),
+                    low: Box::new(low),
+                    high: Box::new(high),
+                    negated: false,
+                    span: Span::synthetic(),
+                },
+                op: CompareOp::Eq,
+                rhs: Expr::Literal {
+                    value: Value::Boolean(true),
+                    span: Span::synthetic(),
+                },
             });
         }
 
         // IN
         if self.consume(&Token::In)? {
+            if let Some(field) = lhs_field.clone() {
+                self.expect(Token::LParen)?;
+                let values = self.parse_value_list()?;
+                self.expect(Token::RParen)?;
+                return Ok(Filter::In { field, values });
+            }
+
             self.expect(Token::LParen)?;
-            let values = self.parse_value_list()?;
+            let values = self.parse_filter_expr_list()?;
             self.expect(Token::RParen)?;
-            return Ok(Filter::In { field, values });
+            return Ok(Filter::CompareExpr {
+                lhs: Expr::InList {
+                    target: Box::new(lhs),
+                    values,
+                    negated: false,
+                    span: Span::synthetic(),
+                },
+                op: CompareOp::Eq,
+                rhs: Expr::Literal {
+                    value: Value::Boolean(true),
+                    span: Span::synthetic(),
+                },
+            });
         }
 
         // LIKE
         if self.consume(&Token::Like)? {
+            let Some(field) = lhs_field.clone() else {
+                return Err(ParseError::new(
+                    "LIKE requires a column reference on the left-hand side".to_string(),
+                    self.position(),
+                ));
+            };
             let pattern = self.parse_string()?;
             return Ok(Filter::Like { field, pattern });
         }
 
         // STARTS WITH
         if self.consume(&Token::Starts)? {
+            let Some(field) = lhs_field.clone() else {
+                return Err(ParseError::new(
+                    "STARTS WITH requires a column reference on the left-hand side".to_string(),
+                    self.position(),
+                ));
+            };
             self.expect(Token::With)?;
             let prefix = self.parse_string()?;
             return Ok(Filter::StartsWith { field, prefix });
@@ -144,6 +233,12 @@ impl<'a> Parser<'a> {
 
         // ENDS WITH
         if self.consume(&Token::Ends)? {
+            let Some(field) = lhs_field.clone() else {
+                return Err(ParseError::new(
+                    "ENDS WITH requires a column reference on the left-hand side".to_string(),
+                    self.position(),
+                ));
+            };
             self.expect(Token::With)?;
             let suffix = self.parse_string()?;
             return Ok(Filter::EndsWith { field, suffix });
@@ -151,6 +246,12 @@ impl<'a> Parser<'a> {
 
         // CONTAINS
         if self.consume(&Token::Contains)? {
+            let Some(field) = lhs_field.clone() else {
+                return Err(ParseError::new(
+                    "CONTAINS requires a column reference on the left-hand side".to_string(),
+                    self.position(),
+                ));
+            };
             let substring = self.parse_string()?;
             return Ok(Filter::Contains { field, substring });
         }
@@ -162,45 +263,62 @@ impl<'a> Parser<'a> {
         // when the RHS is a bare literal, and falls back to
         // `Filter::CompareExpr` when it sees anything expression-shaped.
         let op = self.parse_compare_op()?;
-        if self.rhs_looks_like_bare_field_ref()? {
-            let start = self.position();
-            let right = self.parse_field_ref()?;
-            if !self.rhs_field_ref_extends_to_expression() {
-                return Ok(Filter::CompareFields {
-                    left: field,
-                    op,
-                    right,
-                });
+        if let Some(field) = lhs_field {
+            if self.rhs_looks_like_bare_field_ref()? {
+                let start = self.position();
+                let right = self.parse_field_ref()?;
+                if !self.rhs_field_ref_extends_to_expression() {
+                    return Ok(Filter::CompareFields {
+                        left: field.clone(),
+                        op,
+                        right,
+                    });
+                }
+                let rhs = self.continue_expr(
+                    Expr::Column {
+                        field: right,
+                        span: Span::new(start, self.position()),
+                    },
+                    0,
+                )?;
+                return Ok(Filter::CompareExpr { lhs, op, rhs });
             }
-            let rhs = self.continue_expr(
-                Expr::Column {
-                    field: right,
-                    span: Span::new(start, self.position()),
-                },
-                0,
-            )?;
-            return Ok(Filter::CompareExpr {
-                lhs: Expr::Column {
-                    field,
-                    span: Span::synthetic(),
-                },
-                op,
-                rhs,
-            });
+            if self.rhs_looks_like_expression() {
+                let rhs = self.parse_filter_operand_expr()?;
+                return Ok(Filter::CompareExpr { lhs, op, rhs });
+            }
+            let value = self.parse_value()?;
+            return Ok(Filter::Compare { field, op, value });
         }
-        if self.rhs_looks_like_expression() {
-            let rhs = self.parse_expr()?;
-            return Ok(Filter::CompareExpr {
-                lhs: Expr::Column {
-                    field,
-                    span: Span::synthetic(),
-                },
-                op,
-                rhs,
-            });
+
+        let rhs = if self.rhs_looks_like_bare_field_ref()? || self.rhs_looks_like_expression() {
+            self.parse_filter_operand_expr()?
+        } else {
+            Expr::Literal {
+                value: self.parse_value()?,
+                span: Span::synthetic(),
+            }
+        };
+        Ok(Filter::CompareExpr { lhs, op, rhs })
+    }
+
+    fn parse_filter_operand_expr(&mut self) -> Result<Expr, ParseError> {
+        // Comparison and postfix predicate operators stay at the Filter layer.
+        self.parse_expr_with_min_precedence(35)
+    }
+
+    fn parse_filter_expr_list(&mut self) -> Result<Vec<Expr>, ParseError> {
+        let mut values = Vec::new();
+        if self.peek() == &Token::RParen {
+            return Ok(values);
         }
-        let value = self.parse_value()?;
-        Ok(Filter::Compare { field, op, value })
+        loop {
+            values.push(self.parse_filter_operand_expr()?);
+            if !self.consume(&Token::Comma)? {
+                break;
+            }
+        }
+        Ok(values)
     }
 
     /// Returns true when the next token starts an expression-shaped
@@ -224,7 +342,7 @@ impl<'a> Parser<'a> {
             // Anything else that can start a primary expression goes
             // through the Expr path.
             Token::LParen => true,
-            Token::Ident(_) => true,
+            token if token_can_start_field_ref(token) => true,
             _ => false,
         }
     }
@@ -234,7 +352,9 @@ impl<'a> Parser<'a> {
     /// them a function call and therefore a general expression.
     fn rhs_looks_like_bare_field_ref(&mut self) -> Result<bool, ParseError> {
         match self.peek() {
-            Token::Ident(_) => Ok(!matches!(self.peek_next()?, Token::LParen)),
+            token if token_can_start_field_ref(token) => {
+                Ok(!matches!(self.peek_next()?, Token::LParen))
+            }
             _ => Ok(false),
         }
     }
@@ -366,4 +486,11 @@ impl<'a> Parser<'a> {
 pub(super) enum ValueOrField {
     Value(Value),
     Field(FieldRef),
+}
+
+fn expr_as_field_ref(expr: &Expr) -> Option<FieldRef> {
+    match expr {
+        Expr::Column { field, .. } => Some(field.clone()),
+        _ => None,
+    }
 }
