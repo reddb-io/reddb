@@ -67,11 +67,12 @@ pub(crate) fn try_sorted_index_lookup(
             }
             Some(ids)
         }
-        Filter::And(_left, _right) => {
-            // For AND filters, don't use sorted index — the hash index path
-            // handles the equality part, and the remaining filter is evaluated
-            // on the candidates. Using sorted index here returns too many results.
-            None
+        Filter::And(left, right) => {
+            // Extract a range predicate from either side of the AND.
+            // The sorted index narrows the candidate set; the caller applies the
+            // full filter on the surviving rows, so it's safe to return a superset here.
+            try_sorted_index_lookup(left, table, idx_store)
+                .or_else(|| try_sorted_index_lookup(right, table, idx_store))
         }
         _ => None,
     }

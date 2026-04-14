@@ -139,12 +139,24 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             );
         }
         if let Some(entity_ids) = sorted_res {
+            // Re-apply the full filter — when the filter is a compound AND, the
+            // sorted lookup used only the range predicate to narrow candidates.
+            // Residual predicates (equality, other ranges) must be checked here.
+            let table_name = query.table.as_str();
+            let table_alias = query.alias.as_deref().unwrap_or(table_name);
+            let compiled_filter = super::filter_compiled::CompiledEntityFilter::compile(
+                filter,
+                table_name,
+                table_alias,
+            );
             let store = db.store();
             let mut records = Vec::with_capacity(entity_ids.len());
             for eid in entity_ids {
                 if let Some(entity) = store.get(&query.table, eid) {
-                    if let Some(record) = runtime_table_record_from_entity(entity) {
-                        records.push(record);
+                    if compiled_filter.evaluate(&entity) {
+                        if let Some(record) = runtime_table_record_from_entity(entity) {
+                            records.push(record);
+                        }
                     }
                 }
             }
@@ -269,12 +281,30 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                         RedDBError::Internal(format!("hash index lookup failed: {err}"))
                     })?;
                 if !entity_ids.is_empty() {
+                    // Compile and re-apply the FULL filter.
+                    // The hash lookup extracted only one equality predicate from the AND tree
+                    // (e.g. city = 'X'); secondary predicates (e.g. age > 30) would be silently
+                    // dropped without this step, producing wrong row counts.
+                    let table_name = query.table.as_str();
+                    let table_alias = query.alias.as_deref().unwrap_or(table_name);
+                    let compiled_filter = query.filter.as_ref().map(|f| {
+                        super::filter_compiled::CompiledEntityFilter::compile(
+                            f,
+                            table_name,
+                            table_alias,
+                        )
+                    });
                     let store = db.store();
                     let mut records = Vec::new();
                     for eid in entity_ids {
                         if let Some(entity) = store.get(&query.table, eid) {
-                            if let Some(record) = runtime_table_record_from_entity(entity) {
-                                records.push(record);
+                            if compiled_filter
+                                .as_ref()
+                                .map_or(true, |cf| cf.evaluate(&entity))
+                            {
+                                if let Some(record) = runtime_table_record_from_entity(entity) {
+                                    records.push(record);
+                                }
                             }
                         }
                     }
