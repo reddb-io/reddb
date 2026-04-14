@@ -904,6 +904,87 @@ impl SegmentManager {
         }
     }
 
+    /// Zone-map-aware parallel query.
+    ///
+    /// Like `query_all` but applies `zone_preds` on the main thread to
+    /// prune sealed segments before spawning workers — segments that
+    /// provably contain no matching rows are skipped entirely.
+    ///
+    /// Zone check runs single-threaded (it reads per-segment metadata,
+    /// not row data), so it's cheap. Surviving segments are then scanned
+    /// in parallel using `std::thread::scope` when there are > 1 of them.
+    pub fn query_all_zoned<F>(
+        &self,
+        zone_preds: &[(&str, ZoneColPred<'_>)],
+        filter: F,
+    ) -> Vec<UnifiedEntity>
+    where
+        F: Fn(&UnifiedEntity) -> bool + Sync,
+    {
+        let mut results = Vec::new();
+
+        // Growing segment — always scan, no zone skip (zones are partial)
+        if let Some(growing_arc) = self
+            .growing
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            let growing = growing_arc.read().unwrap_or_else(|e| e.into_inner());
+            results.extend(growing.iter().filter(|e| filter(e)).cloned());
+        }
+
+        // Sealed segments: zone-prune on main thread, then scan in parallel.
+        let sealed = self.sealed.read().unwrap_or_else(|e| e.into_inner());
+        // Collect only the segments that survive zone-predicate pruning.
+        let surviving: Vec<_> = sealed
+            .iter()
+            .filter(|seg_arc| {
+                if zone_preds.is_empty() {
+                    return true;
+                }
+                let seg = seg_arc.read().unwrap_or_else(|e| e.into_inner());
+                !seg.can_skip_zone_preds(zone_preds)
+            })
+            .collect();
+
+        let use_parallel = surviving.len() > 1
+            && crate::runtime::SystemInfo::should_parallelize();
+
+        if use_parallel {
+            let filter_ref = &filter;
+            let segment_results: Vec<Vec<UnifiedEntity>> = std::thread::scope(|s| {
+                surviving
+                    .iter()
+                    .map(|segment| {
+                        s.spawn(move || {
+                            segment
+                                .read()
+                                .unwrap_or_else(|err| err.into_inner())
+                                .iter()
+                                .filter(|e| filter_ref(e))
+                                .cloned()
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .map(|handle| handle.join().unwrap_or_default())
+                    .collect()
+            });
+            for batch in segment_results {
+                results.extend(batch);
+            }
+        } else {
+            for segment_arc in surviving {
+                let seg = segment_arc.read().unwrap_or_else(|e| e.into_inner());
+                results.extend(seg.iter().filter(|e| filter(e)).cloned());
+            }
+        }
+
+        results
+    }
+
     /// Query across all segments. Uses parallel scanning for sealed segments
     /// when more than one sealed segment exists.
     pub fn query_all<F>(&self, filter: F) -> Vec<UnifiedEntity>

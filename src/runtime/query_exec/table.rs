@@ -18,7 +18,10 @@ use super::helpers::{
 };
 use super::indexed_scan::try_sorted_index_lookup;
 use super::*;
-use crate::storage::query::sql_lowering::{effective_table_filter, effective_table_projections};
+use crate::storage::query::sql_lowering::{
+    effective_table_filter, effective_table_group_by_exprs, effective_table_having_filter,
+    effective_table_projections,
+};
 
 /// Build the JSON result from a set of entity IDs (from index lookup).
 /// Scan entities sequentially but only process those in the candidate set (from hash index).
@@ -36,6 +39,8 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
 ) -> RedDBResult<Vec<UnifiedRecord>> {
     let effective_projections = effective_table_projections(query);
     let effective_filter = effective_table_filter(query);
+    let effective_group_by = effective_table_group_by_exprs(query);
+    let effective_having = effective_table_having_filter(query);
 
     // ── FROM SUBQUERY PATH (Fase 1.7 / W4 rebind): when the query's
     // source is a `(SELECT …) AS alias`, execute the inner query
@@ -232,8 +237,8 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 let projected_cols = extract_select_column_names(&effective_projections);
                 let index_only_eligible = !projected_cols.is_empty()
                     && projected_cols.iter().all(|c| c == &column)
-                    && query.group_by.is_empty()
-                    && query.having.is_none()
+                    && effective_group_by.is_empty()
+                    && effective_having.is_none()
                     && query.order_by.is_empty();
 
                 if index_only_eligible {
@@ -324,8 +329,8 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     // UnifiedRecord for every entity in the collection.
     // Excludes universal entity sources (e.g. "any") which span all collections.
     if effective_filter.is_some()
-        && query.group_by.is_empty()
-        && query.having.is_none()
+        && effective_group_by.is_empty()
+        && effective_having.is_none()
         && query.expand.is_none()
         && !effective_projections
             .iter()
@@ -342,7 +347,8 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         })?;
         let table_name = query.table.as_str();
         let table_alias = query.alias.as_deref().unwrap_or(table_name);
-        let limit = query.limit.unwrap_or(10000) as usize;
+        let explicit_limit = query.limit;
+        let limit = explicit_limit.unwrap_or(10000) as usize;
 
         // Bloom filter: extract PK key for segment pruning
         let bloom_key = extract_bloom_key_for_pk(filter);
@@ -423,14 +429,20 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             None
         };
 
+        // A5 — parallel scan: when there's no explicit LIMIT and the collection
+        // is large enough, use query_all_zoned which parallelises filter eval
+        // across sealed segments using std::thread::scope. Sequential path kept
+        // for LIMIT queries so the early-exit optimisation still works.
+        let entity_count = manager.count();
+        let use_parallel = explicit_limit.is_none()
+            && entity_count
+                >= crate::storage::query::executors::parallel_scan::MIN_PARALLEL_ROWS;
+
         let mut records: Vec<UnifiedRecord> = Vec::new();
-        manager.for_each_entity_zoned(&zone_preds, |entity| {
-            if records.len() >= limit {
-                return false; // stop iteration
-            }
-            if compiled.evaluate(entity) {
+        if use_parallel {
+            let matching = manager.query_all_zoned(&zone_preds, |entity| compiled.evaluate(entity));
+            for entity in &matching {
                 let record = if !select_cols.is_empty() {
-                    // Fast columnar path: use pre-computed schema indices when available.
                     if let Some(ref idx_map) = schema_col_indices {
                         super::super::record_search::runtime_table_record_with_col_indices(
                             entity, &select_cols, idx_map,
@@ -459,8 +471,45 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                     records.push(record);
                 }
             }
-            true // continue
-        });
+        } else {
+            manager.for_each_entity_zoned(&zone_preds, |entity| {
+                if records.len() >= limit {
+                    return false; // stop iteration
+                }
+                if compiled.evaluate(entity) {
+                    let record = if !select_cols.is_empty() {
+                        // Fast columnar path: use pre-computed schema indices when available.
+                        if let Some(ref idx_map) = schema_col_indices {
+                            super::super::record_search::runtime_table_record_with_col_indices(
+                                entity, &select_cols, idx_map,
+                            )
+                            .or_else(|| {
+                                super::super::record_search::runtime_table_record_from_entity_ref_projected(
+                                    entity, &select_cols,
+                                )
+                            })
+                            .or_else(|| {
+                                runtime_table_record_from_entity_projected(entity.clone(), &select_cols)
+                            })
+                        } else {
+                            super::super::record_search::runtime_table_record_from_entity_ref_projected(
+                                entity,
+                                &select_cols,
+                            )
+                            .or_else(|| {
+                                runtime_table_record_from_entity_projected(entity.clone(), &select_cols)
+                            })
+                        }
+                    } else {
+                        runtime_table_record_from_entity(entity.clone())
+                    };
+                    if let Some(record) = record {
+                        records.push(record);
+                    }
+                }
+                true // continue
+            });
+        }
 
         // Apply ORDER BY — Schwartzian transform extracts keys once (O(n))
         // instead of per-comparison (O(n log n) HashMap lookups).
@@ -494,8 +543,8 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         .iter()
         .any(|p| matches!(p, Projection::Function(_, _) | Projection::Expression(_, _)));
     if effective_filter.is_none()
-        && query.group_by.is_empty()
-        && query.having.is_none()
+        && effective_group_by.is_empty()
+        && effective_having.is_none()
         && query.expand.is_none()
         && !has_scalar_function
     {
