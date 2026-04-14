@@ -4,7 +4,7 @@ version = "0.1.5"
 edition = "2021"
 authors = ["RedBlue Team"]
 description = "Unified multi-model database: tables, documents, graphs, vectors, and key-value in one engine"
-license = "MIT"
+license = "AGPL-3.0-only"
 homepage = "https://github.com/forattini-dev/reddb"
 repository = "https://github.com/forattini-dev/reddb"
 documentation = "https://docs.rs/reddb"
@@ -65,6 +65,10 @@ harness = false
 
 [[bench]]
 name = "bench_profiles"
+harness = false
+
+[[bench]]
+name = "perf_sweep"
 harness = false
 
 # [profile.release] — use default
