@@ -6,6 +6,7 @@ use super::node::{InternalNode, LeafEntry, LeafNode, Node, NodeId, NodeType};
 use super::version::{next_timestamp, ActiveTransaction, Snapshot, Timestamp, TxnId};
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 fn recover_read_guard<'a, T>(lock: &'a RwLock<T>) -> RwLockReadGuard<'a, T> {
@@ -105,6 +106,10 @@ where
     pub(crate) first_leaf: RwLock<Option<NodeId>>,
     /// Statistics
     stats: RwLock<BTreeStats>,
+    /// Lock-free hot-path counters — avoids serializing concurrent reads through
+    /// a write lock just to increment a counter.
+    gets_counter: AtomicU64,
+    range_scans_counter: AtomicU64,
     /// Active transactions
     active_txns: RwLock<HashMap<TxnId, ActiveTransaction>>,
     /// Next transaction ID
@@ -124,6 +129,8 @@ where
             nodes: RwLock::new(HashMap::new()),
             first_leaf: RwLock::new(None),
             stats: RwLock::new(BTreeStats::default()),
+            gets_counter: AtomicU64::new(0),
+            range_scans_counter: AtomicU64::new(0),
             active_txns: RwLock::new(HashMap::new()),
             next_txn_id: RwLock::new(TxnId(1)),
         }
@@ -141,7 +148,10 @@ where
 
     /// Get statistics
     pub fn stats(&self) -> BTreeStats {
-        recover_read_guard(&self.stats).clone()
+        let mut s = recover_read_guard(&self.stats).clone();
+        s.gets = self.gets_counter.load(Ordering::Relaxed);
+        s.range_scans = self.range_scans_counter.load(Ordering::Relaxed);
+        s
     }
 
     /// Check if tree is empty
@@ -254,7 +264,7 @@ where
 
     /// Get value for key
     pub fn get(&self, key: &K, snapshot: &Snapshot) -> Option<V> {
-        recover_write_guard(&self.stats).gets += 1;
+        self.gets_counter.fetch_add(1, Ordering::Relaxed);
 
         let root_id = *recover_read_guard(&self.root);
         let root_id = root_id?;
@@ -284,7 +294,7 @@ where
 
     /// Get range of values
     pub fn range(&self, start: Option<&K>, end: Option<&K>, snapshot: &Snapshot) -> Vec<(K, V)> {
-        recover_write_guard(&self.stats).range_scans += 1;
+        self.range_scans_counter.fetch_add(1, Ordering::Relaxed);
 
         let mut results = Vec::new();
 

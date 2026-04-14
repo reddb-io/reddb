@@ -57,6 +57,14 @@ where
     state: CursorState,
     /// Cached current key-value
     current_entry: Option<(K, V)>,
+    /// Pre-fetched visible entries from the current leaf.
+    ///
+    /// Populated once when the cursor lands on a new leaf (via `fill_leaf_cache`).
+    /// Subsequent `next()` calls drain this vec without re-acquiring `nodes.read()`.
+    /// One lock acquisition per leaf instead of one per visible entry.
+    leaf_cache: Vec<(K, V)>,
+    /// Next position to consume from `leaf_cache`.
+    leaf_cache_idx: usize,
 }
 
 impl<'a, K, V> Cursor<'a, K, V>
@@ -74,6 +82,8 @@ where
             direction: CursorDirection::Forward,
             state: CursorState::BeforeFirst,
             current_entry: None,
+            leaf_cache: Vec::new(),
+            leaf_cache_idx: 0,
         }
     }
 
@@ -94,6 +104,8 @@ where
             direction: CursorDirection::Backward,
             state: CursorState::AfterLast,
             current_entry: None,
+            leaf_cache: Vec::new(),
+            leaf_cache_idx: 0,
         }
     }
 
@@ -136,6 +148,9 @@ where
         self.current_leaf = Some(first_leaf);
         self.current_index = 0;
         self.direction = CursorDirection::Forward;
+        // Reset cache so fill_leaf_cache() is called for the new leaf
+        self.leaf_cache.clear();
+        self.leaf_cache_idx = 0;
 
         self.load_current()
     }
@@ -177,7 +192,11 @@ where
         }
 
         self.direction = CursorDirection::Backward;
-        self.load_current()
+        // Reset cache — last() positions at a specific index; subsequent prev()
+        // calls use load_current_at() which bypasses the forward cache.
+        self.leaf_cache.clear();
+        self.leaf_cache_idx = 0;
+        self.load_current_at(self.current_index)
     }
 
     /// Seek to key (or first key >= key)
@@ -204,6 +223,10 @@ where
             }
         }
 
+        // Reset cache — fill_leaf_cache respects current_index for seek offset
+        self.leaf_cache.clear();
+        self.leaf_cache_idx = 0;
+
         self.load_current()
     }
 
@@ -213,13 +236,15 @@ where
             CursorState::BeforeFirst => self.first(),
             CursorState::AfterLast | CursorState::Invalid => false,
             CursorState::Valid => {
-                self.current_index += 1;
-                if !self.check_bounds() {
-                    // Move to next leaf
-                    self.move_to_next_leaf()
-                } else {
-                    self.load_current()
+                // Fast path: consume next entry from the pre-fetched leaf cache
+                self.leaf_cache_idx += 1;
+                if self.leaf_cache_idx < self.leaf_cache.len() {
+                    let entry = self.leaf_cache[self.leaf_cache_idx].clone();
+                    self.current_entry = Some(entry);
+                    return true;
                 }
+                // Cache exhausted — move to next leaf
+                self.move_to_next_leaf()
             }
         }
     }
@@ -235,10 +260,46 @@ where
                     self.move_to_prev_leaf()
                 } else {
                     self.current_index -= 1;
-                    self.load_current()
+                    // Backward traversal bypasses the forward cache — load directly
+                    // from the node at current_index.
+                    self.leaf_cache.clear();
+                    self.leaf_cache_idx = 0;
+                    self.load_current_at(self.current_index)
                 }
             }
         }
+    }
+
+    /// Load a single visible entry at `index` in `current_leaf`, without using
+    /// or populating `leaf_cache`.  Used by backward traversal where the cache
+    /// (filled in forward order from seek/first position) doesn't cover earlier
+    /// positions.
+    fn load_current_at(&mut self, index: usize) -> bool {
+        let leaf_id = match self.current_leaf {
+            Some(id) => id,
+            None => {
+                self.state = CursorState::Invalid;
+                self.current_entry = None;
+                return false;
+            }
+        };
+
+        if let Some(node) = self.tree.get_node(leaf_id) {
+            let node = recover_read_guard(&node);
+            if let Node::Leaf(leaf) = &*node {
+                if index < leaf.keys.len() {
+                    if let Some(value) = leaf.entries[index].get(&self.snapshot) {
+                        self.current_entry = Some((leaf.keys[index].clone(), value.clone()));
+                        self.state = CursorState::Valid;
+                        return true;
+                    }
+                }
+            }
+        }
+
+        self.state = CursorState::BeforeFirst;
+        self.current_entry = None;
+        false
     }
 
     /// Find leaf for key
@@ -274,36 +335,56 @@ where
         false
     }
 
-    /// Load current entry from leaf
-    fn load_current(&mut self) -> bool {
+    /// Populate `leaf_cache` with all visible entries from `current_leaf`.
+    ///
+    /// Acquires `nodes.read()` exactly once for the entire leaf, then releases
+    /// the lock. Subsequent `next()` calls drain the cache without re-locking.
+    /// Returns true if at least one visible entry was found.
+    fn fill_leaf_cache(&mut self) -> bool {
+        self.leaf_cache.clear();
+        self.leaf_cache_idx = 0;
+
         let leaf_id = match self.current_leaf {
             Some(id) => id,
-            None => {
-                self.state = CursorState::Invalid;
-                self.current_entry = None;
-                return false;
-            }
+            None => return false,
         };
 
         if let Some(node) = self.tree.get_node(leaf_id) {
             let node = recover_read_guard(&node);
             if let Node::Leaf(leaf) = &*node {
-                // Find visible entry starting from current index
-                while self.current_index < leaf.keys.len() {
-                    let key = &leaf.keys[self.current_index];
-                    if let Some(value) = leaf.entries[self.current_index].get(&self.snapshot) {
-                        self.current_entry = Some((key.clone(), value.clone()));
-                        self.state = CursorState::Valid;
-                        return true;
+                // Skip entries before current_index (used by seek())
+                for i in self.current_index..leaf.keys.len() {
+                    if let Some(value) = leaf.entries[i].get(&self.snapshot) {
+                        self.leaf_cache.push((leaf.keys[i].clone(), value.clone()));
                     }
-                    // Skip invisible entries
-                    self.current_index += 1;
                 }
             }
         }
 
-        // No more entries in this leaf
-        self.move_to_next_leaf()
+        !self.leaf_cache.is_empty()
+    }
+
+    /// Load current entry from leaf — uses `leaf_cache` when available,
+    /// falling back to `fill_leaf_cache()` on first entry of a new leaf.
+    fn load_current(&mut self) -> bool {
+        // If cache is warm and has entries, serve directly (no lock needed)
+        if self.leaf_cache_idx < self.leaf_cache.len() {
+            let entry = self.leaf_cache[self.leaf_cache_idx].clone();
+            self.current_entry = Some(entry);
+            self.state = CursorState::Valid;
+            return true;
+        }
+
+        // Cache empty — fill from current leaf (one lock acquisition)
+        if self.fill_leaf_cache() {
+            let entry = self.leaf_cache[0].clone();
+            self.current_entry = Some(entry);
+            self.state = CursorState::Valid;
+            true
+        } else {
+            // No visible entries in this leaf — move to next
+            self.move_to_next_leaf()
+        }
     }
 
     /// Move to next leaf
@@ -316,6 +397,7 @@ where
             }
         };
 
+        // Read next sibling pointer — single lock acquisition, also resets cache
         let next_leaf = if let Some(node) = self.tree.get_node(leaf_id) {
             let node = recover_read_guard(&node);
             if let Node::Leaf(leaf) = &*node {
@@ -331,6 +413,9 @@ where
             Some(next_id) => {
                 self.current_leaf = Some(next_id);
                 self.current_index = 0;
+                // Clear cache — fill_leaf_cache() will populate it from the new leaf
+                self.leaf_cache.clear();
+                self.leaf_cache_idx = 0;
                 self.load_current()
             }
             None => {
@@ -372,7 +457,9 @@ where
                         self.current_index = leaf.keys.len().saturating_sub(1);
                     }
                 }
-                self.load_current()
+                self.leaf_cache.clear();
+                self.leaf_cache_idx = 0;
+                self.load_current_at(self.current_index)
             }
             None => {
                 self.state = CursorState::BeforeFirst;

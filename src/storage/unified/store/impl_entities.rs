@@ -21,12 +21,19 @@ impl UnifiedStore {
     /// Get or create a collection
     pub fn get_or_create_collection(&self, name: impl Into<String>) -> Arc<SegmentManager> {
         let name = name.into();
+        // Fast path: shared read lock — zero contention for existing collections
+        {
+            let collections = self.collections.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(manager) = collections.get(&name) {
+                return Arc::clone(manager);
+            }
+        }
+        // Slow path: exclusive write lock — only when collection is missing
         let mut collections = self.collections.write().unwrap_or_else(|e| e.into_inner());
-
+        // Double-check after acquiring write lock (another thread may have created it)
         if let Some(manager) = collections.get(&name) {
             return Arc::clone(manager);
         }
-
         let manager = Arc::new(SegmentManager::with_config(
             &name,
             self.config.manager_config.clone(),
