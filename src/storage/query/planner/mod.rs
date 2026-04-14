@@ -15,6 +15,7 @@ pub mod cost;
 pub mod histogram;
 pub mod join_dp;
 pub mod optimizer;
+pub mod pathkeys;
 pub mod rewriter;
 pub mod stats_provider;
 

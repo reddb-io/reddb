@@ -42,6 +42,8 @@
 //! let results = executor.execute(&query)?;
 //! ```
 
+pub mod analyze_cmd;
+pub mod analyzer;
 pub mod ast;
 pub mod binary;
 pub mod engine;
