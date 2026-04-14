@@ -56,7 +56,15 @@ impl CardinalityEstimate {
     }
 }
 
-/// Cost of executing a query plan
+/// Cost of executing a query plan.
+///
+/// Mirrors PostgreSQL's `Cost` split: `startup_cost` is the work needed
+/// before the **first** row can be produced, `total` is the work to
+/// produce the **last** row. Both are reported so plan selection can
+/// pick a low-startup plan when a small `LIMIT` is in scope, even if
+/// total work is higher.
+///
+/// See `src/storage/query/planner/README.md` § Invariant 1.
 #[derive(Debug, Clone, Default)]
 pub struct PlanCost {
     /// CPU computation cost
@@ -67,12 +75,18 @@ pub struct PlanCost {
     pub network: f64,
     /// Memory requirement
     pub memory: f64,
-    /// Total combined cost
+    /// Cost to produce the **first** row.
+    ///
+    /// Zero for streaming operators (full scan, index scan, filter over
+    /// scan). Equal to `total` for blocking operators (sort, hash join
+    /// build side, materialize).
+    pub startup_cost: f64,
+    /// Cost to produce the **last** row.
     pub total: f64,
 }
 
 impl PlanCost {
-    /// Create a new cost estimate
+    /// Create a new cost estimate with `startup_cost = 0` (streaming).
     pub fn new(cpu: f64, io: f64, memory: f64) -> Self {
         let total = cpu + io * 10.0 + memory * 0.1; // IO is expensive
         Self {
@@ -80,30 +94,103 @@ impl PlanCost {
             io,
             network: 0.0,
             memory,
+            startup_cost: 0.0,
             total,
         }
     }
 
-    /// Combine two costs (for joins, etc.)
-    pub fn combine(&self, other: &PlanCost) -> PlanCost {
+    /// Create a cost with an explicit `startup_cost`. Use for blocking
+    /// operators (sort, hash build) and for index point lookups whose
+    /// first-row cost is non-zero.
+    pub fn with_startup(cpu: f64, io: f64, memory: f64, startup_cost: f64) -> Self {
+        let total = cpu + io * 10.0 + memory * 0.1;
+        Self {
+            cpu,
+            io,
+            network: 0.0,
+            memory,
+            startup_cost: startup_cost.max(0.0),
+            total: total.max(startup_cost),
+        }
+    }
+
+    /// Compose two costs in a **pipelined** fashion: the second operator
+    /// consumes the first as a stream.
+    ///
+    /// Both `startup_cost` and `total` add together. Use for filter
+    /// over scan, projection over filter, etc.
+    pub fn combine_pipelined(&self, other: &PlanCost) -> PlanCost {
         PlanCost {
             cpu: self.cpu + other.cpu,
             io: self.io + other.io,
             network: self.network + other.network,
-            memory: self.memory.max(other.memory), // Peak memory
+            memory: self.memory.max(other.memory),
+            startup_cost: self.startup_cost + other.startup_cost,
             total: self.total + other.total,
         }
     }
 
-    /// Scale cost by a factor
+    /// Compose two costs where `self` must be **fully consumed** before
+    /// `blocker` can produce its first row.
+    ///
+    /// `self.total` flows into `blocker.startup_cost`. Use for sort,
+    /// hash build, materialise — anything that has to drain its input
+    /// before emitting.
+    pub fn combine_blocking(&self, blocker: &PlanCost) -> PlanCost {
+        PlanCost {
+            cpu: self.cpu + blocker.cpu,
+            io: self.io + blocker.io,
+            network: self.network + blocker.network,
+            memory: self.memory.max(blocker.memory),
+            startup_cost: self.total + blocker.startup_cost,
+            total: self.total + blocker.total,
+        }
+    }
+
+    /// Backwards-compatible alias for [`combine_pipelined`].
+    ///
+    /// New code should prefer `combine_pipelined` / `combine_blocking`
+    /// explicitly. This is kept so existing callers compile unchanged.
+    pub fn combine(&self, other: &PlanCost) -> PlanCost {
+        self.combine_pipelined(other)
+    }
+
+    /// Scale cost by a factor (cardinality multiplier, etc.).
     pub fn scale(&self, factor: f64) -> PlanCost {
         PlanCost {
             cpu: self.cpu * factor,
             io: self.io * factor,
             network: self.network * factor,
-            memory: self.memory, // Memory doesn't scale linearly
+            memory: self.memory,             // Memory doesn't scale linearly
+            startup_cost: self.startup_cost, // startup is per-plan, not per-row
             total: self.total * factor,
         }
+    }
+
+    /// Plan-comparison helper. Picks `Less` when `self` should be
+    /// preferred over `other`.
+    ///
+    /// When `limit` is `Some(k)` and `k < 0.1 * cardinality`, the
+    /// comparison switches from `total` to `startup_cost` — the client
+    /// will only consume a small slice of the result, so we want the
+    /// plan that produces the first rows fastest even if the full scan
+    /// would be more expensive.
+    ///
+    /// This mirrors PostgreSQL's `compare_path_costs_fuzzily` logic for
+    /// `STARTUP` vs `TOTAL` cost ordering.
+    pub fn prefer_over(
+        &self,
+        other: &PlanCost,
+        limit: Option<u64>,
+        cardinality: f64,
+    ) -> std::cmp::Ordering {
+        let use_startup = matches!(limit, Some(k) if (k as f64) < 0.1 * cardinality.max(1.0));
+        let (lhs, rhs) = if use_startup {
+            (self.startup_cost, other.startup_cost)
+        } else {
+            (self.total, other.total)
+        };
+        lhs.partial_cmp(&rhs).unwrap_or(std::cmp::Ordering::Equal)
     }
 }
 
@@ -409,17 +496,26 @@ impl CostEstimator {
         let left_card = self.estimate_cardinality(&query.left);
         let right_card = self.estimate_cardinality(&query.right);
 
-        // Hash join cost model
-        let build_cost = left_card.rows * self.hash_probe_cost;
-        let probe_cost = right_card.rows * self.hash_probe_cost;
+        // Hash join cost model.
+        //
+        // Build side (left) is **blocking** — we must drain the entire
+        // left input and populate the hash table before any probe can
+        // produce its first output row. Probe side (right) is then
+        // streamed pipelined.
+        let build_cpu = left_card.rows * self.hash_probe_cost;
+        let probe_cpu = right_card.rows * self.hash_probe_cost;
+        let join_memory = left_card.rows * 100.0; // hash table footprint
 
-        let join_cpu = build_cost + probe_cost;
-        let join_io = 0.0; // Hash join is in-memory
-        let join_memory = left_card.rows * 100.0; // Hash table
+        // The build operator: zero work upstream, blocking on left input.
+        let build_op = PlanCost::with_startup(build_cpu, 0.0, join_memory, build_cpu);
+        // The probe operator: pipelined over right input.
+        let probe_op = PlanCost::new(probe_cpu, 0.0, 0.0);
 
-        let join_cost = PlanCost::new(join_cpu, join_io, join_memory);
-
-        left_cost.combine(&right_cost).combine(&join_cost)
+        // Compose: left → block on build → pipelined probe with right.
+        let after_build = left_cost.combine_blocking(&build_op);
+        after_build
+            .combine_pipelined(&right_cost)
+            .combine_pipelined(&probe_op)
     }
 
     fn estimate_join_cardinality(&self, query: &JoinQuery) -> CardinalityEstimate {
@@ -473,7 +569,9 @@ impl CostEstimator {
         // Typical search visits ~100-500 nodes for 1M vectors
         let k = query.k as f64;
 
-        // Base cost from HNSW traversal
+        // Base cost from HNSW traversal — must descend the layer graph
+        // before *any* candidate can be returned. This is the operator's
+        // intrinsic startup cost.
         let hnsw_cost = 100.0 * (1.0 + k.ln()); // ~100-300 node visits
 
         // Metadata filtering adds cost if present
@@ -483,7 +581,11 @@ impl CostEstimator {
         let io = 20.0; // HNSW layers are cached
         let memory = k * 32.0 + 1000.0; // k results + working set
 
-        PlanCost::new(cpu, io, memory)
+        // Vector search is *partly* blocking: HNSW must traverse the
+        // entry layers before the first neighbour is known, so the
+        // first-row cost is roughly the descent cost. Subsequent rows
+        // come essentially free until `k`.
+        PlanCost::with_startup(cpu, io, memory, hnsw_cost * 0.5)
     }
 
     fn estimate_vector_cardinality(&self, query: &VectorQuery) -> CardinalityEstimate {
@@ -829,5 +931,166 @@ mod tests {
 
         let card = estimator.estimate_table_cardinality(&query);
         assert!(card.rows <= 10.0);
+    }
+
+    // ---------------------------------------------------------------
+    // Target 2: startup_cost vs total_cost split
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn startup_zero_for_full_scan() {
+        // estimate_table is implemented as a streaming sequential scan
+        // (no startup cost — the first row is producible as soon as the
+        // first page is read).
+        let estimator = CostEstimator::new();
+        let q = table_query("any_table", None);
+        let cost = estimator.estimate(&QueryExpr::Table(q));
+        assert_eq!(cost.startup_cost, 0.0, "full scan must have zero startup");
+        assert!(cost.total > 0.0);
+    }
+
+    #[test]
+    fn startup_nonzero_for_blocking_combine() {
+        // combine_blocking models a sort or hash build: the input must
+        // be fully consumed before the blocker can emit its first row.
+        let input = PlanCost::new(100.0, 10.0, 50.0); // cost = 100 + 100 + 5 = 205
+        let blocker = PlanCost::new(20.0, 0.0, 10.0); // cost = 20 + 0 + 1 = 21
+        let composed = input.combine_blocking(&blocker);
+        // Blocking startup absorbs all of input.total
+        assert_eq!(composed.startup_cost, input.total);
+        // Total is input.total + blocker.total
+        assert_eq!(composed.total, input.total + blocker.total);
+        assert!(composed.startup_cost > 0.0);
+    }
+
+    #[test]
+    fn pipelined_combine_adds_startup_directly() {
+        let upstream = PlanCost::with_startup(50.0, 5.0, 10.0, 30.0);
+        let downstream = PlanCost::with_startup(20.0, 0.0, 0.0, 5.0);
+        let composed = upstream.combine_pipelined(&downstream);
+        assert_eq!(composed.startup_cost, 30.0 + 5.0);
+        assert_eq!(composed.total, upstream.total + downstream.total);
+    }
+
+    #[test]
+    fn cost_prefers_low_startup_when_limit_small() {
+        // Two plans with the same total but different startup. With a
+        // small LIMIT, the planner must pick the low-startup plan.
+        let fast_first = PlanCost {
+            cpu: 100.0,
+            io: 10.0,
+            network: 0.0,
+            memory: 50.0,
+            startup_cost: 5.0,
+            total: 200.0,
+        };
+        let slow_first = PlanCost {
+            cpu: 100.0,
+            io: 10.0,
+            network: 0.0,
+            memory: 50.0,
+            startup_cost: 150.0,
+            total: 200.0,
+        };
+        // Cardinality 10_000, LIMIT 10 → 10 < 0.1 * 10_000 = 1000 → use startup.
+        assert_eq!(
+            fast_first.prefer_over(&slow_first, Some(10), 10_000.0),
+            std::cmp::Ordering::Less
+        );
+    }
+
+    #[test]
+    fn cost_prefers_low_total_when_no_limit() {
+        // Same two plans, no LIMIT — total wins.
+        let low_total = PlanCost {
+            cpu: 50.0,
+            io: 5.0,
+            network: 0.0,
+            memory: 0.0,
+            startup_cost: 30.0,
+            total: 100.0,
+        };
+        let high_total = PlanCost {
+            cpu: 100.0,
+            io: 10.0,
+            network: 0.0,
+            memory: 0.0,
+            startup_cost: 5.0,
+            total: 200.0,
+        };
+        assert_eq!(
+            low_total.prefer_over(&high_total, None, 10_000.0),
+            std::cmp::Ordering::Less
+        );
+    }
+
+    #[test]
+    fn limit_threshold_falls_back_to_total_when_limit_large() {
+        // LIMIT 5000 vs cardinality 10_000 → 5000 > 1000 → use total.
+        let low_total = PlanCost {
+            cpu: 50.0,
+            io: 5.0,
+            network: 0.0,
+            memory: 0.0,
+            startup_cost: 30.0,
+            total: 100.0,
+        };
+        let low_startup = PlanCost {
+            cpu: 100.0,
+            io: 10.0,
+            network: 0.0,
+            memory: 0.0,
+            startup_cost: 5.0,
+            total: 200.0,
+        };
+        assert_eq!(
+            low_total.prefer_over(&low_startup, Some(5000), 10_000.0),
+            std::cmp::Ordering::Less
+        );
+    }
+
+    #[test]
+    fn hash_join_startup_includes_build_cost() {
+        // Direct combine_blocking semantics: a hash join must drain the
+        // left input and build the hash table before producing the first
+        // probe result.
+        let left = PlanCost::new(80.0, 8.0, 100.0); // table scan
+        let build = PlanCost::with_startup(50.0, 0.0, 200.0, 50.0); // build op
+        let after_build = left.combine_blocking(&build);
+        assert!(
+            after_build.startup_cost >= left.total,
+            "after-build startup ({}) must absorb left.total ({})",
+            after_build.startup_cost,
+            left.total
+        );
+        assert!(after_build.total >= after_build.startup_cost);
+    }
+
+    #[test]
+    fn vector_search_reports_nonzero_startup() {
+        // estimate_vector now uses with_startup so HNSW descent shows
+        // up as startup_cost > 0 (and < total — subsequent neighbours
+        // are essentially free).
+        let estimator = CostEstimator::new();
+        // We can't easily build a VectorQuery without the AST helpers,
+        // so test the direct cost surface with_startup uses.
+        let v = PlanCost::with_startup(150.0, 20.0, 1320.0, 50.0);
+        assert!(v.startup_cost > 0.0);
+        assert!(v.startup_cost < v.total);
+        let _ = estimator; // suppress unused
+    }
+
+    #[test]
+    fn with_startup_clamps_total_below_startup() {
+        // If a caller asks for total < startup, with_startup raises total.
+        let cost = PlanCost::with_startup(1.0, 0.0, 0.0, 100.0);
+        assert!(cost.total >= cost.startup_cost);
+    }
+
+    #[test]
+    fn default_plancost_has_zero_startup() {
+        let c = PlanCost::default();
+        assert_eq!(c.startup_cost, 0.0);
+        assert_eq!(c.total, 0.0);
     }
 }
