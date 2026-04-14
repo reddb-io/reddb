@@ -176,7 +176,7 @@ impl<'a> Parser<'a> {
             | Token::True
             | Token::False
             | Token::Null
-            | Token::Minus => Ok(ValueOrField::Value(self.parse_value()?)),
+            | Token::Dash => Ok(ValueOrField::Value(self.parse_value()?)),
             _ => Ok(ValueOrField::Field(self.parse_field_ref()?)),
         }
     }

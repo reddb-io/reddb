@@ -248,7 +248,7 @@ impl<'a> Parser<'a> {
         loop {
             let (op_name, prec) = match self.peek() {
                 Token::Plus => ("ADD", 20u8),
-                Token::Minus => ("SUB", 20u8),
+                Token::Dash => ("SUB", 20u8),
                 Token::Star => ("MUL", 30u8),
                 Token::Slash => ("DIV", 30u8),
                 Token::Percent => ("MOD", 30u8),
@@ -303,7 +303,7 @@ impl<'a> Parser<'a> {
                 let val = self.parse_function_literal_arg()?;
                 return Ok(Projection::Column(format!("LIT:{}", val)));
             }
-            Token::Minus => {
+            Token::Dash => {
                 self.advance()?;
                 let val = self.parse_function_literal_arg()?;
                 return Ok(Projection::Column(format!("LIT:-{}", val)));
@@ -349,7 +349,7 @@ impl<'a> Parser<'a> {
     /// lands in Fase 1.3.
     fn parse_projection_atom(&mut self) -> Result<Projection, ParseError> {
         match self.peek().clone() {
-            Token::Integer(_) | Token::Float(_) | Token::Minus => {
+            Token::Integer(_) | Token::Float(_) | Token::Dash => {
                 let val = self.parse_function_literal_arg()?;
                 Ok(Projection::Column(format!("LIT:{}", val)))
             }
@@ -443,7 +443,7 @@ impl<'a> Parser<'a> {
             // Numeric literal
             if matches!(
                 self.peek(),
-                Token::Integer(_) | Token::Float(_) | Token::Minus
+                Token::Integer(_) | Token::Float(_) | Token::Dash
             ) {
                 let val = self.parse_function_literal_arg()?;
                 args.push(Projection::Column(format!("LIT:{}", val)));
@@ -473,7 +473,7 @@ impl<'a> Parser<'a> {
 
     /// Parse a numeric literal (float, positive or negative)
     fn parse_numeric_literal(&mut self) -> Result<f64, ParseError> {
-        let negative = self.consume(&Token::Minus)?;
+        let negative = self.consume(&Token::Dash)?;
         match self.advance()? {
             Token::Integer(n) => Ok(if negative { -(n as f64) } else { n as f64 }),
             Token::Float(n) => Ok(if negative { -n } else { n }),
@@ -616,7 +616,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_function_literal_arg(&mut self) -> Result<String, ParseError> {
-        let negative = self.consume(&Token::Minus)?;
+        let negative = self.consume(&Token::Dash)?;
         let mut literal = match self.advance()? {
             Token::Integer(n) => {
                 if negative {

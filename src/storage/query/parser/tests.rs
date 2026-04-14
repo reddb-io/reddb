@@ -20,6 +20,39 @@ fn test_parse_simple_select() {
 }
 
 #[test]
+fn test_parse_arithmetic_projection_sub() {
+    // Regression: Fase 1.3 projection Pratt referenced Token::Minus
+    // but the lexer emits Token::Dash. Subtraction silently fell
+    // through to parse_field_ref and errored. Ensure `a - b` parses
+    // into the nested Function("SUB", [col(a), col(b)]) form.
+    let query = parse("SELECT a - b FROM t").unwrap();
+    let QueryExpr::Table(tq) = query else {
+        panic!("Expected TableQuery");
+    };
+    assert_eq!(tq.columns.len(), 1);
+    let Projection::Function(name, args) = &tq.columns[0] else {
+        panic!("expected arithmetic Function, got {:?}", tq.columns[0]);
+    };
+    assert_eq!(name, "SUB");
+    assert_eq!(args.len(), 2);
+}
+
+#[test]
+fn test_parse_arithmetic_projection_chain() {
+    // `a - b - c` is left-associative → SUB(SUB(a,b), c).
+    let query = parse("SELECT a - b - c FROM t").unwrap();
+    let QueryExpr::Table(tq) = query else {
+        panic!("Expected TableQuery");
+    };
+    let Projection::Function(name, args) = &tq.columns[0] else {
+        panic!("expected Function");
+    };
+    assert_eq!(name, "SUB");
+    // lhs should itself be a SUB
+    assert!(matches!(&args[0], Projection::Function(n, _) if n == "SUB"));
+}
+
+#[test]
 fn test_parse_cast_column_to_text() {
     let query = parse("SELECT CAST(age AS TEXT) FROM users").unwrap();
     let QueryExpr::Table(tq) = query else {
