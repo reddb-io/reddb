@@ -525,3 +525,34 @@ impl AvgState {
         }
     }
 }
+
+/// Phase 3.3 wiring entry point. Builds a `SpilledHashAgg` with
+/// production-grade defaults (`mem_limit_bytes = 64 MiB`,
+/// `avg_entry_bytes = 128`) targeting reddb's tmpfs at
+/// `/tmp/reddb-spill`. Used by `executors/aggregation.rs::execute_group_by`
+/// when the input row count exceeds the in-memory threshold.
+///
+/// The caller is expected to feed every row via `accumulate` and
+/// then call `drain` to materialise the merged result. The helper
+/// returns the constructed aggregator so the caller can wire it
+/// into its existing per-row loop without re-implementing the
+/// spill bookkeeping.
+///
+/// Spill files land in a process-unique subdirectory so concurrent
+/// queries don't collide; the directory is auto-cleaned on Drop.
+pub fn spilled_hash_agg_default<K, S>() -> std::io::Result<SpilledHashAgg<K, S>>
+where
+    K: std::hash::Hash + Eq + Clone + SpillCodec,
+    S: Clone + Mergeable + SpillCodec,
+{
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let dir = std::env::temp_dir().join(format!("reddb-spill-{pid}-{seq}"));
+    std::fs::create_dir_all(&dir)?;
+    Ok(SpilledHashAgg::new(
+        dir, 64 * 1024 * 1024, // 64 MiB soft limit
+        128,                   // avg bytes per (key, state) — tuned for SUM/COUNT
+    ))
+}

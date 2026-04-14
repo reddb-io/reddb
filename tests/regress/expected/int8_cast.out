@@ -1,0 +1,12 @@
+-- CREATE TABLE metrics (age INT8)
+table 'metrics' created
+
+-- INSERT INTO metrics (age) VALUES (123456)
+INSERT 0 1
+
+-- SELECT CAST(age AS BIGINT) AS agebig FROM metrics
+agebig
+------
+123456
+(1 row)
+

@@ -86,9 +86,20 @@ pub(crate) fn execute_aggregate_query(
     let compiled_filter = filter
         .map(|f| super::filter_compiled::CompiledEntityFilter::compile(f, table_name, table_alias));
 
+    // Work-mem cap: prevent OOM on runaway GROUP BY aggregations.
+    // 64 MB default mirrors PostgreSQL's work_mem GUC default.
+    // When exceeded the query fails cleanly instead of OOMing the process.
+    // TODO(A8-full): replace with SpilledHashAgg drain when the full
+    // agg_spill serialization layer is wired in.
+    const WORK_MEM_BYTES: usize = 64 * 1024 * 1024;
+    // Approximate per-entry cost: 128 B for AggState + 64 B for group key + HashMap overhead
+    const ESTIMATED_ENTRY_BYTES: usize = 256;
+    let max_groups = WORK_MEM_BYTES / ESTIMATED_ENTRY_BYTES; // ~256k groups
+
     // Accumulators per group (empty string key = no grouping)
     let mut groups: std::collections::HashMap<String, AggregateGroup> =
         std::collections::HashMap::new();
+    let mut work_mem_exceeded = false;
 
     manager.for_each_entity(|entity| {
         if let Some(c) = compiled_filter.as_ref() {
@@ -131,6 +142,13 @@ pub(crate) fn execute_aggregate_query(
         } else {
             String::new()
         };
+
+        // Work-mem guard: if we'd exceed the cap on a new group key, stop.
+        // Existing group keys are always allowed (they don't grow the map).
+        if !groups.contains_key(&group_key) && groups.len() >= max_groups {
+            work_mem_exceeded = true;
+            return false; // stop iteration
+        }
 
         let group = groups.entry(group_key).or_insert_with(|| AggregateGroup {
             group_values: group_values.clone(),
@@ -241,6 +259,19 @@ pub(crate) fn execute_aggregate_query(
         }
         true
     });
+
+    // Work-mem exceeded: return an informative error rather than silently
+    // producing a partial or wrong result. Full spill-to-disk lives in
+    // agg_spill.rs and wires in when the Codec/Mergeable traits are impl'd
+    // for AggregateGroup (A8-full).
+    if work_mem_exceeded {
+        return Err(RedDBError::Query(format!(
+            "GROUP BY aggregation exceeded work_mem ({} MB, ~{} groups). \
+             Reduce cardinality or increase work_mem.",
+            WORK_MEM_BYTES / (1024 * 1024),
+            max_groups,
+        )));
+    }
 
     // Build result records from accumulated groups
     let mut records = Vec::with_capacity(groups.len().max(1));

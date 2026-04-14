@@ -6,6 +6,7 @@ impl BTree {
         Self {
             pager,
             root_page_id: RwLock::new(0),
+            rightmost_leaf: RwLock::new(None),
         }
     }
 
@@ -14,6 +15,7 @@ impl BTree {
         Self {
             pager,
             root_page_id: RwLock::new(root_page_id),
+            rightmost_leaf: RwLock::new(None),
         }
     }
 
@@ -78,6 +80,67 @@ impl BTree {
             return Ok(());
         }
 
+        // D2 fastpath: if key > cached rightmost high_key, go directly to
+        // the cached leaf without descending from the root. This cuts
+        // tree descent entirely for monotonic append workloads (timeseries,
+        // auto-increment entity IDs).
+        let cached = {
+            self.rightmost_leaf
+                .read()
+                .map_err(|e| BTreeError::LockPoisoned(format!("rightmost_leaf read: {e}")))?
+                .clone()
+        };
+        if let Some((cached_page_id, ref high_key)) = cached {
+            if key > high_key.as_slice() {
+                let mut page = self.pager.read_page(cached_page_id)?;
+                // Confirm this page is still a valid leaf with a right-link
+                // of 0 (i.e., it IS the rightmost leaf — not mid-tree after
+                // a concurrent split moved the boundary).
+                let right_sibling = leaf_right_sibling(&page);
+                if right_sibling == 0 {
+                    // Still the rightmost leaf. Try fast append.
+                    if can_insert_leaf(&page, key, value) {
+                        insert_into_leaf(&mut page, key, value)?;
+                        page.update_checksum();
+                        let page_id = page.page_id();
+                        // Update cached high_key
+                        *self.rightmost_leaf.write().map_err(|e| {
+                            BTreeError::LockPoisoned(format!("rightmost_leaf write: {e}"))
+                        })? = Some((page_id, key.to_vec()));
+                        self.pager.write_page(page_id, page)?;
+                        return Ok(());
+                    }
+                    // Leaf is full — split. After split, invalidate cache
+                    // (the new rightmost leaf is the split result).
+                    let (new_leaf, separator_key) = self.split_leaf(&mut page, key, value)?;
+                    let new_leaf_id = new_leaf.page_id();
+                    page.update_checksum();
+                    let page_id = page.page_id();
+                    self.pager.write_page(page_id, page.clone())?;
+                    // Cache the new rightmost leaf after split
+                    *self.rightmost_leaf.write().map_err(|e| {
+                        BTreeError::LockPoisoned(format!("rightmost_leaf write: {e}"))
+                    })? = Some((new_leaf_id, key.to_vec()));
+                    // Get parent path for the split propagation.
+                    // The left child is the original cached leaf.
+                    let (_, path) = self.find_leaf(root_id, &separator_key)?;
+                    self.insert_into_parent(
+                        path,
+                        cached_page_id,
+                        &separator_key,
+                        new_leaf_id,
+                    )?;
+                    return Ok(());
+                }
+                // right_sibling != 0: cached page is no longer rightmost.
+                // Fall through to the full find_leaf path below and
+                // refresh the cache.
+                *self.rightmost_leaf.write().map_err(|e| {
+                    BTreeError::LockPoisoned(format!("rightmost_leaf write: {e}"))
+                })? = None;
+            }
+        }
+
         // Find the leaf and path to it
         let (leaf_id, path) = self.find_leaf(root_id, key)?;
         let mut page = self.pager.read_page(leaf_id)?;
@@ -92,18 +155,29 @@ impl BTree {
             insert_into_leaf(&mut page, key, value)?;
             page.update_checksum();
             let page_id = page.page_id();
+            // If this is the rightmost leaf (right_sibling == 0), cache it.
+            if leaf_right_sibling(&page) == 0 {
+                *self.rightmost_leaf.write().map_err(|e| {
+                    BTreeError::LockPoisoned(format!("rightmost_leaf write: {e}"))
+                })? = Some((page_id, key.to_vec()));
+            }
             self.pager.write_page(page_id, page)?;
             return Ok(());
         }
 
         // Need to split the leaf
         let (new_leaf, separator_key) = self.split_leaf(&mut page, key, value)?;
+        let new_leaf_id = new_leaf.page_id();
         page.update_checksum();
         let page_id = page.page_id();
         self.pager.write_page(page_id, page.clone())?;
+        // Cache the new rightmost leaf (split result gets the larger keys)
+        *self.rightmost_leaf.write().map_err(|e| {
+            BTreeError::LockPoisoned(format!("rightmost_leaf write: {e}"))
+        })? = Some((new_leaf_id, key.to_vec()));
 
         // Propagate split up the tree
-        self.insert_into_parent(path, page.page_id(), &separator_key, new_leaf.page_id())?;
+        self.insert_into_parent(path, page_id, &separator_key, new_leaf_id)?;
 
         Ok(())
     }
@@ -266,6 +340,13 @@ impl BTree {
                 page.update_checksum();
                 let page_id = page.page_id();
                 self.pager.write_page(page_id, page.clone())?;
+
+                // D2: invalidate rightmost cache on any delete — the high_key
+                // may no longer be valid after rebalancing.
+                *self
+                    .rightmost_leaf
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner()) = None;
 
                 // Handle empty root
                 if page.cell_count() == 0 && page.page_id() == root_id {

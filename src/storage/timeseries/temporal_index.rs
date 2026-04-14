@@ -241,6 +241,7 @@ impl IndexBase for TemporalIndex {
             approx_bytes: 0,
             kind: IndexKind::Temporal,
             has_bloom: true,
+            index_correlation: 1.0, // timeseries inserts are monotonically increasing
         }
     }
 

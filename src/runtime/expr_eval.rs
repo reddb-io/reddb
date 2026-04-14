@@ -16,7 +16,9 @@
 //! - `Projection::Expression` once the planner flips from Filter
 //!   to Expr for scalar projection bodies.
 
-use super::join_filter::{compare_runtime_values, evaluate_runtime_filter, resolve_runtime_field};
+use super::join_filter::{
+    compare_runtime_values, evaluate_runtime_filter, resolve_runtime_field,
+};
 use crate::storage::query::ast::{BinOp, Expr, Filter, UnaryOp};
 use crate::storage::query::unified::UnifiedRecord;
 use crate::storage::schema::Value;
@@ -367,11 +369,127 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
             Value::Float(f) => Some(Value::Float(f.round())),
             other => Some(other.clone()),
         },
+        "FLOOR" => match args.first()? {
+            Value::Float(f) => Some(Value::Float(f.floor())),
+            other => Some(other.clone()),
+        },
+        "CEIL" => match args.first()? {
+            Value::Float(f) => Some(Value::Float(f.ceil())),
+            other => Some(other.clone()),
+        },
         "COALESCE" => args
             .iter()
             .find(|v| !matches!(v, Value::Null))
             .cloned()
             .or(Some(Value::Null)),
+        "NOW" | "CURRENT_TIMESTAMP" => Some(Value::TimestampMs(current_unix_ms())),
+        "CURRENT_DATE" => Some(Value::Date((current_unix_ms() / 86_400_000) as i32)),
+        "TIME_BUCKET" => {
+            let bucket_ns = time_bucket_duration(args.first()?)?;
+            let timestamp_ns = args.get(1).and_then(value_to_bucket_timestamp_ns)?;
+            let bucket_start = if bucket_ns == 0 {
+                timestamp_ns
+            } else {
+                (timestamp_ns / bucket_ns) * bucket_ns
+            };
+            Some(Value::UnsignedInteger(bucket_start))
+        }
+        "GEO_DISTANCE" | "HAVERSINE" => {
+            let (lat1, lon1, lat2, lon2) = geo_args(args)?;
+            Some(Value::Float(crate::geo::haversine_km(
+                lat1, lon1, lat2, lon2,
+            )))
+        }
+        "VINCENTY" => {
+            let (lat1, lon1, lat2, lon2) = geo_args(args)?;
+            Some(Value::Float(crate::geo::vincenty_km(
+                lat1, lon1, lat2, lon2,
+            )))
+        }
+        "GEO_BEARING" => {
+            let (lat1, lon1, lat2, lon2) = geo_args(args)?;
+            Some(Value::Float(crate::geo::bearing(lat1, lon1, lat2, lon2)))
+        }
+        "POWER" => {
+            let base = value_as_f64(args.first()?)?;
+            let exp = value_as_f64(args.get(1)?)?;
+            Some(Value::Float(base.powf(exp)))
+        }
+        "VERIFY_PASSWORD" => {
+            let stored = args.first()?;
+            let candidate = args.get(1)?;
+            let hash = match stored {
+                Value::Password(hash) | Value::Text(hash) => hash,
+                _ => return Some(Value::Boolean(false)),
+            };
+            let plain = match candidate {
+                Value::Text(plain) => plain,
+                _ => return Some(Value::Boolean(false)),
+            };
+            Some(Value::Boolean(crate::auth::store::verify_password(
+                plain, hash,
+            )))
+        }
+        _ => None,
+    }
+}
+
+fn current_unix_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn time_bucket_duration(value: &Value) -> Option<u64> {
+    match value {
+        Value::Text(text) => crate::storage::timeseries::retention::parse_duration_ns(text),
+        Value::UnsignedInteger(value) => Some(*value),
+        Value::Integer(value) if *value >= 0 => Some(*value as u64),
+        _ => None,
+    }
+}
+
+fn value_to_bucket_timestamp_ns(value: &Value) -> Option<u64> {
+    match value {
+        Value::UnsignedInteger(v) => Some(*v),
+        Value::Integer(v) if *v >= 0 => Some(*v as u64),
+        Value::Float(v) if *v >= 0.0 => Some(*v as u64),
+        Value::Timestamp(v) if *v >= 0 => Some((*v as u64) * 1_000_000_000),
+        Value::TimestampMs(v) if *v >= 0 => Some((*v as u64) * 1_000_000),
+        _ => None,
+    }
+}
+
+fn geo_args(args: &[Value]) -> Option<(f64, f64, f64, f64)> {
+    match args {
+        [left, right] => {
+            let (lat1, lon1) = geo_point(left)?;
+            let (lat2, lon2) = geo_point(right)?;
+            Some((lat1, lon1, lat2, lon2))
+        }
+        [lat1, lon1, lat2, lon2] => Some((
+            value_as_f64(lat1)?,
+            value_as_f64(lon1)?,
+            value_as_f64(lat2)?,
+            value_as_f64(lon2)?,
+        )),
+        _ => None,
+    }
+}
+
+fn geo_point(value: &Value) -> Option<(f64, f64)> {
+    match value {
+        Value::GeoPoint(lat, lon) => Some((crate::geo::micro_to_deg(*lat), crate::geo::micro_to_deg(*lon))),
+        _ => None,
+    }
+}
+
+fn value_as_f64(value: &Value) -> Option<f64> {
+    match value {
+        Value::Float(value) => Some(*value),
+        Value::Integer(value) => Some(*value as f64),
+        Value::UnsignedInteger(value) => Some(*value as f64),
         _ => None,
     }
 }

@@ -299,6 +299,7 @@ mod tests {
                     approx_bytes: 32_000_000,
                     kind: IndexKind::Hash,
                     has_bloom: true,
+                    index_correlation: 0.0,
                 },
             );
 
@@ -395,6 +396,7 @@ mod tests {
                 approx_bytes: 0,
                 kind: IndexKind::Hash,
                 has_bloom: true,
+                index_correlation: 0.0,
             })),
         );
 
@@ -445,6 +447,7 @@ mod tests {
                 approx_bytes: 0,
                 kind: IndexKind::BTree,
                 has_bloom: false,
+                index_correlation: 0.0,
             },
         );
         assert_eq!(p.distinct_values("t", "name"), Some(7));

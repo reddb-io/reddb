@@ -183,6 +183,7 @@ mod tests {
                     approx_bytes: 0,
                     kind,
                     has_bloom: false,
+                    index_correlation: 0.0,
                 },
             }
         }

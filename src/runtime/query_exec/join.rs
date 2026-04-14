@@ -271,7 +271,8 @@ pub(crate) fn runtime_join_table_context(
         | QueryExpr::DropTimeSeries(_)
         | QueryExpr::CreateQueue(_)
         | QueryExpr::DropQueue(_)
-        | QueryExpr::QueueCommand(_) => (None, None),
+        | QueryExpr::QueueCommand(_)
+        | QueryExpr::ExplainAlter(_) => (None, None),
     };
 
     (

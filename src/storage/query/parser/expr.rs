@@ -53,10 +53,20 @@ impl<'a> Parser<'a> {
         self.parse_expr_prec(0)
     }
 
+    /// Continue parsing an expression after the caller has already
+    /// materialized the left-hand side atom.
+    pub(crate) fn continue_expr(&mut self, left: Expr, min_prec: u8) -> Result<Expr, ParseError> {
+        self.parse_expr_suffix(left, min_prec)
+    }
+
     /// Pratt climb: parse a unary atom then consume any infix operators
     /// whose precedence meets or exceeds `min_prec`.
     fn parse_expr_prec(&mut self, min_prec: u8) -> Result<Expr, ParseError> {
-        let mut left = self.parse_expr_unary()?;
+        let left = self.parse_expr_unary()?;
+        self.parse_expr_suffix(left, min_prec)
+    }
+
+    fn parse_expr_suffix(&mut self, mut left: Expr, min_prec: u8) -> Result<Expr, ParseError> {
         loop {
             let Some((op, prec)) = self.peek_binop() else {
                 // Not a standard infix op — check for postfix forms.

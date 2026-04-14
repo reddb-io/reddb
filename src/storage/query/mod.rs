@@ -68,6 +68,11 @@ pub mod unified;
 pub(crate) mod value_compare;
 
 // Re-export common types
+pub use crate::storage::schema::{SqlTypeName, TypeModifier};
+pub use analyzer::{
+    analyze_create_table, resolve_declared_data_type, resolve_sql_type_name, AnalysisError,
+    AnalyzedColumnDef, AnalyzedCreateTableQuery,
+};
 pub use ast::{
     AlterOperation, AlterTableQuery, CompareOp, CreateColumnDef, CreateTableQuery,
     CreateTimeSeriesQuery, CteDefinition, CteQueryBuilder, DeleteQuery, DropTableQuery,

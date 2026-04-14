@@ -29,10 +29,10 @@ use crate::storage::engine::{
 use crate::storage::query::ast::{
     AlterOperation, AlterTableQuery, CompareOp, CreateIndexQuery, CreateQueueQuery,
     CreateTableQuery, CreateTimeSeriesQuery, DeleteQuery, DropIndexQuery, DropQueueQuery,
-    DropTableQuery, DropTimeSeriesQuery, FieldRef, Filter, FusionStrategy, GraphCommand,
-    HybridQuery, IndexMethod, InsertEntityType, InsertQuery, JoinQuery, JoinType, OrderByClause,
-    ProbabilisticCommand, Projection, QueryExpr, QueueCommand, QueueSide, SearchCommand,
-    TableQuery, UpdateQuery, VectorQuery, VectorSource,
+    DropTableQuery, DropTimeSeriesQuery, ExplainAlterQuery, ExplainFormat, FieldRef, Filter,
+    FusionStrategy, GraphCommand, HybridQuery, IndexMethod, InsertEntityType, InsertQuery,
+    JoinQuery, JoinType, OrderByClause, ProbabilisticCommand, Projection, QueryExpr, QueueCommand,
+    QueueSide, SearchCommand, TableQuery, UpdateQuery, VectorQuery, VectorSource,
 };
 use crate::storage::query::is_universal_entity_source as is_universal_query_source;
 use crate::storage::query::modes::{detect_mode, parse_multi, QueryMode};
@@ -222,6 +222,36 @@ impl RuntimeQueryResult {
             mode: QueryMode::Sql,
             statement: statement_type,
             engine: "runtime-ddl",
+            result,
+            affected_rows: 0,
+            statement_type,
+        }
+    }
+
+    /// Construct a multi-column record result for read-only meta commands
+    /// (EXPLAIN ALTER, schema introspection, etc.). Each row is a Vec of
+    /// (column_name, value) pairs in column order.
+    pub fn ok_records(
+        query: String,
+        columns: Vec<String>,
+        rows: Vec<Vec<(String, Value)>>,
+        statement_type: &'static str,
+    ) -> Self {
+        let mut result = UnifiedResult::empty();
+        for row in rows {
+            let mut record = UnifiedRecord::new();
+            for (k, v) in row {
+                record.set(&k, v);
+            }
+            result.push(record);
+        }
+        result.columns = columns;
+
+        Self {
+            query,
+            mode: QueryMode::Sql,
+            statement: statement_type,
+            engine: "runtime-meta",
             result,
             affected_rows: 0,
             statement_type,
@@ -609,6 +639,7 @@ pub struct RuntimeConnection {
 
 mod expr_eval;
 mod graph_dsl;
+pub mod snapshot_reuse;
 mod health_connection;
 mod impl_core;
 mod impl_ddl;
@@ -627,6 +658,7 @@ mod join_filter;
 mod probabilistic_store;
 pub(crate) mod query_exec;
 mod record_search;
+pub mod schema_diff;
 
 pub use self::graph_dsl::*;
 use self::join_filter::*;

@@ -208,3 +208,24 @@ pub fn page_of(entity_id: u64, rows_per_page: u32) -> u32 {
     }
     (entity_id / rows_per_page as u64) as u32
 }
+
+/// Phase 3.5 wiring callback. The btree write path calls this
+/// after every insert / update / delete to clear the all-visible
+/// bit for the affected page. Centralised so a single function
+/// can be hooked into multiple write call sites without each
+/// rewriting the page-of math.
+pub fn mark_dirty_after_write(
+    vmap: &VisibilityMap,
+    entity_id: u64,
+    rows_per_page: u32,
+) {
+    let page = page_of(entity_id, rows_per_page);
+    vmap.clear_all_visible(page);
+}
+
+/// Phase 3.5 wiring callback for VACUUM / GC. After confirming
+/// every row in a page range is visible to all active txns, the
+/// GC sweeps this with the (start, end) page bounds.
+pub fn mark_clean_after_gc(vmap: &VisibilityMap, start_page: u32, end_page: u32) {
+    vmap.mark_range_visible(start_page, end_page);
+}

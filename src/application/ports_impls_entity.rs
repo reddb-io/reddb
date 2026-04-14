@@ -3,6 +3,7 @@ use crate::application::ttl_payload::{
     has_internal_ttl_metadata, normalize_ttl_patch_operations, parse_top_level_ttl_metadata_entries,
 };
 use crate::json::{to_vec as json_to_vec, Value as JsonValue};
+use crate::storage::query::resolve_declared_data_type;
 use crate::storage::schema::{coerce as coerce_schema_value, DataType, Value};
 use crate::storage::unified::MetadataValue;
 
@@ -571,9 +572,16 @@ fn resolved_contract_columns(
         .declared_columns
         .iter()
         .map(|column| {
+            let data_type = column
+                .sql_type
+                .as_ref()
+                .map(crate::storage::query::resolve_sql_type_name)
+                .transpose()
+                .map_err(|err| crate::RedDBError::Query(err.to_string()))?
+                .unwrap_or(parse_declared_data_type(&column.data_type)?);
             Ok(ResolvedColumnRule {
                 name: column.name.clone(),
-                data_type: parse_declared_data_type(&column.data_type)?,
+                data_type,
                 data_type_name: column.data_type.clone(),
                 not_null: column.not_null,
                 default: column.default.clone(),
@@ -584,65 +592,7 @@ fn resolved_contract_columns(
 }
 
 fn parse_declared_data_type(value: &str) -> RedDBResult<DataType> {
-    let normalized = value.trim().to_ascii_lowercase();
-    let data_type = match normalized.as_str() {
-        "integer" | "int" => DataType::Integer,
-        "unsignedinteger" | "unsigned_integer" | "uint" => DataType::UnsignedInteger,
-        "float" | "double" | "real" => DataType::Float,
-        "text" | "string" => DataType::Text,
-        "blob" => DataType::Blob,
-        "boolean" | "bool" => DataType::Boolean,
-        "timestamp" => DataType::Timestamp,
-        "duration" => DataType::Duration,
-        "ipaddr" | "ip" => DataType::IpAddr,
-        "macaddr" => DataType::MacAddr,
-        "vector" => DataType::Vector,
-        "json" => DataType::Json,
-        "uuid" => DataType::Uuid,
-        "noderef" => DataType::NodeRef,
-        "edgeref" => DataType::EdgeRef,
-        "vectorref" => DataType::VectorRef,
-        "rowref" => DataType::RowRef,
-        "color" => DataType::Color,
-        "email" => DataType::Email,
-        "url" => DataType::Url,
-        "phone" => DataType::Phone,
-        "semver" => DataType::Semver,
-        "cidr" => DataType::Cidr,
-        "date" => DataType::Date,
-        "time" => DataType::Time,
-        "decimal" => DataType::Decimal,
-        "enum" => DataType::Enum,
-        "array" => DataType::Array,
-        "timestampms" | "timestamp_ms" => DataType::TimestampMs,
-        "ipv4" => DataType::Ipv4,
-        "ipv6" => DataType::Ipv6,
-        "subnet" => DataType::Subnet,
-        "port" => DataType::Port,
-        "latitude" => DataType::Latitude,
-        "longitude" => DataType::Longitude,
-        "geopoint" | "geo_point" => DataType::GeoPoint,
-        "country2" => DataType::Country2,
-        "country3" => DataType::Country3,
-        "lang2" => DataType::Lang2,
-        "lang5" => DataType::Lang5,
-        "currency" => DataType::Currency,
-        "coloralpha" | "color_alpha" => DataType::ColorAlpha,
-        "bigint" | "big_int" => DataType::BigInt,
-        "keyref" => DataType::KeyRef,
-        "docref" => DataType::DocRef,
-        "tableref" => DataType::TableRef,
-        "pageref" => DataType::PageRef,
-        "secret" => DataType::Secret,
-        "password" => DataType::Password,
-        other => {
-            return Err(crate::RedDBError::Query(format!(
-                "unsupported declared data type '{}'",
-                other
-            )))
-        }
-    };
-    Ok(data_type)
+    resolve_declared_data_type(value).map_err(|err| crate::RedDBError::Query(err.to_string()))
 }
 
 fn data_type_name(data_type: DataType) -> &'static str {

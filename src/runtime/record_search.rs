@@ -156,15 +156,39 @@ pub(super) fn runtime_table_record_from_entity_projected(
 
     match entity.data {
         EntityData::Row(row) => {
-            let mut record = UnifiedRecord::new();
+            let mut record = UnifiedRecord::with_capacity(1 + columns.len());
 
             // Always include system fields needed for filtering
             record.set("red_entity_id", Value::UnsignedInteger(entity.id.raw()));
 
             if let Some(named) = row.named {
+                // Named path (single-insert entities): O(1) HashMap lookup per column.
                 for col in columns {
                     if let Some(value) = named.get(col) {
                         record.set(col, value.clone());
+                    }
+                }
+            } else if let Some(ref schema) = row.schema {
+                // Columnar path (bulk-insert entities): resolve column name → index
+                // in schema, then access row.columns[idx]. O(n_schema * n_projected)
+                // but n_projected is small (explicit SELECT list).
+                for col in columns {
+                    if let Some(idx) = schema.iter().position(|s| s == col) {
+                        if let Some(value) = row.columns.get(idx) {
+                            record.set(col, value.clone());
+                        }
+                    }
+                }
+            } else {
+                // Positional-only (no schema, no names): map c0/c1/... or fallback
+                for col in columns {
+                    if let Some(idx) = col
+                        .strip_prefix('c')
+                        .and_then(|s| s.parse::<usize>().ok())
+                    {
+                        if let Some(value) = row.columns.get(idx) {
+                            record.set(col, value.clone());
+                        }
                     }
                 }
             }
@@ -195,6 +219,52 @@ pub(super) fn runtime_table_record_from_entity_projected(
         }
         _ => None,
     }
+}
+
+/// Ref-based projected materialization — avoids cloning the whole entity.
+/// Only clones the K projected field values, not the N-K ignored ones.
+/// Used by the fast-path scan when `select_cols` is non-empty.
+///
+/// Returns `None` for non-Row entities (caller falls back to owned path).
+pub(super) fn runtime_table_record_from_entity_ref_projected(
+    entity: &UnifiedEntity,
+    columns: &[String],
+) -> Option<UnifiedRecord> {
+    if columns.is_empty() {
+        return None; // caller should use full materialization for SELECT *
+    }
+    let row = entity.data.as_row()?;
+
+    let mut record = UnifiedRecord::with_capacity(1 + columns.len());
+    record.set("red_entity_id", Value::UnsignedInteger(entity.id.raw()));
+
+    if let Some(ref named) = row.named {
+        for col in columns {
+            if let Some(value) = named.get(col.as_str()) {
+                record.set(col, value.clone());
+            }
+        }
+    } else if let Some(ref schema) = row.schema {
+        for col in columns {
+            if let Some(idx) = schema.iter().position(|s| s == col) {
+                if let Some(value) = row.columns.get(idx) {
+                    record.set(col, value.clone());
+                }
+            }
+        }
+    } else {
+        for col in columns {
+            if let Some(idx) = col
+                .strip_prefix('c')
+                .and_then(|s| s.parse::<usize>().ok())
+            {
+                if let Some(value) = row.columns.get(idx) {
+                    record.set(col, value.clone());
+                }
+            }
+        }
+    }
+    Some(record)
 }
 
 #[inline(never)]

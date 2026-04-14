@@ -40,7 +40,10 @@ impl RedDbError {
     }
 
     fn __repr__(&self) -> String {
-        format!("RedDbError(code={:?}, message={:?})", self.code, self.message)
+        format!(
+            "RedDbError(code={:?}, message={:?})",
+            self.code, self.message
+        )
     }
 }
 
@@ -110,14 +113,15 @@ impl RedDb {
             }
             Backend::Grpc(client) => {
                 let json_payload = pydict_to_json_str(payload)?;
-                crate::get_runtime()
+                let reply = crate::get_runtime()
                     .block_on(async {
                         let mut guard = client.lock().expect("client poisoned");
-                        guard.create_row(collection, &json_payload).await
+                        guard.create_row_entity(collection, &json_payload).await
                     })
                     .map_err(|e| err("QUERY_ERROR", e.to_string()))?;
                 let out = PyDict::new(py);
                 out.set_item("affected", 1u64)?;
+                out.set_item("id", reply.id.to_string())?;
                 Ok(out)
             }
         }
@@ -136,9 +140,9 @@ impl RedDb {
             Backend::Embedded(rt) => {
                 let mut total: u64 = 0;
                 for item in payloads.iter() {
-                    let dict = item.downcast::<PyDict>().map_err(|_| {
-                        err("INVALID_PARAMS", "bulk_insert payloads must be dicts")
-                    })?;
+                    let dict = item
+                        .downcast::<PyDict>()
+                        .map_err(|_| err("INVALID_PARAMS", "bulk_insert payloads must be dicts"))?;
                     let fields = pydict_to_fields(dict)?;
                     total += rt
                         .insert_object(collection, &fields)
@@ -151,14 +155,14 @@ impl RedDb {
             Backend::Grpc(client) => {
                 let mut total: u64 = 0;
                 for item in payloads.iter() {
-                    let dict = item.downcast::<PyDict>().map_err(|_| {
-                        err("INVALID_PARAMS", "bulk_insert payloads must be dicts")
-                    })?;
+                    let dict = item
+                        .downcast::<PyDict>()
+                        .map_err(|_| err("INVALID_PARAMS", "bulk_insert payloads must be dicts"))?;
                     let json_payload = pydict_to_json_str(dict)?;
                     crate::get_runtime()
                         .block_on(async {
                             let mut guard = client.lock().expect("client poisoned");
-                            guard.create_row(collection, &json_payload).await
+                            guard.create_row_entity(collection, &json_payload).await
                         })
                         .map_err(|e| err("QUERY_ERROR", e.to_string()))?;
                     total += 1;
@@ -181,21 +185,25 @@ impl RedDb {
         match &self.backend {
             #[cfg(feature = "embedded")]
             Backend::Embedded(rt) => {
-                let n = rt.delete(collection, id).map_err(|e| err("QUERY_ERROR", e))?;
+                let n = rt
+                    .delete(collection, id)
+                    .map_err(|e| err("QUERY_ERROR", e))?;
                 let out = PyDict::new(py);
                 out.set_item("affected", n)?;
                 Ok(out)
             }
             Backend::Grpc(client) => {
-                let sql = format!("DELETE FROM {collection} WHERE _entity_id = {id}");
-                let _ = crate::get_runtime()
+                let id = id
+                    .parse::<u64>()
+                    .map_err(|_| err("INVALID_PARAMS", "id must be a numeric string"))?;
+                crate::get_runtime()
                     .block_on(async {
                         let mut guard = client.lock().expect("client poisoned");
-                        guard.query(&sql).await
+                        guard.delete_entity(collection, id).await
                     })
                     .map_err(|e| err("QUERY_ERROR", e.to_string()))?;
                 let out = PyDict::new(py);
-                out.set_item("affected", 0u64)?;
+                out.set_item("affected", 1u64)?;
                 Ok(out)
             }
         }
@@ -204,8 +212,25 @@ impl RedDb {
     fn health<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         self.ensure_open()?;
         let out = PyDict::new(py);
-        out.set_item("ok", true)?;
-        out.set_item("version", env!("CARGO_PKG_VERSION"))?;
+        match &self.backend {
+            #[cfg(feature = "embedded")]
+            Backend::Embedded(_) => {
+                out.set_item("ok", true)?;
+                out.set_item("version", env!("CARGO_PKG_VERSION"))?;
+            }
+            Backend::Grpc(client) => {
+                let health = crate::get_runtime()
+                    .block_on(async {
+                        let mut guard = client.lock().expect("client poisoned");
+                        guard.health_status().await
+                    })
+                    .map_err(|e| err("QUERY_ERROR", e.to_string()))?;
+                out.set_item("ok", health.healthy)?;
+                out.set_item("state", health.state)?;
+                out.set_item("checked_at_unix_ms", health.checked_at_unix_ms)?;
+                out.set_item("version", env!("CARGO_PKG_VERSION"))?;
+            }
+        }
         Ok(out)
     }
 
@@ -452,10 +477,7 @@ fn json_escape(s: &str) -> String {
 /// dict shape the embedded backend returns. We rely on the fact that
 /// the server produces standard JSON; parse it with `serde_json` (already
 /// a direct dep of this crate via the gRPC stack) and rebuild a PyDict.
-fn grpc_query_json_to_pydict<'py>(
-    py: Python<'py>,
-    json_str: &str,
-) -> PyResult<Bound<'py, PyDict>> {
+fn grpc_query_json_to_pydict<'py>(py: Python<'py>, json_str: &str) -> PyResult<Bound<'py, PyDict>> {
     let parsed: serde_json::Value = serde_json::from_str(json_str)
         .map_err(|e| err("INTERNAL_ERROR", format!("bad server JSON: {e}")))?;
 
@@ -492,10 +514,7 @@ fn grpc_query_json_to_pydict<'py>(
     }
     out.set_item("columns", columns_py)?;
 
-    let affected = parsed
-        .get("affected")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
+    let affected = parsed.get("affected").and_then(|v| v.as_u64()).unwrap_or(0);
     out.set_item("affected", affected)?;
 
     let statement = parsed
@@ -508,10 +527,7 @@ fn grpc_query_json_to_pydict<'py>(
     Ok(out)
 }
 
-fn json_value_to_py<'py>(
-    py: Python<'py>,
-    v: &serde_json::Value,
-) -> PyResult<Bound<'py, PyAny>> {
+fn json_value_to_py<'py>(py: Python<'py>, v: &serde_json::Value) -> PyResult<Bound<'py, PyAny>> {
     use pyo3::IntoPyObject;
     Ok(match v {
         serde_json::Value::Null => py.None().into_bound(py),

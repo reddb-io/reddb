@@ -176,6 +176,35 @@ fn test_parse_between_mixed_bounds() {
 }
 
 #[test]
+fn test_parse_compare_rhs_bare_identifier_uses_compare_fields() {
+    let query = parse("SELECT * FROM sensors WHERE temp = max_temp").unwrap();
+    let QueryExpr::Table(tq) = query else {
+        panic!("Expected TableQuery");
+    };
+    let Some(Filter::CompareFields { op, right, .. }) = tq.filter else {
+        panic!("Expected CompareFields, got {:?}", tq.filter);
+    };
+    assert_eq!(op, CompareOp::Eq);
+    let FieldRef::TableColumn { table, column } = right else {
+        panic!("Expected table column rhs");
+    };
+    assert!(table.is_empty());
+    assert_eq!(column, "max_temp");
+}
+
+#[test]
+fn test_parse_compare_rhs_column_expression_stays_compare_expr() {
+    let query = parse("SELECT * FROM sensors WHERE temp = max_temp + 1").unwrap();
+    let QueryExpr::Table(tq) = query else {
+        panic!("Expected TableQuery");
+    };
+    assert!(
+        matches!(tq.filter, Some(Filter::CompareExpr { .. })),
+        "column arithmetic rhs must stay on CompareExpr"
+    );
+}
+
+#[test]
 fn test_parse_cast_lowercase_keyword() {
     // keyword should be case-insensitive
     let query = parse("SELECT cast(age as float) FROM users").unwrap();

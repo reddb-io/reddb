@@ -74,7 +74,7 @@ pub fn parallel_scan<T, U, F>(
     worker: F,
 ) -> Vec<U>
 where
-    T: Send + Sync + Clone,
+    T: Send + Sync + Clone + 'static,
     U: Send + 'static,
     F: Fn(&[T]) -> Vec<U> + Send + Sync + 'static,
 {
@@ -149,7 +149,7 @@ pub fn parallel_count<T, F>(
     counter: F,
 ) -> u64
 where
-    T: Send + Sync + Clone,
+    T: Send + Sync + Clone + 'static,
     F: Fn(&[T]) -> u64 + Send + Sync + 'static,
 {
     if chunk_count <= 1 || input.len() < MIN_PARALLEL_ROWS {
@@ -193,4 +193,28 @@ pub fn default_parallelism() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get().min(8))
         .unwrap_or(1)
+}
+
+/// Phase 3.4 wiring entry point. Calls `parallel_scan` with
+/// `default_parallelism()` worker count. Used by the runtime
+/// scan executor when its planner cost model decides parallel
+/// is profitable (input size > MIN_PARALLEL_ROWS). Saves the
+/// caller from manually threading the worker count through.
+pub fn parallel_scan_default<T, U, F>(input: &[T], worker: F) -> Vec<U>
+where
+    T: Send + Sync + Clone + 'static,
+    U: Send + 'static,
+    F: Fn(&[T]) -> Vec<U> + Send + Sync + 'static,
+{
+    parallel_scan(input, default_parallelism(), worker)
+}
+
+/// Phase 3.4 wiring entry point for COUNT(*) over a filtered
+/// scan. Same default parallelism as `parallel_scan_default`.
+pub fn parallel_count_default<T, F>(input: &[T], counter: F) -> u64
+where
+    T: Send + Sync + Clone + 'static,
+    F: Fn(&[T]) -> u64 + Send + Sync + 'static,
+{
+    parallel_count(input, default_parallelism(), counter)
 }

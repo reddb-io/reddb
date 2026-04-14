@@ -26,6 +26,7 @@ pub mod registry;
 pub mod stats;
 pub mod tid_bitmap;
 pub mod zone_map;
+pub mod zone_map_persist;
 
 pub use bloom_segment::{BloomSegment, BloomSegmentBuilder, HasBloom};
 pub use heavy_hitters::HeavyHitters;
@@ -162,6 +163,7 @@ mod tests {
                 approx_bytes: 0,
                 kind: IndexKind::BTree,
                 has_bloom: true,
+                index_correlation: 0.0,
             }
         }
         fn bloom(&self) -> Option<&BloomFilter> {

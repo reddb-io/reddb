@@ -250,7 +250,8 @@ impl JoinQueryBuilder {
             | QueryExpr::DropTimeSeries(_)
             | QueryExpr::CreateQueue(_)
             | QueryExpr::DropQueue(_)
-            | QueryExpr::QueueCommand(_) => {}
+            | QueryExpr::QueueCommand(_)
+            | QueryExpr::ExplainAlter(_) => {}
         }
         self
     }

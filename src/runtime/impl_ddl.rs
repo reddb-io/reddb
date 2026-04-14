@@ -6,7 +6,7 @@
 //! rigid constraints.
 
 use super::*;
-use crate::storage::query::CreateColumnDef;
+use crate::storage::query::{analyze_create_table, resolve_declared_data_type, CreateColumnDef};
 
 impl RedDBRuntime {
     /// Execute CREATE TABLE
@@ -20,6 +20,7 @@ impl RedDBRuntime {
         query: &CreateTableQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         let store = self.inner.db.store();
+        analyze_create_table(query).map_err(|err| RedDBError::Query(err.to_string()))?;
 
         // Check if the collection already exists.
         let exists = store.get_collection(&query.name).is_some();
@@ -37,6 +38,10 @@ impl RedDBRuntime {
             )));
         }
 
+        // Build and validate the contract before mutating storage so invalid
+        // SQL types / duplicate columns do not leave partial side effects.
+        let contract = collection_contract_from_create_table(query)?;
+
         // Create the collection.
         store
             .create_collection(&query.name)
@@ -49,7 +54,7 @@ impl RedDBRuntime {
         }
         self.inner
             .db
-            .save_collection_contract(collection_contract_from_create_table(query)?)
+            .save_collection_contract(contract)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         self.inner
             .db
@@ -186,6 +191,67 @@ impl RedDBRuntime {
             raw_query.to_string(),
             &message,
             "alter",
+        ))
+    }
+
+    /// Execute EXPLAIN ALTER FOR CREATE TABLE
+    ///
+    /// Pure read: computes the schema diff between the target table's
+    /// current `CollectionContract` and the embedded `CREATE TABLE` body,
+    /// and returns it as SQL `ALTER TABLE` text (default) or structured
+    /// JSON. Never mutates storage.
+    pub fn execute_explain_alter(
+        &self,
+        raw_query: &str,
+        query: &ExplainAlterQuery,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        // Validate the target CREATE TABLE body so syntactically valid
+        // but semantically broken targets (bad SQL types, duplicate
+        // columns) are caught here rather than inside the diff engine.
+        analyze_create_table(&query.target).map_err(|err| RedDBError::Query(err.to_string()))?;
+
+        let current_contract = self
+            .inner
+            .db
+            .collection_contract(&query.target.name);
+
+        let current_columns: Vec<crate::physical::DeclaredColumnContract> = current_contract
+            .as_ref()
+            .map(|c| c.declared_columns.clone())
+            .unwrap_or_default();
+
+        let diff = super::schema_diff::compute_column_diff(
+            &query.target.name,
+            &current_columns,
+            &query.target.columns,
+        );
+
+        let rendered = match query.format {
+            ExplainFormat::Sql => super::schema_diff::format_as_sql(&diff),
+            ExplainFormat::Json => super::schema_diff::format_as_json(&diff),
+        };
+
+        let format_label = match query.format {
+            ExplainFormat::Sql => "sql",
+            ExplainFormat::Json => "json",
+        };
+
+        let columns = vec![
+            "table".to_string(),
+            "format".to_string(),
+            "diff".to_string(),
+        ];
+        let row = vec![
+            ("table".to_string(), Value::Text(query.target.name.clone())),
+            ("format".to_string(), Value::Text(format_label.to_string())),
+            ("diff".to_string(), Value::Text(rendered)),
+        ];
+
+        Ok(RuntimeQueryResult::ok_records(
+            raw_query.to_string(),
+            columns,
+            vec![row],
+            "explain",
         ))
     }
 
@@ -345,6 +411,7 @@ fn collection_contract_from_create_table(
         declared_columns.push(crate::physical::DeclaredColumnContract {
             name: "created_at".to_string(),
             data_type: "BIGINT".to_string(),
+            sql_type: Some(crate::storage::schema::SqlTypeName::simple("BIGINT")),
             not_null: true,
             default: None,
             compress: None,
@@ -357,6 +424,7 @@ fn collection_contract_from_create_table(
         declared_columns.push(crate::physical::DeclaredColumnContract {
             name: "updated_at".to_string(),
             data_type: "BIGINT".to_string(),
+            sql_type: Some(crate::storage::schema::SqlTypeName::simple("BIGINT")),
             not_null: true,
             default: None,
             compress: None,
@@ -409,6 +477,7 @@ fn declared_column_contract_from_ddl(
     crate::physical::DeclaredColumnContract {
         name: column.name.clone(),
         data_type: column.data_type.clone(),
+        sql_type: Some(column.sql_type.clone()),
         not_null: column.not_null,
         default: column.default.clone(),
         compress: column.compress,
@@ -623,7 +692,8 @@ fn build_table_def_from_create_table(
 }
 
 fn column_def_from_ddl(column: &CreateColumnDef) -> RedDBResult<crate::storage::schema::ColumnDef> {
-    let data_type = parse_schema_data_type(&column.data_type)?;
+    let data_type = resolve_declared_data_type(&column.data_type)
+        .map_err(|err| RedDBError::Query(err.to_string()))?;
     let mut column_def = crate::storage::schema::ColumnDef::new(column.name.clone(), data_type);
     if column.not_null {
         column_def = column_def.not_null();
@@ -641,7 +711,10 @@ fn column_def_from_ddl(column: &CreateColumnDef) -> RedDBResult<crate::storage::
         column_def = column_def.with_precision(precision);
     }
     if let Some(element_type) = &column.array_element {
-        column_def = column_def.with_element_type(parse_schema_data_type(element_type)?);
+        column_def = column_def.with_element_type(
+            resolve_declared_data_type(element_type)
+                .map_err(|err| RedDBError::Query(err.to_string()))?,
+        );
     }
     column_def = column_def.with_metadata("ddl_data_type", column.data_type.clone());
     if column.unique {
@@ -651,70 +724,6 @@ fn column_def_from_ddl(column: &CreateColumnDef) -> RedDBResult<crate::storage::
         column_def = column_def.with_metadata("primary_key", "true");
     }
     Ok(column_def)
-}
-
-fn parse_schema_data_type(value: &str) -> RedDBResult<crate::storage::schema::DataType> {
-    let normalized = value.trim().to_ascii_lowercase();
-    let data_type = match normalized.as_str() {
-        "integer" | "int" => crate::storage::schema::DataType::Integer,
-        "unsignedinteger" | "unsigned_integer" | "uint" => {
-            crate::storage::schema::DataType::UnsignedInteger
-        }
-        "float" | "double" | "real" => crate::storage::schema::DataType::Float,
-        "text" | "string" => crate::storage::schema::DataType::Text,
-        "blob" => crate::storage::schema::DataType::Blob,
-        "boolean" | "bool" => crate::storage::schema::DataType::Boolean,
-        "timestamp" => crate::storage::schema::DataType::Timestamp,
-        "duration" => crate::storage::schema::DataType::Duration,
-        "ipaddr" | "ip" => crate::storage::schema::DataType::IpAddr,
-        "macaddr" => crate::storage::schema::DataType::MacAddr,
-        "vector" => crate::storage::schema::DataType::Vector,
-        "json" => crate::storage::schema::DataType::Json,
-        "uuid" => crate::storage::schema::DataType::Uuid,
-        "noderef" => crate::storage::schema::DataType::NodeRef,
-        "edgeref" => crate::storage::schema::DataType::EdgeRef,
-        "vectorref" => crate::storage::schema::DataType::VectorRef,
-        "rowref" => crate::storage::schema::DataType::RowRef,
-        "color" => crate::storage::schema::DataType::Color,
-        "email" => crate::storage::schema::DataType::Email,
-        "url" => crate::storage::schema::DataType::Url,
-        "phone" => crate::storage::schema::DataType::Phone,
-        "semver" => crate::storage::schema::DataType::Semver,
-        "cidr" => crate::storage::schema::DataType::Cidr,
-        "date" => crate::storage::schema::DataType::Date,
-        "time" => crate::storage::schema::DataType::Time,
-        "decimal" => crate::storage::schema::DataType::Decimal,
-        "enum" => crate::storage::schema::DataType::Enum,
-        "array" => crate::storage::schema::DataType::Array,
-        "timestampms" | "timestamp_ms" => crate::storage::schema::DataType::TimestampMs,
-        "ipv4" => crate::storage::schema::DataType::Ipv4,
-        "ipv6" => crate::storage::schema::DataType::Ipv6,
-        "subnet" => crate::storage::schema::DataType::Subnet,
-        "port" => crate::storage::schema::DataType::Port,
-        "latitude" => crate::storage::schema::DataType::Latitude,
-        "longitude" => crate::storage::schema::DataType::Longitude,
-        "geopoint" | "geo_point" => crate::storage::schema::DataType::GeoPoint,
-        "country2" => crate::storage::schema::DataType::Country2,
-        "country3" => crate::storage::schema::DataType::Country3,
-        "lang2" => crate::storage::schema::DataType::Lang2,
-        "lang5" => crate::storage::schema::DataType::Lang5,
-        "currency" => crate::storage::schema::DataType::Currency,
-        "coloralpha" | "color_alpha" => crate::storage::schema::DataType::ColorAlpha,
-        "bigint" | "big_int" => crate::storage::schema::DataType::BigInt,
-        "keyref" => crate::storage::schema::DataType::KeyRef,
-        "docref" => crate::storage::schema::DataType::DocRef,
-        "tableref" => crate::storage::schema::DataType::TableRef,
-        "pageref" => crate::storage::schema::DataType::PageRef,
-        "secret" => crate::storage::schema::DataType::Secret,
-        "password" => crate::storage::schema::DataType::Password,
-        other => {
-            return Err(RedDBError::Query(format!(
-                "unsupported declared data type '{}'",
-                other
-            )))
-        }
-    };
-    Ok(data_type)
 }
 
 fn current_unix_ms() -> u128 {

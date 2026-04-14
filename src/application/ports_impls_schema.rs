@@ -2,6 +2,7 @@ use super::*;
 use crate::storage::query::{
     CreateColumnDef, CreateTableQuery, CreateTimeSeriesQuery, DropTableQuery, DropTimeSeriesQuery,
 };
+use crate::storage::schema::SqlTypeName;
 
 fn api_query(label: &str, name: &str) -> String {
     format!("api.{label}({name})")
@@ -10,9 +11,11 @@ fn api_query(label: &str, name: &str) -> String {
 fn to_create_column_def(
     column: crate::application::schema::CreateTableColumnInput,
 ) -> CreateColumnDef {
+    let sql_type = SqlTypeName::parse_declared(&column.data_type);
     CreateColumnDef {
         name: column.name,
         data_type: column.data_type,
+        sql_type,
         not_null: column.not_null,
         default: column.default,
         compress: column.compress,

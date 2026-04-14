@@ -10,6 +10,37 @@ use crate::grpc::proto::*;
 use tonic::transport::Channel;
 use tonic::Request;
 
+#[derive(Debug, Clone)]
+pub struct HealthStatus {
+    pub healthy: bool,
+    pub state: String,
+    pub checked_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct QueryResponse {
+    pub ok: bool,
+    pub mode: String,
+    pub statement: String,
+    pub engine: String,
+    pub columns: Vec<String>,
+    pub record_count: u64,
+    pub result_json: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreatedEntity {
+    pub ok: bool,
+    pub id: u64,
+    pub entity_json: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct OperationStatus {
+    pub ok: bool,
+    pub message: String,
+}
+
 pub struct RedDBClient {
     inner: RedDbClient<Channel>,
     token: Option<String>,
@@ -53,17 +84,29 @@ impl RedDBClient {
     // Wrappers for common operations
     // ========================================================================
 
-    pub async fn health(&mut self) -> Result<String, Box<dyn std::error::Error>> {
+    pub async fn health_status(&mut self) -> Result<HealthStatus, Box<dyn std::error::Error>> {
         let req = self.auth_request(Empty {});
         let resp = self.inner.health(req).await?;
         let reply = resp.into_inner();
+        Ok(HealthStatus {
+            healthy: reply.healthy,
+            state: reply.state,
+            checked_at_unix_ms: reply.checked_at_unix_ms,
+        })
+    }
+
+    pub async fn health(&mut self) -> Result<String, Box<dyn std::error::Error>> {
+        let reply = self.health_status().await?;
         Ok(format!(
             "state: {}, healthy: {}",
             reply.state, reply.healthy
         ))
     }
 
-    pub async fn query(&mut self, sql: &str) -> Result<String, Box<dyn std::error::Error>> {
+    pub async fn query_reply(
+        &mut self,
+        sql: &str,
+    ) -> Result<QueryResponse, Box<dyn std::error::Error>> {
         let req = self.auth_request(QueryRequest {
             query: sql.to_string(),
             entity_types: vec![],
@@ -71,6 +114,19 @@ impl RedDBClient {
         });
         let resp = self.inner.query(req).await?;
         let reply = resp.into_inner();
+        Ok(QueryResponse {
+            ok: reply.ok,
+            mode: reply.mode,
+            statement: reply.statement,
+            engine: reply.engine,
+            columns: reply.columns,
+            record_count: reply.record_count,
+            result_json: reply.result_json,
+        })
+    }
+
+    pub async fn query(&mut self, sql: &str) -> Result<String, Box<dyn std::error::Error>> {
+        let reply = self.query_reply(sql).await?;
         Ok(reply.result_json)
     }
 
@@ -118,13 +174,26 @@ impl RedDBClient {
         collection: &str,
         json: &str,
     ) -> Result<String, Box<dyn std::error::Error>> {
+        let reply = self.create_row_entity(collection, json).await?;
+        Ok(format!("id: {}, entity: {}", reply.id, reply.entity_json))
+    }
+
+    pub async fn create_row_entity(
+        &mut self,
+        collection: &str,
+        json: &str,
+    ) -> Result<CreatedEntity, Box<dyn std::error::Error>> {
         let req = self.auth_request(JsonCreateRequest {
             collection: collection.to_string(),
             payload_json: json.to_string(),
         });
         let resp = self.inner.create_row(req).await?;
         let reply = resp.into_inner();
-        Ok(format!("id: {}, entity: {}", reply.id, reply.entity_json))
+        Ok(CreatedEntity {
+            ok: reply.ok,
+            id: reply.id,
+            entity_json: reply.entity_json,
+        })
     }
 
     pub async fn explain(&mut self, sql: &str) -> Result<String, Box<dyn std::error::Error>> {
@@ -158,5 +227,22 @@ impl RedDBClient {
         let req = self.auth_request(Empty {});
         let resp = self.inner.replication_status(req).await?;
         Ok(resp.into_inner().payload)
+    }
+
+    pub async fn delete_entity(
+        &mut self,
+        collection: &str,
+        id: u64,
+    ) -> Result<OperationStatus, Box<dyn std::error::Error>> {
+        let req = self.auth_request(DeleteEntityRequest {
+            collection: collection.to_string(),
+            id,
+        });
+        let resp = self.inner.delete_entity(req).await?;
+        let reply = resp.into_inner();
+        Ok(OperationStatus {
+            ok: reply.ok,
+            message: reply.message,
+        })
     }
 }

@@ -156,6 +156,55 @@ impl OrderBy {
         rows.sort_by(|a, b| self.compare(a, b, &get_value));
     }
 
+    /// Phase 3.2 dispatch entry point. Combines `OrderBy::sort_rows`
+    /// and `incremental_sort_top_k` behind a single callable that
+    /// the planner / executor invokes after deciding the strategy
+    /// via `planner::pathkeys::plan_sort`.
+    ///
+    /// `prefix_keys` is the number of leading sort keys the input
+    /// already satisfies (0 if unknown). `limit` is the LIMIT k for
+    /// top-k early termination, or `None` for an unbounded sort.
+    ///
+    /// Behavior matrix:
+    /// - `prefix_keys == 0` && `limit == None` → full `sort_rows`.
+    /// - `prefix_keys == 0` && `limit == Some(k)` → full sort then
+    ///   truncate to k.
+    /// - `prefix_keys > 0` && `limit == Some(k)` → call
+    ///   `incremental_sort_top_k(prefix_keys, k)`.
+    /// - `prefix_keys > 0` && `limit == None` → walk groups and
+    ///   sort within each, no early termination (still cheaper than
+    ///   full sort because each group is independent).
+    pub fn dispatch_sort<R>(
+        &self,
+        rows: Vec<R>,
+        prefix_keys: usize,
+        limit: Option<usize>,
+        get_value: impl Fn(&R, &str) -> Value,
+    ) -> Vec<R> {
+        if self.is_empty() {
+            return rows;
+        }
+        match (prefix_keys, limit) {
+            (0, None) => {
+                let mut all = rows;
+                self.sort_rows(&mut all, &get_value);
+                all
+            }
+            (0, Some(k)) => {
+                let mut all = rows;
+                self.sort_rows(&mut all, &get_value);
+                all.truncate(k);
+                all
+            }
+            (_, Some(k)) => self.incremental_sort_top_k(rows, prefix_keys, k, get_value),
+            (_, None) => {
+                // Group-by-prefix sort with no early termination.
+                // Equivalent to incremental_sort_top_k with k = usize::MAX.
+                self.incremental_sort_top_k(rows, prefix_keys, usize::MAX, get_value)
+            }
+        }
+    }
+
     /// Incremental top-K sort.
     ///
     /// Fase 4 P3 win: when the upstream operator already returns

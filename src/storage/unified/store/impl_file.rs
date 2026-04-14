@@ -1048,6 +1048,28 @@ impl UnifiedStore {
                 *pos += len;
                 Value::Password(hash)
             }
+            // C3 TOAST: compressed Text (0x85) and Blob (0x86).
+            0x85 => {
+                let orig_len = Self::read_varu32_safe(buf, pos)?;
+                let comp_len = Self::read_varu32_safe(buf, pos)?;
+                let compressed = &buf[*pos..*pos + comp_len];
+                *pos += comp_len;
+                let mut out = vec![0u8; orig_len];
+                zstd::bulk::decompress_to_buffer(compressed, &mut out)
+                    .map_err(|e| format!("C3 Text decompress: {e}"))?;
+                Value::Text(String::from_utf8(out)
+                    .map_err(|e| format!("C3 Text UTF-8: {e}"))?)
+            }
+            0x86 => {
+                let orig_len = Self::read_varu32_safe(buf, pos)?;
+                let comp_len = Self::read_varu32_safe(buf, pos)?;
+                let compressed = &buf[*pos..*pos + comp_len];
+                *pos += comp_len;
+                let mut out = vec![0u8; orig_len];
+                zstd::bulk::decompress_to_buffer(compressed, &mut out)
+                    .map_err(|e| format!("C3 Blob decompress: {e}"))?;
+                Value::Blob(out)
+            }
             _ => return Err(format!("Unknown Value type: {}", type_byte).into()),
         })
     }
@@ -1078,11 +1100,40 @@ impl UnifiedStore {
                 buf.extend_from_slice(&f.to_le_bytes());
             }
             Value::Text(s) => {
+                // C3 TOAST: compress Text values > 2 KiB with zstd.
+                // Type 0x85 = compressed Text; type 5 = uncompressed (existing).
+                // Layout for 0x85: [0x85][orig_len: varuint][comp_len: varuint][compressed bytes]
+                const TEXT_COMPRESS_THRESHOLD: usize = 2048;
+                if s.len() >= TEXT_COMPRESS_THRESHOLD {
+                    if let Ok(compressed) = zstd::bulk::compress(s.as_bytes(), 3) {
+                        if compressed.len() < s.len() {
+                            buf.push(0x85); // compressed Text marker
+                            write_varu32(buf, s.len() as u32); // orig_len (decompression hint)
+                            write_varu32(buf, compressed.len() as u32);
+                            buf.extend_from_slice(&compressed);
+                            return; // written — skip uncompressed path
+                        }
+                    }
+                }
                 buf.push(5);
                 write_varu32(buf, s.len() as u32);
                 buf.extend_from_slice(s.as_bytes());
             }
             Value::Blob(bytes) => {
+                // C3 TOAST: compress Blob values > 2 KiB with zstd.
+                // Type 0x86 = compressed Blob; type 6 = uncompressed (existing).
+                const BLOB_COMPRESS_THRESHOLD: usize = 2048;
+                if bytes.len() >= BLOB_COMPRESS_THRESHOLD {
+                    if let Ok(compressed) = zstd::bulk::compress(bytes.as_slice(), 3) {
+                        if compressed.len() < bytes.len() {
+                            buf.push(0x86); // compressed Blob marker
+                            write_varu32(buf, bytes.len() as u32);
+                            write_varu32(buf, compressed.len() as u32);
+                            buf.extend_from_slice(&compressed);
+                            return;
+                        }
+                    }
+                }
                 buf.push(6);
                 write_varu32(buf, bytes.len() as u32);
                 buf.extend_from_slice(bytes);

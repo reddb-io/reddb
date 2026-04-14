@@ -145,3 +145,35 @@ pub fn execute_bitmap_scan_with_stats<F: RowFetcher>(
     }
     Ok((out, stats))
 }
+
+/// Phase 3.6 wiring entry point. Combines a list of per-index
+/// bitmaps via the requested boolean op and runs a single heap
+/// fetch over the result. The planner uses this when WHERE has
+/// multi-index AND/OR predicates.
+///
+/// `combine` controls the merge: `BitmapCombine::And` produces
+/// the intersection (rows matching every index), `Or` produces
+/// the union (rows matching any index).
+///
+/// Returns the scan rows in TID-sorted order. Caller can wrap
+/// in `execute_bitmap_scan_with_stats` instead if it wants the
+/// diagnostic counters.
+pub fn execute_combined_bitmap_scan<F: RowFetcher>(
+    bitmaps: Vec<TidBitmap>,
+    combine: BitmapCombine,
+    fetcher: &F,
+    rows_per_page: u32,
+) -> Result<Vec<F::Row>, F::Error> {
+    let merged = match combine {
+        BitmapCombine::And => crate::storage::index::tid_bitmap::intersect_all(bitmaps),
+        BitmapCombine::Or => crate::storage::index::tid_bitmap::union_all(bitmaps),
+    };
+    execute_bitmap_scan(&merged, fetcher, rows_per_page)
+}
+
+/// Boolean combinator passed into `execute_combined_bitmap_scan`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BitmapCombine {
+    And,
+    Or,
+}

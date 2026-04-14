@@ -4,7 +4,7 @@ use super::builders::{GraphQueryBuilder, PathQueryBuilder, TableQueryBuilder};
 pub use crate::storage::engine::distance::DistanceMetric;
 pub use crate::storage::engine::graph_store::{GraphEdgeType, GraphNodeType};
 pub use crate::storage::engine::vector_metadata::MetadataFilter;
-use crate::storage::schema::Value;
+use crate::storage::schema::{SqlTypeName, Value};
 
 /// Root query expression
 #[derive(Debug, Clone)]
@@ -59,6 +59,50 @@ pub enum QueryExpr {
     SetConfig { key: String, value: Value },
     /// SHOW CONFIG [prefix]
     ShowConfig { prefix: Option<String> },
+    /// EXPLAIN ALTER FOR CREATE TABLE name (...) [FORMAT JSON]
+    ///
+    /// Pure read command that diffs the embedded `CREATE TABLE`
+    /// statement against the live `CollectionContract` of the
+    /// table with the same name and returns the `ALTER TABLE`
+    /// operations that would close the gap. Never executes
+    /// anything — output is text (default) or JSON depending on
+    /// the optional `FORMAT JSON` suffix. Powers the Purple
+    /// framework's migration generator and any other client that
+    /// wants reddb to own the schema-diff rules.
+    ExplainAlter(ExplainAlterQuery),
+}
+
+/// AST node for `EXPLAIN ALTER FOR <CreateTableStmt> [FORMAT JSON]`.
+///
+/// `target` carries the CREATE TABLE structure exactly as the
+/// parser produces it for a regular CREATE — full reuse of
+/// `parse_create_table_body`. `format` determines whether the
+/// executor emits a `ALTER TABLE …;`-flavored text payload
+/// (the default — copy-paste friendly into the REPL) or a
+/// structured JSON object (machine-friendly).
+#[derive(Debug, Clone)]
+pub struct ExplainAlterQuery {
+    pub target: CreateTableQuery,
+    pub format: ExplainFormat,
+}
+
+/// Output format requested for an `EXPLAIN ALTER` command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExplainFormat {
+    /// Plain SQL text — `ALTER TABLE …;` lines plus header
+    /// comments and rename hints. Default; copy-paste friendly.
+    Sql,
+    /// Structured JSON object with `operations`,
+    /// `rename_candidates`, `summary`. Machine-friendly for
+    /// driver code (Purple migration generator, dashboards,
+    /// CLI tools).
+    Json,
+}
+
+impl Default for ExplainFormat {
+    fn default() -> Self {
+        Self::Sql
+    }
 }
 
 /// Probabilistic data structure commands
@@ -1027,8 +1071,10 @@ pub struct CreateTableQuery {
 pub struct CreateColumnDef {
     /// Column name
     pub name: String,
-    /// Data type (e.g. TEXT, INTEGER, EMAIL, ENUM(...), ARRAY(TEXT), DECIMAL(2))
+    /// Legacy declared type string preserved for the runtime/storage pipeline.
     pub data_type: String,
+    /// Structured SQL type used by the semantic layer.
+    pub sql_type: SqlTypeName,
     /// NOT NULL constraint
     pub not_null: bool,
     /// DEFAULT value expression

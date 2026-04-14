@@ -1,4 +1,4 @@
-.PHONY: help build release test test-fast test-persistent clean run run-grpc install fmt lint check link unlink dev which patch minor major docs publish publish-dry-run env-up env-down env-logs test-env test-env-shell test-env-rust
+.PHONY: help build build-fast release test test-fast test-persistent clean run run-grpc install fmt lint check check-driver-rust check-driver-python timings link unlink dev which patch minor major docs publish publish-dry-run env-up env-down env-logs test-env test-env-shell test-env-rust
 
 # Paths
 LOCAL_BIN := $(HOME)/.local/bin
@@ -11,6 +11,7 @@ help:
 	@echo ""
 	@echo "Core:"
 	@echo "  make build         - Build debug version"
+	@echo "  make build-fast    - Build the `red` binary with the release-fast profile"
 	@echo "  make release       - Build optimized release version"
 	@echo "  make test          - Run the default local test layer"
 	@echo "  make test-fast     - Run the default local test layer"
@@ -26,6 +27,9 @@ help:
 	@echo "  make fmt           - Format code"
 	@echo "  make lint          - Run clippy"
 	@echo "  make check         - Quick compile check"
+	@echo "  make check-driver-rust - Compile-check the Rust SDK with gRPC enabled"
+	@echo "  make check-driver-python - Compile-check the Python SDK"
+	@echo "  make timings       - Generate cargo build timings for the `red` binary"
 	@echo ""
 	@echo "Release:"
 	@echo "  make patch         - Release bump + commit/tag (patch)"
@@ -38,6 +42,9 @@ help:
 # Build debug version
 build:
 	cargo build
+
+build-fast:
+	cargo build --profile release-fast --bin red
 
 # Build release version (optimized)
 release:
@@ -76,6 +83,15 @@ lint:
 # Quick compile check
 check:
 	cargo check --locked
+
+check-driver-rust:
+	cargo check --manifest-path drivers/rust/Cargo.toml --features grpc
+
+check-driver-python:
+	cargo check --manifest-path drivers/python/Cargo.toml
+
+timings:
+	cargo build --profile release-fast --bin red --timings
 
 # Install from source
 install:

@@ -277,3 +277,41 @@ pub fn build_table_analysis(
         elapsed_secs,
     }
 }
+
+/// Phase 3.7 cutover entry point. The runtime calls this to
+/// kick off an ANALYZE TABLE pass without going through the
+/// SQL DDL parser — for now the only public surface is via
+/// the API/HTTP layer, which avoids a `QueryExpr` cascade.
+///
+/// Inputs:
+/// - `table_name`: the collection to analyse
+/// - `column_names`: ordered list of columns the caller wants
+///   stats for (typically `SchemaRegistry::columns_of(table)`)
+/// - `sampled_rows`: the row sample the caller has already
+///   fetched. Each inner Vec is one row, indexed parallel to
+///   `column_names`. `None` represents NULL.
+/// - `total_count`: the full row count (not the sample size),
+///   used by selectivity estimates downstream.
+///
+/// Returns the final `TableAnalysis` ready to feed into
+/// `StatsProvider::update`. Phase 5 wires the caller chain
+/// (sample fetch → this call → stats provider update) into
+/// `runtime::impl_ddl::handle_analyze`.
+pub fn run_analyze_from_sample(
+    table_name: impl Into<String>,
+    column_names: &[String],
+    sampled_rows: &[Vec<Option<String>>],
+    total_count: u64,
+) -> TableAnalysis {
+    let opts = AnalyzeOptions::default();
+    let columns = compute_column_stats(column_names, sampled_rows, total_count, opts);
+    let avg_row_size = sampled_rows
+        .first()
+        .map(|row| {
+            row.iter()
+                .map(|v| v.as_ref().map(|s| s.len()).unwrap_or(0))
+                .sum::<usize>() as u64
+        })
+        .unwrap_or(0);
+    build_table_analysis(table_name, total_count, avg_row_size, columns, 0.0)
+}

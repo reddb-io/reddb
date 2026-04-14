@@ -3,8 +3,62 @@
 //! Converts human-readable input strings into compact native Value representations.
 //! Each parser validates format, enforces constraints, and produces the most compact
 //! binary encoding possible for the target type.
+//!
+//! ## Phase 2 cutover bridge
+//!
+//! The legacy `coerce()` function below is the historical entry point —
+//! it owns ~1400 LOC of bespoke parsing logic for every reddb type. Phase 2
+//! of the closing plan retires the bulk of it in favor of the catalog-driven
+//! resolver in `cast_catalog`, `function_catalog`, `operator_catalog`, and
+//! `expr_typing`. The cutover is a *bridge*, not a flag flip: callers that
+//! understand the catalog flow call `coerce_via_catalog` first, and only
+//! drop into the legacy `coerce()` when the catalog returns `NotCovering`.
 
+use super::cast_catalog::{find_cast, CastContext};
 use super::types::{DataType, Value};
+
+/// Phase 2 cutover entry point. Routes through the cast catalog when
+/// possible, falls back to the legacy `coerce()` text parser when
+/// the catalog has no entry for the (src, target) pair.
+///
+/// `src_type` is the type of `value` BEFORE coercion (typically
+/// `DataType::Text` when coming from a JSON literal or SQL parser
+/// expression). `target` is the destination column type.
+///
+/// Resolution:
+/// 1. Identity (src == target) → return value unchanged.
+/// 2. `cast_catalog::find_cast(src, target, Assignment)` hit → use
+///    catalog cast logic (currently delegates to legacy `coerce()`
+///    for actual conversion since catalog is metadata-only at Phase 2).
+/// 3. Catalog miss → fall back to legacy `coerce()` for backward compat.
+///
+/// As the catalog grows in later phases, more (src, target) pairs
+/// hit the catalog path and the legacy fallback shrinks.
+pub fn coerce_via_catalog(
+    value: &Value,
+    src_type: DataType,
+    target: DataType,
+    enum_variants: Option<&[String]>,
+) -> Result<Value, String> {
+    // Identity: zero work.
+    if src_type == target {
+        return Ok(value.clone());
+    }
+
+    // Catalog lookup at Assignment context (INSERT/UPDATE RHS).
+    if find_cast(src_type, target, CastContext::Assignment).is_some() {
+        // Catalog says the cast is legal. Delegate the actual byte-level
+        // conversion to the legacy `coerce()` text parser using the
+        // value's display form.  When the catalog grows native cast
+        // function pointers, this branch materializes the function.
+        return coerce(&value.display_string(), target, enum_variants);
+    }
+
+    // No catalog entry. Try legacy `coerce()` for backwards compat.
+    // Any `Value::Text(_)` succeeds via the legacy text parsers; other
+    // shapes go through display_string + parse round-trip.
+    coerce(&value.display_string(), target, enum_variants)
+}
 
 /// Coerce a string input into the target type. Returns error description on failure.
 pub fn coerce(

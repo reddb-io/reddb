@@ -94,6 +94,11 @@ impl<'a> Parser<'a> {
         &self.current.token
     }
 
+    /// Peek one token past the current parser position without consuming it.
+    pub fn peek_next(&mut self) -> Result<&Token, ParseError> {
+        Ok(&self.lexer.peek_token()?.token)
+    }
+
     /// Check if current token matches
     pub fn check(&self, expected: &Token) -> bool {
         std::mem::discriminant(&self.current.token) == std::mem::discriminant(expected)
@@ -249,6 +254,7 @@ impl<'a> Parser<'a> {
             Token::Insert => self.parse_insert_query(),
             Token::Update => self.parse_update_query(),
             Token::Delete => self.parse_delete_query(),
+            Token::Explain => self.parse_explain_alter_query(),
             Token::Create => {
                 let pos = self.position();
                 self.advance()?; // consume CREATE
@@ -447,6 +453,62 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(values)
+    }
+
+    /// Phase 1 cutover bridge: parse an expression via the new Pratt
+    /// parser (`parser/expr.rs`) and try to fold it back into a
+    /// literal `Value`. Used by INSERT VALUES / UPDATE SET / DEFAULT
+    /// slots that still store `Value` in their AST nodes — the bridge
+    /// lets them benefit from the full Expr grammar (parenthesised
+    /// literals, unary minus, CAST literals) without an AST cascade.
+    ///
+    /// Folds these Expr shapes:
+    /// - `Expr::Literal { value, .. }` → `value`
+    /// - `Expr::UnaryOp { Neg, operand: Literal(Integer/Float), .. }`
+    ///   → negated value
+    /// - `Expr::Cast { inner: Literal(text), target, .. }` →
+    ///   coerce(text, target) via schema::coerce
+    ///
+    /// Anything else returns an error so callers can decide whether
+    /// to fall back to the legacy `parse_literal_value` path or
+    /// surface a "non-literal not supported in this position" error.
+    pub fn parse_expr_value(&mut self) -> Result<Value, ParseError> {
+        use super::ast::{Expr, UnaryOp};
+        let expr = self.parse_expr()?;
+        fold_expr_to_value(expr).map_err(|msg| ParseError::new(msg, self.position()))
+    }
+}
+
+/// Best-effort literal evaluator used by `parse_expr_value`. Pure
+/// function so it can be unit-tested independently of the parser.
+fn fold_expr_to_value(expr: super::ast::Expr) -> Result<Value, String> {
+    use super::ast::{Expr, UnaryOp};
+    match expr {
+        Expr::Literal { value, .. } => Ok(value),
+        Expr::UnaryOp { op, operand, .. } => {
+            let inner = fold_expr_to_value(*operand)?;
+            match (op, inner) {
+                (UnaryOp::Neg, Value::Integer(n)) => Ok(Value::Integer(-n)),
+                (UnaryOp::Neg, Value::Float(f)) => Ok(Value::Float(-f)),
+                (UnaryOp::Neg, Value::BigInt(n)) => Ok(Value::BigInt(-n)),
+                (UnaryOp::Not, Value::Boolean(b)) => Ok(Value::Boolean(!b)),
+                (op, other) => Err(format!(
+                    "unary `{op:?}` cannot fold to literal Value (operand: {other:?})"
+                )),
+            }
+        }
+        Expr::Cast { inner, target, .. } => {
+            // Only fold CAST(literal AS type) — the analyze pass
+            // owns runtime CAST evaluation. Best-effort: stringify
+            // the inner literal and call the schema coerce path.
+            let lit = fold_expr_to_value(*inner)?;
+            let s = lit.display_string();
+            crate::storage::schema::coerce::coerce(&s, target, None)
+                .map_err(|e| format!("CAST literal to {target:?} failed: {e}"))
+        }
+        other => Err(format!(
+            "expression {other:?} is not a foldable literal in this position"
+        )),
     }
 }
 

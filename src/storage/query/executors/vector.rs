@@ -594,6 +594,7 @@ fn query_expr_name(expr: &QueryExpr) -> &'static str {
         QueryExpr::QueueCommand(_) => "queue_command",
         QueryExpr::SetConfig { .. } => "set_config",
         QueryExpr::ShowConfig { .. } => "show_config",
+        QueryExpr::ExplainAlter(_) => "explain_alter",
     }
 }
 

@@ -233,6 +233,7 @@ impl IndexBase for NodeSecondaryIndex {
             approx_bytes: 0,
             kind: IndexKind::Inverted,
             has_bloom: true,
+            index_correlation: 0.0,
         }
     }
 

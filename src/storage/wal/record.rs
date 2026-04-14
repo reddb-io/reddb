@@ -5,7 +5,29 @@ use std::io::{self, Read};
 pub const WAL_MAGIC: &[u8; 4] = b"RDBW";
 
 /// WAL file format version
-pub const WAL_VERSION: u8 = 1;
+pub const WAL_VERSION: u8 = 2;
+
+/// Minimum payload size (bytes) to attempt zstd compression.
+/// Smaller records pay more overhead than benefit from compression.
+const COMPRESS_THRESHOLD: usize = 256;
+
+/// Compression algorithm tag embedded in `PageWriteCompressed` records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Compression {
+    None = 0,
+    Zstd = 1,
+}
+
+impl Compression {
+    fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Compression::None),
+            1 => Some(Compression::Zstd),
+            _ => None,
+        }
+    }
+}
 
 /// Type of WAL record
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,8 +36,19 @@ pub enum RecordType {
     Begin = 1,
     Commit = 2,
     Rollback = 3,
+    /// Legacy uncompressed page write (v1 format — still written for
+    /// small payloads to avoid compression overhead).
     PageWrite = 4,
     Checkpoint = 5,
+    /// Compressed page write (v2 format).
+    ///
+    /// Layout (after the type byte):
+    /// ```text
+    /// [TxID: 8][PageID: 4][Compression: 1][OrigLen: 4][DataLen: 4][Data: N][CRC: 4]
+    /// ```
+    /// `OrigLen` is the original (uncompressed) size; needed to pre-allocate
+    /// the decompression buffer.
+    PageWriteCompressed = 6,
 }
 
 impl RecordType {
@@ -26,6 +59,7 @@ impl RecordType {
             3 => Some(RecordType::Rollback),
             4 => Some(RecordType::PageWrite),
             5 => Some(RecordType::Checkpoint),
+            6 => Some(RecordType::PageWriteCompressed),
             _ => None,
         }
     }
@@ -40,7 +74,8 @@ pub enum WalRecord {
     Commit { tx_id: u64 },
     /// Rollback of a transaction
     Rollback { tx_id: u64 },
-    /// Write of a page
+    /// Write of a page — always carries uncompressed data (transparent to
+    /// callers: `read()` decompresses on-the-fly).
     PageWrite {
         tx_id: u64,
         page_id: u32,
@@ -51,17 +86,24 @@ pub enum WalRecord {
 }
 
 impl WalRecord {
-    /// Serialize record to bytes (including checksum)
+    /// Serialize record to bytes (including checksum).
+    ///
+    /// `PageWrite` records whose payload is ≥ `COMPRESS_THRESHOLD` bytes are
+    /// compressed with zstd level 3 and emitted as `PageWriteCompressed`.
+    /// Smaller payloads use the plain `PageWrite` encoding (no overhead).
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();
 
-        // Layout:
+        // Layout (non-PageWrite):
         // [Type: 1]
-        // [TxID: 8] (or LSN for Checkpoint)
-        // [PageID: 4] (only for PageWrite)
-        // [DataLen: 4] (only for PageWrite)
-        // [Data: N] (only for PageWrite)
+        // [TxID/LSN: 8]
         // [Checksum: 4]
+        //
+        // PageWrite (uncompressed):
+        // [Type: 1][TxID: 8][PageID: 4][DataLen: 4][Data: N][CRC: 4]
+        //
+        // PageWriteCompressed:
+        // [Type: 1][TxID: 8][PageID: 4][Compression: 1][OrigLen: 4][DataLen: 4][Data: N][CRC: 4]
 
         match self {
             WalRecord::Begin { tx_id } => {
@@ -81,6 +123,27 @@ impl WalRecord {
                 page_id,
                 data,
             } => {
+                if data.len() >= COMPRESS_THRESHOLD {
+                    // Try zstd compression; fall back to uncompressed if it expands.
+                    if let Ok(compressed) =
+                        zstd::bulk::compress(data.as_slice(), /* level */ 3)
+                    {
+                        if compressed.len() < data.len() {
+                            // Compressed is smaller — use compressed format.
+                            buf.push(RecordType::PageWriteCompressed as u8);
+                            buf.extend_from_slice(&tx_id.to_le_bytes());
+                            buf.extend_from_slice(&page_id.to_le_bytes());
+                            buf.push(Compression::Zstd as u8);
+                            buf.extend_from_slice(&(data.len() as u32).to_le_bytes()); // orig_len
+                            buf.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
+                            buf.extend_from_slice(&compressed);
+                            let checksum = crc32(&buf);
+                            buf.extend_from_slice(&checksum.to_le_bytes());
+                            return buf;
+                        }
+                    }
+                }
+                // Uncompressed path (small payload or compression expanded).
                 buf.push(RecordType::PageWrite as u8);
                 buf.extend_from_slice(&tx_id.to_le_bytes());
                 buf.extend_from_slice(&page_id.to_le_bytes());
@@ -100,7 +163,10 @@ impl WalRecord {
         buf
     }
 
-    /// Read a record from a reader
+    /// Read a record from a reader.
+    ///
+    /// Handles both v1 (`PageWrite`) and v2 (`PageWriteCompressed`) record
+    /// formats transparently — callers always receive uncompressed data.
     pub fn read<R: Read>(reader: &mut R) -> io::Result<Option<WalRecord>> {
         // Read type byte
         let mut type_buf = [0u8; 1];
@@ -160,6 +226,68 @@ impl WalRecord {
                     data,
                 }
             }
+            RecordType::PageWriteCompressed => {
+                // Read TxID
+                let mut tx_buf = [0u8; 8];
+                reader.read_exact(&mut tx_buf)?;
+                running_crc = crc32_update(running_crc, &tx_buf);
+                let tx_id = u64::from_le_bytes(tx_buf);
+
+                // Read PageID
+                let mut page_buf = [0u8; 4];
+                reader.read_exact(&mut page_buf)?;
+                running_crc = crc32_update(running_crc, &page_buf);
+                let page_id = u32::from_le_bytes(page_buf);
+
+                // Read Compression algorithm byte
+                let mut comp_buf = [0u8; 1];
+                reader.read_exact(&mut comp_buf)?;
+                running_crc = crc32_update(running_crc, &comp_buf);
+                let compression = Compression::from_u8(comp_buf[0]).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("Unknown WAL compression algorithm: {}", comp_buf[0]),
+                    )
+                })?;
+
+                // Read original (uncompressed) length — used to pre-allocate decompression buffer
+                let mut orig_len_buf = [0u8; 4];
+                reader.read_exact(&mut orig_len_buf)?;
+                running_crc = crc32_update(running_crc, &orig_len_buf);
+                let orig_len = u32::from_le_bytes(orig_len_buf) as usize;
+
+                // Read compressed data length
+                let mut len_buf = [0u8; 4];
+                reader.read_exact(&mut len_buf)?;
+                running_crc = crc32_update(running_crc, &len_buf);
+                let len = u32::from_le_bytes(len_buf) as usize;
+
+                // Read compressed data
+                let mut compressed = vec![0u8; len];
+                reader.read_exact(&mut compressed)?;
+                running_crc = crc32_update(running_crc, &compressed);
+
+                // Decompress
+                let data = match compression {
+                    Compression::Zstd => {
+                        let mut out = vec![0u8; orig_len];
+                        zstd::bulk::decompress_to_buffer(&compressed, &mut out).map_err(|e| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!("WAL zstd decompress failed: {e}"),
+                            )
+                        })?;
+                        out
+                    }
+                    Compression::None => compressed,
+                };
+
+                WalRecord::PageWrite {
+                    tx_id,
+                    page_id,
+                    data,
+                }
+            }
             RecordType::Checkpoint => {
                 let mut buf = [0u8; 8];
                 reader.read_exact(&mut buf)?;
@@ -173,14 +301,6 @@ impl WalRecord {
         let mut crc_buf = [0u8; 4];
         reader.read_exact(&mut crc_buf)?;
         let stored_crc = u32::from_le_bytes(crc_buf);
-
-        // Note: Our crc32_update takes the previous CRC value (not raw accumulator)
-        // But our `crc32_update` implementation expects the *previous computed CRC* as input.
-        // Wait, `crc32_update` in `crc32.rs` is:
-        // let mut crc = crc ^ 0xFFFFFFFF; ... crc ^ 0xFFFFFFFF
-        // So passing 0 starts a new one. Passing the result of a previous call continues it.
-        // HOWEVER, `crc32(&buf)` is equivalent to `crc32_update(0, &buf)`.
-        // So `running_crc` here should be correct.
 
         if running_crc != stored_crc {
             return Err(io::Error::new(
@@ -207,12 +327,13 @@ mod tests {
         assert_eq!(RecordType::from_u8(3), Some(RecordType::Rollback));
         assert_eq!(RecordType::from_u8(4), Some(RecordType::PageWrite));
         assert_eq!(RecordType::from_u8(5), Some(RecordType::Checkpoint));
+        assert_eq!(RecordType::from_u8(6), Some(RecordType::PageWriteCompressed));
     }
 
     #[test]
     fn test_record_type_invalid() {
         assert_eq!(RecordType::from_u8(0), None);
-        assert_eq!(RecordType::from_u8(6), None);
+        assert_eq!(RecordType::from_u8(7), None);
         assert_eq!(RecordType::from_u8(255), None);
     }
 
@@ -256,7 +377,8 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_page_write() {
+    fn test_encode_page_write_small() {
+        // Small data (< COMPRESS_THRESHOLD) stays uncompressed.
         let data = vec![1, 2, 3, 4, 5];
         let record = WalRecord::PageWrite {
             tx_id: 100,
@@ -346,6 +468,7 @@ mod tests {
 
     #[test]
     fn test_read_page_write_large_data() {
+        // Large enough to trigger compression.
         let data: Vec<u8> = (0..4096).map(|i| (i % 256) as u8).collect();
         let original = WalRecord::PageWrite {
             tx_id: 1,
@@ -357,7 +480,35 @@ mod tests {
         let mut cursor = Cursor::new(encoded);
         let decoded = WalRecord::read(&mut cursor).unwrap().unwrap();
 
+        // Round-trip: decoded data matches original (even if encoded differently).
         assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn page_write_compressed_roundtrip() {
+        // Highly compressible payload: 1 KiB of repeated bytes.
+        let data = vec![0xABu8; 1024];
+        let record = WalRecord::PageWrite {
+            tx_id: 7,
+            page_id: 3,
+            data: data.clone(),
+        };
+        let encoded = record.encode();
+
+        // Should be stored as PageWriteCompressed (compressible > threshold).
+        assert_eq!(encoded[0], RecordType::PageWriteCompressed as u8);
+
+        // And round-trip decoding recovers original.
+        let mut cursor = Cursor::new(encoded);
+        let decoded = WalRecord::read(&mut cursor).unwrap().unwrap();
+        assert_eq!(
+            decoded,
+            WalRecord::PageWrite {
+                tx_id: 7,
+                page_id: 3,
+                data
+            }
+        );
     }
 
     #[test]
@@ -452,6 +603,6 @@ mod tests {
 
     #[test]
     fn test_wal_version() {
-        assert_eq!(WAL_VERSION, 1);
+        assert_eq!(WAL_VERSION, 2);
     }
 }

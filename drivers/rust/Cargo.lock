@@ -1149,7 +1149,7 @@ dependencies = [
 
 [[package]]
 name = "reddb"
-version = "0.1.2"
+version = "0.1.5"
 dependencies = [
  "aes-gcm",
  "fs2",
@@ -1174,7 +1174,7 @@ dependencies = [
 
 [[package]]
 name = "reddb-client"
-version = "0.1.2"
+version = "0.1.5"
 dependencies = [
  "reddb",
  "tokio",

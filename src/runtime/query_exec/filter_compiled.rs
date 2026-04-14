@@ -56,6 +56,12 @@ pub enum EntityFieldKind {
     SystemRowId,
     /// User column on a row, looked up by name. Plain SQL columns.
     RowField(String),
+    /// User column with compile-time resolved index into `row.columns`.
+    /// Hot path for bulk-inserted entities (schema path) — O(1) positional
+    /// access. Falls back to HashMap lookup when entity was single-inserted
+    /// (named path). Replaces `RowField` when the collection schema is
+    /// available at filter compile time.
+    RowFieldFast { name: String, idx: u16 },
     /// Positional row column `c0`, `c1`, ... — bypasses field-name lookup.
     RowFieldPosition(usize),
     /// Document path traversal (`column.nested.field`). Falls back
@@ -71,10 +77,33 @@ pub enum EntityFieldKind {
 /// Classify a [`FieldRef`] against the table context. Equivalent
 /// to the work `resolve_entity_field` does on every call, but
 /// performed exactly once per compile.
+///
+/// `schema_cols` is the ordered list of user column names for the collection
+/// (from `SegmentManager::column_schema()`). When provided, plain user columns
+/// are classified as [`EntityFieldKind::RowFieldFast`] with a pre-resolved
+/// index — O(1) positional access in the per-row hot path.
 pub(crate) fn classify_field(
     field: &FieldRef,
     table_name: &str,
     table_alias: &str,
+) -> EntityFieldKind {
+    classify_field_inner(field, table_name, table_alias, None)
+}
+
+pub(crate) fn classify_field_with_schema<'s>(
+    field: &FieldRef,
+    table_name: &str,
+    table_alias: &str,
+    schema_cols: &'s [String],
+) -> EntityFieldKind {
+    classify_field_inner(field, table_name, table_alias, Some(schema_cols))
+}
+
+fn classify_field_inner(
+    field: &FieldRef,
+    table_name: &str,
+    table_alias: &str,
+    schema_cols: Option<&[String]>,
 ) -> EntityFieldKind {
     let column = match field {
         FieldRef::TableColumn { table, column } => {
@@ -118,6 +147,18 @@ pub(crate) fn classify_field(
         .and_then(|s| s.parse::<usize>().ok())
     {
         return EntityFieldKind::RowFieldPosition(idx);
+    }
+
+    // Schema-resolved fast path: when the collection schema is known at
+    // compile time, emit RowFieldFast with the pre-resolved column index.
+    // Per-row cost drops from O(n schema search) to O(1) array index.
+    if let Some(schema) = schema_cols {
+        if let Some(idx) = schema.iter().position(|s| s.as_str() == column) {
+            return EntityFieldKind::RowFieldFast {
+                name: column.to_string(),
+                idx: idx as u16,
+            };
+        }
     }
 
     EntityFieldKind::RowField(column.to_string())
@@ -172,6 +213,19 @@ fn resolve_kind<'a>(
             }
             if let EntityData::Edge(ref edge) = entity.data {
                 if let Some(v) = edge.properties.get(name) {
+                    return Some(Cow::Borrowed(v));
+                }
+            }
+            None
+        }
+        EntityFieldKind::RowFieldFast { name, idx } => {
+            if let Some(row) = entity.data.as_row() {
+                // Fast path (bulk-insert entities): columns[] in schema order, O(1).
+                if row.named.is_none() {
+                    return row.columns.get(*idx as usize).map(Cow::Borrowed);
+                }
+                // Fallback (single-insert entities): named HashMap, also O(1).
+                if let Some(v) = row.get_field(name) {
                     return Some(Cow::Borrowed(v));
                 }
             }
@@ -260,7 +314,35 @@ impl CompiledEntityFilter {
     /// Walk the AST filter once and produce a flat opcode list.
     pub fn compile(filter: &Filter, table_name: &str, table_alias: &str) -> Self {
         let mut ops = Vec::new();
-        compile_into(filter, table_name, table_alias, &mut ops);
+        compile_into(filter, table_name, table_alias, None, &mut ops);
+        Self {
+            ops,
+            table_name: table_name.to_string(),
+            table_alias: table_alias.to_string(),
+        }
+    }
+
+    /// Like `compile`, but with a collection schema for pre-resolving column
+    /// indices. User columns become `RowFieldFast` (O(1) access) instead of
+    /// `RowField` (O(n schema search) for bulk-inserted entities).
+    ///
+    /// `schema_cols` is the ordered column name list from
+    /// `SegmentManager::column_schema()`. When `None`, falls back to
+    /// `compile()` semantics.
+    pub fn compile_with_schema(
+        filter: &Filter,
+        table_name: &str,
+        table_alias: &str,
+        schema_cols: &[String],
+    ) -> Self {
+        let mut ops = Vec::new();
+        compile_into(
+            filter,
+            table_name,
+            table_alias,
+            Some(schema_cols),
+            &mut ops,
+        );
         Self {
             ops,
             table_name: table_name.to_string(),
@@ -392,11 +474,20 @@ fn compile_into(
     filter: &Filter,
     table_name: &str,
     table_alias: &str,
+    schema_cols: Option<&[String]>,
     ops: &mut Vec<CompiledEntityOp>,
 ) {
+    // Helper: classify using schema when available, plain classify otherwise.
+    let classify = |field: &FieldRef| -> EntityFieldKind {
+        match schema_cols {
+            Some(schema) => classify_field_with_schema(field, table_name, table_alias, schema),
+            None => classify_field(field, table_name, table_alias),
+        }
+    };
+
     match filter {
         Filter::Compare { field, op, value } => {
-            let kind = classify_field(field, table_name, table_alias);
+            let kind = classify(field);
             if needs_fallback(&kind) {
                 ops.push(CompiledEntityOp::Fallback(Box::new(filter.clone())));
                 return;
@@ -408,21 +499,13 @@ fn compile_into(
             });
         }
         Filter::CompareFields { .. } => {
-            // CompareFields resolves both operands from the row at
-            // runtime — the compiled interpreter here only knows how
-            // to compare a field against a pre-computed Value, so
-            // defer to the legacy walker via Fallback.
             ops.push(CompiledEntityOp::Fallback(Box::new(filter.clone())));
         }
         Filter::CompareExpr { .. } => {
-            // Expression-level comparisons require the full Expr
-            // walker and UnifiedRecord context — neither is available
-            // inside the compiled interpreter. Route through the
-            // Fallback opcode which re-enters the legacy evaluator.
             ops.push(CompiledEntityOp::Fallback(Box::new(filter.clone())));
         }
         Filter::Between { field, low, high } => {
-            let kind = classify_field(field, table_name, table_alias);
+            let kind = classify(field);
             if needs_fallback(&kind) {
                 ops.push(CompiledEntityOp::Fallback(Box::new(filter.clone())));
                 return;
@@ -434,7 +517,7 @@ fn compile_into(
             });
         }
         Filter::In { field, values } => {
-            let kind = classify_field(field, table_name, table_alias);
+            let kind = classify(field);
             if needs_fallback(&kind) {
                 ops.push(CompiledEntityOp::Fallback(Box::new(filter.clone())));
                 return;
@@ -445,7 +528,7 @@ fn compile_into(
             });
         }
         Filter::Like { field, pattern } => {
-            let kind = classify_field(field, table_name, table_alias);
+            let kind = classify(field);
             if needs_fallback(&kind) {
                 ops.push(CompiledEntityOp::Fallback(Box::new(filter.clone())));
                 return;
@@ -456,7 +539,7 @@ fn compile_into(
             });
         }
         Filter::StartsWith { field, prefix } => {
-            let kind = classify_field(field, table_name, table_alias);
+            let kind = classify(field);
             if needs_fallback(&kind) {
                 ops.push(CompiledEntityOp::Fallback(Box::new(filter.clone())));
                 return;
@@ -467,7 +550,7 @@ fn compile_into(
             });
         }
         Filter::EndsWith { field, suffix } => {
-            let kind = classify_field(field, table_name, table_alias);
+            let kind = classify(field);
             if needs_fallback(&kind) {
                 ops.push(CompiledEntityOp::Fallback(Box::new(filter.clone())));
                 return;
@@ -478,7 +561,7 @@ fn compile_into(
             });
         }
         Filter::Contains { field, substring } => {
-            let kind = classify_field(field, table_name, table_alias);
+            let kind = classify(field);
             if needs_fallback(&kind) {
                 ops.push(CompiledEntityOp::Fallback(Box::new(filter.clone())));
                 return;
@@ -489,7 +572,7 @@ fn compile_into(
             });
         }
         Filter::IsNull(field) => {
-            let kind = classify_field(field, table_name, table_alias);
+            let kind = classify(field);
             if needs_fallback(&kind) {
                 ops.push(CompiledEntityOp::Fallback(Box::new(filter.clone())));
                 return;
@@ -497,7 +580,7 @@ fn compile_into(
             ops.push(CompiledEntityOp::IsNull { kind });
         }
         Filter::IsNotNull(field) => {
-            let kind = classify_field(field, table_name, table_alias);
+            let kind = classify(field);
             if needs_fallback(&kind) {
                 ops.push(CompiledEntityOp::Fallback(Box::new(filter.clone())));
                 return;
@@ -505,17 +588,17 @@ fn compile_into(
             ops.push(CompiledEntityOp::IsNotNull { kind });
         }
         Filter::And(left, right) => {
-            compile_into(left, table_name, table_alias, ops);
-            compile_into(right, table_name, table_alias, ops);
+            compile_into(left, table_name, table_alias, schema_cols, ops);
+            compile_into(right, table_name, table_alias, schema_cols, ops);
             ops.push(CompiledEntityOp::And);
         }
         Filter::Or(left, right) => {
-            compile_into(left, table_name, table_alias, ops);
-            compile_into(right, table_name, table_alias, ops);
+            compile_into(left, table_name, table_alias, schema_cols, ops);
+            compile_into(right, table_name, table_alias, schema_cols, ops);
             ops.push(CompiledEntityOp::Or);
         }
         Filter::Not(inner) => {
-            compile_into(inner, table_name, table_alias, ops);
+            compile_into(inner, table_name, table_alias, schema_cols, ops);
             ops.push(CompiledEntityOp::Not);
         }
     }
@@ -630,6 +713,73 @@ mod tests {
         match &c.ops[0] {
             CompiledEntityOp::Fallback(_) => {}
             other => panic!("expected Fallback, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compile_with_schema_emits_row_field_fast() {
+        let schema = vec!["id".to_string(), "name".to_string(), "age".to_string()];
+        let f = Filter::Compare {
+            field: FieldRef::TableColumn {
+                table: String::new(),
+                column: "name".to_string(),
+            },
+            op: CompareOp::Eq,
+            value: Value::Text("alice".to_string()),
+        };
+        let c = CompiledEntityFilter::compile_with_schema(&f, "users", "u", &schema);
+        assert_eq!(c.op_count(), 1);
+        match &c.ops[0] {
+            CompiledEntityOp::Compare {
+                kind: EntityFieldKind::RowFieldFast { name, idx },
+                ..
+            } => {
+                assert_eq!(name, "name");
+                assert_eq!(*idx, 1); // "name" is at index 1 in schema
+            }
+            other => panic!("expected RowFieldFast, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compile_with_schema_unknown_column_falls_back_to_row_field() {
+        let schema = vec!["id".to_string(), "name".to_string()];
+        let f = Filter::Compare {
+            field: FieldRef::TableColumn {
+                table: String::new(),
+                column: "email".to_string(), // not in schema
+            },
+            op: CompareOp::Eq,
+            value: Value::Text("a@b.com".to_string()),
+        };
+        let c = CompiledEntityFilter::compile_with_schema(&f, "users", "u", &schema);
+        match &c.ops[0] {
+            CompiledEntityOp::Compare {
+                kind: EntityFieldKind::RowField(name),
+                ..
+            } => assert_eq!(name, "email"),
+            other => panic!("expected RowField fallback, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compile_with_schema_system_fields_unchanged() {
+        let schema = vec!["id".to_string(), "name".to_string()];
+        let f = Filter::Compare {
+            field: FieldRef::TableColumn {
+                table: String::new(),
+                column: "red_entity_id".to_string(),
+            },
+            op: CompareOp::Eq,
+            value: Value::UnsignedInteger(42),
+        };
+        let c = CompiledEntityFilter::compile_with_schema(&f, "users", "u", &schema);
+        match &c.ops[0] {
+            CompiledEntityOp::Compare {
+                kind: EntityFieldKind::SystemEntityId,
+                ..
+            } => {}
+            other => panic!("expected SystemEntityId, got {other:?}"),
         }
     }
 

@@ -11,6 +11,188 @@
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+/// Structured SQL type name used by the parser/analyzer boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlTypeName {
+    pub name: String,
+    pub modifiers: Vec<TypeModifier>,
+}
+
+impl SqlTypeName {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            modifiers: Vec::new(),
+        }
+    }
+
+    pub fn simple(name: impl Into<String>) -> Self {
+        Self::new(name)
+    }
+
+    pub fn with_modifiers(mut self, modifiers: Vec<TypeModifier>) -> Self {
+        self.modifiers = modifiers;
+        self
+    }
+
+    pub fn base_name(&self) -> String {
+        self.name.to_ascii_uppercase()
+    }
+
+    pub fn parse_declared(input: &str) -> Self {
+        parse_sql_type_name(input).unwrap_or_else(|| Self::simple(input.trim()))
+    }
+
+    pub fn enum_variants(&self) -> Option<Vec<String>> {
+        if self.base_name() != "ENUM" {
+            return None;
+        }
+        let mut variants = Vec::new();
+        for modifier in &self.modifiers {
+            if let TypeModifier::StringLiteral(value) = modifier {
+                variants.push(value.clone());
+            } else {
+                return None;
+            }
+        }
+        Some(variants)
+    }
+
+    pub fn array_element_type(&self) -> Option<String> {
+        if self.base_name() != "ARRAY" {
+            return None;
+        }
+        self.modifiers.iter().find_map(|modifier| match modifier {
+            TypeModifier::Type(inner) => Some(inner.to_string()),
+            TypeModifier::Ident(name) => Some(name.to_ascii_uppercase()),
+            _ => None,
+        })
+    }
+
+    pub fn decimal_precision(&self) -> Option<u8> {
+        match self.base_name().as_str() {
+            "DECIMAL" | "NUMERIC" => self.modifiers.iter().find_map(|modifier| match modifier {
+                TypeModifier::Number(value) => u8::try_from(*value).ok(),
+                _ => None,
+            }),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for SqlTypeName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.base_name())?;
+        if !self.modifiers.is_empty() {
+            write!(f, "(")?;
+            for (idx, modifier) in self.modifiers.iter().enumerate() {
+                if idx > 0 {
+                    write!(f, ",")?;
+                }
+                write!(f, "{modifier}")?;
+            }
+            write!(f, ")")?;
+        }
+        Ok(())
+    }
+}
+
+/// Type modifiers used by SQL types like `DECIMAL(10)` or `ARRAY(TEXT)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypeModifier {
+    Number(u32),
+    Ident(String),
+    StringLiteral(String),
+    Type(Box<SqlTypeName>),
+}
+
+impl fmt::Display for TypeModifier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Number(value) => write!(f, "{value}"),
+            Self::Ident(value) => write!(f, "{}", value.to_ascii_uppercase()),
+            Self::StringLiteral(value) => write!(f, "'{value}'"),
+            Self::Type(value) => write!(f, "{value}"),
+        }
+    }
+}
+
+fn parse_sql_type_name(input: &str) -> Option<SqlTypeName> {
+    let input = input.trim();
+    if input.is_empty() {
+        return None;
+    }
+
+    let open = input.find('(');
+    let close = input.rfind(')');
+    match (open, close) {
+        (Some(open), Some(close)) if close > open => {
+            let name = input[..open].trim();
+            let inner = &input[open + 1..close];
+            let modifiers = split_type_modifiers(inner)
+                .into_iter()
+                .map(parse_type_modifier)
+                .collect::<Option<Vec<_>>>()?;
+            Some(SqlTypeName::new(name).with_modifiers(modifiers))
+        }
+        _ => Some(SqlTypeName::new(input)),
+    }
+}
+
+fn parse_type_modifier(input: String) -> Option<TypeModifier> {
+    let value = input.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
+        return Some(TypeModifier::StringLiteral(
+            value[1..value.len() - 1].to_string(),
+        ));
+    }
+    if let Ok(number) = value.parse::<u32>() {
+        return Some(TypeModifier::Number(number));
+    }
+    if value.contains('(') {
+        return parse_sql_type_name(value).map(|inner| TypeModifier::Type(Box::new(inner)));
+    }
+    Some(TypeModifier::Ident(value.to_string()))
+}
+
+fn split_type_modifiers(input: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    let mut in_string = false;
+
+    for ch in input.chars() {
+        match ch {
+            '\'' => {
+                in_string = !in_string;
+                current.push(ch);
+            }
+            '(' if !in_string => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' if !in_string => {
+                depth = depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ',' if !in_string && depth == 0 => {
+                parts.push(current.trim().to_string());
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if !current.trim().is_empty() {
+        parts.push(current.trim().to_string());
+    }
+
+    parts
+}
+
 /// Type identifier for column definitions
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -324,29 +506,39 @@ impl DataType {
     /// canonical reddb names rendered by `Display`. Returns `None` for
     /// unknown / unsupported names so callers can surface a parse error.
     pub fn from_sql_name(name: &str) -> Option<Self> {
-        let n = name.trim().to_ascii_uppercase();
+        Self::from_sql_type_name(&SqlTypeName::parse_declared(name))
+    }
+
+    /// Resolve a DataType from a parsed SQL type name.
+    pub fn from_sql_type_name(sql_type: &SqlTypeName) -> Option<Self> {
+        let n = sql_type.base_name();
         Some(match n.as_str() {
-            "INT" | "INTEGER" | "INT8" | "BIGINT_SIGNED" => DataType::Integer,
+            "BOOL" | "BOOLEAN" => DataType::Boolean,
+            "INT" | "INTEGER" | "INT4" | "SERIAL" => DataType::Integer,
+            "INT2" | "SMALLINT" => DataType::Integer,
+            "INT8" | "BIGINT" | "BIGINT_SIGNED" | "BIGSERIAL" => DataType::BigInt,
             "UINT" | "UNSIGNED" | "UNSIGNED_INTEGER" | "UNSIGNED INTEGER" => {
                 DataType::UnsignedInteger
             }
             "FLOAT" | "DOUBLE" | "REAL" | "FLOAT8" => DataType::Float,
             "TEXT" | "STRING" | "VARCHAR" | "CHAR" => DataType::Text,
             "BLOB" | "BYTES" | "BYTEA" => DataType::Blob,
-            "BOOL" | "BOOLEAN" => DataType::Boolean,
             "TIMESTAMP" => DataType::Timestamp,
-            "TIMESTAMPMS" | "TIMESTAMP_MS" => DataType::TimestampMs,
+            "TIMESTAMPTZ" | "TIMESTAMPMS" | "TIMESTAMP_MS" => DataType::TimestampMs,
             "DURATION" | "INTERVAL" => DataType::Duration,
             "DATE" => DataType::Date,
             "TIME" => DataType::Time,
             "DECIMAL" | "NUMERIC" => DataType::Decimal,
-            "BIGINT" => DataType::BigInt,
             "JSON" | "JSONB" => DataType::Json,
             "UUID" => DataType::Uuid,
-            "IPADDR" | "INET" => DataType::IpAddr,
+            "IPADDR" | "IP" | "INET" => DataType::IpAddr,
             "IPV4" => DataType::Ipv4,
             "IPV6" => DataType::Ipv6,
             "MACADDR" => DataType::MacAddr,
+            "NODEREF" => DataType::NodeRef,
+            "EDGEREF" => DataType::EdgeRef,
+            "VECTORREF" => DataType::VectorRef,
+            "ROWREF" => DataType::RowRef,
             "CIDR" => DataType::Cidr,
             "SUBNET" => DataType::Subnet,
             "PORT" => DataType::Port,
@@ -364,6 +556,14 @@ impl DataType {
             "LANG2" => DataType::Lang2,
             "LANG5" => DataType::Lang5,
             "CURRENCY" => DataType::Currency,
+            "ENUM" => DataType::Enum,
+            "ARRAY" => DataType::Array,
+            "KEYREF" => DataType::KeyRef,
+            "DOCREF" => DataType::DocRef,
+            "TABLEREF" => DataType::TableRef,
+            "PAGEREF" => DataType::PageRef,
+            "SECRET" => DataType::Secret,
+            "PASSWORD" => DataType::Password,
             "VECTOR" => DataType::Vector,
             _ => return None,
         })
@@ -2052,6 +2252,14 @@ mod tests {
             let recovered = DataType::from_byte(byte).unwrap();
             assert_eq!(dt, recovered);
         }
+    }
+
+    #[test]
+    fn test_from_sql_name_uses_shared_alias_mapping() {
+        assert_eq!(DataType::from_sql_name("INT8"), Some(DataType::BigInt));
+        assert_eq!(DataType::from_sql_name("BIGINT"), Some(DataType::BigInt));
+        assert_eq!(DataType::from_sql_name("TIMESTAMPTZ"), Some(DataType::TimestampMs));
+        assert_eq!(DataType::from_sql_name("ROWREF"), Some(DataType::RowRef));
     }
 
     #[test]

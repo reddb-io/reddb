@@ -245,12 +245,21 @@ impl UnifiedStore {
         let manager = self.get_or_create_collection(collection);
         let t_get_coll = t_start.elapsed();
 
-        // Assign IDs before serialization (manager.bulk_insert also assigns,
-        // but we need IDs for B-tree keys)
+        // Assign IDs and per-table row_ids before serialization.
+        // `insert()`/`insert_auto()` already do this, but bulk_insert
+        // needs the same guarantee or SQL/system fields like `row_id`
+        // remain zero in the segment + serialized B-tree image.
         let t0 = std::time::Instant::now();
         for entity in &mut entities {
             if entity.id.raw() == 0 {
                 entity.id = manager.next_entity_id();
+            }
+            if let EntityKind::TableRow { ref mut row_id, .. } = entity.kind {
+                if *row_id == 0 {
+                    *row_id = manager.next_row_id();
+                } else {
+                    manager.register_row_id(*row_id);
+                }
             }
         }
         let t_assign_ids = t0.elapsed();

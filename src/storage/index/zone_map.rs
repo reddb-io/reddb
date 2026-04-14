@@ -268,6 +268,7 @@ impl IndexBase for ZoneMap {
             approx_bytes: self.bloom.filter().byte_size() + 16 * 1024, // HLL fixed
             kind: IndexKind::ZoneMap,
             has_bloom: true,
+            index_correlation: 0.0,
         }
     }
 

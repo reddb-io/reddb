@@ -199,7 +199,8 @@ impl RewriteRule for NormalizeRule {
             | QueryExpr::DropTimeSeries(_)
             | QueryExpr::CreateQueue(_)
             | QueryExpr::DropQueue(_)
-            | QueryExpr::QueueCommand(_)) => other,
+            | QueryExpr::QueueCommand(_)
+            | QueryExpr::ExplainAlter(_)) => other,
         }
     }
 
@@ -270,7 +271,8 @@ impl RewriteRule for SimplifyFiltersRule {
             | QueryExpr::DropTimeSeries(_)
             | QueryExpr::CreateQueue(_)
             | QueryExpr::DropQueue(_)
-            | QueryExpr::QueueCommand(_)) => other,
+            | QueryExpr::QueueCommand(_)
+            | QueryExpr::ExplainAlter(_)) => other,
         }
     }
 
@@ -301,7 +303,8 @@ impl RewriteRule for SimplifyFiltersRule {
             | QueryExpr::DropTimeSeries(_)
             | QueryExpr::CreateQueue(_)
             | QueryExpr::DropQueue(_)
-            | QueryExpr::QueueCommand(_) => false,
+            | QueryExpr::QueueCommand(_)
+            | QueryExpr::ExplainAlter(_) => false,
         }
     }
 }

@@ -10,10 +10,12 @@
 
 pub mod archiver;
 pub mod checkpoint;
+pub mod checkpointer_task;
 pub mod group_commit;
 pub mod reader;
 pub mod record;
 pub mod recovery;
+pub mod rmgr;
 pub mod transaction;
 pub mod writer;
 

@@ -386,6 +386,14 @@ fn declared_column_contract_to_json(column: &DeclaredColumnContract) -> JsonValu
         "data_type".to_string(),
         JsonValue::String(column.data_type.clone()),
     );
+    object.insert(
+        "sql_type".to_string(),
+        column
+            .sql_type
+            .as_ref()
+            .map(sql_type_name_to_json)
+            .unwrap_or(JsonValue::Null),
+    );
     object.insert("not_null".to_string(), JsonValue::Bool(column.not_null));
     object.insert(
         "default".to_string(),
@@ -440,6 +448,17 @@ fn declared_column_contract_from_json(value: &JsonValue) -> io::Result<DeclaredC
     Ok(DeclaredColumnContract {
         name: json_string_required(object, "name")?,
         data_type: json_string_required(object, "data_type")?,
+        sql_type: object
+            .get("sql_type")
+            .map(sql_type_name_from_json)
+            .transpose()?
+            .flatten()
+            .or_else(|| {
+                object
+                    .get("data_type")
+                    .and_then(JsonValue::as_str)
+                    .map(crate::storage::schema::SqlTypeName::parse_declared)
+            }),
         not_null: json_bool_required(object, "not_null")?,
         default: object
             .get("default")
@@ -470,6 +489,101 @@ fn declared_column_contract_from_json(value: &JsonValue) -> io::Result<DeclaredC
             Some(value) => Some(json_u8_field_value(value)?),
         },
     })
+}
+
+fn sql_type_name_to_json(sql_type: &crate::storage::schema::SqlTypeName) -> JsonValue {
+    let mut object = Map::new();
+    object.insert("name".to_string(), JsonValue::String(sql_type.name.clone()));
+    object.insert(
+        "modifiers".to_string(),
+        JsonValue::Array(
+            sql_type
+                .modifiers
+                .iter()
+                .map(type_modifier_to_json)
+                .collect(),
+        ),
+    );
+    JsonValue::Object(object)
+}
+
+fn sql_type_name_from_json(
+    value: &JsonValue,
+) -> io::Result<Option<crate::storage::schema::SqlTypeName>> {
+    match value {
+        JsonValue::Null => Ok(None),
+        JsonValue::Object(object) => {
+            let name = json_string_required(object, "name")?;
+            let modifiers = object
+                .get("modifiers")
+                .and_then(JsonValue::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .map(type_modifier_from_json)
+                        .collect::<io::Result<Vec<_>>>()
+                })
+                .transpose()?
+                .unwrap_or_default();
+            Ok(Some(crate::storage::schema::SqlTypeName {
+                name,
+                modifiers,
+            }))
+        }
+        _ => Err(invalid_data(
+            "sql_type must be an object or null".to_string(),
+        )),
+    }
+}
+
+fn type_modifier_to_json(modifier: &crate::storage::schema::TypeModifier) -> JsonValue {
+    let mut object = Map::new();
+    match modifier {
+        crate::storage::schema::TypeModifier::Number(value) => {
+            object.insert("kind".to_string(), JsonValue::String("number".to_string()));
+            object.insert("value".to_string(), JsonValue::Number(*value as f64));
+        }
+        crate::storage::schema::TypeModifier::Ident(value) => {
+            object.insert("kind".to_string(), JsonValue::String("ident".to_string()));
+            object.insert("value".to_string(), JsonValue::String(value.clone()));
+        }
+        crate::storage::schema::TypeModifier::StringLiteral(value) => {
+            object.insert("kind".to_string(), JsonValue::String("string".to_string()));
+            object.insert("value".to_string(), JsonValue::String(value.clone()));
+        }
+        crate::storage::schema::TypeModifier::Type(value) => {
+            object.insert("kind".to_string(), JsonValue::String("type".to_string()));
+            object.insert("value".to_string(), sql_type_name_to_json(value));
+        }
+    }
+    JsonValue::Object(object)
+}
+
+fn type_modifier_from_json(value: &JsonValue) -> io::Result<crate::storage::schema::TypeModifier> {
+    let object = expect_object(value, "type_modifier")?;
+    let kind = json_string_required(object, "kind")?;
+    match kind.as_str() {
+        "number" => Ok(crate::storage::schema::TypeModifier::Number(
+            json_u32_required(object, "value")?,
+        )),
+        "ident" => Ok(crate::storage::schema::TypeModifier::Ident(
+            json_string_required(object, "value")?,
+        )),
+        "string" => Ok(crate::storage::schema::TypeModifier::StringLiteral(
+            json_string_required(object, "value")?,
+        )),
+        "type" => {
+            let value = object
+                .get("value")
+                .ok_or_else(|| invalid_data("missing type modifier value".to_string()))?;
+            let nested = sql_type_name_from_json(value)?
+                .ok_or_else(|| invalid_data("type modifier cannot be null".to_string()))?;
+            Ok(crate::storage::schema::TypeModifier::Type(Box::new(nested)))
+        }
+        other => Err(invalid_data(format!(
+            "unsupported type modifier kind: {other}"
+        ))),
+    }
 }
 
 fn json_u8_field_value(value: &JsonValue) -> io::Result<u8> {

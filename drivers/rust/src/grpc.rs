@@ -15,6 +15,7 @@
 use tokio::sync::Mutex;
 
 use reddb::client::RedDBClient;
+use reddb::json::Value as JsonWireValue;
 
 use crate::error::{ClientError, ErrorCode, Result};
 use crate::types::{InsertResult, JsonValue, QueryResult, ValueOut};
@@ -49,14 +50,14 @@ impl GrpcClient {
     }
 
     pub async fn query(&self, sql: &str) -> Result<QueryResult> {
-        let json_str = {
+        let reply = {
             let mut guard = self.inner.lock().await;
             guard
-                .query(sql)
+                .query_reply(sql)
                 .await
                 .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?
         };
-        parse_query_json(&json_str)
+        parse_query_json(&reply.result_json)
     }
 
     pub async fn insert(&self, collection: &str, payload: &JsonValue) -> Result<InsertResult> {
@@ -70,16 +71,14 @@ impl GrpcClient {
         let reply = {
             let mut guard = self.inner.lock().await;
             guard
-                .create_row(collection, &json_payload)
+                .create_row_entity(collection, &json_payload)
                 .await
                 .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?
         };
-        // `create_row()` returns "id: N, entity: {..}" — extract the id.
-        let id = reply
-            .split_once("id: ")
-            .and_then(|(_, rest)| rest.split_once(','))
-            .map(|(id, _)| id.trim().to_string());
-        Ok(InsertResult { affected: 1, id })
+        Ok(InsertResult {
+            affected: 1,
+            id: Some(reply.id.to_string()),
+        })
     }
 
     pub async fn bulk_insert(&self, collection: &str, payloads: &[JsonValue]) -> Result<u64> {
@@ -95,7 +94,7 @@ impl GrpcClient {
             {
                 let mut guard = self.inner.lock().await;
                 guard
-                    .create_row(collection, &json_payload)
+                    .create_row_entity(collection, &json_payload)
                     .await
                     .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?;
             }
@@ -105,16 +104,20 @@ impl GrpcClient {
     }
 
     pub async fn delete(&self, collection: &str, id: &str) -> Result<u64> {
-        let sql = format!("DELETE FROM {collection} WHERE _entity_id = {id}");
-        let json_str = {
+        let id = id.parse::<u64>().map_err(|_| {
+            ClientError::new(
+                ErrorCode::InvalidUri,
+                "id must be a numeric string".to_string(),
+            )
+        })?;
+        {
             let mut guard = self.inner.lock().await;
             guard
-                .query(&sql)
+                .delete_entity(collection, id)
                 .await
                 .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?
         };
-        let parsed = parse_query_json(&json_str)?;
-        Ok(parsed.affected)
+        Ok(1)
     }
 
     pub async fn close(&self) -> Result<()> {
@@ -123,21 +126,33 @@ impl GrpcClient {
     }
 }
 
-/// Minimal, hand-rolled JSON parser for the server's `QueryReply.result_json`.
-///
-/// We cannot depend on `serde_json` without forcing a version on
-/// downstream crates. The server JSON we care about has a stable,
-/// simple shape: `{"statement", "affected", "columns", "rows"}`.
-/// For anything we can't parse cleanly we fall back to empty fields
-/// so the caller never crashes on an unexpected envelope.
 fn parse_query_json(s: &str) -> Result<QueryResult> {
-    let statement = extract_string(s, "statement").unwrap_or_else(|| "select".to_string());
-    let affected = extract_u64(s, "affected").unwrap_or(0);
-    let columns = extract_string_array(s, "columns").unwrap_or_default();
-    // Rows are more complex — we walk the JSON structurally. Fall back
-    // to an empty row list on parse failure, but surface errors via
-    // `QueryError` when the top-level braces are missing.
-    let rows = extract_rows(s, "rows").unwrap_or_default();
+    let parsed = reddb::json::from_str::<JsonWireValue>(s)
+        .map_err(|e| ClientError::new(ErrorCode::QueryError, format!("bad server JSON: {e}")))?;
+    let statement = parsed
+        .get("statement")
+        .and_then(JsonWireValue::as_str)
+        .unwrap_or("select")
+        .to_string();
+    let affected = parsed
+        .get("affected")
+        .and_then(JsonWireValue::as_f64)
+        .unwrap_or(0.0) as u64;
+    let columns = parsed
+        .get("columns")
+        .and_then(JsonWireValue::as_array)
+        .map(|cols| {
+            cols.iter()
+                .filter_map(|col| col.as_str().map(ToString::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let rows = parsed
+        .get("rows")
+        .or_else(|| parsed.get("records"))
+        .and_then(JsonWireValue::as_array)
+        .map(|rows| rows.iter().map(parse_row_value).collect())
+        .unwrap_or_default();
     Ok(QueryResult {
         statement,
         affected,
@@ -146,252 +161,31 @@ fn parse_query_json(s: &str) -> Result<QueryResult> {
     })
 }
 
-fn extract_string(s: &str, key: &str) -> Option<String> {
-    let needle = format!("\"{key}\":\"");
-    let start = s.find(&needle)? + needle.len();
-    let rest = &s[start..];
-    let mut end = 0;
-    let mut escaped = false;
-    for (i, c) in rest.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if c == '\\' {
-            escaped = true;
-            continue;
-        }
-        if c == '"' {
-            end = i;
-            break;
-        }
-    }
-    Some(unescape(&rest[..end]))
+fn parse_row_value(value: &JsonWireValue) -> Vec<(String, ValueOut)> {
+    value
+        .as_object()
+        .map(|row| {
+            row.iter()
+                .map(|(key, value)| (key.clone(), parse_scalar(value)))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
-fn extract_u64(s: &str, key: &str) -> Option<u64> {
-    let needle = format!("\"{key}\":");
-    let start = s.find(&needle)? + needle.len();
-    let rest = &s[start..];
-    let end = rest
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(rest.len());
-    rest[..end].parse().ok()
-}
-
-fn extract_string_array(s: &str, key: &str) -> Option<Vec<String>> {
-    let needle = format!("\"{key}\":[");
-    let start = s.find(&needle)? + needle.len();
-    let rest = &s[start..];
-    let end = rest.find(']')?;
-    let body = &rest[..end];
-    let mut out = Vec::new();
-    let mut in_str = false;
-    let mut cur = String::new();
-    let mut escaped = false;
-    for c in body.chars() {
-        if escaped {
-            cur.push(c);
-            escaped = false;
-            continue;
-        }
-        match c {
-            '\\' if in_str => escaped = true,
-            '"' => {
-                if in_str {
-                    out.push(std::mem::take(&mut cur));
-                    in_str = false;
-                } else {
-                    in_str = true;
-                }
-            }
-            _ if in_str => cur.push(c),
-            _ => {}
-        }
-    }
-    Some(out)
-}
-
-fn extract_rows(s: &str, key: &str) -> Option<Vec<Vec<(String, ValueOut)>>> {
-    let needle = format!("\"{key}\":[");
-    let start = s.find(&needle)? + needle.len();
-    let rest = &s[start..];
-    // Find the matching closing bracket, respecting nested braces.
-    let mut depth = 1i32;
-    let mut end = 0usize;
-    let mut in_str = false;
-    let mut escaped = false;
-    for (i, c) in rest.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if in_str {
-            match c {
-                '\\' => escaped = true,
-                '"' => in_str = false,
-                _ => {}
-            }
-            continue;
-        }
-        match c {
-            '"' => in_str = true,
-            '[' | '{' => depth += 1,
-            ']' | '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    end = i;
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    let body = &rest[..end];
-    // Split on `},{` at depth 0 — cheap because server output doesn't
-    // nest rows.
-    let mut rows = Vec::new();
-    let mut cur = String::new();
-    let mut d = 0i32;
-    let mut in_str = false;
-    let mut escaped = false;
-    for c in body.chars() {
-        if escaped {
-            cur.push(c);
-            escaped = false;
-            continue;
-        }
-        if in_str {
-            cur.push(c);
-            match c {
-                '\\' => escaped = true,
-                '"' => in_str = false,
-                _ => {}
-            }
-            continue;
-        }
-        match c {
-            '"' => {
-                in_str = true;
-                cur.push(c);
-            }
-            '{' => {
-                d += 1;
-                cur.push(c);
-            }
-            '}' => {
-                d -= 1;
-                cur.push(c);
-                if d == 0 {
-                    rows.push(std::mem::take(&mut cur));
-                }
-            }
-            ',' if d == 0 => {}
-            _ => cur.push(c),
-        }
-    }
-    Some(rows.into_iter().map(parse_row_object).collect())
-}
-
-fn parse_row_object(s: String) -> Vec<(String, ValueOut)> {
-    // Strip leading '{' and trailing '}'.
-    let trimmed = s.trim();
-    let inner = trimmed
-        .strip_prefix('{')
-        .and_then(|r| r.strip_suffix('}'))
-        .unwrap_or(trimmed);
-    let mut out = Vec::new();
-    let mut key = String::new();
-    let mut value = String::new();
-    let mut in_key = true;
-    let mut in_str = false;
-    let mut escaped = false;
-    let mut saw_string_value = false;
-
-    for c in inner.chars() {
-        if escaped {
-            if in_key {
-                key.push(c);
+fn parse_scalar(value: &JsonWireValue) -> ValueOut {
+    match value {
+        JsonWireValue::Null => ValueOut::Null,
+        JsonWireValue::Bool(b) => ValueOut::Bool(*b),
+        JsonWireValue::Number(n) => {
+            if n.fract() == 0.0 {
+                ValueOut::Integer(*n as i64)
             } else {
-                value.push(c);
-            }
-            escaped = false;
-            continue;
-        }
-        match c {
-            '\\' if in_str => escaped = true,
-            '"' => {
-                in_str = !in_str;
-                if !in_key && !in_str {
-                    saw_string_value = true;
-                }
-            }
-            ':' if !in_str && in_key => {
-                in_key = false;
-            }
-            ',' if !in_str && !in_key => {
-                let parsed = parse_scalar(&value, saw_string_value);
-                out.push((std::mem::take(&mut key), parsed));
-                value.clear();
-                in_key = true;
-                saw_string_value = false;
-            }
-            _ if in_str && in_key => key.push(c),
-            _ if in_str && !in_key => value.push(c),
-            _ if !in_key && !c.is_whitespace() => value.push(c),
-            _ => {}
-        }
-    }
-    if !key.is_empty() {
-        let parsed = parse_scalar(&value, saw_string_value);
-        out.push((key, parsed));
-    }
-    out
-}
-
-fn parse_scalar(raw: &str, was_string: bool) -> ValueOut {
-    let trimmed = raw.trim();
-    if was_string {
-        return ValueOut::String(unescape(trimmed));
-    }
-    match trimmed {
-        "null" => ValueOut::Null,
-        "true" => ValueOut::Bool(true),
-        "false" => ValueOut::Bool(false),
-        _ => {
-            if let Ok(i) = trimmed.parse::<i64>() {
-                ValueOut::Integer(i)
-            } else if let Ok(f) = trimmed.parse::<f64>() {
-                ValueOut::Float(f)
-            } else {
-                ValueOut::String(trimmed.to_string())
+                ValueOut::Float(*n)
             }
         }
+        JsonWireValue::String(s) => ValueOut::String(s.clone()),
+        other => ValueOut::String(other.to_string_compact()),
     }
-}
-
-fn unescape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut iter = s.chars();
-    while let Some(c) = iter.next() {
-        if c == '\\' {
-            match iter.next() {
-                Some('"') => out.push('"'),
-                Some('\\') => out.push('\\'),
-                Some('n') => out.push('\n'),
-                Some('r') => out.push('\r'),
-                Some('t') => out.push('\t'),
-                Some(other) => {
-                    out.push('\\');
-                    out.push(other);
-                }
-                None => out.push('\\'),
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
 }
 
 #[cfg(test)]

@@ -391,7 +391,8 @@ pub(crate) fn join_expr_exposes_field_table(expr: &QueryExpr, table: &str) -> bo
         | QueryExpr::DropTimeSeries(_)
         | QueryExpr::CreateQueue(_)
         | QueryExpr::DropQueue(_)
-        | QueryExpr::QueueCommand(_) => false,
+        | QueryExpr::QueueCommand(_)
+        | QueryExpr::ExplainAlter(_) => false,
     }
 }
 
@@ -690,6 +691,7 @@ pub(crate) fn query_expr_kind(expr: &QueryExpr) -> &'static str {
         QueryExpr::CreateQueue(_) => "create_queue",
         QueryExpr::DropQueue(_) => "drop_queue",
         QueryExpr::QueueCommand(_) => "queue_command",
+        QueryExpr::ExplainAlter(_) => "explain_alter",
     }
 }
 

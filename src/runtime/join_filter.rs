@@ -1107,6 +1107,10 @@ pub(super) fn runtime_values_equal(left: &Value, right: &Value) -> bool {
         return left == right;
     }
 
+    // Equality: prefer borrow path to avoid two String clones.
+    if let (Some(ls), Some(rs)) = (runtime_value_text_str(left), runtime_value_text_str(right)) {
+        return ls == rs;
+    }
     if let (Some(left), Some(right)) = (runtime_value_text(left), runtime_value_text(right)) {
         return left == right;
     }
@@ -1127,8 +1131,20 @@ pub(super) fn runtime_partial_cmp(left: &Value, right: &Value) -> Option<Orderin
         return left.partial_cmp(&right);
     }
 
+    // Fast text path: borrow the string slice when possible (avoids two
+    // String clones), then compare abbreviated 8-byte keys first — full
+    // str::cmp only if the first 8 bytes are equal.
+    if let (Some(ls), Some(rs)) = (runtime_value_text_str(left), runtime_value_text_str(right)) {
+        let l_abbrev = text_abbrev_key(ls);
+        let r_abbrev = text_abbrev_key(rs);
+        return Some(match l_abbrev.cmp(&r_abbrev) {
+            Ordering::Equal => ls.cmp(rs),
+            other => other,
+        });
+    }
+    // Slower path for non-String text variants (RowRef, VectorRef, formatted values).
     if let (Some(left), Some(right)) = (runtime_value_text(left), runtime_value_text(right)) {
-        return Some(left.cmp(&right));
+        return Some(left.as_str().cmp(right.as_str()));
     }
 
     match (left, right) {
@@ -1264,6 +1280,31 @@ pub(super) fn runtime_value_text(value: &Value) -> Option<String> {
         Value::PageRef(page_id) => Some(format!("page:{}", page_id)),
         Value::Secret(_) | Value::Password(_) => Some("***".to_string()),
     }
+}
+
+/// Borrow-only text view — only covers variants whose value is already
+/// a `String` field (no allocations). Used by `runtime_partial_cmp` to
+/// avoid cloning text values when comparing.
+pub(super) fn runtime_value_text_str(value: &Value) -> Option<&str> {
+    match value {
+        Value::Text(s) => Some(s.as_str()),
+        Value::NodeRef(s) | Value::EdgeRef(s) | Value::TableRef(s) => Some(s.as_str()),
+        Value::Email(s) | Value::Url(s) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
+/// Abbreviated sort key for a text slice: first 8 bytes in big-endian as a
+/// `u64`. Shorter strings are zero-padded. Comparing this key first avoids
+/// a full `str::cmp` in the typical case where the first 8 bytes differ —
+/// mirrors PostgreSQL varlena abbreviated key optimisation (varlena.c:98-130).
+#[inline]
+pub(super) fn text_abbrev_key(s: &str) -> u64 {
+    let bytes = s.as_bytes();
+    let len = bytes.len().min(8);
+    let mut key = [0u8; 8];
+    key[..len].copy_from_slice(&bytes[..len]);
+    u64::from_be_bytes(key)
 }
 
 pub(super) fn table_column_name(field: &FieldRef) -> Option<&str> {
@@ -1405,6 +1446,7 @@ pub(super) fn query_expr_name(expr: &QueryExpr) -> &'static str {
         QueryExpr::CreateQueue(_) => "create_queue",
         QueryExpr::DropQueue(_) => "drop_queue",
         QueryExpr::QueueCommand(_) => "queue_command",
+        QueryExpr::ExplainAlter(_) => "explain_alter",
     }
 }
 

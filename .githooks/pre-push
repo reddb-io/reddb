@@ -1,0 +1,10 @@
+#!/bin/sh
+# Pre-push hook: enforce Rust formatting before sending commits upstream.
+set -e
+
+if command -v cargo >/dev/null 2>&1; then
+  if ! cargo fmt --all -- --check 2>/dev/null; then
+    echo "pre-push: cargo fmt found diffs. Run 'cargo fmt --all' before pushing."
+    exit 1
+  fi
+fi

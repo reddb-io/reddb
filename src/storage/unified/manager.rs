@@ -20,8 +20,9 @@ use super::entity::{EntityId, UnifiedEntity};
 use super::metadata::{Metadata, MetadataFilter};
 use super::segment::{
     GrowingSegment, SegmentConfig, SegmentError, SegmentId, SegmentState, SegmentStats,
-    UnifiedSegment,
+    UnifiedSegment, ZoneColPred, ZoneColPredKind,
 };
+use crate::storage::btree::visibility_map::VisibilityMap;
 
 /// Configuration for the segment manager
 #[derive(Debug, Clone)]
@@ -113,6 +114,10 @@ pub struct SegmentManager {
     stats: RwLock<ManagerStats>,
     /// Event listeners (simplified - would be channels in production)
     events: RwLock<Vec<LifecycleEvent>>,
+    /// Visibility map: sealed segment entity ranges marked as all-visible.
+    /// Growing segment is never all-visible (writes are in-flight).
+    /// Used by index-only scan decisions.
+    visibility_map: VisibilityMap,
 }
 
 impl SegmentManager {
@@ -136,6 +141,7 @@ impl SegmentManager {
             column_schema: RwLock::new(None),
             stats: RwLock::new(ManagerStats::default()),
             events: RwLock::new(Vec::new()),
+            visibility_map: VisibilityMap::new(),
         }
     }
 
@@ -286,10 +292,17 @@ impl SegmentManager {
         &self,
         mut entities: Vec<UnifiedEntity>,
     ) -> Result<Vec<EntityId>, SegmentError> {
-        // Assign IDs
+        // Assign IDs and per-table row_ids.
         for entity in &mut entities {
             if entity.id.raw() == 0 {
                 entity.id = self.next_entity_id();
+            }
+            if let super::entity::EntityKind::TableRow { ref mut row_id, .. } = entity.kind {
+                if *row_id == 0 {
+                    *row_id = self.next_row_id();
+                } else {
+                    self.register_row_id(*row_id);
+                }
             }
         }
 
@@ -566,6 +579,7 @@ impl SegmentManager {
         if let Some(growing_arc) = growing_opt {
             let mut growing = growing_arc.write().unwrap_or_else(|e| e.into_inner());
             let seg_id = growing.id();
+            let entity_count = growing.stats().entity_count as u64;
 
             // Seal it
             growing.seal()?;
@@ -579,6 +593,9 @@ impl SegmentManager {
                 .write()
                 .unwrap_or_else(|e| e.into_inner())
                 .push(growing_arc);
+
+            // Mark sealed segment pages all-visible — they're now immutable
+            self.mark_sealed_pages_visible(entity_count);
 
             // Update stats
             {
@@ -610,6 +627,47 @@ impl SegmentManager {
         }
     }
 
+    /// Fraction of "pages" in sealed segments that are marked all-visible.
+    ///
+    /// Sealed segments are immutable so all their rows are safe for
+    /// index-only scans. The growing segment is never counted (writes
+    /// may be in-flight). Uses `rows_per_page = 256` (matching 8 KB pages
+    /// with ~32-byte rows).
+    ///
+    /// Returns a value in `[0.0, 1.0]`. 1.0 when all sealed rows are
+    /// visible; 0.0 when there are no sealed segments.
+    pub fn all_visible_fraction(&self) -> f64 {
+        const ROWS_PER_PAGE: u32 = 256;
+        let sealed = self.sealed.read().unwrap_or_else(|e| e.into_inner());
+        if sealed.is_empty() {
+            return 0.0;
+        }
+        let mut total_pages: u64 = 0;
+        for seg_arc in sealed.iter() {
+            let seg = seg_arc.read().unwrap_or_else(|e| e.into_inner());
+            let entity_count = seg.stats().entity_count as u64;
+            let pages = (entity_count + ROWS_PER_PAGE as u64 - 1) / ROWS_PER_PAGE as u64;
+            total_pages += pages;
+        }
+        if total_pages == 0 {
+            return 0.0;
+        }
+        let visible = self.visibility_map.all_visible_count();
+        (visible as f64 / total_pages as f64).min(1.0)
+    }
+
+    /// Mark all pages of newly sealed segments as all-visible in the
+    /// visibility map. Called internally after `seal_current`.
+    fn mark_sealed_pages_visible(&self, seg_entity_count: u64) {
+        const ROWS_PER_PAGE: u32 = 256;
+        let existing_visible = self.visibility_map.all_visible_count();
+        // Append pages starting after the last known visible page
+        let start_page = existing_visible as u32;
+        let new_pages = (seg_entity_count + ROWS_PER_PAGE as u64 - 1) / ROWS_PER_PAGE as u64;
+        let end_page = start_page + new_pages as u32;
+        self.visibility_map.mark_range_visible(start_page, end_page);
+    }
+
     /// Iterate over all entities in-place without collecting into a Vec.
     ///
     /// The callback receives a reference to each entity. Return `true` to
@@ -636,6 +694,44 @@ impl SegmentManager {
         let sealed = self.sealed.read().unwrap_or_else(|e| e.into_inner());
         for segment_arc in sealed.iter() {
             let segment = segment_arc.read().unwrap_or_else(|e| e.into_inner());
+            if !segment.for_each_fast(&mut callback) {
+                return;
+            }
+        }
+    }
+
+    /// Zone-map-aware iteration across all segments.
+    ///
+    /// Like `for_each_entity`, but checks `zone_preds` against each segment's
+    /// column zone maps before iterating. Segments where any predicate can
+    /// definitively prove no rows match are skipped entirely.
+    ///
+    /// `zone_preds`: slice of `(column_name, ZoneColPred)` extracted from the WHERE clause.
+    /// Empty slice → same behaviour as `for_each_entity` (no pruning).
+    pub fn for_each_entity_zoned<F>(&self, zone_preds: &[(&str, ZoneColPred<'_>)], mut callback: F)
+    where
+        F: FnMut(&UnifiedEntity) -> bool,
+    {
+        // Growing segment — never skip (it's receiving writes, zones are partial)
+        if let Some(growing_arc) = self
+            .growing
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            let growing = growing_arc.read().unwrap_or_else(|e| e.into_inner());
+            if !growing.for_each_fast(&mut callback) {
+                return;
+            }
+        }
+
+        // Sealed segments — check zone maps before iterating
+        let sealed = self.sealed.read().unwrap_or_else(|e| e.into_inner());
+        for segment_arc in sealed.iter() {
+            let segment = segment_arc.read().unwrap_or_else(|e| e.into_inner());
+            if !zone_preds.is_empty() && segment.can_skip_zone_preds(zone_preds) {
+                continue; // entire segment pruned
+            }
             if !segment.for_each_fast(&mut callback) {
                 return;
             }

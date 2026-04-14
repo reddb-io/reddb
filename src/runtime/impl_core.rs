@@ -1063,9 +1063,16 @@ impl RedDBRuntime {
             return Err(RedDBError::Query("unable to detect query mode".to_string()));
         }
 
-        // ── Plan cache: skip parse if we already have a cached plan ──
+        // ── Plan cache: reuse only exact-query ASTs ──
+        //
+        // `QueryExpr` still embeds concrete literal values. Reusing a
+        // normalized cache key such as `INSERT INTO t VALUES (?)`
+        // would make different literal executions share the same AST
+        // and replay stale values on cache hits. Keep the cache
+        // exact-match until placeholder binding is wired end to end.
+        let cache_key = query.to_string();
         let expr = if let Ok(mut plan_cache) = self.inner.query_cache.write() {
-            if let Some(cached) = plan_cache.get(query) {
+            if let Some(cached) = plan_cache.get(&cache_key) {
                 cached.plan.optimized.clone()
             } else {
                 drop(plan_cache);
@@ -1079,7 +1086,7 @@ impl RedDBRuntime {
                         Default::default(),
                     );
                     pc.insert(
-                        query.to_string(),
+                        cache_key.clone(),
                         crate::storage::query::planner::CachedPlan::new(plan),
                     );
                 }
@@ -1161,6 +1168,7 @@ impl RedDBRuntime {
             QueryExpr::CreateTable(ref create) => self.execute_create_table(query, create),
             QueryExpr::DropTable(ref drop_tbl) => self.execute_drop_table(query, drop_tbl),
             QueryExpr::AlterTable(ref alter) => self.execute_alter_table(query, alter),
+            QueryExpr::ExplainAlter(ref explain) => self.execute_explain_alter(query, explain),
             // Graph analytics commands
             QueryExpr::GraphCommand(ref cmd) => self.execute_graph_command(query, cmd),
             // Search commands

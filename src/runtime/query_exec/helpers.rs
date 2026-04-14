@@ -125,6 +125,80 @@ pub(crate) fn extract_index_candidate(
     }
 }
 
+/// Extract ALL equality predicates from an AND-tree, one per indexed column.
+/// Used by the TID bitmap path to AND multiple hash index lookups.
+/// Stops at OR / NOT — not AND-combinable.
+pub(crate) fn extract_all_eq_candidates(
+    filter: &crate::storage::query::ast::Filter,
+    out: &mut Vec<(String, Vec<u8>)>,
+) {
+    use crate::storage::query::ast::{CompareOp, FieldRef, Filter};
+    match filter {
+        Filter::Compare { field, op: CompareOp::Eq, value } => {
+            let col = match field {
+                FieldRef::TableColumn { column, .. } => column.clone(),
+                _ => return,
+            };
+            let bytes = match value {
+                crate::storage::schema::Value::Text(s) => s.as_bytes().to_vec(),
+                crate::storage::schema::Value::Integer(n) => n.to_le_bytes().to_vec(),
+                crate::storage::schema::Value::UnsignedInteger(n) => n.to_le_bytes().to_vec(),
+                _ => return,
+            };
+            out.push((col, bytes));
+        }
+        Filter::And(left, right) => {
+            extract_all_eq_candidates(left, out);
+            extract_all_eq_candidates(right, out);
+        }
+        _ => {}
+    }
+}
+
+/// Extract range/equality predicates for zone-map segment pruning.
+///
+/// Walks a filter tree and collects `(column, ZoneColPred)` pairs for
+/// simple comparisons on named user columns (not system fields).  The
+/// caller passes the returned slice to `SegmentManager::for_each_entity_zoned`.
+///
+/// Returns owned `(String, Value)` pairs because the caller needs them to
+/// outlive the filter borrow; `ZoneColPred` is reconstructed from refs at
+/// the call site.
+pub(crate) fn extract_zone_predicates(
+    filter: &crate::storage::query::ast::Filter,
+    out: &mut Vec<(String, crate::storage::schema::Value, crate::storage::unified::segment::ZoneColPredKind)>,
+) {
+    use crate::storage::query::ast::{CompareOp, FieldRef, Filter};
+    use crate::storage::unified::segment::ZoneColPredKind;
+    match filter {
+        Filter::Compare { field, op, value } => {
+            let col = match field {
+                FieldRef::TableColumn { column, .. } => column.as_str(),
+                _ => return,
+            };
+            // Skip system fields — they live outside named HashMap
+            if col.starts_with('_') || col == "red_entity_id" || col == "entity_id" {
+                return;
+            }
+            let kind = match op {
+                CompareOp::Eq => ZoneColPredKind::Eq,
+                CompareOp::Gt => ZoneColPredKind::Gt,
+                CompareOp::Ge => ZoneColPredKind::Gte,
+                CompareOp::Lt => ZoneColPredKind::Lt,
+                CompareOp::Le => ZoneColPredKind::Lte,
+                _ => return,
+            };
+            out.push((col.to_string(), value.clone(), kind));
+        }
+        Filter::And(left, right) => {
+            extract_zone_predicates(left, out);
+            extract_zone_predicates(right, out);
+        }
+        // OR / NOT: can't prune — skip
+        _ => {}
+    }
+}
+
 /// Extract simple column names from SELECT projections for projection pushdown.
 /// Returns empty Vec for SELECT * or when projections contain expressions/functions.
 pub(crate) fn extract_select_column_names(projections: &[Projection]) -> Vec<String> {

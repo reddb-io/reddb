@@ -187,6 +187,7 @@ impl ContractOrigin {
 pub struct DeclaredColumnContract {
     pub name: String,
     pub data_type: String,
+    pub sql_type: Option<crate::storage::schema::SqlTypeName>,
     pub not_null: bool,
     pub default: Option<String>,
     pub compress: Option<u8>,

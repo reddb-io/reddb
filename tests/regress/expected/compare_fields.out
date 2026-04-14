@@ -1,0 +1,15 @@
+-- CREATE TABLE pairs (name TEXT, alias TEXT)
+table 'pairs' created
+
+-- INSERT INTO pairs (name, alias) VALUES ('same', 'same')
+INSERT 0 1
+
+-- INSERT INTO pairs (name, alias) VALUES ('diff', 'other')
+INSERT 0 1
+
+-- SELECT name FROM pairs WHERE name = alias ORDER BY name
+name
+----
+same
+(1 row)
+

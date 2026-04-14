@@ -294,7 +294,8 @@ impl JoinReorderingPass {
             | QueryExpr::DropTimeSeries(_)
             | QueryExpr::CreateQueue(_)
             | QueryExpr::DropQueue(_)
-            | QueryExpr::QueueCommand(_) => 1.0,
+            | QueryExpr::QueueCommand(_)
+            | QueryExpr::ExplainAlter(_) => 1.0,
         }
     }
 }

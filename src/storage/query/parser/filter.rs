@@ -1,6 +1,6 @@
 //! Filter parsing for WHERE clauses
 
-use super::super::ast::{CompareOp, FieldRef, Filter};
+use super::super::ast::{CompareOp, Expr, FieldRef, Filter, Span};
 use super::super::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
@@ -162,12 +162,34 @@ impl<'a> Parser<'a> {
         // when the RHS is a bare literal, and falls back to
         // `Filter::CompareExpr` when it sees anything expression-shaped.
         let op = self.parse_compare_op()?;
+        if self.rhs_looks_like_bare_field_ref()? {
+            let start = self.position();
+            let right = self.parse_field_ref()?;
+            if !self.rhs_field_ref_extends_to_expression() {
+                return Ok(Filter::CompareFields { left: field, op, right });
+            }
+            let rhs = self.continue_expr(
+                Expr::Column {
+                    field: right,
+                    span: Span::new(start, self.position()),
+                },
+                0,
+            )?;
+            return Ok(Filter::CompareExpr {
+                lhs: Expr::Column {
+                    field,
+                    span: Span::synthetic(),
+                },
+                op,
+                rhs,
+            });
+        }
         if self.rhs_looks_like_expression() {
             let rhs = self.parse_expr()?;
             return Ok(Filter::CompareExpr {
-                lhs: super::super::ast::Expr::Column {
+                lhs: Expr::Column {
                     field,
-                    span: super::super::ast::Span::synthetic(),
+                    span: Span::synthetic(),
                 },
                 op,
                 rhs,
@@ -201,6 +223,37 @@ impl<'a> Parser<'a> {
             Token::Ident(_) => true,
             _ => false,
         }
+    }
+
+    /// Bare RHS identifiers should stay on the `CompareFields` fast
+    /// path unless they are immediately followed by `(`, which makes
+    /// them a function call and therefore a general expression.
+    fn rhs_looks_like_bare_field_ref(&mut self) -> Result<bool, ParseError> {
+        match self.peek() {
+            Token::Ident(_) => Ok(!matches!(self.peek_next()?, Token::LParen)),
+            _ => Ok(false),
+        }
+    }
+
+    fn rhs_field_ref_extends_to_expression(&self) -> bool {
+        matches!(
+            self.peek(),
+            Token::Eq
+                | Token::Ne
+                | Token::Lt
+                | Token::Le
+                | Token::Gt
+                | Token::Ge
+                | Token::Plus
+                | Token::Dash
+                | Token::Star
+                | Token::Slash
+                | Token::Percent
+                | Token::DoublePipe
+                | Token::Is
+                | Token::Between
+                | Token::In
+        )
     }
 
     /// Parse either a literal Value or a FieldRef. Used by BETWEEN

@@ -994,12 +994,17 @@ fn dispatch_method_remote(
         "health" => {
             let result = tokio_rt.block_on(async {
                 let mut guard = client.lock().await;
-                guard.health().await
+                guard.health_status().await
             });
             match result {
-                Ok(_state) => Ok(Value::Object(
+                Ok(status) => Ok(Value::Object(
                     [
-                        ("ok".to_string(), Value::Bool(true)),
+                        ("ok".to_string(), Value::Bool(status.healthy)),
+                        ("state".to_string(), Value::String(status.state)),
+                        (
+                            "checked_at_unix_ms".to_string(),
+                            Value::Number(status.checked_at_unix_ms as f64),
+                        ),
                         (
                             "version".to_string(),
                             Value::String(env!("CARGO_PKG_VERSION").to_string()),
@@ -1048,23 +1053,15 @@ fn dispatch_method_remote(
                 ));
             }
             let payload_json = payload.to_string_compact();
-            let reply_str = tokio_rt
+            let reply = tokio_rt
                 .block_on(async {
                     let mut guard = client.lock().await;
-                    guard.create_row(collection, &payload_json).await
+                    guard.create_row_entity(collection, &payload_json).await
                 })
                 .map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
-            // `create_row()` returns "id: N, entity: {..}". We normalize
-            // to the canonical stdio shape.
-            let id = reply_str
-                .split_once("id: ")
-                .and_then(|(_, rest)| rest.split_once(','))
-                .map(|(id, _)| id.trim().to_string());
             let mut out = json::Map::new();
             out.insert("affected".to_string(), Value::Number(1.0));
-            if let Some(id) = id {
-                out.insert("id".to_string(), Value::String(id));
-            }
+            out.insert("id".to_string(), Value::String(reply.id.to_string()));
             Ok(Value::Object(out))
         }
 
@@ -1089,7 +1086,7 @@ fn dispatch_method_remote(
                 tokio_rt
                     .block_on(async {
                         let mut guard = client.lock().await;
-                        guard.create_row(collection, &payload_json).await
+                        guard.create_row_entity(collection, &payload_json).await
                     })
                     .map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
                 total += 1;
@@ -1140,21 +1137,20 @@ fn dispatch_method_remote(
                 error_code::INVALID_PARAMS,
                 "missing 'id' string".to_string(),
             ))?;
-            let sql = format!("DELETE FROM {collection} WHERE _entity_id = {id}");
-            let json_str = tokio_rt
+            let id = id.parse::<u64>().map_err(|_| {
+                (
+                    error_code::INVALID_PARAMS,
+                    "id must be a numeric string".to_string(),
+                )
+            })?;
+            let _reply = tokio_rt
                 .block_on(async {
                     let mut guard = client.lock().await;
-                    guard.query(&sql).await
+                    guard.delete_entity(collection, id).await
                 })
                 .map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
-            let parsed = json::from_str::<Value>(&json_str)
-                .map_err(|e| (error_code::INTERNAL_ERROR, format!("bad server JSON: {e}")))?;
-            let affected = parsed
-                .get("affected")
-                .and_then(Value::as_f64)
-                .unwrap_or(0.0);
             Ok(Value::Object(
-                [("affected".to_string(), Value::Number(affected))]
+                [("affected".to_string(), Value::Number(1.0))]
                     .into_iter()
                     .collect(),
             ))

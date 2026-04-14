@@ -306,7 +306,8 @@ impl CostEstimator {
             | QueryExpr::DropTimeSeries(_)
             | QueryExpr::CreateQueue(_)
             | QueryExpr::DropQueue(_)
-            | QueryExpr::QueueCommand(_) => PlanCost::new(1.0, 1.0, 0.0),
+            | QueryExpr::QueueCommand(_)
+            | QueryExpr::ExplainAlter(_) => PlanCost::new(1.0, 1.0, 0.0),
         }
     }
 
@@ -338,7 +339,8 @@ impl CostEstimator {
             | QueryExpr::DropTimeSeries(_)
             | QueryExpr::CreateQueue(_)
             | QueryExpr::DropQueue(_)
-            | QueryExpr::QueueCommand(_) => CardinalityEstimate::new(1.0, 1.0),
+            | QueryExpr::QueueCommand(_)
+            | QueryExpr::ExplainAlter(_) => CardinalityEstimate::new(1.0, 1.0),
         }
     }
 
@@ -350,10 +352,43 @@ impl CostEstimator {
         let cardinality = self.estimate_table_cardinality(query);
 
         let cpu = cardinality.rows * self.row_scan_cost;
-        let io = (cardinality.rows / 100.0).ceil(); // Assume 100 rows per page
+
+        // I/O cost: use Mackert-Lohman when we have index stats and a filter
+        // column with a known index; otherwise fall back to the naive heuristic.
+        let io = self.estimate_table_io(query, cardinality.rows);
+
         let memory = cardinality.rows * 100.0; // 100 bytes per row estimate
 
         PlanCost::new(cpu, io, memory)
+    }
+
+    /// Compute the I/O page cost for a table scan.
+    ///
+    /// When the query has a simple equality or range filter on an indexed
+    /// column, use `IndexStats::correlated_io_cost` (Mackert-Lohman) which
+    /// accounts for `index_correlation` (0.0 = random I/O, 1.0 = sequential).
+    /// Falls back to the naive `rows / 100` heuristic otherwise.
+    fn estimate_table_io(&self, query: &TableQuery, result_rows: f64) -> f64 {
+        const ROWS_PER_PAGE: f64 = 100.0;
+
+        // Look up total heap pages from table stats if available
+        let table_stats = self.stats.table_stats(&query.table);
+        let heap_pages = table_stats
+            .map(|s| s.page_count as f64)
+            .unwrap_or_else(|| (result_rows / ROWS_PER_PAGE).max(1.0));
+
+        // If the filter is a simple comparison on an indexed column, use
+        // the Mackert-Lohman formula with correlation from IndexStats.
+        if let Some(ref filter) = query.filter {
+            if let Some(col) = first_filter_column(filter, &query.table) {
+                if let Some(idx) = self.stats.index_stats(&query.table, col) {
+                    return idx.correlated_io_cost(result_rows, heap_pages);
+                }
+            }
+        }
+
+        // Heuristic fallback: assume sequential pages = rows / 100
+        (result_rows / ROWS_PER_PAGE).ceil()
     }
 
     fn estimate_table_cardinality(&self, query: &TableQuery) -> CardinalityEstimate {
@@ -817,6 +852,19 @@ fn column_value_from(v: &crate::storage::schema::Value) -> Option<super::histogr
 
 /// Resolve a `FieldRef` to a bare column name when it refers to `table`.
 /// Returns `None` when the field targets another relation — in that case
+/// Extract the first plain column name from a filter for index-stat lookup.
+/// Walks AND nodes; stops at OR/NOT (too complex for simple correlation lookup).
+fn first_filter_column<'a>(filter: &'a AstFilter, table: &str) -> Option<&'a str> {
+    match filter {
+        AstFilter::Compare { field, .. } => column_name_for_table(field, table),
+        AstFilter::Between { field, .. } => column_name_for_table(field, table),
+        AstFilter::And(l, r) => {
+            first_filter_column(l, table).or_else(|| first_filter_column(r, table))
+        }
+        _ => None,
+    }
+}
+
 /// the legacy heuristic still applies.
 fn column_name_for_table<'a>(field: &'a FieldRef, table: &str) -> Option<&'a str> {
     match field {
@@ -900,6 +948,7 @@ mod tests {
                         approx_bytes: 0,
                         kind: IndexKind::Hash,
                         has_bloom: true,
+                        index_correlation: 0.0,
                     },
                 ),
         );
@@ -959,6 +1008,7 @@ mod tests {
                         approx_bytes: 0,
                         kind: IndexKind::BTree,
                         has_bloom: false,
+                        index_correlation: 0.0,
                     },
                 )
                 .with_index(
@@ -970,6 +1020,7 @@ mod tests {
                         approx_bytes: 0,
                         kind: IndexKind::BTree,
                         has_bloom: false,
+                        index_correlation: 0.0,
                     },
                 ),
         );

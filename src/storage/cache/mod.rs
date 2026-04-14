@@ -26,6 +26,7 @@
 //! ```
 
 pub mod aggregates;
+pub mod bgwriter;
 pub mod result;
 pub mod ring;
 pub mod sieve;

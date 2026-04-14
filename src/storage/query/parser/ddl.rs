@@ -1,11 +1,13 @@
 //! DDL SQL Parser: CREATE TABLE, DROP TABLE, ALTER TABLE
 
 use super::super::ast::{
-    AlterOperation, AlterTableQuery, CreateColumnDef, CreateTableQuery, DropTableQuery, QueryExpr,
+    AlterOperation, AlterTableQuery, CreateColumnDef, CreateTableQuery, DropTableQuery,
+    ExplainAlterQuery, ExplainFormat, QueryExpr,
 };
 use super::super::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
+use crate::storage::schema::{SqlTypeName, TypeModifier};
 
 impl<'a> Parser<'a> {
     /// Parse: CREATE TABLE [IF NOT EXISTS] name (col1 TYPE [modifiers], ...)
@@ -129,6 +131,49 @@ impl<'a> Parser<'a> {
         }))
     }
 
+    /// Parse: EXPLAIN ALTER FOR CREATE TABLE name (...) [FORMAT JSON|SQL]
+    ///
+    /// Pure read: does not execute DDL. Returns a schema-diff rendering of the
+    /// difference between the table's current contract and the target CREATE
+    /// TABLE body.
+    pub fn parse_explain_alter_query(&mut self) -> Result<QueryExpr, ParseError> {
+        self.expect(Token::Explain)?;
+        self.expect(Token::Alter)?;
+        self.expect(Token::For)?;
+        self.expect(Token::Create)?;
+        self.expect(Token::Table)?;
+
+        let body = self.parse_create_table_body()?;
+        let target = match body {
+            QueryExpr::CreateTable(t) => t,
+            _ => {
+                return Err(ParseError::new(
+                    "EXPLAIN ALTER FOR CREATE TABLE body must be a CREATE TABLE statement"
+                        .to_string(),
+                    self.position(),
+                ));
+            }
+        };
+
+        let format = if self.consume(&Token::Format)? {
+            if self.consume(&Token::Json)? {
+                ExplainFormat::Json
+            } else if self.consume_ident_ci("SQL")? {
+                ExplainFormat::Sql
+            } else {
+                return Err(ParseError::expected(
+                    vec!["JSON", "SQL"],
+                    self.peek(),
+                    self.position(),
+                ));
+            }
+        } else {
+            ExplainFormat::Sql
+        };
+
+        Ok(QueryExpr::ExplainAlter(ExplainAlterQuery { target, format }))
+    }
+
     /// Parse the body of DROP TABLE after DROP TABLE has been consumed
     pub fn parse_drop_table_body(&mut self) -> Result<QueryExpr, ParseError> {
         let if_exists = self.match_if_exists()?;
@@ -185,19 +230,21 @@ impl<'a> Parser<'a> {
     /// Parse a single column definition: name TYPE [NOT NULL] [DEFAULT=val] [COMPRESS:N] [UNIQUE] [PRIMARY KEY]
     fn parse_column_def(&mut self) -> Result<CreateColumnDef, ParseError> {
         let name = self.expect_ident()?;
-        let data_type = self.parse_column_type()?;
+        let sql_type = self.parse_column_type()?;
+        let data_type = sql_type.to_string();
 
         let mut def = CreateColumnDef {
             name,
             data_type,
+            sql_type: sql_type.clone(),
             not_null: false,
             default: None,
             compress: None,
             unique: false,
             primary_key: false,
-            enum_variants: Vec::new(),
-            array_element: None,
-            decimal_precision: None,
+            enum_variants: sql_type.enum_variants().unwrap_or_default(),
+            array_element: sql_type.array_element_type(),
+            decimal_precision: sql_type.decimal_precision(),
         };
 
         // Parse modifiers in any order
@@ -223,48 +270,40 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse column type: TEXT, INTEGER, EMAIL, ENUM('a','b','c'), ARRAY(TEXT), DECIMAL(2)
-    fn parse_column_type(&mut self) -> Result<String, ParseError> {
+    fn parse_column_type(&mut self) -> Result<SqlTypeName, ParseError> {
         let type_name = self.expect_ident_or_keyword()?;
-        // Handle parameterized types
         if self.consume(&Token::LParen)? {
             let inner = self.parse_type_params()?;
             self.expect(Token::RParen)?;
-            Ok(format!("{}({})", type_name, inner))
+            Ok(SqlTypeName::new(type_name).with_modifiers(inner))
         } else {
-            Ok(type_name)
+            Ok(SqlTypeName::new(type_name))
         }
     }
 
     /// Parse type parameters inside parentheses: 'a','b' or TEXT or 2
-    fn parse_type_params(&mut self) -> Result<String, ParseError> {
+    fn parse_type_params(&mut self) -> Result<Vec<TypeModifier>, ParseError> {
         let mut parts = Vec::new();
         loop {
             match self.peek().clone() {
                 Token::String(s) => {
                     let s = s.clone();
                     self.advance()?;
-                    parts.push(format!("'{}'", s));
+                    parts.push(TypeModifier::StringLiteral(s));
                 }
                 Token::Integer(n) => {
                     self.advance()?;
-                    parts.push(n.to_string());
-                }
-                Token::Ident(s) => {
-                    let s = s.clone();
-                    self.advance()?;
-                    parts.push(s);
+                    parts.push(TypeModifier::Number(n as u32));
                 }
                 _ => {
-                    // Also accept keywords as type names inside params
-                    let name = self.expect_ident_or_keyword()?;
-                    parts.push(name);
+                    parts.push(TypeModifier::Type(Box::new(self.parse_column_type()?)));
                 }
             }
             if !self.consume(&Token::Comma)? {
                 break;
             }
         }
-        Ok(parts.join(","))
+        Ok(parts)
     }
 
     /// Parse a literal string value for DDL DEFAULT expressions

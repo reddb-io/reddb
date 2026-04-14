@@ -95,7 +95,8 @@ pub use metadata::{
     MetadataValue, RefTarget, TypedColumn,
 };
 pub use segment::{
-    SegmentConfig, SegmentError, SegmentId, SegmentState, SegmentStats, UnifiedSegment,
+    ColZone, SegmentConfig, SegmentError, SegmentId, SegmentState, SegmentStats, UnifiedSegment,
+    ZoneColPred, ZoneColPredKind,
 };
 pub use spatial_index::{
     SpatialIndex, SpatialIndexManager, SpatialIndexStats, SpatialSearchResult,

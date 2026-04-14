@@ -162,6 +162,7 @@ impl IndexBase for HeavyHitters {
             approx_bytes: 0,
             kind: IndexKind::HeavyHitters,
             has_bloom: false,
+            index_correlation: 0.0,
         }
     }
 }

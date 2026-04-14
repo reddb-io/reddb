@@ -201,6 +201,15 @@ pub struct BTree {
     pager: Arc<Pager>,
     /// Root page ID (0 = empty tree)
     root_page_id: RwLock<u32>,
+    /// D2 fastpath: cached rightmost leaf (page_id, high_key).
+    ///
+    /// When the next key to insert is strictly greater than `high_key`,
+    /// skip `find_leaf` (tree descent from root) and go directly to the
+    /// cached page. Invalidated on splits and deletes.
+    ///
+    /// Mirrors `BTPageCacheIsValid` / `BTREE_FASTPATH_MIN_LEVEL` in
+    /// `nbtinsert.c:31`.
+    rightmost_leaf: RwLock<Option<(u32, Vec<u8>)>>,
 }
 
 #[path = "btree/impl.rs"]
@@ -514,6 +523,13 @@ fn read_next_leaf(page: &Page) -> u32 {
         data[LEAF_NEXT_OFFSET + 2],
         data[LEAF_NEXT_OFFSET + 3],
     ])
+}
+
+/// Returns the right-sibling page ID for a leaf page.
+/// 0 means this is the rightmost leaf — used by the D2 fastpath cache.
+#[inline]
+fn leaf_right_sibling(page: &Page) -> u32 {
+    read_next_leaf(page)
 }
 
 fn set_prev_leaf(page: &mut Page, prev: u32) {

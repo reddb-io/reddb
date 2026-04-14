@@ -24,6 +24,8 @@ use super::entity::{CrossRef, EntityData, EntityId, EntityKind, RefType, Unified
 use super::memtable::Memtable;
 use super::metadata::{Metadata, MetadataStorage};
 use crate::storage::primitives::bloom::BloomFilter;
+use crate::storage::schema::Value;
+use crate::storage::query::value_compare::partial_compare_values;
 
 /// Unique identifier for a segment
 pub type SegmentId = u64;
@@ -210,6 +212,92 @@ pub trait UnifiedSegment: Send + Sync {
     ) -> Vec<EntityId>;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Zone map: per-column min/max for segment pruning
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Tracks the min and max observed `Value` for one column in a segment.
+/// Used to skip segments that cannot satisfy a range or equality predicate.
+#[derive(Debug, Clone)]
+pub struct ColZone {
+    pub min: Value,
+    pub max: Value,
+}
+
+impl ColZone {
+    fn new(v: Value) -> Self {
+        Self { min: v.clone(), max: v }
+    }
+
+    fn update(&mut self, v: &Value) {
+        if partial_compare_values(v, &self.min)
+            .map(|o| o == std::cmp::Ordering::Less)
+            .unwrap_or(false)
+        {
+            self.min = v.clone();
+        }
+        if partial_compare_values(v, &self.max)
+            .map(|o| o == std::cmp::Ordering::Greater)
+            .unwrap_or(false)
+        {
+            self.max = v.clone();
+        }
+    }
+}
+
+/// Tag-only variant of `ZoneColPred` — used where the Value is stored separately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZoneColPredKind {
+    Eq,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+}
+
+/// A predicate on a single column that can be checked against a `ColZone`.
+#[derive(Debug, Clone)]
+pub enum ZoneColPred<'a> {
+    Eq(&'a Value),
+    Gt(&'a Value),
+    Gte(&'a Value),
+    Lt(&'a Value),
+    Lte(&'a Value),
+}
+
+impl<'a> ZoneColPred<'a> {
+    /// Returns `true` when the entire segment can be skipped (no row can match).
+    pub fn can_skip(&self, zone: &ColZone) -> bool {
+        match self {
+            // Equality: skip if val < min OR val > max
+            ZoneColPred::Eq(val) => {
+                partial_compare_values(val, &zone.min)
+                    .map(|o| o == std::cmp::Ordering::Less)
+                    .unwrap_or(false)
+                    || partial_compare_values(val, &zone.max)
+                        .map(|o| o == std::cmp::Ordering::Greater)
+                        .unwrap_or(false)
+            }
+            // col > val: skip if max <= val (all rows have col ≤ val, none > val)
+            ZoneColPred::Gt(val) => partial_compare_values(&zone.max, val)
+                .map(|o| o != std::cmp::Ordering::Greater)
+                .unwrap_or(false),
+            // col >= val: skip if max < val
+            ZoneColPred::Gte(val) => partial_compare_values(&zone.max, val)
+                .map(|o| o == std::cmp::Ordering::Less)
+                .unwrap_or(false),
+            // col < val: skip if min >= val
+            ZoneColPred::Lt(val) => partial_compare_values(&zone.min, val)
+                .map(|o| o != std::cmp::Ordering::Less)
+                .unwrap_or(false),
+            // col <= val: skip if min > val
+            ZoneColPred::Lte(val) => partial_compare_values(&zone.min, val)
+                .map(|o| o == std::cmp::Ordering::Greater)
+                .unwrap_or(false),
+        }
+    }
+}
+
 /// Growing segment implementation (in-memory, writable)
 pub struct GrowingSegment {
     /// Segment ID
@@ -251,6 +339,9 @@ pub struct GrowingSegment {
 
     /// Write buffer for absorbing write spikes (sorted by key)
     memtable: Memtable,
+
+    /// Per-column zone maps: col_name → (min, max) for segment pruning
+    col_zones: HashMap<String, ColZone>,
 
     /// Sequence counter for ordering
     sequence: AtomicU64,
@@ -313,6 +404,7 @@ impl GrowingSegment {
             cross_ref_reverse: HashMap::new(),
             bloom: BloomFilter::with_capacity(100_000, 0.01),
             memtable: Memtable::new(),
+            col_zones: HashMap::new(),
             sequence: AtomicU64::new(0),
             memory_bytes: AtomicU64::new(0),
         }
@@ -353,6 +445,41 @@ impl GrowingSegment {
         size += std::mem::size_of_val(entity.cross_refs());
 
         size
+    }
+
+    /// Update per-column zone maps from a newly inserted entity's named fields.
+    /// Only processes `EntityData::Row` rows — other kinds don't have named columns.
+    fn update_col_zones_from_entity(&mut self, entity: &UnifiedEntity) {
+        if let EntityData::Row(row) = &entity.data {
+            if let Some(named) = &row.named {
+                for (col, val) in named {
+                    if matches!(val, Value::Null) {
+                        continue;
+                    }
+                    self.col_zones
+                        .entry(col.clone())
+                        .and_modify(|z| z.update(val))
+                        .or_insert_with(|| ColZone::new(val.clone()));
+                }
+            }
+        }
+    }
+
+    /// Returns `true` when this segment can be entirely skipped for the given predicates.
+    /// A segment is skipped only if ALL predicates say so (conservative: any non-skippable
+    /// predicate forces the scan to proceed).
+    pub fn can_skip_zone_preds(&self, preds: &[(&str, ZoneColPred<'_>)]) -> bool {
+        if preds.is_empty() {
+            return false;
+        }
+        for (col, pred) in preds {
+            if let Some(zone) = self.col_zones.get(*col) {
+                if pred.can_skip(zone) {
+                    return true; // ONE predicate suffices to skip
+                }
+            }
+        }
+        false
     }
 
     /// Index an entity
@@ -505,6 +632,10 @@ impl GrowingSegment {
             self.use_flat = true;
         }
 
+        // Collect (col, value) pairs for zone updates BEFORE the mutable borrow
+        // on `kind_set` is released (Rust can't split field borrows through `self`).
+        let mut zone_updates: Vec<(String, Value)> = Vec::new();
+
         if self.use_flat {
             self.flat_entities.reserve(n);
             for (i, mut entity) in entities.into_iter().enumerate() {
@@ -512,6 +643,16 @@ impl GrowingSegment {
                 let id = entity.id;
                 kind_set.insert(id);
                 ids.push(id);
+                // Collect zone data from this entity
+                if let EntityData::Row(row) = &entity.data {
+                    if let Some(named) = &row.named {
+                        for (col, val) in named {
+                            if !matches!(val, Value::Null) {
+                                zone_updates.push((col.clone(), val.clone()));
+                            }
+                        }
+                    }
+                }
                 self.flat_entities.push(entity);
             }
         } else {
@@ -523,9 +664,27 @@ impl GrowingSegment {
                 let id = entity.id;
                 kind_set.insert(id);
                 ids.push(id);
+                if let EntityData::Row(row) = &entity.data {
+                    if let Some(named) = &row.named {
+                        for (col, val) in named {
+                            if !matches!(val, Value::Null) {
+                                zone_updates.push((col.clone(), val.clone()));
+                            }
+                        }
+                    }
+                }
                 pairs.push((id, entity));
             }
             self.entities.extend(pairs);
+        }
+
+        // Apply zone updates now that kind_set borrow is released
+        let _ = kind_set;
+        for (col, val) in zone_updates {
+            self.col_zones
+                .entry(col)
+                .and_modify(|z| z.update(&val))
+                .or_insert_with(|| ColZone::new(val));
         }
 
         self.last_write_at = now;
@@ -644,6 +803,9 @@ impl UnifiedSegment for GrowingSegment {
 
         // Index the entity
         self.index_entity(&entity);
+
+        // Update column zone maps for range-based segment pruning
+        self.update_col_zones_from_entity(&entity);
 
         // Write to memtable (write buffer for sorted flush)
         let id = entity.id;
