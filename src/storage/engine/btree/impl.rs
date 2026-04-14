@@ -423,6 +423,7 @@ impl BTree {
                 leaf_page_id: 0,
                 position: 0,
                 pager: self.pager.clone(),
+                prefetched_next: false,
             });
         }
 
@@ -433,6 +434,7 @@ impl BTree {
             leaf_page_id: first_leaf,
             position: 0,
             pager: self.pager.clone(),
+            prefetched_next: false,
         })
     }
 
@@ -444,6 +446,7 @@ impl BTree {
                 leaf_page_id: 0,
                 position: 0,
                 pager: self.pager.clone(),
+                prefetched_next: false,
             });
         }
 
@@ -459,6 +462,7 @@ impl BTree {
             leaf_page_id: leaf_id,
             position,
             pager: self.pager.clone(),
+            prefetched_next: false,
         })
     }
 

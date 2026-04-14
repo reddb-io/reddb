@@ -937,6 +937,23 @@ impl Pager {
         Ok(file.metadata()?.len())
     }
 
+    /// Issue an OS-level read-ahead hint for `page_id`.
+    ///
+    /// A6 prefetch wire: called from `BTreeCursor::next` when the
+    /// cursor passes 50% of the current leaf, so the kernel fetches
+    /// the next leaf page while CPU processes the remaining half of
+    /// the current one. Failures are silent — a missed prefetch is a
+    /// performance miss, never a correctness bug.
+    pub fn prefetch_hint(&self, page_id: u32) {
+        if let Ok(file) = self.file_lock() {
+            let _ = crate::storage::btree::prefetch::prefetch_page(
+                &*file,
+                page_id as u64,
+                PAGE_SIZE as u32,
+            );
+        }
+    }
+
     // ── Corruption defense helpers ──────────────────────────────────
 
     /// Path for the header shadow file

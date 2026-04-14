@@ -647,6 +647,8 @@ fn data_type_name(data_type: DataType) -> &'static str {
         DataType::PageRef => "pageref",
         DataType::Secret => "secret",
         DataType::Password => "password",
+        DataType::TextZstd => "text",
+        DataType::BlobZstd => "blob",
     }
 }
 
@@ -1562,6 +1564,19 @@ impl RuntimeEntityPort for RedDBRuntime {
 
         // HOT-update: use column-aware path when we know which fields changed,
         // so the segment can skip pk_index and cross_ref when unaffected.
+        if !modified_columns.is_empty() {
+            let mut unique = Vec::with_capacity(modified_columns.len());
+            for column in modified_columns.drain(..) {
+                if !unique
+                    .iter()
+                    .any(|existing: &String| existing.eq_ignore_ascii_case(&column))
+                {
+                    unique.push(column);
+                }
+            }
+            modified_columns = unique;
+        }
+
         if modified_columns.is_empty() {
             manager
                 .update(entity)

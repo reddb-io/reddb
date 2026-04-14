@@ -297,6 +297,13 @@ pub enum DataType {
     Secret = 49,
     /// Argon2id password hash
     Password = 50,
+    /// C3 TOAST: zstd-compressed UTF-8 text (> TOAST_THRESHOLD bytes).
+    /// In-memory representation is always `Value::Text` — compression is
+    /// transparent to all callers above the serialization layer.
+    TextZstd = 51,
+    /// C3 TOAST: zstd-compressed binary blob (> TOAST_THRESHOLD bytes).
+    /// In-memory representation is always `Value::Blob`.
+    BlobZstd = 52,
 }
 
 /// Type categories used by the Fase 3 coercion resolver. Mirrors
@@ -409,6 +416,11 @@ impl DataType {
             DataType::Vector => TypeCategory::Vector,
             DataType::Json => TypeCategory::Json,
             DataType::Nullable => TypeCategory::Unknown,
+            // C3 TOAST compressed variants — same category as their uncompressed originals.
+            // Callers see Value::Text / Value::Blob after decompression; the DataType is an
+            // on-disk-only detail.
+            DataType::TextZstd => TypeCategory::String,
+            DataType::BlobZstd => TypeCategory::String,
         }
     }
 
@@ -497,6 +509,8 @@ impl DataType {
             48 => Some(DataType::PageRef),
             49 => Some(DataType::Secret),
             50 => Some(DataType::Password),
+            51 => Some(DataType::TextZstd),
+            52 => Some(DataType::BlobZstd),
             _ => None,
         }
     }
@@ -624,6 +638,8 @@ impl DataType {
             DataType::PageRef => Some(4),     // u32
             DataType::Secret => None,         // variable-length ciphertext
             DataType::Password => None,       // variable-length hash string
+            DataType::TextZstd => None,       // variable-length compressed text
+            DataType::BlobZstd => None,       // variable-length compressed blob
         }
     }
 
@@ -746,6 +762,8 @@ impl fmt::Display for DataType {
             DataType::PageRef => write!(f, "PAGE_REF"),
             DataType::Secret => write!(f, "SECRET"),
             DataType::Password => write!(f, "PASSWORD"),
+            DataType::TextZstd => write!(f, "TEXT"),   // presents as TEXT externally
+            DataType::BlobZstd => write!(f, "BLOB"),   // presents as BLOB externally
         }
     }
 }
@@ -917,6 +935,16 @@ impl Value {
         matches!(self, Value::Null)
     }
 
+    /// C3 TOAST: minimum byte length to attempt zstd compression.
+    /// Values shorter than this are stored uncompressed — compression
+    /// overhead (~50 ns + header bytes) outweighs savings for small values.
+    const TOAST_THRESHOLD: usize = 2048;
+
+    /// zstd compression level for TOAST values. Level 3 is PG's default
+    /// (balanced speed/ratio). Raise to 6 for write-rarely / read-many
+    /// workloads; lower to 1 for high-write, latency-sensitive paths.
+    const TOAST_ZSTD_LEVEL: i32 = 3;
+
     /// Serialize value to bytes
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
@@ -938,13 +966,40 @@ impl Value {
                 buf.extend_from_slice(&v.to_le_bytes());
             }
             Value::Text(s) => {
-                buf.push(DataType::Text.to_byte());
                 let bytes = s.as_bytes();
-                // Varint length encoding
+                // C3 TOAST: compress text values larger than the threshold.
+                // Stores with `TextZstd` type byte when compression wins;
+                // falls back to plain `Text` for small values or when zstd
+                // doesn't reduce the size (e.g. already-compressed content).
+                if bytes.len() > TOAST_THRESHOLD {
+                    if let Ok(compressed) = zstd::bulk::compress(bytes, TOAST_ZSTD_LEVEL) {
+                        if compressed.len() < bytes.len() {
+                            buf.push(DataType::TextZstd.to_byte());
+                            // original length first (needed to pre-allocate decompression buffer)
+                            write_varint(&mut buf, bytes.len() as u64);
+                            write_varint(&mut buf, compressed.len() as u64);
+                            buf.extend_from_slice(&compressed);
+                            return buf;
+                        }
+                    }
+                }
+                buf.push(DataType::Text.to_byte());
                 write_varint(&mut buf, bytes.len() as u64);
                 buf.extend_from_slice(bytes);
             }
             Value::Blob(data) => {
+                // C3 TOAST: same pattern as Text.
+                if data.len() > TOAST_THRESHOLD {
+                    if let Ok(compressed) = zstd::bulk::compress(data, TOAST_ZSTD_LEVEL) {
+                        if compressed.len() < data.len() {
+                            buf.push(DataType::BlobZstd.to_byte());
+                            write_varint(&mut buf, data.len() as u64);
+                            write_varint(&mut buf, compressed.len() as u64);
+                            buf.extend_from_slice(&compressed);
+                            return buf;
+                        }
+                    }
+                }
                 buf.push(DataType::Blob.to_byte());
                 write_varint(&mut buf, data.len() as u64);
                 buf.extend_from_slice(data);
@@ -1677,6 +1732,41 @@ impl Value {
             DataType::Nullable => {
                 // Nullable without inner type means null
                 Value::Null
+            }
+            // C3 TOAST: zstd-compressed Text — transparent decompression.
+            // Wire: to_bytes writes TextZstd when text > TOAST_THRESHOLD and
+            // compression saves space; from_bytes always materialises as Value::Text.
+            DataType::TextZstd => {
+                let (orig_len, vs1) = read_varint(&data[offset..])?;
+                offset += vs1;
+                let (comp_len, vs2) = read_varint(&data[offset..])?;
+                offset += vs2;
+                if data.len() < offset + comp_len as usize {
+                    return Err(ValueError::TruncatedData);
+                }
+                let compressed = &data[offset..offset + comp_len as usize];
+                let mut out = vec![0u8; orig_len as usize];
+                zstd::bulk::decompress_to_buffer(compressed, &mut out)
+                    .map_err(|_| ValueError::InvalidUtf8)?;
+                offset += comp_len as usize;
+                let s = String::from_utf8(out).map_err(|_| ValueError::InvalidUtf8)?;
+                Value::Text(s)
+            }
+            // C3 TOAST: zstd-compressed Blob — same pattern as TextZstd.
+            DataType::BlobZstd => {
+                let (orig_len, vs1) = read_varint(&data[offset..])?;
+                offset += vs1;
+                let (comp_len, vs2) = read_varint(&data[offset..])?;
+                offset += vs2;
+                if data.len() < offset + comp_len as usize {
+                    return Err(ValueError::TruncatedData);
+                }
+                let compressed = &data[offset..offset + comp_len as usize];
+                let mut out = vec![0u8; orig_len as usize];
+                zstd::bulk::decompress_to_buffer(compressed, &mut out)
+                    .map_err(|_| ValueError::InvalidUtf8)?;
+                offset += comp_len as usize;
+                Value::Blob(out)
             }
         };
 

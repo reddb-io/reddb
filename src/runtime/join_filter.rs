@@ -1694,15 +1694,35 @@ fn evaluate_scalar_function(
                 Value::Text(text) => text,
                 _ => return Some(Value::Null),
             };
-            let start =
-                resolve_scalar_arg(args, 1, source).and_then(|value| value_as_i64(&value))?;
-            let count = args
-                .get(2)
-                .map(|_| {
-                    resolve_scalar_arg(args, 2, source).and_then(|value| value_as_i64(&value))
-                })
-                .transpose()?;
-            Some(Value::Text(substring_text(&text, start, count)?))
+            match resolve_scalar_arg(args, 1, source)? {
+                Value::Text(pattern) if func_name == "SUBSTRING" && args.len() == 2 => {
+                    Some(match substring_pattern_text(&text, &pattern) {
+                        Some(matched) => Value::Text(matched),
+                        None => Value::Null,
+                    })
+                }
+                start_value => {
+                    let start = value_as_i64(&start_value)?;
+                    let count = args
+                        .get(2)
+                        .map(|_| {
+                            resolve_scalar_arg(args, 2, source).and_then(|value| value_as_i64(&value))
+                        })
+                        .transpose()?;
+                    Some(Value::Text(substring_text(&text, start, count)?))
+                }
+            }
+        },
+        "POSITION" => {
+            let needle = match resolve_scalar_arg(args, 0, source)? {
+                Value::Text(text) => text,
+                _ => return Some(Value::Null),
+            };
+            let haystack = match resolve_scalar_arg(args, 1, source)? {
+                Value::Text(text) => text,
+                _ => return Some(Value::Null),
+            };
+            Some(Value::Integer(position_text(&needle, &haystack)))
         },
         "TRIM" | "BTRIM" => {
             let text = match resolve_scalar_arg(args, 0, source)? {
@@ -1739,6 +1759,52 @@ fn evaluate_scalar_function(
                 Some(_) => return Some(Value::Null),
             };
             Some(Value::Text(trim_text(&text, chars.as_deref(), false, true)))
+        },
+        "CONCAT_WS" => {
+            let separator = match resolve_scalar_arg(args, 0, source)? {
+                Value::Null => return Some(Value::Null),
+                Value::Text(text) => text,
+                other => other.display_string(),
+            };
+            let mut parts = Vec::new();
+            for idx in 1..args.len() {
+                let value = resolve_scalar_arg(args, idx, source)?;
+                if matches!(value, Value::Null) {
+                    continue;
+                }
+                parts.push(value.display_string());
+            }
+            Some(Value::Text(parts.join(&separator)))
+        },
+        "REVERSE" => {
+            let text = match resolve_scalar_arg(args, 0, source)? {
+                Value::Text(text) => text,
+                _ => return Some(Value::Null),
+            };
+            Some(Value::Text(text.chars().rev().collect()))
+        },
+        "LEFT" => {
+            let text = match resolve_scalar_arg(args, 0, source)? {
+                Value::Text(text) => text,
+                _ => return Some(Value::Null),
+            };
+            let count =
+                resolve_scalar_arg(args, 1, source).and_then(|value| value_as_i64(&value))?;
+            Some(Value::Text(slice_left_text(&text, count)))
+        },
+        "RIGHT" => {
+            let text = match resolve_scalar_arg(args, 0, source)? {
+                Value::Text(text) => text,
+                _ => return Some(Value::Null),
+            };
+            let count =
+                resolve_scalar_arg(args, 1, source).and_then(|value| value_as_i64(&value))?;
+            Some(Value::Text(slice_right_text(&text, count)))
+        },
+        "QUOTE_LITERAL" => match resolve_scalar_arg(args, 0, source)? {
+            Value::Null => Some(Value::Null),
+            Value::Text(text) => Some(Value::Text(quote_literal_text(&text))),
+            other => Some(Value::Text(quote_literal_text(&other.display_string()))),
         },
         "ABS" => {
             let val = resolve_scalar_arg(args, 0, source)?;
@@ -1934,7 +2000,7 @@ fn resolve_scalar_arg(args: &[Projection], index: usize, source: &UnifiedRecord)
 /// - `Projection::Field` to walk FieldRef resolution,
 /// - `Projection::Function` recursively (enables nested arithmetic / casts),
 /// - `Projection::Expression` as a boolean coming from a Filter.
-fn eval_projection_value(proj: &Projection, source: &UnifiedRecord) -> Option<Value> {
+pub(super) fn eval_projection_value(proj: &Projection, source: &UnifiedRecord) -> Option<Value> {
     match proj {
         Projection::Column(col) => {
             if let Some(lit_val) = col.strip_prefix("LIT:") {
@@ -2028,6 +2094,58 @@ fn substring_text(text: &str, start: i64, count: Option<i64>) -> Option<String> 
     };
 
     Some(chars[start_idx..end_idx].iter().collect())
+}
+
+fn substring_pattern_text(text: &str, pattern: &str) -> Option<String> {
+    let regex = regex::Regex::new(pattern).ok()?;
+    let captures = regex.captures(text)?;
+    if captures.len() > 1 {
+        return captures.get(1).map(|capture| capture.as_str().to_string());
+    }
+    captures.get(0).map(|capture| capture.as_str().to_string())
+}
+
+fn position_text(needle: &str, haystack: &str) -> i64 {
+    if needle.is_empty() {
+        return 1;
+    }
+    haystack
+        .find(needle)
+        .map(|byte_idx| haystack[..byte_idx].chars().count() as i64 + 1)
+        .unwrap_or(0)
+}
+
+fn slice_left_text(text: &str, count: i64) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let take = normalized_slice_len(chars.len(), count);
+    chars.into_iter().take(take).collect()
+}
+
+fn slice_right_text(text: &str, count: i64) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let take = normalized_slice_len(chars.len(), count);
+    let len = chars.len();
+    chars
+        .into_iter()
+        .skip(len.saturating_sub(take))
+        .collect()
+}
+
+fn normalized_slice_len(len: usize, count: i64) -> usize {
+    if count >= 0 {
+        usize::try_from(count).unwrap_or(usize::MAX).min(len)
+    } else {
+        len.saturating_sub(count.unsigned_abs() as usize)
+    }
+}
+
+fn quote_literal_text(text: &str) -> String {
+    let escaped = text.replace('\'', "''");
+    if text.contains('\\') {
+        format!("E'{}'", escaped.replace('\\', "\\\\"))
+    } else {
+        format!("'{escaped}'")
+    }
 }
 
 fn trim_text(text: &str, chars: Option<&str>, left: bool, right: bool) -> String {

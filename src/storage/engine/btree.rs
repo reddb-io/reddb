@@ -137,6 +137,10 @@ pub struct BTreeCursor {
     position: usize,
     /// Pager reference
     pager: Arc<Pager>,
+    /// A6 — true once we've issued a prefetch hint for the next leaf on
+    /// this leaf. Reset to false every time we move to a new leaf so the
+    /// hint fires once per leaf, at the halfway point.
+    prefetched_next: bool,
 }
 
 impl BTreeCursor {
@@ -148,6 +152,19 @@ impl BTreeCursor {
 
         let page = self.pager.read_page(self.leaf_page_id)?;
         let cell_count = page.cell_count() as usize;
+
+        // A6 — prefetch the next leaf when we cross the halfway point of
+        // the current one. The hint fires at most once per leaf (guarded
+        // by `prefetched_next`) so the syscall overhead is amortized over
+        // ~half a leaf's worth of entries. The kernel uses the hint to
+        // start DMA-ing the next page while we finish the current one.
+        if !self.prefetched_next && self.position >= cell_count / 2 && cell_count > 0 {
+            let next_leaf = read_next_leaf(&page);
+            if next_leaf != 0 {
+                self.pager.prefetch_hint(next_leaf);
+            }
+            self.prefetched_next = true;
+        }
 
         // Check if we have more cells in current page
         if self.position < cell_count {
@@ -165,6 +182,7 @@ impl BTreeCursor {
 
         self.leaf_page_id = next_leaf;
         self.position = 0;
+        self.prefetched_next = false; // reset for the new leaf
 
         // Read from new leaf
         let page = self.pager.read_page(self.leaf_page_id)?;

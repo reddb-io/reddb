@@ -641,57 +641,102 @@ impl std::fmt::Debug for AggregationDef {
     }
 }
 
-/// Execute GROUP BY with aggregations
+/// Soft memory cap for in-process hash aggregation.
+///
+/// When the groups HashMap grows beyond this threshold, an OOM-guard
+/// warning fires. Full spill-to-disk requires changing the calling
+/// convention to a row-at-a-time streaming API (tracked separately).
+const WORK_MEM_BYTES: usize = 64 * 1024 * 1024; // 64 MiB
+
+/// Estimated heap cost per group entry in the streaming HashMap.
+///
+/// In practice each entry holds:
+///   - a String group-key (~32 B avg)
+///   - group key Var/Value pairs (~64 B)
+///   - one Box<dyn Aggregator> per agg_def (~64 B each, assume ≤4 defs → ~256 B)
+///
+/// 512 B is deliberately conservative to avoid premature eviction
+/// in the common case.
+const AVG_GROUP_ENTRY_BYTES: usize = 512;
+
+/// 1-pass streaming GROUP BY.
+///
+/// Previous implementation accumulated ALL input bindings per group
+/// (`HashMap<String, Vec<Binding>>`), then ran aggregations in a
+/// second pass. Memory cost: O(input_rows) in the groups map.
+///
+/// This version keeps only the incremental aggregation state per group
+/// — one `Box<dyn Aggregator>` per `AggregationDef`. Memory cost drops
+/// to O(distinct_groups × agg_defs), which is dramatically lower for
+/// high-cardinality inputs with few distinct groups.
 pub fn execute_group_by(
     bindings: Vec<Binding>,
     group_vars: &[Var],
     aggregations: &[AggregationDef],
 ) -> Vec<Binding> {
-    // Group bindings by the group key
-    let mut groups: HashMap<String, Vec<Binding>> = HashMap::new();
+    // Each entry: (snapshot of group-key values from first binding,
+    //              incremental aggregator state for each agg_def)
+    let mut groups: HashMap<String, (Binding, Vec<Box<dyn Aggregator>>)> = HashMap::new();
 
-    for binding in bindings {
-        let key = make_group_key(&binding, group_vars);
-        groups.entry(key).or_default().push(binding);
+    for binding in &bindings {
+        let key = make_group_key(binding, group_vars);
+        let entry = groups.entry(key).or_insert_with(|| {
+            // Capture group key values once from the first binding in this group.
+            let mut key_binding = Binding::empty();
+            for var in group_vars {
+                if let Some(value) = binding.get(var) {
+                    let partial = Binding::one(var.clone(), value.clone());
+                    key_binding = key_binding.merge(&partial).unwrap_or(key_binding);
+                }
+            }
+            // Allocate one fresh aggregator instance per agg def.
+            let agg_instances = aggregations
+                .iter()
+                .map(|a| a.aggregator.new_instance())
+                .collect();
+            (key_binding, agg_instances)
+        });
+
+        // Accumulate each aggregation in a single pass over the binding.
+        for (i, agg_def) in aggregations.iter().enumerate() {
+            entry.1[i].accumulate(binding.get(&agg_def.source_var));
+        }
+
+        // Memory guard: O(1) check, avoids estimating actual heap usage.
+        // When the number of distinct groups × avg cost exceeds WORK_MEM,
+        // we've likely exhausted the intended budget. For now we continue
+        // (the data is already in memory via the input Vec<Binding>) but
+        // emit a debug trace so operators can see when this fires.
+        #[cfg(debug_assertions)]
+        if groups.len() * AVG_GROUP_ENTRY_BYTES > WORK_MEM_BYTES {
+            // Only log once — on entry count crossing the threshold,
+            // not on every subsequent row.
+            static WARNED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!(
+                    "[reddb] hash-agg: {} distinct groups × {} B ≈ {} MiB exceeds WORK_MEM {}  MiB; \
+                     disk spill not yet wired — upgrade calling convention to streaming for OOM safety",
+                    groups.len(),
+                    AVG_GROUP_ENTRY_BYTES,
+                    (groups.len() * AVG_GROUP_ENTRY_BYTES) / (1024 * 1024),
+                    WORK_MEM_BYTES / (1024 * 1024),
+                );
+            }
+        }
     }
 
-    // Compute aggregations for each group
-    let mut results = Vec::new();
-
-    for (_, group_bindings) in groups {
-        if group_bindings.is_empty() {
-            continue;
-        }
-
-        // Start with the group key values from first binding
-        let first = &group_bindings[0];
-        let mut result = Binding::empty();
-
-        // Add group key variables
-        for var in group_vars {
-            if let Some(value) = first.get(var) {
-                let partial = Binding::one(var.clone(), value.clone());
-                result = result.merge(&partial).unwrap_or(result);
-            }
-        }
-
-        // Compute each aggregation
-        for agg_def in aggregations {
-            let mut aggregator = agg_def.aggregator.new_instance();
-
-            for binding in &group_bindings {
-                let value = binding.get(&agg_def.source_var);
-                aggregator.accumulate(value);
-            }
-
-            let agg_result = aggregator.finalize();
+    // Finalize: emit one output Binding per distinct group.
+    let mut results = Vec::with_capacity(groups.len());
+    for (_, (key_binding, mut agg_instances)) in groups {
+        let mut result = key_binding;
+        for (i, agg_def) in aggregations.iter().enumerate() {
+            let agg_result = agg_instances[i].finalize();
             let partial = Binding::one(agg_def.result_var.clone(), agg_result);
             result = result.merge(&partial).unwrap_or(result);
         }
-
         results.push(result);
     }
-
     results
 }
 

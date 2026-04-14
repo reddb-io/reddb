@@ -970,6 +970,11 @@ impl UnifiedSegment for GrowingSegment {
             self.reindex_for_update(old_entity, &entity, None);
         }
 
+        // Zone maps are append-only summaries. Updates must widen them with the
+        // new row image so segment pruning never skips a segment that now holds
+        // an out-of-range value. We intentionally do not try to shrink here.
+        self.update_col_zones_from_entity(&entity);
+
         // Insert new version (skip for flat storage — already replaced in-place)
         if !self.use_flat {
             self.entities.insert(entity.id, entity);
@@ -1011,6 +1016,9 @@ impl UnifiedSegment for GrowingSegment {
         if let Some(ref old_entity) = old {
             self.reindex_for_update(old_entity, &entity, Some(modified_columns));
         }
+
+        // Same safety rule as `update()`: widen zone maps with the updated row.
+        self.update_col_zones_from_entity(&entity);
 
         if !self.use_flat {
             self.entities.insert(entity.id, entity);

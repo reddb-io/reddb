@@ -565,16 +565,59 @@ pub(crate) fn execute_runtime_canonical_table_node(
                         table_alias,
                     ),
                 };
+                // Schema-index precomputation: same optimisation as the indexed scan path.
+                // Resolve projected column names → schema positions once before the loop.
+                let schema_col_indices: Option<Vec<(usize, usize)>> =
+                    if !select_cols.is_empty() {
+                        schema_arc.as_ref().map(|schema| {
+                            select_cols
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(ci, col)| {
+                                    schema.iter().position(|s| s == col).map(|si| (ci, si))
+                                })
+                                .collect()
+                        })
+                    } else {
+                        None
+                    };
+
                 let mut records: Vec<UnifiedRecord> = Vec::new();
                 manager.for_each_entity(|entity| {
                     if records.len() >= limit {
                         return false;
                     }
                     if compiled.evaluate(entity) {
-                        let record = if select_cols.is_empty() {
-                            runtime_table_record_from_entity(entity.clone())
+                        let record = if !select_cols.is_empty() {
+                            if let Some(ref idx_map) = schema_col_indices {
+                                super::super::record_search::runtime_table_record_with_col_indices(
+                                    entity, &select_cols, idx_map,
+                                )
+                                .or_else(|| {
+                                    super::super::record_search::runtime_table_record_from_entity_ref_projected(
+                                        entity, &select_cols,
+                                    )
+                                })
+                                .or_else(|| {
+                                    runtime_table_record_from_entity_projected(
+                                        entity.clone(),
+                                        &select_cols,
+                                    )
+                                })
+                            } else {
+                                super::super::record_search::runtime_table_record_from_entity_ref_projected(
+                                    entity,
+                                    &select_cols,
+                                )
+                                .or_else(|| {
+                                    runtime_table_record_from_entity_projected(
+                                        entity.clone(),
+                                        &select_cols,
+                                    )
+                                })
+                            }
                         } else {
-                            runtime_table_record_from_entity_projected(entity.clone(), &select_cols)
+                            runtime_table_record_from_entity(entity.clone())
                         };
                         if let Some(record) = record {
                             records.push(record);

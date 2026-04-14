@@ -19,9 +19,31 @@ pub(super) fn scan_runtime_table_source_records(
         .get_collection(table)
         .ok_or_else(|| RedDBError::NotFound(table.to_string()))?;
 
-    // Use for_each_entity to avoid the intermediate Vec<UnifiedEntity> allocation.
-    // Each entity is cloned only once (for record creation) instead of being
-    // first collected into a Vec then consumed.
+    // A5 — parallel scan: for large unfiltered tables, collect entities once
+    // then convert to records in parallel using the thread-pool coordinator.
+    // The threshold guards against spawn overhead dominating on small tables.
+    use crate::storage::query::executors::parallel_scan::MIN_PARALLEL_ROWS;
+    let entity_count = manager.count();
+    if entity_count >= MIN_PARALLEL_ROWS {
+        let mut entities: Vec<crate::storage::unified::entity::UnifiedEntity> =
+            Vec::with_capacity(entity_count);
+        manager.for_each_entity(|e| {
+            entities.push(e.clone());
+            true
+        });
+        let records = crate::storage::query::executors::parallel_scan::parallel_scan_default(
+            &entities,
+            |chunk| {
+                chunk
+                    .iter()
+                    .filter_map(|e| runtime_table_record_from_entity(e.clone()))
+                    .collect()
+            },
+        );
+        return Ok(records);
+    }
+
+    // Sequential path for smaller tables — avoids thread overhead.
     let mut records = Vec::new();
     manager.for_each_entity(|entity| {
         if let Some(record) = runtime_table_record_from_entity(entity.clone()) {
