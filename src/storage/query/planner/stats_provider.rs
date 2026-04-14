@@ -208,6 +208,50 @@ impl StatsProvider for StaticProvider {
     }
 }
 
+/// [`StatsProvider`] backed by a [`crate::api::CatalogSnapshot`].
+///
+/// Provides real row counts to the cost estimator without requiring a
+/// live `RedDB` reference in the planner's inner loops. Build once per
+/// query from `db.catalog_snapshot()` and wrap in `Arc`.
+pub struct CatalogStatsProvider {
+    tables: HashMap<String, TableStats>,
+}
+
+impl CatalogStatsProvider {
+    /// Build a provider from a catalog snapshot.  Only `row_count` and a
+    /// minimal `page_count` estimate are populated — index stats still come
+    /// from [`RegistryProvider`] or remain `None`.
+    pub fn from_catalog(snapshot: &crate::api::CatalogSnapshot) -> Self {
+        const AVG_ROW_SIZE: u32 = 128;
+        const ROWS_PER_PAGE: u64 = 100;
+        let tables = snapshot
+            .stats_by_collection
+            .iter()
+            .map(|(name, cstats)| {
+                let row_count = cstats.entities as u64;
+                let stats = TableStats {
+                    row_count,
+                    avg_row_size: AVG_ROW_SIZE,
+                    page_count: (row_count / ROWS_PER_PAGE).max(1),
+                    columns: vec![],
+                };
+                (name.clone(), stats)
+            })
+            .collect();
+        Self { tables }
+    }
+}
+
+impl StatsProvider for CatalogStatsProvider {
+    fn table_stats(&self, table: &str) -> Option<TableStats> {
+        self.tables.get(table).cloned()
+    }
+
+    fn index_stats(&self, _table: &str, _column: &str) -> Option<IndexStats> {
+        None
+    }
+}
+
 /// [`StatsProvider`] backed by an [`IndexRegistry`].
 ///
 /// Closes the loop between the index trait layer and the planner stats

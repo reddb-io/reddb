@@ -1,10 +1,12 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::storage::query::ast::{
     FieldRef, Filter, FusionStrategy, JoinQuery, OrderByClause, Projection, QueryExpr, TableQuery,
 };
 use crate::storage::query::is_universal_entity_source as is_universal_query_source;
-use crate::storage::query::sql_lowering::effective_table_projections;
+use crate::storage::query::sql_lowering::{effective_table_filter, effective_table_projections};
+use crate::storage::query::planner::stats_provider::CatalogStatsProvider;
 use crate::storage::schema::Value;
 use crate::storage::RedDB;
 
@@ -68,11 +70,12 @@ pub(crate) fn universal_entity_cardinality(db: &RedDB) -> CardinalityEstimate {
     }
 }
 
-pub(crate) fn table_filtered_cardinality(query: &TableQuery) -> CardinalityEstimate {
+pub(crate) fn table_filtered_cardinality(db: &RedDB, query: &TableQuery) -> CardinalityEstimate {
+    let provider = Arc::new(CatalogStatsProvider::from_catalog(&db.catalog_snapshot()));
     let mut filtered = query.clone();
     filtered.limit = None;
     filtered.offset = None;
-    estimate_cardinality(&QueryExpr::Table(filtered))
+    CostEstimator::with_stats(provider).estimate_cardinality(&QueryExpr::Table(filtered))
 }
 
 pub(crate) fn document_index_cardinality(db: &RedDB, collection: &str) -> CardinalityEstimate {
@@ -84,11 +87,12 @@ pub(crate) fn document_index_cardinality(db: &RedDB, collection: &str) -> Cardin
     }
 }
 
-pub(crate) fn document_filtered_cardinality(query: &TableQuery) -> CardinalityEstimate {
+pub(crate) fn document_filtered_cardinality(db: &RedDB, query: &TableQuery) -> CardinalityEstimate {
+    let provider = Arc::new(CatalogStatsProvider::from_catalog(&db.catalog_snapshot()));
     let mut filtered = query.clone();
     filtered.limit = None;
     filtered.offset = None;
-    let estimate = estimate_cardinality(&QueryExpr::Table(filtered));
+    let estimate = CostEstimator::with_stats(provider).estimate_cardinality(&QueryExpr::Table(filtered));
     CardinalityEstimate {
         rows: (estimate.rows * 0.5).max(1.0),
         selectivity: (estimate.selectivity * 0.5).min(1.0),
@@ -190,7 +194,7 @@ pub(crate) fn table_access_path_hint(db: &RedDB, query: &TableQuery) -> AccessPa
         .collect::<Vec<_>>();
     indexes.sort_by(|left, right| left.kind.cmp(&right.kind).then(left.name.cmp(&right.name)));
 
-    if query.filter.is_some() && is_document_like_collection(db, collection) {
+    if effective_table_filter(query).is_some() && is_document_like_collection(db, collection) {
         if let Some(index) = indexes
             .iter()
             .find(|status| status.kind == "document.pathvalue")
@@ -231,11 +235,10 @@ pub(crate) fn table_access_path_hint(db: &RedDB, query: &TableQuery) -> AccessPa
 }
 
 pub(crate) fn uses_document_path_filter(db: &RedDB, query: &TableQuery) -> bool {
-    query
-        .filter
+    effective_table_filter(query)
         .as_ref()
         .is_some_and(|filter| filter_uses_document_path(filter, query))
-        || (query.filter.is_some()
+        || (effective_table_filter(query).is_some()
             && !is_universal_entity_source(query.table.as_str())
             && is_document_like_collection(db, query.table.as_str())
             && db.index_statuses().into_iter().any(|status| {

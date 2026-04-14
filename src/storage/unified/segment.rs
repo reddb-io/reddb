@@ -477,12 +477,30 @@ impl GrowingSegment {
         size
     }
 
-    /// Update per-column zone maps from a newly inserted entity's named fields.
-    /// Only processes `EntityData::Row` rows — other kinds don't have named columns.
+    /// Update per-column zone maps from a newly inserted entity's fields.
+    ///
+    /// Handles both insert paths:
+    /// - **Named** (`row.named`): individual inserts where fields are a `HashMap<String, Value>`
+    /// - **Positional** (`row.columns` + `row.schema`): bulk-inserted entities stored as `Vec<Value>`
+    ///   keyed by the shared schema. Previously this path was silently skipped, meaning zone maps
+    ///   were always empty for bulk-loaded tables and segment pruning never fired.
     fn update_col_zones_from_entity(&mut self, entity: &UnifiedEntity) {
         if let EntityData::Row(row) = &entity.data {
             if let Some(named) = &row.named {
+                // Individual insert path — HashMap fields
                 for (col, val) in named {
+                    if matches!(val, Value::Null) {
+                        continue;
+                    }
+                    self.col_zones
+                        .entry(col.clone())
+                        .and_modify(|z| z.update(val))
+                        .or_insert_with(|| ColZone::new(val.clone()));
+                }
+            } else if let Some(schema) = &row.schema {
+                // Bulk-insert (columnar) path — positional Vec<Value> + shared schema.
+                // Previously skipped: zone maps were always empty for bulk-loaded tables.
+                for (col, val) in schema.iter().zip(row.columns.iter()) {
                     if matches!(val, Value::Null) {
                         continue;
                     }

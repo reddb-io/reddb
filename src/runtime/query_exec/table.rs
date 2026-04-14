@@ -292,7 +292,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                     // dropped without this step, producing wrong row counts.
                     let table_name = query.table.as_str();
                     let table_alias = query.alias.as_deref().unwrap_or(table_name);
-                    let compiled_filter = query.filter.as_ref().map(|f| {
+                    let compiled_filter = effective_filter.as_ref().map(|f| {
                         super::filter_compiled::CompiledEntityFilter::compile(
                             f,
                             table_name,
@@ -323,7 +323,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     // Evaluates the filter directly on raw entity data to avoid materializing
     // UnifiedRecord for every entity in the collection.
     // Excludes universal entity sources (e.g. "any") which span all collections.
-    if query.filter.is_some()
+    if effective_filter.is_some()
         && query.group_by.is_empty()
         && query.having.is_none()
         && query.expand.is_none()
@@ -337,7 +337,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             .get_collection(query.table.as_str())
             .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
 
-        let filter = query.filter.as_ref().ok_or_else(|| {
+        let filter = effective_filter.as_ref().ok_or_else(|| {
             RedDBError::Internal("filtered runtime scan selected without a WHERE clause".into())
         })?;
         let table_name = query.table.as_str();
@@ -493,7 +493,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     let has_scalar_function = effective_projections
         .iter()
         .any(|p| matches!(p, Projection::Function(_, _) | Projection::Expression(_, _)));
-    if query.filter.is_none()
+    if effective_filter.is_none()
         && query.group_by.is_empty()
         && query.having.is_none()
         && query.expand.is_none()
@@ -544,10 +544,11 @@ pub(crate) fn execute_runtime_canonical_table_node(
     node: &crate::storage::query::planner::CanonicalLogicalNode,
     context: &RuntimeTableExecutionContext<'_>,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
+    let effective_filter = effective_table_filter(context.query);
     match node.operator.as_str() {
         "table_scan" | "index_seek" | "entity_scan" | "document_path_index_seek" => {
             // ── FAST PATH 1: Direct entity_id lookup (O(1) instead of full scan) ──
-            if let Some(entity_id) = extract_entity_id_from_filter(&context.query.filter) {
+            if let Some(entity_id) = extract_entity_id_from_filter(&effective_filter) {
                 let store = db.store();
                 if let Some(entity) = store.get(&context.query.table, EntityId::new(entity_id)) {
                     return Ok(runtime_table_record_from_entity(entity)
@@ -561,7 +562,7 @@ pub(crate) fn execute_runtime_canonical_table_node(
             // Evaluates the WHERE clause directly on raw entity data, only
             // creating UnifiedRecord for entities that match the filter.
             // Skip for universal sources ("any") which need cross-collection scanning.
-            if context.query.filter.is_some()
+            if effective_filter.is_some()
                 && !effective_table_projections(context.query)
                     .iter()
                     .any(|p| matches!(p, Projection::Function(_, _) | Projection::Expression(_, _)))
@@ -572,7 +573,7 @@ pub(crate) fn execute_runtime_canonical_table_node(
                     .get_collection(context.query.table.as_str())
                     .ok_or_else(|| RedDBError::NotFound(context.query.table.clone()))?;
 
-                let filter = context.query.filter.as_ref().ok_or_else(|| {
+                let filter = effective_filter.as_ref().ok_or_else(|| {
                     RedDBError::Internal(
                         "canonical filtered scan selected without a WHERE clause".into(),
                     )
@@ -666,7 +667,7 @@ pub(crate) fn execute_runtime_canonical_table_node(
         }
         "filter" | "entity_filter" => {
             // ── FAST PATH: Direct entity_id lookup (O(1)) ──
-            if let Some(entity_id) = extract_entity_id_from_filter(&context.query.filter) {
+            if let Some(entity_id) = extract_entity_id_from_filter(&effective_filter) {
                 let store = db.store();
                 if let Some(entity) = store.get(&context.query.table, EntityId::new(entity_id)) {
                     return Ok(runtime_table_record_from_entity(entity)
@@ -677,7 +678,7 @@ pub(crate) fn execute_runtime_canonical_table_node(
             }
 
             let mut records = execute_runtime_canonical_table_child(db, node, context)?;
-            if let Some(filter) = context.query.filter.as_ref() {
+            if let Some(filter) = effective_filter.as_ref() {
                 records.retain(|record| {
                     evaluate_runtime_filter(
                         record,
@@ -691,7 +692,7 @@ pub(crate) fn execute_runtime_canonical_table_node(
         }
         "document_path_filter" => {
             let mut records = execute_runtime_canonical_table_child(db, node, context)?;
-            if let Some(filter) = context.query.filter.as_ref() {
+            if let Some(filter) = effective_filter.as_ref() {
                 records.retain(|record| {
                     runtime_record_has_document_capability(record)
                         && evaluate_runtime_document_filter(

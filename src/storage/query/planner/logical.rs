@@ -8,6 +8,9 @@ use crate::storage::query::ast::{
     TableQuery, VectorSource,
 };
 use crate::storage::query::is_universal_entity_source as is_universal_query_source;
+use crate::storage::query::sql_lowering::{
+    effective_join_projections, effective_table_filter, effective_table_projections,
+};
 use crate::storage::schema::Value;
 use crate::storage::RedDB;
 
@@ -18,8 +21,8 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
     match expr {
         QueryExpr::Table(query) => {
             let mut details = BTreeMap::new();
-            let effective_projection_count =
-                crate::storage::query::sql_lowering::effective_table_projections(query).len();
+            let effective_projection_count = effective_table_projections(query).len();
+            let effective_filter = effective_table_filter(query);
             let is_any = is_universal_entity_source(query.table.as_str());
             let access = if is_any {
                 AccessPathDecision {
@@ -47,7 +50,7 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
                 details.insert("index_hint".to_string(), index_hint);
             }
             details.insert("universal".to_string(), is_any.to_string());
-            details.insert("filter".to_string(), query.filter.is_some().to_string());
+            details.insert("filter".to_string(), effective_filter.is_some().to_string());
             details.insert("order_by".to_string(), query.order_by.len().to_string());
             details.insert(
                 "limit".to_string(),
@@ -77,12 +80,12 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
                 operator_cost: operator_cost_estimate(access.path, scan_estimate.rows),
                 children: Vec::new(),
             };
-            if let Some(filter) = &query.filter {
+            if let Some(filter) = &effective_filter {
                 let document_path_filter = uses_document_path_filter(db, query);
                 let filter_estimate = if document_path_filter {
-                    document_filtered_cardinality(query)
+                    document_filtered_cardinality(db, query)
                 } else {
-                    table_filtered_cardinality(query)
+                    table_filtered_cardinality(db, query)
                 };
                 node = wrap_unary_plan(
                     if document_path_filter {
@@ -222,6 +225,8 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
         QueryExpr::Join(query) => {
             let mut details = BTreeMap::new();
             let estimate = estimate_cardinality(expr);
+            let effective_projections = effective_join_projections(query);
+            let effective_filter = query.filter.as_ref();
             let join_strategy = join_strategy_hint(query);
             details.insert(
                 "join_type".to_string(),
@@ -255,7 +260,7 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
                 "join_strategy_reason".to_string(),
                 join_strategy_reason(query).to_string(),
             );
-            details.insert("filter".to_string(), query.filter.is_some().to_string());
+            details.insert("filter".to_string(), effective_filter.is_some().to_string());
             details.insert("order_by".to_string(), query.order_by.len().to_string());
             details.insert(
                 "limit".to_string(),
@@ -271,7 +276,10 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
                     .map(|value| value.to_string())
                     .unwrap_or_else(|| "none".to_string()),
             );
-            details.insert("return_count".to_string(), query.return_.len().to_string());
+            details.insert(
+                "return_count".to_string(),
+                effective_projections.len().to_string(),
+            );
             let mut node = CanonicalLogicalNode {
                 operator: "join".to_string(),
                 source: None,
@@ -285,7 +293,7 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
                     logical_plan_node_with_catalog(db, query.right.as_ref()),
                 ],
             };
-            if let Some(filter) = &query.filter {
+            if let Some(filter) = effective_filter {
                 node = wrap_unary_plan(
                     "filter",
                     btree_details([("predicate", filter_summary(filter))]),
@@ -354,10 +362,10 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
                     node,
                 );
             }
-            if has_explicit_projection(&query.return_) {
+            if has_explicit_projection(&effective_projections) {
                 node = wrap_unary_plan(
                     "projection",
-                    btree_details([("columns", projection_summary(&query.return_))]),
+                    btree_details([("columns", projection_summary(&effective_projections))]),
                     None,
                     node,
                 );
