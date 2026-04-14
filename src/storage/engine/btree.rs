@@ -532,6 +532,18 @@ fn leaf_right_sibling(page: &Page) -> u32 {
     read_next_leaf(page)
 }
 
+/// Returns the maximum (last) key stored in a leaf page, or `None` if empty.
+/// This is the Lehman-Yao "high_key" — any key > this value belongs on a
+/// right-sibling page. Reads only the last slot so it is O(1).
+fn leaf_high_key(page: &Page) -> BTreeResult<Option<Vec<u8>>> {
+    let cell_count = page.cell_count() as usize;
+    if cell_count == 0 {
+        return Ok(None);
+    }
+    let (key, _) = read_leaf_cell(page, cell_count - 1)?;
+    Ok(Some(key))
+}
+
 fn set_prev_leaf(page: &mut Page, prev: u32) {
     let data = page.as_bytes_mut();
     data[LEAF_PREV_OFFSET..LEAF_PREV_OFFSET + 4].copy_from_slice(&prev.to_le_bytes());

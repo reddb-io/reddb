@@ -39,11 +39,48 @@ impl BTree {
             return Ok(None);
         }
 
-        // Find the leaf page
+        // Descend from root to the target leaf
         let (leaf_id, _) = self.find_leaf(root_id, key)?;
-        let page = self.pager.read_page(leaf_id)?;
 
-        // Search within the leaf
+        // D3 — Lehman-Yao right-link traversal.
+        //
+        // A concurrent insert may have split the leaf between our descent
+        // and this read. If the key we're searching for is greater than the
+        // current page's high_key (max stored key), the key lives on a
+        // right-sibling page — follow the right-link instead of re-descending
+        // from the root. Cap at MAX_RIGHTLINK_HOPS to guard against corrupt
+        // link chains.
+        const MAX_RIGHTLINK_HOPS: usize = 32;
+        let mut current_id = leaf_id;
+        for _ in 0..MAX_RIGHTLINK_HOPS {
+            let page = self.pager.read_page(current_id)?;
+
+            match search_leaf(&page, key)? {
+                SearchResult::Found(pos) => {
+                    let (_, value) = read_leaf_cell(&page, pos)?;
+                    return Ok(Some(value));
+                }
+                SearchResult::NotFound(_) => {
+                    // Check if a split pushed our key to the right sibling
+                    let right = leaf_right_sibling(&page);
+                    if right != 0 {
+                        if let Some(high_key) = leaf_high_key(&page)? {
+                            if key > high_key.as_slice() {
+                                // Key belongs on a right sibling — follow link
+                                current_id = right;
+                                continue;
+                            }
+                        }
+                    }
+                    // Key genuinely not present
+                    return Ok(None);
+                }
+            }
+        }
+
+        // Exhausted hop limit — fall back to root descent (corrupt link chain)
+        let (leaf_id, _) = self.find_leaf(self.root_page_id(), key)?;
+        let page = self.pager.read_page(leaf_id)?;
         match search_leaf(&page, key)? {
             SearchResult::Found(pos) => {
                 let (_, value) = read_leaf_cell(&page, pos)?;
@@ -330,38 +367,52 @@ impl BTree {
             return Ok(false);
         }
 
+        // D3 — Lehman-Yao right-link traversal for delete.
+        // A split may have moved the key to a right sibling between our
+        // descent and the actual page read. Follow right-links before giving up.
         let (leaf_id, path) = self.find_leaf(root_id, key)?;
-        let mut page = self.pager.read_page(leaf_id)?;
+        let mut current_id = leaf_id;
+        const MAX_RIGHTLINK_HOPS: usize = 32;
+        for _ in 0..MAX_RIGHTLINK_HOPS {
+            let mut page = self.pager.read_page(current_id)?;
+            match search_leaf(&page, key)? {
+                SearchResult::Found(pos) => {
+                    // Found — delete from this page (may differ from leaf_id)
+                    delete_from_leaf(&mut page, pos)?;
+                    page.update_checksum();
+                    let page_id = page.page_id();
+                    self.pager.write_page(page_id, page.clone())?;
 
-        // Find the key
-        match search_leaf(&page, key)? {
-            SearchResult::Found(pos) => {
-                delete_from_leaf(&mut page, pos)?;
-                page.update_checksum();
-                let page_id = page.page_id();
-                self.pager.write_page(page_id, page.clone())?;
+                    *self
+                        .rightmost_leaf
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner()) = None;
 
-                // D2: invalidate rightmost cache on any delete — the high_key
-                // may no longer be valid after rebalancing.
-                *self
-                    .rightmost_leaf
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner()) = None;
-
-                // Handle empty root
-                if page.cell_count() == 0 && page.page_id() == root_id {
-                    self.pager.free_page(root_id)?;
-                    *self.root_page_id.write().map_err(|e| {
-                        BTreeError::LockPoisoned(format!("delete: root_page_id write lock: {e}"))
-                    })? = 0;
-                } else {
-                    self.rebalance_leaf(leaf_id, path)?;
+                    if page.cell_count() == 0 && page_id == root_id {
+                        self.pager.free_page(root_id)?;
+                        *self.root_page_id.write().map_err(|e| {
+                            BTreeError::LockPoisoned(format!("delete: root_page_id write lock: {e}"))
+                        })? = 0;
+                    } else {
+                        self.rebalance_leaf(current_id, path)?;
+                    }
+                    return Ok(true);
                 }
-
-                Ok(true)
+                SearchResult::NotFound(_) => {
+                    let right = leaf_right_sibling(&page);
+                    if right != 0 {
+                        if let Some(high_key) = leaf_high_key(&page)? {
+                            if key > high_key.as_slice() {
+                                current_id = right;
+                                continue;
+                            }
+                        }
+                    }
+                    return Ok(false);
+                }
             }
-            SearchResult::NotFound(_) => Ok(false),
         }
+        Ok(false)
     }
 
     /// Create a cursor starting at the first entry
