@@ -259,6 +259,14 @@ where
     stats: AtomicStats,
     /// Page writer for dirty pages
     writer: W,
+    /// Per-strategy buffer rings.
+    ///
+    /// Lazily allocated when a non-`Normal` strategy is first used. The
+    /// rings are completely isolated from the main pool — a page in a
+    /// ring does NOT appear in `entries`/`slots`, and vice versa. See
+    /// `src/storage/cache/README.md` § Invariant 4.
+    rings:
+        RwLock<HashMap<super::strategy::BufferAccessStrategy, Arc<super::ring::BufferRing<K, V>>>>,
 }
 
 impl<K, V> PageCache<K, V, NoOpWriter>
@@ -294,6 +302,94 @@ where
             count: AtomicUsize::new(0),
             stats: AtomicStats::new(),
             writer,
+            rings: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Strategy-aware get.
+    ///
+    /// `Normal` behaves exactly like [`PageCache::get`]. Non-`Normal`
+    /// strategies look in the main pool first (a hit is a free win),
+    /// then fall through to the strategy's dedicated ring buffer.
+    /// Hits in the ring do NOT promote the page into the main pool —
+    /// that is the whole point of the strategy: keep scans out of the
+    /// hot working set.
+    pub fn get_with(&self, key: &K, strategy: super::strategy::BufferAccessStrategy) -> Option<V> {
+        // Always check the main pool first — a present page should be
+        // served from there at zero cost regardless of strategy.
+        if let Some(v) = self.get(key) {
+            return Some(v);
+        }
+        // Non-Normal strategies fall through to their ring.
+        if strategy.is_ring() {
+            if let Some(ring) = self.get_ring(strategy) {
+                return ring.get(key);
+            }
+        }
+        None
+    }
+
+    /// Strategy-aware insert.
+    ///
+    /// `Normal` behaves exactly like [`PageCache::insert`]. Non-`Normal`
+    /// strategies route the write into the dedicated ring instead of
+    /// the main pool. The ring's eviction return is propagated up so
+    /// callers (the pager) can flush dirty pages through the
+    /// double-write buffer.
+    pub fn insert_with(
+        &self,
+        key: K,
+        value: V,
+        strategy: super::strategy::BufferAccessStrategy,
+    ) -> Option<(K, V)> {
+        if !strategy.is_ring() {
+            // Normal path: existing insert, returning the prior value
+            // wrapped in (key, value) tuple shape for caller uniformity.
+            let prev = self.insert(key.clone(), value);
+            return prev.map(|v| (key, v));
+        }
+        let ring = self.ensure_ring(strategy);
+        ring.insert(key, value)
+    }
+
+    /// Look up the ring for `strategy`, creating it lazily if needed.
+    fn ensure_ring(
+        &self,
+        strategy: super::strategy::BufferAccessStrategy,
+    ) -> Arc<super::ring::BufferRing<K, V>> {
+        // Fast path: ring already exists.
+        {
+            let rings = recover_read_guard(&self.rings);
+            if let Some(r) = rings.get(&strategy) {
+                return Arc::clone(r);
+            }
+        }
+        // Slow path: create under write lock, double-check first.
+        let mut rings = recover_write_guard(&self.rings);
+        if let Some(r) = rings.get(&strategy) {
+            return Arc::clone(r);
+        }
+        let cap = strategy.ring_size().unwrap_or(16);
+        let ring = Arc::new(super::ring::BufferRing::new(cap));
+        rings.insert(strategy, Arc::clone(&ring));
+        ring
+    }
+
+    /// Read-only ring lookup (does not allocate).
+    fn get_ring(
+        &self,
+        strategy: super::strategy::BufferAccessStrategy,
+    ) -> Option<Arc<super::ring::BufferRing<K, V>>> {
+        let rings = recover_read_guard(&self.rings);
+        rings.get(&strategy).cloned()
+    }
+
+    /// Drop every strategy ring. Used by tests and by post-checkpoint
+    /// cleanup.
+    pub fn clear_strategy_rings(&self) {
+        let rings = recover_read_guard(&self.rings);
+        for ring in rings.values() {
+            ring.clear();
         }
     }
 
@@ -869,5 +965,147 @@ mod tests {
         assert_eq!(config.capacity, 1024);
         assert_eq!(config.page_size, 8192);
         assert_eq!(config.memory_size(), 1024 * 8192);
+    }
+
+    // ---------------------------------------------------------------
+    // Target 4: BufferAccessStrategy / ring tests
+    // ---------------------------------------------------------------
+
+    use super::super::strategy::BufferAccessStrategy;
+
+    #[test]
+    fn normal_strategy_is_backwards_compatible() {
+        // get_with(Normal) and insert_with(Normal) must behave exactly
+        // like get/insert — same hot pool, same eviction.
+        let cache: PageCache<u64, String> = PageCache::with_capacity(8);
+        let prev = cache.insert_with(1, "a".to_string(), BufferAccessStrategy::Normal);
+        assert!(prev.is_none());
+        assert_eq!(
+            cache.get_with(&1, BufferAccessStrategy::Normal),
+            Some("a".to_string())
+        );
+        // Plain get/insert see the same value.
+        assert_eq!(cache.get(&1), Some("a".to_string()));
+    }
+
+    #[test]
+    fn sequential_scan_does_not_pollute_main_pool() {
+        // Warm the main pool, then do a scan via SequentialScan.
+        // The hot keys must still be in the main pool afterwards.
+        let cache: PageCache<u64, String> = PageCache::with_capacity(64);
+        for i in 0..50 {
+            cache.insert(i, format!("hot-{i}"));
+        }
+        // Now scan 200 cold pages via SequentialScan strategy.
+        for k in 1000..1200u64 {
+            let _ = cache.insert_with(k, format!("cold-{k}"), BufferAccessStrategy::SequentialScan);
+        }
+        // Hot keys must still be present in the main pool.
+        for i in 0..50u64 {
+            assert!(
+                cache.contains(&i),
+                "hot key {i} was evicted by sequential scan"
+            );
+        }
+    }
+
+    #[test]
+    fn scan_pages_are_findable_via_strategy_get() {
+        // Pages inserted via SequentialScan are reachable through
+        // get_with(SequentialScan) but NOT through plain get (they live
+        // in the ring, not the main pool).
+        let cache: PageCache<u64, String> = PageCache::with_capacity(64);
+        cache.insert_with(
+            42,
+            "scanned".to_string(),
+            BufferAccessStrategy::SequentialScan,
+        );
+        // Plain get hits main pool only — must miss.
+        assert_eq!(cache.get(&42), None);
+        // get_with sees both pools.
+        assert_eq!(
+            cache.get_with(&42, BufferAccessStrategy::SequentialScan),
+            Some("scanned".to_string())
+        );
+    }
+
+    #[test]
+    fn bulk_read_and_bulk_write_are_independent_rings() {
+        let cache: PageCache<u64, String> = PageCache::with_capacity(64);
+        cache.insert_with(1, "r".to_string(), BufferAccessStrategy::BulkRead);
+        cache.insert_with(2, "w".to_string(), BufferAccessStrategy::BulkWrite);
+
+        // Each strategy sees its own page only.
+        assert_eq!(
+            cache.get_with(&1, BufferAccessStrategy::BulkRead),
+            Some("r".to_string())
+        );
+        assert_eq!(
+            cache.get_with(&2, BufferAccessStrategy::BulkWrite),
+            Some("w".to_string())
+        );
+
+        // Cross-strategy lookups miss because rings are isolated.
+        assert!(cache
+            .get_with(&1, BufferAccessStrategy::BulkWrite)
+            .is_none());
+        assert!(cache.get_with(&2, BufferAccessStrategy::BulkRead).is_none());
+    }
+
+    #[test]
+    fn bulk_write_evicts_dirty_page_on_overflow() {
+        // Fill a BulkWrite ring (capacity 32) past its limit and verify
+        // insert_with returns the evicted (key, value) pair so the
+        // pager can flush it.
+        let cache: PageCache<u64, String> = PageCache::with_capacity(64);
+        let mut last_evicted = None;
+        for i in 0..40u64 {
+            let evicted = cache.insert_with(i, format!("v{i}"), BufferAccessStrategy::BulkWrite);
+            if evicted.is_some() {
+                last_evicted = evicted;
+            }
+        }
+        // Some eviction must have happened (40 inserts into a 32-slot ring).
+        assert!(last_evicted.is_some());
+        // The first 8 keys should be evicted.
+        for i in 0..8u64 {
+            assert!(
+                cache
+                    .get_with(&i, BufferAccessStrategy::BulkWrite)
+                    .is_none(),
+                "key {i} should have been evicted from bulk_write ring"
+            );
+        }
+    }
+
+    #[test]
+    fn clear_strategy_rings_drops_all_ring_pages() {
+        let cache: PageCache<u64, String> = PageCache::with_capacity(64);
+        // Seed both pools.
+        cache.insert(99, "main".to_string());
+        cache.insert_with(1, "ring".to_string(), BufferAccessStrategy::SequentialScan);
+        // Clear only the rings.
+        cache.clear_strategy_rings();
+        // Main pool survives.
+        assert_eq!(cache.get(&99), Some("main".to_string()));
+        // Ring is empty.
+        assert!(cache
+            .get_with(&1, BufferAccessStrategy::SequentialScan)
+            .is_none());
+    }
+
+    #[test]
+    fn ring_is_lazily_allocated() {
+        let cache: PageCache<u64, String> = PageCache::with_capacity(64);
+        // Initially no rings exist.
+        assert!(cache
+            .get_with(&1, BufferAccessStrategy::SequentialScan)
+            .is_none());
+        // Inserting via a strategy creates the ring.
+        cache.insert_with(1, "a".to_string(), BufferAccessStrategy::SequentialScan);
+        assert_eq!(
+            cache.get_with(&1, BufferAccessStrategy::SequentialScan),
+            Some("a".to_string())
+        );
     }
 }

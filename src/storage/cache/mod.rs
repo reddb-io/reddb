@@ -27,13 +27,17 @@
 
 pub mod aggregates;
 pub mod result;
+pub mod ring;
 pub mod sieve;
 pub mod spill;
+pub mod strategy;
 
 pub use aggregates::{AggCacheStats, AggValue, AggregationCache, CardinalityEstimate, NumericAgg};
 pub use result::{
     CacheKey, CachePolicy, MaterializedViewCache, MaterializedViewDef, RefreshPolicy, ResultCache,
     ResultCacheStats,
 };
+pub use ring::BufferRing;
 pub use sieve::{CacheConfig, CacheStats, PageCache, PageId};
 pub use spill::{SpillConfig, SpillError, SpillManager, SpillStats, SpillableGraph};
+pub use strategy::BufferAccessStrategy;
