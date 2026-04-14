@@ -20,6 +20,7 @@ use crate::runtime::runtime_table_record_from_entity;
 use crate::storage::query::ast::{
     BinOp, CompareOp, Expr, FieldRef, Filter, OrderByClause, Projection, Span, UnaryOp,
 };
+use crate::storage::query::sql_lowering::expr_to_projection as lower_expr_to_projection;
 use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
 use crate::storage::schema::Value;
 use crate::RedDB;
@@ -900,68 +901,7 @@ fn render_value_signature(value: &Value) -> String {
 }
 
 fn projection_from_expr(expr: &Expr) -> Option<Projection> {
-    match expr {
-        Expr::Literal { value, .. } => projection_from_literal(value),
-        Expr::Column { field, .. } => {
-            if matches!(
-                field,
-                FieldRef::TableColumn { table, column } if table.is_empty() && column == "*"
-            ) {
-                Some(Projection::All)
-            } else {
-                Some(Projection::Field(field.clone(), None))
-            }
-        }
-        Expr::Parameter { .. } => None,
-        Expr::BinaryOp { op, lhs, rhs, .. } => match op {
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Concat => {
-                Some(Projection::Function(
-                    render_binop_signature_name(*op).to_string(),
-                    vec![projection_from_expr(lhs)?, projection_from_expr(rhs)?],
-                ))
-            }
-            _ => Some(boolean_expr_projection(expr.clone())),
-        },
-        Expr::UnaryOp { op, operand, .. } => match op {
-            UnaryOp::Neg => Some(Projection::Function(
-                "SUB".to_string(),
-                vec![
-                    Projection::Column("LIT:0".to_string()),
-                    projection_from_expr(operand)?,
-                ],
-            )),
-            UnaryOp::Not => Some(boolean_expr_projection(expr.clone())),
-        },
-        Expr::Cast { inner, target, .. } => Some(Projection::Function(
-            "CAST".to_string(),
-            vec![
-                projection_from_expr(inner)?,
-                Projection::Column(format!("TYPE:{target}")),
-            ],
-        )),
-        Expr::FunctionCall { name, args, .. } => Some(Projection::Function(
-            name.to_uppercase(),
-            args.iter()
-                .map(projection_from_expr)
-                .collect::<Option<Vec<_>>>()?,
-        )),
-        Expr::Case {
-            branches, else_, ..
-        } => {
-            let mut args = Vec::with_capacity(branches.len() * 2 + usize::from(else_.is_some()));
-            for (cond, value) in branches {
-                args.push(case_condition_projection(cond.clone()));
-                args.push(projection_from_expr(value)?);
-            }
-            if let Some(else_expr) = else_ {
-                args.push(projection_from_expr(else_expr)?);
-            }
-            Some(Projection::Function("CASE".to_string(), args))
-        }
-        Expr::IsNull { .. } | Expr::InList { .. } | Expr::Between { .. } => {
-            Some(boolean_expr_projection(expr.clone()))
-        }
-    }
+    lower_expr_to_projection(expr)
 }
 
 fn projection_from_literal(value: &Value) -> Option<Projection> {

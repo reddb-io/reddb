@@ -18,6 +18,8 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
     match expr {
         QueryExpr::Table(query) => {
             let mut details = BTreeMap::new();
+            let effective_projection_count =
+                crate::storage::query::sql_lowering::effective_table_projections(query).len();
             let is_any = is_universal_entity_source(query.table.as_str());
             let access = if is_any {
                 AccessPathDecision {
@@ -63,7 +65,7 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
             );
             details.insert(
                 "projection_count".to_string(),
-                query.columns.len().to_string(),
+                effective_projection_count.to_string(),
             );
             let mut node = CanonicalLogicalNode {
                 operator: access.path.to_string(),
@@ -156,7 +158,7 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
                     node,
                 );
             }
-            if has_explicit_projection(&query.columns) {
+            if table_has_explicit_projection(query) {
                 let document_projection = is_document_projection(db, query);
                 node = wrap_unary_plan(
                     if document_projection {
@@ -166,7 +168,7 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
                     } else {
                         "projection"
                     },
-                    btree_details([("columns", projection_summary(&query.columns))]),
+                    btree_details([("columns", table_projection_summary(query))]),
                     None,
                     node,
                 );

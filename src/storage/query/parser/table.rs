@@ -1,8 +1,13 @@
 //! Table query parsing (SELECT ... FROM ...)
 
-use super::super::ast::{FieldRef, OrderByClause, Projection, QueryExpr, TableQuery};
+use super::super::ast::{
+    BinOp, CompareOp, Expr, FieldRef, Filter, OrderByClause, Projection, QueryExpr, SelectItem,
+    Span, TableQuery, UnaryOp,
+};
 use super::super::lexer::Token;
 use super::error::ParseError;
+use crate::storage::query::sql_lowering::{expr_to_projection, filter_to_expr};
+use crate::storage::schema::Value;
 
 fn is_scalar_function(name: &str) -> bool {
     matches!(
@@ -102,7 +107,7 @@ impl<'a> Parser<'a> {
         self.expect(Token::Select)?;
 
         // Parse column list
-        let columns = self.parse_projection_list()?;
+        let (select_items, columns) = self.parse_select_items_and_projections()?;
 
         // Parse optional table source. If omitted, default to `ANY` so the query
         // can return mixed entities (table, document, graph, and vector) by default.
@@ -134,9 +139,13 @@ impl<'a> Parser<'a> {
             table,
             source: None,
             alias,
+            select_items,
             columns,
+            where_expr: None,
             filter: None,
+            group_by_exprs: Vec::new(),
             group_by: Vec::new(),
+            having_expr: None,
             having: None,
             order_by: Vec::new(),
             limit: None,
@@ -169,181 +178,59 @@ impl<'a> Parser<'a> {
 
     /// Parse projection list (column selections)
     pub fn parse_projection_list(&mut self) -> Result<Vec<Projection>, ParseError> {
+        Ok(self.parse_select_items_and_projections()?.1)
+    }
+
+    fn parse_select_items_and_projections(
+        &mut self,
+    ) -> Result<(Vec<SelectItem>, Vec<Projection>), ParseError> {
         // Handle SELECT *
         if self.consume(&Token::Star)? {
-            return Ok(Vec::new()); // Empty means all columns
+            return Ok((vec![SelectItem::Wildcard], Vec::new())); // Empty legacy vec means all columns
         }
 
+        let mut select_items = Vec::new();
         let mut projections = Vec::new();
         loop {
-            let proj = self.parse_projection()?;
+            let (item, proj) = self.parse_projection()?;
+            select_items.push(item);
             projections.push(proj);
 
             if !self.consume(&Token::Comma)? {
                 break;
             }
         }
-        Ok(projections)
+        Ok((select_items, projections))
     }
 
     /// Parse a single projection — supports columns, aggregate functions, and scalar functions
-    fn parse_projection(&mut self) -> Result<Projection, ParseError> {
-        // Check for aggregate functions tokenized as keywords.
-        if let Some(func_name) = aggregate_token_name(self.peek()) {
-            if matches!(self.peek_next()?, Token::LParen) {
-                self.advance()?;
-                self.expect(Token::LParen)?;
-                let (resolved_name, args) =
-                    if func_name == "COUNT" && self.consume(&Token::Distinct)? {
-                        let arg = self.parse_projection_factor()?;
-                        (
-                            "COUNT_DISTINCT",
-                            vec![self.parse_projection_binop_tail(arg, 0)?],
-                        )
-                    } else if self.consume(&Token::Star)? {
-                        (func_name, vec![Projection::All])
-                    } else {
-                        let arg = self.parse_projection_factor()?;
-                        (func_name, vec![self.parse_projection_binop_tail(arg, 0)?])
-                    };
-                self.expect(Token::RParen)?;
-                let alias = if self.consume(&Token::As)? {
-                    Some(self.expect_ident()?)
-                } else {
-                    None
-                };
-                return Ok(if let Some(alias) = alias {
-                    Projection::Function(format!("{resolved_name}:{alias}"), args)
-                } else {
-                    Projection::Function(resolved_name.to_string(), args)
-                });
-            }
+    fn parse_projection(&mut self) -> Result<(SelectItem, Projection), ParseError> {
+        let expr = self.parse_expr()?;
+        if contains_nested_aggregate(&expr) && !is_plain_aggregate_expr(&expr) {
+            return Err(ParseError::new(
+                "aggregate function is not valid inside another expression".to_string(),
+                self.position(),
+            ));
         }
-
-        // CAST(expr AS type) — special form because it embeds the AS
-        // keyword inside the argument list. We parse it by hand and encode
-        // it as Projection::Function("CAST", [inner, Column("TYPE:<name>")])
-        // so the existing scalar-function plumbing picks it up without any
-        // new AST variant. Same wire format is used by the `expr::type`
-        // postfix shortcut below.
-        if let Some(name) = match self.peek() {
-            Token::Ident(name) => Some(name.clone()),
-            _ => None,
-        } {
-            if name.eq_ignore_ascii_case("CAST") && matches!(self.peek_next()?, Token::LParen) {
-                self.advance()?;
-                self.expect(Token::LParen)?;
-                let inner = self.parse_projection_factor()?;
-                let inner = self.parse_projection_binop_tail(inner, 0)?;
-                self.expect(Token::As)?;
-                let type_name = self.expect_ident_or_keyword()?;
-                self.expect(Token::RParen)?;
-                let alias = if self.consume(&Token::As)? {
-                    Some(self.expect_ident()?)
-                } else {
-                    None
-                };
-                let args = vec![
-                    inner,
-                    Projection::Column(format!("TYPE:{}", type_name.to_uppercase())),
-                ];
-                return Ok(if let Some(a) = alias {
-                    Projection::Function(format!("CAST:{}", a), args)
-                } else {
-                    Projection::Function("CAST".to_string(), args)
-                });
-            }
-        }
-
-        // CASE WHEN <cond> THEN <val> [WHEN ... THEN ...] [ELSE <val>] END
-        // Encoded as Projection::Function("CASE", [Expression(cond1), val1,
-        // Expression(cond2), val2, ..., else_val]). Even number of args →
-        // no ELSE; odd → last is the ELSE branch. The executor interprets
-        // this layout in evaluate_scalar_function.
-        if let Token::Ident(ref name) = self.peek() {
-            if name.eq_ignore_ascii_case("CASE") {
-                return self.parse_case_projection();
-            }
-        }
-
-        if let Some(name) = match self.peek() {
-            Token::Ident(name) => Some(name.clone()),
-            _ => None,
-        } {
-            if name.eq_ignore_ascii_case("POSITION") && matches!(self.peek_next()?, Token::LParen) {
-                return self.parse_position_projection();
-            }
-            if name.eq_ignore_ascii_case("TRIM") && matches!(self.peek_next()?, Token::LParen) {
-                return self.parse_trim_projection();
-            }
-        }
-
-        if let Some(name) = match self.peek() {
-            Token::Ident(name) => Some(name.clone()),
-            _ => None,
-        } {
-            if name.eq_ignore_ascii_case("SUBSTRING") && matches!(self.peek_next()?, Token::LParen)
-            {
-                return self.parse_substring_projection();
-            }
-        }
-
-        if let Some(func_name) = scalar_token_name(self.peek()) {
-            if matches!(self.peek_next()?, Token::LParen) && is_scalar_function(func_name) {
-                self.advance()?;
-                self.expect(Token::LParen)?;
-                let args = self.parse_function_args()?;
-                self.expect(Token::RParen)?;
-                let alias = if self.consume(&Token::As)? {
-                    Some(self.expect_ident()?)
-                } else {
-                    None
-                };
-                return Ok(if let Some(alias) = alias {
-                    Projection::Function(format!("{func_name}:{alias}"), args)
-                } else {
-                    Projection::Function(func_name.to_string(), args)
-                });
-            }
-        }
-
-        // Check for scalar function: IDENT(args) — e.g. GEO_DISTANCE(col, POINT(x,y))
-        if let Some(name) = match self.peek() {
-            Token::Ident(name) => Some(name.clone()),
-            _ => None,
-        } {
-            let upper = name.to_uppercase();
-            if matches!(self.peek_next()?, Token::LParen) && is_scalar_function(&upper) {
-                self.advance()?; // consume function name
-                self.expect(Token::LParen)?;
-                let args = self.parse_function_args()?;
-                self.expect(Token::RParen)?;
-                let alias = if self.consume(&Token::As)? {
-                    Some(self.expect_ident()?)
-                } else {
-                    None
-                };
-                return Ok(if let Some(a) = alias {
-                    Projection::Function(format!("{}:{}", upper, a), args)
-                } else {
-                    Projection::Function(upper, args)
-                });
-            }
-        }
-
-        // Default path: field reference (optionally followed by an
-        // infix arithmetic tail for Fase 1.3 expressions). When no
-        // operator follows, the result collapses back to a plain
-        // Projection::Field, preserving every legacy test.
-        let field = self.parse_field_ref()?;
-        let left = Projection::Field(field, None);
-        let expr = self.parse_projection_binop_tail(left, 0)?;
         let alias = if self.consume(&Token::As)? {
             Some(self.expect_ident()?)
         } else {
             None
         };
-        Ok(attach_projection_alias(expr, alias))
+        let select_item = SelectItem::Expr {
+            expr: expr.clone(),
+            alias: alias.clone(),
+        };
+        let projection = attach_projection_alias(
+            expr_to_projection(&expr).ok_or_else(|| {
+                ParseError::new(
+                    "projection cannot yet be lowered to legacy runtime representation".to_string(),
+                    self.position(),
+                )
+            })?,
+            alias,
+        );
+        Ok((select_item, projection))
     }
 
     /// Pratt-style climb for `+ - * / % ||` infix operators on top of an
@@ -503,6 +390,7 @@ fn attach_projection_alias(proj: Projection, alias: Option<String>) -> Projectio
     let Some(alias) = alias else { return proj };
     match proj {
         Projection::Field(f, _) => Projection::Field(f, Some(alias)),
+        Projection::Expression(filter, _) => Projection::Expression(filter, Some(alias)),
         Projection::Function(name, args) => {
             // Don't double-suffix if name already carries an alias.
             if name.contains(':') {
@@ -513,6 +401,204 @@ fn attach_projection_alias(proj: Projection, alias: Option<String>) -> Projectio
         }
         Projection::Column(c) => Projection::Alias(c, alias),
         other => other,
+    }
+}
+
+fn contains_nested_aggregate(expr: &Expr) -> bool {
+    match expr {
+        Expr::FunctionCall { name, args, .. } => {
+            is_aggregate_function(&name.to_uppercase())
+                || args.iter().any(contains_nested_aggregate)
+        }
+        Expr::BinaryOp { lhs, rhs, .. } => {
+            contains_nested_aggregate(lhs) || contains_nested_aggregate(rhs)
+        }
+        Expr::UnaryOp { operand, .. } | Expr::IsNull { operand, .. } => {
+            contains_nested_aggregate(operand)
+        }
+        Expr::Cast { inner, .. } => contains_nested_aggregate(inner),
+        Expr::Case {
+            branches, else_, ..
+        } => {
+            branches.iter().any(|(cond, value)| {
+                contains_nested_aggregate(cond) || contains_nested_aggregate(value)
+            }) || else_.as_deref().is_some_and(contains_nested_aggregate)
+        }
+        Expr::InList { target, values, .. } => {
+            contains_nested_aggregate(target) || values.iter().any(contains_nested_aggregate)
+        }
+        Expr::Between {
+            target, low, high, ..
+        } => {
+            contains_nested_aggregate(target)
+                || contains_nested_aggregate(low)
+                || contains_nested_aggregate(high)
+        }
+        Expr::Literal { .. } | Expr::Column { .. } | Expr::Parameter { .. } => false,
+    }
+}
+
+fn is_plain_aggregate_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::FunctionCall { name, args, .. } if is_aggregate_function(&name.to_uppercase()) => {
+            !args.iter().any(contains_nested_aggregate)
+        }
+        _ => false,
+    }
+}
+
+fn projection_from_expr(expr: Expr) -> Result<Projection, ParseError> {
+    match expr {
+        Expr::Literal { value, .. } => Ok(projection_from_literal(value)),
+        Expr::Column { field, .. } => Ok(
+            if matches!(
+                field,
+                FieldRef::TableColumn { ref table, ref column } if table.is_empty() && column == "*"
+            ) {
+                Projection::All
+            } else {
+                Projection::Field(field, None)
+            },
+        ),
+        Expr::Parameter { .. } => Err(ParseError::new(
+            "query parameters are not supported in SELECT projections yet".to_string(),
+            crate::storage::query::lexer::Position::default(),
+        )),
+        Expr::BinaryOp { op, lhs, rhs, .. } => match op {
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Concat => {
+                Ok(Projection::Function(
+                    projection_binop_name(op).to_string(),
+                    vec![projection_from_expr(*lhs)?, projection_from_expr(*rhs)?],
+                ))
+            }
+            _ => Ok(boolean_expr_projection(Expr::BinaryOp {
+                op,
+                lhs,
+                rhs,
+                span: Span::synthetic(),
+            })),
+        },
+        Expr::UnaryOp { op, operand, .. } => match op {
+            UnaryOp::Neg => Ok(Projection::Function(
+                "SUB".to_string(),
+                vec![
+                    Projection::Column("LIT:0".to_string()),
+                    projection_from_expr(*operand)?,
+                ],
+            )),
+            UnaryOp::Not => Ok(boolean_expr_projection(Expr::UnaryOp {
+                op,
+                operand,
+                span: Span::synthetic(),
+            })),
+        },
+        Expr::Cast { inner, target, .. } => Ok(Projection::Function(
+            "CAST".to_string(),
+            vec![
+                projection_from_expr(*inner)?,
+                Projection::Column(format!("TYPE:{target}")),
+            ],
+        )),
+        Expr::FunctionCall { name, args, .. } => Ok(Projection::Function(
+            name.to_uppercase(),
+            args.into_iter()
+                .map(projection_from_expr)
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        Expr::Case {
+            branches, else_, ..
+        } => {
+            let mut args = Vec::with_capacity(branches.len() * 2 + usize::from(else_.is_some()));
+            for (cond, value) in branches {
+                args.push(case_condition_projection(cond));
+                args.push(projection_from_expr(value)?);
+            }
+            if let Some(else_expr) = else_ {
+                args.push(projection_from_expr(*else_expr)?);
+            }
+            Ok(Projection::Function("CASE".to_string(), args))
+        }
+        Expr::IsNull { .. } | Expr::InList { .. } | Expr::Between { .. } => {
+            Ok(boolean_expr_projection(expr))
+        }
+    }
+}
+
+fn projection_from_literal(value: Value) -> Projection {
+    match value {
+        Value::Boolean(_) => boolean_expr_projection(Expr::Literal {
+            value,
+            span: Span::synthetic(),
+        }),
+        other => Projection::Column(format!("LIT:{}", render_projection_literal(&other))),
+    }
+}
+
+fn boolean_expr_projection(expr: Expr) -> Projection {
+    Projection::Expression(
+        Box::new(Filter::CompareExpr {
+            lhs: expr,
+            op: CompareOp::Eq,
+            rhs: Expr::Literal {
+                value: Value::Boolean(true),
+                span: Span::synthetic(),
+            },
+        }),
+        None,
+    )
+}
+
+fn case_condition_projection(condition: Expr) -> Projection {
+    Projection::Expression(
+        Box::new(Filter::CompareExpr {
+            lhs: condition,
+            op: CompareOp::Eq,
+            rhs: Expr::Literal {
+                value: Value::Boolean(true),
+                span: Span::synthetic(),
+            },
+        }),
+        None,
+    )
+}
+
+fn projection_binop_name(op: BinOp) -> &'static str {
+    match op {
+        BinOp::Add => "ADD",
+        BinOp::Sub => "SUB",
+        BinOp::Mul => "MUL",
+        BinOp::Div => "DIV",
+        BinOp::Mod => "MOD",
+        BinOp::Concat => "CONCAT",
+        BinOp::Eq
+        | BinOp::Ne
+        | BinOp::Lt
+        | BinOp::Le
+        | BinOp::Gt
+        | BinOp::Ge
+        | BinOp::And
+        | BinOp::Or => {
+            unreachable!("boolean operators are lowered through Projection::Expression")
+        }
+    }
+}
+
+fn render_projection_literal(value: &Value) -> String {
+    match value {
+        Value::Null => String::new(),
+        Value::Integer(v) => v.to_string(),
+        Value::Float(v) => {
+            if v.fract().abs() < f64::EPSILON {
+                (*v as i64).to_string()
+            } else {
+                v.to_string()
+            }
+        }
+        Value::Text(v) => v.clone(),
+        Value::Boolean(true) => "true".to_string(),
+        Value::Boolean(false) => "false".to_string(),
+        Value::Blob(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+        other => other.to_string(),
     }
 }
 
@@ -789,18 +875,24 @@ impl<'a> Parser<'a> {
     pub fn parse_table_clauses(&mut self, query: &mut TableQuery) -> Result<(), ParseError> {
         // WHERE clause
         if self.consume(&Token::Where)? {
-            query.filter = Some(self.parse_filter()?);
+            let filter = self.parse_filter()?;
+            query.where_expr = Some(filter_to_expr(&filter));
+            query.filter = Some(filter);
         }
 
         // GROUP BY clause
         if self.consume(&Token::Group)? {
             self.expect(Token::By)?;
-            query.group_by = self.parse_group_by_list()?;
+            let (group_by_exprs, group_by) = self.parse_group_by_items()?;
+            query.group_by_exprs = group_by_exprs;
+            query.group_by = group_by;
         }
 
         // HAVING clause (only valid after GROUP BY)
         if !query.group_by.is_empty() && self.consume_ident_ci("HAVING")? {
-            query.having = Some(self.parse_filter()?);
+            let having = self.parse_filter()?;
+            query.having_expr = Some(filter_to_expr(&having));
+            query.having = Some(having);
         }
 
         // ORDER BY clause
@@ -870,14 +962,28 @@ impl<'a> Parser<'a> {
 
     /// Parse GROUP BY field list
     pub fn parse_group_by_list(&mut self) -> Result<Vec<String>, ParseError> {
+        Ok(self.parse_group_by_items()?.1)
+    }
+
+    fn parse_group_by_items(&mut self) -> Result<(Vec<Expr>, Vec<String>), ParseError> {
+        let mut exprs = Vec::new();
         let mut fields = Vec::new();
         loop {
-            fields.push(self.parse_group_by_entry()?);
+            let expr = self.parse_expr()?;
+            let rendered = render_group_by_expr(&expr).ok_or_else(|| {
+                ParseError::new(
+                    "GROUP BY expression cannot yet be lowered to legacy runtime representation"
+                        .to_string(),
+                    self.position(),
+                )
+            })?;
+            exprs.push(expr);
+            fields.push(rendered);
             if !self.consume(&Token::Comma)? {
                 break;
             }
         }
-        Ok(fields)
+        Ok((exprs, fields))
     }
 
     /// Parse ORDER BY list.
@@ -1035,6 +1141,52 @@ fn is_duration_unit(unit: &str) -> bool {
             | "day"
             | "days"
     )
+}
+
+fn render_group_by_expr(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Column { field, .. } => match field {
+            FieldRef::TableColumn { table, column } if table.is_empty() => Some(column.clone()),
+            FieldRef::TableColumn { table, column } => Some(format!("{table}.{column}")),
+            other => Some(format!("{other:?}")),
+        },
+        Expr::FunctionCall { name, args, .. } if name.eq_ignore_ascii_case("TIME_BUCKET") => {
+            let rendered = args
+                .iter()
+                .map(render_group_by_expr)
+                .collect::<Option<Vec<_>>>()?;
+            Some(format!("TIME_BUCKET({})", rendered.join(",")))
+        }
+        Expr::Literal { value, .. } => Some(match value {
+            Value::Null => String::new(),
+            Value::Text(text) => text.clone(),
+            other => other.to_string(),
+        }),
+        _ => expr_to_projection(expr).map(|projection| match projection {
+            Projection::Field(FieldRef::TableColumn { table, column }, _) if table.is_empty() => {
+                column
+            }
+            Projection::Field(FieldRef::TableColumn { table, column }, _) => {
+                format!("{table}.{column}")
+            }
+            Projection::Function(name, args) => {
+                let rendered = args
+                    .iter()
+                    .map(render_group_by_function_arg)
+                    .collect::<Option<Vec<_>>>()
+                    .unwrap_or_default();
+                format!(
+                    "{}({})",
+                    name.split(':').next().unwrap_or(&name),
+                    rendered.join(",")
+                )
+            }
+            Projection::Column(column) | Projection::Alias(column, _) => column,
+            Projection::All => "*".to_string(),
+            Projection::Expression(_, _) => "expr".to_string(),
+            Projection::Field(other, _) => format!("{other:?}"),
+        }),
+    }
 }
 
 fn render_group_by_function_arg(arg: &Projection) -> Option<String> {

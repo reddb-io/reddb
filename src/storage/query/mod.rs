@@ -61,6 +61,7 @@ pub mod rag;
 pub mod security;
 pub mod similarity;
 pub mod sort;
+pub mod sql_lowering;
 pub mod step;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -79,7 +80,7 @@ pub use ast::{
     DropTimeSeriesQuery, EdgeDirection, EdgePattern, FieldRef, Filter as AstFilter, GraphCommand,
     GraphPattern, GraphQuery, InsertEntityType, InsertQuery, JoinCondition, JoinQuery, JoinType,
     NodePattern, NodeSelector, OrderByClause, PathQuery, Projection, QueryExpr, QueryWithCte,
-    SearchCommand, TableQuery, UpdateQuery, WithClause,
+    SearchCommand, SelectItem, TableQuery, UpdateQuery, WithClause,
 };
 pub use engine::{
     Binding, BindingBuilder, BindingIterator, Op, OpBGP, OpDisjunction, OpDistinct, OpExtend,

@@ -18,6 +18,7 @@ use super::helpers::{
 };
 use super::indexed_scan::try_sorted_index_lookup;
 use super::*;
+use crate::storage::query::sql_lowering::effective_table_projections;
 
 /// Build the JSON result from a set of entity IDs (from index lookup).
 /// Scan entities sequentially but only process those in the candidate set (from hash index).
@@ -33,6 +34,8 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     query: &TableQuery,
     index_store: Option<&super::index_store::IndexStore>,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
+    let effective_projections = effective_table_projections(query);
+
     // ── FROM SUBQUERY PATH (Fase 1.7 / W4 rebind): when the query's
     // source is a `(SELECT …) AS alias`, execute the inner query
     // recursively to get its records, then apply the outer query's
@@ -224,7 +227,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 // When the query projects only the indexed column (SELECT col FROM t WHERE col = ?)
                 // and the collection has sealed (all-visible) data, skip the entity heap fetch.
                 // The value we need is the equality predicate value itself — no entity scan needed.
-                let projected_cols = extract_select_column_names(&query.columns);
+                let projected_cols = extract_select_column_names(&effective_projections);
                 let index_only_eligible = !projected_cols.is_empty()
                     && projected_cols.iter().all(|c| c == &column)
                     && query.group_by.is_empty()
@@ -322,8 +325,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         && query.group_by.is_empty()
         && query.having.is_none()
         && query.expand.is_none()
-        && !query
-            .columns
+        && !effective_projections
             .iter()
             .any(|p| matches!(p, Projection::Function(_, _) | Projection::Expression(_, _)))
         && !is_universal_query_source(&query.table)
@@ -374,7 +376,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             .collect();
 
         // Extract explicit column names for projection pushdown
-        let select_cols = extract_select_column_names(&query.columns);
+        let select_cols = extract_select_column_names(&effective_projections);
 
         // Compile the filter ONCE before iterating. When the collection
         // schema is available, use compile_with_schema to pre-resolve
@@ -486,8 +488,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     // Skipped when the projection list contains scalar function calls
     // (e.g. VERIFY_PASSWORD(...), UPPER(...)), since the fast path
     // returns raw records without running project_runtime_record.
-    let has_scalar_function = query
-        .columns
+    let has_scalar_function = effective_projections
         .iter()
         .any(|p| matches!(p, Projection::Function(_, _) | Projection::Expression(_, _)));
     if query.filter.is_none()
@@ -559,9 +560,7 @@ pub(crate) fn execute_runtime_canonical_table_node(
             // creating UnifiedRecord for entities that match the filter.
             // Skip for universal sources ("any") which need cross-collection scanning.
             if context.query.filter.is_some()
-                && !context
-                    .query
-                    .columns
+                && !effective_table_projections(context.query)
                     .iter()
                     .any(|p| matches!(p, Projection::Function(_, _) | Projection::Expression(_, _)))
                 && !is_universal_query_source(context.query.table.as_str())
@@ -580,7 +579,8 @@ pub(crate) fn execute_runtime_canonical_table_node(
                 let table_alias = context.table_alias;
                 let limit = context.query.limit.unwrap_or(10000) as usize;
 
-                let select_cols = extract_select_column_names(&context.query.columns);
+                let effective_projections = effective_table_projections(context.query);
+                let select_cols = extract_select_column_names(&effective_projections);
                 let schema_arc = manager.column_schema();
                 let compiled = match schema_arc.as_ref() {
                     Some(schema) => {
@@ -752,7 +752,7 @@ pub(crate) fn execute_runtime_canonical_table_node(
                 .map(|record| {
                     project_runtime_record(
                         record,
-                        &context.query.columns,
+                        &effective_table_projections(context.query),
                         Some(context.table_name),
                         Some(context.table_alias),
                         document_projection,

@@ -279,12 +279,20 @@ pub struct TableQuery {
     pub source: Option<TableSource>,
     /// Optional table alias
     pub alias: Option<String>,
+    /// Canonical SQL select list.
+    pub select_items: Vec<SelectItem>,
     /// Columns to select (empty = all)
     pub columns: Vec<Projection>,
+    /// Canonical SQL WHERE clause.
+    pub where_expr: Option<super::Expr>,
     /// Filter condition
     pub filter: Option<Filter>,
+    /// Canonical SQL GROUP BY items.
+    pub group_by_exprs: Vec<super::Expr>,
     /// GROUP BY fields
     pub group_by: Vec<String>,
+    /// Canonical SQL HAVING clause.
+    pub having_expr: Option<super::Expr>,
     /// HAVING filter (applied after grouping)
     pub having: Option<Filter>,
     /// Order by clauses
@@ -330,9 +338,13 @@ impl TableQuery {
             table: table.to_string(),
             source: None,
             alias: None,
+            select_items: Vec::new(),
             columns: Vec::new(),
+            where_expr: None,
             filter: None,
+            group_by_exprs: Vec::new(),
             group_by: Vec::new(),
+            having_expr: None,
             having: None,
             order_by: Vec::new(),
             limit: None,
@@ -355,9 +367,13 @@ impl TableQuery {
             table: sentinel,
             source: Some(TableSource::Subquery(Box::new(subquery))),
             alias,
+            select_items: Vec::new(),
             columns: Vec::new(),
+            where_expr: None,
             filter: None,
+            group_by_exprs: Vec::new(),
             group_by: Vec::new(),
+            having_expr: None,
             having: None,
             order_by: Vec::new(),
             limit: None,
@@ -365,6 +381,16 @@ impl TableQuery {
             expand: None,
         }
     }
+}
+
+/// Canonical SQL select item for table queries.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SelectItem {
+    Wildcard,
+    Expr {
+        expr: super::Expr,
+        alias: Option<String>,
+    },
 }
 
 // ============================================================================
@@ -994,6 +1020,8 @@ pub struct InsertQuery {
     pub entity_type: InsertEntityType,
     /// Column names
     pub columns: Vec<String>,
+    /// Canonical SQL rows of expressions.
+    pub value_exprs: Vec<Vec<super::Expr>>,
     /// Rows of values (each inner Vec is one row)
     pub values: Vec<Vec<Value>>,
     /// Whether to return inserted rows
@@ -1024,8 +1052,12 @@ pub struct AutoEmbedConfig {
 pub struct UpdateQuery {
     /// Target table name
     pub table: String,
+    /// Canonical SQL assignments.
+    pub assignment_exprs: Vec<(String, super::Expr)>,
     /// Column-value assignments
     pub assignments: Vec<(String, Value)>,
+    /// Canonical SQL WHERE clause.
+    pub where_expr: Option<super::Expr>,
     /// Optional WHERE filter
     pub filter: Option<Filter>,
     /// Optional TTL in milliseconds (from WITH TTL clause)
@@ -1041,6 +1073,8 @@ pub struct UpdateQuery {
 pub struct DeleteQuery {
     /// Target table name
     pub table: String,
+    /// Canonical SQL WHERE clause.
+    pub where_expr: Option<super::Expr>,
     /// Optional WHERE filter
     pub filter: Option<Filter>,
 }

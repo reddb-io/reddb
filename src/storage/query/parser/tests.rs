@@ -84,7 +84,12 @@ fn test_parse_cast_with_alias() {
         panic!("Expected Function");
     };
     assert_eq!(name, "CAST:score_int");
-    assert!(matches!(&args[1], Projection::Column(c) if c == "TYPE:INT"));
+    // Pratt path emits TYPE:INTEGER (DataType display); legacy path emits TYPE:INT (raw SQL name)
+    assert!(
+        matches!(&args[1], Projection::Column(c) if c == "TYPE:INT" || c == "TYPE:INTEGER"),
+        "unexpected type arg: {:?}",
+        &args[1]
+    );
 }
 
 #[test]

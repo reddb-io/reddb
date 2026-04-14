@@ -867,6 +867,23 @@ pub(super) fn compare_runtime_order(
 /// For a naive `sort_by(compare_runtime_order)`, the sort calls
 /// `resolve_runtime_field` O(n log n) times — once per comparison.
 /// With pre-extraction, field resolution is O(n) regardless of sort depth.
+/// A single sort key, carrying the full `Value` plus an optional `u64` abbreviated key
+/// for `Text` values so the comparator can skip full string comparisons in the common case.
+struct SortKey {
+    value: Option<Value>,
+    abbrev: Option<u64>,
+}
+
+impl SortKey {
+    fn new(value: Option<Value>) -> Self {
+        let abbrev = match &value {
+            Some(Value::Text(s)) => Some(text_abbrev_key(s)),
+            _ => None,
+        };
+        SortKey { value, abbrev }
+    }
+}
+
 pub(super) fn sort_records_by_order_by(
     records: &mut Vec<UnifiedRecord>,
     order_by: &[OrderByClause],
@@ -877,29 +894,48 @@ pub(super) fn sort_records_by_order_by(
         return;
     }
 
-    // Extract sort keys once per record — O(n × k) where k = ORDER BY clauses
-    let mut keyed: Vec<(usize, Vec<Option<Value>>)> = records
+    // Extract sort keys once per record — O(n × k) where k = ORDER BY clauses.
+    // Text columns also get a u64 abbreviated key (first 8 bytes big-endian) so the
+    // comparator short-circuits without touching the heap string in the common case.
+    let mut keyed: Vec<(usize, Vec<SortKey>)> = records
         .iter()
         .enumerate()
         .map(|(i, rec)| {
-            let keys: Vec<Option<Value>> = order_by
+            let keys: Vec<SortKey> = order_by
                 .iter()
                 .map(|clause| {
-                    if let Some(ref expr) = clause.expr {
+                    let v = if let Some(ref expr) = clause.expr {
                         super::expr_eval::evaluate_runtime_expr(expr, rec, table_name, table_alias)
                     } else {
                         resolve_runtime_field(rec, &clause.field, table_name, table_alias)
-                    }
+                    };
+                    SortKey::new(v)
                 })
                 .collect();
             (i, keys)
         })
         .collect();
 
-    // Sort by extracted keys — O(n log n) value comparisons, no HashMap access
+    // Sort by extracted keys — O(n log n).
+    // Text: compare abbreviated u64 key first; only fall through to full str::cmp on tie.
+    // Non-text: delegate to the existing value comparator as before.
     keyed.sort_by(|(_, lkeys), (_, rkeys)| {
-        for (clause, (lv, rv)) in order_by.iter().zip(lkeys.iter().zip(rkeys.iter())) {
-            let ord = compare_runtime_optional_values(lv.as_ref(), rv.as_ref(), clause.nulls_first);
+        for (clause, (lk, rk)) in order_by.iter().zip(lkeys.iter().zip(rkeys.iter())) {
+            let ord = match (&lk.abbrev, &rk.abbrev, &lk.value, &rk.value) {
+                // Both have abbreviated keys: fast u64 compare first
+                (Some(la), Some(ra), Some(Value::Text(ls)), Some(Value::Text(rs))) => {
+                    match la.cmp(ra) {
+                        Ordering::Equal => ls.as_str().cmp(rs.as_str()),
+                        other => other,
+                    }
+                }
+                // Fallback: full value compare (handles Null, non-text, mixed)
+                _ => compare_runtime_optional_values(
+                    lk.value.as_ref(),
+                    rk.value.as_ref(),
+                    clause.nulls_first,
+                ),
+            };
             if ord != Ordering::Equal {
                 return if clause.ascending { ord } else { ord.reverse() };
             }

@@ -473,42 +473,9 @@ impl<'a> Parser<'a> {
     /// to fall back to the legacy `parse_literal_value` path or
     /// surface a "non-literal not supported in this position" error.
     pub fn parse_expr_value(&mut self) -> Result<Value, ParseError> {
-        use super::ast::{Expr, UnaryOp};
         let expr = self.parse_expr()?;
-        fold_expr_to_value(expr).map_err(|msg| ParseError::new(msg, self.position()))
-    }
-}
-
-/// Best-effort literal evaluator used by `parse_expr_value`. Pure
-/// function so it can be unit-tested independently of the parser.
-fn fold_expr_to_value(expr: super::ast::Expr) -> Result<Value, String> {
-    use super::ast::{Expr, UnaryOp};
-    match expr {
-        Expr::Literal { value, .. } => Ok(value),
-        Expr::UnaryOp { op, operand, .. } => {
-            let inner = fold_expr_to_value(*operand)?;
-            match (op, inner) {
-                (UnaryOp::Neg, Value::Integer(n)) => Ok(Value::Integer(-n)),
-                (UnaryOp::Neg, Value::Float(f)) => Ok(Value::Float(-f)),
-                (UnaryOp::Neg, Value::BigInt(n)) => Ok(Value::BigInt(-n)),
-                (UnaryOp::Not, Value::Boolean(b)) => Ok(Value::Boolean(!b)),
-                (op, other) => Err(format!(
-                    "unary `{op:?}` cannot fold to literal Value (operand: {other:?})"
-                )),
-            }
-        }
-        Expr::Cast { inner, target, .. } => {
-            // Only fold CAST(literal AS type) — the analyze pass
-            // owns runtime CAST evaluation. Best-effort: stringify
-            // the inner literal and call the schema coerce path.
-            let lit = fold_expr_to_value(*inner)?;
-            let s = lit.display_string();
-            crate::storage::schema::coerce::coerce(&s, target, None)
-                .map_err(|e| format!("CAST literal to {target:?} failed: {e}"))
-        }
-        other => Err(format!(
-            "expression {other:?} is not a foldable literal in this position"
-        )),
+        super::sql_lowering::fold_expr_to_value(expr)
+            .map_err(|msg| ParseError::new(msg, self.position()))
     }
 }
 

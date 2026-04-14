@@ -1,5 +1,6 @@
 use super::*;
 use crate::storage::engine::GraphEdgeType;
+use crate::storage::query::sql_lowering::filter_to_expr;
 
 pub struct TableQueryBuilder {
     query: TableQuery,
@@ -21,23 +22,32 @@ impl TableQueryBuilder {
 
     /// Add column to select
     pub fn select(mut self, column: &str) -> Self {
-        self.query
-            .columns
-            .push(Projection::from_field(FieldRef::column(
-                self.query.alias.as_deref().unwrap_or(&self.query.table),
-                column,
-            )));
+        let field = FieldRef::column(
+            self.query.alias.as_deref().unwrap_or(&self.query.table),
+            column,
+        );
+        self.query.select_items.push(SelectItem::Expr {
+            expr: Expr::col(field.clone()),
+            alias: None,
+        });
+        self.query.columns.push(Projection::from_field(field));
         self
     }
 
     /// Add all columns
     pub fn select_all(mut self) -> Self {
+        self.query.select_items = vec![SelectItem::Wildcard];
         self.query.columns.clear();
         self
     }
 
     /// Add filter
     pub fn filter(mut self, f: Filter) -> Self {
+        let f_expr = filter_to_expr(&f);
+        self.query.where_expr = Some(match self.query.where_expr.take() {
+            Some(existing) => Expr::binop(BinOp::And, existing, f_expr),
+            None => f_expr,
+        });
         self.query.filter = Some(match self.query.filter.take() {
             Some(existing) => existing.and(f),
             None => f,

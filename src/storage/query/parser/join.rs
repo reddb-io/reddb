@@ -1,11 +1,12 @@
 //! Join query parsing (FROM ... JOIN GRAPH/PATH/TABLE/VECTOR ...)
 
 use super::super::ast::{
-    FieldRef, GraphQuery, JoinCondition, JoinQuery, JoinType, QueryExpr, TableQuery,
+    FieldRef, GraphQuery, JoinCondition, JoinQuery, JoinType, QueryExpr, SelectItem, TableQuery,
 };
 use super::super::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
+use crate::storage::query::sql_lowering::filter_to_expr;
 impl<'a> Parser<'a> {
     /// Parse FROM ... JOIN (GRAPH / PATH / TABLE / VECTOR / HYBRID) query
     pub fn parse_from_query(&mut self) -> Result<QueryExpr, ParseError> {
@@ -53,9 +54,13 @@ impl<'a> Parser<'a> {
                 table,
                 source: None,
                 alias,
+                select_items: Vec::new(),
                 columns: Vec::new(),
+                where_expr: None,
                 filter: None,
+                group_by_exprs: Vec::new(),
                 group_by: Vec::new(),
+                having_expr: None,
                 having: None,
                 order_by: Vec::new(),
                 limit: None,
@@ -71,7 +76,9 @@ impl<'a> Parser<'a> {
 
         // Parse optional WHERE clause
         if self.consume(&Token::Where)? {
-            table_query.filter = Some(self.parse_filter()?);
+            let filter = self.parse_filter()?;
+            table_query.where_expr = Some(filter_to_expr(&filter));
+            table_query.filter = Some(filter);
         }
 
         // Parse optional ORDER BY
@@ -90,7 +97,13 @@ impl<'a> Parser<'a> {
 
         // Check for RETURN (shorthand for column selection)
         if self.consume(&Token::Return)? {
-            table_query.columns = self.parse_projection_list()?;
+            let columns = self.parse_projection_list()?;
+            table_query.select_items = if columns.is_empty() {
+                vec![SelectItem::Wildcard]
+            } else {
+                Vec::new()
+            };
+            table_query.columns = columns;
         }
 
         Ok(QueryExpr::Table(table_query))
@@ -207,9 +220,13 @@ impl<'a> Parser<'a> {
             table,
             source: None,
             alias,
+            select_items: Vec::new(),
             columns: Vec::new(),
+            where_expr: None,
             filter: None,
+            group_by_exprs: Vec::new(),
             group_by: Vec::new(),
+            having_expr: None,
             having: None,
             order_by: Vec::new(),
             limit: None,

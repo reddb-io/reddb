@@ -10,11 +10,15 @@
 //!
 //! # Design notes
 //!
-//! The parser is **not** wired into the main `parse_*_query` flow yet.
-//! That migration lands in Week 3, where `OrderByClause`, the RHS of
-//! `Filter::Compare`, and `TableQuery.table` all grow `Expr` slots.
-//! Until then, this module exposes `Parser::parse_expr` as a standalone
-//! entry point that tests and shim paths can call explicitly.
+//! The parser is now the canonical entry point for SQL expression
+//! parsing in the table-query flow:
+//! - `SELECT` projections parse through `Parser::parse_expr`
+//! - `WHERE` / `HAVING` operands parse through `Parser::parse_expr`
+//! - `ORDER BY` expressions parse through `Parser::parse_expr`
+//!
+//! Some legacy AST slots are still adapter-based (`Projection`,
+//! `Filter`, `GROUP BY` strings), so statement parsing still lowers
+//! `Expr` trees into those older shapes at the boundary.
 //!
 //! # Precedence table (matches PG gram.y modulo features we don't have)
 //!
@@ -45,6 +49,33 @@ use super::super::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
 use crate::storage::schema::{DataType, Value};
+
+fn is_duration_unit(unit: &str) -> bool {
+    matches!(
+        unit.to_ascii_lowercase().as_str(),
+        "ms" | "msec"
+            | "millisecond"
+            | "milliseconds"
+            | "s"
+            | "sec"
+            | "secs"
+            | "second"
+            | "seconds"
+            | "m"
+            | "min"
+            | "mins"
+            | "minute"
+            | "minutes"
+            | "h"
+            | "hr"
+            | "hrs"
+            | "hour"
+            | "hours"
+            | "d"
+            | "day"
+            | "days"
+    )
+}
 
 fn keyword_function_name(token: &Token) -> Option<&'static str> {
     match token {
@@ -184,9 +215,21 @@ impl<'a> Parser<'a> {
             });
         }
 
-        // Numeric literals
+        // Numeric literals — with optional duration-unit suffix (e.g. `5m`, `10s`, `2h`).
+        // Duration literals are emitted as Value::Text so downstream code sees "5m" verbatim
+        // (matching the legacy Projection::Column("LIT:5m") path used by time_bucket).
         if let Token::Integer(n) = *self.peek() {
             self.advance()?;
+            if let Token::Ident(ref unit) = *self.peek() {
+                if is_duration_unit(unit) {
+                    let duration = format!("{n}{}", unit.to_ascii_lowercase());
+                    self.advance()?;
+                    return Ok(Expr::Literal {
+                        value: Value::Text(duration),
+                        span: Span::new(start, self.position()),
+                    });
+                }
+            }
             return Ok(Expr::Literal {
                 value: Value::Integer(n),
                 span: Span::new(start, self.position()),
@@ -204,6 +247,18 @@ impl<'a> Parser<'a> {
             self.advance()?;
             return Ok(Expr::Literal {
                 value: Value::Text(text),
+                span: Span::new(start, self.position()),
+            });
+        }
+
+        // JSON object `{…}` and array `[…]` literals — delegate to the DML literal parser
+        // which already handles the full JSON value grammar including nested objects.
+        if matches!(self.peek(), Token::LBrace | Token::LBracket) {
+            let value = self
+                .parse_literal_value()
+                .map_err(|e| ParseError::new(e.message, self.position()))?;
+            return Ok(Expr::Literal {
+                value,
                 span: Span::new(start, self.position()),
             });
         }
@@ -666,8 +721,8 @@ impl<'a> Parser<'a> {
     }
 }
 
-// Avoid `unused` lints if no integration yet references this type —
-// Week 3 wires it into the analyze pass and removes this shim.
+// Avoid `unused` lints in partial-migration builds where the analyzer
+// still does not consume every expression shape directly.
 #[allow(dead_code)]
 fn _expr_module_used(_: Expr) {}
 
@@ -973,6 +1028,21 @@ mod tests {
         assert_eq!(name, "COALESCE");
         assert_eq!(args.len(), 2);
         assert!(matches!(&args[1], Expr::FunctionCall { .. }));
+    }
+
+    #[test]
+    fn duration_literal_parses_as_text() {
+        let e = parse("time_bucket(5m)");
+        let Expr::FunctionCall { name, args, .. } = e else {
+            panic!("expected FunctionCall, got {e:?}");
+        };
+        assert_eq!(name.to_uppercase(), "TIME_BUCKET");
+        assert_eq!(args.len(), 1);
+        assert!(
+            matches!(&args[0], Expr::Literal { value: Value::Text(s), .. } if s == "5m"),
+            "expected Text(\"5m\"), got {:?}",
+            args[0]
+        );
     }
 
     #[test]

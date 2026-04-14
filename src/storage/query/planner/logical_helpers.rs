@@ -4,6 +4,7 @@ use crate::storage::query::ast::{
     FieldRef, Filter, FusionStrategy, JoinQuery, OrderByClause, Projection, QueryExpr, TableQuery,
 };
 use crate::storage::query::is_universal_entity_source as is_universal_query_source;
+use crate::storage::query::sql_lowering::effective_table_projections;
 use crate::storage::schema::Value;
 use crate::storage::RedDB;
 
@@ -247,9 +248,9 @@ pub(crate) fn uses_document_path_filter(db: &RedDB, query: &TableQuery) -> bool 
 }
 
 pub(crate) fn is_document_projection(db: &RedDB, query: &TableQuery) -> bool {
-    has_explicit_projection(&query.columns)
-        && (query
-            .columns
+    let projections = effective_table_projections(query);
+    has_explicit_projection(&projections)
+        && (projections
             .iter()
             .any(|projection| projection_uses_document_path(projection, query))
             || (!is_universal_entity_source(query.table.as_str())
@@ -551,6 +552,16 @@ pub(crate) fn has_explicit_projection(projections: &[Projection]) -> bool {
             .all(|projection| matches!(projection, Projection::All))
 }
 
+pub(crate) fn table_has_explicit_projection(query: &TableQuery) -> bool {
+    let projections = effective_table_projections(query);
+    has_explicit_projection(&projections)
+}
+
+pub(crate) fn table_projection_summary(query: &TableQuery) -> String {
+    let projections = effective_table_projections(query);
+    projection_summary(&projections)
+}
+
 pub(crate) fn projection_summary(projections: &[Projection]) -> String {
     projections
         .iter()
@@ -792,9 +803,13 @@ mod tests {
             table: "hosts".to_string(),
             source: None,
             alias: None,
+            select_items: Vec::new(),
             columns: vec![Projection::All],
+            where_expr: None,
             filter: None,
+            group_by_exprs: Vec::new(),
             group_by: Vec::new(),
+            having_expr: None,
             having: None,
             order_by: vec![],
             limit: None,

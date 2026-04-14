@@ -1,4 +1,5 @@
 use super::*;
+use crate::storage::query::sql_lowering::effective_table_projections;
 
 mod aggregate;
 mod filter_compiled;
@@ -35,8 +36,10 @@ pub(super) fn execute_runtime_table_query(
     query: &TableQuery,
     index_store: Option<&super::index_store::IndexStore>,
 ) -> RedDBResult<UnifiedResult> {
+    let effective_projections = effective_table_projections(query);
+
     // ── AGGREGATE PATH: COUNT, AVG, SUM, MIN, MAX, GROUP BY ──
-    if has_aggregate_projections(&query.columns) {
+    if has_aggregate_projections(&effective_projections) {
         return execute_aggregate_query(db, query);
     }
 
@@ -63,7 +66,7 @@ pub(super) fn execute_runtime_table_query(
                 let records: Vec<UnifiedRecord> = runtime_table_record_from_entity(entity)
                     .into_iter()
                     .collect();
-                let columns = projected_columns(&records, &query.columns);
+                let columns = projected_columns(&records, &effective_projections);
                 return Ok(UnifiedResult {
                     columns,
                     records,
@@ -79,7 +82,7 @@ pub(super) fn execute_runtime_table_query(
     }
 
     let records = execute_runtime_canonical_table_query_indexed(db, query, index_store)?;
-    let columns = projected_columns(&records, &query.columns);
+    let columns = projected_columns(&records, &effective_projections);
 
     Ok(UnifiedResult {
         columns,

@@ -1,11 +1,12 @@
 //! DML SQL Parser: INSERT, UPDATE, DELETE
 
 use super::super::ast::{
-    AskQuery, DeleteQuery, Filter, InsertEntityType, InsertQuery, QueryExpr, UpdateQuery,
+    AskQuery, DeleteQuery, Expr, Filter, InsertEntityType, InsertQuery, QueryExpr, UpdateQuery,
 };
 use super::super::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
+use crate::storage::query::sql_lowering::{filter_to_expr, fold_expr_to_value};
 use crate::storage::schema::Value;
 
 impl<'a> Parser<'a> {
@@ -48,10 +49,18 @@ impl<'a> Parser<'a> {
         // Parse VALUES
         self.expect(Token::Values)?;
         let mut all_values = Vec::new();
+        let mut all_value_exprs = Vec::new();
         loop {
             self.expect(Token::LParen)?;
-            let row_values = self.parse_dml_value_list()?;
+            let row_exprs = self.parse_dml_expr_list()?;
             self.expect(Token::RParen)?;
+            let row_values = row_exprs
+                .iter()
+                .cloned()
+                .map(fold_expr_to_value)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|msg| ParseError::new(msg, self.position()))?;
+            all_value_exprs.push(row_exprs);
             all_values.push(row_values);
             if !self.consume(&Token::Comma)? {
                 break;
@@ -67,6 +76,7 @@ impl<'a> Parser<'a> {
             table,
             entity_type,
             columns,
+            value_exprs: all_value_exprs,
             values: all_values,
             returning,
             ttl_ms,
@@ -237,10 +247,14 @@ impl<'a> Parser<'a> {
         self.expect(Token::Set)?;
 
         let mut assignments = Vec::new();
+        let mut assignment_exprs = Vec::new();
         loop {
             let col = self.expect_ident()?;
             self.expect(Token::Eq)?;
-            let val = self.parse_literal_value()?;
+            let expr = self.parse_expr()?;
+            let val = fold_expr_to_value(expr.clone())
+                .map_err(|msg| ParseError::new(msg, self.position()))?;
+            assignment_exprs.push((col.clone(), expr));
             assignments.push((col, val));
             if !self.consume(&Token::Comma)? {
                 break;
@@ -252,12 +266,15 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+        let where_expr = filter.as_ref().map(filter_to_expr);
 
         let (ttl_ms, expires_at_ms, with_metadata, _auto_embed) = self.parse_with_clauses()?;
 
         Ok(QueryExpr::Update(UpdateQuery {
             table,
+            assignment_exprs,
             assignments,
+            where_expr,
             filter,
             ttl_ms,
             expires_at_ms,
@@ -277,7 +294,13 @@ impl<'a> Parser<'a> {
             None
         };
 
-        Ok(QueryExpr::Delete(DeleteQuery { table, filter }))
+        let where_expr = filter.as_ref().map(filter_to_expr);
+
+        Ok(QueryExpr::Delete(DeleteQuery {
+            table,
+            where_expr,
+            filter,
+        }))
     }
 
     /// Parse: ASK 'question' [USING provider] [MODEL 'model'] [DEPTH n] [LIMIT n] [COLLECTION col]
@@ -333,9 +356,18 @@ impl<'a> Parser<'a> {
 
     /// Parse comma-separated literal values for DML statements
     fn parse_dml_value_list(&mut self) -> Result<Vec<Value>, ParseError> {
+        Ok(self
+            .parse_dml_expr_list()?
+            .into_iter()
+            .map(fold_expr_to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|msg| ParseError::new(msg, self.position()))?)
+    }
+
+    fn parse_dml_expr_list(&mut self) -> Result<Vec<Expr>, ParseError> {
         let mut values = Vec::new();
         loop {
-            values.push(self.parse_literal_value()?);
+            values.push(self.parse_expr()?);
             if !self.consume(&Token::Comma)? {
                 break;
             }
