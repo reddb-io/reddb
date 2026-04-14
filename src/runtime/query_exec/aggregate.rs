@@ -74,13 +74,25 @@ pub(crate) fn execute_aggregate_query(
     let table_alias = query.alias.as_deref().unwrap_or(table_name);
     let has_group_by = !query.group_by.is_empty();
 
+    // Compile the filter ONCE before the for_each_entity loop. The
+    // compiled form pre-classifies every FieldRef into an
+    // EntityFieldKind, so the per-row evaluator skips the ~6
+    // system-field string compares + entity-kind cascade that
+    // evaluate_entity_filter performs on every call.
+    //
+    // See `runtime/query_exec/filter_compiled.rs` for the algorithm
+    // and `runtime/query_exec/table.rs` for the canonical scan-path
+    // wire-up.
+    let compiled_filter = filter
+        .map(|f| super::filter_compiled::CompiledEntityFilter::compile(f, table_name, table_alias));
+
     // Accumulators per group (empty string key = no grouping)
     let mut groups: std::collections::HashMap<String, AggregateGroup> =
         std::collections::HashMap::new();
 
     manager.for_each_entity(|entity| {
-        if let Some(f) = filter {
-            if !evaluate_entity_filter(entity, f, table_name, table_alias) {
+        if let Some(c) = compiled_filter.as_ref() {
+            if !c.evaluate(entity) {
                 return true;
             }
         }
