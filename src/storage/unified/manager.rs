@@ -445,6 +445,50 @@ impl SegmentManager {
         Err(SegmentError::NotFound(entity.id))
     }
 
+    /// HOT-update: like update but skips index work for unchanged columns.
+    /// `modified_columns` is the list of column names actually changed by the
+    /// UPDATE statement — lets us skip pk_index and cross_ref when safe.
+    pub fn update_hot(
+        &self,
+        entity: UnifiedEntity,
+        modified_columns: &[String],
+    ) -> Result<(), SegmentError> {
+        if let Some(growing_arc) = self
+            .growing
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            let mut growing = growing_arc.write().unwrap_or_else(|e| e.into_inner());
+            if growing.contains(entity.id) && growing.state().is_writable() {
+                return growing.update_hot(entity, modified_columns);
+            }
+        }
+
+        let segment_id = self
+            .entity_segment
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&entity.id)
+            .copied();
+        if let Some(seg_id) = segment_id {
+            if let Some(growing_arc) = self
+                .growing
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+            {
+                let mut growing = growing_arc.write().unwrap_or_else(|e| e.into_inner());
+                if growing.id() == seg_id && growing.state().is_writable() {
+                    return growing.update_hot(entity, modified_columns);
+                }
+            }
+            return Err(SegmentError::NotWritable);
+        }
+
+        Err(SegmentError::NotFound(entity.id))
+    }
+
     /// Delete an entity
     pub fn delete(&self, id: EntityId) -> Result<bool, SegmentError> {
         let segment_id = self
@@ -1026,8 +1070,20 @@ impl UnifiedSegment for Arc<RwLock<GrowingSegment>> {
             .update(entity)
     }
 
+    fn update_hot(
+        &mut self,
+        entity: UnifiedEntity,
+        modified_columns: &[String],
+    ) -> Result<(), SegmentError> {
+        self.write()
+            .unwrap_or_else(|e| e.into_inner())
+            .update_hot(entity, modified_columns)
+    }
+
     fn delete(&mut self, id: EntityId) -> Result<bool, SegmentError> {
-        self.write().unwrap_or_else(|e| e.into_inner()).delete(id)
+        self.write()
+            .unwrap_or_else(|e| e.into_inner())
+            .delete(id)
     }
 
     fn get_metadata(&self, id: EntityId) -> Option<Metadata> {

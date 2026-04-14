@@ -171,7 +171,10 @@ impl<'a> Parser<'a> {
             ExplainFormat::Sql
         };
 
-        Ok(QueryExpr::ExplainAlter(ExplainAlterQuery { target, format }))
+        Ok(QueryExpr::ExplainAlter(ExplainAlterQuery {
+            target,
+            format,
+        }))
     }
 
     /// Parse the body of DROP TABLE after DROP TABLE has been consumed

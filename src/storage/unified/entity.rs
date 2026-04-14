@@ -672,7 +672,7 @@ impl UnifiedEntity {
 }
 
 /// A cross-reference between entities
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CrossRef {
     /// Source entity ID (the entity that holds this reference)
     pub source: EntityId,

@@ -2258,7 +2258,10 @@ mod tests {
     fn test_from_sql_name_uses_shared_alias_mapping() {
         assert_eq!(DataType::from_sql_name("INT8"), Some(DataType::BigInt));
         assert_eq!(DataType::from_sql_name("BIGINT"), Some(DataType::BigInt));
-        assert_eq!(DataType::from_sql_name("TIMESTAMPTZ"), Some(DataType::TimestampMs));
+        assert_eq!(
+            DataType::from_sql_name("TIMESTAMPTZ"),
+            Some(DataType::TimestampMs)
+        );
         assert_eq!(DataType::from_sql_name("ROWREF"), Some(DataType::RowRef));
     }
 

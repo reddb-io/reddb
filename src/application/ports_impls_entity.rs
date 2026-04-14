@@ -1157,6 +1157,9 @@ impl RuntimeEntityPort for RedDBRuntime {
 
         let mut patch_metadata = store.get_metadata(&collection, id).unwrap_or_default();
         let mut metadata_changed = false;
+        // HOT-update: track which field names are actually modified so that
+        // the segment can skip index work when indexed columns are untouched.
+        let mut modified_columns: Vec<String> = Vec::new();
 
         // Contract-aware guard: if this collection auto-manages
         // `created_at`/`updated_at`, reject any patch that targets
@@ -1217,6 +1220,12 @@ impl RuntimeEntityPort for RedDBRuntime {
                 }
 
                 if !field_ops.is_empty() {
+                    // HOT-update: record which columns are touched
+                    for op in &field_ops {
+                        if let Some(col) = op.path.first() {
+                            modified_columns.push(col.clone());
+                        }
+                    }
                     let named = row.named.get_or_insert_with(Default::default);
                     apply_patch_operations_to_storage_map(named, &field_ops)?;
                 }
@@ -1237,6 +1246,8 @@ impl RuntimeEntityPort for RedDBRuntime {
                     }
                     let named = row.named.get_or_insert_with(Default::default);
                     for (key, value) in fields {
+                        // HOT-update: record columns from payload path
+                        modified_columns.push(key.clone());
                         named.insert(key.clone(), json_to_storage_value(value)?);
                     }
                 }
@@ -1549,9 +1560,17 @@ impl RuntimeEntityPort for RedDBRuntime {
             .unwrap_or_default()
             .as_secs();
 
-        manager
-            .update(entity)
-            .map_err(|err| crate::RedDBError::Query(err.to_string()))?;
+        // HOT-update: use column-aware path when we know which fields changed,
+        // so the segment can skip pk_index and cross_ref when unaffected.
+        if modified_columns.is_empty() {
+            manager
+                .update(entity)
+                .map_err(|err| crate::RedDBError::Query(err.to_string()))?;
+        } else {
+            manager
+                .update_hot(entity, &modified_columns)
+                .map_err(|err| crate::RedDBError::Query(err.to_string()))?;
+        }
         refresh_context_index(&db, &collection, id)?;
         self.cdc_emit(
             crate::replication::cdc::ChangeOperation::Update,

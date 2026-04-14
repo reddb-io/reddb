@@ -21,7 +21,9 @@
 //!    - Otherwise take the coordinator state lock. Re-check the
 //!      flushed LSN (another leader may have raced).
 //!    - If a leader is already mid-flush, wait on the condvar until
-//!      `flushed_lsn >= commit_lsn`. The leader will wake us up.
+//!      that flush finishes. Re-check `flushed_lsn`; if the batch now
+//!      covers `commit_lsn`, return, otherwise race to become the next
+//!      leader for the remaining tail.
 //!    - If no leader is in progress, become the leader: mark
 //!      `in_progress = true`, drop the state lock, take the WAL
 //!      lock, call `wal.sync()`, publish the new `flushed_lsn`,
@@ -33,9 +35,10 @@
 //! Between the first writer's `append` and the leader's `wal.sync()`,
 //! other writers can grab the WAL lock and append more records.
 //! When the leader finally calls `sync()`, it flushes **everything**
-//! that has been appended so far — not just its own records. Each
-//! late writer wakes up to find `flushed_lsn` already past its LSN,
-//! and returns without a second fsync.
+//! that has been appended so far — not just its own records. Writers
+//! whose LSN is now covered return immediately; writers that appended
+//! after the leader captured `target_lsn` wake up, see they still need
+//! more durability, and one of them becomes the next leader.
 //!
 //! So `commit_at_least` produces one fsync per *batch* of concurrent
 //! writers, not per writer. On a workload with 8 concurrent
@@ -80,6 +83,10 @@ pub struct GroupCommit {
     cond: Condvar,
 }
 
+struct LeadershipGuard<'a> {
+    group_commit: &'a GroupCommit,
+}
+
 impl GroupCommit {
     /// Create a new coordinator initialised with the WAL's current
     /// durable position. Pass `wal.durable_lsn()` from a freshly
@@ -112,27 +119,37 @@ impl GroupCommit {
 
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
 
-        // Re-check under the lock: another leader may have raced
-        // and already flushed past our target between the load
-        // above and the lock acquisition.
-        if self.flushed_lsn.load(Ordering::Acquire) >= target {
-            return Ok(());
-        }
-
-        if state.in_progress {
-            // Another leader is mid-flush. Wait until they wake us
-            // OR until the WAL has advanced past our target.
-            while self.flushed_lsn.load(Ordering::Acquire) < target {
-                state = self.cond.wait(state).unwrap_or_else(|p| p.into_inner());
+        loop {
+            // Re-check under the lock: another leader may have raced
+            // and already flushed past our target between the load
+            // above and the lock acquisition.
+            if self.flushed_lsn.load(Ordering::Acquire) >= target {
+                return Ok(());
             }
-            return Ok(());
+
+            if state.in_progress {
+                // Another leader is mid-flush. Wait until they wake us,
+                // then re-check whether our target is covered. If not,
+                // loop and try to become the next leader instead of
+                // going back to sleep forever.
+                state = self
+                    .cond
+                    .wait_while(state, |state| {
+                        state.in_progress && self.flushed_lsn.load(Ordering::Acquire) < target
+                    })
+                    .unwrap_or_else(|p| p.into_inner());
+                continue;
+            }
+
+            // ── We are the leader. ──────────────────────────────────
+            state.in_progress = true;
+            break;
         }
 
-        // ── We are the leader. ──────────────────────────────────────
-        state.in_progress = true;
         // Drop the state lock so waiters can re-check `flushed_lsn`
         // without bouncing on this mutex.
         drop(state);
+        let _leader = LeadershipGuard { group_commit: self };
 
         // Phase 1 — take the WAL lock BRIEFLY to drain the BufWriter
         // into the kernel and capture both the LSN and a cloned
@@ -168,15 +185,17 @@ impl GroupCommit {
         }
 
         // Publish the new flushed LSN to atomic readers, then
-        // release leadership and wake every waiter.
+        // let the leadership guard wake every waiter.
         self.flushed_lsn.store(target_lsn, Ordering::Release);
 
+        Ok(())
+    }
+
+    fn release_leadership(&self) {
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.in_progress = false;
         drop(state);
         self.cond.notify_all();
-
-        Ok(())
     }
 }
 
@@ -188,15 +207,22 @@ impl std::fmt::Debug for GroupCommit {
     }
 }
 
+impl Drop for LeadershipGuard<'_> {
+    fn drop(&mut self) {
+        self.group_commit.release_leadership();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::storage::wal::record::WalRecord;
     use crate::storage::wal::writer::WalWriter;
+    use std::sync::mpsc;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::thread;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     struct FileGuard {
         path: PathBuf,
@@ -328,6 +354,51 @@ mod tests {
         // 20 commits worth of 13-byte Begin + 13-byte Commit
         // records = 520 bytes minimum on top of the 8-byte header.
         assert!(final_durable >= 8 + 520);
+    }
+
+    #[test]
+    fn waiter_retries_after_wakeup_if_previous_flush_was_too_small() {
+        let (_g, path) = temp_wal("waiter_retry");
+        let wal = Arc::new(Mutex::new(WalWriter::open(&path).unwrap()));
+        let initial = wal.lock().unwrap().durable_lsn();
+        let gc = Arc::new(GroupCommit::new(initial));
+
+        let target = {
+            let mut w = wal.lock().unwrap();
+            w.append(&WalRecord::Begin { tx_id: 1 }).unwrap();
+            w.append(&WalRecord::Commit { tx_id: 1 }).unwrap();
+            w.current_lsn()
+        };
+
+        {
+            let mut state = gc.state.lock().unwrap();
+            state.in_progress = true;
+        }
+
+        let (done_tx, done_rx) = mpsc::channel();
+        let wal_c = Arc::clone(&wal);
+        let gc_c = Arc::clone(&gc);
+        let waiter = thread::spawn(move || {
+            let result = gc_c.commit_at_least(target, &wal_c);
+            let _ = done_tx.send(result);
+        });
+
+        thread::sleep(Duration::from_millis(50));
+
+        {
+            let mut state = gc.state.lock().unwrap_or_else(|p| p.into_inner());
+            state.in_progress = false;
+        }
+        gc.cond.notify_all();
+
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("waiter should retry as the next leader")
+            .unwrap();
+        waiter.join().unwrap();
+
+        assert!(gc.flushed_lsn() >= target);
+        assert!(wal.lock().unwrap().durable_lsn() >= target);
     }
 
     #[test]

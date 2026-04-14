@@ -166,7 +166,11 @@ impl<'a> Parser<'a> {
             let start = self.position();
             let right = self.parse_field_ref()?;
             if !self.rhs_field_ref_extends_to_expression() {
-                return Ok(Filter::CompareFields { left: field, op, right });
+                return Ok(Filter::CompareFields {
+                    left: field,
+                    op,
+                    right,
+                });
             }
             let rhs = self.continue_expr(
                 Expr::Column {

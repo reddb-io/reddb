@@ -9,17 +9,17 @@ use reddb::storage::schema::Value;
 fn regression_sql_snapshots_match() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/regress");
     let cases = discover_cases(&root.join("sql"), &root.join("expected")).expect("discover cases");
-    assert!(!cases.is_empty(), "expected at least one regression fixture");
+    assert!(
+        !cases.is_empty(),
+        "expected at least one regression fixture"
+    );
 
     let mut failures = Vec::new();
     for case in &cases {
         let runtime = RedDBRuntime::in_memory().expect("in-memory runtime");
         let failure = run_case(case, |sql| execute_statement(&runtime, sql)).expect("run case");
         if let Some(failure) = failure {
-            failures.push(format!(
-                "case `{}` diff:\n{}",
-                failure.name, failure.diff
-            ));
+            failures.push(format!("case `{}` diff:\n{}", failure.name, failure.diff));
         }
     }
 

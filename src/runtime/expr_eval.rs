@@ -16,9 +16,7 @@
 //! - `Projection::Expression` once the planner flips from Filter
 //!   to Expr for scalar projection bodies.
 
-use super::join_filter::{
-    compare_runtime_values, evaluate_runtime_filter, resolve_runtime_field,
-};
+use super::join_filter::{compare_runtime_values, evaluate_runtime_filter, resolve_runtime_field};
 use crate::storage::query::ast::{BinOp, Expr, Filter, UnaryOp};
 use crate::storage::query::unified::UnifiedRecord;
 use crate::storage::schema::Value;
@@ -480,7 +478,10 @@ fn geo_args(args: &[Value]) -> Option<(f64, f64, f64, f64)> {
 
 fn geo_point(value: &Value) -> Option<(f64, f64)> {
     match value {
-        Value::GeoPoint(lat, lon) => Some((crate::geo::micro_to_deg(*lat), crate::geo::micro_to_deg(*lon))),
+        Value::GeoPoint(lat, lon) => Some((
+            crate::geo::micro_to_deg(*lat),
+            crate::geo::micro_to_deg(*lon),
+        )),
         _ => None,
     }
 }

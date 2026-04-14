@@ -184,6 +184,18 @@ pub trait UnifiedSegment: Send + Sync {
     /// Update an existing entity
     fn update(&mut self, entity: UnifiedEntity) -> Result<(), SegmentError>;
 
+    /// HOT-update: like update but receives the set of field names that actually
+    /// changed. Allows skipping index work when indexed columns are unaffected.
+    /// Default: falls back to full update.
+    fn update_hot(
+        &mut self,
+        entity: UnifiedEntity,
+        modified_columns: &[String],
+    ) -> Result<(), SegmentError> {
+        let _ = modified_columns;
+        self.update(entity)
+    }
+
     /// Delete an entity
     fn delete(&mut self, id: EntityId) -> Result<bool, SegmentError>;
 
@@ -559,6 +571,95 @@ impl GrowingSegment {
         // Note: reverse refs from this entity still need cleanup
     }
 
+    /// Selective re-index for updates.
+    ///
+    /// Skips index work that is not needed:
+    /// - `kind_index`: entity kind is immutable, so remove+reinsert is always
+    ///   a no-op; we skip it entirely and keep the existing entry.
+    /// - `pk_index`: only updated when the primary-key column (first column of
+    ///   a Row entity) actually changed. When `modified_columns` is provided,
+    ///   we check membership; otherwise we compare old vs new pk value.
+    /// - `bloom`: add-only by design, so we only insert the new pk when it
+    ///   genuinely changes (old entry is a benign false positive).
+    /// - `cross_ref`: only rebuilt when the refs actually differ.
+    fn reindex_for_update(
+        &mut self,
+        old: &UnifiedEntity,
+        new: &UnifiedEntity,
+        modified_columns: Option<&[String]>,
+    ) {
+        // kind_index: kind is immutable — the existing entry is already correct.
+        // No remove + reinsert needed.
+
+        // bloom: entity ID never changes; already present from insert.
+
+        // pk_index: only update when pk column is touched
+        let pk_changed = match (&old.data, &new.data) {
+            (EntityData::Row(old_row), EntityData::Row(new_row)) => {
+                if let Some(cols) = modified_columns {
+                    // Caller told us exactly what changed — check if first schema column modified
+                    // pk is the first column; check by name against the schema or by position 0
+                    let schema = old_row.schema.as_deref().or(new_row.schema.as_deref());
+                    let pk_col_name = schema.and_then(|s| s.first()).map(String::as_str);
+                    match pk_col_name {
+                        Some(pk_name) => cols.iter().any(|c| c == pk_name),
+                        // No schema — fall back to value comparison
+                        None => old_row.columns.first() != new_row.columns.first(),
+                    }
+                } else {
+                    old_row.columns.first() != new_row.columns.first()
+                }
+            }
+            // Non-row types don't use pk_index
+            _ => false,
+        };
+
+        if pk_changed {
+            // Remove old pk entry
+            if let EntityData::Row(row) = &old.data {
+                if let Some(first_col) = row.columns.first() {
+                    let pk_str = format!("{:?}", first_col);
+                    self.pk_index
+                        .remove(&(old.kind.collection().to_string(), pk_str));
+                }
+            }
+            // Insert new pk entry
+            if let EntityData::Row(row) = &new.data {
+                if let Some(first_col) = row.columns.first() {
+                    let pk_str = format!("{:?}", first_col);
+                    self.bloom.insert(pk_str.as_bytes());
+                    self.pk_index
+                        .insert((new.kind.collection().to_string(), pk_str), new.id);
+                }
+            }
+        }
+
+        // cross_ref: only rebuild when refs actually changed
+        let old_refs = old.cross_refs().to_vec();
+        let new_refs = new.cross_refs().to_vec();
+        if old_refs != new_refs {
+            // Remove stale forward refs
+            self.cross_ref_forward.remove(&old.id);
+            // Prune stale entries from reverse index
+            for cross_ref in &old_refs {
+                if let Some(rev) = self.cross_ref_reverse.get_mut(&cross_ref.target) {
+                    rev.retain(|(src, _)| *src != old.id);
+                }
+            }
+            // Add new refs
+            for cross_ref in &new_refs {
+                self.cross_ref_forward
+                    .entry(cross_ref.source)
+                    .or_default()
+                    .push((cross_ref.target, cross_ref.ref_type));
+                self.cross_ref_reverse
+                    .entry(cross_ref.target)
+                    .or_default()
+                    .push((cross_ref.source, cross_ref.ref_type));
+            }
+        }
+    }
+
     /// Get entities referencing the given entity
     pub fn get_references_to(&self, id: EntityId) -> Vec<(EntityId, RefType)> {
         self.cross_ref_reverse.get(&id).cloned().unwrap_or_default()
@@ -849,15 +950,53 @@ impl UnifiedSegment for GrowingSegment {
             return Err(SegmentError::NotFound(entity.id));
         }
 
-        // Unindex old entity
+        // HOT-reindex: compare old vs new to skip unchanged index work
         if let Some(ref old_entity) = old {
-            self.unindex_entity(old_entity);
+            self.reindex_for_update(old_entity, &entity, None);
         }
 
-        // Index new entity
-        self.index_entity(&entity);
-
         // Insert new version (skip for flat storage — already replaced in-place)
+        if !self.use_flat {
+            self.entities.insert(entity.id, entity);
+        }
+
+        self.last_write_at = current_unix_secs();
+
+        Ok(())
+    }
+
+    fn update_hot(
+        &mut self,
+        entity: UnifiedEntity,
+        modified_columns: &[String],
+    ) -> Result<(), SegmentError> {
+        if !self.state.is_writable() {
+            return Err(SegmentError::NotWritable);
+        }
+
+        let old = if self.use_flat {
+            let raw = entity.id.raw();
+            if raw >= self.base_entity_id {
+                let idx = (raw - self.base_entity_id) as usize;
+                if idx < self.flat_entities.len() && self.flat_entities[idx].id == entity.id {
+                    Some(std::mem::replace(&mut self.flat_entities[idx], entity.clone()))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            self.entities.remove(&entity.id)
+        };
+        if old.is_none() {
+            return Err(SegmentError::NotFound(entity.id));
+        }
+
+        if let Some(ref old_entity) = old {
+            self.reindex_for_update(old_entity, &entity, Some(modified_columns));
+        }
+
         if !self.use_flat {
             self.entities.insert(entity.id, entity);
         }
