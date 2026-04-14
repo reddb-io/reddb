@@ -4,9 +4,23 @@
 //! sorting, and limits to produce results.
 
 use super::filter::Filter;
+use super::filter_compiled::CompiledFilter;
 use super::sort::{OrderBy, QueryLimits};
 use crate::storage::schema::{Row, Value};
 use std::collections::HashMap;
+
+/// Build a `column name → slot index` map from the executor's
+/// columns Vec. Used by [`MemoryExecutor`] to compile filters once
+/// per query against the table's schema instead of doing a linear
+/// `columns.iter().position()` per predicate per row.
+#[inline]
+fn build_schema_index(columns: &[String]) -> HashMap<String, usize> {
+    columns
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.clone(), i))
+        .collect()
+}
 
 /// Query result set
 #[derive(Debug, Clone)]
@@ -351,21 +365,32 @@ impl QueryExecutor for MemoryExecutor {
             ..Default::default()
         };
 
+        // Compile the filter ONCE before the row loop. This resolves
+        // every `column name → slot index` lookup at compile time
+        // (no per-row `columns.iter().position(|c| c == col)` linear
+        // scan) and produces a flat opcode list that the hot loop
+        // walks without recursion or closure indirection. Falls
+        // back to the legacy walker only when the filter references
+        // a column that isn't in the table — which is a query bug
+        // the executor would have surfaced anyway.
+        let compiled_filter = plan.filter.as_ref().and_then(|f| {
+            let schema = build_schema_index(columns);
+            CompiledFilter::compile(f, &schema).ok()
+        });
+
         // Filter rows
         let mut matched_rows: Vec<Row> = rows
             .iter()
-            .filter(|row| {
-                if let Some(filter) = &plan.filter {
-                    filter.evaluate(&|col| {
-                        if let Some(idx) = columns.iter().position(|c| c == col) {
-                            row.get(idx).cloned()
-                        } else {
-                            None
-                        }
-                    })
-                } else {
-                    true
-                }
+            .filter(|row| match (&compiled_filter, &plan.filter) {
+                (Some(compiled), _) => compiled.evaluate(row.values()),
+                (None, Some(filter)) => filter.evaluate(&|col| {
+                    if let Some(idx) = columns.iter().position(|c| c == col) {
+                        row.get(idx).cloned()
+                    } else {
+                        None
+                    }
+                }),
+                (None, None) => true,
             })
             .cloned()
             .collect();
@@ -444,20 +469,25 @@ impl QueryExecutor for MemoryExecutor {
             .get(table)
             .ok_or_else(|| QueryError::TableNotFound(table.to_string()))?;
 
+        // Compile once before the count loop — same pattern as
+        // execute(). See filter_compiled.rs for the algorithm.
+        let compiled = filter.and_then(|f| {
+            let schema = build_schema_index(columns);
+            CompiledFilter::compile(f, &schema).ok()
+        });
+
         let count = rows
             .iter()
-            .filter(|row| {
-                if let Some(filter) = filter {
-                    filter.evaluate(&|col| {
-                        if let Some(idx) = columns.iter().position(|c| c == col) {
-                            row.get(idx).cloned()
-                        } else {
-                            None
-                        }
-                    })
-                } else {
-                    true
-                }
+            .filter(|row| match (&compiled, filter) {
+                (Some(c), _) => c.evaluate(row.values()),
+                (None, Some(f)) => f.evaluate(&|col| {
+                    if let Some(idx) = columns.iter().position(|c| c == col) {
+                        row.get(idx).cloned()
+                    } else {
+                        None
+                    }
+                }),
+                (None, None) => true,
             })
             .count();
 
