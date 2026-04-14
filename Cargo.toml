@@ -103,3 +103,28 @@ incremental = true
 codegen-units = 256
 
 # [profile.release] — use default
+
+# Fast-build variant of release. Trades ~5-10% runtime perf for
+# ~3× faster cold build of the `red` binary. Use for local smoke
+# tests and CI artifacts where release speed matters more than
+# microbenchmark numbers:
+#
+#     cargo build --profile release-fast --bin red
+#
+# Shipping binaries should still use `--release` (default profile).
+[profile.release-fast]
+inherits = "release"
+# 256 codegen units lets LLVM parallelise across all cores. Default
+# release is 16. This is the single biggest win for bin build time.
+codegen-units = 256
+# LTO is already off in default release. Restate for clarity.
+lto = false
+# Strip symbols — cuts link time and shrinks the binary ~40%.
+strip = "symbols"
+# Debug info generation dominates a surprising slice of bin link
+# time. 0 = no debuginfo.
+debug = 0
+# Keep incremental on for warm rebuilds. Release has it off by
+# default because incremental hurts runtime perf slightly; in
+# release-fast we already traded runtime for build time.
+incremental = true
