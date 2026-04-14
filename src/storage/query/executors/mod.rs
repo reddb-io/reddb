@@ -12,7 +12,9 @@
 
 pub mod agg_spill;
 pub mod aggregation;
+pub mod bitmap_scan;
 pub mod cte;
+pub mod parallel_scan;
 pub mod gremlin;
 pub mod hybrid;
 pub mod join;

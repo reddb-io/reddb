@@ -11,6 +11,7 @@
 pub mod cast_catalog;
 pub mod coerce;
 pub mod function_catalog;
+pub mod operator_catalog;
 pub mod polymorphic;
 pub mod registry;
 pub mod table;
