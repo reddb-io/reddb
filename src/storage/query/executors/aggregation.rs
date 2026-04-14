@@ -707,18 +707,10 @@ where
 // Helper Functions
 // ============================================================================
 
-fn make_group_key(binding: &Binding, group_vars: &[Var]) -> String {
-    let mut parts = Vec::new();
-    for var in group_vars {
-        let value_str = binding
-            .get(var)
-            .map(value_to_string)
-            .unwrap_or_else(|| "NULL".to_string());
-        parts.push(format!("{}={}", var.name(), value_str));
-    }
-    parts.join("|")
-}
-
+/// Format a single `Value` as a String. **Cold path** — used by
+/// non-hot consumers like GROUP_CONCAT result formatting. The
+/// hot group-by key path inlines this logic into a shared buffer
+/// in [`make_group_key`] to avoid per-row allocations.
 fn value_to_string(value: &Value) -> String {
     match value {
         Value::Node(id) => format!("node:{}", id),
@@ -730,6 +722,55 @@ fn value_to_string(value: &Value) -> String {
         Value::Uri(u) => u.clone(),
         Value::Null => "null".to_string(),
     }
+}
+
+/// Build a group-by key for one row.
+///
+/// **Hot path** — called once per row in `execute_group_by`. The
+/// previous implementation paid `N+2` String allocations per row
+/// (one per `value_to_string`, one per `format!`, one for the final
+/// `join("|")`). This version writes everything into a single
+/// `String` buffer with one allocation.
+///
+/// On a 3-column GROUP BY the difference is ~5 allocations vs 1,
+/// which on a 1M-row aggregation saves ~4M small allocations.
+fn make_group_key(binding: &Binding, group_vars: &[Var]) -> String {
+    use std::fmt::Write;
+    // Tunable initial capacity. 64 bytes covers most numeric / short
+    // text group keys in one allocation; longer text grows in place
+    // through String's exponential growth.
+    let mut key = String::with_capacity(64);
+    for (i, var) in group_vars.iter().enumerate() {
+        if i > 0 {
+            key.push('|');
+        }
+        key.push_str(var.name());
+        key.push('=');
+        match binding.get(var) {
+            None => key.push_str("NULL"),
+            Some(Value::Null) => key.push_str("null"),
+            Some(Value::String(s)) => key.push_str(s),
+            Some(Value::Integer(n)) => {
+                let _ = write!(key, "{n}");
+            }
+            Some(Value::Float(f)) => {
+                let _ = write!(key, "{f}");
+            }
+            Some(Value::Boolean(b)) => {
+                let _ = write!(key, "{b}");
+            }
+            Some(Value::Node(id)) => {
+                key.push_str("node:");
+                key.push_str(id);
+            }
+            Some(Value::Edge(id)) => {
+                key.push_str("edge:");
+                key.push_str(id);
+            }
+            Some(Value::Uri(u)) => key.push_str(u),
+        }
+    }
+    key
 }
 
 fn value_to_number(value: &Value) -> Option<f64> {

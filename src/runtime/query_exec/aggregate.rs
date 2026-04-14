@@ -102,12 +102,20 @@ pub(crate) fn execute_aggregate_query(
         } else {
             Vec::new()
         };
+        // Build the group-by key in a single String buffer instead
+        // of `iter().map().collect::<Vec<_>>().join("|")`, which used
+        // to pay N+1 String allocations per row. See sibling
+        // `aggregation.rs::make_group_key` for the same optimisation
+        // on the executor path.
         let group_key = if has_group_by {
-            group_values
-                .iter()
-                .map(group_value_key)
-                .collect::<Vec<_>>()
-                .join("|")
+            let mut key = String::with_capacity(64);
+            for (i, v) in group_values.iter().enumerate() {
+                if i > 0 {
+                    key.push('|');
+                }
+                append_group_value_key(&mut key, v);
+            }
+            key
         } else {
             String::new()
         };
@@ -596,16 +604,48 @@ fn value_to_bucket_timestamp_ns(value: &Value) -> Option<u64> {
     }
 }
 
-fn group_value_key(value: &Value) -> String {
+/// Append a single group-by `Value` to a shared key buffer.
+///
+/// **Hot path** — called once per group-by column per row in
+/// `execute_aggregate_query`. Writes directly into the caller's
+/// `String` buffer to avoid the per-value `format!` allocation
+/// the previous `group_value_key` paid.
+fn append_group_value_key(buf: &mut String, value: &Value) {
+    use std::fmt::Write;
     match value {
-        Value::Null => "null".to_string(),
-        Value::Boolean(v) => format!("b:{v}"),
-        Value::Integer(v) => format!("i:{v}"),
-        Value::UnsignedInteger(v) => format!("u:{v}"),
-        Value::Float(v) => format!("f:{:016x}", v.to_bits()),
-        Value::Text(v) => format!("t:{v}"),
-        other => format!("o:{other:?}"),
+        Value::Null => buf.push_str("null"),
+        Value::Boolean(v) => {
+            buf.push_str("b:");
+            let _ = write!(buf, "{v}");
+        }
+        Value::Integer(v) => {
+            buf.push_str("i:");
+            let _ = write!(buf, "{v}");
+        }
+        Value::UnsignedInteger(v) => {
+            buf.push_str("u:");
+            let _ = write!(buf, "{v}");
+        }
+        Value::Float(v) => {
+            buf.push_str("f:");
+            let _ = write!(buf, "{:016x}", v.to_bits());
+        }
+        Value::Text(v) => {
+            buf.push_str("t:");
+            buf.push_str(v);
+        }
+        other => {
+            buf.push_str("o:");
+            let _ = write!(buf, "{other:?}");
+        }
     }
+}
+
+#[allow(dead_code)]
+fn group_value_key(value: &Value) -> String {
+    let mut buf = String::with_capacity(32);
+    append_group_value_key(&mut buf, value);
+    buf
 }
 
 #[derive(Default)]
