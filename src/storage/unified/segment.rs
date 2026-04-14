@@ -926,12 +926,8 @@ impl UnifiedSegment for GrowingSegment {
         // Update column zone maps for range-based segment pruning
         self.update_col_zones_from_entity(&entity);
 
-        // Write to memtable (write buffer for sorted flush)
-        let id = entity.id;
-        let key = id.raw().to_le_bytes();
-        self.memtable.put(&key, &key); // key=entityId, value=entityId (pointer)
-
         // Store
+        let id = entity.id;
         self.entities.insert(id, entity);
 
         // Update write timestamp
@@ -1066,10 +1062,6 @@ impl UnifiedSegment for GrowingSegment {
 
         // Remove metadata
         self.metadata.remove_all(id);
-
-        // Tombstone in memtable
-        let key = id.raw().to_le_bytes();
-        self.memtable.delete(&key);
 
         // Mark as deleted (tombstone)
         self.deleted.insert(id);

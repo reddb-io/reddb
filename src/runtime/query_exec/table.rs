@@ -18,7 +18,7 @@ use super::helpers::{
 };
 use super::indexed_scan::try_sorted_index_lookup;
 use super::*;
-use crate::storage::query::sql_lowering::effective_table_projections;
+use crate::storage::query::sql_lowering::{effective_table_filter, effective_table_projections};
 
 /// Build the JSON result from a set of entity IDs (from index lookup).
 /// Scan entities sequentially but only process those in the candidate set (from hash index).
@@ -35,6 +35,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     index_store: Option<&super::index_store::IndexStore>,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
     let effective_projections = effective_table_projections(query);
+    let effective_filter = effective_table_filter(query);
 
     // ── FROM SUBQUERY PATH (Fase 1.7 / W4 rebind): when the query's
     // source is a `(SELECT …) AS alias`, execute the inner query
@@ -63,7 +64,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 // unaliased) so qualified column references resolve
                 // back onto the inner projection keys.
                 let outer_alias = query.alias.as_deref();
-                if let Some(ref outer_filter) = query.filter {
+                if let Some(ref outer_filter) = effective_filter {
                     records.retain(|record| {
                         super::super::join_filter::evaluate_runtime_filter(
                             record,
@@ -113,7 +114,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     }
 
     // ── ULTRA-FAST PATH: entity_id lookup bypasses planner entirely ──
-    if let Some(entity_id) = extract_entity_id_from_filter(&query.filter) {
+    if let Some(entity_id) = extract_entity_id_from_filter(&effective_filter) {
         let store = db.store();
         if let Some(entity) = store.get(&query.table, EntityId::new(entity_id)) {
             return Ok(runtime_table_record_from_entity(entity)
@@ -130,7 +131,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     // the main execution path only looked at hash (equality) indices,
     // so `WHERE age BETWEEN 30 AND 40` always fell through to a full
     // scan even when a BTREE index on `age` existed.
-    if let (Some(idx_store), Some(ref filter)) = (index_store, &query.filter) {
+    if let (Some(idx_store), Some(ref filter)) = (index_store, &effective_filter) {
         let trace = std::env::var("REDDB_INDEX_TRACE").ok().as_deref() == Some("1");
         let sorted_res = try_sorted_index_lookup(filter, &query.table, idx_store);
         if trace {
@@ -153,13 +154,13 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 table_alias,
             );
             let store = db.store();
+            // Batch fetch: single lock acquisition for the entire candidate set
+            let entities = store.get_batch(&query.table, &entity_ids);
             let mut records = Vec::with_capacity(entity_ids.len());
-            for eid in entity_ids {
-                if let Some(entity) = store.get(&query.table, eid) {
-                    if compiled_filter.evaluate(&entity) {
-                        if let Some(record) = runtime_table_record_from_entity(entity) {
-                            records.push(record);
-                        }
+            for entity_opt in entities.into_iter().flatten() {
+                if compiled_filter.evaluate(&entity_opt) {
+                    if let Some(record) = runtime_table_record_from_entity(entity_opt) {
+                        records.push(record);
                     }
                 }
             }
@@ -173,7 +174,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     // - AND the bitmaps (in-CPU, no heap I/O)
     // - Fetch only the rows that survived both predicates
     // Only fires when ≥2 indexed equality columns exist in the filter.
-    if let (Some(idx_store), Some(ref filter)) = (index_store, &query.filter) {
+    if let (Some(idx_store), Some(ref filter)) = (index_store, &effective_filter) {
         let mut eq_candidates: Vec<(String, Vec<u8>)> = Vec::new();
         extract_all_eq_candidates(filter, &mut eq_candidates);
 
@@ -207,12 +208,13 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             let store = db.store();
             let mut sorted_ids: Vec<u64> = intersection.into_iter().collect();
             sorted_ids.sort_unstable();
+            let entity_ids: Vec<EntityId> = sorted_ids.iter().map(|&r| EntityId::new(r)).collect();
+            // Batch fetch: single lock acquisition for the entire candidate set
+            let entities = store.get_batch(&query.table, &entity_ids);
             let mut records = Vec::new();
-            for raw_id in sorted_ids {
-                if let Some(entity) = store.get(&query.table, EntityId::new(raw_id)) {
-                    if let Some(record) = runtime_table_record_from_entity(entity) {
-                        records.push(record);
-                    }
+            for entity_opt in entities.into_iter().flatten() {
+                if let Some(record) = runtime_table_record_from_entity(entity_opt) {
+                    records.push(record);
                 }
             }
             return Ok(records);
@@ -220,7 +222,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     }
 
     // ── INDEX-ASSISTED PATH: use hash index for O(1) equality lookups ──
-    if let (Some(idx_store), Some(ref filter)) = (index_store, &query.filter) {
+    if let (Some(idx_store), Some(ref filter)) = (index_store, &effective_filter) {
         if let Some((column, value_bytes)) = extract_index_candidate(filter) {
             if let Some(idx) = idx_store.find_index_for_column(&query.table, &column) {
                 // ── INDEX-ONLY SCAN CHECK ──────────────────────────────────────
@@ -298,16 +300,16 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                         )
                     });
                     let store = db.store();
+                    // Batch fetch: single lock acquisition for the entire candidate set
+                    let entities = store.get_batch(&query.table, &entity_ids);
                     let mut records = Vec::new();
-                    for eid in entity_ids {
-                        if let Some(entity) = store.get(&query.table, eid) {
-                            if compiled_filter
-                                .as_ref()
-                                .map_or(true, |cf| cf.evaluate(&entity))
-                            {
-                                if let Some(record) = runtime_table_record_from_entity(entity) {
-                                    records.push(record);
-                                }
+                    for entity_opt in entities.into_iter().flatten() {
+                        if compiled_filter
+                            .as_ref()
+                            .map_or(true, |cf| cf.evaluate(&entity_opt))
+                        {
+                            if let Some(record) = runtime_table_record_from_entity(entity_opt) {
+                                records.push(record);
                             }
                         }
                     }

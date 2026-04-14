@@ -402,6 +402,56 @@ impl SegmentManager {
         None
     }
 
+    /// Batch-fetch multiple entities by ID in a single lock acquisition per segment.
+    ///
+    /// For indexed-scan result sets (up to ~5000 ids from range/bitmap lookup) this
+    /// is 2-3 lock acquisitions total vs N×3 with individual `get()` calls.
+    pub fn get_many(&self, ids: &[EntityId]) -> Vec<Option<UnifiedEntity>> {
+        let mut out: Vec<Option<UnifiedEntity>> = vec![None; ids.len()];
+        let mut remaining: Vec<usize> = (0..ids.len()).collect(); // indices still unfound
+
+        // Growing segment — one read lock for the entire batch
+        if let Some(growing_arc) = self
+            .growing
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            let growing = growing_arc.read().unwrap_or_else(|e| e.into_inner());
+            remaining.retain(|&i| {
+                if let Some(entity) = growing.get(ids[i]) {
+                    out[i] = Some(entity.clone());
+                    false // remove from remaining
+                } else {
+                    true // keep — not found yet
+                }
+            });
+        }
+
+        if remaining.is_empty() {
+            return out;
+        }
+
+        // Sealed segments — one read lock per segment
+        let sealed = self.sealed.read().unwrap_or_else(|e| e.into_inner());
+        for segment in sealed.iter() {
+            if remaining.is_empty() {
+                break;
+            }
+            let seg = segment.read().unwrap_or_else(|e| e.into_inner());
+            remaining.retain(|&i| {
+                if let Some(entity) = seg.get(ids[i]) {
+                    out[i] = Some(entity.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+
+        out
+    }
+
     /// Scan all segments for an entity
     fn scan_for_entity(&self, id: EntityId) -> Option<UnifiedEntity> {
         // Check growing

@@ -429,6 +429,18 @@ impl UnifiedStore {
         self.get_collection(collection)?.get(id)
     }
 
+    /// Batch-fetch multiple entities from the same collection in minimal lock acquisitions.
+    ///
+    /// Preferred over N individual `get()` calls in indexed-scan loops (sorted index,
+    /// bitmap, hash). Reduces lock acquisitions from N×3 to 2-3 total.
+    /// Preserves input order: `result[i]` corresponds to `ids[i]`.
+    pub fn get_batch(&self, collection: &str, ids: &[EntityId]) -> Vec<Option<UnifiedEntity>> {
+        match self.get_collection(collection) {
+            Some(manager) => manager.get_many(ids),
+            None => vec![None; ids.len()],
+        }
+    }
+
     /// Get an entity from any collection
     pub fn get_any(&self, id: EntityId) -> Option<(String, UnifiedEntity)> {
         // Check entity cache first
