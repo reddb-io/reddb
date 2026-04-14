@@ -47,6 +47,7 @@ pub mod binary;
 pub mod engine;
 pub mod executor;
 pub mod executors;
+pub mod expr_typing;
 pub mod filter;
 pub mod filter_compiled;
 pub mod lexer;
