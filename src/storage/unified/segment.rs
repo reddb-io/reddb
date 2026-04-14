@@ -363,31 +363,46 @@ pub struct GrowingSegment {
 
 impl GrowingSegment {
     /// Direct iteration without Box<dyn> trait dispatch. Returns false to stop early.
+    /// Uses concrete iterator types to avoid heap allocation per call.
     #[inline]
     pub fn for_each_fast<F>(&self, mut f: F) -> bool
     where
         F: FnMut(&UnifiedEntity) -> bool,
     {
-        // Use flat_entities when in flat mode (sequential Vec, better cache locality)
-        let iter: Box<dyn Iterator<Item = &UnifiedEntity>> = if self.use_flat {
-            Box::new(self.flat_entities.iter())
-        } else {
-            Box::new(self.entities.values())
-        };
-
-        if self.deleted.is_empty() {
-            for entity in iter {
-                if !f(entity) {
-                    return false;
+        if self.use_flat {
+            // Sequential Vec — best cache locality
+            if self.deleted.is_empty() {
+                for entity in &self.flat_entities {
+                    if !f(entity) {
+                        return false;
+                    }
+                }
+            } else {
+                for entity in &self.flat_entities {
+                    if self.deleted.contains(&entity.id) {
+                        continue;
+                    }
+                    if !f(entity) {
+                        return false;
+                    }
                 }
             }
         } else {
-            for entity in iter {
-                if self.deleted.contains(&entity.id) {
-                    continue;
+            // HashMap values — random order, no boxing
+            if self.deleted.is_empty() {
+                for entity in self.entities.values() {
+                    if !f(entity) {
+                        return false;
+                    }
                 }
-                if !f(entity) {
-                    return false;
+            } else {
+                for entity in self.entities.values() {
+                    if self.deleted.contains(&entity.id) {
+                        continue;
+                    }
+                    if !f(entity) {
+                        return false;
+                    }
                 }
             }
         }
@@ -602,7 +617,7 @@ impl GrowingSegment {
                     let schema = old_row.schema.as_deref().or(new_row.schema.as_deref());
                     let pk_col_name = schema.and_then(|s| s.first()).map(String::as_str);
                     match pk_col_name {
-                        Some(pk_name) => cols.iter().any(|c| c == pk_name),
+                        Some(pk_name) => cols.iter().any(|c| c.eq_ignore_ascii_case(pk_name)),
                         // No schema — fall back to value comparison
                         None => old_row.columns.first() != new_row.columns.first(),
                     }

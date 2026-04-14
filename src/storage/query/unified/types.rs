@@ -115,6 +115,13 @@ impl UnifiedRecord {
         self.values.insert(column.to_string(), value);
     }
 
+    /// Set a column value from an already-owned String key — avoids the
+    /// `to_string()` clone in hot-path callers that already hold a `String`.
+    #[inline]
+    pub fn set_owned(&mut self, column: String, value: Value) {
+        self.values.insert(column, value);
+    }
+
     /// Get a column value
     pub fn get(&self, column: &str) -> Option<&Value> {
         self.values.get(column)

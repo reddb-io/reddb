@@ -1421,21 +1421,43 @@ pub(super) fn like_matches(value: &str, pattern: &str) -> bool {
     like_matches_bytes(value.as_bytes(), pattern.as_bytes())
 }
 
+/// O(m × n) iterative LIKE matching — mirrors the Wildcards/Leetcode-44 DP
+/// approach but without heap allocation. Replaces the recursive version which
+/// was exponential on patterns with many `%` wildcards.
+///
+/// `%` matches any sequence of zero or more characters.
+/// `_` matches exactly one character.
+/// All other bytes are literal.
 pub(super) fn like_matches_bytes(value: &[u8], pattern: &[u8]) -> bool {
-    if pattern.is_empty() {
-        return value.is_empty();
+    let (mut vi, mut pi) = (0usize, 0usize);
+    // `star_vi` / `star_pi`: position after the last `%` wildcard seen.
+    let (mut star_vi, mut star_pi) = (usize::MAX, usize::MAX);
+
+    while vi < value.len() {
+        if pi < pattern.len() && (pattern[pi] == b'_' || pattern[pi] == value[vi]) {
+            vi += 1;
+            pi += 1;
+        } else if pi < pattern.len() && pattern[pi] == b'%' {
+            // Record position right after `%`; the `%` matches empty for now.
+            star_vi = vi;
+            star_pi = pi;
+            pi += 1;
+        } else if star_pi != usize::MAX {
+            // Backtrack: the `%` consumes one more value character.
+            star_vi += 1;
+            vi = star_vi;
+            pi = star_pi + 1;
+        } else {
+            return false;
+        }
     }
 
-    match pattern[0] {
-        b'%' => {
-            like_matches_bytes(value, &pattern[1..])
-                || (!value.is_empty() && like_matches_bytes(&value[1..], pattern))
-        }
-        b'_' => !value.is_empty() && like_matches_bytes(&value[1..], &pattern[1..]),
-        byte => {
-            !value.is_empty() && value[0] == byte && like_matches_bytes(&value[1..], &pattern[1..])
-        }
+    // Consume trailing `%` wildcards in pattern.
+    while pi < pattern.len() && pattern[pi] == b'%' {
+        pi += 1;
     }
+
+    pi == pattern.len()
 }
 
 pub(super) fn query_expr_name(expr: &QueryExpr) -> &'static str {
@@ -1485,16 +1507,15 @@ fn evaluate_scalar_function(
             Some(arith_binop(func_name, a, b))
         }
         "CONCAT" => {
-            // `a || b` — string concatenation. Stringifies both sides via
-            // display_string so `'user:' || id` Just Works even when `id`
-            // is an Integer / Uuid / etc.
-            let a = resolve_scalar_arg(args, 0, source)?;
-            let b = resolve_scalar_arg(args, 1, source)?;
-            Some(Value::Text(format!(
-                "{}{}",
-                a.display_string(),
-                b.display_string()
-            )))
+            let mut out = String::new();
+            for idx in 0..args.len() {
+                let value = resolve_scalar_arg(args, idx, source)?;
+                if matches!(value, Value::Null) {
+                    continue;
+                }
+                out.push_str(&value.display_string());
+            }
+            Some(Value::Text(out))
         }
         "CASE" => {
             // CASE WHEN cond THEN val ... ELSE val END is encoded as
@@ -1623,10 +1644,48 @@ fn evaluate_scalar_function(
                 resolve_scalar_arg(args, 1, source).and_then(|value| value_as_i64(&value))?;
             let count = args
                 .get(2)
-                .map(|_| resolve_scalar_arg(args, 2, source).and_then(|value| value_as_i64(&value)))
+                .map(|_| {
+                    resolve_scalar_arg(args, 2, source).and_then(|value| value_as_i64(&value))
+                })
                 .transpose()?;
             Some(Value::Text(substring_text(&text, start, count)?))
-        }
+        },
+        "TRIM" | "BTRIM" => {
+            let text = match resolve_scalar_arg(args, 0, source)? {
+                Value::Text(text) => text,
+                _ => return Some(Value::Null),
+            };
+            let chars = match args.get(1).and_then(|_| resolve_scalar_arg(args, 1, source)) {
+                None => None,
+                Some(Value::Text(chars)) => Some(chars),
+                Some(_) => return Some(Value::Null),
+            };
+            Some(Value::Text(trim_text(&text, chars.as_deref(), true, true)))
+        },
+        "LTRIM" => {
+            let text = match resolve_scalar_arg(args, 0, source)? {
+                Value::Text(text) => text,
+                _ => return Some(Value::Null),
+            };
+            let chars = match args.get(1).and_then(|_| resolve_scalar_arg(args, 1, source)) {
+                None => None,
+                Some(Value::Text(chars)) => Some(chars),
+                Some(_) => return Some(Value::Null),
+            };
+            Some(Value::Text(trim_text(&text, chars.as_deref(), true, false)))
+        },
+        "RTRIM" => {
+            let text = match resolve_scalar_arg(args, 0, source)? {
+                Value::Text(text) => text,
+                _ => return Some(Value::Null),
+            };
+            let chars = match args.get(1).and_then(|_| resolve_scalar_arg(args, 1, source)) {
+                None => None,
+                Some(Value::Text(chars)) => Some(chars),
+                Some(_) => return Some(Value::Null),
+            };
+            Some(Value::Text(trim_text(&text, chars.as_deref(), false, true)))
+        },
         "ABS" => {
             let val = resolve_scalar_arg(args, 0, source)?;
             match val {
@@ -1885,10 +1944,55 @@ fn value_to_bucket_timestamp_ns(value: &Value) -> Option<u64> {
     match value {
         Value::UnsignedInteger(v) => Some(*v),
         Value::Integer(v) if *v >= 0 => Some(*v as u64),
+        Value::BigInt(v) if *v >= 0 => Some(*v as u64),
         Value::Float(v) if *v >= 0.0 => Some(*v as u64),
         Value::Timestamp(v) if *v >= 0 => Some((*v as u64) * 1_000_000_000),
         Value::TimestampMs(v) if *v >= 0 => Some((*v as u64) * 1_000_000),
         _ => None,
+    }
+}
+
+fn substring_text(text: &str, start: i64, count: Option<i64>) -> Option<String> {
+    if count.is_some_and(|count| count < 0) {
+        return None;
+    }
+
+    let chars: Vec<char> = text.chars().collect();
+    let start_idx = if start <= 1 {
+        0
+    } else {
+        usize::try_from(start - 1).ok()?
+    };
+
+    if start_idx >= chars.len() {
+        return Some(String::new());
+    }
+
+    let end_idx = match count {
+        Some(count) => start_idx.saturating_add(count as usize).min(chars.len()),
+        None => chars.len(),
+    };
+
+    Some(chars[start_idx..end_idx].iter().collect())
+}
+
+fn trim_text(text: &str, chars: Option<&str>, left: bool, right: bool) -> String {
+    match chars {
+        Some(chars) => {
+            let predicate = |ch| chars.contains(ch);
+            match (left, right) {
+                (true, true) => text.trim_matches(predicate).to_string(),
+                (true, false) => text.trim_start_matches(predicate).to_string(),
+                (false, true) => text.trim_end_matches(predicate).to_string(),
+                (false, false) => text.to_string(),
+            }
+        }
+        None => match (left, right) {
+            (true, true) => text.trim().to_string(),
+            (true, false) => text.trim_start().to_string(),
+            (false, true) => text.trim_end().to_string(),
+            (false, false) => text.to_string(),
+        },
     }
 }
 
