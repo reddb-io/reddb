@@ -2,6 +2,7 @@ use super::record::{WalRecord, WAL_MAGIC, WAL_VERSION};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
+use std::sync::Arc;
 
 /// User-space buffer size for the WAL writer.
 ///
@@ -28,6 +29,17 @@ const WAL_BUFFER_BYTES: usize = 64 * 1024;
 /// the kernel before fsync, and durability is silently broken.
 pub struct WalWriter {
     file: BufWriter<File>,
+    /// Cloned file descriptor for `sync_all()` outside the writer
+    /// mutex. Both this and `file`'s inner `File` point at the same
+    /// kernel inode; calling `sync_all()` on either flushes ALL
+    /// pending bytes for that inode. This is the trick that lets
+    /// the group-commit leader release the WAL writer lock during
+    /// the expensive fsync — see [`WalWriter::drain_for_group_sync`].
+    ///
+    /// Without this clone, a leader holding the writer mutex during
+    /// `sync_all()` blocks every other writer from appending,
+    /// defeating the entire purpose of group commit.
+    sync_handle: Arc<File>,
     /// Log Sequence Number — byte offset of the next record. Advances
     /// every `append`; survives across restarts via `seek(End)`.
     current_lsn: u64,
@@ -71,6 +83,12 @@ impl WalWriter {
             raw.seek(SeekFrom::End(0))?
         };
 
+        // Clone the file handle BEFORE wrapping in BufWriter. The
+        // clone shares the same kernel file description, so
+        // sync_all() on either descriptor flushes the whole inode.
+        // The BufWriter owns the original; the Arc<File> is shared
+        // with the group-commit leader.
+        let sync_handle = Arc::new(raw.try_clone()?);
         let file = BufWriter::with_capacity(WAL_BUFFER_BYTES, raw);
 
         // On open, every byte already on disk is by definition durable
@@ -78,6 +96,7 @@ impl WalWriter {
         // page cache). Initialise `durable_lsn` to `current_lsn`.
         Ok(Self {
             file,
+            sync_handle,
             current_lsn,
             durable_lsn: current_lsn,
         })
@@ -142,6 +161,45 @@ impl WalWriter {
     /// Get current LSN (end of file offset)
     pub fn current_lsn(&self) -> u64 {
         self.current_lsn
+    }
+
+    /// Drain the BufWriter into the kernel and return the captured
+    /// LSN plus a cloned file handle for the caller to fsync
+    /// **without holding the WAL writer mutex**.
+    ///
+    /// Used by the group-commit leader path. The flow is:
+    ///
+    /// 1. Take the WAL writer mutex.
+    /// 2. Call this method — drains user-space buffer to the kernel
+    ///    and captures `(target_lsn, sync_handle)`.
+    /// 3. Release the WAL writer mutex.
+    /// 4. Call `sync_handle.sync_all()` — this is the expensive
+    ///    ~100 µs syscall, and other writers can keep appending
+    ///    while it runs.
+    /// 5. Take the WAL writer mutex briefly and call
+    ///    [`WalWriter::mark_durable(target_lsn)`] to publish the
+    ///    new durable position.
+    ///
+    /// The cloned `sync_handle` shares the same kernel inode with
+    /// the writer's `file`, so `sync_all()` on the clone flushes
+    /// ALL bytes that have reached the kernel for that file —
+    /// including bytes appended by other writers AFTER step 3.
+    /// This is the coalescing window that makes group commit win.
+    pub fn drain_for_group_sync(&mut self) -> io::Result<(u64, Arc<File>)> {
+        // Drain user-space buffer into the kernel.
+        self.file.flush()?;
+        Ok((self.current_lsn, Arc::clone(&self.sync_handle)))
+    }
+
+    /// Manually advance `durable_lsn` after a successful out-of-lock
+    /// `sync_all()` performed via [`WalWriter::drain_for_group_sync`].
+    ///
+    /// Monotonic — never lowers `durable_lsn`. Safe to call with a
+    /// stale `lsn`; just becomes a no-op.
+    pub fn mark_durable(&mut self, lsn: u64) {
+        if lsn > self.durable_lsn {
+            self.durable_lsn = lsn;
+        }
     }
 
     /// Truncate the WAL (usually after checkpoint).

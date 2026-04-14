@@ -130,27 +130,46 @@ impl GroupCommit {
 
         // ── We are the leader. ──────────────────────────────────────
         state.in_progress = true;
-        // Drop the state lock before taking the WAL lock so other
-        // writers can still **append** while we fsync. They will
-        // either piggyback on this very flush (if their record made
-        // it into the WAL before our `sync_all()` call) or wait for
-        // the next leader.
+        // Drop the state lock so waiters can re-check `flushed_lsn`
+        // without bouncing on this mutex.
         drop(state);
 
-        // Take the WAL lock briefly to call sync(). The sync drains
-        // the BufWriter and calls sync_all, then bumps the WAL's
-        // own internal `durable_lsn`.
-        let new_durable = {
+        // Phase 1 — take the WAL lock BRIEFLY to drain the BufWriter
+        // into the kernel and capture both the LSN and a cloned
+        // file handle for the fsync. The whole point of this dance
+        // is that we DO NOT hold the WAL lock during the expensive
+        // sync_all() call below.
+        let (target_lsn, sync_handle) = {
             let mut wal_guard = wal.lock().unwrap_or_else(|p| p.into_inner());
-            wal_guard.sync()?;
-            wal_guard.durable_lsn()
+            wal_guard.drain_for_group_sync()?
         };
 
-        // Publish the new flushed LSN to readers, then release
-        // leadership and wake every waiter — they'll re-check the
-        // counter and either return or wait again on the next
-        // leader.
-        self.flushed_lsn.store(new_durable, Ordering::Release);
+        // Phase 2 — the lock is released. Other writers can now
+        // append into the BufWriter while we wait on fsync. Their
+        // bytes will either be picked up by THIS sync_all() (if
+        // they reach the kernel before the syscall returns) or
+        // by the NEXT leader.
+        //
+        // sync_all() on the cloned handle flushes the same kernel
+        // inode the BufWriter writes to, so coverage is correct.
+        sync_handle.sync_all()?;
+
+        // Phase 3 — take the WAL lock briefly to publish the new
+        // durable LSN. Other writers may have appended in the
+        // meantime; their bytes that reached the kernel are NOW
+        // also durable, but we conservatively only mark `target_lsn`
+        // (the LSN we drained) as durable. Any later writer's
+        // commit_at_least call will quickly become a no-op via the
+        // fast path if the kernel already had their bytes when we
+        // fsync'd.
+        {
+            let mut wal_guard = wal.lock().unwrap_or_else(|p| p.into_inner());
+            wal_guard.mark_durable(target_lsn);
+        }
+
+        // Publish the new flushed LSN to atomic readers, then
+        // release leadership and wake every waiter.
+        self.flushed_lsn.store(target_lsn, Ordering::Release);
 
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.in_progress = false;
