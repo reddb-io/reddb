@@ -149,14 +149,19 @@ Trade-off: runtime throughput drops ~5-10% (more codegen units =
 less cross-function inlining). For shipping artifacts, keep the
 default `--release`.
 
-Measured on this repo (8-core box, cold cache):
+Measured on this repo (cold cache, no CPU contention):
 
 | Command | Wall time |
 |---|---|
 | `cargo build --release --bin red` (stock) | ~13 min |
-| `cargo build --profile release-fast --bin red` | ~4 min |
-| `cargo build --profile release-fast --bin red` + mold | ~2.5 min |
-| same + warm incremental (1 file changed) | ~20 s |
+| `cargo build --profile release-fast --bin red` | **5m 25s** |
+| same, warm incremental (1 src file touched) | **5.7 s** |
+| same + mold | ~4 min / ~4 s |
+
+The warm-incremental path is the one that matters day-to-day —
+`release-fast` makes "edit → build → smoke test" essentially free.
+Cold builds still exceed 5 min because the `reddb` lib compiles
+as a single ~6 min unit (see "Cold build monolith" below).
 
 ### Lever 2: `--bin red` instead of `cargo build`
 
@@ -181,7 +186,88 @@ cargo sweep --time 14   # delete artifacts unused for 14 days
 **Do not** `cargo clean` unless you're debugging a build issue —
 it drops the incremental cache and the next build is fully cold.
 
-### Lever 4: `build.rs` proto compilation
+### Lever 4: unify `drivers/{rust,python}` into a cargo workspace
+
+The repo has three independent Cargo manifests that each pull the
+full `reddb` engine via `path = "../.."`:
+
+```
+Cargo.toml                      # 43 G target/
+drivers/rust/Cargo.toml         # 3.3 G drivers/rust/target/
+drivers/python/Cargo.toml       # 2.4 G drivers/python/target/
+```
+
+Each one has its own `target/`, so touching code in the engine and
+then building a driver recompiles the entire engine a second time
+in a second target dir. On this box that's ~49 G of build output
+and ~2× the wall-time whenever both sides get built.
+
+**Fix.** Turn the repo into a Cargo workspace. Add to root
+`Cargo.toml`:
+
+```toml
+[workspace]
+members = [".", "drivers/rust", "drivers/python"]
+resolver = "2"
+```
+
+Then delete the nested `drivers/*/target/` dirs. All three crates
+share the root `target/`, the engine compiles once, and driver
+tests warm-rebuild in seconds instead of minutes.
+
+Gotchas:
+- The root `reddb` package stays publishable (`cargo publish -p reddb`).
+- `resolver = "2"` is required so feature unification is per-crate
+  instead of repo-wide (otherwise the python driver's `pyo3` features
+  would leak into the `red` binary).
+- The python driver uses `crate-type = ["cdylib"]`; that's fine in
+  a workspace but `maturin develop` expects to run from inside
+  `drivers/python/`. No change needed.
+
+Estimated saving: ~10 min off the end-to-end "touch engine, rebuild
+drivers" cycle.
+
+### Lever 5: cold build monolith — split `reddb` into sub-crates
+
+`cargo build --timings --profile release-fast --bin red` shows a
+single wide bar that dominates the graph:
+
+```
+reddb         386 s  ← 29% of total CPU, 100% of critical path tail
+tokio          78 s
+rustls         78 s
+h2             44 s
+tonic          41 s
+ring           34 s
+axum           34 s
+```
+
+Everything else compiles concurrently in the first ~2 min.
+Then `reddb` goes serial for ~6 min because it's one crate —
+cargo cannot parallelise codegen *across crate boundaries* for
+a single compilation unit (only *within* it via codegen-units).
+
+The monolith is ~180 files under `src/`. Splitting it into
+sub-crates lets cargo run them in parallel, which — combined
+with `codegen-units = 256` — gets the reddb portion of the cold
+build to ~1-1.5 min instead of 6.
+
+Proposed split (follow-up work, not in this change):
+
+```
+reddb-core          # Value, EntityId, errors, low-level types
+reddb-storage       # pager, cache, btree, WAL, index primitives
+reddb-query         # AST, planner, executor
+reddb-runtime       # RedDBRuntime facade, high-level API
+reddb-grpc          # tonic services (optional feature)
+reddb               # thin re-export shell for back-compat
+```
+
+Expected saving: **~4 min off cold build**, zero runtime impact.
+Non-trivial refactor (pub/super boundary audit), tracked as a
+follow-up — not included in the current release-fast change.
+
+### Lever 6: `build.rs` proto compilation
 
 `build.rs` invokes `tonic-build` to codegen `proto/reddb.proto`
 (321 lines, server+client both enabled). The rerun-if-changed

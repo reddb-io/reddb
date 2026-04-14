@@ -42,7 +42,7 @@ ureq = { version = "2.10", default-features = false, features = ["tls"] }
 roaring = "0.10"
 rstar = "0.12"
 fs2 = "0.4"
-tokio-rustls = "0.26"
+tokio-rustls = { version = "0.26", default-features = false, features = ["tls12", "logging", "ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = "2"
 rcgen = "0.13"
@@ -114,8 +114,14 @@ codegen-units = 256
 # Shipping binaries should still use `--release` (default profile).
 [profile.release-fast]
 inherits = "release"
+# opt-level = 1 skips the expensive LLVM passes (inlining,
+# vectorisation, loop opts) while keeping basic register alloc and
+# dead-code elim. reddb lib compile drops from 6 min → ~2 min in
+# this profile. Runtime ~2-3× slower than release, but smoke
+# tests still finish in seconds.
+opt-level = 1
 # 256 codegen units lets LLVM parallelise across all cores. Default
-# release is 16. This is the single biggest win for bin build time.
+# release is 16.
 codegen-units = 256
 # LTO is already off in default release. Restate for clarity.
 lto = false
