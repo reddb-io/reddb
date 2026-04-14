@@ -243,15 +243,23 @@ pub fn type_expr(expr: &Expr, scope: &dyn Scope) -> Result<TypedExpr, TypeError>
             })
         }
         Expr::FunctionCall { name, args, .. } => {
-            // Function registry doesn't exist yet — type each arg
-            // for diagnostics but emit Nullable for the call result.
-            // Fase 3 W4 wires a real function catalog here.
             let typed_args = args
                 .iter()
                 .map(|a| type_expr(a, scope))
                 .collect::<Result<Vec<_>, _>>()?;
+            // Look up the function in the static catalog. Resolution
+            // picks the best-matching overload by exact-type score
+            // with a preferred-return-type tie break (see
+            // schema::function_catalog::resolve). Unknown functions
+            // fall through to `Nullable` so the rest of the query
+            // still types — matches PG's permissive
+            // `function does not exist` warning rather than hard fail.
+            let arg_dt: Vec<DataType> = typed_args.iter().map(|t| t.ty).collect();
+            let return_ty = crate::storage::schema::function_catalog::resolve(name, &arg_dt)
+                .map(|entry| entry.return_type)
+                .unwrap_or(DataType::Nullable);
             Ok(TypedExpr {
-                ty: DataType::Nullable,
+                ty: return_ty,
                 kind: TypedExprKind::FunctionCall {
                     name: name.clone(),
                     args: typed_args,

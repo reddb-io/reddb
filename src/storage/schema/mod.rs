@@ -10,6 +10,7 @@
 
 pub mod cast_catalog;
 pub mod coerce;
+pub mod function_catalog;
 pub mod registry;
 pub mod table;
 pub mod types;
