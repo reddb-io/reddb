@@ -606,6 +606,14 @@ impl UnifiedExecutor {
                     None => false,
                 }
             }
+            Filter::CompareFields { left, op, right } => {
+                let l = self.get_field_value(left, matched);
+                let r = self.get_field_value(right, matched);
+                match (l, r) {
+                    (Some(lv), Some(rv)) => self.compare_values(&lv, op, &rv),
+                    _ => false,
+                }
+            }
             Filter::And(left, right) => {
                 self.eval_filter(left, matched) && self.eval_filter(right, matched)
             }

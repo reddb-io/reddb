@@ -301,6 +301,9 @@ pub(crate) fn filter_uses_document_path(filter: &Filter, query: &TableQuery) -> 
         | Filter::StartsWith { field, .. }
         | Filter::EndsWith { field, .. }
         | Filter::Contains { field, .. } => field_ref_uses_document_path(field, query),
+        Filter::CompareFields { left, right, .. } => {
+            field_ref_uses_document_path(left, query) || field_ref_uses_document_path(right, query)
+        }
         Filter::And(left, right) | Filter::Or(left, right) => {
             filter_uses_document_path(left, query) || filter_uses_document_path(right, query)
         }
@@ -578,6 +581,14 @@ pub(crate) fn filter_summary(filter: &Filter) -> String {
                 field_ref_summary(field),
                 op,
                 summarize_value(value)
+            )
+        }
+        Filter::CompareFields { left, op, right } => {
+            format!(
+                "{} {} {}",
+                field_ref_summary(left),
+                op,
+                field_ref_summary(right)
             )
         }
         Filter::And(left, right) => {

@@ -412,6 +412,28 @@ pub(crate) fn evaluate_runtime_join_filter(
             .map(|candidate| compare_runtime_values(candidate, value, *op))
         })
         .unwrap_or(false),
+        Filter::CompareFields { left, op, right } => {
+            let left_val = resolve_runtime_join_field(
+                record,
+                left,
+                left_table_name,
+                left_table_alias,
+                right_table_name,
+                right_table_alias,
+            );
+            let right_val = resolve_runtime_join_field(
+                record,
+                right,
+                left_table_name,
+                left_table_alias,
+                right_table_name,
+                right_table_alias,
+            );
+            match (left_val, right_val) {
+                (Some(l), Some(r)) => compare_runtime_values(&l, &r, *op),
+                _ => false,
+            }
+        }
         Filter::And(left, right) => {
             evaluate_runtime_join_filter(
                 record,

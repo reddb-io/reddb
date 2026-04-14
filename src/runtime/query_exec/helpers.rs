@@ -352,6 +352,14 @@ pub(crate) fn evaluate_entity_filter(
                 .map(|candidate| compare_runtime_values(candidate.as_ref(), value, *op))
                 .unwrap_or(false)
         }
+        Filter::CompareFields { left, op, right } => {
+            let left_val = resolve_entity_field(entity, left, table_name, table_alias);
+            let right_val = resolve_entity_field(entity, right, table_name, table_alias);
+            match (left_val, right_val) {
+                (Some(l), Some(r)) => compare_runtime_values(l.as_ref(), r.as_ref(), *op),
+                _ => false,
+            }
+        }
         Filter::And(left, right) => {
             evaluate_entity_filter(entity, left, table_name, table_alias)
                 && evaluate_entity_filter(entity, right, table_name, table_alias)

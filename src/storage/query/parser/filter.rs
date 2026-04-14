@@ -4,6 +4,7 @@ use super::super::ast::{CompareOp, FieldRef, Filter};
 use super::super::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
+use crate::storage::schema::Value;
 
 impl<'a> Parser<'a> {
     /// Parse a filter expression (WHERE condition)
@@ -68,12 +69,56 @@ impl<'a> Parser<'a> {
             });
         }
 
-        // BETWEEN
+        // BETWEEN — accept either literal-low/literal-high (emits
+        // Filter::Between for backwards compat) or column-low/column-
+        // high (decomposes to `field >= low AND field <= high` using
+        // the new Filter::CompareFields variant). Mixed forms are
+        // deferred until Fase 2's Expr AST rewrite.
         if self.consume(&Token::Between)? {
-            let low = self.parse_value()?;
+            let low = self.parse_value_or_field()?;
             self.expect(Token::And)?;
-            let high = self.parse_value()?;
-            return Ok(Filter::Between { field, low, high });
+            let high = self.parse_value_or_field()?;
+            return Ok(match (low, high) {
+                (ValueOrField::Value(low), ValueOrField::Value(high)) => {
+                    Filter::Between { field, low, high }
+                }
+                (ValueOrField::Field(low_field), ValueOrField::Field(high_field)) => Filter::And(
+                    Box::new(Filter::CompareFields {
+                        left: field.clone(),
+                        op: CompareOp::Ge,
+                        right: low_field,
+                    }),
+                    Box::new(Filter::CompareFields {
+                        left: field,
+                        op: CompareOp::Le,
+                        right: high_field,
+                    }),
+                ),
+                (ValueOrField::Value(low), ValueOrField::Field(high_field)) => Filter::And(
+                    Box::new(Filter::Compare {
+                        field: field.clone(),
+                        op: CompareOp::Ge,
+                        value: low,
+                    }),
+                    Box::new(Filter::CompareFields {
+                        left: field,
+                        op: CompareOp::Le,
+                        right: high_field,
+                    }),
+                ),
+                (ValueOrField::Field(low_field), ValueOrField::Value(high)) => Filter::And(
+                    Box::new(Filter::CompareFields {
+                        left: field.clone(),
+                        op: CompareOp::Ge,
+                        right: low_field,
+                    }),
+                    Box::new(Filter::Compare {
+                        field,
+                        op: CompareOp::Le,
+                        value: high,
+                    }),
+                ),
+            });
         }
 
         // IN
@@ -115,6 +160,25 @@ impl<'a> Parser<'a> {
         let value = self.parse_value()?;
 
         Ok(Filter::Compare { field, op, value })
+    }
+
+    /// Parse either a literal Value or a FieldRef. Used by BETWEEN
+    /// and other RHS positions that tolerate column-to-column
+    /// predicates. Decides based on the next token — literals
+    /// (Integer / Float / String / TRUE / FALSE / NULL / minus)
+    /// go through parse_value; anything else is treated as an
+    /// identifier / qualified column reference.
+    pub(super) fn parse_value_or_field(&mut self) -> Result<ValueOrField, ParseError> {
+        match self.peek() {
+            Token::Integer(_)
+            | Token::Float(_)
+            | Token::String(_)
+            | Token::True
+            | Token::False
+            | Token::Null
+            | Token::Minus => Ok(ValueOrField::Value(self.parse_value()?)),
+            _ => Ok(ValueOrField::Field(self.parse_field_ref()?)),
+        }
     }
 
     /// Parse comparison operator
@@ -196,4 +260,12 @@ impl<'a> Parser<'a> {
             }
         }
     }
+}
+
+/// Result of parsing an RHS that accepts either a literal value or a
+/// column reference. Temporary shim until Fase 2 introduces a proper
+/// `Expr` AST that can unify the two under one walker.
+pub(super) enum ValueOrField {
+    Value(Value),
+    Field(FieldRef),
 }

@@ -737,6 +737,14 @@ pub(super) fn evaluate_runtime_filter(
                 })
                 .unwrap_or(false)
         }
+        Filter::CompareFields { left, op, right } => {
+            let left_value = resolve_runtime_field(record, left, table_name, table_alias);
+            let right_value = resolve_runtime_field(record, right, table_name, table_alias);
+            match (left_value, right_value) {
+                (Some(l), Some(r)) => compare_runtime_values(&l, &r, *op),
+                _ => false,
+            }
+        }
         Filter::And(left, right) => {
             evaluate_runtime_filter(record, left, table_name, table_alias)
                 && evaluate_runtime_filter(record, right, table_name, table_alias)

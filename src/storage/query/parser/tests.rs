@@ -4,8 +4,8 @@ use super::*;
 use crate::storage::engine::graph_store::{GraphEdgeType, GraphNodeType};
 use crate::storage::engine::vector_metadata::MetadataValue;
 use crate::storage::query::ast::{
-    DistanceMetric, EdgeDirection, FieldRef, Filter, FusionStrategy, JoinType, MetadataFilter,
-    Projection, QueueCommand, TableQuery, VectorSource,
+    CompareOp, DistanceMetric, EdgeDirection, FieldRef, Filter, FusionStrategy, JoinType,
+    MetadataFilter, Projection, QueueCommand, TableQuery, VectorSource,
 };
 
 #[test]
@@ -60,6 +60,86 @@ fn test_parse_cast_literal_integer() {
     assert_eq!(name, "CAST");
     assert!(matches!(&args[0], Projection::Column(c) if c == "LIT:42"));
     assert!(matches!(&args[1], Projection::Column(c) if c == "TYPE:TEXT"));
+}
+
+#[test]
+fn test_parse_between_with_column_bounds() {
+    // BETWEEN where both bounds are columns decomposes into
+    // AND(CompareFields(target, >=, low), CompareFields(target, <=, high)).
+    let query = parse("SELECT * FROM sensors WHERE temp BETWEEN min_temp AND max_temp").unwrap();
+    let QueryExpr::Table(tq) = query else {
+        panic!("Expected TableQuery");
+    };
+    let Some(Filter::And(left, right)) = tq.filter else {
+        panic!("Expected AND of CompareFields, got {:?}", tq.filter);
+    };
+    let Filter::CompareFields {
+        op: op_lo,
+        right: lo,
+        ..
+    } = &*left
+    else {
+        panic!("Expected CompareFields on lower bound");
+    };
+    let Filter::CompareFields {
+        op: op_hi,
+        right: hi,
+        ..
+    } = &*right
+    else {
+        panic!("Expected CompareFields on upper bound");
+    };
+    assert_eq!(*op_lo, CompareOp::Ge);
+    assert_eq!(*op_hi, CompareOp::Le);
+    let FieldRef::TableColumn { column: lo_col, .. } = lo else {
+        panic!("lower bound not a column ref");
+    };
+    let FieldRef::TableColumn { column: hi_col, .. } = hi else {
+        panic!("upper bound not a column ref");
+    };
+    assert_eq!(lo_col, "min_temp");
+    assert_eq!(hi_col, "max_temp");
+}
+
+#[test]
+fn test_parse_between_literal_bounds_preserved() {
+    // Literal bounds still emit the classic Filter::Between form so
+    // existing planner / executor paths are untouched.
+    let query = parse("SELECT * FROM sensors WHERE temp BETWEEN 10 AND 20").unwrap();
+    let QueryExpr::Table(tq) = query else {
+        panic!("Expected TableQuery");
+    };
+    assert!(
+        matches!(tq.filter, Some(Filter::Between { .. })),
+        "literal BETWEEN must stay on the classic variant"
+    );
+}
+
+#[test]
+fn test_parse_between_mixed_bounds() {
+    // Mixed: literal low + column high. Decomposes to
+    // AND(Compare(field >= lit), CompareFields(field <= col)).
+    let query = parse("SELECT * FROM sensors WHERE temp BETWEEN 0 AND max_temp").unwrap();
+    let QueryExpr::Table(tq) = query else {
+        panic!("Expected TableQuery");
+    };
+    let Some(Filter::And(left, right)) = tq.filter else {
+        panic!("Expected AND for mixed bounds");
+    };
+    assert!(matches!(
+        &*left,
+        Filter::Compare {
+            op: CompareOp::Ge,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &*right,
+        Filter::CompareFields {
+            op: CompareOp::Le,
+            ..
+        }
+    ));
 }
 
 #[test]

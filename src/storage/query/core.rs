@@ -1073,6 +1073,16 @@ pub enum Filter {
         op: CompareOp,
         value: Value,
     },
+    /// Field-to-field comparison: left.field op right.field. Used when
+    /// WHERE / BETWEEN operands reference another column instead of a
+    /// literal — the pre-Fase-2-parser-v2 shim for column-to-column
+    /// predicates. Once the Expr-rewrite lands, this collapses into
+    /// `Compare { left: Expr, op, right: Expr }`.
+    CompareFields {
+        left: FieldRef,
+        op: CompareOp,
+        right: FieldRef,
+    },
     /// Logical AND
     And(Box<Filter>, Box<Filter>),
     /// Logical OR

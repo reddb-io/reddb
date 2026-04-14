@@ -464,6 +464,12 @@ impl CostEstimator {
                 s1 + s2 - (s1 * s2)
             }
             AstFilter::Not(inner) => 1.0 - self.filter_selectivity(inner, table),
+            AstFilter::CompareFields { .. } => {
+                // Column-to-column predicates lack histogram leverage
+                // — assume moderate selectivity. Histogram/MCV hooks
+                // only help literal-valued filters.
+                0.1
+            }
         }
     }
 
@@ -694,6 +700,7 @@ impl CostEstimator {
                 s1 + s2 - (s1 * s2) // Inclusion-exclusion
             }
             AstFilter::Not(inner) => 1.0 - Self::estimate_filter_selectivity(inner),
+            AstFilter::CompareFields { .. } => 0.1,
         }
     }
 }

@@ -407,6 +407,13 @@ fn compile_into(
                 value: value.clone(),
             });
         }
+        Filter::CompareFields { .. } => {
+            // CompareFields resolves both operands from the row at
+            // runtime — the compiled interpreter here only knows how
+            // to compare a field against a pre-computed Value, so
+            // defer to the legacy walker via Fallback.
+            ops.push(CompiledEntityOp::Fallback(Box::new(filter.clone())));
+        }
         Filter::Between { field, low, high } => {
             let kind = classify_field(field, table_name, table_alias);
             if needs_fallback(&kind) {
