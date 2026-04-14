@@ -156,6 +156,124 @@ impl OrderBy {
         rows.sort_by(|a, b| self.compare(a, b, &get_value));
     }
 
+    /// Incremental top-K sort.
+    ///
+    /// Fase 4 P3 win: when the upstream operator already returns
+    /// rows in `prefix_keys` order (e.g. an index scan whose key
+    /// is a prefix of the requested ORDER BY), this method walks
+    /// the input in chunks of equal-prefix rows, sorts each chunk
+    /// by the *remaining* keys, emits up to `k` rows total, and
+    /// terminates as soon as the budget is met.
+    ///
+    /// Mirrors PG's `nodeIncrementalSort.c` algorithm, simplified:
+    ///
+    /// 1. Walk `rows` left-to-right, grouping by equal-prefix.
+    /// 2. For each group, full-sort by `self.keys[prefix_keys..]`
+    ///    (the suffix not already covered by upstream order).
+    /// 3. Append at most `k - emitted` rows from the sorted group
+    ///    to the output, then advance to the next group.
+    /// 4. Stop iteration entirely once `emitted == k`.
+    ///
+    /// **Caller contract**: rows MUST already be sorted by
+    /// `self.keys[..prefix_keys]`. Violating this produces wrong
+    /// results — the planner is responsible for verifying input
+    /// pathkey order before choosing this operator.
+    ///
+    /// When `prefix_keys == 0` this degenerates to a regular
+    /// top-k sort using `sort_rows` + truncate. When
+    /// `prefix_keys >= self.keys.len()` the input is already
+    /// fully ordered and the method just truncates.
+    pub fn incremental_sort_top_k<R>(
+        &self,
+        rows: Vec<R>,
+        prefix_keys: usize,
+        k: usize,
+        get_value: impl Fn(&R, &str) -> Value,
+    ) -> Vec<R> {
+        if k == 0 || rows.is_empty() {
+            return Vec::new();
+        }
+        // No prefix order known — fall back to full sort + truncate.
+        if prefix_keys == 0 {
+            let mut all = rows;
+            self.sort_rows(&mut all, &get_value);
+            all.truncate(k);
+            return all;
+        }
+        // Input is already fully ordered — just truncate.
+        if prefix_keys >= self.keys.len() {
+            let mut out = rows;
+            out.truncate(k);
+            return out;
+        }
+
+        let suffix_keys = &self.keys[prefix_keys..];
+        let prefix_slice = &self.keys[..prefix_keys];
+        let mut out: Vec<R> = Vec::with_capacity(k);
+        let mut group: Vec<R> = Vec::new();
+
+        // Closure to flush the current group into `out`, sorting
+        // by suffix keys first. Returns `true` when the budget is
+        // exhausted and the caller should stop iteration.
+        let flush =
+            |group: &mut Vec<R>, out: &mut Vec<R>, get_value: &dyn Fn(&R, &str) -> Value| -> bool {
+                if group.is_empty() {
+                    return false;
+                }
+                // Sort the group by the suffix keys only — prefix is
+                // already equal across the whole group.
+                group.sort_by(|a, b| {
+                    for key in suffix_keys {
+                        let ord =
+                            key.compare(&get_value(a, &key.column), &get_value(b, &key.column));
+                        if ord != Ordering::Equal {
+                            return ord;
+                        }
+                    }
+                    Ordering::Equal
+                });
+                let remaining = k - out.len();
+                if group.len() <= remaining {
+                    out.append(group);
+                } else {
+                    out.extend(group.drain(..remaining));
+                    group.clear();
+                }
+                out.len() >= k
+            };
+
+        // Helper to compare two rows by prefix keys. Inline closure
+        // would shadow `get_value`; use an inner fn-style binding.
+        let prefix_eq = |a: &R, b: &R| -> bool {
+            for key in prefix_slice {
+                if key.compare(&get_value(a, &key.column), &get_value(b, &key.column))
+                    != Ordering::Equal
+                {
+                    return false;
+                }
+            }
+            true
+        };
+
+        // Wrap get_value so the flush closure can take `&dyn Fn`.
+        // The wrapper has a stable address inside this function.
+        let get_value_dyn: &dyn Fn(&R, &str) -> Value = &get_value;
+
+        for row in rows {
+            if let Some(first) = group.first() {
+                if !prefix_eq(first, &row) {
+                    if flush(&mut group, &mut out, get_value_dyn) {
+                        return out;
+                    }
+                }
+            }
+            group.push(row);
+        }
+        // Flush the final group.
+        flush(&mut group, &mut out, get_value_dyn);
+        out
+    }
+
     /// Get all referenced columns
     pub fn referenced_columns(&self) -> Vec<&str> {
         self.keys.iter().map(|k| k.column.as_str()).collect()
