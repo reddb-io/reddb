@@ -29,6 +29,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::cost::{ColumnStats, TableStats};
+use super::histogram::{Histogram, MostCommonValues};
 use crate::storage::index::{IndexRegistry, IndexScope, IndexStats};
 
 /// Read-only interface the planner uses to look up storage statistics.
@@ -73,6 +74,24 @@ pub trait StatsProvider: Send + Sync {
         self.index_stats(table, column)
             .map(|s| s.distinct_keys as u64)
     }
+
+    /// Optional equi-depth histogram for the column. Defaults to
+    /// `None`, in which case the planner falls back to its uniform
+    /// 0.3 range heuristic.
+    ///
+    /// Implementations should sample once and cache — this is called
+    /// during plan construction and must not block on I/O.
+    fn column_histogram(&self, _table: &str, _column: &str) -> Option<Histogram> {
+        None
+    }
+
+    /// Optional most-common-values list for the column. Defaults to
+    /// `None`, in which case the planner falls back to its uniform
+    /// 0.01 equality heuristic. Use for skewed columns where one or
+    /// two values dominate the table.
+    fn column_mcv(&self, _table: &str, _column: &str) -> Option<MostCommonValues> {
+        None
+    }
 }
 
 /// Provider that returns `None` for everything. Planner uses its built-in
@@ -97,6 +116,10 @@ pub struct StaticProvider {
     tables: HashMap<String, TableStats>,
     /// Indexes keyed by `(table, column)`.
     indexes: HashMap<(String, String), IndexStats>,
+    /// Optional histograms keyed by `(table, column)`.
+    histograms: HashMap<(String, String), Histogram>,
+    /// Optional MCV lists keyed by `(table, column)`.
+    mcvs: HashMap<(String, String), MostCommonValues>,
 }
 
 impl StaticProvider {
@@ -136,6 +159,29 @@ impl StaticProvider {
     ) {
         self.indexes.insert((table.into(), column.into()), stats);
     }
+
+    /// Register or replace an equi-depth histogram on `(table, column)`.
+    pub fn with_histogram(
+        mut self,
+        table: impl Into<String>,
+        column: impl Into<String>,
+        histogram: Histogram,
+    ) -> Self {
+        self.histograms
+            .insert((table.into(), column.into()), histogram);
+        self
+    }
+
+    /// Register or replace an MCV list on `(table, column)`.
+    pub fn with_mcv(
+        mut self,
+        table: impl Into<String>,
+        column: impl Into<String>,
+        mcv: MostCommonValues,
+    ) -> Self {
+        self.mcvs.insert((table.into(), column.into()), mcv);
+        self
+    }
 }
 
 impl StatsProvider for StaticProvider {
@@ -145,6 +191,18 @@ impl StatsProvider for StaticProvider {
 
     fn index_stats(&self, table: &str, column: &str) -> Option<IndexStats> {
         self.indexes
+            .get(&(table.to_string(), column.to_string()))
+            .cloned()
+    }
+
+    fn column_histogram(&self, table: &str, column: &str) -> Option<Histogram> {
+        self.histograms
+            .get(&(table.to_string(), column.to_string()))
+            .cloned()
+    }
+
+    fn column_mcv(&self, table: &str, column: &str) -> Option<MostCommonValues> {
+        self.mcvs
             .get(&(table.to_string(), column.to_string()))
             .cloned()
     }
@@ -263,6 +321,51 @@ mod tests {
         let cs = p.column_stats("users", "id").unwrap();
         assert_eq!(cs.distinct_count, 100);
         assert!(cs.has_index);
+    }
+
+    #[test]
+    fn null_provider_returns_no_histogram_or_mcv() {
+        let p = NullProvider;
+        assert!(p.column_histogram("users", "email").is_none());
+        assert!(p.column_mcv("users", "email").is_none());
+    }
+
+    #[test]
+    fn static_provider_serves_histograms() {
+        use super::super::histogram::{ColumnValue, Histogram};
+        let h = Histogram::equi_depth_from_sample((0..100i64).map(ColumnValue::Int).collect(), 10);
+        let p = StaticProvider::new().with_histogram("orders", "amount", h);
+        let got = p.column_histogram("orders", "amount").unwrap();
+        assert_eq!(got.bucket_count(), 10);
+        assert_eq!(got.total_count, 100);
+        // Other columns unaffected.
+        assert!(p.column_histogram("orders", "missing").is_none());
+    }
+
+    #[test]
+    fn static_provider_serves_mcv_lists() {
+        use super::super::histogram::{ColumnValue, MostCommonValues};
+        let mcv = MostCommonValues::new(vec![
+            (ColumnValue::Text("admin".to_string()), 0.4),
+            (ColumnValue::Text("user".to_string()), 0.5),
+        ]);
+        let p = StaticProvider::new().with_mcv("users", "role", mcv);
+        let got = p.column_mcv("users", "role").unwrap();
+        assert_eq!(got.len(), 2);
+        // Sorted descending by frequency on construction.
+        assert_eq!(got.values[0].1, 0.5);
+        assert!(p.column_mcv("users", "missing").is_none());
+    }
+
+    #[test]
+    fn registry_provider_default_no_histogram() {
+        // RegistryProvider doesn't have a histogram path yet — falls
+        // through to None like NullProvider.
+        use crate::storage::index::IndexRegistry;
+        use std::sync::Arc;
+        let p = RegistryProvider::new(Arc::new(IndexRegistry::new()));
+        assert!(p.column_histogram("any", "any").is_none());
+        assert!(p.column_mcv("any", "any").is_none());
     }
 
     #[test]
