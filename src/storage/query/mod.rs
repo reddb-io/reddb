@@ -48,6 +48,7 @@ pub mod engine;
 pub mod executor;
 pub mod executors;
 pub mod filter;
+pub mod filter_compiled;
 pub mod lexer;
 pub mod modes;
 pub mod optimizer;
