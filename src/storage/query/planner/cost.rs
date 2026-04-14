@@ -16,6 +16,7 @@ use crate::storage::query::ast::{
     CompareOp, FieldRef, Filter as AstFilter, GraphQuery, HybridQuery, JoinQuery, JoinType,
     PathQuery, QueryExpr, TableQuery, VectorQuery,
 };
+use crate::storage::schema::Value;
 
 /// Cardinality estimate for a query result
 #[derive(Debug, Clone, Default)]
@@ -381,48 +382,67 @@ impl CostEstimator {
         estimate
     }
 
-    /// Stats-aware selectivity computation. For each leaf comparison, if
-    /// the provider has an index on the referenced column, use
-    /// [`crate::storage::index::IndexStats::point_selectivity`] (or its
-    /// scaled range counterpart) instead of the hardcoded heuristic. All
-    /// non-leaf predicates recurse with the same table context.
+    /// Stats-aware selectivity computation.
+    ///
+    /// Resolution order (best → worst):
+    ///   1. `column_mcv` for equality on a known frequent value
+    ///   2. `column_histogram` for ranges and BETWEEN
+    ///   3. `index_stats.point_selectivity()` for indexed columns
+    ///   4. Hardcoded heuristic constants as final fallback
+    ///
+    /// Mirrors postgres `var_eq_const` / `histogram_selectivity` in
+    /// `src/backend/utils/adt/selfuncs.c`. Histogram + MCV data
+    /// structures already live in `super::histogram`; this method is
+    /// where we finally consume them on the hot planner path.
     fn filter_selectivity(&self, filter: &AstFilter, table: &str) -> f64 {
         match filter {
-            AstFilter::Compare { field, op, .. } => {
+            AstFilter::Compare { field, op, value } => {
                 let column = column_name_for_table(field, table);
-                let stats = column.and_then(|c| self.stats.index_stats(table, c));
                 match op {
-                    CompareOp::Eq => stats
-                        .as_ref()
-                        .map(|s| s.point_selectivity())
-                        .unwrap_or(0.01),
-                    CompareOp::Ne => stats
-                        .as_ref()
-                        .map(|s| 1.0 - s.point_selectivity())
-                        .unwrap_or(0.99),
-                    CompareOp::Lt | CompareOp::Le | CompareOp::Gt | CompareOp::Ge => {
-                        // Range is roughly "half the distinct values" when
-                        // the column is indexed, capped to the old heuristic.
-                        stats
-                            .as_ref()
-                            .map(|s| {
-                                (s.point_selectivity() * (s.distinct_keys as f64 / 2.0)).min(0.3)
-                            })
-                            .unwrap_or(0.3)
+                    CompareOp::Eq => self.eq_selectivity(table, column, value),
+                    CompareOp::Ne => 1.0 - self.eq_selectivity(table, column, value),
+                    CompareOp::Lt | CompareOp::Le => {
+                        self.range_selectivity(table, column, None, Some(value))
+                    }
+                    CompareOp::Gt | CompareOp::Ge => {
+                        self.range_selectivity(table, column, Some(value), None)
                     }
                 }
             }
-            AstFilter::Between { field, .. } => {
+            AstFilter::Between {
+                field, low, high, ..
+            } => {
                 let column = column_name_for_table(field, table);
-                let stats = column.and_then(|c| self.stats.index_stats(table, c));
-                stats
-                    .as_ref()
-                    .map(|s| (s.point_selectivity() * (s.distinct_keys as f64 / 4.0)).min(0.25))
-                    .unwrap_or(0.25)
+                self.range_selectivity(table, column, Some(low), Some(high))
             }
             AstFilter::In { field, values, .. } => {
                 let column = column_name_for_table(field, table);
+                // If we have an MCV list, sum the per-value frequencies
+                // for values that are actually in the list, plus the
+                // residual estimate for the rest.
                 if let Some(c) = column {
+                    if let Some(mcv) = self.stats.column_mcv(table, c) {
+                        let mut hits: f64 = 0.0;
+                        let mut residual_count = 0usize;
+                        for v in values {
+                            if let Some(cv) = column_value_from(v) {
+                                if let Some(freq) = mcv.frequency_of(&cv) {
+                                    hits += freq;
+                                } else {
+                                    residual_count += 1;
+                                }
+                            } else {
+                                residual_count += 1;
+                            }
+                        }
+                        let total = mcv.total_frequency();
+                        let distinct = self.stats.distinct_values(table, c).unwrap_or(100);
+                        let non_mcv_distinct =
+                            distinct.saturating_sub(mcv.values.len() as u64).max(1);
+                        let per_residual = (1.0 - total) / non_mcv_distinct as f64;
+                        let estimate = hits + (residual_count as f64) * per_residual;
+                        return estimate.clamp(0.0, 1.0).min(0.5);
+                    }
                     if let Some(s) = self.stats.index_stats(table, c) {
                         return (s.point_selectivity() * values.len() as f64).min(0.5);
                     }
@@ -676,9 +696,106 @@ impl CostEstimator {
     }
 }
 
+impl CostEstimator {
+    /// Equality selectivity for `column = value`.
+    ///
+    /// Resolution order:
+    /// 1. MCV list — exact frequency for tracked values, residual
+    ///    formula for untracked values.
+    /// 2. `index_stats.point_selectivity()` — `1 / distinct_keys`.
+    /// 3. Heuristic constant `0.01`.
+    fn eq_selectivity(&self, table: &str, column: Option<&str>, value: &Value) -> f64 {
+        if let Some(col) = column {
+            // 1. Most-common-values lookup.
+            if let Some(mcv) = self.stats.column_mcv(table, col) {
+                if let Some(cv) = column_value_from(value) {
+                    if let Some(freq) = mcv.frequency_of(&cv) {
+                        return freq;
+                    }
+                    // Untracked value: residual / non_mcv_distinct.
+                    let total = mcv.total_frequency();
+                    let distinct = self.stats.distinct_values(table, col).unwrap_or(100);
+                    let non_mcv_distinct = distinct.saturating_sub(mcv.values.len() as u64).max(1);
+                    return ((1.0 - total) / non_mcv_distinct as f64).clamp(0.0, 1.0);
+                }
+            }
+            // 2. Index stats fallback.
+            if let Some(s) = self.stats.index_stats(table, col) {
+                return s.point_selectivity();
+            }
+        }
+        // 3. Heuristic.
+        0.01
+    }
+
+    /// Range selectivity for `lo <= column <= hi`. Either bound may
+    /// be `None` to express an open side. Used by `<`, `<=`, `>`,
+    /// `>=`, and `BETWEEN`.
+    ///
+    /// Resolution order:
+    /// 1. Histogram — `Histogram::range_selectivity` with bounds
+    ///    converted via `column_value_from`.
+    /// 2. `index_stats.point_selectivity() * (distinct_keys / 2)`
+    ///    capped at the legacy heuristic.
+    /// 3. Heuristic `0.3` for one-sided, `0.25` for two-sided.
+    fn range_selectivity(
+        &self,
+        table: &str,
+        column: Option<&str>,
+        lo: Option<&Value>,
+        hi: Option<&Value>,
+    ) -> f64 {
+        if let Some(col) = column {
+            // 1. Histogram bucket arithmetic.
+            if let Some(h) = self.stats.column_histogram(table, col) {
+                let lo_cv = lo.and_then(column_value_from);
+                let hi_cv = hi.and_then(column_value_from);
+                return h.range_selectivity(lo_cv.as_ref(), hi_cv.as_ref());
+            }
+            // 2. Index stats fallback.
+            if let Some(s) = self.stats.index_stats(table, col) {
+                let cap = if lo.is_some() && hi.is_some() {
+                    0.25
+                } else {
+                    0.3
+                };
+                return (s.point_selectivity() * (s.distinct_keys as f64 / 2.0)).min(cap);
+            }
+        }
+        // 3. Heuristic.
+        if lo.is_some() && hi.is_some() {
+            0.25
+        } else {
+            0.3
+        }
+    }
+}
+
 impl Default for CostEstimator {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Convert a query AST `Value` into a histogram-comparable
+/// [`super::histogram::ColumnValue`]. Returns `None` for value types
+/// that histograms don't support (Bool, Null, Bytes, etc.) — callers
+/// fall through to the heuristic path.
+fn column_value_from(v: &crate::storage::schema::Value) -> Option<super::histogram::ColumnValue> {
+    use super::histogram::ColumnValue;
+    use crate::storage::schema::Value;
+    match v {
+        Value::Integer(i) => Some(ColumnValue::Int(*i)),
+        Value::UnsignedInteger(u) => Some(ColumnValue::Int(*u as i64)),
+        Value::Float(f) => Some(ColumnValue::Float(*f)),
+        Value::Text(s) => Some(ColumnValue::Text(s.clone())),
+        Value::Timestamp(t) => Some(ColumnValue::Int(*t)),
+        Value::Duration(d) => Some(ColumnValue::Int(*d)),
+        // Other variants (Null, Blob, Boolean, IpAddr, MacAddr,
+        // Vector, Json, Uuid, NodeRef, EdgeRef, vector ref...) are
+        // not orderable in a histogram-meaningful way; the planner
+        // falls through to the heuristic for these.
+        _ => None,
     }
 }
 
@@ -1092,5 +1209,147 @@ mod tests {
         let c = PlanCost::default();
         assert_eq!(c.startup_cost, 0.0);
         assert_eq!(c.total, 0.0);
+    }
+
+    // ---------------------------------------------------------------
+    // Perf 1.3: histogram + MCV plug-in into filter_selectivity
+    // ---------------------------------------------------------------
+
+    use super::super::histogram::{ColumnValue, Histogram, MostCommonValues};
+
+    fn provider_with_skew() -> Arc<StaticProvider> {
+        // Build a histogram where 80 of 100 values fall in [0, 9]
+        // and the rest spread sparsely up to 1000. range_selectivity
+        // for `<= 9` should be ~0.8, vastly beating the heuristic 0.3.
+        let mut sample: Vec<ColumnValue> = Vec::new();
+        for i in 0..80 {
+            sample.push(ColumnValue::Int(i % 10));
+        }
+        for i in 0..20 {
+            sample.push(ColumnValue::Int(10 + i * 50));
+        }
+        let h = Histogram::equi_depth_from_sample(sample, 10);
+
+        let mcv = MostCommonValues::new(vec![
+            (ColumnValue::Text("boss".to_string()), 0.5),
+            (ColumnValue::Text("intern".to_string()), 0.05),
+        ]);
+
+        Arc::new(
+            StaticProvider::new()
+                .with_table(
+                    "people",
+                    TableStats {
+                        row_count: 100_000,
+                        avg_row_size: 64,
+                        page_count: 100,
+                        columns: vec![],
+                    },
+                )
+                .with_histogram("people", "score", h)
+                .with_mcv("people", "role", mcv),
+        )
+    }
+
+    #[test]
+    fn eq_uses_mcv_when_value_is_tracked() {
+        let provider = provider_with_skew();
+        let estimator = CostEstimator::with_stats(provider);
+        let filter = AstFilter::Compare {
+            field: FieldRef::column("people", "role"),
+            op: CompareOp::Eq,
+            value: Value::Text("boss".to_string()),
+        };
+        // MCV says "boss" is 50% of the table → selectivity 0.5,
+        // not the 0.01 heuristic.
+        let s = estimator.filter_selectivity(&filter, "people");
+        assert!(
+            (s - 0.5).abs() < 1e-9,
+            "MCV-tracked equality should report exact frequency, got {s}"
+        );
+    }
+
+    #[test]
+    fn eq_uses_residual_for_non_mcv_value() {
+        let provider = provider_with_skew();
+        let estimator = CostEstimator::with_stats(provider);
+        let filter = AstFilter::Compare {
+            field: FieldRef::column("people", "role"),
+            op: CompareOp::Eq,
+            value: Value::Text("staff".to_string()),
+        };
+        // 1 - 0.55 (mcv totals) = 0.45 spread across (distinct - 2)
+        // distinct values. We don't have an exact distinct count, so
+        // the planner uses the default 100 → 0.45 / 98 ≈ 0.0046.
+        let s = estimator.filter_selectivity(&filter, "people");
+        assert!(s > 0.0 && s < 0.01, "residual eq should be tiny, got {s}");
+    }
+
+    #[test]
+    fn ne_is_one_minus_eq_under_mcv() {
+        let provider = provider_with_skew();
+        let estimator = CostEstimator::with_stats(provider);
+        let filter = AstFilter::Compare {
+            field: FieldRef::column("people", "role"),
+            op: CompareOp::Ne,
+            value: Value::Text("boss".to_string()),
+        };
+        let s = estimator.filter_selectivity(&filter, "people");
+        // 1 - 0.5 == 0.5
+        assert!((s - 0.5).abs() < 1e-9, "Ne selectivity = 0.5, got {s}");
+    }
+
+    #[test]
+    fn range_uses_histogram_when_present() {
+        let provider = provider_with_skew();
+        let estimator = CostEstimator::with_stats(provider);
+        let filter = AstFilter::Compare {
+            field: FieldRef::column("people", "score"),
+            op: CompareOp::Le,
+            value: Value::Integer(9),
+        };
+        // Histogram says ~80% of values are in [0, 9], heuristic
+        // would have said 0.3.
+        let s = estimator.filter_selectivity(&filter, "people");
+        assert!(
+            s > 0.5,
+            "histogram-based range selectivity should beat 0.3, got {s}"
+        );
+    }
+
+    #[test]
+    fn between_uses_histogram() {
+        let provider = provider_with_skew();
+        let estimator = CostEstimator::with_stats(provider);
+        let filter = AstFilter::Between {
+            field: FieldRef::column("people", "score"),
+            low: Value::Integer(0),
+            high: Value::Integer(9),
+        };
+        let s = estimator.filter_selectivity(&filter, "people");
+        assert!(s > 0.5, "BETWEEN should use histogram too, got {s}");
+    }
+
+    #[test]
+    fn graceful_fallback_when_histogram_absent() {
+        // Provider has no histogram on `unknown_col` — must fall
+        // through to the 0.3 heuristic without panicking.
+        let provider = Arc::new(StaticProvider::new().with_table(
+            "people",
+            TableStats {
+                row_count: 1000,
+                avg_row_size: 64,
+                page_count: 10,
+                columns: vec![],
+            },
+        ));
+        let estimator = CostEstimator::with_stats(provider);
+        let filter = AstFilter::Compare {
+            field: FieldRef::column("people", "unknown_col"),
+            op: CompareOp::Lt,
+            value: Value::Integer(50),
+        };
+        let s = estimator.filter_selectivity(&filter, "people");
+        assert!((s - 0.3).abs() < 1e-9, "fallback heuristic 0.3, got {s}");
     }
 }
