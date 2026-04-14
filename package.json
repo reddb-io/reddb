@@ -26,7 +26,7 @@
   "scripts": {
     "postinstall": "node sdk/postinstall.js",
     "test": "node sdk/test/sdk.test.js",
-    "version": "node scripts/sync-version.js && git add Cargo.toml drivers/rust/Cargo.toml drivers/js/package.json drivers/python/Cargo.toml drivers/python/pyproject.toml"
+    "version": "node scripts/sync-version.js && cargo generate-lockfile && git add Cargo.toml Cargo.lock drivers/rust/Cargo.toml drivers/js/package.json drivers/python/Cargo.toml drivers/python/pyproject.toml"
   },
   "keywords": [
     "database",
