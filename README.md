@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="https://github.com/forattini-dev/reddb/releases"><img src="https://img.shields.io/github/v/release/forattini-dev/reddb?style=flat-square" alt="Release"></a>
-  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License"></a>
+  <a href="https://www.gnu.org/licenses/agpl-3.0"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square" alt="License"></a>
   <a href="https://www.npmjs.com/package/reddb-cli"><img src="https://img.shields.io/npm/v/reddb-cli?style=flat-square&label=npm" alt="npm"></a>
 </p>
 
@@ -489,4 +489,4 @@ npx reddb-cli@latest server --http --bind 127.0.0.1:8080
 
 ---
 
-**MIT License** -- Built by [Filipe Forattini](https://github.com/forattini-dev)
+**AGPL-3.0 License** -- Built by [Filipe Forattini](https://github.com/forattini-dev)
