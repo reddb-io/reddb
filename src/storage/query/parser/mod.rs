@@ -39,6 +39,7 @@ mod cte;
 mod ddl;
 mod dml;
 mod error;
+mod expr;
 mod filter;
 mod graph;
 mod graph_commands;
