@@ -180,6 +180,56 @@ impl DataType {
         }
     }
 
+    /// Resolve a DataType from an SQL-level type name (case-insensitive).
+    /// Accepts short SQL aliases (INT → Integer, STRING → Text) plus the
+    /// canonical reddb names rendered by `Display`. Returns `None` for
+    /// unknown / unsupported names so callers can surface a parse error.
+    pub fn from_sql_name(name: &str) -> Option<Self> {
+        let n = name.trim().to_ascii_uppercase();
+        Some(match n.as_str() {
+            "INT" | "INTEGER" | "INT8" | "BIGINT_SIGNED" => DataType::Integer,
+            "UINT" | "UNSIGNED" | "UNSIGNED_INTEGER" | "UNSIGNED INTEGER" => {
+                DataType::UnsignedInteger
+            }
+            "FLOAT" | "DOUBLE" | "REAL" | "FLOAT8" => DataType::Float,
+            "TEXT" | "STRING" | "VARCHAR" | "CHAR" => DataType::Text,
+            "BLOB" | "BYTES" | "BYTEA" => DataType::Blob,
+            "BOOL" | "BOOLEAN" => DataType::Boolean,
+            "TIMESTAMP" => DataType::Timestamp,
+            "TIMESTAMPMS" | "TIMESTAMP_MS" => DataType::TimestampMs,
+            "DURATION" | "INTERVAL" => DataType::Duration,
+            "DATE" => DataType::Date,
+            "TIME" => DataType::Time,
+            "DECIMAL" | "NUMERIC" => DataType::Decimal,
+            "BIGINT" => DataType::BigInt,
+            "JSON" | "JSONB" => DataType::Json,
+            "UUID" => DataType::Uuid,
+            "IPADDR" | "INET" => DataType::IpAddr,
+            "IPV4" => DataType::Ipv4,
+            "IPV6" => DataType::Ipv6,
+            "MACADDR" => DataType::MacAddr,
+            "CIDR" => DataType::Cidr,
+            "SUBNET" => DataType::Subnet,
+            "PORT" => DataType::Port,
+            "COLOR" => DataType::Color,
+            "COLOR_ALPHA" | "COLORALPHA" => DataType::ColorAlpha,
+            "EMAIL" => DataType::Email,
+            "URL" => DataType::Url,
+            "PHONE" => DataType::Phone,
+            "SEMVER" => DataType::Semver,
+            "LATITUDE" => DataType::Latitude,
+            "LONGITUDE" => DataType::Longitude,
+            "GEOPOINT" | "GEO_POINT" => DataType::GeoPoint,
+            "COUNTRY2" => DataType::Country2,
+            "COUNTRY3" => DataType::Country3,
+            "LANG2" => DataType::Lang2,
+            "LANG5" => DataType::Lang5,
+            "CURRENCY" => DataType::Currency,
+            "VECTOR" => DataType::Vector,
+            _ => return None,
+        })
+    }
+
     /// Returns the fixed size in bytes if known, None for variable-length types
     pub fn fixed_size(&self) -> Option<usize> {
         match self {

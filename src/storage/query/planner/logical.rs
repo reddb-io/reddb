@@ -227,6 +227,8 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
                     JoinType::Inner => "inner",
                     JoinType::LeftOuter => "left_outer",
                     JoinType::RightOuter => "right_outer",
+                    JoinType::FullOuter => "full_outer",
+                    JoinType::Cross => "cross",
                 }
                 .to_string(),
             );

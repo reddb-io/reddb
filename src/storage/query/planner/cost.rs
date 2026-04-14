@@ -547,6 +547,8 @@ impl CostEstimator {
             JoinType::Inner => 0.1,      // Inner join is selective
             JoinType::LeftOuter => 1.0,  // Left join preserves left side
             JoinType::RightOuter => 1.0, // Right join preserves right side
+            JoinType::FullOuter => 1.0,  // Full outer preserves both sides entirely
+            JoinType::Cross => 1.0,      // Cartesian product — every pair matches
         };
 
         CardinalityEstimate::new(

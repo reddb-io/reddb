@@ -1262,6 +1262,8 @@ pub(super) fn canonical_join_type(
         Some("inner") => Ok(JoinType::Inner),
         Some("left_outer") => Ok(JoinType::LeftOuter),
         Some("right_outer") => Ok(JoinType::RightOuter),
+        Some("full_outer") => Ok(JoinType::FullOuter),
+        Some("cross") => Ok(JoinType::Cross),
         Some(other) => Err(RedDBError::Query(format!(
             "unsupported canonical join type {other}"
         ))),

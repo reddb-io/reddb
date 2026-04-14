@@ -20,6 +20,63 @@ fn test_parse_simple_select() {
 }
 
 #[test]
+fn test_parse_cast_column_to_text() {
+    let query = parse("SELECT CAST(age AS TEXT) FROM users").unwrap();
+    let QueryExpr::Table(tq) = query else {
+        panic!("Expected TableQuery");
+    };
+    assert_eq!(tq.columns.len(), 1);
+    let Projection::Function(name, args) = &tq.columns[0] else {
+        panic!("Expected Function, got {:?}", tq.columns[0]);
+    };
+    assert_eq!(name, "CAST");
+    assert_eq!(args.len(), 2);
+    assert!(matches!(&args[0], Projection::Column(c) if c == "age"));
+    assert!(matches!(&args[1], Projection::Column(c) if c == "TYPE:TEXT"));
+}
+
+#[test]
+fn test_parse_cast_with_alias() {
+    let query = parse("SELECT CAST(score AS INT) AS score_int FROM matches").unwrap();
+    let QueryExpr::Table(tq) = query else {
+        panic!("Expected TableQuery");
+    };
+    let Projection::Function(name, args) = &tq.columns[0] else {
+        panic!("Expected Function");
+    };
+    assert_eq!(name, "CAST:score_int");
+    assert!(matches!(&args[1], Projection::Column(c) if c == "TYPE:INT"));
+}
+
+#[test]
+fn test_parse_cast_literal_integer() {
+    let query = parse("SELECT CAST(42 AS TEXT) FROM users").unwrap();
+    let QueryExpr::Table(tq) = query else {
+        panic!("Expected TableQuery");
+    };
+    let Projection::Function(name, args) = &tq.columns[0] else {
+        panic!("Expected Function");
+    };
+    assert_eq!(name, "CAST");
+    assert!(matches!(&args[0], Projection::Column(c) if c == "LIT:42"));
+    assert!(matches!(&args[1], Projection::Column(c) if c == "TYPE:TEXT"));
+}
+
+#[test]
+fn test_parse_cast_lowercase_keyword() {
+    // keyword should be case-insensitive
+    let query = parse("SELECT cast(age as float) FROM users").unwrap();
+    let QueryExpr::Table(tq) = query else {
+        panic!("Expected TableQuery");
+    };
+    let Projection::Function(name, args) = &tq.columns[0] else {
+        panic!("Expected Function");
+    };
+    assert_eq!(name, "CAST");
+    assert!(matches!(&args[1], Projection::Column(c) if c == "TYPE:FLOAT"));
+}
+
+#[test]
 fn test_parse_select_star() {
     let query = parse("SELECT * FROM hosts").unwrap();
     if let QueryExpr::Table(tq) = query {

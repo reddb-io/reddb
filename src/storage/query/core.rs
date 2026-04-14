@@ -505,12 +505,16 @@ impl JoinQuery {
 /// Join type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinType {
-    /// Inner join
+    /// Inner join — only matching pairs emitted
     Inner,
-    /// Left outer join
+    /// Left outer join — every left row, matched or padded with nulls on the right
     LeftOuter,
-    /// Right outer join
+    /// Right outer join — every right row, matched or padded with nulls on the left
     RightOuter,
+    /// Full outer join — LeftOuter ∪ RightOuter, each unmatched side padded
+    FullOuter,
+    /// Cross join — Cartesian product, no predicate
+    Cross,
 }
 
 /// Join condition: how to match rows with nodes

@@ -38,6 +38,30 @@ pub(super) fn parse_canonical_field_ref(value: &str) -> RedDBResult<FieldRef> {
     )))
 }
 
+/// Emit the Cartesian product of two record sets as a flat Vec of
+/// merged records. Shared by every runtime join loop — CROSS JOIN
+/// has no predicate, so the loop contents are identical regardless
+/// of which dispatcher was chosen (nested / hash / graph / indexed).
+fn cross_join_records(
+    left_records: &[UnifiedRecord],
+    right_records: &[UnifiedRecord],
+    left_query: &TableQuery,
+    right_alias_or_name: Option<&str>,
+) -> Vec<UnifiedRecord> {
+    let mut records = Vec::with_capacity(left_records.len() * right_records.len());
+    for left_record in left_records {
+        for right_record in right_records {
+            records.push(merge_join_records(
+                Some(left_record),
+                Some(right_record),
+                left_query,
+                right_alias_or_name,
+            ));
+        }
+    }
+    records
+}
+
 pub(super) fn execute_runtime_nested_loop_join(
     left_query: &TableQuery,
     left_records: &[UnifiedRecord],
@@ -50,6 +74,15 @@ pub(super) fn execute_runtime_nested_loop_join(
     right_join_field: &FieldRef,
     join_type: JoinType,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
+    if matches!(join_type, JoinType::Cross) {
+        return Ok(cross_join_records(
+            left_records,
+            right_records,
+            left_query,
+            right_table_alias.or(right_table_name),
+        ));
+    }
+
     let mut matched_right = vec![false; right_records.len()];
     let mut records = Vec::new();
 
@@ -77,7 +110,7 @@ pub(super) fn execute_runtime_nested_loop_join(
             }
         }
 
-        if !matched && matches!(join_type, JoinType::LeftOuter) {
+        if !matched && matches!(join_type, JoinType::LeftOuter | JoinType::FullOuter) {
             records.push(merge_join_records(
                 Some(left_record),
                 None,
@@ -87,7 +120,7 @@ pub(super) fn execute_runtime_nested_loop_join(
         }
     }
 
-    if matches!(join_type, JoinType::RightOuter) {
+    if matches!(join_type, JoinType::RightOuter | JoinType::FullOuter) {
         for (matched, right_record) in matched_right.into_iter().zip(right_records.iter()) {
             if !matched {
                 records.push(merge_join_records(
@@ -117,6 +150,14 @@ pub(super) fn execute_runtime_hash_join(
     right_join_field: &FieldRef,
     join_type: JoinType,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
+    if matches!(join_type, JoinType::Cross) {
+        return Ok(cross_join_records(
+            left_records,
+            right_records,
+            left_query,
+            right_table_alias.or(right_table_name),
+        ));
+    }
     // Build hash table on right side
     let mut hash_table: HashMap<String, Vec<usize>> = HashMap::new();
     for (idx, right_record) in right_records.iter().enumerate() {
@@ -159,7 +200,7 @@ pub(super) fn execute_runtime_hash_join(
             }
         }
 
-        if !matched && matches!(join_type, JoinType::LeftOuter) {
+        if !matched && matches!(join_type, JoinType::LeftOuter | JoinType::FullOuter) {
             records.push(merge_join_records(
                 Some(left_record),
                 None,
@@ -169,7 +210,7 @@ pub(super) fn execute_runtime_hash_join(
         }
     }
 
-    if matches!(join_type, JoinType::RightOuter) {
+    if matches!(join_type, JoinType::RightOuter | JoinType::FullOuter) {
         for (matched, right_record) in matched_right.into_iter().zip(right_records.iter()) {
             if !matched {
                 records.push(merge_join_records(
@@ -197,6 +238,14 @@ pub(super) fn execute_runtime_graph_lookup_join(
     right_join_field: &FieldRef,
     join_type: JoinType,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
+    if matches!(join_type, JoinType::Cross) {
+        return Ok(cross_join_records(
+            left_records,
+            right_records,
+            left_query,
+            right_table_alias.or(right_table_name),
+        ));
+    }
     let mut right_index: HashMap<String, Vec<usize>> = HashMap::new();
     for (index, right_record) in right_records.iter().enumerate() {
         let keys = runtime_graph_join_record_keys(
@@ -246,7 +295,7 @@ pub(super) fn execute_runtime_graph_lookup_join(
             }
         }
 
-        if !matched && matches!(join_type, JoinType::LeftOuter) {
+        if !matched && matches!(join_type, JoinType::LeftOuter | JoinType::FullOuter) {
             records.push(merge_join_records(
                 Some(left_record),
                 None,
@@ -256,7 +305,7 @@ pub(super) fn execute_runtime_graph_lookup_join(
         }
     }
 
-    if matches!(join_type, JoinType::RightOuter) {
+    if matches!(join_type, JoinType::RightOuter | JoinType::FullOuter) {
         for (matched, right_record) in matched_right.into_iter().zip(right_records.iter()) {
             if !matched {
                 records.push(merge_join_records(
@@ -284,6 +333,14 @@ pub(super) fn execute_runtime_indexed_join(
     right_join_field: &FieldRef,
     join_type: JoinType,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
+    if matches!(join_type, JoinType::Cross) {
+        return Ok(cross_join_records(
+            left_records,
+            right_records,
+            left_query,
+            right_table_alias.or(right_table_name),
+        ));
+    }
     let mut right_index: HashMap<String, Vec<usize>> = HashMap::new();
     for (index, right_record) in right_records.iter().enumerate() {
         let Some(value) = resolve_runtime_field(
@@ -340,7 +397,7 @@ pub(super) fn execute_runtime_indexed_join(
             }
         }
 
-        if !matched && matches!(join_type, JoinType::LeftOuter) {
+        if !matched && matches!(join_type, JoinType::LeftOuter | JoinType::FullOuter) {
             records.push(merge_join_records(
                 Some(left_record),
                 None,
@@ -350,7 +407,7 @@ pub(super) fn execute_runtime_indexed_join(
         }
     }
 
-    if matches!(join_type, JoinType::RightOuter) {
+    if matches!(join_type, JoinType::RightOuter | JoinType::FullOuter) {
         for (matched, right_record) in matched_right.into_iter().zip(right_records.iter()) {
             if !matched {
                 records.push(merge_join_records(
@@ -1327,6 +1384,68 @@ fn evaluate_scalar_function(
     let func_name = name.split(':').next().unwrap_or(name);
 
     match func_name {
+        "ADD" | "SUB" | "MUL" | "DIV" | "MOD" => {
+            let a = resolve_scalar_arg(args, 0, source)?;
+            let b = resolve_scalar_arg(args, 1, source)?;
+            Some(arith_binop(func_name, a, b))
+        }
+        "CONCAT" => {
+            // `a || b` — string concatenation. Stringifies both sides via
+            // display_string so `'user:' || id` Just Works even when `id`
+            // is an Integer / Uuid / etc.
+            let a = resolve_scalar_arg(args, 0, source)?;
+            let b = resolve_scalar_arg(args, 1, source)?;
+            Some(Value::Text(format!(
+                "{}{}",
+                a.display_string(),
+                b.display_string()
+            )))
+        }
+        "CASE" => {
+            // CASE WHEN cond THEN val ... ELSE val END is encoded as
+            //   Function("CASE", [Expression(cond1), val1,
+            //                      Expression(cond2), val2,
+            //                      ..., else_val?])
+            // Even-length args => no ELSE; odd-length => last arg is ELSE.
+            // Walk WHEN/THEN pairs left-to-right, short-circuit on first
+            // matching predicate. Fall through to ELSE (or Null) when no
+            // branch matches.
+            let mut i = 0;
+            while i + 1 < args.len() {
+                if let Projection::Expression(filter, _) = &args[i] {
+                    let matched = evaluate_runtime_filter(source, filter, None, None);
+                    if matched {
+                        return resolve_scalar_arg(args, i + 1, source).or(Some(Value::Null));
+                    }
+                    i += 2;
+                } else {
+                    break;
+                }
+            }
+            if args.len() % 2 == 1 {
+                return resolve_scalar_arg(args, args.len() - 1, source).or(Some(Value::Null));
+            }
+            Some(Value::Null)
+        }
+        "CAST" => {
+            // CAST(expr AS type) is parsed into Function("CAST", [inner, Column("TYPE:<name>")]).
+            // Resolve the source value, look up the target type by SQL name,
+            // and reuse the existing string→Value coerce path. On any
+            // failure (unknown type, coerce error) we emit Null so queries
+            // keep running — CAST is advisory, not a hard assertion.
+            let src = resolve_scalar_arg(args, 0, source)?;
+            let Some(Projection::Column(col)) = args.get(1) else {
+                return Some(Value::Null);
+            };
+            let Some(type_name) = col.strip_prefix("TYPE:") else {
+                return Some(Value::Null);
+            };
+            let Some(target) = crate::storage::schema::types::DataType::from_sql_name(type_name)
+            else {
+                return Some(Value::Null);
+            };
+            Some(cast_value_to(&src, target))
+        }
         "GEO_DISTANCE" | "HAVERSINE" => {
             let (lat1, lon1, lat2, lon2) = resolve_two_geo_points(args, source)?;
             Some(Value::Float(crate::geo::haversine_km(
@@ -1433,11 +1552,161 @@ fn evaluate_scalar_function(
 }
 
 /// Resolve a single scalar argument from a function's arg list.
+/// Evaluate an arithmetic binary operator on two values. Promotes
+/// heterogeneous numeric operands to Float when either side is Float;
+/// preserves Integer when both sides are Integer. Non-numeric operands
+/// and zero divisors collapse to `Value::Null` so queries keep running
+/// — SQL-style "erroring on bad arithmetic" is the job of the type
+/// system v2 (Fase 3), not Fase 1.3.
+fn arith_binop(op: &str, a: Value, b: Value) -> Value {
+    let (lhs, rhs) = match (value_as_number(&a), value_as_number(&b)) {
+        (Some(l), Some(r)) => (l, r),
+        _ => return Value::Null,
+    };
+    // Integer fast path when both operands are integers and the op
+    // doesn't force a float (division always floats for predictability
+    // — avoids surprising truncation).
+    let force_float = matches!(op, "DIV") || lhs.is_float || rhs.is_float;
+    let out = match op {
+        "ADD" => lhs.as_f64() + rhs.as_f64(),
+        "SUB" => lhs.as_f64() - rhs.as_f64(),
+        "MUL" => lhs.as_f64() * rhs.as_f64(),
+        "DIV" => {
+            if rhs.as_f64() == 0.0 {
+                return Value::Null;
+            }
+            lhs.as_f64() / rhs.as_f64()
+        }
+        "MOD" => {
+            if rhs.as_f64() == 0.0 {
+                return Value::Null;
+            }
+            lhs.as_f64() % rhs.as_f64()
+        }
+        _ => return Value::Null,
+    };
+    if force_float {
+        Value::Float(out)
+    } else {
+        Value::Integer(out as i64)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NumOperand {
+    int_val: i64,
+    float_val: f64,
+    is_float: bool,
+}
+
+impl NumOperand {
+    fn as_f64(self) -> f64 {
+        if self.is_float {
+            self.float_val
+        } else {
+            self.int_val as f64
+        }
+    }
+}
+
+fn value_as_number(v: &Value) -> Option<NumOperand> {
+    match v {
+        Value::Integer(n) | Value::BigInt(n) => Some(NumOperand {
+            int_val: *n,
+            float_val: *n as f64,
+            is_float: false,
+        }),
+        Value::UnsignedInteger(n) => Some(NumOperand {
+            int_val: *n as i64,
+            float_val: *n as f64,
+            is_float: false,
+        }),
+        Value::Float(f) => Some(NumOperand {
+            int_val: *f as i64,
+            float_val: *f,
+            is_float: true,
+        }),
+        Value::Decimal(d) => Some(NumOperand {
+            int_val: (*d / 10_000) as i64,
+            float_val: *d as f64 / 10_000.0,
+            is_float: true,
+        }),
+        Value::Text(s) => {
+            if let Ok(n) = s.parse::<i64>() {
+                Some(NumOperand {
+                    int_val: n,
+                    float_val: n as f64,
+                    is_float: false,
+                })
+            } else if let Ok(f) = s.parse::<f64>() {
+                Some(NumOperand {
+                    int_val: f as i64,
+                    float_val: f,
+                    is_float: true,
+                })
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Convert a `Value` to a new `Value` of the requested `DataType`. Used
+/// by the CAST scalar function. Covers the common numeric/text/boolean
+/// paths directly (so `CAST(123 AS TEXT)` doesn't round-trip through the
+/// schema coercion layer) and falls back to `schema::coerce::coerce`
+/// on the value's `display_string()` for everything else — that reuses
+/// the battle-tested input validators we already have for INSERT.
+fn cast_value_to(src: &Value, target: crate::storage::schema::types::DataType) -> Value {
+    use crate::storage::schema::types::DataType as DT;
+    match (src, target) {
+        (v, DT::Text) => Value::Text(v.display_string()),
+        (Value::Integer(n), DT::Float) => Value::Float(*n as f64),
+        (Value::Integer(n), DT::BigInt) => Value::BigInt(*n),
+        (Value::Integer(n), DT::UnsignedInteger) if *n >= 0 => Value::UnsignedInteger(*n as u64),
+        (Value::UnsignedInteger(n), DT::Integer) if *n <= i64::MAX as u64 => {
+            Value::Integer(*n as i64)
+        }
+        (Value::UnsignedInteger(n), DT::Float) => Value::Float(*n as f64),
+        (Value::Float(f), DT::Integer) => Value::Integer(*f as i64),
+        (Value::Float(f), DT::UnsignedInteger) if *f >= 0.0 => Value::UnsignedInteger(*f as u64),
+        (Value::Boolean(b), DT::Integer) => Value::Integer(if *b { 1 } else { 0 }),
+        (Value::Integer(n), DT::Boolean) => Value::Boolean(*n != 0),
+        (Value::Text(s), target) => match crate::storage::schema::coerce::coerce(s, target, None) {
+            Ok(v) => v,
+            Err(_) => Value::Null,
+        },
+        (v, target) => {
+            match crate::storage::schema::coerce::coerce(&v.display_string(), target, None) {
+                Ok(v) => v,
+                Err(_) => Value::Null,
+            }
+        }
+    }
+}
+
 fn resolve_scalar_arg(args: &[Projection], index: usize, source: &UnifiedRecord) -> Option<Value> {
     let arg = args.get(index)?;
-    match arg {
+    eval_projection_value(arg, source)
+}
+
+/// Evaluate a single Projection node into a Value for scalar-function
+/// argument resolution. Handles:
+/// - `Projection::Column` with the `LIT:<literal>` / raw column conventions,
+/// - `Projection::Field` to walk FieldRef resolution,
+/// - `Projection::Function` recursively (enables nested arithmetic / casts),
+/// - `Projection::Expression` as a boolean coming from a Filter.
+fn eval_projection_value(proj: &Projection, source: &UnifiedRecord) -> Option<Value> {
+    match proj {
         Projection::Column(col) => {
             if let Some(lit_val) = col.strip_prefix("LIT:") {
+                if lit_val.is_empty() {
+                    return Some(Value::Null);
+                }
+                if let Ok(n) = lit_val.parse::<i64>() {
+                    return Some(Value::Integer(n));
+                }
                 if let Ok(n) = lit_val.parse::<f64>() {
                     return Some(Value::Float(n));
                 }
@@ -1445,7 +1714,15 @@ fn resolve_scalar_arg(args: &[Projection], index: usize, source: &UnifiedRecord)
             }
             source.values.get(col).cloned()
         }
-        _ => None,
+        Projection::Alias(col, _) => source.values.get(col).cloned(),
+        Projection::Field(field, _) => resolve_runtime_field(source, field, None, None),
+        Projection::Function(name, inner_args) => {
+            evaluate_scalar_function(name, inner_args, source)
+        }
+        Projection::Expression(filter, _) => Some(Value::Boolean(evaluate_runtime_filter(
+            source, filter, None, None,
+        ))),
+        Projection::All => None,
     }
 }
 

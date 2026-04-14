@@ -52,6 +52,8 @@ pub enum Token {
     Left,
     Right,
     Outer,
+    Full,
+    Cross,
     Starts,
     Ends,
     With,
@@ -191,11 +193,12 @@ pub enum Token {
     Semi,     // ;
 
     // Graph syntax
-    Arrow,     // ->
-    ArrowLeft, // <-
-    Dash,      // -
-    DotDot,    // ..
-    Pipe,      // |
+    Arrow,      // ->
+    ArrowLeft,  // <-
+    Dash,       // -
+    DotDot,     // ..
+    Pipe,       // |
+    DoublePipe, // ||
 
     // End of input
     Eof,
@@ -237,6 +240,8 @@ impl fmt::Display for Token {
             Token::Left => write!(f, "LEFT"),
             Token::Right => write!(f, "RIGHT"),
             Token::Outer => write!(f, "OUTER"),
+            Token::Full => write!(f, "FULL"),
+            Token::Cross => write!(f, "CROSS"),
             Token::Starts => write!(f, "STARTS"),
             Token::Ends => write!(f, "ENDS"),
             Token::With => write!(f, "WITH"),
@@ -361,6 +366,7 @@ impl fmt::Display for Token {
             Token::Dash => write!(f, "-"),
             Token::DotDot => write!(f, ".."),
             Token::Pipe => write!(f, "|"),
+            Token::DoublePipe => write!(f, "||"),
             Token::Eof => write!(f, "EOF"),
         }
     }
@@ -653,7 +659,12 @@ impl<'a> Lexer<'a> {
             }
             '|' => {
                 self.advance();
-                Token::Pipe
+                if self.peek() == Some('|') {
+                    self.advance();
+                    Token::DoublePipe
+                } else {
+                    Token::Pipe
+                }
             }
             _ => {
                 return Err(LexerError::new(
@@ -871,6 +882,8 @@ impl<'a> Lexer<'a> {
             "LEFT" => Token::Left,
             "RIGHT" => Token::Right,
             "OUTER" => Token::Outer,
+            "FULL" => Token::Full,
+            "CROSS" => Token::Cross,
             "STARTS" => Token::Starts,
             "ENDS" => Token::Ends,
             "WITH" => Token::With,

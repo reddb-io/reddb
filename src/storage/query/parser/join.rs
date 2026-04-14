@@ -70,7 +70,7 @@ impl<'a> Parser<'a> {
     pub fn is_join_keyword(&self) -> bool {
         matches!(
             self.peek(),
-            Token::Join | Token::Inner | Token::Left | Token::Right
+            Token::Join | Token::Inner | Token::Left | Token::Right | Token::Full | Token::Cross
         )
     }
 
@@ -88,6 +88,14 @@ impl<'a> Parser<'a> {
             self.consume(&Token::Outer)?;
             self.expect(Token::Join)?;
             JoinType::RightOuter
+        } else if self.consume(&Token::Full)? {
+            // `FULL JOIN` and `FULL OUTER JOIN` are aliases.
+            self.consume(&Token::Outer)?;
+            self.expect(Token::Join)?;
+            JoinType::FullOuter
+        } else if self.consume(&Token::Cross)? {
+            self.expect(Token::Join)?;
+            JoinType::Cross
         } else {
             self.expect(Token::Join)?;
             JoinType::Inner
@@ -156,8 +164,14 @@ impl<'a> Parser<'a> {
             None
         };
 
-        self.expect(Token::On)?;
-        let on = self.parse_table_join_condition()?;
+        // CROSS JOIN has no ON clause — emit a sentinel JoinCondition
+        // that the runtime join loops treat as "always matches".
+        let on = if matches!(join_type, JoinType::Cross) {
+            cross_join_sentinel()
+        } else {
+            self.expect(Token::On)?;
+            self.parse_table_join_condition()?
+        };
         let (filter, order_by, limit, offset, return_) = self.parse_join_post_clauses()?;
         let table_query = TableQuery {
             table,
@@ -381,5 +395,22 @@ impl<'a> Parser<'a> {
             left_field,
             right_field,
         })
+    }
+}
+
+/// Sentinel JoinCondition used for CROSS JOIN — neither field references
+/// anything real. The runtime join loops must detect
+/// `join_type == JoinType::Cross` and skip predicate evaluation entirely
+/// rather than resolving these empty fields.
+fn cross_join_sentinel() -> JoinCondition {
+    JoinCondition {
+        left_field: FieldRef::TableColumn {
+            table: String::new(),
+            column: String::new(),
+        },
+        right_field: FieldRef::TableColumn {
+            table: String::new(),
+            column: String::new(),
+        },
     }
 }

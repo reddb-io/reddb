@@ -30,6 +30,8 @@ fn is_scalar_function(name: &str) -> bool {
             | "ARRAY_AGG"
             | "COUNT_DISTINCT"
             | "VERIFY_PASSWORD"
+            | "CAST"
+            | "CASE"
     )
 }
 use super::Parser;
@@ -152,6 +154,48 @@ impl<'a> Parser<'a> {
             });
         }
 
+        // CAST(expr AS type) — special form because it embeds the AS
+        // keyword inside the argument list. We parse it by hand and encode
+        // it as Projection::Function("CAST", [inner, Column("TYPE:<name>")])
+        // so the existing scalar-function plumbing picks it up without any
+        // new AST variant. Same wire format is used by the `expr::type`
+        // postfix shortcut below.
+        if let Token::Ident(ref name) = self.peek() {
+            if name.eq_ignore_ascii_case("CAST") {
+                self.advance()?;
+                self.expect(Token::LParen)?;
+                let inner = self.parse_projection_atom()?;
+                self.expect(Token::As)?;
+                let type_name = self.expect_ident_or_keyword()?;
+                self.expect(Token::RParen)?;
+                let alias = if self.consume(&Token::As)? {
+                    Some(self.expect_ident()?)
+                } else {
+                    None
+                };
+                let args = vec![
+                    inner,
+                    Projection::Column(format!("TYPE:{}", type_name.to_uppercase())),
+                ];
+                return Ok(if let Some(a) = alias {
+                    Projection::Function(format!("CAST:{}", a), args)
+                } else {
+                    Projection::Function("CAST".to_string(), args)
+                });
+            }
+        }
+
+        // CASE WHEN <cond> THEN <val> [WHEN ... THEN ...] [ELSE <val>] END
+        // Encoded as Projection::Function("CASE", [Expression(cond1), val1,
+        // Expression(cond2), val2, ..., else_val]). Even number of args →
+        // no ELSE; odd → last is the ELSE branch. The executor interprets
+        // this layout in evaluate_scalar_function.
+        if let Token::Ident(ref name) = self.peek() {
+            if name.eq_ignore_ascii_case("CASE") {
+                return self.parse_case_projection();
+            }
+        }
+
         // Check for scalar function: IDENT(args) — e.g. GEO_DISTANCE(col, POINT(x,y))
         if let Token::Ident(ref name) = self.peek() {
             let upper = name.to_uppercase();
@@ -173,13 +217,204 @@ impl<'a> Parser<'a> {
             }
         }
 
+        // Default path: field reference (optionally followed by an
+        // infix arithmetic tail for Fase 1.3 expressions). When no
+        // operator follows, the result collapses back to a plain
+        // Projection::Field, preserving every legacy test.
         let field = self.parse_field_ref()?;
+        let left = Projection::Field(field, None);
+        let expr = self.parse_projection_binop_tail(left, 0)?;
         let alias = if self.consume(&Token::As)? {
             Some(self.expect_ident()?)
         } else {
             None
         };
-        Ok(Projection::Field(field, alias))
+        Ok(attach_projection_alias(expr, alias))
+    }
+
+    /// Pratt-style climb for `+ - * / % ||` infix operators on top of an
+    /// already-parsed LHS projection. Emits the operation as a nested
+    /// `Projection::Function` so the executor plumbing in
+    /// `evaluate_scalar_function` handles it without a new AST variant.
+    /// Left-associative. Precedence table:
+    ///   10  || (concat)
+    ///   20  + -
+    ///   30  * / %
+    fn parse_projection_binop_tail(
+        &mut self,
+        mut left: Projection,
+        min_prec: u8,
+    ) -> Result<Projection, ParseError> {
+        loop {
+            let (op_name, prec) = match self.peek() {
+                Token::Plus => ("ADD", 20u8),
+                Token::Minus => ("SUB", 20u8),
+                Token::Star => ("MUL", 30u8),
+                Token::Slash => ("DIV", 30u8),
+                Token::Percent => ("MOD", 30u8),
+                Token::DoublePipe => ("CONCAT", 10u8),
+                _ => break,
+            };
+            if prec < min_prec {
+                break;
+            }
+            self.advance()?; // consume operator
+                             // Parse RHS atom then climb higher-precedence tail (left-assoc).
+            let rhs_atom = self.parse_projection_factor()?;
+            let rhs = self.parse_projection_binop_tail(rhs_atom, prec + 1)?;
+            left = Projection::Function(op_name.to_string(), vec![left, rhs]);
+        }
+        Ok(left)
+    }
+
+    /// Parse a single projection factor — an atom usable as the LHS or
+    /// RHS of an arithmetic operator. Accepts literals, columns, CAST
+    /// (via the scalar-function plumbing), and parenthesised
+    /// sub-expressions. Does **not** accept CASE or aggregate functions
+    /// — those only appear at top-level projection position.
+    fn parse_projection_factor(&mut self) -> Result<Projection, ParseError> {
+        // Parenthesised sub-expression: ( expr )
+        if self.consume(&Token::LParen)? {
+            let inner = self.parse_projection_factor()?;
+            let climbed = self.parse_projection_binop_tail(inner, 0)?;
+            self.expect(Token::RParen)?;
+            return Ok(climbed);
+        }
+        // Nested CAST inside an arithmetic expression.
+        if let Token::Ident(ref name) = self.peek() {
+            if name.eq_ignore_ascii_case("CAST") {
+                self.advance()?;
+                self.expect(Token::LParen)?;
+                let inner = self.parse_projection_factor()?;
+                let inner = self.parse_projection_binop_tail(inner, 0)?;
+                self.expect(Token::As)?;
+                let type_name = self.expect_ident_or_keyword()?;
+                self.expect(Token::RParen)?;
+                let args = vec![
+                    inner,
+                    Projection::Column(format!("TYPE:{}", type_name.to_uppercase())),
+                ];
+                return Ok(Projection::Function("CAST".to_string(), args));
+            }
+        }
+        // Numeric / string / null literal.
+        match self.peek().clone() {
+            Token::Integer(_) | Token::Float(_) => {
+                let val = self.parse_function_literal_arg()?;
+                return Ok(Projection::Column(format!("LIT:{}", val)));
+            }
+            Token::Minus => {
+                self.advance()?;
+                let val = self.parse_function_literal_arg()?;
+                return Ok(Projection::Column(format!("LIT:-{}", val)));
+            }
+            Token::String(s) => {
+                self.advance()?;
+                return Ok(Projection::Column(format!("LIT:{}", s)));
+            }
+            _ => {}
+        }
+        // Bare column / qualified field reference.
+        let field = self.parse_field_ref()?;
+        Ok(Projection::Field(field, None))
+    }
+}
+
+/// Attach an optional alias to a projection by re-wrapping. Field and
+/// Function projections store alias natively; anything else (including
+/// a nested arithmetic tree rooted in Function) gets a `:alias` suffix
+/// on the function name, matching the existing CAST/CASE convention.
+fn attach_projection_alias(proj: Projection, alias: Option<String>) -> Projection {
+    let Some(alias) = alias else { return proj };
+    match proj {
+        Projection::Field(f, _) => Projection::Field(f, Some(alias)),
+        Projection::Function(name, args) => {
+            // Don't double-suffix if name already carries an alias.
+            if name.contains(':') {
+                Projection::Function(name, args)
+            } else {
+                Projection::Function(format!("{}:{}", name, alias), args)
+            }
+        }
+        Projection::Column(c) => Projection::Alias(c, alias),
+        other => other,
+    }
+}
+
+impl<'a> Parser<'a> {
+    /// Parse a single atomic projection — a column reference, numeric
+    /// literal, or quoted string — used inside CAST / CASE / future
+    /// Fase 1.3 arithmetic expressions. Wider forms (function calls,
+    /// arithmetic) are deferred until the projection-level Pratt parser
+    /// lands in Fase 1.3.
+    fn parse_projection_atom(&mut self) -> Result<Projection, ParseError> {
+        match self.peek().clone() {
+            Token::Integer(_) | Token::Float(_) | Token::Minus => {
+                let val = self.parse_function_literal_arg()?;
+                Ok(Projection::Column(format!("LIT:{}", val)))
+            }
+            Token::String(s) => {
+                self.advance()?;
+                Ok(Projection::Column(format!("LIT:{}", s)))
+            }
+            Token::Null => {
+                self.advance()?;
+                Ok(Projection::Column("LIT:".to_string()))
+            }
+            _ => {
+                let col = self.expect_ident_or_keyword()?;
+                Ok(Projection::Column(col))
+            }
+        }
+    }
+
+    /// Parse `CASE WHEN <filter> THEN <atom> [WHEN ... THEN ...]
+    /// [ELSE <atom>] END`. The caller has already peeked `CASE`.
+    fn parse_case_projection(&mut self) -> Result<Projection, ParseError> {
+        // Consume CASE (it's an Ident token).
+        self.advance()?;
+        let mut args: Vec<Projection> = Vec::new();
+        loop {
+            if !self.consume_ident_ci("WHEN")? {
+                break;
+            }
+            let cond = self.parse_filter()?;
+            if !self.consume_ident_ci("THEN")? {
+                return Err(ParseError::new(
+                    "expected THEN after CASE WHEN condition".to_string(),
+                    self.position(),
+                ));
+            }
+            let then_val = self.parse_projection_atom()?;
+            args.push(Projection::Expression(Box::new(cond), None));
+            args.push(then_val);
+        }
+        if args.is_empty() {
+            return Err(ParseError::new(
+                "CASE must have at least one WHEN branch".to_string(),
+                self.position(),
+            ));
+        }
+        if self.consume_ident_ci("ELSE")? {
+            let else_val = self.parse_projection_atom()?;
+            args.push(else_val);
+        }
+        if !self.consume_ident_ci("END")? {
+            return Err(ParseError::new(
+                "expected END to close CASE expression".to_string(),
+                self.position(),
+            ));
+        }
+        let alias = if self.consume(&Token::As)? {
+            Some(self.expect_ident()?)
+        } else {
+            None
+        };
+        Ok(if let Some(a) = alias {
+            Projection::Function(format!("CASE:{}", a), args)
+        } else {
+            Projection::Function("CASE".to_string(), args)
+        })
     }
 
     /// Parse comma-separated function arguments (columns, literals, POINT())
