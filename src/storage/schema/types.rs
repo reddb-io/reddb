@@ -117,6 +117,145 @@ pub enum DataType {
     Password = 50,
 }
 
+/// Type categories used by the Fase 3 coercion resolver. Mirrors
+/// PostgreSQL's `pg_type.h` `typcategory` values. Types in the same
+/// category are candidates for implicit coercion; the preferred flag
+/// breaks ties when multiple candidates match an operator / function
+/// signature.
+///
+/// See the Fase 3 algorithm described in the roadmap file
+/// (`/home/cyber/.claude/plans/squishy-mixing-honey.md`, Parte 4)
+/// for the full candidate-selection heuristic. This enum is the
+/// decoupler that makes that algorithm tractable — without
+/// categories you'd need O(n²) pairwise coercion rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TypeCategory {
+    /// Integer, float, decimal — widening promotes int → float → numeric.
+    Numeric,
+    /// Text, blob, enum labels — stringy families that freely coerce
+    /// to text via display.
+    String,
+    /// Boolean only.
+    Boolean,
+    /// Date, time, timestamp — temporal values that share arithmetic
+    /// (`date + interval`, `timestamp - timestamp`, etc.).
+    DateTime,
+    /// Duration / interval.
+    TimeSpan,
+    /// Array of any element type. The element's own category is
+    /// tracked on `DataType::Array` itself; this top-level marker
+    /// distinguishes array-typed operands from scalar ones.
+    Array,
+    /// Network addresses (IPv4, IPv6, CIDR, subnet, MAC).
+    Network,
+    /// Geographic / spatial types (lat / lon / geopoint).
+    Geo,
+    /// Domain-typed values (email, URL, phone, semver, color, locale codes)
+    /// — these are all conceptually strings with extra validation, but
+    /// they get their own category so the coercion resolver can prefer
+    /// their native equality over `text` equality.
+    Domain,
+    /// UUID — distinct category because neither string nor numeric
+    /// coercion makes sense.
+    Uuid,
+    /// Encrypted / protected values (Secret, Password). Callers must
+    /// opt in to any coercion; the resolver treats this category as
+    /// opaque.
+    Opaque,
+    /// Reference to another entity / page / table — opaque to the
+    /// expression layer.
+    Reference,
+    /// Vector of floats.
+    Vector,
+    /// Embedded JSON blob.
+    Json,
+    /// Null / unknown — used as the sentinel for untyped literals
+    /// before the analyzer resolves a concrete type.
+    Unknown,
+}
+
+impl DataType {
+    /// Return the coercion category this type belongs to. Used by
+    /// the Fase 3 operator / function resolver to group candidate
+    /// types when picking an overload.
+    pub fn category(&self) -> TypeCategory {
+        match self {
+            DataType::Integer
+            | DataType::UnsignedInteger
+            | DataType::Float
+            | DataType::Decimal
+            | DataType::BigInt
+            | DataType::Port
+            | DataType::Latitude
+            | DataType::Longitude => TypeCategory::Numeric,
+            DataType::Text | DataType::Blob => TypeCategory::String,
+            DataType::Boolean => TypeCategory::Boolean,
+            DataType::Timestamp | DataType::TimestampMs | DataType::Date | DataType::Time => {
+                TypeCategory::DateTime
+            }
+            DataType::Duration => TypeCategory::TimeSpan,
+            DataType::Array => TypeCategory::Array,
+            DataType::IpAddr
+            | DataType::Ipv4
+            | DataType::Ipv6
+            | DataType::Cidr
+            | DataType::Subnet
+            | DataType::MacAddr => TypeCategory::Network,
+            DataType::GeoPoint => TypeCategory::Geo,
+            DataType::Email
+            | DataType::Url
+            | DataType::Phone
+            | DataType::Semver
+            | DataType::Color
+            | DataType::ColorAlpha
+            | DataType::Country2
+            | DataType::Country3
+            | DataType::Lang2
+            | DataType::Lang5
+            | DataType::Currency
+            | DataType::Enum => TypeCategory::Domain,
+            DataType::Uuid => TypeCategory::Uuid,
+            DataType::Secret | DataType::Password => TypeCategory::Opaque,
+            DataType::NodeRef
+            | DataType::EdgeRef
+            | DataType::VectorRef
+            | DataType::RowRef
+            | DataType::KeyRef
+            | DataType::DocRef
+            | DataType::TableRef
+            | DataType::PageRef => TypeCategory::Reference,
+            DataType::Vector => TypeCategory::Vector,
+            DataType::Json => TypeCategory::Json,
+            DataType::Nullable => TypeCategory::Unknown,
+        }
+    }
+
+    /// Is this type the *preferred* representative of its category?
+    /// When the Fase 3 resolver has two equally-good candidates after
+    /// exact-match counting, it picks the preferred one. Preferences
+    /// are:
+    ///
+    /// - Numeric: `Float` (highest precision, captures all integer
+    ///   values lossily for arithmetic purposes)
+    /// - String: `Text`
+    /// - DateTime: `TimestampMs` (milli precision beats second)
+    /// - Network: `IpAddr` (superset of Ipv4/Ipv6)
+    /// - Domain / Reference / Opaque / others: no preferred member
+    ///   (categories where every type is equally "native" so a tie
+    ///   means the user must be explicit).
+    pub fn is_preferred(&self) -> bool {
+        matches!(
+            self,
+            DataType::Float
+                | DataType::Text
+                | DataType::TimestampMs
+                | DataType::IpAddr
+                | DataType::Boolean
+                | DataType::Uuid
+        )
+    }
+}
+
 impl DataType {
     /// Serialize type to byte
     pub fn to_byte(&self) -> u8 {

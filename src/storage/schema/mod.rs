@@ -8,6 +8,7 @@
 //! The schema system is designed to support security-focused data types
 //! like IP addresses, MAC addresses, and vectors for similarity search.
 
+pub mod cast_catalog;
 pub mod coerce;
 pub mod registry;
 pub mod table;
