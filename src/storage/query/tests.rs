@@ -87,6 +87,7 @@ mod query_tests {
             ))
             .order_by(OrderByClause {
                 field: FieldRef::column("h", "ip"),
+                expr: None,
                 ascending: true,
                 nulls_first: false,
             })

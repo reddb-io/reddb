@@ -33,6 +33,28 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     query: &TableQuery,
     index_store: Option<&super::index_store::IndexStore>,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
+    // ── FROM SUBQUERY PATH (Fase 1.7): when the query's source is a
+    // `(SELECT …) AS alias`, execute the inner query recursively.
+    // For Week 3 scope we only support nested Table queries — joins
+    // / unions / CTEs inside a FROM subquery wait for Week 4. Outer-
+    // query WHERE / ORDER BY / LIMIT rebinding also lands in Week 4
+    // because it needs the inner's projection list mapped into the
+    // outer's column scope.
+    if let Some(crate::storage::query::ast::TableSource::Subquery(inner)) = &query.source {
+        match inner.as_ref() {
+            crate::storage::query::ast::QueryExpr::Table(inner_table) => {
+                return execute_runtime_canonical_table_query_indexed(db, inner_table, index_store);
+            }
+            other => {
+                return Err(RedDBError::Query(format!(
+                    "FROM subquery of kind {} is not yet supported — \
+                     only nested SELECT lands in Fase 2 Week 3",
+                    super::super::join_filter::query_expr_name(other)
+                )));
+            }
+        }
+    }
+
     // ── ULTRA-FAST PATH: entity_id lookup bypasses planner entirely ──
     if let Some(entity_id) = extract_entity_id_from_filter(&query.filter) {
         let store = db.store();

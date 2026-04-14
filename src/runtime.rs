@@ -607,6 +607,7 @@ pub struct RuntimeConnection {
     inner: Arc<RuntimeInner>,
 }
 
+mod expr_eval;
 mod graph_dsl;
 mod health_connection;
 mod impl_core;

@@ -476,6 +476,7 @@ mod tests {
     fn make_table_query(name: &str) -> QueryExpr {
         QueryExpr::Table(TableQuery {
             table: name.to_string(),
+            source: None,
             alias: Some(name.to_string()),
             columns: vec![Projection::All],
             filter: None,
@@ -504,6 +505,7 @@ mod tests {
 
         let small = QueryExpr::Table(TableQuery {
             table: "small".to_string(),
+            source: None,
             alias: None,
             columns: vec![Projection::All],
             filter: None,
@@ -517,6 +519,7 @@ mod tests {
 
         let large = QueryExpr::Table(TableQuery {
             table: "large".to_string(),
+            source: None,
             alias: None,
             columns: vec![Projection::All],
             filter: None,

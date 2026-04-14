@@ -210,6 +210,7 @@ mod tests {
         QueryPlan::new(
             QueryExpr::Table(TableQuery {
                 table: "test".to_string(),
+                source: None,
                 alias: None,
                 columns: vec![Projection::All],
                 filter: None,
@@ -222,6 +223,7 @@ mod tests {
             }),
             QueryExpr::Table(TableQuery {
                 table: "test".to_string(),
+                source: None,
                 alias: None,
                 columns: vec![Projection::All],
                 filter: None,

@@ -11,27 +11,57 @@ impl<'a> Parser<'a> {
     pub fn parse_from_query(&mut self) -> Result<QueryExpr, ParseError> {
         self.expect(Token::From)?;
 
-        // Parse table name and alias
-        let table = self.parse_table_source()?;
-        let alias = if self.consume(&Token::As)?
-            || (self.check(&Token::Ident("".into())) && !self.is_join_keyword())
-        {
-            Some(self.expect_ident()?)
+        // Fase 1.7 unlock: `FROM (SELECT … FROM t) AS alias` — subquery
+        // in FROM position. Detect by peeking LParen before falling
+        // through to the legacy identifier-only parse_table_source.
+        // The subquery branch builds the outer TableQuery via
+        // `TableQuery::from_subquery` which sets `source` to
+        // `TableSource::Subquery` and marks `table` with a sentinel
+        // `__subq_<alias>` so code that still reads `table.as_str()`
+        // errors loudly instead of silently mis-resolving.
+        let mut table_query = if self.check(&Token::LParen) {
+            self.advance()?; // consume `(`
+                             // Only SELECT is allowed in a FROM subquery — reject
+                             // `FROM (MATCH … RETURN)` and other non-SELECT shapes.
+            if !self.check(&Token::Select) {
+                return Err(ParseError::new(
+                    "subquery in FROM must start with SELECT".to_string(),
+                    self.position(),
+                ));
+            }
+            let inner = self.parse_select_query()?;
+            self.expect(Token::RParen)?;
+            let alias = if self.consume(&Token::As)?
+                || (self.check(&Token::Ident("".into())) && !self.is_join_keyword())
+            {
+                Some(self.expect_ident()?)
+            } else {
+                None
+            };
+            TableQuery::from_subquery(inner, alias)
         } else {
-            None
-        };
-
-        let mut table_query = TableQuery {
-            table,
-            alias,
-            columns: Vec::new(),
-            filter: None,
-            group_by: Vec::new(),
-            having: None,
-            order_by: Vec::new(),
-            limit: None,
-            offset: None,
-            expand: None,
+            // Parse table name and alias
+            let table = self.parse_table_source()?;
+            let alias = if self.consume(&Token::As)?
+                || (self.check(&Token::Ident("".into())) && !self.is_join_keyword())
+            {
+                Some(self.expect_ident()?)
+            } else {
+                None
+            };
+            TableQuery {
+                table,
+                source: None,
+                alias,
+                columns: Vec::new(),
+                filter: None,
+                group_by: Vec::new(),
+                having: None,
+                order_by: Vec::new(),
+                limit: None,
+                offset: None,
+                expand: None,
+            }
         };
 
         // Check for JOIN
@@ -175,6 +205,7 @@ impl<'a> Parser<'a> {
         let (filter, order_by, limit, offset, return_) = self.parse_join_post_clauses()?;
         let table_query = TableQuery {
             table,
+            source: None,
             alias,
             columns: Vec::new(),
             filter: None,

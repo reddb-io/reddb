@@ -840,6 +840,7 @@ mod tests {
     fn table_query(name: &str, filter: Option<AstFilter>) -> TableQuery {
         TableQuery {
             table: name.to_string(),
+            source: None,
             alias: None,
             columns: vec![Projection::All],
             filter,
@@ -982,6 +983,7 @@ mod tests {
 
         let query = QueryExpr::Table(TableQuery {
             table: "hosts".to_string(),
+            source: None,
             alias: None,
             columns: vec![Projection::All],
             filter: None,
@@ -1044,6 +1046,7 @@ mod tests {
 
         let query = TableQuery {
             table: "hosts".to_string(),
+            source: None,
             alias: None,
             columns: vec![Projection::All],
             filter: None,

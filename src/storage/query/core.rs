@@ -220,8 +220,19 @@ impl QueryExpr {
 /// Table query: SELECT columns FROM table WHERE filter ORDER BY ... LIMIT ...
 #[derive(Debug, Clone)]
 pub struct TableQuery {
-    /// Table name
+    /// Table name. Legacy slot — still populated even when `source`
+    /// is set to a subquery so existing call sites that read
+    /// `query.table.as_str()` keep compiling. When `source` is
+    /// `Some(TableSource::Subquery(…))`, this field holds a synthetic
+    /// sentinel name (`"__subq_NNNN"`) that runtime code must never
+    /// resolve against the real schema registry.
     pub table: String,
+    /// Fase 2 Week 3: structured table source. `None` means the
+    /// legacy `table` field is authoritative. `Some(Name)` is the
+    /// same information as `table` but in typed form. `Some(Subquery)`
+    /// wires a `(SELECT …) AS alias` in a FROM position — the Fase
+    /// 1.7 unlock.
+    pub source: Option<TableSource>,
     /// Optional table alias
     pub alias: Option<String>,
     /// Columns to select (empty = all)
@@ -242,6 +253,19 @@ pub struct TableQuery {
     pub expand: Option<ExpandOptions>,
 }
 
+/// Structured FROM source for a `TableQuery`. Additive alongside the
+/// legacy `TableQuery.table: String` slot — callers that understand
+/// this type can branch on subqueries; callers that only read `table`
+/// fall back to the synthetic sentinel name and, for subqueries,
+/// produce an "unknown table" error until they migrate.
+#[derive(Debug, Clone)]
+pub enum TableSource {
+    /// Plain table reference — equivalent to the legacy `String` form.
+    Name(String),
+    /// A subquery in FROM position: `FROM (SELECT …) AS alias`.
+    Subquery(Box<QueryExpr>),
+}
+
 /// Options for WITH EXPAND clause on SELECT queries.
 #[derive(Debug, Clone, Default)]
 pub struct ExpandOptions {
@@ -260,7 +284,33 @@ impl TableQuery {
     pub fn new(table: &str) -> Self {
         Self {
             table: table.to_string(),
+            source: None,
             alias: None,
+            columns: Vec::new(),
+            filter: None,
+            group_by: Vec::new(),
+            having: None,
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            expand: None,
+        }
+    }
+
+    /// Create a TableQuery that wraps a subquery in FROM position.
+    /// The legacy `table` slot holds a synthetic sentinel so code that
+    /// only reads `table.as_str()` errors loudly with a
+    /// recognisable marker instead of silently treating it as a
+    /// real collection.
+    pub fn from_subquery(subquery: QueryExpr, alias: Option<String>) -> Self {
+        let sentinel = match &alias {
+            Some(a) => format!("__subq_{a}"),
+            None => "__subq_anon".to_string(),
+        };
+        Self {
+            table: sentinel,
+            source: Some(TableSource::Subquery(Box::new(subquery))),
+            alias,
             columns: Vec::new(),
             filter: None,
             group_by: Vec::new(),
@@ -1163,11 +1213,31 @@ impl fmt::Display for CompareOp {
     }
 }
 
-/// Order by clause
+/// Order by clause.
+///
+/// Fase 2 migration: `field` is the legacy bare column reference and
+/// remains populated for back-compat with existing callers (SPARQL /
+/// Gremlin / Cypher translators, the planner cost model, etc.). The
+/// new `expr` slot carries an arbitrary `Expr` tree — when present,
+/// runtime comparators prefer it over `field`, so the parser can
+/// emit `ORDER BY CAST(a AS INT)`, `ORDER BY a + b * 2`, etc. without
+/// breaking the rest of the codebase.
+///
+/// When `expr` is `None`, the clause behaves exactly like before.
+/// When `expr` is `Some(Expr::Column(f))`, runtime code may still use
+/// the legacy path — it's equivalent. Constructors default `expr` to
+/// `None` so all existing call sites stay source-compatible.
 #[derive(Debug, Clone)]
 pub struct OrderByClause {
-    /// Field to order by
+    /// Field to order by. Left populated even when `expr` is set so
+    /// legacy consumers (planner cardinality estimate, cost model,
+    /// mode translators) that still pattern-match on `field` keep
+    /// working during the Fase 2 migration.
     pub field: FieldRef,
+    /// Fase 2 expression-aware sort key. When `Some`, runtime order
+    /// comparators evaluate this expression per row and sort on the
+    /// resulting values — unlocks `ORDER BY expr` (Fase 1.6).
+    pub expr: Option<super::Expr>,
     /// Ascending or descending
     pub ascending: bool,
     /// Nulls first or last
@@ -1179,6 +1249,7 @@ impl OrderByClause {
     pub fn asc(field: FieldRef) -> Self {
         Self {
             field,
+            expr: None,
             ascending: true,
             nulls_first: false,
         }
@@ -1188,9 +1259,17 @@ impl OrderByClause {
     pub fn desc(field: FieldRef) -> Self {
         Self {
             field,
+            expr: None,
             ascending: false,
             nulls_first: true,
         }
+    }
+
+    /// Attach an `Expr` sort key to an existing clause. Leaves `field`
+    /// untouched so back-compat match sites keep their pattern.
+    pub fn with_expr(mut self, expr: super::Expr) -> Self {
+        self.expr = Some(expr);
+        self
     }
 }
 

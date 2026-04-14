@@ -814,8 +814,22 @@ pub(super) fn compare_runtime_order(
     table_alias: Option<&str>,
 ) -> Ordering {
     for clause in clauses {
-        let left_value = resolve_runtime_field(left, &clause.field, table_name, table_alias);
-        let right_value = resolve_runtime_field(right, &clause.field, table_name, table_alias);
+        // Fase 1.6: when the ORDER BY item is an expression (CAST,
+        // arithmetic, CASE, etc.), evaluate it against each record
+        // and compare the resulting Values. Bare-column clauses fall
+        // back to the direct field resolver which is cheaper for the
+        // common case.
+        let (left_value, right_value) = if let Some(ref expr) = clause.expr {
+            (
+                super::expr_eval::evaluate_runtime_expr(expr, left, table_name, table_alias),
+                super::expr_eval::evaluate_runtime_expr(expr, right, table_name, table_alias),
+            )
+        } else {
+            (
+                resolve_runtime_field(left, &clause.field, table_name, table_alias),
+                resolve_runtime_field(right, &clause.field, table_name, table_alias),
+            )
+        };
         let ordering = compare_runtime_optional_values(
             left_value.as_ref(),
             right_value.as_ref(),

@@ -1,6 +1,6 @@
 //! Table query parsing (SELECT ... FROM ...)
 
-use super::super::ast::{OrderByClause, Projection, QueryExpr, TableQuery};
+use super::super::ast::{FieldRef, OrderByClause, Projection, QueryExpr, TableQuery};
 use super::super::lexer::Token;
 use super::error::ParseError;
 
@@ -72,6 +72,7 @@ impl<'a> Parser<'a> {
 
         let mut query = TableQuery {
             table,
+            source: None,
             alias,
             columns,
             filter: None,
@@ -579,11 +580,38 @@ impl<'a> Parser<'a> {
         Ok(fields)
     }
 
-    /// Parse ORDER BY list
+    /// Parse ORDER BY list.
+    ///
+    /// Fase 1.6 unlock: uses the new `Expr` Pratt parser so
+    /// `ORDER BY CAST(age AS INT)`, `ORDER BY a + b * 2`,
+    /// `ORDER BY last_seen - created_at` all parse cleanly. If the
+    /// parsed expression is a bare `Column`, we store it in the
+    /// legacy `field` slot and leave `expr` None so downstream
+    /// consumers (planner cost, mode translators) keep using the
+    /// fast path. Otherwise we stash the full tree in `expr` and
+    /// populate `field` with a synthetic marker that runtime code
+    /// never touches.
     pub fn parse_order_by_list(&mut self) -> Result<Vec<OrderByClause>, ParseError> {
+        use super::super::ast::Expr as AstExpr;
         let mut clauses = Vec::new();
         loop {
-            let field = self.parse_field_ref()?;
+            let parsed = self.parse_expr()?;
+            let (field, expr_slot) = match parsed {
+                AstExpr::Column { field, .. } => (field, None),
+                other => (
+                    // Synthetic placeholder so legacy pattern-matches
+                    // on `OrderByClause.field` still destructure.
+                    // Runtime comparators check `expr` first when set,
+                    // so the sentinel never gets resolved against a
+                    // real record.
+                    FieldRef::TableColumn {
+                        table: String::new(),
+                        column: String::new(),
+                    },
+                    Some(other),
+                ),
+            };
+
             let ascending = if self.consume(&Token::Desc)? {
                 false
             } else {
@@ -604,6 +632,7 @@ impl<'a> Parser<'a> {
 
             clauses.push(OrderByClause {
                 field,
+                expr: expr_slot,
                 ascending,
                 nulls_first,
             });

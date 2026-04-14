@@ -773,6 +773,7 @@ mod tests {
     fn make_simple_query() -> QueryExpr {
         QueryExpr::Table(TableQuery {
             table: "hosts".to_string(),
+            source: None,
             alias: None,
             columns: vec![Projection::All],
             filter: None,
