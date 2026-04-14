@@ -4,3 +4,5 @@ PLAN.md
 drivers/python/.venv/
 # Runtime WAL — binary, machine-local, should never be versioned.
 wal.log
+node_modules
+
