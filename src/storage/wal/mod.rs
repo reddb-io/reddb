@@ -10,6 +10,7 @@
 
 pub mod archiver;
 pub mod checkpoint;
+pub mod group_commit;
 pub mod reader;
 pub mod record;
 pub mod recovery;
@@ -22,6 +23,7 @@ pub use archiver::{
     BackupHead, SnapshotManifest, WalArchiver, WalSegmentMeta,
 };
 pub use checkpoint::{CheckpointError, CheckpointMode, CheckpointResult, Checkpointer};
+pub use group_commit::GroupCommit;
 pub use reader::WalReader;
 pub use record::{RecordType, WalRecord};
 pub use recovery::{PointInTimeRecovery, RecoveryResult, RestorePoint};

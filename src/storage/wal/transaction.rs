@@ -206,24 +206,40 @@ impl Transaction {
             return Ok(());
         }
 
-        // Write all buffered pages to WAL
-        let mut wal = self.manager.wal_writer()?;
+        // ── Append phase ────────────────────────────────────────────
+        // Take the WAL lock briefly to append our PageWrite records
+        // and the Commit marker, then capture the resulting LSN and
+        // RELEASE the WAL lock so other concurrent writers can also
+        // append before the next group-commit fsync covers all of
+        // them in one syscall.
+        let commit_lsn = {
+            let mut wal = self.manager.wal_writer()?;
 
-        for (page_id, buffered) in &self.write_set {
-            let record = WalRecord::PageWrite {
-                tx_id: self.id,
-                page_id: *page_id,
-                data: buffered.data.to_vec(),
-            };
-            wal.append(&record)?;
-        }
+            for (page_id, buffered) in &self.write_set {
+                let record = WalRecord::PageWrite {
+                    tx_id: self.id,
+                    page_id: *page_id,
+                    data: buffered.data.to_vec(),
+                };
+                wal.append(&record)?;
+            }
 
-        // Write commit record
-        let commit_record = WalRecord::Commit { tx_id: self.id };
-        wal.append(&commit_record)?;
+            let commit_record = WalRecord::Commit { tx_id: self.id };
+            wal.append(&commit_record)?;
+            wal.current_lsn()
+        };
 
-        // Sync WAL to disk
-        wal.sync()?;
+        // ── Group commit fsync ──────────────────────────────────────
+        // Wait until the WAL is durable up to our LSN. If another
+        // writer is already mid-fsync, we piggyback on it. If we are
+        // the first to arrive, we become the leader and run the
+        // single fsync that flushes every byte appended so far —
+        // including bytes from writers that took the WAL lock after
+        // we released it.
+        self.manager
+            .group_commit
+            .commit_at_least(commit_lsn, &self.manager.wal)
+            .map_err(TxError::Io)?;
 
         // Apply writes to pager cache (for immediate visibility)
         for (page_id, buffered) in &self.write_set {
@@ -298,6 +314,10 @@ pub struct TransactionManager {
     wal_path: PathBuf,
     /// Active transaction IDs
     active_transactions: RwLock<Vec<u64>>,
+    /// Group-commit coordinator. Concurrent writers piggyback on a
+    /// single shared `wal.sync()` instead of paying one fsync per
+    /// commit. See `super::group_commit` for the algorithm.
+    group_commit: super::group_commit::GroupCommit,
 }
 
 impl TransactionManager {
@@ -310,12 +330,14 @@ impl TransactionManager {
     pub fn new(pager: Arc<Pager>, wal_path: impl AsRef<Path>) -> io::Result<Self> {
         let wal_path = wal_path.as_ref().to_path_buf();
         let wal = WalWriter::open(&wal_path)?;
+        let initial_durable = wal.durable_lsn();
 
         Ok(Self {
             pager,
             wal: Mutex::new(wal),
             wal_path,
             active_transactions: RwLock::new(Vec::new()),
+            group_commit: super::group_commit::GroupCommit::new(initial_durable),
         })
     }
 
