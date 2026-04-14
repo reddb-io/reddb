@@ -367,6 +367,26 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         // B3 optimisation: when select_cols is non-empty, use the ref-based
         // projected materialiser — avoids cloning the whole entity, only
         // clones the K selected field values instead of all N.
+        //
+        // Schema-index precomputation: for bulk-inserted (columnar) entities,
+        // resolve projected column names → schema positions once before the
+        // scan loop. Each row then does O(1) indexed access instead of
+        // O(schema_len) linear search per (row, column) pair.
+        let schema_col_indices: Option<Vec<(usize, usize)>> =
+            if !select_cols.is_empty() {
+                schema_arc.as_ref().map(|schema| {
+                    select_cols
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(ci, col)| {
+                            schema.iter().position(|s| s == col).map(|si| (ci, si))
+                        })
+                        .collect()
+                })
+            } else {
+                None
+            };
+
         let mut records: Vec<UnifiedRecord> = Vec::new();
         manager.for_each_entity_zoned(&zone_preds, |entity| {
             if records.len() >= limit {
@@ -374,15 +394,28 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             }
             if compiled.evaluate(entity) {
                 let record = if !select_cols.is_empty() {
-                    // Try ref-based projected path first (no entity clone).
-                    // Falls back to full clone path for non-Row entities.
-                    super::super::record_search::runtime_table_record_from_entity_ref_projected(
-                        entity,
-                        &select_cols,
-                    )
-                    .or_else(|| {
-                        runtime_table_record_from_entity_projected(entity.clone(), &select_cols)
-                    })
+                    // Fast columnar path: use pre-computed schema indices when available.
+                    if let Some(ref idx_map) = schema_col_indices {
+                        super::super::record_search::runtime_table_record_with_col_indices(
+                            entity, &select_cols, idx_map,
+                        )
+                        .or_else(|| {
+                            super::super::record_search::runtime_table_record_from_entity_ref_projected(
+                                entity, &select_cols,
+                            )
+                        })
+                        .or_else(|| {
+                            runtime_table_record_from_entity_projected(entity.clone(), &select_cols)
+                        })
+                    } else {
+                        super::super::record_search::runtime_table_record_from_entity_ref_projected(
+                            entity,
+                            &select_cols,
+                        )
+                        .or_else(|| {
+                            runtime_table_record_from_entity_projected(entity.clone(), &select_cols)
+                        })
+                    }
                 } else {
                     runtime_table_record_from_entity(entity.clone())
                 };

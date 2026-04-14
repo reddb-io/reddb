@@ -223,6 +223,37 @@ pub(super) fn runtime_table_record_from_entity_projected(
 
 /// Ref-based projected materialization — avoids cloning the whole entity.
 /// Only clones the K projected field values, not the N-K ignored ones.
+/// Pre-computed index path for columnar (bulk-inserted) entities.
+///
+/// `idx_map` is `&[(col_pos_in_columns, schema_idx)]` — precomputed once
+/// before the scan loop so every row does O(k) direct indexed access instead
+/// of O(schema_len × k) linear searches.
+///
+/// Returns `None` when the entity is not a columnar Row (schema = None).
+pub(super) fn runtime_table_record_with_col_indices(
+    entity: &UnifiedEntity,
+    columns: &[String],
+    idx_map: &[(usize, usize)],
+) -> Option<UnifiedRecord> {
+    if idx_map.is_empty() {
+        return None;
+    }
+    let row = entity.data.as_row()?;
+    // Only applies to columnar entities (row.schema is Some, row.named is None)
+    if row.named.is_some() || row.schema.is_none() {
+        return None;
+    }
+    let mut record = UnifiedRecord::with_capacity(1 + idx_map.len());
+    record.set("red_entity_id", Value::UnsignedInteger(entity.id.raw()));
+    for &(ci, si) in idx_map {
+        if let Some(value) = row.columns.get(si) {
+            // Use set_owned to skip the hidden to_string() clone.
+            record.set_owned(columns[ci].clone(), value.clone());
+        }
+    }
+    Some(record)
+}
+
 /// Used by the fast-path scan when `select_cols` is non-empty.
 ///
 /// Returns `None` for non-Row entities (caller falls back to owned path).
