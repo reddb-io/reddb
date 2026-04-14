@@ -210,10 +210,7 @@ impl RedDBRuntime {
         // columns) are caught here rather than inside the diff engine.
         analyze_create_table(&query.target).map_err(|err| RedDBError::Query(err.to_string()))?;
 
-        let current_contract = self
-            .inner
-            .db
-            .collection_contract(&query.target.name);
+        let current_contract = self.inner.db.collection_contract(&query.target.name);
 
         let current_columns: Vec<crate::physical::DeclaredColumnContract> = current_contract
             .as_ref()

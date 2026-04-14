@@ -234,6 +234,37 @@ impl<'a> Parser<'a> {
                         span: Span::new(start, end),
                     });
                 }
+                if saved_name.eq_ignore_ascii_case("TRIM") {
+                    let (name, args) = self.parse_trim_expr_args()?;
+                    self.expect(Token::RParen)?;
+                    let end = self.position();
+                    return Ok(Expr::FunctionCall {
+                        name,
+                        args,
+                        span: Span::new(start, end),
+                    });
+                }
+                if saved_name.eq_ignore_ascii_case("POSITION") {
+                    let args = self.parse_position_expr_args()?;
+                    self.expect(Token::RParen)?;
+                    let end = self.position();
+                    return Ok(Expr::FunctionCall {
+                        name: saved_name,
+                        args,
+                        span: Span::new(start, end),
+                    });
+                }
+                if saved_name.eq_ignore_ascii_case("SUBSTRING") {
+                    let args = self.parse_substring_expr_args()?;
+                    self.expect(Token::RParen)?;
+                    let end = self.position();
+                    return Ok(Expr::FunctionCall {
+                        name: saved_name,
+                        args,
+                        span: Span::new(start, end),
+                    });
+                }
+
                 // Generic function call.
                 let mut args = Vec::new();
                 if !self.check(&Token::RParen) {
@@ -339,6 +370,94 @@ impl<'a> Parser<'a> {
             else_,
             span: Span::new(start, end),
         })
+    }
+
+    fn parse_trim_expr_args(&mut self) -> Result<(String, Vec<Expr>), ParseError> {
+        let mut function_name = "TRIM".to_string();
+
+        if self.consume_ident_ci("LEADING")? {
+            function_name = "LTRIM".to_string();
+        } else if self.consume_ident_ci("TRAILING")? {
+            function_name = "RTRIM".to_string();
+        } else if self.consume_ident_ci("BOTH")? {
+            function_name = "TRIM".to_string();
+        }
+
+        if self.consume(&Token::From)? {
+            let source = self.parse_expr_prec(0)?;
+            return Ok((function_name, vec![source]));
+        }
+
+        let first = self.parse_expr_prec(0)?;
+
+        if self.consume(&Token::Comma)? {
+            let second = self.parse_expr_prec(0)?;
+            return Ok((function_name, vec![first, second]));
+        }
+
+        if self.consume(&Token::From)? {
+            let source = self.parse_expr_prec(0)?;
+            return Ok((function_name, vec![source, first]));
+        }
+
+        Ok((function_name, vec![first]))
+    }
+
+    /// PostgreSQL-style `POSITION(substr IN string)` or plain
+    /// `POSITION(substr, string)` lowered to the ordinary two-argument
+    /// function form.
+    fn parse_position_expr_args(&mut self) -> Result<Vec<Expr>, ParseError> {
+        // `IN` is also a postfix operator in the main expression grammar, so
+        // parse the first operand above postfix-IN precedence and then consume
+        // the function's `IN` keyword explicitly.
+        let needle = self.parse_expr_prec(35)?;
+        if !self.consume(&Token::Comma)? {
+            self.expect(Token::In)?;
+        }
+        let haystack = self.parse_expr_prec(0)?;
+        Ok(vec![needle, haystack])
+    }
+
+    /// PostgreSQL-style `SUBSTRING` syntax:
+    /// - `SUBSTRING(expr FROM start [FOR count])`
+    /// - `SUBSTRING(expr FOR count [FROM start])`
+    /// - plain function-call form `SUBSTRING(expr, start[, count])`
+    ///
+    /// The SQL-syntax variants are desugared to the comma-arg form so the
+    /// rest of the stack sees the same `Expr::FunctionCall` shape.
+    fn parse_substring_expr_args(&mut self) -> Result<Vec<Expr>, ParseError> {
+        let source = self.parse_expr_prec(0)?;
+
+        if self.consume(&Token::Comma)? {
+            let mut args = vec![source];
+            loop {
+                args.push(self.parse_expr_prec(0)?);
+                if !self.consume(&Token::Comma)? {
+                    break;
+                }
+            }
+            return Ok(args);
+        }
+
+        if self.consume(&Token::From)? {
+            let start = self.parse_expr_prec(0)?;
+            if self.consume(&Token::For)? {
+                let count = self.parse_expr_prec(0)?;
+                return Ok(vec![source, start, count]);
+            }
+            return Ok(vec![source, start]);
+        }
+
+        if self.consume(&Token::For)? {
+            let count = self.parse_expr_prec(0)?;
+            if self.consume(&Token::From)? {
+                let start = self.parse_expr_prec(0)?;
+                return Ok(vec![source, start, count]);
+            }
+            return Ok(vec![source, Expr::lit(Value::Integer(1)), count]);
+        }
+
+        Ok(vec![source])
     }
 
     /// Try to consume a postfix operator on top of the already-parsed

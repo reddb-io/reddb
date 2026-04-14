@@ -66,11 +66,7 @@ impl std::error::Error for PrefetchError {}
 /// **macOS / BSD**: stub returning `Unsupported`. A future commit
 /// adds `fcntl(F_RDADVISE)` for Darwin.
 /// **Windows**: stub returning `Unsupported`.
-pub fn prefetch_range(
-    file: &std::fs::File,
-    offset: u64,
-    length: u64,
-) -> Result<(), PrefetchError> {
+pub fn prefetch_range(file: &std::fs::File, offset: u64, length: u64) -> Result<(), PrefetchError> {
     #[cfg(target_os = "linux")]
     {
         // POSIX_FADV_WILLNEED == 3 on Linux. Hardcoded so we

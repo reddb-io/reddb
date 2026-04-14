@@ -62,12 +62,7 @@ pub struct OperatorEntry {
     pub kind: OperatorKind,
 }
 
-const fn infix(
-    name: &'static str,
-    lhs: DataType,
-    rhs: DataType,
-    ret: DataType,
-) -> OperatorEntry {
+const fn infix(name: &'static str, lhs: DataType, rhs: DataType, ret: DataType) -> OperatorEntry {
     OperatorEntry {
         name,
         lhs_type: lhs,
@@ -91,49 +86,24 @@ const fn prefix(name: &'static str, operand: DataType, ret: DataType) -> Operato
 /// family for readability.
 pub const OPERATOR_CATALOG: &[OperatorEntry] = &[
     // ── Arithmetic: + ──
-    infix(
-        "+",
-        DataType::Integer,
-        DataType::Integer,
-        DataType::Integer,
-    ),
+    infix("+", DataType::Integer, DataType::Integer, DataType::Integer),
     infix("+", DataType::Integer, DataType::Float, DataType::Float),
     infix("+", DataType::Float, DataType::Integer, DataType::Float),
     infix("+", DataType::Float, DataType::Float, DataType::Float),
     infix("+", DataType::BigInt, DataType::BigInt, DataType::BigInt),
-    infix(
-        "+",
-        DataType::Decimal,
-        DataType::Decimal,
-        DataType::Decimal,
-    ),
+    infix("+", DataType::Decimal, DataType::Decimal, DataType::Decimal),
     // ── Arithmetic: - ──
-    infix(
-        "-",
-        DataType::Integer,
-        DataType::Integer,
-        DataType::Integer,
-    ),
+    infix("-", DataType::Integer, DataType::Integer, DataType::Integer),
     infix("-", DataType::Float, DataType::Float, DataType::Float),
     infix("-", DataType::BigInt, DataType::BigInt, DataType::BigInt),
-    infix(
-        "-",
-        DataType::Decimal,
-        DataType::Decimal,
-        DataType::Decimal,
-    ),
+    infix("-", DataType::Decimal, DataType::Decimal, DataType::Decimal),
     // Unary negation — prefix operator.
     prefix("-", DataType::Integer, DataType::Integer),
     prefix("-", DataType::Float, DataType::Float),
     prefix("-", DataType::BigInt, DataType::BigInt),
     prefix("-", DataType::Decimal, DataType::Decimal),
     // ── Arithmetic: * ──
-    infix(
-        "*",
-        DataType::Integer,
-        DataType::Integer,
-        DataType::Integer,
-    ),
+    infix("*", DataType::Integer, DataType::Integer, DataType::Integer),
     infix("*", DataType::Float, DataType::Float, DataType::Float),
     infix("*", DataType::BigInt, DataType::BigInt, DataType::BigInt),
     // ── Arithmetic: / (always produces Float) ──
@@ -141,30 +111,15 @@ pub const OPERATOR_CATALOG: &[OperatorEntry] = &[
     infix("/", DataType::Float, DataType::Float, DataType::Float),
     infix("/", DataType::BigInt, DataType::BigInt, DataType::Float),
     // ── Arithmetic: % (modulo) ──
-    infix(
-        "%",
-        DataType::Integer,
-        DataType::Integer,
-        DataType::Integer,
-    ),
+    infix("%", DataType::Integer, DataType::Integer, DataType::Integer),
     infix("%", DataType::BigInt, DataType::BigInt, DataType::BigInt),
     // ── String concat: || ──
     infix("||", DataType::Text, DataType::Text, DataType::Text),
     // ── Comparison: = ──
-    infix(
-        "=",
-        DataType::Integer,
-        DataType::Integer,
-        DataType::Boolean,
-    ),
+    infix("=", DataType::Integer, DataType::Integer, DataType::Boolean),
     infix("=", DataType::Float, DataType::Float, DataType::Boolean),
     infix("=", DataType::Text, DataType::Text, DataType::Boolean),
-    infix(
-        "=",
-        DataType::Boolean,
-        DataType::Boolean,
-        DataType::Boolean,
-    ),
+    infix("=", DataType::Boolean, DataType::Boolean, DataType::Boolean),
     infix("=", DataType::Uuid, DataType::Uuid, DataType::Boolean),
     infix(
         "=",
@@ -182,12 +137,7 @@ pub const OPERATOR_CATALOG: &[OperatorEntry] = &[
     infix("<>", DataType::Float, DataType::Float, DataType::Boolean),
     infix("<>", DataType::Text, DataType::Text, DataType::Boolean),
     // ── Ordered comparisons: <, <=, >, >= ──
-    infix(
-        "<",
-        DataType::Integer,
-        DataType::Integer,
-        DataType::Boolean,
-    ),
+    infix("<", DataType::Integer, DataType::Integer, DataType::Boolean),
     infix("<", DataType::Float, DataType::Float, DataType::Boolean),
     infix("<", DataType::Text, DataType::Text, DataType::Boolean),
     infix(
@@ -202,19 +152,9 @@ pub const OPERATOR_CATALOG: &[OperatorEntry] = &[
         DataType::Integer,
         DataType::Boolean,
     ),
-    infix(
-        "<=",
-        DataType::Float,
-        DataType::Float,
-        DataType::Boolean,
-    ),
+    infix("<=", DataType::Float, DataType::Float, DataType::Boolean),
     infix("<=", DataType::Text, DataType::Text, DataType::Boolean),
-    infix(
-        ">",
-        DataType::Integer,
-        DataType::Integer,
-        DataType::Boolean,
-    ),
+    infix(">", DataType::Integer, DataType::Integer, DataType::Boolean),
     infix(">", DataType::Float, DataType::Float, DataType::Boolean),
     infix(">", DataType::Text, DataType::Text, DataType::Boolean),
     infix(
@@ -223,12 +163,7 @@ pub const OPERATOR_CATALOG: &[OperatorEntry] = &[
         DataType::Integer,
         DataType::Boolean,
     ),
-    infix(
-        ">=",
-        DataType::Float,
-        DataType::Float,
-        DataType::Boolean,
-    ),
+    infix(">=", DataType::Float, DataType::Float, DataType::Boolean),
     infix(">=", DataType::Text, DataType::Text, DataType::Boolean),
     // ── Logical: AND / OR ──
     infix(
@@ -250,10 +185,7 @@ pub const OPERATOR_CATALOG: &[OperatorEntry] = &[
 /// Returns a `Vec` of static references so the typer can
 /// score each candidate without copying.
 pub fn lookup(name: &str) -> Vec<&'static OperatorEntry> {
-    OPERATOR_CATALOG
-        .iter()
-        .filter(|e| e.name == name)
-        .collect()
+    OPERATOR_CATALOG.iter().filter(|e| e.name == name).collect()
 }
 
 /// Resolve an operator call to the best-matching overload.

@@ -185,7 +185,10 @@ mod tests {
             has_bloom: false,
             index_correlation: 0.0,
         };
-        let correlated = IndexStats { index_correlation: 1.0, ..base.clone() };
+        let correlated = IndexStats {
+            index_correlation: 1.0,
+            ..base.clone()
+        };
         let heap_pages = 1000.0;
         let result_rows = 100.0;
 

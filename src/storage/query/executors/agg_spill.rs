@@ -246,11 +246,7 @@ where
     /// `accumulate` triggers a spill when the in-memory table's
     /// estimated footprint exceeds the configured limit. Returns
     /// the key/state pair after the merge so callers can chain.
-    pub fn accumulate(
-        &mut self,
-        key: K,
-        increment: S,
-    ) -> Result<(), SpillError> {
+    pub fn accumulate(&mut self, key: K, increment: S) -> Result<(), SpillError> {
         match self.table.get_mut(&key) {
             Some(existing) => existing.merge(increment),
             None => {
@@ -552,7 +548,8 @@ where
     let dir = std::env::temp_dir().join(format!("reddb-spill-{pid}-{seq}"));
     std::fs::create_dir_all(&dir)?;
     Ok(SpilledHashAgg::new(
-        dir, 64 * 1024 * 1024, // 64 MiB soft limit
-        128,                   // avg bytes per (key, state) — tuned for SUM/COUNT
+        dir,
+        64 * 1024 * 1024, // 64 MiB soft limit
+        128,              // avg bytes per (key, state) — tuned for SUM/COUNT
     ))
 }

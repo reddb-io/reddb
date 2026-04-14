@@ -762,8 +762,8 @@ impl fmt::Display for DataType {
             DataType::PageRef => write!(f, "PAGE_REF"),
             DataType::Secret => write!(f, "SECRET"),
             DataType::Password => write!(f, "PASSWORD"),
-            DataType::TextZstd => write!(f, "TEXT"),   // presents as TEXT externally
-            DataType::BlobZstd => write!(f, "BLOB"),   // presents as BLOB externally
+            DataType::TextZstd => write!(f, "TEXT"), // presents as TEXT externally
+            DataType::BlobZstd => write!(f, "BLOB"), // presents as BLOB externally
         }
     }
 }

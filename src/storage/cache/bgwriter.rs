@@ -150,10 +150,7 @@ impl Drop for BgWriterHandle {
 /// The implementation is intentionally tokio-free so it works
 /// in the embedded-library use case where the user hasn't
 /// brought up a runtime.
-pub fn spawn(
-    flusher: Arc<dyn DirtyPageFlusher>,
-    config: BgWriterConfig,
-) -> BgWriterHandle {
+pub fn spawn(flusher: Arc<dyn DirtyPageFlusher>, config: BgWriterConfig) -> BgWriterHandle {
     let stop = Arc::new(AtomicBool::new(false));
     let stats = BgWriterStats::new();
     let stop_clone = Arc::clone(&stop);

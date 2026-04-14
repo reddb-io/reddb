@@ -218,8 +218,8 @@ mod tests {
     use super::*;
     use crate::storage::wal::record::WalRecord;
     use crate::storage::wal::writer::WalWriter;
-    use std::sync::mpsc;
     use std::path::PathBuf;
+    use std::sync::mpsc;
     use std::sync::Arc;
     use std::thread;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};

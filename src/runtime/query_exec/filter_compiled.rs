@@ -336,13 +336,7 @@ impl CompiledEntityFilter {
         schema_cols: &[String],
     ) -> Self {
         let mut ops = Vec::new();
-        compile_into(
-            filter,
-            table_name,
-            table_alias,
-            Some(schema_cols),
-            &mut ops,
-        );
+        compile_into(filter, table_name, table_alias, Some(schema_cols), &mut ops);
         Self {
             ops,
             table_name: table_name.to_string(),

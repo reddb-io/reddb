@@ -41,11 +41,7 @@ pub trait RowFetcher {
     /// Load the row at `(page, row_within_page)`. Returns
     /// `None` when the slot is empty (tombstone / deleted)
     /// so the scan can skip it without raising an error.
-    fn fetch(
-        &self,
-        page: u32,
-        row_within_page: u32,
-    ) -> Result<Option<Self::Row>, Self::Error>;
+    fn fetch(&self, page: u32, row_within_page: u32) -> Result<Option<Self::Row>, Self::Error>;
 }
 
 /// Execute a bitmap heap scan over `bitmap`, invoking `fetcher`

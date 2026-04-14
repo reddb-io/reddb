@@ -204,10 +204,7 @@ pub(super) fn runtime_table_record_from_entity_projected(
             } else {
                 // Positional-only (no schema, no names): map c0/c1/... or fallback
                 for col in columns {
-                    if let Some(idx) = col
-                        .strip_prefix('c')
-                        .and_then(|s| s.parse::<usize>().ok())
-                    {
+                    if let Some(idx) = col.strip_prefix('c').and_then(|s| s.parse::<usize>().ok()) {
                         if let Some(value) = row.columns.get(idx) {
                             record.set(col, value.clone());
                         }
@@ -307,10 +304,7 @@ pub(super) fn runtime_table_record_from_entity_ref_projected(
         }
     } else {
         for col in columns {
-            if let Some(idx) = col
-                .strip_prefix('c')
-                .and_then(|s| s.parse::<usize>().ok())
-            {
+            if let Some(idx) = col.strip_prefix('c').and_then(|s| s.parse::<usize>().ok()) {
                 if let Some(value) = row.columns.get(idx) {
                     record.set(col, value.clone());
                 }

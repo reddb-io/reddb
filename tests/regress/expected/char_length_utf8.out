@@ -1,0 +1,18 @@
+-- SELECT LENGTH('josé') AS chars
+chars
+-----
+4
+(1 row)
+
+-- SELECT CHAR_LENGTH('josé') AS chars
+chars
+-----
+4
+(1 row)
+
+-- SELECT CHARACTER_LENGTH('josé') AS chars
+chars
+-----
+4
+(1 row)
+

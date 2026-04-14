@@ -18,8 +18,9 @@
 //!
 //! Scope today (Fase 3 starter): handles literals, columns, unary,
 //! binary arith / comparison / logical, cast, IsNull, Between,
-//! InList, Case. FunctionCall returns `DataType::Nullable` (== "we
-//! don't know") because the function registry is still TODO.
+//! InList, Case, and built-in FunctionCall nodes resolved through the
+//! static function catalog. The remaining gap is advanced polymorphic
+//! signatures beyond lightweight cases such as `COALESCE`.
 //! Subqueries / parameters / advanced polymorphism are out of scope.
 //!
 //! This module is **not yet wired** into the parser → planner flow.
@@ -255,9 +256,7 @@ pub fn type_expr(expr: &Expr, scope: &dyn Scope) -> Result<TypedExpr, TypeError>
             // still types — matches PG's permissive
             // `function does not exist` warning rather than hard fail.
             let arg_dt: Vec<DataType> = typed_args.iter().map(|t| t.ty).collect();
-            let return_ty = crate::storage::schema::function_catalog::resolve(name, &arg_dt)
-                .map(|entry| entry.return_type)
-                .unwrap_or(DataType::Nullable);
+            let return_ty = resolve_function_return_type(name, &arg_dt);
             Ok(TypedExpr {
                 ty: return_ty,
                 kind: TypedExprKind::FunctionCall {
@@ -274,28 +273,24 @@ pub fn type_expr(expr: &Expr, scope: &dyn Scope) -> Result<TypedExpr, TypeError>
             for (cond, val) in branches {
                 let cond_typed = type_expr(cond, scope)?;
                 let val_typed = type_expr(val, scope)?;
-                if let Some(prev) = result_ty {
-                    if val_typed.ty != prev && !can_implicit_cast(val_typed.ty, prev) {
-                        return Err(TypeError::CaseBranchMismatch {
-                            first: prev,
-                            other: val_typed.ty,
-                        });
+                let prev_ty = result_ty;
+                result_ty = merge_compatible_type(result_ty, val_typed.ty).map_err(|_| {
+                    TypeError::CaseBranchMismatch {
+                        first: prev_ty.unwrap_or(val_typed.ty),
+                        other: val_typed.ty,
                     }
-                } else {
-                    result_ty = Some(val_typed.ty);
-                }
+                })?;
                 typed_branches.push((cond_typed, val_typed));
             }
             let typed_else = if let Some(else_expr) = else_ {
                 let e = type_expr(else_expr, scope)?;
-                if let Some(prev) = result_ty {
-                    if e.ty != prev && !can_implicit_cast(e.ty, prev) {
-                        return Err(TypeError::CaseBranchMismatch {
-                            first: prev,
-                            other: e.ty,
-                        });
+                let prev_ty = result_ty;
+                result_ty = merge_compatible_type(result_ty, e.ty).map_err(|_| {
+                    TypeError::CaseBranchMismatch {
+                        first: prev_ty.unwrap_or(e.ty),
+                        other: e.ty,
                     }
-                }
+                })?;
                 Some(Box::new(e))
             } else {
                 None
@@ -437,6 +432,52 @@ fn literal_type(v: &Value) -> DataType {
         Value::PageRef(_) => DataType::PageRef,
         Value::Secret(_) => DataType::Secret,
         Value::Password(_) => DataType::Password,
+    }
+}
+
+fn resolve_function_return_type(name: &str, arg_types: &[DataType]) -> DataType {
+    let upper = name.to_ascii_uppercase();
+    match upper.as_str() {
+        // CONCAT stringifies every non-null argument at runtime, so the
+        // return type is always text even when the catalog match is
+        // intentionally loose.
+        "CONCAT" | "CONCAT_WS" | "QUOTE_LITERAL" => DataType::Text,
+        // COALESCE is effectively `anycompatible`: ignore NULL/unknown
+        // args, then widen left-to-right using the implicit-cast graph.
+        "COALESCE" => resolve_coalesce_return_type(arg_types),
+        _ => crate::storage::schema::function_catalog::resolve(name, arg_types)
+            .map(|entry| entry.return_type)
+            .unwrap_or(DataType::Nullable),
+    }
+}
+
+fn resolve_coalesce_return_type(arg_types: &[DataType]) -> DataType {
+    let mut resolved: Option<DataType> = None;
+
+    for &arg_ty in arg_types {
+        match merge_compatible_type(resolved, arg_ty) {
+            Ok(next) => resolved = next,
+            Err(_) => return DataType::Nullable,
+        }
+    }
+
+    resolved.unwrap_or(DataType::Nullable)
+}
+
+fn merge_compatible_type(
+    current: Option<DataType>,
+    next: DataType,
+) -> Result<Option<DataType>, ()> {
+    if next == DataType::Nullable {
+        return Ok(current);
+    }
+
+    match current {
+        None => Ok(Some(next)),
+        Some(prev) if prev == next => Ok(Some(prev)),
+        Some(prev) if can_implicit_cast(next, prev) => Ok(Some(prev)),
+        Some(prev) if can_implicit_cast(prev, next) => Ok(Some(next)),
+        Some(_) => Err(()),
     }
 }
 

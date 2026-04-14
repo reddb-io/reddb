@@ -214,11 +214,7 @@ pub fn page_of(entity_id: u64, rows_per_page: u32) -> u32 {
 /// bit for the affected page. Centralised so a single function
 /// can be hooked into multiple write call sites without each
 /// rewriting the page-of math.
-pub fn mark_dirty_after_write(
-    vmap: &VisibilityMap,
-    entity_id: u64,
-    rows_per_page: u32,
-) {
+pub fn mark_dirty_after_write(vmap: &VisibilityMap, entity_id: u64, rows_per_page: u32) {
     let page = page_of(entity_id, rows_per_page);
     vmap.clear_all_visible(page);
 }

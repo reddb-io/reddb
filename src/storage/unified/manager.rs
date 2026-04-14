@@ -1081,9 +1081,7 @@ impl UnifiedSegment for Arc<RwLock<GrowingSegment>> {
     }
 
     fn delete(&mut self, id: EntityId) -> Result<bool, SegmentError> {
-        self.write()
-            .unwrap_or_else(|e| e.into_inner())
-            .delete(id)
+        self.write().unwrap_or_else(|e| e.into_inner()).delete(id)
     }
 
     fn get_metadata(&self, id: EntityId) -> Option<Metadata> {

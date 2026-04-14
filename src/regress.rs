@@ -131,7 +131,10 @@ pub fn discover_cases(sql_dir: &Path, expected_dir: &Path) -> std::io::Result<Ve
 /// `executor` is a closure so the harness doesn't depend on
 /// the runtime types directly — tests inject a closure that
 /// takes a SQL string and returns the canonical output.
-pub fn run_case<F>(case: &RegressCase, executor: F) -> Result<Option<RegressFailure>, std::io::Error>
+pub fn run_case<F>(
+    case: &RegressCase,
+    executor: F,
+) -> Result<Option<RegressFailure>, std::io::Error>
 where
     F: FnMut(&str) -> String,
 {

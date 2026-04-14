@@ -12,7 +12,9 @@
 //! function.
 
 use crate::api::{RedDBError, RedDBResult};
-use crate::runtime::join_filter::projection_name;
+use crate::runtime::join_filter::{
+    eval_projection_value, field_ref_name, projection_name, runtime_partial_cmp,
+};
 use crate::runtime::runtime_table_record_from_entity;
 use crate::storage::query::ast::{FieldRef, Projection};
 use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
@@ -169,9 +171,9 @@ pub(crate) fn execute_aggregate_query(
                     Some(col) => col,
                     None => continue,
                 };
-                if col_name == "_count" {
+                if func_name == "COUNT" && col_name == "*" {
                     continue;
-                } // COUNT(*) just needs count
+                }
 
                 let val = match resolve_aggregate_argument_value(args.first(), &record) {
                     Some(v) => v,
@@ -180,78 +182,86 @@ pub(crate) fn execute_aggregate_query(
                 let num = value_to_f64(&val);
 
                 match func_name {
+                    "COUNT" => {
+                        if !matches!(val, Value::Null) {
+                            *state.agg_counts.entry(col_name.clone()).or_insert(0) += 1;
+                        }
+                    }
                     "SUM" | "AVG" => {
                         if let Some(n) = num {
-                            *state.sums.entry(col_name.to_string()).or_insert(0.0) += n;
-                            *state.agg_counts.entry(col_name.to_string()).or_insert(0) += 1;
+                            *state.sums.entry(col_name.clone()).or_insert(0.0) += n;
+                            *state.agg_counts.entry(col_name.clone()).or_insert(0) += 1;
                         }
                     }
                     "MIN" => {
-                        if let Some(n) = num {
-                            let entry = state.mins.entry(col_name.to_string()).or_insert(f64::MAX);
-                            if n < *entry {
-                                *entry = n;
-                            }
-                        }
+                        update_extreme_value(
+                            &mut state.mins,
+                            &col_name,
+                            &val,
+                            std::cmp::Ordering::Less,
+                        );
                     }
                     "MAX" => {
-                        if let Some(n) = num {
-                            let entry = state.maxs.entry(col_name.to_string()).or_insert(f64::MIN);
-                            if n > *entry {
-                                *entry = n;
-                            }
-                        }
+                        update_extreme_value(
+                            &mut state.maxs,
+                            &col_name,
+                            &val,
+                            std::cmp::Ordering::Greater,
+                        );
                     }
                     "STDDEV" | "VARIANCE" => {
                         if let Some(n) = num {
-                            *state.sums.entry(col_name.to_string()).or_insert(0.0) += n;
-                            *state.sum_squares.entry(col_name.to_string()).or_insert(0.0) += n * n;
-                            *state.agg_counts.entry(col_name.to_string()).or_insert(0) += 1;
+                            *state.sums.entry(col_name.clone()).or_insert(0.0) += n;
+                            *state.sum_squares.entry(col_name.clone()).or_insert(0.0) += n * n;
+                            *state.agg_counts.entry(col_name.clone()).or_insert(0) += 1;
                         }
                     }
                     "MEDIAN" | "PERCENTILE" => {
                         if let Some(n) = num {
                             state
                                 .all_values
-                                .entry(col_name.to_string())
+                                .entry(col_name.clone())
                                 .or_default()
                                 .push(n);
                         }
                     }
                     "GROUP_CONCAT" => {
-                        let text = match &val {
-                            Value::Text(s) => s.clone(),
-                            other => format!("{:?}", other),
-                        };
-                        state
-                            .concat_values
-                            .entry(col_name.to_string())
-                            .or_default()
-                            .push(text);
+                        if !matches!(val, Value::Null) {
+                            let text = match &val {
+                                Value::Text(s) => s.clone(),
+                                other => other.display_string(),
+                            };
+                            state
+                                .concat_values
+                                .entry(col_name.clone())
+                                .or_default()
+                                .push(text);
+                        }
                     }
                     "FIRST" => {
                         state
                             .first_values
-                            .entry(col_name.to_string())
+                            .entry(col_name.clone())
                             .or_insert_with(|| val.clone());
                     }
                     "LAST" => {
-                        state.last_values.insert(col_name.to_string(), val.clone());
+                        state.last_values.insert(col_name.clone(), val.clone());
                     }
                     "ARRAY_AGG" => {
                         state
                             .array_values
-                            .entry(col_name.to_string())
+                            .entry(col_name.clone())
                             .or_default()
                             .push(val.clone());
                     }
                     "COUNT_DISTINCT" => {
-                        let key = format!("{:?}", val);
-                        state
-                            .distinct_sets
-                            .entry(col_name.to_string())
-                            .or_default()
-                            .insert(key);
+                        if !matches!(val, Value::Null) {
+                            state
+                                .distinct_sets
+                                .entry(col_name.clone())
+                                .or_default()
+                                .insert(group_value_key(&val));
+                        }
                     }
                     _ => {}
                 }
@@ -307,71 +317,87 @@ pub(crate) fn execute_aggregate_query(
                     Some(col_name) => col_name,
                     None => continue,
                 };
-                let result_name = aggregate_output_name(proj, func_name, col_name);
+                let result_name = aggregate_output_name(proj, func_name, &col_name);
 
                 if !columns.contains(&result_name) {
                     columns.push(result_name.clone());
                 }
 
                 let result_val = match func_name {
-                    "COUNT" => Value::Integer(group.state.count as i64),
-                    "SUM" => {
-                        let s = group.state.sums.get(col_name).copied().unwrap_or(0.0);
-                        Value::Float(s)
+                    "COUNT" => {
+                        if col_name == "*" {
+                            Value::Integer(group.state.count as i64)
+                        } else {
+                            Value::Integer(
+                                group.state.agg_counts.get(&col_name).copied().unwrap_or(0) as i64,
+                            )
+                        }
                     }
+                    "SUM" => match group.state.sums.get(&col_name).copied() {
+                        Some(s) => Value::Float(s),
+                        None => Value::Null,
+                    },
                     "AVG" => {
-                        let s = group.state.sums.get(col_name).copied().unwrap_or(0.0);
-                        let n = group.state.agg_counts.get(col_name).copied().unwrap_or(0);
-                        Value::Float(if n > 0 { s / n as f64 } else { 0.0 })
+                        let s = group.state.sums.get(&col_name).copied().unwrap_or(0.0);
+                        let n = group.state.agg_counts.get(&col_name).copied().unwrap_or(0);
+                        if n > 0 {
+                            Value::Float(s / n as f64)
+                        } else {
+                            Value::Null
+                        }
                     }
-                    "MIN" => {
-                        let m = group.state.mins.get(col_name).copied().unwrap_or(0.0);
-                        Value::Float(m)
-                    }
-                    "MAX" => {
-                        let m = group.state.maxs.get(col_name).copied().unwrap_or(0.0);
-                        Value::Float(m)
-                    }
+                    "MIN" => group
+                        .state
+                        .mins
+                        .get(&col_name)
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                    "MAX" => group
+                        .state
+                        .maxs
+                        .get(&col_name)
+                        .cloned()
+                        .unwrap_or(Value::Null),
                     "VARIANCE" => {
-                        let n = group.state.agg_counts.get(col_name).copied().unwrap_or(0) as f64;
+                        let n = group.state.agg_counts.get(&col_name).copied().unwrap_or(0) as f64;
                         if n > 0.0 {
-                            let sum = group.state.sums.get(col_name).copied().unwrap_or(0.0);
+                            let sum = group.state.sums.get(&col_name).copied().unwrap_or(0.0);
                             let sum_sq = group
                                 .state
                                 .sum_squares
-                                .get(col_name)
+                                .get(&col_name)
                                 .copied()
                                 .unwrap_or(0.0);
                             Value::Float(sum_sq / n - (sum / n).powi(2))
                         } else {
-                            Value::Float(0.0)
+                            Value::Null
                         }
                     }
                     "STDDEV" => {
-                        let n = group.state.agg_counts.get(col_name).copied().unwrap_or(0) as f64;
+                        let n = group.state.agg_counts.get(&col_name).copied().unwrap_or(0) as f64;
                         if n > 0.0 {
-                            let sum = group.state.sums.get(col_name).copied().unwrap_or(0.0);
+                            let sum = group.state.sums.get(&col_name).copied().unwrap_or(0.0);
                             let sum_sq = group
                                 .state
                                 .sum_squares
-                                .get(col_name)
+                                .get(&col_name)
                                 .copied()
                                 .unwrap_or(0.0);
                             let variance = sum_sq / n - (sum / n).powi(2);
                             Value::Float(variance.max(0.0).sqrt())
                         } else {
-                            Value::Float(0.0)
+                            Value::Null
                         }
                     }
                     "MEDIAN" => {
                         let mut vals = group
                             .state
                             .all_values
-                            .get(col_name)
+                            .get(&col_name)
                             .cloned()
                             .unwrap_or_default();
                         if vals.is_empty() {
-                            Value::Float(0.0)
+                            Value::Null
                         } else {
                             vals.sort_by(|a, b| {
                                 a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
@@ -385,23 +411,17 @@ pub(crate) fn execute_aggregate_query(
                         }
                     }
                     "PERCENTILE" => {
-                        let pct = args
-                            .get(1)
-                            .and_then(|a| match a {
-                                Projection::Column(c) => {
-                                    c.strip_prefix("LIT:").and_then(|s| s.parse::<f64>().ok())
-                                }
-                                _ => None,
-                            })
-                            .unwrap_or(0.5);
+                        let pct = resolve_static_projection_number(args.get(1))
+                            .unwrap_or(0.5)
+                            .clamp(0.0, 1.0);
                         let mut vals = group
                             .state
                             .all_values
-                            .get(col_name)
+                            .get(&col_name)
                             .cloned()
                             .unwrap_or_default();
                         if vals.is_empty() {
-                            Value::Float(0.0)
+                            Value::Null
                         } else {
                             vals.sort_by(|a, b| {
                                 a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
@@ -415,37 +435,45 @@ pub(crate) fn execute_aggregate_query(
                         let vals = group
                             .state
                             .concat_values
-                            .get(col_name)
+                            .get(&col_name)
                             .cloned()
                             .unwrap_or_default();
-                        Value::Text(vals.join(", "))
+                        if vals.is_empty() {
+                            Value::Null
+                        } else {
+                            Value::Text(vals.join(", "))
+                        }
                     }
                     "FIRST" => group
                         .state
                         .first_values
-                        .get(col_name)
+                        .get(&col_name)
                         .cloned()
                         .unwrap_or(Value::Null),
                     "LAST" => group
                         .state
                         .last_values
-                        .get(col_name)
+                        .get(&col_name)
                         .cloned()
                         .unwrap_or(Value::Null),
                     "ARRAY_AGG" => {
                         let vals = group
                             .state
                             .array_values
-                            .get(col_name)
+                            .get(&col_name)
                             .cloned()
                             .unwrap_or_default();
-                        Value::Array(vals)
+                        if vals.is_empty() {
+                            Value::Null
+                        } else {
+                            Value::Array(vals)
+                        }
                     }
                     "COUNT_DISTINCT" => {
                         let set = group
                             .state
                             .distinct_sets
-                            .get(col_name)
+                            .get(&col_name)
                             .map(|s| s.len())
                             .unwrap_or(0);
                         Value::Integer(set as i64)
@@ -472,15 +500,15 @@ pub(crate) fn execute_aggregate_query(
                     Some(col_name) => col_name,
                     None => continue,
                 };
-                let name = aggregate_output_name(proj, func_name, col_name);
+                let name = aggregate_output_name(proj, func_name, &col_name);
                 if !columns.contains(&name) {
                     columns.push(name.clone());
                 }
                 record.set(
                     &name,
                     match func_name {
-                        "COUNT" => Value::Integer(0),
-                        _ => Value::Float(0.0),
+                        "COUNT" | "COUNT_DISTINCT" => Value::Integer(0),
+                        _ => Value::Null,
                     },
                 );
             }
@@ -496,12 +524,8 @@ pub(crate) fn execute_aggregate_query(
     })
 }
 
-fn aggregate_argument_key(args: &[Projection]) -> Option<&str> {
-    match args.first() {
-        Some(Projection::Column(column)) => Some(column.as_str()),
-        Some(Projection::All) => Some("*"),
-        _ => None,
-    }
+fn aggregate_argument_key(args: &[Projection]) -> Option<String> {
+    args.first().map(render_aggregate_argument_key)
 }
 
 fn resolve_aggregate_argument_value(
@@ -509,7 +533,8 @@ fn resolve_aggregate_argument_value(
     record: &UnifiedRecord,
 ) -> Option<Value> {
     match arg {
-        Some(Projection::Column(column)) => record.get(column).cloned(),
+        Some(Projection::All) => None,
+        Some(arg) => eval_projection_value(arg, record),
         _ => None,
     }
 }
@@ -525,6 +550,55 @@ fn aggregate_output_name(projection: &Projection, func_name: &str, column_name: 
         format!("{}(*)", func_name.to_lowercase())
     } else {
         format!("{}({})", func_name.to_lowercase(), column_name)
+    }
+}
+
+fn render_aggregate_argument_key(arg: &Projection) -> String {
+    match arg {
+        Projection::Column(column) => column
+            .strip_prefix("LIT:")
+            .map(str::to_string)
+            .unwrap_or_else(|| column.clone()),
+        Projection::All => "*".to_string(),
+        Projection::Alias(_, alias) => alias.clone(),
+        Projection::Field(field, alias) => alias.clone().unwrap_or_else(|| field_ref_name(field)),
+        Projection::Function(name, args) => {
+            let rendered = args
+                .iter()
+                .map(render_aggregate_argument_key)
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{}({rendered})", base_function_name(name))
+        }
+        Projection::Expression(_, alias) => alias.clone().unwrap_or_else(|| "expr".to_string()),
+    }
+}
+
+fn resolve_static_projection_number(arg: Option<&Projection>) -> Option<f64> {
+    let record = UnifiedRecord::new();
+    let value = eval_projection_value(arg?, &record)?;
+    value_to_f64(&value)
+}
+
+fn update_extreme_value(
+    map: &mut std::collections::HashMap<String, Value>,
+    key: &str,
+    candidate: &Value,
+    ordering: std::cmp::Ordering,
+) {
+    if matches!(candidate, Value::Null) {
+        return;
+    }
+
+    match map.get_mut(key) {
+        Some(current) => {
+            if runtime_partial_cmp(candidate, current).is_some_and(|ord| ord == ordering) {
+                *current = candidate.clone();
+            }
+        }
+        None => {
+            map.insert(key.to_string(), candidate.clone());
+        }
     }
 }
 
@@ -640,6 +714,7 @@ fn value_to_bucket_timestamp_ns(value: &Value) -> Option<u64> {
     match value {
         Value::UnsignedInteger(v) => Some(*v),
         Value::Integer(v) if *v >= 0 => Some(*v as u64),
+        Value::BigInt(v) if *v >= 0 => Some(*v as u64),
         Value::Float(v) if *v >= 0.0 => Some(*v as u64),
         Value::Timestamp(v) if *v >= 0 => Some((*v as u64) * 1_000_000_000),
         Value::TimestampMs(v) if *v >= 0 => Some((*v as u64) * 1_000_000),
@@ -701,8 +776,8 @@ struct AggregateGroup {
 struct AggState {
     count: u64,
     sums: std::collections::HashMap<String, f64>,
-    mins: std::collections::HashMap<String, f64>,
-    maxs: std::collections::HashMap<String, f64>,
+    mins: std::collections::HashMap<String, Value>,
+    maxs: std::collections::HashMap<String, Value>,
     // For STDDEV/VARIANCE: collect sum of squares
     sum_squares: std::collections::HashMap<String, f64>,
     agg_counts: std::collections::HashMap<String, u64>,
@@ -723,7 +798,9 @@ fn value_to_f64(val: &Value) -> Option<f64> {
     match val {
         Value::Integer(n) => Some(*n as f64),
         Value::UnsignedInteger(n) => Some(*n as f64),
+        Value::BigInt(n) => Some(*n as f64),
         Value::Float(f) => Some(*f),
+        Value::Decimal(d) => Some(*d as f64 / 10_000.0),
         _ => None,
     }
 }

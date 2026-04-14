@@ -125,7 +125,10 @@ impl std::fmt::Display for DpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::TooManyRelations { count, max } => {
-                write!(f, "join DP only supports up to {max} relations, got {count}")
+                write!(
+                    f,
+                    "join DP only supports up to {max} relations, got {count}"
+                )
             }
             Self::Disconnected => write!(f, "join graph is disconnected"),
             Self::Empty => write!(f, "join DP requires at least one relation"),
@@ -140,10 +143,7 @@ impl std::error::Error for DpError {}
 /// `order` field contains the relation IDs in execution order
 /// (leftmost = build / outer side, rightmost = probe / inner
 /// side of the last join).
-pub fn reorder(
-    rels: &[RelStats],
-    edges: &[JoinEdge],
-) -> Result<DpEntry, DpError> {
+pub fn reorder(rels: &[RelStats], edges: &[JoinEdge]) -> Result<DpEntry, DpError> {
     if rels.is_empty() {
         return Err(DpError::Empty);
     }

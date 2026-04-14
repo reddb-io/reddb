@@ -352,11 +352,142 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
             Value::Text(s) => Some(Value::Text(s.to_lowercase())),
             other => Some(other.clone()),
         },
-        "LENGTH" => match args.first()? {
-            Value::Text(s) => Some(Value::Integer(s.len() as i64)),
+        "LENGTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH" => match args.first()? {
+            Value::Text(s) => Some(Value::Integer(s.chars().count() as i64)),
             Value::Blob(b) => Some(Value::Integer(b.len() as i64)),
             Value::Array(a) => Some(Value::Integer(a.len() as i64)),
             _ => Some(Value::Null),
+        },
+        "OCTET_LENGTH" => match args.first()? {
+            Value::Text(s) => Some(Value::Integer(s.len() as i64)),
+            Value::Blob(b) => Some(Value::Integer(b.len() as i64)),
+            _ => Some(Value::Null),
+        },
+        "BIT_LENGTH" => match args.first()? {
+            Value::Text(s) => Some(Value::Integer((s.len() * 8) as i64)),
+            Value::Blob(b) => Some(Value::Integer((b.len() * 8) as i64)),
+            _ => Some(Value::Null),
+        },
+        "SUBSTRING" | "SUBSTR" => {
+            let text = match args.first()? {
+                Value::Text(text) => text,
+                _ => return Some(Value::Null),
+            };
+            match args.get(1)? {
+                Value::Text(pattern) if name == "SUBSTRING" && args.len() == 2 => {
+                    Some(match substring_pattern_text(text, pattern) {
+                        Some(matched) => Value::Text(matched),
+                        None => Value::Null,
+                    })
+                }
+                start_value => {
+                    let start = value_as_i64(start_value)?;
+                    let count = args.get(2).map(value_as_i64).transpose()?;
+                    Some(Value::Text(substring_text(text, start, count)?))
+                }
+            }
+        }
+        "POSITION" => {
+            let needle = match args.first()? {
+                Value::Text(text) => text,
+                _ => return Some(Value::Null),
+            };
+            let haystack = match args.get(1)? {
+                Value::Text(text) => text,
+                _ => return Some(Value::Null),
+            };
+            Some(Value::Integer(position_text(needle, haystack)))
+        }
+        "TRIM" | "BTRIM" => {
+            let text = match args.first()? {
+                Value::Text(text) => text,
+                _ => return Some(Value::Null),
+            };
+            let chars = match args.get(1) {
+                None => None,
+                Some(Value::Text(chars)) => Some(chars.as_str()),
+                Some(_) => return Some(Value::Null),
+            };
+            Some(Value::Text(trim_text(text, chars, true, true)))
+        }
+        "LTRIM" => {
+            let text = match args.first()? {
+                Value::Text(text) => text,
+                _ => return Some(Value::Null),
+            };
+            let chars = match args.get(1) {
+                None => None,
+                Some(Value::Text(chars)) => Some(chars.as_str()),
+                Some(_) => return Some(Value::Null),
+            };
+            Some(Value::Text(trim_text(text, chars, true, false)))
+        }
+        "RTRIM" => {
+            let text = match args.first()? {
+                Value::Text(text) => text,
+                _ => return Some(Value::Null),
+            };
+            let chars = match args.get(1) {
+                None => None,
+                Some(Value::Text(chars)) => Some(chars.as_str()),
+                Some(_) => return Some(Value::Null),
+            };
+            Some(Value::Text(trim_text(text, chars, false, true)))
+        }
+        "CONCAT" => Some(Value::Text(
+            args.iter()
+                .filter(|value| !matches!(value, Value::Null))
+                .map(Value::display_string)
+                .collect::<String>(),
+        )),
+        "CONCAT_WS" => {
+            let separator = match args.first()? {
+                Value::Null => return Some(Value::Null),
+                Value::Text(text) => text.as_str(),
+                other => {
+                    return Some(Value::Text(
+                        args.iter()
+                            .skip(1)
+                            .filter(|value| !matches!(value, Value::Null))
+                            .map(Value::display_string)
+                            .collect::<Vec<_>>()
+                            .join(&other.display_string()),
+                    ))
+                }
+            };
+            Some(Value::Text(
+                args.iter()
+                    .skip(1)
+                    .filter(|value| !matches!(value, Value::Null))
+                    .map(Value::display_string)
+                    .collect::<Vec<_>>()
+                    .join(separator),
+            ))
+        }
+        "REVERSE" => match args.first()? {
+            Value::Text(text) => Some(Value::Text(text.chars().rev().collect())),
+            _ => Some(Value::Null),
+        },
+        "LEFT" => {
+            let text = match args.first()? {
+                Value::Text(text) => text,
+                _ => return Some(Value::Null),
+            };
+            let count = value_as_i64(args.get(1)?)?;
+            Some(Value::Text(slice_left_text(text, count)))
+        }
+        "RIGHT" => {
+            let text = match args.first()? {
+                Value::Text(text) => text,
+                _ => return Some(Value::Null),
+            };
+            let count = value_as_i64(args.get(1)?)?;
+            Some(Value::Text(slice_right_text(text, count)))
+        }
+        "QUOTE_LITERAL" => match args.first()? {
+            Value::Null => Some(Value::Null),
+            Value::Text(text) => Some(Value::Text(quote_literal_text(text))),
+            other => Some(Value::Text(quote_literal_text(&other.display_string()))),
         },
         "ABS" => match args.first()? {
             Value::Integer(n) => Some(Value::Integer(n.abs())),
@@ -444,6 +575,7 @@ fn time_bucket_duration(value: &Value) -> Option<u64> {
         Value::Text(text) => crate::storage::timeseries::retention::parse_duration_ns(text),
         Value::UnsignedInteger(value) => Some(*value),
         Value::Integer(value) if *value >= 0 => Some(*value as u64),
+        Value::BigInt(value) if *value >= 0 => Some(*value as u64),
         _ => None,
     }
 }
@@ -452,6 +584,7 @@ fn value_to_bucket_timestamp_ns(value: &Value) -> Option<u64> {
     match value {
         Value::UnsignedInteger(v) => Some(*v),
         Value::Integer(v) if *v >= 0 => Some(*v as u64),
+        Value::BigInt(v) if *v >= 0 => Some(*v as u64),
         Value::Float(v) if *v >= 0.0 => Some(*v as u64),
         Value::Timestamp(v) if *v >= 0 => Some((*v as u64) * 1_000_000_000),
         Value::TimestampMs(v) if *v >= 0 => Some((*v as u64) * 1_000_000),
@@ -491,6 +624,108 @@ fn value_as_f64(value: &Value) -> Option<f64> {
         Value::Float(value) => Some(*value),
         Value::Integer(value) => Some(*value as f64),
         Value::UnsignedInteger(value) => Some(*value as f64),
+        Value::BigInt(value) => Some(*value as f64),
         _ => None,
+    }
+}
+
+fn value_as_i64(value: &Value) -> Option<i64> {
+    match value {
+        Value::Integer(value) | Value::BigInt(value) => Some(*value),
+        Value::UnsignedInteger(value) => i64::try_from(*value).ok(),
+        _ => None,
+    }
+}
+
+fn substring_text(text: &str, start: i64, count: Option<i64>) -> Option<String> {
+    if count.is_some_and(|count| count < 0) {
+        return None;
+    }
+
+    let chars: Vec<char> = text.chars().collect();
+    let start_idx = if start <= 1 {
+        0
+    } else {
+        usize::try_from(start - 1).ok()?
+    };
+
+    if start_idx >= chars.len() {
+        return Some(String::new());
+    }
+
+    let end_idx = match count {
+        Some(count) => start_idx.saturating_add(count as usize).min(chars.len()),
+        None => chars.len(),
+    };
+
+    Some(chars[start_idx..end_idx].iter().collect())
+}
+
+fn substring_pattern_text(text: &str, pattern: &str) -> Option<String> {
+    let regex = regex::Regex::new(pattern).ok()?;
+    let captures = regex.captures(text)?;
+    if captures.len() > 1 {
+        return captures.get(1).map(|capture| capture.as_str().to_string());
+    }
+    captures.get(0).map(|capture| capture.as_str().to_string())
+}
+
+fn position_text(needle: &str, haystack: &str) -> i64 {
+    if needle.is_empty() {
+        return 1;
+    }
+    haystack
+        .find(needle)
+        .map(|byte_idx| haystack[..byte_idx].chars().count() as i64 + 1)
+        .unwrap_or(0)
+}
+
+fn slice_left_text(text: &str, count: i64) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let take = normalized_slice_len(chars.len(), count);
+    chars.into_iter().take(take).collect()
+}
+
+fn slice_right_text(text: &str, count: i64) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let take = normalized_slice_len(chars.len(), count);
+    let len = chars.len();
+    chars.into_iter().skip(len.saturating_sub(take)).collect()
+}
+
+fn normalized_slice_len(len: usize, count: i64) -> usize {
+    if count >= 0 {
+        usize::try_from(count).unwrap_or(usize::MAX).min(len)
+    } else {
+        len.saturating_sub(count.unsigned_abs() as usize)
+    }
+}
+
+fn quote_literal_text(text: &str) -> String {
+    let escaped = text.replace('\'', "''");
+    if text.contains('\\') {
+        format!("E'{}'", escaped.replace('\\', "\\\\"))
+    } else {
+        format!("'{escaped}'")
+    }
+}
+
+fn trim_text(text: &str, chars: Option<&str>, left: bool, right: bool) -> String {
+    match chars {
+        Some(chars) => {
+            let predicate = |ch| chars.contains(ch);
+            match (left, right) {
+                (true, true) => text.trim_matches(predicate).to_string(),
+                (true, false) => text.trim_start_matches(predicate).to_string(),
+                (false, true) => text.trim_end_matches(predicate).to_string(),
+                (false, false) => text.to_string(),
+            }
+        }
+        None => match (left, right) {
+            (true, true) => text.trim().to_string(),
+            (true, false) => text.trim_start().to_string(),
+            (false, true) => text.trim_end().to_string(),
+            (false, false) => text.to_string(),
+        },
     }
 }

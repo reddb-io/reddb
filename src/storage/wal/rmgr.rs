@@ -131,10 +131,7 @@ pub enum RmgrError {
     /// No resource manager registered for this id.
     Unregistered(RmgrId),
     /// Subsystem-specific failure during redo / undo.
-    SubsystemFailure {
-        rmgr: RmgrId,
-        message: String,
-    },
+    SubsystemFailure { rmgr: RmgrId, message: String },
 }
 
 impl std::fmt::Display for RmgrError {

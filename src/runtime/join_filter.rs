@@ -886,9 +886,7 @@ pub(super) fn sort_records_by_order_by(
                 .iter()
                 .map(|clause| {
                     if let Some(ref expr) = clause.expr {
-                        super::expr_eval::evaluate_runtime_expr(
-                            expr, rec, table_name, table_alias,
-                        )
+                        super::expr_eval::evaluate_runtime_expr(expr, rec, table_name, table_alias)
                     } else {
                         resolve_runtime_field(rec, &clause.field, table_name, table_alias)
                     }
@@ -1706,13 +1704,14 @@ fn evaluate_scalar_function(
                     let count = args
                         .get(2)
                         .map(|_| {
-                            resolve_scalar_arg(args, 2, source).and_then(|value| value_as_i64(&value))
+                            resolve_scalar_arg(args, 2, source)
+                                .and_then(|value| value_as_i64(&value))
                         })
                         .transpose()?;
                     Some(Value::Text(substring_text(&text, start, count)?))
                 }
             }
-        },
+        }
         "POSITION" => {
             let needle = match resolve_scalar_arg(args, 0, source)? {
                 Value::Text(text) => text,
@@ -1723,43 +1722,52 @@ fn evaluate_scalar_function(
                 _ => return Some(Value::Null),
             };
             Some(Value::Integer(position_text(&needle, &haystack)))
-        },
+        }
         "TRIM" | "BTRIM" => {
             let text = match resolve_scalar_arg(args, 0, source)? {
                 Value::Text(text) => text,
                 _ => return Some(Value::Null),
             };
-            let chars = match args.get(1).and_then(|_| resolve_scalar_arg(args, 1, source)) {
+            let chars = match args
+                .get(1)
+                .and_then(|_| resolve_scalar_arg(args, 1, source))
+            {
                 None => None,
                 Some(Value::Text(chars)) => Some(chars),
                 Some(_) => return Some(Value::Null),
             };
             Some(Value::Text(trim_text(&text, chars.as_deref(), true, true)))
-        },
+        }
         "LTRIM" => {
             let text = match resolve_scalar_arg(args, 0, source)? {
                 Value::Text(text) => text,
                 _ => return Some(Value::Null),
             };
-            let chars = match args.get(1).and_then(|_| resolve_scalar_arg(args, 1, source)) {
+            let chars = match args
+                .get(1)
+                .and_then(|_| resolve_scalar_arg(args, 1, source))
+            {
                 None => None,
                 Some(Value::Text(chars)) => Some(chars),
                 Some(_) => return Some(Value::Null),
             };
             Some(Value::Text(trim_text(&text, chars.as_deref(), true, false)))
-        },
+        }
         "RTRIM" => {
             let text = match resolve_scalar_arg(args, 0, source)? {
                 Value::Text(text) => text,
                 _ => return Some(Value::Null),
             };
-            let chars = match args.get(1).and_then(|_| resolve_scalar_arg(args, 1, source)) {
+            let chars = match args
+                .get(1)
+                .and_then(|_| resolve_scalar_arg(args, 1, source))
+            {
                 None => None,
                 Some(Value::Text(chars)) => Some(chars),
                 Some(_) => return Some(Value::Null),
             };
             Some(Value::Text(trim_text(&text, chars.as_deref(), false, true)))
-        },
+        }
         "CONCAT_WS" => {
             let separator = match resolve_scalar_arg(args, 0, source)? {
                 Value::Null => return Some(Value::Null),
@@ -1775,14 +1783,14 @@ fn evaluate_scalar_function(
                 parts.push(value.display_string());
             }
             Some(Value::Text(parts.join(&separator)))
-        },
+        }
         "REVERSE" => {
             let text = match resolve_scalar_arg(args, 0, source)? {
                 Value::Text(text) => text,
                 _ => return Some(Value::Null),
             };
             Some(Value::Text(text.chars().rev().collect()))
-        },
+        }
         "LEFT" => {
             let text = match resolve_scalar_arg(args, 0, source)? {
                 Value::Text(text) => text,
@@ -1791,7 +1799,7 @@ fn evaluate_scalar_function(
             let count =
                 resolve_scalar_arg(args, 1, source).and_then(|value| value_as_i64(&value))?;
             Some(Value::Text(slice_left_text(&text, count)))
-        },
+        }
         "RIGHT" => {
             let text = match resolve_scalar_arg(args, 0, source)? {
                 Value::Text(text) => text,
@@ -1800,7 +1808,7 @@ fn evaluate_scalar_function(
             let count =
                 resolve_scalar_arg(args, 1, source).and_then(|value| value_as_i64(&value))?;
             Some(Value::Text(slice_right_text(&text, count)))
-        },
+        }
         "QUOTE_LITERAL" => match resolve_scalar_arg(args, 0, source)? {
             Value::Null => Some(Value::Null),
             Value::Text(text) => Some(Value::Text(quote_literal_text(&text))),
@@ -2125,10 +2133,7 @@ fn slice_right_text(text: &str, count: i64) -> String {
     let chars: Vec<char> = text.chars().collect();
     let take = normalized_slice_len(chars.len(), count);
     let len = chars.len();
-    chars
-        .into_iter()
-        .skip(len.saturating_sub(take))
-        .collect()
+    chars.into_iter().skip(len.saturating_sub(take)).collect()
 }
 
 fn normalized_slice_len(len: usize, count: i64) -> usize {

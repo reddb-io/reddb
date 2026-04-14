@@ -17,6 +17,23 @@ fn is_scalar_function(name: &str) -> bool {
             | "UPPER"
             | "LOWER"
             | "LENGTH"
+            | "CHAR_LENGTH"
+            | "CHARACTER_LENGTH"
+            | "OCTET_LENGTH"
+            | "BIT_LENGTH"
+            | "SUBSTRING"
+            | "SUBSTR"
+            | "POSITION"
+            | "TRIM"
+            | "LTRIM"
+            | "RTRIM"
+            | "BTRIM"
+            | "CONCAT"
+            | "CONCAT_WS"
+            | "REVERSE"
+            | "LEFT"
+            | "RIGHT"
+            | "QUOTE_LITERAL"
             | "ABS"
             | "ROUND"
             | "COALESCE"
@@ -32,6 +49,26 @@ fn is_scalar_function(name: &str) -> bool {
             | "VERIFY_PASSWORD"
             | "CAST"
             | "CASE"
+    )
+}
+
+fn is_aggregate_function(name: &str) -> bool {
+    matches!(
+        name,
+        "COUNT"
+            | "AVG"
+            | "SUM"
+            | "MIN"
+            | "MAX"
+            | "STDDEV"
+            | "VARIANCE"
+            | "MEDIAN"
+            | "PERCENTILE"
+            | "GROUP_CONCAT"
+            | "FIRST"
+            | "LAST"
+            | "ARRAY_AGG"
+            | "COUNT_DISTINCT"
     )
 }
 use super::Parser;
@@ -139,8 +176,8 @@ impl<'a> Parser<'a> {
             let args = if self.consume(&Token::Star)? {
                 vec![Projection::All]
             } else {
-                let col = self.expect_ident_or_keyword()?;
-                vec![Projection::Column(col)]
+                let arg = self.parse_projection_factor()?;
+                vec![self.parse_projection_binop_tail(arg, 0)?]
             };
             self.expect(Token::RParen)?;
             let alias = if self.consume(&Token::As)? {
@@ -161,11 +198,15 @@ impl<'a> Parser<'a> {
         // so the existing scalar-function plumbing picks it up without any
         // new AST variant. Same wire format is used by the `expr::type`
         // postfix shortcut below.
-        if let Token::Ident(ref name) = self.peek() {
-            if name.eq_ignore_ascii_case("CAST") {
+        if let Some(name) = match self.peek() {
+            Token::Ident(name) => Some(name.clone()),
+            _ => None,
+        } {
+            if name.eq_ignore_ascii_case("CAST") && matches!(self.peek_next()?, Token::LParen) {
                 self.advance()?;
                 self.expect(Token::LParen)?;
-                let inner = self.parse_projection_atom()?;
+                let inner = self.parse_projection_factor()?;
+                let inner = self.parse_projection_binop_tail(inner, 0)?;
                 self.expect(Token::As)?;
                 let type_name = self.expect_ident_or_keyword()?;
                 self.expect(Token::RParen)?;
@@ -197,10 +238,35 @@ impl<'a> Parser<'a> {
             }
         }
 
+        if let Some(name) = match self.peek() {
+            Token::Ident(name) => Some(name.clone()),
+            _ => None,
+        } {
+            if name.eq_ignore_ascii_case("POSITION") && matches!(self.peek_next()?, Token::LParen) {
+                return self.parse_position_projection();
+            }
+            if name.eq_ignore_ascii_case("TRIM") && matches!(self.peek_next()?, Token::LParen) {
+                return self.parse_trim_projection();
+            }
+        }
+
+        if let Some(name) = match self.peek() {
+            Token::Ident(name) => Some(name.clone()),
+            _ => None,
+        } {
+            if name.eq_ignore_ascii_case("SUBSTRING") && matches!(self.peek_next()?, Token::LParen)
+            {
+                return self.parse_substring_projection();
+            }
+        }
+
         // Check for scalar function: IDENT(args) — e.g. GEO_DISTANCE(col, POINT(x,y))
-        if let Token::Ident(ref name) = self.peek() {
+        if let Some(name) = match self.peek() {
+            Token::Ident(name) => Some(name.clone()),
+            _ => None,
+        } {
             let upper = name.to_uppercase();
-            if is_scalar_function(&upper) {
+            if matches!(self.peek_next()?, Token::LParen) && is_scalar_function(&upper) {
                 self.advance()?; // consume function name
                 self.expect(Token::LParen)?;
                 let args = self.parse_function_args()?;
@@ -269,10 +335,9 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse a single projection factor — an atom usable as the LHS or
-    /// RHS of an arithmetic operator. Accepts literals, columns, CAST
-    /// (via the scalar-function plumbing), and parenthesised
-    /// sub-expressions. Does **not** accept CASE or aggregate functions
-    /// — those only appear at top-level projection position.
+    /// RHS of an arithmetic operator. Accepts literals, field refs,
+    /// scalar-function calls, CASE, CAST, and parenthesised
+    /// sub-expressions. Aggregate functions still stay at top level.
     fn parse_projection_factor(&mut self) -> Result<Projection, ParseError> {
         // Parenthesised sub-expression: ( expr )
         if self.consume(&Token::LParen)? {
@@ -282,8 +347,11 @@ impl<'a> Parser<'a> {
             return Ok(climbed);
         }
         // Nested CAST inside an arithmetic expression.
-        if let Token::Ident(ref name) = self.peek() {
-            if name.eq_ignore_ascii_case("CAST") {
+        if let Some(name) = match self.peek() {
+            Token::Ident(name) => Some(name.clone()),
+            _ => None,
+        } {
+            if name.eq_ignore_ascii_case("CAST") && matches!(self.peek_next()?, Token::LParen) {
                 self.advance()?;
                 self.expect(Token::LParen)?;
                 let inner = self.parse_projection_factor()?;
@@ -296,6 +364,41 @@ impl<'a> Parser<'a> {
                     Projection::Column(format!("TYPE:{}", type_name.to_uppercase())),
                 ];
                 return Ok(Projection::Function("CAST".to_string(), args));
+            }
+        }
+        if let Some(name) = match self.peek() {
+            Token::Ident(name) => Some(name.clone()),
+            _ => None,
+        } {
+            if name.eq_ignore_ascii_case("CASE") {
+                return self.parse_case_projection();
+            }
+            if matches!(self.peek_next()?, Token::LParen) {
+                if name.eq_ignore_ascii_case("POSITION") {
+                    return self.parse_position_projection();
+                }
+                if name.eq_ignore_ascii_case("TRIM") {
+                    return self.parse_trim_projection();
+                }
+                if name.eq_ignore_ascii_case("SUBSTRING") {
+                    return self.parse_substring_projection();
+                }
+                let upper = name.to_uppercase();
+                if is_aggregate_function(&upper) {
+                    return Err(ParseError::new(
+                        format!(
+                            "aggregate function `{upper}` is not valid inside another expression"
+                        ),
+                        self.position(),
+                    ));
+                }
+                if is_scalar_function(&upper) {
+                    self.advance()?; // consume function name
+                    self.expect(Token::LParen)?;
+                    let args = self.parse_function_args()?;
+                    self.expect(Token::RParen)?;
+                    return Ok(Projection::Function(upper, args));
+                }
             }
         }
         // Numeric / string / null literal.
@@ -312,6 +415,10 @@ impl<'a> Parser<'a> {
             Token::String(s) => {
                 self.advance()?;
                 return Ok(Projection::Column(format!("LIT:{}", s)));
+            }
+            Token::Null => {
+                self.advance()?;
+                return Ok(Projection::Column("LIT:".to_string()));
             }
             _ => {}
         }
@@ -369,8 +476,8 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse `CASE WHEN <filter> THEN <atom> [WHEN ... THEN ...]
-    /// [ELSE <atom>] END`. The caller has already peeked `CASE`.
+    /// Parse `CASE WHEN <filter> THEN <expr> [WHEN ... THEN ...]
+    /// [ELSE <expr>] END`. The caller has already peeked `CASE`.
     fn parse_case_projection(&mut self) -> Result<Projection, ParseError> {
         // Consume CASE (it's an Ident token).
         self.advance()?;
@@ -386,7 +493,7 @@ impl<'a> Parser<'a> {
                     self.position(),
                 ));
             }
-            let then_val = self.parse_projection_atom()?;
+            let then_val = self.parse_case_projection_value()?;
             args.push(Projection::Expression(Box::new(cond), None));
             args.push(then_val);
         }
@@ -397,7 +504,7 @@ impl<'a> Parser<'a> {
             ));
         }
         if self.consume_ident_ci("ELSE")? {
-            let else_val = self.parse_projection_atom()?;
+            let else_val = self.parse_case_projection_value()?;
             args.push(else_val);
         }
         if !self.consume_ident_ci("END")? {
@@ -416,6 +523,152 @@ impl<'a> Parser<'a> {
         } else {
             Projection::Function("CASE".to_string(), args)
         })
+    }
+
+    fn parse_case_projection_value(&mut self) -> Result<Projection, ParseError> {
+        let atom = self.parse_projection_factor()?;
+        self.parse_projection_binop_tail(atom, 0)
+    }
+
+    fn parse_trim_projection(&mut self) -> Result<Projection, ParseError> {
+        self.advance()?; // consume TRIM
+        self.expect(Token::LParen)?;
+        let (name, args) = self.parse_trim_projection_args()?;
+        self.expect(Token::RParen)?;
+        let alias = if self.consume(&Token::As)? {
+            Some(self.expect_ident()?)
+        } else {
+            None
+        };
+        Ok(if let Some(alias) = alias {
+            Projection::Function(format!("{name}:{alias}"), args)
+        } else {
+            Projection::Function(name, args)
+        })
+    }
+
+    fn parse_trim_projection_args(&mut self) -> Result<(String, Vec<Projection>), ParseError> {
+        let mut function_name = "TRIM".to_string();
+
+        if self.consume_ident_ci("LEADING")? {
+            function_name = "LTRIM".to_string();
+        } else if self.consume_ident_ci("TRAILING")? {
+            function_name = "RTRIM".to_string();
+        } else if self.consume_ident_ci("BOTH")? {
+            function_name = "TRIM".to_string();
+        }
+
+        if self.consume(&Token::From)? {
+            let source = self.parse_trim_projection_value()?;
+            return Ok((function_name, vec![source]));
+        }
+
+        let first = self.parse_trim_projection_value()?;
+
+        if self.consume(&Token::Comma)? {
+            let second = self.parse_trim_projection_value()?;
+            return Ok((function_name, vec![first, second]));
+        }
+
+        if self.consume(&Token::From)? {
+            let source = self.parse_trim_projection_value()?;
+            return Ok((function_name, vec![source, first]));
+        }
+
+        Ok((function_name, vec![first]))
+    }
+
+    fn parse_trim_projection_value(&mut self) -> Result<Projection, ParseError> {
+        let atom = self.parse_projection_factor()?;
+        self.parse_projection_binop_tail(atom, 0)
+    }
+
+    fn parse_position_projection(&mut self) -> Result<Projection, ParseError> {
+        self.advance()?; // consume POSITION
+        self.expect(Token::LParen)?;
+        let args = self.parse_position_projection_args()?;
+        self.expect(Token::RParen)?;
+        let alias = if self.consume(&Token::As)? {
+            Some(self.expect_ident()?)
+        } else {
+            None
+        };
+        Ok(if let Some(alias) = alias {
+            Projection::Function(format!("POSITION:{alias}"), args)
+        } else {
+            Projection::Function("POSITION".to_string(), args)
+        })
+    }
+
+    fn parse_position_projection_args(&mut self) -> Result<Vec<Projection>, ParseError> {
+        let needle = self.parse_projection_factor()?;
+        let needle = self.parse_projection_binop_tail(needle, 0)?;
+        if !self.consume(&Token::Comma)? {
+            self.expect(Token::In)?;
+        }
+        let haystack = self.parse_projection_factor()?;
+        let haystack = self.parse_projection_binop_tail(haystack, 0)?;
+        Ok(vec![needle, haystack])
+    }
+
+    fn parse_substring_projection(&mut self) -> Result<Projection, ParseError> {
+        self.advance()?; // consume SUBSTRING
+        self.expect(Token::LParen)?;
+        let args = self.parse_substring_projection_args()?;
+        self.expect(Token::RParen)?;
+        let alias = if self.consume(&Token::As)? {
+            Some(self.expect_ident()?)
+        } else {
+            None
+        };
+        Ok(if let Some(alias) = alias {
+            Projection::Function(format!("SUBSTRING:{alias}"), args)
+        } else {
+            Projection::Function("SUBSTRING".to_string(), args)
+        })
+    }
+
+    /// PostgreSQL-style `SUBSTRING` syntax lowered to the plain variadic
+    /// `Projection::Function("SUBSTRING", args)` form used by the legacy
+    /// executor.
+    fn parse_substring_projection_args(&mut self) -> Result<Vec<Projection>, ParseError> {
+        let source = self.parse_substring_projection_value()?;
+
+        if self.consume(&Token::Comma)? {
+            let mut args = vec![source];
+            loop {
+                args.push(self.parse_substring_projection_value()?);
+                if !self.consume(&Token::Comma)? {
+                    break;
+                }
+            }
+            return Ok(args);
+        }
+
+        if self.consume(&Token::From)? {
+            let start = self.parse_substring_projection_value()?;
+            if self.consume(&Token::For)? {
+                let count = self.parse_substring_projection_value()?;
+                return Ok(vec![source, start, count]);
+            }
+            return Ok(vec![source, start]);
+        }
+
+        if self.consume(&Token::For)? {
+            let count = self.parse_substring_projection_value()?;
+            if self.consume(&Token::From)? {
+                let start = self.parse_substring_projection_value()?;
+                return Ok(vec![source, start, count]);
+            }
+            return Ok(vec![source, Projection::Column("LIT:1".to_string()), count]);
+        }
+
+        Ok(vec![source])
+    }
+
+    fn parse_substring_projection_value(&mut self) -> Result<Projection, ParseError> {
+        let atom = self.parse_projection_factor()?;
+        self.parse_projection_binop_tail(atom, 0)
     }
 
     /// Parse comma-separated function arguments (columns, literals, POINT())
@@ -441,30 +694,10 @@ impl<'a> Parser<'a> {
                     continue;
                 }
             }
-            // Numeric literal
-            if matches!(
-                self.peek(),
-                Token::Integer(_) | Token::Float(_) | Token::Dash
-            ) {
-                let val = self.parse_function_literal_arg()?;
-                args.push(Projection::Column(format!("LIT:{}", val)));
-                if !self.consume(&Token::Comma)? {
-                    break;
-                }
-                continue;
-            }
-            // String literal
-            if let Token::String(s) = self.peek().clone() {
-                self.advance()?;
-                args.push(Projection::Column(format!("LIT:{}", s)));
-                if !self.consume(&Token::Comma)? {
-                    break;
-                }
-                continue;
-            }
-            // Column reference
-            let col = self.expect_ident_or_keyword()?;
-            args.push(Projection::Column(col));
+
+            let atom = self.parse_projection_factor()?;
+            let arg = self.parse_projection_binop_tail(atom, 0)?;
+            args.push(arg);
             if !self.consume(&Token::Comma)? {
                 break;
             }

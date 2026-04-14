@@ -134,7 +134,11 @@ pub(crate) fn extract_all_eq_candidates(
 ) {
     use crate::storage::query::ast::{CompareOp, FieldRef, Filter};
     match filter {
-        Filter::Compare { field, op: CompareOp::Eq, value } => {
+        Filter::Compare {
+            field,
+            op: CompareOp::Eq,
+            value,
+        } => {
             let col = match field {
                 FieldRef::TableColumn { column, .. } => column.clone(),
                 _ => return,
@@ -166,7 +170,11 @@ pub(crate) fn extract_all_eq_candidates(
 /// the call site.
 pub(crate) fn extract_zone_predicates(
     filter: &crate::storage::query::ast::Filter,
-    out: &mut Vec<(String, crate::storage::schema::Value, crate::storage::unified::segment::ZoneColPredKind)>,
+    out: &mut Vec<(
+        String,
+        crate::storage::schema::Value,
+        crate::storage::unified::segment::ZoneColPredKind,
+    )>,
 ) {
     use crate::storage::query::ast::{CompareOp, FieldRef, Filter};
     use crate::storage::unified::segment::ZoneColPredKind;

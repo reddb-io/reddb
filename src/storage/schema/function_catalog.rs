@@ -42,6 +42,7 @@
 //! - Operator functions backing `+`, `-`, `*` — those go in
 //!   `pg_operator` equivalent which we haven't built yet.
 
+use super::cast_catalog::can_implicit_cast;
 use super::types::DataType;
 
 /// Function classification — affects resolver behavior and
@@ -104,6 +105,9 @@ const ARGS_INT: &[DataType] = &[DataType::Integer];
 const ARGS_FLOAT: &[DataType] = &[DataType::Float];
 const ARGS_BIGINT: &[DataType] = &[DataType::BigInt];
 const ARGS_TEXT: &[DataType] = &[DataType::Text];
+const ARGS_TWO_TEXT: &[DataType] = &[DataType::Text, DataType::Text];
+const ARGS_TEXT_INT: &[DataType] = &[DataType::Text, DataType::Integer];
+const ARGS_TEXT_TWO_INT: &[DataType] = &[DataType::Text, DataType::Integer, DataType::Integer];
 const ARGS_NONE: &[DataType] = &[];
 const ARGS_TWO_FLOATS: &[DataType] = &[DataType::Float, DataType::Float];
 const ARGS_GEO_PAIR: &[DataType] = &[DataType::GeoPoint, DataType::GeoPoint];
@@ -261,6 +265,174 @@ pub const FUNCTION_CATALOG: &[FunctionEntry] = &[
         "LENGTH",
         ARGS_TEXT,
         DataType::Integer,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "CHAR_LENGTH",
+        ARGS_TEXT,
+        DataType::Integer,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "CHARACTER_LENGTH",
+        ARGS_TEXT,
+        DataType::Integer,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "OCTET_LENGTH",
+        ARGS_TEXT,
+        DataType::Integer,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "BIT_LENGTH",
+        ARGS_TEXT,
+        DataType::Integer,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "SUBSTRING",
+        ARGS_TWO_TEXT,
+        DataType::Text,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "SUBSTRING",
+        ARGS_TEXT_INT,
+        DataType::Text,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "SUBSTRING",
+        ARGS_TEXT_TWO_INT,
+        DataType::Text,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "SUBSTR",
+        ARGS_TEXT_INT,
+        DataType::Text,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "SUBSTR",
+        ARGS_TEXT_TWO_INT,
+        DataType::Text,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "POSITION",
+        ARGS_TWO_TEXT,
+        DataType::Integer,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "TRIM",
+        ARGS_TEXT,
+        DataType::Text,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "TRIM",
+        ARGS_TWO_TEXT,
+        DataType::Text,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "LTRIM",
+        ARGS_TEXT,
+        DataType::Text,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "LTRIM",
+        ARGS_TWO_TEXT,
+        DataType::Text,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "RTRIM",
+        ARGS_TEXT,
+        DataType::Text,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "RTRIM",
+        ARGS_TWO_TEXT,
+        DataType::Text,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "BTRIM",
+        ARGS_TEXT,
+        DataType::Text,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "BTRIM",
+        ARGS_TWO_TEXT,
+        DataType::Text,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "CONCAT",
+        ARGS_TEXT,
+        DataType::Text,
+        FunctionKind::Scalar,
+        true,
+    ),
+    entry(
+        "CONCAT_WS",
+        ARGS_TEXT,
+        DataType::Text,
+        FunctionKind::Scalar,
+        true,
+    ),
+    entry(
+        "REVERSE",
+        ARGS_TEXT,
+        DataType::Text,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "LEFT",
+        ARGS_TEXT_INT,
+        DataType::Text,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "RIGHT",
+        ARGS_TEXT_INT,
+        DataType::Text,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "QUOTE_LITERAL",
+        ARGS_TEXT,
+        DataType::Text,
         FunctionKind::Scalar,
         false,
     ),
@@ -428,8 +600,8 @@ pub fn lookup(name: &str) -> Vec<&'static FunctionEntry> {
 ///
 /// 1. Filter overloads by name (case-insensitive).
 /// 2. Filter by arity (variadic entries skip this check).
-/// 3. Score each remaining overload by counting exact-type matches
-///    on each argument position. Highest score wins.
+/// 3. Discard overloads with any incompatible argument position.
+///    Exact matches win over implicit-cast matches.
 /// 4. Tie-break by preferring the overload whose return type is
 ///    the preferred member of its category (Float over Integer,
 ///    Text over Blob, etc.).
@@ -451,25 +623,46 @@ pub fn resolve(name: &str, arg_types: &[DataType]) -> Option<&'static FunctionEn
             continue;
         }
 
-        let score = if entry.variadic {
-            let target = entry.arg_types[0];
-            arg_types.iter().filter(|t| **t == target).count()
+        let compatible = if entry.variadic {
+            if entry.name.eq_ignore_ascii_case("CONCAT")
+                || entry.name.eq_ignore_ascii_case("CONCAT_WS")
+            {
+                true
+            } else {
+                let target = entry.arg_types[0];
+                arg_types
+                    .iter()
+                    .all(|arg| *arg == target || can_implicit_cast(*arg, target))
+            }
         } else {
             entry
                 .arg_types
                 .iter()
                 .zip(arg_types.iter())
-                .filter(|(a, b)| a == b)
-                .count()
+                .all(|(target, arg)| *target == *arg || can_implicit_cast(*arg, *target))
         };
 
-        // Reject candidates with zero exact matches when arity > 0
-        // — implies all arguments would need coercion and a better
-        // candidate likely exists. Variadic with type mismatch on
-        // every arg also rejects.
-        if score == 0 && !arg_types.is_empty() {
+        if !compatible {
             continue;
         }
+
+        let score = if entry.variadic {
+            let target = entry.arg_types[0];
+            if entry.name.eq_ignore_ascii_case("CONCAT")
+                || entry.name.eq_ignore_ascii_case("CONCAT_WS")
+            {
+                arg_types.len()
+            } else {
+                arg_types.iter().filter(|t| **t == target).count()
+            }
+        } else {
+            entry
+                .arg_types
+                .iter()
+                .zip(arg_types.iter())
+                .filter(|(target, arg)| *target == *arg)
+                .count()
+        };
 
         match best {
             None => best = Some((score, entry)),

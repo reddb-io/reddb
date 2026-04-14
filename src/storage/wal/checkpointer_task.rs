@@ -86,9 +86,7 @@ impl CheckpointStats {
             pages_flushed_total: self.pages_flushed_total.load(Ordering::Relaxed),
             wal_truncated_bytes: self.wal_truncated_bytes.load(Ordering::Relaxed),
             last_checkpoint_lsn: self.last_checkpoint_lsn.load(Ordering::Relaxed),
-            last_checkpoint_duration_ms: self
-                .last_checkpoint_duration_ms
-                .load(Ordering::Relaxed),
+            last_checkpoint_duration_ms: self.last_checkpoint_duration_ms.load(Ordering::Relaxed),
         }
     }
 }
@@ -150,10 +148,7 @@ impl Drop for CheckpointerHandle {
 /// Spawn the checkpointer thread. Wakes on a 1-second cadence
 /// to check both the timeout and the WAL byte threshold; runs
 /// a checkpoint as soon as either trips.
-pub fn spawn(
-    driver: Arc<dyn CheckpointDriver>,
-    config: CheckpointConfig,
-) -> CheckpointerHandle {
+pub fn spawn(driver: Arc<dyn CheckpointDriver>, config: CheckpointConfig) -> CheckpointerHandle {
     let stop = Arc::new(AtomicBool::new(false));
     let stats = CheckpointStats::new();
     let stop_clone = Arc::clone(&stop);
@@ -167,8 +162,7 @@ pub fn spawn(
             }
 
             let elapsed = last_checkpoint_at.elapsed();
-            let wal_grown =
-                driver.current_wal_bytes() - driver.last_checkpoint_wal_bytes();
+            let wal_grown = driver.current_wal_bytes() - driver.last_checkpoint_wal_bytes();
 
             let trigger = elapsed >= config.timeout || wal_grown >= config.max_wal_bytes;
             if trigger {

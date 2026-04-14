@@ -68,11 +68,7 @@ pub const MIN_PARALLEL_ROWS: usize = 4096;
 ///
 /// Falls back to sequential execution when the input is
 /// smaller than `MIN_PARALLEL_ROWS` or when `chunk_count <= 1`.
-pub fn parallel_scan<T, U, F>(
-    input: &[T],
-    chunk_count: usize,
-    worker: F,
-) -> Vec<U>
+pub fn parallel_scan<T, U, F>(input: &[T], chunk_count: usize, worker: F) -> Vec<U>
 where
     T: Send + Sync + Clone + 'static,
     U: Send + 'static,
@@ -143,11 +139,7 @@ where
 ///
 /// Used by `SELECT COUNT(*) FROM t WHERE filter` where the
 /// full row payload is irrelevant.
-pub fn parallel_count<T, F>(
-    input: &[T],
-    chunk_count: usize,
-    counter: F,
-) -> u64
+pub fn parallel_count<T, F>(input: &[T], chunk_count: usize, counter: F) -> u64
 where
     T: Send + Sync + Clone + 'static,
     F: Fn(&[T]) -> u64 + Send + Sync + 'static,

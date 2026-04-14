@@ -167,7 +167,8 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         for (col, val_bytes) in &eq_candidates {
             if let Some(idx) = idx_store.find_index_for_column(&query.table, col) {
                 if let Ok(ids) = idx_store.hash_lookup(&query.table, &idx.name, val_bytes) {
-                    let id_set: std::collections::HashSet<u64> = ids.iter().map(|e| e.raw()).collect();
+                    let id_set: std::collections::HashSet<u64> =
+                        ids.iter().map(|e| e.raw()).collect();
                     indexed_id_sets.push(id_set);
                 }
             }
@@ -320,7 +321,11 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
 
         // Zone map: extract range/equality predicates for segment-level pruning.
         // Sealed segments whose column min/max proves no row can match are skipped.
-        let mut zone_raw: Vec<(String, crate::storage::schema::Value, crate::storage::unified::segment::ZoneColPredKind)> = Vec::new();
+        let mut zone_raw: Vec<(
+            String,
+            crate::storage::schema::Value,
+            crate::storage::unified::segment::ZoneColPredKind,
+        )> = Vec::new();
         extract_zone_predicates(filter, &mut zone_raw);
         // Reconstruct lifetime-bound ZoneColPred refs from the owned Vec.
         let zone_preds: Vec<(&str, crate::storage::unified::segment::ZoneColPred<'_>)> = zone_raw
@@ -372,20 +377,17 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         // resolve projected column names → schema positions once before the
         // scan loop. Each row then does O(1) indexed access instead of
         // O(schema_len) linear search per (row, column) pair.
-        let schema_col_indices: Option<Vec<(usize, usize)>> =
-            if !select_cols.is_empty() {
-                schema_arc.as_ref().map(|schema| {
-                    select_cols
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(ci, col)| {
-                            schema.iter().position(|s| s == col).map(|si| (ci, si))
-                        })
-                        .collect()
-                })
-            } else {
-                None
-            };
+        let schema_col_indices: Option<Vec<(usize, usize)>> = if !select_cols.is_empty() {
+            schema_arc.as_ref().map(|schema| {
+                select_cols
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(ci, col)| schema.iter().position(|s| s == col).map(|si| (ci, si)))
+                    .collect()
+            })
+        } else {
+            None
+        };
 
         let mut records: Vec<UnifiedRecord> = Vec::new();
         manager.for_each_entity_zoned(&zone_preds, |entity| {
@@ -567,20 +569,19 @@ pub(crate) fn execute_runtime_canonical_table_node(
                 };
                 // Schema-index precomputation: same optimisation as the indexed scan path.
                 // Resolve projected column names → schema positions once before the loop.
-                let schema_col_indices: Option<Vec<(usize, usize)>> =
-                    if !select_cols.is_empty() {
-                        schema_arc.as_ref().map(|schema| {
-                            select_cols
-                                .iter()
-                                .enumerate()
-                                .filter_map(|(ci, col)| {
-                                    schema.iter().position(|s| s == col).map(|si| (ci, si))
-                                })
-                                .collect()
-                        })
-                    } else {
-                        None
-                    };
+                let schema_col_indices: Option<Vec<(usize, usize)>> = if !select_cols.is_empty() {
+                    schema_arc.as_ref().map(|schema| {
+                        select_cols
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(ci, col)| {
+                                schema.iter().position(|s| s == col).map(|si| (ci, si))
+                            })
+                            .collect()
+                    })
+                } else {
+                    None
+                };
 
                 let mut records: Vec<UnifiedRecord> = Vec::new();
                 manager.for_each_entity(|entity| {

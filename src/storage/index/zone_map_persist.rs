@@ -133,9 +133,7 @@ pub fn write_sidecar(
 
 /// Read a sidecar file produced by `write_sidecar`. Returns
 /// `(column_count, zones)`.
-pub fn read_sidecar(
-    path: &Path,
-) -> Result<(u32, Vec<PersistedZone>), ZoneMapPersistError> {
+pub fn read_sidecar(path: &Path) -> Result<(u32, Vec<PersistedZone>), ZoneMapPersistError> {
     let file = File::open(path)?;
     let mut r = BufReader::new(file);
     let magic = read_u32(&mut r)?;
@@ -177,19 +175,22 @@ fn write_str<W: Write>(w: &mut W, s: &str) -> Result<(), ZoneMapPersistError> {
 
 fn read_u32<R: Read>(r: &mut R) -> Result<u32, ZoneMapPersistError> {
     let mut buf = [0u8; 4];
-    r.read_exact(&mut buf).map_err(|_| ZoneMapPersistError::Truncated)?;
+    r.read_exact(&mut buf)
+        .map_err(|_| ZoneMapPersistError::Truncated)?;
     Ok(u32::from_le_bytes(buf))
 }
 
 fn read_u64<R: Read>(r: &mut R) -> Result<u64, ZoneMapPersistError> {
     let mut buf = [0u8; 8];
-    r.read_exact(&mut buf).map_err(|_| ZoneMapPersistError::Truncated)?;
+    r.read_exact(&mut buf)
+        .map_err(|_| ZoneMapPersistError::Truncated)?;
     Ok(u64::from_le_bytes(buf))
 }
 
 fn read_str<R: Read>(r: &mut R) -> Result<String, ZoneMapPersistError> {
     let len = read_u32(r)?;
     let mut buf = vec![0u8; len as usize];
-    r.read_exact(&mut buf).map_err(|_| ZoneMapPersistError::Truncated)?;
+    r.read_exact(&mut buf)
+        .map_err(|_| ZoneMapPersistError::Truncated)?;
     Ok(String::from_utf8(buf)?)
 }

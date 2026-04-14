@@ -24,8 +24,8 @@ use super::entity::{CrossRef, EntityData, EntityId, EntityKind, RefType, Unified
 use super::memtable::Memtable;
 use super::metadata::{Metadata, MetadataStorage};
 use crate::storage::primitives::bloom::BloomFilter;
-use crate::storage::schema::Value;
 use crate::storage::query::value_compare::partial_compare_values;
+use crate::storage::schema::Value;
 
 /// Unique identifier for a segment
 pub type SegmentId = u64;
@@ -238,7 +238,10 @@ pub struct ColZone {
 
 impl ColZone {
     fn new(v: Value) -> Self {
-        Self { min: v.clone(), max: v }
+        Self {
+            min: v.clone(),
+            max: v,
+        }
     }
 
     fn update(&mut self, v: &Value) {
@@ -999,7 +1002,10 @@ impl UnifiedSegment for GrowingSegment {
             if raw >= self.base_entity_id {
                 let idx = (raw - self.base_entity_id) as usize;
                 if idx < self.flat_entities.len() && self.flat_entities[idx].id == entity.id {
-                    Some(std::mem::replace(&mut self.flat_entities[idx], entity.clone()))
+                    Some(std::mem::replace(
+                        &mut self.flat_entities[idx],
+                        entity.clone(),
+                    ))
                 } else {
                     None
                 }

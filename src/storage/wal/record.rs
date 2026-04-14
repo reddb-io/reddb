@@ -327,7 +327,10 @@ mod tests {
         assert_eq!(RecordType::from_u8(3), Some(RecordType::Rollback));
         assert_eq!(RecordType::from_u8(4), Some(RecordType::PageWrite));
         assert_eq!(RecordType::from_u8(5), Some(RecordType::Checkpoint));
-        assert_eq!(RecordType::from_u8(6), Some(RecordType::PageWriteCompressed));
+        assert_eq!(
+            RecordType::from_u8(6),
+            Some(RecordType::PageWriteCompressed)
+        );
     }
 
     #[test]

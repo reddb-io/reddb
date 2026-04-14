@@ -211,9 +211,7 @@ pub enum SortStrategy {
     /// Input matches a prefix of the required order. Use
     /// `incremental_sort_top_k` with the matching prefix
     /// length.
-    Incremental {
-        prefix_len: usize,
-    },
+    Incremental { prefix_len: usize },
     /// Input has no relevant order. Full sort required.
     Full,
 }

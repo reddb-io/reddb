@@ -1057,8 +1057,7 @@ impl UnifiedStore {
                 let mut out = vec![0u8; orig_len];
                 zstd::bulk::decompress_to_buffer(compressed, &mut out)
                     .map_err(|e| format!("C3 Text decompress: {e}"))?;
-                Value::Text(String::from_utf8(out)
-                    .map_err(|e| format!("C3 Text UTF-8: {e}"))?)
+                Value::Text(String::from_utf8(out).map_err(|e| format!("C3 Text UTF-8: {e}"))?)
             }
             0x86 => {
                 let orig_len = Self::read_varu32_safe(buf, pos)?;

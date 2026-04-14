@@ -128,14 +128,10 @@ pub fn compute_column_diff(
     current: &[DeclaredColumnContract],
     target: &[CreateColumnDef],
 ) -> SchemaDiff {
-    let current_by_name: HashMap<&str, &DeclaredColumnContract> = current
-        .iter()
-        .map(|c| (c.name.as_str(), c))
-        .collect();
-    let target_by_name: HashMap<&str, &CreateColumnDef> = target
-        .iter()
-        .map(|c| (c.name.as_str(), c))
-        .collect();
+    let current_by_name: HashMap<&str, &DeclaredColumnContract> =
+        current.iter().map(|c| (c.name.as_str(), c)).collect();
+    let target_by_name: HashMap<&str, &CreateColumnDef> =
+        target.iter().map(|c| (c.name.as_str(), c)).collect();
 
     let mut operations: Vec<DiffOp> = Vec::new();
     let mut unpaired_drops: Vec<&DeclaredColumnContract> = Vec::new();
@@ -172,8 +168,7 @@ pub fn compute_column_diff(
     // both sides are still emitted as DROP + ADD operations
     // (rename is consultative — clients decide). We only attach
     // a rename hint to the output.
-    let rename_candidates =
-        detect_rename_candidates(&unpaired_drops, &unpaired_adds);
+    let rename_candidates = detect_rename_candidates(&unpaired_drops, &unpaired_adds);
 
     // Emit all unpaired drops + adds as raw DropColumn /
     // AddColumn operations.
@@ -325,9 +320,7 @@ fn detect_rename_candidates(
             if let Some((conf, basis)) = pair_score {
                 let better = match (&best, conf) {
                     (None, _) => true,
-                    (Some((_, prev, _)), new) => {
-                        confidence_rank(new) > confidence_rank(*prev)
-                    }
+                    (Some((_, prev, _)), new) => confidence_rank(new) > confidence_rank(*prev),
                 };
                 if better {
                     best = Some((i, conf, basis));
@@ -446,10 +439,7 @@ pub fn format_as_sql(diff: &SchemaDiff) -> String {
     let total = diff.summary.add_columns + diff.summary.drop_columns + diff.summary.type_changes;
     out.push_str(&format!(
         "-- {} changes detected ({} adds, {} drops, {} type changes)\n",
-        total,
-        diff.summary.add_columns,
-        diff.summary.drop_columns,
-        diff.summary.type_changes
+        total, diff.summary.add_columns, diff.summary.drop_columns, diff.summary.type_changes
     ));
     if !diff.rename_candidates.is_empty() {
         out.push_str(&format!(
@@ -473,7 +463,10 @@ pub fn format_as_sql(diff: &SchemaDiff) -> String {
                 ));
             }
             DiffOp::DropColumn(name) => {
-                out.push_str(&format!("ALTER TABLE {} DROP COLUMN {};\n", diff.table, name));
+                out.push_str(&format!(
+                    "ALTER TABLE {} DROP COLUMN {};\n",
+                    diff.table, name
+                ));
             }
             DiffOp::TypeChange { name, to, .. } => {
                 // No native ALTER COLUMN ... TYPE in reddb yet,
@@ -483,7 +476,10 @@ pub fn format_as_sql(diff: &SchemaDiff) -> String {
                     "-- type change on `{}`: emitting DROP + ADD\n",
                     name
                 ));
-                out.push_str(&format!("ALTER TABLE {} DROP COLUMN {};\n", diff.table, name));
+                out.push_str(&format!(
+                    "ALTER TABLE {} DROP COLUMN {};\n",
+                    diff.table, name
+                ));
                 out.push_str(&format!(
                     "ALTER TABLE {} ADD COLUMN {} {};\n",
                     diff.table,
@@ -550,7 +546,11 @@ pub fn format_as_json(diff: &SchemaDiff) -> String {
     out.push_str(&format!("  \"sql\": {},\n", json_string(&sql)));
     out.push_str("  \"operations\": [\n");
     for (i, op) in diff.operations.iter().enumerate() {
-        let comma = if i + 1 < diff.operations.len() { "," } else { "" };
+        let comma = if i + 1 < diff.operations.len() {
+            ","
+        } else {
+            ""
+        };
         out.push_str(&format!("    {}{}\n", json_op(op), comma));
     }
     out.push_str("  ],\n");
@@ -683,7 +683,10 @@ mod tests {
 
     #[test]
     fn diff_identical_columns_returns_empty() {
-        let current = vec![declared("id", "TEXT", true), declared("name", "TEXT", false)];
+        let current = vec![
+            declared("id", "TEXT", true),
+            declared("name", "TEXT", false),
+        ];
         let target = vec![target("id", "TEXT", true), target("name", "TEXT", false)];
         let diff = compute_column_diff("users", &current, &target);
         assert!(!diff.drifted);
@@ -704,7 +707,10 @@ mod tests {
 
     #[test]
     fn diff_drops_extra_column() {
-        let current = vec![declared("id", "TEXT", true), declared("legacy", "TEXT", false)];
+        let current = vec![
+            declared("id", "TEXT", true),
+            declared("legacy", "TEXT", false),
+        ];
         let target = vec![target("id", "TEXT", true)];
         let diff = compute_column_diff("users", &current, &target);
         assert!(diff.drifted);
@@ -752,10 +758,7 @@ mod tests {
         let target = vec![target("renamed", "TEXT", true)]; // not_null differs
         let diff = compute_column_diff("t", &current, &target);
         assert_eq!(diff.rename_candidates.len(), 1);
-        assert_eq!(
-            diff.rename_candidates[0].confidence,
-            RenameConfidence::Low
-        );
+        assert_eq!(diff.rename_candidates[0].confidence, RenameConfidence::Low);
     }
 
     #[test]

@@ -38,15 +38,9 @@ pub enum VarcharMode {
 #[derive(Debug, Clone)]
 pub enum ParametricError {
     /// Input string exceeds VARCHAR's declared `max_len`.
-    VarcharOverflow {
-        actual: usize,
-        max: u32,
-    },
+    VarcharOverflow { actual: usize, max: u32 },
     /// Decimal exceeds declared total precision.
-    DecimalPrecisionOverflow {
-        precision: u8,
-        actual_digits: usize,
-    },
+    DecimalPrecisionOverflow { precision: u8, actual_digits: usize },
     /// Decimal scale doesn't match the declared scale (rounded
     /// would lose information).
     DecimalScaleOverflow {
@@ -66,7 +60,10 @@ impl std::fmt::Display for ParametricError {
             Self::VarcharOverflow { actual, max } => {
                 write!(f, "string of length {actual} exceeds VARCHAR({max})")
             }
-            Self::DecimalPrecisionOverflow { precision, actual_digits } => {
+            Self::DecimalPrecisionOverflow {
+                precision,
+                actual_digits,
+            } => {
                 write!(
                     f,
                     "decimal with {actual_digits} digits exceeds DECIMAL precision {precision}"
@@ -103,11 +100,7 @@ pub fn validate_varchar(
         // then re-checked. Caller can avoid the round-trip by
         // pre-coercing.
         other => {
-            return validate_varchar(
-                &Value::Text(other.display_string()),
-                max_len,
-                mode,
-            );
+            return validate_varchar(&Value::Text(other.display_string()), max_len, mode);
         }
     };
     let len = s.chars().count();
@@ -135,11 +128,7 @@ pub fn validate_varchar(
 /// `display_string()` to count the actual digits, which is the
 /// most correct path until `DataType::Decimal { p, s }` lands and
 /// we can carry the scale on the value itself.
-pub fn validate_decimal(
-    value: &Value,
-    precision: u8,
-    scale: u8,
-) -> Result<Value, ParametricError> {
+pub fn validate_decimal(value: &Value, precision: u8, scale: u8) -> Result<Value, ParametricError> {
     let s = value.display_string();
     let trimmed = s.trim();
     let body = trimmed.strip_prefix('-').unwrap_or(trimmed);
@@ -150,9 +139,7 @@ pub fn validate_decimal(
     if whole.is_empty() && frac.is_empty() {
         return Err(ParametricError::NotADecimal(s));
     }
-    if !whole.bytes().all(|b| b.is_ascii_digit())
-        || !frac.bytes().all(|b| b.is_ascii_digit())
-    {
+    if !whole.bytes().all(|b| b.is_ascii_digit()) || !frac.bytes().all(|b| b.is_ascii_digit()) {
         return Err(ParametricError::NotADecimal(s));
     }
     let total_digits = whole.len() + frac.len();

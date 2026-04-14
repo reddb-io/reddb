@@ -161,12 +161,7 @@ impl BTree {
                     // Get parent path for the split propagation.
                     // The left child is the original cached leaf.
                     let (_, path) = self.find_leaf(root_id, &separator_key)?;
-                    self.insert_into_parent(
-                        path,
-                        cached_page_id,
-                        &separator_key,
-                        new_leaf_id,
-                    )?;
+                    self.insert_into_parent(path, cached_page_id, &separator_key, new_leaf_id)?;
                     return Ok(());
                 }
                 // right_sibling != 0: cached page is no longer rightmost.
@@ -209,9 +204,11 @@ impl BTree {
         let page_id = page.page_id();
         self.pager.write_page(page_id, page.clone())?;
         // Cache the new rightmost leaf (split result gets the larger keys)
-        *self.rightmost_leaf.write().map_err(|e| {
-            BTreeError::LockPoisoned(format!("rightmost_leaf write: {e}"))
-        })? = Some((new_leaf_id, key.to_vec()));
+        *self
+            .rightmost_leaf
+            .write()
+            .map_err(|e| BTreeError::LockPoisoned(format!("rightmost_leaf write: {e}")))? =
+            Some((new_leaf_id, key.to_vec()));
 
         // Propagate split up the tree
         self.insert_into_parent(path, page_id, &separator_key, new_leaf_id)?;
@@ -391,7 +388,9 @@ impl BTree {
                     if page.cell_count() == 0 && page_id == root_id {
                         self.pager.free_page(root_id)?;
                         *self.root_page_id.write().map_err(|e| {
-                            BTreeError::LockPoisoned(format!("delete: root_page_id write lock: {e}"))
+                            BTreeError::LockPoisoned(format!(
+                                "delete: root_page_id write lock: {e}"
+                            ))
                         })? = 0;
                     } else {
                         self.rebalance_leaf(current_id, path)?;

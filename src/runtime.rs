@@ -639,7 +639,6 @@ pub struct RuntimeConnection {
 
 mod expr_eval;
 mod graph_dsl;
-pub mod snapshot_reuse;
 mod health_connection;
 mod impl_core;
 mod impl_ddl;
@@ -659,6 +658,7 @@ mod probabilistic_store;
 pub(crate) mod query_exec;
 mod record_search;
 pub mod schema_diff;
+pub mod snapshot_reuse;
 
 pub use self::graph_dsl::*;
 use self::join_filter::*;

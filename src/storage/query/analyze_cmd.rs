@@ -239,7 +239,8 @@ pub fn compute_column_stats(
             let boundaries = opts.hist_buckets + 1;
             let mut bounds = Vec::with_capacity(boundaries);
             for b in 0..boundaries {
-                let idx = ((b * (sorted_values.len() - 1)) / opts.hist_buckets).min(sorted_values.len() - 1);
+                let idx = ((b * (sorted_values.len() - 1)) / opts.hist_buckets)
+                    .min(sorted_values.len() - 1);
                 bounds.push(sorted_values[idx].clone());
             }
             bounds

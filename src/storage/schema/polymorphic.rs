@@ -140,7 +140,10 @@ impl std::fmt::Display for ResolveError {
             Self::NonArrayGotArray => write!(f, "AnyNonArray position got an array argument"),
             Self::ArrayGotScalar => write!(f, "AnyArray position got a non-array argument"),
             Self::ArityMismatch { expected, got } => {
-                write!(f, "polymorphic signature expects {expected} args, got {got}")
+                write!(
+                    f,
+                    "polymorphic signature expects {expected} args, got {got}"
+                )
             }
         }
     }

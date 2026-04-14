@@ -114,7 +114,10 @@ impl TidBitmap {
     /// Bulk insert from any iterator of row IDs. Stops on the
     /// first cap violation and returns the number of IDs that
     /// were successfully inserted before the cap was hit.
-    pub fn extend_from_iter(&mut self, iter: impl IntoIterator<Item = u32>) -> Result<usize, BitmapError> {
+    pub fn extend_from_iter(
+        &mut self,
+        iter: impl IntoIterator<Item = u32>,
+    ) -> Result<usize, BitmapError> {
         let mut count = 0usize;
         for tid in iter {
             self.inner.insert(tid);
