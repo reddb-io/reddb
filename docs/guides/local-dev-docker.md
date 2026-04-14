@@ -17,6 +17,12 @@ From the repository root:
 docker compose -f examples/docker-compose.replica.yml up -d --build
 ```
 
+If you want the same stack plus automatic smoke validation, use:
+
+```bash
+make test-env PROFILE=replica
+```
+
 This uses
 [examples/docker-compose.replica.yml](https://github.com/forattini-dev/reddb/blob/main/examples/docker-compose.replica.yml).
 
@@ -137,3 +143,4 @@ See also:
 
 - [Docker Deployment](/deployment/docker.md)
 - [Replication](/deployment/replication.md)
+- [examples/README.md](https://github.com/forattini-dev/reddb/blob/main/examples/README.md)

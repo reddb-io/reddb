@@ -1,4 +1,4 @@
-.PHONY: help build release test test-fast test-persistent clean run run-grpc install fmt lint check link unlink dev which patch minor major docs publish publish-dry-run
+.PHONY: help build release test test-fast test-persistent clean run run-grpc install fmt lint check link unlink dev which patch minor major docs publish publish-dry-run env-up env-down env-logs test-env test-env-shell test-env-rust
 
 # Paths
 LOCAL_BIN := $(HOME)/.local/bin
@@ -15,6 +15,9 @@ help:
 	@echo "  make test          - Run the default local test layer"
 	@echo "  make test-fast     - Run the default local test layer"
 	@echo "  make test-persistent - Run the persistent multimodel integration layer"
+	@echo "  make test-env PROFILE=replica - Bring up an example environment and run shell + Rust external-env tests"
+	@echo "  make test-env-shell PROFILE=replica - Bring up an example environment and run shell checks only"
+	@echo "  make test-env-rust PROFILE=replica - Run Rust external-env tests against an already running environment"
 	@echo "  make clean         - Clean build artifacts"
 	@echo "  make run           - Run HTTP server (ARGS='--path ... --bind ...')"
 	@echo "  make run-grpc      - Run gRPC server (ARGS='--path ... --bind ...')"
@@ -100,6 +103,24 @@ which:
 # Local development mode (build + link)
 dev: link
 	@echo "✓ RedDB local dev binaries available"
+
+env-up:
+	@docker compose -f examples/docker-compose.$${PROFILE:-replica}.yml up -d --build
+
+env-down:
+	@docker compose -f examples/docker-compose.$${PROFILE:-replica}.yml down -v
+
+env-logs:
+	@docker compose -f examples/docker-compose.$${PROFILE:-replica}.yml logs -f
+
+test-env:
+	@./scripts/test-environment.sh $${PROFILE:-replica} all
+
+test-env-shell:
+	@./scripts/test-environment.sh $${PROFILE:-replica} shell
+
+test-env-rust:
+	@./scripts/test-environment.sh $${PROFILE:-replica} rust
 
 # Release bump helpers
 patch:
