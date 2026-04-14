@@ -860,6 +860,60 @@ pub(super) fn compare_runtime_order(
     runtime_record_identity_key(left).cmp(&runtime_record_identity_key(right))
 }
 
+/// Sort `records` by `order_by` using the Schwartzian transform:
+/// extract sort keys once per record (O(n)), sort by the extracted keys
+/// (O(n log n) value comparisons, no HashMap lookups), then reorder.
+///
+/// For a naive `sort_by(compare_runtime_order)`, the sort calls
+/// `resolve_runtime_field` O(n log n) times — once per comparison.
+/// With pre-extraction, field resolution is O(n) regardless of sort depth.
+pub(super) fn sort_records_by_order_by(
+    records: &mut Vec<UnifiedRecord>,
+    order_by: &[OrderByClause],
+    table_name: Option<&str>,
+    table_alias: Option<&str>,
+) {
+    if order_by.is_empty() || records.len() < 2 {
+        return;
+    }
+
+    // Extract sort keys once per record — O(n × k) where k = ORDER BY clauses
+    let mut keyed: Vec<(usize, Vec<Option<Value>>)> = records
+        .iter()
+        .enumerate()
+        .map(|(i, rec)| {
+            let keys: Vec<Option<Value>> = order_by
+                .iter()
+                .map(|clause| {
+                    if let Some(ref expr) = clause.expr {
+                        super::expr_eval::evaluate_runtime_expr(
+                            expr, rec, table_name, table_alias,
+                        )
+                    } else {
+                        resolve_runtime_field(rec, &clause.field, table_name, table_alias)
+                    }
+                })
+                .collect();
+            (i, keys)
+        })
+        .collect();
+
+    // Sort by extracted keys — O(n log n) value comparisons, no HashMap access
+    keyed.sort_by(|(_, lkeys), (_, rkeys)| {
+        for (clause, (lv, rv)) in order_by.iter().zip(lkeys.iter().zip(rkeys.iter())) {
+            let ord = compare_runtime_optional_values(lv.as_ref(), rv.as_ref(), clause.nulls_first);
+            if ord != Ordering::Equal {
+                return if clause.ascending { ord } else { ord.reverse() };
+            }
+        }
+        Ordering::Equal
+    });
+
+    // Reorder records in-place using the sorted index permutation
+    let orig: Vec<_> = std::mem::take(records);
+    *records = keyed.into_iter().map(|(i, _)| orig[i].clone()).collect();
+}
+
 pub(super) fn compare_runtime_optional_values(
     left: Option<&Value>,
     right: Option<&Value>,

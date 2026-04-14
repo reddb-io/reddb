@@ -76,15 +76,12 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 // path. Expression-shaped sort keys run through
                 // expr_eval, bare columns through resolve_field.
                 if !query.order_by.is_empty() {
-                    records.sort_by(|a, b| {
-                        super::super::join_filter::compare_runtime_order(
-                            a,
-                            b,
-                            &query.order_by,
-                            outer_alias,
-                            outer_alias,
-                        )
-                    });
+                    super::super::join_filter::sort_records_by_order_by(
+                        &mut records,
+                        &query.order_by,
+                        outer_alias,
+                        outer_alias,
+                    );
                 }
 
                 // Outer OFFSET / LIMIT.
@@ -396,12 +393,15 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             true // continue
         });
 
-        // Apply ORDER BY if present
+        // Apply ORDER BY — Schwartzian transform extracts keys once (O(n))
+        // instead of per-comparison (O(n log n) HashMap lookups).
         if !query.order_by.is_empty() {
-            let order_by = &query.order_by;
-            records.sort_by(|left, right| {
-                compare_runtime_order(left, right, order_by, Some(table_name), Some(table_alias))
-            });
+            super::super::join_filter::sort_records_by_order_by(
+                &mut records,
+                &query.order_by,
+                Some(table_name),
+                Some(table_alias),
+            );
         }
 
         // Apply OFFSET
@@ -436,15 +436,12 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         let table_alias = query.alias.as_deref().unwrap_or(table_name);
 
         if !query.order_by.is_empty() {
-            records.sort_by(|left, right| {
-                compare_runtime_order(
-                    left,
-                    right,
-                    &query.order_by,
-                    Some(table_name),
-                    Some(table_alias),
-                )
-            });
+            super::super::join_filter::sort_records_by_order_by(
+                &mut records,
+                &query.order_by,
+                Some(table_name),
+                Some(table_alias),
+            );
         }
 
         if let Some(offset) = query.offset {
@@ -601,15 +598,12 @@ pub(crate) fn execute_runtime_canonical_table_node(
         "sort" | "entity_sort" | "document_sort" => {
             let mut records = execute_runtime_canonical_table_child(db, node, context)?;
             if !context.query.order_by.is_empty() {
-                records.sort_by(|left, right| {
-                    compare_runtime_order(
-                        left,
-                        right,
-                        &context.query.order_by,
-                        Some(context.table_name),
-                        Some(context.table_alias),
-                    )
-                });
+                super::super::join_filter::sort_records_by_order_by(
+                    &mut records,
+                    &context.query.order_by,
+                    Some(context.table_name),
+                    Some(context.table_alias),
+                );
             } else if node.operator == "entity_sort" {
                 records.sort_by(compare_runtime_ranked_records);
             }
