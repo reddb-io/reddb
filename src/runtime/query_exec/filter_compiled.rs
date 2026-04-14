@@ -414,6 +414,13 @@ fn compile_into(
             // defer to the legacy walker via Fallback.
             ops.push(CompiledEntityOp::Fallback(Box::new(filter.clone())));
         }
+        Filter::CompareExpr { .. } => {
+            // Expression-level comparisons require the full Expr
+            // walker and UnifiedRecord context — neither is available
+            // inside the compiled interpreter. Route through the
+            // Fallback opcode which re-enters the legacy evaluator.
+            ops.push(CompiledEntityOp::Fallback(Box::new(filter.clone())));
+        }
         Filter::Between { field, low, high } => {
             let kind = classify_field(field, table_name, table_alias);
             if needs_fallback(&kind) {

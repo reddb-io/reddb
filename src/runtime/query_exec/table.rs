@@ -33,22 +33,79 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     query: &TableQuery,
     index_store: Option<&super::index_store::IndexStore>,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
-    // ── FROM SUBQUERY PATH (Fase 1.7): when the query's source is a
-    // `(SELECT …) AS alias`, execute the inner query recursively.
-    // For Week 3 scope we only support nested Table queries — joins
-    // / unions / CTEs inside a FROM subquery wait for Week 4. Outer-
-    // query WHERE / ORDER BY / LIMIT rebinding also lands in Week 4
-    // because it needs the inner's projection list mapped into the
-    // outer's column scope.
+    // ── FROM SUBQUERY PATH (Fase 1.7 / W4 rebind): when the query's
+    // source is a `(SELECT …) AS alias`, execute the inner query
+    // recursively to get its records, then apply the outer query's
+    // WHERE / ORDER BY / OFFSET / LIMIT on top of those records so
+    // the user sees the canonical SQL semantics.
+    //
+    // Column scope: the outer sees the inner's projection aliases
+    // verbatim because UnifiedRecord keys are string column names.
+    // If the user writes `SELECT score FROM (SELECT a + b AS score
+    // FROM t) AS s WHERE score > 10 ORDER BY score DESC LIMIT 5`,
+    // the inner emits records keyed by `score` and the outer's
+    // filter / sort resolve against that key directly.
+    //
+    // Only QueryExpr::Table nested shapes are supported here —
+    // joins / unions / CTEs in FROM-subquery position error loudly.
     if let Some(crate::storage::query::ast::TableSource::Subquery(inner)) = &query.source {
         match inner.as_ref() {
             crate::storage::query::ast::QueryExpr::Table(inner_table) => {
-                return execute_runtime_canonical_table_query_indexed(db, inner_table, index_store);
+                let mut records =
+                    execute_runtime_canonical_table_query_indexed(db, inner_table, index_store)?;
+
+                // Outer WHERE: re-evaluate the legacy filter walker
+                // against each materialised record. The alias is the
+                // outer query's alias (or the synthetic sentinel if
+                // unaliased) so qualified column references resolve
+                // back onto the inner projection keys.
+                let outer_alias = query.alias.as_deref();
+                if let Some(ref outer_filter) = query.filter {
+                    records.retain(|record| {
+                        super::super::join_filter::evaluate_runtime_filter(
+                            record,
+                            outer_filter,
+                            outer_alias,
+                            outer_alias,
+                        )
+                    });
+                }
+
+                // Outer ORDER BY: sort the materialised records
+                // using the same comparator as the normal table
+                // path. Expression-shaped sort keys run through
+                // expr_eval, bare columns through resolve_field.
+                if !query.order_by.is_empty() {
+                    records.sort_by(|a, b| {
+                        super::super::join_filter::compare_runtime_order(
+                            a,
+                            b,
+                            &query.order_by,
+                            outer_alias,
+                            outer_alias,
+                        )
+                    });
+                }
+
+                // Outer OFFSET / LIMIT.
+                if let Some(offset) = query.offset {
+                    let offset = offset as usize;
+                    if offset >= records.len() {
+                        records.clear();
+                    } else {
+                        records.drain(..offset);
+                    }
+                }
+                if let Some(limit) = query.limit {
+                    records.truncate(limit as usize);
+                }
+
+                return Ok(records);
             }
             other => {
                 return Err(RedDBError::Query(format!(
                     "FROM subquery of kind {} is not yet supported — \
-                     only nested SELECT lands in Fase 2 Week 3",
+                     only nested SELECT lands in Fase 2 Week 4",
                     super::super::join_filter::query_expr_name(other)
                 )));
             }

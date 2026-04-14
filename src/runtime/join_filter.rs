@@ -745,6 +745,18 @@ pub(super) fn evaluate_runtime_filter(
                 _ => false,
             }
         }
+        Filter::CompareExpr { lhs, op, rhs } => {
+            // Evaluate both sides as Expr trees and compare the
+            // resulting Values. Missing / null operands collapse to
+            // false so the predicate acts like SQL three-valued
+            // logic's UNKNOWN → not-matched.
+            let l = super::expr_eval::evaluate_runtime_expr(lhs, record, table_name, table_alias);
+            let r = super::expr_eval::evaluate_runtime_expr(rhs, record, table_name, table_alias);
+            match (l, r) {
+                (Some(lv), Some(rv)) => compare_runtime_values(&lv, &rv, *op),
+                _ => false,
+            }
+        }
         Filter::And(left, right) => {
             evaluate_runtime_filter(record, left, table_name, table_alias)
                 && evaluate_runtime_filter(record, right, table_name, table_alias)

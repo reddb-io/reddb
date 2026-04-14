@@ -434,6 +434,29 @@ pub(crate) fn evaluate_runtime_join_filter(
                 _ => false,
             }
         }
+        Filter::CompareExpr { lhs, op, rhs } => {
+            // Join-record expression evaluation: delegate to the
+            // single-side expr_eval walker using the LEFT table's
+            // scope — join-scoped field references embed their own
+            // table qualifier, so the walker resolves them via
+            // resolve_runtime_field's qualified-column path.
+            let l = super::super::expr_eval::evaluate_runtime_expr(
+                lhs,
+                record,
+                left_table_name,
+                left_table_alias,
+            );
+            let r = super::super::expr_eval::evaluate_runtime_expr(
+                rhs,
+                record,
+                left_table_name,
+                left_table_alias,
+            );
+            match (l, r) {
+                (Some(lv), Some(rv)) => compare_runtime_values(&lv, &rv, *op),
+                _ => false,
+            }
+        }
         Filter::And(left, right) => {
             evaluate_runtime_join_filter(
                 record,

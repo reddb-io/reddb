@@ -1133,6 +1133,19 @@ pub enum Filter {
         op: CompareOp,
         right: FieldRef,
     },
+    /// Expression-to-expression comparison: `lhs op rhs` where either
+    /// side may be an arbitrary `Expr` tree (function call, CAST,
+    /// arithmetic, nested CASE). This is the most general compare
+    /// variant — `Compare` and `CompareFields` stay as fast-path
+    /// specialisations because the planner / cost model / index
+    /// selector all pattern-match on the simpler shapes. The parser
+    /// only emits this variant when a simpler one cannot express the
+    /// predicate.
+    CompareExpr {
+        lhs: super::Expr,
+        op: CompareOp,
+        rhs: super::Expr,
+    },
     /// Logical AND
     And(Box<Filter>, Box<Filter>),
     /// Logical OR

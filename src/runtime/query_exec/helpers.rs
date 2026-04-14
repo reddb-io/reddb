@@ -360,6 +360,17 @@ pub(crate) fn evaluate_entity_filter(
                 _ => false,
             }
         }
+        Filter::CompareExpr { .. } => {
+            // Entity-level evaluator can only resolve FieldRef-based
+            // operands. For expression-shaped predicates we return
+            // `true` so the row is NOT pre-filtered — downstream
+            // per-record evaluation (which has full `UnifiedRecord`
+            // context and the Expr walker) applies the real predicate.
+            // Correctness is preserved; selectivity at the scan layer
+            // is lost. The planner's `filter_compiled` layer also
+            // routes this variant through its `Fallback` opcode.
+            true
+        }
         Filter::And(left, right) => {
             evaluate_entity_filter(entity, left, table_name, table_alias)
                 && evaluate_entity_filter(entity, right, table_name, table_alias)

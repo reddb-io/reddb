@@ -304,6 +304,15 @@ pub(crate) fn filter_uses_document_path(filter: &Filter, query: &TableQuery) -> 
         Filter::CompareFields { left, right, .. } => {
             field_ref_uses_document_path(left, query) || field_ref_uses_document_path(right, query)
         }
+        Filter::CompareExpr { .. } => {
+            // Conservative: assume expression-shaped predicates may
+            // touch document-path fields. A future pass can walk the
+            // Expr tree looking for qualified Column references and
+            // return a precise answer, but for Week 4 we opt into
+            // the document-filter path rather than risking missed
+            // paths.
+            true
+        }
         Filter::And(left, right) | Filter::Or(left, right) => {
             filter_uses_document_path(left, query) || filter_uses_document_path(right, query)
         }
@@ -590,6 +599,12 @@ pub(crate) fn filter_summary(filter: &Filter) -> String {
                 op,
                 field_ref_summary(right)
             )
+        }
+        Filter::CompareExpr { op, .. } => {
+            // Stringifying a full Expr tree is a Week 5+ job —
+            // for now emit an opaque placeholder so the plan
+            // printer keeps working.
+            format!("<expr> {} <expr>", op)
         }
         Filter::And(left, right) => {
             format!("({}) AND ({})", filter_summary(left), filter_summary(right))

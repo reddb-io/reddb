@@ -470,6 +470,12 @@ impl CostEstimator {
                 // only help literal-valued filters.
                 0.1
             }
+            AstFilter::CompareExpr { .. } => {
+                // Expression-shaped predicates: conservative 0.1 until
+                // the planner learns to walk Expr trees. Matches the
+                // CompareFields default.
+                0.1
+            }
         }
     }
 
@@ -701,6 +707,7 @@ impl CostEstimator {
             }
             AstFilter::Not(inner) => 1.0 - Self::estimate_filter_selectivity(inner),
             AstFilter::CompareFields { .. } => 0.1,
+            AstFilter::CompareExpr { .. } => 0.1,
         }
     }
 }

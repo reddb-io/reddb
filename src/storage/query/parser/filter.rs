@@ -155,11 +155,52 @@ impl<'a> Parser<'a> {
             return Ok(Filter::Contains { field, substring });
         }
 
-        // Comparison operator
+        // Comparison operator — now accepts an `Expr` RHS so users
+        // can write `WHERE age = price + 1`, `WHERE status = CAST(flag AS TEXT)`,
+        // or `WHERE name = UPPER(alias)`. The parser uses a cheap
+        // token lookahead to pick the fast `Filter::Compare` form
+        // when the RHS is a bare literal, and falls back to
+        // `Filter::CompareExpr` when it sees anything expression-shaped.
         let op = self.parse_compare_op()?;
+        if self.rhs_looks_like_expression() {
+            let rhs = self.parse_expr()?;
+            return Ok(Filter::CompareExpr {
+                lhs: super::super::ast::Expr::Column {
+                    field,
+                    span: super::super::ast::Span::synthetic(),
+                },
+                op,
+                rhs,
+            });
+        }
         let value = self.parse_value()?;
-
         Ok(Filter::Compare { field, op, value })
+    }
+
+    /// Returns true when the next token starts an expression-shaped
+    /// RHS (function call, CAST, CASE, parenthesised, unary sign, or
+    /// any identifier that isn't already in the literal-value set).
+    /// Used by `parse_primary_filter` to decide between the fast
+    /// `Compare` form and the general `CompareExpr` form.
+    fn rhs_looks_like_expression(&self) -> bool {
+        match self.peek() {
+            // Literal tokens stay on the fast path.
+            Token::Integer(_)
+            | Token::Float(_)
+            | Token::String(_)
+            | Token::True
+            | Token::False
+            | Token::Null => false,
+            // Minus is ambiguous — `-5` is a literal, `-col` is an
+            // expression. The legacy `parse_value` already handles
+            // the literal case, so err on the literal side.
+            Token::Dash => false,
+            // Anything else that can start a primary expression goes
+            // through the Expr path.
+            Token::LParen => true,
+            Token::Ident(_) => true,
+            _ => false,
+        }
     }
 
     /// Parse either a literal Value or a FieldRef. Used by BETWEEN

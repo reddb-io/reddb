@@ -614,6 +614,14 @@ impl UnifiedExecutor {
                     _ => false,
                 }
             }
+            Filter::CompareExpr { .. } => {
+                // The unified graph-level executor doesn't yet carry
+                // the `UnifiedRecord` context that expr_eval needs.
+                // Return false (conservative — the predicate is
+                // treated as unmatched) until the executor is
+                // upgraded in Week 5.
+                false
+            }
             Filter::And(left, right) => {
                 self.eval_filter(left, matched) && self.eval_filter(right, matched)
             }
