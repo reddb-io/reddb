@@ -1,0 +1,50 @@
+# Cargo build configuration template.
+#
+# Copy to `.cargo/config.toml` to activate. Provides a 30-50% link
+# time reduction (mold) and ~80% rebuild reduction (sccache) once
+# the prerequisites are installed.
+#
+# Prerequisites:
+#   sudo apt install mold clang     # or: sudo dnf install mold clang
+#   cargo install sccache
+#
+# After installing, run:
+#   cp .cargo/config.toml.example .cargo/config.toml
+#
+# `.cargo/config.toml` is gitignored (or should be — add it if
+# missing) so each developer keeps their own build config.
+
+# ---------------------------------------------------------------------
+# Linker — mold via clang driver
+# ---------------------------------------------------------------------
+#
+# mold is a parallel single-pass linker that links the reddb binary
+# in ~1s instead of ~5s with GNU ld. Big win on incremental dev
+# builds where the linker dominates the rebuild cost.
+
+[target.x86_64-unknown-linux-gnu]
+linker = "clang"
+rustflags = [
+    "-C", "link-arg=-fuse-ld=mold",
+    # Optional: shrink dwarf debug info for faster link time.
+    # Enable if your IDE/debugger doesn't need full type info.
+    # "-C", "link-arg=-Wl,--compress-debug-sections=zlib",
+]
+
+[target.aarch64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+# ---------------------------------------------------------------------
+# Compiler cache — sccache
+# ---------------------------------------------------------------------
+#
+# sccache hashes the source + flags and caches the .rlib output
+# under ~/.cache/sccache. On a fresh checkout or a branch switch
+# that touches a few files, the cache hits ~80% of the deps and
+# the build collapses from minutes to seconds.
+
+[build]
+rustc-wrapper = "sccache"
+# Optional: cap parallelism if your machine OOMs on heavy crates.
+# jobs = 8

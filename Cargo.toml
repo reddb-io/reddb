@@ -54,7 +54,10 @@ backend-turso = []
 backend-d1 = []
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+# `default-features = false` drops criterion's optional `rayon` dep
+# (~10 transitive crates we don't need for our microbenches) and
+# the `cast` crate. We keep `html_reports` for local plots.
+criterion = { version = "0.5", default-features = false, features = ["html_reports", "plotters", "cargo_bench_support"] }
 
 [build-dependencies]
 tonic-build = "0.12"
@@ -70,5 +73,33 @@ harness = false
 [[bench]]
 name = "perf_sweep"
 harness = false
+
+# ---------------------------------------------------------------------
+# Build profile tuning — trades runtime perf for build wall time
+# where it makes sense.
+# ---------------------------------------------------------------------
+
+# `cargo bench` builds in the bench profile. By default that profile
+# disables incremental compilation, so every bench rerun recompiles
+# the entire crate from scratch — even if only the bench file
+# changed. Enabling incremental cuts bench rebuild from ~7 minutes
+# (cold-ish) to ~30 seconds (warm) on this codebase.
+[profile.bench]
+incremental = true
+
+# Dev profile already has `incremental = true` by default. We bump
+# `codegen-units` so the linker can parallelise more aggressively
+# at the cost of a tiny runtime hit (we don't care about runtime
+# in dev). 256 is the cargo-stable sweet spot for crates of this
+# size.
+[profile.dev]
+incremental = true
+codegen-units = 256
+
+# Test profile inherits from dev, but we restate the values so the
+# intent is explicit and `cargo test` is as fast as `cargo build`.
+[profile.test]
+incremental = true
+codegen-units = 256
 
 # [profile.release] — use default

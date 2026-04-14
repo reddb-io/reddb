@@ -1,6 +1,7 @@
 .study
 target/
 PLAN.md
+.cargo/config.toml
 drivers/python/.venv/
 # Runtime WAL — binary, machine-local, should never be versioned.
 wal.log
