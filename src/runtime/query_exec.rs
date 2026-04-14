@@ -1,6 +1,7 @@
 use super::*;
 
 mod aggregate;
+mod filter_compiled;
 mod helpers;
 mod hybrid;
 mod indexed_scan;

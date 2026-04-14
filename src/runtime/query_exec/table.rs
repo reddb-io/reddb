@@ -139,13 +139,22 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         // Extract explicit column names for projection pushdown
         let select_cols = extract_select_column_names(&query.columns);
 
+        // Compile the filter ONCE before iterating. The compiled
+        // form pre-classifies every FieldRef into an EntityFieldKind
+        // so the per-row evaluator skips the ~6 system-field string
+        // compares + entity-kind cascade that the legacy walker
+        // performs on every call. See
+        // `runtime/query_exec/filter_compiled.rs` for the algorithm.
+        let compiled =
+            super::filter_compiled::CompiledEntityFilter::compile(filter, table_name, table_alias);
+
         // Pre-filter at entity level, only materialize records that pass
         let mut records: Vec<UnifiedRecord> = Vec::new();
         manager.for_each_entity(|entity| {
             if records.len() >= limit {
                 return false; // stop iteration
             }
-            if evaluate_entity_filter(entity, filter, table_name, table_alias) {
+            if compiled.evaluate(entity) {
                 let record = if select_cols.is_empty() {
                     runtime_table_record_from_entity(entity.clone())
                 } else {
@@ -281,12 +290,17 @@ pub(crate) fn execute_runtime_canonical_table_node(
                 let limit = context.query.limit.unwrap_or(10000) as usize;
 
                 let select_cols = extract_select_column_names(&context.query.columns);
+                let compiled = super::filter_compiled::CompiledEntityFilter::compile(
+                    filter,
+                    table_name,
+                    table_alias,
+                );
                 let mut records: Vec<UnifiedRecord> = Vec::new();
                 manager.for_each_entity(|entity| {
                     if records.len() >= limit {
                         return false;
                     }
-                    if evaluate_entity_filter(entity, filter, table_name, table_alias) {
+                    if compiled.evaluate(entity) {
                         let record = if select_cols.is_empty() {
                             runtime_table_record_from_entity(entity.clone())
                         } else {
