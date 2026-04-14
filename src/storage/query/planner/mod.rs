@@ -10,8 +10,10 @@
 //! - **optimizer**: Query optimization strategies
 
 pub mod cache;
+pub mod cache_key;
 pub mod cost;
 pub mod histogram;
+pub mod join_dp;
 pub mod optimizer;
 pub mod rewriter;
 pub mod stats_provider;

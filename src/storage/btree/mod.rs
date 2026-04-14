@@ -40,6 +40,7 @@ pub mod gc;
 pub mod node;
 pub mod tree;
 pub mod version;
+pub mod visibility_map;
 
 pub use cursor::{Cursor, CursorDirection};
 pub use gc::{GarbageCollector, GcConfig, GcStats};

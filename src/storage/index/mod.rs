@@ -24,6 +24,7 @@ pub mod bloom_segment;
 pub mod heavy_hitters;
 pub mod registry;
 pub mod stats;
+pub mod tid_bitmap;
 pub mod zone_map;
 
 pub use bloom_segment::{BloomSegment, BloomSegmentBuilder, HasBloom};

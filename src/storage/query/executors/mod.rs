@@ -10,6 +10,7 @@
 //! Each executor converts its native AST to execution operations,
 //! leveraging the unified executor for common operations.
 
+pub mod agg_spill;
 pub mod aggregation;
 pub mod cte;
 pub mod gremlin;
