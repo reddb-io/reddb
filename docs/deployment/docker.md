@@ -238,7 +238,10 @@ The repository ships several compose topologies under `examples/`:
 - `examples/docker-compose.pitr.yml`: single primary + MinIO for PITR and restore-point flows
 - `examples/docker-compose.serverless.yml`: single remote-backed serverless-style node + MinIO
 
-There is also a shared local harness for bringing these up and validating them:
+`examples/` is for manual usage and documentation. The automated test harness uses a separate
+test-only compose tree under `testdata/compose/`.
+
+There is also a shared local harness for bringing up those test environments and validating them:
 
 ```bash
 make test-env PROFILE=replica
@@ -246,7 +249,7 @@ make test-env PROFILE=remote
 make test-env PROFILE=serverless
 ```
 
-That harness combines:
+That test harness combines:
 
 - shell checks for health/readiness/control-plane endpoints
 - Rust integration tests from `tests/integration_external_env.rs`

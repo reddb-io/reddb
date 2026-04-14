@@ -20,6 +20,8 @@ make env-logs PROFILE=replica
 make env-down PROFILE=replica
 ```
 
+For automated validation, use the test-owned compose files under `testdata/compose/`.
+
 Run validations:
 
 ```bash

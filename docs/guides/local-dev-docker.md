@@ -17,7 +17,8 @@ From the repository root:
 docker compose -f examples/docker-compose.replica.yml up -d --build
 ```
 
-If you want the same stack plus automatic smoke validation, use:
+If you want automatic smoke validation, use the dedicated test topology instead of the
+manual `examples/` compose files:
 
 ```bash
 make test-env PROFILE=replica

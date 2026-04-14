@@ -15,8 +15,8 @@ help:
 	@echo "  make test          - Run the default local test layer"
 	@echo "  make test-fast     - Run the default local test layer"
 	@echo "  make test-persistent - Run the persistent multimodel integration layer"
-	@echo "  make test-env PROFILE=replica - Bring up an example environment and run shell + Rust external-env tests"
-	@echo "  make test-env-shell PROFILE=replica - Bring up an example environment and run shell checks only"
+	@echo "  make test-env PROFILE=replica - Bring up a dedicated test environment and run shell + Rust external-env tests"
+	@echo "  make test-env-shell PROFILE=replica - Bring up a dedicated test environment and run shell checks only"
 	@echo "  make test-env-rust PROFILE=replica - Run Rust external-env tests against an already running environment"
 	@echo "  make clean         - Clean build artifacts"
 	@echo "  make run           - Run HTTP server (ARGS='--path ... --bind ...')"
@@ -105,13 +105,13 @@ dev: link
 	@echo "✓ RedDB local dev binaries available"
 
 env-up:
-	@docker compose -f examples/docker-compose.$${PROFILE:-replica}.yml up -d --build
+	@docker compose -f testdata/compose/$${PROFILE:-replica}.yml up -d --build
 
 env-down:
-	@docker compose -f examples/docker-compose.$${PROFILE:-replica}.yml down -v
+	@docker compose -f testdata/compose/$${PROFILE:-replica}.yml down -v
 
 env-logs:
-	@docker compose -f examples/docker-compose.$${PROFILE:-replica}.yml logs -f
+	@docker compose -f testdata/compose/$${PROFILE:-replica}.yml logs -f
 
 test-env:
 	@./scripts/test-environment.sh $${PROFILE:-replica} all

@@ -1,0 +1,30 @@
+services:
+  server:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: reddb-server-min
+    ports:
+      - "50051:50051"
+      - "8080:8080"
+    volumes:
+      - server-data:/data
+    command:
+      - "server"
+      - "--path"
+      - "/data/data.rdb"
+      - "--grpc-bind"
+      - "0.0.0.0:50051"
+      - "--http-bind"
+      - "0.0.0.0:8080"
+    environment:
+      RUST_LOG: info
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:8080"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+volumes:
+  server-data:

@@ -9,6 +9,7 @@ KEEP_UP="${KEEP_UP:-0}"
 BUILD="${BUILD:-1}"
 
 COMPOSE_FILE=""
+TEST_COMPOSE_DIR="testdata/compose"
 PRIMARY_HTTP_URL=""
 PRIMARY_GRPC_ADDR=""
 REPLICA_HTTP_URL="${REDDB_TEST_REPLICA_HTTP_URL:-}"
@@ -103,13 +104,13 @@ wait_for_health() {
 configure_profile() {
     case "${PROFILE}" in
         min)
-            COMPOSE_FILE="examples/docker-compose.min.yml"
+            COMPOSE_FILE="${TEST_COMPOSE_DIR}/min.yml"
             PRIMARY_HTTP_URL="http://127.0.0.1:8080"
             PRIMARY_GRPC_ADDR="127.0.0.1:50051"
             HEALTH_URLS=("server|${PRIMARY_HTTP_URL}/health")
             ;;
         replica)
-            COMPOSE_FILE="examples/docker-compose.replica.yml"
+            COMPOSE_FILE="${TEST_COMPOSE_DIR}/replica.yml"
             PRIMARY_HTTP_URL="http://127.0.0.1:8080"
             PRIMARY_GRPC_ADDR="127.0.0.1:50051"
             REPLICA_HTTP_URL="http://127.0.0.1:8081"
@@ -117,7 +118,7 @@ configure_profile() {
             HEALTH_URLS=("primary|${PRIMARY_HTTP_URL}/health" "replica|${REPLICA_HTTP_URL}/health")
             ;;
         full)
-            COMPOSE_FILE="examples/docker-compose.full.yml"
+            COMPOSE_FILE="${TEST_COMPOSE_DIR}/full.yml"
             PRIMARY_HTTP_URL="http://127.0.0.1:8080"
             PRIMARY_GRPC_ADDR="127.0.0.1:50051"
             REPLICA_HTTP_URL="http://127.0.0.1:8081"
@@ -127,7 +128,7 @@ configure_profile() {
             HEALTH_URLS=("primary|${PRIMARY_HTTP_URL}/health" "replica-1|${REPLICA_HTTP_URL}/health" "replica-2|${SECONDARY_REPLICA_HTTP_URL}/health")
             ;;
         remote)
-            COMPOSE_FILE="examples/docker-compose.remote.yml"
+            COMPOSE_FILE="${TEST_COMPOSE_DIR}/remote.yml"
             PRIMARY_HTTP_URL="http://127.0.0.1:8080"
             PRIMARY_GRPC_ADDR="127.0.0.1:50051"
             REPLICA_HTTP_URL="http://127.0.0.1:8081"
@@ -136,21 +137,21 @@ configure_profile() {
             HEALTH_URLS=("primary|${PRIMARY_HTTP_URL}/health" "replica|${REPLICA_HTTP_URL}/health")
             ;;
         backup)
-            COMPOSE_FILE="examples/docker-compose.backup.yml"
+            COMPOSE_FILE="${TEST_COMPOSE_DIR}/backup.yml"
             PRIMARY_HTTP_URL="http://127.0.0.1:8090"
             PRIMARY_GRPC_ADDR="127.0.0.1:50061"
             MINIO_URL="http://127.0.0.1:9010"
             HEALTH_URLS=("server|${PRIMARY_HTTP_URL}/health")
             ;;
         pitr)
-            COMPOSE_FILE="examples/docker-compose.pitr.yml"
+            COMPOSE_FILE="${TEST_COMPOSE_DIR}/pitr.yml"
             PRIMARY_HTTP_URL="http://127.0.0.1:8100"
             PRIMARY_GRPC_ADDR="127.0.0.1:50071"
             MINIO_URL="http://127.0.0.1:9020"
             HEALTH_URLS=("primary|${PRIMARY_HTTP_URL}/health")
             ;;
         serverless)
-            COMPOSE_FILE="examples/docker-compose.serverless.yml"
+            COMPOSE_FILE="${TEST_COMPOSE_DIR}/serverless.yml"
             PRIMARY_HTTP_URL="http://127.0.0.1:8110"
             PRIMARY_GRPC_ADDR="127.0.0.1:50081"
             MINIO_URL="http://127.0.0.1:9030"
