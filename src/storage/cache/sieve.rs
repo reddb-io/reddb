@@ -432,8 +432,13 @@ where
             }
         }
 
-        // Need to insert new entry - evict if needed
-        let index = if self.count.load(Ordering::SeqCst) >= self.config.capacity {
+        // Need to insert new entry - evict if needed.
+        //
+        // `count` is read with Acquire to pair with the Release stores
+        // in fetch_add/fetch_sub. We do not need SeqCst here — there's
+        // no cross-atomic ordering requirement, and the subsequent
+        // write lock on `entries` provides the actual synchronisation.
+        let index = if self.count.load(Ordering::Acquire) >= self.config.capacity {
             self.evict_one()
         } else {
             None
@@ -464,7 +469,10 @@ where
         slots[slot_index] = Slot::Occupied(key.clone());
         entries.insert(key, entry);
 
-        self.count.fetch_add(1, Ordering::SeqCst);
+        // Release-store: pairs with the Acquire-load above. The
+        // entries write lock has already published the slot, so
+        // counters need only single-variable Release semantics.
+        self.count.fetch_add(1, Ordering::Release);
 
         if self.config.collect_stats {
             self.stats.insertions.fetch_add(1, Ordering::Relaxed);
@@ -494,7 +502,7 @@ where
         if let Some(entry) = entries.remove(key) {
             let mut slots = recover_write_guard(&self.slots);
             slots[entry.index] = Slot::Empty;
-            self.count.fetch_sub(1, Ordering::SeqCst);
+            self.count.fetch_sub(1, Ordering::Release);
 
             // Writeback if dirty
             if entry.is_dirty() {
@@ -511,12 +519,21 @@ where
     }
 
     /// Evict one entry using SIEVE algorithm
+    ///
+    /// **Atomic ordering note:** the `hand` pointer is read and
+    /// written with `Relaxed` because it does not coordinate
+    /// visibility of any page content — the hand is just a sweep
+    /// position, and concurrent writers always re-acquire the
+    /// `entries`/`slots` write locks before touching anything the
+    /// hand selects. The `pin_count` check inside `is_pinned()`
+    /// stays SeqCst (in `CacheEntry`) and that single SeqCst load
+    /// is what coordinates pin/unpin visibility across threads.
     fn evict_one(&self) -> Option<usize> {
         let capacity = self.config.capacity;
         let max_sweeps = capacity * 2;
 
         for _ in 0..max_sweeps {
-            let current_hand = self.hand.load(Ordering::SeqCst);
+            let current_hand = self.hand.load(Ordering::Relaxed);
 
             // Acquire both locks in consistent order: entries first, then slots
             let mut entries = recover_write_guard(&self.entries);
@@ -534,7 +551,7 @@ where
                         let key_clone = key.clone();
                         let Some(entry) = entries.remove(&key_clone) else {
                             let next = (current_hand + 1) % capacity;
-                            self.hand.store(next, Ordering::SeqCst);
+                            self.hand.store(next, Ordering::Relaxed);
                             continue;
                         };
 
@@ -547,7 +564,7 @@ where
                         }
 
                         slots[current_hand] = Slot::Empty;
-                        self.count.fetch_sub(1, Ordering::SeqCst);
+                        self.count.fetch_sub(1, Ordering::Release);
 
                         if self.config.collect_stats {
                             self.stats.evictions.fetch_add(1, Ordering::Relaxed);
@@ -556,7 +573,7 @@ where
 
                         // Advance hand for next eviction
                         let next = (current_hand + 1) % capacity;
-                        self.hand.store(next, Ordering::SeqCst);
+                        self.hand.store(next, Ordering::Relaxed);
 
                         return Some(current_hand);
                     }
@@ -565,7 +582,7 @@ where
 
             // Advance hand and try next slot
             let next = (current_hand + 1) % capacity;
-            self.hand.store(next, Ordering::SeqCst);
+            self.hand.store(next, Ordering::Relaxed);
         }
 
         if self.config.collect_stats {
@@ -643,13 +660,15 @@ where
             *slot = Slot::Empty;
         }
 
-        self.count.store(0, Ordering::SeqCst);
-        self.hand.store(0, Ordering::SeqCst);
+        // clear() is exclusive (write locks above); Relaxed is safe.
+        self.count.store(0, Ordering::Relaxed);
+        self.hand.store(0, Ordering::Relaxed);
     }
 
     /// Get current entry count
     pub fn len(&self) -> usize {
-        self.count.load(Ordering::SeqCst)
+        // Acquire pairs with the Release stores in insert/remove/evict.
+        self.count.load(Ordering::Acquire)
     }
 
     /// Check if empty
