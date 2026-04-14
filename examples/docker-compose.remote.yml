@@ -31,7 +31,7 @@ services:
 
   primary:
     build:
-      context: .
+      context: ..
       dockerfile: Dockerfile
       args:
         REDDB_CARGO_FEATURES: backend-s3
@@ -73,7 +73,7 @@ services:
 
   replica:
     build:
-      context: .
+      context: ..
       dockerfile: Dockerfile
       args:
         REDDB_CARGO_FEATURES: backend-s3

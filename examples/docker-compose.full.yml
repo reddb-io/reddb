@@ -1,7 +1,7 @@
 services:
   primary:
     build:
-      context: .
+      context: ..
       dockerfile: Dockerfile
     container_name: reddb-primary
     ports:
@@ -18,7 +18,7 @@ services:
 
   replica-1:
     build:
-      context: .
+      context: ..
       dockerfile: Dockerfile
     container_name: reddb-replica-1
     ports:
@@ -37,7 +37,7 @@ services:
 
   replica-2:
     build:
-      context: .
+      context: ..
       dockerfile: Dockerfile
     container_name: reddb-replica-2
     ports:

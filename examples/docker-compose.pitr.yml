@@ -1,0 +1,75 @@
+services:
+  minio:
+    image: minio/minio:latest
+    container_name: reddb-minio-pitr
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9020:9000"
+      - "9021:9001"
+    volumes:
+      - minio-pitr-data:/data
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: reddb-minio-pitr-init
+    depends_on:
+      - minio
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        until /usr/bin/mc alias set local http://minio:9000 minioadmin minioadmin; do
+          sleep 1
+        done
+        /usr/bin/mc alias set local http://minio:9000 minioadmin minioadmin
+        /usr/bin/mc mb --ignore-existing local/reddb-pitr
+        /usr/bin/mc anonymous set private local/reddb-pitr
+
+  primary:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        REDDB_CARGO_FEATURES: backend-s3
+    container_name: reddb-pitr-primary
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    ports:
+      - "50071:50051"
+      - "8100:8080"
+    volumes:
+      - pitr-primary-data:/data
+    command:
+      - "server"
+      - "--path"
+      - "/data/data.rdb"
+      - "--role"
+      - "primary"
+      - "--grpc-bind"
+      - "0.0.0.0:50051"
+      - "--http-bind"
+      - "0.0.0.0:8080"
+    environment:
+      RUST_LOG: info
+      REDDB_REMOTE_BACKEND: s3
+      REDDB_REMOTE_KEY: pitr/demo/data.rdb
+      REDDB_S3_ENDPOINT: http://minio:9000
+      REDDB_S3_BUCKET: reddb-pitr
+      REDDB_S3_REGION: us-east-1
+      REDDB_S3_ACCESS_KEY: minioadmin
+      REDDB_S3_SECRET_KEY: minioadmin
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:8080"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  minio-pitr-data:
+  pitr-primary-data:

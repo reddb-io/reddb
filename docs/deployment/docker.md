@@ -228,20 +228,24 @@ red health --grpc --bind localhost:50051
 
 ## Local Dev and CI
 
-The repository ships two compose topologies:
+The repository ships several compose topologies under `examples/`:
 
-- `docker-compose.yml`: primary + one read replica
-- `docker-compose.full.yml`: primary + two read replicas
-- `dev.docker-compose.yml`: primary + replica + MinIO for remote snapshot/WAL archive testing
+- `examples/docker-compose.min.yml`: single local server
+- `examples/docker-compose.replica.yml`: primary + one read replica
+- `examples/docker-compose.full.yml`: primary + two read replicas
+- `examples/docker-compose.remote.yml`: primary + replica + MinIO for remote snapshot/WAL archive testing
+- `examples/docker-compose.backup.yml`: single server + MinIO for remote backup flows
+- `examples/docker-compose.pitr.yml`: single primary + MinIO for PITR and restore-point flows
+- `examples/docker-compose.serverless.yml`: single remote-backed serverless-style node + MinIO
 
 Typical local-dev loop:
 
 ```bash
-docker compose up -d --build
-docker compose logs -f
+docker compose -f examples/docker-compose.replica.yml up -d --build
+docker compose -f examples/docker-compose.replica.yml logs -f
 curl -s http://127.0.0.1:8080/health
 curl -s http://127.0.0.1:8081/health
-docker compose down -v
+docker compose -f examples/docker-compose.replica.yml down -v
 ```
 
 For a step-by-step walkthrough, see [Local Development with Docker](/guides/local-dev-docker.md).
@@ -249,11 +253,11 @@ For a step-by-step walkthrough, see [Local Development with Docker](/guides/loca
 For timeline/backup testing against an S3-compatible backend without cloud infrastructure:
 
 ```bash
-docker compose -f dev.docker-compose.yml up -d --build
-docker compose -f dev.docker-compose.yml logs -f
+docker compose -f examples/docker-compose.remote.yml up -d --build
+docker compose -f examples/docker-compose.remote.yml logs -f
 curl -s http://127.0.0.1:8080/replication/status
 curl -s http://127.0.0.1:8081/replication/status
-docker compose -f dev.docker-compose.yml down -v
+docker compose -f examples/docker-compose.remote.yml down -v
 ```
 
 The dev topology provisions a local MinIO bucket and builds the RedDB image

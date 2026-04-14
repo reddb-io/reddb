@@ -14,11 +14,11 @@ Use it when you want:
 From the repository root:
 
 ```bash
-docker compose up -d --build
+docker compose -f examples/docker-compose.replica.yml up -d --build
 ```
 
 This uses
-[docker-compose.yml](https://github.com/forattini-dev/reddb/blob/main/docker-compose.yml).
+[examples/docker-compose.replica.yml](https://github.com/forattini-dev/reddb/blob/main/examples/docker-compose.replica.yml).
 
 The topology is:
 
@@ -35,8 +35,8 @@ curl -s http://127.0.0.1:8081/health
 For gRPC:
 
 ```bash
-docker compose exec -T primary /usr/local/bin/red health --grpc --bind 127.0.0.1:50051
-docker compose exec -T replica /usr/local/bin/red health --grpc --bind 127.0.0.1:50051
+docker compose -f examples/docker-compose.replica.yml exec -T primary /usr/local/bin/red health --grpc --bind 127.0.0.1:50051
+docker compose -f examples/docker-compose.replica.yml exec -T replica /usr/local/bin/red health --grpc --bind 127.0.0.1:50051
 ```
 
 ## 3. Write to the primary
@@ -93,14 +93,14 @@ red connect 127.0.0.1:50052
 ## 6. Watch the stack
 
 ```bash
-docker compose ps
-docker compose logs -f
+docker compose -f examples/docker-compose.replica.yml ps
+docker compose -f examples/docker-compose.replica.yml logs -f
 ```
 
 To inspect just the replica:
 
 ```bash
-docker compose logs -f replica
+docker compose -f examples/docker-compose.replica.yml logs -f replica
 ```
 
 ## 7. Reset everything
@@ -108,13 +108,13 @@ docker compose logs -f replica
 Stop containers only:
 
 ```bash
-docker compose down
+docker compose -f examples/docker-compose.replica.yml down
 ```
 
 Stop and delete volumes:
 
 ```bash
-docker compose down -v
+docker compose -f examples/docker-compose.replica.yml down -v
 ```
 
 That removes the local primary and replica data files under Docker volumes.
@@ -124,7 +124,7 @@ That removes the local primary and replica data files under Docker volumes.
 If you want one primary and two replicas:
 
 ```bash
-docker compose -f docker-compose.full.yml up -d --build
+docker compose -f examples/docker-compose.full.yml up -d --build
 ```
 
 That stack exposes:

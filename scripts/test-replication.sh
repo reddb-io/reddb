@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-COMPOSE_FILE="${1:-docker-compose.yml}"
+COMPOSE_FILE="${1:-examples/docker-compose.replica.yml}"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 echo "=== RedDB Replication Test ==="

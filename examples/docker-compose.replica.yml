@@ -1,16 +1,11 @@
 # ==========================================================================
 # RedDB - Primary + Read-Replica test environment
 # ==========================================================================
-# Usage:
-#   docker compose up -d --build      # start cluster
-#   docker compose logs -f             # follow logs
-#   docker compose down -v             # tear down with volumes
-# ==========================================================================
 
 services:
   primary:
     build:
-      context: .
+      context: ..
       dockerfile: Dockerfile
     container_name: reddb-primary
     ports:
@@ -43,7 +38,7 @@ services:
 
   replica:
     build:
-      context: .
+      context: ..
       dockerfile: Dockerfile
     container_name: reddb-replica
     ports:
