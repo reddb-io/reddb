@@ -6,7 +6,15 @@ use std::path::Path;
 /// Writer for the Write-Ahead Log
 pub struct WalWriter {
     file: File,
-    current_lsn: u64, // Log Sequence Number (byte offset)
+    /// Log Sequence Number — byte offset of the next record. Advances
+    /// every `append`; survives across restarts via `seek(End)`.
+    current_lsn: u64,
+    /// Highest LSN that has been `sync_all()`'d to disk. The WAL-first
+    /// flush invariant relies on this: a page with `header.lsn = L` may
+    /// only be written to its data file once `durable_lsn >= L`.
+    /// See `src/storage/cache/README.md` § Invariant 2 and the Target 3
+    /// section of `PLAN.md`.
+    durable_lsn: u64,
 }
 
 impl WalWriter {
@@ -36,7 +44,14 @@ impl WalWriter {
             file.seek(SeekFrom::End(0))?
         };
 
-        Ok(Self { file, current_lsn })
+        // On open, every byte already on disk is by definition durable
+        // (any pre-crash unflushed tail was lost when the OS dropped
+        // page cache). Initialise `durable_lsn` to `current_lsn`.
+        Ok(Self {
+            file,
+            current_lsn,
+            durable_lsn: current_lsn,
+        })
     }
 
     /// Append a record to the WAL
@@ -51,9 +66,35 @@ impl WalWriter {
         Ok(record_lsn)
     }
 
-    /// Force sync to disk
+    /// Force sync to disk. Updates `durable_lsn` so subsequent
+    /// `flush_until` calls become no-ops up to `current_lsn`.
     pub fn sync(&mut self) -> io::Result<()> {
-        self.file.sync_all()
+        self.file.sync_all()?;
+        self.durable_lsn = self.current_lsn;
+        Ok(())
+    }
+
+    /// Ensure the WAL is durable on disk at least up to byte offset
+    /// `target`. No-op when `target <= durable_lsn`.
+    ///
+    /// This is the postgres `XLogFlush(LSN)` analogue. Pager flush
+    /// paths call this with `max(dirty.header.lsn)` before writing
+    /// any data page so the WAL record describing the change is
+    /// guaranteed to be on disk before the page itself.
+    pub fn flush_until(&mut self, target: u64) -> io::Result<()> {
+        if self.durable_lsn >= target {
+            return Ok(());
+        }
+        self.file.sync_all()?;
+        self.durable_lsn = self.current_lsn;
+        Ok(())
+    }
+
+    /// Highest byte offset that is durable on disk. Used by the pager
+    /// to decide whether a `flush_until` call would actually need a
+    /// `fsync`.
+    pub fn durable_lsn(&self) -> u64 {
+        self.durable_lsn
     }
 
     /// Get current LSN (end of file offset)
@@ -76,6 +117,7 @@ impl WalWriter {
         self.file.sync_all()?;
 
         self.current_lsn = 8;
+        self.durable_lsn = 8;
         Ok(())
     }
 }
@@ -242,5 +284,95 @@ mod tests {
             .unwrap();
         assert_eq!(lsn, 8);
         assert_eq!(writer.current_lsn(), 8 + 13);
+    }
+
+    // -----------------------------------------------------------------
+    // Target 3: durable_lsn / flush_until tests
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn fresh_wal_has_durable_lsn_at_header_end() {
+        let (_guard, path) = temp_wal("durable_init");
+        let writer = WalWriter::open(&path).unwrap();
+        assert_eq!(writer.durable_lsn(), 8);
+        assert_eq!(writer.current_lsn(), 8);
+    }
+
+    #[test]
+    fn flush_until_below_durable_is_noop() {
+        let (_guard, path) = temp_wal("flush_noop");
+        let mut writer = WalWriter::open(&path).unwrap();
+        // After open, durable_lsn == 8.
+        let before = writer.durable_lsn();
+        writer.flush_until(0).unwrap();
+        writer.flush_until(8).unwrap();
+        assert_eq!(writer.durable_lsn(), before);
+    }
+
+    #[test]
+    fn flush_until_advances_durable_to_current() {
+        let (_guard, path) = temp_wal("flush_advance");
+        let mut writer = WalWriter::open(&path).unwrap();
+        writer.append(&WalRecord::Begin { tx_id: 7 }).unwrap();
+        writer.append(&WalRecord::Commit { tx_id: 7 }).unwrap();
+        let target = writer.current_lsn();
+        // Before flush_until, durable still at the header.
+        assert_eq!(writer.durable_lsn(), 8);
+        writer.flush_until(target).unwrap();
+        assert_eq!(writer.durable_lsn(), target);
+    }
+
+    #[test]
+    fn flush_until_is_monotonic() {
+        let (_guard, path) = temp_wal("flush_monotonic");
+        let mut writer = WalWriter::open(&path).unwrap();
+        writer.append(&WalRecord::Begin { tx_id: 1 }).unwrap();
+        let lo = writer.current_lsn();
+        writer.flush_until(lo).unwrap();
+        let durable_after_lo = writer.durable_lsn();
+        writer.append(&WalRecord::Commit { tx_id: 1 }).unwrap();
+        let hi = writer.current_lsn();
+        writer.flush_until(hi).unwrap();
+        assert!(writer.durable_lsn() >= durable_after_lo);
+        // Calling flush_until(lo) after flush_until(hi) is a no-op.
+        writer.flush_until(lo).unwrap();
+        assert_eq!(writer.durable_lsn(), hi);
+    }
+
+    #[test]
+    fn sync_advances_durable_lsn_too() {
+        let (_guard, path) = temp_wal("sync_durable");
+        let mut writer = WalWriter::open(&path).unwrap();
+        writer.append(&WalRecord::Begin { tx_id: 9 }).unwrap();
+        let before = writer.durable_lsn();
+        let after_append = writer.current_lsn();
+        assert!(after_append > before);
+        writer.sync().unwrap();
+        assert_eq!(writer.durable_lsn(), after_append);
+    }
+
+    #[test]
+    fn truncate_resets_durable_lsn() {
+        let (_guard, path) = temp_wal("truncate_durable");
+        let mut writer = WalWriter::open(&path).unwrap();
+        writer.append(&WalRecord::Begin { tx_id: 1 }).unwrap();
+        writer.sync().unwrap();
+        assert!(writer.durable_lsn() > 8);
+        writer.truncate().unwrap();
+        assert_eq!(writer.durable_lsn(), 8);
+        assert_eq!(writer.current_lsn(), 8);
+    }
+
+    #[test]
+    fn reopen_initialises_durable_to_current() {
+        let (_guard, path) = temp_wal("reopen_durable");
+        {
+            let mut writer = WalWriter::open(&path).unwrap();
+            writer.append(&WalRecord::Begin { tx_id: 1 }).unwrap();
+            writer.sync().unwrap();
+        }
+        let writer = WalWriter::open(&path).unwrap();
+        // After reopen, every byte on disk is durable by definition.
+        assert_eq!(writer.durable_lsn(), writer.current_lsn());
     }
 }

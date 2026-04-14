@@ -63,6 +63,39 @@ impl Page {
         u32::from_le_bytes([self.data[8], self.data[9], self.data[10], self.data[11]])
     }
 
+    /// Get the WAL Log Sequence Number stamped on this page.
+    ///
+    /// `0` means "no WAL guarantee" — the page was modified through a
+    /// path that did not append a WAL record (freelist trunks, header
+    /// shadow pages). The double-write buffer is responsible for the
+    /// integrity of `lsn == 0` pages.
+    ///
+    /// See `src/storage/engine/btree/README.md` § Invariant 3.
+    pub fn lsn(&self) -> u64 {
+        u64::from_le_bytes([
+            self.data[20],
+            self.data[21],
+            self.data[22],
+            self.data[23],
+            self.data[24],
+            self.data[25],
+            self.data[26],
+            self.data[27],
+        ])
+    }
+
+    /// Stamp the WAL LSN of the record describing the most recent
+    /// mutation to this page. The pager's flush path guarantees that
+    /// the WAL is durable up to this LSN before writing the page to
+    /// disk (WAL-first ordering — see `PLAN.md` § Target 3).
+    ///
+    /// Callers should pass the LSN returned by `WalWriter::append`
+    /// for the change record. Pass `0` only on legacy / non-WAL
+    /// write paths (DWB-protected freelist + header writes).
+    pub fn set_lsn(&mut self, lsn: u64) {
+        self.data[20..28].copy_from_slice(&lsn.to_le_bytes());
+    }
+
     /// Get cell count
     pub fn cell_count(&self) -> u16 {
         u16::from_le_bytes([self.data[2], self.data[3]])

@@ -35,11 +35,12 @@
 use super::freelist::FreeList;
 use super::page::{Page, PageError, PageType, DB_VERSION, HEADER_SIZE, MAGIC_BYTES, PAGE_SIZE};
 use super::page_cache::PageCache;
+use crate::storage::wal::writer::WalWriter;
 use fs2::FileExt;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 /// Default cache size (pages)
 const DEFAULT_CACHE_SIZE: usize = 10_000;
@@ -220,6 +221,18 @@ pub struct Pager {
     config: PagerConfig,
     /// Dirty flag for header
     header_dirty: Mutex<bool>,
+    /// Optional WAL writer for WAL-first flush ordering.
+    ///
+    /// When set, [`Pager::flush`] computes the maximum `header.lsn` of
+    /// every dirty page and calls [`WalWriter::flush_until`] before
+    /// passing the batch to the double-write buffer. This guarantees
+    /// the postgres-style invariant: a page on disk implies its WAL
+    /// record is already durable.
+    ///
+    /// Wired in via [`Pager::set_wal_writer`] post-construction so
+    /// existing callers that build a Pager without a WAL keep working
+    /// unchanged. See `PLAN.md` § Target 3.
+    wal: RwLock<Option<Arc<Mutex<WalWriter>>>>,
 }
 
 #[path = "pager/impl.rs"]
@@ -506,5 +519,133 @@ mod tests {
         }
 
         cleanup(&path);
+    }
+
+    // -----------------------------------------------------------------
+    // Target 3: WAL-first flush ordering
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn pager_starts_without_wal_writer() {
+        let path = temp_db_path();
+        let pager = Pager::open(&path, PagerConfig::default()).unwrap();
+        assert!(!pager.has_wal_writer());
+        drop(pager);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn set_wal_writer_attaches_handle() {
+        use crate::storage::wal::writer::WalWriter;
+        use std::sync::{Arc, Mutex};
+
+        let db_path = temp_db_path();
+        let mut wal_path = db_path.clone();
+        wal_path.set_extension("wal");
+        let _ = fs::remove_file(&wal_path);
+
+        let pager = Pager::open(&db_path, PagerConfig::default()).unwrap();
+        let wal = Arc::new(Mutex::new(WalWriter::open(&wal_path).unwrap()));
+        pager.set_wal_writer(Arc::clone(&wal));
+        assert!(pager.has_wal_writer());
+
+        pager.clear_wal_writer();
+        assert!(!pager.has_wal_writer());
+
+        drop(pager);
+        let _ = fs::remove_file(&wal_path);
+        cleanup(&db_path);
+    }
+
+    #[test]
+    fn flush_with_lsn_zero_pages_skips_wal_call() {
+        // When every dirty page has lsn == 0 (the legacy auto-commit
+        // path), flush() must NOT call wal.flush_until — there is no
+        // WAL record to wait for. We verify this by attaching a WAL
+        // whose durable_lsn starts at 8 and confirming flush() does
+        // not advance it (no append, no flush).
+        use crate::storage::wal::writer::WalWriter;
+        use std::sync::{Arc, Mutex};
+
+        let db_path = temp_db_path();
+        let mut wal_path = db_path.clone();
+        wal_path.set_extension("wal");
+        let _ = fs::remove_file(&wal_path);
+
+        let pager = Pager::open(&db_path, PagerConfig::default()).unwrap();
+        let wal = Arc::new(Mutex::new(WalWriter::open(&wal_path).unwrap()));
+        let initial_durable = {
+            let g = wal.lock().unwrap();
+            g.durable_lsn()
+        };
+        pager.set_wal_writer(Arc::clone(&wal));
+
+        // Allocate and write a page with lsn = 0.
+        let mut page = pager.allocate_page(PageType::BTreeLeaf).unwrap();
+        page.insert_cell(b"k", b"v").unwrap();
+        // header.lsn stays at 0 — caller did not stamp.
+        pager.write_page(page.page_id(), page).unwrap();
+        pager.flush().unwrap();
+
+        // WAL durable_lsn must be unchanged because flush_until was
+        // never called (max lsn over dirty pages was 0).
+        let after_flush = {
+            let g = wal.lock().unwrap();
+            g.durable_lsn()
+        };
+        assert_eq!(after_flush, initial_durable);
+
+        drop(pager);
+        let _ = fs::remove_file(&wal_path);
+        cleanup(&db_path);
+    }
+
+    #[test]
+    fn flush_advances_wal_durable_when_pages_carry_lsn() {
+        // The full WAL-first dance: append a record, capture the
+        // returned LSN, stamp it on a page, flush — afterwards the
+        // WAL must be durable up to at least that LSN.
+        use crate::storage::wal::record::WalRecord;
+        use crate::storage::wal::writer::WalWriter;
+        use std::sync::{Arc, Mutex};
+
+        let db_path = temp_db_path();
+        let mut wal_path = db_path.clone();
+        wal_path.set_extension("wal");
+        let _ = fs::remove_file(&wal_path);
+
+        let pager = Pager::open(&db_path, PagerConfig::default()).unwrap();
+        let wal = Arc::new(Mutex::new(WalWriter::open(&wal_path).unwrap()));
+        pager.set_wal_writer(Arc::clone(&wal));
+
+        // Stamp two dirty pages with a real WAL LSN.
+        let stamped_lsn = {
+            let mut wal_guard = wal.lock().unwrap();
+            wal_guard.append(&WalRecord::Begin { tx_id: 1 }).unwrap();
+            wal_guard.append(&WalRecord::Commit { tx_id: 1 }).unwrap();
+            wal_guard.current_lsn()
+        };
+        let mut page = pager.allocate_page(PageType::BTreeLeaf).unwrap();
+        page.insert_cell(b"k", b"v").unwrap();
+        // Use the public Page API to set the LSN.
+        page.set_lsn(stamped_lsn);
+        pager.write_page(page.page_id(), page).unwrap();
+        pager.flush().unwrap();
+
+        // After flush, the WAL is durable at least up to our stamp.
+        let after_flush = {
+            let g = wal.lock().unwrap();
+            g.durable_lsn()
+        };
+        assert!(
+            after_flush >= stamped_lsn,
+            "after flush durable_lsn {} must be >= stamped {}",
+            after_flush,
+            stamped_lsn
+        );
+
+        drop(pager);
+        let _ = fs::remove_file(&wal_path);
+        cleanup(&db_path);
     }
 }

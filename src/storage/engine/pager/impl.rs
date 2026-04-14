@@ -60,6 +60,7 @@ impl Pager {
             header: RwLock::new(DatabaseHeader::default()),
             config,
             header_dirty: Mutex::new(false),
+            wal: RwLock::new(None),
         };
 
         if exists {
@@ -811,6 +812,33 @@ impl Pager {
         Ok(self.header_read()?.page_count)
     }
 
+    /// Attach a WAL writer to enforce WAL-first flush ordering.
+    ///
+    /// After this call, [`Pager::flush`] computes the maximum
+    /// `header.lsn` over all dirty pages and calls
+    /// `WalWriter::flush_until(max_lsn)` before any page is written
+    /// to the data file. This is the postgres rule: a page on disk
+    /// implies its WAL record is already durable on disk.
+    ///
+    /// Existing call sites that construct a Pager without a WAL
+    /// keep their previous behaviour (no LSN check) — wiring is
+    /// strictly opt-in.
+    pub fn set_wal_writer(&self, wal: Arc<Mutex<crate::storage::wal::writer::WalWriter>>) {
+        let mut slot = self.wal.write().unwrap_or_else(|p| p.into_inner());
+        *slot = Some(wal);
+    }
+
+    /// Detach the WAL writer (test / shutdown path).
+    pub fn clear_wal_writer(&self) {
+        let mut slot = self.wal.write().unwrap_or_else(|p| p.into_inner());
+        *slot = None;
+    }
+
+    /// Has a WAL writer been attached?
+    pub fn has_wal_writer(&self) -> bool {
+        self.wal.read().map(|s| s.is_some()).unwrap_or(false)
+    }
+
     /// Flush all dirty pages to disk
     pub fn flush(&self) -> Result<(), PagerError> {
         if self.config.read_only {
@@ -845,6 +873,28 @@ impl Pager {
         // Flush dirty pages from cache (through DWB if enabled)
         let dirty_pages = self.cache.flush_dirty();
         if !dirty_pages.is_empty() {
+            // WAL-FIRST: ensure every WAL record describing a dirty
+            // page is durable BEFORE the page itself reaches disk.
+            // Pages with `lsn == 0` are exempt (freelist trunks, header
+            // shadow pages, anything not produced by a WAL append).
+            let max_lsn = dirty_pages
+                .iter()
+                .filter_map(|(_, page)| page.header().ok().map(|h| h.lsn))
+                .max()
+                .unwrap_or(0);
+            if max_lsn > 0 {
+                if let Ok(slot) = self.wal.read() {
+                    if let Some(wal) = slot.as_ref() {
+                        let wal = Arc::clone(wal);
+                        // Drop the read lock before taking the WAL
+                        // mutex so an unrelated reader cannot block
+                        // the flush path.
+                        drop(slot);
+                        let mut wal_guard = wal.lock().unwrap_or_else(|p| p.into_inner());
+                        wal_guard.flush_until(max_lsn).map_err(PagerError::Io)?;
+                    }
+                }
+            }
             self.write_pages_through_dwb(&dirty_pages)?;
         }
 
