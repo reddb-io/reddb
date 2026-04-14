@@ -1,6 +1,6 @@
 //! Filter parsing for WHERE clauses
 
-use super::super::ast::{CompareOp, Expr, FieldRef, Filter, Span};
+use super::super::ast::{BinOp, CompareOp, Expr, FieldRef, Filter, Span, UnaryOp};
 use super::super::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
@@ -14,6 +14,12 @@ fn token_can_start_field_ref(token: &Token) -> bool {
             | Token::RParen
             | Token::LBracket
             | Token::RBracket
+            | Token::Integer(_)
+            | Token::Float(_)
+            | Token::String(_)
+            | Token::True
+            | Token::False
+            | Token::Null
             | Token::Comma
             | Token::Dot
             | Token::Eq
@@ -74,13 +80,6 @@ impl<'a> Parser<'a> {
 
     /// Parse primary filter (comparison, parenthesized, etc.)
     fn parse_primary_filter(&mut self) -> Result<Filter, ParseError> {
-        // Parenthesized expression
-        if self.consume(&Token::LParen)? {
-            let expr = self.parse_filter()?;
-            self.expect(Token::RParen)?;
-            return Ok(expr);
-        }
-
         let lhs = self.parse_filter_operand_expr()?;
         let lhs_field = expr_as_field_ref(&lhs);
 
@@ -254,6 +253,22 @@ impl<'a> Parser<'a> {
             };
             let substring = self.parse_string()?;
             return Ok(Filter::Contains { field, substring });
+        }
+
+        if matches!(
+            self.peek(),
+            Token::And | Token::Or | Token::RParen | Token::Eof
+        ) {
+            if expr_is_booleanish(&lhs) {
+                return Ok(Filter::CompareExpr {
+                    lhs,
+                    op: CompareOp::Eq,
+                    rhs: Expr::Literal {
+                        value: Value::Boolean(true),
+                        span: Span::synthetic(),
+                    },
+                });
+            }
         }
 
         // Comparison operator — now accepts an `Expr` RHS so users
@@ -492,5 +507,32 @@ fn expr_as_field_ref(expr: &Expr) -> Option<FieldRef> {
     match expr {
         Expr::Column { field, .. } => Some(field.clone()),
         _ => None,
+    }
+}
+
+fn expr_is_booleanish(expr: &Expr) -> bool {
+    match expr {
+        Expr::Literal {
+            value: Value::Boolean(_),
+            ..
+        } => true,
+        Expr::BinaryOp { op, .. } => matches!(
+            op,
+            BinOp::Eq
+                | BinOp::Ne
+                | BinOp::Lt
+                | BinOp::Le
+                | BinOp::Gt
+                | BinOp::Ge
+                | BinOp::And
+                | BinOp::Or
+        ),
+        Expr::UnaryOp {
+            op: UnaryOp::Not, ..
+        }
+        | Expr::IsNull { .. }
+        | Expr::InList { .. }
+        | Expr::Between { .. } => true,
+        _ => false,
     }
 }
