@@ -475,31 +475,59 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                     }
                 }
 
-                let entity_ids = idx_store
+                let mut entity_ids = idx_store
                     .hash_lookup(&query.table, &idx.name, &value_bytes)
                     .map_err(|err| {
                         RedDBError::Internal(format!("hash index lookup failed: {err}"))
                     })?;
                 if !entity_ids.is_empty() {
-                    // Compile and re-apply the FULL filter.
-                    // The hash lookup extracted only one equality predicate from the AND tree
-                    // (e.g. city = 'X'); secondary predicates (e.g. age > 30) would be silently
-                    // dropped without this step, producing wrong row counts.
+                    let limit = query.limit.map(|l| l as usize).unwrap_or(usize::MAX);
+
+                    // When the hash result is much larger than LIMIT and the filter has
+                    // secondary predicates (e.g. AND(city='X', age>30)), fetching and
+                    // cloning all N candidates is wasteful — a sequential scan with
+                    // early termination visits ~limit/combined_selectivity entities and
+                    // stops, vs N entity clones.  Fall through to the fast-scan path below.
                     //
-                    // Use compile_with_schema when the collection schema is available so that
-                    // user column accesses use O(1) index lookup (RowFieldFast) instead of
-                    // O(n) linear search (RowField) — matters for 50K+ candidate sets.
-                    let table_name = query.table.as_str();
-                    let table_alias = query.alias.as_deref().unwrap_or(table_name);
-                    let schema_arc = db
-                        .store()
-                        .get_collection(table_name)
-                        .and_then(|m| m.column_schema());
-                    let compiled_filter =
-                        effective_filter
-                            .as_ref()
-                            .map(|f| {
-                                match schema_arc
+                    // Threshold: N > limit * 20. For LIMIT=100, N must be >2000 before
+                    // we skip; for LIMIT=usize::MAX (no LIMIT), we never skip.
+                    //
+                    // Simple equality filter (no secondary predicates): truncate candidate
+                    // list to limit instead — any limit rows from the hash set are valid
+                    // without fetching the rest.
+                    let is_simple_eq = matches!(
+                        effective_filter.as_ref(),
+                        Some(Filter::Compare {
+                            op: CompareOp::Eq,
+                            ..
+                        })
+                    );
+                    if is_simple_eq && limit < entity_ids.len() {
+                        // No secondary predicate — any N rows are valid.
+                        entity_ids.truncate(limit);
+                    } else if !is_simple_eq
+                        && limit < usize::MAX
+                        && entity_ids.len() > limit.saturating_mul(20)
+                    {
+                        // Compound filter + large candidate set: let fast scan handle it.
+                        // Drop entity_ids and fall through to for_each_entity_zoned below.
+                    } else {
+                        // Compile and re-apply the FULL filter.
+                        // The hash lookup extracted only one equality predicate from the AND tree
+                        // (e.g. city = 'X'); secondary predicates (e.g. age > 30) would be silently
+                        // dropped without this step, producing wrong row counts.
+                        //
+                        // Use compile_with_schema when the collection schema is available so that
+                        // user column accesses use O(1) index lookup (RowFieldFast) instead of
+                        // O(n) linear search (RowField) — matters for 50K+ candidate sets.
+                        let table_name = query.table.as_str();
+                        let table_alias = query.alias.as_deref().unwrap_or(table_name);
+                        let schema_arc = db
+                            .store()
+                            .get_collection(table_name)
+                            .and_then(|m| m.column_schema());
+                        let compiled_filter = effective_filter.as_ref().map(|f| {
+                            match schema_arc
                         .as_ref()
                     {
                         Some(schema) => {
@@ -516,36 +544,38 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                             table_alias,
                         ),
                     }
-                            });
-                    let store = db.store();
-                    // Batch fetch: single lock acquisition for the entire candidate set
-                    let entities = store.get_batch(&query.table, &entity_ids);
-                    let limit = query.limit.map(|l| l as usize).unwrap_or(usize::MAX);
-                    let explicit_cols = extract_select_column_names(&effective_projections);
-                    let lean = explicit_cols.is_empty();
-                    let mut records = Vec::with_capacity(entity_ids.len().min(limit));
-                    for entity_opt in entities.into_iter().flatten() {
-                        if records.len() >= limit {
-                            break;
-                        }
-                        if compiled_filter
-                            .as_ref()
-                            .map_or(true, |cf| cf.evaluate(&entity_opt))
-                        {
-                            let record_opt = if lean {
-                                super::super::record_search::runtime_table_record_lean(entity_opt)
-                            } else {
-                                runtime_table_record_from_entity_projected(
-                                    entity_opt,
-                                    &explicit_cols,
-                                )
-                            };
-                            if let Some(record) = record_opt {
-                                records.push(record);
+                        });
+                        let store = db.store();
+                        // Batch fetch: single lock acquisition for the entire candidate set
+                        let entities = store.get_batch(&query.table, &entity_ids);
+                        let explicit_cols = extract_select_column_names(&effective_projections);
+                        let lean = explicit_cols.is_empty();
+                        let mut records = Vec::with_capacity(entity_ids.len().min(limit));
+                        for entity_opt in entities.into_iter().flatten() {
+                            if records.len() >= limit {
+                                break;
+                            }
+                            if compiled_filter
+                                .as_ref()
+                                .map_or(true, |cf| cf.evaluate(&entity_opt))
+                            {
+                                let record_opt = if lean {
+                                    super::super::record_search::runtime_table_record_lean(
+                                        entity_opt,
+                                    )
+                                } else {
+                                    runtime_table_record_from_entity_projected(
+                                        entity_opt,
+                                        &explicit_cols,
+                                    )
+                                };
+                                if let Some(record) = record_opt {
+                                    records.push(record);
+                                }
                             }
                         }
-                    }
-                    return Ok(records);
+                        return Ok(records);
+                    } // end else (hash batch path)
                 }
             }
         }
