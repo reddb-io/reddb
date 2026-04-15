@@ -209,6 +209,70 @@ impl SortedColumnIndex {
         Some(self.collect_range_limited((Unbounded, Included(threshold)), limit))
     }
 
+    /// IN-list multi-point lookup: performs one BTree point-lookup per value
+    /// (O(log n) each) instead of a range scan — matches MongoDB's
+    /// `IndexBoundsChecker` MUST_ADVANCE / multi-interval seek behaviour.
+    ///
+    /// `values` need not be sorted; the method sorts internally.
+    /// Stops after collecting `limit` entity IDs total.
+    /// Returns `None` when inexact numeric values make the index unsafe.
+    pub fn in_lookup_limited(
+        &self,
+        values: &[SortedNumericKey],
+        limit: usize,
+    ) -> Option<Vec<EntityId>> {
+        if self.has_inexact_numeric_values {
+            return None;
+        }
+        let mut sorted_vals = values.to_vec();
+        sorted_vals.sort_unstable();
+        sorted_vals.dedup();
+
+        let mut result = Vec::with_capacity(limit.min(sorted_vals.len() * 4));
+        'outer: for key in &sorted_vals {
+            if let Some(ids) = self.entries.get(key) {
+                for &id in ids {
+                    result.push(id);
+                    if result.len() >= limit {
+                        break 'outer;
+                    }
+                }
+            }
+        }
+        Some(result)
+    }
+
+    /// Like `in_lookup_limited` but only returns IDs also present in `filter_set`.
+    /// Used for bitmap-AND of a hash-index predicate + an IN-list sorted-index predicate.
+    pub fn in_lookup_limited_filtered_by_set(
+        &self,
+        values: &[SortedNumericKey],
+        filter_set: &std::collections::HashSet<u64>,
+        limit: usize,
+    ) -> Option<Vec<EntityId>> {
+        if self.has_inexact_numeric_values {
+            return None;
+        }
+        let mut sorted_vals = values.to_vec();
+        sorted_vals.sort_unstable();
+        sorted_vals.dedup();
+
+        let mut result = Vec::with_capacity(limit.min(sorted_vals.len() * 4));
+        'outer: for key in &sorted_vals {
+            if let Some(ids) = self.entries.get(key) {
+                for &id in ids {
+                    if filter_set.contains(&id.raw()) {
+                        result.push(id);
+                        if result.len() >= limit {
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        }
+        Some(result)
+    }
+
     fn collect_range<R>(&self, range: R) -> Vec<EntityId>
     where
         R: std::ops::RangeBounds<SortedNumericKey>,
@@ -536,6 +600,39 @@ impl SortedIndexManager {
             filter_set,
             limit,
         )
+    }
+
+    /// IN-list multi-point lookup on a sorted index.
+    /// Performs one BTree point-lookup per value — O(k log n) for k values
+    /// instead of O(n) for a range scan covering all values.
+    /// Stops after `limit` total entity IDs.
+    pub(crate) fn in_lookup_limited(
+        &self,
+        collection: &str,
+        column: &str,
+        values: &[SortedNumericKey],
+        limit: usize,
+    ) -> Option<Vec<EntityId>> {
+        let indices = read_unpoisoned(&self.indices);
+        let key = (collection.to_string(), column.to_string());
+        indices.get(&key)?.in_lookup_limited(values, limit)
+    }
+
+    /// IN-list multi-point lookup filtered by a hash-index candidate set.
+    /// Bitmap AND: sorted-index point lookups ∩ hash-index set.
+    pub(crate) fn in_lookup_limited_filtered_by_set(
+        &self,
+        collection: &str,
+        column: &str,
+        values: &[SortedNumericKey],
+        filter_set: &std::collections::HashSet<u64>,
+        limit: usize,
+    ) -> Option<Vec<EntityId>> {
+        let indices = read_unpoisoned(&self.indices);
+        let key = (collection.to_string(), column.to_string());
+        indices
+            .get(&key)?
+            .in_lookup_limited_filtered_by_set(values, filter_set, limit)
     }
 
     /// Check if a sorted index exists for a column.

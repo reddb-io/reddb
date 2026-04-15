@@ -92,6 +92,31 @@ pub(crate) fn try_sorted_index_lookup(
             }
             Some(ids)
         }
+        // IN-list: one BTree point-lookup per value (O(k log n)) instead of
+        // a range scan that covers all gaps between values.
+        // Enabled by Phase 1's OR→IN rewrite: OR(city='A', city='B') is now
+        // Filter::In which lands here.
+        Filter::In { field, values } => {
+            let col = match field {
+                FieldRef::TableColumn { column, .. } => column.as_str(),
+                _ => return None,
+            };
+            if !idx_store.sorted.has_index(table, col) {
+                return None;
+            }
+            // Convert Value → SortedNumericKey (skip non-numeric values)
+            let keys: Vec<super::super::index_store::SortedNumericKey> = values
+                .iter()
+                .filter_map(super::super::index_store::value_to_sorted_numeric_key)
+                .collect();
+            if keys.is_empty() {
+                return None; // No numeric values — can't use sorted index
+            }
+            let effective_limit = limit.unwrap_or(usize::MAX);
+            idx_store
+                .sorted
+                .in_lookup_limited(table, col, &keys, effective_limit)
+        }
         Filter::And(left, right) => {
             // Extract a range predicate from either side of the AND.
             // The sorted index narrows the candidate set; the caller applies the
@@ -243,6 +268,22 @@ pub(crate) fn try_sorted_index_filtered_by_set(
                     .le_filtered_by_set(table, col, threshold, filter_set, limit),
                 _ => unreachable!(),
             }
+        }
+        Filter::In { field, values } => {
+            let col = match field {
+                FieldRef::TableColumn { column, .. } => column.as_str(),
+                _ => return None,
+            };
+            let keys: Vec<super::super::index_store::SortedNumericKey> = values
+                .iter()
+                .filter_map(super::super::index_store::value_to_sorted_numeric_key)
+                .collect();
+            if keys.is_empty() {
+                return None;
+            }
+            idx_store
+                .sorted
+                .in_lookup_limited_filtered_by_set(table, col, &keys, filter_set, limit)
         }
         _ => None,
     }
