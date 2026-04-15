@@ -39,15 +39,19 @@ pub(crate) fn try_sorted_index_lookup(
             }
             let lo = super::super::index_store::value_to_sorted_numeric_key(low)?;
             let hi = super::super::index_store::value_to_sorted_numeric_key(high)?;
-            // Use the effective cap: query LIMIT if present, otherwise the break-even
-            // cap (5001 = one more than the threshold so we can detect "too many").
-            // This avoids collecting 900K IDs only to discard them.
-            let cap = limit.unwrap_or(5001);
+            // Use the effective cap: query LIMIT if present, otherwise a static break-even
+            // cap. For BETWEEN on a 1M-row table with ~16% selectivity (~160K matches),
+            // the sorted-index path (160K BTree traversal + 160K HashMap lookups) outperforms
+            // a full scan of 1M rows. The cap is set to 200_001 (one above the threshold)
+            // so we can detect "too many" without collecting the entire result set.
+            // At >200K matches the parallel full-scan wins on cache locality.
+            const BREAK_EVEN_CAP: usize = 200_000;
+            let cap = limit.unwrap_or(BREAK_EVEN_CAP + 1);
             let ids = idx_store
                 .sorted
                 .range_lookup_limited(table, col, lo, hi, cap)?;
-            if limit.is_none() && ids.len() > 5000 {
-                return None; // Full scan is cheaper for large result sets without LIMIT
+            if limit.is_none() && ids.len() > BREAK_EVEN_CAP {
+                return None; // Full scan cheaper for very large result sets without LIMIT
             }
             Some(ids)
         }
@@ -65,8 +69,9 @@ pub(crate) fn try_sorted_index_lookup(
                 return None;
             }
             let threshold = super::super::index_store::value_to_sorted_numeric_key(value)?;
-            // Same cap logic: stop collecting early to avoid 900K-element allocations
-            let cap = limit.unwrap_or(5001);
+            // Same cap logic as BETWEEN above.
+            const BREAK_EVEN_CAP: usize = 200_000;
+            let cap = limit.unwrap_or(BREAK_EVEN_CAP + 1);
             let ids = match *op {
                 CompareOp::Lt => idx_store
                     .sorted
@@ -82,8 +87,8 @@ pub(crate) fn try_sorted_index_lookup(
                     .ge_lookup_limited(table, col, threshold, cap)?,
                 _ => unreachable!("non-range compare op guarded above"),
             };
-            if limit.is_none() && ids.len() > 5000 {
-                return None;
+            if limit.is_none() && ids.len() > BREAK_EVEN_CAP {
+                return None; // Full scan cheaper for very large result sets without LIMIT
             }
             Some(ids)
         }
@@ -391,10 +396,10 @@ mod tests {
     }
 
     #[test]
-    fn test_limit_bypasses_5000_cap_for_large_ranges() {
+    fn test_limit_bypasses_200k_cap_for_large_ranges() {
         let idx_store = IndexStore::new();
-        // 6000 entities — exceeds the 5000 break-even cap
-        let entities: Vec<(EntityId, Vec<(String, Value)>)> = (1u64..=6000)
+        // 210_000 entities — exceeds the 200K break-even cap
+        let entities: Vec<(EntityId, Vec<(String, Value)>)> = (1u64..=210_000)
             .map(|i| {
                 (
                     EntityId::new(i),
@@ -407,18 +412,18 @@ mod tests {
         let filter = Filter::Between {
             field: FieldRef::column("t", "score"),
             low: Value::Integer(1),
-            high: Value::Integer(6000),
+            high: Value::Integer(210_000),
         };
 
-        // Without limit: > 5000 results → None (falls back to full scan)
+        // Without limit: > 200K results → None (falls back to full scan)
         assert!(
             try_sorted_index_lookup(&filter, "t", &idx_store, None).is_none(),
-            "should fall back to full scan when > 5000 results and no limit"
+            "should fall back to full scan when > 200K results and no limit"
         );
 
         // With limit=100: should succeed and return exactly 100 IDs
         let limited = try_sorted_index_lookup(&filter, "t", &idx_store, Some(100))
-            .expect("should use sorted index with limit even when total > 5000");
+            .expect("should use sorted index with limit even when total > 200K");
         assert_eq!(limited.len(), 100);
     }
 
