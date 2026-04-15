@@ -477,9 +477,11 @@ impl SortedIndexManager {
     ) -> Option<Vec<EntityId>> {
         let indices = read_unpoisoned(&self.indices);
         let key = (collection.to_string(), column.to_string());
-        indices
-            .get(&key)?
-            .collect_range_filtered_by_set((Excluded(threshold), Unbounded), filter_set, limit)
+        indices.get(&key)?.collect_range_filtered_by_set(
+            (Excluded(threshold), Unbounded),
+            filter_set,
+            limit,
+        )
     }
 
     /// Bitmap AND: ge filtered to IDs in `filter_set`.
@@ -493,9 +495,11 @@ impl SortedIndexManager {
     ) -> Option<Vec<EntityId>> {
         let indices = read_unpoisoned(&self.indices);
         let key = (collection.to_string(), column.to_string());
-        indices
-            .get(&key)?
-            .collect_range_filtered_by_set((Included(threshold), Unbounded), filter_set, limit)
+        indices.get(&key)?.collect_range_filtered_by_set(
+            (Included(threshold), Unbounded),
+            filter_set,
+            limit,
+        )
     }
 
     /// Bitmap AND: lt filtered to IDs in `filter_set`.
@@ -509,9 +513,11 @@ impl SortedIndexManager {
     ) -> Option<Vec<EntityId>> {
         let indices = read_unpoisoned(&self.indices);
         let key = (collection.to_string(), column.to_string());
-        indices
-            .get(&key)?
-            .collect_range_filtered_by_set((Unbounded, Excluded(threshold)), filter_set, limit)
+        indices.get(&key)?.collect_range_filtered_by_set(
+            (Unbounded, Excluded(threshold)),
+            filter_set,
+            limit,
+        )
     }
 
     /// Bitmap AND: le filtered to IDs in `filter_set`.
@@ -525,9 +531,11 @@ impl SortedIndexManager {
     ) -> Option<Vec<EntityId>> {
         let indices = read_unpoisoned(&self.indices);
         let key = (collection.to_string(), column.to_string());
-        indices
-            .get(&key)?
-            .collect_range_filtered_by_set((Unbounded, Included(threshold)), filter_set, limit)
+        indices.get(&key)?.collect_range_filtered_by_set(
+            (Unbounded, Included(threshold)),
+            filter_set,
+            limit,
+        )
     }
 
     /// Check if a sorted index exists for a column.

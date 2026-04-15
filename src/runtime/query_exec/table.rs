@@ -251,8 +251,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                             let entities = store.get_batch(&query.table, &intersection_ids);
                             let explicit_cols = extract_select_column_names(&effective_projections);
                             let lean = explicit_cols.is_empty();
-                            let mut records =
-                                Vec::with_capacity(intersection_ids.len().min(limit));
+                            let mut records = Vec::with_capacity(intersection_ids.len().min(limit));
                             for entity_opt in entities.into_iter().flatten() {
                                 if records.len() >= limit {
                                     break;

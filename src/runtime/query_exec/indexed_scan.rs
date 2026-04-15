@@ -112,7 +112,10 @@ fn is_range_filter_with_sorted_index(filter: &Filter, table: &str, idx_store: &I
             idx_store.sorted.has_index(table, col)
         }
         Filter::Compare { field, op, .. }
-            if matches!(*op, CompareOp::Gt | CompareOp::Ge | CompareOp::Lt | CompareOp::Le) =>
+            if matches!(
+                *op,
+                CompareOp::Gt | CompareOp::Ge | CompareOp::Lt | CompareOp::Le
+            ) =>
         {
             let col = match field {
                 FieldRef::TableColumn { column, .. } => column.as_str(),
@@ -143,9 +146,7 @@ pub(crate) fn extract_cross_index_predicates<'a>(
     };
 
     // Try left = equality (hash index), right = range (sorted index)
-    if let Some((col, bytes)) =
-        super::helpers::extract_index_candidate(left)
-    {
+    if let Some((col, bytes)) = super::helpers::extract_index_candidate(left) {
         if idx_store.find_index_for_column(table, &col).is_some()
             && is_range_filter_with_sorted_index(right, table, idx_store)
         {
@@ -154,9 +155,7 @@ pub(crate) fn extract_cross_index_predicates<'a>(
     }
 
     // Try right = equality (hash index), left = range (sorted index)
-    if let Some((col, bytes)) =
-        super::helpers::extract_index_candidate(right)
-    {
+    if let Some((col, bytes)) = super::helpers::extract_index_candidate(right) {
         if idx_store.find_index_for_column(table, &col).is_some()
             && is_range_filter_with_sorted_index(left, table, idx_store)
         {
@@ -193,7 +192,10 @@ pub(crate) fn try_sorted_index_filtered_by_set(
                 .range_filtered_by_set(table, col, lo, hi, filter_set, limit)
         }
         Filter::Compare { field, op, value }
-            if matches!(*op, CompareOp::Gt | CompareOp::Ge | CompareOp::Lt | CompareOp::Le) =>
+            if matches!(
+                *op,
+                CompareOp::Gt | CompareOp::Ge | CompareOp::Lt | CompareOp::Le
+            ) =>
         {
             let col = match field {
                 FieldRef::TableColumn { column, .. } => column.as_str(),
