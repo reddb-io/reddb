@@ -8,6 +8,7 @@
 //! Uses `use super::*;` to inherit the parent executor's imports.
 
 use super::*;
+use crate::storage::query::sql_lowering::effective_vector_filter;
 
 pub(crate) fn execute_runtime_vector_query(
     db: &RedDB,
@@ -40,7 +41,7 @@ pub(crate) fn execute_runtime_canonical_vector_node(
         }
         "metadata_filter" => {
             let mut records = execute_runtime_canonical_vector_child(db, node, query)?;
-            if let Some(filter) = query.filter.as_ref() {
+            if let Some(filter) = effective_vector_filter(query).as_ref() {
                 records.retain(|record| {
                     runtime_vector_record_matches_filter(db, &query.collection, record, filter)
                 });
@@ -90,7 +91,7 @@ pub(crate) fn runtime_vector_matches(
         .get_collection(&query.collection)
         .ok_or_else(|| RedDBError::NotFound(query.collection.clone()))?;
 
-    if query.filter.is_none() {
+    if effective_vector_filter(query).is_none() {
         let mut results = db.similar(&query.collection, vector, manager.count().max(1));
         results.sort_by(|a, b| {
             b.score

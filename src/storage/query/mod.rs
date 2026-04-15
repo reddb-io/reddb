@@ -130,7 +130,7 @@ pub use security::{
 };
 pub use similarity::{SimilarityQuery, SimilarityResult};
 pub use sort::{Direction, NullsOrder, OrderBy, QueryLimits, SortKey};
-pub use sql::SqlCommand;
+pub use sql::{FrontendStatement, SqlCommand, SqlStatement};
 pub use step::{
     AggregateStep, BarrierStep, BasicTraversal, BranchStep, ChooseStep, CollectingBarrierStep,
     DedupStep, Direction as TraversalDirection, EdgeSourceStep, EdgeStep, ExecutionMode,

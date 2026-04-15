@@ -10,6 +10,9 @@ use crate::storage::query::ast::{
     CompareOp, EdgeDirection, EdgePattern, FieldRef, Filter, GraphPattern, GraphQuery, JoinQuery,
     JoinType, NodePattern, NodeSelector, PathQuery, Projection, QueryExpr, TableQuery,
 };
+use crate::storage::query::sql_lowering::{
+    effective_graph_filter, effective_graph_projections, effective_path_filter,
+};
 use crate::storage::schema::Value;
 
 pub struct UnifiedExecutor {
@@ -357,14 +360,16 @@ impl UnifiedExecutor {
         let matches = self.match_pattern(&query.pattern, &mut stats)?;
 
         // Apply filter
+        let effective_filter = effective_graph_filter(query);
+        let effective_projections = effective_graph_projections(query);
         let filtered: Vec<_> = matches
             .into_iter()
-            .filter(|m| self.eval_filter_on_match(&query.filter, m))
+            .filter(|m| self.eval_filter_on_match(&effective_filter, m))
             .collect();
 
         // Build result records with projections
         for matched in filtered {
-            let record = self.project_match(&matched, &query.return_);
+            let record = self.project_match(&matched, &effective_projections);
             result.push(record);
         }
 
@@ -882,7 +887,7 @@ impl UnifiedExecutor {
 
             for path in paths {
                 // Apply filter if present
-                if query.filter.is_some() {
+                if effective_path_filter(query).is_some() {
                     // Path filtering would require converting path to match
                     // For now, include all paths
                 }

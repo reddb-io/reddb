@@ -9,7 +9,10 @@ use crate::storage::query::ast::{
 };
 use crate::storage::query::is_universal_entity_source as is_universal_query_source;
 use crate::storage::query::sql_lowering::{
-    effective_join_projections, effective_table_filter, effective_table_projections,
+    effective_graph_filter, effective_graph_projections, effective_join_filter,
+    effective_join_projections, effective_path_filter, effective_path_projections,
+    effective_table_filter,
+    effective_table_projections, effective_vector_filter,
 };
 use crate::storage::schema::Value;
 use crate::storage::RedDB;
@@ -182,6 +185,8 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
             let mut details = BTreeMap::new();
             let access = graph_access_path_hint(db);
             let estimate = estimate_cardinality(expr);
+            let effective_filter = effective_graph_filter(query);
+            let effective_projections = effective_graph_projections(query);
             details.insert("access_path".to_string(), access.path.to_string());
             details.insert("access_path_reason".to_string(), access.reason);
             if let Some(warning) = access.warning {
@@ -192,8 +197,11 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
             }
             details.insert("nodes".to_string(), query.pattern.nodes.len().to_string());
             details.insert("edges".to_string(), query.pattern.edges.len().to_string());
-            details.insert("filter".to_string(), query.filter.is_some().to_string());
-            details.insert("return_count".to_string(), query.return_.len().to_string());
+            details.insert("filter".to_string(), effective_filter.is_some().to_string());
+            details.insert(
+                "return_count".to_string(),
+                effective_projections.len().to_string(),
+            );
             let mut node = CanonicalLogicalNode {
                 operator: access.path.to_string(),
                 source: None,
@@ -204,7 +212,7 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
                 operator_cost: operator_cost_estimate(access.path, estimate.rows),
                 children: Vec::new(),
             };
-            if let Some(filter) = &query.filter {
+            if let Some(filter) = &effective_filter {
                 node = wrap_unary_plan(
                     "filter",
                     btree_details([("predicate", filter_summary(filter))]),
@@ -212,10 +220,10 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
                     node,
                 );
             }
-            if has_explicit_projection(&query.return_) {
+            if has_explicit_projection(&effective_projections) {
                 node = wrap_unary_plan(
                     "projection",
-                    btree_details([("columns", projection_summary(&query.return_))]),
+                    btree_details([("columns", projection_summary(&effective_projections))]),
                     None,
                     node,
                 );
@@ -226,7 +234,7 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
             let mut details = BTreeMap::new();
             let estimate = estimate_cardinality(expr);
             let effective_projections = effective_join_projections(query);
-            let effective_filter = query.filter.as_ref();
+            let effective_filter = effective_join_filter(query);
             let join_strategy = join_strategy_hint(query);
             details.insert(
                 "join_type".to_string(),
@@ -293,7 +301,7 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
                     logical_plan_node_with_catalog(db, query.right.as_ref()),
                 ],
             };
-            if let Some(filter) = effective_filter {
+            if let Some(filter) = effective_filter.as_ref() {
                 node = wrap_unary_plan(
                     "filter",
                     btree_details([("predicate", filter_summary(filter))]),
@@ -376,6 +384,8 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
             let mut details = BTreeMap::new();
             let access = graph_access_path_hint(db);
             let estimate = estimate_cardinality(expr);
+            let effective_filter = effective_path_filter(query);
+            let effective_projections = effective_path_projections(query);
             details.insert("access_path".to_string(), access.path.to_string());
             details.insert("access_path_reason".to_string(), access.reason);
             if let Some(warning) = access.warning {
@@ -386,8 +396,11 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
             }
             details.insert("max_length".to_string(), query.max_length.to_string());
             details.insert("via_count".to_string(), query.via.len().to_string());
-            details.insert("filter".to_string(), query.filter.is_some().to_string());
-            details.insert("return_count".to_string(), query.return_.len().to_string());
+            details.insert("filter".to_string(), effective_filter.is_some().to_string());
+            details.insert(
+                "return_count".to_string(),
+                effective_projections.len().to_string(),
+            );
             let mut node = CanonicalLogicalNode {
                 operator: access.path.to_string(),
                 source: None,
@@ -398,7 +411,7 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
                 operator_cost: operator_cost_estimate(access.path, estimate.rows),
                 children: Vec::new(),
             };
-            if let Some(filter) = &query.filter {
+            if let Some(filter) = &effective_filter {
                 node = wrap_unary_plan(
                     "filter",
                     btree_details([("predicate", filter_summary(filter))]),
@@ -406,10 +419,10 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
                     node,
                 );
             }
-            if has_explicit_projection(&query.return_) {
+            if has_explicit_projection(&effective_projections) {
                 node = wrap_unary_plan(
                     "projection",
-                    btree_details([("columns", projection_summary(&query.return_))]),
+                    btree_details([("columns", projection_summary(&effective_projections))]),
                     None,
                     node,
                 );
@@ -420,6 +433,7 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
             let mut details = BTreeMap::new();
             let access = vector_access_path_hint(db, query.collection.as_str());
             let scan_estimate = base_collection_cardinality(db, query.collection.as_str());
+            let effective_filter = effective_vector_filter(query);
             details.insert("access_path".to_string(), access.path.to_string());
             details.insert("access_path_reason".to_string(), access.reason);
             if let Some(warning) = access.warning {
@@ -429,7 +443,7 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
                 details.insert("index_hint".to_string(), index_hint);
             }
             details.insert("k".to_string(), query.k.to_string());
-            details.insert("filter".to_string(), query.filter.is_some().to_string());
+            details.insert("filter".to_string(), effective_filter.is_some().to_string());
             details.insert(
                 "metric".to_string(),
                 query
@@ -472,7 +486,7 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
                 operator_cost: operator_cost_estimate(access.path, scan_estimate.rows),
                 children,
             };
-            if query.filter.is_some() {
+            if effective_filter.is_some() {
                 let estimate = heuristic_selectivity(&node, 0.5, 0.75);
                 node = wrap_unary_plan(
                     "metadata_filter",

@@ -9,7 +9,8 @@
 //! - **Nearest-K search**: Find the K closest points to a location
 
 use std::collections::HashMap;
-use std::sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+
+use parking_lot::RwLock;
 
 use rstar::{primitives::GeomWithData, RTree, AABB};
 
@@ -215,24 +216,6 @@ pub struct SpatialIndexManager {
     indices: RwLock<HashMap<(String, String), SpatialIndex>>,
 }
 
-fn recover_read_guard<'a, T>(
-    result: Result<RwLockReadGuard<'a, T>, PoisonError<RwLockReadGuard<'a, T>>>,
-) -> RwLockReadGuard<'a, T> {
-    match result {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
-
-fn recover_write_guard<'a, T>(
-    result: Result<RwLockWriteGuard<'a, T>, PoisonError<RwLockWriteGuard<'a, T>>>,
-) -> RwLockWriteGuard<'a, T> {
-    match result {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
-
 impl SpatialIndexManager {
     pub fn new() -> Self {
         Self {
@@ -242,7 +225,7 @@ impl SpatialIndexManager {
 
     /// Create a spatial index
     pub fn create_index(&self, collection: &str, column: &str) {
-        let mut indices = recover_write_guard(self.indices.write());
+        let mut indices = self.indices.write();
         let key = (collection.to_string(), column.to_string());
         indices
             .entry(key)
@@ -251,7 +234,7 @@ impl SpatialIndexManager {
 
     /// Drop a spatial index
     pub fn drop_index(&self, collection: &str, column: &str) -> bool {
-        let mut indices = recover_write_guard(self.indices.write());
+        let mut indices = self.indices.write();
         indices
             .remove(&(collection.to_string(), column.to_string()))
             .is_some()
@@ -266,7 +249,7 @@ impl SpatialIndexManager {
         lat: f64,
         lon: f64,
     ) -> Result<(), SpatialIndexError> {
-        let mut indices = recover_write_guard(self.indices.write());
+        let mut indices = self.indices.write();
         if let Some(index) = indices.get_mut(&(collection.to_string(), column.to_string())) {
             index.insert(entity_id, lat, lon);
             Ok(())
@@ -285,7 +268,7 @@ impl SpatialIndexManager {
         column: &str,
         entity_id: EntityId,
     ) -> Result<bool, SpatialIndexError> {
-        let mut indices = recover_write_guard(self.indices.write());
+        let mut indices = self.indices.write();
         if let Some(index) = indices.get_mut(&(collection.to_string(), column.to_string())) {
             Ok(index.remove(entity_id))
         } else {
@@ -306,7 +289,7 @@ impl SpatialIndexManager {
         radius_km: f64,
         limit: usize,
     ) -> Result<Vec<SpatialSearchResult>, SpatialIndexError> {
-        let indices = recover_read_guard(self.indices.read());
+        let indices = self.indices.read();
         if let Some(idx) = indices.get(&(collection.to_string(), column.to_string())) {
             Ok(idx.search_radius(center_lat, center_lon, radius_km, limit))
         } else {
@@ -328,7 +311,7 @@ impl SpatialIndexManager {
         max_lon: f64,
         limit: usize,
     ) -> Result<Vec<SpatialSearchResult>, SpatialIndexError> {
-        let indices = recover_read_guard(self.indices.read());
+        let indices = self.indices.read();
         if let Some(idx) = indices.get(&(collection.to_string(), column.to_string())) {
             Ok(idx.search_bbox(min_lat, min_lon, max_lat, max_lon, limit))
         } else {
@@ -348,7 +331,7 @@ impl SpatialIndexManager {
         lon: f64,
         k: usize,
     ) -> Result<Vec<SpatialSearchResult>, SpatialIndexError> {
-        let indices = recover_read_guard(self.indices.read());
+        let indices = self.indices.read();
         if let Some(idx) = indices.get(&(collection.to_string(), column.to_string())) {
             Ok(idx.search_nearest(lat, lon, k))
         } else {
@@ -365,7 +348,7 @@ impl SpatialIndexManager {
         collection: &str,
         column: &str,
     ) -> Result<SpatialIndexStats, SpatialIndexError> {
-        let indices = recover_read_guard(self.indices.read());
+        let indices = self.indices.read();
         if let Some(idx) = indices.get(&(collection.to_string(), column.to_string())) {
             Ok(SpatialIndexStats {
                 column: column.to_string(),
@@ -508,7 +491,7 @@ mod tests {
         mgr.create_index("sites", "location");
 
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = mgr.indices.write().unwrap();
+            let _guard = mgr.indices.write();
             panic!("poison spatial index manager");
         }));
 

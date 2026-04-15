@@ -1,5 +1,8 @@
 use super::*;
-use crate::storage::query::sql_lowering::effective_table_projections;
+use crate::storage::query::sql_lowering::{
+    effective_table_filter, effective_table_group_by_exprs, effective_table_having_filter,
+    effective_table_projections,
+};
 
 mod aggregate;
 mod filter_compiled;
@@ -18,7 +21,7 @@ mod vector;
 // `pub(crate)` is needed for the two helpers because wire/listener.rs
 // reaches them via `crate::runtime::query_exec::X` (cross-module path,
 // not just super-path).
-pub(crate) use helpers::{evaluate_entity_filter, extract_entity_id_from_filter};
+pub(crate) use helpers::{evaluate_entity_filter, extract_entity_id_from_filter, try_hash_eq_lookup};
 pub(super) use hybrid::execute_runtime_hybrid_query;
 pub(super) use join::execute_runtime_join_query;
 pub(super) use json_writers::execute_runtime_serialize_single_entity;
@@ -37,6 +40,9 @@ pub(super) fn execute_runtime_table_query(
     index_store: Option<&super::index_store::IndexStore>,
 ) -> RedDBResult<UnifiedResult> {
     let effective_projections = effective_table_projections(query);
+    let effective_filter = effective_table_filter(query);
+    let effective_group_by = effective_table_group_by_exprs(query);
+    let effective_having = effective_table_having_filter(query);
 
     // ── AGGREGATE PATH: COUNT, AVG, SUM, MIN, MAX, GROUP BY ──
     if has_aggregate_projections(&effective_projections) {
@@ -51,15 +57,15 @@ pub(super) fn execute_runtime_table_query(
     // Secret decryption post-pass, and the CLI).  We now materialize
     // a `UnifiedRecord` as well — JSON callers still get the fast
     // pre-serialized blob, but non-HTTP callers see the row too.
-    if query.filter.is_some()
+    if effective_filter.is_some()
         && query.order_by.is_empty()
-        && query.group_by.is_empty()
-        && query.having.is_none()
+        && effective_group_by.is_empty()
+        && effective_having.is_none()
         && query.expand.is_none()
         && query.offset.is_none()
         && !is_universal_query_source(&query.table)
     {
-        if let Some(entity_id) = extract_entity_id_from_filter(&query.filter) {
+        if let Some(entity_id) = extract_entity_id_from_filter(&effective_filter) {
             let store = db.store();
             if let Some(entity) = store.get(&query.table, EntityId::new(entity_id)) {
                 let json = execute_runtime_serialize_single_entity(&entity);

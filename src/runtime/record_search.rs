@@ -1,4 +1,5 @@
 use super::*;
+use crate::storage::query::sql_lowering::effective_table_projections;
 
 #[inline(never)]
 pub(super) fn scan_runtime_table_source_records(
@@ -76,6 +77,53 @@ pub(super) fn scan_runtime_table_with_bloom_hint(
 
 pub(super) fn is_universal_entity_source(table: &str) -> bool {
     is_universal_query_source(table)
+}
+
+/// Lean materialization for the index scan hot path.
+///
+/// Emits `red_entity_id`, `created_at`, `updated_at`, plus the raw user data
+/// columns. Skips the heavier red_* metadata fields (collection, kind, type,
+/// capabilities, sequence_id, row_id). Each skipped field is one fewer string
+/// clone and one fewer HashMap insert per entity.
+///
+/// Used when the caller already knows the collection name and doesn't need
+/// the full metadata in the result (e.g. SELECT * range/filtered scans).
+#[inline]
+pub(super) fn runtime_table_record_lean(entity: UnifiedEntity) -> Option<UnifiedRecord> {
+    let created_at = entity.created_at;
+    let updated_at = entity.updated_at;
+    let row = match entity.data {
+        EntityData::Row(row) => row,
+        _ => return None,
+    };
+    if let Some(named) = row.named {
+        let mut record = UnifiedRecord::with_capacity(3 + named.len());
+        record.set("red_entity_id", Value::UnsignedInteger(entity.id.raw()));
+        record.set("created_at", Value::UnsignedInteger(created_at));
+        record.set("updated_at", Value::UnsignedInteger(updated_at));
+        for (key, value) in named {
+            record.set(&key, value);
+        }
+        Some(record)
+    } else if let Some(ref schema) = row.schema {
+        let mut record = UnifiedRecord::with_capacity(3 + schema.len());
+        record.set("red_entity_id", Value::UnsignedInteger(entity.id.raw()));
+        record.set("created_at", Value::UnsignedInteger(created_at));
+        record.set("updated_at", Value::UnsignedInteger(updated_at));
+        for (name, value) in schema.iter().zip(row.columns.into_iter()) {
+            record.set(name, value);
+        }
+        Some(record)
+    } else {
+        let mut record = UnifiedRecord::with_capacity(3 + row.columns.len());
+        record.set("red_entity_id", Value::UnsignedInteger(entity.id.raw()));
+        record.set("created_at", Value::UnsignedInteger(created_at));
+        record.set("updated_at", Value::UnsignedInteger(updated_at));
+        for (i, value) in row.columns.into_iter().enumerate() {
+            record.set(&format!("c{i}"), value);
+        }
+        Some(record)
+    }
 }
 
 #[inline(never)]
@@ -1311,7 +1359,7 @@ pub(super) fn merge_join_records(
     if let Some(left_record) = left {
         merged = project_runtime_record(
             left_record,
-            &left_query.columns,
+            &effective_table_projections(left_query),
             Some(left_table_name),
             Some(left_table_alias),
             false,

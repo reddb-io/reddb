@@ -14,7 +14,8 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 
 use super::entity::{EntityId, UnifiedEntity};
 use super::metadata::{Metadata, MetadataFilter};
@@ -158,7 +159,7 @@ impl SegmentManager {
         named: &HashMap<String, crate::storage::schema::Value>,
     ) -> Arc<Vec<String>> {
         {
-            let schema = self.column_schema.read().unwrap_or_else(|e| e.into_inner());
+            let schema = self.column_schema.read();
             if let Some(ref s) = *schema {
                 return Arc::clone(s);
             }
@@ -167,8 +168,7 @@ impl SegmentManager {
         let arc = Arc::new(cols);
         *self
             .column_schema
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&arc));
+            .write() = Some(Arc::clone(&arc));
         arc
     }
 
@@ -176,7 +176,6 @@ impl SegmentManager {
     pub fn column_schema(&self) -> Option<Arc<Vec<String>>> {
         self.column_schema
             .read()
-            .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
 
@@ -193,7 +192,7 @@ impl SegmentManager {
     /// Get statistics. total_entities is read from the lock-free atomic;
     /// other fields come from the slow-path stats struct.
     pub fn stats(&self) -> ManagerStats {
-        let mut s = self.stats.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let mut s = self.stats.read().clone();
         s.total_entities = self.total_entities_atomic.load(Ordering::Relaxed) as usize;
         s
     }
@@ -235,14 +234,14 @@ impl SegmentManager {
     fn get_or_create_growing(&self) -> Arc<RwLock<GrowingSegment>> {
         // Common case: segment already exists — shared read lock, zero contention.
         {
-            let growing = self.growing.read().unwrap_or_else(|e| e.into_inner());
+            let growing = self.growing.read();
             if let Some(segment) = growing.as_ref() {
                 return Arc::clone(segment);
             }
         }
 
         // Slow path: segment missing — take exclusive write lock to create it.
-        let mut growing = self.growing.write().unwrap_or_else(|e| e.into_inner());
+        let mut growing = self.growing.write();
         // Double-check: another thread may have created it between the two lock acquisitions.
         if let Some(segment) = growing.as_ref() {
             return Arc::clone(segment);
@@ -259,7 +258,6 @@ impl SegmentManager {
         // This is the rare segment-creation path — locking is fine here.
         self.stats
             .write()
-            .unwrap_or_else(|e| e.into_inner())
             .growing_count += 1;
 
         segment_arc
@@ -271,7 +269,7 @@ impl SegmentManager {
         self.maybe_seal_growing()?;
 
         let segment_arc = self.get_or_create_growing();
-        let mut segment = segment_arc.write().unwrap_or_else(|e| e.into_inner());
+        let mut segment = segment_arc.write();
 
         // Assign entity ID if not already set
         if entity.id.raw() == 0 {
@@ -359,7 +357,7 @@ impl SegmentManager {
         }
 
         let segment_arc = self.get_or_create_growing();
-        let mut segment = segment_arc.write().unwrap_or_else(|e| e.into_inner());
+        let mut segment = segment_arc.write();
         let segment_id = segment.id();
 
         // Single call to GrowingSegment.bulk_insert (one lock, no bloom/memtable)
@@ -381,19 +379,18 @@ impl SegmentManager {
         if let Some(growing_arc) = self
             .growing
             .read()
-            .unwrap_or_else(|e| e.into_inner())
             .as_ref()
         {
-            let growing = growing_arc.read().unwrap_or_else(|e| e.into_inner());
+            let growing = growing_arc.read();
             if let Some(entity) = growing.get(id) {
                 return Some(entity.clone());
             }
         }
 
         // Then sealed segments
-        let sealed = self.sealed.read().unwrap_or_else(|e| e.into_inner());
+        let sealed = self.sealed.read();
         for segment in sealed.iter() {
-            let seg = segment.read().unwrap_or_else(|e| e.into_inner());
+            let seg = segment.read();
             if let Some(entity) = seg.get(id) {
                 return Some(entity.clone());
             }
@@ -410,14 +407,14 @@ impl SegmentManager {
         let mut out: Vec<Option<UnifiedEntity>> = vec![None; ids.len()];
         let mut remaining: Vec<usize> = (0..ids.len()).collect(); // indices still unfound
 
-        // Growing segment — one read lock for the entire batch
+        // Growing segment — one read lock for the entire batch.
+        // Non-blocking first: if a writer is active, fall back to blocking.
         if let Some(growing_arc) = self
             .growing
             .read()
-            .unwrap_or_else(|e| e.into_inner())
             .as_ref()
         {
-            let growing = growing_arc.read().unwrap_or_else(|e| e.into_inner());
+            let growing = if let Some(g) = growing_arc.try_read() { g } else { growing_arc.read() };
             remaining.retain(|&i| {
                 if let Some(entity) = growing.get(ids[i]) {
                     out[i] = Some(entity.clone());
@@ -433,12 +430,12 @@ impl SegmentManager {
         }
 
         // Sealed segments — one read lock per segment
-        let sealed = self.sealed.read().unwrap_or_else(|e| e.into_inner());
+        let sealed = self.sealed.read();
         for segment in sealed.iter() {
             if remaining.is_empty() {
                 break;
             }
-            let seg = segment.read().unwrap_or_else(|e| e.into_inner());
+            let seg = segment.read();
             remaining.retain(|&i| {
                 if let Some(entity) = seg.get(ids[i]) {
                     out[i] = Some(entity.clone());
@@ -458,17 +455,16 @@ impl SegmentManager {
         if let Some(growing_arc) = self
             .growing
             .read()
-            .unwrap_or_else(|e| e.into_inner())
             .as_ref()
         {
-            let growing = growing_arc.read().unwrap_or_else(|e| e.into_inner());
+            let growing = growing_arc.read();
             if let Some(entity) = growing.get(id) {
                 return Some(entity.clone());
             }
         }
 
         // Check sealed
-        let sealed = self.sealed.read().unwrap_or_else(|e| e.into_inner());
+        let sealed = self.sealed.read();
         for segment in sealed.iter() {
             if let Some(entity) = segment.get(id) {
                 return Some(entity.clone());
@@ -484,10 +480,9 @@ impl SegmentManager {
         if let Some(growing_arc) = self
             .growing
             .read()
-            .unwrap_or_else(|e| e.into_inner())
             .as_ref()
         {
-            let mut growing = growing_arc.write().unwrap_or_else(|e| e.into_inner());
+            let mut growing = growing_arc.write();
             if growing.contains(entity.id) && growing.state().is_writable() {
                 return growing.update(entity);
             }
@@ -497,17 +492,15 @@ impl SegmentManager {
         let segment_id = self
             .entity_segment
             .read()
-            .unwrap_or_else(|e| e.into_inner())
             .get(&entity.id)
             .copied();
         if let Some(seg_id) = segment_id {
             if let Some(growing_arc) = self
                 .growing
                 .read()
-                .unwrap_or_else(|e| e.into_inner())
                 .as_ref()
             {
-                let mut growing = growing_arc.write().unwrap_or_else(|e| e.into_inner());
+                let mut growing = growing_arc.write();
                 if growing.id() == seg_id && growing.state().is_writable() {
                     return growing.update(entity);
                 }
@@ -529,10 +522,9 @@ impl SegmentManager {
         if let Some(growing_arc) = self
             .growing
             .read()
-            .unwrap_or_else(|e| e.into_inner())
             .as_ref()
         {
-            let mut growing = growing_arc.write().unwrap_or_else(|e| e.into_inner());
+            let mut growing = growing_arc.write();
             if growing.contains(entity.id) && growing.state().is_writable() {
                 return growing.update_hot(entity, modified_columns);
             }
@@ -541,17 +533,15 @@ impl SegmentManager {
         let segment_id = self
             .entity_segment
             .read()
-            .unwrap_or_else(|e| e.into_inner())
             .get(&entity.id)
             .copied();
         if let Some(seg_id) = segment_id {
             if let Some(growing_arc) = self
                 .growing
                 .read()
-                .unwrap_or_else(|e| e.into_inner())
                 .as_ref()
             {
-                let mut growing = growing_arc.write().unwrap_or_else(|e| e.into_inner());
+                let mut growing = growing_arc.write();
                 if growing.id() == seg_id && growing.state().is_writable() {
                     return growing.update_hot(entity, modified_columns);
                 }
@@ -569,17 +559,15 @@ impl SegmentManager {
         if let Some(growing_arc) = self
             .growing
             .read()
-            .unwrap_or_else(|e| e.into_inner())
             .as_ref()
         {
-            let mut growing = growing_arc.write().unwrap_or_else(|e| e.into_inner());
+            let mut growing = growing_arc.write();
             if growing.contains(id) && growing.state().is_writable() {
                 let seg_id = growing.id();
                 let deleted = growing.delete(id)?;
                 if deleted {
                     self.entity_segment
                         .write()
-                        .unwrap_or_else(|e| e.into_inner())
                         .remove(&id);
                     self.total_entities_atomic.fetch_sub(1, Ordering::Relaxed);
                     self.emit(LifecycleEvent::EntityDeleted(id, seg_id));
@@ -593,7 +581,6 @@ impl SegmentManager {
         let segment_id = self
             .entity_segment
             .read()
-            .unwrap_or_else(|e| e.into_inner())
             .get(&id)
             .copied();
 
@@ -601,16 +588,14 @@ impl SegmentManager {
             if let Some(growing_arc) = self
                 .growing
                 .read()
-                .unwrap_or_else(|e| e.into_inner())
                 .as_ref()
             {
-                let mut growing = growing_arc.write().unwrap_or_else(|e| e.into_inner());
+                let mut growing = growing_arc.write();
                 if growing.id() == seg_id && growing.state().is_writable() {
                     let deleted = growing.delete(id)?;
                     if deleted {
                         self.entity_segment
                             .write()
-                            .unwrap_or_else(|e| e.into_inner())
                             .remove(&id);
                         self.total_entities_atomic.fetch_sub(1, Ordering::Relaxed);
                         self.emit(LifecycleEvent::EntityDeleted(id, seg_id));
@@ -630,10 +615,9 @@ impl SegmentManager {
         if let Some(growing_arc) = self
             .growing
             .read()
-            .unwrap_or_else(|e| e.into_inner())
             .as_ref()
         {
-            let growing = growing_arc.read().unwrap_or_else(|e| e.into_inner());
+            let growing = growing_arc.read();
             if growing.contains(id) {
                 return growing.get_metadata(id);
             }
@@ -643,7 +627,6 @@ impl SegmentManager {
         let segment_id = self
             .entity_segment
             .read()
-            .unwrap_or_else(|e| e.into_inner())
             .get(&id)
             .copied();
 
@@ -651,16 +634,15 @@ impl SegmentManager {
             if let Some(growing_arc) = self
                 .growing
                 .read()
-                .unwrap_or_else(|e| e.into_inner())
                 .as_ref()
             {
-                let growing = growing_arc.read().unwrap_or_else(|e| e.into_inner());
+                let growing = growing_arc.read();
                 if growing.id() == seg_id {
                     return growing.get_metadata(id);
                 }
             }
 
-            let sealed = self.sealed.read().unwrap_or_else(|e| e.into_inner());
+            let sealed = self.sealed.read();
             for segment in sealed.iter() {
                 if segment.id() == seg_id {
                     return segment.get_metadata(id);
@@ -678,10 +660,9 @@ impl SegmentManager {
         if let Some(growing_arc) = self
             .growing
             .read()
-            .unwrap_or_else(|e| e.into_inner())
             .as_ref()
         {
-            let mut growing = growing_arc.write().unwrap_or_else(|e| e.into_inner());
+            let mut growing = growing_arc.write();
             if growing.contains(id) && growing.state().is_writable() {
                 return growing.set_metadata(id, metadata);
             }
@@ -691,7 +672,6 @@ impl SegmentManager {
         let segment_id = self
             .entity_segment
             .read()
-            .unwrap_or_else(|e| e.into_inner())
             .get(&id)
             .copied();
 
@@ -699,10 +679,9 @@ impl SegmentManager {
             if let Some(growing_arc) = self
                 .growing
                 .read()
-                .unwrap_or_else(|e| e.into_inner())
                 .as_ref()
             {
-                let mut growing = growing_arc.write().unwrap_or_else(|e| e.into_inner());
+                let mut growing = growing_arc.write();
                 if growing.id() == seg_id && growing.state().is_writable() {
                     return growing.set_metadata(id, metadata);
                 }
@@ -717,9 +696,9 @@ impl SegmentManager {
     /// Check if growing segment should be sealed
     fn maybe_seal_growing(&self) -> Result<(), SegmentError> {
         let should_seal = {
-            let growing_opt = self.growing.read().unwrap_or_else(|e| e.into_inner());
+            let growing_opt = self.growing.read();
             if let Some(growing_arc) = growing_opt.as_ref() {
-                let growing = growing_arc.read().unwrap_or_else(|e| e.into_inner());
+                let growing = growing_arc.read();
                 growing.should_seal(&self.config.segment_config)
                     || growing.idle_secs() >= self.config.idle_seal_secs
             } else {
@@ -739,11 +718,10 @@ impl SegmentManager {
         let growing_opt = self
             .growing
             .write()
-            .unwrap_or_else(|e| e.into_inner())
             .take();
 
         if let Some(growing_arc) = growing_opt {
-            let mut growing = growing_arc.write().unwrap_or_else(|e| e.into_inner());
+            let mut growing = growing_arc.write();
             let seg_id = growing.id();
             let entity_count = growing.stats().entity_count as u64;
 
@@ -757,7 +735,6 @@ impl SegmentManager {
             // For now, we keep it as-is since GrowingSegment implements UnifiedSegment
             self.sealed
                 .write()
-                .unwrap_or_else(|e| e.into_inner())
                 .push(growing_arc);
 
             // Mark sealed segment pages all-visible — they're now immutable
@@ -765,7 +742,7 @@ impl SegmentManager {
 
             // Update stats
             {
-                let mut stats = self.stats.write().unwrap_or_else(|e| e.into_inner());
+                let mut stats = self.stats.write();
                 stats.growing_count = stats.growing_count.saturating_sub(1);
                 stats.sealed_count += 1;
                 stats.seal_ops += 1;
@@ -784,7 +761,6 @@ impl SegmentManager {
         let has_growing = self
             .growing
             .read()
-            .unwrap_or_else(|e| e.into_inner())
             .is_some();
         if has_growing {
             Ok(Some(self.seal_current()?))
@@ -804,13 +780,13 @@ impl SegmentManager {
     /// visible; 0.0 when there are no sealed segments.
     pub fn all_visible_fraction(&self) -> f64 {
         const ROWS_PER_PAGE: u32 = 256;
-        let sealed = self.sealed.read().unwrap_or_else(|e| e.into_inner());
+        let sealed = self.sealed.read();
         if sealed.is_empty() {
             return 0.0;
         }
         let mut total_pages: u64 = 0;
         for seg_arc in sealed.iter() {
-            let seg = seg_arc.read().unwrap_or_else(|e| e.into_inner());
+            let seg = seg_arc.read();
             let entity_count = seg.stats().entity_count as u64;
             let pages = (entity_count + ROWS_PER_PAGE as u64 - 1) / ROWS_PER_PAGE as u64;
             total_pages += pages;
@@ -844,22 +820,27 @@ impl SegmentManager {
         F: FnMut(&UnifiedEntity) -> bool,
     {
         // Growing segment — direct iteration (no Box<dyn>)
+        // Try non-blocking read first; fall back to blocking only when a writer
+        // is actively holding the write lock (rare in read-heavy workloads).
         if let Some(growing_arc) = self
             .growing
             .read()
-            .unwrap_or_else(|e| e.into_inner())
             .as_ref()
         {
-            let growing = growing_arc.read().unwrap_or_else(|e| e.into_inner());
+            let growing = if let Some(g) = growing_arc.try_read() {
+                g
+            } else {
+                growing_arc.read()
+            };
             if !growing.for_each_fast(&mut callback) {
                 return;
             }
         }
 
         // Sealed segments
-        let sealed = self.sealed.read().unwrap_or_else(|e| e.into_inner());
+        let sealed = self.sealed.read();
         for segment_arc in sealed.iter() {
-            let segment = segment_arc.read().unwrap_or_else(|e| e.into_inner());
+            let segment = segment_arc.read();
             if !segment.for_each_fast(&mut callback) {
                 return;
             }
@@ -878,23 +859,30 @@ impl SegmentManager {
     where
         F: FnMut(&UnifiedEntity) -> bool,
     {
-        // Growing segment — never skip (it's receiving writes, zones are partial)
+        // Growing segment — never skip (it's receiving writes, zones are partial).
+        // Try a non-blocking read first: if a writer is currently inserting
+        // (holding the write lock), try_read() returns None and we fall back to
+        // the blocking read.  In low-contention workloads (reads far outnumber
+        // writes) the try_read() almost always succeeds and readers never stall.
         if let Some(growing_arc) = self
             .growing
             .read()
-            .unwrap_or_else(|e| e.into_inner())
             .as_ref()
         {
-            let growing = growing_arc.read().unwrap_or_else(|e| e.into_inner());
+            let growing = if let Some(g) = growing_arc.try_read() {
+                g
+            } else {
+                growing_arc.read()
+            };
             if !growing.for_each_fast(&mut callback) {
                 return;
             }
         }
 
         // Sealed segments — check zone maps before iterating
-        let sealed = self.sealed.read().unwrap_or_else(|e| e.into_inner());
+        let sealed = self.sealed.read();
         for segment_arc in sealed.iter() {
-            let segment = segment_arc.read().unwrap_or_else(|e| e.into_inner());
+            let segment = segment_arc.read();
             if !zone_preds.is_empty() && segment.can_skip_zone_preds(zone_preds) {
                 continue; // entire segment pruned
             }
@@ -923,19 +911,23 @@ impl SegmentManager {
     {
         let mut results = Vec::new();
 
-        // Growing segment — always scan, no zone skip (zones are partial)
+        // Growing segment — always scan, no zone skip (zones are partial).
+        // Non-blocking try_read() avoids stalling behind in-progress inserts.
         if let Some(growing_arc) = self
             .growing
             .read()
-            .unwrap_or_else(|e| e.into_inner())
             .as_ref()
         {
-            let growing = growing_arc.read().unwrap_or_else(|e| e.into_inner());
+            let growing = if let Some(g) = growing_arc.try_read() {
+                g
+            } else {
+                growing_arc.read()
+            };
             results.extend(growing.iter().filter(|e| filter(e)).cloned());
         }
 
         // Sealed segments: zone-prune on main thread, then scan in parallel.
-        let sealed = self.sealed.read().unwrap_or_else(|e| e.into_inner());
+        let sealed = self.sealed.read();
         // Collect only the segments that survive zone-predicate pruning.
         let surviving: Vec<_> = sealed
             .iter()
@@ -943,7 +935,7 @@ impl SegmentManager {
                 if zone_preds.is_empty() {
                     return true;
                 }
-                let seg = seg_arc.read().unwrap_or_else(|e| e.into_inner());
+                let seg = seg_arc.read();
                 !seg.can_skip_zone_preds(zone_preds)
             })
             .collect();
@@ -960,7 +952,6 @@ impl SegmentManager {
                         s.spawn(move || {
                             segment
                                 .read()
-                                .unwrap_or_else(|err| err.into_inner())
                                 .iter()
                                 .filter(|e| filter_ref(e))
                                 .cloned()
@@ -977,7 +968,7 @@ impl SegmentManager {
             }
         } else {
             for segment_arc in surviving {
-                let seg = segment_arc.read().unwrap_or_else(|e| e.into_inner());
+                let seg = segment_arc.read();
                 results.extend(seg.iter().filter(|e| filter(e)).cloned());
             }
         }
@@ -993,19 +984,23 @@ impl SegmentManager {
     {
         let mut results = Vec::new();
 
-        // Query growing segment (single, in-memory, fast)
+        // Query growing segment — try non-blocking read first (avoids stalling
+        // behind an in-progress insert; falls back to blocking if writer is active).
         if let Some(growing_arc) = self
             .growing
             .read()
-            .unwrap_or_else(|e| e.into_inner())
             .as_ref()
         {
-            let growing = growing_arc.read().unwrap_or_else(|e| e.into_inner());
+            let growing = if let Some(g) = growing_arc.try_read() {
+                g
+            } else {
+                growing_arc.read()
+            };
             results.extend(growing.iter().filter(|e| filter(e)).cloned());
         }
 
         // Query sealed segments — parallel when multiple exist AND multi-core
-        let sealed = self.sealed.read().unwrap_or_else(|e| e.into_inner());
+        let sealed = self.sealed.read();
         let use_parallel = sealed.len() > 1 && crate::runtime::SystemInfo::should_parallelize();
         if use_parallel {
             let filter_ref = &filter;
@@ -1016,7 +1011,6 @@ impl SegmentManager {
                         s.spawn(move || {
                             segment
                                 .read()
-                                .unwrap_or_else(|err| err.into_inner())
                                 .iter()
                                 .filter(|e| filter_ref(e))
                                 .cloned()
@@ -1033,7 +1027,7 @@ impl SegmentManager {
             }
         } else {
             for segment in sealed.iter() {
-                let seg = segment.read().unwrap_or_else(|e| e.into_inner());
+                let seg = segment.read();
                 results.extend(seg.iter().filter(|e| filter(e)).cloned());
             }
         }
@@ -1064,10 +1058,9 @@ impl SegmentManager {
         if let Some(growing_arc) = self
             .growing
             .read()
-            .unwrap_or_else(|e| e.into_inner())
             .as_ref()
         {
-            let growing = growing_arc.read().unwrap_or_else(|e| e.into_inner());
+            let growing = growing_arc.read();
             if let Some(key) = key_hint {
                 if !growing.bloom_might_contain_key(key) {
                     bloom_pruned = true;
@@ -1082,9 +1075,9 @@ impl SegmentManager {
         }
 
         // Sealed segments (currently empty iter, but future-proofed)
-        let sealed = self.sealed.read().unwrap_or_else(|e| e.into_inner());
+        let sealed = self.sealed.read();
         for segment_arc in sealed.iter() {
-            let segment = segment_arc.read().unwrap_or_else(|e| e.into_inner());
+            let segment = segment_arc.read();
             if let Some(key) = key_hint {
                 if !segment.bloom_might_contain_key(key) {
                     bloom_pruned = true;
@@ -1109,15 +1102,14 @@ impl SegmentManager {
         if let Some(growing_arc) = self
             .growing
             .read()
-            .unwrap_or_else(|e| e.into_inner())
             .as_ref()
         {
-            let growing = growing_arc.read().unwrap_or_else(|e| e.into_inner());
+            let growing = growing_arc.read();
             results.extend(growing.filter_metadata(filters));
         }
 
         // Sealed segments
-        let sealed = self.sealed.read().unwrap_or_else(|e| e.into_inner());
+        let sealed = self.sealed.read();
         for segment in sealed.iter() {
             results.extend(segment.filter_metadata(filters));
         }
@@ -1133,17 +1125,16 @@ impl SegmentManager {
         if let Some(growing_arc) = self
             .growing
             .read()
-            .unwrap_or_else(|e| e.into_inner())
             .as_ref()
         {
-            let growing = growing_arc.read().unwrap_or_else(|e| e.into_inner());
+            let growing = growing_arc.read();
             for entity in growing.iter_kind(kind) {
                 results.push(entity.clone());
             }
         }
 
         // Sealed segments
-        let sealed = self.sealed.read().unwrap_or_else(|e| e.into_inner());
+        let sealed = self.sealed.read();
         for segment in sealed.iter() {
             for entity in segment.iter_kind(kind) {
                 results.push(entity.clone());
@@ -1165,13 +1156,12 @@ impl SegmentManager {
         if let Some(growing_arc) = self
             .growing
             .read()
-            .unwrap_or_else(|e| e.into_inner())
             .as_ref()
         {
-            ids.push(growing_arc.read().unwrap_or_else(|e| e.into_inner()).id());
+            ids.push(growing_arc.read().id());
         }
 
-        let sealed = self.sealed.read().unwrap_or_else(|e| e.into_inner());
+        let sealed = self.sealed.read();
         for segment in sealed.iter() {
             ids.push(segment.id());
         }
@@ -1179,7 +1169,6 @@ impl SegmentManager {
         ids.extend(
             self.archived
                 .read()
-                .unwrap_or_else(|e| e.into_inner())
                 .iter()
                 .copied(),
         );
@@ -1191,13 +1180,12 @@ impl SegmentManager {
     fn emit(&self, event: LifecycleEvent) {
         self.events
             .write()
-            .unwrap_or_else(|e| e.into_inner())
             .push(event);
     }
 
     /// Drain events (for testing/monitoring)
     pub fn drain_events(&self) -> Vec<LifecycleEvent> {
-        std::mem::take(&mut *self.events.write().unwrap_or_else(|e| e.into_inner()))
+        std::mem::take(&mut *self.events.write())
     }
 
     /// Run maintenance (would be called periodically in production)
@@ -1207,7 +1195,7 @@ impl SegmentManager {
 
         // Compact if too many sealed segments
         if self.config.enable_compaction {
-            let sealed_count = self.sealed.read().unwrap_or_else(|e| e.into_inner()).len();
+            let sealed_count = self.sealed.read().len();
             if sealed_count > self.config.max_sealed_segments {
                 // In production, we'd trigger background compaction here
                 // For now, just log that compaction is needed
@@ -1222,11 +1210,11 @@ impl SegmentManager {
 // This is needed because we store growing segments in the sealed list after sealing
 impl UnifiedSegment for Arc<RwLock<GrowingSegment>> {
     fn id(&self) -> SegmentId {
-        self.read().unwrap_or_else(|e| e.into_inner()).id()
+        self.read().id()
     }
 
     fn state(&self) -> SegmentState {
-        self.read().unwrap_or_else(|e| e.into_inner()).state()
+        self.read().state()
     }
 
     fn collection(&self) -> &str {
@@ -1235,17 +1223,16 @@ impl UnifiedSegment for Arc<RwLock<GrowingSegment>> {
     }
 
     fn stats(&self) -> SegmentStats {
-        self.read().unwrap_or_else(|e| e.into_inner()).stats()
+        self.read().stats()
     }
 
     fn entity_count(&self) -> usize {
         self.read()
-            .unwrap_or_else(|e| e.into_inner())
             .entity_count()
     }
 
     fn contains(&self, id: EntityId) -> bool {
-        self.read().unwrap_or_else(|e| e.into_inner()).contains(id)
+        self.read().contains(id)
     }
 
     fn get(&self, id: EntityId) -> Option<&UnifiedEntity> {
@@ -1260,13 +1247,11 @@ impl UnifiedSegment for Arc<RwLock<GrowingSegment>> {
 
     fn insert(&mut self, entity: UnifiedEntity) -> Result<EntityId, SegmentError> {
         self.write()
-            .unwrap_or_else(|e| e.into_inner())
             .insert(entity)
     }
 
     fn update(&mut self, entity: UnifiedEntity) -> Result<(), SegmentError> {
         self.write()
-            .unwrap_or_else(|e| e.into_inner())
             .update(entity)
     }
 
@@ -1276,33 +1261,29 @@ impl UnifiedSegment for Arc<RwLock<GrowingSegment>> {
         modified_columns: &[String],
     ) -> Result<(), SegmentError> {
         self.write()
-            .unwrap_or_else(|e| e.into_inner())
             .update_hot(entity, modified_columns)
     }
 
     fn delete(&mut self, id: EntityId) -> Result<bool, SegmentError> {
-        self.write().unwrap_or_else(|e| e.into_inner()).delete(id)
+        self.write().delete(id)
     }
 
     fn get_metadata(&self, id: EntityId) -> Option<Metadata> {
         self.read()
-            .unwrap_or_else(|e| e.into_inner())
             .get_metadata(id)
     }
 
     fn set_metadata(&mut self, id: EntityId, metadata: Metadata) -> Result<(), SegmentError> {
         self.write()
-            .unwrap_or_else(|e| e.into_inner())
             .set_metadata(id, metadata)
     }
 
     fn seal(&mut self) -> Result<(), SegmentError> {
-        self.write().unwrap_or_else(|e| e.into_inner()).seal()
+        self.write().seal()
     }
 
     fn should_seal(&self, config: &SegmentConfig) -> bool {
         self.read()
-            .unwrap_or_else(|e| e.into_inner())
             .should_seal(config)
     }
 
@@ -1317,7 +1298,6 @@ impl UnifiedSegment for Arc<RwLock<GrowingSegment>> {
 
     fn filter_metadata(&self, filters: &[(String, MetadataFilter)]) -> Vec<EntityId> {
         self.read()
-            .unwrap_or_else(|e| e.into_inner())
             .filter_metadata(filters)
     }
 }

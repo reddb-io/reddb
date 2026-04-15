@@ -26,8 +26,9 @@
 //! ```
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use parking_lot::RwLock;
 
 use super::entity::EntityId;
 use super::metadata::{Metadata, MetadataStorage, MetadataValue};
@@ -98,7 +99,8 @@ impl GraphAdjacencyIndex {
         weight: f32,
     ) {
         // Add to outgoing adjacency
-        if let Ok(mut outgoing) = self.outgoing.write() {
+        {
+            let mut outgoing = self.outgoing.write();
             let entry = AdjacencyEntry {
                 edge_id,
                 neighbor_id: target_id,
@@ -109,7 +111,8 @@ impl GraphAdjacencyIndex {
         }
 
         // Add to incoming adjacency
-        if let Ok(mut incoming) = self.incoming.write() {
+        {
+            let mut incoming = self.incoming.write();
             let entry = AdjacencyEntry {
                 edge_id,
                 neighbor_id: source_id,
@@ -120,7 +123,8 @@ impl GraphAdjacencyIndex {
         }
 
         // Add to label index
-        if let Ok(mut by_label) = self.by_label.write() {
+        {
+            let mut by_label = self.by_label.write();
             by_label
                 .entry(label.to_string())
                 .or_default()
@@ -128,7 +132,8 @@ impl GraphAdjacencyIndex {
         }
 
         // Update counts
-        if let Ok(mut count) = self.edge_count.write() {
+        {
+            let mut count = self.edge_count.write();
             *count += 1;
         }
 
@@ -139,28 +144,32 @@ impl GraphAdjacencyIndex {
     /// Remove an edge from the index
     pub fn remove_edge(&self, edge_id: EntityId) {
         // Remove from outgoing
-        if let Ok(mut outgoing) = self.outgoing.write() {
+        {
+            let mut outgoing = self.outgoing.write();
             for entries in outgoing.values_mut() {
                 entries.retain(|e| e.edge_id != edge_id);
             }
         }
 
         // Remove from incoming
-        if let Ok(mut incoming) = self.incoming.write() {
+        {
+            let mut incoming = self.incoming.write();
             for entries in incoming.values_mut() {
                 entries.retain(|e| e.edge_id != edge_id);
             }
         }
 
         // Remove from label index
-        if let Ok(mut by_label) = self.by_label.write() {
+        {
+            let mut by_label = self.by_label.write();
             for edges in by_label.values_mut() {
                 edges.remove(&edge_id);
             }
         }
 
         // Update counts
-        if let Ok(mut count) = self.edge_count.write() {
+        {
+            let mut count = self.edge_count.write();
             *count = count.saturating_sub(1);
         }
     }
@@ -175,24 +184,22 @@ impl GraphAdjacencyIndex {
         let mut results = Vec::new();
 
         if matches!(direction, EdgeDirection::Outgoing | EdgeDirection::Both) {
-            if let Ok(outgoing) = self.outgoing.read() {
-                if let Some(entries) = outgoing.get(&node_id) {
-                    for entry in entries {
-                        if label_filter.is_none_or(|l| entry.label == l) {
-                            results.push(entry.clone());
-                        }
+            let outgoing = self.outgoing.read();
+            if let Some(entries) = outgoing.get(&node_id) {
+                for entry in entries {
+                    if label_filter.is_none_or(|l| entry.label == l) {
+                        results.push(entry.clone());
                     }
                 }
             }
         }
 
         if matches!(direction, EdgeDirection::Incoming | EdgeDirection::Both) {
-            if let Ok(incoming) = self.incoming.read() {
-                if let Some(entries) = incoming.get(&node_id) {
-                    for entry in entries {
-                        if label_filter.is_none_or(|l| entry.label == l) {
-                            results.push(entry.clone());
-                        }
+            let incoming = self.incoming.read();
+            if let Some(entries) = incoming.get(&node_id) {
+                for entry in entries {
+                    if label_filter.is_none_or(|l| entry.label == l) {
+                        results.push(entry.clone());
                     }
                 }
             }
@@ -203,30 +210,20 @@ impl GraphAdjacencyIndex {
 
     /// Get all edges with a specific label
     pub fn get_edges_by_label(&self, label: &str) -> Vec<EntityId> {
-        self.by_label
-            .read()
-            .map(|idx| {
-                idx.get(label)
-                    .map(|s| s.iter().copied().collect())
-                    .unwrap_or_default()
-            })
+        let idx = self.by_label.read();
+        idx.get(label)
+            .map(|s| s.iter().copied().collect())
             .unwrap_or_default()
     }
 
     /// Get outgoing degree of a node
     pub fn out_degree(&self, node_id: EntityId) -> usize {
-        self.outgoing
-            .read()
-            .map(|o| o.get(&node_id).map(|v| v.len()).unwrap_or(0))
-            .unwrap_or(0)
+        self.outgoing.read().get(&node_id).map(|v| v.len()).unwrap_or(0)
     }
 
     /// Get incoming degree of a node
     pub fn in_degree(&self, node_id: EntityId) -> usize {
-        self.incoming
-            .read()
-            .map(|i| i.get(&node_id).map(|v| v.len()).unwrap_or(0))
-            .unwrap_or(0)
+        self.incoming.read().get(&node_id).map(|v| v.len()).unwrap_or(0)
     }
 
     /// Get total degree of a node
@@ -236,49 +233,29 @@ impl GraphAdjacencyIndex {
 
     /// Get edge count
     pub fn edge_count(&self) -> usize {
-        self.edge_count.read().map(|c| *c).unwrap_or(0)
+        *self.edge_count.read()
     }
 
     /// Get node count
     pub fn node_count(&self) -> usize {
-        self.node_count.read().map(|c| *c).unwrap_or(0)
+        *self.node_count.read()
     }
 
     /// Clear the entire index
     pub fn clear(&self) {
-        if let Ok(mut o) = self.outgoing.write() {
-            o.clear();
-        }
-        if let Ok(mut i) = self.incoming.write() {
-            i.clear();
-        }
-        if let Ok(mut l) = self.by_label.write() {
-            l.clear();
-        }
-        if let Ok(mut c) = self.edge_count.write() {
-            *c = 0;
-        }
-        if let Ok(mut n) = self.node_count.write() {
-            *n = 0;
-        }
+        self.outgoing.write().clear();
+        self.incoming.write().clear();
+        self.by_label.write().clear();
+        *self.edge_count.write() = 0;
+        *self.node_count.write() = 0;
     }
 
     fn update_node_count(&self) {
-        let out_nodes = self
-            .outgoing
-            .read()
-            .map(|o| o.keys().copied().collect::<HashSet<_>>())
-            .unwrap_or_default();
-        let in_nodes = self
-            .incoming
-            .read()
-            .map(|i| i.keys().copied().collect::<HashSet<_>>())
-            .unwrap_or_default();
+        let out_nodes: HashSet<_> = self.outgoing.read().keys().copied().collect();
+        let in_nodes: HashSet<_> = self.incoming.read().keys().copied().collect();
 
         let total: HashSet<_> = out_nodes.union(&in_nodes).collect();
-        if let Ok(mut count) = self.node_count.write() {
-            *count = total.len();
-        }
+        *self.node_count.write() = total.len();
     }
 }
 
@@ -332,12 +309,11 @@ impl InvertedIndex {
 
     /// Configure which fields to index for a collection
     pub fn add_indexed_field(&self, collection: &str, field: &str) {
-        if let Ok(mut fields) = self.indexed_fields.write() {
-            fields
-                .entry(collection.to_string())
-                .or_default()
-                .insert(field.to_string());
-        }
+        self.indexed_fields
+            .write()
+            .entry(collection.to_string())
+            .or_default()
+            .insert(field.to_string());
     }
 
     /// Index a document's text content
@@ -361,7 +337,8 @@ impl InvertedIndex {
         }
 
         // Add to index
-        if let Ok(mut index) = self.index.write() {
+        {
+            let mut index = self.index.write();
             for (term, positions) in term_freqs {
                 let tf = positions.len() as f32 / term_count.max(1.0);
 
@@ -378,17 +355,14 @@ impl InvertedIndex {
         }
 
         // Update doc count
-        if let Ok(mut count) = self.doc_count.write() {
-            *count += 1;
-        }
+        *self.doc_count.write() += 1;
     }
 
     /// Remove a document from the index
     pub fn remove_document(&self, entity_id: EntityId) {
-        if let Ok(mut index) = self.index.write() {
-            for postings in index.values_mut() {
-                postings.retain(|p| p.entity_id != entity_id);
-            }
+        let mut index = self.index.write();
+        for postings in index.values_mut() {
+            postings.retain(|p| p.entity_id != entity_id);
         }
     }
 
@@ -399,12 +373,9 @@ impl InvertedIndex {
             return Vec::new();
         }
 
-        let index = match self.index.read() {
-            Ok(i) => i,
-            Err(_) => return Vec::new(),
-        };
+        let index = self.index.read();
 
-        let doc_count = self.doc_count.read().map(|g| *g).unwrap_or(1);
+        let doc_count = *self.doc_count.read();
 
         // Get posting lists for all terms
         let mut term_postings: Vec<&Vec<PostingEntry>> = Vec::new();
@@ -478,10 +449,7 @@ impl InvertedIndex {
     pub fn search_prefix(&self, prefix: &str, limit: usize) -> Vec<String> {
         let prefix_lower = prefix.to_lowercase();
 
-        let index = match self.index.read() {
-            Ok(i) => i,
-            Err(_) => return Vec::new(),
-        };
+        let index = self.index.read();
 
         index
             .range(prefix_lower.clone()..)

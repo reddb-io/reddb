@@ -16,6 +16,9 @@ use crate::application::ttl_payload::has_internal_ttl_metadata;
 use crate::presentation::entity_json::storage_value_to_json;
 use crate::storage::unified::MetadataValue;
 use crate::storage::Metadata;
+use crate::storage::query::sql_lowering::{
+    effective_delete_filter, effective_insert_rows, effective_update_filter,
+};
 
 use super::*;
 
@@ -30,6 +33,8 @@ impl RedDBRuntime {
         query: &InsertQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         let mut inserted_count: u64 = 0;
+        let effective_rows =
+            effective_insert_rows(query).map_err(|msg| RedDBError::Query(msg.to_string()))?;
 
         // Ensure the collection exists (auto-create on first insert).
         let store = self.inner.db.store();
@@ -39,7 +44,7 @@ impl RedDBRuntime {
             .collection_contract(&query.table)
             .map(|contract| contract.declared_model);
 
-        for row_values in &query.values {
+        for row_values in &effective_rows {
             if row_values.len() != query.columns.len() {
                 return Err(RedDBError::Query(format!(
                     "INSERT column count ({}) does not match value count ({})",
@@ -219,7 +224,7 @@ impl RedDBRuntime {
             let recent: Vec<_> = entities
                 .into_iter()
                 .rev()
-                .take(query.values.len())
+                .take(effective_rows.len())
                 .collect();
 
             for entity in &recent {
@@ -333,10 +338,11 @@ impl RedDBRuntime {
         query: &UpdateQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         let store = self.inner.db.store();
+        let effective_filter = effective_update_filter(query);
 
         // ── FAST PATH: UPDATE ... WHERE _entity_id = N ──
         // Direct entity lookup instead of full collection scan.
-        if let Some(entity_id) = query_exec::extract_entity_id_from_filter(&query.filter) {
+        if let Some(entity_id) = query_exec::extract_entity_id_from_filter(&effective_filter) {
             let manager = store
                 .get_collection(&query.table)
                 .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
@@ -364,6 +370,50 @@ impl RedDBRuntime {
             ));
         }
 
+        // ── FAST PATH: UPDATE ... WHERE <indexed_col> = <value> ──
+        // When the filter is a single equality predicate on a hash-indexed column,
+        // use the index to find the matching entity IDs in O(log N) instead of
+        // scanning the full collection.
+        if let Some(ref filter) = effective_filter {
+            let idx_store = self.index_store_ref();
+            if let Some(entity_ids) =
+                query_exec::try_hash_eq_lookup(filter, &query.table, idx_store)
+            {
+                if entity_ids.is_empty() {
+                    return Ok(RuntimeQueryResult::dml_result(
+                        raw_query.to_string(),
+                        0,
+                        "update",
+                        "runtime-dml",
+                    ));
+                }
+                let manager = store
+                    .get_collection(&query.table)
+                    .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
+                let operations = self.build_update_operations(query)?;
+                let mut affected: u64 = 0;
+                for eid in entity_ids {
+                    if manager.get(eid).is_some() {
+                        let input = PatchEntityInput {
+                            collection: query.table.clone(),
+                            id: eid,
+                            payload: crate::json::Value::Null,
+                            operations: operations.clone(),
+                        };
+                        if self.patch_entity(input).is_ok() {
+                            affected += 1;
+                        }
+                    }
+                }
+                return Ok(RuntimeQueryResult::dml_result(
+                    raw_query.to_string(),
+                    affected,
+                    "update",
+                    "runtime-dml",
+                ));
+            }
+        }
+
         let manager = store
             .get_collection(&query.table)
             .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
@@ -373,7 +423,7 @@ impl RedDBRuntime {
         let table_name = query.table.as_str();
 
         manager.for_each_entity(|entity| {
-            let matches = match &query.filter {
+            let matches = match &effective_filter {
                 Some(filter) => {
                     query_exec::evaluate_entity_filter(entity, filter, table_name, table_name)
                 }
@@ -467,9 +517,10 @@ impl RedDBRuntime {
         query: &DeleteQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         let store = self.inner.db.store();
+        let effective_filter = effective_delete_filter(query);
 
         // ── FAST PATH: DELETE ... WHERE _entity_id = N ──
-        if let Some(entity_id) = query_exec::extract_entity_id_from_filter(&query.filter) {
+        if let Some(entity_id) = query_exec::extract_entity_id_from_filter(&effective_filter) {
             let manager = store
                 .get_collection(&query.table)
                 .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
@@ -493,6 +544,33 @@ impl RedDBRuntime {
             ));
         }
 
+        // ── FAST PATH: DELETE ... WHERE <indexed_col> = <value> ──
+        if let Some(ref filter) = effective_filter {
+            let idx_store = self.index_store_ref();
+            if let Some(entity_ids) =
+                query_exec::try_hash_eq_lookup(filter, &query.table, idx_store)
+            {
+                let mut affected: u64 = 0;
+                for eid in entity_ids {
+                    if self
+                        .delete_entity(DeleteEntityInput {
+                            collection: query.table.clone(),
+                            id: eid,
+                        })
+                        .is_ok()
+                    {
+                        affected += 1;
+                    }
+                }
+                return Ok(RuntimeQueryResult::dml_result(
+                    raw_query.to_string(),
+                    affected,
+                    "delete",
+                    "runtime-dml",
+                ));
+            }
+        }
+
         let manager = store
             .get_collection(&query.table)
             .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
@@ -501,7 +579,7 @@ impl RedDBRuntime {
 
         let table_name = query.table.as_str();
         manager.for_each_entity(|entity| {
-            let matches = match &query.filter {
+            let matches = match &effective_filter {
                 Some(filter) => {
                     query_exec::evaluate_entity_filter(entity, filter, table_name, table_name)
                 }

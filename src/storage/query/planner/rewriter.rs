@@ -13,6 +13,9 @@
 use crate::storage::query::ast::{
     CompareOp, FieldRef, Filter as AstFilter, JoinQuery, Projection, QueryExpr,
 };
+use crate::storage::query::sql_lowering::{
+    effective_graph_filter, effective_join_filter, effective_table_filter, effective_vector_filter,
+};
 use crate::storage::schema::Value;
 
 /// Context for rewrite operations
@@ -220,21 +223,22 @@ impl RewriteRule for SimplifyFiltersRule {
     fn apply(&self, query: QueryExpr, ctx: &mut RewriteContext) -> QueryExpr {
         match query {
             QueryExpr::Table(mut tq) => {
-                if let Some(filter) = tq.filter.take() {
+                if let Some(filter) = effective_table_filter(&tq) {
                     tq.filter = Some(simplify_filter(filter, ctx));
                 }
                 QueryExpr::Table(tq)
             }
             QueryExpr::Graph(mut gq) => {
-                if let Some(filter) = gq.filter.take() {
+                if let Some(filter) = effective_graph_filter(&gq) {
                     gq.filter = Some(simplify_filter(filter, ctx));
                 }
                 QueryExpr::Graph(gq)
             }
             QueryExpr::Join(mut jq) => {
+                let join_filter = effective_join_filter(&jq);
                 let left = self.apply(*jq.left, ctx);
                 let right = self.apply(*jq.right, ctx);
-                if let Some(filter) = jq.filter.take() {
+                if let Some(filter) = join_filter {
                     jq.filter = Some(simplify_filter(filter, ctx));
                 }
                 jq.left = Box::new(left);
@@ -278,11 +282,11 @@ impl RewriteRule for SimplifyFiltersRule {
 
     fn is_applicable(&self, query: &QueryExpr) -> bool {
         match query {
-            QueryExpr::Table(tq) => tq.filter.is_some(),
-            QueryExpr::Graph(gq) => gq.filter.is_some(),
+            QueryExpr::Table(tq) => effective_table_filter(tq).is_some(),
+            QueryExpr::Graph(gq) => effective_graph_filter(gq).is_some(),
             QueryExpr::Join(_) => true,
             QueryExpr::Path(_) => false,
-            QueryExpr::Vector(vq) => vq.filter.is_some(),
+            QueryExpr::Vector(vq) => effective_vector_filter(vq).is_some(),
             QueryExpr::Hybrid(_) => true, // May have filters in structured part
             // DML/DDL/Command statements are not applicable for filter simplification
             QueryExpr::Insert(_)
@@ -351,7 +355,7 @@ impl RewriteRule for EliminateDeadCodeRule {
         match query {
             QueryExpr::Table(mut tq) => {
                 // Remove always-true filters
-                if let Some(ref filter) = tq.filter {
+                if let Some(filter) = effective_table_filter(&tq).as_ref() {
                     if is_always_true(filter) {
                         tq.filter = None;
                     }

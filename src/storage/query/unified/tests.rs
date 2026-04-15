@@ -380,6 +380,7 @@ fn test_join_query_execution() {
         order_by: Vec::new(),
         limit: None,
         offset: None,
+        return_items: Vec::new(),
         return_: Vec::new(),
     });
 

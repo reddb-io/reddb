@@ -9,7 +9,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Bound::{Excluded, Included, Unbounded};
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::storage::schema::Value;
 use crate::storage::unified::bitmap_index::BitmapIndexManager;
@@ -64,11 +64,11 @@ enum SortedNumericValue {
 }
 
 fn read_unpoisoned<'a, T>(lock: &'a RwLock<T>) -> RwLockReadGuard<'a, T> {
-    lock.read().unwrap_or_else(|poison| poison.into_inner())
+    lock.read()
 }
 
 fn write_unpoisoned<'a, T>(lock: &'a RwLock<T>) -> RwLockWriteGuard<'a, T> {
-    lock.write().unwrap_or_else(|poison| poison.into_inner())
+    lock.write()
 }
 
 /// In-memory sorted index for exact integral range scans.
@@ -142,6 +142,73 @@ impl SortedColumnIndex {
         self.entries.values().map(|v| v.len()).sum()
     }
 
+    /// Range scan with early stop at `limit` entity IDs.
+    /// Iterates the BTree in key order — cheaper than `range()` for LIMIT-bounded
+    /// queries because it stops as soon as enough IDs are collected.
+    /// Returns None when float values make ordering unsafe.
+    pub fn range_limited(
+        &self,
+        low: SortedNumericKey,
+        high: SortedNumericKey,
+        limit: usize,
+    ) -> Option<Vec<EntityId>> {
+        if self.has_inexact_numeric_values {
+            return None;
+        }
+        if low > high {
+            return Some(Vec::new());
+        }
+        Some(self.collect_range_limited(low..=high, limit))
+    }
+
+    /// Greater-than scan with early stop at `limit`.
+    pub fn greater_than_limited(
+        &self,
+        threshold: SortedNumericKey,
+        limit: usize,
+    ) -> Option<Vec<EntityId>> {
+        if self.has_inexact_numeric_values {
+            return None;
+        }
+        Some(self.collect_range_limited((Excluded(threshold), Unbounded), limit))
+    }
+
+    /// Greater-or-equal scan with early stop at `limit`.
+    pub fn greater_equal_limited(
+        &self,
+        threshold: SortedNumericKey,
+        limit: usize,
+    ) -> Option<Vec<EntityId>> {
+        if self.has_inexact_numeric_values {
+            return None;
+        }
+        Some(self.collect_range_limited((Included(threshold), Unbounded), limit))
+    }
+
+    /// Less-than scan with early stop at `limit`.
+    pub fn less_than_limited(
+        &self,
+        threshold: SortedNumericKey,
+        limit: usize,
+    ) -> Option<Vec<EntityId>> {
+        if self.has_inexact_numeric_values {
+            return None;
+        }
+        Some(self.collect_range_limited((Unbounded, Excluded(threshold)), limit))
+    }
+
+    /// Less-or-equal scan with early stop at `limit`.
+    pub fn less_equal_limited(
+        &self,
+        threshold: SortedNumericKey,
+        limit: usize,
+    ) -> Option<Vec<EntityId>> {
+        if self.has_inexact_numeric_values {
+            return None;
+        }
+        Some(self.collect_range_limited((Unbounded, Included(threshold)), limit))
+    }
+
     fn collect_range<R>(&self, range: R) -> Vec<EntityId>
     where
         R: std::ops::RangeBounds<SortedNumericKey>,
@@ -149,6 +216,22 @@ impl SortedColumnIndex {
         let mut result = Vec::new();
         for ids in self.entries.range(range).map(|(_, ids)| ids) {
             result.extend_from_slice(ids);
+        }
+        result
+    }
+
+    fn collect_range_limited<R>(&self, range: R, limit: usize) -> Vec<EntityId>
+    where
+        R: std::ops::RangeBounds<SortedNumericKey>,
+    {
+        let mut result = Vec::with_capacity(limit.min(512));
+        'outer: for ids in self.entries.range(range).map(|(_, ids)| ids) {
+            for &id in ids {
+                result.push(id);
+                if result.len() >= limit {
+                    break 'outer;
+                }
+            }
         }
         result
     }
@@ -264,6 +347,69 @@ impl SortedIndexManager {
             Some(index) => index.less_equal(threshold),
             None => None,
         }
+    }
+
+    /// Range lookup with early stop at `limit` — avoids collecting all IDs
+    /// when only the first N results are needed (LIMIT-bounded queries).
+    pub(crate) fn range_lookup_limited(
+        &self,
+        collection: &str,
+        column: &str,
+        low: SortedNumericKey,
+        high: SortedNumericKey,
+        limit: usize,
+    ) -> Option<Vec<EntityId>> {
+        let indices = read_unpoisoned(&self.indices);
+        let key = (collection.to_string(), column.to_string());
+        indices.get(&key)?.range_limited(low, high, limit)
+    }
+
+    pub(crate) fn gt_lookup_limited(
+        &self,
+        collection: &str,
+        column: &str,
+        threshold: SortedNumericKey,
+        limit: usize,
+    ) -> Option<Vec<EntityId>> {
+        let indices = read_unpoisoned(&self.indices);
+        let key = (collection.to_string(), column.to_string());
+        indices.get(&key)?.greater_than_limited(threshold, limit)
+    }
+
+    pub(crate) fn ge_lookup_limited(
+        &self,
+        collection: &str,
+        column: &str,
+        threshold: SortedNumericKey,
+        limit: usize,
+    ) -> Option<Vec<EntityId>> {
+        let indices = read_unpoisoned(&self.indices);
+        let key = (collection.to_string(), column.to_string());
+        indices.get(&key)?.greater_equal_limited(threshold, limit)
+    }
+
+    pub(crate) fn lt_lookup_limited(
+        &self,
+        collection: &str,
+        column: &str,
+        threshold: SortedNumericKey,
+        limit: usize,
+    ) -> Option<Vec<EntityId>> {
+        let indices = read_unpoisoned(&self.indices);
+        let key = (collection.to_string(), column.to_string());
+        indices.get(&key)?.less_than_limited(threshold, limit)
+    }
+
+    pub(crate) fn le_lookup_limited(
+        &self,
+        collection: &str,
+        column: &str,
+        threshold: SortedNumericKey,
+        limit: usize,
+    ) -> Option<Vec<EntityId>> {
+        let indices = read_unpoisoned(&self.indices);
+        let key = (collection.to_string(), column.to_string());
+        indices.get(&key)?.less_equal_limited(threshold, limit)
     }
 
     /// Check if a sorted index exists for a column.
@@ -557,10 +703,7 @@ impl IndexStore {
         entity_id: EntityId,
         fields: &[(String, Value)],
     ) -> Result<(), String> {
-        let registry = self
-            .registry
-            .read()
-            .map_err(|err| format!("index registry lock poisoned: {err}"))?;
+        let registry = self.registry.read();
         for idx in registry.values() {
             if idx.collection != collection {
                 continue;

@@ -12,6 +12,7 @@ use crate::storage::engine::unified_index::UnifiedIndex;
 use crate::storage::engine::vector_metadata::{MetadataFilter, MetadataValue};
 use crate::storage::engine::vector_store::VectorStore;
 use crate::storage::query::ast::{QueryExpr, VectorQuery, VectorSource};
+use crate::storage::query::sql_lowering::effective_vector_filter;
 use crate::storage::query::unified::{
     ExecutionError, QueryStats, UnifiedRecord, UnifiedResult, VectorSearchResult,
 };
@@ -53,8 +54,11 @@ impl VectorExecutor {
         })?;
 
         // Search the vector store with filter
-        let search_results =
-            collection.search_with_filter(&query_vector, query.k, query.filter.as_ref());
+        let search_results = collection.search_with_filter(
+            &query_vector,
+            query.k,
+            effective_vector_filter(query).as_ref(),
+        );
 
         // Build result
         let mut result = UnifiedResult::with_columns(vec![

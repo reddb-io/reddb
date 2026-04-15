@@ -20,7 +20,8 @@
 //! ```
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::sync::RwLock;
+
+use parking_lot::RwLock;
 
 use super::entity::{EntityData, EntityId, EntityKind, UnifiedEntity};
 use super::tokenization::{push_text_tokens, push_value_tokens, MAX_INDEX_TOKENS};
@@ -106,7 +107,7 @@ impl ContextIndex {
         let mut keys = EntityKeys::default();
 
         {
-            let mut index = self.tokens.write().unwrap_or_else(|e| e.into_inner());
+            let mut index = self.tokens.write();
             for (token, field) in &entity_tokens {
                 keys.token_keys.push(token.clone());
                 index
@@ -121,7 +122,7 @@ impl ContextIndex {
         }
 
         {
-            let mut index = self.field_values.write().unwrap_or_else(|e| e.into_inner());
+            let mut index = self.field_values.write();
             for (field, value_token) in &field_pairs {
                 keys.field_value_keys
                     .push((field.clone(), value_token.clone()));
@@ -137,12 +138,12 @@ impl ContextIndex {
         }
 
         {
-            let mut reverse = self.reverse.write().unwrap_or_else(|e| e.into_inner());
+            let mut reverse = self.reverse.write();
             reverse.insert(entity.id.raw(), keys);
         }
 
         {
-            let mut indexed = self.indexed.write().unwrap_or_else(|e| e.into_inner());
+            let mut indexed = self.indexed.write();
             indexed.insert(entity.id.raw());
         }
     }
@@ -150,7 +151,7 @@ impl ContextIndex {
     /// Remove all postings for an entity. O(k) where k = entity's token count.
     pub fn remove_entity(&self, entity_id: EntityId) {
         let keys = {
-            let mut reverse = self.reverse.write().unwrap_or_else(|e| e.into_inner());
+            let mut reverse = self.reverse.write();
             reverse.remove(&entity_id.raw())
         };
 
@@ -159,7 +160,7 @@ impl ContextIndex {
         };
 
         if !keys.token_keys.is_empty() {
-            let mut index = self.tokens.write().unwrap_or_else(|e| e.into_inner());
+            let mut index = self.tokens.write();
             for key in &keys.token_keys {
                 if let Some(postings) = index.get_mut(key) {
                     postings.retain(|p| p.entity_id != entity_id);
@@ -171,7 +172,7 @@ impl ContextIndex {
         }
 
         if !keys.field_value_keys.is_empty() {
-            let mut index = self.field_values.write().unwrap_or_else(|e| e.into_inner());
+            let mut index = self.field_values.write();
             for key in &keys.field_value_keys {
                 if let Some(postings) = index.get_mut(key) {
                     postings.retain(|p| p.entity_id != entity_id);
@@ -183,7 +184,7 @@ impl ContextIndex {
         }
 
         {
-            let mut indexed = self.indexed.write().unwrap_or_else(|e| e.into_inner());
+            let mut indexed = self.indexed.write();
             indexed.remove(&entity_id.raw());
         }
     }
@@ -200,7 +201,7 @@ impl ContextIndex {
             return Vec::new();
         }
 
-        let index = self.tokens.read().unwrap_or_else(|e| e.into_inner());
+        let index = self.tokens.read();
 
         let mut scored: HashMap<u64, (String, usize)> = HashMap::new();
 
@@ -263,7 +264,7 @@ impl ContextIndex {
             return Vec::new();
         }
 
-        let index = self.field_values.read().unwrap_or_else(|e| e.into_inner());
+        let index = self.field_values.read();
 
         let mut scored: HashMap<u64, (String, usize)> = HashMap::new();
         let mut total_pairs = 0usize;
@@ -311,14 +312,10 @@ impl ContextIndex {
 
     /// Return index statistics.
     pub fn stats(&self) -> ContextIndexStats {
-        let token_count = self.tokens.read().map(|i| i.len()).unwrap_or(0);
-        let field_value_count = self.field_values.read().map(|i| i.len()).unwrap_or(0);
-        let total_postings = self
-            .tokens
-            .read()
-            .map(|i| i.values().map(|v| v.len()).sum())
-            .unwrap_or(0);
-        let indexed_entities = self.indexed.read().map(|s| s.len()).unwrap_or(0);
+        let token_count = self.tokens.read().len();
+        let field_value_count = self.field_values.read().len();
+        let total_postings = self.tokens.read().values().map(|v| v.len()).sum();
+        let indexed_entities = self.indexed.read().len();
 
         ContextIndexStats {
             indexed_entities,

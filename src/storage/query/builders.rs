@@ -1,6 +1,6 @@
 use super::*;
 use crate::storage::engine::GraphEdgeType;
-use crate::storage::query::sql_lowering::filter_to_expr;
+use crate::storage::query::sql_lowering::{filter_to_expr, projection_to_select_item};
 
 pub struct TableQueryBuilder {
     query: TableQuery,
@@ -84,6 +84,7 @@ impl TableQueryBuilder {
             order_by: Vec::new(),
             limit: None,
             offset: None,
+            return_items: Vec::new(),
             return_: Vec::new(),
         }
     }
@@ -99,6 +100,7 @@ impl TableQueryBuilder {
             order_by: Vec::new(),
             limit: None,
             offset: None,
+            return_items: Vec::new(),
             return_: Vec::new(),
         }
     }
@@ -114,6 +116,7 @@ impl TableQueryBuilder {
             order_by: Vec::new(),
             limit: None,
             offset: None,
+            return_items: Vec::new(),
             return_: Vec::new(),
         }
     }
@@ -129,6 +132,7 @@ impl TableQueryBuilder {
             order_by: Vec::new(),
             limit: None,
             offset: None,
+            return_items: Vec::new(),
             return_: Vec::new(),
         }
     }
@@ -144,6 +148,7 @@ impl TableQueryBuilder {
             order_by: Vec::new(),
             limit: None,
             offset: None,
+            return_items: Vec::new(),
             return_: Vec::new(),
         }
     }
@@ -222,6 +227,7 @@ pub struct JoinQueryBuilder {
     order_by: Vec<OrderByClause>,
     limit: Option<u64>,
     offset: Option<u64>,
+    return_items: Vec<SelectItem>,
     return_: Vec<Projection>,
 }
 
@@ -295,14 +301,21 @@ impl JoinQueryBuilder {
 
     /// Add post-join projected field
     pub fn return_field(mut self, field: FieldRef) -> Self {
-        self.return_.push(Projection::from_field(field));
+        let projection = Projection::from_field(field);
+        if let Some(item) = projection_to_select_item(&projection) {
+            self.return_items.push(item);
+        }
+        self.return_.push(projection);
         self
     }
 
     /// Add post-join projected column
     pub fn select(mut self, column: &str) -> Self {
-        self.return_
-            .push(Projection::from_field(FieldRef::column("", column)));
+        let projection = Projection::from_field(FieldRef::column("", column));
+        if let Some(item) = projection_to_select_item(&projection) {
+            self.return_items.push(item);
+        }
+        self.return_.push(projection);
         self
     }
 
@@ -317,6 +330,7 @@ impl JoinQueryBuilder {
             order_by: self.order_by,
             limit: self.limit,
             offset: self.offset,
+            return_items: self.return_items,
             return_: self.return_,
         })
     }

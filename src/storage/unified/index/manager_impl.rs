@@ -55,7 +55,8 @@ impl IntegratedIndexManager {
             return;
         }
 
-        if let Ok(mut indices) = self.hnsw_indices.write() {
+        {
+            let mut indices = self.hnsw_indices.write();
             let info = indices
                 .entry(collection.to_string())
                 .or_insert_with(|| HnswIndexInfo {
@@ -83,10 +84,7 @@ impl IntegratedIndexManager {
         query: &[f32],
         k: usize,
     ) -> Vec<VectorSearchResult> {
-        let indices = match self.hnsw_indices.read() {
-            Ok(i) => i,
-            Err(_) => return Vec::new(),
-        };
+        let indices = self.hnsw_indices.read();
 
         let info = match indices.get(collection) {
             Some(i) => i,
@@ -146,7 +144,8 @@ impl IntegratedIndexManager {
             return;
         }
         // MetadataStorage handles this internally via set()
-        if let Ok(mut storage) = self.metadata_index.write() {
+        {
+            let mut storage = self.metadata_index.write();
             for (key, value) in &metadata.fields {
                 storage.set(id, key.clone(), value.clone());
             }
@@ -155,10 +154,7 @@ impl IntegratedIndexManager {
 
     /// Query metadata with filters
     pub fn query_metadata(&self, key: &str, filter: MetadataQueryFilter) -> Vec<EntityId> {
-        let storage = match self.metadata_index.read() {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
+        let storage = self.metadata_index.read();
 
         match filter {
             MetadataQueryFilter::Equals(ref value) => storage.filter_eq(key, value),
@@ -205,7 +201,8 @@ impl IntegratedIndexManager {
         self.text_index.remove_document(id);
 
         // Remove from vector indices
-        if let Ok(mut indices) = self.hnsw_indices.write() {
+        {
+            let mut indices = self.hnsw_indices.write();
             for info in indices.values_mut() {
                 info.vectors.remove(&id);
             }
@@ -280,21 +277,18 @@ impl IntegratedIndexManager {
         let key = (index_type, collection.map(|s| s.to_string()));
 
         // Check if already exists
-        if let Ok(status) = self.index_status.read() {
+        {
+            let status = self.index_status.read();
             if let Some(IndexStatus::Ready) = status.get(&key) {
                 return Err(format!("Index {:?} already exists", index_type));
             }
         }
 
         // Set status to building
-        if let Ok(mut status) = self.index_status.write() {
-            status.insert(key.clone(), IndexStatus::Building { progress: 0.0 });
-        }
+        self.index_status.write().insert(key.clone(), IndexStatus::Building { progress: 0.0 });
 
         // For now, just mark as ready (actual building would be async)
-        if let Ok(mut status) = self.index_status.write() {
-            status.insert(key.clone(), IndexStatus::Ready);
-        }
+        self.index_status.write().insert(key.clone(), IndexStatus::Ready);
 
         // Record event
         self.record_event(IndexEvent {
@@ -319,11 +313,9 @@ impl IntegratedIndexManager {
         match index_type {
             IndexType::Hnsw => {
                 if let Some(coll) = collection {
-                    if let Ok(mut indices) = self.hnsw_indices.write() {
-                        indices.remove(coll);
-                    }
-                } else if let Ok(mut indices) = self.hnsw_indices.write() {
-                    indices.clear();
+                    self.hnsw_indices.write().remove(coll);
+                } else {
+                    self.hnsw_indices.write().clear();
                 }
             }
             IndexType::Graph => {
@@ -334,9 +326,7 @@ impl IntegratedIndexManager {
         }
 
         // Update status
-        if let Ok(mut status) = self.index_status.write() {
-            status.remove(&key);
-        }
+        self.index_status.write().remove(&key);
 
         // Record event
         self.record_event(IndexEvent {
@@ -358,19 +348,16 @@ impl IntegratedIndexManager {
         let key = (index_type, collection.map(|s| s.to_string()));
 
         // Set status to building
-        if let Ok(mut status) = self.index_status.write() {
-            status.insert(key.clone(), IndexStatus::Building { progress: 0.0 });
-        }
+        self.index_status.write().insert(key.clone(), IndexStatus::Building { progress: 0.0 });
 
         // Clear existing data
         match index_type {
             IndexType::Hnsw => {
                 if let Some(coll) = collection {
-                    if let Ok(mut indices) = self.hnsw_indices.write() {
-                        if let Some(info) = indices.get_mut(coll) {
-                            info.vectors.clear();
-                            info.entry_point = None;
-                        }
+                    let mut indices = self.hnsw_indices.write();
+                    if let Some(info) = indices.get_mut(coll) {
+                        info.vectors.clear();
+                        info.entry_point = None;
                     }
                 }
             }
@@ -381,9 +368,7 @@ impl IntegratedIndexManager {
         }
 
         // Mark as ready (actual rebuild would re-index all entities)
-        if let Ok(mut status) = self.index_status.write() {
-            status.insert(key.clone(), IndexStatus::Ready);
-        }
+        self.index_status.write().insert(key.clone(), IndexStatus::Ready);
 
         // Record event
         self.record_event(IndexEvent {
@@ -401,25 +386,19 @@ impl IntegratedIndexManager {
         let key = (index_type, collection.map(|s| s.to_string()));
         self.index_status
             .read()
-            .ok()
-            .and_then(|s| s.get(&key).cloned())
+            .get(&key)
+            .cloned()
             .unwrap_or(IndexStatus::Disabled)
     }
 
     /// Get all index statuses
     pub fn all_index_statuses(&self) -> HashMap<(IndexType, Option<String>), IndexStatus> {
-        self.index_status
-            .read()
-            .map(|s| s.clone())
-            .unwrap_or_default()
+        self.index_status.read().clone()
     }
 
     /// Get index event history
     pub fn event_history(&self) -> Vec<IndexEvent> {
-        self.event_history
-            .read()
-            .map(|h| h.clone())
-            .unwrap_or_default()
+        self.event_history.read().clone()
     }
 
     // =========================================================================
@@ -433,22 +412,19 @@ impl IntegratedIndexManager {
         let vector_count = self
             .hnsw_indices
             .read()
-            .map(|i| i.values().map(|info| info.vectors.len()).sum())
-            .unwrap_or(0);
+            .values()
+            .map(|info| info.vectors.len())
+            .sum();
 
-        let (document_count, term_count) = self
-            .text_index
-            .index
-            .read()
-            .map(|i| {
-                let terms = i.len();
-                let docs: HashSet<EntityId> = i
-                    .values()
-                    .flat_map(|postings| postings.iter().map(|p| p.entity_id))
-                    .collect();
-                (docs.len(), terms)
-            })
-            .unwrap_or((0, 0));
+        let (document_count, term_count) = {
+            let i = self.text_index.index.read();
+            let terms = i.len();
+            let docs: HashSet<EntityId> = i
+                .values()
+                .flat_map(|postings| postings.iter().map(|p| p.entity_id))
+                .collect();
+            (docs.len(), terms)
+        };
 
         IndexStats {
             vector_count,
@@ -472,12 +448,11 @@ impl IntegratedIndexManager {
     // =========================================================================
 
     fn record_event(&self, event: IndexEvent) {
-        if let Ok(mut history) = self.event_history.write() {
-            history.push(event);
-            // Keep last 1000 events
-            if history.len() > 1000 {
-                history.drain(0..100);
-            }
+        let mut history = self.event_history.write();
+        history.push(event);
+        // Keep last 1000 events
+        if history.len() > 1000 {
+            history.drain(0..100);
         }
     }
 

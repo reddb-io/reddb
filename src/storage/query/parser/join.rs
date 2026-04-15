@@ -6,7 +6,7 @@ use super::super::ast::{
 use super::super::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
-use crate::storage::query::sql_lowering::filter_to_expr;
+use crate::storage::query::sql_lowering::{filter_to_expr, projection_to_select_item};
 impl<'a> Parser<'a> {
     /// Parse FROM ... JOIN (GRAPH / PATH / TABLE / VECTOR / HYBRID) query
     pub fn parse_from_query(&mut self) -> Result<QueryExpr, ParseError> {
@@ -97,12 +97,8 @@ impl<'a> Parser<'a> {
 
         // Check for RETURN (shorthand for column selection)
         if self.consume(&Token::Return)? {
-            let columns = self.parse_projection_list()?;
-            table_query.select_items = if columns.is_empty() {
-                vec![SelectItem::Wildcard]
-            } else {
-                Vec::new()
-            };
+            let (select_items, columns) = self.parse_select_items_and_projections()?;
+            table_query.select_items = select_items;
             table_query.columns = columns;
         }
 
@@ -172,7 +168,8 @@ impl<'a> Parser<'a> {
         // Parse ON condition
         self.expect(Token::On)?;
         let on = self.parse_graph_join_condition()?;
-        let (filter, order_by, limit, offset, return_) = self.parse_join_post_clauses()?;
+        let (filter, order_by, limit, offset, return_items, return_) =
+            self.parse_join_post_clauses()?;
         let graph_query = GraphQuery {
             alias,
             pattern,
@@ -189,6 +186,7 @@ impl<'a> Parser<'a> {
             order_by,
             limit,
             offset,
+            return_items,
             return_,
         }))
     }
@@ -215,7 +213,8 @@ impl<'a> Parser<'a> {
             self.expect(Token::On)?;
             self.parse_table_join_condition()?
         };
-        let (filter, order_by, limit, offset, return_) = self.parse_join_post_clauses()?;
+        let (filter, order_by, limit, offset, return_items, return_) =
+            self.parse_join_post_clauses()?;
         let table_query = TableQuery {
             table,
             source: None,
@@ -243,6 +242,7 @@ impl<'a> Parser<'a> {
             order_by,
             limit,
             offset,
+            return_items,
             return_,
         }))
     }
@@ -259,7 +259,8 @@ impl<'a> Parser<'a> {
         right.alias = self.parse_join_rhs_alias()?;
         self.expect(Token::On)?;
         let on = self.parse_table_join_condition()?;
-        let (filter, order_by, limit, offset, return_) = self.parse_join_post_clauses()?;
+        let (filter, order_by, limit, offset, return_items, return_) =
+            self.parse_join_post_clauses()?;
 
         Ok(QueryExpr::Join(JoinQuery {
             left: Box::new(QueryExpr::Table(left_table)),
@@ -270,6 +271,7 @@ impl<'a> Parser<'a> {
             order_by,
             limit,
             offset,
+            return_items,
             return_,
         }))
     }
@@ -286,7 +288,8 @@ impl<'a> Parser<'a> {
         right.alias = self.parse_join_rhs_alias()?;
         self.expect(Token::On)?;
         let on = self.parse_table_join_condition()?;
-        let (filter, order_by, limit, offset, return_) = self.parse_join_post_clauses()?;
+        let (filter, order_by, limit, offset, return_items, return_) =
+            self.parse_join_post_clauses()?;
 
         Ok(QueryExpr::Join(JoinQuery {
             left: Box::new(QueryExpr::Table(left_table)),
@@ -297,6 +300,7 @@ impl<'a> Parser<'a> {
             order_by,
             limit,
             offset,
+            return_items,
             return_,
         }))
     }
@@ -313,7 +317,8 @@ impl<'a> Parser<'a> {
         right.alias = self.parse_join_rhs_alias()?;
         self.expect(Token::On)?;
         let on = self.parse_table_join_condition()?;
-        let (filter, order_by, limit, offset, return_) = self.parse_join_post_clauses()?;
+        let (filter, order_by, limit, offset, return_items, return_) =
+            self.parse_join_post_clauses()?;
 
         Ok(QueryExpr::Join(JoinQuery {
             left: Box::new(QueryExpr::Table(left_table)),
@@ -324,6 +329,7 @@ impl<'a> Parser<'a> {
             order_by,
             limit,
             offset,
+            return_items,
             return_,
         }))
     }
@@ -336,6 +342,7 @@ impl<'a> Parser<'a> {
             Vec<super::super::ast::OrderByClause>,
             Option<u64>,
             Option<u64>,
+            Vec<SelectItem>,
             Vec<super::super::ast::Projection>,
         ),
         ParseError,
@@ -365,13 +372,18 @@ impl<'a> Parser<'a> {
             None
         };
 
-        let return_ = if self.consume(&Token::Return)? {
-            self.parse_return_list()?
+        let (return_items, return_) = if self.consume(&Token::Return)? {
+            let projections = self.parse_return_list()?;
+            let items = projections
+                .iter()
+                .filter_map(projection_to_select_item)
+                .collect();
+            (items, projections)
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
 
-        Ok((filter, order_by, limit, offset, return_))
+        Ok((filter, order_by, limit, offset, return_items, return_))
     }
 
     fn parse_join_rhs_alias(&mut self) -> Result<Option<String>, ParseError> {

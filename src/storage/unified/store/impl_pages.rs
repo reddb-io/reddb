@@ -1,4 +1,5 @@
 use super::*;
+use parking_lot::RwLock;
 
 impl UnifiedStore {
     /// Get a reference to the underlying pager (if in paged mode).
@@ -195,9 +196,6 @@ impl UnifiedStore {
                             // Store the B-tree for future lookups
                             self.btree_indices
                                 .write()
-                                .map_err(|_| {
-                                    StoreError::Internal("btree_indices lock poisoned".into())
-                                })?
                                 .insert(name, btree);
                         }
                     } else {
@@ -265,7 +263,6 @@ impl UnifiedStore {
 
                         self.cross_refs
                             .write()
-                            .map_err(|_| StoreError::Internal("cross_refs lock poisoned".into()))?
                             .entry(source_id)
                             .or_default()
                             .push((target_id, ref_type, target_collection.clone()));
@@ -348,14 +345,8 @@ impl UnifiedStore {
             }
         }
 
-        let collections = self
-            .collections
-            .read()
-            .map_err(|_| StoreError::Internal("collections lock poisoned".into()))?;
-        let mut btree_indices = self
-            .btree_indices
-            .write()
-            .map_err(|_| StoreError::Internal("btree_indices lock poisoned".into()))?;
+        let collections = self.collections.read();
+        let mut btree_indices = self.btree_indices.write();
 
         // Collect collection names and their B-tree root pages
         let mut collection_roots: Vec<(String, u32)> = Vec::new();
@@ -414,10 +405,7 @@ impl UnifiedStore {
         }
 
         // Write cross-reference metadata
-        let cross_refs = self
-            .cross_refs
-            .read()
-            .map_err(|_| StoreError::Internal("cross_refs lock poisoned".into()))?;
+        let cross_refs = self.cross_refs.read();
         let total_refs: usize = cross_refs.values().map(|v| v.len()).sum();
         meta_data.extend_from_slice(&(total_refs as u32).to_le_bytes());
         for (source_id, refs) in cross_refs.iter() {

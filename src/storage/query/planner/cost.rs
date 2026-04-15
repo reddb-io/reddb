@@ -379,8 +379,8 @@ impl CostEstimator {
 
         // If the filter is a simple comparison on an indexed column, use
         // the Mackert-Lohman formula with correlation from IndexStats.
-        if let Some(ref filter) = query.filter {
-            if let Some(col) = first_filter_column(filter, &query.table) {
+        if let Some(filter) = crate::storage::query::sql_lowering::effective_table_filter(query) {
+            if let Some(col) = first_filter_column(&filter, &query.table) {
                 if let Some(idx) = self.stats.index_stats(&query.table, col) {
                     return idx.correlated_io_cost(result_rows, heap_pages);
                 }
@@ -404,8 +404,8 @@ impl CostEstimator {
 
         // Apply filter selectivity (stats-aware when provider has index
         // stats on the compared column).
-        if let Some(ref filter) = query.filter {
-            let selectivity = self.filter_selectivity(filter, &query.table);
+        if let Some(filter) = crate::storage::query::sql_lowering::effective_table_filter(query) {
+            let selectivity = self.filter_selectivity(&filter, &query.table);
             estimate = estimate.with_filter(selectivity);
         }
 
@@ -644,7 +644,13 @@ impl CostEstimator {
         let hnsw_cost = 100.0 * (1.0 + k.ln()); // ~100-300 node visits
 
         // Metadata filtering adds cost if present
-        let filter_cost = if query.filter.is_some() { 50.0 } else { 0.0 };
+        let filter_cost = if crate::storage::query::sql_lowering::effective_vector_filter(query)
+            .is_some()
+        {
+            50.0
+        } else {
+            0.0
+        };
 
         let cpu = hnsw_cost + filter_cost;
         let io = 20.0; // HNSW layers are cached

@@ -20,7 +20,10 @@ use crate::runtime::runtime_table_record_from_entity;
 use crate::storage::query::ast::{
     BinOp, CompareOp, Expr, FieldRef, Filter, OrderByClause, Projection, Span, UnaryOp,
 };
-use crate::storage::query::sql_lowering::expr_to_projection as lower_expr_to_projection;
+use crate::storage::query::sql_lowering::{
+    effective_table_filter, effective_table_group_by_exprs, effective_table_having_filter,
+    effective_table_projections, expr_to_projection as lower_expr_to_projection,
+};
 use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
 use crate::storage::schema::Value;
 use crate::RedDB;
@@ -71,9 +74,11 @@ pub(crate) fn execute_aggregate_query(
     query: &TableQuery,
 ) -> RedDBResult<UnifiedResult> {
     validate_aggregate_projection_shape(query)?;
+    let effective_projections = effective_table_projections(query);
+    let effective_filter = effective_table_filter(query);
+    let effective_group_by = effective_table_group_by_exprs(query);
     let runtime_plan = prepare_aggregate_runtime_plan(query);
-    let mut all_aggregate_projections = query
-        .columns
+    let mut all_aggregate_projections = effective_projections
         .iter()
         .filter(|projection| {
             matches!(
@@ -102,10 +107,9 @@ pub(crate) fn execute_aggregate_query(
         .get_collection(query.table.as_str())
         .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
 
-    let filter = query.filter.as_ref();
     let table_name = query.table.as_str();
     let table_alias = query.alias.as_deref().unwrap_or(table_name);
-    let has_group_by = !query.group_by.is_empty();
+    let has_group_by = !effective_group_by.is_empty();
 
     // Compile the filter ONCE before the for_each_entity loop. The
     // compiled form pre-classifies every FieldRef into an
@@ -116,23 +120,41 @@ pub(crate) fn execute_aggregate_query(
     // See `runtime/query_exec/filter_compiled.rs` for the algorithm
     // and `runtime/query_exec/table.rs` for the canonical scan-path
     // wire-up.
-    let compiled_filter = filter
+    let compiled_filter = effective_filter
+        .as_ref()
         .map(|f| super::filter_compiled::CompiledEntityFilter::compile(f, table_name, table_alias));
 
-    // Work-mem cap: prevent OOM on runaway GROUP BY aggregations.
-    // 64 MB default mirrors PostgreSQL's work_mem GUC default.
-    // When exceeded the query fails cleanly instead of OOMing the process.
-    // TODO(A8-full): replace with SpilledHashAgg drain when the full
-    // agg_spill serialization layer is wired in.
+    // Work-mem cap: 64 MB mirrors PostgreSQL's work_mem GUC default.
+    // When the in-memory HashMap exceeds `max_groups` entries, we flush the
+    // current partial state to a SpilledHashAgg batch file on tmpfs and reset
+    // the local HashMap.  The final drain() merges all on-disk batches back.
     const WORK_MEM_BYTES: usize = 64 * 1024 * 1024;
-    // Approximate per-entry cost: 128 B for AggState + 64 B for group key + HashMap overhead
+    // Approximate per-entry cost: 128 B for AggState + 64 B for group key + overhead
     const ESTIMATED_ENTRY_BYTES: usize = 256;
-    let max_groups = WORK_MEM_BYTES / ESTIMATED_ENTRY_BYTES; // ~256k groups
+    let max_groups = WORK_MEM_BYTES / ESTIMATED_ENTRY_BYTES;
 
-    // Accumulators per group (empty string key = no grouping)
+    // Hot accumulator: in-memory HashMap for per-row mutation.
+    // Flushed to `spill_agg` when it exceeds max_groups.
     let mut groups: std::collections::HashMap<String, AggregateGroup> =
         std::collections::HashMap::new();
-    let mut work_mem_exceeded = false;
+
+    // SpilledHashAgg receives flushed batches and performs the final merge.
+    let spill_dir = {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        let d = std::env::temp_dir().join(format!("reddb-agg-{pid}-{seq}"));
+        std::fs::create_dir_all(&d)
+            .map_err(|e| RedDBError::Query(format!("agg spill dir: {e}")))?;
+        d
+    };
+    let mut spill_agg =
+        crate::storage::query::executors::agg_spill::SpilledHashAgg::<
+            String,
+            AggregateGroup,
+        >::new(spill_dir, WORK_MEM_BYTES, ESTIMATED_ENTRY_BYTES);
+    let mut spill_err: Option<String> = None;
 
     manager.for_each_entity(|entity| {
         if let Some(c) = compiled_filter.as_ref() {
@@ -147,8 +169,8 @@ pub(crate) fn execute_aggregate_query(
         };
 
         let group_values = if has_group_by {
-            let mut values = Vec::with_capacity(query.group_by.len());
-            for group_expr in &query.group_by {
+            let mut values = Vec::with_capacity(effective_group_by.len());
+            for group_expr in &effective_group_by {
                 let Some(value) = resolve_group_by_value(group_expr, &record) else {
                     return true;
                 };
@@ -176,11 +198,16 @@ pub(crate) fn execute_aggregate_query(
             String::new()
         };
 
-        // Work-mem guard: if we'd exceed the cap on a new group key, stop.
-        // Existing group keys are always allowed (they don't grow the map).
+        // Spill to disk when adding a *new* key would exceed the local cap.
+        // Existing keys are always allowed (they don't grow the entry count).
         if !groups.contains_key(&group_key) && groups.len() >= max_groups {
-            work_mem_exceeded = true;
-            return false; // stop iteration
+            let batch = std::mem::take(&mut groups);
+            for (k, v) in batch {
+                if let Err(e) = spill_agg.accumulate(k, v) {
+                    spill_err = Some(format!("agg spill error: {e}"));
+                    return false; // stop iteration
+                }
+            }
         }
 
         let group = groups.entry(group_key).or_insert_with(|| AggregateGroup {
@@ -301,18 +328,22 @@ pub(crate) fn execute_aggregate_query(
         true
     });
 
-    // Work-mem exceeded: return an informative error rather than silently
-    // producing a partial or wrong result. Full spill-to-disk lives in
-    // agg_spill.rs and wires in when the Codec/Mergeable traits are impl'd
-    // for AggregateGroup (A8-full).
-    if work_mem_exceeded {
-        return Err(RedDBError::Query(format!(
-            "GROUP BY aggregation exceeded work_mem ({} MB, ~{} groups). \
-             Reduce cardinality or increase work_mem.",
-            WORK_MEM_BYTES / (1024 * 1024),
-            max_groups,
-        )));
+    // Propagate any spill I/O error from the iteration callback
+    if let Some(e) = spill_err {
+        return Err(RedDBError::Query(e));
     }
+
+    // Flush the remaining in-memory groups to spill_agg, then drain all
+    // on-disk batches back into a single merged HashMap.
+    // When no spill occurred, spill_agg holds only the in-memory table.
+    for (k, v) in groups {
+        spill_agg
+            .accumulate(k, v)
+            .map_err(|e| RedDBError::Query(format!("agg spill flush: {e}")))?;
+    }
+    let groups = spill_agg
+        .drain()
+        .map_err(|e| RedDBError::Query(format!("agg spill drain: {e}")))?;
 
     // Build result records from accumulated groups
     let mut records = Vec::with_capacity(groups.len().max(1));
@@ -323,7 +354,7 @@ pub(crate) fn execute_aggregate_query(
 
         // Add GROUP BY columns
         if has_group_by {
-            for (index, group_expr) in query.group_by.iter().enumerate() {
+            for (index, group_expr) in effective_group_by.iter().enumerate() {
                 let Some(value) = group.group_values.get(index).cloned() else {
                     continue;
                 };
@@ -331,13 +362,13 @@ pub(crate) fn execute_aggregate_query(
                 if !columns.contains(&label) {
                     columns.push(label.clone());
                 }
-                record.set(group_expr, value.clone());
+                record.set(&group_expr_key(group_expr).unwrap_or_else(|| label.clone()), value.clone());
                 record.set(&label, value);
             }
         }
 
         // Add visible aggregate results
-        for proj in &query.columns {
+        for proj in &effective_projections {
             if let Some((result_name, result_val)) = aggregate_projection_result(proj, &group.state)
             {
                 if !columns.contains(&result_name) {
@@ -362,7 +393,7 @@ pub(crate) fn execute_aggregate_query(
     // If no input rows matched, return a single aggregate row.
     if groups.is_empty() && !has_group_by {
         let mut record = UnifiedRecord::new();
-        for proj in &query.columns {
+        for proj in &effective_projections {
             if let Some((result_name, result_val)) =
                 empty_aggregate_projection_result(proj, &AggState::default())
             {
@@ -445,15 +476,14 @@ impl HiddenAggregateRegistry {
 }
 
 fn prepare_aggregate_runtime_plan(query: &TableQuery) -> AggregateRuntimePlan {
-    let visible_outputs = query
-        .columns
+    let effective_projections = effective_table_projections(query);
+    let visible_outputs = effective_projections
         .iter()
         .filter_map(visible_aggregate_output_name)
         .collect::<std::collections::HashMap<_, _>>();
     let mut hidden = HiddenAggregateRegistry::default();
 
-    let having = query
-        .having
+    let having = effective_table_having_filter(query)
         .as_ref()
         .map(|filter| rewrite_aggregate_filter_refs(filter, &visible_outputs, &mut hidden));
     let order_by = query
@@ -904,47 +934,6 @@ fn projection_from_expr(expr: &Expr) -> Option<Projection> {
     lower_expr_to_projection(expr)
 }
 
-fn projection_from_literal(value: &Value) -> Option<Projection> {
-    match value {
-        Value::Boolean(_) => Some(boolean_expr_projection(Expr::Literal {
-            value: value.clone(),
-            span: Span::synthetic(),
-        })),
-        _ => Some(Projection::Column(format!(
-            "LIT:{}",
-            render_value_signature(value)
-        ))),
-    }
-}
-
-fn boolean_expr_projection(expr: Expr) -> Projection {
-    Projection::Expression(
-        Box::new(Filter::CompareExpr {
-            lhs: expr,
-            op: CompareOp::Eq,
-            rhs: Expr::Literal {
-                value: Value::Boolean(true),
-                span: Span::synthetic(),
-            },
-        }),
-        None,
-    )
-}
-
-fn case_condition_projection(condition: Expr) -> Projection {
-    Projection::Expression(
-        Box::new(Filter::CompareExpr {
-            lhs: condition,
-            op: CompareOp::Eq,
-            rhs: Expr::Literal {
-                value: Value::Boolean(true),
-                span: Span::synthetic(),
-            },
-        }),
-        None,
-    )
-}
-
 fn aggregate_projection_result(
     projection: &Projection,
     state: &AggState,
@@ -1130,9 +1119,11 @@ fn aggregate_output_name(projection: &Projection, func_name: &str, column_name: 
 }
 
 fn validate_aggregate_projection_shape(query: &TableQuery) -> RedDBResult<()> {
-    let has_group_by = !query.group_by.is_empty();
+    let effective_projections = effective_table_projections(query);
+    let effective_group_by = effective_table_group_by_exprs(query);
+    let has_group_by = !effective_group_by.is_empty();
 
-    for projection in &query.columns {
+    for projection in &effective_projections {
         if matches!(
             projection,
             Projection::Function(name, _)
@@ -1143,9 +1134,9 @@ fn validate_aggregate_projection_shape(query: &TableQuery) -> RedDBResult<()> {
 
         if has_group_by
             && projection_group_key(projection).is_some_and(|group_key| {
-                query
-                    .group_by
+                effective_group_by
                     .iter()
+                    .filter_map(group_expr_key)
                     .any(|entry| entry.eq_ignore_ascii_case(&group_key))
             })
         {
@@ -1225,19 +1216,18 @@ fn update_extreme_value(
     }
 }
 
-fn group_output_label(query: &TableQuery, group_expr: &str) -> String {
-    query
-        .columns
+fn group_output_label(query: &TableQuery, group_expr: &Expr) -> String {
+    effective_table_projections(query)
         .iter()
         .find_map(|projection| {
             let key = projection_group_key(projection)?;
-            if key.eq_ignore_ascii_case(group_expr) {
+            if group_expr_key(group_expr).is_some_and(|group_key| key.eq_ignore_ascii_case(&group_key)) {
                 Some(projection_name(projection))
             } else {
                 None
             }
         })
-        .unwrap_or_else(|| group_expr.to_string())
+        .unwrap_or_else(|| group_expr_key(group_expr).unwrap_or_else(|| "group".to_string()))
 }
 
 fn projection_group_key(projection: &Projection) -> Option<String> {
@@ -1274,8 +1264,10 @@ fn render_group_by_argument(arg: &Projection) -> Option<String> {
     }
 }
 
-fn resolve_group_by_value(group_expr: &str, record: &UnifiedRecord) -> Option<Value> {
-    if let Some((bucket_ns, timestamp_column)) = parse_time_bucket_group_expr(group_expr) {
+fn resolve_group_by_value(group_expr: &Expr, record: &UnifiedRecord) -> Option<Value> {
+    if let Some((bucket_ns, timestamp_column)) = parse_time_bucket_group_expr(
+        &group_expr_key(group_expr).unwrap_or_default(),
+    ) {
         let timestamp_ns = resolve_bucket_timestamp_ns(record, timestamp_column.as_deref())?;
         let bucket_start = if bucket_ns == 0 {
             timestamp_ns
@@ -1285,7 +1277,20 @@ fn resolve_group_by_value(group_expr: &str, record: &UnifiedRecord) -> Option<Va
         return Some(Value::UnsignedInteger(bucket_start));
     }
 
-    record.get(group_expr).cloned()
+    match group_expr {
+        Expr::Column { field, .. } => record.get(&field_ref_name(field)).cloned(),
+        _ => {
+            let projection = projection_from_expr(group_expr)?;
+            eval_projection_value(&projection, record)
+        }
+    }
+}
+
+fn group_expr_key(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Column { field, .. } => Some(field_ref_name(field)),
+        _ => render_expr_signature(expr),
+    }
 }
 
 fn parse_time_bucket_group_expr(expr: &str) -> Option<(u64, Option<String>)> {
@@ -1389,13 +1394,13 @@ fn group_value_key(value: &Value) -> String {
     buf
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct AggregateGroup {
     group_values: Vec<Value>,
     state: AggState,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct AggState {
     count: u64,
     sums: std::collections::HashMap<String, f64>,
@@ -1425,5 +1430,452 @@ fn value_to_f64(val: &Value) -> Option<f64> {
         Value::Float(f) => Some(*f),
         Value::Decimal(d) => Some(*d as f64 / 10_000.0),
         _ => None,
+    }
+}
+
+// ── SpillCodec / Mergeable for AggState + AggregateGroup ────────────────────
+//
+// Enables SpilledHashAgg<String, AggregateGroup> so GROUP BY queries that
+// exceed work_mem spill to a tmpfs batch file rather than failing.
+// Encoding is manual little-endian (no serde dep) using the same style as
+// the built-in impls in `agg_spill.rs`.
+mod agg_spill_codec {
+    use std::collections::{HashMap, HashSet};
+    use std::io::{Read, Write};
+
+    use crate::storage::query::executors::agg_spill::{Mergeable, SpillCodec, SpillError};
+    use crate::storage::schema::Value;
+
+    use super::{AggState, AggregateGroup};
+
+    // ── low-level helpers ────────────────────────────────────────────────────
+
+    fn w_u64<W: Write>(w: &mut W, v: u64) -> std::io::Result<usize> {
+        w.write_all(&v.to_le_bytes())?;
+        Ok(8)
+    }
+    fn r_u64<R: Read>(r: &mut R) -> std::io::Result<u64> {
+        let mut b = [0u8; 8];
+        r.read_exact(&mut b)?;
+        Ok(u64::from_le_bytes(b))
+    }
+    fn w_f64<W: Write>(w: &mut W, v: f64) -> std::io::Result<usize> {
+        w.write_all(&v.to_le_bytes())?;
+        Ok(8)
+    }
+    fn r_f64<R: Read>(r: &mut R) -> std::io::Result<f64> {
+        let mut b = [0u8; 8];
+        r.read_exact(&mut b)?;
+        Ok(f64::from_le_bytes(b))
+    }
+    fn w_str<W: Write>(w: &mut W, s: &str) -> std::io::Result<usize> {
+        let b = s.as_bytes();
+        w.write_all(&(b.len() as u32).to_le_bytes())?;
+        w.write_all(b)?;
+        Ok(4 + b.len())
+    }
+    fn r_str<R: Read>(r: &mut R) -> std::io::Result<String> {
+        let mut nb = [0u8; 4];
+        r.read_exact(&mut nb)?;
+        let n = u32::from_le_bytes(nb) as usize;
+        let mut buf = vec![0u8; n];
+        r.read_exact(&mut buf)?;
+        String::from_utf8(buf)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+    /// Value tag: 0=Null 1=Bool 2=Int 3=UInt 4=Float 5=Text; others → Null
+    fn w_val<W: Write>(w: &mut W, v: &Value) -> std::io::Result<usize> {
+        match v {
+            Value::Null => {
+                w.write_all(&[0u8])?;
+                Ok(1)
+            }
+            Value::Boolean(b) => {
+                w.write_all(&[1u8, *b as u8])?;
+                Ok(2)
+            }
+            Value::Integer(n) => {
+                w.write_all(&[2u8])?;
+                w.write_all(&n.to_le_bytes())?;
+                Ok(9)
+            }
+            Value::UnsignedInteger(n) => {
+                w.write_all(&[3u8])?;
+                w.write_all(&n.to_le_bytes())?;
+                Ok(9)
+            }
+            Value::Float(f) => {
+                w.write_all(&[4u8])?;
+                w.write_all(&f.to_le_bytes())?;
+                Ok(9)
+            }
+            Value::Text(s) => {
+                w.write_all(&[5u8])?;
+                Ok(1 + w_str(w, s)?)
+            }
+            _ => {
+                w.write_all(&[0u8])?;
+                Ok(1)
+            }
+        }
+    }
+    fn r_val<R: Read>(r: &mut R) -> std::io::Result<Value> {
+        let mut tag = [0u8];
+        r.read_exact(&mut tag)?;
+        match tag[0] {
+            1 => {
+                let mut b = [0u8];
+                r.read_exact(&mut b)?;
+                Ok(Value::Boolean(b[0] != 0))
+            }
+            2 => {
+                let mut b = [0u8; 8];
+                r.read_exact(&mut b)?;
+                Ok(Value::Integer(i64::from_le_bytes(b)))
+            }
+            3 => {
+                let mut b = [0u8; 8];
+                r.read_exact(&mut b)?;
+                Ok(Value::UnsignedInteger(u64::from_le_bytes(b)))
+            }
+            4 => {
+                let mut b = [0u8; 8];
+                r.read_exact(&mut b)?;
+                Ok(Value::Float(f64::from_le_bytes(b)))
+            }
+            5 => Ok(Value::Text(r_str(r)?)),
+            _ => Ok(Value::Null),
+        }
+    }
+
+    // ── compound helpers ─────────────────────────────────────────────────────
+
+    fn w_map_f64<W: Write>(w: &mut W, m: &HashMap<String, f64>) -> std::io::Result<usize> {
+        w.write_all(&(m.len() as u32).to_le_bytes())?;
+        let mut t = 4;
+        for (k, v) in m {
+            t += w_str(w, k)?;
+            t += w_f64(w, *v)?;
+        }
+        Ok(t)
+    }
+    fn r_map_f64<R: Read>(r: &mut R) -> std::io::Result<HashMap<String, f64>> {
+        let mut nb = [0u8; 4];
+        r.read_exact(&mut nb)?;
+        let n = u32::from_le_bytes(nb) as usize;
+        let mut m = HashMap::with_capacity(n);
+        for _ in 0..n {
+            m.insert(r_str(r)?, r_f64(r)?);
+        }
+        Ok(m)
+    }
+    fn w_map_u64<W: Write>(w: &mut W, m: &HashMap<String, u64>) -> std::io::Result<usize> {
+        w.write_all(&(m.len() as u32).to_le_bytes())?;
+        let mut t = 4;
+        for (k, v) in m {
+            t += w_str(w, k)?;
+            t += w_u64(w, *v)?;
+        }
+        Ok(t)
+    }
+    fn r_map_u64<R: Read>(r: &mut R) -> std::io::Result<HashMap<String, u64>> {
+        let mut nb = [0u8; 4];
+        r.read_exact(&mut nb)?;
+        let n = u32::from_le_bytes(nb) as usize;
+        let mut m = HashMap::with_capacity(n);
+        for _ in 0..n {
+            m.insert(r_str(r)?, r_u64(r)?);
+        }
+        Ok(m)
+    }
+    fn w_map_val<W: Write>(w: &mut W, m: &HashMap<String, Value>) -> std::io::Result<usize> {
+        w.write_all(&(m.len() as u32).to_le_bytes())?;
+        let mut t = 4;
+        for (k, v) in m {
+            t += w_str(w, k)?;
+            t += w_val(w, v)?;
+        }
+        Ok(t)
+    }
+    fn r_map_val<R: Read>(r: &mut R) -> std::io::Result<HashMap<String, Value>> {
+        let mut nb = [0u8; 4];
+        r.read_exact(&mut nb)?;
+        let n = u32::from_le_bytes(nb) as usize;
+        let mut m = HashMap::with_capacity(n);
+        for _ in 0..n {
+            m.insert(r_str(r)?, r_val(r)?);
+        }
+        Ok(m)
+    }
+    fn w_map_vec_f64<W: Write>(
+        w: &mut W,
+        m: &HashMap<String, Vec<f64>>,
+    ) -> std::io::Result<usize> {
+        w.write_all(&(m.len() as u32).to_le_bytes())?;
+        let mut t = 4;
+        for (k, v) in m {
+            t += w_str(w, k)?;
+            w.write_all(&(v.len() as u32).to_le_bytes())?;
+            t += 4;
+            for &f in v {
+                t += w_f64(w, f)?;
+            }
+        }
+        Ok(t)
+    }
+    fn r_map_vec_f64<R: Read>(r: &mut R) -> std::io::Result<HashMap<String, Vec<f64>>> {
+        let mut nb = [0u8; 4];
+        r.read_exact(&mut nb)?;
+        let n = u32::from_le_bytes(nb) as usize;
+        let mut m = HashMap::with_capacity(n);
+        for _ in 0..n {
+            let k = r_str(r)?;
+            let mut vn = [0u8; 4];
+            r.read_exact(&mut vn)?;
+            let vn = u32::from_le_bytes(vn) as usize;
+            let mut v = Vec::with_capacity(vn);
+            for _ in 0..vn {
+                v.push(r_f64(r)?);
+            }
+            m.insert(k, v);
+        }
+        Ok(m)
+    }
+    fn w_map_vec_str<W: Write>(
+        w: &mut W,
+        m: &HashMap<String, Vec<String>>,
+    ) -> std::io::Result<usize> {
+        w.write_all(&(m.len() as u32).to_le_bytes())?;
+        let mut t = 4;
+        for (k, v) in m {
+            t += w_str(w, k)?;
+            w.write_all(&(v.len() as u32).to_le_bytes())?;
+            t += 4;
+            for s in v {
+                t += w_str(w, s)?;
+            }
+        }
+        Ok(t)
+    }
+    fn r_map_vec_str<R: Read>(r: &mut R) -> std::io::Result<HashMap<String, Vec<String>>> {
+        let mut nb = [0u8; 4];
+        r.read_exact(&mut nb)?;
+        let n = u32::from_le_bytes(nb) as usize;
+        let mut m = HashMap::with_capacity(n);
+        for _ in 0..n {
+            let k = r_str(r)?;
+            let mut vn = [0u8; 4];
+            r.read_exact(&mut vn)?;
+            let vn = u32::from_le_bytes(vn) as usize;
+            let mut v = Vec::with_capacity(vn);
+            for _ in 0..vn {
+                v.push(r_str(r)?);
+            }
+            m.insert(k, v);
+        }
+        Ok(m)
+    }
+    fn w_map_vec_val<W: Write>(
+        w: &mut W,
+        m: &HashMap<String, Vec<Value>>,
+    ) -> std::io::Result<usize> {
+        w.write_all(&(m.len() as u32).to_le_bytes())?;
+        let mut t = 4;
+        for (k, v) in m {
+            t += w_str(w, k)?;
+            w.write_all(&(v.len() as u32).to_le_bytes())?;
+            t += 4;
+            for val in v {
+                t += w_val(w, val)?;
+            }
+        }
+        Ok(t)
+    }
+    fn r_map_vec_val<R: Read>(r: &mut R) -> std::io::Result<HashMap<String, Vec<Value>>> {
+        let mut nb = [0u8; 4];
+        r.read_exact(&mut nb)?;
+        let n = u32::from_le_bytes(nb) as usize;
+        let mut m = HashMap::with_capacity(n);
+        for _ in 0..n {
+            let k = r_str(r)?;
+            let mut vn = [0u8; 4];
+            r.read_exact(&mut vn)?;
+            let vn = u32::from_le_bytes(vn) as usize;
+            let mut v = Vec::with_capacity(vn);
+            for _ in 0..vn {
+                v.push(r_val(r)?);
+            }
+            m.insert(k, v);
+        }
+        Ok(m)
+    }
+    fn w_map_set_str<W: Write>(
+        w: &mut W,
+        m: &HashMap<String, HashSet<String>>,
+    ) -> std::io::Result<usize> {
+        w.write_all(&(m.len() as u32).to_le_bytes())?;
+        let mut t = 4;
+        for (k, set) in m {
+            t += w_str(w, k)?;
+            w.write_all(&(set.len() as u32).to_le_bytes())?;
+            t += 4;
+            for s in set {
+                t += w_str(w, s)?;
+            }
+        }
+        Ok(t)
+    }
+    fn r_map_set_str<R: Read>(r: &mut R) -> std::io::Result<HashMap<String, HashSet<String>>> {
+        let mut nb = [0u8; 4];
+        r.read_exact(&mut nb)?;
+        let n = u32::from_le_bytes(nb) as usize;
+        let mut m = HashMap::with_capacity(n);
+        for _ in 0..n {
+            let k = r_str(r)?;
+            let mut sn = [0u8; 4];
+            r.read_exact(&mut sn)?;
+            let sn = u32::from_le_bytes(sn) as usize;
+            let mut set = HashSet::with_capacity(sn);
+            for _ in 0..sn {
+                set.insert(r_str(r)?);
+            }
+            m.insert(k, set);
+        }
+        Ok(m)
+    }
+    fn w_vec_val<W: Write>(w: &mut W, v: &[Value]) -> std::io::Result<usize> {
+        w.write_all(&(v.len() as u32).to_le_bytes())?;
+        let mut t = 4;
+        for val in v {
+            t += w_val(w, val)?;
+        }
+        Ok(t)
+    }
+    fn r_vec_val<R: Read>(r: &mut R) -> std::io::Result<Vec<Value>> {
+        let mut nb = [0u8; 4];
+        r.read_exact(&mut nb)?;
+        let n = u32::from_le_bytes(nb) as usize;
+        let mut v = Vec::with_capacity(n);
+        for _ in 0..n {
+            v.push(r_val(r)?);
+        }
+        Ok(v)
+    }
+
+    // ── SpillCodec ───────────────────────────────────────────────────────────
+
+    impl SpillCodec for AggregateGroup {
+        fn encode<W: Write>(&self, w: &mut W) -> Result<usize, SpillError> {
+            let mut t = 0;
+            t += w_vec_val(w, &self.group_values).map_err(SpillError::Io)?;
+            let s = &self.state;
+            t += w_u64(w, s.count).map_err(SpillError::Io)?;
+            t += w_map_f64(w, &s.sums).map_err(SpillError::Io)?;
+            t += w_map_val(w, &s.mins).map_err(SpillError::Io)?;
+            t += w_map_val(w, &s.maxs).map_err(SpillError::Io)?;
+            t += w_map_f64(w, &s.sum_squares).map_err(SpillError::Io)?;
+            t += w_map_u64(w, &s.agg_counts).map_err(SpillError::Io)?;
+            t += w_map_vec_f64(w, &s.all_values).map_err(SpillError::Io)?;
+            t += w_map_vec_str(w, &s.concat_values).map_err(SpillError::Io)?;
+            t += w_map_val(w, &s.first_values).map_err(SpillError::Io)?;
+            t += w_map_val(w, &s.last_values).map_err(SpillError::Io)?;
+            t += w_map_vec_val(w, &s.array_values).map_err(SpillError::Io)?;
+            t += w_map_set_str(w, &s.distinct_sets).map_err(SpillError::Io)?;
+            Ok(t)
+        }
+
+        fn decode<R: Read>(r: &mut R) -> Result<Option<Self>, SpillError> {
+            // Detect clean EOF via the first field (group_values length prefix)
+            let mut nb = [0u8; 4];
+            match r.read_exact(&mut nb) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+                Err(e) => return Err(SpillError::Io(e)),
+            }
+            let gv_n = u32::from_le_bytes(nb) as usize;
+            let mut group_values = Vec::with_capacity(gv_n);
+            for _ in 0..gv_n {
+                group_values.push(r_val(r).map_err(SpillError::Io)?);
+            }
+            Ok(Some(AggregateGroup {
+                group_values,
+                state: AggState {
+                    count: r_u64(r).map_err(SpillError::Io)?,
+                    sums: r_map_f64(r).map_err(SpillError::Io)?,
+                    mins: r_map_val(r).map_err(SpillError::Io)?,
+                    maxs: r_map_val(r).map_err(SpillError::Io)?,
+                    sum_squares: r_map_f64(r).map_err(SpillError::Io)?,
+                    agg_counts: r_map_u64(r).map_err(SpillError::Io)?,
+                    all_values: r_map_vec_f64(r).map_err(SpillError::Io)?,
+                    concat_values: r_map_vec_str(r).map_err(SpillError::Io)?,
+                    first_values: r_map_val(r).map_err(SpillError::Io)?,
+                    last_values: r_map_val(r).map_err(SpillError::Io)?,
+                    array_values: r_map_vec_val(r).map_err(SpillError::Io)?,
+                    distinct_sets: r_map_set_str(r).map_err(SpillError::Io)?,
+                },
+            }))
+        }
+    }
+
+    // ── Mergeable ────────────────────────────────────────────────────────────
+
+    impl Mergeable for AggregateGroup {
+        fn merge(&mut self, other: Self) {
+            // group_values comes from the same GROUP BY key — keep self's copy.
+            let s = &mut self.state;
+            let o = other.state;
+            s.count += o.count;
+            for (k, v) in o.sums {
+                *s.sums.entry(k).or_default() += v;
+            }
+            for (k, v) in o.mins {
+                s.mins
+                    .entry(k)
+                    .and_modify(|e| {
+                        use crate::storage::query::ast::CompareOp;
+                        use crate::runtime::query_exec::compare_runtime_values;
+                        if compare_runtime_values(&v, e, CompareOp::Lt) {
+                            *e = v.clone();
+                        }
+                    })
+                    .or_insert(v);
+            }
+            for (k, v) in o.maxs {
+                s.maxs
+                    .entry(k)
+                    .and_modify(|e| {
+                        use crate::storage::query::ast::CompareOp;
+                        use crate::runtime::query_exec::compare_runtime_values;
+                        if compare_runtime_values(&v, e, CompareOp::Gt) {
+                            *e = v.clone();
+                        }
+                    })
+                    .or_insert(v);
+            }
+            for (k, v) in o.sum_squares {
+                *s.sum_squares.entry(k).or_default() += v;
+            }
+            for (k, v) in o.agg_counts {
+                *s.agg_counts.entry(k).or_default() += v;
+            }
+            for (k, v) in o.all_values {
+                s.all_values.entry(k).or_default().extend(v);
+            }
+            for (k, v) in o.concat_values {
+                s.concat_values.entry(k).or_default().extend(v);
+            }
+            // FIRST: keep existing (first-seen batch wins)
+            for (k, v) in o.first_values {
+                s.first_values.entry(k).or_insert(v);
+            }
+            // LAST: overwrite with later batch
+            s.last_values.extend(o.last_values);
+            for (k, v) in o.array_values {
+                s.array_values.entry(k).or_default().extend(v);
+            }
+            for (k, set) in o.distinct_sets {
+                s.distinct_sets.entry(k).or_default().extend(set);
+            }
+        }
     }
 }

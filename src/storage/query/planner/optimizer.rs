@@ -11,6 +11,7 @@
 //! 5. **ExpressionSimplification**: Simplify complex expressions
 
 use crate::storage::query::ast::{JoinQuery, JoinType, QueryExpr};
+use crate::storage::query::sql_lowering::{effective_table_filter, effective_vector_filter};
 
 /// An optimization pass that transforms query expressions
 pub trait OptimizationPass: Send + Sync {
@@ -228,6 +229,7 @@ impl JoinReorderingPass {
                 order_by,
                 limit,
                 offset,
+                return_items,
                 return_,
             } = query;
             QueryExpr::Join(JoinQuery {
@@ -239,6 +241,7 @@ impl JoinReorderingPass {
                 order_by,
                 limit,
                 offset,
+                return_items,
                 return_,
             })
         } else {
@@ -250,7 +253,7 @@ impl JoinReorderingPass {
         match query {
             QueryExpr::Table(tq) => {
                 let base = 1000.0;
-                if tq.filter.is_some() {
+                if effective_table_filter(tq).is_some() {
                     base * 0.1
                 } else if tq.limit.is_some() {
                     tq.limit.unwrap() as f64
@@ -265,7 +268,11 @@ impl JoinReorderingPass {
             QueryExpr::Path(_) => 10.0,
             QueryExpr::Vector(vq) => {
                 // Vector search returns k results
-                vq.k as f64
+                if effective_vector_filter(vq).is_some() {
+                    (vq.k as f64).min(100.0)
+                } else {
+                    vq.k as f64
+                }
             }
             QueryExpr::Hybrid(hq) => {
                 // Hybrid query combines structured and vector results
@@ -322,7 +329,7 @@ impl OptimizationPass for IndexSelectionPass {
     fn apply(&self, query: QueryExpr) -> QueryExpr {
         match query {
             QueryExpr::Table(mut tq) => {
-                if let Some(ref filter) = tq.filter {
+                if let Some(filter) = effective_table_filter(&tq).as_ref() {
                     if let Some(hint) = Self::analyze_filter(filter) {
                         // Store index hint in expand metadata for executor
                         let expand = tq.expand.get_or_insert_with(Default::default);
@@ -562,6 +569,7 @@ mod tests {
             order_by: Vec::new(),
             limit: None,
             offset: None,
+            return_items: Vec::new(),
             return_: Vec::new(),
         });
 

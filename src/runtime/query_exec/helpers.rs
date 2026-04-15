@@ -198,6 +198,17 @@ pub(crate) fn extract_zone_predicates(
             };
             out.push((col.to_string(), value.clone(), kind));
         }
+        Filter::Between { field, low, high } => {
+            let col = match field {
+                FieldRef::TableColumn { column, .. } => column.as_str(),
+                _ => return,
+            };
+            if col.starts_with('_') || col == "red_entity_id" || col == "entity_id" {
+                return;
+            }
+            out.push((col.to_string(), low.clone(), ZoneColPredKind::Gte));
+            out.push((col.to_string(), high.clone(), ZoneColPredKind::Lte));
+        }
         Filter::And(left, right) => {
             extract_zone_predicates(left, out);
             extract_zone_predicates(right, out);
@@ -417,6 +428,26 @@ pub(crate) fn resolve_entity_document_path(
     }
 
     None
+}
+
+/// Try to resolve a simple equality filter (`WHERE col = val`) via hash index.
+///
+/// Returns `Some(entity_ids)` when:
+/// - The filter contains a simple `col = val` equality predicate
+/// - A hash index exists for that column on the given table
+/// - The lookup succeeds
+///
+/// Returns `None` when any condition isn't met — caller falls back to full scan.
+/// Only extracts the first equality predicate; compound filters with extra
+/// predicates still need post-fetch filtering.
+pub(crate) fn try_hash_eq_lookup(
+    filter: &crate::storage::query::ast::Filter,
+    table: &str,
+    idx_store: &super::super::index_store::IndexStore,
+) -> Option<Vec<crate::storage::unified::entity::EntityId>> {
+    let (col, val_bytes) = extract_index_candidate(filter)?;
+    let idx = idx_store.find_index_for_column(table, &col)?;
+    idx_store.hash_lookup(table, &idx.name, &val_bytes).ok()
 }
 
 /// Evaluate a SQL Filter directly against a UnifiedEntity without creating a

@@ -1,22 +1,20 @@
 //! Execution of probabilistic data structure commands (HLL, SKETCH, FILTER)
 
 use super::*;
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 fn probabilistic_read<'a, T>(
     lock: &'a RwLock<T>,
-    name: &str,
-) -> RedDBResult<RwLockReadGuard<'a, T>> {
+    _name: &str,
+) -> RwLockReadGuard<'a, T> {
     lock.read()
-        .map_err(|err| RedDBError::Internal(format!("{name} lock poisoned: {err}")))
 }
 
 fn probabilistic_write<'a, T>(
     lock: &'a RwLock<T>,
-    name: &str,
-) -> RedDBResult<RwLockWriteGuard<'a, T>> {
+    _name: &str,
+) -> RwLockWriteGuard<'a, T> {
     lock.write()
-        .map_err(|err| RedDBError::Internal(format!("{name} lock poisoned: {err}")))
 }
 
 impl RedDBRuntime {
@@ -32,7 +30,7 @@ impl RedDBRuntime {
                 if_not_exists,
             } => {
                 let mut hlls =
-                    probabilistic_write(&self.inner.probabilistic.hlls, "probabilistic HLL store")?;
+                    probabilistic_write(&self.inner.probabilistic.hlls, "probabilistic HLL store");
                 if hlls.contains_key(name) {
                     if *if_not_exists {
                         return Ok(RuntimeQueryResult::ok_message(
@@ -55,7 +53,7 @@ impl RedDBRuntime {
             }
             ProbabilisticCommand::HllAdd { name, elements } => {
                 let mut hlls =
-                    probabilistic_write(&self.inner.probabilistic.hlls, "probabilistic HLL store")?;
+                    probabilistic_write(&self.inner.probabilistic.hlls, "probabilistic HLL store");
                 let hll = hlls
                     .get_mut(name)
                     .ok_or_else(|| RedDBError::NotFound(format!("HLL '{}' not found", name)))?;
@@ -70,7 +68,7 @@ impl RedDBRuntime {
             }
             ProbabilisticCommand::HllCount { names } => {
                 let hlls =
-                    probabilistic_read(&self.inner.probabilistic.hlls, "probabilistic HLL store")?;
+                    probabilistic_read(&self.inner.probabilistic.hlls, "probabilistic HLL store");
                 if names.len() == 1 {
                     let hll = hlls.get(&names[0]).ok_or_else(|| {
                         RedDBError::NotFound(format!("HLL '{}' not found", names[0]))
@@ -116,7 +114,7 @@ impl RedDBRuntime {
             }
             ProbabilisticCommand::HllMerge { dest, sources } => {
                 let mut hlls =
-                    probabilistic_write(&self.inner.probabilistic.hlls, "probabilistic HLL store")?;
+                    probabilistic_write(&self.inner.probabilistic.hlls, "probabilistic HLL store");
                 let mut merged = crate::storage::primitives::hyperloglog::HyperLogLog::new();
                 for src in sources {
                     let hll = hlls
@@ -137,7 +135,7 @@ impl RedDBRuntime {
             }
             ProbabilisticCommand::HllInfo { name } => {
                 let hlls =
-                    probabilistic_read(&self.inner.probabilistic.hlls, "probabilistic HLL store")?;
+                    probabilistic_read(&self.inner.probabilistic.hlls, "probabilistic HLL store");
                 let hll = hlls
                     .get(name)
                     .ok_or_else(|| RedDBError::NotFound(format!("HLL '{}' not found", name)))?;
@@ -166,7 +164,7 @@ impl RedDBRuntime {
             }
             ProbabilisticCommand::DropHll { name, if_exists } => {
                 let mut hlls =
-                    probabilistic_write(&self.inner.probabilistic.hlls, "probabilistic HLL store")?;
+                    probabilistic_write(&self.inner.probabilistic.hlls, "probabilistic HLL store");
                 if hlls.remove(name).is_none() {
                     if *if_exists {
                         return Ok(RuntimeQueryResult::ok_message(
@@ -194,7 +192,7 @@ impl RedDBRuntime {
                 let mut sketches = probabilistic_write(
                     &self.inner.probabilistic.sketches,
                     "probabilistic sketch store",
-                )?;
+                );
                 if sketches.contains_key(name) {
                     if *if_not_exists {
                         return Ok(RuntimeQueryResult::ok_message(
@@ -231,7 +229,7 @@ impl RedDBRuntime {
                 let mut sketches = probabilistic_write(
                     &self.inner.probabilistic.sketches,
                     "probabilistic sketch store",
-                )?;
+                );
                 let sketch = sketches
                     .get_mut(name)
                     .ok_or_else(|| RedDBError::NotFound(format!("SKETCH '{}' not found", name)))?;
@@ -246,7 +244,7 @@ impl RedDBRuntime {
                 let sketches = probabilistic_read(
                     &self.inner.probabilistic.sketches,
                     "probabilistic sketch store",
-                )?;
+                );
                 let sketch = sketches
                     .get(name)
                     .ok_or_else(|| RedDBError::NotFound(format!("SKETCH '{}' not found", name)))?;
@@ -269,7 +267,7 @@ impl RedDBRuntime {
                 let mut sketches = probabilistic_write(
                     &self.inner.probabilistic.sketches,
                     "probabilistic sketch store",
-                )?;
+                );
                 let first_src = sketches.get(&sources[0]).ok_or_else(|| {
                     RedDBError::NotFound(format!("SKETCH '{}' not found", sources[0]))
                 })?;
@@ -303,7 +301,7 @@ impl RedDBRuntime {
                 let sketches = probabilistic_read(
                     &self.inner.probabilistic.sketches,
                     "probabilistic sketch store",
-                )?;
+                );
                 let sketch = sketches
                     .get(name)
                     .ok_or_else(|| RedDBError::NotFound(format!("SKETCH '{}' not found", name)))?;
@@ -338,7 +336,7 @@ impl RedDBRuntime {
                 let mut sketches = probabilistic_write(
                     &self.inner.probabilistic.sketches,
                     "probabilistic sketch store",
-                )?;
+                );
                 if sketches.remove(name).is_none() {
                     if *if_exists {
                         return Ok(RuntimeQueryResult::ok_message(
@@ -365,7 +363,7 @@ impl RedDBRuntime {
                 let mut filters = probabilistic_write(
                     &self.inner.probabilistic.filters,
                     "probabilistic filter store",
-                )?;
+                );
                 if filters.contains_key(name) {
                     if *if_not_exists {
                         return Ok(RuntimeQueryResult::ok_message(
@@ -393,7 +391,7 @@ impl RedDBRuntime {
                 let mut filters = probabilistic_write(
                     &self.inner.probabilistic.filters,
                     "probabilistic filter store",
-                )?;
+                );
                 let filter = filters
                     .get_mut(name)
                     .ok_or_else(|| RedDBError::NotFound(format!("FILTER '{}' not found", name)))?;
@@ -410,7 +408,7 @@ impl RedDBRuntime {
                 let filters = probabilistic_read(
                     &self.inner.probabilistic.filters,
                     "probabilistic filter store",
-                )?;
+                );
                 let filter = filters
                     .get(name)
                     .ok_or_else(|| RedDBError::NotFound(format!("FILTER '{}' not found", name)))?;
@@ -433,7 +431,7 @@ impl RedDBRuntime {
                 let mut filters = probabilistic_write(
                     &self.inner.probabilistic.filters,
                     "probabilistic filter store",
-                )?;
+                );
                 let filter = filters
                     .get_mut(name)
                     .ok_or_else(|| RedDBError::NotFound(format!("FILTER '{}' not found", name)))?;
@@ -452,7 +450,7 @@ impl RedDBRuntime {
                 let filters = probabilistic_read(
                     &self.inner.probabilistic.filters,
                     "probabilistic filter store",
-                )?;
+                );
                 let filter = filters
                     .get(name)
                     .ok_or_else(|| RedDBError::NotFound(format!("FILTER '{}' not found", name)))?;
@@ -474,7 +472,7 @@ impl RedDBRuntime {
                 let filters = probabilistic_read(
                     &self.inner.probabilistic.filters,
                     "probabilistic filter store",
-                )?;
+                );
                 let filter = filters
                     .get(name)
                     .ok_or_else(|| RedDBError::NotFound(format!("FILTER '{}' not found", name)))?;
@@ -507,7 +505,7 @@ impl RedDBRuntime {
                 let mut filters = probabilistic_write(
                     &self.inner.probabilistic.filters,
                     "probabilistic filter store",
-                )?;
+                );
                 if filters.remove(name).is_none() {
                     if *if_exists {
                         return Ok(RuntimeQueryResult::ok_message(

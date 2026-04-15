@@ -1,6 +1,8 @@
 use crate::storage::query::ast::{
-    BinOp, CompareOp, Expr, FieldRef, Filter, Projection, SelectItem, Span, TableQuery, UnaryOp,
+    BinOp, CompareOp, DeleteQuery, Expr, FieldRef, Filter, GraphQuery, InsertQuery, JoinQuery,
+    PathQuery, Projection, SelectItem, Span, TableQuery, UnaryOp, UpdateQuery, VectorQuery,
 };
+use crate::storage::engine::vector_metadata::MetadataFilter;
 use crate::storage::schema::Value;
 
 pub fn expr_to_projection(expr: &Expr) -> Option<Projection> {
@@ -93,6 +95,259 @@ pub fn effective_table_projections(query: &TableQuery) -> Vec<Projection> {
         vec![Projection::All]
     } else {
         query.columns.clone()
+    }
+}
+
+pub fn effective_table_filter(query: &TableQuery) -> Option<Filter> {
+    query
+        .filter
+        .clone()
+        .or_else(|| query.where_expr.as_ref().map(expr_to_filter))
+}
+
+pub fn effective_table_group_by_exprs(query: &TableQuery) -> Vec<Expr> {
+    if !query.group_by_exprs.is_empty() {
+        query.group_by_exprs.clone()
+    } else {
+        query
+            .group_by
+            .iter()
+            .map(|column| Expr::Column {
+                field: FieldRef::TableColumn {
+                    table: String::new(),
+                    column: column.clone(),
+                },
+                span: Span::synthetic(),
+            })
+            .collect()
+    }
+}
+
+pub fn effective_table_having_filter(query: &TableQuery) -> Option<Filter> {
+    query
+        .having
+        .clone()
+        .or_else(|| query.having_expr.as_ref().map(expr_to_filter))
+}
+
+pub fn effective_update_filter(query: &UpdateQuery) -> Option<Filter> {
+    query
+        .filter
+        .clone()
+        .or_else(|| query.where_expr.as_ref().map(expr_to_filter))
+}
+
+pub fn effective_insert_rows(query: &InsertQuery) -> Result<Vec<Vec<Value>>, String> {
+    if !query.value_exprs.is_empty() {
+        return query
+            .value_exprs
+            .iter()
+            .cloned()
+            .map(|row| row.into_iter().map(fold_expr_to_value).collect())
+            .collect();
+    }
+    Ok(query.values.clone())
+}
+
+pub fn effective_delete_filter(query: &DeleteQuery) -> Option<Filter> {
+    query
+        .filter
+        .clone()
+        .or_else(|| query.where_expr.as_ref().map(expr_to_filter))
+}
+
+pub fn effective_join_filter(query: &JoinQuery) -> Option<Filter> {
+    query.filter.clone()
+}
+
+pub fn effective_graph_filter(query: &GraphQuery) -> Option<Filter> {
+    query.filter.clone()
+}
+
+pub fn effective_graph_projections(query: &GraphQuery) -> Vec<Projection> {
+    query.return_.clone()
+}
+
+pub fn effective_path_filter(query: &PathQuery) -> Option<Filter> {
+    query.filter.clone()
+}
+
+pub fn effective_path_projections(query: &PathQuery) -> Vec<Projection> {
+    query.return_.clone()
+}
+
+pub fn effective_vector_filter(query: &VectorQuery) -> Option<MetadataFilter> {
+    query.filter.clone()
+}
+
+pub fn projection_to_expr(projection: &Projection) -> Option<(Expr, Option<String>)> {
+    match projection {
+        Projection::All => Some((
+            Expr::Column {
+                field: FieldRef::TableColumn {
+                    table: String::new(),
+                    column: "*".to_string(),
+                },
+                span: Span::synthetic(),
+            },
+            None,
+        )),
+        Projection::Column(column) => Some((
+            Expr::Column {
+                field: FieldRef::TableColumn {
+                    table: String::new(),
+                    column: column.clone(),
+                },
+                span: Span::synthetic(),
+            },
+            None,
+        )),
+        Projection::Alias(column, alias) => Some((
+            Expr::Column {
+                field: FieldRef::TableColumn {
+                    table: String::new(),
+                    column: column.clone(),
+                },
+                span: Span::synthetic(),
+            },
+            Some(alias.clone()),
+        )),
+        Projection::Function(name, args) => {
+            let (name, alias) = split_projection_function_alias(name);
+            let args = args
+                .iter()
+                .map(projection_to_expr)
+                .collect::<Option<Vec<_>>>()?
+                .into_iter()
+                .map(|(expr, _)| expr)
+                .collect();
+            Some((
+                Expr::FunctionCall {
+                    name,
+                    args,
+                    span: Span::synthetic(),
+                },
+                alias,
+            ))
+        }
+        Projection::Expression(filter, alias) => Some((filter_to_expr(filter), alias.clone())),
+        Projection::Field(field, alias) => Some((
+            Expr::Column {
+                field: field.clone(),
+                span: Span::synthetic(),
+            },
+            alias.clone(),
+        )),
+    }
+}
+
+pub fn projection_to_select_item(projection: &Projection) -> Option<SelectItem> {
+    match projection {
+        Projection::All => Some(SelectItem::Wildcard),
+        other => {
+            let (expr, alias) = projection_to_expr(other)?;
+            Some(SelectItem::Expr { expr, alias })
+        }
+    }
+}
+
+pub fn effective_join_projections(query: &JoinQuery) -> Vec<Projection> {
+    if !query.return_items.is_empty() {
+        return query
+            .return_items
+            .iter()
+            .filter_map(select_item_to_projection)
+            .collect();
+    }
+    query.return_.clone()
+}
+
+pub fn expr_to_filter(expr: &Expr) -> Filter {
+    match expr {
+        Expr::BinaryOp { op, lhs, rhs, .. } => match op {
+            BinOp::And => Filter::And(Box::new(expr_to_filter(lhs)), Box::new(expr_to_filter(rhs))),
+            BinOp::Or => Filter::Or(Box::new(expr_to_filter(lhs)), Box::new(expr_to_filter(rhs))),
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                try_specialized_compare_filter(lhs, *op, rhs).unwrap_or_else(|| {
+                    Filter::CompareExpr {
+                        lhs: lhs.as_ref().clone(),
+                        op: binop_to_compare_op(*op),
+                        rhs: rhs.as_ref().clone(),
+                    }
+                })
+            }
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Concat => {
+                Filter::CompareExpr {
+                    lhs: expr.clone(),
+                    op: CompareOp::Eq,
+                    rhs: Expr::lit(Value::Boolean(true)),
+                }
+            }
+        },
+        Expr::UnaryOp {
+            op: UnaryOp::Not,
+            operand,
+            ..
+        } => Filter::Not(Box::new(expr_to_filter(operand))),
+        Expr::IsNull {
+            operand, negated, ..
+        } => match operand.as_ref() {
+            Expr::Column { field, .. } => {
+                if *negated {
+                    Filter::IsNotNull(field.clone())
+                } else {
+                    Filter::IsNull(field.clone())
+                }
+            }
+            _ => Filter::CompareExpr {
+                lhs: expr.clone(),
+                op: CompareOp::Eq,
+                rhs: Expr::lit(Value::Boolean(true)),
+            },
+        },
+        Expr::InList {
+            target,
+            values,
+            negated,
+            ..
+        } => match (target.as_ref(), all_literal_values(values)) {
+            (Expr::Column { field, .. }, Some(values)) if !negated => Filter::In {
+                field: field.clone(),
+                values,
+            },
+            _ => Filter::CompareExpr {
+                lhs: expr.clone(),
+                op: CompareOp::Eq,
+                rhs: Expr::lit(Value::Boolean(true)),
+            },
+        },
+        Expr::Between {
+            target,
+            low,
+            high,
+            negated,
+            ..
+        } => match (
+            target.as_ref(),
+            literal_expr_value(low),
+            literal_expr_value(high),
+        ) {
+            (Expr::Column { field, .. }, Some(low), Some(high)) if !negated => Filter::Between {
+                field: field.clone(),
+                low,
+                high,
+            },
+            _ => Filter::CompareExpr {
+                lhs: expr.clone(),
+                op: CompareOp::Eq,
+                rhs: Expr::lit(Value::Boolean(true)),
+            },
+        },
+        _ => Filter::CompareExpr {
+            lhs: expr.clone(),
+            op: CompareOp::Eq,
+            rhs: Expr::lit(Value::Boolean(true)),
+        },
     }
 }
 
@@ -334,6 +589,18 @@ fn projection_binop_name(op: BinOp) -> &'static str {
     }
 }
 
+fn binop_to_compare_op(op: BinOp) -> CompareOp {
+    match op {
+        BinOp::Eq => CompareOp::Eq,
+        BinOp::Ne => CompareOp::Ne,
+        BinOp::Lt => CompareOp::Lt,
+        BinOp::Le => CompareOp::Le,
+        BinOp::Gt => CompareOp::Gt,
+        BinOp::Ge => CompareOp::Ge,
+        other => unreachable!("non-compare binop cannot lower to CompareOp: {other:?}"),
+    }
+}
+
 fn compare_op_to_binop(op: CompareOp) -> BinOp {
     match op {
         CompareOp::Eq => BinOp::Eq,
@@ -362,6 +629,15 @@ fn attach_projection_alias(proj: Projection, alias: Option<String>) -> Projectio
     }
 }
 
+fn split_projection_function_alias(name: &str) -> (String, Option<String>) {
+    match name.split_once(':') {
+        Some((function, alias)) if !function.is_empty() && !alias.is_empty() => {
+            (function.to_string(), Some(alias.to_string()))
+        }
+        _ => (name.to_string(), None),
+    }
+}
+
 fn render_projection_literal(value: &Value) -> String {
     match value {
         Value::Null => String::new(),
@@ -379,4 +655,50 @@ fn render_projection_literal(value: &Value) -> String {
         Value::Boolean(false) => "false".to_string(),
         other => other.to_string(),
     }
+}
+
+fn try_specialized_compare_filter(lhs: &Expr, op: BinOp, rhs: &Expr) -> Option<Filter> {
+    let op = binop_to_compare_op(op);
+    match (lhs, rhs) {
+        (Expr::Column { field, .. }, Expr::Literal { value, .. }) => Some(Filter::Compare {
+            field: field.clone(),
+            op,
+            value: value.clone(),
+        }),
+        (Expr::Literal { value, .. }, Expr::Column { field, .. }) => Some(Filter::Compare {
+            field: field.clone(),
+            op: flipped_compare_op(op),
+            value: value.clone(),
+        }),
+        (Expr::Column { field: left, .. }, Expr::Column { field: right, .. }) => {
+            Some(Filter::CompareFields {
+                left: left.clone(),
+                op,
+                right: right.clone(),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn flipped_compare_op(op: CompareOp) -> CompareOp {
+    match op {
+        CompareOp::Eq => CompareOp::Eq,
+        CompareOp::Ne => CompareOp::Ne,
+        CompareOp::Lt => CompareOp::Gt,
+        CompareOp::Le => CompareOp::Ge,
+        CompareOp::Gt => CompareOp::Lt,
+        CompareOp::Ge => CompareOp::Le,
+    }
+}
+
+fn literal_expr_value(expr: &Expr) -> Option<Value> {
+    match expr {
+        Expr::Literal { value, .. } => Some(value.clone()),
+        _ => None,
+    }
+}
+
+fn all_literal_values(values: &[Expr]) -> Option<Vec<Value>> {
+    values.iter().map(literal_expr_value).collect()
 }

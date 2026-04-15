@@ -1,8 +1,8 @@
 use crate::storage::query::ast::{
     AlterTableQuery, CreateIndexQuery, CreateQueueQuery, CreateTableQuery, CreateTimeSeriesQuery,
     DeleteQuery, DropIndexQuery, DropQueueQuery, DropTableQuery, DropTimeSeriesQuery,
-    ExplainAlterQuery, InsertQuery, JoinQuery, ProbabilisticCommand, QueryExpr, TableQuery,
-    UpdateQuery,
+    ExplainAlterQuery, GraphQuery, HybridQuery, InsertQuery, JoinQuery, PathQuery,
+    ProbabilisticCommand, QueryExpr, TableQuery, UpdateQuery, VectorQuery,
 };
 use crate::storage::query::parser::{ParseError, Parser};
 use crate::storage::query::Token;
@@ -12,6 +12,23 @@ use crate::storage::schema::Value;
 ///
 /// This is the single entrypoint for SQL/RQL-style commands before they are
 /// lowered into the broader multi-backend `QueryExpr` space.
+#[derive(Debug, Clone)]
+pub enum SqlStatement {
+    Query(SqlQuery),
+    Mutation(SqlMutation),
+    Schema(SqlSchemaCommand),
+    Admin(SqlAdminCommand),
+}
+
+#[derive(Debug, Clone)]
+pub enum FrontendStatement {
+    Sql(SqlStatement),
+    Graph(GraphQuery),
+    Path(PathQuery),
+    Vector(VectorQuery),
+    Hybrid(HybridQuery),
+}
+
 #[derive(Debug, Clone)]
 pub enum SqlCommand {
     Select(TableQuery),
@@ -32,6 +49,107 @@ pub enum SqlCommand {
     Probabilistic(ProbabilisticCommand),
     SetConfig { key: String, value: Value },
     ShowConfig { prefix: Option<String> },
+}
+
+#[derive(Debug, Clone)]
+pub enum SqlQuery {
+    Select(TableQuery),
+    Join(JoinQuery),
+}
+
+#[derive(Debug, Clone)]
+pub enum SqlMutation {
+    Insert(InsertQuery),
+    Update(UpdateQuery),
+    Delete(DeleteQuery),
+}
+
+#[derive(Debug, Clone)]
+pub enum SqlSchemaCommand {
+    ExplainAlter(ExplainAlterQuery),
+    CreateTable(CreateTableQuery),
+    DropTable(DropTableQuery),
+    AlterTable(AlterTableQuery),
+    CreateIndex(CreateIndexQuery),
+    DropIndex(DropIndexQuery),
+    CreateTimeSeries(CreateTimeSeriesQuery),
+    DropTimeSeries(DropTimeSeriesQuery),
+    CreateQueue(CreateQueueQuery),
+    DropQueue(DropQueueQuery),
+    Probabilistic(ProbabilisticCommand),
+}
+
+#[derive(Debug, Clone)]
+pub enum SqlAdminCommand {
+    SetConfig { key: String, value: Value },
+    ShowConfig { prefix: Option<String> },
+}
+
+impl SqlStatement {
+    pub fn into_command(self) -> SqlCommand {
+        match self {
+            SqlStatement::Query(SqlQuery::Select(query)) => SqlCommand::Select(query),
+            SqlStatement::Query(SqlQuery::Join(query)) => SqlCommand::Join(query),
+            SqlStatement::Mutation(SqlMutation::Insert(query)) => SqlCommand::Insert(query),
+            SqlStatement::Mutation(SqlMutation::Update(query)) => SqlCommand::Update(query),
+            SqlStatement::Mutation(SqlMutation::Delete(query)) => SqlCommand::Delete(query),
+            SqlStatement::Schema(SqlSchemaCommand::ExplainAlter(query)) => {
+                SqlCommand::ExplainAlter(query)
+            }
+            SqlStatement::Schema(SqlSchemaCommand::CreateTable(query)) => {
+                SqlCommand::CreateTable(query)
+            }
+            SqlStatement::Schema(SqlSchemaCommand::DropTable(query)) => {
+                SqlCommand::DropTable(query)
+            }
+            SqlStatement::Schema(SqlSchemaCommand::AlterTable(query)) => {
+                SqlCommand::AlterTable(query)
+            }
+            SqlStatement::Schema(SqlSchemaCommand::CreateIndex(query)) => {
+                SqlCommand::CreateIndex(query)
+            }
+            SqlStatement::Schema(SqlSchemaCommand::DropIndex(query)) => {
+                SqlCommand::DropIndex(query)
+            }
+            SqlStatement::Schema(SqlSchemaCommand::CreateTimeSeries(query)) => {
+                SqlCommand::CreateTimeSeries(query)
+            }
+            SqlStatement::Schema(SqlSchemaCommand::DropTimeSeries(query)) => {
+                SqlCommand::DropTimeSeries(query)
+            }
+            SqlStatement::Schema(SqlSchemaCommand::CreateQueue(query)) => {
+                SqlCommand::CreateQueue(query)
+            }
+            SqlStatement::Schema(SqlSchemaCommand::DropQueue(query)) => {
+                SqlCommand::DropQueue(query)
+            }
+            SqlStatement::Schema(SqlSchemaCommand::Probabilistic(command)) => {
+                SqlCommand::Probabilistic(command)
+            }
+            SqlStatement::Admin(SqlAdminCommand::SetConfig { key, value }) => {
+                SqlCommand::SetConfig { key, value }
+            }
+            SqlStatement::Admin(SqlAdminCommand::ShowConfig { prefix }) => {
+                SqlCommand::ShowConfig { prefix }
+            }
+        }
+    }
+
+    pub fn into_query_expr(self) -> QueryExpr {
+        self.into_command().into_query_expr()
+    }
+}
+
+impl FrontendStatement {
+    pub fn into_query_expr(self) -> QueryExpr {
+        match self {
+            FrontendStatement::Sql(statement) => statement.into_query_expr(),
+            FrontendStatement::Graph(query) => QueryExpr::Graph(query),
+            FrontendStatement::Path(query) => QueryExpr::Path(query),
+            FrontendStatement::Vector(query) => QueryExpr::Vector(query),
+            FrontendStatement::Hybrid(query) => QueryExpr::Hybrid(query),
+        }
+    }
 }
 
 impl SqlCommand {
@@ -57,9 +175,118 @@ impl SqlCommand {
             SqlCommand::ShowConfig { prefix } => QueryExpr::ShowConfig { prefix },
         }
     }
+
+    pub fn into_statement(self) -> SqlStatement {
+        match self {
+            SqlCommand::Select(query) => SqlStatement::Query(SqlQuery::Select(query)),
+            SqlCommand::Join(query) => SqlStatement::Query(SqlQuery::Join(query)),
+            SqlCommand::Insert(query) => SqlStatement::Mutation(SqlMutation::Insert(query)),
+            SqlCommand::Update(query) => SqlStatement::Mutation(SqlMutation::Update(query)),
+            SqlCommand::Delete(query) => SqlStatement::Mutation(SqlMutation::Delete(query)),
+            SqlCommand::ExplainAlter(query) => {
+                SqlStatement::Schema(SqlSchemaCommand::ExplainAlter(query))
+            }
+            SqlCommand::CreateTable(query) => {
+                SqlStatement::Schema(SqlSchemaCommand::CreateTable(query))
+            }
+            SqlCommand::DropTable(query) => {
+                SqlStatement::Schema(SqlSchemaCommand::DropTable(query))
+            }
+            SqlCommand::AlterTable(query) => {
+                SqlStatement::Schema(SqlSchemaCommand::AlterTable(query))
+            }
+            SqlCommand::CreateIndex(query) => {
+                SqlStatement::Schema(SqlSchemaCommand::CreateIndex(query))
+            }
+            SqlCommand::DropIndex(query) => {
+                SqlStatement::Schema(SqlSchemaCommand::DropIndex(query))
+            }
+            SqlCommand::CreateTimeSeries(query) => {
+                SqlStatement::Schema(SqlSchemaCommand::CreateTimeSeries(query))
+            }
+            SqlCommand::DropTimeSeries(query) => {
+                SqlStatement::Schema(SqlSchemaCommand::DropTimeSeries(query))
+            }
+            SqlCommand::CreateQueue(query) => {
+                SqlStatement::Schema(SqlSchemaCommand::CreateQueue(query))
+            }
+            SqlCommand::DropQueue(query) => {
+                SqlStatement::Schema(SqlSchemaCommand::DropQueue(query))
+            }
+            SqlCommand::Probabilistic(command) => {
+                SqlStatement::Schema(SqlSchemaCommand::Probabilistic(command))
+            }
+            SqlCommand::SetConfig { key, value } => {
+                SqlStatement::Admin(SqlAdminCommand::SetConfig { key, value })
+            }
+            SqlCommand::ShowConfig { prefix } => {
+                SqlStatement::Admin(SqlAdminCommand::ShowConfig { prefix })
+            }
+        }
+    }
 }
 
 impl<'a> Parser<'a> {
+    /// Parse any top-level frontend statement through a single shared surface.
+    pub fn parse_frontend_statement(&mut self) -> Result<FrontendStatement, ParseError> {
+        match self.peek() {
+            Token::Select
+            | Token::From
+            | Token::Insert
+            | Token::Update
+            | Token::Delete
+            | Token::Explain
+            | Token::Create
+            | Token::Drop
+            | Token::Alter
+            | Token::Set => self.parse_sql_statement().map(FrontendStatement::Sql),
+            Token::Ident(name) if name.eq_ignore_ascii_case("SHOW") => {
+                self.parse_sql_statement().map(FrontendStatement::Sql)
+            }
+            Token::Match => match self.parse_match_query()? {
+                QueryExpr::Graph(query) => Ok(FrontendStatement::Graph(query)),
+                other => Err(ParseError::new(
+                    format!("internal: MATCH produced unexpected query kind {other:?}"),
+                    self.position(),
+                )),
+            },
+            Token::Path => match self.parse_path_query()? {
+                QueryExpr::Path(query) => Ok(FrontendStatement::Path(query)),
+                other => Err(ParseError::new(
+                    format!("internal: PATH produced unexpected query kind {other:?}"),
+                    self.position(),
+                )),
+            },
+            Token::Vector => match self.parse_vector_query()? {
+                QueryExpr::Vector(query) => Ok(FrontendStatement::Vector(query)),
+                other => Err(ParseError::new(
+                    format!("internal: VECTOR produced unexpected query kind {other:?}"),
+                    self.position(),
+                )),
+            },
+            Token::Hybrid => match self.parse_hybrid_query()? {
+                QueryExpr::Hybrid(query) => Ok(FrontendStatement::Hybrid(query)),
+                other => Err(ParseError::new(
+                    format!("internal: HYBRID produced unexpected query kind {other:?}"),
+                    self.position(),
+                )),
+            },
+            other => Err(ParseError::expected(
+                vec![
+                    "SELECT", "MATCH", "PATH", "FROM", "VECTOR", "HYBRID", "INSERT", "UPDATE",
+                    "DELETE", "CREATE", "DROP", "ALTER", "SET", "SHOW",
+                ],
+                other,
+                self.position(),
+            )),
+        }
+    }
+
+    /// Parse any SQL/RQL-style command into the canonical SQL frontend IR.
+    pub fn parse_sql_statement(&mut self) -> Result<SqlStatement, ParseError> {
+        self.parse_sql_command().map(SqlCommand::into_statement)
+    }
+
     /// Parse any SQL/RQL-style command through a single frontend module.
     pub fn parse_sql_command(&mut self) -> Result<SqlCommand, ParseError> {
         match self.peek() {

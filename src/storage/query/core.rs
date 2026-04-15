@@ -595,6 +595,8 @@ pub struct JoinQuery {
     pub limit: Option<u64>,
     /// Post-join offset
     pub offset: Option<u64>,
+    /// Canonical SQL RETURN projection.
+    pub return_items: Vec<SelectItem>,
     /// Post-join projection
     pub return_: Vec<Projection>,
 }
@@ -611,6 +613,7 @@ impl JoinQuery {
             order_by: Vec::new(),
             limit: None,
             offset: None,
+            return_items: Vec::new(),
             return_: Vec::new(),
         }
     }

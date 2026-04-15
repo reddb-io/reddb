@@ -15,7 +15,8 @@
 //! `WHERE status = 'active' AND role = 'admin'` → `bitmap_and(status_active, role_admin)`
 
 use std::collections::HashMap;
-use std::sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+
+use parking_lot::RwLock;
 
 use roaring::RoaringBitmap;
 
@@ -176,24 +177,6 @@ pub struct BitmapIndexManager {
     indices: RwLock<HashMap<(String, String), BitmapColumnIndex>>,
 }
 
-fn recover_read_guard<'a, T>(
-    result: Result<RwLockReadGuard<'a, T>, PoisonError<RwLockReadGuard<'a, T>>>,
-) -> RwLockReadGuard<'a, T> {
-    match result {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
-
-fn recover_write_guard<'a, T>(
-    result: Result<RwLockWriteGuard<'a, T>, PoisonError<RwLockWriteGuard<'a, T>>>,
-) -> RwLockWriteGuard<'a, T> {
-    match result {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
-
 impl BitmapIndexManager {
     /// Create a new manager
     pub fn new() -> Self {
@@ -204,7 +187,7 @@ impl BitmapIndexManager {
 
     /// Create a bitmap index for a column
     pub fn create_index(&self, collection: &str, column: &str) {
-        let mut indices = recover_write_guard(self.indices.write());
+        let mut indices = self.indices.write();
         let key = (collection.to_string(), column.to_string());
         indices
             .entry(key)
@@ -213,7 +196,7 @@ impl BitmapIndexManager {
 
     /// Drop a bitmap index
     pub fn drop_index(&self, collection: &str, column: &str) -> bool {
-        let mut indices = recover_write_guard(self.indices.write());
+        let mut indices = self.indices.write();
         indices
             .remove(&(collection.to_string(), column.to_string()))
             .is_some()
@@ -227,7 +210,7 @@ impl BitmapIndexManager {
         entity_id: EntityId,
         value: &[u8],
     ) -> Result<(), BitmapIndexError> {
-        let mut indices = recover_write_guard(self.indices.write());
+        let mut indices = self.indices.write();
         if let Some(index) = indices.get_mut(&(collection.to_string(), column.to_string())) {
             index.insert(entity_id, value);
             Ok(())
@@ -246,7 +229,7 @@ impl BitmapIndexManager {
         column: &str,
         entity_id: EntityId,
     ) -> Result<(), BitmapIndexError> {
-        let mut indices = recover_write_guard(self.indices.write());
+        let mut indices = self.indices.write();
         if let Some(index) = indices.get_mut(&(collection.to_string(), column.to_string())) {
             index.remove(entity_id);
             Ok(())
@@ -265,7 +248,7 @@ impl BitmapIndexManager {
         column: &str,
         value: &[u8],
     ) -> Result<u64, BitmapIndexError> {
-        let indices = recover_read_guard(self.indices.read());
+        let indices = self.indices.read();
         if let Some(idx) = indices.get(&(collection.to_string(), column.to_string())) {
             Ok(idx.count(value))
         } else {
@@ -283,7 +266,7 @@ impl BitmapIndexManager {
         column: &str,
         value: &[u8],
     ) -> Result<Vec<EntityId>, BitmapIndexError> {
-        let indices = recover_read_guard(self.indices.read());
+        let indices = self.indices.read();
         if let Some(idx) = indices.get(&(collection.to_string(), column.to_string())) {
             Ok(idx.get(value))
         } else {
@@ -300,7 +283,7 @@ impl BitmapIndexManager {
         collection: &str,
         column: &str,
     ) -> Result<Vec<(Vec<u8>, u64)>, BitmapIndexError> {
-        let indices = recover_read_guard(self.indices.read());
+        let indices = self.indices.read();
         if let Some(idx) = indices.get(&(collection.to_string(), column.to_string())) {
             Ok(idx.value_counts())
         } else {
@@ -317,7 +300,7 @@ impl BitmapIndexManager {
         collection: &str,
         column: &str,
     ) -> Result<BitmapIndexStats, BitmapIndexError> {
-        let indices = recover_read_guard(self.indices.read());
+        let indices = self.indices.read();
         if let Some(idx) = indices.get(&(collection.to_string(), column.to_string())) {
             Ok(BitmapIndexStats {
                 column: column.to_string(),
@@ -466,7 +449,7 @@ mod tests {
         mgr.create_index("users", "status");
 
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = mgr.indices.write().unwrap();
+            let _guard = mgr.indices.write();
             panic!("poison bitmap index manager");
         }));
 

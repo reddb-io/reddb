@@ -9,6 +9,7 @@ use tokio::net::TcpListener;
 
 use super::protocol::*;
 use crate::runtime::RedDBRuntime;
+use crate::storage::query::sql_lowering::effective_table_filter;
 use crate::storage::schema::Value;
 use crate::storage::unified::{EntityData, EntityId, EntityKind};
 
@@ -168,8 +169,10 @@ fn handle_query_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
     let store = db.store();
 
     // Entity_id point lookup — single entity binary
+    let effective_filter = effective_table_filter(table_query);
+
     if let Some(entity_id) =
-        crate::runtime::query_exec::extract_entity_id_from_filter(&table_query.filter)
+        crate::runtime::query_exec::extract_entity_id_from_filter(&effective_filter)
     {
         return match store.get(&table_query.table, EntityId::new(entity_id)) {
             Some(entity) => encode_entity_binary(&entity),
@@ -183,7 +186,7 @@ fn handle_query_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
         None => return make_error(b"collection not found"),
     };
 
-    let filter = table_query.filter.as_ref();
+    let filter = effective_filter.as_ref();
     let table_name = table_query.table.as_str();
     let table_alias = table_query.alias.as_deref().unwrap_or(table_name);
     let limit = table_query.limit.unwrap_or(10000) as usize;

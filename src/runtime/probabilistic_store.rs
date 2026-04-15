@@ -1,7 +1,8 @@
 //! In-memory store for probabilistic data structures (HLL, Sketch, Filter)
 
 use std::collections::HashMap;
-use std::sync::RwLock;
+
+use parking_lot::RwLock;
 
 use crate::storage::primitives::count_min_sketch::CountMinSketch;
 use crate::storage::primitives::cuckoo_filter::CuckooFilter;

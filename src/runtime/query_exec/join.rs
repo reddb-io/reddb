@@ -11,13 +11,15 @@
 
 use super::super::*;
 use super::*;
+use crate::storage::query::sql_lowering::{effective_join_filter, effective_join_projections};
 
 pub(crate) fn execute_runtime_join_query(
     db: &RedDB,
     query: &JoinQuery,
 ) -> RedDBResult<UnifiedResult> {
     let records = execute_runtime_canonical_join_query(db, query)?;
-    let columns = projected_columns(&records, &query.return_);
+    let effective_projections = effective_join_projections(query);
+    let columns = projected_columns(&records, &effective_projections);
 
     Ok(UnifiedResult {
         columns,
@@ -46,7 +48,7 @@ pub(crate) fn execute_runtime_canonical_join_node(
     match node.operator.as_str() {
         "filter" => {
             let mut records = execute_runtime_canonical_join_child(db, node, query)?;
-            if let Some(filter) = query.filter.as_ref() {
+            if let Some(filter) = effective_join_filter(query).as_ref() {
                 records.retain(|record| {
                     evaluate_runtime_join_filter(
                         record,
@@ -94,12 +96,13 @@ pub(crate) fn execute_runtime_canonical_join_node(
         }
         "projection" => {
             let records = execute_runtime_canonical_join_child(db, node, query)?;
+            let effective_projections = effective_join_projections(query);
             Ok(records
                 .iter()
                 .map(|record| {
                     project_runtime_join_record(
                         record,
-                        &query.return_,
+                        &effective_projections,
                         left_table_name,
                         left_table_alias,
                         right_table_name,

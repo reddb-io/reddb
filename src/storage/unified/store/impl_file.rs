@@ -173,10 +173,7 @@ impl UnifiedStore {
         buf.extend_from_slice(&STORE_VERSION_V3.to_le_bytes());
 
         // Get all collections
-        let collections = self
-            .collections
-            .read()
-            .map_err(|_| -> Box<dyn std::error::Error> { "collections lock poisoned".into() })?;
+        let collections = self.collections.read();
         write_varu32(&mut buf, collections.len() as u32);
 
         for (name, manager) in collections.iter() {
@@ -194,10 +191,7 @@ impl UnifiedStore {
         }
 
         // Write cross-references
-        let cross_refs = self
-            .cross_refs
-            .read()
-            .map_err(|_| -> Box<dyn std::error::Error> { "cross_refs lock poisoned".into() })?;
+        let cross_refs = self.cross_refs.read();
         let total_refs: usize = cross_refs.values().map(|v| v.len()).sum();
         write_varu32(&mut buf, total_refs as u32);
 

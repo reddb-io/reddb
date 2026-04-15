@@ -17,7 +17,7 @@
 //! ```
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::entity::{CrossRef, EntityData, EntityId, EntityKind, RefType, UnifiedEntity};
@@ -362,6 +362,14 @@ pub struct GrowingSegment {
     sequence: AtomicU64,
     /// Approximate memory usage
     memory_bytes: AtomicU64,
+
+    /// Epoch counter for lock-free reads of `flat_entities`.
+    ///
+    /// Updated with `Release` ordering after every flat-mode insert so that
+    /// readers can safely access `flat_entities[0..published_flat_len]` by
+    /// loading with `Acquire` ordering, without holding the segment RwLock.
+    /// Only meaningful when `use_flat == true`; always 0 in HashMap mode.
+    pub(crate) published_flat_len: AtomicUsize,
 }
 
 impl GrowingSegment {
@@ -437,6 +445,7 @@ impl GrowingSegment {
             col_zones: HashMap::new(),
             sequence: AtomicU64::new(0),
             memory_bytes: AtomicU64::new(0),
+            published_flat_len: AtomicUsize::new(0),
         }
     }
 
@@ -825,6 +834,13 @@ impl GrowingSegment {
         }
 
         self.last_write_at = now;
+
+        // Publish the new flat length so lock-free readers can see the new entities.
+        if self.use_flat {
+            self.published_flat_len
+                .store(self.flat_entities.len(), Ordering::Release);
+        }
+
         Ok(ids)
     }
 }

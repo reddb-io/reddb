@@ -246,7 +246,11 @@ impl<'a> Parser<'a> {
     pub fn parse_query_expr(&mut self) -> Result<QueryExpr, ParseError> {
         match self.peek() {
             Token::Select
+            | Token::Match
+            | Token::Path
             | Token::From
+            | Token::Vector
+            | Token::Hybrid
             | Token::Insert
             | Token::Update
             | Token::Delete
@@ -255,15 +259,11 @@ impl<'a> Parser<'a> {
             | Token::Drop
             | Token::Alter
             | Token::Set => self
-                .parse_sql_command()
-                .map(|command| command.into_query_expr()),
+                .parse_frontend_statement()
+                .map(|statement| statement.into_query_expr()),
             Token::Ident(ref name) if name.eq_ignore_ascii_case("SHOW") => self
-                .parse_sql_command()
-                .map(|command| command.into_query_expr()),
-            Token::Match => self.parse_match_query(),
-            Token::Path => self.parse_path_query(),
-            Token::Vector => self.parse_vector_query(),
-            Token::Hybrid => self.parse_hybrid_query(),
+                .parse_frontend_statement()
+                .map(|statement| statement.into_query_expr()),
             Token::Graph => self.parse_graph_command(),
             Token::Search => self.parse_search_command(),
             Token::Ident(ref name) if name.eq_ignore_ascii_case("ASK") => self.parse_ask_query(),

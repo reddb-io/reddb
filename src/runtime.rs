@@ -607,8 +607,8 @@ struct RuntimeInner {
     index_store: index_store::IndexStore,
     cdc: crate::replication::cdc::CdcBuffer,
     backup_scheduler: crate::replication::scheduler::BackupScheduler,
-    query_cache: std::sync::RwLock<crate::storage::query::planner::cache::PlanCache>,
-    result_cache: std::sync::RwLock<(
+    query_cache: parking_lot::RwLock<crate::storage::query::planner::cache::PlanCache>,
+    result_cache: parking_lot::RwLock<(
         HashMap<String, (RuntimeQueryResult, std::time::Instant)>,
         std::collections::VecDeque<String>,
     )>,
@@ -618,7 +618,7 @@ struct RuntimeInner {
     /// enabled. Required for `Value::Secret` auto-encrypt/decrypt
     /// because the AES key lives in the vault KV under the
     /// `red.secret.aes_key` entry.
-    auth_store: std::sync::RwLock<Option<Arc<crate::auth::store::AuthStore>>>,
+    auth_store: parking_lot::RwLock<Option<Arc<crate::auth::store::AuthStore>>>,
     /// Global serialization point for transactional commits initiated via
     /// the stdio JSON-RPC `tx.commit` path. Held only for the duration of
     /// the write-set replay so concurrent auto-committed writes can still

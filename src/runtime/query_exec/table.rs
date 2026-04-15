@@ -138,7 +138,12 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     // scan even when a BTREE index on `age` existed.
     if let (Some(idx_store), Some(ref filter)) = (index_store, &effective_filter) {
         let trace = std::env::var("REDDB_INDEX_TRACE").ok().as_deref() == Some("1");
-        let sorted_res = try_sorted_index_lookup(filter, &query.table, idx_store);
+        let sorted_res = try_sorted_index_lookup(
+            filter,
+            &query.table,
+            idx_store,
+            query.limit.map(|l| l as usize),
+        );
         if trace {
             eprintln!(
                 "sorted_index_lookup table={} filter={:?} result={:?}",
@@ -159,12 +164,27 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 table_alias,
             );
             let store = db.store();
+            // Use lean materialization (skip red_* system fields) when SELECT *
+            // was requested.  Explicit projection columns still go through the full
+            // path below so user-specified system fields (e.g. SELECT red_entity_id,
+            // age FROM t) are not silently dropped.
+            let explicit_cols = extract_select_column_names(&effective_projections);
+            let lean = explicit_cols.is_empty(); // SELECT * → lean path
             // Batch fetch: single lock acquisition for the entire candidate set
             let entities = store.get_batch(&query.table, &entity_ids);
-            let mut records = Vec::with_capacity(entity_ids.len());
+            let limit = query.limit.map(|l| l as usize).unwrap_or(usize::MAX);
+            let mut records = Vec::with_capacity(entity_ids.len().min(limit));
             for entity_opt in entities.into_iter().flatten() {
+                if records.len() >= limit {
+                    break;
+                }
                 if compiled_filter.evaluate(&entity_opt) {
-                    if let Some(record) = runtime_table_record_from_entity(entity_opt) {
+                    let record_opt = if lean {
+                        super::super::record_search::runtime_table_record_lean(entity_opt)
+                    } else {
+                        runtime_table_record_from_entity_projected(entity_opt, &explicit_cols)
+                    };
+                    if let Some(record) = record_opt {
                         records.push(record);
                     }
                 }
@@ -213,11 +233,15 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             let store = db.store();
             let mut sorted_ids: Vec<u64> = intersection.into_iter().collect();
             sorted_ids.sort_unstable();
+            let limit = query.limit.map(|l| l as usize).unwrap_or(usize::MAX);
             let entity_ids: Vec<EntityId> = sorted_ids.iter().map(|&r| EntityId::new(r)).collect();
             // Batch fetch: single lock acquisition for the entire candidate set
             let entities = store.get_batch(&query.table, &entity_ids);
-            let mut records = Vec::new();
+            let mut records = Vec::with_capacity(entity_ids.len().min(limit));
             for entity_opt in entities.into_iter().flatten() {
+                if records.len() >= limit {
+                    break;
+                }
                 if let Some(record) = runtime_table_record_from_entity(entity_opt) {
                     records.push(record);
                 }
@@ -307,13 +331,24 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                     let store = db.store();
                     // Batch fetch: single lock acquisition for the entire candidate set
                     let entities = store.get_batch(&query.table, &entity_ids);
-                    let mut records = Vec::new();
+                    let limit = query.limit.map(|l| l as usize).unwrap_or(usize::MAX);
+                    let explicit_cols = extract_select_column_names(&effective_projections);
+                    let lean = explicit_cols.is_empty();
+                    let mut records = Vec::with_capacity(entity_ids.len().min(limit));
                     for entity_opt in entities.into_iter().flatten() {
+                        if records.len() >= limit {
+                            break;
+                        }
                         if compiled_filter
                             .as_ref()
                             .map_or(true, |cf| cf.evaluate(&entity_opt))
                         {
-                            if let Some(record) = runtime_table_record_from_entity(entity_opt) {
+                            let record_opt = if lean {
+                                super::super::record_search::runtime_table_record_lean(entity_opt)
+                            } else {
+                                runtime_table_record_from_entity_projected(entity_opt, &explicit_cols)
+                            };
+                            if let Some(record) = record_opt {
                                 records.push(record);
                             }
                         }
