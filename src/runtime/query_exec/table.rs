@@ -319,15 +319,38 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                     // The hash lookup extracted only one equality predicate from the AND tree
                     // (e.g. city = 'X'); secondary predicates (e.g. age > 30) would be silently
                     // dropped without this step, producing wrong row counts.
+                    //
+                    // Use compile_with_schema when the collection schema is available so that
+                    // user column accesses use O(1) index lookup (RowFieldFast) instead of
+                    // O(n) linear search (RowField) — matters for 50K+ candidate sets.
                     let table_name = query.table.as_str();
                     let table_alias = query.alias.as_deref().unwrap_or(table_name);
-                    let compiled_filter = effective_filter.as_ref().map(|f| {
-                        super::filter_compiled::CompiledEntityFilter::compile(
+                    let schema_arc = db
+                        .store()
+                        .get_collection(table_name)
+                        .and_then(|m| m.column_schema());
+                    let compiled_filter =
+                        effective_filter
+                            .as_ref()
+                            .map(|f| {
+                                match schema_arc
+                        .as_ref()
+                    {
+                        Some(schema) => {
+                            super::filter_compiled::CompiledEntityFilter::compile_with_schema(
+                                f,
+                                table_name,
+                                table_alias,
+                                schema.as_ref(),
+                            )
+                        }
+                        None => super::filter_compiled::CompiledEntityFilter::compile(
                             f,
                             table_name,
                             table_alias,
-                        )
-                    });
+                        ),
+                    }
+                            });
                     let store = db.store();
                     // Batch fetch: single lock acquisition for the entire candidate set
                     let entities = store.get_batch(&query.table, &entity_ids);
@@ -475,6 +498,11 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         let use_parallel = explicit_limit.is_none()
             && entity_count >= crate::storage::query::executors::parallel_scan::MIN_PARALLEL_ROWS;
 
+        // SELECT * with lean materialization: skip the 6 heavy red_* system fields
+        // (collection, kind, type, capabilities, sequence_id, row_id) while keeping
+        // the two timestamp fields that external adapters commonly parse.
+        let lean_select_star = select_cols.is_empty();
+
         let mut records: Vec<UnifiedRecord> = Vec::new();
         if use_parallel {
             let matching = manager.query_all_zoned(&zone_preds, |entity| compiled.evaluate(entity));
@@ -501,6 +529,8 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                             runtime_table_record_from_entity_projected(entity.clone(), &select_cols)
                         })
                     }
+                } else if lean_select_star {
+                    super::super::record_search::runtime_table_record_lean(entity.clone())
                 } else {
                     runtime_table_record_from_entity(entity.clone())
                 };
@@ -537,6 +567,8 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                                 runtime_table_record_from_entity_projected(entity.clone(), &select_cols)
                             })
                         }
+                    } else if lean_select_star {
+                        super::super::record_search::runtime_table_record_lean(entity.clone())
                     } else {
                         runtime_table_record_from_entity(entity.clone())
                     };

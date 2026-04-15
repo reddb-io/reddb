@@ -1064,13 +1064,32 @@ impl RedDBRuntime {
 
         // ── Plan cache: reuse only exact-query ASTs ──
         //
-        // `QueryExpr` still embeds concrete literal values. Reusing a
-        // normalized cache key such as `INSERT INTO t VALUES (?)`
-        // would make different literal executions share the same AST
-        // and replay stale values on cache hits. Keep the cache
-        // exact-match until placeholder binding is wired end to end.
-        let cache_key = query.to_string();
-        let expr = {
+        // DML statements (INSERT/UPDATE/DELETE) almost always have unique literal
+        // values, so caching them burns CPU on eviction bookkeeping (Vec::remove(0)
+        // shifts the entire LRU list) with zero hit rate. Skip the cache entirely
+        // for write operations — parse directly.
+        //
+        // Only SELECT/DDL statements benefit from plan caching.
+        // Detect by peeking at the first keyword of the trimmed query.
+        let first_word = query
+            .trim()
+            .split_ascii_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_ascii_uppercase();
+        let is_write_op =
+            first_word == "INSERT" || first_word == "UPDATE" || first_word == "DELETE";
+
+        let cache_key = if is_write_op {
+            String::new() // unused
+        } else {
+            query.to_string()
+        };
+
+        let expr = if is_write_op {
+            // Bypass plan cache for write operations — no benefit, pure overhead
+            parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?
+        } else {
             let mut plan_cache = self.inner.query_cache.write();
             if let Some(cached) = plan_cache.get(&cache_key) {
                 cached.plan.optimized.clone()
