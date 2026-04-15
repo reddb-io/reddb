@@ -20,6 +20,7 @@ impl UnifiedStore {
             btree_indices: RwLock::new(HashMap::new()),
             context_index: ContextIndex::new(),
             entity_cache: RwLock::new(HashMap::new()),
+            graph_label_index: RwLock::new(HashMap::new()),
         }
     }
 
@@ -71,6 +72,7 @@ impl UnifiedStore {
             btree_indices: RwLock::new(HashMap::new()),
             context_index: ContextIndex::new(),
             entity_cache: RwLock::new(HashMap::new()),
+            graph_label_index: RwLock::new(HashMap::new()),
         };
 
         // Load existing data from pages if database exists

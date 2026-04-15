@@ -195,38 +195,50 @@ pub fn execute_graph_query(
             }
         }
         GraphStartPoint::NodeLabel(label) => {
-            // Scan for matching labels
-            let mut found = Vec::new();
-            for col in store.list_collections() {
-                if let Some(manager) = store.get_collection(&col) {
-                    for entity in manager.query_all(|_| true) {
-                        scanned += 1;
-                        if let EntityKind::GraphNode(ref node) = &entity.kind {
-                            if &node.label == label {
-                                found.push(entity);
-                            }
+            // Use label index for O(1) candidate lookup when populated;
+            // fall back to parallel scan with inline filter otherwise.
+            let candidate_ids = store.lookup_graph_nodes_by_label(label);
+            if !candidate_ids.is_empty() {
+                let mut found = Vec::new();
+                for col in store.list_collections() {
+                    if let Some(manager) = store.get_collection(&col) {
+                        let batch = manager.get_many(&candidate_ids);
+                        for entity_opt in batch.into_iter().flatten() {
+                            scanned += 1;
+                            found.push(entity_opt);
                         }
                     }
                 }
+                found
+            } else {
+                // Fallback: parallel scan with inline filter (handles cold start)
+                let mut found = Vec::new();
+                for col in store.list_collections() {
+                    if let Some(manager) = store.get_collection(&col) {
+                        let label_ref = label.as_str();
+                        let mut batch = manager.query_all_zoned(&[], |e| {
+                            matches!(&e.kind, EntityKind::GraphNode(ref n) if n.label == label_ref)
+                        });
+                        scanned += batch.len();
+                        found.append(&mut batch);
+                    }
+                }
+                found
             }
-            found
         }
         GraphStartPoint::Pattern(pattern) => {
             let mut found = Vec::new();
             for col in store.list_collections() {
                 if let Some(manager) = store.get_collection(&col) {
-                    for entity in manager.query_all(|_| true) {
-                        scanned += 1;
-                        let matches_pattern = match &entity.kind {
-                            EntityKind::GraphNode(ref node) => {
-                                pattern.labels.is_empty() || pattern.labels.contains(&node.label)
-                            }
-                            _ => false,
-                        };
-                        if matches_pattern {
-                            found.push(entity);
+                    let patterns = &pattern.labels;
+                    let mut batch = manager.query_all_zoned(&[], |e| match &e.kind {
+                        EntityKind::GraphNode(ref n) => {
+                            patterns.is_empty() || patterns.contains(&n.label)
                         }
-                    }
+                        _ => false,
+                    });
+                    scanned += batch.len();
+                    found.append(&mut batch);
                 }
             }
             found
@@ -277,22 +289,21 @@ pub fn execute_table_query(
     let mut scanned = 0;
 
     if let Some(manager) = store.get_collection(&query.collection) {
-        let entities = manager.query_all(|_| true);
+        let filters = &query.filters;
+        let entities = manager.query_all_zoned(&[], |e| apply_filters(e, filters));
+        scanned += entities.len();
         for entity in entities {
-            scanned += 1;
-            if apply_filters(&entity, &query.filters) {
-                matches.push(ScoredMatch {
-                    entity,
-                    score: 1.0,
-                    components: MatchComponents {
-                        structured_match: Some(1.0),
-                        filter_match: true,
-                        final_score: Some(1.0),
-                        ..Default::default()
-                    },
-                    path: None,
-                });
-            }
+            matches.push(ScoredMatch {
+                entity,
+                score: 1.0,
+                components: MatchComponents {
+                    structured_match: Some(1.0),
+                    filter_match: true,
+                    final_score: Some(1.0),
+                    ..Default::default()
+                },
+                path: None,
+            });
         }
     }
 
@@ -322,21 +333,20 @@ pub fn execute_scan_query(
     let mut scanned = 0;
 
     if let Some(manager) = store.get_collection(&query.collection) {
-        let entities = manager.query_all(|_| true);
+        let filters = &query.filters;
+        let entities = manager.query_all_zoned(&[], |e| apply_filters(e, filters));
+        scanned += entities.len();
         for entity in entities {
-            scanned += 1;
-            if apply_filters(&entity, &query.filters) {
-                matches.push(ScoredMatch {
-                    entity,
-                    score: 1.0,
-                    components: MatchComponents {
-                        structured_match: Some(1.0),
-                        final_score: Some(1.0),
-                        ..Default::default()
-                    },
-                    path: None,
-                });
-            }
+            matches.push(ScoredMatch {
+                entity,
+                score: 1.0,
+                components: MatchComponents {
+                    structured_match: Some(1.0),
+                    final_score: Some(1.0),
+                    ..Default::default()
+                },
+                path: None,
+            });
         }
     }
 

@@ -1,6 +1,22 @@
 use super::*;
 
 impl UnifiedStore {
+    /// Insert a label→entity_id mapping into the graph label index.
+    fn update_graph_label_index(&self, collection: &str, label: &str, entity_id: EntityId) {
+        let key = (collection.to_string(), label.to_string());
+        let mut idx = self.graph_label_index.write();
+        idx.entry(key).or_default().push(entity_id);
+    }
+
+    /// Look up entity IDs for a graph node label across all collections.
+    pub fn lookup_graph_nodes_by_label(&self, label: &str) -> Vec<EntityId> {
+        let idx = self.graph_label_index.read();
+        idx.iter()
+            .filter(|((_, l), _)| l == label)
+            .flat_map(|(_, ids)| ids.iter().copied())
+            .collect()
+    }
+
     pub fn create_collection(&self, name: impl Into<String>) -> Result<(), StoreError> {
         let name = name.into();
         let mut collections = self.collections.write();
@@ -175,8 +191,21 @@ impl UnifiedStore {
                 manager.register_row_id(*row_id);
             }
         }
+        // Capture graph node label before entity is moved into the manager
+        let graph_node_label: Option<String> = if let EntityKind::GraphNode(ref node) = entity.kind
+        {
+            Some(node.label.clone())
+        } else {
+            None
+        };
+
         let id = manager.insert(entity)?;
         self.register_entity_id(id);
+
+        // Update graph label index for GraphNode entities
+        if let Some(ref label) = graph_node_label {
+            self.update_graph_label_index(collection, label, id);
+        }
 
         // Also insert into B-tree index if pager is active
         if let Some(pager) = &self.pager {
@@ -243,6 +272,18 @@ impl UnifiedStore {
         }
         let t_assign_ids = t0.elapsed();
 
+        // Capture graph node labels before entities are moved into the segment manager
+        let graph_labels: Vec<Option<(String, EntityId)>> = entities
+            .iter()
+            .map(|e| {
+                if let EntityKind::GraphNode(ref node) = e.kind {
+                    Some((node.label.clone(), e.id))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         // Pre-serialize for B-tree while we still have references
         let t0 = std::time::Instant::now();
         let serialized: Option<Vec<(Vec<u8>, Vec<u8>)>> = if self.pager.is_some() {
@@ -267,6 +308,13 @@ impl UnifiedStore {
         let t0 = std::time::Instant::now();
         let ids = manager.bulk_insert(entities)?;
         let t_manager = t0.elapsed();
+
+        // Update graph label index for bulk-inserted GraphNode entities
+        for label_entry in &graph_labels {
+            if let Some((label, entity_id)) = label_entry {
+                self.update_graph_label_index(collection, label, *entity_id);
+            }
+        }
 
         // REDDB_SKIP_BTREE_ON_BULK=1 skips the persistent B-tree index
         // during bulk ingest. Safe when the caller has already persisted
@@ -344,11 +392,24 @@ impl UnifiedStore {
             }
         }
 
+        // Capture graph node label before entity is moved into the manager
+        let graph_node_label: Option<String> = if let EntityKind::GraphNode(ref node) = entity.kind
+        {
+            Some(node.label.clone())
+        } else {
+            None
+        };
+
         // Index into context index before consuming the entity
         self.context_index.index_entity(collection, &entity);
 
         let id = manager.insert(entity)?;
         self.register_entity_id(id);
+
+        // Update graph label index for GraphNode entities
+        if let Some(ref label) = graph_node_label {
+            self.update_graph_label_index(collection, label, id);
+        }
 
         // Also insert into B-tree index if pager is active
         if let Some(pager) = &self.pager {

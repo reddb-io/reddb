@@ -424,6 +424,9 @@ pub struct UnifiedStore {
     context_index: ContextIndex,
     /// Hot entity cache — LRU for frequently accessed entities by ID
     entity_cache: RwLock<HashMap<u64, (String, UnifiedEntity)>>,
+    /// Graph node label index: (collection, label) → Vec<EntityId>.
+    /// O(1) lookup for MATCH (n:Label) graph patterns — avoids full collection scan.
+    graph_label_index: RwLock<HashMap<(String, String), Vec<EntityId>>>,
 }
 
 mod builder;
