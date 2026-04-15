@@ -275,6 +275,14 @@ pub enum CompiledEntityOp {
         kind: EntityFieldKind,
         set: Arc<HashSet<Value>>,
     },
+    /// IN-list with > IN_BLOOM_THRESHOLD values: SplitBlockBloom pre-filter + HashSet fallback.
+    /// Bloom eliminates ~99% of non-matching rows before touching the HashSet.
+    /// Built once at compile time.
+    InBloom {
+        kind: EntityFieldKind,
+        set: Arc<HashSet<Value>>,
+        bloom: Arc<crate::storage::primitives::split_block_bloom::SplitBlockBloom>,
+    },
     Like {
         kind: EntityFieldKind,
         pattern: String,
@@ -447,6 +455,19 @@ impl CompiledEntityFilter {
                     let result = resolve_kind(kind, entity)
                         .as_ref()
                         .map(|candidate| set.contains(candidate.as_ref()))
+                        .unwrap_or(false);
+                    push!(result);
+                }
+                CompiledEntityOp::InBloom { kind, set, bloom } => {
+                    // Two-stage: bloom pre-filter eliminates ~99% of misses before HashSet probe.
+                    let result = resolve_kind(kind, entity)
+                        .as_ref()
+                        .map(|candidate| {
+                            let h = crate::storage::primitives::split_block_bloom::hash_value_u32(
+                                candidate.as_ref(),
+                            );
+                            bloom.probe(h) && set.contains(candidate.as_ref())
+                        })
                         .unwrap_or(false);
                     push!(result);
                 }
@@ -630,19 +651,37 @@ fn compile_into(
                 ops.push(CompiledEntityOp::Fallback(Box::new(filter.clone())));
                 return;
             }
-            // Small IN-list: linear scan avoids HashSet allocation overhead.
-            // Large IN-list: build HashSet once at compile time — O(1) per-row probe.
+            // ≤8 values:    InList  — linear scan, avoids HashSet overhead
+            // 9..=1000:      InSet   — HashSet O(1) probe
+            // >1000 values:  InBloom — SplitBlockBloom pre-filter + HashSet fallback
+            //                         ~99% of non-matching rows skip HashSet entirely
             const IN_SMALL_THRESHOLD: usize = 8;
+            const IN_BLOOM_THRESHOLD: usize = 1000;
             if values.len() <= IN_SMALL_THRESHOLD {
                 ops.push(CompiledEntityOp::InList {
                     kind,
                     values: values.clone(),
                 });
-            } else {
+            } else if values.len() <= IN_BLOOM_THRESHOLD {
                 let set: HashSet<Value> = values.iter().cloned().collect();
                 ops.push(CompiledEntityOp::InSet {
                     kind,
                     set: Arc::new(set),
+                });
+            } else {
+                // Build HashSet for exact membership + SplitBlockBloom for pre-filter.
+                let set: HashSet<Value> = values.iter().cloned().collect();
+                let mut bloom =
+                    crate::storage::primitives::split_block_bloom::SplitBlockBloom::with_capacity(
+                        values.len(),
+                    );
+                for v in values {
+                    bloom.insert(crate::storage::primitives::split_block_bloom::hash_value_u32(v));
+                }
+                ops.push(CompiledEntityOp::InBloom {
+                    kind,
+                    set: Arc::new(set),
+                    bloom: Arc::new(bloom),
                 });
             }
         }
