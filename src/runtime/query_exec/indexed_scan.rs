@@ -173,6 +173,27 @@ pub(crate) fn extract_cross_index_predicates<'a>(
         .or_else(|| extract_cross_index_predicates(right, table, idx_store))
 }
 
+/// Find any range predicate in an AND-tree that has a sorted index on its column.
+///
+/// Unlike `extract_cross_index_predicates`, this does NOT require a paired equality
+/// predicate — it is used by the TID bitmap path after the equality intersection is
+/// already built, to further narrow via a sorted range scan.
+pub(crate) fn find_range_predicate_with_sorted_index<'a>(
+    filter: &'a Filter,
+    table: &str,
+    idx_store: &IndexStore,
+) -> Option<&'a Filter> {
+    if is_range_filter_with_sorted_index(filter, table, idx_store) {
+        return Some(filter);
+    }
+    if let Filter::And(left, right) = filter {
+        find_range_predicate_with_sorted_index(left, table, idx_store)
+            .or_else(|| find_range_predicate_with_sorted_index(right, table, idx_store))
+    } else {
+        None
+    }
+}
+
 /// Sorted-range scan filtered by a pre-built candidate `HashSet` (from hash index).
 /// Implements PG-style bitmap AND: iterate the BTree range, only collect IDs in the
 /// hash set. Stops after `limit` results.

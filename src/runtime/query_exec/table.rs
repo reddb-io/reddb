@@ -17,7 +17,8 @@ use super::helpers::{
     extract_index_candidate, extract_select_column_names, extract_zone_predicates,
 };
 use super::indexed_scan::{
-    extract_cross_index_predicates, try_sorted_index_filtered_by_set, try_sorted_index_lookup,
+    extract_cross_index_predicates, find_range_predicate_with_sorted_index,
+    try_sorted_index_filtered_by_set, try_sorted_index_lookup,
 };
 use super::*;
 use crate::storage::query::sql_lowering::{
@@ -296,10 +297,12 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     }
 
     // ── TID BITMAP PATH: AND multiple hash indexes for multi-predicate queries ──
-    // `WHERE a = 1 AND b = 2` with separate indexes on a and b:
-    // - Look up each index → TidBitmap
-    // - AND the bitmaps (in-CPU, no heap I/O)
-    // - Fetch only the rows that survived both predicates
+    // `WHERE a = 1 AND b = 2 [AND range_col op val]` with hash indexes on a, b
+    // and optional sorted index on range_col:
+    // - Look up each equality index → TidBitmap per column
+    // - AND the bitmaps (HashSet intersection, smallest-first)
+    // - Optionally narrow further via sorted range scan filtered by the intersection set
+    // - Fetch only the surviving rows; re-apply full compiled filter for residual predicates
     // Only fires when ≥2 indexed equality columns exist in the filter.
     if let (Some(idx_store), Some(ref filter)) = (index_store, &effective_filter) {
         let mut eq_candidates: Vec<(String, Vec<u8>)> = Vec::new();
@@ -331,21 +334,78 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             if intersection.is_empty() {
                 return Ok(Vec::new());
             }
-            // Fetch matching entities in sorted order (ascending EntityId for sequential access)
-            let store = db.store();
-            let mut sorted_ids: Vec<u64> = intersection.into_iter().collect();
-            sorted_ids.sort_unstable();
+
+            let table_name = query.table.as_str();
+            let table_alias = query.alias.as_deref().unwrap_or(table_name);
+            let schema_arc = db
+                .store()
+                .get_collection(table_name)
+                .and_then(|m| m.column_schema());
+            // Always re-apply the full filter — residual predicates (range, OR, etc.)
+            // not captured by the eq-bitmap path must still be checked.
+            let compiled_filter = match schema_arc.as_ref() {
+                Some(schema) => super::filter_compiled::CompiledEntityFilter::compile_with_schema(
+                    filter,
+                    table_name,
+                    table_alias,
+                    schema.as_ref(),
+                ),
+                None => super::filter_compiled::CompiledEntityFilter::compile(
+                    filter,
+                    table_name,
+                    table_alias,
+                ),
+            };
+
             let limit = query.limit.map(|l| l as usize).unwrap_or(usize::MAX);
-            let entity_ids: Vec<EntityId> = sorted_ids.iter().map(|&r| EntityId::new(r)).collect();
-            // Batch fetch: single lock acquisition for the entire candidate set
+            let explicit_cols = extract_select_column_names(&effective_projections);
+            let lean = explicit_cols.is_empty();
+
+            // Optional: narrow via sorted range index filtered by the eq-intersection set.
+            // Handles `WHERE city='NYC' AND status='active' AND age > 30` fully in-index.
+            // Uses find_range_predicate_with_sorted_index (not extract_cross_index_predicates)
+            // because the eq predicates are already handled by the bitmap intersection above.
+            let entity_ids: Vec<EntityId> = if let Some(range_filter) =
+                find_range_predicate_with_sorted_index(filter, table_name, idx_store)
+            {
+                // Sorted-range scan filtered by the eq-bitmap intersection set
+                if let Some(range_ids) = try_sorted_index_filtered_by_set(
+                    range_filter,
+                    table_name,
+                    idx_store,
+                    &intersection,
+                    limit,
+                ) {
+                    range_ids
+                } else {
+                    // Sorted range not applicable; use eq-intersection directly
+                    let mut sorted: Vec<u64> = intersection.into_iter().collect();
+                    sorted.sort_unstable();
+                    sorted.into_iter().map(EntityId::new).collect()
+                }
+            } else {
+                // No range predicate; just sort eq-intersection for sequential access
+                let mut sorted: Vec<u64> = intersection.into_iter().collect();
+                sorted.sort_unstable();
+                sorted.into_iter().map(EntityId::new).collect()
+            };
+
+            let store = db.store();
             let entities = store.get_batch(&query.table, &entity_ids);
             let mut records = Vec::with_capacity(entity_ids.len().min(limit));
             for entity_opt in entities.into_iter().flatten() {
                 if records.len() >= limit {
                     break;
                 }
-                if let Some(record) = runtime_table_record_from_entity(entity_opt) {
-                    records.push(record);
+                if compiled_filter.evaluate(&entity_opt) {
+                    let record_opt = if lean {
+                        super::super::record_search::runtime_table_record_lean(entity_opt)
+                    } else {
+                        runtime_table_record_from_entity_projected(entity_opt, &explicit_cols)
+                    };
+                    if let Some(record) = record_opt {
+                        records.push(record);
+                    }
                 }
             }
             return Ok(records);
