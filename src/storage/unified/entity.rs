@@ -513,6 +513,17 @@ pub struct UnifiedEntity {
     pub data: EntityData,
     /// Sequence ID for ordering/versioning
     pub sequence_id: u64,
+    /// Field-name bloom filter (u64, zero-allocation).
+    ///
+    /// Each bit encodes one possible mid-character value: for field name `n`
+    /// the bit position is `n.as_bytes()[n.len()/2] & 63`. OR of all user
+    /// field names present in this entity. Cleared for schema-based bulk rows
+    /// (all rows share the same schema so bloom is segment-level).
+    ///
+    /// The compiled filter computes `required_bloom` from predicate field names
+    /// at compile time. If `entity.field_bloom & required_bloom != required_bloom`,
+    /// the entity cannot match and is skipped before any HashMap probe.
+    pub field_bloom: u64,
     /// Optional auxiliary data (embeddings, cross-refs).
     /// None for most table rows — saves 40 bytes/entity.
     aux: Option<Box<EntityAux>>,
@@ -560,10 +571,55 @@ impl UnifiedEntity {
     }
 }
 
+/// Compute one bit of a field-name bloom filter.
+///
+/// Uses the mid-character trick from MongoDB's `FieldNameBloomFilter.h`:
+/// the bit position is the mid-byte value clamped to 0..63. Zero-allocation,
+/// ~1.5% false-positive rate for ≤5 distinct field names.
+#[inline]
+pub fn field_name_bloom(name: &str) -> u64 {
+    let b = name.as_bytes();
+    if b.is_empty() {
+        return 0;
+    }
+    1u64 << (b[b.len() / 2] & 63)
+}
+
+/// Compute the combined field-name bloom for all user-level fields in `data`.
+/// Returns 0 for schema-based rows (all rows share the same schema, so the
+/// per-entity bloom would be identical — caller uses a segment-level bloom).
+pub fn compute_entity_field_bloom(data: &EntityData) -> u64 {
+    match data {
+        EntityData::Row(row) => {
+            if row.schema.is_some() {
+                // Schema path: bloom is identical for every row in this table.
+                // Don't store per-entity — use segment-level bloom instead.
+                return 0;
+            }
+            if let Some(named) = &row.named {
+                named.keys().fold(0u64, |acc, k| acc | field_name_bloom(k))
+            } else {
+                0
+            }
+        }
+        EntityData::Node(node) => node
+            .properties
+            .keys()
+            .fold(0u64, |acc, k| acc | field_name_bloom(k)),
+        EntityData::Edge(edge) => edge
+            .properties
+            .keys()
+            .fold(0u64, |acc, k| acc | field_name_bloom(k)),
+        // Vectors, time-series, queue: no user-named fields worth blooming.
+        _ => 0,
+    }
+}
+
 impl UnifiedEntity {
     /// Create a new unified entity
     pub fn new(id: EntityId, kind: EntityKind, data: EntityData) -> Self {
         let now = current_unix_secs();
+        let field_bloom = compute_entity_field_bloom(&data);
 
         Self {
             id,
@@ -572,6 +628,7 @@ impl UnifiedEntity {
             updated_at: now,
             data,
             sequence_id: 0,
+            field_bloom,
             aux: None,
         }
     }

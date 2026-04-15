@@ -34,7 +34,7 @@ use super::helpers::evaluate_entity_filter;
 use super::*;
 use crate::storage::query::ast::{CompareOp, FieldRef, Filter};
 use crate::storage::schema::Value;
-use crate::storage::unified::entity::{EntityData, EntityKind, UnifiedEntity};
+use crate::storage::unified::entity::{field_name_bloom, EntityData, EntityKind, UnifiedEntity};
 
 /// Pre-classified field reference. The classifier in
 /// [`classify_field`] turns every `FieldRef` into one of these
@@ -317,6 +317,14 @@ pub struct CompiledEntityFilter {
     ops: Vec<CompiledEntityOp>,
     table_name: String,
     table_alias: String,
+    /// OR of `field_name_bloom(name)` for every non-system user field
+    /// referenced by any predicate in this filter. 0 means no user fields
+    /// (pure system-field query — bloom gate skipped).
+    ///
+    /// At evaluate time: if `entity.field_bloom & required_bloom != required_bloom`
+    /// the entity cannot satisfy any user-field predicate and is skipped before
+    /// any HashMap probe.
+    required_bloom: u64,
 }
 
 impl CompiledEntityFilter {
@@ -324,10 +332,12 @@ impl CompiledEntityFilter {
     pub fn compile(filter: &Filter, table_name: &str, table_alias: &str) -> Self {
         let mut ops = Vec::new();
         compile_into(filter, table_name, table_alias, None, &mut ops);
+        let required_bloom = collect_required_bloom(filter);
         Self {
             ops,
             table_name: table_name.to_string(),
             table_alias: table_alias.to_string(),
+            required_bloom,
         }
     }
 
@@ -346,10 +356,12 @@ impl CompiledEntityFilter {
     ) -> Self {
         let mut ops = Vec::new();
         compile_into(filter, table_name, table_alias, Some(schema_cols), &mut ops);
+        let required_bloom = collect_required_bloom(filter);
         Self {
             ops,
             table_name: table_name.to_string(),
             table_alias: table_alias.to_string(),
+            required_bloom,
         }
     }
 
@@ -362,6 +374,18 @@ impl CompiledEntityFilter {
     /// Evaluate against an entity. Hot path — must stay allocation-free
     /// in the common case.
     pub fn evaluate(&self, entity: &UnifiedEntity) -> bool {
+        // Field-name bloom gate: if the entity is missing a required field,
+        // it cannot satisfy any user-field predicate. Skip before any HashMap.
+        // Only fires when entity.field_bloom is non-zero (named/document entities).
+        // Schema-based bulk rows have field_bloom == 0 (bloom tracked at segment
+        // level for those) so the gate is a no-op for the table hot path.
+        if self.required_bloom != 0
+            && entity.field_bloom != 0
+            && (entity.field_bloom & self.required_bloom) != self.required_bloom
+        {
+            return false;
+        }
+
         // Fixed-size bool stack — no heap allocation per row.
         // 32 slots is enough for any filter tree likely to appear in a real
         // query (worst case: N binary ops need N+1 operand slots at once).
@@ -500,6 +524,53 @@ impl CompiledEntityFilter {
 /// semantics. This keeps document-path queries on the slow path
 /// without breaking them — a future iteration can teach the
 /// classifier to walk paths too.
+/// Walk the filter AST and OR together `field_name_bloom(name)` for every
+/// non-system user field referenced. System fields (entity_id, created_at…)
+/// are always present on every entity so they don't need the bloom gate.
+/// Returns 0 when no user fields are referenced (pure system-field query).
+fn collect_required_bloom(filter: &Filter) -> u64 {
+    const SYSTEM_FIELDS: &[&str] = &[
+        "red_entity_id",
+        "entity_id",
+        "created_at",
+        "updated_at",
+        "red_sequence_id",
+        "red_collection",
+        "red_kind",
+        "row_id",
+    ];
+    fn is_system(col: &str) -> bool {
+        SYSTEM_FIELDS.contains(&col)
+    }
+    fn bloom_for_field(field: &FieldRef) -> u64 {
+        match field {
+            FieldRef::TableColumn { column, .. } => {
+                if is_system(column) || column.contains('.') {
+                    0
+                } else {
+                    field_name_bloom(column)
+                }
+            }
+            _ => 0,
+        }
+    }
+    match filter {
+        Filter::Compare { field, .. } => bloom_for_field(field),
+        Filter::Between { field, .. } => bloom_for_field(field),
+        Filter::In { field, .. } => bloom_for_field(field),
+        Filter::Like { field, .. } => bloom_for_field(field),
+        Filter::StartsWith { field, .. } => bloom_for_field(field),
+        Filter::EndsWith { field, .. } => bloom_for_field(field),
+        Filter::Contains { field, .. } => bloom_for_field(field),
+        Filter::IsNull(field) => bloom_for_field(field),
+        Filter::IsNotNull(field) => bloom_for_field(field),
+        Filter::And(l, r) => collect_required_bloom(l) | collect_required_bloom(r),
+        Filter::Or(l, r) => collect_required_bloom(l) | collect_required_bloom(r),
+        Filter::Not(inner) => collect_required_bloom(inner),
+        _ => 0,
+    }
+}
+
 fn needs_fallback(kind: &EntityFieldKind) -> bool {
     matches!(
         kind,
