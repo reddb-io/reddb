@@ -273,6 +273,48 @@ impl SortedColumnIndex {
         Some(result)
     }
 
+    /// Covered-query projection: return the BTree **keys** (= column values) for a range.
+    /// The key IS the value — no entity fetch needed for `SELECT col FROM t WHERE col op x`.
+    /// Stops after `limit` distinct keys (each key may have multiple entity IDs, but for
+    /// covered queries we only need the value once per distinct key).
+    pub fn range_lookup_values<R>(&self, range: R, limit: usize) -> Vec<SortedNumericKey>
+    where
+        R: std::ops::RangeBounds<SortedNumericKey>,
+    {
+        if self.has_inexact_numeric_values {
+            return Vec::new();
+        }
+        self.entries
+            .range(range)
+            .take(limit)
+            .map(|(key, _)| *key)
+            .collect()
+    }
+
+    /// Covered-query projection for IN-lists: return BTree keys for the given values.
+    pub fn in_lookup_values(
+        &self,
+        values: &[SortedNumericKey],
+        limit: usize,
+    ) -> Vec<SortedNumericKey> {
+        if self.has_inexact_numeric_values {
+            return Vec::new();
+        }
+        let mut sorted_vals = values.to_vec();
+        sorted_vals.sort_unstable();
+        sorted_vals.dedup();
+        let mut result = Vec::with_capacity(sorted_vals.len().min(limit));
+        for key in sorted_vals {
+            if self.entries.contains_key(&key) {
+                result.push(key);
+                if result.len() >= limit {
+                    break;
+                }
+            }
+        }
+        result
+    }
+
     fn collect_range<R>(&self, range: R) -> Vec<EntityId>
     where
         R: std::ops::RangeBounds<SortedNumericKey>,
@@ -635,6 +677,58 @@ impl SortedIndexManager {
             .in_lookup_limited_filtered_by_set(values, filter_set, limit)
     }
 
+    /// Covered-query range projection: return BTree keys (= column values) for a range.
+    /// No entity fetch required — the BTree key IS the column value.
+    pub(crate) fn range_lookup_values(
+        &self,
+        collection: &str,
+        column: &str,
+        low: SortedNumericKey,
+        high: SortedNumericKey,
+        limit: usize,
+    ) -> Option<Vec<SortedNumericKey>> {
+        let indices = read_unpoisoned(&self.indices);
+        let key = (collection.to_string(), column.to_string());
+        let idx = indices.get(&key)?;
+        Some(idx.range_lookup_values((Included(low), Included(high)), limit))
+    }
+
+    /// Covered-query gt/ge/lt/le projection.
+    pub(crate) fn compare_lookup_values(
+        &self,
+        collection: &str,
+        column: &str,
+        threshold: SortedNumericKey,
+        op: &crate::storage::query::ast::CompareOp,
+        limit: usize,
+    ) -> Option<Vec<SortedNumericKey>> {
+        use crate::storage::query::ast::CompareOp;
+        let indices = read_unpoisoned(&self.indices);
+        let key = (collection.to_string(), column.to_string());
+        let idx = indices.get(&key)?;
+        let values = match op {
+            CompareOp::Gt => idx.range_lookup_values((Excluded(threshold), Unbounded), limit),
+            CompareOp::Ge => idx.range_lookup_values((Included(threshold), Unbounded), limit),
+            CompareOp::Lt => idx.range_lookup_values((Unbounded, Excluded(threshold)), limit),
+            CompareOp::Le => idx.range_lookup_values((Unbounded, Included(threshold)), limit),
+            _ => return None,
+        };
+        Some(values)
+    }
+
+    /// Covered-query IN-list projection.
+    pub(crate) fn in_lookup_values(
+        &self,
+        collection: &str,
+        column: &str,
+        values: &[SortedNumericKey],
+        limit: usize,
+    ) -> Option<Vec<SortedNumericKey>> {
+        let indices = read_unpoisoned(&self.indices);
+        let key = (collection.to_string(), column.to_string());
+        Some(indices.get(&key)?.in_lookup_values(values, limit))
+    }
+
     /// Check if a sorted index exists for a column.
     pub fn has_index(&self, collection: &str, column: &str) -> bool {
         let indices = read_unpoisoned(&self.indices);
@@ -702,6 +796,14 @@ pub(crate) fn value_to_sorted_numeric_key(val: &Value) -> Option<SortedNumericKe
     match classify_sorted_numeric_value(val) {
         SortedNumericValue::Exact(key) => Some(key),
         SortedNumericValue::Inexact | SortedNumericValue::Unsupported => None,
+    }
+}
+
+/// Convert a `SortedNumericKey` back to a `Value` for covered-query projection.
+pub(crate) fn sorted_numeric_key_to_value(key: SortedNumericKey) -> Value {
+    match key {
+        SortedNumericKey::Signed(n) => Value::Integer(n),
+        SortedNumericKey::Unsigned(n) => Value::UnsignedInteger(n),
     }
 }
 

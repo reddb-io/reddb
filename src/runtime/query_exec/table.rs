@@ -18,7 +18,7 @@ use super::helpers::{
 };
 use super::indexed_scan::{
     extract_cross_index_predicates, find_range_predicate_with_sorted_index,
-    try_sorted_index_filtered_by_set, try_sorted_index_lookup,
+    try_covered_sorted_index_query, try_sorted_index_filtered_by_set, try_sorted_index_lookup,
 };
 use super::*;
 use crate::storage::query::sql_lowering::{
@@ -156,6 +156,41 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             );
         }
         if let Some(entity_ids) = sorted_res {
+            // ── COVERED QUERY: skip heap fetch when projection ⊆ indexed column ──
+            //
+            // `SELECT age FROM t WHERE age > 30` — the BTree key IS the value.
+            // Return directly from index without touching flat_entities.
+            // Only valid when: single column projection matching the indexed column,
+            // no GROUP BY, no HAVING, no ORDER BY (those need entity data).
+            let explicit_cols = extract_select_column_names(&effective_projections);
+            let is_covered_candidate = !explicit_cols.is_empty()
+                && effective_group_by.is_empty()
+                && effective_having.is_none()
+                && query.order_by.is_empty();
+
+            if is_covered_candidate {
+                let limit = query.limit.map(|l| l as usize).unwrap_or(usize::MAX);
+                if let Some(values) = super::indexed_scan::try_covered_sorted_index_query(
+                    filter,
+                    &query.table,
+                    idx_store,
+                    &explicit_cols,
+                    limit,
+                ) {
+                    // Each value becomes a single-field UnifiedRecord
+                    let col_name = &explicit_cols[0];
+                    let records = values
+                        .into_iter()
+                        .map(|v| {
+                            let mut rec = UnifiedRecord::new();
+                            rec.set(col_name, v);
+                            rec
+                        })
+                        .collect();
+                    return Ok(records);
+                }
+            }
+
             // Re-apply the full filter — when the filter is a compound AND, the
             // sorted lookup used only the range predicate to narrow candidates.
             // Residual predicates (equality, other ranges) must be checked here.
@@ -183,7 +218,6 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             // was requested.  Explicit projection columns still go through the full
             // path below so user-specified system fields (e.g. SELECT red_entity_id,
             // age FROM t) are not silently dropped.
-            let explicit_cols = extract_select_column_names(&effective_projections);
             let lean = explicit_cols.is_empty(); // SELECT * → lean path
                                                  // Batch fetch: single lock acquisition for the entire candidate set
             let entities = store.get_batch(&query.table, &entity_ids);

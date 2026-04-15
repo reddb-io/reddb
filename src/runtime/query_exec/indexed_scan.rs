@@ -118,11 +118,154 @@ pub(crate) fn try_sorted_index_lookup(
                 .in_lookup_limited(table, col, &keys, effective_limit)
         }
         Filter::And(left, right) => {
-            // Extract a range predicate from either side of the AND.
-            // The sorted index narrows the candidate set; the caller applies the
-            // full filter on the surviving rows, so it's safe to return a superset here.
-            try_sorted_index_lookup(left, table, idx_store, limit)
-                .or_else(|| try_sorted_index_lookup(right, table, idx_store, limit))
+            // Phase 6: if BOTH sides have sorted indexes, intersect their ID sets.
+            // Eliminates the gap-scanning problem for compound range queries like
+            // `WHERE age > 30 AND score > 0.5` when both columns are indexed.
+            let ids_left = try_sorted_index_lookup_leaf(left, table, idx_store, limit);
+            let ids_right = try_sorted_index_lookup_leaf(right, table, idx_store, limit);
+            match (ids_left, ids_right) {
+                (Some(a), Some(b)) => {
+                    // Intersect: build HashSet from smaller, filter larger.
+                    // Returns a subset — safe because caller re-applies full filter.
+                    let effective_limit = limit.unwrap_or(usize::MAX);
+                    Some(intersect_sorted_id_sets(a, b, effective_limit))
+                }
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => {
+                    // Fall through to nested AND extraction (for deeply nested filters)
+                    try_sorted_index_lookup(left, table, idx_store, limit)
+                        .or_else(|| try_sorted_index_lookup(right, table, idx_store, limit))
+                }
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Like `try_sorted_index_lookup` but only matches leaf predicates (not AND/OR wrappers).
+/// Used by Phase 6 AND-of-sorted to prevent double-counting nested ANDs.
+fn try_sorted_index_lookup_leaf(
+    filter: &Filter,
+    table: &str,
+    idx_store: &IndexStore,
+    limit: Option<usize>,
+) -> Option<Vec<EntityId>> {
+    match filter {
+        Filter::And(_, _) | Filter::Or(_, _) | Filter::Not(_) => None,
+        other => try_sorted_index_lookup(other, table, idx_store, limit),
+    }
+}
+
+/// Intersect two EntityId sets. Builds a HashSet from the smaller and filters
+/// the larger. Returns up to `limit` IDs. O(min(|a|,|b|) + max(|a|,|b|)).
+pub(crate) fn intersect_sorted_id_sets(
+    a: Vec<EntityId>,
+    b: Vec<EntityId>,
+    limit: usize,
+) -> Vec<EntityId> {
+    if a.is_empty() || b.is_empty() {
+        return Vec::new();
+    }
+    // Build HashSet from smaller side
+    let (larger, smaller) = if a.len() >= b.len() { (a, b) } else { (b, a) };
+    let set: std::collections::HashSet<u64> = smaller.iter().map(|id| id.raw()).collect();
+    let mut result = Vec::with_capacity(limit.min(set.len()));
+    for id in larger {
+        if set.contains(&id.raw()) {
+            result.push(id);
+            if result.len() >= limit {
+                break;
+            }
+        }
+    }
+    result
+}
+
+/// Covered-query optimization: when the filter is a simple range/IN predicate on a sorted
+/// index column, and the projection only requests that column, return the BTree keys directly
+/// as Values — no entity fetch needed.
+///
+/// Returns `Some(Vec<Value>)` when the query is covered; `None` to fall through to entity fetch.
+pub(crate) fn try_covered_sorted_index_query(
+    filter: &Filter,
+    table: &str,
+    idx_store: &IndexStore,
+    explicit_cols: &[String],
+    limit: usize,
+) -> Option<Vec<crate::storage::schema::Value>> {
+    // Only covers single-column projections on the exact indexed column.
+    if explicit_cols.len() != 1 {
+        return None;
+    }
+    let proj_col = &explicit_cols[0];
+
+    match filter {
+        Filter::Between { field, low, high } => {
+            let col = match field {
+                FieldRef::TableColumn { column, .. } => column.as_str(),
+                _ => return None,
+            };
+            if col != proj_col.as_str() {
+                return None;
+            }
+            let lo = super::super::index_store::value_to_sorted_numeric_key(low)?;
+            let hi = super::super::index_store::value_to_sorted_numeric_key(high)?;
+            let keys = idx_store
+                .sorted
+                .range_lookup_values(table, col, lo, hi, limit)?;
+            Some(
+                keys.into_iter()
+                    .map(super::super::index_store::sorted_numeric_key_to_value)
+                    .collect(),
+            )
+        }
+        Filter::Compare { field, op, value }
+            if matches!(
+                *op,
+                CompareOp::Gt | CompareOp::Ge | CompareOp::Lt | CompareOp::Le
+            ) =>
+        {
+            let col = match field {
+                FieldRef::TableColumn { column, .. } => column.as_str(),
+                _ => return None,
+            };
+            if col != proj_col.as_str() {
+                return None;
+            }
+            let threshold = super::super::index_store::value_to_sorted_numeric_key(value)?;
+            let keys = idx_store
+                .sorted
+                .compare_lookup_values(table, col, threshold, op, limit)?;
+            Some(
+                keys.into_iter()
+                    .map(super::super::index_store::sorted_numeric_key_to_value)
+                    .collect(),
+            )
+        }
+        Filter::In { field, values } => {
+            let col = match field {
+                FieldRef::TableColumn { column, .. } => column.as_str(),
+                _ => return None,
+            };
+            if col != proj_col.as_str() {
+                return None;
+            }
+            let keys: Vec<super::super::index_store::SortedNumericKey> = values
+                .iter()
+                .filter_map(super::super::index_store::value_to_sorted_numeric_key)
+                .collect();
+            if keys.is_empty() {
+                return None;
+            }
+            let keys = idx_store
+                .sorted
+                .in_lookup_values(table, col, &keys, limit)?;
+            Some(
+                keys.into_iter()
+                    .map(super::super::index_store::sorted_numeric_key_to_value)
+                    .collect(),
+            )
         }
         _ => None,
     }
