@@ -160,11 +160,23 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             // Residual predicates (equality, other ranges) must be checked here.
             let table_name = query.table.as_str();
             let table_alias = query.alias.as_deref().unwrap_or(table_name);
-            let compiled_filter = super::filter_compiled::CompiledEntityFilter::compile(
-                filter,
-                table_name,
-                table_alias,
-            );
+            let schema_arc = db
+                .store()
+                .get_collection(table_name)
+                .and_then(|m| m.column_schema());
+            let compiled_filter = match schema_arc.as_ref() {
+                Some(schema) => super::filter_compiled::CompiledEntityFilter::compile_with_schema(
+                    filter,
+                    table_name,
+                    table_alias,
+                    schema.as_ref(),
+                ),
+                None => super::filter_compiled::CompiledEntityFilter::compile(
+                    filter,
+                    table_name,
+                    table_alias,
+                ),
+            };
             let store = db.store();
             // Use lean materialization (skip red_* system fields) when SELECT *
             // was requested.  Explicit projection columns still go through the full
