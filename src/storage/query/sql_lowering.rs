@@ -103,6 +103,7 @@ pub fn effective_table_filter(query: &TableQuery) -> Option<Filter> {
         .filter
         .clone()
         .or_else(|| query.where_expr.as_ref().map(expr_to_filter))
+        .map(|f| f.optimize()) // OR-of-Eq → In; AND/OR flatten; constant fold
 }
 
 pub fn effective_table_group_by_exprs(query: &TableQuery) -> Vec<Expr> {

@@ -52,6 +52,7 @@ pub mod executors;
 pub mod expr_typing;
 pub mod filter;
 pub mod filter_compiled;
+pub mod filter_optimizer;
 pub mod lexer;
 pub mod modes;
 pub mod optimizer;
@@ -130,7 +131,7 @@ pub use security::{
 };
 pub use similarity::{SimilarityQuery, SimilarityResult};
 pub use sort::{Direction, NullsOrder, OrderBy, QueryLimits, SortKey};
-pub use sql::{FrontendStatement, SqlCommand, SqlStatement};
+pub use sql::{parse_frontend, FrontendStatement, SqlCommand, SqlStatement};
 pub use step::{
     AggregateStep, BarrierStep, BasicTraversal, BranchStep, ChooseStep, CollectingBarrierStep,
     DedupStep, Direction as TraversalDirection, EdgeSourceStep, EdgeStep, ExecutionMode,

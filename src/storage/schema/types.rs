@@ -873,6 +873,106 @@ pub enum Value {
     Password(String),
 }
 
+/// Manual `Eq` impl: consistent with the manual `Hash` impl below.
+/// Float NaN is treated as equal to itself (bit-level equality) so that
+/// `Value` can be used in `HashSet<Value>` for IN-list optimizations.
+/// This diverges from IEEE 754 but is safe for SQL query evaluation.
+impl Eq for Value {}
+
+/// Manual `Hash` impl for `Value`.
+/// - Floats: use `f64.to_bits()` so the invariant `a == b → hash(a) == hash(b)` holds.
+/// - Arrays / nested values: hash each element recursively.
+/// - All other variants: delegate to the byte-level representation.
+impl std::hash::Hash for Value {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Discriminant first — ensures different variants never collide
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Value::Null => {}
+            Value::Integer(v) => v.hash(state),
+            Value::UnsignedInteger(v) => v.hash(state),
+            Value::Float(v) => v.to_bits().hash(state),
+            Value::Text(v) => v.hash(state),
+            Value::Blob(v) => v.hash(state),
+            Value::Boolean(v) => v.hash(state),
+            Value::Timestamp(v) => v.hash(state),
+            Value::Duration(v) => v.hash(state),
+            Value::IpAddr(v) => v.hash(state),
+            Value::MacAddr(v) => v.hash(state),
+            Value::Vector(v) => {
+                v.len().hash(state);
+                for f in v {
+                    f.to_bits().hash(state);
+                }
+            }
+            Value::Json(v) => v.hash(state),
+            Value::Uuid(v) => v.hash(state),
+            Value::NodeRef(v) => v.hash(state),
+            Value::EdgeRef(v) => v.hash(state),
+            Value::VectorRef(c, id) => {
+                c.hash(state);
+                id.hash(state);
+            }
+            Value::RowRef(c, id) => {
+                c.hash(state);
+                id.hash(state);
+            }
+            Value::Color(v) => v.hash(state),
+            Value::Email(v) => v.hash(state),
+            Value::Url(v) => v.hash(state),
+            Value::Phone(v) => v.hash(state),
+            Value::Semver(v) => v.hash(state),
+            Value::Cidr(ip, prefix) => {
+                ip.hash(state);
+                prefix.hash(state);
+            }
+            Value::Date(v) => v.hash(state),
+            Value::Time(v) => v.hash(state),
+            Value::Decimal(v) => v.hash(state),
+            Value::EnumValue(v) => v.hash(state),
+            Value::Array(v) => {
+                v.len().hash(state);
+                for elem in v {
+                    elem.hash(state);
+                }
+            }
+            Value::TimestampMs(v) => v.hash(state),
+            Value::Ipv4(v) => v.hash(state),
+            Value::Ipv6(v) => v.hash(state),
+            Value::Subnet(ip, mask) => {
+                ip.hash(state);
+                mask.hash(state);
+            }
+            Value::Port(v) => v.hash(state),
+            Value::Latitude(v) => v.hash(state),
+            Value::Longitude(v) => v.hash(state),
+            Value::GeoPoint(lat, lon) => {
+                lat.hash(state);
+                lon.hash(state);
+            }
+            Value::Country2(v) => v.hash(state),
+            Value::Country3(v) => v.hash(state),
+            Value::Lang2(v) => v.hash(state),
+            Value::Lang5(v) => v.hash(state),
+            Value::Currency(v) => v.hash(state),
+            Value::ColorAlpha(v) => v.hash(state),
+            Value::BigInt(v) => v.hash(state),
+            Value::KeyRef(c, k) => {
+                c.hash(state);
+                k.hash(state);
+            }
+            Value::DocRef(c, id) => {
+                c.hash(state);
+                id.hash(state);
+            }
+            Value::TableRef(v) => v.hash(state),
+            Value::PageRef(v) => v.hash(state),
+            Value::Secret(v) => v.hash(state),
+            Value::Password(v) => v.hash(state),
+        }
+    }
+}
+
 impl Value {
     /// Get the data type of this value
     pub fn data_type(&self) -> DataType {

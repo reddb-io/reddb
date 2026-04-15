@@ -1277,6 +1277,13 @@ impl Filter {
     pub fn not(self) -> Self {
         Self::Not(Box::new(self))
     }
+
+    /// Bottom-up AST rewrites: OR-of-equalities → IN, AND/OR flatten.
+    /// Inspired by MongoDB's `MatchExpression::optimize()`.
+    /// Call on the result of `effective_table_filter()` before evaluation.
+    pub fn optimize(self) -> Self {
+        crate::storage::query::filter_optimizer::optimize(self)
+    }
 }
 
 /// Comparison operator

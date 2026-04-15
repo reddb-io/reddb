@@ -27,6 +27,8 @@
 //! `evaluate_entity_filter` to guard against drift.
 
 use std::borrow::Cow;
+use std::collections::HashSet;
+use std::sync::Arc;
 
 use super::helpers::evaluate_entity_filter;
 use super::*;
@@ -262,9 +264,16 @@ pub enum CompiledEntityOp {
         low: Value,
         high: Value,
     },
+    /// IN-list with ≤ IN_SMALL_THRESHOLD values: linear scan (avoids HashSet overhead for tiny lists).
     InList {
         kind: EntityFieldKind,
         values: Vec<Value>,
+    },
+    /// IN-list with > IN_SMALL_THRESHOLD values: O(1) HashSet probe.
+    /// Built once at compile time; shared across evaluate() calls via Arc.
+    InSet {
+        kind: EntityFieldKind,
+        set: Arc<HashSet<Value>>,
     },
     Like {
         kind: EntityFieldKind,
@@ -409,6 +418,14 @@ impl CompiledEntityFilter {
                         .unwrap_or(false);
                     push!(result);
                 }
+                CompiledEntityOp::InSet { kind, set } => {
+                    // O(1) HashSet::contains — built once at compile time
+                    let result = resolve_kind(kind, entity)
+                        .as_ref()
+                        .map(|candidate| set.contains(candidate.as_ref()))
+                        .unwrap_or(false);
+                    push!(result);
+                }
                 CompiledEntityOp::Like { kind, pattern } => {
                     // runtime_value_text_cow: borrow for Text/Email/Url, owned for others
                     let result = resolve_kind(kind, entity)
@@ -542,10 +559,21 @@ fn compile_into(
                 ops.push(CompiledEntityOp::Fallback(Box::new(filter.clone())));
                 return;
             }
-            ops.push(CompiledEntityOp::InList {
-                kind,
-                values: values.clone(),
-            });
+            // Small IN-list: linear scan avoids HashSet allocation overhead.
+            // Large IN-list: build HashSet once at compile time — O(1) per-row probe.
+            const IN_SMALL_THRESHOLD: usize = 8;
+            if values.len() <= IN_SMALL_THRESHOLD {
+                ops.push(CompiledEntityOp::InList {
+                    kind,
+                    values: values.clone(),
+                });
+            } else {
+                let set: HashSet<Value> = values.iter().cloned().collect();
+                ops.push(CompiledEntityOp::InSet {
+                    kind,
+                    set: Arc::new(set),
+                });
+            }
         }
         Filter::Like { field, pattern } => {
             let kind = classify(field);
