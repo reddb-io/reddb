@@ -1978,7 +1978,11 @@ async fn create_row(
 ) -> Result<Response<EntityReply>, Status> {
     self.authorize_write(request.metadata())?;
     let request = request.into_inner();
-    Ok(Response::new(create_row_reply(self, request)?))
+    let rt = self.clone();
+    tokio::task::spawn_blocking(move || create_row_reply(&rt, request))
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
+        .map(Response::new)
 }
 
 async fn create_node(
@@ -1987,7 +1991,11 @@ async fn create_node(
 ) -> Result<Response<EntityReply>, Status> {
     self.authorize_write(request.metadata())?;
     let request = request.into_inner();
-    Ok(Response::new(create_node_reply(self, request)?))
+    let rt = self.clone();
+    tokio::task::spawn_blocking(move || create_node_reply(&rt, request))
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
+        .map(Response::new)
 }
 
 async fn create_edge(
@@ -1996,7 +2004,11 @@ async fn create_edge(
 ) -> Result<Response<EntityReply>, Status> {
     self.authorize_write(request.metadata())?;
     let request = request.into_inner();
-    Ok(Response::new(create_edge_reply(self, request)?))
+    let rt = self.clone();
+    tokio::task::spawn_blocking(move || create_edge_reply(&rt, request))
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
+        .map(Response::new)
 }
 
 async fn create_vector(
@@ -2005,7 +2017,11 @@ async fn create_vector(
 ) -> Result<Response<EntityReply>, Status> {
     self.authorize_write(request.metadata())?;
     let request = request.into_inner();
-    Ok(Response::new(create_vector_reply(self, request)?))
+    let rt = self.clone();
+    tokio::task::spawn_blocking(move || create_vector_reply(&rt, request))
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
+        .map(Response::new)
 }
 
 async fn create_document(
@@ -2032,7 +2048,14 @@ async fn bulk_create_rows(
 ) -> Result<Response<BulkEntityReply>, Status> {
     self.authorize_write(request.metadata())?;
     let request = request.into_inner();
-    Ok(Response::new(bulk_create_rows_fast(self, request)?))
+    // spawn_blocking: bulk_create_rows_fast acquires segment_arc.write() internally.
+    // Running it directly inside an async fn would block the Tokio worker thread,
+    // starving other concurrent requests under high write concurrency.
+    let rt = self.clone();
+    tokio::task::spawn_blocking(move || bulk_create_rows_fast(&rt, request))
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
+        .map(Response::new)
 }
 
 async fn bulk_insert_binary(
@@ -2041,7 +2064,11 @@ async fn bulk_insert_binary(
 ) -> Result<Response<proto::BulkInsertReply>, Status> {
     self.authorize_write(request.metadata())?;
     let request = request.into_inner();
-    Ok(Response::new(bulk_insert_binary(self, request)?))
+    let rt = self.clone();
+    tokio::task::spawn_blocking(move || bulk_insert_binary(&rt, request))
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
+        .map(Response::new)
 }
 
 async fn bulk_create_nodes(
@@ -2050,7 +2077,11 @@ async fn bulk_create_nodes(
 ) -> Result<Response<BulkEntityReply>, Status> {
     self.authorize_write(request.metadata())?;
     let request = request.into_inner();
-    Ok(Response::new(bulk_create_reply(self, request, create_node_reply)?))
+    let rt = self.clone();
+    tokio::task::spawn_blocking(move || bulk_create_reply(&rt, request, create_node_reply))
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
+        .map(Response::new)
 }
 
 async fn bulk_create_edges(
@@ -2059,7 +2090,11 @@ async fn bulk_create_edges(
 ) -> Result<Response<BulkEntityReply>, Status> {
     self.authorize_write(request.metadata())?;
     let request = request.into_inner();
-    Ok(Response::new(bulk_create_reply(self, request, create_edge_reply)?))
+    let rt = self.clone();
+    tokio::task::spawn_blocking(move || bulk_create_reply(&rt, request, create_edge_reply))
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
+        .map(Response::new)
 }
 
 async fn bulk_create_vectors(
@@ -2068,7 +2103,11 @@ async fn bulk_create_vectors(
 ) -> Result<Response<BulkEntityReply>, Status> {
     self.authorize_write(request.metadata())?;
     let request = request.into_inner();
-    Ok(Response::new(bulk_create_reply(self, request, create_vector_reply)?))
+    let rt = self.clone();
+    tokio::task::spawn_blocking(move || bulk_create_reply(&rt, request, create_vector_reply))
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
+        .map(Response::new)
 }
 
 async fn bulk_create_documents(
@@ -2077,7 +2116,11 @@ async fn bulk_create_documents(
 ) -> Result<Response<BulkEntityReply>, Status> {
     self.authorize_write(request.metadata())?;
     let request = request.into_inner();
-    Ok(Response::new(bulk_create_reply(self, request, create_document_reply)?))
+    let rt = self.clone();
+    tokio::task::spawn_blocking(move || bulk_create_reply(&rt, request, create_document_reply))
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
+        .map(Response::new)
 }
 
 async fn ask(

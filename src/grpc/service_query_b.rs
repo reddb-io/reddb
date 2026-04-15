@@ -168,7 +168,11 @@ async fn create_row(
 ) -> Result<Response<EntityReply>, Status> {
     self.authorize_write(request.metadata())?;
     let request = request.into_inner();
-    Ok(Response::new(create_row_reply(self, request)?))
+    let rt = self.clone();
+    tokio::task::spawn_blocking(move || create_row_reply(&rt, request))
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
+        .map(Response::new)
 }
 
 async fn create_node(
@@ -177,7 +181,11 @@ async fn create_node(
 ) -> Result<Response<EntityReply>, Status> {
     self.authorize_write(request.metadata())?;
     let request = request.into_inner();
-    Ok(Response::new(create_node_reply(self, request)?))
+    let rt = self.clone();
+    tokio::task::spawn_blocking(move || create_node_reply(&rt, request))
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
+        .map(Response::new)
 }
 
 async fn create_edge(
@@ -186,7 +194,11 @@ async fn create_edge(
 ) -> Result<Response<EntityReply>, Status> {
     self.authorize_write(request.metadata())?;
     let request = request.into_inner();
-    Ok(Response::new(create_edge_reply(self, request)?))
+    let rt = self.clone();
+    tokio::task::spawn_blocking(move || create_edge_reply(&rt, request))
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
+        .map(Response::new)
 }
 
 async fn create_vector(
@@ -195,7 +207,11 @@ async fn create_vector(
 ) -> Result<Response<EntityReply>, Status> {
     self.authorize_write(request.metadata())?;
     let request = request.into_inner();
-    Ok(Response::new(create_vector_reply(self, request)?))
+    let rt = self.clone();
+    tokio::task::spawn_blocking(move || create_vector_reply(&rt, request))
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
+        .map(Response::new)
 }
 
 async fn bulk_create_rows(
@@ -204,7 +220,11 @@ async fn bulk_create_rows(
 ) -> Result<Response<BulkEntityReply>, Status> {
     self.authorize_write(request.metadata())?;
     let request = request.into_inner();
-    Ok(Response::new(bulk_create_reply(self, request, create_row_reply)?))
+    let rt = self.clone();
+    tokio::task::spawn_blocking(move || bulk_create_reply(&rt, request, create_row_reply))
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
+        .map(Response::new)
 }
 
 async fn bulk_create_nodes(
@@ -213,7 +233,11 @@ async fn bulk_create_nodes(
 ) -> Result<Response<BulkEntityReply>, Status> {
     self.authorize_write(request.metadata())?;
     let request = request.into_inner();
-    Ok(Response::new(bulk_create_reply(self, request, create_node_reply)?))
+    let rt = self.clone();
+    tokio::task::spawn_blocking(move || bulk_create_reply(&rt, request, create_node_reply))
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
+        .map(Response::new)
 }
 
 async fn bulk_create_edges(
@@ -222,7 +246,11 @@ async fn bulk_create_edges(
 ) -> Result<Response<BulkEntityReply>, Status> {
     self.authorize_write(request.metadata())?;
     let request = request.into_inner();
-    Ok(Response::new(bulk_create_reply(self, request, create_edge_reply)?))
+    let rt = self.clone();
+    tokio::task::spawn_blocking(move || bulk_create_reply(&rt, request, create_edge_reply))
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
+        .map(Response::new)
 }
 
 async fn bulk_create_vectors(
@@ -231,7 +259,11 @@ async fn bulk_create_vectors(
 ) -> Result<Response<BulkEntityReply>, Status> {
     self.authorize_write(request.metadata())?;
     let request = request.into_inner();
-    Ok(Response::new(bulk_create_reply(self, request, create_vector_reply)?))
+    let rt = self.clone();
+    tokio::task::spawn_blocking(move || bulk_create_reply(&rt, request, create_vector_reply))
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
+        .map(Response::new)
 }
 
 async fn patch_entity(
