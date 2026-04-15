@@ -41,10 +41,7 @@ impl UnifiedStore {
 
     /// Get a collection
     pub fn get_collection(&self, name: &str) -> Option<Arc<SegmentManager>> {
-        self.collections
-            .read()
-                        .get(name)
-            .map(Arc::clone)
+        self.collections.read().get(name).map(Arc::clone)
     }
 
     /// Get the context index for cross-structure search.
@@ -110,11 +107,7 @@ impl UnifiedStore {
 
     /// List all collections
     pub fn list_collections(&self) -> Vec<String> {
-        self.collections
-            .read()
-                        .keys()
-            .cloned()
-            .collect()
+        self.collections.read().keys().cloned().collect()
     }
 
     /// Drop a collection
@@ -137,9 +130,11 @@ impl UnifiedStore {
 
         self.btree_indices.write().remove(name);
 
-        self.entity_cache.write().retain(|entity_id, (collection, _)| {
-            collection != name && !entity_ids.iter().any(|id| id.raw() == *entity_id)
-        });
+        self.entity_cache
+            .write()
+            .retain(|entity_id, (collection, _)| {
+                collection != name && !entity_ids.iter().any(|id| id.raw() == *entity_id)
+            });
 
         self.cross_refs.write().retain(|source_id, refs| {
             refs.retain(|(target_id, _, target_collection)| {
@@ -574,7 +569,11 @@ impl UnifiedStore {
 
     /// Get cross-references to an entity
     pub fn get_refs_to(&self, id: EntityId) -> Vec<(EntityId, RefType, String)> {
-        self.reverse_refs.read().get(&id).cloned().unwrap_or_default()
+        self.reverse_refs
+            .read()
+            .get(&id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Expand cross-references to get related entities

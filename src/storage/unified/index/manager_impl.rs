@@ -285,10 +285,14 @@ impl IntegratedIndexManager {
         }
 
         // Set status to building
-        self.index_status.write().insert(key.clone(), IndexStatus::Building { progress: 0.0 });
+        self.index_status
+            .write()
+            .insert(key.clone(), IndexStatus::Building { progress: 0.0 });
 
         // For now, just mark as ready (actual building would be async)
-        self.index_status.write().insert(key.clone(), IndexStatus::Ready);
+        self.index_status
+            .write()
+            .insert(key.clone(), IndexStatus::Ready);
 
         // Record event
         self.record_event(IndexEvent {
@@ -348,7 +352,9 @@ impl IntegratedIndexManager {
         let key = (index_type, collection.map(|s| s.to_string()));
 
         // Set status to building
-        self.index_status.write().insert(key.clone(), IndexStatus::Building { progress: 0.0 });
+        self.index_status
+            .write()
+            .insert(key.clone(), IndexStatus::Building { progress: 0.0 });
 
         // Clear existing data
         match index_type {
@@ -368,7 +374,9 @@ impl IntegratedIndexManager {
         }
 
         // Mark as ready (actual rebuild would re-index all entities)
-        self.index_status.write().insert(key.clone(), IndexStatus::Ready);
+        self.index_status
+            .write()
+            .insert(key.clone(), IndexStatus::Ready);
 
         // Record event
         self.record_event(IndexEvent {

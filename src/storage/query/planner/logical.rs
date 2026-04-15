@@ -11,8 +11,7 @@ use crate::storage::query::is_universal_entity_source as is_universal_query_sour
 use crate::storage::query::sql_lowering::{
     effective_graph_filter, effective_graph_projections, effective_join_filter,
     effective_join_projections, effective_path_filter, effective_path_projections,
-    effective_table_filter,
-    effective_table_projections, effective_vector_filter,
+    effective_table_filter, effective_table_projections, effective_vector_filter,
 };
 use crate::storage::schema::Value;
 use crate::storage::RedDB;

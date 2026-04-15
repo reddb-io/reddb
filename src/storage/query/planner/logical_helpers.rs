@@ -5,8 +5,8 @@ use crate::storage::query::ast::{
     FieldRef, Filter, FusionStrategy, JoinQuery, OrderByClause, Projection, QueryExpr, TableQuery,
 };
 use crate::storage::query::is_universal_entity_source as is_universal_query_source;
-use crate::storage::query::sql_lowering::{effective_table_filter, effective_table_projections};
 use crate::storage::query::planner::stats_provider::CatalogStatsProvider;
+use crate::storage::query::sql_lowering::{effective_table_filter, effective_table_projections};
 use crate::storage::schema::Value;
 use crate::storage::RedDB;
 
@@ -92,7 +92,8 @@ pub(crate) fn document_filtered_cardinality(db: &RedDB, query: &TableQuery) -> C
     let mut filtered = query.clone();
     filtered.limit = None;
     filtered.offset = None;
-    let estimate = CostEstimator::with_stats(provider).estimate_cardinality(&QueryExpr::Table(filtered));
+    let estimate =
+        CostEstimator::with_stats(provider).estimate_cardinality(&QueryExpr::Table(filtered));
     CardinalityEstimate {
         rows: (estimate.rows * 0.5).max(1.0),
         selectivity: (estimate.selectivity * 0.5).min(1.0),

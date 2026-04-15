@@ -12,10 +12,10 @@
 //! - Background compaction of sealed segments
 //! - Archive old segments to cold storage
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 use super::entity::{EntityId, UnifiedEntity};
 use super::metadata::{Metadata, MetadataFilter};
@@ -166,17 +166,13 @@ impl SegmentManager {
         }
         let cols: Vec<String> = named.keys().cloned().collect();
         let arc = Arc::new(cols);
-        *self
-            .column_schema
-            .write() = Some(Arc::clone(&arc));
+        *self.column_schema.write() = Some(Arc::clone(&arc));
         arc
     }
 
     /// Get the column schema if it exists.
     pub fn column_schema(&self) -> Option<Arc<Vec<String>>> {
-        self.column_schema
-            .read()
-            .clone()
+        self.column_schema.read().clone()
     }
 
     /// Get collection name
@@ -256,9 +252,7 @@ impl SegmentManager {
 
         // Update growing_count in the slow-path stats struct.
         // This is the rare segment-creation path — locking is fine here.
-        self.stats
-            .write()
-            .growing_count += 1;
+        self.stats.write().growing_count += 1;
 
         segment_arc
     }
@@ -376,11 +370,7 @@ impl SegmentManager {
     /// Get an entity by ID — scans growing then sealed segments.
     pub fn get(&self, id: EntityId) -> Option<UnifiedEntity> {
         // Growing segment first (most likely for recent inserts)
-        if let Some(growing_arc) = self
-            .growing
-            .read()
-            .as_ref()
-        {
+        if let Some(growing_arc) = self.growing.read().as_ref() {
             let growing = growing_arc.read();
             if let Some(entity) = growing.get(id) {
                 return Some(entity.clone());
@@ -409,12 +399,12 @@ impl SegmentManager {
 
         // Growing segment — one read lock for the entire batch.
         // Non-blocking first: if a writer is active, fall back to blocking.
-        if let Some(growing_arc) = self
-            .growing
-            .read()
-            .as_ref()
-        {
-            let growing = if let Some(g) = growing_arc.try_read() { g } else { growing_arc.read() };
+        if let Some(growing_arc) = self.growing.read().as_ref() {
+            let growing = if let Some(g) = growing_arc.try_read() {
+                g
+            } else {
+                growing_arc.read()
+            };
             remaining.retain(|&i| {
                 if let Some(entity) = growing.get(ids[i]) {
                     out[i] = Some(entity.clone());
@@ -452,11 +442,7 @@ impl SegmentManager {
     /// Scan all segments for an entity
     fn scan_for_entity(&self, id: EntityId) -> Option<UnifiedEntity> {
         // Check growing
-        if let Some(growing_arc) = self
-            .growing
-            .read()
-            .as_ref()
-        {
+        if let Some(growing_arc) = self.growing.read().as_ref() {
             let growing = growing_arc.read();
             if let Some(entity) = growing.get(id) {
                 return Some(entity.clone());
@@ -477,11 +463,7 @@ impl SegmentManager {
     /// Update an entity
     pub fn update(&self, entity: UnifiedEntity) -> Result<(), SegmentError> {
         // Try growing segment directly (covers bulk-inserted entities without entity_segment map)
-        if let Some(growing_arc) = self
-            .growing
-            .read()
-            .as_ref()
-        {
+        if let Some(growing_arc) = self.growing.read().as_ref() {
             let mut growing = growing_arc.write();
             if growing.contains(entity.id) && growing.state().is_writable() {
                 return growing.update(entity);
@@ -489,17 +471,9 @@ impl SegmentManager {
         }
 
         // Try entity_segment mapping for individually inserted entities
-        let segment_id = self
-            .entity_segment
-            .read()
-            .get(&entity.id)
-            .copied();
+        let segment_id = self.entity_segment.read().get(&entity.id).copied();
         if let Some(seg_id) = segment_id {
-            if let Some(growing_arc) = self
-                .growing
-                .read()
-                .as_ref()
-            {
+            if let Some(growing_arc) = self.growing.read().as_ref() {
                 let mut growing = growing_arc.write();
                 if growing.id() == seg_id && growing.state().is_writable() {
                     return growing.update(entity);
@@ -519,28 +493,16 @@ impl SegmentManager {
         entity: UnifiedEntity,
         modified_columns: &[String],
     ) -> Result<(), SegmentError> {
-        if let Some(growing_arc) = self
-            .growing
-            .read()
-            .as_ref()
-        {
+        if let Some(growing_arc) = self.growing.read().as_ref() {
             let mut growing = growing_arc.write();
             if growing.contains(entity.id) && growing.state().is_writable() {
                 return growing.update_hot(entity, modified_columns);
             }
         }
 
-        let segment_id = self
-            .entity_segment
-            .read()
-            .get(&entity.id)
-            .copied();
+        let segment_id = self.entity_segment.read().get(&entity.id).copied();
         if let Some(seg_id) = segment_id {
-            if let Some(growing_arc) = self
-                .growing
-                .read()
-                .as_ref()
-            {
+            if let Some(growing_arc) = self.growing.read().as_ref() {
                 let mut growing = growing_arc.write();
                 if growing.id() == seg_id && growing.state().is_writable() {
                     return growing.update_hot(entity, modified_columns);
@@ -556,19 +518,13 @@ impl SegmentManager {
     pub fn delete(&self, id: EntityId) -> Result<bool, SegmentError> {
         // Fast path: probe the growing segment directly — covers entities inserted via
         // insert() which no longer writes to entity_segment, and bulk-inserted entities.
-        if let Some(growing_arc) = self
-            .growing
-            .read()
-            .as_ref()
-        {
+        if let Some(growing_arc) = self.growing.read().as_ref() {
             let mut growing = growing_arc.write();
             if growing.contains(id) && growing.state().is_writable() {
                 let seg_id = growing.id();
                 let deleted = growing.delete(id)?;
                 if deleted {
-                    self.entity_segment
-                        .write()
-                        .remove(&id);
+                    self.entity_segment.write().remove(&id);
                     self.total_entities_atomic.fetch_sub(1, Ordering::Relaxed);
                     self.emit(LifecycleEvent::EntityDeleted(id, seg_id));
                 }
@@ -578,25 +534,15 @@ impl SegmentManager {
 
         // Fallback: check entity_segment map (populated for older insert() paths
         // or entities that were in a previous growing segment).
-        let segment_id = self
-            .entity_segment
-            .read()
-            .get(&id)
-            .copied();
+        let segment_id = self.entity_segment.read().get(&id).copied();
 
         if let Some(seg_id) = segment_id {
-            if let Some(growing_arc) = self
-                .growing
-                .read()
-                .as_ref()
-            {
+            if let Some(growing_arc) = self.growing.read().as_ref() {
                 let mut growing = growing_arc.write();
                 if growing.id() == seg_id && growing.state().is_writable() {
                     let deleted = growing.delete(id)?;
                     if deleted {
-                        self.entity_segment
-                            .write()
-                            .remove(&id);
+                        self.entity_segment.write().remove(&id);
                         self.total_entities_atomic.fetch_sub(1, Ordering::Relaxed);
                         self.emit(LifecycleEvent::EntityDeleted(id, seg_id));
                     }
@@ -612,11 +558,7 @@ impl SegmentManager {
     /// Get metadata for an entity
     pub fn get_metadata(&self, id: EntityId) -> Option<Metadata> {
         // Fast path: probe growing segment directly (no entity_segment needed).
-        if let Some(growing_arc) = self
-            .growing
-            .read()
-            .as_ref()
-        {
+        if let Some(growing_arc) = self.growing.read().as_ref() {
             let growing = growing_arc.read();
             if growing.contains(id) {
                 return growing.get_metadata(id);
@@ -624,18 +566,10 @@ impl SegmentManager {
         }
 
         // Fallback: entity_segment map (for pre-existing or sealed entities)
-        let segment_id = self
-            .entity_segment
-            .read()
-            .get(&id)
-            .copied();
+        let segment_id = self.entity_segment.read().get(&id).copied();
 
         if let Some(seg_id) = segment_id {
-            if let Some(growing_arc) = self
-                .growing
-                .read()
-                .as_ref()
-            {
+            if let Some(growing_arc) = self.growing.read().as_ref() {
                 let growing = growing_arc.read();
                 if growing.id() == seg_id {
                     return growing.get_metadata(id);
@@ -657,11 +591,7 @@ impl SegmentManager {
     pub fn set_metadata(&self, id: EntityId, metadata: Metadata) -> Result<(), SegmentError> {
         // Fast path: probe growing segment directly — covers entities inserted via
         // insert() which no longer writes to entity_segment.
-        if let Some(growing_arc) = self
-            .growing
-            .read()
-            .as_ref()
-        {
+        if let Some(growing_arc) = self.growing.read().as_ref() {
             let mut growing = growing_arc.write();
             if growing.contains(id) && growing.state().is_writable() {
                 return growing.set_metadata(id, metadata);
@@ -669,18 +599,10 @@ impl SegmentManager {
         }
 
         // Fallback: entity_segment map (sealed or pre-atomic-path entities)
-        let segment_id = self
-            .entity_segment
-            .read()
-            .get(&id)
-            .copied();
+        let segment_id = self.entity_segment.read().get(&id).copied();
 
         if let Some(seg_id) = segment_id {
-            if let Some(growing_arc) = self
-                .growing
-                .read()
-                .as_ref()
-            {
+            if let Some(growing_arc) = self.growing.read().as_ref() {
                 let mut growing = growing_arc.write();
                 if growing.id() == seg_id && growing.state().is_writable() {
                     return growing.set_metadata(id, metadata);
@@ -715,10 +637,7 @@ impl SegmentManager {
 
     /// Seal the current growing segment
     pub fn seal_current(&self) -> Result<SegmentId, SegmentError> {
-        let growing_opt = self
-            .growing
-            .write()
-            .take();
+        let growing_opt = self.growing.write().take();
 
         if let Some(growing_arc) = growing_opt {
             let mut growing = growing_arc.write();
@@ -733,9 +652,7 @@ impl SegmentManager {
 
             // In a real implementation, we'd convert to SealedSegment here
             // For now, we keep it as-is since GrowingSegment implements UnifiedSegment
-            self.sealed
-                .write()
-                .push(growing_arc);
+            self.sealed.write().push(growing_arc);
 
             // Mark sealed segment pages all-visible — they're now immutable
             self.mark_sealed_pages_visible(entity_count);
@@ -758,10 +675,7 @@ impl SegmentManager {
 
     /// Force seal (for testing/manual control)
     pub fn force_seal(&self) -> Result<Option<SegmentId>, SegmentError> {
-        let has_growing = self
-            .growing
-            .read()
-            .is_some();
+        let has_growing = self.growing.read().is_some();
         if has_growing {
             Ok(Some(self.seal_current()?))
         } else {
@@ -822,11 +736,7 @@ impl SegmentManager {
         // Growing segment — direct iteration (no Box<dyn>)
         // Try non-blocking read first; fall back to blocking only when a writer
         // is actively holding the write lock (rare in read-heavy workloads).
-        if let Some(growing_arc) = self
-            .growing
-            .read()
-            .as_ref()
-        {
+        if let Some(growing_arc) = self.growing.read().as_ref() {
             let growing = if let Some(g) = growing_arc.try_read() {
                 g
             } else {
@@ -864,11 +774,7 @@ impl SegmentManager {
         // (holding the write lock), try_read() returns None and we fall back to
         // the blocking read.  In low-contention workloads (reads far outnumber
         // writes) the try_read() almost always succeeds and readers never stall.
-        if let Some(growing_arc) = self
-            .growing
-            .read()
-            .as_ref()
-        {
+        if let Some(growing_arc) = self.growing.read().as_ref() {
             let growing = if let Some(g) = growing_arc.try_read() {
                 g
             } else {
@@ -913,11 +819,7 @@ impl SegmentManager {
 
         // Growing segment — always scan, no zone skip (zones are partial).
         // Non-blocking try_read() avoids stalling behind in-progress inserts.
-        if let Some(growing_arc) = self
-            .growing
-            .read()
-            .as_ref()
-        {
+        if let Some(growing_arc) = self.growing.read().as_ref() {
             let growing = if let Some(g) = growing_arc.try_read() {
                 g
             } else {
@@ -940,8 +842,7 @@ impl SegmentManager {
             })
             .collect();
 
-        let use_parallel = surviving.len() > 1
-            && crate::runtime::SystemInfo::should_parallelize();
+        let use_parallel = surviving.len() > 1 && crate::runtime::SystemInfo::should_parallelize();
 
         if use_parallel {
             let filter_ref = &filter;
@@ -986,11 +887,7 @@ impl SegmentManager {
 
         // Query growing segment — try non-blocking read first (avoids stalling
         // behind an in-progress insert; falls back to blocking if writer is active).
-        if let Some(growing_arc) = self
-            .growing
-            .read()
-            .as_ref()
-        {
+        if let Some(growing_arc) = self.growing.read().as_ref() {
             let growing = if let Some(g) = growing_arc.try_read() {
                 g
             } else {
@@ -1055,11 +952,7 @@ impl SegmentManager {
         let mut results = Vec::new();
         let mut bloom_pruned = false;
 
-        if let Some(growing_arc) = self
-            .growing
-            .read()
-            .as_ref()
-        {
+        if let Some(growing_arc) = self.growing.read().as_ref() {
             let growing = growing_arc.read();
             if let Some(key) = key_hint {
                 if !growing.bloom_might_contain_key(key) {
@@ -1099,11 +992,7 @@ impl SegmentManager {
         let mut results = Vec::new();
 
         // Growing segment
-        if let Some(growing_arc) = self
-            .growing
-            .read()
-            .as_ref()
-        {
+        if let Some(growing_arc) = self.growing.read().as_ref() {
             let growing = growing_arc.read();
             results.extend(growing.filter_metadata(filters));
         }
@@ -1122,11 +1011,7 @@ impl SegmentManager {
         let mut results = Vec::new();
 
         // Growing segment
-        if let Some(growing_arc) = self
-            .growing
-            .read()
-            .as_ref()
-        {
+        if let Some(growing_arc) = self.growing.read().as_ref() {
             let growing = growing_arc.read();
             for entity in growing.iter_kind(kind) {
                 results.push(entity.clone());
@@ -1153,11 +1038,7 @@ impl SegmentManager {
     pub fn segment_ids(&self) -> Vec<SegmentId> {
         let mut ids = Vec::new();
 
-        if let Some(growing_arc) = self
-            .growing
-            .read()
-            .as_ref()
-        {
+        if let Some(growing_arc) = self.growing.read().as_ref() {
             ids.push(growing_arc.read().id());
         }
 
@@ -1166,21 +1047,14 @@ impl SegmentManager {
             ids.push(segment.id());
         }
 
-        ids.extend(
-            self.archived
-                .read()
-                .iter()
-                .copied(),
-        );
+        ids.extend(self.archived.read().iter().copied());
 
         ids
     }
 
     /// Emit a lifecycle event
     fn emit(&self, event: LifecycleEvent) {
-        self.events
-            .write()
-            .push(event);
+        self.events.write().push(event);
     }
 
     /// Drain events (for testing/monitoring)
@@ -1227,8 +1101,7 @@ impl UnifiedSegment for Arc<RwLock<GrowingSegment>> {
     }
 
     fn entity_count(&self) -> usize {
-        self.read()
-            .entity_count()
+        self.read().entity_count()
     }
 
     fn contains(&self, id: EntityId) -> bool {
@@ -1246,13 +1119,11 @@ impl UnifiedSegment for Arc<RwLock<GrowingSegment>> {
     }
 
     fn insert(&mut self, entity: UnifiedEntity) -> Result<EntityId, SegmentError> {
-        self.write()
-            .insert(entity)
+        self.write().insert(entity)
     }
 
     fn update(&mut self, entity: UnifiedEntity) -> Result<(), SegmentError> {
-        self.write()
-            .update(entity)
+        self.write().update(entity)
     }
 
     fn update_hot(
@@ -1260,8 +1131,7 @@ impl UnifiedSegment for Arc<RwLock<GrowingSegment>> {
         entity: UnifiedEntity,
         modified_columns: &[String],
     ) -> Result<(), SegmentError> {
-        self.write()
-            .update_hot(entity, modified_columns)
+        self.write().update_hot(entity, modified_columns)
     }
 
     fn delete(&mut self, id: EntityId) -> Result<bool, SegmentError> {
@@ -1269,13 +1139,11 @@ impl UnifiedSegment for Arc<RwLock<GrowingSegment>> {
     }
 
     fn get_metadata(&self, id: EntityId) -> Option<Metadata> {
-        self.read()
-            .get_metadata(id)
+        self.read().get_metadata(id)
     }
 
     fn set_metadata(&mut self, id: EntityId, metadata: Metadata) -> Result<(), SegmentError> {
-        self.write()
-            .set_metadata(id, metadata)
+        self.write().set_metadata(id, metadata)
     }
 
     fn seal(&mut self) -> Result<(), SegmentError> {
@@ -1283,8 +1151,7 @@ impl UnifiedSegment for Arc<RwLock<GrowingSegment>> {
     }
 
     fn should_seal(&self, config: &SegmentConfig) -> bool {
-        self.read()
-            .should_seal(config)
+        self.read().should_seal(config)
     }
 
     fn iter(&self) -> Box<dyn Iterator<Item = &UnifiedEntity> + '_> {
@@ -1297,8 +1164,7 @@ impl UnifiedSegment for Arc<RwLock<GrowingSegment>> {
     }
 
     fn filter_metadata(&self, filters: &[(String, MetadataFilter)]) -> Vec<EntityId> {
-        self.read()
-            .filter_metadata(filters)
+        self.read().filter_metadata(filters)
     }
 }
 

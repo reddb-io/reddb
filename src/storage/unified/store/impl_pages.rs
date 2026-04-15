@@ -194,9 +194,7 @@ impl UnifiedStore {
                             }
 
                             // Store the B-tree for future lookups
-                            self.btree_indices
-                                .write()
-                                .insert(name, btree);
+                            self.btree_indices.write().insert(name, btree);
                         }
                     } else {
                         pos += name_len + 4;
@@ -261,11 +259,11 @@ impl UnifiedStore {
                         let source_id = EntityId::new(source_id);
                         let target_id = EntityId::new(target_id);
 
-                        self.cross_refs
-                            .write()
-                            .entry(source_id)
-                            .or_default()
-                            .push((target_id, ref_type, target_collection.clone()));
+                        self.cross_refs.write().entry(source_id).or_default().push((
+                            target_id,
+                            ref_type,
+                            target_collection.clone(),
+                        ));
 
                         if let Some((collection, mut entity)) = self.get_any(source_id) {
                             let exists = entity.cross_refs().iter().any(|xref| {

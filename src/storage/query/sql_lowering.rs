@@ -1,8 +1,8 @@
+use crate::storage::engine::vector_metadata::MetadataFilter;
 use crate::storage::query::ast::{
     BinOp, CompareOp, DeleteQuery, Expr, FieldRef, Filter, GraphQuery, InsertQuery, JoinQuery,
     PathQuery, Projection, SelectItem, Span, TableQuery, UnaryOp, UpdateQuery, VectorQuery,
 };
-use crate::storage::engine::vector_metadata::MetadataFilter;
 use crate::storage::schema::Value;
 
 pub fn expr_to_projection(expr: &Expr) -> Option<Projection> {

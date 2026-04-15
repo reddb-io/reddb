@@ -3,17 +3,11 @@
 use super::*;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-fn probabilistic_read<'a, T>(
-    lock: &'a RwLock<T>,
-    _name: &str,
-) -> RwLockReadGuard<'a, T> {
+fn probabilistic_read<'a, T>(lock: &'a RwLock<T>, _name: &str) -> RwLockReadGuard<'a, T> {
     lock.read()
 }
 
-fn probabilistic_write<'a, T>(
-    lock: &'a RwLock<T>,
-    _name: &str,
-) -> RwLockWriteGuard<'a, T> {
+fn probabilistic_write<'a, T>(lock: &'a RwLock<T>, _name: &str) -> RwLockWriteGuard<'a, T> {
     lock.write()
 }
 

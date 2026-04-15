@@ -43,7 +43,9 @@ pub(crate) fn try_sorted_index_lookup(
             // cap (5001 = one more than the threshold so we can detect "too many").
             // This avoids collecting 900K IDs only to discard them.
             let cap = limit.unwrap_or(5001);
-            let ids = idx_store.sorted.range_lookup_limited(table, col, lo, hi, cap)?;
+            let ids = idx_store
+                .sorted
+                .range_lookup_limited(table, col, lo, hi, cap)?;
             if limit.is_none() && ids.len() > 5000 {
                 return None; // Full scan is cheaper for large result sets without LIMIT
             }
@@ -66,10 +68,18 @@ pub(crate) fn try_sorted_index_lookup(
             // Same cap logic: stop collecting early to avoid 900K-element allocations
             let cap = limit.unwrap_or(5001);
             let ids = match *op {
-                CompareOp::Lt => idx_store.sorted.lt_lookup_limited(table, col, threshold, cap)?,
-                CompareOp::Le => idx_store.sorted.le_lookup_limited(table, col, threshold, cap)?,
-                CompareOp::Gt => idx_store.sorted.gt_lookup_limited(table, col, threshold, cap)?,
-                CompareOp::Ge => idx_store.sorted.ge_lookup_limited(table, col, threshold, cap)?,
+                CompareOp::Lt => idx_store
+                    .sorted
+                    .lt_lookup_limited(table, col, threshold, cap)?,
+                CompareOp::Le => idx_store
+                    .sorted
+                    .le_lookup_limited(table, col, threshold, cap)?,
+                CompareOp::Gt => idx_store
+                    .sorted
+                    .gt_lookup_limited(table, col, threshold, cap)?,
+                CompareOp::Ge => idx_store
+                    .sorted
+                    .ge_lookup_limited(table, col, threshold, cap)?,
                 _ => unreachable!("non-range compare op guarded above"),
             };
             if limit.is_none() && ids.len() > 5000 {
@@ -247,10 +257,12 @@ mod tests {
         assert_eq!(limited.len(), 10);
 
         // Returned IDs must be a subset of valid IDs
-        let all_set: std::collections::HashSet<u64> =
-            all.iter().map(|id| id.raw()).collect();
+        let all_set: std::collections::HashSet<u64> = all.iter().map(|id| id.raw()).collect();
         for id in &limited {
-            assert!(all_set.contains(&id.raw()), "limited ID {id:?} not in full result");
+            assert!(
+                all_set.contains(&id.raw()),
+                "limited ID {id:?} not in full result"
+            );
         }
     }
 

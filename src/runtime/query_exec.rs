@@ -21,7 +21,9 @@ mod vector;
 // `pub(crate)` is needed for the two helpers because wire/listener.rs
 // reaches them via `crate::runtime::query_exec::X` (cross-module path,
 // not just super-path).
-pub(crate) use helpers::{evaluate_entity_filter, extract_entity_id_from_filter, try_hash_eq_lookup};
+pub(crate) use helpers::{
+    evaluate_entity_filter, extract_entity_id_from_filter, try_hash_eq_lookup,
+};
 pub(super) use hybrid::execute_runtime_hybrid_query;
 pub(super) use join::execute_runtime_join_query;
 pub(super) use json_writers::execute_runtime_serialize_single_entity;

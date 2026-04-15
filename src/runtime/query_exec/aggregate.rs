@@ -149,11 +149,10 @@ pub(crate) fn execute_aggregate_query(
             .map_err(|e| RedDBError::Query(format!("agg spill dir: {e}")))?;
         d
     };
-    let mut spill_agg =
-        crate::storage::query::executors::agg_spill::SpilledHashAgg::<
-            String,
-            AggregateGroup,
-        >::new(spill_dir, WORK_MEM_BYTES, ESTIMATED_ENTRY_BYTES);
+    let mut spill_agg = crate::storage::query::executors::agg_spill::SpilledHashAgg::<
+        String,
+        AggregateGroup,
+    >::new(spill_dir, WORK_MEM_BYTES, ESTIMATED_ENTRY_BYTES);
     let mut spill_err: Option<String> = None;
 
     manager.for_each_entity(|entity| {
@@ -362,7 +361,10 @@ pub(crate) fn execute_aggregate_query(
                 if !columns.contains(&label) {
                     columns.push(label.clone());
                 }
-                record.set(&group_expr_key(group_expr).unwrap_or_else(|| label.clone()), value.clone());
+                record.set(
+                    &group_expr_key(group_expr).unwrap_or_else(|| label.clone()),
+                    value.clone(),
+                );
                 record.set(&label, value);
             }
         }
@@ -1221,7 +1223,9 @@ fn group_output_label(query: &TableQuery, group_expr: &Expr) -> String {
         .iter()
         .find_map(|projection| {
             let key = projection_group_key(projection)?;
-            if group_expr_key(group_expr).is_some_and(|group_key| key.eq_ignore_ascii_case(&group_key)) {
+            if group_expr_key(group_expr)
+                .is_some_and(|group_key| key.eq_ignore_ascii_case(&group_key))
+            {
                 Some(projection_name(projection))
             } else {
                 None
@@ -1265,9 +1269,9 @@ fn render_group_by_argument(arg: &Projection) -> Option<String> {
 }
 
 fn resolve_group_by_value(group_expr: &Expr, record: &UnifiedRecord) -> Option<Value> {
-    if let Some((bucket_ns, timestamp_column)) = parse_time_bucket_group_expr(
-        &group_expr_key(group_expr).unwrap_or_default(),
-    ) {
+    if let Some((bucket_ns, timestamp_column)) =
+        parse_time_bucket_group_expr(&group_expr_key(group_expr).unwrap_or_default())
+    {
         let timestamp_ns = resolve_bucket_timestamp_ns(record, timestamp_column.as_deref())?;
         let bucket_start = if bucket_ns == 0 {
             timestamp_ns
@@ -1480,8 +1484,7 @@ mod agg_spill_codec {
         let n = u32::from_le_bytes(nb) as usize;
         let mut buf = vec![0u8; n];
         r.read_exact(&mut buf)?;
-        String::from_utf8(buf)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        String::from_utf8(buf).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
     /// Value tag: 0=Null 1=Bool 2=Int 3=UInt 4=Float 5=Text; others → Null
     fn w_val<W: Write>(w: &mut W, v: &Value) -> std::io::Result<usize> {
@@ -1607,10 +1610,7 @@ mod agg_spill_codec {
         }
         Ok(m)
     }
-    fn w_map_vec_f64<W: Write>(
-        w: &mut W,
-        m: &HashMap<String, Vec<f64>>,
-    ) -> std::io::Result<usize> {
+    fn w_map_vec_f64<W: Write>(w: &mut W, m: &HashMap<String, Vec<f64>>) -> std::io::Result<usize> {
         w.write_all(&(m.len() as u32).to_le_bytes())?;
         let mut t = 4;
         for (k, v) in m {
@@ -1832,8 +1832,8 @@ mod agg_spill_codec {
                 s.mins
                     .entry(k)
                     .and_modify(|e| {
-                        use crate::storage::query::ast::CompareOp;
                         use crate::runtime::query_exec::compare_runtime_values;
+                        use crate::storage::query::ast::CompareOp;
                         if compare_runtime_values(&v, e, CompareOp::Lt) {
                             *e = v.clone();
                         }
@@ -1844,8 +1844,8 @@ mod agg_spill_codec {
                 s.maxs
                     .entry(k)
                     .and_modify(|e| {
-                        use crate::storage::query::ast::CompareOp;
                         use crate::runtime::query_exec::compare_runtime_values;
+                        use crate::storage::query::ast::CompareOp;
                         if compare_runtime_values(&v, e, CompareOp::Gt) {
                             *e = v.clone();
                         }

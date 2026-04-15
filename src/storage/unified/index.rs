@@ -218,12 +218,20 @@ impl GraphAdjacencyIndex {
 
     /// Get outgoing degree of a node
     pub fn out_degree(&self, node_id: EntityId) -> usize {
-        self.outgoing.read().get(&node_id).map(|v| v.len()).unwrap_or(0)
+        self.outgoing
+            .read()
+            .get(&node_id)
+            .map(|v| v.len())
+            .unwrap_or(0)
     }
 
     /// Get incoming degree of a node
     pub fn in_degree(&self, node_id: EntityId) -> usize {
-        self.incoming.read().get(&node_id).map(|v| v.len()).unwrap_or(0)
+        self.incoming
+            .read()
+            .get(&node_id)
+            .map(|v| v.len())
+            .unwrap_or(0)
     }
 
     /// Get total degree of a node

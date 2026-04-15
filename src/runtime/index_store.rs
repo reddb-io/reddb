@@ -6,10 +6,10 @@
 //! The executor calls `lookup()` with a collection, column, and value —
 //! the IndexStore finds the right index and returns matching entity IDs.
 
+use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Bound::{Excluded, Included, Unbounded};
-use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::storage::schema::Value;
 use crate::storage::unified::bitmap_index::BitmapIndexManager;

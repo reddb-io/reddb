@@ -644,13 +644,12 @@ impl CostEstimator {
         let hnsw_cost = 100.0 * (1.0 + k.ln()); // ~100-300 node visits
 
         // Metadata filtering adds cost if present
-        let filter_cost = if crate::storage::query::sql_lowering::effective_vector_filter(query)
-            .is_some()
-        {
-            50.0
-        } else {
-            0.0
-        };
+        let filter_cost =
+            if crate::storage::query::sql_lowering::effective_vector_filter(query).is_some() {
+                50.0
+            } else {
+                0.0
+            };
 
         let cpu = hnsw_cost + filter_cost;
         let io = 20.0; // HNSW layers are cached

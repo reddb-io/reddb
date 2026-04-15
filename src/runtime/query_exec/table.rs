@@ -170,7 +170,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             // age FROM t) are not silently dropped.
             let explicit_cols = extract_select_column_names(&effective_projections);
             let lean = explicit_cols.is_empty(); // SELECT * → lean path
-            // Batch fetch: single lock acquisition for the entire candidate set
+                                                 // Batch fetch: single lock acquisition for the entire candidate set
             let entities = store.get_batch(&query.table, &entity_ids);
             let limit = query.limit.map(|l| l as usize).unwrap_or(usize::MAX);
             let mut records = Vec::with_capacity(entity_ids.len().min(limit));
@@ -346,7 +346,10 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                             let record_opt = if lean {
                                 super::super::record_search::runtime_table_record_lean(entity_opt)
                             } else {
-                                runtime_table_record_from_entity_projected(entity_opt, &explicit_cols)
+                                runtime_table_record_from_entity_projected(
+                                    entity_opt,
+                                    &explicit_cols,
+                                )
                             };
                             if let Some(record) = record_opt {
                                 records.push(record);
@@ -470,8 +473,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         // for LIMIT queries so the early-exit optimisation still works.
         let entity_count = manager.count();
         let use_parallel = explicit_limit.is_none()
-            && entity_count
-                >= crate::storage::query::executors::parallel_scan::MIN_PARALLEL_ROWS;
+            && entity_count >= crate::storage::query::executors::parallel_scan::MIN_PARALLEL_ROWS;
 
         let mut records: Vec<UnifiedRecord> = Vec::new();
         if use_parallel {

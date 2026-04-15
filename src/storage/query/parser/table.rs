@@ -232,7 +232,6 @@ impl<'a> Parser<'a> {
         );
         Ok((select_item, projection))
     }
-
 }
 
 fn contains_nested_aggregate(expr: &Expr) -> bool {
@@ -510,7 +509,6 @@ impl<'a> Parser<'a> {
 
         Ok(literal)
     }
-
 }
 
 fn is_duration_unit(unit: &str) -> bool {
