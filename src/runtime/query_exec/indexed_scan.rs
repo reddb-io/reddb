@@ -98,6 +98,128 @@ pub(crate) fn try_sorted_index_lookup(
     }
 }
 
+// ─── Cross-index AND intersection helpers ────────────────────────────────────
+
+/// Check if `filter` is a range predicate (BETWEEN / Gt / Ge / Lt / Le) that
+/// has a sorted index on the referenced column for the given table.
+fn is_range_filter_with_sorted_index(filter: &Filter, table: &str, idx_store: &IndexStore) -> bool {
+    match filter {
+        Filter::Between { field, .. } => {
+            let col = match field {
+                FieldRef::TableColumn { column, .. } => column.as_str(),
+                _ => return false,
+            };
+            idx_store.sorted.has_index(table, col)
+        }
+        Filter::Compare { field, op, .. }
+            if matches!(*op, CompareOp::Gt | CompareOp::Ge | CompareOp::Lt | CompareOp::Le) =>
+        {
+            let col = match field {
+                FieldRef::TableColumn { column, .. } => column.as_str(),
+                _ => return false,
+            };
+            idx_store.sorted.has_index(table, col)
+        }
+        _ => false,
+    }
+}
+
+/// Extract cross-index predicates from a compound AND filter.
+///
+/// Returns `(eq_column, eq_value_bytes, range_filter)` when the filter tree
+/// contains an equality predicate on a column with a hash index AND a range
+/// predicate on a column with a sorted index, joined by AND.
+///
+/// Used by the bitmap-AND path to perform:
+///   hash_lookup(eq_col = val) → HashSet  ∩  sorted_range(range_col op val2)
+/// instead of fetching all hash candidates and filtering in-memory.
+pub(crate) fn extract_cross_index_predicates<'a>(
+    filter: &'a Filter,
+    table: &str,
+    idx_store: &IndexStore,
+) -> Option<(String, Vec<u8>, &'a Filter)> {
+    let Filter::And(left, right) = filter else {
+        return None;
+    };
+
+    // Try left = equality (hash index), right = range (sorted index)
+    if let Some((col, bytes)) =
+        super::helpers::extract_index_candidate(left)
+    {
+        if idx_store.find_index_for_column(table, &col).is_some()
+            && is_range_filter_with_sorted_index(right, table, idx_store)
+        {
+            return Some((col, bytes, right.as_ref()));
+        }
+    }
+
+    // Try right = equality (hash index), left = range (sorted index)
+    if let Some((col, bytes)) =
+        super::helpers::extract_index_candidate(right)
+    {
+        if idx_store.find_index_for_column(table, &col).is_some()
+            && is_range_filter_with_sorted_index(left, table, idx_store)
+        {
+            return Some((col, bytes, left.as_ref()));
+        }
+    }
+
+    // Recurse into nested AND
+    extract_cross_index_predicates(left, table, idx_store)
+        .or_else(|| extract_cross_index_predicates(right, table, idx_store))
+}
+
+/// Sorted-range scan filtered by a pre-built candidate `HashSet` (from hash index).
+/// Implements PG-style bitmap AND: iterate the BTree range, only collect IDs in the
+/// hash set. Stops after `limit` results.
+/// Returns None when the range filter is unsupported or no sorted index exists.
+pub(crate) fn try_sorted_index_filtered_by_set(
+    range_filter: &Filter,
+    table: &str,
+    idx_store: &IndexStore,
+    filter_set: &std::collections::HashSet<u64>,
+    limit: usize,
+) -> Option<Vec<EntityId>> {
+    match range_filter {
+        Filter::Between { field, low, high } => {
+            let col = match field {
+                FieldRef::TableColumn { column, .. } => column.as_str(),
+                _ => return None,
+            };
+            let lo = super::super::index_store::value_to_sorted_numeric_key(low)?;
+            let hi = super::super::index_store::value_to_sorted_numeric_key(high)?;
+            idx_store
+                .sorted
+                .range_filtered_by_set(table, col, lo, hi, filter_set, limit)
+        }
+        Filter::Compare { field, op, value }
+            if matches!(*op, CompareOp::Gt | CompareOp::Ge | CompareOp::Lt | CompareOp::Le) =>
+        {
+            let col = match field {
+                FieldRef::TableColumn { column, .. } => column.as_str(),
+                _ => return None,
+            };
+            let threshold = super::super::index_store::value_to_sorted_numeric_key(value)?;
+            match *op {
+                CompareOp::Gt => idx_store
+                    .sorted
+                    .gt_filtered_by_set(table, col, threshold, filter_set, limit),
+                CompareOp::Ge => idx_store
+                    .sorted
+                    .ge_filtered_by_set(table, col, threshold, filter_set, limit),
+                CompareOp::Lt => idx_store
+                    .sorted
+                    .lt_filtered_by_set(table, col, threshold, filter_set, limit),
+                CompareOp::Le => idx_store
+                    .sorted
+                    .le_filtered_by_set(table, col, threshold, filter_set, limit),
+                _ => unreachable!(),
+            }
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

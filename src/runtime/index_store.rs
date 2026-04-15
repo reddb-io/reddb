@@ -235,6 +235,40 @@ impl SortedColumnIndex {
         }
         result
     }
+
+    /// Bitmap AND: iterate the sorted range and collect only IDs present in
+    /// `filter_set` (a hash-index candidate set from an equality predicate).
+    /// Stops after `limit` results — matching PG's bitmap heap scan behaviour
+    /// where the intersection is fetched in physical order.
+    ///
+    /// This avoids fetching ALL hash-index candidates when the range predicate
+    /// is highly selective (e.g. `city='X'` ∩ `age > 30` → ~1K not 50K).
+    /// Returns None when float values make the ordering unsafe.
+    pub fn collect_range_filtered_by_set<R>(
+        &self,
+        range: R,
+        filter_set: &std::collections::HashSet<u64>,
+        limit: usize,
+    ) -> Option<Vec<EntityId>>
+    where
+        R: std::ops::RangeBounds<SortedNumericKey>,
+    {
+        if self.has_inexact_numeric_values {
+            return None;
+        }
+        let mut result = Vec::new();
+        'outer: for ids in self.entries.range(range).map(|(_, ids)| ids) {
+            for &id in ids {
+                if filter_set.contains(&id.raw()) {
+                    result.push(id);
+                    if result.len() >= limit {
+                        break 'outer;
+                    }
+                }
+            }
+        }
+        Some(result)
+    }
 }
 
 /// Manages sorted column indices per (collection, column).
@@ -410,6 +444,90 @@ impl SortedIndexManager {
         let indices = read_unpoisoned(&self.indices);
         let key = (collection.to_string(), column.to_string());
         indices.get(&key)?.less_equal_limited(threshold, limit)
+    }
+
+    /// Bitmap AND: range [low, high] filtered to IDs in `filter_set`.
+    pub(crate) fn range_filtered_by_set(
+        &self,
+        collection: &str,
+        column: &str,
+        low: SortedNumericKey,
+        high: SortedNumericKey,
+        filter_set: &std::collections::HashSet<u64>,
+        limit: usize,
+    ) -> Option<Vec<EntityId>> {
+        let indices = read_unpoisoned(&self.indices);
+        let key = (collection.to_string(), column.to_string());
+        if low > high {
+            return Some(Vec::new());
+        }
+        indices
+            .get(&key)?
+            .collect_range_filtered_by_set(low..=high, filter_set, limit)
+    }
+
+    /// Bitmap AND: gt filtered to IDs in `filter_set`.
+    pub(crate) fn gt_filtered_by_set(
+        &self,
+        collection: &str,
+        column: &str,
+        threshold: SortedNumericKey,
+        filter_set: &std::collections::HashSet<u64>,
+        limit: usize,
+    ) -> Option<Vec<EntityId>> {
+        let indices = read_unpoisoned(&self.indices);
+        let key = (collection.to_string(), column.to_string());
+        indices
+            .get(&key)?
+            .collect_range_filtered_by_set((Excluded(threshold), Unbounded), filter_set, limit)
+    }
+
+    /// Bitmap AND: ge filtered to IDs in `filter_set`.
+    pub(crate) fn ge_filtered_by_set(
+        &self,
+        collection: &str,
+        column: &str,
+        threshold: SortedNumericKey,
+        filter_set: &std::collections::HashSet<u64>,
+        limit: usize,
+    ) -> Option<Vec<EntityId>> {
+        let indices = read_unpoisoned(&self.indices);
+        let key = (collection.to_string(), column.to_string());
+        indices
+            .get(&key)?
+            .collect_range_filtered_by_set((Included(threshold), Unbounded), filter_set, limit)
+    }
+
+    /// Bitmap AND: lt filtered to IDs in `filter_set`.
+    pub(crate) fn lt_filtered_by_set(
+        &self,
+        collection: &str,
+        column: &str,
+        threshold: SortedNumericKey,
+        filter_set: &std::collections::HashSet<u64>,
+        limit: usize,
+    ) -> Option<Vec<EntityId>> {
+        let indices = read_unpoisoned(&self.indices);
+        let key = (collection.to_string(), column.to_string());
+        indices
+            .get(&key)?
+            .collect_range_filtered_by_set((Unbounded, Excluded(threshold)), filter_set, limit)
+    }
+
+    /// Bitmap AND: le filtered to IDs in `filter_set`.
+    pub(crate) fn le_filtered_by_set(
+        &self,
+        collection: &str,
+        column: &str,
+        threshold: SortedNumericKey,
+        filter_set: &std::collections::HashSet<u64>,
+        limit: usize,
+    ) -> Option<Vec<EntityId>> {
+        let indices = read_unpoisoned(&self.indices);
+        let key = (collection.to_string(), column.to_string());
+        indices
+            .get(&key)?
+            .collect_range_filtered_by_set((Unbounded, Included(threshold)), filter_set, limit)
     }
 
     /// Check if a sorted index exists for a column.

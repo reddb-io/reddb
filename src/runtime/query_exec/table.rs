@@ -16,7 +16,9 @@ use super::helpers::{
     extract_all_eq_candidates, extract_bloom_key_for_pk, extract_entity_id_from_filter,
     extract_index_candidate, extract_select_column_names, extract_zone_predicates,
 };
-use super::indexed_scan::try_sorted_index_lookup;
+use super::indexed_scan::{
+    extract_cross_index_predicates, try_sorted_index_filtered_by_set, try_sorted_index_lookup,
+};
 use super::*;
 use crate::storage::query::sql_lowering::{
     effective_table_filter, effective_table_group_by_exprs, effective_table_having_filter,
@@ -190,6 +192,95 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 }
             }
             return Ok(records);
+        }
+    }
+
+    // ── CROSS-INDEX BITMAP AND: hash eq ∩ sorted range ──────────────────────────
+    // Handles `WHERE city = 'X' AND age > 30` when city has a hash index and
+    // age has a sorted index.
+    //
+    // Current single-index path: fetch ALL ~50K hash candidates → filter by age.
+    // This path: iterate sorted range for age, check each ID against a HashSet
+    // built from the hash candidates. Only fetch the ~1K intersection.
+    //
+    // Equivalent to PG's bitmap heap scan where two bitmap indexes are AND-ed
+    // at word level before touching heap pages. Here we use HashSet instead of
+    // actual bitmaps but the reduction in entity fetches is the same.
+    if let (Some(idx_store), Some(ref filter)) = (index_store, &effective_filter) {
+        if let Some((eq_col, eq_bytes, range_filter)) =
+            extract_cross_index_predicates(filter, &query.table, idx_store)
+        {
+            if let Some(idx) = idx_store.find_index_for_column(&query.table, &eq_col) {
+                if let Ok(hash_ids) = idx_store.hash_lookup(&query.table, &idx.name, &eq_bytes) {
+                    if !hash_ids.is_empty() {
+                        let limit = query.limit.map(|l| l as usize).unwrap_or(usize::MAX);
+                        // Build HashSet from the smaller (hash) candidate set
+                        let hash_set: std::collections::HashSet<u64> =
+                            hash_ids.iter().map(|id| id.raw()).collect();
+                        // Stream sorted range, collect only IDs in hash_set
+                        if let Some(intersection_ids) = try_sorted_index_filtered_by_set(
+                            range_filter,
+                            &query.table,
+                            idx_store,
+                            &hash_set,
+                            limit,
+                        ) {
+                            let table_name = query.table.as_str();
+                            let table_alias = query.alias.as_deref().unwrap_or(table_name);
+                            let schema_arc = db
+                                .store()
+                                .get_collection(table_name)
+                                .and_then(|m| m.column_schema());
+                            let compiled_filter =
+                                effective_filter.as_ref().map(|f| match schema_arc.as_ref() {
+                                    Some(schema) => {
+                                        super::filter_compiled::CompiledEntityFilter::compile_with_schema(
+                                            f,
+                                            table_name,
+                                            table_alias,
+                                            schema.as_ref(),
+                                        )
+                                    }
+                                    None => super::filter_compiled::CompiledEntityFilter::compile(
+                                        f,
+                                        table_name,
+                                        table_alias,
+                                    ),
+                                });
+                            let store = db.store();
+                            let entities = store.get_batch(&query.table, &intersection_ids);
+                            let explicit_cols = extract_select_column_names(&effective_projections);
+                            let lean = explicit_cols.is_empty();
+                            let mut records =
+                                Vec::with_capacity(intersection_ids.len().min(limit));
+                            for entity_opt in entities.into_iter().flatten() {
+                                if records.len() >= limit {
+                                    break;
+                                }
+                                if compiled_filter
+                                    .as_ref()
+                                    .map_or(true, |cf| cf.evaluate(&entity_opt))
+                                {
+                                    let record_opt = if lean {
+                                        super::super::record_search::runtime_table_record_lean(
+                                            entity_opt,
+                                        )
+                                    } else {
+                                        runtime_table_record_from_entity_projected(
+                                            entity_opt,
+                                            &explicit_cols,
+                                        )
+                                    };
+                                    if let Some(record) = record_opt {
+                                        records.push(record);
+                                    }
+                                }
+                            }
+                            return Ok(records);
+                        }
+                    }
+                }
+            }
         }
     }
 
