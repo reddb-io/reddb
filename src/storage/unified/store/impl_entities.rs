@@ -8,6 +8,18 @@ impl UnifiedStore {
         idx.entry(key).or_default().push(entity_id);
     }
 
+    /// Remove a specific entity_id from the graph label index (called on delete).
+    fn remove_from_graph_label_index(&self, collection: &str, entity_id: EntityId) {
+        let mut idx = self.graph_label_index.write();
+        for ((col, _), ids) in idx.iter_mut() {
+            if col == collection {
+                ids.retain(|&id| id != entity_id);
+            }
+        }
+        // Prune empty entries to keep the index compact
+        idx.retain(|_, ids| !ids.is_empty());
+    }
+
     /// Look up entity IDs for a graph node label across all collections.
     pub fn lookup_graph_nodes_by_label(&self, label: &str) -> Vec<EntityId> {
         let idx = self.graph_label_index.read();
@@ -520,6 +532,9 @@ impl UnifiedStore {
 
         // Remove cross-references
         self.unindex_cross_refs(id)?;
+
+        // Remove from graph label index
+        self.remove_from_graph_label_index(collection, id);
 
         Ok(manager.delete(id)?)
     }
