@@ -61,6 +61,7 @@ pub use error::ParseError;
 
 use super::ast::QueryExpr;
 use super::lexer::{Lexer, Position, Spanned, Token};
+use super::sql::parse_frontend;
 use crate::storage::schema::Value;
 
 /// RQL Parser
@@ -229,7 +230,7 @@ impl<'a> Parser<'a> {
 
     /// Parse a complete query
     pub fn parse(&mut self) -> Result<QueryExpr, ParseError> {
-        let query = self.parse_query_expr()?;
+        let query = self.parse_frontend_statement()?.into_query_expr();
 
         // Expect end of input
         if !self.check(&Token::Eof) {
@@ -244,47 +245,8 @@ impl<'a> Parser<'a> {
 
     /// Parse the main query expression (without CTEs)
     pub fn parse_query_expr(&mut self) -> Result<QueryExpr, ParseError> {
-        match self.peek() {
-            Token::Select
-            | Token::Match
-            | Token::Path
-            | Token::From
-            | Token::Vector
-            | Token::Hybrid
-            | Token::Insert
-            | Token::Update
-            | Token::Delete
-            | Token::Explain
-            | Token::Create
-            | Token::Drop
-            | Token::Alter
-            | Token::Set => self
-                .parse_frontend_statement()
-                .map(|statement| statement.into_query_expr()),
-            Token::Ident(ref name) if name.eq_ignore_ascii_case("SHOW") => self
-                .parse_frontend_statement()
-                .map(|statement| statement.into_query_expr()),
-            Token::Graph => self.parse_graph_command(),
-            Token::Search => self.parse_search_command(),
-            Token::Ident(ref name) if name.eq_ignore_ascii_case("ASK") => self.parse_ask_query(),
-            Token::Queue => self.parse_queue_command(),
-            Token::Ident(ref name) if name.eq_ignore_ascii_case("HLL") => self.parse_hll_command(),
-            Token::Ident(ref name) if name.eq_ignore_ascii_case("SKETCH") => {
-                self.parse_sketch_command()
-            }
-            Token::Ident(ref name) if name.eq_ignore_ascii_case("FILTER") => {
-                self.parse_filter_command()
-            }
-            other => Err(ParseError::expected(
-                vec![
-                    "SELECT", "MATCH", "PATH", "FROM", "VECTOR", "HYBRID", "INSERT", "UPDATE",
-                    "DELETE", "CREATE", "DROP", "ALTER", "GRAPH", "SEARCH", "ASK", "HLL", "SKETCH",
-                    "FILTER",
-                ],
-                other,
-                self.position(),
-            )),
-        }
+        self.parse_frontend_statement()
+            .map(|statement| statement.into_query_expr())
     }
 
     /// Parse an integer literal
@@ -375,6 +337,5 @@ impl<'a> Parser<'a> {
 
 /// Parse an RQL query string
 pub fn parse(input: &str) -> Result<QueryExpr, ParseError> {
-    let mut parser = Parser::new(input)?;
-    parser.parse()
+    parse_frontend(input).map(|statement| statement.into_query_expr())
 }

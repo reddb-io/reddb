@@ -1,8 +1,9 @@
 use crate::storage::query::ast::{
-    AlterTableQuery, CreateIndexQuery, CreateQueueQuery, CreateTableQuery, CreateTimeSeriesQuery,
-    DeleteQuery, DropIndexQuery, DropQueueQuery, DropTableQuery, DropTimeSeriesQuery,
-    ExplainAlterQuery, GraphQuery, HybridQuery, InsertQuery, JoinQuery, PathQuery,
-    ProbabilisticCommand, QueryExpr, TableQuery, UpdateQuery, VectorQuery,
+    AlterTableQuery, AskQuery, CreateIndexQuery, CreateQueueQuery, CreateTableQuery,
+    CreateTimeSeriesQuery, DeleteQuery, DropIndexQuery, DropQueueQuery, DropTableQuery,
+    DropTimeSeriesQuery, ExplainAlterQuery, GraphCommand, GraphQuery, HybridQuery, InsertQuery,
+    JoinQuery, PathQuery, ProbabilisticCommand, QueryExpr, QueueCommand, SearchCommand, TableQuery,
+    UpdateQuery, VectorQuery,
 };
 use crate::storage::query::parser::{ParseError, Parser};
 use crate::storage::query::Token;
@@ -24,9 +25,14 @@ pub enum SqlStatement {
 pub enum FrontendStatement {
     Sql(SqlStatement),
     Graph(GraphQuery),
+    GraphCommand(GraphCommand),
     Path(PathQuery),
     Vector(VectorQuery),
     Hybrid(HybridQuery),
+    Search(SearchCommand),
+    Ask(AskQuery),
+    QueueCommand(QueueCommand),
+    ProbabilisticCommand(ProbabilisticCommand),
 }
 
 #[derive(Debug, Clone)]
@@ -145,11 +151,30 @@ impl FrontendStatement {
         match self {
             FrontendStatement::Sql(statement) => statement.into_query_expr(),
             FrontendStatement::Graph(query) => QueryExpr::Graph(query),
+            FrontendStatement::GraphCommand(command) => QueryExpr::GraphCommand(command),
             FrontendStatement::Path(query) => QueryExpr::Path(query),
             FrontendStatement::Vector(query) => QueryExpr::Vector(query),
             FrontendStatement::Hybrid(query) => QueryExpr::Hybrid(query),
+            FrontendStatement::Search(command) => QueryExpr::SearchCommand(command),
+            FrontendStatement::Ask(query) => QueryExpr::Ask(query),
+            FrontendStatement::QueueCommand(command) => QueryExpr::QueueCommand(command),
+            FrontendStatement::ProbabilisticCommand(command) => {
+                QueryExpr::ProbabilisticCommand(command)
+            }
         }
     }
+}
+
+pub fn parse_frontend(input: &str) -> Result<FrontendStatement, ParseError> {
+    let mut parser = Parser::new(input)?;
+    let statement = parser.parse_frontend_statement()?;
+    if !parser.check(&Token::Eof) {
+        return Err(ParseError::new(
+            format!("Unexpected token after query: {}", parser.current.token),
+            parser.position(),
+        ));
+    }
+    Ok(statement)
 }
 
 impl SqlCommand {
@@ -271,10 +296,74 @@ impl<'a> Parser<'a> {
                     self.position(),
                 )),
             },
+            Token::Graph => match self.parse_graph_command()? {
+                QueryExpr::GraphCommand(command) => Ok(FrontendStatement::GraphCommand(command)),
+                other => Err(ParseError::new(
+                    format!("internal: GRAPH produced unexpected query kind {other:?}"),
+                    self.position(),
+                )),
+            },
+            Token::Search => match self.parse_search_command()? {
+                QueryExpr::SearchCommand(command) => Ok(FrontendStatement::Search(command)),
+                other => Err(ParseError::new(
+                    format!("internal: SEARCH produced unexpected query kind {other:?}"),
+                    self.position(),
+                )),
+            },
+            Token::Ident(name) if name.eq_ignore_ascii_case("ASK") => {
+                match self.parse_ask_query()? {
+                    QueryExpr::Ask(query) => Ok(FrontendStatement::Ask(query)),
+                    other => Err(ParseError::new(
+                        format!("internal: ASK produced unexpected query kind {other:?}"),
+                        self.position(),
+                    )),
+                }
+            }
+            Token::Queue => match self.parse_queue_command()? {
+                QueryExpr::QueueCommand(command) => Ok(FrontendStatement::QueueCommand(command)),
+                other => Err(ParseError::new(
+                    format!("internal: QUEUE produced unexpected query kind {other:?}"),
+                    self.position(),
+                )),
+            },
+            Token::Ident(name) if name.eq_ignore_ascii_case("HLL") => {
+                match self.parse_hll_command()? {
+                    QueryExpr::ProbabilisticCommand(command) => {
+                        Ok(FrontendStatement::ProbabilisticCommand(command))
+                    }
+                    other => Err(ParseError::new(
+                        format!("internal: HLL produced unexpected query kind {other:?}"),
+                        self.position(),
+                    )),
+                }
+            }
+            Token::Ident(name) if name.eq_ignore_ascii_case("SKETCH") => {
+                match self.parse_sketch_command()? {
+                    QueryExpr::ProbabilisticCommand(command) => {
+                        Ok(FrontendStatement::ProbabilisticCommand(command))
+                    }
+                    other => Err(ParseError::new(
+                        format!("internal: SKETCH produced unexpected query kind {other:?}"),
+                        self.position(),
+                    )),
+                }
+            }
+            Token::Ident(name) if name.eq_ignore_ascii_case("FILTER") => {
+                match self.parse_filter_command()? {
+                    QueryExpr::ProbabilisticCommand(command) => {
+                        Ok(FrontendStatement::ProbabilisticCommand(command))
+                    }
+                    other => Err(ParseError::new(
+                        format!("internal: FILTER produced unexpected query kind {other:?}"),
+                        self.position(),
+                    )),
+                }
+            }
             other => Err(ParseError::expected(
                 vec![
                     "SELECT", "MATCH", "PATH", "FROM", "VECTOR", "HYBRID", "INSERT", "UPDATE",
-                    "DELETE", "CREATE", "DROP", "ALTER", "SET", "SHOW",
+                    "DELETE", "CREATE", "DROP", "ALTER", "GRAPH", "SEARCH", "ASK", "QUEUE", "HLL",
+                    "SKETCH", "FILTER", "SET", "SHOW",
                 ],
                 other,
                 self.position(),
