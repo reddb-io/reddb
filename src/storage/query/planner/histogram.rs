@@ -64,6 +64,17 @@ impl PartialEq for ColumnValue {
 
 impl Eq for ColumnValue {}
 
+impl std::hash::Hash for ColumnValue {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            ColumnValue::Int(v) => v.hash(state),
+            ColumnValue::Float(v) => v.to_bits().hash(state),
+            ColumnValue::Text(v) => v.hash(state),
+        }
+    }
+}
+
 impl PartialOrd for ColumnValue {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp_inner(other))

@@ -50,6 +50,9 @@
 //! formal parse — we only care about stable equivalence
 //! classes, not strict correctness.
 
+use crate::storage::query::lexer::{Lexer, Token};
+use crate::storage::schema::Value;
+
 /// Normalise a raw SQL query into a cache-friendly canonical
 /// form. Stable across whitespace, case, and literal values;
 /// identical AST shapes collapse to the same output.
@@ -61,6 +64,7 @@ pub fn normalize_cache_key(sql: &str) -> String {
     let bytes = sql.as_bytes();
     let mut i = 0;
     let mut last_was_space = true; // suppress leading space
+    let mut preserve_numeric_literal = false;
     while i < bytes.len() {
         let b = bytes[i];
 
@@ -118,6 +122,7 @@ pub fn normalize_cache_key(sql: &str) -> String {
         // could be a binary operator; we only canonicalise
         // digit-led runs.
         if b.is_ascii_digit() {
+            let start = i;
             while i < bytes.len()
                 && (bytes[i].is_ascii_digit()
                     || bytes[i] == b'.'
@@ -136,7 +141,12 @@ pub fn normalize_cache_key(sql: &str) -> String {
                 }
                 i += 1;
             }
-            out.push('?');
+            if preserve_numeric_literal {
+                out.push_str(&sql[start..i]);
+                preserve_numeric_literal = false;
+            } else {
+                out.push('?');
+            }
             last_was_space = false;
             continue;
         }
@@ -155,6 +165,7 @@ pub fn normalize_cache_key(sql: &str) -> String {
                 || word.eq_ignore_ascii_case("null")
             {
                 out.push('?');
+                preserve_numeric_literal = false;
             } else {
                 // Uppercase the word so `select` and `SELECT`
                 // collapse. This over-normalises — it also
@@ -165,6 +176,8 @@ pub fn normalize_cache_key(sql: &str) -> String {
                 for c in word.chars() {
                     out.push(c.to_ascii_uppercase());
                 }
+                preserve_numeric_literal =
+                    word.eq_ignore_ascii_case("limit") || word.eq_ignore_ascii_case("offset");
             }
             last_was_space = false;
             continue;
@@ -173,6 +186,7 @@ pub fn normalize_cache_key(sql: &str) -> String {
         // Everything else (punctuation, operators, parens).
         // Emit verbatim.
         out.push(b as char);
+        preserve_numeric_literal = false;
         last_was_space = false;
         i += 1;
     }
@@ -191,6 +205,55 @@ pub fn normalize_cache_key(sql: &str) -> String {
 /// normalisation is doing its job.
 pub fn same_cache_key(a: &str, b: &str) -> bool {
     normalize_cache_key(a) == normalize_cache_key(b)
+}
+
+pub fn extract_literal_bindings(sql: &str) -> Result<Vec<Value>, String> {
+    let mut lexer = Lexer::new(sql);
+    let mut binds = Vec::new();
+    let mut skip_next_numeric = false;
+
+    loop {
+        let spanned = lexer.next_token().map_err(|err| err.to_string())?;
+        match spanned.token {
+            Token::Eof => break,
+            Token::Limit | Token::Offset => {
+                skip_next_numeric = true;
+            }
+            Token::Integer(n) => {
+                if !skip_next_numeric {
+                    binds.push(Value::Integer(n));
+                }
+                skip_next_numeric = false;
+            }
+            Token::Float(n) => {
+                if !skip_next_numeric {
+                    binds.push(Value::Float(n));
+                }
+                skip_next_numeric = false;
+            }
+            Token::String(s) => {
+                binds.push(Value::Text(s));
+                skip_next_numeric = false;
+            }
+            Token::True => {
+                binds.push(Value::Boolean(true));
+                skip_next_numeric = false;
+            }
+            Token::False => {
+                binds.push(Value::Boolean(false));
+                skip_next_numeric = false;
+            }
+            Token::Null => {
+                binds.push(Value::Null);
+                skip_next_numeric = false;
+            }
+            _ => {
+                skip_next_numeric = false;
+            }
+        }
+    }
+
+    Ok(binds)
 }
 
 #[cfg(test)]
@@ -261,5 +324,25 @@ mod tests {
             normalize_cache_key(r#"SELECT "col" FROM t"#),
             normalize_cache_key(r#"SELECT "other" FROM t"#),
         );
+    }
+
+    #[test]
+    fn limit_and_offset_literals_remain_in_shape() {
+        assert_ne!(
+            normalize_cache_key("SELECT * FROM t WHERE id = 1 LIMIT 10"),
+            normalize_cache_key("SELECT * FROM t WHERE id = 2 LIMIT 20"),
+        );
+        assert_ne!(
+            normalize_cache_key("SELECT * FROM t WHERE id = 1 OFFSET 10"),
+            normalize_cache_key("SELECT * FROM t WHERE id = 2 OFFSET 20"),
+        );
+    }
+
+    #[test]
+    fn extract_literal_bindings_skips_limit_and_offset() {
+        let binds =
+            extract_literal_bindings("SELECT * FROM t WHERE age = 18 AND active = true LIMIT 10")
+                .unwrap();
+        assert_eq!(binds, vec![Value::Integer(18), Value::Boolean(true)]);
     }
 }

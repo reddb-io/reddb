@@ -167,6 +167,20 @@ curl -fsSL https://raw.githubusercontent.com/forattini-dev/reddb/main/install.sh
 npx reddb-cli@latest server --path ./data/reddb.rdb --http-bind 127.0.0.1:8080
 ```
 
+### JavaScript / TypeScript driver
+
+```bash
+pnpm add reddb
+```
+
+```ts
+import { connect } from 'reddb'
+
+const db = await connect('memory://')
+const result = await db.query('SELECT * FROM hosts')
+await db.close()
+```
+
 ## First connection
 
 Start the server:

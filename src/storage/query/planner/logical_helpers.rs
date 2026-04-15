@@ -71,7 +71,7 @@ pub(crate) fn universal_entity_cardinality(db: &RedDB) -> CardinalityEstimate {
 }
 
 pub(crate) fn table_filtered_cardinality(db: &RedDB, query: &TableQuery) -> CardinalityEstimate {
-    let provider = Arc::new(CatalogStatsProvider::from_catalog(&db.catalog_snapshot()));
+    let provider = Arc::new(CatalogStatsProvider::from_db(db));
     let mut filtered = query.clone();
     filtered.limit = None;
     filtered.offset = None;
@@ -88,7 +88,7 @@ pub(crate) fn document_index_cardinality(db: &RedDB, collection: &str) -> Cardin
 }
 
 pub(crate) fn document_filtered_cardinality(db: &RedDB, query: &TableQuery) -> CardinalityEstimate {
-    let provider = Arc::new(CatalogStatsProvider::from_catalog(&db.catalog_snapshot()));
+    let provider = Arc::new(CatalogStatsProvider::from_db(db));
     let mut filtered = query.clone();
     filtered.limit = None;
     filtered.offset = None;

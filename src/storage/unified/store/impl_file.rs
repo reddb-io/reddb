@@ -64,7 +64,11 @@ impl UnifiedStore {
         // Version check
         let version = u32::from_le_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]]);
         pos += 4;
-        if version != STORE_VERSION_V1 && version != STORE_VERSION_V2 && version != STORE_VERSION_V3
+        if version != STORE_VERSION_V1
+            && version != STORE_VERSION_V2
+            && version != STORE_VERSION_V3
+            && version != STORE_VERSION_V4
+            && version != STORE_VERSION_V5
         {
             return Err(format!("Unsupported version: {}", version).into());
         }
@@ -152,6 +156,10 @@ impl UnifiedStore {
             }
         }
 
+        if store.format_version() < STORE_VERSION_V5 {
+            store.set_format_version(STORE_VERSION_V5);
+        }
+
         Ok(store)
     }
 
@@ -169,8 +177,8 @@ impl UnifiedStore {
         // Magic bytes "RDST"
         buf.extend_from_slice(STORE_MAGIC);
 
-        // Version (3 — includes CRC32 footer)
-        buf.extend_from_slice(&STORE_VERSION_V3.to_le_bytes());
+        // Version (5 — includes CRC32 footer, queue tails, and timeseries tags)
+        buf.extend_from_slice(&STORE_VERSION_V5.to_le_bytes());
 
         // Get all collections
         let collections = self.collections.read();
@@ -186,7 +194,7 @@ impl UnifiedStore {
             write_varu32(&mut buf, entities.len() as u32);
 
             for entity in entities {
-                Self::write_entity_binary(&mut buf, &entity, STORE_VERSION_V2);
+                Self::write_entity_binary(&mut buf, &entity, STORE_VERSION_V5);
             }
         }
 
@@ -205,7 +213,7 @@ impl UnifiedStore {
             }
         }
 
-        self.set_format_version(STORE_VERSION_V3);
+        self.set_format_version(STORE_VERSION_V5);
 
         // Append CRC32 footer over entire content
         let checksum = crate::storage::engine::crc32::crc32(&buf);
@@ -293,6 +301,24 @@ impl UnifiedStore {
                 *pos += collection_len;
                 EntityKind::Vector { collection }
             }
+            4 => {
+                // TimeSeriesPoint
+                let series_len = Self::read_varu32_safe(buf, pos)?;
+                let series = String::from_utf8(buf[*pos..*pos + series_len].to_vec())?;
+                *pos += series_len;
+                let metric_len = Self::read_varu32_safe(buf, pos)?;
+                let metric = String::from_utf8(buf[*pos..*pos + metric_len].to_vec())?;
+                *pos += metric_len;
+                EntityKind::TimeSeriesPoint(Box::new(TimeSeriesPointKind { series, metric }))
+            }
+            5 => {
+                // QueueMessage
+                let queue_len = Self::read_varu32_safe(buf, pos)?;
+                let queue = String::from_utf8(buf[*pos..*pos + queue_len].to_vec())?;
+                *pos += queue_len;
+                let position = Self::read_varu64_safe(buf, pos)?;
+                EntityKind::QueueMessage { queue, position }
+            }
             _ => return Err(format!("Unknown EntityKind type: {}", kind_type).into()),
         };
 
@@ -301,7 +327,7 @@ impl UnifiedStore {
         *pos += 1;
 
         // EntityData
-        let data = match data_type {
+        let mut data = match data_type {
             0 => {
                 // Row
                 let col_count = Self::read_varu32_safe(buf, pos)?;
@@ -352,6 +378,58 @@ impl UnifiedStore {
                     dense.push(f32::from_le_bytes(bytes));
                 }
                 EntityData::Vector(VectorData::new(dense))
+            }
+            4 => {
+                // TimeSeries
+                let metric_len = Self::read_varu32_safe(buf, pos)?;
+                let metric = String::from_utf8(buf[*pos..*pos + metric_len].to_vec())?;
+                *pos += metric_len;
+                let timestamp_ns = Self::read_varu64_safe(buf, pos)?;
+                let value_bytes = [
+                    buf[*pos],
+                    buf[*pos + 1],
+                    buf[*pos + 2],
+                    buf[*pos + 3],
+                    buf[*pos + 4],
+                    buf[*pos + 5],
+                    buf[*pos + 6],
+                    buf[*pos + 7],
+                ];
+                *pos += 8;
+                let mut tags = HashMap::new();
+                if format_version >= STORE_VERSION_V5 {
+                    let tag_count = Self::read_varu32_safe(buf, pos)?;
+                    tags = HashMap::with_capacity(tag_count);
+                    for _ in 0..tag_count {
+                        let key_len = Self::read_varu32_safe(buf, pos)?;
+                        let key = String::from_utf8(buf[*pos..*pos + key_len].to_vec())?;
+                        *pos += key_len;
+                        let value_len = Self::read_varu32_safe(buf, pos)?;
+                        let value = String::from_utf8(buf[*pos..*pos + value_len].to_vec())?;
+                        *pos += value_len;
+                        tags.insert(key, value);
+                    }
+                }
+                EntityData::TimeSeries(crate::storage::unified::entity::TimeSeriesData {
+                    metric,
+                    timestamp_ns,
+                    value: f64::from_le_bytes(value_bytes),
+                    tags,
+                })
+            }
+            5 => {
+                // QueueMessage
+                let payload = Self::read_value_binary(buf, pos)?;
+                let enqueued_at_ns = Self::read_varu64_safe(buf, pos)?;
+                let attempts = Self::read_varu32_safe(buf, pos)? as u32;
+                EntityData::QueueMessage(crate::storage::unified::entity::QueueMessageData {
+                    payload,
+                    priority: None,
+                    enqueued_at_ns,
+                    attempts,
+                    max_attempts: 3,
+                    acked: false,
+                })
             }
             6 => {
                 // Row with named HashMap
@@ -434,6 +512,31 @@ impl UnifiedStore {
 
         // Sequence ID
         let sequence_id = Self::read_varu64_safe(buf, pos)?;
+
+        if format_version >= STORE_VERSION_V4 {
+            if let EntityData::QueueMessage(message) = &mut data {
+                if *pos < buf.len() {
+                    let priority_present = buf[*pos] != 0;
+                    *pos += 1;
+                    message.priority = if priority_present {
+                        if *pos + 4 > buf.len() {
+                            return Err("truncated queue priority".into());
+                        }
+                        let bytes = [buf[*pos], buf[*pos + 1], buf[*pos + 2], buf[*pos + 3]];
+                        *pos += 4;
+                        Some(i32::from_le_bytes(bytes))
+                    } else {
+                        None
+                    };
+                    message.max_attempts = Self::read_varu32_safe(buf, pos)? as u32;
+                    if *pos >= buf.len() {
+                        return Err("truncated queue ack flag".into());
+                    }
+                    message.acked = buf[*pos] != 0;
+                    *pos += 1;
+                }
+            }
+        }
 
         let mut entity = UnifiedEntity::new(EntityId::new(id), kind, data);
         entity.created_at = created_at;
@@ -565,6 +668,15 @@ impl UnifiedStore {
                 buf.extend_from_slice(ts.metric.as_bytes());
                 write_varu64(buf, ts.timestamp_ns);
                 buf.extend_from_slice(&ts.value.to_le_bytes());
+                if format_version >= STORE_VERSION_V5 {
+                    write_varu32(buf, ts.tags.len() as u32);
+                    for (key, value) in &ts.tags {
+                        write_varu32(buf, key.len() as u32);
+                        buf.extend_from_slice(key.as_bytes());
+                        write_varu32(buf, value.len() as u32);
+                        buf.extend_from_slice(value.as_bytes());
+                    }
+                }
             }
             EntityData::QueueMessage(msg) => {
                 buf.push(5);
@@ -607,6 +719,17 @@ impl UnifiedStore {
 
         // Sequence ID
         write_varu64(buf, entity.sequence_id);
+
+        if format_version >= STORE_VERSION_V4 {
+            if let EntityData::QueueMessage(message) = &entity.data {
+                buf.push(u8::from(message.priority.is_some()));
+                if let Some(priority) = message.priority {
+                    buf.extend_from_slice(&priority.to_le_bytes());
+                }
+                write_varu32(buf, message.max_attempts);
+                buf.push(u8::from(message.acked));
+            }
+        }
     }
 
     /// Read a Value from binary buffer

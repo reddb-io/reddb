@@ -66,7 +66,7 @@ impl<'a> Parser<'a> {
             Token::Push => {
                 self.advance()?;
                 let queue = self.expect_ident()?;
-                let value = self.parse_string()?;
+                let value = self.parse_value()?;
                 let priority = if self.consume(&Token::Priority)? {
                     Some(self.parse_integer()? as i32)
                 } else {
@@ -113,6 +113,15 @@ impl<'a> Parser<'a> {
                 let queue = self.expect_ident()?;
                 Ok(QueryExpr::QueueCommand(QueueCommand::Purge { queue }))
             }
+            Token::Ident(ref name) if name.eq_ignore_ascii_case("LPOP") => {
+                self.advance()?;
+                let queue = self.expect_ident()?;
+                Ok(QueryExpr::QueueCommand(QueueCommand::Pop {
+                    queue,
+                    side: QueueSide::Left,
+                    count: 1,
+                }))
+            }
             Token::Ident(ref name) if name.eq_ignore_ascii_case("RPOP") => {
                 self.advance()?;
                 let queue = self.expect_ident()?;
@@ -125,12 +134,28 @@ impl<'a> Parser<'a> {
             Token::Ident(ref name) if name.eq_ignore_ascii_case("LPUSH") => {
                 self.advance()?;
                 let queue = self.expect_ident()?;
-                let value = self.parse_string()?;
+                let value = self.parse_value()?;
                 Ok(QueryExpr::QueueCommand(QueueCommand::Push {
                     queue,
                     value,
                     side: QueueSide::Left,
                     priority: None,
+                }))
+            }
+            Token::Ident(ref name) if name.eq_ignore_ascii_case("RPUSH") => {
+                self.advance()?;
+                let queue = self.expect_ident()?;
+                let value = self.parse_value()?;
+                let priority = if self.consume(&Token::Priority)? {
+                    Some(self.parse_integer()? as i32)
+                } else {
+                    None
+                };
+                Ok(QueryExpr::QueueCommand(QueueCommand::Push {
+                    queue,
+                    value,
+                    side: QueueSide::Right,
+                    priority,
                 }))
             }
             Token::Group => {
@@ -228,7 +253,7 @@ impl<'a> Parser<'a> {
             _ => Err(ParseError::expected(
                 vec![
                     "PUSH", "POP", "PEEK", "LEN", "PURGE", "GROUP", "READ", "ACK", "NACK", "LPUSH",
-                    "RPOP", "PENDING", "CLAIM",
+                    "RPUSH", "LPOP", "RPOP", "PENDING", "CLAIM",
                 ],
                 self.peek(),
                 self.position(),

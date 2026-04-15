@@ -15,6 +15,9 @@ jobs:
     name: Quality (fmt, check, clippy)
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.91.0
@@ -24,15 +27,26 @@ jobs:
         with:
           version: '28.x'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: rui314/setup-mold@v1
+      - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ubuntu-rust-1.91.0
+          cache-on-failure: "true"
       - run: cargo fmt --all -- --check
       - run: cargo check --locked --all
       - run: cargo clippy --locked --all -- -D warnings
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats
 
   tests:
     name: Test Suite
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.91.0
@@ -40,13 +54,24 @@ jobs:
         with:
           version: '28.x'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: rui314/setup-mold@v1
+      - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ubuntu-rust-1.91.0
+          cache-on-failure: "true"
+          workspaces: |
+            . -> target
+            . -> target/persistent-tests
       - name: Run default test layer
         run: cargo test --locked --verbose
       - name: Run persistent multimodel layer
         env:
           CARGO_TARGET_DIR: target/persistent-tests
         run: cargo test --locked --test integration_persistent_multimodel -- --ignored
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats
 
   containers:
     name: Container Stack

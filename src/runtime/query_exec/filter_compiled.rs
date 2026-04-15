@@ -218,6 +218,9 @@ fn resolve_kind<'a>(
                     return Some(Cow::Borrowed(v));
                 }
             }
+            if let Some(value) = resolve_timeseries_field(entity, name) {
+                return Some(value);
+            }
             None
         }
         EntityFieldKind::RowFieldFast { name, idx } => {
@@ -230,6 +233,9 @@ fn resolve_kind<'a>(
                 if let Some(v) = row.get_field(name) {
                     return Some(Cow::Borrowed(v));
                 }
+            }
+            if let Some(value) = resolve_timeseries_field(entity, name) {
+                return Some(value);
             }
             None
         }
@@ -244,6 +250,23 @@ fn resolve_kind<'a>(
             None
         }
         EntityFieldKind::Unknown => None,
+    }
+}
+
+fn resolve_timeseries_field<'a>(entity: &'a UnifiedEntity, name: &str) -> Option<Cow<'a, Value>> {
+    let EntityData::TimeSeries(ts) = &entity.data else {
+        return None;
+    };
+    match name {
+        "metric" => Some(Cow::Owned(Value::Text(ts.metric.clone()))),
+        "timestamp_ns" | "timestamp" | "time" => {
+            Some(Cow::Owned(Value::UnsignedInteger(ts.timestamp_ns)))
+        }
+        "value" => Some(Cow::Owned(Value::Float(ts.value))),
+        "tags" => Some(Cow::Owned(super::json_writers::timeseries_tags_json_value(
+            &ts.tags,
+        ))),
+        _ => None,
     }
 }
 
@@ -939,6 +962,36 @@ mod tests {
             } => {}
             other => panic!("expected SystemEntityId, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn compiled_filter_matches_timeseries_native_fields() {
+        let filter = Filter::Compare {
+            field: FieldRef::TableColumn {
+                table: String::new(),
+                column: "metric".to_string(),
+            },
+            op: CompareOp::Eq,
+            value: Value::Text("cpu.usage".to_string()),
+        };
+        let compiled = CompiledEntityFilter::compile(&filter, "metrics", "m");
+        let entity = UnifiedEntity::new(
+            crate::storage::EntityId::new(1),
+            crate::storage::EntityKind::TimeSeriesPoint(Box::new(
+                crate::storage::TimeSeriesPointKind {
+                    series: "metrics".to_string(),
+                    metric: "cpu.usage".to_string(),
+                },
+            )),
+            crate::storage::EntityData::TimeSeries(crate::storage::TimeSeriesData {
+                metric: "cpu.usage".to_string(),
+                timestamp_ns: 42,
+                value: 10.5,
+                tags: std::collections::HashMap::new(),
+            }),
+        );
+
+        assert!(compiled.evaluate(&entity));
     }
 
     // Note: full evaluate() correctness is covered by the runtime

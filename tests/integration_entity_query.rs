@@ -206,6 +206,54 @@ fn test_row_patch_unset() {
     );
 }
 
+#[test]
+fn test_select_by_entity_id_sees_latest_updated_row_image() {
+    let rt = rt();
+    let entity = EntityUseCases::new(&rt);
+    let query = QueryUseCases::new(&rt);
+
+    let created = entity
+        .create_row(CreateRowInput {
+            collection: "entity_id_latest".into(),
+            fields: vec![
+                ("name".into(), Value::Text("Alice".into())),
+                ("role".into(), Value::Text("developer".into())),
+            ],
+            metadata: vec![],
+            node_links: vec![],
+            vector_links: vec![],
+        })
+        .expect("create_row should succeed");
+
+    query
+        .execute(ExecuteQueryInput {
+            query: format!(
+                "UPDATE entity_id_latest SET role = 'architect' WHERE red_entity_id = {}",
+                created.id.raw()
+            ),
+        })
+        .expect("UPDATE by red_entity_id should succeed");
+
+    let result = query
+        .execute(ExecuteQueryInput {
+            query: format!(
+                "SELECT role FROM entity_id_latest WHERE red_entity_id = {}",
+                created.id.raw()
+            ),
+        })
+        .expect("SELECT by red_entity_id should succeed");
+
+    assert_eq!(
+        result.result.records.len(),
+        1,
+        "should return one updated row"
+    );
+    match result.result.records[0].values.get("role") {
+        Some(Value::Text(value)) => assert_eq!(value, "architect"),
+        other => panic!("expected updated role, got {:?}", other),
+    }
+}
+
 // 4. test_row_delete
 #[test]
 fn test_row_patch_top_level_ttl_payload_expires_entity() {

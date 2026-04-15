@@ -841,12 +841,29 @@ fn column_value_from(v: &crate::storage::schema::Value) -> Option<super::histogr
     use super::histogram::ColumnValue;
     use crate::storage::schema::Value;
     match v {
-        Value::Integer(i) => Some(ColumnValue::Int(*i)),
+        Value::Integer(i) | Value::BigInt(i) => Some(ColumnValue::Int(*i)),
         Value::UnsignedInteger(u) => Some(ColumnValue::Int(*u as i64)),
-        Value::Float(f) => Some(ColumnValue::Float(*f)),
-        Value::Text(s) => Some(ColumnValue::Text(s.clone())),
+        Value::Float(f) if f.is_finite() => Some(ColumnValue::Float(*f)),
+        Value::Text(s)
+        | Value::Email(s)
+        | Value::Url(s)
+        | Value::NodeRef(s)
+        | Value::EdgeRef(s)
+        | Value::TableRef(s)
+        | Value::Password(s) => Some(ColumnValue::Text(s.clone())),
         Value::Timestamp(t) => Some(ColumnValue::Int(*t)),
         Value::Duration(d) => Some(ColumnValue::Int(*d)),
+        Value::TimestampMs(t) => Some(ColumnValue::Int(*t)),
+        Value::Decimal(d) => Some(ColumnValue::Int(*d)),
+        Value::Date(d) => Some(ColumnValue::Int(i64::from(*d))),
+        Value::Time(t) => Some(ColumnValue::Int(i64::from(*t))),
+        Value::Phone(p) => Some(ColumnValue::Int(*p as i64)),
+        Value::Semver(v) => Some(ColumnValue::Int(i64::from(*v))),
+        Value::Port(v) => Some(ColumnValue::Int(i64::from(*v))),
+        Value::PageRef(v) => Some(ColumnValue::Int(i64::from(*v))),
+        Value::EnumValue(v) => Some(ColumnValue::Int(i64::from(*v))),
+        Value::Latitude(v) => Some(ColumnValue::Int(i64::from(*v))),
+        Value::Longitude(v) => Some(ColumnValue::Int(i64::from(*v))),
         // Other variants (Null, Blob, Boolean, IpAddr, MacAddr,
         // Vector, Json, Uuid, NodeRef, EdgeRef, vector ref...) are
         // not orderable in a histogram-meaningful way; the planner

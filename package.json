@@ -1,31 +1,22 @@
 {
   "name": "reddb-cli",
   "version": "0.1.5",
-  "description": "JavaScript/TypeScript SDK for RedDB - unified multi-model database",
+  "description": "CLI launcher for RedDB. For JS/TS app code, use the `reddb` driver package.",
   "type": "commonjs",
-  "main": "./sdk/red-sdk.js",
-  "types": "./sdk/index.d.ts",
   "bin": {
-    "red": "./sdk/red-sdk.js"
-  },
-  "exports": {
-    ".": {
-      "require": "./sdk/red-sdk.js",
-      "types": "./sdk/index.d.ts",
-      "default": "./sdk/red-sdk.js"
-    }
+    "reddb-cli": "./drivers/js/src/cli.js"
   },
   "files": [
-    "sdk/red-sdk.js",
-    "sdk/postinstall.js",
-    "sdk/index.d.ts"
+    "drivers/js/src/",
+    "drivers/js/postinstall.js",
+    "drivers/js/package.json"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=18"
   },
   "scripts": {
-    "postinstall": "node sdk/postinstall.js",
-    "test": "node sdk/test/sdk.test.js",
+    "postinstall": "node drivers/js/postinstall.js",
+    "test": "node drivers/js/test/smoke.test.mjs",
     "version": "node scripts/sync-version.js && cargo generate-lockfile && git add Cargo.toml Cargo.lock drivers/rust/Cargo.toml drivers/js/package.json drivers/python/Cargo.toml drivers/python/pyproject.toml"
   },
   "keywords": [

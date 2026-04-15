@@ -60,6 +60,8 @@ impl RedDBRuntime {
             .db
             .persist_metadata()
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        self.refresh_table_planner_stats(&query.name);
+        self.invalidate_result_cache();
 
         let ttl_suffix = query
             .default_ttl_ms
@@ -118,6 +120,7 @@ impl RedDBRuntime {
             .db
             .remove_collection_contract(&query.name)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        self.clear_table_planner_stats(&query.name);
         self.invalidate_result_cache();
         self.inner
             .db
@@ -180,6 +183,8 @@ impl RedDBRuntime {
             .db
             .save_collection_contract(contract)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        self.clear_table_planner_stats(&query.name);
+        self.invalidate_result_cache();
 
         let message = if messages.is_empty() {
             format!("table '{}' altered (no operations)", query.name)
@@ -331,6 +336,13 @@ impl RedDBRuntime {
             )
             .map_err(RedDBError::Internal)?;
 
+        let analyzed = crate::storage::query::planner::stats_catalog::analyze_entity_fields(
+            &query.table,
+            &entity_fields,
+        );
+        crate::storage::query::planner::stats_catalog::persist_table_stats(&store, &analyzed);
+        self.invalidate_plan_cache();
+
         // Register metadata
         self.inner
             .index_store
@@ -383,6 +395,7 @@ impl RedDBRuntime {
 
         // Remove from IndexStore
         self.inner.index_store.drop_index(&query.name, &query.table);
+        self.invalidate_plan_cache();
 
         Ok(RuntimeQueryResult::ok_message(
             raw_query.to_string(),

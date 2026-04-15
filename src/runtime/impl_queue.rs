@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::storage::unified::entity::{QueueMessageData, RowData};
-use crate::storage::unified::UnifiedStore;
+use crate::storage::unified::{Metadata, MetadataValue, UnifiedStore};
 
 use super::*;
 
@@ -232,7 +232,7 @@ impl RedDBRuntime {
                         position,
                     },
                     EntityData::QueueMessage(QueueMessageData {
-                        payload: Value::Text(value.clone()),
+                        payload: value.clone(),
                         priority: if config.priority { *priority } else { None },
                         enqueued_at_ns: now_ns(),
                         attempts: 0,
@@ -243,6 +243,11 @@ impl RedDBRuntime {
                 let id = store
                     .insert_auto(queue, entity)
                     .map_err(|err| RedDBError::Internal(err.to_string()))?;
+                if let Some(ttl_ms) = config.ttl_ms {
+                    store
+                        .set_metadata(queue, id, queue_message_ttl_metadata(ttl_ms))
+                        .map_err(|err| RedDBError::Internal(err.to_string()))?;
+                }
                 self.invalidate_result_cache();
 
                 let mut result = UnifiedResult::with_columns(vec![
@@ -1082,9 +1087,7 @@ fn increment_queue_attempts(
     queue: &str,
     message_id: EntityId,
 ) -> RedDBResult<u32> {
-    let manager = store
-        .get_collection(queue)
-        .ok_or_else(|| RedDBError::NotFound(format!("queue '{}' not found", queue)))?;
+    let manager = queue_manager(store, queue)?;
     let mut entity = manager
         .get(message_id)
         .ok_or_else(|| RedDBError::NotFound(format!("message '{}' not found", message_id.raw())))?;
@@ -1109,16 +1112,7 @@ fn queue_message_attempts(
     queue: &str,
     message_id: EntityId,
 ) -> RedDBResult<u32> {
-    let entity = store
-        .get(queue, message_id)
-        .ok_or_else(|| RedDBError::NotFound(format!("message '{}' not found", message_id.raw())))?;
-    match entity.data {
-        EntityData::QueueMessage(message) => Ok(message.attempts),
-        _ => Err(RedDBError::Query(format!(
-            "entity '{}' is not a queue message",
-            message_id.raw()
-        ))),
-    }
+    Ok(queue_message_data(store, queue, message_id)?.attempts)
 }
 
 fn queue_message_max_attempts(
@@ -1126,16 +1120,7 @@ fn queue_message_max_attempts(
     queue: &str,
     message_id: EntityId,
 ) -> RedDBResult<u32> {
-    let entity = store
-        .get(queue, message_id)
-        .ok_or_else(|| RedDBError::NotFound(format!("message '{}' not found", message_id.raw())))?;
-    match entity.data {
-        EntityData::QueueMessage(message) => Ok(message.max_attempts),
-        _ => Err(RedDBError::Query(format!(
-            "entity '{}' is not a queue message",
-            message_id.raw()
-        ))),
-    }
+    Ok(queue_message_data(store, queue, message_id)?.max_attempts)
 }
 
 fn queue_message_payload(
@@ -1143,16 +1128,7 @@ fn queue_message_payload(
     queue: &str,
     message_id: EntityId,
 ) -> RedDBResult<Value> {
-    let entity = store
-        .get(queue, message_id)
-        .ok_or_else(|| RedDBError::NotFound(format!("message '{}' not found", message_id.raw())))?;
-    match entity.data {
-        EntityData::QueueMessage(message) => Ok(message.payload),
-        _ => Err(RedDBError::Query(format!(
-            "entity '{}' is not a queue message",
-            message_id.raw()
-        ))),
-    }
+    Ok(queue_message_data(store, queue, message_id)?.payload)
 }
 
 fn delete_message_with_state(
@@ -1181,18 +1157,7 @@ fn move_message_to_dlq_or_drop(
     config: &QueueRuntimeConfig,
     _reason: &str,
 ) -> RedDBResult<Option<String>> {
-    let entity = store
-        .get(queue, message_id)
-        .ok_or_else(|| RedDBError::NotFound(format!("message '{}' not found", message_id.raw())))?;
-    let data = match entity.data {
-        EntityData::QueueMessage(data) => data,
-        _ => {
-            return Err(RedDBError::Query(format!(
-                "entity '{}' is not a queue message",
-                message_id.raw()
-            )));
-        }
-    };
+    let data = queue_message_data(store, queue, message_id)?;
 
     if let Some(dlq) = &config.dlq {
         if store.get_collection(dlq).is_none() {
@@ -1216,14 +1181,47 @@ fn move_message_to_dlq_or_drop(
                 acked: false,
             }),
         );
-        store
+        let inserted_id = store
             .insert_auto(dlq, dlq_entity)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        let dlq_config = load_queue_config(store, dlq);
+        if let Some(ttl_ms) = dlq_config.ttl_ms {
+            store
+                .set_metadata(dlq, inserted_id, queue_message_ttl_metadata(ttl_ms))
+                .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        }
         delete_message_with_state(store, queue, message_id)?;
         Ok(Some(dlq.clone()))
     } else {
         delete_message_with_state(store, queue, message_id)?;
         Ok(None)
+    }
+}
+
+fn queue_manager(
+    store: &UnifiedStore,
+    queue: &str,
+) -> RedDBResult<Arc<crate::storage::unified::SegmentManager>> {
+    store
+        .get_collection(queue)
+        .ok_or_else(|| RedDBError::NotFound(format!("queue '{}' not found", queue)))
+}
+
+fn queue_message_data(
+    store: &UnifiedStore,
+    queue: &str,
+    message_id: EntityId,
+) -> RedDBResult<QueueMessageData> {
+    let manager = queue_manager(store, queue)?;
+    let entity = manager
+        .get(message_id)
+        .ok_or_else(|| RedDBError::NotFound(format!("message '{}' not found", message_id.raw())))?;
+    match entity.data {
+        EntityData::QueueMessage(message) => Ok(message),
+        _ => Err(RedDBError::Query(format!(
+            "entity '{}' is not a queue message",
+            message_id.raw()
+        ))),
     }
 }
 
@@ -1345,4 +1343,19 @@ fn now_ns() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos() as u64
+}
+
+fn queue_message_ttl_metadata(ttl_ms: u64) -> Metadata {
+    Metadata::with_fields(
+        [(
+            "_ttl_ms".to_string(),
+            if ttl_ms <= i64::MAX as u64 {
+                MetadataValue::Int(ttl_ms as i64)
+            } else {
+                MetadataValue::Timestamp(ttl_ms)
+            },
+        )]
+        .into_iter()
+        .collect(),
+    )
 }

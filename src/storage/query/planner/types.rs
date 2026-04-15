@@ -1,10 +1,13 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::storage::query::ast::QueryExpr;
 use crate::storage::RedDB;
 
 use super::logical::logical_plan_node_with_catalog;
-use super::{CachedPlan, CostEstimator, PlanCache, PlanCost, QueryOptimizer, QueryRewriter};
+use super::{
+    CachedPlan, CostEstimator, PlanCache, PlanCost, QueryOptimizer, QueryRewriter, StatsProvider,
+};
 
 /// Query plan ready for execution
 #[derive(Debug, Clone)]
@@ -92,6 +95,16 @@ impl QueryPlanner {
             rewriter: QueryRewriter::new(),
             cache: PlanCache::new(cache_size),
             cost_estimator: CostEstimator::new(),
+            optimizer: QueryOptimizer::new(),
+        }
+    }
+
+    /// Create a planner backed by a real stats provider.
+    pub fn with_stats_provider(provider: Arc<dyn StatsProvider>) -> Self {
+        Self {
+            rewriter: QueryRewriter::new(),
+            cache: PlanCache::new(1000),
+            cost_estimator: CostEstimator::with_stats(provider),
             optimizer: QueryOptimizer::new(),
         }
     }

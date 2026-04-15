@@ -9,9 +9,11 @@
 //! - Inverted indexes enable fast filtering by metadata
 //! - Supports rich filter operators (eq, ne, gt, gte, lt, lte, in, contains)
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::hnsw::NodeId;
+use crate::storage::query::value_compare::partial_compare_values;
+use crate::storage::schema::{value_to_canonical_key, CanonicalKey, CanonicalKeyFamily, Value};
 
 /// A metadata value that can be one of several types
 #[derive(Debug, Clone, PartialEq)]
@@ -31,34 +33,14 @@ pub enum MetadataValue {
 impl MetadataValue {
     /// Check if this value matches another for equality
     pub fn matches_eq(&self, other: &MetadataValue) -> bool {
-        match (self, other) {
-            (MetadataValue::String(a), MetadataValue::String(b)) => a == b,
-            (MetadataValue::Integer(a), MetadataValue::Integer(b)) => a == b,
-            (MetadataValue::Float(a), MetadataValue::Float(b)) => (a - b).abs() < f64::EPSILON,
-            (MetadataValue::Bool(a), MetadataValue::Bool(b)) => a == b,
-            (MetadataValue::Null, MetadataValue::Null) => true,
-            // Cross-type numeric comparisons
-            (MetadataValue::Integer(a), MetadataValue::Float(b)) => {
-                (*a as f64 - b).abs() < f64::EPSILON
-            }
-            (MetadataValue::Float(a), MetadataValue::Integer(b)) => {
-                (a - *b as f64).abs() < f64::EPSILON
-            }
-            _ => false,
-        }
+        compare_metadata_values(self, other)
+            .map(|ord| ord == std::cmp::Ordering::Equal)
+            .unwrap_or(false)
     }
 
     /// Compare for ordering (returns None for incompatible types)
     pub fn compare(&self, other: &MetadataValue) -> Option<std::cmp::Ordering> {
-        match (self, other) {
-            (MetadataValue::Integer(a), MetadataValue::Integer(b)) => Some(a.cmp(b)),
-            (MetadataValue::Float(a), MetadataValue::Float(b)) => a.partial_cmp(b),
-            (MetadataValue::String(a), MetadataValue::String(b)) => Some(a.cmp(b)),
-            // Cross-type numeric comparisons
-            (MetadataValue::Integer(a), MetadataValue::Float(b)) => (*a as f64).partial_cmp(b),
-            (MetadataValue::Float(a), MetadataValue::Integer(b)) => a.partial_cmp(&(*b as f64)),
-            _ => None,
-        }
+        compare_metadata_values(self, other)
     }
 
     /// Check if this string value contains a substring
@@ -126,6 +108,34 @@ impl From<bool> for MetadataValue {
     fn from(b: bool) -> Self {
         MetadataValue::Bool(b)
     }
+}
+
+fn metadata_value_to_storage_value(value: &MetadataValue) -> Value {
+    match value {
+        MetadataValue::String(s) => Value::Text(s.clone()),
+        MetadataValue::Integer(i) => Value::Integer(*i),
+        MetadataValue::Float(f) => Value::Float(*f),
+        MetadataValue::Bool(b) => Value::Boolean(*b),
+        MetadataValue::Null => Value::Null,
+    }
+}
+
+fn metadata_value_to_canonical_key(value: &MetadataValue) -> Option<CanonicalKey> {
+    let storage_value = metadata_value_to_storage_value(value);
+    value_to_canonical_key(&storage_value)
+}
+
+fn compare_metadata_values(
+    left: &MetadataValue,
+    right: &MetadataValue,
+) -> Option<std::cmp::Ordering> {
+    let left_value = metadata_value_to_storage_value(left);
+    let right_value = metadata_value_to_storage_value(right);
+    partial_compare_values(&left_value, &right_value).or_else(|| {
+        let left_key = value_to_canonical_key(&left_value)?;
+        let right_key = value_to_canonical_key(&right_value)?;
+        (left_key.family() == right_key.family()).then(|| left_key.cmp(&right_key))
+    })
 }
 
 /// A metadata entry containing key-value pairs organized by type
@@ -366,6 +376,11 @@ struct KeyIndex {
     integer_index: HashMap<i64, HashSet<NodeId>>,
     /// Boolean value -> vector IDs
     bool_index: HashMap<bool, HashSet<NodeId>>,
+    /// Canonical ordered value -> vector IDs
+    ordered_index: BTreeMap<CanonicalKey, HashSet<NodeId>>,
+    /// Family seen in this key's metadata values. Mixed families disable range pushdown.
+    range_family: Option<CanonicalKeyFamily>,
+    has_mixed_families: bool,
     /// All vector IDs that have this key
     all_ids: HashSet<NodeId>,
 }
@@ -387,10 +402,16 @@ impl KeyIndex {
             MetadataValue::Bool(b) => {
                 self.bool_index.entry(*b).or_default().insert(id);
             }
-            MetadataValue::Float(_) => {
-                // Floats are not indexed (imprecise for equality)
+            MetadataValue::Float(_) | MetadataValue::Null => {}
+        }
+
+        if let Some(key) = metadata_value_to_canonical_key(value) {
+            match self.range_family {
+                Some(existing) if existing != key.family() => self.has_mixed_families = true,
+                None => self.range_family = Some(key.family()),
+                _ => {}
             }
-            MetadataValue::Null => {}
+            self.ordered_index.entry(key).or_default().insert(id);
         }
     }
 
@@ -414,7 +435,94 @@ impl KeyIndex {
             }
             _ => {}
         }
+
+        if let Some(key) = metadata_value_to_canonical_key(value) {
+            if let Some(ids) = self.ordered_index.get_mut(&key) {
+                ids.remove(&id);
+                if ids.is_empty() {
+                    self.ordered_index.remove(&key);
+                }
+            }
+        }
     }
+
+    fn exact_match_ids(&self, value: &MetadataValue) -> Option<HashSet<NodeId>> {
+        match value {
+            MetadataValue::String(s) => Some(self.string_index.get(s).cloned().unwrap_or_default()),
+            MetadataValue::Integer(i) => {
+                Some(self.integer_index.get(i).cloned().unwrap_or_default())
+            }
+            MetadataValue::Bool(b) => Some(self.bool_index.get(b).cloned().unwrap_or_default()),
+            MetadataValue::Null => Some(HashSet::new()),
+            MetadataValue::Float(f) if f.is_nan() => Some(HashSet::new()),
+            MetadataValue::Float(_) => metadata_value_to_canonical_key(value)
+                .map(|key| self.ordered_index.get(&key).cloned().unwrap_or_default()),
+        }
+    }
+
+    fn supports_range_key(&self, key: &CanonicalKey) -> bool {
+        !self.has_mixed_families && self.range_family == Some(key.family())
+    }
+
+    fn range_match_ids(
+        &self,
+        value: &MetadataValue,
+        op: MetadataRangeOp,
+    ) -> Option<HashSet<NodeId>> {
+        let key = metadata_value_to_canonical_key(value)?;
+        if !self.supports_range_key(&key) {
+            return None;
+        }
+
+        let mut out = HashSet::new();
+        match op {
+            MetadataRangeOp::Gt => {
+                for ids in self
+                    .ordered_index
+                    .range((std::ops::Bound::Excluded(key), std::ops::Bound::Unbounded))
+                    .map(|(_, ids)| ids)
+                {
+                    out.extend(ids.iter().copied());
+                }
+            }
+            MetadataRangeOp::Gte => {
+                for ids in self
+                    .ordered_index
+                    .range((std::ops::Bound::Included(key), std::ops::Bound::Unbounded))
+                    .map(|(_, ids)| ids)
+                {
+                    out.extend(ids.iter().copied());
+                }
+            }
+            MetadataRangeOp::Lt => {
+                for ids in self
+                    .ordered_index
+                    .range((std::ops::Bound::Unbounded, std::ops::Bound::Excluded(key)))
+                    .map(|(_, ids)| ids)
+                {
+                    out.extend(ids.iter().copied());
+                }
+            }
+            MetadataRangeOp::Lte => {
+                for ids in self
+                    .ordered_index
+                    .range((std::ops::Bound::Unbounded, std::ops::Bound::Included(key)))
+                    .map(|(_, ids)| ids)
+                {
+                    out.extend(ids.iter().copied());
+                }
+            }
+        }
+        Some(out)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MetadataRangeOp {
+    Gt,
+    Gte,
+    Lt,
+    Lte,
 }
 
 /// Metadata storage with inverted indexes for filtering
@@ -498,24 +606,141 @@ impl MetadataStore {
 
     fn filter_internal(&self, filter: &MetadataFilter) -> HashSet<NodeId> {
         match filter {
-            MetadataFilter::Eq(key, MetadataValue::String(s)) => self
+            MetadataFilter::Eq(key, value) => self
                 .indexes
                 .get(key)
-                .and_then(|idx| idx.string_index.get(s))
-                .cloned()
-                .unwrap_or_default(),
-            MetadataFilter::Eq(key, MetadataValue::Integer(i)) => self
+                .and_then(|idx| idx.exact_match_ids(value))
+                .unwrap_or_else(|| {
+                    self.entries
+                        .iter()
+                        .filter(|(_, entry)| {
+                            entry.get(key).map(|candidate| candidate.matches_eq(value)).unwrap_or(false)
+                        })
+                        .map(|(id, _)| *id)
+                        .collect()
+                }),
+            MetadataFilter::Ne(key, value) => {
+                let all: HashSet<_> = self.entries.keys().copied().collect();
+                if let Some(index) = self.indexes.get(key) {
+                    if let Some(exact) = index.exact_match_ids(value) {
+                        return all.difference(&exact).copied().collect();
+                    }
+                }
+                self.entries
+                    .iter()
+                    .filter(|(_, entry)| {
+                        entry.get(key).map(|candidate| !candidate.matches_eq(value)).unwrap_or(true)
+                    })
+                    .map(|(id, _)| *id)
+                    .collect()
+            }
+            MetadataFilter::Gt(key, value) => self
                 .indexes
                 .get(key)
-                .and_then(|idx| idx.integer_index.get(i))
-                .cloned()
-                .unwrap_or_default(),
-            MetadataFilter::Eq(key, MetadataValue::Bool(b)) => self
+                .and_then(|idx| idx.range_match_ids(value, MetadataRangeOp::Gt))
+                .unwrap_or_else(|| {
+                    self.entries
+                        .iter()
+                        .filter(|(_, entry)| {
+                            entry.get(key)
+                                .and_then(|candidate| candidate.compare(value))
+                                .map(|ord| ord == std::cmp::Ordering::Greater)
+                                .unwrap_or(false)
+                        })
+                        .map(|(id, _)| *id)
+                        .collect()
+                }),
+            MetadataFilter::Gte(key, value) => self
                 .indexes
                 .get(key)
-                .and_then(|idx| idx.bool_index.get(b))
-                .cloned()
-                .unwrap_or_default(),
+                .and_then(|idx| idx.range_match_ids(value, MetadataRangeOp::Gte))
+                .unwrap_or_else(|| {
+                    self.entries
+                        .iter()
+                        .filter(|(_, entry)| {
+                            entry.get(key)
+                                .and_then(|candidate| candidate.compare(value))
+                                .map(|ord| ord != std::cmp::Ordering::Less)
+                                .unwrap_or(false)
+                        })
+                        .map(|(id, _)| *id)
+                        .collect()
+                }),
+            MetadataFilter::Lt(key, value) => self
+                .indexes
+                .get(key)
+                .and_then(|idx| idx.range_match_ids(value, MetadataRangeOp::Lt))
+                .unwrap_or_else(|| {
+                    self.entries
+                        .iter()
+                        .filter(|(_, entry)| {
+                            entry.get(key)
+                                .and_then(|candidate| candidate.compare(value))
+                                .map(|ord| ord == std::cmp::Ordering::Less)
+                                .unwrap_or(false)
+                        })
+                        .map(|(id, _)| *id)
+                        .collect()
+                }),
+            MetadataFilter::Lte(key, value) => self
+                .indexes
+                .get(key)
+                .and_then(|idx| idx.range_match_ids(value, MetadataRangeOp::Lte))
+                .unwrap_or_else(|| {
+                    self.entries
+                        .iter()
+                        .filter(|(_, entry)| {
+                            entry.get(key)
+                                .and_then(|candidate| candidate.compare(value))
+                                .map(|ord| ord != std::cmp::Ordering::Greater)
+                                .unwrap_or(false)
+                        })
+                        .map(|(id, _)| *id)
+                        .collect()
+                }),
+            MetadataFilter::In(key, values) => {
+                if let Some(index) = self.indexes.get(key) {
+                    if let Some(result) = values.iter().try_fold(HashSet::new(), |mut acc, value| {
+                        let ids = index.exact_match_ids(value)?;
+                        acc.extend(ids);
+                        Some(acc)
+                    }) {
+                        return result;
+                    }
+                }
+                self.entries
+                    .iter()
+                    .filter(|(_, entry)| {
+                        entry.get(key)
+                            .map(|candidate| values.iter().any(|value| candidate.matches_eq(value)))
+                            .unwrap_or(false)
+                    })
+                    .map(|(id, _)| *id)
+                    .collect()
+            }
+            MetadataFilter::NotIn(key, values) => {
+                let all: HashSet<_> = self.entries.keys().copied().collect();
+                if let Some(index) = self.indexes.get(key) {
+                    if let Some(matched) =
+                        values.iter().try_fold(HashSet::new(), |mut acc, value| {
+                            let ids = index.exact_match_ids(value)?;
+                            acc.extend(ids);
+                            Some(acc)
+                        })
+                    {
+                        return all.difference(&matched).copied().collect();
+                    }
+                }
+                self.entries
+                    .iter()
+                    .filter(|(_, entry)| {
+                        entry.get(key)
+                            .map(|candidate| !values.iter().any(|value| candidate.matches_eq(value)))
+                            .unwrap_or(true)
+                    })
+                    .map(|(id, _)| *id)
+                    .collect()
+            }
             MetadataFilter::Exists(key) => self
                 .indexes
                 .get(key)
@@ -748,5 +973,38 @@ mod tests {
         store.remove(1);
 
         assert_eq!(store.filter(&MetadataFilter::eq("type", "host")).len(), 0);
+    }
+
+    #[test]
+    fn test_filter_float_eq_uses_canonical_index() {
+        let mut store = MetadataStore::new();
+
+        let mut entry1 = MetadataEntry::new();
+        entry1.insert("score", MetadataValue::Float(1.5));
+        store.insert(1, entry1);
+
+        let mut entry2 = MetadataEntry::new();
+        entry2.insert("score", MetadataValue::Float(2.5));
+        store.insert(2, entry2);
+
+        let results = store.filter(&MetadataFilter::eq("score", MetadataValue::Float(2.5)));
+        assert_eq!(results, HashSet::from([2]));
+    }
+
+    #[test]
+    fn test_filter_string_range_uses_ordered_index() {
+        let mut store = MetadataStore::new();
+
+        for (id, tier) in [(1, "alpha"), (2, "bravo"), (3, "delta")] {
+            let mut entry = MetadataEntry::new();
+            entry.insert("tier", MetadataValue::String(tier.to_string()));
+            store.insert(id, entry);
+        }
+
+        let results = store.filter(&MetadataFilter::gte(
+            "tier",
+            MetadataValue::String("bravo".to_string()),
+        ));
+        assert_eq!(results, HashSet::from([2, 3]));
     }
 }

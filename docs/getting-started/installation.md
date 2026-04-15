@@ -1,6 +1,6 @@
 # Installation
 
-RedDB ships as a single binary called `red`, and it can also be used through the `reddb-cli` npm package or as a Rust dependency for embedded mode.
+RedDB ships as a single binary called `red`. In JavaScript and TypeScript, use the `reddb` driver package in application code and `reddb-cli` only as the npm CLI launcher.
 
 ## Install from GitHub Releases
 
@@ -52,7 +52,7 @@ red version
 
 ## Install with `npx`
 
-The npm package installs the real `red` binary and forwards CLI arguments directly to it.
+The `reddb-cli` npm package installs the real `red` binary and forwards CLI arguments directly to it.
 
 Run a command through `npx`:
 
@@ -69,7 +69,23 @@ npx reddb-cli@latest server --http --path ./data/reddb.rdb --bind 127.0.0.1:8080
 If you use `pnpm`:
 
 ```bash
-pnpm dlx reddb -- --version
+pnpm dlx reddb-cli version
+```
+
+## Install the JavaScript / TypeScript driver
+
+Use the `reddb` package in app code:
+
+```bash
+pnpm add reddb
+```
+
+```ts
+import { connect } from 'reddb'
+
+const db = await connect('memory://')
+const result = await db.query('SELECT * FROM users LIMIT 10')
+await db.close()
 ```
 
 ## Build from source

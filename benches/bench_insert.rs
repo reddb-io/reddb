@@ -1,6 +1,6 @@
 //! Quick Rust-native benchmark for persistent bulk insert.
 //!
-//! Run with: `cargo run --release --example bench_insert`
+//! Run with: `cargo bench --bench bench_insert`
 
 use std::path::PathBuf;
 use std::time::Instant;

@@ -25,11 +25,12 @@
 //! fallback to the old heuristic path — so adding new stats is strictly
 //! additive.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::cost::{ColumnStats, TableStats};
 use super::histogram::{Histogram, MostCommonValues};
+use super::stats_catalog::load_persisted_stats;
 use crate::storage::index::{IndexRegistry, IndexScope, IndexStats};
 
 /// Read-only interface the planner uses to look up storage statistics.
@@ -215,6 +216,8 @@ impl StatsProvider for StaticProvider {
 /// query from `db.catalog_snapshot()` and wrap in `Arc`.
 pub struct CatalogStatsProvider {
     tables: HashMap<String, TableStats>,
+    histograms: HashMap<(String, String), Histogram>,
+    mcvs: HashMap<(String, String), MostCommonValues>,
 }
 
 impl CatalogStatsProvider {
@@ -238,8 +241,59 @@ impl CatalogStatsProvider {
                 (name.clone(), stats)
             })
             .collect();
-        Self { tables }
+        Self {
+            tables,
+            histograms: HashMap::new(),
+            mcvs: HashMap::new(),
+        }
     }
+
+    /// Build a provider from the live database, overlaying persisted
+    /// `red_stats` column statistics onto the catalog's fresh row counts.
+    pub fn from_db(db: &crate::storage::RedDB) -> Self {
+        let mut provider = Self::from_catalog(&db.catalog_snapshot());
+        let persisted = load_persisted_stats(&db.store(), &db.catalog_snapshot());
+        for (table, stats) in persisted.tables {
+            provider
+                .tables
+                .entry(table)
+                .and_modify(|current| {
+                    current.avg_row_size = stats.avg_row_size;
+                    current.page_count = stats.page_count.max(current.page_count);
+                    current.columns = merge_persisted_columns(&current.columns, &stats.columns);
+                })
+                .or_insert(stats);
+        }
+        provider.histograms = persisted.histograms;
+        provider.mcvs = persisted.mcvs;
+        provider
+    }
+}
+
+fn merge_persisted_columns(current: &[ColumnStats], persisted: &[ColumnStats]) -> Vec<ColumnStats> {
+    let current_by_name: HashMap<&str, &ColumnStats> = current
+        .iter()
+        .map(|column| (column.name.as_str(), column))
+        .collect();
+    let mut merged = Vec::with_capacity(current.len().max(persisted.len()));
+    let mut seen = HashSet::new();
+
+    for column in persisted {
+        let mut merged_column = column.clone();
+        if let Some(current_column) = current_by_name.get(merged_column.name.as_str()) {
+            merged_column.has_index = current_column.has_index;
+        }
+        seen.insert(merged_column.name.clone());
+        merged.push(merged_column);
+    }
+
+    for column in current {
+        if seen.insert(column.name.clone()) {
+            merged.push(column.clone());
+        }
+    }
+
+    merged
 }
 
 impl StatsProvider for CatalogStatsProvider {
@@ -249,6 +303,18 @@ impl StatsProvider for CatalogStatsProvider {
 
     fn index_stats(&self, _table: &str, _column: &str) -> Option<IndexStats> {
         None
+    }
+
+    fn column_histogram(&self, table: &str, column: &str) -> Option<Histogram> {
+        self.histograms
+            .get(&(table.to_string(), column.to_string()))
+            .cloned()
+    }
+
+    fn column_mcv(&self, table: &str, column: &str) -> Option<MostCommonValues> {
+        self.mcvs
+            .get(&(table.to_string(), column.to_string()))
+            .cloned()
     }
 }
 

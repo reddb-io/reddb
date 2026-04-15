@@ -2288,7 +2288,35 @@ fn test_parse_queue_push() {
     let query = parse("QUEUE PUSH tasks 'hello world'").unwrap();
     if let QueryExpr::QueueCommand(QueueCommand::Push { queue, value, .. }) = query {
         assert_eq!(queue, "tasks");
-        assert_eq!(value, "hello world");
+        assert_eq!(
+            value,
+            crate::storage::schema::Value::Text("hello world".to_string())
+        );
+    } else {
+        panic!("Expected QueueCommand::Push");
+    }
+}
+
+#[test]
+fn test_parse_queue_push_inline_json_literal() {
+    let query = parse("QUEUE PUSH tasks {job: 'hello', retries: 3}").unwrap();
+    if let QueryExpr::QueueCommand(QueueCommand::Push { queue, value, .. }) = query {
+        assert_eq!(queue, "tasks");
+        match value {
+            crate::storage::schema::Value::Json(bytes) => {
+                let json: crate::json::Value =
+                    crate::json::from_slice(&bytes).expect("queue payload json should decode");
+                assert_eq!(
+                    json.get("job").and_then(crate::json::Value::as_str),
+                    Some("hello")
+                );
+                assert_eq!(
+                    json.get("retries").and_then(crate::json::Value::as_i64),
+                    Some(3)
+                );
+            }
+            other => panic!("Expected JSON queue payload, got {other:?}"),
+        }
     } else {
         panic!("Expected QueueCommand::Push");
     }
@@ -2300,6 +2328,37 @@ fn test_parse_queue_pop() {
     if let QueryExpr::QueueCommand(QueueCommand::Pop { queue, count, .. }) = query {
         assert_eq!(queue, "tasks");
         assert_eq!(count, 1);
+    } else {
+        panic!("Expected QueueCommand::Pop");
+    }
+}
+
+#[test]
+fn test_parse_queue_alias_sides() {
+    let lpush = parse("QUEUE LPUSH tasks 'left'").unwrap();
+    if let QueryExpr::QueueCommand(QueueCommand::Push { side, .. }) = lpush {
+        assert_eq!(side, crate::storage::query::ast::QueueSide::Left);
+    } else {
+        panic!("Expected QueueCommand::Push");
+    }
+
+    let rpush = parse("QUEUE RPUSH tasks 'right'").unwrap();
+    if let QueryExpr::QueueCommand(QueueCommand::Push { side, .. }) = rpush {
+        assert_eq!(side, crate::storage::query::ast::QueueSide::Right);
+    } else {
+        panic!("Expected QueueCommand::Push");
+    }
+
+    let lpop = parse("QUEUE LPOP tasks").unwrap();
+    if let QueryExpr::QueueCommand(QueueCommand::Pop { side, .. }) = lpop {
+        assert_eq!(side, crate::storage::query::ast::QueueSide::Left);
+    } else {
+        panic!("Expected QueueCommand::Pop");
+    }
+
+    let rpop = parse("QUEUE RPOP tasks").unwrap();
+    if let QueryExpr::QueueCommand(QueueCommand::Pop { side, .. }) = rpop {
+        assert_eq!(side, crate::storage::query::ast::QueueSide::Right);
     } else {
         panic!("Expected QueueCommand::Pop");
     }

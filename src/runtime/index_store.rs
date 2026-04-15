@@ -7,59 +7,17 @@
 //! the IndexStore finds the right index and returns matching entity IDs.
 
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Bound::{Excluded, Included, Unbounded};
 
-use crate::storage::schema::Value;
+use crate::storage::schema::{value_to_canonical_key, CanonicalKey, CanonicalKeyFamily, Value};
 use crate::storage::unified::bitmap_index::BitmapIndexManager;
 use crate::storage::unified::entity::EntityId;
 use crate::storage::unified::hash_index::{HashIndexConfig, HashIndexManager};
 use crate::storage::unified::spatial_index::SpatialIndexManager;
 
-/// Numeric key used by the in-memory sorted index.
-///
-/// The key preserves the natural order between signed and unsigned integers
-/// without lossy casts. In particular, `u64` values above `i64::MAX` remain
-/// correctly ordered after every signed integer instead of wrapping negative.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum SortedNumericKey {
-    Signed(i64),
-    Unsigned(u64),
-}
-
-impl Ord for SortedNumericKey {
-    fn cmp(&self, other: &Self) -> Ordering {
-        match (*self, *other) {
-            (Self::Signed(left), Self::Signed(right)) => left.cmp(&right),
-            (Self::Unsigned(left), Self::Unsigned(right)) => left.cmp(&right),
-            (Self::Signed(left), Self::Unsigned(right)) => {
-                if left < 0 {
-                    Ordering::Less
-                } else {
-                    (left as u64).cmp(&right)
-                }
-            }
-            (Self::Unsigned(left), Self::Signed(right)) => {
-                if right < 0 {
-                    Ordering::Greater
-                } else {
-                    left.cmp(&(right as u64))
-                }
-            }
-        }
-    }
-}
-
-impl PartialOrd for SortedNumericKey {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-enum SortedNumericValue {
-    Exact(SortedNumericKey),
-    Inexact,
+enum CanonicalizedValue {
+    Exact(CanonicalKey),
     Unsupported,
 }
 
@@ -71,36 +29,49 @@ fn write_unpoisoned<'a, T>(lock: &'a RwLock<T>) -> RwLockWriteGuard<'a, T> {
     lock.write()
 }
 
-/// In-memory sorted index for exact integral range scans.
-/// Supports BETWEEN, >, <, >=, <= queries in O(log N + K) when the indexed
-/// column contains only `Integer` and `UnsignedInteger` values.
+/// In-memory sorted index for exact range scans over a single canonical family.
+///
+/// Point lookups remain safe even when the column contains mixed families,
+/// because BTree seeks are exact on the canonical key. Range scans are only
+/// enabled when every indexed value for the column belongs to the same family.
 pub struct SortedColumnIndex {
-    /// Sorted entries: numeric key → entity IDs
-    entries: BTreeMap<SortedNumericKey, Vec<EntityId>>,
-    /// Floats on the indexed column make the integral-only ordering unsafe for
-    /// pushdown, so lookups must fall back to a full scan.
-    has_inexact_numeric_values: bool,
+    /// Sorted entries: canonical key → entity IDs
+    entries: BTreeMap<CanonicalKey, Vec<EntityId>>,
+    /// Family seen in this index. Mixed families keep exact lookup safe but
+    /// disable range pushdown.
+    range_family: Option<CanonicalKeyFamily>,
+    has_mixed_families: bool,
 }
 
 impl SortedColumnIndex {
     pub fn new() -> Self {
         Self {
             entries: BTreeMap::new(),
-            has_inexact_numeric_values: false,
+            range_family: None,
+            has_mixed_families: false,
         }
     }
 
-    pub fn insert(&mut self, key: SortedNumericKey, entity_id: EntityId) {
+    pub fn insert(&mut self, key: CanonicalKey, entity_id: EntityId) {
+        match self.range_family {
+            Some(existing) if existing != key.family() => self.has_mixed_families = true,
+            None => self.range_family = Some(key.family()),
+            _ => {}
+        }
         self.entries.entry(key).or_default().push(entity_id);
     }
 
-    pub fn mark_inexact_numeric_values(&mut self) {
-        self.has_inexact_numeric_values = true;
+    fn range_enabled(&self, family: CanonicalKeyFamily) -> bool {
+        !self.has_mixed_families && self.range_family == Some(family)
+    }
+
+    pub fn supports_range_key(&self, key: &CanonicalKey) -> bool {
+        self.range_enabled(key.family())
     }
 
     /// Range scan: returns all entity IDs where key is in [low, high].
-    pub fn range(&self, low: SortedNumericKey, high: SortedNumericKey) -> Option<Vec<EntityId>> {
-        if self.has_inexact_numeric_values {
+    pub fn range(&self, low: CanonicalKey, high: CanonicalKey) -> Option<Vec<EntityId>> {
+        if !self.range_enabled(low.family()) || low.family() != high.family() {
             return None;
         }
         if low > high {
@@ -110,29 +81,29 @@ impl SortedColumnIndex {
     }
 
     /// Greater than: returns all entity IDs where key > threshold.
-    pub fn greater_than(&self, threshold: SortedNumericKey) -> Option<Vec<EntityId>> {
-        if self.has_inexact_numeric_values {
+    pub fn greater_than(&self, threshold: CanonicalKey) -> Option<Vec<EntityId>> {
+        if !self.range_enabled(threshold.family()) {
             return None;
         }
         Some(self.collect_range((Excluded(threshold), Unbounded)))
     }
 
-    pub fn greater_equal(&self, threshold: SortedNumericKey) -> Option<Vec<EntityId>> {
-        if self.has_inexact_numeric_values {
+    pub fn greater_equal(&self, threshold: CanonicalKey) -> Option<Vec<EntityId>> {
+        if !self.range_enabled(threshold.family()) {
             return None;
         }
         Some(self.collect_range((Included(threshold), Unbounded)))
     }
 
-    pub fn less_than(&self, threshold: SortedNumericKey) -> Option<Vec<EntityId>> {
-        if self.has_inexact_numeric_values {
+    pub fn less_than(&self, threshold: CanonicalKey) -> Option<Vec<EntityId>> {
+        if !self.range_enabled(threshold.family()) {
             return None;
         }
         Some(self.collect_range((Unbounded, Excluded(threshold))))
     }
 
-    pub fn less_equal(&self, threshold: SortedNumericKey) -> Option<Vec<EntityId>> {
-        if self.has_inexact_numeric_values {
+    pub fn less_equal(&self, threshold: CanonicalKey) -> Option<Vec<EntityId>> {
+        if !self.range_enabled(threshold.family()) {
             return None;
         }
         Some(self.collect_range((Unbounded, Included(threshold))))
@@ -148,11 +119,11 @@ impl SortedColumnIndex {
     /// Returns None when float values make ordering unsafe.
     pub fn range_limited(
         &self,
-        low: SortedNumericKey,
-        high: SortedNumericKey,
+        low: CanonicalKey,
+        high: CanonicalKey,
         limit: usize,
     ) -> Option<Vec<EntityId>> {
-        if self.has_inexact_numeric_values {
+        if !self.range_enabled(low.family()) || low.family() != high.family() {
             return None;
         }
         if low > high {
@@ -164,10 +135,10 @@ impl SortedColumnIndex {
     /// Greater-than scan with early stop at `limit`.
     pub fn greater_than_limited(
         &self,
-        threshold: SortedNumericKey,
+        threshold: CanonicalKey,
         limit: usize,
     ) -> Option<Vec<EntityId>> {
-        if self.has_inexact_numeric_values {
+        if !self.range_enabled(threshold.family()) {
             return None;
         }
         Some(self.collect_range_limited((Excluded(threshold), Unbounded), limit))
@@ -176,10 +147,10 @@ impl SortedColumnIndex {
     /// Greater-or-equal scan with early stop at `limit`.
     pub fn greater_equal_limited(
         &self,
-        threshold: SortedNumericKey,
+        threshold: CanonicalKey,
         limit: usize,
     ) -> Option<Vec<EntityId>> {
-        if self.has_inexact_numeric_values {
+        if !self.range_enabled(threshold.family()) {
             return None;
         }
         Some(self.collect_range_limited((Included(threshold), Unbounded), limit))
@@ -188,10 +159,10 @@ impl SortedColumnIndex {
     /// Less-than scan with early stop at `limit`.
     pub fn less_than_limited(
         &self,
-        threshold: SortedNumericKey,
+        threshold: CanonicalKey,
         limit: usize,
     ) -> Option<Vec<EntityId>> {
-        if self.has_inexact_numeric_values {
+        if !self.range_enabled(threshold.family()) {
             return None;
         }
         Some(self.collect_range_limited((Unbounded, Excluded(threshold)), limit))
@@ -200,10 +171,10 @@ impl SortedColumnIndex {
     /// Less-or-equal scan with early stop at `limit`.
     pub fn less_equal_limited(
         &self,
-        threshold: SortedNumericKey,
+        threshold: CanonicalKey,
         limit: usize,
     ) -> Option<Vec<EntityId>> {
-        if self.has_inexact_numeric_values {
+        if !self.range_enabled(threshold.family()) {
             return None;
         }
         Some(self.collect_range_limited((Unbounded, Included(threshold)), limit))
@@ -218,12 +189,9 @@ impl SortedColumnIndex {
     /// Returns `None` when inexact numeric values make the index unsafe.
     pub fn in_lookup_limited(
         &self,
-        values: &[SortedNumericKey],
+        values: &[CanonicalKey],
         limit: usize,
     ) -> Option<Vec<EntityId>> {
-        if self.has_inexact_numeric_values {
-            return None;
-        }
         let mut sorted_vals = values.to_vec();
         sorted_vals.sort_unstable();
         sorted_vals.dedup();
@@ -246,13 +214,10 @@ impl SortedColumnIndex {
     /// Used for bitmap-AND of a hash-index predicate + an IN-list sorted-index predicate.
     pub fn in_lookup_limited_filtered_by_set(
         &self,
-        values: &[SortedNumericKey],
+        values: &[CanonicalKey],
         filter_set: &std::collections::HashSet<u64>,
         limit: usize,
     ) -> Option<Vec<EntityId>> {
-        if self.has_inexact_numeric_values {
-            return None;
-        }
         let mut sorted_vals = values.to_vec();
         sorted_vals.sort_unstable();
         sorted_vals.dedup();
@@ -277,29 +242,19 @@ impl SortedColumnIndex {
     /// The key IS the value — no entity fetch needed for `SELECT col FROM t WHERE col op x`.
     /// Stops after `limit` distinct keys (each key may have multiple entity IDs, but for
     /// covered queries we only need the value once per distinct key).
-    pub fn range_lookup_values<R>(&self, range: R, limit: usize) -> Vec<SortedNumericKey>
+    pub fn range_lookup_values<R>(&self, range: R, limit: usize) -> Vec<CanonicalKey>
     where
-        R: std::ops::RangeBounds<SortedNumericKey>,
+        R: std::ops::RangeBounds<CanonicalKey>,
     {
-        if self.has_inexact_numeric_values {
-            return Vec::new();
-        }
         self.entries
             .range(range)
             .take(limit)
-            .map(|(key, _)| *key)
+            .map(|(key, _)| key.clone())
             .collect()
     }
 
     /// Covered-query projection for IN-lists: return BTree keys for the given values.
-    pub fn in_lookup_values(
-        &self,
-        values: &[SortedNumericKey],
-        limit: usize,
-    ) -> Vec<SortedNumericKey> {
-        if self.has_inexact_numeric_values {
-            return Vec::new();
-        }
+    pub fn in_lookup_values(&self, values: &[CanonicalKey], limit: usize) -> Vec<CanonicalKey> {
         let mut sorted_vals = values.to_vec();
         sorted_vals.sort_unstable();
         sorted_vals.dedup();
@@ -317,7 +272,7 @@ impl SortedColumnIndex {
 
     fn collect_range<R>(&self, range: R) -> Vec<EntityId>
     where
-        R: std::ops::RangeBounds<SortedNumericKey>,
+        R: std::ops::RangeBounds<CanonicalKey>,
     {
         let mut result = Vec::new();
         for ids in self.entries.range(range).map(|(_, ids)| ids) {
@@ -328,7 +283,7 @@ impl SortedColumnIndex {
 
     fn collect_range_limited<R>(&self, range: R, limit: usize) -> Vec<EntityId>
     where
-        R: std::ops::RangeBounds<SortedNumericKey>,
+        R: std::ops::RangeBounds<CanonicalKey>,
     {
         let mut result = Vec::with_capacity(limit.min(512));
         'outer: for ids in self.entries.range(range).map(|(_, ids)| ids) {
@@ -357,9 +312,9 @@ impl SortedColumnIndex {
         limit: usize,
     ) -> Option<Vec<EntityId>>
     where
-        R: std::ops::RangeBounds<SortedNumericKey>,
+        R: std::ops::RangeBounds<CanonicalKey>,
     {
-        if self.has_inexact_numeric_values {
+        if self.has_mixed_families {
             return None;
         }
         let mut result = Vec::new();
@@ -401,13 +356,12 @@ impl SortedIndexManager {
         for (eid, fields) in entities {
             for (col, val) in fields {
                 if col == column {
-                    match classify_sorted_numeric_value(val) {
-                        SortedNumericValue::Exact(key) => {
+                    match classify_sorted_value(val) {
+                        CanonicalizedValue::Exact(key) => {
                             index.insert(key, *eid);
                             count += 1;
                         }
-                        SortedNumericValue::Inexact => index.mark_inexact_numeric_values(),
-                        SortedNumericValue::Unsupported => {}
+                        CanonicalizedValue::Unsupported => {}
                     }
                 }
             }
@@ -421,8 +375,8 @@ impl SortedIndexManager {
         &self,
         collection: &str,
         column: &str,
-        low: SortedNumericKey,
-        high: SortedNumericKey,
+        low: CanonicalKey,
+        high: CanonicalKey,
     ) -> Option<Vec<EntityId>> {
         let indices = read_unpoisoned(&self.indices);
         let key = (collection.to_string(), column.to_string());
@@ -437,7 +391,7 @@ impl SortedIndexManager {
         &self,
         collection: &str,
         column: &str,
-        threshold: SortedNumericKey,
+        threshold: CanonicalKey,
     ) -> Option<Vec<EntityId>> {
         let indices = read_unpoisoned(&self.indices);
         let key = (collection.to_string(), column.to_string());
@@ -451,7 +405,7 @@ impl SortedIndexManager {
         &self,
         collection: &str,
         column: &str,
-        threshold: SortedNumericKey,
+        threshold: CanonicalKey,
     ) -> Option<Vec<EntityId>> {
         let indices = read_unpoisoned(&self.indices);
         let key = (collection.to_string(), column.to_string());
@@ -465,7 +419,7 @@ impl SortedIndexManager {
         &self,
         collection: &str,
         column: &str,
-        threshold: SortedNumericKey,
+        threshold: CanonicalKey,
     ) -> Option<Vec<EntityId>> {
         let indices = read_unpoisoned(&self.indices);
         let key = (collection.to_string(), column.to_string());
@@ -479,7 +433,7 @@ impl SortedIndexManager {
         &self,
         collection: &str,
         column: &str,
-        threshold: SortedNumericKey,
+        threshold: CanonicalKey,
     ) -> Option<Vec<EntityId>> {
         let indices = read_unpoisoned(&self.indices);
         let key = (collection.to_string(), column.to_string());
@@ -495,8 +449,8 @@ impl SortedIndexManager {
         &self,
         collection: &str,
         column: &str,
-        low: SortedNumericKey,
-        high: SortedNumericKey,
+        low: CanonicalKey,
+        high: CanonicalKey,
         limit: usize,
     ) -> Option<Vec<EntityId>> {
         let indices = read_unpoisoned(&self.indices);
@@ -508,7 +462,7 @@ impl SortedIndexManager {
         &self,
         collection: &str,
         column: &str,
-        threshold: SortedNumericKey,
+        threshold: CanonicalKey,
         limit: usize,
     ) -> Option<Vec<EntityId>> {
         let indices = read_unpoisoned(&self.indices);
@@ -520,7 +474,7 @@ impl SortedIndexManager {
         &self,
         collection: &str,
         column: &str,
-        threshold: SortedNumericKey,
+        threshold: CanonicalKey,
         limit: usize,
     ) -> Option<Vec<EntityId>> {
         let indices = read_unpoisoned(&self.indices);
@@ -532,7 +486,7 @@ impl SortedIndexManager {
         &self,
         collection: &str,
         column: &str,
-        threshold: SortedNumericKey,
+        threshold: CanonicalKey,
         limit: usize,
     ) -> Option<Vec<EntityId>> {
         let indices = read_unpoisoned(&self.indices);
@@ -544,7 +498,7 @@ impl SortedIndexManager {
         &self,
         collection: &str,
         column: &str,
-        threshold: SortedNumericKey,
+        threshold: CanonicalKey,
         limit: usize,
     ) -> Option<Vec<EntityId>> {
         let indices = read_unpoisoned(&self.indices);
@@ -557,8 +511,8 @@ impl SortedIndexManager {
         &self,
         collection: &str,
         column: &str,
-        low: SortedNumericKey,
-        high: SortedNumericKey,
+        low: CanonicalKey,
+        high: CanonicalKey,
         filter_set: &std::collections::HashSet<u64>,
         limit: usize,
     ) -> Option<Vec<EntityId>> {
@@ -567,9 +521,11 @@ impl SortedIndexManager {
         if low > high {
             return Some(Vec::new());
         }
-        indices
-            .get(&key)?
-            .collect_range_filtered_by_set(low..=high, filter_set, limit)
+        let idx = indices.get(&key)?;
+        if !idx.supports_range_key(&low) || low.family() != high.family() {
+            return None;
+        }
+        idx.collect_range_filtered_by_set(low..=high, filter_set, limit)
     }
 
     /// Bitmap AND: gt filtered to IDs in `filter_set`.
@@ -577,17 +533,17 @@ impl SortedIndexManager {
         &self,
         collection: &str,
         column: &str,
-        threshold: SortedNumericKey,
+        threshold: CanonicalKey,
         filter_set: &std::collections::HashSet<u64>,
         limit: usize,
     ) -> Option<Vec<EntityId>> {
         let indices = read_unpoisoned(&self.indices);
         let key = (collection.to_string(), column.to_string());
-        indices.get(&key)?.collect_range_filtered_by_set(
-            (Excluded(threshold), Unbounded),
-            filter_set,
-            limit,
-        )
+        let idx = indices.get(&key)?;
+        if !idx.supports_range_key(&threshold) {
+            return None;
+        }
+        idx.collect_range_filtered_by_set((Excluded(threshold), Unbounded), filter_set, limit)
     }
 
     /// Bitmap AND: ge filtered to IDs in `filter_set`.
@@ -595,17 +551,17 @@ impl SortedIndexManager {
         &self,
         collection: &str,
         column: &str,
-        threshold: SortedNumericKey,
+        threshold: CanonicalKey,
         filter_set: &std::collections::HashSet<u64>,
         limit: usize,
     ) -> Option<Vec<EntityId>> {
         let indices = read_unpoisoned(&self.indices);
         let key = (collection.to_string(), column.to_string());
-        indices.get(&key)?.collect_range_filtered_by_set(
-            (Included(threshold), Unbounded),
-            filter_set,
-            limit,
-        )
+        let idx = indices.get(&key)?;
+        if !idx.supports_range_key(&threshold) {
+            return None;
+        }
+        idx.collect_range_filtered_by_set((Included(threshold), Unbounded), filter_set, limit)
     }
 
     /// Bitmap AND: lt filtered to IDs in `filter_set`.
@@ -613,17 +569,17 @@ impl SortedIndexManager {
         &self,
         collection: &str,
         column: &str,
-        threshold: SortedNumericKey,
+        threshold: CanonicalKey,
         filter_set: &std::collections::HashSet<u64>,
         limit: usize,
     ) -> Option<Vec<EntityId>> {
         let indices = read_unpoisoned(&self.indices);
         let key = (collection.to_string(), column.to_string());
-        indices.get(&key)?.collect_range_filtered_by_set(
-            (Unbounded, Excluded(threshold)),
-            filter_set,
-            limit,
-        )
+        let idx = indices.get(&key)?;
+        if !idx.supports_range_key(&threshold) {
+            return None;
+        }
+        idx.collect_range_filtered_by_set((Unbounded, Excluded(threshold)), filter_set, limit)
     }
 
     /// Bitmap AND: le filtered to IDs in `filter_set`.
@@ -631,17 +587,17 @@ impl SortedIndexManager {
         &self,
         collection: &str,
         column: &str,
-        threshold: SortedNumericKey,
+        threshold: CanonicalKey,
         filter_set: &std::collections::HashSet<u64>,
         limit: usize,
     ) -> Option<Vec<EntityId>> {
         let indices = read_unpoisoned(&self.indices);
         let key = (collection.to_string(), column.to_string());
-        indices.get(&key)?.collect_range_filtered_by_set(
-            (Unbounded, Included(threshold)),
-            filter_set,
-            limit,
-        )
+        let idx = indices.get(&key)?;
+        if !idx.supports_range_key(&threshold) {
+            return None;
+        }
+        idx.collect_range_filtered_by_set((Unbounded, Included(threshold)), filter_set, limit)
     }
 
     /// IN-list multi-point lookup on a sorted index.
@@ -652,7 +608,7 @@ impl SortedIndexManager {
         &self,
         collection: &str,
         column: &str,
-        values: &[SortedNumericKey],
+        values: &[CanonicalKey],
         limit: usize,
     ) -> Option<Vec<EntityId>> {
         let indices = read_unpoisoned(&self.indices);
@@ -666,7 +622,7 @@ impl SortedIndexManager {
         &self,
         collection: &str,
         column: &str,
-        values: &[SortedNumericKey],
+        values: &[CanonicalKey],
         filter_set: &std::collections::HashSet<u64>,
         limit: usize,
     ) -> Option<Vec<EntityId>> {
@@ -683,13 +639,16 @@ impl SortedIndexManager {
         &self,
         collection: &str,
         column: &str,
-        low: SortedNumericKey,
-        high: SortedNumericKey,
+        low: CanonicalKey,
+        high: CanonicalKey,
         limit: usize,
-    ) -> Option<Vec<SortedNumericKey>> {
+    ) -> Option<Vec<CanonicalKey>> {
         let indices = read_unpoisoned(&self.indices);
         let key = (collection.to_string(), column.to_string());
         let idx = indices.get(&key)?;
+        if !idx.supports_range_key(&low) || low.family() != high.family() {
+            return None;
+        }
         Some(idx.range_lookup_values((Included(low), Included(high)), limit))
     }
 
@@ -698,14 +657,17 @@ impl SortedIndexManager {
         &self,
         collection: &str,
         column: &str,
-        threshold: SortedNumericKey,
+        threshold: CanonicalKey,
         op: &crate::storage::query::ast::CompareOp,
         limit: usize,
-    ) -> Option<Vec<SortedNumericKey>> {
+    ) -> Option<Vec<CanonicalKey>> {
         use crate::storage::query::ast::CompareOp;
         let indices = read_unpoisoned(&self.indices);
         let key = (collection.to_string(), column.to_string());
         let idx = indices.get(&key)?;
+        if !idx.supports_range_key(&threshold) {
+            return None;
+        }
         let values = match op {
             CompareOp::Gt => idx.range_lookup_values((Excluded(threshold), Unbounded), limit),
             CompareOp::Ge => idx.range_lookup_values((Included(threshold), Unbounded), limit),
@@ -721,9 +683,9 @@ impl SortedIndexManager {
         &self,
         collection: &str,
         column: &str,
-        values: &[SortedNumericKey],
+        values: &[CanonicalKey],
         limit: usize,
-    ) -> Option<Vec<SortedNumericKey>> {
+    ) -> Option<Vec<CanonicalKey>> {
         let indices = read_unpoisoned(&self.indices);
         let key = (collection.to_string(), column.to_string());
         Some(indices.get(&key)?.in_lookup_values(values, limit))
@@ -749,10 +711,9 @@ impl SortedIndexManager {
         let mut indices = write_unpoisoned(&self.indices);
         let k = (collection.to_string(), column.to_string());
         if let Some(index) = indices.get_mut(&k) {
-            match classify_sorted_numeric_value(value) {
-                SortedNumericValue::Exact(key) => index.insert(key, entity_id),
-                SortedNumericValue::Inexact => index.mark_inexact_numeric_values(),
-                SortedNumericValue::Unsupported => {}
+            match classify_sorted_value(value) {
+                CanonicalizedValue::Exact(key) => index.insert(key, entity_id),
+                CanonicalizedValue::Unsupported => {}
             }
         }
     }
@@ -770,7 +731,7 @@ impl SortedIndexManager {
         let mut indices = write_unpoisoned(&self.indices);
         let k = (collection.to_string(), column.to_string());
         if let Some(index) = indices.get_mut(&k) {
-            let Some(key) = value_to_sorted_numeric_key(value) else {
+            let Some(key) = value_to_sorted_key(value) else {
                 return;
             };
             if let Some(bucket) = index.entries.get_mut(&key) {
@@ -783,28 +744,23 @@ impl SortedIndexManager {
     }
 }
 
-fn classify_sorted_numeric_value(val: &Value) -> SortedNumericValue {
-    match val {
-        Value::Integer(n) => SortedNumericValue::Exact(SortedNumericKey::Signed(*n)),
-        Value::UnsignedInteger(n) => SortedNumericValue::Exact(SortedNumericKey::Unsigned(*n)),
-        Value::Float(_) => SortedNumericValue::Inexact,
-        _ => SortedNumericValue::Unsupported,
+fn classify_sorted_value(val: &Value) -> CanonicalizedValue {
+    match value_to_canonical_key(val) {
+        Some(key) => CanonicalizedValue::Exact(key),
+        None => CanonicalizedValue::Unsupported,
     }
 }
 
-pub(crate) fn value_to_sorted_numeric_key(val: &Value) -> Option<SortedNumericKey> {
-    match classify_sorted_numeric_value(val) {
-        SortedNumericValue::Exact(key) => Some(key),
-        SortedNumericValue::Inexact | SortedNumericValue::Unsupported => None,
+pub(crate) fn value_to_sorted_key(val: &Value) -> Option<CanonicalKey> {
+    match classify_sorted_value(val) {
+        CanonicalizedValue::Exact(key) => Some(key),
+        CanonicalizedValue::Unsupported => None,
     }
 }
 
-/// Convert a `SortedNumericKey` back to a `Value` for covered-query projection.
-pub(crate) fn sorted_numeric_key_to_value(key: SortedNumericKey) -> Value {
-    match key {
-        SortedNumericKey::Signed(n) => Value::Integer(n),
-        SortedNumericKey::Unsigned(n) => Value::UnsignedInteger(n),
-    }
+/// Convert a canonical sorted key back to a `Value` for covered-query projection.
+pub(crate) fn sorted_key_to_value(key: CanonicalKey) -> Value {
+    key.into_value()
 }
 
 /// Metadata about a registered index
@@ -1095,33 +1051,38 @@ mod tests {
     }
 
     #[test]
-    fn test_sorted_numeric_key_orders_unsigned_above_i64_max_without_wrap() {
+    fn test_sorted_key_supports_text_ranges() {
         let mut index = SortedColumnIndex::new();
-        index.insert(SortedNumericKey::Signed(i64::MIN), EntityId::new(1));
-        index.insert(SortedNumericKey::Signed(i64::MAX), EntityId::new(2));
         index.insert(
-            SortedNumericKey::Unsigned(i64::MAX as u64 + 1),
+            value_to_sorted_key(&Value::Text("alpha".to_string())).unwrap(),
+            EntityId::new(1),
+        );
+        index.insert(
+            value_to_sorted_key(&Value::Text("bravo".to_string())).unwrap(),
+            EntityId::new(2),
+        );
+        index.insert(
+            value_to_sorted_key(&Value::Text("charlie".to_string())).unwrap(),
             EntityId::new(3),
         );
-        index.insert(SortedNumericKey::Unsigned(u64::MAX), EntityId::new(4));
 
         assert_eq!(
             ids(&index
-                .greater_than(SortedNumericKey::Signed(i64::MAX))
+                .greater_than(value_to_sorted_key(&Value::Text("alpha".to_string())).unwrap())
                 .unwrap()),
-            vec![3, 4]
+            vec![2, 3]
         );
         assert_eq!(
             ids(&index
-                .less_equal(SortedNumericKey::Signed(i64::MIN))
+                .less_equal(value_to_sorted_key(&Value::Text("alpha".to_string())).unwrap())
                 .unwrap()),
             vec![1]
         );
         assert_eq!(
             ids(&index
                 .range(
-                    SortedNumericKey::Signed(i64::MAX),
-                    SortedNumericKey::Unsigned(i64::MAX as u64 + 1),
+                    value_to_sorted_key(&Value::Text("bravo".to_string())).unwrap(),
+                    value_to_sorted_key(&Value::Text("charlie".to_string())).unwrap(),
                 )
                 .unwrap()),
             vec![2, 3]
@@ -1129,7 +1090,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sorted_index_disables_exact_lookup_when_float_values_are_present() {
+    fn test_sorted_index_disables_range_lookup_when_mixed_families_are_present() {
         let manager = SortedIndexManager::new();
         let entities = vec![
             (
@@ -1148,11 +1109,38 @@ mod tests {
             manager.range_lookup(
                 "numbers",
                 "score",
-                SortedNumericKey::Signed(0),
-                SortedNumericKey::Signed(20),
+                value_to_sorted_key(&Value::Integer(0)).unwrap(),
+                value_to_sorted_key(&Value::Integer(20)).unwrap(),
             ),
             None
         );
+    }
+
+    #[test]
+    fn test_sorted_index_keeps_exact_in_lookup_when_mixed_families_are_present() {
+        let manager = SortedIndexManager::new();
+        let entities = vec![
+            (
+                EntityId::new(1),
+                vec![("mixed".to_string(), Value::Integer(10))],
+            ),
+            (
+                EntityId::new(2),
+                vec![("mixed".to_string(), Value::Text("ten".to_string()))],
+            ),
+        ];
+
+        manager.build_index("mixed_table", "mixed", &entities);
+
+        let matched = manager
+            .in_lookup_limited(
+                "mixed_table",
+                "mixed",
+                &[value_to_sorted_key(&Value::Integer(10)).unwrap()],
+                10,
+            )
+            .unwrap();
+        assert_eq!(ids(&matched), vec![1]);
     }
 
     #[test]

@@ -1,3 +1,8 @@
+mod support;
+
+use std::thread::sleep;
+use std::time::Duration;
+
 use reddb::application::{ExecuteQueryInput, QueryUseCases};
 use reddb::catalog::CollectionModel;
 use reddb::storage::query::UnifiedRecord;
@@ -7,6 +12,8 @@ use reddb::storage::{
 };
 use reddb::RedDBRuntime;
 use std::collections::HashMap;
+
+use support::{checkpoint_and_reopen, PersistentDbPath};
 
 fn rt() -> RedDBRuntime {
     RedDBRuntime::in_memory().expect("failed to create in-memory runtime")
@@ -43,6 +50,23 @@ fn float(record: &UnifiedRecord, column: &str) -> f64 {
         Some(Value::UnsignedInteger(value)) => *value as f64,
         other => panic!("expected numeric value for {column}, got {other:?}"),
     }
+}
+
+fn payloads(result: &reddb::runtime::RuntimeQueryResult) -> Vec<String> {
+    result
+        .result
+        .records
+        .iter()
+        .map(|record| match record.get("payload") {
+            Some(Value::Text(value)) => value.clone(),
+            Some(Value::Json(bytes)) => {
+                let json: reddb::json::Value =
+                    reddb::json::from_slice(bytes).expect("payload json should decode");
+                json.to_string()
+            }
+            other => panic!("expected payload value, got {other:?}"),
+        })
+        .collect()
 }
 
 #[test]
@@ -165,6 +189,164 @@ fn test_queue_nack_moves_message_to_dlq_after_max_attempts() {
     let dlq_peek = exec(&rt, "QUEUE PEEK failed_tasks");
     assert_eq!(dlq_peek.result.records.len(), 1);
     assert_eq!(text(&dlq_peek.result.records[0], "payload"), "job-dlq");
+}
+
+#[test]
+fn test_queue_aliases_preserve_deque_sides() {
+    let rt = rt();
+
+    exec(&rt, "CREATE QUEUE tasks");
+    exec(&rt, "QUEUE RPUSH tasks 'tail-a'");
+    exec(&rt, "QUEUE LPUSH tasks 'head'");
+    exec(&rt, "QUEUE RPUSH tasks 'tail-b'");
+
+    let peek = exec(&rt, "QUEUE PEEK tasks 3");
+    assert_eq!(payloads(&peek), vec!["head", "tail-a", "tail-b"]);
+
+    let left = exec(&rt, "QUEUE LPOP tasks");
+    assert_eq!(payloads(&left), vec!["head"]);
+
+    let right = exec(&rt, "QUEUE RPOP tasks");
+    assert_eq!(payloads(&right), vec!["tail-b"]);
+}
+
+#[test]
+fn test_queue_push_accepts_inline_json_literal() {
+    let rt = rt();
+
+    exec(&rt, "CREATE QUEUE tasks");
+    exec(&rt, "QUEUE PUSH tasks {job: 'process', retries: 3}");
+
+    let peek = exec(&rt, "QUEUE PEEK tasks");
+    match peek.result.records[0].get("payload") {
+        Some(Value::Json(bytes)) => {
+            let json: reddb::json::Value =
+                reddb::json::from_slice(bytes).expect("payload json should decode");
+            assert_eq!(
+                json.get("job").and_then(reddb::json::Value::as_str),
+                Some("process")
+            );
+            assert_eq!(
+                json.get("retries").and_then(reddb::json::Value::as_i64),
+                Some(3)
+            );
+        }
+        other => panic!("expected json payload, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_queue_ttl_expires_messages_after_retention() {
+    let rt = rt();
+
+    exec(&rt, "CREATE QUEUE tasks WITH TTL 1 ms");
+    exec(&rt, "QUEUE PUSH tasks 'ttl-test'");
+    sleep(Duration::from_millis(10));
+
+    rt.apply_retention_policy()
+        .expect("queue retention policy should succeed");
+
+    let len = exec(&rt, "QUEUE LEN tasks");
+    assert_eq!(uint(&len.result.records[0], "len"), 0);
+}
+
+#[test]
+fn test_queue_persistent_reopen_retains_messages_and_recovers_pending() {
+    let path = PersistentDbPath::new("queue_reopen");
+    let rt = path.open_runtime();
+
+    exec(
+        &rt,
+        "CREATE QUEUE tasks PRIORITY WITH DLQ failed_tasks MAX_ATTEMPTS 5",
+    );
+    exec(&rt, "QUEUE GROUP CREATE tasks workers");
+    exec(&rt, "QUEUE PUSH tasks 'job-1' PRIORITY 10");
+
+    let first_read = exec(
+        &rt,
+        "QUEUE READ tasks GROUP workers CONSUMER worker1 COUNT 1",
+    );
+    assert_eq!(payloads(&first_read), vec!["job-1"]);
+
+    let rt = checkpoint_and_reopen(&path, rt);
+
+    let store = rt.db().store();
+    let tasks = store
+        .get_collection("tasks")
+        .expect("tasks queue collection should exist after reopen");
+    let messages = tasks.query_all(|entity| matches!(entity.kind, EntityKind::QueueMessage { .. }));
+    assert_eq!(messages.len(), 1, "queue message should survive reopen");
+    match &messages[0].data {
+        EntityData::QueueMessage(message) => {
+            assert_eq!(message.priority, Some(10));
+            assert_eq!(message.attempts, 1);
+            assert_eq!(message.max_attempts, 5);
+        }
+        other => panic!("expected queue message entity, got {other:?}"),
+    }
+
+    let len = exec(&rt, "QUEUE LEN tasks");
+    assert_eq!(uint(&len.result.records[0], "len"), 1);
+
+    let recovered = exec(
+        &rt,
+        "QUEUE READ tasks GROUP workers CONSUMER worker2 COUNT 1",
+    );
+    assert_eq!(payloads(&recovered), vec!["job-1"]);
+}
+
+#[test]
+fn test_timeseries_persistent_reopen_retains_tags() {
+    let path = PersistentDbPath::new("timeseries_reopen_tags");
+    let rt = path.open_runtime();
+
+    exec(&rt, "CREATE TIMESERIES cpu_metrics RETENTION 7 d");
+    exec(
+        &rt,
+        "INSERT INTO cpu_metrics (metric, value, tags, timestamp) VALUES ('cpu.idle', 94.8, {host: 'srv1', region: 'us-east'}, 1704067200000000000)",
+    );
+
+    let rt = checkpoint_and_reopen(&path, rt);
+
+    let selected = exec(
+        &rt,
+        "SELECT metric, value, timestamp, tags FROM cpu_metrics WHERE metric = 'cpu.idle'",
+    );
+    assert_eq!(selected.result.records.len(), 1);
+    assert_eq!(text(&selected.result.records[0], "metric"), "cpu.idle");
+    assert_eq!(
+        uint(&selected.result.records[0], "timestamp"),
+        1_704_067_200_000_000_000u64
+    );
+    match selected.result.records[0].get("tags") {
+        Some(Value::Json(bytes)) => {
+            let json: reddb::json::Value =
+                reddb::json::from_slice(bytes).expect("tags json should decode after reopen");
+            assert_eq!(
+                json.get("host").and_then(reddb::json::Value::as_str),
+                Some("srv1")
+            );
+            assert_eq!(
+                json.get("region").and_then(reddb::json::Value::as_str),
+                Some("us-east")
+            );
+        }
+        other => panic!("expected json tags after reopen, got {other:?}"),
+    }
+
+    let store = rt.db().store();
+    let manager = store
+        .get_collection("cpu_metrics")
+        .expect("cpu_metrics collection should exist after reopen");
+    let entities = manager.query_all(|entity| matches!(entity.data, EntityData::TimeSeries(_)));
+    assert_eq!(entities.len(), 1);
+    match &entities[0].data {
+        EntityData::TimeSeries(ts) => {
+            assert_eq!(ts.tags.get("host").map(String::as_str), Some("srv1"));
+            assert_eq!(ts.tags.get("region").map(String::as_str), Some("us-east"));
+        }
+        other => panic!("expected native timeseries entity, got {other:?}"),
+    }
 }
 
 #[test]

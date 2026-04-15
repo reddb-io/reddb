@@ -3,6 +3,7 @@ use reddb::application::{
     CreateDocumentInput, CreateEdgeInput, CreateKvInput, CreateNodeInput, CreateRowInput,
     CreateVectorInput, ExecuteQueryInput, SearchSimilarInput,
 };
+use reddb::health::HealthProvider;
 use reddb::storage::schema::Value;
 use reddb::{EntityUseCases, QueryUseCases, RedDBRuntime};
 
@@ -556,6 +557,249 @@ fn bench_query_5k_filtered(c: &mut Criterion) {
     });
 }
 
+// ---------------------------------------------------------------------------
+// Embedded profile cycles
+// ---------------------------------------------------------------------------
+
+fn bench_embedded_insert_query_cycle(c: &mut Criterion) {
+    let rt = RedDBRuntime::in_memory().unwrap();
+    let uc_entity = EntityUseCases::new(&rt);
+    let uc_query = QueryUseCases::new(&rt);
+
+    c.bench_function("embedded_insert_query_cycle", |b| {
+        b.iter(|| {
+            uc_entity
+                .create_row(CreateRowInput {
+                    collection: "cycle_rows".into(),
+                    fields: vec![
+                        ("name".into(), Value::Text("Alice".into())),
+                        ("score".into(), Value::Integer(99)),
+                    ],
+                    metadata: vec![],
+                    node_links: vec![],
+                    vector_links: vec![],
+                })
+                .unwrap();
+
+            uc_query
+                .execute(ExecuteQueryInput {
+                    query: "SELECT * FROM cycle_rows".into(),
+                })
+                .unwrap();
+        })
+    });
+}
+
+fn bench_embedded_vector_cycle(c: &mut Criterion) {
+    let rt = RedDBRuntime::in_memory().unwrap();
+    let uc_entity = EntityUseCases::new(&rt);
+    let uc_query = QueryUseCases::new(&rt);
+
+    for i in 0..20 {
+        let dense: Vec<f32> = (0..64)
+            .map(|d| ((i * 64 + d) as f32 * 0.01).sin())
+            .collect();
+        uc_entity
+            .create_vector(CreateVectorInput {
+                collection: "cycle_vectors".into(),
+                dense,
+                content: None,
+                metadata: vec![],
+                link_row: None,
+                link_node: None,
+            })
+            .unwrap();
+    }
+
+    let query_vec: Vec<f32> = (0..64).map(|d| (d as f32 * 0.03).cos()).collect();
+
+    c.bench_function("embedded_vector_cycle", |b| {
+        b.iter(|| {
+            let dense: Vec<f32> = (0..64).map(|d| (d as f32 * 0.02).sin()).collect();
+            uc_entity
+                .create_vector(CreateVectorInput {
+                    collection: "cycle_vectors".into(),
+                    dense,
+                    content: Some("cycle doc".into()),
+                    metadata: vec![],
+                    link_row: None,
+                    link_node: None,
+                })
+                .unwrap();
+
+            uc_query
+                .search_similar(SearchSimilarInput {
+                    collection: "cycle_vectors".into(),
+                    vector: query_vec.clone(),
+                    k: 5,
+                    min_score: 0.0,
+                    text: None,
+                    provider: None,
+                })
+                .unwrap();
+        })
+    });
+}
+
+fn bench_embedded_graph_cycle(c: &mut Criterion) {
+    let rt = RedDBRuntime::in_memory().unwrap();
+    let uc_entity = EntityUseCases::new(&rt);
+    let uc_query = QueryUseCases::new(&rt);
+
+    c.bench_function("embedded_graph_cycle", |b| {
+        b.iter(|| {
+            let node_a = uc_entity
+                .create_node(CreateNodeInput {
+                    collection: "cycle_graph".into(),
+                    label: "PersonA".into(),
+                    node_type: Some("entity".into()),
+                    properties: vec![("role".into(), Value::Text("admin".into()))],
+                    metadata: vec![],
+                    embeddings: vec![],
+                    table_links: vec![],
+                    node_links: vec![],
+                })
+                .unwrap();
+
+            let node_b = uc_entity
+                .create_node(CreateNodeInput {
+                    collection: "cycle_graph".into(),
+                    label: "PersonB".into(),
+                    node_type: Some("entity".into()),
+                    properties: vec![("role".into(), Value::Text("user".into()))],
+                    metadata: vec![],
+                    embeddings: vec![],
+                    table_links: vec![],
+                    node_links: vec![],
+                })
+                .unwrap();
+
+            uc_entity
+                .create_edge(CreateEdgeInput {
+                    collection: "cycle_graph".into(),
+                    label: "KNOWS".into(),
+                    from: node_a.id,
+                    to: node_b.id,
+                    weight: Some(1.0),
+                    properties: vec![],
+                    metadata: vec![],
+                })
+                .unwrap();
+
+            uc_query
+                .execute(ExecuteQueryInput {
+                    query: "SELECT * FROM cycle_graph".into(),
+                })
+                .unwrap();
+        })
+    });
+}
+
+fn bench_embedded_kv_cycle(c: &mut Criterion) {
+    let rt = RedDBRuntime::in_memory().unwrap();
+    let uc = EntityUseCases::new(&rt);
+
+    c.bench_function("embedded_kv_cycle", |b| {
+        let mut counter = 0u64;
+        b.iter(|| {
+            let key = format!("cycle_key_{counter}");
+
+            uc.create_kv(CreateKvInput {
+                collection: "cycle_kv".into(),
+                key: key.clone(),
+                value: Value::Text("cycle-value".into()),
+                metadata: vec![],
+            })
+            .unwrap();
+
+            let _ = uc.get_kv("cycle_kv", &key);
+            let _ = uc.delete_kv("cycle_kv", &key);
+
+            counter += 1;
+        })
+    });
+}
+
+fn bench_embedded_mixed_workload(c: &mut Criterion) {
+    let rt = RedDBRuntime::in_memory().unwrap();
+    let uc_entity = EntityUseCases::new(&rt);
+    let uc_query = QueryUseCases::new(&rt);
+
+    for i in 0..50 {
+        uc_entity
+            .create_row(CreateRowInput {
+                collection: "mixed_workload".into(),
+                fields: vec![
+                    ("name".into(), Value::Text(format!("Seed_{i}"))),
+                    ("score".into(), Value::Integer(i)),
+                ],
+                metadata: vec![],
+                node_links: vec![],
+                vector_links: vec![],
+            })
+            .unwrap();
+    }
+
+    c.bench_function("embedded_mixed_workload_100ops", |b| {
+        b.iter(|| {
+            for i in 0..50 {
+                uc_entity
+                    .create_row(CreateRowInput {
+                        collection: "mixed_workload".into(),
+                        fields: vec![
+                            ("name".into(), Value::Text(format!("Mixed_{i}"))),
+                            ("score".into(), Value::Integer(i + 1000)),
+                        ],
+                        metadata: vec![],
+                        node_links: vec![],
+                        vector_links: vec![],
+                    })
+                    .unwrap();
+
+                uc_query
+                    .execute(ExecuteQueryInput {
+                        query: "SELECT * FROM mixed_workload LIMIT 10".into(),
+                    })
+                    .unwrap();
+            }
+        })
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Serverless profile cycles
+// ---------------------------------------------------------------------------
+
+fn bench_serverless_startup(c: &mut Criterion) {
+    c.bench_function("serverless_cold_start", |b| {
+        b.iter(|| {
+            let _rt = RedDBRuntime::in_memory().unwrap();
+        })
+    });
+}
+
+fn bench_serverless_warmup(c: &mut Criterion) {
+    let rt = RedDBRuntime::in_memory().unwrap();
+    let uc = EntityUseCases::new(&rt);
+    for i in 0..20 {
+        uc.create_row(CreateRowInput {
+            collection: "warmup_data".into(),
+            fields: vec![("idx".into(), Value::Integer(i))],
+            metadata: vec![],
+            node_links: vec![],
+            vector_links: vec![],
+        })
+        .unwrap();
+    }
+
+    c.bench_function("serverless_warmup", |b| {
+        b.iter(|| {
+            let _report = rt.health();
+            let _catalog = rt.catalog();
+        })
+    });
+}
+
 criterion_group!(
     query_benches,
     bench_query_select,
@@ -568,4 +812,24 @@ criterion_group!(
     bench_query_5k_filtered,
 );
 
-criterion_main!(entity_benches, query_benches);
+criterion_group!(
+    embedded_profiles,
+    bench_embedded_insert_query_cycle,
+    bench_embedded_vector_cycle,
+    bench_embedded_graph_cycle,
+    bench_embedded_kv_cycle,
+    bench_embedded_mixed_workload,
+);
+
+criterion_group!(
+    serverless_profiles,
+    bench_serverless_startup,
+    bench_serverless_warmup,
+);
+
+criterion_main!(
+    entity_benches,
+    query_benches,
+    embedded_profiles,
+    serverless_profiles
+);

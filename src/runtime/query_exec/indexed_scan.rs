@@ -37,8 +37,8 @@ pub(crate) fn try_sorted_index_lookup(
             if !idx_store.sorted.has_index(table, col) {
                 return None;
             }
-            let lo = super::super::index_store::value_to_sorted_numeric_key(low)?;
-            let hi = super::super::index_store::value_to_sorted_numeric_key(high)?;
+            let lo = super::super::index_store::value_to_sorted_key(low)?;
+            let hi = super::super::index_store::value_to_sorted_key(high)?;
             // Use the effective cap: query LIMIT if present, otherwise a static break-even
             // cap. For BETWEEN on a 1M-row table with ~16% selectivity (~160K matches),
             // the sorted-index path (160K BTree traversal + 160K HashMap lookups) outperforms
@@ -68,7 +68,7 @@ pub(crate) fn try_sorted_index_lookup(
             if !idx_store.sorted.has_index(table, col) {
                 return None;
             }
-            let threshold = super::super::index_store::value_to_sorted_numeric_key(value)?;
+            let threshold = super::super::index_store::value_to_sorted_key(value)?;
             // Same cap logic as BETWEEN above.
             const BREAK_EVEN_CAP: usize = 200_000;
             let cap = limit.unwrap_or(BREAK_EVEN_CAP + 1);
@@ -104,13 +104,13 @@ pub(crate) fn try_sorted_index_lookup(
             if !idx_store.sorted.has_index(table, col) {
                 return None;
             }
-            // Convert Value → SortedNumericKey (skip non-numeric values)
-            let keys: Vec<super::super::index_store::SortedNumericKey> = values
+            // Convert Value → CanonicalKey (skip unsupported values)
+            let keys: Vec<crate::storage::schema::CanonicalKey> = values
                 .iter()
-                .filter_map(super::super::index_store::value_to_sorted_numeric_key)
+                .filter_map(super::super::index_store::value_to_sorted_key)
                 .collect();
             if keys.is_empty() {
-                return None; // No numeric values — can't use sorted index
+                return None; // No comparable values — can't use sorted index
             }
             let effective_limit = limit.unwrap_or(usize::MAX);
             idx_store
@@ -209,14 +209,14 @@ pub(crate) fn try_covered_sorted_index_query(
             if col != proj_col.as_str() {
                 return None;
             }
-            let lo = super::super::index_store::value_to_sorted_numeric_key(low)?;
-            let hi = super::super::index_store::value_to_sorted_numeric_key(high)?;
+            let lo = super::super::index_store::value_to_sorted_key(low)?;
+            let hi = super::super::index_store::value_to_sorted_key(high)?;
             let keys = idx_store
                 .sorted
                 .range_lookup_values(table, col, lo, hi, limit)?;
             Some(
                 keys.into_iter()
-                    .map(super::super::index_store::sorted_numeric_key_to_value)
+                    .map(super::super::index_store::sorted_key_to_value)
                     .collect(),
             )
         }
@@ -233,13 +233,13 @@ pub(crate) fn try_covered_sorted_index_query(
             if col != proj_col.as_str() {
                 return None;
             }
-            let threshold = super::super::index_store::value_to_sorted_numeric_key(value)?;
+            let threshold = super::super::index_store::value_to_sorted_key(value)?;
             let keys = idx_store
                 .sorted
                 .compare_lookup_values(table, col, threshold, op, limit)?;
             Some(
                 keys.into_iter()
-                    .map(super::super::index_store::sorted_numeric_key_to_value)
+                    .map(super::super::index_store::sorted_key_to_value)
                     .collect(),
             )
         }
@@ -251,9 +251,9 @@ pub(crate) fn try_covered_sorted_index_query(
             if col != proj_col.as_str() {
                 return None;
             }
-            let keys: Vec<super::super::index_store::SortedNumericKey> = values
+            let keys: Vec<crate::storage::schema::CanonicalKey> = values
                 .iter()
-                .filter_map(super::super::index_store::value_to_sorted_numeric_key)
+                .filter_map(super::super::index_store::value_to_sorted_key)
                 .collect();
             if keys.is_empty() {
                 return None;
@@ -263,7 +263,7 @@ pub(crate) fn try_covered_sorted_index_query(
                 .in_lookup_values(table, col, &keys, limit)?;
             Some(
                 keys.into_iter()
-                    .map(super::super::index_store::sorted_numeric_key_to_value)
+                    .map(super::super::index_store::sorted_key_to_value)
                     .collect(),
             )
         }
@@ -379,8 +379,8 @@ pub(crate) fn try_sorted_index_filtered_by_set(
                 FieldRef::TableColumn { column, .. } => column.as_str(),
                 _ => return None,
             };
-            let lo = super::super::index_store::value_to_sorted_numeric_key(low)?;
-            let hi = super::super::index_store::value_to_sorted_numeric_key(high)?;
+            let lo = super::super::index_store::value_to_sorted_key(low)?;
+            let hi = super::super::index_store::value_to_sorted_key(high)?;
             idx_store
                 .sorted
                 .range_filtered_by_set(table, col, lo, hi, filter_set, limit)
@@ -395,7 +395,7 @@ pub(crate) fn try_sorted_index_filtered_by_set(
                 FieldRef::TableColumn { column, .. } => column.as_str(),
                 _ => return None,
             };
-            let threshold = super::super::index_store::value_to_sorted_numeric_key(value)?;
+            let threshold = super::super::index_store::value_to_sorted_key(value)?;
             match *op {
                 CompareOp::Gt => idx_store
                     .sorted
@@ -417,9 +417,9 @@ pub(crate) fn try_sorted_index_filtered_by_set(
                 FieldRef::TableColumn { column, .. } => column.as_str(),
                 _ => return None,
             };
-            let keys: Vec<super::super::index_store::SortedNumericKey> = values
+            let keys: Vec<crate::storage::schema::CanonicalKey> = values
                 .iter()
-                .filter_map(super::super::index_store::value_to_sorted_numeric_key)
+                .filter_map(super::super::index_store::value_to_sorted_key)
                 .collect();
             if keys.is_empty() {
                 return None;

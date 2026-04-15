@@ -1559,7 +1559,7 @@ pub enum QueueSide {
 pub enum QueueCommand {
     Push {
         queue: String,
-        value: String,
+        value: Value,
         side: QueueSide,
         priority: Option<i32>,
     },

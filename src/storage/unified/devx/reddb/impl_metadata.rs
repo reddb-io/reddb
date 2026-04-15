@@ -324,6 +324,7 @@ impl RedDB {
             // that caused stack overflow / 12-second hang on startup.
         }
         self.load_collection_ttl_defaults_from_metadata();
+        self.recover_queue_pending_state();
         Ok(self)
     }
 
@@ -1256,6 +1257,27 @@ impl RedDB {
             metadata_state_checksum: 0,
             vector_artifact_page: 0,
             vector_artifact_checksum: 0,
+        }
+    }
+
+    fn recover_queue_pending_state(&self) {
+        const QUEUE_META_COLLECTION: &str = "red_queue_meta";
+
+        let Some(manager) = self.store.get_collection(QUEUE_META_COLLECTION) else {
+            return;
+        };
+
+        let pending_rows = manager.query_all(|entity| {
+            entity.data.as_row().is_some_and(|row| {
+                matches!(
+                    row.get_field("kind"),
+                    Some(crate::storage::schema::Value::Text(kind)) if kind == "queue_pending"
+                )
+            })
+        });
+
+        for row in pending_rows {
+            let _ = self.store.delete(QUEUE_META_COLLECTION, row.id);
         }
     }
 }

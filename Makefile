@@ -1,4 +1,4 @@
-.PHONY: help build build-fast release test test-fast test-persistent clean run run-grpc install fmt lint check check-driver-rust check-driver-python timings link unlink dev which patch minor major docs publish publish-dry-run env-up env-down env-logs test-env test-env-shell test-env-rust
+.PHONY: help build build-fast release warm test test-fast test-persistent clean run run-grpc install fmt lint check check-driver-rust check-driver-python timings link unlink dev which patch minor major docs publish publish-dry-run env-up env-down env-logs test-env test-env-shell test-env-rust
 
 # Paths
 LOCAL_BIN := $(HOME)/.local/bin
@@ -12,6 +12,7 @@ help:
 	@echo "Core:"
 	@echo "  make build         - Build debug version"
 	@echo "  make build-fast    - Build the `red` binary with the release-fast profile"
+	@echo "  make warm          - Prebuild the common dev artifacts (build + tests/benches check)"
 	@echo "  make release       - Build optimized release version"
 	@echo "  make test          - Run the default local test layer"
 	@echo "  make test-fast     - Run the default local test layer"
@@ -41,21 +42,26 @@ help:
 
 # Build debug version
 build:
-	cargo build
+	./scripts/cargo-fast.sh build
 
 build-fast:
-	cargo build --profile release-fast --bin red
+	REDB_USE_SCCACHE=1 ./scripts/cargo-fast.sh build --profile release-fast --bin red
 
 # Build release version (optimized)
 release:
-	cargo build --release
+	REDB_USE_SCCACHE=1 ./scripts/cargo-fast.sh build --release
+
+warm:
+	./scripts/cargo-fast.sh build
+	./scripts/cargo-fast.sh check --tests
+	./scripts/cargo-fast.sh check --benches
 
 # Run tests
 test:
 	$(MAKE) test-fast
 
 test-fast:
-	cargo test --locked
+	./scripts/cargo-fast.sh test --locked
 
 test-persistent:
 	CARGO_TARGET_DIR=$${CARGO_TARGET_DIR:-target/persistent-tests} cargo test --locked --test integration_persistent_multimodel -- --ignored
@@ -82,16 +88,16 @@ lint:
 
 # Quick compile check
 check:
-	cargo check --locked
+	./scripts/cargo-fast.sh check --locked
 
 check-driver-rust:
-	cargo check --manifest-path drivers/rust/Cargo.toml --features grpc
+	./scripts/cargo-fast.sh check --manifest-path drivers/rust/Cargo.toml --features grpc
 
 check-driver-python:
-	cargo check --manifest-path drivers/python/Cargo.toml
+	./scripts/cargo-fast.sh check --manifest-path drivers/python/Cargo.toml
 
 timings:
-	cargo build --profile release-fast --bin red --timings
+	REDB_USE_SCCACHE=1 ./scripts/cargo-fast.sh build --profile release-fast --bin red --timings
 
 # Install from source
 install:

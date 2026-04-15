@@ -1,12 +1,12 @@
 # Cargo build configuration template.
 #
-# Copy to `.cargo/config.toml` to activate. Provides a 30-50% link
-# time reduction (mold) and ~80% rebuild reduction (sccache) once
-# the prerequisites are installed.
+# Copy to `.cargo/config.toml` to activate the local linker speedup.
+# `mold` works well with Rust incremental builds. `sccache` is useful
+# too, but it conflicts with incremental compilation, so it stays
+# optional and commented out below.
 #
 # Prerequisites:
-#   sudo apt install mold clang     # or: sudo dnf install mold clang
-#   cargo install sccache
+#   sudo apt install mold clang sccache   # or: sudo dnf install mold clang sccache
 #
 # After installing, run:
 #   cp .cargo/config.toml.example .cargo/config.toml
@@ -36,15 +36,21 @@ linker = "clang"
 rustflags = ["-C", "link-arg=-fuse-ld=mold"]
 
 # ---------------------------------------------------------------------
-# Compiler cache — sccache
+# Optional compiler cache — sccache
 # ---------------------------------------------------------------------
 #
 # sccache hashes the source + flags and caches the .rlib output
 # under ~/.cache/sccache. On a fresh checkout or a branch switch
 # that touches a few files, the cache hits ~80% of the deps and
 # the build collapses from minutes to seconds.
+#
+# Important:
+# Rust incremental compilation and sccache are mutually exclusive.
+# For normal local dev this repo prefers incremental builds. Enable
+# the wrapper only for CI or for one-off local builds where you also
+# run with `CARGO_INCREMENTAL=0`.
 
-[build]
-rustc-wrapper = "sccache"
+# [build]
+# rustc-wrapper = "sccache"
 # Optional: cap parallelism if your machine OOMs on heavy crates.
 # jobs = 8

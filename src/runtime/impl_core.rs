@@ -3,6 +3,8 @@ use crate::application::entity::metadata_to_json;
 use crate::replication::cdc::ChangeRecord;
 use crate::replication::logical::{ApplyMode, LogicalChangeApplier};
 
+const AUTO_REFRESH_STATS_WRITE_ROW_LIMIT: usize = 4_096;
+
 fn runtime_pool_lock(runtime: &RedDBRuntime) -> std::sync::MutexGuard<'_, PoolState> {
     runtime
         .inner
@@ -1083,31 +1085,109 @@ impl RedDBRuntime {
         let cache_key = if is_write_op {
             String::new() // unused
         } else {
-            query.to_string()
+            crate::storage::query::planner::cache_key::normalize_cache_key(query)
         };
 
         let expr = if is_write_op {
             // Bypass plan cache for write operations — no benefit, pure overhead
             parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?
         } else {
+            let shape_binds =
+                crate::storage::query::planner::cache_key::extract_literal_bindings(query)
+                    .unwrap_or_default();
+
             let mut plan_cache = self.inner.query_cache.write();
             if let Some(cached) = plan_cache.get(&cache_key) {
-                cached.plan.optimized.clone()
+                if cached.parameter_count > 0 {
+                    if let Some(bound) =
+                        crate::storage::query::planner::shape::bind_parameterized_query(
+                            &cached.plan.optimized,
+                            &shape_binds,
+                            cached.parameter_count,
+                        )
+                    {
+                        bound
+                    } else if cached.matches_exact_query(query) {
+                        cached.plan.optimized.clone()
+                    } else {
+                        drop(plan_cache);
+                        let parsed =
+                            parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?;
+                        let (cached_expr, parameter_count) = if let Some(prepared) =
+                            crate::storage::query::planner::shape::parameterize_query_expr(&parsed)
+                        {
+                            (prepared.shape, prepared.parameter_count)
+                        } else {
+                            (parsed.clone(), 0)
+                        };
+                        let mut pc = self.inner.query_cache.write();
+                        let plan = crate::storage::query::planner::QueryPlan::new(
+                            parsed.clone(),
+                            cached_expr,
+                            Default::default(),
+                        );
+                        pc.insert(
+                            cache_key.clone(),
+                            crate::storage::query::planner::CachedPlan::new(plan)
+                                .with_shape_key(cache_key.clone())
+                                .with_exact_query(query.to_string())
+                                .with_parameter_count(parameter_count),
+                        );
+                        parsed
+                    }
+                } else if cached.matches_exact_query(query) {
+                    cached.plan.optimized.clone()
+                } else {
+                    drop(plan_cache);
+                    let parsed =
+                        parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?;
+                    let (cached_expr, parameter_count) = if let Some(prepared) =
+                        crate::storage::query::planner::shape::parameterize_query_expr(&parsed)
+                    {
+                        (prepared.shape, prepared.parameter_count)
+                    } else {
+                        (parsed.clone(), 0)
+                    };
+                    let mut pc = self.inner.query_cache.write();
+                    let plan = crate::storage::query::planner::QueryPlan::new(
+                        parsed.clone(),
+                        cached_expr,
+                        Default::default(),
+                    );
+                    pc.insert(
+                        cache_key.clone(),
+                        crate::storage::query::planner::CachedPlan::new(plan)
+                            .with_shape_key(cache_key.clone())
+                            .with_exact_query(query.to_string())
+                            .with_parameter_count(parameter_count),
+                    );
+                    parsed
+                }
             } else {
                 drop(plan_cache);
                 let parsed =
                     parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?;
+                let (cached_expr, parameter_count) = if let Some(prepared) =
+                    crate::storage::query::planner::shape::parameterize_query_expr(&parsed)
+                {
+                    (prepared.shape, prepared.parameter_count)
+                } else {
+                    (parsed.clone(), 0)
+                };
                 // Store in plan cache for next time
                 {
                     let mut pc = self.inner.query_cache.write();
                     let plan = crate::storage::query::planner::QueryPlan::new(
                         parsed.clone(),
-                        parsed.clone(),
+                        cached_expr,
                         Default::default(),
                     );
                     pc.insert(
                         cache_key.clone(),
-                        crate::storage::query::planner::CachedPlan::new(plan),
+                        crate::storage::query::planner::CachedPlan::new(plan)
+                            .with_shape_key(cache_key.clone())
+                            .with_exact_query(query.to_string())
+                            .with_parameter_count(parameter_count),
                     );
                 }
                 parsed
@@ -1298,6 +1378,12 @@ impl RedDBRuntime {
         // zero while the clone cost (100 records × ~16 fields each) is high.
         // Aggregations (1 row) and point lookups (1 row) still benefit.
         if let Ok(ref result) = query_result {
+            if !is_write_op && result.statement_type == "select" {
+                self.inner
+                    .query_cache
+                    .write()
+                    .record_observation(&cache_key, result.result.stats.rows_scanned);
+            }
             if result.statement_type == "select"
                 && result.result.pre_serialized_json.is_none()
                 && result.result.records.len() <= 5
@@ -1394,5 +1480,50 @@ impl RedDBRuntime {
         let mut cache = self.inner.result_cache.write();
         cache.0.clear();
         cache.1.clear();
+    }
+
+    pub(crate) fn invalidate_plan_cache(&self) {
+        self.inner.query_cache.write().clear();
+    }
+
+    pub(crate) fn clear_table_planner_stats(&self, table: &str) {
+        let store = self.inner.db.store();
+        crate::storage::query::planner::stats_catalog::clear_table_stats(store.as_ref(), table);
+        self.invalidate_plan_cache();
+    }
+
+    pub(crate) fn refresh_table_planner_stats(&self, table: &str) {
+        let store = self.inner.db.store();
+        if let Some(stats) =
+            crate::storage::query::planner::stats_catalog::analyze_collection(store.as_ref(), table)
+        {
+            crate::storage::query::planner::stats_catalog::persist_table_stats(
+                store.as_ref(),
+                &stats,
+            );
+        } else {
+            crate::storage::query::planner::stats_catalog::clear_table_stats(store.as_ref(), table);
+        }
+        self.invalidate_plan_cache();
+    }
+
+    pub(crate) fn note_table_write(&self, table: &str) {
+        let snapshot = self.inner.db.catalog_snapshot();
+        let row_count = snapshot
+            .stats_by_collection
+            .get(table)
+            .map(|stats| stats.entities)
+            .unwrap_or(0);
+
+        // Re-analyze small collections eagerly so the planner keeps real
+        // histograms/MCVs hot. For larger collections, avoid a full scan on
+        // every write and simply fall back to fresh catalog cardinalities.
+        if row_count <= AUTO_REFRESH_STATS_WRITE_ROW_LIMIT {
+            self.refresh_table_planner_stats(table);
+        } else {
+            self.clear_table_planner_stats(table);
+        }
+
+        self.invalidate_result_cache();
     }
 }

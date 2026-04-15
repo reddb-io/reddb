@@ -11,9 +11,18 @@ impl RedDBRuntime {
 
         let expr = parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?;
         let statement = query_expr_name(&expr);
-        let mut planner = QueryPlanner::new();
+        let mut planner = QueryPlanner::with_stats_provider(Arc::new(
+            crate::storage::query::planner::stats_provider::CatalogStatsProvider::from_db(
+                &self.inner.db,
+            ),
+        ));
         let plan = planner.plan(expr.clone());
-        let cardinality = CostEstimator::new().estimate_cardinality(&plan.optimized);
+        let cardinality = CostEstimator::with_stats(Arc::new(
+            crate::storage::query::planner::stats_provider::CatalogStatsProvider::from_db(
+                &self.inner.db,
+            ),
+        ))
+        .estimate_cardinality(&plan.optimized);
 
         let is_universal = match &expr {
             QueryExpr::Table(t) => is_universal_query_source(&t.table),

@@ -266,6 +266,10 @@ impl RedDBRuntime {
             }
         }
 
+        if inserted_count > 0 {
+            self.note_table_write(&query.table);
+        }
+
         Ok(RuntimeQueryResult::dml_result(
             raw_query.to_string(),
             inserted_count,
@@ -355,6 +359,7 @@ impl RedDBRuntime {
                     operations,
                 };
                 self.patch_entity(input)?;
+                self.note_table_write(&query.table);
                 return Ok(RuntimeQueryResult::dml_result(
                     raw_query.to_string(),
                     1,
@@ -405,6 +410,9 @@ impl RedDBRuntime {
                         }
                     }
                 }
+                if affected > 0 {
+                    self.note_table_write(&query.table);
+                }
                 return Ok(RuntimeQueryResult::dml_result(
                     raw_query.to_string(),
                     affected,
@@ -449,6 +457,10 @@ impl RedDBRuntime {
             if self.patch_entity(input).is_ok() {
                 affected += 1;
             }
+        }
+
+        if affected > 0 {
+            self.note_table_write(&query.table);
         }
 
         Ok(RuntimeQueryResult::dml_result(
@@ -529,6 +541,7 @@ impl RedDBRuntime {
                     collection: query.table.clone(),
                     id: EntityId::new(entity_id),
                 })?;
+                self.note_table_write(&query.table);
                 return Ok(RuntimeQueryResult::dml_result(
                     raw_query.to_string(),
                     1,
@@ -561,6 +574,9 @@ impl RedDBRuntime {
                     {
                         affected += 1;
                     }
+                }
+                if affected > 0 {
+                    self.note_table_write(&query.table);
                 }
                 return Ok(RuntimeQueryResult::dml_result(
                     raw_query.to_string(),
@@ -598,6 +614,10 @@ impl RedDBRuntime {
                 id,
             })?;
             affected += 1;
+        }
+
+        if affected > 0 {
+            self.note_table_write(&query.table);
         }
 
         Ok(RuntimeQueryResult::dml_result(

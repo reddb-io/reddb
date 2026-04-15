@@ -106,6 +106,9 @@ jobs:
     needs: [plan]
     if: needs.plan.outputs.should_skip != 'true'
     runs-on: ${{ matrix.os }}
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
     strategy:
       fail-fast: false
       matrix:
@@ -136,13 +139,17 @@ jobs:
         with:
           version: '28.x'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: rui314/setup-mold@v1
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
 
       - name: Regenerate lockfile after version sync
         run: cargo generate-lockfile
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ runner.os }}-${{ matrix.target }}
+          shared-key: release-${{ runner.os }}-${{ matrix.target }}
+          cache-on-failure: "true"
 
       - name: Cross-compile tools
         if: matrix.cross && matrix.target != 'aarch64-unknown-linux-musl'
@@ -193,6 +200,9 @@ jobs:
         with:
           name: ${{ matrix.asset_name }}
           path: red-${{ matrix.asset_name }}*
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats
 
   publish-github:
     name: GitHub Release

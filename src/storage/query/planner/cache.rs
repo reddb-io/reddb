@@ -14,6 +14,12 @@ use std::time::{Duration, Instant};
 
 use super::{CacheStats, QueryPlan};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheEntryState {
+    Inactive,
+    Active,
+}
+
 /// A cached query plan with metadata
 #[derive(Debug, Clone)]
 pub struct CachedPlan {
@@ -25,6 +31,20 @@ pub struct CachedPlan {
     pub access_count: u64,
     /// Last access time
     pub last_accessed: Instant,
+    /// Query shape key used for parameter-insensitive cache grouping.
+    pub shape_key: Option<String>,
+    /// Last exact query string stored in this slot.
+    pub exact_query: Option<String>,
+    /// Runtime activation state inspired by Mongo's active/inactive plan cache.
+    pub state: CacheEntryState,
+    /// Moving expectation for storage reads (`rows_scanned`) on this shape.
+    pub expected_rows_scanned: Option<u64>,
+    /// Last observed runtime reads for the shape.
+    pub last_observed_rows_scanned: Option<u64>,
+    /// Number of literal binds expected by the cached shape skeleton.
+    pub parameter_count: usize,
+    /// When true, the next cache lookup forces a fresh replan.
+    pub replan_pending: bool,
 }
 
 impl CachedPlan {
@@ -36,7 +56,29 @@ impl CachedPlan {
             cached_at: now,
             access_count: 0,
             last_accessed: now,
+            shape_key: None,
+            exact_query: None,
+            state: CacheEntryState::Inactive,
+            expected_rows_scanned: None,
+            last_observed_rows_scanned: None,
+            parameter_count: 0,
+            replan_pending: false,
         }
+    }
+
+    pub fn with_shape_key(mut self, shape_key: impl Into<String>) -> Self {
+        self.shape_key = Some(shape_key.into());
+        self
+    }
+
+    pub fn with_exact_query(mut self, query: impl Into<String>) -> Self {
+        self.exact_query = Some(query.into());
+        self
+    }
+
+    pub fn with_parameter_count(mut self, parameter_count: usize) -> Self {
+        self.parameter_count = parameter_count;
+        self
     }
 
     /// Check if the plan has expired
@@ -48,6 +90,43 @@ impl CachedPlan {
     pub fn touch(&mut self) {
         self.access_count += 1;
         self.last_accessed = Instant::now();
+    }
+
+    pub fn matches_exact_query(&self, query: &str) -> bool {
+        self.exact_query.as_deref() == Some(query)
+    }
+
+    pub fn needs_replan(&self) -> bool {
+        self.replan_pending
+    }
+
+    pub fn record_observation(&mut self, rows_scanned: u64) {
+        self.last_observed_rows_scanned = Some(rows_scanned);
+        match (self.state, self.expected_rows_scanned) {
+            (_, None) => {
+                self.expected_rows_scanned = Some(rows_scanned.max(1));
+                self.replan_pending = false;
+            }
+            (CacheEntryState::Inactive, Some(expected)) => {
+                if rows_scanned <= expected {
+                    self.state = CacheEntryState::Active;
+                    self.expected_rows_scanned = Some(rows_scanned.max(1));
+                    self.replan_pending = false;
+                } else {
+                    self.expected_rows_scanned = Some(rows_scanned.min(expected.saturating_mul(2)));
+                }
+            }
+            (CacheEntryState::Active, Some(expected)) => {
+                if rows_scanned > expected.saturating_mul(10).max(10) {
+                    self.state = CacheEntryState::Inactive;
+                    self.expected_rows_scanned = Some(rows_scanned.max(1));
+                    self.replan_pending = true;
+                } else if rows_scanned < expected {
+                    self.expected_rows_scanned = Some(rows_scanned.max(1));
+                    self.replan_pending = false;
+                }
+            }
+        }
     }
 }
 
@@ -87,6 +166,16 @@ impl PlanCache {
 
     /// Get a cached plan by key
     pub fn get(&mut self, key: &str) -> Option<&CachedPlan> {
+        if self
+            .entries
+            .get(key)
+            .is_some_and(|entry| entry.needs_replan())
+        {
+            self.remove(key);
+            self.misses += 1;
+            return None;
+        }
+
         // Check if entry exists and is not expired
         if let Some(entry) = self.entries.get_mut(key) {
             if entry.is_expired(self.ttl) {
@@ -190,6 +279,12 @@ impl PlanCache {
 
         for key in expired {
             self.remove(&key);
+        }
+    }
+
+    pub fn record_observation(&mut self, key: &str, rows_scanned: u64) {
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.record_observation(rows_scanned);
         }
     }
 }
@@ -307,5 +402,17 @@ mod tests {
         assert!(cache.get("hosts_query1").is_none());
         assert!(cache.get("hosts_query2").is_none());
         assert!(cache.get("users_query").is_some());
+    }
+
+    #[test]
+    fn active_entry_forces_replan_after_large_regression() {
+        let mut cache = PlanCache::new(10);
+        cache.insert("q1".to_string(), CachedPlan::new(make_test_plan()));
+
+        cache.record_observation("q1", 10);
+        cache.record_observation("q1", 10);
+        cache.record_observation("q1", 500);
+
+        assert!(cache.get("q1").is_none());
     }
 }

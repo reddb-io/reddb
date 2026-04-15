@@ -478,29 +478,41 @@ impl Default for InMemoryVectorExecutor {
 /// Evaluate a metadata filter against metadata values
 fn evaluate_filter(filter: &MetadataFilter, metadata: &HashMap<String, MetadataValue>) -> bool {
     match filter {
-        MetadataFilter::Eq(field, value) => {
-            metadata.get(field).map(|v| v == value).unwrap_or(false)
-        }
-        MetadataFilter::Ne(field, value) => metadata.get(field).map(|v| v != value).unwrap_or(true),
-        MetadataFilter::Lt(field, value) => {
-            compare_values(metadata.get(field), value, |a, b| a < b)
-        }
-        MetadataFilter::Lte(field, value) => {
-            compare_values(metadata.get(field), value, |a, b| a <= b)
-        }
-        MetadataFilter::Gt(field, value) => {
-            compare_values(metadata.get(field), value, |a, b| a > b)
-        }
-        MetadataFilter::Gte(field, value) => {
-            compare_values(metadata.get(field), value, |a, b| a >= b)
-        }
+        MetadataFilter::Eq(field, value) => metadata
+            .get(field)
+            .map(|candidate| candidate.matches_eq(value))
+            .unwrap_or(false),
+        MetadataFilter::Ne(field, value) => metadata
+            .get(field)
+            .map(|candidate| !candidate.matches_eq(value))
+            .unwrap_or(true),
+        MetadataFilter::Lt(field, value) => metadata
+            .get(field)
+            .and_then(|candidate| candidate.compare(value))
+            .map(|ord| ord == std::cmp::Ordering::Less)
+            .unwrap_or(false),
+        MetadataFilter::Lte(field, value) => metadata
+            .get(field)
+            .and_then(|candidate| candidate.compare(value))
+            .map(|ord| ord != std::cmp::Ordering::Greater)
+            .unwrap_or(false),
+        MetadataFilter::Gt(field, value) => metadata
+            .get(field)
+            .and_then(|candidate| candidate.compare(value))
+            .map(|ord| ord == std::cmp::Ordering::Greater)
+            .unwrap_or(false),
+        MetadataFilter::Gte(field, value) => metadata
+            .get(field)
+            .and_then(|candidate| candidate.compare(value))
+            .map(|ord| ord != std::cmp::Ordering::Less)
+            .unwrap_or(false),
         MetadataFilter::In(field, values) => metadata
             .get(field)
-            .map(|v| values.contains(v))
+            .map(|candidate| values.iter().any(|value| candidate.matches_eq(value)))
             .unwrap_or(false),
         MetadataFilter::NotIn(field, values) => metadata
             .get(field)
-            .map(|v| !values.contains(v))
+            .map(|candidate| !values.iter().any(|value| candidate.matches_eq(value)))
             .unwrap_or(true),
         MetadataFilter::Contains(field, substring) => {
             if let Some(MetadataValue::String(s)) = metadata.get(field) {
@@ -528,20 +540,6 @@ fn evaluate_filter(filter: &MetadataFilter, metadata: &HashMap<String, MetadataV
         }
         MetadataFilter::Exists(field) => metadata.contains_key(field),
         MetadataFilter::NotExists(field) => !metadata.contains_key(field),
-    }
-}
-
-/// Compare metadata values with a comparison function
-fn compare_values<F>(actual: Option<&MetadataValue>, expected: &MetadataValue, cmp: F) -> bool
-where
-    F: Fn(f64, f64) -> bool,
-{
-    match (actual, expected) {
-        (Some(MetadataValue::Integer(a)), MetadataValue::Integer(b)) => cmp(*a as f64, *b as f64),
-        (Some(MetadataValue::Float(a)), MetadataValue::Float(b)) => cmp(*a, *b),
-        (Some(MetadataValue::Integer(a)), MetadataValue::Float(b)) => cmp(*a as f64, *b),
-        (Some(MetadataValue::Float(a)), MetadataValue::Integer(b)) => cmp(*a, *b as f64),
-        _ => false,
     }
 }
 

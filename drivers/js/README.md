@@ -5,6 +5,14 @@ stdio to a local `red` binary, which is downloaded automatically on install.
 Works in **Node 18+**, **Bun** and **Deno** (via `npm:` specifier) — same
 package, no per-runtime fork.
 
+Use this package for application code. If you just want to launch the CLI from
+npm, use:
+
+```bash
+npx reddb-cli@latest version
+npx reddb-cli@latest server --http-bind 127.0.0.1:8080 --path ./data.rdb
+```
+
 ## Install
 
 ```bash
@@ -43,6 +51,25 @@ console.log(result.rows)
 await db.close()
 ```
 
+TypeScript is the same API:
+
+```ts
+import { connect, RedDBError } from 'reddb'
+
+const db = await connect('file:///var/lib/reddb/data.rdb')
+
+try {
+  const result = await db.query('SELECT * FROM users LIMIT 10')
+  console.log(result.rows)
+} catch (err) {
+  if (err instanceof RedDBError) {
+    console.error(err.code, err.message)
+  }
+}
+
+await db.close()
+```
+
 ## Connection URIs
 
 | URI                        | Mode                                 |
@@ -64,6 +91,16 @@ JSON-RPC client to its stdin/stdout, then returns a connection handle.
 Options:
 - `binary` — override the `red` binary path. Defaults to `bin/red` next to the
   package, or `REDDB_BINARY_PATH` env var if set.
+
+Examples:
+
+```js
+import { connect } from 'reddb'
+
+const db = await connect('memory://')
+const persisted = await connect('file:///tmp/app.rdb')
+const custom = await connect('memory://', { binary: '/usr/local/bin/red' })
+```
 
 ### `db.query(sql) → Promise<{ statement, affected, columns, rows }>`
 

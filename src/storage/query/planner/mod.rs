@@ -18,9 +18,11 @@ pub mod join_dp;
 pub mod optimizer;
 pub mod pathkeys;
 pub mod rewriter;
+pub mod shape;
 pub mod stats_provider;
 
 mod logical;
+pub(crate) mod stats_catalog;
 mod types;
 
 pub use cache::{CachedPlan, PlanCache};

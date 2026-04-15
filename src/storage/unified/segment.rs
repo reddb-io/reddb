@@ -25,7 +25,7 @@ use super::memtable::Memtable;
 use super::metadata::{Metadata, MetadataStorage};
 use crate::storage::primitives::bloom::BloomFilter;
 use crate::storage::query::value_compare::partial_compare_values;
-use crate::storage::schema::Value;
+use crate::storage::schema::{value_to_canonical_key, CanonicalKey, Value};
 
 /// Unique identifier for a segment
 pub type SegmentId = u64;
@@ -152,6 +152,8 @@ fn current_unix_secs() -> u64 {
         .as_secs()
 }
 
+const SEALED_MULTI_ZONE_MAX_INTERVALS: usize = 4;
+
 /// A unified segment that stores all entity types
 pub trait UnifiedSegment: Send + Sync {
     /// Get segment ID
@@ -234,30 +236,71 @@ pub trait UnifiedSegment: Send + Sync {
 pub struct ColZone {
     pub min: Value,
     pub max: Value,
+    min_key: Option<CanonicalKey>,
+    max_key: Option<CanonicalKey>,
 }
 
 impl ColZone {
     fn new(v: Value) -> Self {
         Self {
+            min_key: value_to_canonical_key(&v),
+            max_key: value_to_canonical_key(&v),
             min: v.clone(),
             max: v,
         }
     }
 
+    fn with_bounds(min: Value, max: Value) -> Self {
+        Self {
+            min_key: value_to_canonical_key(&min),
+            max_key: value_to_canonical_key(&max),
+            min,
+            max,
+        }
+    }
+
     fn update(&mut self, v: &Value) {
-        if partial_compare_values(v, &self.min)
+        if compare_zone_values(v, None, &self.min, self.min_key.as_ref())
             .map(|o| o == std::cmp::Ordering::Less)
             .unwrap_or(false)
         {
             self.min = v.clone();
+            self.min_key = value_to_canonical_key(v);
         }
-        if partial_compare_values(v, &self.max)
+        if compare_zone_values(v, None, &self.max, self.max_key.as_ref())
             .map(|o| o == std::cmp::Ordering::Greater)
             .unwrap_or(false)
         {
             self.max = v.clone();
+            self.max_key = value_to_canonical_key(v);
         }
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MultiColZone {
+    pub intervals: Vec<ColZone>,
+}
+
+impl MultiColZone {
+    fn can_skip(&self, pred: &ZoneColPred<'_>) -> bool {
+        !self.intervals.is_empty() && self.intervals.iter().all(|zone| pred.can_skip(zone))
+    }
+}
+
+fn compare_zone_values(
+    left: &Value,
+    left_key: Option<&CanonicalKey>,
+    right: &Value,
+    right_key: Option<&CanonicalKey>,
+) -> Option<std::cmp::Ordering> {
+    partial_compare_values(left, right).or_else(|| {
+        let left_key = left_key.cloned().or_else(|| value_to_canonical_key(left))?;
+        let right_key = right_key
+            .cloned()
+            .or_else(|| value_to_canonical_key(right))?;
+        (left_key.family() == right_key.family()).then(|| left_key.cmp(&right_key))
+    })
 }
 
 /// Tag-only variant of `ZoneColPred` — used where the Value is stored separately.
@@ -286,29 +329,37 @@ impl<'a> ZoneColPred<'a> {
         match self {
             // Equality: skip if val < min OR val > max
             ZoneColPred::Eq(val) => {
-                partial_compare_values(val, &zone.min)
+                compare_zone_values(val, None, &zone.min, zone.min_key.as_ref())
                     .map(|o| o == std::cmp::Ordering::Less)
                     .unwrap_or(false)
-                    || partial_compare_values(val, &zone.max)
+                    || compare_zone_values(val, None, &zone.max, zone.max_key.as_ref())
                         .map(|o| o == std::cmp::Ordering::Greater)
                         .unwrap_or(false)
             }
             // col > val: skip if max <= val (all rows have col ≤ val, none > val)
-            ZoneColPred::Gt(val) => partial_compare_values(&zone.max, val)
-                .map(|o| o != std::cmp::Ordering::Greater)
-                .unwrap_or(false),
+            ZoneColPred::Gt(val) => {
+                compare_zone_values(&zone.max, zone.max_key.as_ref(), val, None)
+                    .map(|o| o != std::cmp::Ordering::Greater)
+                    .unwrap_or(false)
+            }
             // col >= val: skip if max < val
-            ZoneColPred::Gte(val) => partial_compare_values(&zone.max, val)
-                .map(|o| o == std::cmp::Ordering::Less)
-                .unwrap_or(false),
+            ZoneColPred::Gte(val) => {
+                compare_zone_values(&zone.max, zone.max_key.as_ref(), val, None)
+                    .map(|o| o == std::cmp::Ordering::Less)
+                    .unwrap_or(false)
+            }
             // col < val: skip if min >= val
-            ZoneColPred::Lt(val) => partial_compare_values(&zone.min, val)
-                .map(|o| o != std::cmp::Ordering::Less)
-                .unwrap_or(false),
+            ZoneColPred::Lt(val) => {
+                compare_zone_values(&zone.min, zone.min_key.as_ref(), val, None)
+                    .map(|o| o != std::cmp::Ordering::Less)
+                    .unwrap_or(false)
+            }
             // col <= val: skip if min > val
-            ZoneColPred::Lte(val) => partial_compare_values(&zone.min, val)
-                .map(|o| o == std::cmp::Ordering::Greater)
-                .unwrap_or(false),
+            ZoneColPred::Lte(val) => {
+                compare_zone_values(&zone.min, zone.min_key.as_ref(), val, None)
+                    .map(|o| o == std::cmp::Ordering::Greater)
+                    .unwrap_or(false)
+            }
         }
     }
 }
@@ -357,6 +408,8 @@ pub struct GrowingSegment {
 
     /// Per-column zone maps: col_name → (min, max) for segment pruning
     col_zones: HashMap<String, ColZone>,
+    /// Sealed-only minmax-multi summaries built from canonical ordering.
+    sealed_col_zones: HashMap<String, MultiColZone>,
 
     /// Sequence counter for ordering
     sequence: AtomicU64,
@@ -443,6 +496,7 @@ impl GrowingSegment {
             bloom: BloomFilter::with_capacity(100_000, 0.01),
             memtable: Memtable::new(),
             col_zones: HashMap::new(),
+            sealed_col_zones: HashMap::new(),
             sequence: AtomicU64::new(0),
             memory_bytes: AtomicU64::new(0),
             published_flat_len: AtomicUsize::new(0),
@@ -522,6 +576,78 @@ impl GrowingSegment {
         }
     }
 
+    fn rebuild_sealed_col_zones(&mut self) {
+        let mut values_by_col: HashMap<String, Vec<(CanonicalKey, Value)>> = HashMap::new();
+        let mut family_by_col: HashMap<String, crate::storage::schema::CanonicalKeyFamily> =
+            HashMap::new();
+        let mut mixed_family_cols = HashSet::new();
+        let mut unsupported_cols = HashSet::new();
+
+        let mut observe_row = |row: &super::entity::RowData| {
+            for (col, value) in row.iter_fields() {
+                if matches!(value, Value::Null) {
+                    continue;
+                }
+                let Some(key) = value_to_canonical_key(value) else {
+                    unsupported_cols.insert(col.to_string());
+                    continue;
+                };
+                match family_by_col.get(col).copied() {
+                    Some(existing) if existing != key.family() => {
+                        mixed_family_cols.insert(col.to_string());
+                    }
+                    None => {
+                        family_by_col.insert(col.to_string(), key.family());
+                    }
+                    _ => {}
+                }
+                values_by_col
+                    .entry(col.to_string())
+                    .or_default()
+                    .push((key, value.clone()));
+            }
+        };
+
+        if self.use_flat {
+            for entity in &self.flat_entities {
+                if self.deleted.contains(&entity.id) {
+                    continue;
+                }
+                if let EntityData::Row(row) = &entity.data {
+                    observe_row(row);
+                }
+            }
+        } else {
+            for entity in self.entities.values() {
+                if self.deleted.contains(&entity.id) {
+                    continue;
+                }
+                if let EntityData::Row(row) = &entity.data {
+                    observe_row(row);
+                }
+            }
+        }
+
+        let mut sealed_col_zones = HashMap::new();
+        for (col, mut entries) in values_by_col {
+            if mixed_family_cols.contains(&col)
+                || unsupported_cols.contains(&col)
+                || entries.is_empty()
+            {
+                continue;
+            }
+            entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+            entries.dedup_by(|left, right| left.0 == right.0);
+
+            let intervals = build_minmax_multi_intervals(&entries, SEALED_MULTI_ZONE_MAX_INTERVALS);
+            if intervals.len() > 1 {
+                sealed_col_zones.insert(col, MultiColZone { intervals });
+            }
+        }
+
+        self.sealed_col_zones = sealed_col_zones;
+    }
+
     /// Returns `true` when this segment can be entirely skipped for the given predicates.
     /// A segment is skipped only if ALL predicates say so (conservative: any non-skippable
     /// predicate forces the scan to proceed).
@@ -530,6 +656,12 @@ impl GrowingSegment {
             return false;
         }
         for (col, pred) in preds {
+            if let Some(zone) = self.sealed_col_zones.get(*col) {
+                if zone.can_skip(pred) {
+                    return true;
+                }
+                continue;
+            }
             if let Some(zone) = self.col_zones.get(*col) {
                 if pred.can_skip(zone) {
                     return true; // ONE predicate suffices to skip
@@ -1143,6 +1275,7 @@ impl UnifiedSegment for GrowingSegment {
         // - HNSW/IVF for vectors (future)
         // - B-tree for sorted access (future)
         // - Inverted index for text search (future)
+        self.rebuild_sealed_col_zones();
 
         self.state = SegmentState::Sealed;
         Ok(())
@@ -1213,10 +1346,112 @@ impl UnifiedSegment for GrowingSegment {
     }
 }
 
+fn build_minmax_multi_intervals(
+    entries: &[(CanonicalKey, Value)],
+    max_intervals: usize,
+) -> Vec<ColZone> {
+    if entries.is_empty() {
+        return Vec::new();
+    }
+    if entries.len() == 1 || max_intervals <= 1 {
+        return vec![ColZone::with_bounds(
+            entries[0].1.clone(),
+            entries[entries.len() - 1].1.clone(),
+        )];
+    }
+
+    let mut split_points = if entries.len() <= max_intervals {
+        (1..entries.len()).collect::<Vec<_>>()
+    } else {
+        let target_splits = max_intervals - 1;
+        let mut selected = select_gap_split_points(entries, target_splits);
+        if selected.len() < target_splits {
+            for bucket in 1..max_intervals {
+                let idx = bucket * entries.len() / max_intervals;
+                if idx == 0 || idx >= entries.len() || selected.contains(&idx) {
+                    continue;
+                }
+                selected.push(idx);
+                if selected.len() >= target_splits {
+                    break;
+                }
+            }
+        }
+        selected.sort_unstable();
+        selected.dedup();
+        selected
+    };
+
+    split_points.push(entries.len());
+
+    let mut out = Vec::with_capacity(split_points.len());
+    let mut start = 0usize;
+    for end in split_points {
+        if end <= start {
+            continue;
+        }
+        out.push(ColZone::with_bounds(
+            entries[start].1.clone(),
+            entries[end - 1].1.clone(),
+        ));
+        start = end;
+    }
+
+    if out.is_empty() {
+        out.push(ColZone::with_bounds(
+            entries[0].1.clone(),
+            entries[entries.len() - 1].1.clone(),
+        ));
+    }
+
+    out
+}
+
+fn select_gap_split_points(entries: &[(CanonicalKey, Value)], max_splits: usize) -> Vec<usize> {
+    let mut gaps = Vec::new();
+    for idx in 1..entries.len() {
+        if let Some(score) = canonical_gap_score(&entries[idx - 1].0, &entries[idx].0) {
+            if score > 0.0 {
+                gaps.push((score, idx));
+            }
+        }
+    }
+    gaps.sort_by(|left, right| {
+        right
+            .0
+            .partial_cmp(&left.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.1.cmp(&right.1))
+    });
+    gaps.into_iter()
+        .take(max_splits)
+        .map(|(_, idx)| idx)
+        .collect()
+}
+
+fn canonical_gap_score(left: &CanonicalKey, right: &CanonicalKey) -> Option<f64> {
+    if left.family() != right.family() {
+        return None;
+    }
+    match (left, right) {
+        (CanonicalKey::Signed(_, l), CanonicalKey::Signed(_, r)) => {
+            Some(r.saturating_sub(*l) as f64)
+        }
+        (CanonicalKey::Unsigned(_, l), CanonicalKey::Unsigned(_, r)) => {
+            Some(r.saturating_sub(*l) as f64)
+        }
+        (CanonicalKey::Float(l), CanonicalKey::Float(r)) => {
+            Some((f64::from_bits(*r) - f64::from_bits(*l)).abs())
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::storage::schema::Value;
+    use crate::storage::unified::entity::RowData;
     use crate::storage::unified::MetadataValue;
 
     #[test]
@@ -1330,5 +1565,45 @@ mod tests {
         let refs_to = segment.get_references_to(EntityId::new(2));
         assert_eq!(refs_to.len(), 1);
         assert_eq!(refs_to[0], (EntityId::new(1), RefType::RowToNode));
+    }
+
+    #[test]
+    fn test_zone_predicate_uses_canonical_fallback_for_email_values() {
+        let mut zone = ColZone::new(Value::Email("bravo@example.com".to_string()));
+        zone.update(&Value::Email("delta@example.com".to_string()));
+
+        let probe = Value::Email("alpha@example.com".to_string());
+        assert!(ZoneColPred::Eq(&probe).can_skip(&zone));
+
+        let in_range = Value::Email("charlie@example.com".to_string());
+        assert!(!ZoneColPred::Eq(&in_range).can_skip(&zone));
+    }
+
+    #[test]
+    fn test_sealed_multi_zone_prunes_numeric_gap_outlier() {
+        let mut segment = GrowingSegment::new(1, "test");
+
+        for (row_id, age) in [(1_u64, 1_i64), (2, 2), (3, 3), (4, 1000)] {
+            let entity = UnifiedEntity::new(
+                EntityId::new(row_id),
+                EntityKind::TableRow {
+                    table: "users".into(),
+                    row_id,
+                },
+                EntityData::Row(RowData::with_names(
+                    vec![Value::Integer(age)],
+                    vec!["age".to_string()],
+                )),
+            );
+            segment.insert(entity).unwrap();
+        }
+
+        segment.seal().unwrap();
+
+        let miss = Value::Integer(500);
+        assert!(segment.can_skip_zone_preds(&[("age", ZoneColPred::Eq(&miss))]));
+
+        let hit = Value::Integer(1000);
+        assert!(!segment.can_skip_zone_preds(&[("age", ZoneColPred::Eq(&hit))]));
     }
 }

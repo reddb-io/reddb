@@ -448,10 +448,19 @@ impl UnifiedStore {
 
     /// Get an entity from a collection
     ///
-    /// Uses B-tree index for O(log n) lookup when page-based storage is active.
-    /// Falls back to linear scan through SegmentManager otherwise.
+    /// Prefers the live SegmentManager view so reads after update/delete observe
+    /// the current in-memory state even when the paged B-tree image has not been
+    /// refreshed yet. Falls back to the B-tree image for recovery-oriented reads.
     pub fn get(&self, collection: &str, id: EntityId) -> Option<UnifiedEntity> {
-        // Try B-tree index first for O(log n) lookup
+        // Prefer the live manager state to avoid stale reads after manager.update().
+        if let Some(entity) = self
+            .get_collection(collection)
+            .and_then(|manager| manager.get(id))
+        {
+            return Some(entity);
+        }
+
+        // Fall back to the paged B-tree image if the manager does not currently hold the row.
         if self.pager.is_some() {
             let btree_indices = self.btree_indices.read();
             if let Some(btree) = btree_indices.get(collection) {
@@ -464,8 +473,7 @@ impl UnifiedStore {
             }
         }
 
-        // Fall back to SegmentManager
-        self.get_collection(collection)?.get(id)
+        None
     }
 
     /// Batch-fetch multiple entities from the same collection in minimal lock acquisitions.

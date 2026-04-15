@@ -450,6 +450,27 @@ Driver docs live in `drivers/rust/README.md`, `drivers/js/README.md`, and
 `drivers/python/README.md`. The full protocol spec and roadmap are in
 [`PLAN_DRIVERS.md`](./PLAN_DRIVERS.md).
 
+For JavaScript and TypeScript, use the `reddb` package in application code:
+
+```bash
+pnpm add reddb
+```
+
+```ts
+import { connect } from 'reddb'
+
+const db = await connect('memory://')
+const result = await db.query('SELECT * FROM users')
+await db.close()
+```
+
+Use `reddb-cli` only when you want to launch the real `red` binary from npm:
+
+```bash
+npx reddb-cli@latest version
+npx reddb-cli@latest server --http-bind 127.0.0.1:8080 --path ./data.rdb
+```
+
 ---
 
 ## Quick Start
@@ -472,7 +493,7 @@ curl -X POST http://127.0.0.1:8080/query \
   -d '{"query":"SELECT * FROM hosts"}'
 ```
 
-Or via npm:
+Or via npm CLI launcher:
 
 ```bash
 npx reddb-cli@latest server --http --bind 127.0.0.1:8080
@@ -484,6 +505,7 @@ npx reddb-cli@latest server --http --bind 127.0.0.1:8080
 
 - [Documentation](https://forattini-dev.github.io/reddb)
 - [GitHub](https://github.com/forattini-dev/reddb)
+- [npm driver package](https://www.npmjs.com/package/reddb)
 - [npm package](https://www.npmjs.com/package/reddb-cli)
 - [Releases](https://github.com/forattini-dev/reddb/releases)
 

@@ -105,6 +105,9 @@
   - [Remote Backends (S3, R2, Turso, D1)](/deployment/backends.md)
 
 - **Guides**
+  - [Builds, Targets, and CI Speed](/guides/builds-and-ci-speed.md)
+  - [JavaScript and TypeScript Driver](/guides/javascript-typescript-driver.md)
+  - [Running Benchmarks](/guides/benchmarks.md)
   - [Ask Your Database (AI Tutorial)](/guides/ask-your-database.md)
   - [Multi-Model Queries](/guides/multi-model-queries.md)
   - [Local Dev with Docker](/guides/local-dev-docker.md)
