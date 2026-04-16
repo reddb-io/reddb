@@ -22,8 +22,9 @@
 //! [`crate::storage::index::HasBloom`] so the query planner and segment
 //! layer can prune uniformly.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::ops::Bound;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::storage::index::{BloomSegment, HasBloom, IndexBase, IndexKind, IndexStats};
 
@@ -86,90 +87,136 @@ impl ChunkHandle {
     }
 }
 
+/// Internal state grouped under a single lock so `register()` takes one
+/// write-lock instead of three. BTree, BRIN ranges, count, and correlation
+/// stats are always updated together — splitting them only added contention.
+struct IndexState {
+    /// BTree keyed by `min_ts`. Multiple chunks may share the same `min_ts`,
+    /// so each key maps to a `Vec`.
+    entries: BTreeMap<u64, Vec<ChunkHandle>>,
+    /// BRIN block-range summaries. Last entry is the "open" range being
+    /// filled; earlier entries are sealed with `BRIN_CHUNKS_PER_RANGE` chunks.
+    brin_ranges: Vec<BrinRange>,
+    /// Number of registered handles. Decremented on `unregister`.
+    count: usize,
+    /// Number of monotonic insertions: `handle.min_ts >= prev_max_min_ts`.
+    /// Used to compute `index_correlation` — PostgreSQL's BRIN planner cost
+    /// model relies on this to decide whether BRIN is worth using.
+    monotonic_inserts: u64,
+    /// Total `register()` calls — denominator for correlation.
+    total_inserts: u64,
+    /// Highest `min_ts` seen so far (for monotonic check on next insert).
+    last_max_min_ts: u64,
+}
+
 /// Temporal BTree index keyed by `min_ts`, with a BRIN block-range layer.
 ///
 /// Two-level structure mirrors PostgreSQL's BRIN architecture:
 ///
-/// **Level 1 — BRIN block ranges** (`brin_ranges`): each entry summarises
-/// the min/max timestamps of up to `BRIN_CHUNKS_PER_RANGE` consecutive
-/// registered chunks. A query first scans this tiny array (O(R/N) where R =
-/// chunks, N = BRIN_CHUNKS_PER_RANGE) and skips entire blocks that cannot
-/// intersect the query window. For append-only workloads with monotonically
-/// increasing timestamps this prunes 90–99% of chunks before touching the
-/// BTree.
+/// **Level 1 — BRIN block ranges**: each entry summarises the min/max
+/// timestamps of up to `BRIN_CHUNKS_PER_RANGE` consecutive registered
+/// chunks. A query first scans this tiny array (O(R/N) where R = chunks,
+/// N = BRIN_CHUNKS_PER_RANGE) and skips entire blocks that cannot intersect
+/// the query window.
 ///
-/// **Level 2 — BTree** (`entries`): keyed by `min_ts`, provides the precise
+/// **Level 2 — BTree**: keyed by `min_ts`, provides the precise
 /// O(log n + k) probe for surviving blocks.
 ///
-/// Multiple chunks may share the same `min_ts` so each BTree key maps to a
-/// `Vec`.
+/// **Locking strategy:** the BTree, BRIN ranges, count, and correlation
+/// stats live under a single `IndexState` lock so `register()` takes one
+/// write-lock per insert. Bloom has its own lock (separable write pattern),
+/// `global_max` is `AtomicU64` so unbounded range queries never block.
 pub struct TemporalIndex {
-    entries: parking_lot::RwLock<BTreeMap<u64, Vec<ChunkHandle>>>,
-    /// BRIN block-range summaries. Built incrementally as chunks are
-    /// registered. The last entry is the "open" (current) range; all earlier
-    /// entries are sealed with exactly `BRIN_CHUNKS_PER_RANGE` chunks.
-    brin_ranges: parking_lot::RwLock<Vec<BrinRange>>,
-    /// Global maximum `max_ts` across registered chunks. Used as the upper
-    /// bound for unbounded range queries without walking to `u64::MAX`.
-    global_max: parking_lot::RwLock<u64>,
+    state: parking_lot::RwLock<IndexState>,
     /// Bloom filter over registered `min_ts` values. Cheap negative check
     /// before touching the BTree.
     bloom: parking_lot::RwLock<BloomSegment>,
-    /// Running count of registered handles. Tracked explicitly so stats
-    /// don't have to walk the BTree.
-    count: parking_lot::RwLock<usize>,
+    /// Highest `max_ts` seen so far. Atomic — lock-free for unbounded range
+    /// queries ("everything after T").
+    global_max: AtomicU64,
 }
 
 impl TemporalIndex {
     /// Create an empty index sized for `expected_chunks` entries.
     pub fn new(expected_chunks: usize) -> Self {
         Self {
-            entries: parking_lot::RwLock::new(BTreeMap::new()),
-            brin_ranges: parking_lot::RwLock::new(Vec::new()),
-            global_max: parking_lot::RwLock::new(0),
+            state: parking_lot::RwLock::new(IndexState {
+                entries: BTreeMap::new(),
+                brin_ranges: Vec::new(),
+                count: 0,
+                monotonic_inserts: 0,
+                total_inserts: 0,
+                last_max_min_ts: 0,
+            }),
             bloom: parking_lot::RwLock::new(BloomSegment::with_capacity(expected_chunks.max(1024))),
-            count: parking_lot::RwLock::new(0),
+            global_max: AtomicU64::new(0),
         }
     }
 
     /// Register a chunk handle. Safe to call from multiple threads.
     ///
-    /// Updates both the fine-grained BTree and the coarse BRIN block-range
-    /// summary. The BRIN range for the current "open" block is widened to
-    /// include the new handle's [min_ts, max_ts]; once a block fills up to
-    /// `BRIN_CHUNKS_PER_RANGE` it is sealed and a new open block begins.
+    /// Single state write-lock + bloom lock + atomic CAS for `global_max`.
+    /// Updates BTree, BRIN block-range summary, count, and correlation
+    /// tracking atomically.
     pub fn register(&self, handle: ChunkHandle) {
-        self.entries.write().entry(handle.min_ts).or_default().push(handle);
-        self.bloom.write().insert(&handle.min_ts.to_le_bytes());
+        // Single state write-lock — covers BTree, BRIN ranges, count, correlation.
         {
-            let mut gmax = self.global_max.write();
-            if handle.max_ts > *gmax {
-                *gmax = handle.max_ts;
-            }
-        }
-        *self.count.write() += 1;
+            let mut s = self.state.write();
+            s.entries
+                .entry(handle.min_ts)
+                .or_default()
+                .push(handle);
+            s.count += 1;
 
-        // Update BRIN block-range summary.
-        let mut ranges = self.brin_ranges.write();
-        if let Some(last) = ranges.last_mut() {
-            // Widen the open (last) range to include the new chunk.
-            if handle.min_ts < last.min_ts { last.min_ts = handle.min_ts; }
-            if handle.max_ts > last.max_ts { last.max_ts = handle.max_ts; }
-            last.chunk_count += 1;
-            if last.chunk_count >= BRIN_CHUNKS_PER_RANGE {
-                // Seal this range; next registration opens a fresh one.
-                ranges.push(BrinRange {
-                    min_ts: u64::MAX,
-                    max_ts: 0,
-                    chunk_count: 0,
+            // Correlation tracking: monotonic if min_ts didn't go backwards.
+            s.total_inserts += 1;
+            if handle.min_ts >= s.last_max_min_ts {
+                s.monotonic_inserts += 1;
+            }
+            if handle.min_ts > s.last_max_min_ts {
+                s.last_max_min_ts = handle.min_ts;
+            }
+
+            // BRIN block-range update: widen open range, seal when full.
+            if let Some(last) = s.brin_ranges.last_mut() {
+                if handle.min_ts < last.min_ts {
+                    last.min_ts = handle.min_ts;
+                }
+                if handle.max_ts > last.max_ts {
+                    last.max_ts = handle.max_ts;
+                }
+                last.chunk_count += 1;
+                if last.chunk_count >= BRIN_CHUNKS_PER_RANGE {
+                    s.brin_ranges.push(BrinRange {
+                        min_ts: u64::MAX,
+                        max_ts: 0,
+                        chunk_count: 0,
+                    });
+                }
+            } else {
+                s.brin_ranges.push(BrinRange {
+                    min_ts: handle.min_ts,
+                    max_ts: handle.max_ts,
+                    chunk_count: 1,
                 });
             }
-        } else {
-            ranges.push(BrinRange {
-                min_ts: handle.min_ts,
-                max_ts: handle.max_ts,
-                chunk_count: 1,
-            });
+        }
+
+        // Bloom: separate lock (different read/write pattern).
+        self.bloom.write().insert(&handle.min_ts.to_le_bytes());
+
+        // Global max via atomic CAS — lock-free for unbounded range queries.
+        let mut current = self.global_max.load(Ordering::Relaxed);
+        while handle.max_ts > current {
+            match self.global_max.compare_exchange_weak(
+                current,
+                handle.max_ts,
+                Ordering::Release,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
         }
     }
 
@@ -179,18 +226,18 @@ impl TemporalIndex {
     ///
     /// BRIN ranges are NOT reconstructed on unregister (no desummarization,
     /// same as PostgreSQL). Ranges may become slightly over-wide after
-    /// removals — acceptable, as false positives only add a cheap BTree probe.
+    /// removals — acceptable, false positives only add a cheap BTree probe.
     pub fn unregister(&self, chunk_id: u64) -> usize {
         let mut removed = 0usize;
-        self.entries.write().retain(|_, handles| {
+        let mut s = self.state.write();
+        s.entries.retain(|_, handles| {
             let before = handles.len();
             handles.retain(|h| h.chunk_id != chunk_id);
             removed += before - handles.len();
             !handles.is_empty()
         });
         if removed > 0 {
-            let mut c = self.count.write();
-            *c = c.saturating_sub(removed);
+            s.count = s.count.saturating_sub(removed);
         }
         removed
     }
@@ -203,24 +250,23 @@ impl TemporalIndex {
     /// Skip any block whose `[min_ts, max_ts]` does not intersect `[start, end]`.
     /// For append-only workloads this prunes the majority of blocks in O(R/N).
     ///
-    /// **Phase 2 (BTree probe):** for each surviving block, walk the BTree
-    /// range `[0, end]` and verify `max_ts >= start`. This is O(log n + k)
-    /// over the un-pruned portion.
+    /// **Phase 2 (BTree probe):** for each surviving block, scan BTree keys
+    /// in `[range.min_ts, min(range.max_ts, end)]` and verify `max_ts >= start`.
     ///
-    /// When the BRIN layer is empty (index just created or cleared), falls
-    /// back directly to the BTree scan — identical to the previous behaviour.
+    /// **Dedup:** out-of-order inserts can produce overlapping BRIN ranges
+    /// where a BTree entry falls under two surviving windows. We dedup by
+    /// `(series_id, chunk_id)` so callers never see duplicates.
     pub fn chunks_overlapping(&self, start: u64, end: u64) -> Vec<ChunkHandle> {
         if start > end {
             return Vec::new();
         }
 
-        let ranges = self.brin_ranges.read();
-        let entries = self.entries.read();
+        let s = self.state.read();
         let mut out = Vec::new();
 
-        if ranges.is_empty() {
+        if s.brin_ranges.is_empty() {
             // No BRIN ranges yet — plain BTree scan (startup / low-volume path).
-            for (_, handles) in entries.range((Bound::Unbounded, Bound::Included(end))) {
+            for (_, handles) in s.entries.range((Bound::Unbounded, Bound::Included(end))) {
                 for h in handles {
                     if h.max_ts >= start {
                         out.push(*h);
@@ -230,13 +276,12 @@ impl TemporalIndex {
             return out;
         }
 
-        // Phase 1: collect the min_ts values of blocks that survive the BRIN filter.
-        // Each block covers BRIN_CHUNKS_PER_RANGE consecutive chunks inserted in order,
-        // so a surviving block's BTree keys fall in the block's [min_ts, max_ts] window.
-        // We collect those windows and probe the BTree only within them.
+        // Phase 1: collect surviving block windows.
         let mut surviving_windows: Vec<(u64, u64)> = Vec::new();
-        for r in ranges.iter() {
-            if r.chunk_count == 0 { continue; }
+        for r in s.brin_ranges.iter() {
+            if r.chunk_count == 0 {
+                continue;
+            }
             if r.overlaps(start, end) {
                 surviving_windows.push((r.min_ts, r.max_ts));
             }
@@ -246,15 +291,17 @@ impl TemporalIndex {
             return Vec::new();
         }
 
-        // Phase 2: BTree probe restricted to surviving block windows.
-        // For each window, scan BTree keys in [0, min(window.max_ts, end)].
+        // Phase 2: BTree probe restricted to surviving windows + dedup.
+        // Out-of-order inserts can cause overlapping BRIN ranges → same
+        // BTree entry hit by multiple probes. Dedup by (series_id, chunk_id).
+        let mut seen: HashSet<(u64, u64)> = HashSet::new();
         for (win_min, win_max) in surviving_windows {
             let probe_end = win_max.min(end);
             for (_, handles) in
-                entries.range((Bound::Included(win_min), Bound::Included(probe_end)))
+                s.entries.range((Bound::Included(win_min), Bound::Included(probe_end)))
             {
                 for h in handles {
-                    if h.max_ts >= start {
+                    if h.max_ts >= start && seen.insert((h.series_id, h.chunk_id)) {
                         out.push(*h);
                     }
                 }
@@ -276,7 +323,7 @@ impl TemporalIndex {
 
     /// Number of registered chunks.
     pub fn len(&self) -> usize {
-        *self.count.read()
+        self.state.read().count
     }
 
     /// Is the index empty?
@@ -285,23 +332,50 @@ impl TemporalIndex {
     }
 
     /// Highest `max_ts` seen so far. Cheap upper bound for unbounded range
-    /// queries ("everything after T").
+    /// queries ("everything after T"). Lock-free atomic load.
     pub fn global_max_timestamp(&self) -> u64 {
-        *self.global_max.read()
+        self.global_max.load(Ordering::Acquire)
     }
 
     /// Number of BRIN block ranges (useful for diagnostics / EXPLAIN output).
     pub fn brin_range_count(&self) -> usize {
-        self.brin_ranges.read().iter().filter(|r| r.chunk_count > 0).count()
+        self.state
+            .read()
+            .brin_ranges
+            .iter()
+            .filter(|r| r.chunk_count > 0)
+            .count()
+    }
+
+    /// Empirical correlation between insertion order and `min_ts` order,
+    /// in `[0.0, 1.0]`. PostgreSQL's planner uses this to decide whether
+    /// BRIN is worth using — values near 1.0 mean append-only monotonic
+    /// inserts (BRIN very effective), values near 0.0 mean random inserts
+    /// (BRIN degrades to a full scan and should be skipped).
+    ///
+    /// Returns `1.0` for an empty index (matches the historical hardcoded
+    /// optimistic default).
+    pub fn index_correlation(&self) -> f64 {
+        let s = self.state.read();
+        if s.total_inserts == 0 {
+            1.0
+        } else {
+            s.monotonic_inserts as f64 / s.total_inserts as f64
+        }
     }
 
     /// Reset the index. Used by tests and deserialize paths.
     pub fn clear(&self) {
-        self.entries.write().clear();
-        self.brin_ranges.write().clear();
-        *self.global_max.write() = 0;
+        let mut s = self.state.write();
+        s.entries.clear();
+        s.brin_ranges.clear();
+        s.count = 0;
+        s.monotonic_inserts = 0;
+        s.total_inserts = 0;
+        s.last_max_min_ts = 0;
+        drop(s);
         *self.bloom.write() = BloomSegment::with_capacity(1024);
-        *self.count.write() = 0;
+        self.global_max.store(0, Ordering::Release);
     }
 }
 
@@ -332,9 +406,15 @@ impl IndexBase for TemporalIndex {
     }
 
     fn stats(&self) -> IndexStats {
-        let entries = self.len();
-        let distinct_keys = self.entries.read().len();
-        let brin_ranges = self.brin_range_count();
+        let s = self.state.read();
+        let entries = s.count;
+        let distinct_keys = s.entries.len();
+        let brin_ranges = s.brin_ranges.iter().filter(|r| r.chunk_count > 0).count();
+        let correlation = if s.total_inserts == 0 {
+            1.0
+        } else {
+            s.monotonic_inserts as f64 / s.total_inserts as f64
+        };
         IndexStats {
             entries,
             distinct_keys,
@@ -343,7 +423,7 @@ impl IndexBase for TemporalIndex {
             approx_bytes: brin_ranges * 24 + distinct_keys * 48,
             kind: IndexKind::Temporal,
             has_bloom: true,
-            index_correlation: 1.0, // timeseries inserts are monotonically increasing
+            index_correlation: correlation,
         }
     }
 
@@ -484,6 +564,65 @@ mod tests {
         let idx = TemporalIndex::new(16);
         idx.register(handle(1, 1, 100, 200));
         assert!(idx.chunks_overlapping(500, 100).is_empty());
+    }
+
+    #[test]
+    fn dedup_overlapping_brin_windows() {
+        // Out-of-order inserts that produce two BRIN windows whose [min,max]
+        // overlap. Without dedup the same chunk would be returned twice.
+        let idx = TemporalIndex::new(16);
+        // Force boundary at 128 chunks: register 130 chunks where the 129th
+        // has out-of-order min_ts that overlaps the previous range.
+        for i in 0..128u64 {
+            idx.register(handle(1, i, 1000 + i, 1000 + i + 5));
+        }
+        // Range 1 is sealed at [1000, 1132]. Range 2 opens.
+        idx.register(handle(1, 200, 1050, 1300)); // out-of-order, in range 2
+        idx.register(handle(1, 201, 1100, 1400));
+
+        // Query overlaps both ranges; chunk 200 (min_ts=1050) lives in range 2,
+        // but range 1 also covers min_ts=1050. Probes for both windows would
+        // return it without dedup.
+        let hits = idx.chunks_overlapping(1100, 1200);
+        let unique: HashSet<_> = hits.iter().map(|h| h.chunk_id).collect();
+        assert_eq!(hits.len(), unique.len(), "duplicates leaked through");
+    }
+
+    #[test]
+    fn correlation_starts_optimistic_then_tracks_inserts() {
+        let idx = TemporalIndex::new(16);
+        assert_eq!(idx.index_correlation(), 1.0); // empty default
+
+        // Pure monotonic = 1.0
+        for i in 0..10u64 {
+            idx.register(handle(1, i, i * 100, i * 100 + 50));
+        }
+        assert!((idx.index_correlation() - 1.0).abs() < 1e-9);
+
+        // Backfill an out-of-order chunk → drop below 1.0.
+        idx.register(handle(1, 99, 50, 100));
+        let c = idx.index_correlation();
+        assert!(c < 1.0 && c > 0.0, "correlation = {c}");
+    }
+
+    #[test]
+    fn brin_block_seal_boundary() {
+        // Verify the chunk at exactly BRIN_CHUNKS_PER_RANGE seals and the
+        // next register opens a fresh range correctly initialized.
+        let idx = TemporalIndex::new(BRIN_CHUNKS_PER_RANGE * 2);
+        for i in 0..BRIN_CHUNKS_PER_RANGE as u64 {
+            idx.register(handle(1, i, i * 10, i * 10 + 5));
+        }
+        assert_eq!(idx.brin_range_count(), 1);
+
+        // Next register opens range 2.
+        idx.register(handle(1, 999, 99_999, 100_000));
+        assert_eq!(idx.brin_range_count(), 2);
+
+        // Range 2 must be initialized with the new chunk's bounds (not u64::MAX/0).
+        let hits = idx.chunks_overlapping(99_999, 100_000);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].chunk_id, 999);
     }
 
     #[test]
