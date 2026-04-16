@@ -1338,6 +1338,7 @@ impl UnifiedSegment for GrowingSegment {
             if raw >= self.base_entity_id {
                 let idx = (raw - self.base_entity_id) as usize;
                 if idx < self.flat_entities.len() && self.flat_entities[idx].id == id {
+                    self.metadata.remove_all(id);
                     self.deleted.insert(id);
                     return Ok(true);
                 }

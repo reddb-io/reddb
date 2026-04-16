@@ -2157,11 +2157,13 @@ impl RuntimeEntityPort for RedDBRuntime {
         if let Some((_, id)) = found {
             let db = self.db();
             let store = db.store();
-            store.context_index().remove_entity(id);
-            store
+            let deleted = store
                 .delete(collection, id)
                 .map_err(|err| crate::RedDBError::Internal(err.to_string()))?;
-            Ok(true)
+            if deleted {
+                store.context_index().remove_entity(id);
+            }
+            Ok(deleted)
         } else {
             Ok(false)
         }
@@ -2198,13 +2200,15 @@ impl RuntimeEntityPort for RedDBRuntime {
         let deleted = store
             .delete(&input.collection, input.id)
             .map_err(|err| crate::RedDBError::Internal(err.to_string()))?;
-        store.context_index().remove_entity(input.id);
-        self.cdc_emit(
-            crate::replication::cdc::ChangeOperation::Delete,
-            &input.collection,
-            input.id.raw(),
-            "entity",
-        );
+        if deleted {
+            store.context_index().remove_entity(input.id);
+            self.cdc_emit(
+                crate::replication::cdc::ChangeOperation::Delete,
+                &input.collection,
+                input.id.raw(),
+                "entity",
+            );
+        }
         Ok(DeleteEntityOutput {
             deleted,
             id: input.id,
