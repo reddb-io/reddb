@@ -1485,7 +1485,7 @@ async fn execute_prepared(
         .collect::<Result<Vec<_>, _>>()?;
 
     let expr = if parameter_count == 0 {
-        shape
+        (*shape).clone()
     } else {
         use crate::storage::query::planner::shape::bind_parameterized_query;
         bind_parameterized_query(&shape, &binds, parameter_count)

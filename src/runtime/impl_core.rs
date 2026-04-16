@@ -1263,21 +1263,28 @@ impl RedDBRuntime {
                         parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?
                     }
                 } else {
-                    // No parameters: shape == exact plan, return directly.
-                    optimized
+                    // No parameters means either there truly are no literals,
+                    // or this statement type does not participate in shape
+                    // parameterization (for example graph/queue commands).
+                    // Reusing a normalized-cache hit across a different exact
+                    // query can therefore leak stale literals into execution.
+                    if exact_query.as_deref() == Some(query) {
+                        optimized
+                    } else {
+                        parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?
+                    }
                 }
             } else {
                 // Cache miss — parse, parameterize, store.
                 let parsed =
                     parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?;
-                let (cached_expr, parameter_count) =
-                    if let Some(prepared) =
-                        crate::storage::query::planner::shape::parameterize_query_expr(&parsed)
-                    {
-                        (prepared.shape, prepared.parameter_count)
-                    } else {
-                        (parsed.clone(), 0)
-                    };
+                let (cached_expr, parameter_count) = if let Some(prepared) =
+                    crate::storage::query::planner::shape::parameterize_query_expr(&parsed)
+                {
+                    (prepared.shape, prepared.parameter_count)
+                } else {
+                    (parsed.clone(), 0)
+                };
                 {
                     let mut pc = self.inner.query_cache.write();
                     let plan = crate::storage::query::planner::QueryPlan::new(
@@ -1515,10 +1522,7 @@ impl RedDBRuntime {
     /// calls pay zero parse + cache overhead.
     ///
     /// Applies secret decryption on SELECT results, identical to `execute_query`.
-    pub(crate) fn execute_query_expr(
-        &self,
-        expr: QueryExpr,
-    ) -> RedDBResult<RuntimeQueryResult> {
+    pub(crate) fn execute_query_expr(&self, expr: QueryExpr) -> RedDBResult<RuntimeQueryResult> {
         let statement = query_expr_name(&expr);
         let mode = detect_mode(statement);
         let query_str = statement;
@@ -1660,10 +1664,20 @@ impl RedDBRuntime {
     }
 
     /// Invalidate the result cache (call after any write operation).
+    /// Full clear — use for DDL (DROP TABLE, schema changes) or when table is unknown.
     pub fn invalidate_result_cache(&self) {
         let mut cache = self.inner.result_cache.write();
         cache.0.clear();
         cache.1.clear();
+    }
+
+    /// Invalidate only result cache entries whose query string references `table`.
+    /// Cheaper than a full clear: concurrent reads on other tables keep their cached results.
+    pub(crate) fn invalidate_result_cache_for_table(&self, table: &str) {
+        let mut cache = self.inner.result_cache.write();
+        let (ref mut map, ref mut order) = *cache;
+        map.retain(|key, _| !key.contains(table));
+        order.retain(|key| !key.contains(table));
     }
 
     pub(crate) fn invalidate_plan_cache(&self) {
@@ -1696,6 +1710,6 @@ impl RedDBRuntime {
             .planner_dirty_tables
             .write()
             .insert(table.to_string());
-        self.invalidate_result_cache();
+        self.invalidate_result_cache_for_table(table);
     }
 }

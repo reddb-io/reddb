@@ -213,6 +213,92 @@ pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<
     }
 }
 
+/// Borrowed version of `runtime_table_record_from_entity` — avoids cloning the full entity.
+/// Only the field values inserted into the record are cloned, not the entity struct itself.
+#[inline(never)]
+pub(super) fn runtime_table_record_from_entity_ref(entity: &UnifiedEntity) -> Option<UnifiedRecord> {
+    match &entity.data {
+        EntityData::Row(row) => {
+            let user_field_count = row
+                .named
+                .as_ref()
+                .map(|n| n.len())
+                .unwrap_or(row.columns.len());
+            let mut record = UnifiedRecord::with_capacity(9 + user_field_count);
+
+            if let EntityKind::TableRow { row_id, .. } = &entity.kind {
+                record.set("row_id", Value::UnsignedInteger(*row_id));
+            }
+
+            record.set("red_entity_id", Value::UnsignedInteger(entity.id.raw()));
+            record.set(
+                "red_collection",
+                Value::Text(entity.kind.collection().to_string()),
+            );
+            record.set(
+                "red_kind",
+                Value::Text(entity.kind.storage_type().to_string()),
+            );
+            record.set("created_at", Value::UnsignedInteger(entity.created_at));
+            record.set("updated_at", Value::UnsignedInteger(entity.updated_at));
+            record.set(
+                "red_sequence_id",
+                Value::UnsignedInteger(entity.sequence_id),
+            );
+
+            let entity_type = runtime_row_entity_type(row);
+            let capabilities_str = runtime_row_capabilities_str(row);
+            record.set("red_entity_type", Value::Text(entity_type.to_string()));
+            record.set(
+                "red_capabilities",
+                Value::Text(capabilities_str.to_string()),
+            );
+
+            if let Some(named) = &row.named {
+                for (key, value) in named {
+                    record.set(key, value.clone());
+                }
+            } else if let Some(schema) = &row.schema {
+                for (name, value) in schema.iter().zip(row.columns.iter()) {
+                    record.set(name, value.clone());
+                }
+            } else {
+                for (index, value) in row.columns.iter().enumerate() {
+                    record.set(&format!("c{index}"), value.clone());
+                }
+            }
+
+            Some(record)
+        }
+        EntityData::TimeSeries(ts) => {
+            let mut record = UnifiedRecord::with_capacity(12 + ts.tags.len());
+            record.set("red_entity_id", Value::UnsignedInteger(entity.id.raw()));
+            record.set(
+                "red_collection",
+                Value::Text(entity.kind.collection().to_string()),
+            );
+            record.set(
+                "red_kind",
+                Value::Text(entity.kind.storage_type().to_string()),
+            );
+            record.set("created_at", Value::UnsignedInteger(entity.created_at));
+            record.set("updated_at", Value::UnsignedInteger(entity.updated_at));
+            record.set(
+                "red_sequence_id",
+                Value::UnsignedInteger(entity.sequence_id),
+            );
+            record.set("red_entity_type", Value::Text("timeseries".to_string()));
+            record.set(
+                "red_capabilities",
+                Value::Text("document,timeseries,metric,temporal".to_string()),
+            );
+            append_timeseries_record_fields(&mut record, ts);
+            Some(record)
+        }
+        _ => None,
+    }
+}
+
 /// Projected version — only materializes requested columns for better performance.
 /// Falls back to full materialization if columns is empty (SELECT *).
 #[inline(never)]

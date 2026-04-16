@@ -16,7 +16,7 @@ use crate::runtime::join_filter::{
     eval_projection_value_with_db, evaluate_runtime_filter_with_db, field_ref_name,
     projection_name, runtime_partial_cmp, sort_records_by_order_by_with_db,
 };
-use crate::runtime::runtime_table_record_from_entity;
+use crate::runtime::runtime_table_record_from_entity_ref;
 use crate::storage::query::ast::{
     BinOp, CompareOp, Expr, FieldRef, Filter, OrderByClause, Projection, Span, UnaryOp,
 };
@@ -270,7 +270,7 @@ pub(crate) fn execute_aggregate_query(
         macro_rules! get_or_make_record {
             () => {{
                 if record_cache.is_none() {
-                    record_cache = runtime_table_record_from_entity(entity.clone());
+                    record_cache = runtime_table_record_from_entity_ref(entity);
                 }
                 record_cache.as_ref()
             }};

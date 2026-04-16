@@ -733,13 +733,17 @@ impl SegmentManager {
         }
 
         // Fallback: entity is in a sealed segment (bulk-inserted, not in entity_segment map).
+        // Single write-lock per segment to avoid TOCTOU race between contains() and force_delete().
         {
             let sealed = self.sealed.read();
             for segment_arc in sealed.iter() {
-                let seg_id = segment_arc.read().id();
-                if segment_arc.read().contains(id) {
-                    let deleted = segment_arc.write().force_delete(id);
+                let mut seg = segment_arc.write();
+                let seg_id = seg.id();
+                if seg.contains(id) {
+                    let deleted = seg.force_delete(id);
+                    drop(seg);
                     if deleted {
+                        self.entity_segment.write().remove(&id);
                         self.total_entities_atomic.fetch_sub(1, Ordering::Relaxed);
                         self.emit(LifecycleEvent::EntityDeleted(id, seg_id));
                     }

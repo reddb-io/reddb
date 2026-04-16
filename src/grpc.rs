@@ -187,7 +187,7 @@ impl RedDBGrpcServer {
 
 /// Server-side prepared statement — parsed + parameterized once, executed N times.
 struct GrpcPreparedStatement {
-    shape: crate::storage::query::ast::QueryExpr,
+    shape: std::sync::Arc<crate::storage::query::ast::QueryExpr>,
     parameter_count: usize,
     created_at: std::time::Instant,
 }
@@ -195,14 +195,15 @@ struct GrpcPreparedStatement {
 /// Registry of prepared statements for one server instance.
 /// Session-independent: any connection can execute any prepared statement by ID.
 struct PreparedStatementRegistry {
-    map: std::sync::RwLock<std::collections::HashMap<u64, GrpcPreparedStatement>>,
+    // parking_lot::RwLock never poisons on panic — safe to use without unwrap().
+    map: parking_lot::RwLock<std::collections::HashMap<u64, GrpcPreparedStatement>>,
     next_id: std::sync::atomic::AtomicU64,
 }
 
 impl PreparedStatementRegistry {
     fn new() -> Arc<Self> {
         Arc::new(Self {
-            map: std::sync::RwLock::new(std::collections::HashMap::new()),
+            map: parking_lot::RwLock::new(std::collections::HashMap::new()),
             next_id: std::sync::atomic::AtomicU64::new(1),
         })
     }
@@ -214,12 +215,13 @@ impl PreparedStatementRegistry {
     ) -> u64 {
         use std::sync::atomic::Ordering;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let mut map = self.map.write().unwrap();
+        let mut map = self.map.write();
         self.evict_old_locked(&mut map);
         map.insert(
             id,
             GrpcPreparedStatement {
-                shape,
+                // Store as Arc to avoid cloning the full AST on every execute.
+                shape: std::sync::Arc::new(shape),
                 parameter_count,
                 created_at: std::time::Instant::now(),
             },
@@ -230,9 +232,15 @@ impl PreparedStatementRegistry {
     fn get_shape_and_count(
         &self,
         id: u64,
-    ) -> Option<(crate::storage::query::ast::QueryExpr, usize)> {
-        let map = self.map.read().unwrap();
-        map.get(&id).map(|s| (s.shape.clone(), s.parameter_count))
+    ) -> Option<(std::sync::Arc<crate::storage::query::ast::QueryExpr>, usize)> {
+        // Probabilistic eviction (1-in-256) to handle long-lived servers that
+        // prepare once and execute many times without ever calling prepare() again.
+        if self.next_id.load(std::sync::atomic::Ordering::Relaxed) % 256 == 0 {
+            let mut map = self.map.write();
+            self.evict_old_locked(&mut map);
+        }
+        let map = self.map.read();
+        map.get(&id).map(|s| (std::sync::Arc::clone(&s.shape), s.parameter_count))
     }
 
     fn evict_old_locked(
