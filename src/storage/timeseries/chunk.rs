@@ -42,6 +42,11 @@ pub struct TimeSeriesChunk {
     /// Query planners can skip a chunk when a wanted timestamp is definitely
     /// absent, even when it falls inside the chunk's min/max range.
     bloom: BloomSegment,
+    /// Zone map over the chunk's timestamp column — BRIN MINMAX equivalent.
+    /// Tracks min/max timestamp plus a HyperLogLog distinct estimate.
+    /// Enables O(1) skip decisions: if chunk's max_ts < query_start or
+    /// min_ts > query_end the chunk is definitively outside the window.
+    timestamp_zone: ZoneMap,
     /// Zone map over the chunk's value column (not timestamps — those are
     /// already ordered). Enables skip-scan for value predicates
     /// (e.g. "show chunks where cpu > 95%") and surfaces a HyperLogLog
@@ -68,6 +73,7 @@ impl TimeSeriesChunk {
             compressed_timestamps: None,
             compressed_values: None,
             bloom: BloomSegment::with_capacity(1024),
+            timestamp_zone: ZoneMap::with_capacity(1024),
             value_zone: ZoneMap::with_capacity(1024),
         }
     }
@@ -80,6 +86,7 @@ impl TimeSeriesChunk {
     ) -> Self {
         let mut chunk = Self::new(metric, tags);
         chunk.max_points = max_points;
+        chunk.timestamp_zone = ZoneMap::with_capacity(max_points);
         chunk
     }
 
@@ -89,6 +96,7 @@ impl TimeSeriesChunk {
             return false;
         }
         self.bloom.insert(&timestamp_ns.to_le_bytes());
+        self.timestamp_zone.observe(&timestamp_ns.to_be_bytes()); // big-endian for correct byte-wise ordering
         self.value_zone.observe(&value.to_le_bytes());
         self.timestamps.push(timestamp_ns);
         self.values.push(value);
@@ -101,6 +109,24 @@ impl TimeSeriesChunk {
     /// absent. A `true` response still requires a real lookup.
     pub fn may_contain_timestamp(&self, timestamp_ns: u64) -> bool {
         !self.bloom.definitely_absent(&timestamp_ns.to_le_bytes())
+    }
+
+    /// BRIN MINMAX equivalent: "can this chunk possibly overlap `[start_ns, end_ns]`?"
+    ///
+    /// Returns `true` (skip) only when the chunk's min/max timestamp range
+    /// definitively does not intersect the query window — O(1) with no
+    /// decompression. Timestamps are stored big-endian so byte-wise min/max
+    /// comparisons are numerically correct.
+    pub fn timestamp_range_skip(&self, start_ns: u64, end_ns: u64) -> bool {
+        let start_b = start_ns.to_be_bytes();
+        let end_b = end_ns.to_be_bytes();
+        matches!(
+            self.timestamp_zone.block_skip(&ZonePredicate::Range {
+                start: Some(&start_b),
+                end: Some(&end_b),
+            }),
+            ZoneDecision::Skip
+        )
     }
 
     /// Value-range planner helper. Answers "can this chunk possibly contain
@@ -175,12 +201,27 @@ impl TimeSeriesChunk {
         self.sealed = true;
     }
 
-    /// Query points within a time range [start_ns, end_ns] inclusive
+    /// Query points within a time range [start_ns, end_ns] inclusive.
+    ///
+    /// BRIN-style pre-filter: if the chunk's timestamp zone map proves no
+    /// overlap with [start_ns, end_ns], return immediately without touching
+    /// the point data.
+    ///
+    /// After zone-map pass: timestamps are sorted (guaranteed by seal), so
+    /// `partition_point` binary-searches to the first relevant point — O(log n)
+    /// instead of O(n). The trailing `take_while` stops at the first point
+    /// beyond end_ns without scanning the rest of the chunk.
     pub fn query_range(&self, start_ns: u64, end_ns: u64) -> Vec<TimeSeriesPoint> {
-        self.timestamps
+        // Zone-map fast-reject (BRIN MINMAX equivalent).
+        if self.timestamp_range_skip(start_ns, end_ns) {
+            return Vec::new();
+        }
+        // Binary search to first point >= start_ns.
+        let start_idx = self.timestamps.partition_point(|&ts| ts < start_ns);
+        self.timestamps[start_idx..]
             .iter()
-            .zip(self.values.iter())
-            .filter(|(&ts, _)| ts >= start_ns && ts <= end_ns)
+            .zip(self.values[start_idx..].iter())
+            .take_while(|(&ts, _)| ts <= end_ns)
             .map(|(&ts, &val)| TimeSeriesPoint {
                 timestamp_ns: ts,
                 value: val,
