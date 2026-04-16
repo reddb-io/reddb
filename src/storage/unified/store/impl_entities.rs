@@ -20,6 +20,20 @@ impl UnifiedStore {
         idx.retain(|_, ids| !ids.is_empty());
     }
 
+    fn remove_from_graph_label_index_batch(&self, collection: &str, entity_ids: &[EntityId]) {
+        if entity_ids.is_empty() {
+            return;
+        }
+        let id_set: std::collections::HashSet<EntityId> = entity_ids.iter().copied().collect();
+        let mut idx = self.graph_label_index.write();
+        for ((col, _), ids) in idx.iter_mut() {
+            if col == collection {
+                ids.retain(|id| !id_set.contains(id));
+            }
+        }
+        idx.retain(|_, ids| !ids.is_empty());
+    }
+
     /// Look up entity IDs for a graph node label across all collections.
     pub fn lookup_graph_nodes_by_label(&self, label: &str) -> Vec<EntityId> {
         let idx = self.graph_label_index.read();
@@ -265,14 +279,17 @@ impl UnifiedStore {
         let manager = self.get_or_create_collection(collection);
         let t_get_coll = t_start.elapsed();
 
-        // Assign IDs and per-table row_ids before serialization.
+        // Assign IDs and per-table row_ids before serialization. Bulk insert
+        // must follow the same global ID semantics as insert()/insert_auto().
         // `insert()`/`insert_auto()` already do this, but bulk_insert
         // needs the same guarantee or SQL/system fields like `row_id`
         // remain zero in the segment + serialized B-tree image.
         let t0 = std::time::Instant::now();
         for entity in &mut entities {
             if entity.id.raw() == 0 {
-                entity.id = manager.next_entity_id();
+                entity.id = self.next_entity_id();
+            } else {
+                self.register_entity_id(entity.id);
             }
             if let EntityKind::TableRow { ref mut row_id, .. } = entity.kind {
                 if *row_id == 0 {
@@ -320,6 +337,9 @@ impl UnifiedStore {
         let t0 = std::time::Instant::now();
         let ids = manager.bulk_insert(entities)?;
         let t_manager = t0.elapsed();
+        for id in &ids {
+            self.register_entity_id(*id);
+        }
 
         // Update graph label index for bulk-inserted GraphNode entities
         for label_entry in &graph_labels {
@@ -328,17 +348,31 @@ impl UnifiedStore {
             }
         }
 
-        // REDDB_SKIP_BTREE_ON_BULK=1 skips the persistent B-tree index
-        // during bulk ingest. Safe when the caller has already persisted
-        // rows via `PageBulkWriter` (the gRPC binary bulk path does this)
-        // AND live queries use the in-memory segment manager rather than
-        // the B-tree. The B-tree would need to be rebuilt on next restart
-        // to serve persisted reads, but the benchmark harness tears down
-        // its containers between runs so there is nothing to rebuild.
+        // REDDB_BULK_SKIP_PERSIST_UNSAFE=1 skips the persistent B-tree index
+        // during bulk ingest.
+        //
+        // UNSAFE: for benchmarks / ephemeral containers only.
+        // When set, bulk-inserted rows are NOT durable — data will be lost
+        // on process restart. The B-tree would need to be rebuilt from WAL
+        // on the next start, but if the process exits before WAL replay the
+        // rows are gone permanently.
+        //
+        // Only safe when the benchmark harness tears down its containers
+        // between runs so there is nothing to rebuild.
         let skip_btree = matches!(
-            std::env::var("REDDB_SKIP_BTREE_ON_BULK").ok().as_deref(),
+            std::env::var("REDDB_BULK_SKIP_PERSIST_UNSAFE").ok().as_deref(),
             Some("1") | Some("true") | Some("on")
         );
+        if skip_btree {
+            // Log once so operators are never silently surprised by data loss.
+            static WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+            WARNED.get_or_init(|| {
+                eprintln!(
+                    "[WARN] REDDB_BULK_SKIP_PERSIST_UNSAFE is set — \
+                     bulk inserts are NOT durable, data will be lost on restart"
+                );
+            });
+        }
 
         // Batch B-tree write from pre-serialized data.
         // Uses sorted bulk insert: walks to a leaf once, appends many entries,
@@ -545,6 +579,47 @@ impl UnifiedStore {
         self.remove_from_graph_label_index(collection, id);
 
         Ok(manager.delete(id)?)
+    }
+
+    pub fn delete_batch(
+        &self,
+        collection: &str,
+        ids: &[EntityId],
+    ) -> Result<Vec<EntityId>, StoreError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        {
+            let mut cache = self.entity_cache.write();
+            for id in ids {
+                cache.remove(&id.raw());
+            }
+        }
+
+        let manager = self
+            .get_collection(collection)
+            .ok_or_else(|| StoreError::CollectionNotFound(collection.to_string()))?;
+
+        let deleted_ids = manager.delete_batch(ids)?;
+        if deleted_ids.is_empty() {
+            return Ok(deleted_ids);
+        }
+
+        if self.pager.is_some() {
+            let btree_indices = self.btree_indices.read();
+            if let Some(btree) = btree_indices.get(collection) {
+                for id in &deleted_ids {
+                    let key = id.raw().to_be_bytes();
+                    let _ = btree.delete(&key);
+                }
+            }
+        }
+
+        self.unindex_cross_refs_batch(&deleted_ids)?;
+        self.remove_from_graph_label_index_batch(collection, &deleted_ids);
+
+        Ok(deleted_ids)
     }
 
     /// Set metadata for an entity
@@ -769,6 +844,31 @@ impl UnifiedStore {
             refs.retain(|(source, _, _)| *source != id);
         }
         reverse.remove(&id);
+
+        Ok(())
+    }
+
+    fn unindex_cross_refs_batch(&self, ids: &[EntityId]) -> Result<(), StoreError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+
+        let id_set: std::collections::HashSet<EntityId> = ids.iter().copied().collect();
+
+        {
+            let mut forward = self.cross_refs.write();
+            for id in &id_set {
+                forward.remove(id);
+            }
+        }
+
+        {
+            let mut reverse = self.reverse_refs.write();
+            for refs in reverse.values_mut() {
+                refs.retain(|(source, _, _)| !id_set.contains(source));
+            }
+            reverse.retain(|target, refs| !id_set.contains(target) && !refs.is_empty());
+        }
 
         Ok(())
     }

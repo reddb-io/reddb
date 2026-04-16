@@ -2192,6 +2192,12 @@ impl RuntimeEntityPort for RedDBRuntime {
 
     fn delete_entity(&self, input: DeleteEntityInput) -> RedDBResult<DeleteEntityOutput> {
         let store = self.db().store();
+        // Store delete first (source of truth). Crash between here and index removal
+        // leaves the entity invisible to most queries but recoverable; the reverse
+        // (remove index first, then crash) leaves the entity permanently orphaned.
+        let deleted = store
+            .delete(&input.collection, input.id)
+            .map_err(|err| crate::RedDBError::Internal(err.to_string()))?;
         store.context_index().remove_entity(input.id);
         self.cdc_emit(
             crate::replication::cdc::ChangeOperation::Delete,
@@ -2199,9 +2205,6 @@ impl RuntimeEntityPort for RedDBRuntime {
             input.id.raw(),
             "entity",
         );
-        let deleted = store
-            .delete(&input.collection, input.id)
-            .map_err(|err| crate::RedDBError::Internal(err.to_string()))?;
         Ok(DeleteEntityOutput {
             deleted,
             id: input.id,

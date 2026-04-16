@@ -1820,7 +1820,9 @@ mod agg_spill_codec {
         r.read_exact(&mut buf)?;
         String::from_utf8(buf).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
-    /// Value tag: 0=Null 1=Bool 2=Int 3=UInt 4=Float 5=Text; others → Null
+    // Value codec: hot-path fast encoding for the 6 most common scalar types;
+    // all other types delegate to Value::to_bytes() (length-prefixed, tag=255).
+    // This preserves full type fidelity for MIN/MAX/FIRST/LAST on any column type.
     fn w_val<W: Write>(w: &mut W, v: &Value) -> std::io::Result<usize> {
         match v {
             Value::Null => {
@@ -1850,9 +1852,14 @@ mod agg_spill_codec {
                 w.write_all(&[5u8])?;
                 Ok(1 + w_str(w, s)?)
             }
-            _ => {
-                w.write_all(&[0u8])?;
-                Ok(1)
+            other => {
+                // Fallback: delegate to Value::to_bytes() for full type coverage.
+                // Tag 255 + u32 length prefix + payload bytes.
+                let payload = other.to_bytes();
+                w.write_all(&[255u8])?;
+                w.write_all(&(payload.len() as u32).to_le_bytes())?;
+                w.write_all(&payload)?;
+                Ok(1 + 4 + payload.len())
             }
         }
     }
@@ -1881,6 +1888,16 @@ mod agg_spill_codec {
                 Ok(Value::Float(f64::from_le_bytes(b)))
             }
             5 => Ok(Value::Text(r_str(r)?)),
+            255 => {
+                let mut nb = [0u8; 4];
+                r.read_exact(&mut nb)?;
+                let n = u32::from_le_bytes(nb) as usize;
+                let mut buf = vec![0u8; n];
+                r.read_exact(&mut buf)?;
+                Value::from_bytes(&buf)
+                    .map(|(v, _)| v)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
+            }
             _ => Ok(Value::Null),
         }
     }

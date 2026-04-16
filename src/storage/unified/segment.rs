@@ -154,6 +154,37 @@ fn current_unix_secs() -> u64 {
 
 const SEALED_MULTI_ZONE_MAX_INTERVALS: usize = 4;
 
+#[derive(Debug, Clone)]
+struct UpdateIndexSnapshot {
+    pk_column_name: Option<String>,
+    pk_value: Option<Value>,
+    pk_index_key: Option<(String, String)>,
+    cross_refs: Vec<CrossRef>,
+}
+
+impl UpdateIndexSnapshot {
+    fn from_entity(entity: &UnifiedEntity) -> Self {
+        let (pk_column_name, pk_value) = match &entity.data {
+            EntityData::Row(row) => (
+                row.schema
+                    .as_deref()
+                    .and_then(|schema| schema.first().cloned()),
+                row.columns.first().cloned(),
+            ),
+            _ => (None, None),
+        };
+        let pk_index_key = pk_value
+            .as_ref()
+            .map(|value| (entity.kind.collection().to_string(), format!("{:?}", value)));
+        Self {
+            pk_column_name,
+            pk_value,
+            pk_index_key,
+            cross_refs: entity.cross_refs().to_vec(),
+        }
+    }
+}
+
 /// A unified segment that stores all entity types
 pub trait UnifiedSegment: Send + Sync {
     /// Get segment ID
@@ -508,6 +539,154 @@ impl GrowingSegment {
         self.sequence.fetch_add(1, Ordering::SeqCst)
     }
 
+    fn has_live_entity(&self, id: EntityId) -> bool {
+        if self.deleted.contains(&id) {
+            return false;
+        }
+        if self.use_flat {
+            let raw = id.raw();
+            if raw < self.base_entity_id {
+                return false;
+            }
+            let idx = (raw - self.base_entity_id) as usize;
+            self.flat_entities
+                .get(idx)
+                .is_some_and(|entity| entity.id == id)
+        } else {
+            self.entities.contains_key(&id)
+        }
+    }
+
+    fn update_existing_entity_in_place(
+        &mut self,
+        entity: &UnifiedEntity,
+    ) -> Result<UpdateIndexSnapshot, SegmentError> {
+        if self.use_flat {
+            let raw = entity.id.raw();
+            if raw < self.base_entity_id {
+                return Err(SegmentError::NotFound(entity.id));
+            }
+            let idx = (raw - self.base_entity_id) as usize;
+            let Some(slot) = self.flat_entities.get_mut(idx) else {
+                return Err(SegmentError::NotFound(entity.id));
+            };
+            if slot.id != entity.id {
+                return Err(SegmentError::NotFound(entity.id));
+            }
+            let snapshot = UpdateIndexSnapshot::from_entity(slot);
+            slot.clone_from(entity);
+            Ok(snapshot)
+        } else {
+            let Some(slot) = self.entities.get_mut(&entity.id) else {
+                return Err(SegmentError::NotFound(entity.id));
+            };
+            let snapshot = UpdateIndexSnapshot::from_entity(slot);
+            slot.clone_from(entity);
+            Ok(snapshot)
+        }
+    }
+
+    fn apply_hot_update_with_metadata(
+        &mut self,
+        entity: &UnifiedEntity,
+        modified_columns: &[String],
+        metadata: Option<&Metadata>,
+    ) -> Result<(), SegmentError> {
+        let old = self.update_existing_entity_in_place(entity)?;
+        self.reindex_for_update(&old, entity, Some(modified_columns));
+        self.update_col_zones_from_entity(entity);
+        if let Some(metadata) = metadata {
+            self.metadata.set_all(entity.id, metadata);
+        }
+        Ok(())
+    }
+
+    fn apply_update_with_metadata(
+        &mut self,
+        entity: &UnifiedEntity,
+        metadata: Option<&Metadata>,
+    ) -> Result<(), SegmentError> {
+        let old = self.update_existing_entity_in_place(entity)?;
+        self.reindex_for_update(&old, entity, None);
+        self.update_col_zones_from_entity(entity);
+        if let Some(metadata) = metadata {
+            self.metadata.set_all(entity.id, metadata);
+        }
+        Ok(())
+    }
+
+    pub fn update_hot_batch_with_metadata<'a, I>(&mut self, items: I) -> Result<(), SegmentError>
+    where
+        I: IntoIterator<Item = (&'a UnifiedEntity, &'a [String], Option<&'a Metadata>)>,
+    {
+        if !self.state.is_writable() {
+            return Err(SegmentError::NotWritable);
+        }
+
+        let items: Vec<(&UnifiedEntity, &[String], Option<&Metadata>)> =
+            items.into_iter().collect();
+        if items.is_empty() {
+            return Ok(());
+        }
+
+        for (entity, _, _) in &items {
+            if !self.has_live_entity(entity.id) {
+                return Err(SegmentError::NotFound(entity.id));
+            }
+        }
+
+        for (entity, modified_columns, metadata) in items {
+            self.apply_hot_update_with_metadata(entity, modified_columns, metadata)?;
+        }
+
+        self.last_write_at = current_unix_secs();
+        Ok(())
+    }
+
+    pub fn delete_batch(&mut self, ids: &[EntityId]) -> Result<Vec<EntityId>, SegmentError> {
+        if !self.state.is_writable() {
+            return Err(SegmentError::NotWritable);
+        }
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut deleted_ids = Vec::with_capacity(ids.len());
+
+        if self.use_flat {
+            for &id in ids {
+                let raw = id.raw();
+                if raw < self.base_entity_id {
+                    continue;
+                }
+                let idx = (raw - self.base_entity_id) as usize;
+                if idx < self.flat_entities.len()
+                    && self.flat_entities[idx].id == id
+                    && !self.deleted.contains(&id)
+                {
+                    self.metadata.remove_all(id);
+                    self.deleted.insert(id);
+                    deleted_ids.push(id);
+                }
+            }
+        } else {
+            for &id in ids {
+                if let Some(entity) = self.entities.remove(&id) {
+                    self.unindex_entity(&entity);
+                    self.metadata.remove_all(id);
+                    self.deleted.insert(id);
+                    deleted_ids.push(id);
+                }
+            }
+        }
+
+        if !deleted_ids.is_empty() {
+            self.last_write_at = current_unix_secs();
+        }
+
+        Ok(deleted_ids)
+    }
+
     /// Update memory estimate
     fn add_memory(&self, bytes: usize) {
         self.memory_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
@@ -761,7 +940,7 @@ impl GrowingSegment {
     /// - `cross_ref`: only rebuilt when the refs actually differ.
     fn reindex_for_update(
         &mut self,
-        old: &UnifiedEntity,
+        old: &UpdateIndexSnapshot,
         new: &UnifiedEntity,
         modified_columns: Option<&[String]>,
     ) {
@@ -771,20 +950,24 @@ impl GrowingSegment {
         // bloom: entity ID never changes; already present from insert.
 
         // pk_index: only update when pk column is touched
-        let pk_changed = match (&old.data, &new.data) {
-            (EntityData::Row(old_row), EntityData::Row(new_row)) => {
+        let pk_changed = match &new.data {
+            EntityData::Row(new_row) => {
                 if let Some(cols) = modified_columns {
                     // Caller told us exactly what changed — check if first schema column modified
                     // pk is the first column; check by name against the schema or by position 0
-                    let schema = old_row.schema.as_deref().or(new_row.schema.as_deref());
-                    let pk_col_name = schema.and_then(|s| s.first()).map(String::as_str);
+                    let pk_col_name = old.pk_column_name.as_deref().or_else(|| {
+                        new_row
+                            .schema
+                            .as_deref()
+                            .and_then(|schema| schema.first().map(|name| name.as_str()))
+                    });
                     match pk_col_name {
                         Some(pk_name) => cols.iter().any(|c| c.eq_ignore_ascii_case(pk_name)),
                         // No schema — fall back to value comparison
-                        None => old_row.columns.first() != new_row.columns.first(),
+                        None => old.pk_value.as_ref() != new_row.columns.first(),
                     }
                 } else {
-                    old_row.columns.first() != new_row.columns.first()
+                    old.pk_value.as_ref() != new_row.columns.first()
                 }
             }
             // Non-row types don't use pk_index
@@ -793,12 +976,8 @@ impl GrowingSegment {
 
         if pk_changed {
             // Remove old pk entry
-            if let EntityData::Row(row) = &old.data {
-                if let Some(first_col) = row.columns.first() {
-                    let pk_str = format!("{:?}", first_col);
-                    self.pk_index
-                        .remove(&(old.kind.collection().to_string(), pk_str));
-                }
+            if let Some((collection, pk_str)) = &old.pk_index_key {
+                self.pk_index.remove(&(collection.clone(), pk_str.clone()));
             }
             // Insert new pk entry
             if let EntityData::Row(row) = &new.data {
@@ -812,19 +991,18 @@ impl GrowingSegment {
         }
 
         // cross_ref: only rebuild when refs actually changed
-        let old_refs = old.cross_refs().to_vec();
-        let new_refs = new.cross_refs().to_vec();
-        if old_refs != new_refs {
+        let new_refs = new.cross_refs();
+        if old.cross_refs.as_slice() != new_refs {
             // Remove stale forward refs
-            self.cross_ref_forward.remove(&old.id);
+            self.cross_ref_forward.remove(&new.id);
             // Prune stale entries from reverse index
-            for cross_ref in &old_refs {
+            for cross_ref in &old.cross_refs {
                 if let Some(rev) = self.cross_ref_reverse.get_mut(&cross_ref.target) {
-                    rev.retain(|(src, _)| *src != old.id);
+                    rev.retain(|(src, _)| *src != new.id);
                 }
             }
             // Add new refs
-            for cross_ref in &new_refs {
+            for cross_ref in new_refs {
                 self.cross_ref_forward
                     .entry(cross_ref.source)
                     .or_default()
@@ -912,6 +1090,7 @@ impl GrowingSegment {
 
         // Collect (col, value) pairs for zone updates BEFORE the mutable borrow
         // on `kind_set` is released (Rust can't split field borrows through `self`).
+        // Use RowData::iter_fields() so both named and columnar rows feed pruning.
         let mut zone_updates: Vec<(String, Value)> = Vec::new();
 
         if self.use_flat {
@@ -923,11 +1102,9 @@ impl GrowingSegment {
                 ids.push(id);
                 // Collect zone data from this entity
                 if let EntityData::Row(row) = &entity.data {
-                    if let Some(named) = &row.named {
-                        for (col, val) in named {
-                            if !matches!(val, Value::Null) {
-                                zone_updates.push((col.clone(), val.clone()));
-                            }
+                    for (col, val) in row.iter_fields() {
+                        if !matches!(val, Value::Null) {
+                            zone_updates.push((col.to_string(), val.clone()));
                         }
                     }
                 }
@@ -943,11 +1120,9 @@ impl GrowingSegment {
                 kind_set.insert(id);
                 ids.push(id);
                 if let EntityData::Row(row) = &entity.data {
-                    if let Some(named) = &row.named {
-                        for (col, val) in named {
-                            if !matches!(val, Value::Null) {
-                                zone_updates.push((col.clone(), val.clone()));
-                            }
+                    for (col, val) in row.iter_fields() {
+                        if !matches!(val, Value::Null) {
+                            zone_updates.push((col.to_string(), val.clone()));
                         }
                     }
                 }
@@ -974,6 +1149,43 @@ impl GrowingSegment {
         }
 
         Ok(ids)
+    }
+
+    /// Delete from this segment regardless of its seal state.
+    /// Used to mutate sealed segments when DELETE touches bulk-inserted entities.
+    pub(crate) fn force_delete(&mut self, id: EntityId) -> bool {
+        if self.use_flat {
+            let raw = id.raw();
+            if raw >= self.base_entity_id {
+                let idx = (raw - self.base_entity_id) as usize;
+                if idx < self.flat_entities.len() && self.flat_entities[idx].id == id {
+                    self.deleted.insert(id);
+                    self.metadata.remove_all(id);
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        if let Some(entity) = self.entities.remove(&id) {
+            self.unindex_entity(&entity);
+            self.metadata.remove_all(id);
+            self.deleted.insert(id);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Update an entity in this segment regardless of its seal state.
+    /// Used to mutate sealed segments when UPDATE touches bulk-inserted entities.
+    pub(crate) fn force_update_with_metadata(
+        &mut self,
+        entity: &UnifiedEntity,
+        modified_columns: &[String],
+        metadata: Option<&Metadata>,
+    ) -> Result<(), SegmentError> {
+        self.apply_hot_update_with_metadata(entity, modified_columns, metadata)
     }
 }
 
@@ -1023,19 +1235,7 @@ impl UnifiedSegment for GrowingSegment {
     }
 
     fn contains(&self, id: EntityId) -> bool {
-        if self.deleted.contains(&id) {
-            return false;
-        }
-        if self.use_flat {
-            let raw = id.raw();
-            if raw < self.base_entity_id {
-                return false;
-            }
-            let idx = (raw - self.base_entity_id) as usize;
-            idx < self.flat_entities.len()
-        } else {
-            self.entities.contains_key(&id)
-        }
+        self.has_live_entity(id)
     }
 
     fn get(&self, id: EntityId) -> Option<&UnifiedEntity> {
@@ -1107,44 +1307,7 @@ impl UnifiedSegment for GrowingSegment {
             return Err(SegmentError::NotWritable);
         }
 
-        // Remove/replace old entity
-        let old = if self.use_flat {
-            let raw = entity.id.raw();
-            if raw >= self.base_entity_id {
-                let idx = (raw - self.base_entity_id) as usize;
-                if idx < self.flat_entities.len() && self.flat_entities[idx].id == entity.id {
-                    Some(std::mem::replace(
-                        &mut self.flat_entities[idx],
-                        entity.clone(),
-                    ))
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            self.entities.remove(&entity.id)
-        };
-        if old.is_none() {
-            return Err(SegmentError::NotFound(entity.id));
-        }
-
-        // HOT-reindex: compare old vs new to skip unchanged index work
-        if let Some(ref old_entity) = old {
-            self.reindex_for_update(old_entity, &entity, None);
-        }
-
-        // Zone maps are append-only summaries. Updates must widen them with the
-        // new row image so segment pruning never skips a segment that now holds
-        // an out-of-range value. We intentionally do not try to shrink here.
-        self.update_col_zones_from_entity(&entity);
-
-        // Insert new version (skip for flat storage — already replaced in-place)
-        if !self.use_flat {
-            self.entities.insert(entity.id, entity);
-        }
-
+        self.apply_update_with_metadata(&entity, None)?;
         self.last_write_at = current_unix_secs();
 
         Ok(())
@@ -1159,41 +1322,8 @@ impl UnifiedSegment for GrowingSegment {
             return Err(SegmentError::NotWritable);
         }
 
-        let old = if self.use_flat {
-            let raw = entity.id.raw();
-            if raw >= self.base_entity_id {
-                let idx = (raw - self.base_entity_id) as usize;
-                if idx < self.flat_entities.len() && self.flat_entities[idx].id == entity.id {
-                    Some(std::mem::replace(
-                        &mut self.flat_entities[idx],
-                        entity.clone(),
-                    ))
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            self.entities.remove(&entity.id)
-        };
-        if old.is_none() {
-            return Err(SegmentError::NotFound(entity.id));
-        }
-
-        if let Some(ref old_entity) = old {
-            self.reindex_for_update(old_entity, &entity, Some(modified_columns));
-        }
-
-        // Same safety rule as `update()`: widen zone maps with the updated row.
-        self.update_col_zones_from_entity(&entity);
-
-        if !self.use_flat {
-            self.entities.insert(entity.id, entity);
-        }
-
+        self.apply_hot_update_with_metadata(&entity, modified_columns, None)?;
         self.last_write_at = current_unix_secs();
-
         Ok(())
     }
 
@@ -1236,7 +1366,7 @@ impl UnifiedSegment for GrowingSegment {
     }
 
     fn get_metadata(&self, id: EntityId) -> Option<Metadata> {
-        if self.deleted.contains(&id) || !self.entities.contains_key(&id) {
+        if !self.has_live_entity(id) {
             return None;
         }
         Some(self.metadata.get_all(id))
@@ -1247,7 +1377,7 @@ impl UnifiedSegment for GrowingSegment {
             return Err(SegmentError::NotWritable);
         }
 
-        if !self.entities.contains_key(&id) {
+        if !self.has_live_entity(id) {
             return Err(SegmentError::NotFound(id));
         }
 

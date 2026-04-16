@@ -485,6 +485,47 @@ impl SegmentManager {
         Err(SegmentError::NotFound(entity.id))
     }
 
+    /// Update an entity and, optionally, replace its metadata while holding
+    /// the segment write lock only once.
+    pub fn update_with_metadata(
+        &self,
+        entity: UnifiedEntity,
+        metadata: Option<&Metadata>,
+    ) -> Result<(), SegmentError> {
+        let entity_id = entity.id;
+        let mut entity = Some(entity);
+
+        // Try growing segment directly (covers bulk-inserted entities without entity_segment map)
+        if let Some(growing_arc) = self.growing.read().as_ref() {
+            let mut growing = growing_arc.write();
+            if growing.contains(entity_id) && growing.state().is_writable() {
+                growing.update(entity.take().expect("entity already moved"))?;
+                if let Some(metadata) = metadata {
+                    growing.set_metadata(entity_id, metadata.clone())?;
+                }
+                return Ok(());
+            }
+        }
+
+        // Try entity_segment mapping for individually inserted entities
+        let segment_id = self.entity_segment.read().get(&entity_id).copied();
+        if let Some(seg_id) = segment_id {
+            if let Some(growing_arc) = self.growing.read().as_ref() {
+                let mut growing = growing_arc.write();
+                if growing.id() == seg_id && growing.state().is_writable() {
+                    growing.update(entity.take().expect("entity already moved"))?;
+                    if let Some(metadata) = metadata {
+                        growing.set_metadata(entity_id, metadata.clone())?;
+                    }
+                    return Ok(());
+                }
+            }
+            return Err(SegmentError::NotWritable);
+        }
+
+        Err(SegmentError::NotFound(entity_id))
+    }
+
     /// HOT-update: like update but skips index work for unchanged columns.
     /// `modified_columns` is the list of column names actually changed by the
     /// UPDATE statement — lets us skip pk_index and cross_ref when safe.
@@ -512,6 +553,95 @@ impl SegmentManager {
         }
 
         Err(SegmentError::NotFound(entity.id))
+    }
+
+    /// HOT-update an entity and, optionally, replace its metadata while
+    /// holding the segment write lock only once.
+    pub fn update_hot_with_metadata(
+        &self,
+        entity: UnifiedEntity,
+        modified_columns: &[String],
+        metadata: Option<&Metadata>,
+    ) -> Result<(), SegmentError> {
+        let entity_id = entity.id;
+        let mut entity = Some(entity);
+
+        if let Some(growing_arc) = self.growing.read().as_ref() {
+            let mut growing = growing_arc.write();
+            if growing.contains(entity_id) && growing.state().is_writable() {
+                growing.update_hot(
+                    entity.take().expect("entity already moved"),
+                    modified_columns,
+                )?;
+                if let Some(metadata) = metadata {
+                    growing.set_metadata(entity_id, metadata.clone())?;
+                }
+                return Ok(());
+            }
+        }
+
+        let segment_id = self.entity_segment.read().get(&entity_id).copied();
+        if let Some(seg_id) = segment_id {
+            if let Some(growing_arc) = self.growing.read().as_ref() {
+                let mut growing = growing_arc.write();
+                if growing.id() == seg_id && growing.state().is_writable() {
+                    growing.update_hot(
+                        entity.take().expect("entity already moved"),
+                        modified_columns,
+                    )?;
+                    if let Some(metadata) = metadata {
+                        growing.set_metadata(entity_id, metadata.clone())?;
+                    }
+                    return Ok(());
+                }
+            }
+            return Err(SegmentError::NotWritable);
+        }
+
+        // Fallback: entity is in a sealed segment (bulk-inserted, not in entity_segment map).
+        // Apply mutation directly — sealed segments are in-memory and still mutable via write lock.
+        {
+            let sealed = self.sealed.read();
+            for segment_arc in sealed.iter() {
+                if segment_arc.read().contains(entity_id) {
+                    let entity_val = entity.take().expect("entity already moved");
+                    return segment_arc
+                        .write()
+                        .force_update_with_metadata(&entity_val, modified_columns, metadata);
+                }
+            }
+        }
+
+        Err(SegmentError::NotFound(entity_id))
+    }
+
+    /// Batch HOT-update multiple entities while holding the growing-segment
+    /// write lock only once when possible.
+    pub fn update_hot_batch_with_metadata<'a, I>(&self, items: I) -> Result<(), SegmentError>
+    where
+        I: IntoIterator<Item = (&'a UnifiedEntity, &'a [String], Option<&'a Metadata>)>,
+    {
+        let items: Vec<(&UnifiedEntity, &[String], Option<&Metadata>)> =
+            items.into_iter().collect();
+        if items.is_empty() {
+            return Ok(());
+        }
+
+        if let Some(growing_arc) = self.growing.read().as_ref() {
+            let mut growing = growing_arc.write();
+            if growing.state().is_writable() {
+                match growing.update_hot_batch_with_metadata(items.iter().copied()) {
+                    Ok(()) => return Ok(()),
+                    Err(SegmentError::NotFound(_)) => {}
+                    Err(other) => return Err(other),
+                }
+            }
+        }
+
+        for (entity, modified_columns, metadata) in items {
+            self.update_hot_with_metadata(entity.clone(), modified_columns, metadata)?;
+        }
+        Ok(())
     }
 
     /// Delete an entity
@@ -552,7 +682,70 @@ impl SegmentManager {
             return Err(SegmentError::NotWritable);
         }
 
+        // Fallback: entity is in a sealed segment (bulk-inserted, not in entity_segment map).
+        {
+            let sealed = self.sealed.read();
+            for segment_arc in sealed.iter() {
+                let seg_id = segment_arc.read().id();
+                if segment_arc.read().contains(id) {
+                    let deleted = segment_arc.write().force_delete(id);
+                    if deleted {
+                        self.total_entities_atomic.fetch_sub(1, Ordering::Relaxed);
+                        self.emit(LifecycleEvent::EntityDeleted(id, seg_id));
+                    }
+                    return Ok(deleted);
+                }
+            }
+        }
+
         Ok(false)
+    }
+
+    pub fn delete_batch(&self, ids: &[EntityId]) -> Result<Vec<EntityId>, SegmentError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut deleted_ids = Vec::with_capacity(ids.len());
+
+        if let Some(growing_arc) = self.growing.read().as_ref() {
+            let mut growing = growing_arc.write();
+            if growing.state().is_writable() {
+                let seg_id = growing.id();
+                let deleted = growing.delete_batch(ids)?;
+                if !deleted.is_empty() {
+                    {
+                        let mut entity_segment = self.entity_segment.write();
+                        for id in &deleted {
+                            entity_segment.remove(id);
+                        }
+                    }
+                    self.total_entities_atomic
+                        .fetch_sub(deleted.len() as u64, Ordering::Relaxed);
+                    for id in &deleted {
+                        self.emit(LifecycleEvent::EntityDeleted(*id, seg_id));
+                    }
+                    deleted_ids.extend(deleted);
+                }
+            }
+        }
+
+        if deleted_ids.len() == ids.len() {
+            return Ok(deleted_ids);
+        }
+
+        let deleted_set: std::collections::HashSet<EntityId> =
+            deleted_ids.iter().copied().collect();
+        for &id in ids {
+            if deleted_set.contains(&id) {
+                continue;
+            }
+            if self.delete(id)? {
+                deleted_ids.push(id);
+            }
+        }
+
+        Ok(deleted_ids)
     }
 
     /// Get metadata for an entity
