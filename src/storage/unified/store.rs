@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -35,6 +35,7 @@ use super::entity::{
 use super::manager::{ManagerConfig, ManagerStats, SegmentManager};
 use super::metadata::{Metadata, MetadataFilter, MetadataValue};
 use super::segment::SegmentError;
+use crate::api::{DurabilityMode, GroupCommitOptions};
 use crate::physical::{ManifestEvent, ManifestEventKind};
 use crate::storage::engine::pager::PagerError;
 use crate::storage::engine::{BTree, BTreeError, Pager, PagerConfig, PhysicalFileHeader};
@@ -47,6 +48,8 @@ const STORE_VERSION_V2: u32 = 2;
 const STORE_VERSION_V3: u32 = 3;
 const STORE_VERSION_V4: u32 = 4;
 const STORE_VERSION_V5: u32 = 5;
+const STORE_VERSION_V6: u32 = 6;
+const STORE_VERSION_V7: u32 = 7; // entity records include metadata (serialize_entity_record format)
 const METADATA_MAGIC: &[u8; 4] = b"RDM2";
 const NATIVE_COLLECTION_ROOTS_MAGIC: &[u8; 4] = b"RDRT";
 const NATIVE_MANIFEST_MAGIC: &[u8; 4] = b"RDMF";
@@ -242,6 +245,10 @@ pub struct UnifiedStoreConfig {
     pub max_cross_refs: usize,
     /// Enable write-ahead logging
     pub enable_wal: bool,
+    /// Durability profile for paged writes.
+    pub durability_mode: DurabilityMode,
+    /// Group-commit batching knobs when using grouped durability.
+    pub group_commit: GroupCommitOptions,
     /// Data directory path
     pub data_dir: Option<std::path::PathBuf>,
 }
@@ -253,6 +260,8 @@ impl Default for UnifiedStoreConfig {
             auto_index_refs: true,
             max_cross_refs: 1000,
             enable_wal: false,
+            durability_mode: DurabilityMode::Strict,
+            group_commit: GroupCommitOptions::default(),
             data_dir: None,
         }
     }
@@ -268,6 +277,16 @@ impl UnifiedStoreConfig {
     /// Enable WAL
     pub fn with_wal(mut self) -> Self {
         self.enable_wal = true;
+        self
+    }
+
+    pub fn with_durability_mode(mut self, mode: DurabilityMode) -> Self {
+        self.durability_mode = mode;
+        self
+    }
+
+    pub fn with_group_commit(mut self, options: GroupCommitOptions) -> Self {
+        self.group_commit = options;
         self
     }
 
@@ -429,9 +448,14 @@ pub struct UnifiedStore {
     /// Graph node label index: (collection, label) → Vec<EntityId>.
     /// O(1) lookup for MATCH (n:Label) graph patterns — avoids full collection scan.
     graph_label_index: RwLock<HashMap<(String, String), Vec<EntityId>>>,
+    /// Whether the paged registry on page 1 must be rewritten before the next flush.
+    paged_registry_dirty: AtomicBool,
+    /// Logical store WAL / grouped durability coordinator for paged mode.
+    commit: Option<Arc<StoreCommitCoordinator>>,
 }
 
 mod builder;
+mod commit;
 mod impl_entities;
 mod impl_file;
 mod impl_native_a;
@@ -441,4 +465,5 @@ mod impl_pages;
 mod native_helpers;
 
 pub use self::builder::EntityBuilder;
+use self::commit::{StoreCommitCoordinator, StoreWalAction};
 use self::native_helpers::*;

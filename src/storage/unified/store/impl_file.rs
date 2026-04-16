@@ -69,6 +69,8 @@ impl UnifiedStore {
             && version != STORE_VERSION_V3
             && version != STORE_VERSION_V4
             && version != STORE_VERSION_V5
+            && version != STORE_VERSION_V6
+            && version != STORE_VERSION_V7
         {
             return Err(format!("Unsupported version: {}", version).into());
         }
@@ -113,10 +115,39 @@ impl UnifiedStore {
             let entity_count = read_varu32(&buf, &mut pos)
                 .map_err(|e| format!("Failed to read entity count: {:?}", e))?;
 
-            // Read each entity
+            // Read each entity — V7+ includes metadata alongside entity data.
             for _ in 0..entity_count {
-                let entity = Self::read_entity_binary(&buf, &mut pos, version)?;
-                store.insert_auto(&name, entity)?;
+                if version >= STORE_VERSION_V7 {
+                    // Length-prefixed entity+metadata record (serialize_entity_record format)
+                    if pos + 4 > buf.len() {
+                        return Err("Truncated entity record length".into());
+                    }
+                    let record_len = u32::from_le_bytes([
+                        buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3],
+                    ]) as usize;
+                    pos += 4;
+                    if pos + record_len > buf.len() {
+                        return Err("Truncated entity record payload".into());
+                    }
+                    let record_bytes = &buf[pos..pos + record_len];
+                    pos += record_len;
+
+                    let (entity, metadata) =
+                        Self::deserialize_entity_record(record_bytes, version)
+                            .map_err(|e| format!("Entity record deserialization error: {e}"))?;
+
+                    store.insert_auto(&name, entity.clone())?;
+
+                    if let Some(metadata) = metadata {
+                        if let Some(manager) = store.get_collection(&name) {
+                            let _ = manager.set_metadata(entity.id, metadata);
+                        }
+                    }
+                } else {
+                    // V1–V6: entity only, no metadata
+                    let entity = Self::read_entity_binary(&buf, &mut pos, version)?;
+                    store.insert_auto(&name, entity)?;
+                }
             }
         }
 
@@ -156,8 +187,8 @@ impl UnifiedStore {
             }
         }
 
-        if store.format_version() < STORE_VERSION_V5 {
-            store.set_format_version(STORE_VERSION_V5);
+        if store.format_version() < STORE_VERSION_V7 {
+            store.set_format_version(STORE_VERSION_V7);
         }
 
         Ok(store)
@@ -177,13 +208,15 @@ impl UnifiedStore {
         // Magic bytes "RDST"
         buf.extend_from_slice(STORE_MAGIC);
 
-        // Version (5 — includes CRC32 footer, queue tails, and timeseries tags)
-        buf.extend_from_slice(&STORE_VERSION_V5.to_le_bytes());
+        // Version (6 — includes CRC32 footer, queue tails, timeseries tags,
+        // and vector content persistence)
+        buf.extend_from_slice(&STORE_VERSION_V6.to_le_bytes());
 
         // Get all collections
         let collections = self.collections.read();
         write_varu32(&mut buf, collections.len() as u32);
 
+        let fv = STORE_VERSION_V7;
         for (name, manager) in collections.iter() {
             // Collection name
             write_varu32(&mut buf, name.len() as u32);
@@ -193,8 +226,13 @@ impl UnifiedStore {
             let entities = manager.query_all(|_| true);
             write_varu32(&mut buf, entities.len() as u32);
 
+            // V7+: serialize entity+metadata as a length-prefixed record.
+            // Each record: [u32 len][serialize_entity_record bytes]
             for entity in entities {
-                Self::write_entity_binary(&mut buf, &entity, STORE_VERSION_V5);
+                let metadata = manager.get_metadata(entity.id);
+                let record = Self::serialize_entity_record(&entity, metadata.as_ref(), fv);
+                buf.extend_from_slice(&(record.len() as u32).to_le_bytes());
+                buf.extend_from_slice(&record);
             }
         }
 
@@ -213,7 +251,7 @@ impl UnifiedStore {
             }
         }
 
-        self.set_format_version(STORE_VERSION_V5);
+        self.set_format_version(STORE_VERSION_V7);
 
         // Append CRC32 footer over entire content
         let checksum = crate::storage::engine::crc32::crc32(&buf);
@@ -377,7 +415,18 @@ impl UnifiedStore {
                     *pos += 4;
                     dense.push(f32::from_le_bytes(bytes));
                 }
-                EntityData::Vector(VectorData::new(dense))
+                let mut vector = VectorData::new(dense);
+                if format_version >= STORE_VERSION_V6 {
+                    let has_content = buf[*pos] != 0;
+                    *pos += 1;
+                    if has_content {
+                        let content_len = Self::read_varu32_safe(buf, pos)?;
+                        vector.content =
+                            Some(String::from_utf8(buf[*pos..*pos + content_len].to_vec())?);
+                        *pos += content_len;
+                    }
+                }
+                EntityData::Vector(vector)
             }
             4 => {
                 // TimeSeries
@@ -660,6 +709,13 @@ impl UnifiedStore {
                 write_varu32(buf, vec.dense.len() as u32);
                 for f in &vec.dense {
                     buf.extend_from_slice(&f.to_le_bytes());
+                }
+                if format_version >= STORE_VERSION_V6 {
+                    buf.push(u8::from(vec.content.is_some()));
+                    if let Some(content) = &vec.content {
+                        write_varu32(buf, content.len() as u32);
+                        buf.extend_from_slice(content.as_bytes());
+                    }
                 }
             }
             EntityData::TimeSeries(ts) => {
