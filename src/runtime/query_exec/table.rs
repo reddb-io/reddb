@@ -74,7 +74,8 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 let outer_alias = query.alias.as_deref();
                 if let Some(ref outer_filter) = effective_filter {
                     records.retain(|record| {
-                        super::super::join_filter::evaluate_runtime_filter(
+                        super::super::join_filter::evaluate_runtime_filter_with_db(
+                            Some(db),
                             record,
                             outer_filter,
                             outer_alias,
@@ -88,7 +89,8 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 // path. Expression-shaped sort keys run through
                 // expr_eval, bare columns through resolve_field.
                 if !query.order_by.is_empty() {
-                    super::super::join_filter::sort_records_by_order_by(
+                    super::super::join_filter::sort_records_by_order_by_with_db(
+                        Some(db),
                         &mut records,
                         &query.order_by,
                         outer_alias,
@@ -294,9 +296,69 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                                         table_alias,
                                     ),
                                 });
+                            let explicit_cols =
+                                extract_select_column_names(&effective_projections);
+                            // ── COVERED QUERY: cross-index bitmap path ───────────
+                            // If every projected column is the eq_col whose value we
+                            // already have from the filter predicate, skip entity fetch.
+                            let is_covered = !explicit_cols.is_empty()
+                                && effective_group_by.is_empty()
+                                && effective_having.is_none()
+                                && query.order_by.is_empty()
+                                && explicit_cols.iter().all(|c| c == &eq_col);
+                            if is_covered {
+                                use crate::storage::query::ast::Filter;
+                                let eq_value = match filter {
+                                    Filter::And(_, _) => {
+                                        // Find the eq_col value in the original filter
+                                        let mut v = None;
+                                        let f = filter;
+                                        loop {
+                                            match f {
+                                                Filter::Compare {
+                                                    field: crate::storage::query::ast::FieldRef::TableColumn { column, .. },
+                                                    op: crate::storage::query::ast::CompareOp::Eq,
+                                                    value,
+                                                } if column == &eq_col => { v = Some(value.clone()); break; }
+                                                Filter::And(l, r) => {
+                                                    // Walk left first, then right
+                                                    let mut stk = vec![l.as_ref(), r.as_ref()];
+                                                    while let Some(node) = stk.pop() {
+                                                        match node {
+                                                            Filter::Compare {
+                                                                field: crate::storage::query::ast::FieldRef::TableColumn { column, .. },
+                                                                op: crate::storage::query::ast::CompareOp::Eq,
+                                                                value,
+                                                            } if column == &eq_col => { v = Some(value.clone()); break; }
+                                                            Filter::And(a, b) => { stk.push(a); stk.push(b); }
+                                                            _ => {}
+                                                        }
+                                                    }
+                                                    break;
+                                                }
+                                                _ => break,
+                                            }
+                                        }
+                                        v
+                                    }
+                                    _ => None,
+                                };
+                                if let Some(val) = eq_value {
+                                    let records = intersection_ids
+                                        .iter()
+                                        .take(limit)
+                                        .map(|_| {
+                                            let mut rec = UnifiedRecord::with_capacity(1);
+                                            rec.set(&eq_col, val.clone());
+                                            rec
+                                        })
+                                        .collect();
+                                    return Ok(records);
+                                }
+                            }
+
                             let store = db.store();
                             let entities = store.get_batch(&query.table, &intersection_ids);
-                            let explicit_cols = extract_select_column_names(&effective_projections);
                             let lean = explicit_cols.is_empty();
                             let mut records = Vec::with_capacity(intersection_ids.len().min(limit));
                             for entity_opt in entities.into_iter().flatten() {
@@ -339,7 +401,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     // - Fetch only the surviving rows; re-apply full compiled filter for residual predicates
     // Only fires when ≥2 indexed equality columns exist in the filter.
     if let (Some(idx_store), Some(ref filter)) = (index_store, &effective_filter) {
-        let mut eq_candidates: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut eq_candidates: Vec<(String, Vec<u8>, crate::storage::schema::Value)> = Vec::new();
         extract_all_eq_candidates(filter, &mut eq_candidates);
 
         // Collect one TidBitmap per indexed equality column.
@@ -347,7 +409,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         // (~32x faster than HashSet retain for 10K+ IDs, and far more cache-friendly).
         // Entity IDs are cast to u32; safe for any reasonable in-memory DB size (< 4 B).
         let mut bitmaps: Vec<crate::storage::index::tid_bitmap::TidBitmap> = Vec::new();
-        for (col, val_bytes) in &eq_candidates {
+        for (col, val_bytes, _val) in &eq_candidates {
             if let Some(idx) = idx_store.find_index_for_column(&query.table, col) {
                 if let Ok(ids) = idx_store.hash_lookup(&query.table, &idx.name, val_bytes) {
                     let mut bmp = crate::storage::index::tid_bitmap::TidBitmap::with_cap_bytes(0);
@@ -397,6 +459,36 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
 
             let limit = query.limit.map(|l| l as usize).unwrap_or(usize::MAX);
             let explicit_cols = extract_select_column_names(&effective_projections);
+
+            // ── COVERED QUERY: TID bitmap path ───────────────────────────────
+            // When every projected column is an equality column whose value
+            // is available from the filter predicate, skip entity fetch entirely.
+            // e.g. `SELECT city FROM t WHERE city='NYC' AND status='active'`
+            // returns {city:'NYC'} for every matching entity ID without a heap read.
+            let is_covered = !explicit_cols.is_empty()
+                && effective_group_by.is_empty()
+                && effective_having.is_none()
+                && query.order_by.is_empty()
+                && explicit_cols.iter().all(|proj_col| {
+                    eq_candidates.iter().any(|(eq_col, _, _)| eq_col == proj_col)
+                });
+            if is_covered {
+                // Build a single template record from eq_candidates values.
+                // All result rows are identical (same equality predicates).
+                let mut template = UnifiedRecord::with_capacity(explicit_cols.len());
+                for proj_col in &explicit_cols {
+                    if let Some((_, _, val)) =
+                        eq_candidates.iter().find(|(c, _, _)| c == proj_col)
+                    {
+                        template.set(proj_col, val.clone());
+                    }
+                }
+                // Count surviving IDs after optional range narrowing — we still need
+                // to know how many rows match, but we don't touch the entity heap.
+                let count = intersection.len().min(limit);
+                return Ok(vec![template; count]);
+            }
+
             let lean = explicit_cols.is_empty();
 
             // Optional: narrow via sorted range index filtered by the eq-intersection set.
@@ -695,6 +787,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 table_alias,
             ),
         };
+        let requires_filter_recheck = compiled.has_fallback();
 
         // Pre-filter at entity level, only materialize records that pass.
         // Uses zone-map-aware iteration: sealed segments whose column zones
@@ -765,7 +858,22 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                     runtime_table_record_from_entity(entity.clone())
                 };
                 if let Some(record) = record {
-                    records.push(record);
+                    if requires_filter_recheck {
+                        let Some(filter_record) = runtime_table_record_from_entity(entity.clone()) else {
+                            continue;
+                        };
+                        if super::super::join_filter::evaluate_runtime_filter_with_db(
+                            Some(db),
+                            &filter_record,
+                            filter,
+                            Some(table_name),
+                            Some(table_alias),
+                        ) {
+                            records.push(record);
+                        }
+                    } else {
+                        records.push(record);
+                    }
                 }
             }
         } else {
@@ -799,11 +907,28 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                         }
                     } else if lean_select_star {
                         super::super::record_search::runtime_table_record_lean(entity.clone())
-                    } else {
-                        runtime_table_record_from_entity(entity.clone())
-                    };
+                        } else {
+                            runtime_table_record_from_entity(entity.clone())
+                        };
                     if let Some(record) = record {
-                        records.push(record);
+                        if requires_filter_recheck {
+                            let Some(filter_record) =
+                                runtime_table_record_from_entity(entity.clone())
+                            else {
+                                return true;
+                            };
+                            if super::super::join_filter::evaluate_runtime_filter_with_db(
+                                Some(db),
+                                &filter_record,
+                                filter,
+                                Some(table_name),
+                                Some(table_alias),
+                            ) {
+                                records.push(record);
+                            }
+                        } else {
+                            records.push(record);
+                        }
                     }
                 }
                 true // continue
@@ -813,7 +938,8 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         // Apply ORDER BY — Schwartzian transform extracts keys once (O(n))
         // instead of per-comparison (O(n log n) HashMap lookups).
         if !query.order_by.is_empty() {
-            super::super::join_filter::sort_records_by_order_by(
+            super::super::join_filter::sort_records_by_order_by_with_db(
+                Some(db),
                 &mut records,
                 &query.order_by,
                 Some(table_name),
@@ -852,7 +978,8 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         let table_alias = query.alias.as_deref().unwrap_or(table_name);
 
         if !query.order_by.is_empty() {
-            super::super::join_filter::sort_records_by_order_by(
+            super::super::join_filter::sort_records_by_order_by_with_db(
+                Some(db),
                 &mut records,
                 &query.order_by,
                 Some(table_name),
@@ -948,6 +1075,7 @@ pub(crate) fn execute_runtime_canonical_table_node(
                         table_alias,
                     ),
                 };
+                let requires_filter_recheck = compiled.has_fallback();
                 // Schema-index precomputation: same optimisation as the indexed scan path.
                 // Resolve projected column names → schema positions once before the loop.
                 let schema_col_indices: Option<Vec<(usize, usize)>> = if !select_cols.is_empty() {
@@ -1002,7 +1130,24 @@ pub(crate) fn execute_runtime_canonical_table_node(
                             runtime_table_record_from_entity(entity.clone())
                         };
                         if let Some(record) = record {
-                            records.push(record);
+                            if requires_filter_recheck {
+                                let Some(filter_record) =
+                                    runtime_table_record_from_entity(entity.clone())
+                                else {
+                                    return true;
+                                };
+                                if evaluate_runtime_filter_with_db(
+                                    Some(db),
+                                    &filter_record,
+                                    filter,
+                                    Some(table_name),
+                                    Some(table_alias),
+                                ) {
+                                    records.push(record);
+                                }
+                            } else {
+                                records.push(record);
+                            }
                         }
                     }
                     true
@@ -1028,7 +1173,8 @@ pub(crate) fn execute_runtime_canonical_table_node(
             let mut records = execute_runtime_canonical_table_child(db, node, context)?;
             if let Some(filter) = effective_filter.as_ref() {
                 records.retain(|record| {
-                    evaluate_runtime_filter(
+                    evaluate_runtime_filter_with_db(
+                        Some(db),
                         record,
                         filter,
                         Some(context.table_name),
@@ -1043,7 +1189,8 @@ pub(crate) fn execute_runtime_canonical_table_node(
             if let Some(filter) = effective_filter.as_ref() {
                 records.retain(|record| {
                     runtime_record_has_document_capability(record)
-                        && evaluate_runtime_document_filter(
+                        && evaluate_runtime_filter_with_db(
+                            Some(db),
                             record,
                             filter,
                             Some(context.table_name),
@@ -1056,7 +1203,8 @@ pub(crate) fn execute_runtime_canonical_table_node(
         "sort" | "entity_sort" | "document_sort" => {
             let mut records = execute_runtime_canonical_table_child(db, node, context)?;
             if !context.query.order_by.is_empty() {
-                super::super::join_filter::sort_records_by_order_by(
+                super::super::join_filter::sort_records_by_order_by_with_db(
+                    Some(db),
                     &mut records,
                     &context.query.order_by,
                     Some(context.table_name),
@@ -1101,7 +1249,8 @@ pub(crate) fn execute_runtime_canonical_table_node(
             Ok(records
                 .iter()
                 .map(|record| {
-                    project_runtime_record(
+                    project_runtime_record_with_db(
+                        Some(db),
                         record,
                         &effective_table_projections(context.query),
                         Some(context.table_name),

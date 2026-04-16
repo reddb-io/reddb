@@ -76,6 +76,8 @@ service RedDb {
   rpc ExplainQuery(QueryRequest) returns (PayloadReply);
   rpc Query(QueryRequest) returns (QueryReply);
   rpc BatchQuery(BatchQueryRequest) returns (BatchQueryReply);
+  rpc PrepareQuery(PrepareQueryRequest) returns (PrepareQueryReply);
+  rpc ExecutePrepared(ExecutePreparedRequest) returns (QueryReply);
   rpc Search(JsonPayloadRequest) returns (PayloadReply);
   rpc TextSearch(JsonPayloadRequest) returns (PayloadReply);
   rpc MultimodalSearch(JsonPayloadRequest) returns (PayloadReply);
@@ -267,6 +269,21 @@ message BatchQueryRequest {
 
 message BatchQueryReply {
   repeated QueryReply results = 1;
+}
+
+message PrepareQueryRequest {
+  string query = 1;
+}
+
+message PrepareQueryReply {
+  uint64 prepared_id = 1;
+  uint32 parameter_count = 2;
+}
+
+message ExecutePreparedRequest {
+  uint64 prepared_id = 1;
+  // Each element is a JSON-encoded value literal: "42", "\"alice\"", "null"
+  repeated string bind_json = 2;
 }
 
 message EntityReply {

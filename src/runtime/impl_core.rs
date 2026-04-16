@@ -3,8 +3,6 @@ use crate::application::entity::metadata_to_json;
 use crate::replication::cdc::ChangeRecord;
 use crate::replication::logical::{ApplyMode, LogicalChangeApplier};
 
-const AUTO_REFRESH_STATS_WRITE_ROW_LIMIT: usize = 4_096;
-
 fn runtime_pool_lock(runtime: &RedDBRuntime) -> std::sync::MutexGuard<'_, PoolState> {
     runtime
         .inner
@@ -57,6 +55,7 @@ impl RedDBRuntime {
                     HashMap::new(),
                     std::collections::VecDeque::new(),
                 )),
+                planner_dirty_tables: parking_lot::RwLock::new(HashSet::new()),
                 ec_registry: Arc::new(crate::ec::config::EcRegistry::new()),
                 ec_worker: crate::ec::worker::EcWorker::new(),
                 auth_store: parking_lot::RwLock::new(None),
@@ -605,6 +604,64 @@ impl RedDBRuntime {
     }
 
     /// Emit a CDC change event and replicate to WAL buffer.
+    /// Create a `MutationEngine` bound to this runtime.
+    ///
+    /// The engine is cheap to construct (no allocation) and should be
+    /// dropped after `apply` returns. Use this from application-layer
+    /// `create_row` / `create_rows_batch` instead of calling
+    /// `bulk_insert` + `index_entity_insert` + `cdc_emit` separately.
+    pub(crate) fn mutation_engine(&self) -> crate::runtime::mutation::MutationEngine<'_> {
+        crate::runtime::mutation::MutationEngine::new(self)
+    }
+
+    /// Emit a CDC record without invalidating the result cache.
+    ///
+    /// Used by `MutationEngine::append_batch` which calls
+    /// `invalidate_result_cache` once for the whole batch before this
+    /// loop, avoiding N write-lock acquisitions.
+    pub(crate) fn cdc_emit_no_cache_invalidate(
+        &self,
+        operation: crate::replication::cdc::ChangeOperation,
+        collection: &str,
+        entity_id: u64,
+        entity_kind: &str,
+    ) {
+        let lsn = self
+            .inner
+            .cdc
+            .emit(operation, collection, entity_id, entity_kind);
+
+        // Append to logical WAL replication buffer (if primary mode)
+        if let Some(ref primary) = self.inner.db.replication {
+            let store = self.inner.db.store();
+            let entity = if operation == crate::replication::cdc::ChangeOperation::Delete {
+                None
+            } else {
+                store.get(collection, EntityId::new(entity_id))
+            };
+            let record = ChangeRecord {
+                lsn,
+                timestamp: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+                operation,
+                collection: collection.to_string(),
+                entity_id,
+                entity_kind: entity_kind.to_string(),
+                entity_bytes: entity
+                    .as_ref()
+                    .map(|e| UnifiedStore::serialize_entity(e, store.format_version())),
+                metadata: self.latest_metadata_for(collection, entity_id),
+            };
+            let encoded = record.encode();
+            primary.wal_buffer.append(record.lsn, encoded.clone());
+            if let Some(spool) = &primary.logical_wal_spool {
+                let _ = spool.append(record.lsn, &encoded);
+            }
+        }
+    }
+
     pub fn cdc_emit(
         &self,
         operation: crate::replication::cdc::ChangeOperation,
@@ -646,6 +703,82 @@ impl RedDBRuntime {
             if let Some(spool) = &primary.logical_wal_spool {
                 let _ = spool.append(record.lsn, &encoded);
             }
+        }
+    }
+
+    pub(crate) fn cdc_emit_prebuilt(
+        &self,
+        operation: crate::replication::cdc::ChangeOperation,
+        collection: &str,
+        entity: &UnifiedEntity,
+        entity_kind: &str,
+        metadata: Option<&crate::storage::Metadata>,
+        invalidate_cache: bool,
+    ) {
+        if invalidate_cache {
+            self.invalidate_result_cache();
+        }
+
+        let lsn = self
+            .inner
+            .cdc
+            .emit(operation, collection, entity.id.raw(), entity_kind);
+
+        if let Some(ref primary) = self.inner.db.replication {
+            let store = self.inner.db.store();
+            let record = ChangeRecord {
+                lsn,
+                timestamp: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+                operation,
+                collection: collection.to_string(),
+                entity_id: entity.id.raw(),
+                entity_kind: entity_kind.to_string(),
+                entity_bytes: Some(UnifiedStore::serialize_entity(
+                    entity,
+                    store.format_version(),
+                )),
+                metadata: metadata
+                    .map(metadata_to_json)
+                    .or_else(|| self.latest_metadata_for(collection, entity.id.raw())),
+            };
+            let encoded = record.encode();
+            primary.wal_buffer.append(record.lsn, encoded.clone());
+            if let Some(spool) = &primary.logical_wal_spool {
+                let _ = spool.append(record.lsn, &encoded);
+            }
+        }
+    }
+
+    pub(crate) fn cdc_emit_prebuilt_batch<'a, I>(
+        &self,
+        operation: crate::replication::cdc::ChangeOperation,
+        entity_kind: &str,
+        items: I,
+        invalidate_cache: bool,
+    ) where
+        I: IntoIterator<
+            Item = (
+                &'a str,
+                &'a UnifiedEntity,
+                Option<&'a crate::storage::Metadata>,
+            ),
+        >,
+    {
+        let items: Vec<(&str, &UnifiedEntity, Option<&crate::storage::Metadata>)> =
+            items.into_iter().collect();
+        if items.is_empty() {
+            return;
+        }
+
+        if invalidate_cache {
+            self.invalidate_result_cache();
+        }
+
+        for (collection, entity, metadata) in items {
+            self.cdc_emit_prebuilt(operation, collection, entity, entity_kind, metadata, false);
         }
     }
 
@@ -1092,89 +1225,59 @@ impl RedDBRuntime {
             // Bypass plan cache for write operations — no benefit, pure overhead
             parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?
         } else {
-            let shape_binds =
-                crate::storage::query::planner::cache_key::extract_literal_bindings(query)
-                    .unwrap_or_default();
+            // ── Hot path: read lock only (no writer serialization on cache hits) ──
+            //
+            // peek() is a non-mutating probe: no LRU promotion, no touch().
+            // This lets concurrent readers proceed without blocking each other.
+            // On hit we bind literals if needed and return immediately.
+            // Only on miss do we drop to a write lock to parse + insert.
+            let hit = {
+                let plan_cache = self.inner.query_cache.read();
+                plan_cache.peek(&cache_key).map(|cached| {
+                    let parameter_count = cached.parameter_count;
+                    let optimized = cached.plan.optimized.clone();
+                    let exact_query = cached.exact_query.clone();
+                    (parameter_count, optimized, exact_query)
+                })
+            };
 
-            let mut plan_cache = self.inner.query_cache.write();
-            if let Some(cached) = plan_cache.get(&cache_key) {
-                if cached.parameter_count > 0 {
+            if let Some((parameter_count, optimized, exact_query)) = hit {
+                if parameter_count > 0 {
+                    // Shape hit: substitute the current literal values into the shape.
+                    let shape_binds =
+                        crate::storage::query::planner::cache_key::extract_literal_bindings(query)
+                            .unwrap_or_default();
                     if let Some(bound) =
                         crate::storage::query::planner::shape::bind_parameterized_query(
-                            &cached.plan.optimized,
+                            &optimized,
                             &shape_binds,
-                            cached.parameter_count,
+                            parameter_count,
                         )
                     {
                         bound
-                    } else if cached.matches_exact_query(query) {
-                        cached.plan.optimized.clone()
+                    } else if exact_query.as_deref() == Some(query) {
+                        // Bind failed but exact query matches — use as-is.
+                        optimized
                     } else {
-                        drop(plan_cache);
-                        let parsed =
-                            parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?;
-                        let (cached_expr, parameter_count) = if let Some(prepared) =
-                            crate::storage::query::planner::shape::parameterize_query_expr(&parsed)
-                        {
-                            (prepared.shape, prepared.parameter_count)
-                        } else {
-                            (parsed.clone(), 0)
-                        };
-                        let mut pc = self.inner.query_cache.write();
-                        let plan = crate::storage::query::planner::QueryPlan::new(
-                            parsed.clone(),
-                            cached_expr,
-                            Default::default(),
-                        );
-                        pc.insert(
-                            cache_key.clone(),
-                            crate::storage::query::planner::CachedPlan::new(plan)
-                                .with_shape_key(cache_key.clone())
-                                .with_exact_query(query.to_string())
-                                .with_parameter_count(parameter_count),
-                        );
-                        parsed
+                        // Bind failed and literals differ: re-parse fresh.
+                        parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?
                     }
-                } else if cached.matches_exact_query(query) {
-                    cached.plan.optimized.clone()
                 } else {
-                    drop(plan_cache);
-                    let parsed =
-                        parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?;
-                    let (cached_expr, parameter_count) = if let Some(prepared) =
+                    // No parameters: shape == exact plan, return directly.
+                    optimized
+                }
+            } else {
+                // Cache miss — parse, parameterize, store.
+                let parsed =
+                    parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?;
+                let (cached_expr, parameter_count) =
+                    if let Some(prepared) =
                         crate::storage::query::planner::shape::parameterize_query_expr(&parsed)
                     {
                         (prepared.shape, prepared.parameter_count)
                     } else {
                         (parsed.clone(), 0)
                     };
-                    let mut pc = self.inner.query_cache.write();
-                    let plan = crate::storage::query::planner::QueryPlan::new(
-                        parsed.clone(),
-                        cached_expr,
-                        Default::default(),
-                    );
-                    pc.insert(
-                        cache_key.clone(),
-                        crate::storage::query::planner::CachedPlan::new(plan)
-                            .with_shape_key(cache_key.clone())
-                            .with_exact_query(query.to_string())
-                            .with_parameter_count(parameter_count),
-                    );
-                    parsed
-                }
-            } else {
-                drop(plan_cache);
-                let parsed =
-                    parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?;
-                let (cached_expr, parameter_count) = if let Some(prepared) =
-                    crate::storage::query::planner::shape::parameterize_query_expr(&parsed)
-                {
-                    (prepared.shape, prepared.parameter_count)
-                } else {
-                    (parsed.clone(), 0)
-                };
-                // Store in plan cache for next time
                 {
                     let mut pc = self.inner.query_cache.write();
                     let plan = crate::storage::query::planner::QueryPlan::new(
@@ -1285,6 +1388,9 @@ impl RedDBRuntime {
             QueryExpr::CreateQueue(ref q) => self.execute_create_queue(query, q),
             QueryExpr::DropQueue(ref q) => self.execute_drop_queue(query, q),
             QueryExpr::QueueCommand(ref cmd) => self.execute_queue_command(query, cmd),
+            QueryExpr::CreateTree(ref tree) => self.execute_create_tree(query, tree),
+            QueryExpr::DropTree(ref tree) => self.execute_drop_tree(query, tree),
+            QueryExpr::TreeCommand(ref cmd) => self.execute_tree_command(query, cmd),
             // SET CONFIG key = value
             QueryExpr::SetConfig { ref key, ref value } => {
                 let store = self.inner.db.store();
@@ -1378,12 +1484,6 @@ impl RedDBRuntime {
         // zero while the clone cost (100 records × ~16 fields each) is high.
         // Aggregations (1 row) and point lookups (1 row) still benefit.
         if let Ok(ref result) = query_result {
-            if !is_write_op && result.statement_type == "select" {
-                self.inner
-                    .query_cache
-                    .write()
-                    .record_observation(&cache_key, result.result.stats.rows_scanned);
-            }
             if result.statement_type == "select"
                 && result.result.pre_serialized_json.is_none()
                 && result.result.records.len() <= 5
@@ -1408,6 +1508,90 @@ impl RedDBRuntime {
         }
 
         query_result
+    }
+
+    /// Execute a pre-parsed `QueryExpr` directly, bypassing SQL parsing and the
+    /// plan cache. Used by the prepared-statement fast path so that `execute_prepared`
+    /// calls pay zero parse + cache overhead.
+    ///
+    /// Applies secret decryption on SELECT results, identical to `execute_query`.
+    pub(crate) fn execute_query_expr(
+        &self,
+        expr: QueryExpr,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let statement = query_expr_name(&expr);
+        let mode = detect_mode(statement);
+        let query_str = statement;
+
+        let result = self.dispatch_expr(expr, query_str, mode)?;
+        let mut r = result;
+        if r.statement_type == "select" {
+            self.apply_secret_decryption(&mut r);
+        }
+        Ok(r)
+    }
+
+    /// Internal dispatch: route a `QueryExpr` to the appropriate executor.
+    /// Shared by `execute_query` (after parse/cache) and `execute_query_expr`
+    /// (direct call from prepared-statement handler).
+    fn dispatch_expr(
+        &self,
+        expr: QueryExpr,
+        query_str: &str,
+        mode: QueryMode,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let statement = query_expr_name(&expr);
+        match expr {
+            QueryExpr::Graph(_) | QueryExpr::Path(_) => {
+                // Graph queries are not cacheable as prepared statements.
+                return Err(RedDBError::Query(
+                    "graph queries cannot be used as prepared statements".to_string(),
+                ));
+            }
+            QueryExpr::Table(table) => Ok(RuntimeQueryResult {
+                query: query_str.to_string(),
+                mode,
+                statement,
+                engine: "runtime-table",
+                result: execute_runtime_table_query(
+                    &self.inner.db,
+                    &table,
+                    Some(&self.inner.index_store),
+                )?,
+                affected_rows: 0,
+                statement_type: "select",
+            }),
+            QueryExpr::Join(join) => Ok(RuntimeQueryResult {
+                query: query_str.to_string(),
+                mode,
+                statement,
+                engine: "runtime-join",
+                result: execute_runtime_join_query(&self.inner.db, &join)?,
+                affected_rows: 0,
+                statement_type: "select",
+            }),
+            QueryExpr::Vector(vector) => Ok(RuntimeQueryResult {
+                query: query_str.to_string(),
+                mode,
+                statement,
+                engine: "runtime-vector",
+                result: execute_runtime_vector_query(&self.inner.db, &vector)?,
+                affected_rows: 0,
+                statement_type: "select",
+            }),
+            QueryExpr::Hybrid(hybrid) => Ok(RuntimeQueryResult {
+                query: query_str.to_string(),
+                mode,
+                statement,
+                engine: "runtime-hybrid",
+                result: execute_runtime_hybrid_query(&self.inner.db, &hybrid)?,
+                affected_rows: 0,
+                statement_type: "select",
+            }),
+            _ => Err(RedDBError::Query(format!(
+                "prepared-statement execution does not support {statement} statements"
+            ))),
+        }
     }
 
     /// Ultra-fast path: detect `SELECT * FROM table WHERE _entity_id = N` by string pattern
@@ -1508,22 +1692,10 @@ impl RedDBRuntime {
     }
 
     pub(crate) fn note_table_write(&self, table: &str) {
-        let snapshot = self.inner.db.catalog_snapshot();
-        let row_count = snapshot
-            .stats_by_collection
-            .get(table)
-            .map(|stats| stats.entities)
-            .unwrap_or(0);
-
-        // Re-analyze small collections eagerly so the planner keeps real
-        // histograms/MCVs hot. For larger collections, avoid a full scan on
-        // every write and simply fall back to fresh catalog cardinalities.
-        if row_count <= AUTO_REFRESH_STATS_WRITE_ROW_LIMIT {
-            self.refresh_table_planner_stats(table);
-        } else {
-            self.clear_table_planner_stats(table);
-        }
-
+        self.inner
+            .planner_dirty_tables
+            .write()
+            .insert(table.to_string());
         self.invalidate_result_cache();
     }
 }

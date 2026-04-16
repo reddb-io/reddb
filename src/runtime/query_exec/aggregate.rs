@@ -13,19 +13,20 @@
 
 use crate::api::{RedDBError, RedDBResult};
 use crate::runtime::join_filter::{
-    eval_projection_value, evaluate_runtime_filter, field_ref_name, projection_name,
-    runtime_partial_cmp, sort_records_by_order_by,
+    eval_projection_value_with_db, evaluate_runtime_filter_with_db, field_ref_name,
+    projection_name, runtime_partial_cmp, sort_records_by_order_by_with_db,
 };
 use crate::runtime::runtime_table_record_from_entity;
 use crate::storage::query::ast::{
     BinOp, CompareOp, Expr, FieldRef, Filter, OrderByClause, Projection, Span, UnaryOp,
 };
+use super::filter_compiled::{classify_field, EntityColumnResolver};
 use crate::storage::query::sql_lowering::{
     effective_table_filter, effective_table_group_by_exprs, effective_table_having_filter,
     effective_table_projections, expr_to_projection as lower_expr_to_projection,
 };
 use crate::storage::query::unified::{UnifiedRecord, UnifiedResult};
-use crate::storage::schema::Value;
+use crate::storage::schema::{value_to_canonical_key, CanonicalKey, Value};
 use crate::RedDB;
 
 use super::TableQuery;
@@ -124,6 +125,102 @@ pub(crate) fn execute_aggregate_query(
         .as_ref()
         .map(|f| super::filter_compiled::CompiledEntityFilter::compile(f, table_name, table_alias));
 
+    // ── GROUP BY fast path ───────────────────────────────────────────────
+    // Pre-classify each GROUP BY expression once. When all expressions are
+    // simple `Expr::Column` references (the common case), we can extract
+    // values directly from the entity without materialising a full
+    // `UnifiedRecord` — skipping the `entity.clone()` + field-map rebuild
+    // that `runtime_table_record_from_entity` performs per row.
+    //
+    // TIME_BUCKET and non-column expressions fall back to record
+    // materialisation (signalled by `None` in the parallel vec).
+    let group_by_kinds: Vec<Option<EntityColumnResolver>> = if has_group_by {
+        effective_group_by
+            .iter()
+            .map(|expr| {
+                // TIME_BUCKET grouping requires a record (timestamp arithmetic).
+                if parse_time_bucket_group_expr(
+                    &group_expr_key(expr).unwrap_or_default(),
+                )
+                .is_some()
+                {
+                    return None;
+                }
+                match expr {
+                    Expr::Column { field, .. } => {
+                        let col_name = field_ref_name(field);
+                        let kind = classify_field(field, table_name, table_alias);
+                        if matches!(
+                            kind,
+                            super::filter_compiled::EntityFieldKind::DocumentPath(_)
+                                | super::filter_compiled::EntityFieldKind::Unknown
+                        ) {
+                            None
+                        } else {
+                            Some(EntityColumnResolver { kinds: vec![kind] })
+                        }
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    // True iff every GROUP BY field can be read directly from the entity.
+    let group_by_all_fast =
+        has_group_by && group_by_kinds.iter().all(|k| k.is_some());
+
+    // ── Aggregate argument fast path ─────────────────────────────────────
+    // For projections like SUM(amount), COUNT(id), MIN(price) the argument
+    // is a single simple column reference. Pre-classify once so the hot
+    // loop can read the value from the entity without a record lookup.
+    let agg_arg_kinds: Vec<Option<super::filter_compiled::EntityFieldKind>> =
+        all_aggregate_projections
+            .iter()
+            .map(|proj| {
+                let Projection::Function(_, args) = proj else {
+                    return None;
+                };
+                match args.first() {
+                    Some(Projection::Field(field, _)) => {
+                        let kind = classify_field(field, table_name, table_alias);
+                        if matches!(
+                            kind,
+                            super::filter_compiled::EntityFieldKind::DocumentPath(_)
+                                | super::filter_compiled::EntityFieldKind::Unknown
+                        ) {
+                            None
+                        } else {
+                            Some(kind)
+                        }
+                    }
+                    Some(Projection::Column(col)) if !col.starts_with("LIT:") && col != "*" => {
+                        let field = FieldRef::TableColumn {
+                            table: String::new(),
+                            column: col.clone(),
+                        };
+                        let kind = classify_field(&field, table_name, table_alias);
+                        if matches!(
+                            kind,
+                            super::filter_compiled::EntityFieldKind::DocumentPath(_)
+                                | super::filter_compiled::EntityFieldKind::Unknown
+                        ) {
+                            None
+                        } else {
+                            Some(kind)
+                        }
+                    }
+                    _ => None,
+                }
+            })
+            .collect();
+
+    // ── Compile the aggregation plan ─────────────────────────────────────────
+    // Assigns a slot index to every projection in `all_aggregate_projections`
+    // so the hot loop can use O(1) array writes instead of HashMap lookups.
+    let agg_plan = CompiledAggPlan::compile(&all_aggregate_projections);
+
     // Work-mem cap: 64 MB mirrors PostgreSQL's work_mem GUC default.
     // When the in-memory HashMap exceeds `max_groups` entries, we flush the
     // current partial state to a SpilledHashAgg batch file on tmpfs and reset
@@ -135,7 +232,7 @@ pub(crate) fn execute_aggregate_query(
 
     // Hot accumulator: in-memory HashMap for per-row mutation.
     // Flushed to `spill_agg` when it exceeds max_groups.
-    let mut groups: std::collections::HashMap<String, AggregateGroup> =
+    let mut groups: std::collections::HashMap<AggregateGroupKey, AggregateGroup> =
         std::collections::HashMap::new();
 
     // SpilledHashAgg receives flushed batches and performs the final merge.
@@ -150,7 +247,7 @@ pub(crate) fn execute_aggregate_query(
         d
     };
     let mut spill_agg = crate::storage::query::executors::agg_spill::SpilledHashAgg::<
-        String,
+        AggregateGroupKey,
         AggregateGroup,
     >::new(spill_dir, WORK_MEM_BYTES, ESTIMATED_ENTRY_BYTES);
     let mut spill_err: Option<String> = None;
@@ -162,20 +259,56 @@ pub(crate) fn execute_aggregate_query(
             }
         }
 
-        let record = match runtime_table_record_from_entity(entity.clone()) {
-            Some(record) => record,
-            None => return true,
-        };
+        // ── Lazy record materialisation ──────────────────────────────────
+        // We defer `runtime_table_record_from_entity` until we actually
+        // need it (complex GROUP BY exprs or aggregate args that can't be
+        // read directly from the entity).  For the common case — plain
+        // column GROUP BY + single-column agg args — we never build it.
+        let mut record_cache: Option<UnifiedRecord> = None;
+
+        // Helper: materialise the record exactly once if not yet done.
+        macro_rules! get_or_make_record {
+            () => {{
+                if record_cache.is_none() {
+                    record_cache = runtime_table_record_from_entity(entity.clone());
+                }
+                record_cache.as_ref()
+            }};
+        }
 
         let group_values = if has_group_by {
-            let mut values = Vec::with_capacity(effective_group_by.len());
-            for group_expr in &effective_group_by {
-                let Some(value) = resolve_group_by_value(group_expr, &record) else {
-                    return true;
-                };
-                values.push(value);
+            if group_by_all_fast {
+                // Fast path: all GROUP BY are simple columns → read from entity.
+                let mut values = Vec::with_capacity(effective_group_by.len());
+                for (resolver_opt, expr) in group_by_kinds.iter().zip(&effective_group_by) {
+                    let value = if let Some(resolver) = resolver_opt {
+                        resolver.get_value(0, entity).map(|v| v.into_owned())
+                    } else {
+                        None
+                    };
+                    if let Some(v) = value {
+                        values.push(v);
+                    } else {
+                        // Shouldn't happen (group_by_all_fast is true) but
+                        // fall back gracefully.
+                        let Some(rec) = get_or_make_record!() else { return true; };
+                        let Some(v) = resolve_group_by_value(db, expr, rec) else { return true; };
+                        values.push(v);
+                    }
+                }
+                values
+            } else {
+                // Slow path: at least one complex GROUP BY expr.
+                let Some(rec) = get_or_make_record!() else { return true; };
+                let mut values = Vec::with_capacity(effective_group_by.len());
+                for group_expr in &effective_group_by {
+                    let Some(value) = resolve_group_by_value(db, group_expr, rec) else {
+                        return true;
+                    };
+                    values.push(value);
+                }
+                values
             }
-            values
         } else {
             Vec::new()
         };
@@ -185,16 +318,9 @@ pub(crate) fn execute_aggregate_query(
         // `aggregation.rs::make_group_key` for the same optimisation
         // on the executor path.
         let group_key = if has_group_by {
-            let mut key = String::with_capacity(64);
-            for (i, v) in group_values.iter().enumerate() {
-                if i > 0 {
-                    key.push('|');
-                }
-                append_group_value_key(&mut key, v);
-            }
-            key
+            build_aggregate_group_key(&group_values)
         } else {
-            String::new()
+            Vec::new()
         };
 
         // Spill to disk when adding a *new* key would exceed the local cap.
@@ -211,116 +337,99 @@ pub(crate) fn execute_aggregate_query(
 
         let group = groups.entry(group_key).or_insert_with(|| AggregateGroup {
             group_values: group_values.clone(),
-            state: AggState::default(),
+            state: SlottedAggState::new(&agg_plan),
         });
         let state = &mut group.state;
         state.count += 1;
 
-        // Accumulate values for each aggregate projection
-        for proj in &all_aggregate_projections {
-            if let Projection::Function(func, args) = proj {
-                let func_name = base_function_name(func);
-                if !is_aggregate_function(func_name) {
-                    continue;
-                }
+        // Accumulate values — slot-indexed, zero HashMap/String overhead per row.
+        for (proj_idx, proj) in all_aggregate_projections.iter().enumerate() {
+            let Projection::Function(func, args) = proj else { continue; };
+            let func_name = base_function_name(func);
+            if !is_aggregate_function(func_name) { continue; }
 
-                let col_name = match aggregate_argument_key(args) {
-                    Some(col) => col,
+            let slot = match agg_plan.proj_slots.get(proj_idx) {
+                Some(s) => s,
+                None => continue,
+            };
+
+            // COUNT(*) — already counted above.
+            if matches!(slot, ProjSlot::CountStar) { continue; }
+
+            // Resolve argument value: entity fast path first, then record.
+            let val = if let Some(kind) = agg_arg_kinds.get(proj_idx).and_then(|k| k.as_ref()) {
+                super::filter_compiled::resolve_kind(kind, entity)
+                    .map(|v| v.into_owned())
+                    .or_else(|| {
+                        get_or_make_record!()
+                            .and_then(|rec| resolve_aggregate_argument_value(db, args.first(), rec))
+                    })
+            } else {
+                match get_or_make_record!() {
+                    Some(rec) => resolve_aggregate_argument_value(db, args.first(), rec),
                     None => continue,
-                };
-                if func_name == "COUNT" && col_name == "*" {
-                    continue;
                 }
+            };
+            let Some(val) = val else { continue };
+            let num = value_to_f64(&val);
 
-                let val = match resolve_aggregate_argument_value(args.first(), &record) {
-                    Some(v) => v,
-                    None => continue,
-                };
-                let num = value_to_f64(&val);
-
-                match func_name {
-                    "COUNT" => {
-                        if !matches!(val, Value::Null) {
-                            *state.agg_counts.entry(col_name.clone()).or_insert(0) += 1;
-                        }
+            match slot {
+                ProjSlot::CountStar => {}
+                ProjSlot::CountOnly(idx) => {
+                    if !matches!(val, Value::Null) {
+                        state.count_only[*idx] += 1;
                     }
-                    "SUM" | "AVG" => {
-                        if let Some(n) = num {
-                            *state.sums.entry(col_name.clone()).or_insert(0.0) += n;
-                            *state.agg_counts.entry(col_name.clone()).or_insert(0) += 1;
-                        }
+                }
+                ProjSlot::SumCount(idx) => {
+                    if let Some(n) = num {
+                        state.sums[*idx] += n;
+                        state.sum_agg_counts[*idx] += 1;
                     }
-                    "MIN" => {
-                        update_extreme_value(
-                            &mut state.mins,
-                            &col_name,
-                            &val,
-                            std::cmp::Ordering::Less,
-                        );
+                }
+                ProjSlot::SumCountSq(idx) => {
+                    if let Some(n) = num {
+                        state.sums[*idx] += n;
+                        state.sum_agg_counts[*idx] += 1;
+                        state.sum_squares[*idx] += n * n;
                     }
-                    "MAX" => {
-                        update_extreme_value(
-                            &mut state.maxs,
-                            &col_name,
-                            &val,
-                            std::cmp::Ordering::Greater,
-                        );
+                }
+                ProjSlot::Min(idx) => {
+                    update_extreme_value_slot(&mut state.mins[*idx], &val, std::cmp::Ordering::Less);
+                }
+                ProjSlot::Max(idx) => {
+                    update_extreme_value_slot(&mut state.maxs[*idx], &val, std::cmp::Ordering::Greater);
+                }
+                ProjSlot::AllValues(idx) => {
+                    if let Some(n) = num {
+                        state.all_values[*idx].push(n);
                     }
-                    "STDDEV" | "VARIANCE" => {
-                        if let Some(n) = num {
-                            *state.sums.entry(col_name.clone()).or_insert(0.0) += n;
-                            *state.sum_squares.entry(col_name.clone()).or_insert(0.0) += n * n;
-                            *state.agg_counts.entry(col_name.clone()).or_insert(0) += 1;
-                        }
+                }
+                ProjSlot::Concat(idx) => {
+                    if !matches!(val, Value::Null) {
+                        let text = match &val {
+                            Value::Text(s) => s.clone(),
+                            other => other.display_string(),
+                        };
+                        state.concat_values[*idx].push(text);
                     }
-                    "MEDIAN" | "PERCENTILE" => {
-                        if let Some(n) = num {
-                            state
-                                .all_values
-                                .entry(col_name.clone())
-                                .or_default()
-                                .push(n);
-                        }
+                }
+                ProjSlot::First(idx) => {
+                    if state.first_values[*idx].is_none() {
+                        state.first_values[*idx] = Some(val);
                     }
-                    "GROUP_CONCAT" | "STRING_AGG" => {
-                        if !matches!(val, Value::Null) {
-                            let text = match &val {
-                                Value::Text(s) => s.clone(),
-                                other => other.display_string(),
-                            };
-                            state
-                                .concat_values
-                                .entry(col_name.clone())
-                                .or_default()
-                                .push(text);
-                        }
+                }
+                ProjSlot::Last(idx) => {
+                    state.last_values[*idx] = Some(val);
+                }
+                ProjSlot::Array(idx) => {
+                    state.array_values[*idx].push(val);
+                }
+                ProjSlot::Distinct(idx) => {
+                    if !matches!(val, Value::Null) {
+                        state.distinct_sets[*idx]
+                            .get_or_insert_with(std::collections::HashSet::new)
+                            .insert(group_value_key(&val));
                     }
-                    "FIRST" => {
-                        state
-                            .first_values
-                            .entry(col_name.clone())
-                            .or_insert_with(|| val.clone());
-                    }
-                    "LAST" => {
-                        state.last_values.insert(col_name.clone(), val.clone());
-                    }
-                    "ARRAY_AGG" => {
-                        state
-                            .array_values
-                            .entry(col_name.clone())
-                            .or_default()
-                            .push(val.clone());
-                    }
-                    "COUNT_DISTINCT" => {
-                        if !matches!(val, Value::Null) {
-                            state
-                                .distinct_sets
-                                .entry(col_name.clone())
-                                .or_default()
-                                .insert(group_value_key(&val));
-                        }
-                    }
-                    _ => {}
                 }
             }
         }
@@ -371,7 +480,8 @@ pub(crate) fn execute_aggregate_query(
 
         // Add visible aggregate results
         for proj in &effective_projections {
-            if let Some((result_name, result_val)) = aggregate_projection_result(proj, &group.state)
+            if let Some((result_name, result_val)) =
+                aggregate_projection_result_slotted(proj, &group.state, &agg_plan)
             {
                 if !columns.contains(&result_name) {
                     columns.push(result_name.clone());
@@ -381,23 +491,25 @@ pub(crate) fn execute_aggregate_query(
         }
 
         for proj in &runtime_plan.hidden_aggregates {
-            if let Some((result_name, result_val)) = aggregate_projection_result(proj, &group.state)
+            if let Some((result_name, result_val)) =
+                aggregate_projection_result_slotted(proj, &group.state, &agg_plan)
             {
                 record.set(&result_name, result_val);
             }
         }
 
-        if having_matches(runtime_plan.having.as_ref(), &record) {
+        if having_matches(db, runtime_plan.having.as_ref(), &record) {
             records.push(record);
         }
     }
 
     // If no input rows matched, return a single aggregate row.
+    let empty_state = SlottedAggState::new(&agg_plan);
     if groups.is_empty() && !has_group_by {
         let mut record = UnifiedRecord::new();
         for proj in &effective_projections {
             if let Some((result_name, result_val)) =
-                empty_aggregate_projection_result(proj, &AggState::default())
+                empty_aggregate_projection_result_slotted(proj, &empty_state, &agg_plan)
             {
                 if !columns.contains(&result_name) {
                     columns.push(result_name.clone());
@@ -407,18 +519,24 @@ pub(crate) fn execute_aggregate_query(
         }
         for proj in &runtime_plan.hidden_aggregates {
             if let Some((result_name, result_val)) =
-                empty_aggregate_projection_result(proj, &AggState::default())
+                empty_aggregate_projection_result_slotted(proj, &empty_state, &agg_plan)
             {
                 record.set(&result_name, result_val);
             }
         }
-        if having_matches(runtime_plan.having.as_ref(), &record) {
+        if having_matches(db, runtime_plan.having.as_ref(), &record) {
             records.push(record);
         }
     }
 
     if !runtime_plan.order_by.is_empty() {
-        sort_records_by_order_by(&mut records, &runtime_plan.order_by, None, None);
+        sort_records_by_order_by_with_db(
+            Some(db),
+            &mut records,
+            &runtime_plan.order_by,
+            None,
+            None,
+        );
     }
 
     if let Some(offset) = query.offset {
@@ -936,14 +1054,14 @@ fn projection_from_expr(expr: &Expr) -> Option<Projection> {
     lower_expr_to_projection(expr)
 }
 
-fn aggregate_projection_result(
+fn aggregate_projection_result_slotted(
     projection: &Projection,
-    state: &AggState,
+    state: &SlottedAggState,
+    plan: &CompiledAggPlan,
 ) -> Option<(String, Value)> {
     let Projection::Function(func, args) = projection else {
         return None;
     };
-
     let func_name = base_function_name(func);
     if !is_aggregate_function(func_name) {
         return None;
@@ -951,46 +1069,58 @@ fn aggregate_projection_result(
 
     let col_name = aggregate_argument_key(args)?;
     let result_name = aggregate_output_name(projection, func_name, &col_name);
+
     let result_value = match func_name {
         "COUNT" => {
             if col_name == "*" {
                 Value::Integer(state.count as i64)
             } else {
-                Value::Integer(state.agg_counts.get(&col_name).copied().unwrap_or(0) as i64)
+                let idx = plan.slot_for(AggStorageGroup::Count, &col_name)?;
+                Value::Integer(state.count_only[idx] as i64)
             }
         }
-        "SUM" => state
-            .sums
-            .get(&col_name)
-            .copied()
-            .map(Value::Float)
-            .unwrap_or(Value::Null),
+        "SUM" => {
+            let idx = plan.slot_for(AggStorageGroup::SumCount, &col_name)?;
+            if state.sum_agg_counts[idx] == 0 {
+                Value::Null
+            } else {
+                Value::Float(state.sums[idx])
+            }
+        }
         "AVG" => {
-            let sum = state.sums.get(&col_name).copied().unwrap_or(0.0);
-            let count = state.agg_counts.get(&col_name).copied().unwrap_or(0);
+            let idx = plan.slot_for(AggStorageGroup::SumCount, &col_name)?;
+            let count = state.sum_agg_counts[idx];
             if count > 0 {
-                Value::Float(sum / count as f64)
+                Value::Float(state.sums[idx] / count as f64)
             } else {
                 Value::Null
             }
         }
-        "MIN" => state.mins.get(&col_name).cloned().unwrap_or(Value::Null),
-        "MAX" => state.maxs.get(&col_name).cloned().unwrap_or(Value::Null),
+        "MIN" => {
+            let idx = plan.slot_for(AggStorageGroup::Min, &col_name)?;
+            state.mins[idx].clone().unwrap_or(Value::Null)
+        }
+        "MAX" => {
+            let idx = plan.slot_for(AggStorageGroup::Max, &col_name)?;
+            state.maxs[idx].clone().unwrap_or(Value::Null)
+        }
         "VARIANCE" => {
-            let n = state.agg_counts.get(&col_name).copied().unwrap_or(0) as f64;
+            let idx = plan.slot_for(AggStorageGroup::SumCount, &col_name)?;
+            let n = state.sum_agg_counts[idx] as f64;
             if n > 0.0 {
-                let sum = state.sums.get(&col_name).copied().unwrap_or(0.0);
-                let sum_sq = state.sum_squares.get(&col_name).copied().unwrap_or(0.0);
+                let sum = state.sums[idx];
+                let sum_sq = state.sum_squares[idx];
                 Value::Float(sum_sq / n - (sum / n).powi(2))
             } else {
                 Value::Null
             }
         }
         "STDDEV" => {
-            let n = state.agg_counts.get(&col_name).copied().unwrap_or(0) as f64;
+            let idx = plan.slot_for(AggStorageGroup::SumCount, &col_name)?;
+            let n = state.sum_agg_counts[idx] as f64;
             if n > 0.0 {
-                let sum = state.sums.get(&col_name).copied().unwrap_or(0.0);
-                let sum_sq = state.sum_squares.get(&col_name).copied().unwrap_or(0.0);
+                let sum = state.sums[idx];
+                let sum_sq = state.sum_squares[idx];
                 let variance = sum_sq / n - (sum / n).powi(2);
                 Value::Float(variance.max(0.0).sqrt())
             } else {
@@ -998,7 +1128,8 @@ fn aggregate_projection_result(
             }
         }
         "MEDIAN" => {
-            let mut values = state.all_values.get(&col_name).cloned().unwrap_or_default();
+            let idx = plan.slot_for(AggStorageGroup::AllValues, &col_name)?;
+            let mut values = state.all_values[idx].clone();
             if values.is_empty() {
                 Value::Null
             } else {
@@ -1015,70 +1146,66 @@ fn aggregate_projection_result(
             let pct = resolve_static_projection_number(args.get(1))
                 .unwrap_or(0.5)
                 .clamp(0.0, 1.0);
-            let mut values = state.all_values.get(&col_name).cloned().unwrap_or_default();
+            let idx = plan.slot_for(AggStorageGroup::AllValues, &col_name)?;
+            let mut values = state.all_values[idx].clone();
             if values.is_empty() {
                 Value::Null
             } else {
                 values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let index =
-                    ((pct * (values.len() as f64 - 1.0)).round() as usize).min(values.len() - 1);
+                let index = ((pct * (values.len() as f64 - 1.0)).round() as usize)
+                    .min(values.len() - 1);
                 Value::Float(values[index])
             }
         }
         "GROUP_CONCAT" | "STRING_AGG" => {
-            let values = state
-                .concat_values
-                .get(&col_name)
-                .cloned()
-                .unwrap_or_default();
+            let idx = plan.slot_for(AggStorageGroup::Concat, &col_name)?;
+            let values = &state.concat_values[idx];
             if values.is_empty() {
                 Value::Null
             } else {
-                let separator =
-                    resolve_static_projection_text(args.get(1)).unwrap_or_else(|| ", ".to_string());
+                let separator = resolve_static_projection_text(args.get(1))
+                    .unwrap_or_else(|| ", ".to_string());
                 Value::Text(values.join(separator.as_str()))
             }
         }
-        "FIRST" => state
-            .first_values
-            .get(&col_name)
-            .cloned()
-            .unwrap_or(Value::Null),
-        "LAST" => state
-            .last_values
-            .get(&col_name)
-            .cloned()
-            .unwrap_or(Value::Null),
+        "FIRST" => {
+            let idx = plan.slot_for(AggStorageGroup::First, &col_name)?;
+            state.first_values[idx].clone().unwrap_or(Value::Null)
+        }
+        "LAST" => {
+            let idx = plan.slot_for(AggStorageGroup::Last, &col_name)?;
+            state.last_values[idx].clone().unwrap_or(Value::Null)
+        }
         "ARRAY_AGG" => {
-            let values = state
-                .array_values
-                .get(&col_name)
-                .cloned()
-                .unwrap_or_default();
+            let idx = plan.slot_for(AggStorageGroup::Array, &col_name)?;
+            let values = state.array_values[idx].clone();
             if values.is_empty() {
                 Value::Null
             } else {
                 Value::Array(values)
             }
         }
-        "COUNT_DISTINCT" => Value::Integer(
-            state
-                .distinct_sets
-                .get(&col_name)
-                .map(|set| set.len())
-                .unwrap_or(0) as i64,
-        ),
+        "COUNT_DISTINCT" => {
+            let idx = plan.slot_for(AggStorageGroup::Distinct, &col_name)?;
+            Value::Integer(
+                state.distinct_sets[idx]
+                    .as_ref()
+                    .map(|s| s.len())
+                    .unwrap_or(0) as i64,
+            )
+        }
         _ => Value::Null,
     };
 
     Some((result_name, result_value))
 }
 
-fn empty_aggregate_projection_result(
+fn empty_aggregate_projection_result_slotted(
     projection: &Projection,
-    state: &AggState,
+    state: &SlottedAggState,
+    plan: &CompiledAggPlan,
 ) -> Option<(String, Value)> {
-    aggregate_projection_result(projection, state)
+    aggregate_projection_result_slotted(projection, state, plan)
 }
 
 fn aggregate_argument_key(args: &[Projection]) -> Option<String> {
@@ -1086,22 +1213,24 @@ fn aggregate_argument_key(args: &[Projection]) -> Option<String> {
 }
 
 fn having_matches(
+    db: &RedDB,
     having: Option<&crate::storage::query::ast::Filter>,
     record: &UnifiedRecord,
 ) -> bool {
     match having {
-        Some(filter) => evaluate_runtime_filter(record, filter, None, None),
+        Some(filter) => evaluate_runtime_filter_with_db(Some(db), record, filter, None, None),
         None => true,
     }
 }
 
 fn resolve_aggregate_argument_value(
+    db: &RedDB,
     arg: Option<&Projection>,
     record: &UnifiedRecord,
 ) -> Option<Value> {
     match arg {
         Some(Projection::All) => None,
-        Some(arg) => eval_projection_value(arg, record),
+        Some(arg) => eval_projection_value_with_db(Some(db), arg, record),
         _ => None,
     }
 }
@@ -1182,40 +1311,18 @@ fn render_aggregate_argument_key(arg: &Projection) -> String {
 
 fn resolve_static_projection_number(arg: Option<&Projection>) -> Option<f64> {
     let record = UnifiedRecord::new();
-    let value = eval_projection_value(arg?, &record)?;
+    let value = eval_projection_value_with_db(None, arg?, &record)?;
     value_to_f64(&value)
 }
 
 fn resolve_static_projection_text(arg: Option<&Projection>) -> Option<String> {
     let record = UnifiedRecord::new();
-    let value = eval_projection_value(arg?, &record)?;
+    let value = eval_projection_value_with_db(None, arg?, &record)?;
     Some(match value {
         Value::Null => String::new(),
         Value::Text(text) => text,
         other => other.display_string(),
     })
-}
-
-fn update_extreme_value(
-    map: &mut std::collections::HashMap<String, Value>,
-    key: &str,
-    candidate: &Value,
-    ordering: std::cmp::Ordering,
-) {
-    if matches!(candidate, Value::Null) {
-        return;
-    }
-
-    match map.get_mut(key) {
-        Some(current) => {
-            if runtime_partial_cmp(candidate, current).is_some_and(|ord| ord == ordering) {
-                *current = candidate.clone();
-            }
-        }
-        None => {
-            map.insert(key.to_string(), candidate.clone());
-        }
-    }
 }
 
 fn group_output_label(query: &TableQuery, group_expr: &Expr) -> String {
@@ -1268,7 +1375,7 @@ fn render_group_by_argument(arg: &Projection) -> Option<String> {
     }
 }
 
-fn resolve_group_by_value(group_expr: &Expr, record: &UnifiedRecord) -> Option<Value> {
+fn resolve_group_by_value(db: &RedDB, group_expr: &Expr, record: &UnifiedRecord) -> Option<Value> {
     if let Some((bucket_ns, timestamp_column)) =
         parse_time_bucket_group_expr(&group_expr_key(group_expr).unwrap_or_default())
     {
@@ -1285,7 +1392,7 @@ fn resolve_group_by_value(group_expr: &Expr, record: &UnifiedRecord) -> Option<V
         Expr::Column { field, .. } => record.get(&field_ref_name(field)).cloned(),
         _ => {
             let projection = projection_from_expr(group_expr)?;
-            eval_projection_value(&projection, record)
+            eval_projection_value_with_db(Some(db), &projection, record)
         }
     }
 }
@@ -1354,14 +1461,21 @@ fn value_to_bucket_timestamp_ns(value: &Value) -> Option<u64> {
     }
 }
 
-/// Append a single group-by `Value` to a shared key buffer.
-///
-/// **Hot path** — called once per group-by column per row in
-/// `execute_aggregate_query`. Writes directly into the caller's
-/// `String` buffer to avoid the per-value `format!` allocation
-/// the previous `group_value_key` paid.
-fn append_group_value_key(buf: &mut String, value: &Value) {
+fn build_aggregate_group_key(values: &[Value]) -> AggregateGroupKey {
+    values
+        .iter()
+        .map(|value| {
+            value_to_canonical_key(value)
+                .map(GroupKeyPart::Canonical)
+                .unwrap_or_else(|| GroupKeyPart::Rendered(group_value_key(value)))
+        })
+        .collect()
+}
+
+#[allow(dead_code)]
+fn group_value_key(value: &Value) -> String {
     use std::fmt::Write;
+    let mut buf = String::with_capacity(32);
     match value {
         Value::Null => buf.push_str("null"),
         Value::Boolean(v) => {
@@ -1389,41 +1503,249 @@ fn append_group_value_key(buf: &mut String, value: &Value) {
             let _ = write!(buf, "{other:?}");
         }
     }
-}
-
-#[allow(dead_code)]
-fn group_value_key(value: &Value) -> String {
-    let mut buf = String::with_capacity(32);
-    append_group_value_key(&mut buf, value);
     buf
 }
 
-#[derive(Default, Clone)]
-struct AggregateGroup {
-    group_values: Vec<Value>,
-    state: AggState,
+type AggregateGroupKey = Vec<GroupKeyPart>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum GroupKeyPart {
+    Canonical(CanonicalKey),
+    Rendered(String),
 }
 
-#[derive(Default, Clone)]
-struct AggState {
+// ── Slot-indexed aggregate state ─────────────────────────────────────────────
+//
+// Replaces the HashMap<String, T> fields in the old AggState with Vec<T>
+// indexed by pre-assigned compile-time slot indices. The "plan" is compiled
+// once from `all_aggregate_projections` before the hot loop; thereafter every
+// accumulation step is a single array write — zero String allocation,
+// zero hash lookup.
+//
+// Slot assignment is deduplicated by (storage_group, col_name): SUM(age) and
+// AVG(age) share the same SumCount slot; MIN(price) and MAX(price) get
+// separate Min and Max slots for the same column.
+
+/// Which backing Vec within `SlottedAggState` stores a given function's data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(usize)]
+enum AggStorageGroup {
+    SumCount   = 0,  // sums + sum_agg_counts (+sum_squares for STDDEV/VARIANCE)
+    Count      = 1,  // count_only (COUNT(col))
+    Min        = 2,
+    Max        = 3,
+    AllValues  = 4,  // MEDIAN, PERCENTILE
+    Concat     = 5,  // GROUP_CONCAT, STRING_AGG
+    First      = 6,
+    Last       = 7,
+    Array      = 8,  // ARRAY_AGG
+    Distinct   = 9,  // COUNT_DISTINCT
+}
+
+fn func_storage_group(func_name: &str) -> Option<AggStorageGroup> {
+    match func_name {
+        "SUM" | "AVG" | "STDDEV" | "VARIANCE" => Some(AggStorageGroup::SumCount),
+        "COUNT" => Some(AggStorageGroup::Count),
+        "MIN" => Some(AggStorageGroup::Min),
+        "MAX" => Some(AggStorageGroup::Max),
+        "MEDIAN" | "PERCENTILE" => Some(AggStorageGroup::AllValues),
+        "GROUP_CONCAT" | "STRING_AGG" => Some(AggStorageGroup::Concat),
+        "FIRST" => Some(AggStorageGroup::First),
+        "LAST" => Some(AggStorageGroup::Last),
+        "ARRAY_AGG" => Some(AggStorageGroup::Array),
+        "COUNT_DISTINCT" => Some(AggStorageGroup::Distinct),
+        _ => None,
+    }
+}
+
+/// Per-projection slot reference: tells the hot loop exactly which Vec index
+/// to write for each aggregate projection.
+#[derive(Debug, Clone, Copy)]
+enum ProjSlot {
+    /// COUNT(*) — just increment the global `state.count`.
+    CountStar,
+    /// sums[idx] + sum_agg_counts[idx] — SUM, AVG.
+    SumCount(usize),
+    /// SumCount + sum_squares[idx] — STDDEV, VARIANCE.
+    SumCountSq(usize),
+    /// count_only[idx] — COUNT(col).
+    CountOnly(usize),
+    Min(usize),
+    Max(usize),
+    AllValues(usize),
+    Concat(usize),
+    First(usize),
+    Last(usize),
+    Array(usize),
+    Distinct(usize),
+}
+
+/// Compiled per-query aggregation plan: slot assignments for all projections.
+struct CompiledAggPlan {
+    /// One slot per entry in `all_aggregate_projections`.
+    proj_slots: Vec<ProjSlot>,
+    /// Vec sizes for `SlottedAggState` allocation.
+    n_sum_count: usize,
+    n_count: usize,
+    n_min: usize,
+    n_max: usize,
+    n_all_values: usize,
+    n_concat: usize,
+    n_first: usize,
+    n_last: usize,
+    n_array: usize,
+    n_distinct: usize,
+    /// Reverse lookup for result building: (group, col_name) → slot_idx.
+    result_slot_map: std::collections::HashMap<(AggStorageGroup, String), usize>,
+}
+
+impl CompiledAggPlan {
+    fn compile(projections: &[Projection]) -> Self {
+        use std::collections::HashMap;
+        let mut slot_key_to_idx: HashMap<(AggStorageGroup, String), usize> = HashMap::new();
+        let mut counters = [0usize; 10];
+        let mut proj_slots = Vec::with_capacity(projections.len());
+        // Tracks whether each SumCount slot needs sum_squares.
+        let mut sum_count_needs_sq: Vec<bool> = Vec::new();
+
+        for proj in projections {
+            let Projection::Function(func, args) = proj else {
+                proj_slots.push(ProjSlot::CountStar);
+                continue;
+            };
+            let func_name = base_function_name(func);
+            let col_name = aggregate_argument_key(args).unwrap_or_default();
+
+            if func_name == "COUNT" && col_name == "*" {
+                proj_slots.push(ProjSlot::CountStar);
+                continue;
+            }
+
+            let Some(group) = func_storage_group(func_name) else {
+                proj_slots.push(ProjSlot::CountStar);
+                continue;
+            };
+
+            let key = (group, col_name);
+            let idx = *slot_key_to_idx.entry(key).or_insert_with(|| {
+                let i = counters[group as usize];
+                counters[group as usize] += 1;
+                if group == AggStorageGroup::SumCount {
+                    sum_count_needs_sq.push(false);
+                }
+                i
+            });
+
+            // STDDEV/VARIANCE need sum_squares for this slot.
+            if group == AggStorageGroup::SumCount
+                && (func_name == "STDDEV" || func_name == "VARIANCE")
+                && idx < sum_count_needs_sq.len()
+            {
+                sum_count_needs_sq[idx] = true;
+            }
+
+            let ps = match group {
+                AggStorageGroup::SumCount => {
+                    if func_name == "STDDEV" || func_name == "VARIANCE" {
+                        ProjSlot::SumCountSq(idx)
+                    } else {
+                        ProjSlot::SumCount(idx)
+                    }
+                }
+                AggStorageGroup::Count => ProjSlot::CountOnly(idx),
+                AggStorageGroup::Min => ProjSlot::Min(idx),
+                AggStorageGroup::Max => ProjSlot::Max(idx),
+                AggStorageGroup::AllValues => ProjSlot::AllValues(idx),
+                AggStorageGroup::Concat => ProjSlot::Concat(idx),
+                AggStorageGroup::First => ProjSlot::First(idx),
+                AggStorageGroup::Last => ProjSlot::Last(idx),
+                AggStorageGroup::Array => ProjSlot::Array(idx),
+                AggStorageGroup::Distinct => ProjSlot::Distinct(idx),
+            };
+            proj_slots.push(ps);
+        }
+
+        CompiledAggPlan {
+            proj_slots,
+            n_sum_count: counters[0],
+            n_count:     counters[1],
+            n_min:       counters[2],
+            n_max:       counters[3],
+            n_all_values: counters[4],
+            n_concat:    counters[5],
+            n_first:     counters[6],
+            n_last:      counters[7],
+            n_array:     counters[8],
+            n_distinct:  counters[9],
+            result_slot_map: slot_key_to_idx,
+        }
+    }
+
+    /// Look up the slot index for a result-building call.
+    fn slot_for(&self, group: AggStorageGroup, col_name: &str) -> Option<usize> {
+        self.result_slot_map.get(&(group, col_name.to_string())).copied()
+    }
+}
+
+/// Vec-indexed replacement for the old HashMap-based `AggState`.
+/// Allocated once per group; hot-path writes are direct array assignments.
+#[derive(Clone)]
+struct SlottedAggState {
     count: u64,
-    sums: std::collections::HashMap<String, f64>,
-    mins: std::collections::HashMap<String, Value>,
-    maxs: std::collections::HashMap<String, Value>,
-    // For STDDEV/VARIANCE: collect sum of squares
-    sum_squares: std::collections::HashMap<String, f64>,
-    agg_counts: std::collections::HashMap<String, u64>,
-    // For MEDIAN/PERCENTILE: collect all values
-    all_values: std::collections::HashMap<String, Vec<f64>>,
-    // For GROUP_CONCAT: collect strings
-    concat_values: std::collections::HashMap<String, Vec<String>>,
-    // For FIRST/LAST: track first and last seen values
-    first_values: std::collections::HashMap<String, Value>,
-    last_values: std::collections::HashMap<String, Value>,
-    // For ARRAY_AGG: collect all values
-    array_values: std::collections::HashMap<String, Vec<Value>>,
-    // For COUNT(DISTINCT): collect unique values
-    distinct_sets: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    sums: Vec<f64>,
+    sum_agg_counts: Vec<u64>,
+    sum_squares: Vec<f64>,
+    count_only: Vec<u64>,
+    mins: Vec<Option<Value>>,
+    maxs: Vec<Option<Value>>,
+    all_values: Vec<Vec<f64>>,
+    concat_values: Vec<Vec<String>>,
+    first_values: Vec<Option<Value>>,
+    last_values: Vec<Option<Value>>,
+    array_values: Vec<Vec<Value>>,
+    distinct_sets: Vec<Option<std::collections::HashSet<String>>>,
+}
+
+impl SlottedAggState {
+    fn new(plan: &CompiledAggPlan) -> Self {
+        Self {
+            count: 0,
+            sums: vec![0.0; plan.n_sum_count],
+            sum_agg_counts: vec![0; plan.n_sum_count],
+            sum_squares: vec![0.0; plan.n_sum_count],
+            count_only: vec![0; plan.n_count],
+            mins: vec![None; plan.n_min],
+            maxs: vec![None; plan.n_max],
+            all_values: vec![Vec::new(); plan.n_all_values],
+            concat_values: vec![Vec::new(); plan.n_concat],
+            first_values: vec![None; plan.n_first],
+            last_values: vec![None; plan.n_last],
+            array_values: vec![Vec::new(); plan.n_array],
+            distinct_sets: vec![None; plan.n_distinct],
+        }
+    }
+}
+
+#[derive(Clone)]
+struct AggregateGroup {
+    group_values: Vec<Value>,
+    state: SlottedAggState,
+}
+
+pub(super) fn update_extreme_value_slot(slot: &mut Option<Value>, candidate: &Value, ordering: std::cmp::Ordering) {
+    if matches!(candidate, Value::Null) {
+        return;
+    }
+    match slot {
+        Some(current) => {
+            if runtime_partial_cmp(candidate, current).is_some_and(|ord| ord == ordering) {
+                *current = candidate.clone();
+            }
+        }
+        None => {
+            *slot = Some(candidate.clone());
+        }
+    }
 }
 
 fn value_to_f64(val: &Value) -> Option<f64> {
@@ -1437,20 +1759,23 @@ fn value_to_f64(val: &Value) -> Option<f64> {
     }
 }
 
-// ── SpillCodec / Mergeable for AggState + AggregateGroup ────────────────────
+// ── SpillCodec / Mergeable for SlottedAggState + AggregateGroup ─────────────
 //
-// Enables SpilledHashAgg<String, AggregateGroup> so GROUP BY queries that
-// exceed work_mem spill to a tmpfs batch file rather than failing.
-// Encoding is manual little-endian (no serde dep) using the same style as
-// the built-in impls in `agg_spill.rs`.
+// Enables SpilledHashAgg<AggregateGroupKey, AggregateGroup> so GROUP BY
+// queries that exceed work_mem spill to a tmpfs batch file rather than
+// failing.  Encoding is manual little-endian (no serde dep) using the same
+// style as the built-in impls in `agg_spill.rs`.
+//
+// SlottedAggState fields are encoded as length-prefixed Vec<T> sequences so
+// that decode can reconstruct the Vec without the CompiledAggPlan.
 mod agg_spill_codec {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashSet;
     use std::io::{Read, Write};
 
     use crate::storage::query::executors::agg_spill::{Mergeable, SpillCodec, SpillError};
-    use crate::storage::schema::Value;
+    use crate::storage::schema::{CanonicalKey, CanonicalKeyFamily, Value};
 
-    use super::{AggState, AggregateGroup};
+    use super::{AggregateGroup, AggregateGroupKey, GroupKeyPart, SlottedAggState};
 
     // ── low-level helpers ────────────────────────────────────────────────────
 
@@ -1471,6 +1796,15 @@ mod agg_spill_codec {
         let mut b = [0u8; 8];
         r.read_exact(&mut b)?;
         Ok(f64::from_le_bytes(b))
+    }
+    fn w_u8<W: Write>(w: &mut W, v: u8) -> std::io::Result<usize> {
+        w.write_all(&[v])?;
+        Ok(1)
+    }
+    fn r_u8<R: Read>(r: &mut R) -> std::io::Result<u8> {
+        let mut b = [0u8; 1];
+        r.read_exact(&mut b)?;
+        Ok(b[0])
     }
     fn w_str<W: Write>(w: &mut W, s: &str) -> std::io::Result<usize> {
         let b = s.as_bytes();
@@ -1551,218 +1885,491 @@ mod agg_spill_codec {
         }
     }
 
-    // ── compound helpers ─────────────────────────────────────────────────────
+    fn family_to_tag(family: CanonicalKeyFamily) -> u8 {
+        match family {
+            CanonicalKeyFamily::Null => 0,
+            CanonicalKeyFamily::Boolean => 1,
+            CanonicalKeyFamily::Integer => 2,
+            CanonicalKeyFamily::BigInt => 3,
+            CanonicalKeyFamily::UnsignedInteger => 4,
+            CanonicalKeyFamily::Float => 5,
+            CanonicalKeyFamily::Text => 6,
+            CanonicalKeyFamily::Blob => 7,
+            CanonicalKeyFamily::Timestamp => 8,
+            CanonicalKeyFamily::Duration => 9,
+            CanonicalKeyFamily::IpAddr => 10,
+            CanonicalKeyFamily::MacAddr => 11,
+            CanonicalKeyFamily::Json => 12,
+            CanonicalKeyFamily::Uuid => 13,
+            CanonicalKeyFamily::NodeRef => 14,
+            CanonicalKeyFamily::EdgeRef => 15,
+            CanonicalKeyFamily::VectorRef => 16,
+            CanonicalKeyFamily::RowRef => 17,
+            CanonicalKeyFamily::Color => 18,
+            CanonicalKeyFamily::Email => 19,
+            CanonicalKeyFamily::Url => 20,
+            CanonicalKeyFamily::Phone => 21,
+            CanonicalKeyFamily::Semver => 22,
+            CanonicalKeyFamily::Cidr => 23,
+            CanonicalKeyFamily::Date => 24,
+            CanonicalKeyFamily::Time => 25,
+            CanonicalKeyFamily::Decimal => 26,
+            CanonicalKeyFamily::EnumValue => 27,
+            CanonicalKeyFamily::TimestampMs => 28,
+            CanonicalKeyFamily::Ipv4 => 29,
+            CanonicalKeyFamily::Ipv6 => 30,
+            CanonicalKeyFamily::Subnet => 31,
+            CanonicalKeyFamily::Port => 32,
+            CanonicalKeyFamily::Latitude => 33,
+            CanonicalKeyFamily::Longitude => 34,
+            CanonicalKeyFamily::GeoPoint => 35,
+            CanonicalKeyFamily::Country2 => 36,
+            CanonicalKeyFamily::Country3 => 37,
+            CanonicalKeyFamily::Lang2 => 38,
+            CanonicalKeyFamily::Lang5 => 39,
+            CanonicalKeyFamily::Currency => 40,
+            CanonicalKeyFamily::ColorAlpha => 41,
+            CanonicalKeyFamily::KeyRef => 42,
+            CanonicalKeyFamily::DocRef => 43,
+            CanonicalKeyFamily::TableRef => 44,
+            CanonicalKeyFamily::PageRef => 45,
+            CanonicalKeyFamily::Password => 46,
+        }
+    }
 
-    fn w_map_f64<W: Write>(w: &mut W, m: &HashMap<String, f64>) -> std::io::Result<usize> {
-        w.write_all(&(m.len() as u32).to_le_bytes())?;
-        let mut t = 4;
-        for (k, v) in m {
-            t += w_str(w, k)?;
-            t += w_f64(w, *v)?;
+    fn tag_to_family(tag: u8) -> Result<CanonicalKeyFamily, SpillError> {
+        match tag {
+            0 => Ok(CanonicalKeyFamily::Null),
+            1 => Ok(CanonicalKeyFamily::Boolean),
+            2 => Ok(CanonicalKeyFamily::Integer),
+            3 => Ok(CanonicalKeyFamily::BigInt),
+            4 => Ok(CanonicalKeyFamily::UnsignedInteger),
+            5 => Ok(CanonicalKeyFamily::Float),
+            6 => Ok(CanonicalKeyFamily::Text),
+            7 => Ok(CanonicalKeyFamily::Blob),
+            8 => Ok(CanonicalKeyFamily::Timestamp),
+            9 => Ok(CanonicalKeyFamily::Duration),
+            10 => Ok(CanonicalKeyFamily::IpAddr),
+            11 => Ok(CanonicalKeyFamily::MacAddr),
+            12 => Ok(CanonicalKeyFamily::Json),
+            13 => Ok(CanonicalKeyFamily::Uuid),
+            14 => Ok(CanonicalKeyFamily::NodeRef),
+            15 => Ok(CanonicalKeyFamily::EdgeRef),
+            16 => Ok(CanonicalKeyFamily::VectorRef),
+            17 => Ok(CanonicalKeyFamily::RowRef),
+            18 => Ok(CanonicalKeyFamily::Color),
+            19 => Ok(CanonicalKeyFamily::Email),
+            20 => Ok(CanonicalKeyFamily::Url),
+            21 => Ok(CanonicalKeyFamily::Phone),
+            22 => Ok(CanonicalKeyFamily::Semver),
+            23 => Ok(CanonicalKeyFamily::Cidr),
+            24 => Ok(CanonicalKeyFamily::Date),
+            25 => Ok(CanonicalKeyFamily::Time),
+            26 => Ok(CanonicalKeyFamily::Decimal),
+            27 => Ok(CanonicalKeyFamily::EnumValue),
+            28 => Ok(CanonicalKeyFamily::TimestampMs),
+            29 => Ok(CanonicalKeyFamily::Ipv4),
+            30 => Ok(CanonicalKeyFamily::Ipv6),
+            31 => Ok(CanonicalKeyFamily::Subnet),
+            32 => Ok(CanonicalKeyFamily::Port),
+            33 => Ok(CanonicalKeyFamily::Latitude),
+            34 => Ok(CanonicalKeyFamily::Longitude),
+            35 => Ok(CanonicalKeyFamily::GeoPoint),
+            36 => Ok(CanonicalKeyFamily::Country2),
+            37 => Ok(CanonicalKeyFamily::Country3),
+            38 => Ok(CanonicalKeyFamily::Lang2),
+            39 => Ok(CanonicalKeyFamily::Lang5),
+            40 => Ok(CanonicalKeyFamily::Currency),
+            41 => Ok(CanonicalKeyFamily::ColorAlpha),
+            42 => Ok(CanonicalKeyFamily::KeyRef),
+            43 => Ok(CanonicalKeyFamily::DocRef),
+            44 => Ok(CanonicalKeyFamily::TableRef),
+            45 => Ok(CanonicalKeyFamily::PageRef),
+            46 => Ok(CanonicalKeyFamily::Password),
+            other => Err(SpillError::Codec(format!(
+                "unknown canonical key family tag {other}"
+            ))),
         }
-        Ok(t)
     }
-    fn r_map_f64<R: Read>(r: &mut R) -> std::io::Result<HashMap<String, f64>> {
-        let mut nb = [0u8; 4];
-        r.read_exact(&mut nb)?;
-        let n = u32::from_le_bytes(nb) as usize;
-        let mut m = HashMap::with_capacity(n);
-        for _ in 0..n {
-            m.insert(r_str(r)?, r_f64(r)?);
-        }
-        Ok(m)
-    }
-    fn w_map_u64<W: Write>(w: &mut W, m: &HashMap<String, u64>) -> std::io::Result<usize> {
-        w.write_all(&(m.len() as u32).to_le_bytes())?;
-        let mut t = 4;
-        for (k, v) in m {
-            t += w_str(w, k)?;
-            t += w_u64(w, *v)?;
-        }
-        Ok(t)
-    }
-    fn r_map_u64<R: Read>(r: &mut R) -> std::io::Result<HashMap<String, u64>> {
-        let mut nb = [0u8; 4];
-        r.read_exact(&mut nb)?;
-        let n = u32::from_le_bytes(nb) as usize;
-        let mut m = HashMap::with_capacity(n);
-        for _ in 0..n {
-            m.insert(r_str(r)?, r_u64(r)?);
-        }
-        Ok(m)
-    }
-    fn w_map_val<W: Write>(w: &mut W, m: &HashMap<String, Value>) -> std::io::Result<usize> {
-        w.write_all(&(m.len() as u32).to_le_bytes())?;
-        let mut t = 4;
-        for (k, v) in m {
-            t += w_str(w, k)?;
-            t += w_val(w, v)?;
-        }
-        Ok(t)
-    }
-    fn r_map_val<R: Read>(r: &mut R) -> std::io::Result<HashMap<String, Value>> {
-        let mut nb = [0u8; 4];
-        r.read_exact(&mut nb)?;
-        let n = u32::from_le_bytes(nb) as usize;
-        let mut m = HashMap::with_capacity(n);
-        for _ in 0..n {
-            m.insert(r_str(r)?, r_val(r)?);
-        }
-        Ok(m)
-    }
-    fn w_map_vec_f64<W: Write>(w: &mut W, m: &HashMap<String, Vec<f64>>) -> std::io::Result<usize> {
-        w.write_all(&(m.len() as u32).to_le_bytes())?;
-        let mut t = 4;
-        for (k, v) in m {
-            t += w_str(w, k)?;
-            w.write_all(&(v.len() as u32).to_le_bytes())?;
-            t += 4;
-            for &f in v {
-                t += w_f64(w, f)?;
+
+    fn w_canonical_key<W: Write>(w: &mut W, key: &CanonicalKey) -> Result<usize, SpillError> {
+        let mut t = 0;
+        match key {
+            CanonicalKey::Null => {
+                t += w_u8(w, 0).map_err(SpillError::Io)?;
+            }
+            CanonicalKey::Boolean(value) => {
+                t += w_u8(w, 1).map_err(SpillError::Io)?;
+                t += w_u8(w, *value as u8).map_err(SpillError::Io)?;
+            }
+            CanonicalKey::Signed(family, value) => {
+                t += w_u8(w, 2).map_err(SpillError::Io)?;
+                t += w_u8(w, family_to_tag(*family)).map_err(SpillError::Io)?;
+                w.write_all(&value.to_le_bytes()).map_err(SpillError::Io)?;
+                t += 8;
+            }
+            CanonicalKey::Unsigned(family, value) => {
+                t += w_u8(w, 3).map_err(SpillError::Io)?;
+                t += w_u8(w, family_to_tag(*family)).map_err(SpillError::Io)?;
+                w.write_all(&value.to_le_bytes()).map_err(SpillError::Io)?;
+                t += 8;
+            }
+            CanonicalKey::Float(bits) => {
+                t += w_u8(w, 4).map_err(SpillError::Io)?;
+                w.write_all(&bits.to_le_bytes()).map_err(SpillError::Io)?;
+                t += 8;
+            }
+            CanonicalKey::Text(family, value) => {
+                t += w_u8(w, 5).map_err(SpillError::Io)?;
+                t += w_u8(w, family_to_tag(*family)).map_err(SpillError::Io)?;
+                t += w_str(w, value).map_err(SpillError::Io)?;
+            }
+            CanonicalKey::Bytes(family, value) => {
+                t += w_u8(w, 6).map_err(SpillError::Io)?;
+                t += w_u8(w, family_to_tag(*family)).map_err(SpillError::Io)?;
+                w.write_all(&(value.len() as u32).to_le_bytes())
+                    .map_err(SpillError::Io)?;
+                w.write_all(value).map_err(SpillError::Io)?;
+                t += 4 + value.len();
+            }
+            CanonicalKey::PairTextU64(family, left, right) => {
+                t += w_u8(w, 7).map_err(SpillError::Io)?;
+                t += w_u8(w, family_to_tag(*family)).map_err(SpillError::Io)?;
+                t += w_str(w, left).map_err(SpillError::Io)?;
+                t += w_u64(w, *right).map_err(SpillError::Io)?;
+            }
+            CanonicalKey::PairTextText(family, left, right) => {
+                t += w_u8(w, 8).map_err(SpillError::Io)?;
+                t += w_u8(w, family_to_tag(*family)).map_err(SpillError::Io)?;
+                t += w_str(w, left).map_err(SpillError::Io)?;
+                t += w_str(w, right).map_err(SpillError::Io)?;
+            }
+            CanonicalKey::PairU32U8(family, left, right) => {
+                t += w_u8(w, 9).map_err(SpillError::Io)?;
+                t += w_u8(w, family_to_tag(*family)).map_err(SpillError::Io)?;
+                w.write_all(&left.to_le_bytes()).map_err(SpillError::Io)?;
+                t += 4;
+                t += w_u8(w, *right).map_err(SpillError::Io)?;
+            }
+            CanonicalKey::PairU32U32(family, left, right) => {
+                t += w_u8(w, 10).map_err(SpillError::Io)?;
+                t += w_u8(w, family_to_tag(*family)).map_err(SpillError::Io)?;
+                w.write_all(&left.to_le_bytes()).map_err(SpillError::Io)?;
+                w.write_all(&right.to_le_bytes()).map_err(SpillError::Io)?;
+                t += 8;
+            }
+            CanonicalKey::PairI32I32(family, left, right) => {
+                t += w_u8(w, 11).map_err(SpillError::Io)?;
+                t += w_u8(w, family_to_tag(*family)).map_err(SpillError::Io)?;
+                w.write_all(&left.to_le_bytes()).map_err(SpillError::Io)?;
+                w.write_all(&right.to_le_bytes()).map_err(SpillError::Io)?;
+                t += 8;
             }
         }
         Ok(t)
     }
-    fn r_map_vec_f64<R: Read>(r: &mut R) -> std::io::Result<HashMap<String, Vec<f64>>> {
-        let mut nb = [0u8; 4];
-        r.read_exact(&mut nb)?;
-        let n = u32::from_le_bytes(nb) as usize;
-        let mut m = HashMap::with_capacity(n);
-        for _ in 0..n {
-            let k = r_str(r)?;
-            let mut vn = [0u8; 4];
-            r.read_exact(&mut vn)?;
-            let vn = u32::from_le_bytes(vn) as usize;
-            let mut v = Vec::with_capacity(vn);
-            for _ in 0..vn {
-                v.push(r_f64(r)?);
+
+    fn r_canonical_key<R: Read>(r: &mut R) -> Result<CanonicalKey, SpillError> {
+        let tag = r_u8(r).map_err(SpillError::Io)?;
+        match tag {
+            0 => Ok(CanonicalKey::Null),
+            1 => Ok(CanonicalKey::Boolean(r_u8(r).map_err(SpillError::Io)? != 0)),
+            2 => {
+                let family = tag_to_family(r_u8(r).map_err(SpillError::Io)?)?;
+                let mut b = [0u8; 8];
+                r.read_exact(&mut b).map_err(SpillError::Io)?;
+                Ok(CanonicalKey::Signed(family, i64::from_le_bytes(b)))
             }
-            m.insert(k, v);
+            3 => {
+                let family = tag_to_family(r_u8(r).map_err(SpillError::Io)?)?;
+                let mut b = [0u8; 8];
+                r.read_exact(&mut b).map_err(SpillError::Io)?;
+                Ok(CanonicalKey::Unsigned(family, u64::from_le_bytes(b)))
+            }
+            4 => {
+                let mut b = [0u8; 8];
+                r.read_exact(&mut b).map_err(SpillError::Io)?;
+                Ok(CanonicalKey::Float(u64::from_le_bytes(b)))
+            }
+            5 => {
+                let family = tag_to_family(r_u8(r).map_err(SpillError::Io)?)?;
+                Ok(CanonicalKey::Text(family, r_str(r).map_err(SpillError::Io)?))
+            }
+            6 => {
+                let family = tag_to_family(r_u8(r).map_err(SpillError::Io)?)?;
+                let mut len = [0u8; 4];
+                r.read_exact(&mut len).map_err(SpillError::Io)?;
+                let len = u32::from_le_bytes(len) as usize;
+                let mut bytes = vec![0u8; len];
+                r.read_exact(&mut bytes).map_err(SpillError::Io)?;
+                Ok(CanonicalKey::Bytes(family, bytes))
+            }
+            7 => {
+                let family = tag_to_family(r_u8(r).map_err(SpillError::Io)?)?;
+                let left = r_str(r).map_err(SpillError::Io)?;
+                let right = r_u64(r).map_err(SpillError::Io)?;
+                Ok(CanonicalKey::PairTextU64(family, left, right))
+            }
+            8 => {
+                let family = tag_to_family(r_u8(r).map_err(SpillError::Io)?)?;
+                let left = r_str(r).map_err(SpillError::Io)?;
+                let right = r_str(r).map_err(SpillError::Io)?;
+                Ok(CanonicalKey::PairTextText(family, left, right))
+            }
+            9 => {
+                let family = tag_to_family(r_u8(r).map_err(SpillError::Io)?)?;
+                let mut left = [0u8; 4];
+                r.read_exact(&mut left).map_err(SpillError::Io)?;
+                let right = r_u8(r).map_err(SpillError::Io)?;
+                Ok(CanonicalKey::PairU32U8(
+                    family,
+                    u32::from_le_bytes(left),
+                    right,
+                ))
+            }
+            10 => {
+                let family = tag_to_family(r_u8(r).map_err(SpillError::Io)?)?;
+                let mut left = [0u8; 4];
+                let mut right = [0u8; 4];
+                r.read_exact(&mut left).map_err(SpillError::Io)?;
+                r.read_exact(&mut right).map_err(SpillError::Io)?;
+                Ok(CanonicalKey::PairU32U32(
+                    family,
+                    u32::from_le_bytes(left),
+                    u32::from_le_bytes(right),
+                ))
+            }
+            11 => {
+                let family = tag_to_family(r_u8(r).map_err(SpillError::Io)?)?;
+                let mut left = [0u8; 4];
+                let mut right = [0u8; 4];
+                r.read_exact(&mut left).map_err(SpillError::Io)?;
+                r.read_exact(&mut right).map_err(SpillError::Io)?;
+                Ok(CanonicalKey::PairI32I32(
+                    family,
+                    i32::from_le_bytes(left),
+                    i32::from_le_bytes(right),
+                ))
+            }
+            other => Err(SpillError::Codec(format!(
+                "unknown canonical key tag {other}"
+            ))),
         }
-        Ok(m)
     }
-    fn w_map_vec_str<W: Write>(
-        w: &mut W,
-        m: &HashMap<String, Vec<String>>,
-    ) -> std::io::Result<usize> {
-        w.write_all(&(m.len() as u32).to_le_bytes())?;
+
+    // ── compound helpers: Vec<T> ─────────────────────────────────────────────
+
+    fn w_vec_f64<W: Write>(w: &mut W, v: &[f64]) -> std::io::Result<usize> {
+        w.write_all(&(v.len() as u32).to_le_bytes())?;
         let mut t = 4;
-        for (k, v) in m {
-            t += w_str(w, k)?;
-            w.write_all(&(v.len() as u32).to_le_bytes())?;
-            t += 4;
-            for s in v {
-                t += w_str(w, s)?;
+        for &f in v { t += w_f64(w, f)?; }
+        Ok(t)
+    }
+    fn r_vec_f64<R: Read>(r: &mut R) -> std::io::Result<Vec<f64>> {
+        let n = r_len(r)?;
+        let mut v = Vec::with_capacity(n);
+        for _ in 0..n { v.push(r_f64(r)?); }
+        Ok(v)
+    }
+    fn w_vec_u64<W: Write>(w: &mut W, v: &[u64]) -> std::io::Result<usize> {
+        w.write_all(&(v.len() as u32).to_le_bytes())?;
+        let mut t = 4;
+        for &n in v { t += w_u64(w, n)?; }
+        Ok(t)
+    }
+    fn r_vec_u64<R: Read>(r: &mut R) -> std::io::Result<Vec<u64>> {
+        let n = r_len(r)?;
+        let mut v = Vec::with_capacity(n);
+        for _ in 0..n { v.push(r_u64(r)?); }
+        Ok(v)
+    }
+    fn w_vec_option_val<W: Write>(w: &mut W, v: &[Option<Value>]) -> std::io::Result<usize> {
+        w.write_all(&(v.len() as u32).to_le_bytes())?;
+        let mut t = 4;
+        for opt in v {
+            match opt {
+                None => { w.write_all(&[0u8])?; t += 1; }
+                Some(val) => {
+                    w.write_all(&[1u8])?;
+                    t += 1 + w_val(w, val)?;
+                }
             }
         }
         Ok(t)
     }
-    fn r_map_vec_str<R: Read>(r: &mut R) -> std::io::Result<HashMap<String, Vec<String>>> {
-        let mut nb = [0u8; 4];
-        r.read_exact(&mut nb)?;
-        let n = u32::from_le_bytes(nb) as usize;
-        let mut m = HashMap::with_capacity(n);
+    fn r_vec_option_val<R: Read>(r: &mut R) -> std::io::Result<Vec<Option<Value>>> {
+        let n = r_len(r)?;
+        let mut v = Vec::with_capacity(n);
         for _ in 0..n {
-            let k = r_str(r)?;
-            let mut vn = [0u8; 4];
-            r.read_exact(&mut vn)?;
-            let vn = u32::from_le_bytes(vn) as usize;
-            let mut v = Vec::with_capacity(vn);
-            for _ in 0..vn {
-                v.push(r_str(r)?);
-            }
-            m.insert(k, v);
+            let tag = r_u8(r)?;
+            v.push(if tag == 0 { None } else { Some(r_val(r)?) });
         }
-        Ok(m)
-    }
-    fn w_map_vec_val<W: Write>(
-        w: &mut W,
-        m: &HashMap<String, Vec<Value>>,
-    ) -> std::io::Result<usize> {
-        w.write_all(&(m.len() as u32).to_le_bytes())?;
-        let mut t = 4;
-        for (k, v) in m {
-            t += w_str(w, k)?;
-            w.write_all(&(v.len() as u32).to_le_bytes())?;
-            t += 4;
-            for val in v {
-                t += w_val(w, val)?;
-            }
-        }
-        Ok(t)
-    }
-    fn r_map_vec_val<R: Read>(r: &mut R) -> std::io::Result<HashMap<String, Vec<Value>>> {
-        let mut nb = [0u8; 4];
-        r.read_exact(&mut nb)?;
-        let n = u32::from_le_bytes(nb) as usize;
-        let mut m = HashMap::with_capacity(n);
-        for _ in 0..n {
-            let k = r_str(r)?;
-            let mut vn = [0u8; 4];
-            r.read_exact(&mut vn)?;
-            let vn = u32::from_le_bytes(vn) as usize;
-            let mut v = Vec::with_capacity(vn);
-            for _ in 0..vn {
-                v.push(r_val(r)?);
-            }
-            m.insert(k, v);
-        }
-        Ok(m)
-    }
-    fn w_map_set_str<W: Write>(
-        w: &mut W,
-        m: &HashMap<String, HashSet<String>>,
-    ) -> std::io::Result<usize> {
-        w.write_all(&(m.len() as u32).to_le_bytes())?;
-        let mut t = 4;
-        for (k, set) in m {
-            t += w_str(w, k)?;
-            w.write_all(&(set.len() as u32).to_le_bytes())?;
-            t += 4;
-            for s in set {
-                t += w_str(w, s)?;
-            }
-        }
-        Ok(t)
-    }
-    fn r_map_set_str<R: Read>(r: &mut R) -> std::io::Result<HashMap<String, HashSet<String>>> {
-        let mut nb = [0u8; 4];
-        r.read_exact(&mut nb)?;
-        let n = u32::from_le_bytes(nb) as usize;
-        let mut m = HashMap::with_capacity(n);
-        for _ in 0..n {
-            let k = r_str(r)?;
-            let mut sn = [0u8; 4];
-            r.read_exact(&mut sn)?;
-            let sn = u32::from_le_bytes(sn) as usize;
-            let mut set = HashSet::with_capacity(sn);
-            for _ in 0..sn {
-                set.insert(r_str(r)?);
-            }
-            m.insert(k, set);
-        }
-        Ok(m)
+        Ok(v)
     }
     fn w_vec_val<W: Write>(w: &mut W, v: &[Value]) -> std::io::Result<usize> {
         w.write_all(&(v.len() as u32).to_le_bytes())?;
         let mut t = 4;
-        for val in v {
-            t += w_val(w, val)?;
-        }
+        for val in v { t += w_val(w, val)?; }
         Ok(t)
     }
     fn r_vec_val<R: Read>(r: &mut R) -> std::io::Result<Vec<Value>> {
-        let mut nb = [0u8; 4];
-        r.read_exact(&mut nb)?;
-        let n = u32::from_le_bytes(nb) as usize;
+        let n = r_len(r)?;
+        let mut v = Vec::with_capacity(n);
+        for _ in 0..n { v.push(r_val(r)?); }
+        Ok(v)
+    }
+    fn w_vec_vec_f64<W: Write>(w: &mut W, v: &[Vec<f64>]) -> std::io::Result<usize> {
+        w.write_all(&(v.len() as u32).to_le_bytes())?;
+        let mut t = 4;
+        for inner in v { t += w_vec_f64(w, inner)?; }
+        Ok(t)
+    }
+    fn r_vec_vec_f64<R: Read>(r: &mut R) -> std::io::Result<Vec<Vec<f64>>> {
+        let n = r_len(r)?;
+        let mut v = Vec::with_capacity(n);
+        for _ in 0..n { v.push(r_vec_f64(r)?); }
+        Ok(v)
+    }
+    fn w_vec_vec_str<W: Write>(w: &mut W, v: &[Vec<String>]) -> std::io::Result<usize> {
+        w.write_all(&(v.len() as u32).to_le_bytes())?;
+        let mut t = 4;
+        for inner in v {
+            w.write_all(&(inner.len() as u32).to_le_bytes())?;
+            t += 4;
+            for s in inner { t += w_str(w, s)?; }
+        }
+        Ok(t)
+    }
+    fn r_vec_vec_str<R: Read>(r: &mut R) -> std::io::Result<Vec<Vec<String>>> {
+        let n = r_len(r)?;
         let mut v = Vec::with_capacity(n);
         for _ in 0..n {
-            v.push(r_val(r)?);
+            let m = r_len(r)?;
+            let mut inner = Vec::with_capacity(m);
+            for _ in 0..m { inner.push(r_str(r)?); }
+            v.push(inner);
         }
         Ok(v)
     }
+    fn w_vec_vec_val<W: Write>(w: &mut W, v: &[Vec<Value>]) -> std::io::Result<usize> {
+        w.write_all(&(v.len() as u32).to_le_bytes())?;
+        let mut t = 4;
+        for inner in v { t += w_vec_val(w, inner)?; }
+        Ok(t)
+    }
+    fn r_vec_vec_val<R: Read>(r: &mut R) -> std::io::Result<Vec<Vec<Value>>> {
+        let n = r_len(r)?;
+        let mut v = Vec::with_capacity(n);
+        for _ in 0..n { v.push(r_vec_val(r)?); }
+        Ok(v)
+    }
+    fn w_vec_option_set_str<W: Write>(
+        w: &mut W,
+        v: &[Option<HashSet<String>>],
+    ) -> std::io::Result<usize> {
+        w.write_all(&(v.len() as u32).to_le_bytes())?;
+        let mut t = 4;
+        for opt in v {
+            match opt {
+                None => { w.write_all(&[0u8])?; t += 1; }
+                Some(set) => {
+                    w.write_all(&[1u8])?;
+                    w.write_all(&(set.len() as u32).to_le_bytes())?;
+                    t += 5;
+                    for s in set { t += w_str(w, s)?; }
+                }
+            }
+        }
+        Ok(t)
+    }
+    fn r_vec_option_set_str<R: Read>(
+        r: &mut R,
+    ) -> std::io::Result<Vec<Option<HashSet<String>>>> {
+        let n = r_len(r)?;
+        let mut v = Vec::with_capacity(n);
+        for _ in 0..n {
+            let tag = r_u8(r)?;
+            if tag == 0 {
+                v.push(None);
+            } else {
+                let m = r_len(r)?;
+                let mut set = HashSet::with_capacity(m);
+                for _ in 0..m { set.insert(r_str(r)?); }
+                v.push(Some(set));
+            }
+        }
+        Ok(v)
+    }
+    fn r_len<R: Read>(r: &mut R) -> std::io::Result<usize> {
+        let mut nb = [0u8; 4];
+        r.read_exact(&mut nb)?;
+        Ok(u32::from_le_bytes(nb) as usize)
+    }
 
     // ── SpillCodec ───────────────────────────────────────────────────────────
+
+    impl SpillCodec for GroupKeyPart {
+        fn encode<W: Write>(&self, w: &mut W) -> Result<usize, SpillError> {
+            match self {
+                GroupKeyPart::Canonical(key) => {
+                    let mut t = w_u8(w, 0).map_err(SpillError::Io)?;
+                    t += w_canonical_key(w, key)?;
+                    Ok(t)
+                }
+                GroupKeyPart::Rendered(value) => {
+                    let mut t = w_u8(w, 1).map_err(SpillError::Io)?;
+                    t += w_str(w, value).map_err(SpillError::Io)?;
+                    Ok(t)
+                }
+            }
+        }
+
+        fn decode<R: Read>(r: &mut R) -> Result<Option<Self>, SpillError> {
+            let tag = match r_u8(r) {
+                Ok(tag) => tag,
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+                Err(e) => return Err(SpillError::Io(e)),
+            };
+            match tag {
+                0 => Ok(Some(GroupKeyPart::Canonical(r_canonical_key(r)?))),
+                1 => Ok(Some(GroupKeyPart::Rendered(
+                    r_str(r).map_err(SpillError::Io)?,
+                ))),
+                other => Err(SpillError::Codec(format!(
+                    "unknown group key part tag {other}"
+                ))),
+            }
+        }
+    }
+
+    impl SpillCodec for AggregateGroupKey {
+        fn encode<W: Write>(&self, w: &mut W) -> Result<usize, SpillError> {
+            w.write_all(&(self.len() as u32).to_le_bytes())
+                .map_err(SpillError::Io)?;
+            let mut t = 4;
+            for part in self {
+                t += part.encode(w)?;
+            }
+            Ok(t)
+        }
+
+        fn decode<R: Read>(r: &mut R) -> Result<Option<Self>, SpillError> {
+            let mut nb = [0u8; 4];
+            match r.read_exact(&mut nb) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+                Err(e) => return Err(SpillError::Io(e)),
+            }
+            let n = u32::from_le_bytes(nb) as usize;
+            let mut parts = Vec::with_capacity(n);
+            for _ in 0..n {
+                let part = GroupKeyPart::decode(r)?
+                    .ok_or_else(|| SpillError::Codec("truncated group key".to_string()))?;
+                parts.push(part);
+            }
+            Ok(Some(parts))
+        }
+    }
 
     impl SpillCodec for AggregateGroup {
         fn encode<W: Write>(&self, w: &mut W) -> Result<usize, SpillError> {
@@ -1770,22 +2377,23 @@ mod agg_spill_codec {
             t += w_vec_val(w, &self.group_values).map_err(SpillError::Io)?;
             let s = &self.state;
             t += w_u64(w, s.count).map_err(SpillError::Io)?;
-            t += w_map_f64(w, &s.sums).map_err(SpillError::Io)?;
-            t += w_map_val(w, &s.mins).map_err(SpillError::Io)?;
-            t += w_map_val(w, &s.maxs).map_err(SpillError::Io)?;
-            t += w_map_f64(w, &s.sum_squares).map_err(SpillError::Io)?;
-            t += w_map_u64(w, &s.agg_counts).map_err(SpillError::Io)?;
-            t += w_map_vec_f64(w, &s.all_values).map_err(SpillError::Io)?;
-            t += w_map_vec_str(w, &s.concat_values).map_err(SpillError::Io)?;
-            t += w_map_val(w, &s.first_values).map_err(SpillError::Io)?;
-            t += w_map_val(w, &s.last_values).map_err(SpillError::Io)?;
-            t += w_map_vec_val(w, &s.array_values).map_err(SpillError::Io)?;
-            t += w_map_set_str(w, &s.distinct_sets).map_err(SpillError::Io)?;
+            t += w_vec_f64(w, &s.sums).map_err(SpillError::Io)?;
+            t += w_vec_u64(w, &s.sum_agg_counts).map_err(SpillError::Io)?;
+            t += w_vec_f64(w, &s.sum_squares).map_err(SpillError::Io)?;
+            t += w_vec_u64(w, &s.count_only).map_err(SpillError::Io)?;
+            t += w_vec_option_val(w, &s.mins).map_err(SpillError::Io)?;
+            t += w_vec_option_val(w, &s.maxs).map_err(SpillError::Io)?;
+            t += w_vec_vec_f64(w, &s.all_values).map_err(SpillError::Io)?;
+            t += w_vec_vec_str(w, &s.concat_values).map_err(SpillError::Io)?;
+            t += w_vec_option_val(w, &s.first_values).map_err(SpillError::Io)?;
+            t += w_vec_option_val(w, &s.last_values).map_err(SpillError::Io)?;
+            t += w_vec_vec_val(w, &s.array_values).map_err(SpillError::Io)?;
+            t += w_vec_option_set_str(w, &s.distinct_sets).map_err(SpillError::Io)?;
             Ok(t)
         }
 
         fn decode<R: Read>(r: &mut R) -> Result<Option<Self>, SpillError> {
-            // Detect clean EOF via the first field (group_values length prefix)
+            // Detect clean EOF on the first field's length prefix.
             let mut nb = [0u8; 4];
             match r.read_exact(&mut nb) {
                 Ok(()) => {}
@@ -1799,19 +2407,20 @@ mod agg_spill_codec {
             }
             Ok(Some(AggregateGroup {
                 group_values,
-                state: AggState {
-                    count: r_u64(r).map_err(SpillError::Io)?,
-                    sums: r_map_f64(r).map_err(SpillError::Io)?,
-                    mins: r_map_val(r).map_err(SpillError::Io)?,
-                    maxs: r_map_val(r).map_err(SpillError::Io)?,
-                    sum_squares: r_map_f64(r).map_err(SpillError::Io)?,
-                    agg_counts: r_map_u64(r).map_err(SpillError::Io)?,
-                    all_values: r_map_vec_f64(r).map_err(SpillError::Io)?,
-                    concat_values: r_map_vec_str(r).map_err(SpillError::Io)?,
-                    first_values: r_map_val(r).map_err(SpillError::Io)?,
-                    last_values: r_map_val(r).map_err(SpillError::Io)?,
-                    array_values: r_map_vec_val(r).map_err(SpillError::Io)?,
-                    distinct_sets: r_map_set_str(r).map_err(SpillError::Io)?,
+                state: SlottedAggState {
+                    count:         r_u64(r).map_err(SpillError::Io)?,
+                    sums:          r_vec_f64(r).map_err(SpillError::Io)?,
+                    sum_agg_counts: r_vec_u64(r).map_err(SpillError::Io)?,
+                    sum_squares:   r_vec_f64(r).map_err(SpillError::Io)?,
+                    count_only:    r_vec_u64(r).map_err(SpillError::Io)?,
+                    mins:          r_vec_option_val(r).map_err(SpillError::Io)?,
+                    maxs:          r_vec_option_val(r).map_err(SpillError::Io)?,
+                    all_values:    r_vec_vec_f64(r).map_err(SpillError::Io)?,
+                    concat_values: r_vec_vec_str(r).map_err(SpillError::Io)?,
+                    first_values:  r_vec_option_val(r).map_err(SpillError::Io)?,
+                    last_values:   r_vec_option_val(r).map_err(SpillError::Io)?,
+                    array_values:  r_vec_vec_val(r).map_err(SpillError::Io)?,
+                    distinct_sets: r_vec_option_set_str(r).map_err(SpillError::Io)?,
                 },
             }))
         }
@@ -1821,60 +2430,67 @@ mod agg_spill_codec {
 
     impl Mergeable for AggregateGroup {
         fn merge(&mut self, other: Self) {
-            // group_values comes from the same GROUP BY key — keep self's copy.
+            // group_values identical (same GROUP BY key) — keep self's copy.
             let s = &mut self.state;
             let o = other.state;
             s.count += o.count;
-            for (k, v) in o.sums {
-                *s.sums.entry(k).or_default() += v;
+            for (i, v) in o.sums.into_iter().enumerate() {
+                if i < s.sums.len() { s.sums[i] += v; }
             }
-            for (k, v) in o.mins {
-                s.mins
-                    .entry(k)
-                    .and_modify(|e| {
-                        use crate::runtime::query_exec::compare_runtime_values;
-                        use crate::storage::query::ast::CompareOp;
-                        if compare_runtime_values(&v, e, CompareOp::Lt) {
-                            *e = v.clone();
-                        }
-                    })
-                    .or_insert(v);
+            for (i, v) in o.sum_agg_counts.into_iter().enumerate() {
+                if i < s.sum_agg_counts.len() { s.sum_agg_counts[i] += v; }
             }
-            for (k, v) in o.maxs {
-                s.maxs
-                    .entry(k)
-                    .and_modify(|e| {
-                        use crate::runtime::query_exec::compare_runtime_values;
-                        use crate::storage::query::ast::CompareOp;
-                        if compare_runtime_values(&v, e, CompareOp::Gt) {
-                            *e = v.clone();
-                        }
-                    })
-                    .or_insert(v);
+            for (i, v) in o.sum_squares.into_iter().enumerate() {
+                if i < s.sum_squares.len() { s.sum_squares[i] += v; }
             }
-            for (k, v) in o.sum_squares {
-                *s.sum_squares.entry(k).or_default() += v;
+            for (i, v) in o.count_only.into_iter().enumerate() {
+                if i < s.count_only.len() { s.count_only[i] += v; }
             }
-            for (k, v) in o.agg_counts {
-                *s.agg_counts.entry(k).or_default() += v;
+            for (i, candidate) in o.mins.into_iter().enumerate() {
+                if i < s.mins.len() {
+                    if let Some(c) = candidate {
+                        super::update_extreme_value_slot(
+                            &mut s.mins[i], &c, std::cmp::Ordering::Less);
+                    }
+                }
             }
-            for (k, v) in o.all_values {
-                s.all_values.entry(k).or_default().extend(v);
+            for (i, candidate) in o.maxs.into_iter().enumerate() {
+                if i < s.maxs.len() {
+                    if let Some(c) = candidate {
+                        super::update_extreme_value_slot(
+                            &mut s.maxs[i], &c, std::cmp::Ordering::Greater);
+                    }
+                }
             }
-            for (k, v) in o.concat_values {
-                s.concat_values.entry(k).or_default().extend(v);
+            for (i, v) in o.all_values.into_iter().enumerate() {
+                if i < s.all_values.len() { s.all_values[i].extend(v); }
             }
-            // FIRST: keep existing (first-seen batch wins)
-            for (k, v) in o.first_values {
-                s.first_values.entry(k).or_insert(v);
+            for (i, v) in o.concat_values.into_iter().enumerate() {
+                if i < s.concat_values.len() { s.concat_values[i].extend(v); }
             }
-            // LAST: overwrite with later batch
-            s.last_values.extend(o.last_values);
-            for (k, v) in o.array_values {
-                s.array_values.entry(k).or_default().extend(v);
+            // FIRST: keep self (first batch wins)
+            for (i, v) in o.first_values.into_iter().enumerate() {
+                if i < s.first_values.len() && s.first_values[i].is_none() {
+                    s.first_values[i] = v;
+                }
             }
-            for (k, set) in o.distinct_sets {
-                s.distinct_sets.entry(k).or_default().extend(set);
+            // LAST: overwrite with other (later batch)
+            for (i, v) in o.last_values.into_iter().enumerate() {
+                if i < s.last_values.len() && v.is_some() {
+                    s.last_values[i] = v;
+                }
+            }
+            for (i, v) in o.array_values.into_iter().enumerate() {
+                if i < s.array_values.len() { s.array_values[i].extend(v); }
+            }
+            for (i, set_opt) in o.distinct_sets.into_iter().enumerate() {
+                if i < s.distinct_sets.len() {
+                    if let Some(set) = set_opt {
+                        s.distinct_sets[i]
+                            .get_or_insert_with(std::collections::HashSet::new)
+                            .extend(set);
+                    }
+                }
             }
         }
     }

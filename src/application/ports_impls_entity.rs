@@ -1,4 +1,9 @@
-use crate::application::entity::{CreateDocumentInput, CreateKvInput, CreateTimeSeriesPointInput};
+use std::collections::HashMap;
+
+use crate::application::entity::{
+    AppliedEntityMutation, CreateDocumentInput, CreateKvInput, CreateTimeSeriesPointInput,
+    RowUpdateColumnRule, RowUpdateContractPlan,
+};
 use crate::application::ttl_payload::{
     has_internal_ttl_metadata, normalize_ttl_patch_operations, parse_top_level_ttl_metadata_entries,
 };
@@ -8,6 +13,9 @@ use crate::storage::schema::{coerce as coerce_schema_value, DataType, Value};
 use crate::storage::unified::MetadataValue;
 
 use super::*;
+
+const TREE_METADATA_PREFIX: &str = "red.tree.";
+const TREE_CHILD_EDGE_LABEL: &str = "TREE_CHILD";
 
 fn apply_collection_default_ttl(
     db: &crate::storage::unified::devx::RedDB,
@@ -379,6 +387,293 @@ fn enforce_row_uniqueness(
     Ok(())
 }
 
+fn enforce_row_batch_uniqueness(
+    db: &crate::storage::unified::devx::RedDB,
+    collection: &str,
+    rows: &[Vec<(String, Value)>],
+) -> RedDBResult<()> {
+    let Some(contract) = db.collection_contract(collection) else {
+        return Ok(());
+    };
+    if contract.declared_model != crate::catalog::CollectionModel::Table
+        && contract.declared_model != crate::catalog::CollectionModel::Mixed
+    {
+        return Ok(());
+    }
+
+    let rules = resolved_uniqueness_rules(&contract);
+    if rules.is_empty() {
+        return Ok(());
+    }
+
+    for rule in &rules {
+        let mut seen = std::collections::HashMap::<String, usize>::new();
+        for (row_index, fields) in rows.iter().enumerate() {
+            let input_fields: std::collections::BTreeMap<String, Value> =
+                fields.iter().cloned().collect();
+            let mut signatures = Vec::new();
+            let mut skip_rule = false;
+
+            for column in &rule.columns {
+                match input_fields.get(column) {
+                    Some(Value::Null) | None if rule.primary_key => {
+                        return Err(crate::RedDBError::Query(format!(
+                            "primary key '{}' in collection '{}' requires non-null column '{}'",
+                            rule.name, collection, column
+                        )))
+                    }
+                    Some(Value::Null) | None => {
+                        skip_rule = true;
+                        break;
+                    }
+                    Some(value) => signatures.push(format!("{column}={}", value_signature(value))),
+                }
+            }
+
+            if skip_rule {
+                continue;
+            }
+
+            let signature = signatures.join("|");
+            if let Some(previous_index) = seen.insert(signature, row_index) {
+                return Err(crate::RedDBError::Query(format!(
+                    "batch insert violates uniqueness rule '{}' in collection '{}' between rows {} and {}",
+                    rule.name,
+                    collection,
+                    previous_index + 1,
+                    row_index + 1
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn row_update_requires_uniqueness_check(
+    db: &crate::storage::unified::devx::RedDB,
+    collection: &str,
+    modified_columns: &[String],
+) -> bool {
+    if modified_columns.is_empty() {
+        return false;
+    }
+
+    let Some(contract) = db.collection_contract(collection) else {
+        return false;
+    };
+    if contract.declared_model != crate::catalog::CollectionModel::Table
+        && contract.declared_model != crate::catalog::CollectionModel::Mixed
+    {
+        return false;
+    }
+
+    let rules = resolved_uniqueness_rules(&contract);
+    if rules.is_empty() {
+        return false;
+    }
+
+    rules.iter().any(|rule| {
+        rule.columns.iter().any(|column| {
+            modified_columns
+                .iter()
+                .any(|modified| modified.eq_ignore_ascii_case(column))
+        })
+    })
+}
+
+pub(crate) fn build_row_update_contract_plan(
+    db: &crate::storage::unified::devx::RedDB,
+    collection: &str,
+) -> RedDBResult<Option<RowUpdateContractPlan>> {
+    let Some(contract) = db.collection_contract(collection) else {
+        return Ok(None);
+    };
+
+    let declared_rules = if contract.declared_model == crate::catalog::CollectionModel::Table
+        && !(contract.declared_columns.is_empty()
+            && contract
+                .table_def
+                .as_ref()
+                .map(|table| table.columns.is_empty())
+                .unwrap_or(true))
+    {
+        resolved_contract_columns(&contract)?
+            .into_iter()
+            .map(|rule| {
+                (
+                    rule.name.clone(),
+                    RowUpdateColumnRule {
+                        name: rule.name,
+                        data_type: rule.data_type,
+                        data_type_name: rule.data_type_name,
+                        not_null: rule.not_null,
+                        enum_variants: rule.enum_variants,
+                    },
+                )
+            })
+            .collect()
+    } else {
+        HashMap::new()
+    };
+
+    let unique_columns = if matches!(
+        contract.declared_model,
+        crate::catalog::CollectionModel::Table | crate::catalog::CollectionModel::Mixed
+    ) {
+        resolved_uniqueness_rules(&contract)
+            .into_iter()
+            .flat_map(|rule| rule.columns.into_iter())
+            .map(|column| (column, ()))
+            .collect()
+    } else {
+        HashMap::new()
+    };
+
+    Ok(Some(RowUpdateContractPlan {
+        timestamps_enabled: contract.timestamps_enabled,
+        strict_schema: matches!(contract.schema_mode, crate::catalog::SchemaMode::Strict),
+        declared_rules,
+        unique_columns,
+    }))
+}
+
+pub(crate) fn normalize_row_update_assignment_with_plan(
+    collection: &str,
+    column: &str,
+    value: Value,
+    row_contract_plan: Option<&RowUpdateContractPlan>,
+) -> RedDBResult<Value> {
+    let Some(plan) = row_contract_plan else {
+        return Ok(value);
+    };
+
+    if plan.timestamps_enabled && (column == "created_at" || column == "updated_at") {
+        return Err(crate::RedDBError::Query(format!(
+            "collection '{}' manages '{}' automatically — do not set it in UPDATE",
+            collection, column
+        )));
+    }
+
+    if let Some(rule) = plan.declared_rules.get(column) {
+        let rule = ResolvedColumnRule {
+            name: rule.name.clone(),
+            data_type: rule.data_type,
+            data_type_name: rule.data_type_name.clone(),
+            not_null: rule.not_null,
+            default: None,
+            enum_variants: rule.enum_variants.clone(),
+        };
+        normalize_contract_value(collection, &rule, value)
+    } else if plan.strict_schema {
+        Err(crate::RedDBError::Query(format!(
+            "collection '{}' is strict and does not allow undeclared fields: {}",
+            collection, column
+        )))
+    } else {
+        Ok(value)
+    }
+}
+
+pub(crate) fn normalize_row_update_value_for_rule(
+    collection: &str,
+    value: Value,
+    row_rule: Option<&RowUpdateColumnRule>,
+) -> RedDBResult<Value> {
+    let Some(rule) = row_rule else {
+        return Ok(value);
+    };
+
+    let rule = ResolvedColumnRule {
+        name: rule.name.clone(),
+        data_type: rule.data_type,
+        data_type_name: rule.data_type_name.clone(),
+        not_null: rule.not_null,
+        default: None,
+        enum_variants: rule.enum_variants.clone(),
+    };
+    normalize_contract_value(collection, &rule, value)
+}
+
+fn set_row_field(row: &mut crate::storage::unified::entity::RowData, name: &str, value: Value) {
+    if let Some(named) = row.named.as_mut() {
+        named.insert(name.to_string(), value);
+        return;
+    }
+
+    if let Some(schema) = row.schema.as_ref() {
+        if let Some(index) = schema.iter().position(|column| column == name) {
+            if let Some(slot) = row.columns.get_mut(index) {
+                *slot = value;
+                return;
+            }
+        }
+
+        let mut named = HashMap::with_capacity(schema.len().saturating_add(1));
+        for (column, current) in schema.iter().zip(row.columns.iter()) {
+            named.insert(column.clone(), current.clone());
+        }
+        named.insert(name.to_string(), value);
+        row.named = Some(named);
+        return;
+    }
+
+    let mut named = HashMap::with_capacity(1);
+    named.insert(name.to_string(), value);
+    row.named = Some(named);
+}
+
+fn collect_row_fields(row: &crate::storage::unified::entity::RowData) -> Vec<(String, Value)> {
+    if let Some(named) = row.named.as_ref() {
+        named
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    } else if let Some(schema) = row.schema.as_ref() {
+        schema
+            .iter()
+            .cloned()
+            .zip(row.columns.iter().cloned())
+            .collect()
+    } else {
+        Vec::new()
+    }
+}
+
+fn apply_row_field_assignments_raw<I>(
+    row: &mut crate::storage::unified::entity::RowData,
+    field_assignments: I,
+) where
+    I: IntoIterator<Item = (String, Value)>,
+{
+    for (column, value) in field_assignments {
+        set_row_field(row, &column, value);
+    }
+}
+
+fn apply_row_field_assignments_incremental<I>(
+    collection: &str,
+    row: &mut crate::storage::unified::entity::RowData,
+    field_assignments: I,
+    row_contract_plan: Option<&RowUpdateContractPlan>,
+) -> RedDBResult<()>
+where
+    I: IntoIterator<Item = (String, Value)>,
+{
+    for (column, value) in field_assignments {
+        let value = normalize_row_update_assignment_with_plan(
+            collection,
+            &column,
+            value,
+            row_contract_plan,
+        )?;
+
+        set_row_field(row, &column, value);
+    }
+
+    Ok(())
+}
+
 fn resolved_uniqueness_rules(
     contract: &crate::physical::CollectionContract,
 ) -> Vec<UniquenessRule> {
@@ -639,6 +934,8 @@ fn data_type_name(data_type: DataType) -> &'static str {
         DataType::Lang2 => "lang2",
         DataType::Lang5 => "lang5",
         DataType::Currency => "currency",
+        DataType::AssetCode => "asset_code",
+        DataType::Money => "money",
         DataType::ColorAlpha => "color_alpha",
         DataType::BigInt => "bigint",
         DataType::KeyRef => "keyref",
@@ -761,68 +1058,686 @@ fn value_to_coercion_input(value: &Value) -> Option<String> {
     }
 }
 
-impl RuntimeEntityPort for RedDBRuntime {
-    fn create_row(&self, input: CreateRowInput) -> RedDBResult<CreateEntityOutput> {
-        let db = self.db();
-        ensure_collection_model_contract(
-            &db,
-            &input.collection,
-            crate::catalog::CollectionModel::Table,
-        )?;
-        let CreateRowInput {
-            collection,
-            fields,
-            metadata: input_metadata,
-            node_links,
-            vector_links,
-        } = input;
-        let mut metadata = input_metadata;
-        apply_collection_default_ttl(&db, &collection, &mut metadata);
-        let fields = normalize_row_fields_for_contract(&db, &collection, fields)?;
-        enforce_row_uniqueness(&db, &collection, &fields, None)?;
-        let columns: Vec<(&str, crate::storage::schema::Value)> = fields
+fn dedupe_modified_columns(mut modified_columns: Vec<String>) -> Vec<String> {
+    if modified_columns.is_empty() {
+        return modified_columns;
+    }
+
+    let mut unique = Vec::with_capacity(modified_columns.len());
+    for column in modified_columns.drain(..) {
+        if !unique
             .iter()
-            .map(|(key, value)| (key.as_str(), value.clone()))
-            .collect();
-        let mut builder = db.row(&collection, columns);
+            .any(|existing: &String| existing.eq_ignore_ascii_case(&column))
+        {
+            unique.push(column);
+        }
+    }
+    unique
+}
 
-        for (key, value) in metadata {
-            builder = builder.metadata(key, value);
+impl RedDBRuntime {
+    pub(crate) fn apply_loaded_patch_entity_core(
+        &self,
+        collection: String,
+        mut entity: crate::storage::UnifiedEntity,
+        payload: JsonValue,
+        operations: Vec<PatchEntityOperation>,
+    ) -> RedDBResult<AppliedEntityMutation> {
+        let id = entity.id;
+        let operations = normalize_ttl_patch_operations(operations)?;
+
+        let db = self.db();
+        let store = db.store();
+        let Some(manager) = store.get_collection(&collection) else {
+            return Err(crate::RedDBError::NotFound(format!(
+                "collection not found: {collection}"
+            )));
+        };
+
+        let mut patch_metadata: Option<crate::storage::unified::Metadata> = None;
+        let mut metadata_changed = false;
+        let mut modified_columns: Vec<String> = Vec::new();
+        let mut context_index_dirty = false;
+
+        let row_contract_timestamps = db
+            .collection_contract(&collection)
+            .map(|c| c.timestamps_enabled)
+            .unwrap_or(false);
+
+        match &mut entity.data {
+            crate::storage::EntityData::Row(row) => {
+                let mut field_ops = Vec::new();
+                let mut metadata_ops = Vec::new();
+
+                for mut op in operations {
+                    let Some(root) = op.path.first().map(String::as_str) else {
+                        return Err(crate::RedDBError::Query(
+                            "patch path cannot be empty".to_string(),
+                        ));
+                    };
+
+                    match root {
+                        "fields" | "named" => {
+                            if op.path.len() < 2 {
+                                return Err(crate::RedDBError::Query(
+                                    "patch path 'fields' requires a nested key".to_string(),
+                                ));
+                            }
+                            if row_contract_timestamps {
+                                let leaf = op.path.get(1).map(String::as_str);
+                                if matches!(leaf, Some("created_at") | Some("updated_at")) {
+                                    return Err(crate::RedDBError::Query(format!(
+                                        "collection '{}' manages '{}' automatically — do not set it in UPDATE",
+                                        collection,
+                                        leaf.unwrap_or("")
+                                    )));
+                                }
+                            }
+                            op.path.remove(0);
+                            field_ops.push(op);
+                        }
+                        "metadata" => {
+                            if op.path.len() < 2 {
+                                return Err(crate::RedDBError::Query(
+                                    "patch path 'metadata' requires a nested key".to_string(),
+                                ));
+                            }
+                            op.path.remove(0);
+                            metadata_ops.push(op);
+                        }
+                        _ => {
+                            return Err(crate::RedDBError::Query(format!(
+                                "unsupported patch target '{root}' for table rows. Use fields/*, metadata/*, or weight"
+                            )));
+                        }
+                    }
+                }
+
+                if !field_ops.is_empty() {
+                    context_index_dirty = true;
+                    for op in &field_ops {
+                        if let Some(col) = op.path.first() {
+                            modified_columns.push(col.clone());
+                        }
+                    }
+                    let named = row.named.get_or_insert_with(Default::default);
+                    apply_patch_operations_to_storage_map(named, &field_ops)?;
+                }
+
+                if let Some(fields) = payload
+                    .get("fields")
+                    .and_then(crate::json::Value::as_object)
+                {
+                    if row_contract_timestamps {
+                        for key in fields.keys() {
+                            if key == "created_at" || key == "updated_at" {
+                                return Err(crate::RedDBError::Query(format!(
+                                    "collection '{}' manages '{}' automatically — do not set it in UPDATE",
+                                    collection, key
+                                )));
+                            }
+                        }
+                    }
+                    context_index_dirty = true;
+                    let named = row.named.get_or_insert_with(Default::default);
+                    for (key, value) in fields {
+                        modified_columns.push(key.clone());
+                        named.insert(key.clone(), json_to_storage_value(value)?);
+                    }
+                }
+
+                if !metadata_ops.is_empty() {
+                    ensure_non_tree_reserved_metadata_patch_paths(&metadata_ops)?;
+                    let metadata = patch_metadata.get_or_insert_with(|| {
+                        store.get_metadata(&collection, id).unwrap_or_default()
+                    });
+                    let mut metadata_json = metadata_to_json(metadata);
+                    apply_patch_operations_to_json(&mut metadata_json, &metadata_ops)
+                        .map_err(crate::RedDBError::Query)?;
+                    *metadata = metadata_from_json(&metadata_json)?;
+                    metadata_changed = true;
+                }
+
+                if !modified_columns.is_empty() || row_contract_timestamps {
+                    let current_fields = if let Some(named) = row.named.take() {
+                        named.into_iter().collect::<Vec<_>>()
+                    } else if let Some(schema) = row.schema.as_ref() {
+                        schema
+                            .iter()
+                            .cloned()
+                            .zip(row.columns.iter().cloned())
+                            .collect::<Vec<_>>()
+                    } else {
+                        Vec::new()
+                    };
+                    let normalized_fields = normalize_row_fields_for_contract_with_mode(
+                        &db,
+                        &collection,
+                        current_fields,
+                        NormalizeMode::Update,
+                    )?;
+                    if row_contract_timestamps {
+                        modified_columns.push("updated_at".to_string());
+                        context_index_dirty = true;
+                    }
+                    if row_update_requires_uniqueness_check(&db, &collection, &modified_columns) {
+                        enforce_row_uniqueness(&db, &collection, &normalized_fields, Some(id))?;
+                    }
+                    row.named = Some(normalized_fields.into_iter().collect());
+                }
+            }
+            crate::storage::EntityData::Node(node) => {
+                let mut field_ops = Vec::new();
+                let mut metadata_ops = Vec::new();
+
+                for mut op in operations {
+                    let Some(root) = op.path.first().map(String::as_str) else {
+                        return Err(crate::RedDBError::Query(
+                            "patch path cannot be empty".to_string(),
+                        ));
+                    };
+
+                    match root {
+                        "fields" | "properties" => {
+                            if op.path.len() < 2 {
+                                return Err(crate::RedDBError::Query(
+                                    "patch path 'fields' requires a nested key".to_string(),
+                                ));
+                            }
+                            op.path.remove(0);
+                            field_ops.push(op);
+                        }
+                        "metadata" => {
+                            if op.path.len() < 2 {
+                                return Err(crate::RedDBError::Query(
+                                    "patch path 'metadata' requires a nested key".to_string(),
+                                ));
+                            }
+                            op.path.remove(0);
+                            metadata_ops.push(op);
+                        }
+                        _ => {
+                            return Err(crate::RedDBError::Query(format!(
+                                "unsupported patch target '{root}' for graph nodes. Use fields/*, properties/*, or metadata/*"
+                            )));
+                        }
+                    }
+                }
+
+                if !field_ops.is_empty() {
+                    context_index_dirty = true;
+                    apply_patch_operations_to_storage_map(&mut node.properties, &field_ops)?;
+                }
+
+                if let Some(fields) = payload
+                    .get("fields")
+                    .and_then(crate::json::Value::as_object)
+                {
+                    context_index_dirty = true;
+                    for (key, value) in fields {
+                        node.properties
+                            .insert(key.clone(), json_to_storage_value(value)?);
+                    }
+                }
+
+                if !metadata_ops.is_empty() {
+                    ensure_non_tree_reserved_metadata_patch_paths(&metadata_ops)?;
+                    let metadata = patch_metadata.get_or_insert_with(|| {
+                        store.get_metadata(&collection, id).unwrap_or_default()
+                    });
+                    let mut metadata_json = metadata_to_json(metadata);
+                    apply_patch_operations_to_json(&mut metadata_json, &metadata_ops)
+                        .map_err(crate::RedDBError::Query)?;
+                    *metadata = metadata_from_json(&metadata_json)?;
+                    metadata_changed = true;
+                }
+            }
+            crate::storage::EntityData::Edge(edge) => {
+                let mut field_ops = Vec::new();
+                let mut metadata_ops = Vec::new();
+                let mut weight_ops = Vec::new();
+
+                for mut op in operations {
+                    let Some(root) = op.path.first().map(String::as_str) else {
+                        return Err(crate::RedDBError::Query(
+                            "patch path cannot be empty".to_string(),
+                        ));
+                    };
+
+                    match root {
+                        "fields" | "properties" => {
+                            if op.path.len() < 2 {
+                                return Err(crate::RedDBError::Query(
+                                    "patch path 'fields' requires a nested key".to_string(),
+                                ));
+                            }
+                            op.path.remove(0);
+                            field_ops.push(op);
+                        }
+                        "weight" => {
+                            if op.path.len() != 1 {
+                                return Err(crate::RedDBError::Query(
+                                    "patch path 'weight' does not allow nested keys".to_string(),
+                                ));
+                            }
+                            op.path.clear();
+                            weight_ops.push(op);
+                        }
+                        "metadata" => {
+                            if op.path.len() < 2 {
+                                return Err(crate::RedDBError::Query(
+                                    "patch path 'metadata' requires a nested key".to_string(),
+                                ));
+                            }
+                            op.path.remove(0);
+                            metadata_ops.push(op);
+                        }
+                        _ => {
+                            return Err(crate::RedDBError::Query(format!(
+                                "unsupported patch target '{root}' for graph edges. Use fields/*, weight, metadata/*"
+                            )));
+                        }
+                    }
+                }
+
+                if !field_ops.is_empty() {
+                    context_index_dirty = true;
+                    apply_patch_operations_to_storage_map(&mut edge.properties, &field_ops)?;
+                }
+
+                for op in weight_ops {
+                    context_index_dirty = true;
+                    let value = op.value.ok_or_else(|| {
+                        crate::RedDBError::Query("weight operations require a value".to_string())
+                    })?;
+
+                    match op.op {
+                        PatchEntityOperationType::Unset => {
+                            return Err(crate::RedDBError::Query(
+                                "weight cannot be unset through patch operations".to_string(),
+                            ));
+                        }
+                        PatchEntityOperationType::Set | PatchEntityOperationType::Replace => {
+                            let Some(weight) = value.as_f64() else {
+                                return Err(crate::RedDBError::Query(
+                                    "weight operation requires a numeric value".to_string(),
+                                ));
+                            };
+                            edge.weight = weight as f32;
+                        }
+                    }
+                }
+
+                if let Some(fields) = payload
+                    .get("fields")
+                    .and_then(crate::json::Value::as_object)
+                {
+                    context_index_dirty = true;
+                    for (key, value) in fields {
+                        edge.properties
+                            .insert(key.clone(), json_to_storage_value(value)?);
+                    }
+                }
+
+                if !metadata_ops.is_empty() {
+                    ensure_non_tree_reserved_metadata_patch_paths(&metadata_ops)?;
+                    let metadata = patch_metadata.get_or_insert_with(|| {
+                        store.get_metadata(&collection, id).unwrap_or_default()
+                    });
+                    let mut metadata_json = metadata_to_json(metadata);
+                    apply_patch_operations_to_json(&mut metadata_json, &metadata_ops)
+                        .map_err(crate::RedDBError::Query)?;
+                    *metadata = metadata_from_json(&metadata_json)?;
+                    metadata_changed = true;
+                }
+            }
+            crate::storage::EntityData::Vector(vector) => {
+                let mut field_ops = Vec::new();
+                let mut metadata_ops = Vec::new();
+
+                for mut op in operations {
+                    let Some(root) = op.path.first().map(String::as_str) else {
+                        return Err(crate::RedDBError::Query(
+                            "patch path cannot be empty".to_string(),
+                        ));
+                    };
+
+                    match root {
+                        "fields" => {
+                            if op.path.len() < 2 {
+                                return Err(crate::RedDBError::Query(
+                                    "patch path 'fields' requires a nested key".to_string(),
+                                ));
+                            }
+                            op.path.remove(0);
+                            let Some(target) = op.path.first().map(String::as_str) else {
+                                return Err(crate::RedDBError::Query(
+                                    "patch path requires a target under fields".to_string(),
+                                ));
+                            };
+                            if !matches!(target, "dense" | "content" | "sparse") {
+                                return Err(crate::RedDBError::Query(format!(
+                                    "unsupported vector patch target '{target}'"
+                                )));
+                            }
+                            field_ops.push(op);
+                        }
+                        "metadata" => {
+                            if op.path.len() < 2 {
+                                return Err(crate::RedDBError::Query(
+                                    "patch path 'metadata' requires a nested key".to_string(),
+                                ));
+                            }
+                            op.path.remove(0);
+                            metadata_ops.push(op);
+                        }
+                        _ => {
+                            return Err(crate::RedDBError::Query(format!(
+                                "unsupported patch target '{root}' for vectors. Use fields/* or metadata/*"
+                            )));
+                        }
+                    }
+                }
+
+                if !field_ops.is_empty() {
+                    context_index_dirty = true;
+                    apply_patch_operations_to_vector_fields(vector, &field_ops)?;
+                }
+
+                if let Some(fields) = payload
+                    .get("fields")
+                    .and_then(crate::json::Value::as_object)
+                {
+                    context_index_dirty = true;
+                    if let Some(content) =
+                        fields.get("content").and_then(crate::json::Value::as_str)
+                    {
+                        vector.content = Some(content.to_string());
+                    }
+                    if let Some(dense) = fields.get("dense") {
+                        vector.dense = dense
+                            .as_array()
+                            .ok_or_else(|| {
+                                crate::RedDBError::Query(
+                                    "field 'dense' must be an array".to_string(),
+                                )
+                            })?
+                            .iter()
+                            .map(|value| {
+                                value.as_f64().map(|value| value as f32).ok_or_else(|| {
+                                    crate::RedDBError::Query(
+                                        "field 'dense' must contain only numbers".to_string(),
+                                    )
+                                })
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                    }
+                }
+
+                if !metadata_ops.is_empty() {
+                    ensure_non_tree_reserved_metadata_patch_paths(&metadata_ops)?;
+                    let metadata = patch_metadata.get_or_insert_with(|| {
+                        store.get_metadata(&collection, id).unwrap_or_default()
+                    });
+                    let mut metadata_json = metadata_to_json(metadata);
+                    apply_patch_operations_to_json(&mut metadata_json, &metadata_ops)
+                        .map_err(crate::RedDBError::Query)?;
+                    *metadata = metadata_from_json(&metadata_json)?;
+                    metadata_changed = true;
+                }
+            }
+            crate::storage::EntityData::TimeSeries(_)
+            | crate::storage::EntityData::QueueMessage(_) => {
+                return Err(crate::RedDBError::Query(
+                    "patch operations are not supported for TimeSeries or QueueMessage entities"
+                        .to_string(),
+                ));
+            }
         }
 
-        for node in node_links {
-            builder = builder.link_to_node(node);
+        if let Some(metadata) = payload
+            .get("metadata")
+            .and_then(crate::json::Value::as_object)
+        {
+            let patch_metadata = patch_metadata
+                .get_or_insert_with(|| store.get_metadata(&collection, id).unwrap_or_default());
+            for (key, value) in metadata {
+                ensure_non_tree_reserved_metadata_key(key)?;
+                patch_metadata.set(key.clone(), json_to_metadata_value(value)?);
+            }
+            metadata_changed = true;
         }
 
-        for vector in vector_links {
-            builder = builder.link_to_vector(vector);
+        for (key, value) in parse_top_level_ttl_metadata_entries(&payload)? {
+            let patch_metadata = patch_metadata
+                .get_or_insert_with(|| store.get_metadata(&collection, id).unwrap_or_default());
+            if matches!(value, crate::storage::unified::MetadataValue::Null) {
+                patch_metadata.remove(&key);
+            } else {
+                patch_metadata.set(key, value);
+            }
+            metadata_changed = true;
         }
 
-        let id = builder.save()?;
-        refresh_context_index(&db, &collection, id)?;
-        // Maintain secondary indexes that were created before this row
-        // landed. Previous implementation of `index_entity_insert` only
-        // wrote Hash + Bitmap and silently skipped BTree; Finding #4
-        // in BASELINE.md was the symptom — `CREATE INDEX` built once
-        // and never grew, so `WHERE age BETWEEN …` fell through to a
-        // full scan for every new row. The BTree arm of
-        // `index_entity_insert` is now wired to the sorted manager.
-        self.index_store_ref()
-            .index_entity_insert(&collection, id, &fields)
-            .map_err(crate::RedDBError::Internal)?;
-        self.cdc_emit(
-            crate::replication::cdc::ChangeOperation::Insert,
-            &collection,
-            id.raw(),
-            "table",
-        );
-        Ok(CreateEntityOutput {
+        entity.updated_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        modified_columns = dedupe_modified_columns(modified_columns);
+
+        Ok(AppliedEntityMutation {
             id,
-            entity: db.get(id),
+            collection,
+            entity,
+            metadata: patch_metadata,
+            modified_columns,
+            persist_metadata: metadata_changed,
+            context_index_dirty,
         })
     }
 
-    fn create_node(&self, input: CreateNodeInput) -> RedDBResult<CreateEntityOutput> {
+    pub(crate) fn apply_loaded_sql_update_row_core(
+        &self,
+        collection: String,
+        mut entity: crate::storage::UnifiedEntity,
+        static_field_assignments: &[(String, Value)],
+        dynamic_field_assignments: Vec<(String, Value)>,
+        static_metadata_assignments: &[(String, MetadataValue)],
+        dynamic_metadata_assignments: Vec<(String, MetadataValue)>,
+        row_contract_plan: Option<&RowUpdateContractPlan>,
+        row_modified_columns_template: &[String],
+        row_touches_unique_columns: bool,
+    ) -> RedDBResult<AppliedEntityMutation> {
+        let id = entity.id;
+        let db = self.db();
+        let store = db.store();
+        let Some(_) = store.get_collection(&collection) else {
+            return Err(crate::RedDBError::NotFound(format!(
+                "collection not found: {collection}"
+            )));
+        };
+
+        let mut patch_metadata: Option<crate::storage::unified::Metadata> = None;
+        let row_contract_timestamps = row_contract_plan
+            .map(|plan| plan.timestamps_enabled)
+            .unwrap_or(false);
+        let mut metadata_changed = false;
+        let mut modified_columns = row_modified_columns_template.to_vec();
+        let mut context_index_dirty = !modified_columns.is_empty();
+
+        let crate::storage::EntityData::Row(row) = &mut entity.data else {
+            return Err(crate::RedDBError::Query(
+                "SQL row update fast path requires a row entity".to_string(),
+            ));
+        };
+
+        let _ = row_contract_plan;
+        apply_row_field_assignments_raw(row, static_field_assignments.iter().cloned());
+        apply_row_field_assignments_raw(row, dynamic_field_assignments);
+
+        for (key, value) in static_metadata_assignments
+            .iter()
+            .cloned()
+            .chain(dynamic_metadata_assignments.into_iter())
+        {
+            ensure_non_tree_reserved_metadata_key(&key)?;
+            patch_metadata
+                .get_or_insert_with(|| store.get_metadata(&collection, id).unwrap_or_default())
+                .set(key, value);
+            metadata_changed = true;
+        }
+
+        if !modified_columns.is_empty() || row_contract_timestamps {
+            if row_contract_timestamps {
+                context_index_dirty = true;
+                set_row_field(
+                    row,
+                    "updated_at",
+                    Value::UnsignedInteger(current_unix_ms_u64()),
+                );
+                modified_columns.push("updated_at".to_string());
+            }
+            if row_touches_unique_columns {
+                let current_fields = collect_row_fields(row);
+                enforce_row_uniqueness(&db, &collection, &current_fields, Some(id))?;
+            }
+        }
+
+        entity.updated_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        modified_columns = dedupe_modified_columns(modified_columns);
+
+        Ok(AppliedEntityMutation {
+            id,
+            collection,
+            entity,
+            metadata: patch_metadata,
+            modified_columns,
+            persist_metadata: metadata_changed,
+            context_index_dirty,
+        })
+    }
+
+    pub(crate) fn persist_applied_entity_mutations(
+        &self,
+        applied: &[AppliedEntityMutation],
+    ) -> RedDBResult<()> {
+        if applied.is_empty() {
+            return Ok(());
+        }
+
+        let store = self.db().store();
+        let collection = &applied[0].collection;
+        let Some(manager) = store.get_collection(collection) else {
+            return Err(crate::RedDBError::NotFound(format!(
+                "collection not found: {collection}"
+            )));
+        };
+
+        manager
+            .update_hot_batch_with_metadata(applied.iter().map(|item| {
+                (
+                    &item.entity,
+                    item.modified_columns.as_slice(),
+                    if item.persist_metadata {
+                        item.metadata.as_ref()
+                    } else {
+                        None
+                    },
+                )
+            }))
+            .map_err(|err| crate::RedDBError::Query(err.to_string()))
+    }
+
+    pub(crate) fn flush_applied_entity_mutation(
+        &self,
+        applied: &AppliedEntityMutation,
+    ) -> RedDBResult<()> {
+        let store = self.db().store();
+        if applied.context_index_dirty {
+            store
+                .context_index()
+                .index_entity(&applied.collection, &applied.entity);
+        }
+        self.cdc_emit_prebuilt(
+            crate::replication::cdc::ChangeOperation::Update,
+            &applied.collection,
+            &applied.entity,
+            "entity",
+            applied.metadata.as_ref(),
+            true,
+        );
+        Ok(())
+    }
+
+    pub(crate) fn apply_loaded_patch_entity(
+        &self,
+        collection: String,
+        entity: crate::storage::UnifiedEntity,
+        payload: JsonValue,
+        operations: Vec<PatchEntityOperation>,
+    ) -> RedDBResult<CreateEntityOutput> {
+        let applied =
+            self.apply_loaded_patch_entity_core(collection, entity, payload, operations)?;
+        self.persist_applied_entity_mutations(std::slice::from_ref(&applied))?;
+        self.flush_applied_entity_mutation(&applied)?;
+        Ok(CreateEntityOutput {
+            id: applied.id,
+            entity: Some(applied.entity),
+        })
+    }
+}
+
+fn ensure_non_tree_reserved_metadata_patch_paths(
+    operations: &[PatchEntityOperation],
+) -> RedDBResult<()> {
+    for operation in operations {
+        let Some(key) = operation.path.first().map(String::as_str) else {
+            continue;
+        };
+        ensure_non_tree_reserved_metadata_key(key)?;
+    }
+    Ok(())
+}
+
+fn ensure_non_tree_reserved_metadata_key(key: &str) -> RedDBResult<()> {
+    if key.starts_with(TREE_METADATA_PREFIX) {
+        return Err(crate::RedDBError::Query(format!(
+            "metadata key '{}' is reserved for managed trees",
+            key
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_non_tree_reserved_metadata_entries(
+    metadata: &[(String, MetadataValue)],
+) -> RedDBResult<()> {
+    for (key, _) in metadata {
+        ensure_non_tree_reserved_metadata_key(key)?;
+    }
+    Ok(())
+}
+
+fn ensure_non_tree_structural_edge_label(label: &str) -> RedDBResult<()> {
+    if label.eq_ignore_ascii_case(TREE_CHILD_EDGE_LABEL) {
+        return Err(crate::RedDBError::Query(format!(
+            "edge label '{}' is reserved for managed trees",
+            TREE_CHILD_EDGE_LABEL
+        )));
+    }
+    Ok(())
+}
+
+impl RedDBRuntime {
+    pub(crate) fn create_node_unchecked(
+        &self,
+        input: CreateNodeInput,
+    ) -> RedDBResult<CreateEntityOutput> {
         let db = self.db();
         ensure_collection_model_contract(
             &db,
@@ -875,7 +1790,10 @@ impl RuntimeEntityPort for RedDBRuntime {
         })
     }
 
-    fn create_edge(&self, input: CreateEdgeInput) -> RedDBResult<CreateEntityOutput> {
+    pub(crate) fn create_edge_unchecked(
+        &self,
+        input: CreateEdgeInput,
+    ) -> RedDBResult<CreateEntityOutput> {
         let db = self.db();
         ensure_collection_model_contract(
             &db,
@@ -913,6 +1831,121 @@ impl RuntimeEntityPort for RedDBRuntime {
             id,
             entity: db.get(id),
         })
+    }
+}
+
+impl RuntimeEntityPort for RedDBRuntime {
+    fn create_row(&self, input: CreateRowInput) -> RedDBResult<CreateEntityOutput> {
+        let db = self.db();
+        ensure_collection_model_contract(
+            &db,
+            &input.collection,
+            crate::catalog::CollectionModel::Table,
+        )?;
+        let CreateRowInput {
+            collection,
+            fields,
+            metadata: input_metadata,
+            node_links,
+            vector_links,
+        } = input;
+        let mut metadata = input_metadata;
+        apply_collection_default_ttl(&db, &collection, &mut metadata);
+        let fields = normalize_row_fields_for_contract(&db, &collection, fields)?;
+        enforce_row_uniqueness(&db, &collection, &fields, None)?;
+        // Route through MutationEngine for unified hot path.
+        let engine = self.mutation_engine();
+        let result = engine.apply(
+            collection.clone(),
+            vec![crate::runtime::mutation::MutationRow {
+                fields,
+                metadata,
+                node_links,
+                vector_links,
+            }],
+        )?;
+        let id = result.ids[0];
+        Ok(CreateEntityOutput {
+            id,
+            entity: db.get(id),
+        })
+    }
+
+    fn create_rows_batch(
+        &self,
+        input: CreateRowsBatchInput,
+    ) -> RedDBResult<Vec<CreateEntityOutput>> {
+        if input.rows.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let db = self.db();
+        let collection = input.collection;
+        ensure_collection_model_contract(
+            &db,
+            &collection,
+            crate::catalog::CollectionModel::Table,
+        )?;
+
+        let mut prepared_rows = Vec::with_capacity(input.rows.len());
+        let mut uniqueness_rows = Vec::with_capacity(input.rows.len());
+        for row in input.rows {
+            if row.collection != collection {
+                return Err(crate::RedDBError::Query(format!(
+                    "batch row collection mismatch: expected '{}', got '{}'",
+                    collection, row.collection
+                )));
+            }
+
+            let mut metadata = row.metadata;
+            apply_collection_default_ttl(&db, &collection, &mut metadata);
+            let fields = normalize_row_fields_for_contract(&db, &collection, row.fields)?;
+            enforce_row_uniqueness(&db, &collection, &fields, None)?;
+            uniqueness_rows.push(fields.clone());
+            prepared_rows.push((fields, metadata, row.node_links, row.vector_links));
+        }
+
+        enforce_row_batch_uniqueness(&db, &collection, &uniqueness_rows)?;
+
+        // Route through MutationEngine: single bulk_insert + one CDC batch
+        // instead of N separate cdc_emit() calls (each acquires a write lock).
+        let engine = self.mutation_engine();
+        let mutation_rows: Vec<crate::runtime::mutation::MutationRow> = prepared_rows
+            .into_iter()
+            .map(|(fields, metadata, node_links, vector_links)| {
+                crate::runtime::mutation::MutationRow {
+                    fields,
+                    metadata,
+                    node_links,
+                    vector_links,
+                }
+            })
+            .collect();
+
+        let result = engine
+            .apply(collection.clone(), mutation_rows)
+            .map_err(|e| crate::RedDBError::Internal(e.to_string()))?;
+
+        let store = db.store();
+        Ok(result
+            .ids
+            .into_iter()
+            .map(|id| CreateEntityOutput {
+                id,
+                entity: store.get(&collection, id),
+            })
+            .collect())
+    }
+
+    fn create_node(&self, input: CreateNodeInput) -> RedDBResult<CreateEntityOutput> {
+        ensure_non_tree_reserved_metadata_entries(&input.metadata)?;
+        self.create_node_unchecked(input)
+    }
+
+    fn create_edge(&self, input: CreateEdgeInput) -> RedDBResult<CreateEntityOutput> {
+        ensure_non_tree_structural_edge_label(&input.label)?;
+        ensure_non_tree_reserved_metadata_entries(&input.metadata)?;
+        self.create_edge_unchecked(input)
     }
 
     fn create_vector(&self, input: CreateVectorInput) -> RedDBResult<CreateEntityOutput> {
@@ -1141,8 +2174,6 @@ impl RuntimeEntityPort for RedDBRuntime {
             payload,
             operations,
         } = input;
-        let operations = normalize_ttl_patch_operations(operations)?;
-
         let db = self.db();
         let store = db.store();
         let Some(manager) = store.get_collection(&collection) else {
@@ -1150,454 +2181,13 @@ impl RuntimeEntityPort for RedDBRuntime {
                 "collection not found: {collection}"
             )));
         };
-        let Some(mut entity) = manager.get(id) else {
+        let Some(entity) = manager.get(id) else {
             return Err(crate::RedDBError::NotFound(format!(
                 "entity not found: {}",
                 id.raw()
             )));
         };
-
-        let mut patch_metadata = store.get_metadata(&collection, id).unwrap_or_default();
-        let mut metadata_changed = false;
-        // HOT-update: track which field names are actually modified so that
-        // the segment can skip index work when indexed columns are untouched.
-        let mut modified_columns: Vec<String> = Vec::new();
-
-        // Contract-aware guard: if this collection auto-manages
-        // `created_at`/`updated_at`, reject any patch that targets
-        // them directly. The runtime will still bump `updated_at`
-        // on its own inside `normalize_row_fields_for_contract_with_mode`.
-        let row_contract_timestamps = db
-            .collection_contract(&collection)
-            .map(|c| c.timestamps_enabled)
-            .unwrap_or(false);
-
-        match &mut entity.data {
-            crate::storage::EntityData::Row(row) => {
-                let mut field_ops = Vec::new();
-                let mut metadata_ops = Vec::new();
-
-                for mut op in operations {
-                    let Some(root) = op.path.first().map(String::as_str) else {
-                        return Err(crate::RedDBError::Query(
-                            "patch path cannot be empty".to_string(),
-                        ));
-                    };
-
-                    match root {
-                        "fields" | "named" => {
-                            if op.path.len() < 2 {
-                                return Err(crate::RedDBError::Query(
-                                    "patch path 'fields' requires a nested key".to_string(),
-                                ));
-                            }
-                            if row_contract_timestamps {
-                                let leaf = op.path.get(1).map(String::as_str);
-                                if matches!(leaf, Some("created_at") | Some("updated_at")) {
-                                    return Err(crate::RedDBError::Query(format!(
-                                        "collection '{}' manages '{}' automatically — do not set it in UPDATE",
-                                        collection,
-                                        leaf.unwrap_or("")
-                                    )));
-                                }
-                            }
-                            op.path.remove(0);
-                            field_ops.push(op);
-                        }
-                        "metadata" => {
-                            if op.path.len() < 2 {
-                                return Err(crate::RedDBError::Query(
-                                    "patch path 'metadata' requires a nested key".to_string(),
-                                ));
-                            }
-                            op.path.remove(0);
-                            metadata_ops.push(op);
-                        }
-                        _ => {
-                            return Err(crate::RedDBError::Query(format!(
-                                "unsupported patch target '{root}' for table rows. Use fields/*, metadata/*, or weight"
-                            )));
-                        }
-                    }
-                }
-
-                if !field_ops.is_empty() {
-                    // HOT-update: record which columns are touched
-                    for op in &field_ops {
-                        if let Some(col) = op.path.first() {
-                            modified_columns.push(col.clone());
-                        }
-                    }
-                    let named = row.named.get_or_insert_with(Default::default);
-                    apply_patch_operations_to_storage_map(named, &field_ops)?;
-                }
-
-                if let Some(fields) = payload
-                    .get("fields")
-                    .and_then(crate::json::Value::as_object)
-                {
-                    if row_contract_timestamps {
-                        for key in fields.keys() {
-                            if key == "created_at" || key == "updated_at" {
-                                return Err(crate::RedDBError::Query(format!(
-                                    "collection '{}' manages '{}' automatically — do not set it in UPDATE",
-                                    collection, key
-                                )));
-                            }
-                        }
-                    }
-                    let named = row.named.get_or_insert_with(Default::default);
-                    for (key, value) in fields {
-                        // HOT-update: record columns from payload path
-                        modified_columns.push(key.clone());
-                        named.insert(key.clone(), json_to_storage_value(value)?);
-                    }
-                }
-
-                if !metadata_ops.is_empty() {
-                    let mut metadata_json = metadata_to_json(&patch_metadata);
-                    apply_patch_operations_to_json(&mut metadata_json, &metadata_ops)
-                        .map_err(crate::RedDBError::Query)?;
-                    patch_metadata = metadata_from_json(&metadata_json)?;
-                    metadata_changed = true;
-                }
-
-                let current_fields = if let Some(named) = row.named.take() {
-                    named.into_iter().collect::<Vec<_>>()
-                } else if let Some(schema) = row.schema.as_ref() {
-                    schema
-                        .iter()
-                        .cloned()
-                        .zip(row.columns.iter().cloned())
-                        .collect::<Vec<_>>()
-                } else {
-                    Vec::new()
-                };
-                let normalized_fields = normalize_row_fields_for_contract_with_mode(
-                    &db,
-                    &collection,
-                    current_fields,
-                    NormalizeMode::Update,
-                )?;
-                enforce_row_uniqueness(&db, &collection, &normalized_fields, Some(id))?;
-                row.named = Some(normalized_fields.into_iter().collect());
-            }
-            crate::storage::EntityData::Node(node) => {
-                let mut field_ops = Vec::new();
-                let mut metadata_ops = Vec::new();
-
-                for mut op in operations {
-                    let Some(root) = op.path.first().map(String::as_str) else {
-                        return Err(crate::RedDBError::Query(
-                            "patch path cannot be empty".to_string(),
-                        ));
-                    };
-
-                    match root {
-                        "fields" | "properties" => {
-                            if op.path.len() < 2 {
-                                return Err(crate::RedDBError::Query(
-                                    "patch path 'fields' requires a nested key".to_string(),
-                                ));
-                            }
-                            op.path.remove(0);
-                            field_ops.push(op);
-                        }
-                        "metadata" => {
-                            if op.path.len() < 2 {
-                                return Err(crate::RedDBError::Query(
-                                    "patch path 'metadata' requires a nested key".to_string(),
-                                ));
-                            }
-                            op.path.remove(0);
-                            metadata_ops.push(op);
-                        }
-                        _ => {
-                            return Err(crate::RedDBError::Query(format!(
-                                "unsupported patch target '{root}' for graph nodes. Use fields/*, properties/*, or metadata/*"
-                            )));
-                        }
-                    }
-                }
-
-                if !field_ops.is_empty() {
-                    apply_patch_operations_to_storage_map(&mut node.properties, &field_ops)?;
-                }
-
-                if let Some(fields) = payload
-                    .get("fields")
-                    .and_then(crate::json::Value::as_object)
-                {
-                    for (key, value) in fields {
-                        node.properties
-                            .insert(key.clone(), json_to_storage_value(value)?);
-                    }
-                }
-
-                if !metadata_ops.is_empty() {
-                    let mut metadata_json = metadata_to_json(&patch_metadata);
-                    apply_patch_operations_to_json(&mut metadata_json, &metadata_ops)
-                        .map_err(crate::RedDBError::Query)?;
-                    patch_metadata = metadata_from_json(&metadata_json)?;
-                    metadata_changed = true;
-                }
-            }
-            crate::storage::EntityData::Edge(edge) => {
-                let mut field_ops = Vec::new();
-                let mut metadata_ops = Vec::new();
-                let mut weight_ops = Vec::new();
-
-                for mut op in operations {
-                    let Some(root) = op.path.first().map(String::as_str) else {
-                        return Err(crate::RedDBError::Query(
-                            "patch path cannot be empty".to_string(),
-                        ));
-                    };
-
-                    match root {
-                        "fields" | "properties" => {
-                            if op.path.len() < 2 {
-                                return Err(crate::RedDBError::Query(
-                                    "patch path 'fields' requires a nested key".to_string(),
-                                ));
-                            }
-                            op.path.remove(0);
-                            field_ops.push(op);
-                        }
-                        "weight" => {
-                            if op.path.len() != 1 {
-                                return Err(crate::RedDBError::Query(
-                                    "patch path 'weight' does not allow nested keys".to_string(),
-                                ));
-                            }
-                            op.path.clear();
-                            weight_ops.push(op);
-                        }
-                        "metadata" => {
-                            if op.path.len() < 2 {
-                                return Err(crate::RedDBError::Query(
-                                    "patch path 'metadata' requires a nested key".to_string(),
-                                ));
-                            }
-                            op.path.remove(0);
-                            metadata_ops.push(op);
-                        }
-                        _ => {
-                            return Err(crate::RedDBError::Query(format!(
-                                "unsupported patch target '{root}' for graph edges. Use fields/*, weight, metadata/*"
-                            )));
-                        }
-                    }
-                }
-
-                if !field_ops.is_empty() {
-                    apply_patch_operations_to_storage_map(&mut edge.properties, &field_ops)?;
-                }
-
-                for op in weight_ops {
-                    let value = op.value.ok_or_else(|| {
-                        crate::RedDBError::Query("weight operations require a value".to_string())
-                    })?;
-
-                    match op.op {
-                        PatchEntityOperationType::Unset => {
-                            return Err(crate::RedDBError::Query(
-                                "weight cannot be unset through patch operations".to_string(),
-                            ));
-                        }
-                        PatchEntityOperationType::Set | PatchEntityOperationType::Replace => {
-                            let Some(weight) = value.as_f64() else {
-                                return Err(crate::RedDBError::Query(
-                                    "weight operation requires a numeric value".to_string(),
-                                ));
-                            };
-                            edge.weight = weight as f32;
-                        }
-                    }
-                }
-
-                if let Some(fields) = payload
-                    .get("fields")
-                    .and_then(crate::json::Value::as_object)
-                {
-                    for (key, value) in fields {
-                        edge.properties
-                            .insert(key.clone(), json_to_storage_value(value)?);
-                    }
-                }
-
-                if !metadata_ops.is_empty() {
-                    let mut metadata_json = metadata_to_json(&patch_metadata);
-                    apply_patch_operations_to_json(&mut metadata_json, &metadata_ops)
-                        .map_err(crate::RedDBError::Query)?;
-                    patch_metadata = metadata_from_json(&metadata_json)?;
-                    metadata_changed = true;
-                }
-            }
-            crate::storage::EntityData::Vector(vector) => {
-                let mut field_ops = Vec::new();
-                let mut metadata_ops = Vec::new();
-
-                for mut op in operations {
-                    let Some(root) = op.path.first().map(String::as_str) else {
-                        return Err(crate::RedDBError::Query(
-                            "patch path cannot be empty".to_string(),
-                        ));
-                    };
-
-                    match root {
-                        "fields" => {
-                            if op.path.len() < 2 {
-                                return Err(crate::RedDBError::Query(
-                                    "patch path 'fields' requires a nested key".to_string(),
-                                ));
-                            }
-                            op.path.remove(0);
-                            let Some(target) = op.path.first().map(String::as_str) else {
-                                return Err(crate::RedDBError::Query(
-                                    "patch path requires a target under fields".to_string(),
-                                ));
-                            };
-                            if !matches!(target, "dense" | "content" | "sparse") {
-                                return Err(crate::RedDBError::Query(format!(
-                                    "unsupported vector patch target '{target}'"
-                                )));
-                            }
-                            field_ops.push(op);
-                        }
-                        "metadata" => {
-                            if op.path.len() < 2 {
-                                return Err(crate::RedDBError::Query(
-                                    "patch path 'metadata' requires a nested key".to_string(),
-                                ));
-                            }
-                            op.path.remove(0);
-                            metadata_ops.push(op);
-                        }
-                        _ => {
-                            return Err(crate::RedDBError::Query(format!(
-                                "unsupported patch target '{root}' for vectors. Use fields/* or metadata/*"
-                            )));
-                        }
-                    }
-                }
-
-                if !field_ops.is_empty() {
-                    apply_patch_operations_to_vector_fields(vector, &field_ops)?;
-                }
-
-                if let Some(fields) = payload
-                    .get("fields")
-                    .and_then(crate::json::Value::as_object)
-                {
-                    if let Some(content) =
-                        fields.get("content").and_then(crate::json::Value::as_str)
-                    {
-                        vector.content = Some(content.to_string());
-                    }
-                    if let Some(dense) = fields.get("dense") {
-                        vector.dense = dense
-                            .as_array()
-                            .ok_or_else(|| {
-                                crate::RedDBError::Query(
-                                    "field 'dense' must be an array".to_string(),
-                                )
-                            })?
-                            .iter()
-                            .map(|value| {
-                                value.as_f64().map(|value| value as f32).ok_or_else(|| {
-                                    crate::RedDBError::Query(
-                                        "field 'dense' must contain only numbers".to_string(),
-                                    )
-                                })
-                            })
-                            .collect::<Result<Vec<_>, _>>()?;
-                    }
-                }
-
-                if !metadata_ops.is_empty() {
-                    let mut metadata_json = metadata_to_json(&patch_metadata);
-                    apply_patch_operations_to_json(&mut metadata_json, &metadata_ops)
-                        .map_err(crate::RedDBError::Query)?;
-                    patch_metadata = metadata_from_json(&metadata_json)?;
-                    metadata_changed = true;
-                }
-            }
-            crate::storage::EntityData::TimeSeries(_)
-            | crate::storage::EntityData::QueueMessage(_) => {
-                return Err(crate::RedDBError::Query(
-                    "patch operations are not supported for TimeSeries or QueueMessage entities"
-                        .to_string(),
-                ));
-            }
-        }
-
-        if let Some(metadata) = payload
-            .get("metadata")
-            .and_then(crate::json::Value::as_object)
-        {
-            for (key, value) in metadata {
-                patch_metadata.set(key.clone(), json_to_metadata_value(value)?);
-            }
-            metadata_changed = true;
-        }
-
-        for (key, value) in parse_top_level_ttl_metadata_entries(&payload)? {
-            if matches!(value, crate::storage::unified::MetadataValue::Null) {
-                patch_metadata.remove(&key);
-            } else {
-                patch_metadata.set(key, value);
-            }
-            metadata_changed = true;
-        }
-
-        if metadata_changed {
-            store
-                .set_metadata(&collection, id, patch_metadata)
-                .map_err(|err| crate::RedDBError::Query(err.to_string()))?;
-        }
-
-        entity.updated_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        // HOT-update: use column-aware path when we know which fields changed,
-        // so the segment can skip pk_index and cross_ref when unaffected.
-        if !modified_columns.is_empty() {
-            let mut unique = Vec::with_capacity(modified_columns.len());
-            for column in modified_columns.drain(..) {
-                if !unique
-                    .iter()
-                    .any(|existing: &String| existing.eq_ignore_ascii_case(&column))
-                {
-                    unique.push(column);
-                }
-            }
-            modified_columns = unique;
-        }
-
-        if modified_columns.is_empty() {
-            manager
-                .update(entity)
-                .map_err(|err| crate::RedDBError::Query(err.to_string()))?;
-        } else {
-            manager
-                .update_hot(entity, &modified_columns)
-                .map_err(|err| crate::RedDBError::Query(err.to_string()))?;
-        }
-        refresh_context_index(&db, &collection, id)?;
-        self.cdc_emit(
-            crate::replication::cdc::ChangeOperation::Update,
-            &collection,
-            id.raw(),
-            "entity",
-        );
-
-        Ok(CreateEntityOutput {
-            id,
-            entity: db.get(id),
-        })
+        self.apply_loaded_patch_entity(collection, entity, payload, operations)
     }
 
     fn delete_entity(&self, input: DeleteEntityInput) -> RedDBResult<DeleteEntityOutput> {

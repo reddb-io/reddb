@@ -127,10 +127,12 @@ pub(crate) fn extract_index_candidate(
 
 /// Extract ALL equality predicates from an AND-tree, one per indexed column.
 /// Used by the TID bitmap path to AND multiple hash index lookups.
+/// The triple is `(column_name, index_bytes, original_Value)`.
+/// `original_Value` lets callers build covered-query records without decoding bytes.
 /// Stops at OR / NOT — not AND-combinable.
 pub(crate) fn extract_all_eq_candidates(
     filter: &crate::storage::query::ast::Filter,
-    out: &mut Vec<(String, Vec<u8>)>,
+    out: &mut Vec<(String, Vec<u8>, crate::storage::schema::Value)>,
 ) {
     use crate::storage::query::ast::{CompareOp, FieldRef, Filter};
     match filter {
@@ -149,7 +151,7 @@ pub(crate) fn extract_all_eq_candidates(
                 crate::storage::schema::Value::UnsignedInteger(n) => n.to_le_bytes().to_vec(),
                 _ => return,
             };
-            out.push((col, bytes));
+            out.push((col, bytes, value.clone()));
         }
         Filter::And(left, right) => {
             extract_all_eq_candidates(left, out);
@@ -458,6 +460,16 @@ pub(crate) fn evaluate_entity_filter(
     table_name: &str,
     table_alias: &str,
 ) -> bool {
+    evaluate_entity_filter_with_db(None, entity, filter, table_name, table_alias)
+}
+
+pub(crate) fn evaluate_entity_filter_with_db(
+    db: Option<&RedDB>,
+    entity: &crate::storage::unified::entity::UnifiedEntity,
+    filter: &Filter,
+    table_name: &str,
+    table_alias: &str,
+) -> bool {
     match filter {
         Filter::Compare { field, op, value } => {
             resolve_entity_field(entity, field, table_name, table_alias)
@@ -482,17 +494,29 @@ pub(crate) fn evaluate_entity_filter(
             // Correctness is preserved; selectivity at the scan layer
             // is lost. The planner's `filter_compiled` layer also
             // routes this variant through its `Fallback` opcode.
-            true
+            let Some(db) = db else { return true };
+            let Some(record) = runtime_table_record_from_entity(entity.clone()) else {
+                return false;
+            };
+            super::super::join_filter::evaluate_runtime_filter_with_db(
+                Some(db),
+                &record,
+                filter,
+                Some(table_name),
+                Some(table_alias),
+            )
         }
         Filter::And(left, right) => {
-            evaluate_entity_filter(entity, left, table_name, table_alias)
-                && evaluate_entity_filter(entity, right, table_name, table_alias)
+            evaluate_entity_filter_with_db(db, entity, left, table_name, table_alias)
+                && evaluate_entity_filter_with_db(db, entity, right, table_name, table_alias)
         }
         Filter::Or(left, right) => {
-            evaluate_entity_filter(entity, left, table_name, table_alias)
-                || evaluate_entity_filter(entity, right, table_name, table_alias)
+            evaluate_entity_filter_with_db(db, entity, left, table_name, table_alias)
+                || evaluate_entity_filter_with_db(db, entity, right, table_name, table_alias)
         }
-        Filter::Not(inner) => !evaluate_entity_filter(entity, inner, table_name, table_alias),
+        Filter::Not(inner) => {
+            !evaluate_entity_filter_with_db(db, entity, inner, table_name, table_alias)
+        }
         Filter::IsNull(field) => resolve_entity_field(entity, field, table_name, table_alias)
             .map(|value| value.as_ref() == &Value::Null)
             .unwrap_or(true),

@@ -48,11 +48,11 @@ pub mod proto {
 use proto::red_db_server::{RedDb, RedDbServer};
 use proto::{
     BatchQueryReply, BatchQueryRequest, BulkEntityReply, CollectionRequest, CollectionsReply,
-    DeleteEntityRequest, DeploymentProfileRequest, Empty, EntityReply, ExportRequest,
-    GraphProjectionUpsertRequest, HealthReply, IndexNameRequest, IndexToggleRequest,
+    DeleteEntityRequest, DeploymentProfileRequest, Empty, EntityReply, ExecutePreparedRequest,
+    ExportRequest, GraphProjectionUpsertRequest, HealthReply, IndexNameRequest, IndexToggleRequest,
     JsonBulkCreateRequest, JsonCreateRequest, JsonPayloadRequest, ManifestRequest, OperationReply,
-    PayloadReply, QueryReply, QueryRequest, ScanEntity, ScanReply, ScanRequest, StatsReply,
-    UpdateEntityRequest,
+    PayloadReply, PrepareQueryReply, PrepareQueryRequest, QueryReply, QueryRequest, ScanEntity,
+    ScanReply, ScanRequest, StatsReply, UpdateEntityRequest,
 };
 
 mod control_support;
@@ -145,16 +145,21 @@ impl RedDBGrpcServer {
         &self.auth_store
     }
 
+    fn grpc_runtime(&self) -> GrpcRuntime {
+        GrpcRuntime {
+            runtime: self.runtime.clone(),
+            auth_store: self.auth_store.clone(),
+            prepared_registry: PreparedStatementRegistry::new(),
+        }
+    }
+
     pub async fn serve(&self) -> Result<(), Box<dyn std::error::Error>> {
         let addr = self.options.bind_addr.parse()?;
         tonic::transport::Server::builder()
             .add_service(
-                RedDbServer::new(GrpcRuntime {
-                    runtime: self.runtime.clone(),
-                    auth_store: self.auth_store.clone(),
-                })
-                .max_decoding_message_size(256 * 1024 * 1024)
-                .max_encoding_message_size(256 * 1024 * 1024),
+                RedDbServer::new(self.grpc_runtime())
+                    .max_decoding_message_size(256 * 1024 * 1024)
+                    .max_encoding_message_size(256 * 1024 * 1024),
             )
             .serve(addr)
             .await?;
@@ -170,12 +175,9 @@ impl RedDBGrpcServer {
         let incoming = TcpListenerStream::new(listener);
         tonic::transport::Server::builder()
             .add_service(
-                RedDbServer::new(GrpcRuntime {
-                    runtime: self.runtime.clone(),
-                    auth_store: self.auth_store.clone(),
-                })
-                .max_decoding_message_size(256 * 1024 * 1024)
-                .max_encoding_message_size(256 * 1024 * 1024),
+                RedDbServer::new(self.grpc_runtime())
+                    .max_decoding_message_size(256 * 1024 * 1024)
+                    .max_encoding_message_size(256 * 1024 * 1024),
             )
             .serve_with_incoming(incoming)
             .await?;
@@ -183,10 +185,70 @@ impl RedDBGrpcServer {
     }
 }
 
+/// Server-side prepared statement — parsed + parameterized once, executed N times.
+struct GrpcPreparedStatement {
+    shape: crate::storage::query::ast::QueryExpr,
+    parameter_count: usize,
+    created_at: std::time::Instant,
+}
+
+/// Registry of prepared statements for one server instance.
+/// Session-independent: any connection can execute any prepared statement by ID.
+struct PreparedStatementRegistry {
+    map: std::sync::RwLock<std::collections::HashMap<u64, GrpcPreparedStatement>>,
+    next_id: std::sync::atomic::AtomicU64,
+}
+
+impl PreparedStatementRegistry {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            map: std::sync::RwLock::new(std::collections::HashMap::new()),
+            next_id: std::sync::atomic::AtomicU64::new(1),
+        })
+    }
+
+    fn prepare(
+        &self,
+        shape: crate::storage::query::ast::QueryExpr,
+        parameter_count: usize,
+    ) -> u64 {
+        use std::sync::atomic::Ordering;
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let mut map = self.map.write().unwrap();
+        self.evict_old_locked(&mut map);
+        map.insert(
+            id,
+            GrpcPreparedStatement {
+                shape,
+                parameter_count,
+                created_at: std::time::Instant::now(),
+            },
+        );
+        id
+    }
+
+    fn get_shape_and_count(
+        &self,
+        id: u64,
+    ) -> Option<(crate::storage::query::ast::QueryExpr, usize)> {
+        let map = self.map.read().unwrap();
+        map.get(&id).map(|s| (s.shape.clone(), s.parameter_count))
+    }
+
+    fn evict_old_locked(
+        &self,
+        map: &mut std::collections::HashMap<u64, GrpcPreparedStatement>,
+    ) {
+        let threshold = std::time::Duration::from_secs(3600);
+        map.retain(|_, v| v.created_at.elapsed() < threshold);
+    }
+}
+
 #[derive(Clone)]
 struct GrpcRuntime {
     runtime: RedDBRuntime,
     auth_store: Arc<AuthStore>,
+    prepared_registry: Arc<PreparedStatementRegistry>,
 }
 
 impl GrpcRuntime {

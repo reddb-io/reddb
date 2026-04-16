@@ -166,10 +166,60 @@ fn classify_field_inner(
     EntityFieldKind::RowField(column.to_string())
 }
 
+/// Compile-time resolver for a named list of columns.
+///
+/// Builds once before the hot loop; each `get_value` call is a
+/// direct enum-dispatch to the right entity accessor — no string
+/// compares or HashMap lookups.
+pub(crate) struct EntityColumnResolver {
+    pub kinds: Vec<EntityFieldKind>,
+}
+
+impl EntityColumnResolver {
+    /// Classify `column_names` against `(table_name, table_alias)`.
+    pub fn build(column_names: &[String], table_name: &str, table_alias: &str) -> Self {
+        let kinds = column_names
+            .iter()
+            .map(|col| {
+                let field = crate::storage::query::ast::FieldRef::TableColumn {
+                    table: String::new(),
+                    column: col.clone(),
+                };
+                classify_field(&field, table_name, table_alias)
+            })
+            .collect();
+        Self { kinds }
+    }
+
+    /// Try to read column `idx` directly from `entity`.
+    /// Returns `None` for complex kinds (DocumentPath, Unknown) that need
+    /// a full record.
+    pub fn get_value<'a>(
+        &'a self,
+        idx: usize,
+        entity: &'a UnifiedEntity,
+    ) -> Option<Cow<'a, Value>> {
+        let kind = self.kinds.get(idx)?;
+        match kind {
+            // These two need the slow path — signal the caller to fall back.
+            EntityFieldKind::DocumentPath(_) | EntityFieldKind::Unknown => None,
+            other => resolve_kind(other, entity),
+        }
+    }
+
+    /// Returns `true` when every column in this resolver can be
+    /// answered directly from the entity (no record needed).
+    pub fn is_all_fast(&self) -> bool {
+        self.kinds.iter().all(|k| {
+            !matches!(k, EntityFieldKind::DocumentPath(_) | EntityFieldKind::Unknown)
+        })
+    }
+}
+
 /// Resolve an [`EntityFieldKind`] against a live entity. The fast
 /// counterpart of `resolve_entity_field`: every variant maps to a
 /// single direct accessor.
-fn resolve_kind<'a>(
+pub(crate) fn resolve_kind<'a>(
     kind: &'a EntityFieldKind,
     entity: &'a UnifiedEntity,
 ) -> Option<Cow<'a, Value>> {
@@ -348,6 +398,7 @@ pub struct CompiledEntityFilter {
     ops: Vec<CompiledEntityOp>,
     table_name: String,
     table_alias: String,
+    has_fallback: bool,
     /// OR of `field_name_bloom(name)` for every non-system user field
     /// referenced by any predicate in this filter. 0 means no user fields
     /// (pure system-field query — bloom gate skipped).
@@ -363,11 +414,15 @@ impl CompiledEntityFilter {
     pub fn compile(filter: &Filter, table_name: &str, table_alias: &str) -> Self {
         let mut ops = Vec::new();
         compile_into(filter, table_name, table_alias, None, &mut ops);
+        let has_fallback = ops
+            .iter()
+            .any(|op| matches!(op, CompiledEntityOp::Fallback(_)));
         let required_bloom = collect_required_bloom(filter);
         Self {
             ops,
             table_name: table_name.to_string(),
             table_alias: table_alias.to_string(),
+            has_fallback,
             required_bloom,
         }
     }
@@ -387,11 +442,15 @@ impl CompiledEntityFilter {
     ) -> Self {
         let mut ops = Vec::new();
         compile_into(filter, table_name, table_alias, Some(schema_cols), &mut ops);
+        let has_fallback = ops
+            .iter()
+            .any(|op| matches!(op, CompiledEntityOp::Fallback(_)));
         let required_bloom = collect_required_bloom(filter);
         Self {
             ops,
             table_name: table_name.to_string(),
             table_alias: table_alias.to_string(),
+            has_fallback,
             required_bloom,
         }
     }
@@ -400,6 +459,12 @@ impl CompiledEntityFilter {
     /// tests and for diagnostics.
     pub fn op_count(&self) -> usize {
         self.ops.len()
+    }
+
+    /// Whether evaluation must be rechecked with the generic filter walker to
+    /// preserve semantics for subtrees that still compile as `Fallback`.
+    pub fn has_fallback(&self) -> bool {
+        self.has_fallback
     }
 
     /// Evaluate against an entity. Hot path — must stay allocation-free

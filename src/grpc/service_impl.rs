@@ -1421,6 +1421,82 @@ async fn batch_query(&self, request: Request<BatchQueryRequest>) -> Result<Respo
     Ok(Response::new(BatchQueryReply { results }))
 }
 
+async fn prepare_query(
+    &self,
+    request: Request<PrepareQueryRequest>,
+) -> Result<Response<PrepareQueryReply>, Status> {
+    self.authorize_read(request.metadata())?;
+    let sql = request.into_inner().query;
+    let parsed = crate::storage::query::modes::parse_multi(&sql)
+        .map_err(|e| Status::invalid_argument(format!("parse error: {e}")))?;
+
+    use crate::storage::query::planner::shape::parameterize_query_expr;
+    let (shape, parameter_count) = match parameterize_query_expr(&parsed) {
+        Some(pq) => (pq.shape, pq.parameter_count),
+        None => (parsed, 0),
+    };
+
+    let id = self.prepared_registry.prepare(shape, parameter_count);
+    Ok(Response::new(PrepareQueryReply {
+        prepared_id: id,
+        parameter_count: parameter_count as u32,
+    }))
+}
+
+async fn execute_prepared(
+    &self,
+    request: Request<ExecutePreparedRequest>,
+) -> Result<Response<QueryReply>, Status> {
+    self.authorize_read(request.metadata())?;
+    let inner = request.into_inner();
+
+    let (shape, parameter_count) = self
+        .prepared_registry
+        .get_shape_and_count(inner.prepared_id)
+        .ok_or_else(|| Status::not_found("prepared statement not found or expired"))?;
+
+    if inner.bind_json.len() != parameter_count {
+        return Err(Status::invalid_argument(format!(
+            "expected {parameter_count} bind values, got {}",
+            inner.bind_json.len()
+        )));
+    }
+
+    let binds = inner
+        .bind_json
+        .iter()
+        .map(|s| {
+            json_from_str::<JsonValue>(s)
+                .map_err(|e| Status::invalid_argument(format!("bind parse error: {e}")))
+                .map(|v| match v {
+                    JsonValue::Null => Value::Null,
+                    JsonValue::Bool(b) => Value::Boolean(b),
+                    JsonValue::Number(n) => {
+                        if n.fract() == 0.0 && n.abs() < i64::MAX as f64 {
+                            Value::Integer(n as i64)
+                        } else {
+                            Value::Float(n)
+                        }
+                    }
+                    JsonValue::String(s) => Value::Text(s),
+                    other => Value::Text(json_to_string(&other).unwrap_or_default()),
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let expr = if parameter_count == 0 {
+        shape
+    } else {
+        use crate::storage::query::planner::shape::bind_parameterized_query;
+        bind_parameterized_query(&shape, &binds, parameter_count)
+            .ok_or_else(|| Status::internal("bind failed"))?
+    };
+
+    let result = self.runtime.execute_query_expr(expr).map_err(to_status)?;
+    let no_filter: Option<Vec<String>> = None;
+    Ok(Response::new(query_reply(result, &no_filter, &no_filter)))
+}
+
 async fn explain_query(
     &self,
     request: Request<QueryRequest>,
