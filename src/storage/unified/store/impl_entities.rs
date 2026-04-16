@@ -351,24 +351,34 @@ impl UnifiedStore {
         // REDDB_BULK_SKIP_PERSIST_UNSAFE=1 skips the persistent B-tree index
         // during bulk ingest.
         //
-        // UNSAFE: for benchmarks / ephemeral containers only.
-        // When set, bulk-inserted rows are NOT durable — data will be lost
-        // on process restart. The B-tree would need to be rebuilt from WAL
-        // on the next start, but if the process exits before WAL replay the
-        // rows are gone permanently.
+        // UNSAFE: for ephemeral benchmark containers ONLY.
+        // This flag is silently ignored when a pager (durable storage) is active.
+        // In persistent mode, bulk inserts ALWAYS write to the B-tree so the data
+        // survives a cold restart without any manual rebuild step.
         //
-        // Only safe when the benchmark harness tears down its containers
-        // between runs so there is nothing to rebuild.
-        let skip_btree = matches!(
+        // The flag is only honoured when self.pager is None (in-memory / ephemeral).
+        let skip_btree_requested = matches!(
             std::env::var("REDDB_BULK_SKIP_PERSIST_UNSAFE").ok().as_deref(),
             Some("1") | Some("true") | Some("on")
         );
-        if skip_btree {
-            // Log once so operators are never silently surprised by data loss.
+        // Honour the flag only when there is no durable pager.
+        // If a pager exists we are in persistent mode → always persist.
+        let skip_btree = skip_btree_requested && self.pager.is_none();
+        if skip_btree_requested && !skip_btree {
+            // Flag was set but we ignored it because we have a real pager.
+            static IGNORED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+            IGNORED.get_or_init(|| {
+                eprintln!(
+                    "[WARN] REDDB_BULK_SKIP_PERSIST_UNSAFE is set but a durable pager is \
+                     active — flag ignored; bulk inserts will be persisted normally"
+                );
+            });
+        } else if skip_btree {
+            // Ephemeral mode and flag is active — warn once.
             static WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
             WARNED.get_or_init(|| {
                 eprintln!(
-                    "[WARN] REDDB_BULK_SKIP_PERSIST_UNSAFE is set — \
+                    "[WARN] REDDB_BULK_SKIP_PERSIST_UNSAFE is set (ephemeral/no-pager mode) — \
                      bulk inserts are NOT durable, data will be lost on restart"
                 );
             });

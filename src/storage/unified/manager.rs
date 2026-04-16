@@ -460,6 +460,47 @@ impl SegmentManager {
         None
     }
 
+    fn find_sealed_segment_arc(&self, id: EntityId) -> Option<Arc<RwLock<GrowingSegment>>> {
+        let sealed = self.sealed.read();
+        sealed
+            .iter()
+            .find(|segment_arc| segment_arc.read().contains(id))
+            .map(Arc::clone)
+    }
+
+    fn rewrite_sealed_entity_into_growing(
+        &self,
+        entity: UnifiedEntity,
+        metadata: Option<&Metadata>,
+    ) -> Result<(), SegmentError> {
+        let entity_id = entity.id;
+        let sealed_arc = self
+            .find_sealed_segment_arc(entity_id)
+            .ok_or(SegmentError::NotFound(entity_id))?;
+
+        let metadata_to_apply = {
+            let mut sealed = sealed_arc.write();
+            let existing_metadata = sealed.get_metadata(entity_id);
+            if !sealed.force_delete(entity_id) {
+                return Err(SegmentError::NotFound(entity_id));
+            }
+            metadata.cloned().or(existing_metadata)
+        };
+
+        let growing_arc = self.get_or_create_growing();
+        let growing_id = {
+            let mut growing = growing_arc.write();
+            growing.insert(entity)?;
+            if let Some(metadata) = metadata_to_apply {
+                growing.set_metadata(entity_id, metadata)?;
+            }
+            growing.id()
+        };
+
+        self.entity_segment.write().insert(entity_id, growing_id);
+        Ok(())
+    }
+
     /// Update an entity
     pub fn update(&self, entity: UnifiedEntity) -> Result<(), SegmentError> {
         // Try growing segment directly (covers bulk-inserted entities without entity_segment map)
@@ -521,6 +562,10 @@ impl SegmentManager {
                 }
             }
             return Err(SegmentError::NotWritable);
+        }
+
+        if let Some(entity) = entity.take() {
+            return self.rewrite_sealed_entity_into_growing(entity, metadata);
         }
 
         Err(SegmentError::NotFound(entity_id))
@@ -598,18 +643,8 @@ impl SegmentManager {
             return Err(SegmentError::NotWritable);
         }
 
-        // Fallback: entity is in a sealed segment (bulk-inserted, not in entity_segment map).
-        // Apply mutation directly — sealed segments are in-memory and still mutable via write lock.
-        {
-            let sealed = self.sealed.read();
-            for segment_arc in sealed.iter() {
-                if segment_arc.read().contains(entity_id) {
-                    let entity_val = entity.take().expect("entity already moved");
-                    return segment_arc
-                        .write()
-                        .force_update_with_metadata(&entity_val, modified_columns, metadata);
-                }
-            }
+        if let Some(entity) = entity.take() {
+            return self.rewrite_sealed_entity_into_growing(entity, metadata);
         }
 
         Err(SegmentError::NotFound(entity_id))
