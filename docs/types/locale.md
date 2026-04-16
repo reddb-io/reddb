@@ -54,6 +54,62 @@ CREATE TABLE prices (currency Currency NOT NULL)
 Value::Currency("BRL")
 ```
 
+Use `Currency` when the domain is strictly fiat ISO 4217. For crypto or mixed-asset ledgers, use
+`AssetCode` or `Money`.
+
+## AssetCode
+
+Validated uppercase asset identifier for fiat or crypto symbols. Examples: `USD`, `BTC`, `ETH`,
+`USDT`, `STETH`.
+
+```sql
+CREATE TABLE balances (asset AssetCode NOT NULL)
+```
+
+```rust
+Value::AssetCode("BTC")
+```
+
+`AssetCode` is more general than `Currency`: it accepts normalized asset symbols beyond 3-letter
+ISO 4217 codes.
+
+## Money
+
+Exact monetary value stored as:
+
+- `asset_code`
+- `minor_units` as signed integer
+- `scale` as explicit decimal places
+
+This avoids float rounding in storage and supports both fiat and crypto.
+
+```sql
+CREATE TABLE balances (
+  balance Money NOT NULL
+)
+```
+
+Accepted text coercions:
+
+- `BRL 10.99`
+- `0.00012345 BTC`
+- `USD:1.23`
+
+Internally:
+
+- `BRL 10.99` -> `asset_code=BRL`, `minor_units=1099`, `scale=2`
+- `BTC 0.00012345` -> `asset_code=BTC`, `minor_units=12345`, `scale=8`
+
+Query helpers:
+
+- `MONEY('BTC 0.125')`
+- `MONEY('BTC', '0.125')`
+- `MONEY_ASSET(balance)`
+- `MONEY_MINOR(balance)`
+- `MONEY_SCALE(balance)`
+
+See [Scalar Functions](/query/scalar-functions.md#financial-functions).
+
 ## Example: Multi-Locale Product Catalog
 
 ```sql
@@ -63,5 +119,16 @@ CREATE TABLE products (
   currency Currency NOT NULL,
   origin Country2,
   language Lang5 DEFAULT 'en-US'
+)
+```
+
+## Example: Fiat + Crypto Pricing
+
+```sql
+CREATE TABLE quotes (
+  base AssetCode NOT NULL,
+  quote AssetCode NOT NULL,
+  mid_price Money NOT NULL,
+  venue Text
 )
 ```

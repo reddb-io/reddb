@@ -28,6 +28,22 @@ pub(super) fn manifest_to_json(manifest: &SchemaManifest) -> JsonValue {
         JsonValue::Bool(manifest.options.verify_checksums),
     );
     options.insert(
+        "durability_mode".to_string(),
+        JsonValue::String(manifest.options.durability_mode.as_str().to_string()),
+    );
+    options.insert(
+        "group_commit_window_ms".to_string(),
+        JsonValue::Number(manifest.options.group_commit.window_ms as f64),
+    );
+    options.insert(
+        "group_commit_max_statements".to_string(),
+        JsonValue::Number(manifest.options.group_commit.max_statements as f64),
+    );
+    options.insert(
+        "group_commit_max_wal_bytes".to_string(),
+        JsonValue::Number(manifest.options.group_commit.max_wal_bytes as f64),
+    );
+    options.insert(
         "auto_checkpoint_pages".to_string(),
         JsonValue::Number(manifest.options.auto_checkpoint_pages as f64),
     );
@@ -111,6 +127,31 @@ pub(super) fn manifest_from_json(value: &JsonValue) -> io::Result<SchemaManifest
         read_only: json_bool_required(options_object, "read_only")?,
         create_if_missing: json_bool_required(options_object, "create_if_missing")?,
         verify_checksums: json_bool_required(options_object, "verify_checksums")?,
+        durability_mode: options_object
+            .get("durability_mode")
+            .and_then(JsonValue::as_str)
+            .and_then(crate::api::DurabilityMode::from_str)
+            .unwrap_or(crate::api::DurabilityMode::Strict),
+        group_commit: crate::api::GroupCommitOptions {
+            window_ms: options_object
+                .get("group_commit_window_ms")
+                .map(|_value| json_u64_required(options_object, "group_commit_window_ms"))
+                .transpose()?
+                .unwrap_or(crate::api::DEFAULT_GROUP_COMMIT_WINDOW_MS)
+                .max(1),
+            max_statements: options_object
+                .get("group_commit_max_statements")
+                .map(|_value| json_usize_required(options_object, "group_commit_max_statements"))
+                .transpose()?
+                .unwrap_or(crate::api::DEFAULT_GROUP_COMMIT_MAX_STATEMENTS)
+                .max(1),
+            max_wal_bytes: options_object
+                .get("group_commit_max_wal_bytes")
+                .map(|_value| json_u64_required(options_object, "group_commit_max_wal_bytes"))
+                .transpose()?
+                .unwrap_or(crate::api::DEFAULT_GROUP_COMMIT_MAX_WAL_BYTES)
+                .max(1),
+        },
         auto_checkpoint_pages: json_u32_required(options_object, "auto_checkpoint_pages")?,
         cache_pages: json_usize_required(options_object, "cache_pages")?,
         snapshot_retention: options_object

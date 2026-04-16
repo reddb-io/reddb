@@ -20,6 +20,12 @@ struct AiEmbeddingSaveOptions {
 }
 
 #[derive(Debug, Clone)]
+struct AiEmbeddingInputItem {
+    text: String,
+    source_row: Option<TableRef>,
+}
+
+#[derive(Debug, Clone)]
 struct AiPromptSaveOptions {
     collection: String,
     prompt_field: String,
@@ -491,7 +497,7 @@ impl RedDBServer {
         let response = match crate::ai::openai_embeddings(crate::ai::OpenAiEmbeddingRequest {
             api_key,
             model: model.clone(),
-            inputs: inputs.clone(),
+            inputs: inputs.iter().map(|item| item.text.clone()).collect(),
             dimensions,
             api_base,
         }) {
@@ -508,119 +514,69 @@ impl RedDBServer {
 
         let mut saved = Vec::new();
         if let Some(save) = save_options {
-            let embedding_count = response.embeddings.len();
-
-            if embedding_count > 10 && crate::runtime::SystemInfo::should_parallelize() {
-                // Parallel persistence for large batches on multi-core systems
-                let save_ref = &save;
-                let response_ref = &response;
-                let credential_ref = &credential;
-                let inputs_ref = &inputs;
-                let runtime = &self.runtime;
-
-                let results: Vec<Result<(usize, u64), String>> = std::thread::scope(|s| {
-                    response_ref
-                        .embeddings
-                        .iter()
-                        .enumerate()
-                        .map(|(index, embedding)| {
-                            s.spawn(move || {
-                                let mut metadata = save_ref.metadata.clone();
-                                metadata.push((
-                                    "_ai_provider".to_string(),
-                                    MetadataValue::String(response_ref.provider.to_string()),
-                                ));
-                                metadata.push((
-                                    "_ai_model".to_string(),
-                                    MetadataValue::String(response_ref.model.clone()),
-                                ));
-                                if let Some(ref cred) = credential_ref {
-                                    metadata.push((
-                                        "_ai_credential".to_string(),
-                                        MetadataValue::String(cred.clone()),
-                                    ));
-                                }
-                                let uc = crate::application::EntityUseCases::new(runtime);
-                                let output = uc
-                                    .create_vector(CreateVectorInput {
-                                        collection: save_ref.collection.clone(),
-                                        dense: embedding.clone(),
-                                        content: if save_ref.include_content {
-                                            Some(inputs_ref[index].clone())
-                                        } else {
-                                            None
-                                        },
-                                        metadata,
-                                        link_row: None,
-                                        link_node: None,
-                                    })
-                                    .map_err(|e| format!("index {index}: {e}"))?;
-                                Ok((index, output.id.raw()))
-                            })
-                        })
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .map(|h| h.join().unwrap_or(Err("thread panic".to_string())))
-                        .collect()
+            // The provider request is already batched. Persist sequentially so
+            // collection/index maintenance stays deterministic and safe.
+            for (index, embedding) in response.embeddings.iter().cloned().enumerate() {
+                let mut metadata = save.metadata.clone();
+                metadata.push((
+                    "_ai_provider".to_string(),
+                    MetadataValue::String(response.provider.to_string()),
+                ));
+                metadata.push((
+                    "_ai_model".to_string(),
+                    MetadataValue::String(response.model.clone()),
+                ));
+                if let Some(ref credential) = credential {
+                    metadata.push((
+                        "_ai_credential".to_string(),
+                        MetadataValue::String(credential.clone()),
+                    ));
+                }
+                if let Some(source_row) = &inputs[index].source_row {
+                    metadata.push((
+                        "_source_collection".to_string(),
+                        MetadataValue::String(source_row.table.clone()),
+                    ));
+                    metadata.push((
+                        "_source_row_id".to_string(),
+                        MetadataValue::Int(source_row.row_id as i64),
+                    ));
+                }
+                let create_result = self.entity_use_cases().create_vector(CreateVectorInput {
+                    collection: save.collection.clone(),
+                    dense: embedding,
+                    content: if save.include_content {
+                        Some(inputs[index].text.clone())
+                    } else {
+                        None
+                    },
+                    metadata,
+                    link_row: None,
+                    link_node: None,
                 });
-
-                for result in results {
-                    match result {
-                        Ok((index, id)) => {
-                            let mut item = Map::new();
-                            item.insert("index".to_string(), JsonValue::Number(index as f64));
-                            item.insert("id".to_string(), JsonValue::Number(id as f64));
-                            saved.push(JsonValue::Object(item));
-                        }
-                        Err(err) => {
-                            return json_error(400, format!("failed to persist embedding: {err}"));
-                        }
+                let output = match create_result {
+                    Ok(output) => output,
+                    Err(err) => {
+                        return json_error(
+                            400,
+                            format!("failed to persist embedding at index {index}: {err}"),
+                        );
                     }
+                };
+                let mut item = Map::new();
+                item.insert("index".to_string(), JsonValue::Number(index as f64));
+                item.insert("id".to_string(), JsonValue::Number(output.id.raw() as f64));
+                if let Some(source_row) = &inputs[index].source_row {
+                    item.insert(
+                        "source_row_id".to_string(),
+                        JsonValue::Number(source_row.row_id as f64),
+                    );
+                    item.insert(
+                        "source_collection".to_string(),
+                        JsonValue::String(source_row.table.clone()),
+                    );
                 }
-            } else {
-                // Sequential for small batches (less overhead)
-                for (index, embedding) in response.embeddings.iter().cloned().enumerate() {
-                    let mut metadata = save.metadata.clone();
-                    metadata.push((
-                        "_ai_provider".to_string(),
-                        MetadataValue::String(response.provider.to_string()),
-                    ));
-                    metadata.push((
-                        "_ai_model".to_string(),
-                        MetadataValue::String(response.model.clone()),
-                    ));
-                    if let Some(ref credential) = credential {
-                        metadata.push((
-                            "_ai_credential".to_string(),
-                            MetadataValue::String(credential.clone()),
-                        ));
-                    }
-                    let create_result = self.entity_use_cases().create_vector(CreateVectorInput {
-                        collection: save.collection.clone(),
-                        dense: embedding,
-                        content: if save.include_content {
-                            Some(inputs[index].clone())
-                        } else {
-                            None
-                        },
-                        metadata,
-                        link_row: None,
-                        link_node: None,
-                    });
-                    let output = match create_result {
-                        Ok(output) => output,
-                        Err(err) => {
-                            return json_error(
-                                400,
-                                format!("failed to persist embedding at index {index}: {err}"),
-                            );
-                        }
-                    };
-                    let mut item = Map::new();
-                    item.insert("index".to_string(), JsonValue::Number(index as f64));
-                    item.insert("id".to_string(), JsonValue::Number(output.id.raw() as f64));
-                    saved.push(JsonValue::Object(item));
-                }
+                saved.push(JsonValue::Object(item));
             }
         }
 
@@ -1016,7 +972,7 @@ impl RedDBServer {
         &self,
         payload: &JsonValue,
         max_inputs: usize,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<Vec<AiEmbeddingInputItem>, String> {
         if let Some(source_query) = json_string_field(payload, "source_query") {
             if source_query.trim().is_empty() {
                 return Err("field 'source_query' cannot be empty".to_string());
@@ -1039,7 +995,10 @@ impl RedDBServer {
                 if text.trim().is_empty() {
                     return Err(format!("field 'inputs[{index}]' cannot be empty"));
                 }
-                out.push(text.to_string());
+                out.push(AiEmbeddingInputItem {
+                    text: text.to_string(),
+                    source_row: None,
+                });
             }
             if out.is_empty() {
                 return Err("field 'inputs' cannot be empty".to_string());
@@ -1057,7 +1016,10 @@ impl RedDBServer {
             if input.trim().is_empty() {
                 return Err("field 'input' cannot be empty".to_string());
             }
-            return Ok(vec![input]);
+            return Ok(vec![AiEmbeddingInputItem {
+                text: input,
+                source_row: None,
+            }]);
         }
 
         Err("provide either 'input', 'inputs', or 'source_query'".to_string())
@@ -1069,7 +1031,7 @@ impl RedDBServer {
         source_mode: AiQuerySourceMode,
         payload: &JsonValue,
         max_inputs: usize,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<Vec<AiEmbeddingInputItem>, String> {
         let result = self
             .query_use_cases()
             .execute(ExecuteQueryInput {
@@ -1085,6 +1047,9 @@ impl RedDBServer {
                 if source_field.trim().is_empty() {
                     return Err("field 'source_field' cannot be empty".to_string());
                 }
+                let source_collection = json_string_field(payload, "source_collection")
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty());
 
                 let mut out = Vec::new();
                 for (index, record) in result.result.records.iter().enumerate() {
@@ -1100,7 +1065,10 @@ impl RedDBServer {
                     if text.trim().is_empty() {
                         continue;
                     }
-                    out.push(text);
+                    out.push(AiEmbeddingInputItem {
+                        text,
+                        source_row: embedding_source_row_ref(record, source_collection.as_deref()),
+                    });
                     if out.len() > max_inputs {
                         return Err(format!(
                             "source_query produced more than max_inputs ({max_inputs}); add LIMIT or increase max_inputs"
@@ -1113,7 +1081,10 @@ impl RedDBServer {
                 let result_json = crate::presentation::query_result_json::runtime_query_json(
                     &result, &None, &None,
                 );
-                Ok(vec![result_json.to_string_compact()])
+                Ok(vec![AiEmbeddingInputItem {
+                    text: result_json.to_string_compact(),
+                    source_row: None,
+                }])
             }
         }
     }
@@ -1302,6 +1273,37 @@ fn parse_source_mode(payload: &JsonValue) -> Result<AiQuerySourceMode, String> {
             "invalid source_mode '{mode}'; expected 'row' or 'result'"
         )),
     }
+}
+
+fn embedding_source_row_ref(
+    record: &crate::storage::query::UnifiedRecord,
+    source_collection: Option<&str>,
+) -> Option<TableRef> {
+    let row_id = record
+        .get("red_entity_id")
+        .or_else(|| record.get("entity_id"))
+        .or_else(|| record.get("_entity_id"))
+        .and_then(|value| match value {
+            Value::UnsignedInteger(id) => Some(*id),
+            Value::Integer(id) if *id >= 0 => Some(*id as u64),
+            _ => None,
+        })?;
+
+    let collection = source_collection
+        .or_else(|| {
+            record.get("red_collection").and_then(|value| match value {
+                Value::Text(value) if !value.trim().is_empty() => Some(value.as_str()),
+                _ => None,
+            })
+        })
+        .or_else(|| {
+            record.get("_collection").and_then(|value| match value {
+                Value::Text(value) if !value.trim().is_empty() => Some(value.as_str()),
+                _ => None,
+            })
+        })?;
+
+    Some(TableRef::new(collection, row_id))
 }
 
 fn parse_optional_positive_usize(

@@ -3,6 +3,15 @@ use crate::json::{from_slice as json_from_slice, Map, Value as JsonValue};
 use crate::runtime::RedDBRuntime;
 use crate::storage::engine::clustering;
 use crate::storage::schema::Value;
+use crate::storage::unified::{MetadataValue, RefType};
+
+struct ClusterVectorItem {
+    entity_id: u64,
+    vector: Vec<f32>,
+    linked_row_id: Option<u64>,
+    linked_row_collection: Option<String>,
+    content: Option<String>,
+}
 
 pub(crate) fn handle_vector_cluster(runtime: &RedDBRuntime, body: Vec<u8>) -> HttpResponse {
     let body: JsonValue = json_from_slice(&body).unwrap_or(JsonValue::Null);
@@ -22,21 +31,75 @@ pub(crate) fn handle_vector_cluster(runtime: &RedDBRuntime, body: Vec<u8>) -> Ht
         None => return json_response(404, err(&format!("collection '{}' not found", collection))),
     };
 
-    let mut vectors: Vec<(u64, Vec<f32>)> = Vec::new();
+    let mut vectors: Vec<ClusterVectorItem> = Vec::new();
     manager.for_each_entity(|entity| {
+        let linked_row_from_refs = entity
+            .cross_refs()
+            .iter()
+            .find(|cross_ref| matches!(cross_ref.ref_type, RefType::VectorToRow))
+            .map(|cross_ref| (cross_ref.target.raw(), cross_ref.target_collection.clone()));
+        let linked_row_from_metadata =
+            store
+                .get_metadata(&collection, entity.id)
+                .and_then(|metadata| {
+                    match (
+                        metadata.get("_source_row_id"),
+                        metadata.get("_source_collection"),
+                    ) {
+                        (
+                            Some(MetadataValue::Int(row_id)),
+                            Some(MetadataValue::String(collection)),
+                        ) if *row_id >= 0 => Some((*row_id as u64, collection.clone())),
+                        (
+                            Some(MetadataValue::Timestamp(row_id)),
+                            Some(MetadataValue::String(collection)),
+                        ) => Some((*row_id, collection.clone())),
+                        _ => None,
+                    }
+                });
+        let linked_row = linked_row_from_refs.or(linked_row_from_metadata);
+
+        if let Some(vector) = entity.data.as_vector() {
+            if !vector.dense.is_empty() {
+                let (linked_row_id, linked_row_collection) = linked_row
+                    .map(|(row_id, collection)| (Some(row_id), Some(collection)))
+                    .unwrap_or((None, None));
+                vectors.push(ClusterVectorItem {
+                    entity_id: entity.id.raw(),
+                    vector: vector.dense.clone(),
+                    linked_row_id,
+                    linked_row_collection,
+                    content: vector.content.clone(),
+                });
+                return true;
+            }
+        }
+
         let id = entity.id.raw();
         // Try embeddings first
         {
             let embs = entity.embeddings();
             if let Some(emb) = embs.first() {
-                vectors.push((id, emb.vector.clone()));
+                vectors.push(ClusterVectorItem {
+                    entity_id: id,
+                    vector: emb.vector.clone(),
+                    linked_row_id: None,
+                    linked_row_collection: None,
+                    content: None,
+                });
                 return true;
             }
         }
         // Try field from row data
         if let Some(row) = entity.data.as_row() {
             if let Some(Value::Vector(v)) = row.get_field(&field) {
-                vectors.push((id, v.clone()));
+                vectors.push(ClusterVectorItem {
+                    entity_id: id,
+                    vector: v.clone(),
+                    linked_row_id: None,
+                    linked_row_collection: None,
+                    content: None,
+                });
             }
         }
         true
@@ -46,7 +109,7 @@ pub(crate) fn handle_vector_cluster(runtime: &RedDBRuntime, body: Vec<u8>) -> Ht
         return json_response(400, err("no vectors found in collection"));
     }
 
-    let vecs: Vec<Vec<f32>> = vectors.iter().map(|(_, v)| v.clone()).collect();
+    let vecs: Vec<Vec<f32>> = vectors.iter().map(|item| item.vector.clone()).collect();
 
     let result = match algorithm.as_str() {
         "dbscan" => {
@@ -86,17 +149,32 @@ pub(crate) fn handle_vector_cluster(runtime: &RedDBRuntime, body: Vec<u8>) -> Ht
     let assignments: Vec<JsonValue> = vectors
         .iter()
         .zip(result.assignments.iter())
-        .map(|((entity_id, _), &cluster_id)| {
-            let mut item = Map::new();
-            item.insert(
+        .map(|(item, &cluster_id)| {
+            let mut assignment = Map::new();
+            assignment.insert(
                 "entity_id".to_string(),
-                JsonValue::Number(*entity_id as f64),
+                JsonValue::Number(item.entity_id as f64),
             );
-            item.insert(
+            assignment.insert(
                 "cluster_id".to_string(),
                 JsonValue::Number(cluster_id as f64),
             );
-            JsonValue::Object(item)
+            if let Some(linked_row_id) = item.linked_row_id {
+                assignment.insert(
+                    "linked_row_id".to_string(),
+                    JsonValue::Number(linked_row_id as f64),
+                );
+            }
+            if let Some(linked_row_collection) = &item.linked_row_collection {
+                assignment.insert(
+                    "linked_row_collection".to_string(),
+                    JsonValue::String(linked_row_collection.clone()),
+                );
+            }
+            if let Some(content) = &item.content {
+                assignment.insert("content".to_string(), JsonValue::String(content.clone()));
+            }
+            JsonValue::Object(assignment)
         })
         .collect();
 

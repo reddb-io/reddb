@@ -12,7 +12,7 @@ red <command> [args] [flags]
 
 | Command | Description |
 |:--------|:------------|
-| `server` | Start the database server (HTTP or gRPC) |
+| `server` | Start the database server (router, HTTP, gRPC, or wire) |
 | `query` | Query command (currently placeholder; execution not wired) |
 | `insert` | Insert command (currently placeholder; execution not wired) |
 | `get` | Get command (currently placeholder; execution not wired) |
@@ -42,8 +42,10 @@ red <command> [args] [flags]
 
 Start the database server.
 
+By default, `red server` without explicit transport flags starts the routed front-door on `127.0.0.1:5050`, which accepts HTTP, gRPC, and wire traffic on one address.
+
 ```bash
-red server [--grpc] [--http] [--grpc-bind 127.0.0.1:50051] [--http-bind 127.0.0.1:8080] [--path ./data/reddb.rdb]
+red server [--grpc] [--http] [--grpc-bind 127.0.0.1:50051] [--http-bind 127.0.0.1:8080] [--wire-bind 127.0.0.1:5051] [--path ./data/reddb.rdb]
 ```
 
 | Flag | Short | Default | Description |
@@ -54,6 +56,10 @@ red server [--grpc] [--http] [--grpc-bind 127.0.0.1:50051] [--http-bind 127.0.0.
 | `--http` | | | Enable HTTP API |
 | `--grpc-bind` | | | Explicit gRPC bind address |
 | `--http-bind` | | | Explicit HTTP bind address |
+| `--wire-bind` | | | Explicit wire TCP bind address |
+| `--wire-tls-bind` | | | Explicit wire TLS bind address |
+| `--wire-tls-cert` | | | TLS certificate PEM for wire TLS |
+| `--wire-tls-key` | | | TLS private key PEM for wire TLS |
 | `--role` | `-r` | `standalone` | Replication role: `standalone`, `primary`, `replica` |
 | `--primary-addr` | | | Primary gRPC address (for replica mode) |
 | `--read-only` | | | Open in read-only mode |
@@ -68,6 +74,9 @@ red server --path ./data/reddb.rdb
 
 # Local dev with both APIs
 red server --path ./data/reddb.rdb --grpc-bind 127.0.0.1:50051 --http-bind 127.0.0.1:8080
+
+# Wire-only server
+red server --path ./data/reddb.rdb --wire-bind 127.0.0.1:5051
 
 # HTTP-only server
 red server --http --bind 0.0.0.0:8080
@@ -205,7 +214,7 @@ red tick [--bind 127.0.0.1:8080] [--operations maintenance,retention,checkpoint]
 Start as a read replica.
 
 ```bash
-red replica --primary-addr http://primary:50051 [--grpc-bind 127.0.0.1:50051] [--http-bind 127.0.0.1:8080] [--path ./data/replica.rdb]
+red replica --primary-addr http://primary:50051 [--grpc-bind 127.0.0.1:50051] [--http-bind 127.0.0.1:8080] [--wire-bind 127.0.0.1:5051] [--path ./data/replica.rdb]
 ```
 
 | Flag | Short | Default | Description |
@@ -217,6 +226,7 @@ red replica --primary-addr http://primary:50051 [--grpc-bind 127.0.0.1:50051] [-
 | `--http` | | | Enable HTTP |
 | `--grpc-bind` | | | Explicit gRPC bind address |
 | `--http-bind` | | | Explicit HTTP bind address |
+| `--wire-bind` | | | Explicit wire TCP bind address |
 | `--vault` | | `false` | Enable vault |
 
 ## red mcp

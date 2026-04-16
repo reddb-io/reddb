@@ -211,7 +211,10 @@ impl EntityColumnResolver {
     /// answered directly from the entity (no record needed).
     pub fn is_all_fast(&self) -> bool {
         self.kinds.iter().all(|k| {
-            !matches!(k, EntityFieldKind::DocumentPath(_) | EntityFieldKind::Unknown)
+            !matches!(
+                k,
+                EntityFieldKind::DocumentPath(_) | EntityFieldKind::Unknown
+            )
         })
     }
 }

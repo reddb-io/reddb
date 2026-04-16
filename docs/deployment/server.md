@@ -1,11 +1,14 @@
 # Server Mode
 
-In server mode, RedDB runs as a standalone process exposing HTTP and/or gRPC APIs.
+In server mode, RedDB runs as a standalone process exposing a routed front-door or explicit HTTP, gRPC, and wire listeners.
 
 ## Starting
 
 ```bash
-# Recommended: one process, both APIs
+# Recommended simplest default: routed front-door on 127.0.0.1:5050
+red server --path ./data/reddb.rdb
+
+# Explicit HTTP + gRPC
 red server \
   --path ./data/reddb.rdb \
   --grpc-bind 0.0.0.0:50051 \
@@ -16,13 +19,16 @@ red server --http --path ./data/reddb.rdb --bind 0.0.0.0:8080
 
 # gRPC only
 red server --grpc --path ./data/reddb.rdb --bind 0.0.0.0:50051
+
+# wire only
+red server --path ./data/reddb.rdb --wire-bind 0.0.0.0:5051
 ```
 
 ## Characteristics
 
 | Property | Value |
 |:---------|:------|
-| Transport | HTTP, gRPC, or both in one process |
+| Transport | Router, HTTP, gRPC, wire, or a combination depending on flags |
 | Latency | Microseconds (network) |
 | Concurrency | Connection pool + async runtime |
 | Persistence | File-backed with WAL |

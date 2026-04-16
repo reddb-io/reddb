@@ -269,9 +269,9 @@ fn server_flags() -> Vec<FlagSchema> {
             .with_short('d')
             .with_description("Persistent database file path (omit for in-memory)")
             .with_default("./data/reddb.rdb"),
-        FlagSchema::new("bind")
-            .with_short('b')
-            .with_description("Bind address (host:port) for the routed front-door or legacy single-transport mode"),
+        FlagSchema::new("bind").with_short('b').with_description(
+            "Bind address (host:port) for the routed front-door or legacy single-transport mode",
+        ),
         FlagSchema::boolean("grpc").with_description("Enable the gRPC API"),
         FlagSchema::boolean("http").with_description("Serve the HTTP API"),
         FlagSchema::new("grpc-bind").with_description("Explicit gRPC bind address (host:port)"),
@@ -307,9 +307,9 @@ fn replica_flags() -> Vec<FlagSchema> {
             .with_short('d')
             .with_description("Local replica database file path")
             .with_default("./data/reddb.rdb"),
-        FlagSchema::new("bind")
-            .with_short('b')
-            .with_description("Bind address (host:port) for the routed front-door or legacy single-transport mode"),
+        FlagSchema::new("bind").with_short('b').with_description(
+            "Bind address (host:port) for the routed front-door or legacy single-transport mode",
+        ),
         FlagSchema::boolean("grpc").with_description("Enable the gRPC API"),
         FlagSchema::boolean("http").with_description("Serve the HTTP API"),
         FlagSchema::new("grpc-bind").with_description("Explicit gRPC bind address (host:port)"),
@@ -339,9 +339,9 @@ fn service_flags() -> Vec<FlagSchema> {
             .with_short('d')
             .with_description("Persistent database file path")
             .with_default("/var/lib/reddb/data.rdb"),
-        FlagSchema::new("bind")
-            .with_short('b')
-            .with_description("Bind address (host:port) for the routed front-door or legacy single-transport mode"),
+        FlagSchema::new("bind").with_short('b').with_description(
+            "Bind address (host:port) for the routed front-door or legacy single-transport mode",
+        ),
         FlagSchema::boolean("grpc").with_description("Enable the gRPC API in the service"),
         FlagSchema::boolean("http").with_description("Install an HTTP service"),
         FlagSchema::new("grpc-bind").with_description("Explicit gRPC bind address (host:port)"),

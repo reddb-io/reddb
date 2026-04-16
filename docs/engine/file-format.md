@@ -370,6 +370,8 @@ Every serialized `Value` is prefixed by a single type byte. All integers are lit
 | 39 | `Lang2` | 3 | `[tag][2 ASCII chars]` (ISO 639-1) |
 | 40 | `Lang5` | 6 | `[tag][5 ASCII chars]` (BCP 47, e.g. `pt-BR`) |
 | 41 | `Currency` | 4 | `[tag][3 ASCII chars]` (ISO 4217) |
+| 53 | `AssetCode` | variable | `[tag][len: varu32][ASCII bytes]` |
+| 54 | `Money` | variable | `[tag][asset_len: varu32][asset ASCII][scale: u8][minor_units: i64 LE]` |
 
 ### Color Types
 

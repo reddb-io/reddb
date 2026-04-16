@@ -31,6 +31,15 @@ SELECT * FROM users
 SELECT name, email, age FROM users
 ```
 
+### With Scalar Functions
+
+```sql
+SELECT wallet_id,
+       MONEY_ASSET(balance) AS asset,
+       MONEY_MINOR(balance) AS minor_units
+FROM wallets
+```
+
 ### With Filters
 
 ```sql
@@ -72,6 +81,14 @@ SELECT * FROM hosts ORDER BY ip ASC LIMIT 50 OFFSET 100
 
 ```sql
 SELECT name AS user_name, age AS user_age FROM users
+```
+
+You can alias scalar-function results the same way:
+
+```sql
+SELECT MONEY('BTC 0.125') AS starting_balance
+FROM wallets
+LIMIT 1
 ```
 
 ## Table Aliases

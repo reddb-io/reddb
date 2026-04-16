@@ -294,12 +294,29 @@ impl RedDBRuntime {
                 let mut result =
                     UnifiedResult::with_columns(vec!["message_id".into(), "payload".into()]);
                 let mut popped = 0u64;
-                for message in messages.into_iter().take(*count) {
+                for message in messages {
+                    if popped >= *count as u64 {
+                        break;
+                    }
+
+                    let message_lock = queue_message_lock_handle(self, queue, message.id);
+                    let Some(_guard) = message_lock.try_lock() else {
+                        continue;
+                    };
+                    if queue_message_pending_any(store.as_ref(), queue, message.id)? {
+                        continue;
+                    }
+                    let Some(current) =
+                        queue_message_view_by_id(store.as_ref(), queue, message.id)?
+                    else {
+                        continue;
+                    };
+
                     let mut record = UnifiedRecord::new();
-                    record.set("message_id", Value::Text(message_id_string(message.id)));
-                    record.set("payload", message.payload.clone());
+                    record.set("message_id", Value::Text(message_id_string(current.id)));
+                    record.set("payload", current.payload.clone());
                     result.push(record);
-                    delete_message_with_state(store.as_ref(), queue, message.id)?;
+                    delete_message_with_state(Some(self), store.as_ref(), queue, current.id)?;
                     popped += 1;
                 }
                 if popped > 0 {
@@ -374,7 +391,9 @@ impl RedDBRuntime {
                 let messages = load_queue_message_views(store.as_ref(), queue)?;
                 let count = messages.len();
                 for message in messages {
-                    delete_message_with_state(store.as_ref(), queue, message.id)?;
+                    let message_lock = queue_message_lock_handle(self, queue, message.id);
+                    let _guard = message_lock.lock();
+                    delete_message_with_state(Some(self), store.as_ref(), queue, message.id)?;
                 }
                 if count > 0 {
                     self.invalidate_result_cache();
@@ -443,13 +462,33 @@ impl RedDBRuntime {
                     "attempts".into(),
                 ]);
 
-                for message in messages.into_iter().take(*count) {
-                    let attempts = increment_queue_attempts(store.as_ref(), queue, message.id)?;
-                    if attempts > message.max_attempts {
+                for message in messages {
+                    if result.records.len() >= *count {
+                        break;
+                    }
+
+                    let message_lock = queue_message_lock_handle(self, queue, message.id);
+                    let Some(_guard) = message_lock.try_lock() else {
+                        continue;
+                    };
+                    if queue_message_pending_for_group(store.as_ref(), queue, group, message.id)?
+                        || queue_message_acked_for_group(store.as_ref(), queue, group, message.id)?
+                    {
+                        continue;
+                    }
+                    let Some(current) =
+                        queue_message_view_by_id(store.as_ref(), queue, message.id)?
+                    else {
+                        continue;
+                    };
+
+                    let attempts = increment_queue_attempts(store.as_ref(), queue, current.id)?;
+                    if attempts > current.max_attempts {
                         let _ = move_message_to_dlq_or_drop(
+                            Some(self),
                             store.as_ref(),
                             queue,
-                            message.id,
+                            current.id,
                             &config,
                             "max_attempts_exceeded",
                         )?;
@@ -461,15 +500,15 @@ impl RedDBRuntime {
                         store.as_ref(),
                         queue,
                         group,
-                        message.id,
+                        current.id,
                         consumer,
                         delivered_at_ns,
                         attempts,
                     )?;
 
                     let mut record = UnifiedRecord::new();
-                    record.set("message_id", Value::Text(message_id_string(message.id)));
-                    record.set("payload", message.payload);
+                    record.set("message_id", Value::Text(message_id_string(current.id)));
+                    record.set("payload", current.payload);
                     record.set("consumer", Value::Text(consumer.clone()));
                     record.set(
                         "delivery_count",
@@ -569,17 +608,36 @@ impl RedDBRuntime {
                 ]);
 
                 for entry in pending {
-                    let payload = queue_message_payload(store.as_ref(), queue, entry.message_id)?;
+                    let message_lock = queue_message_lock_handle(self, queue, entry.message_id);
+                    let Some(_guard) = message_lock.try_lock() else {
+                        continue;
+                    };
+                    let Some(current) = load_pending_entries(
+                        store.as_ref(),
+                        queue,
+                        Some(group),
+                        Some(entry.message_id),
+                    )?
+                    .into_iter()
+                    .next() else {
+                        continue;
+                    };
+                    if current_time_ns.saturating_sub(current.delivered_at_ns) < min_idle_ns {
+                        continue;
+                    }
+
+                    let payload = queue_message_payload(store.as_ref(), queue, current.message_id)?;
                     let attempts =
-                        increment_queue_attempts(store.as_ref(), queue, entry.message_id)?;
+                        increment_queue_attempts(store.as_ref(), queue, current.message_id)?;
                     if attempts
-                        > queue_message_max_attempts(store.as_ref(), queue, entry.message_id)?
+                        > queue_message_max_attempts(store.as_ref(), queue, current.message_id)?
                     {
-                        delete_meta_entity(store.as_ref(), entry.entity_id);
+                        delete_meta_entity(store.as_ref(), current.entity_id);
                         let _ = move_message_to_dlq_or_drop(
+                            Some(self),
                             store.as_ref(),
                             queue,
-                            entry.message_id,
+                            current.message_id,
                             &config,
                             "claim_max_attempts_exceeded",
                         )?;
@@ -590,22 +648,22 @@ impl RedDBRuntime {
                         store.as_ref(),
                         queue,
                         group,
-                        entry.message_id,
+                        current.message_id,
                         consumer,
                         current_time_ns,
-                        entry.delivery_count.saturating_add(1),
+                        current.delivery_count.saturating_add(1),
                     )?;
 
                     let mut record = UnifiedRecord::new();
                     record.set(
                         "message_id",
-                        Value::Text(message_id_string(entry.message_id)),
+                        Value::Text(message_id_string(current.message_id)),
                     );
                     record.set("payload", payload);
                     record.set("consumer", Value::Text(consumer.clone()));
                     record.set(
                         "delivery_count",
-                        Value::UnsignedInteger(u64::from(entry.delivery_count.saturating_add(1))),
+                        Value::UnsignedInteger(u64::from(current.delivery_count.saturating_add(1))),
                     );
                     result.push(record);
                 }
@@ -633,12 +691,14 @@ impl RedDBRuntime {
                 ensure_queue_exists(store.as_ref(), queue)?;
                 require_queue_group(store.as_ref(), queue, group)?;
                 let message_id = parse_message_id(message_id)?;
+                let message_lock = queue_message_lock_handle(self, queue, message_id);
+                let _guard = message_lock.lock();
                 let pending = require_pending_entry(store.as_ref(), queue, group, message_id)?;
                 delete_meta_entity(store.as_ref(), pending.entity_id);
                 save_queue_ack(store.as_ref(), queue, group, message_id)?;
 
                 if queue_message_completed_for_all_groups(store.as_ref(), queue, message_id)? {
-                    delete_message_with_state(store.as_ref(), queue, message_id)?;
+                    delete_message_with_state(Some(self), store.as_ref(), queue, message_id)?;
                 }
                 self.invalidate_result_cache();
 
@@ -658,6 +718,8 @@ impl RedDBRuntime {
                 require_queue_group(store.as_ref(), queue, group)?;
                 let config = load_queue_config(store.as_ref(), queue);
                 let message_id = parse_message_id(message_id)?;
+                let message_lock = queue_message_lock_handle(self, queue, message_id);
+                let _guard = message_lock.lock();
                 let pending = require_pending_entry(store.as_ref(), queue, group, message_id)?;
                 delete_meta_entity(store.as_ref(), pending.entity_id);
 
@@ -665,6 +727,7 @@ impl RedDBRuntime {
                 let max_attempts = queue_message_max_attempts(store.as_ref(), queue, message_id)?;
                 let message = if attempts >= max_attempts {
                     let target = move_message_to_dlq_or_drop(
+                        Some(self),
                         store.as_ref(),
                         queue,
                         message_id,
@@ -1036,6 +1099,17 @@ fn queue_message_view_from_entity(entity: UnifiedEntity) -> Option<QueueMessageV
     })
 }
 
+fn queue_message_view_by_id(
+    store: &UnifiedStore,
+    queue: &str,
+    message_id: EntityId,
+) -> RedDBResult<Option<QueueMessageView>> {
+    let manager = queue_manager(store, queue)?;
+    Ok(manager
+        .get(message_id)
+        .and_then(queue_message_view_from_entity))
+}
+
 fn sort_queue_messages(
     messages: &mut [QueueMessageView],
     config: &QueueRuntimeConfig,
@@ -1131,7 +1205,34 @@ fn queue_message_payload(
     Ok(queue_message_data(store, queue, message_id)?.payload)
 }
 
+fn queue_message_pending_any(
+    store: &UnifiedStore,
+    queue: &str,
+    message_id: EntityId,
+) -> RedDBResult<bool> {
+    Ok(!load_pending_entries(store, queue, None, Some(message_id))?.is_empty())
+}
+
+fn queue_message_pending_for_group(
+    store: &UnifiedStore,
+    queue: &str,
+    group: &str,
+    message_id: EntityId,
+) -> RedDBResult<bool> {
+    Ok(!load_pending_entries(store, queue, Some(group), Some(message_id))?.is_empty())
+}
+
+fn queue_message_acked_for_group(
+    store: &UnifiedStore,
+    queue: &str,
+    group: &str,
+    message_id: EntityId,
+) -> RedDBResult<bool> {
+    Ok(!load_ack_entries(store, queue, Some(group), Some(message_id))?.is_empty())
+}
+
 fn delete_message_with_state(
+    runtime: Option<&RedDBRuntime>,
     store: &UnifiedStore,
     queue: &str,
     message_id: EntityId,
@@ -1140,6 +1241,9 @@ fn delete_message_with_state(
     store
         .delete(queue, message_id)
         .map_err(|err| RedDBError::Internal(err.to_string()))?;
+    if let Some(runtime) = runtime {
+        forget_queue_message_lock(runtime, queue, message_id);
+    }
     Ok(())
 }
 
@@ -1151,6 +1255,7 @@ fn remove_message_state(store: &UnifiedStore, queue: &str, message_id: EntityId)
 }
 
 fn move_message_to_dlq_or_drop(
+    runtime: Option<&RedDBRuntime>,
     store: &UnifiedStore,
     queue: &str,
     message_id: EntityId,
@@ -1190,10 +1295,10 @@ fn move_message_to_dlq_or_drop(
                 .set_metadata(dlq, inserted_id, queue_message_ttl_metadata(ttl_ms))
                 .map_err(|err| RedDBError::Internal(err.to_string()))?;
         }
-        delete_message_with_state(store, queue, message_id)?;
+        delete_message_with_state(runtime, store, queue, message_id)?;
         Ok(Some(dlq.clone()))
     } else {
-        delete_message_with_state(store, queue, message_id)?;
+        delete_message_with_state(runtime, store, queue, message_id)?;
         Ok(None)
     }
 }
@@ -1259,6 +1364,35 @@ fn remove_meta_rows(store: &UnifiedStore, predicate: impl Fn(&RowData) -> bool +
 
 fn delete_meta_entity(store: &UnifiedStore, entity_id: EntityId) {
     let _ = store.delete(QUEUE_META_COLLECTION, entity_id);
+}
+
+fn queue_message_lock_key(queue: &str, message_id: EntityId) -> String {
+    format!("{queue}:{}", message_id.raw())
+}
+
+fn queue_message_lock_handle(
+    runtime: &RedDBRuntime,
+    queue: &str,
+    message_id: EntityId,
+) -> Arc<parking_lot::Mutex<()>> {
+    let key = queue_message_lock_key(queue, message_id);
+    if let Some(lock) = runtime.inner.queue_message_locks.read().get(&key).cloned() {
+        return lock;
+    }
+
+    let mut locks = runtime.inner.queue_message_locks.write();
+    locks
+        .entry(key)
+        .or_insert_with(|| Arc::new(parking_lot::Mutex::new(())))
+        .clone()
+}
+
+fn forget_queue_message_lock(runtime: &RedDBRuntime, queue: &str, message_id: EntityId) {
+    runtime
+        .inner
+        .queue_message_locks
+        .write()
+        .remove(&queue_message_lock_key(queue, message_id));
 }
 
 fn parse_message_id(value: &str) -> RedDBResult<EntityId> {

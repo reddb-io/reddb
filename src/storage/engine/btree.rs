@@ -1105,6 +1105,34 @@ mod tests {
     }
 
     #[test]
+    fn test_btree_bulk_insert_sorted_preserves_leaf_layout() {
+        let path = temp_db_path();
+        cleanup(&path);
+
+        let pager = Arc::new(Pager::open_default(&path).unwrap());
+        let tree = BTree::new(pager);
+
+        let items: Vec<(Vec<u8>, Vec<u8>)> = (0..240u32)
+            .map(|i| {
+                (
+                    format!("key{:08}", i).into_bytes(),
+                    vec![b'v'; 32 + (i as usize % 7)],
+                )
+            })
+            .collect();
+
+        tree.bulk_insert_sorted(&items).unwrap();
+
+        assert_eq!(tree.count().unwrap(), items.len());
+
+        for (key, value) in &items {
+            assert_eq!(tree.get(key).unwrap(), Some(value.clone()));
+        }
+
+        cleanup(&path);
+    }
+
+    #[test]
     fn test_btree_sorted_iteration() {
         let path = temp_db_path();
         cleanup(&path);

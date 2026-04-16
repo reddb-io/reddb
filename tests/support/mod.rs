@@ -749,6 +749,326 @@ pub fn assert_shared_query_behavior(rt: &RedDBRuntime) {
     assert_eq!(uint(&meta.result.records[0], "chunk_size"), 64);
 }
 
+pub fn apply_end_to_end_mutations(rt: &RedDBRuntime) {
+    let query = QueryUseCases::new(rt);
+
+    exec(
+        &query,
+        "UPDATE accounts SET tier = 'team' WHERE username = 'alice'",
+    );
+    exec(
+        &query,
+        "UPDATE accounts SET status = 'active', tier = 'enterprise', score = 80.0 WHERE username = 'bob'",
+    );
+    exec(&query, "DELETE FROM accounts WHERE username = 'carol'");
+    exec(
+        &query,
+        "INSERT INTO accounts (id, username, status, tier, score) VALUES ('u4', 'dora', 'suspended', 'basic', 66.0)",
+    );
+
+    exec(&query, "DELETE FROM docs WHERE slug = 'runbook'");
+    exec(
+        &query,
+        "INSERT INTO docs DOCUMENT (body) VALUES ('{\"category\":\"ops\",\"slug\":\"faq\",\"title\":\"FAQ\"}')",
+    );
+
+    exec(&query, "DELETE FROM settings WHERE key = 'feature_flag'");
+    exec(
+        &query,
+        "INSERT INTO settings KV (key, value) VALUES ('feature_flag', false)",
+    );
+    exec(&query, "DELETE FROM settings WHERE key = 'max_retries'");
+    exec(
+        &query,
+        "INSERT INTO settings KV (key, value) VALUES ('max_retries', 5)",
+    );
+
+    exec(
+        &query,
+        "CREATE QUEUE workflow WITH DLQ workflow_failed MAX_ATTEMPTS 3",
+    );
+    exec(&query, "QUEUE GROUP CREATE workflow workers");
+    exec(&query, "QUEUE PUSH workflow 'task-a'");
+
+    let delivered = exec(
+        &query,
+        "QUEUE READ workflow GROUP workers CONSUMER worker1 COUNT 1",
+    );
+    let message_id = text(&delivered.result.records[0], "message_id");
+    assert_eq!(
+        text(&delivered.result.records[0], "payload"),
+        "task-a",
+        "workflow read should deliver the inserted payload"
+    );
+    assert_eq!(
+        text(&delivered.result.records[0], "consumer"),
+        "worker1",
+        "workflow read should bind the first consumer"
+    );
+
+    let claimed = exec(
+        &query,
+        "QUEUE CLAIM workflow GROUP workers CONSUMER worker2 MIN_IDLE 0",
+    );
+    assert_eq!(
+        text(&claimed.result.records[0], "message_id"),
+        message_id,
+        "workflow claim should keep the same message id"
+    );
+    assert_eq!(
+        text(&claimed.result.records[0], "consumer"),
+        "worker2",
+        "workflow claim should transfer the pending message"
+    );
+    exec(
+        &query,
+        &format!("QUEUE ACK workflow GROUP workers '{message_id}'"),
+    );
+
+    exec(
+        &query,
+        "INSERT INTO network NODE (label, node_type, role) VALUES ('cache', 'Host', 'cache')",
+    );
+    let app = graph_node_id(rt, "network", "app");
+    let cache = graph_node_id(rt, "network", "cache");
+    exec(
+        &query,
+        &format!(
+            "INSERT INTO network EDGE (label, from, to, weight) VALUES ('connects', {app}, {cache}, 0.5)"
+        ),
+    );
+
+    exec(
+        &query,
+        "INSERT INTO embeddings VECTOR (dense, content) VALUES ([0.9, 0.1], 'gateway followup')",
+    );
+
+    exec(
+        &query,
+        "INSERT INTO metrics (metric, value, tags, timestamp) VALUES ('cpu.usage', 50.0, '{\"host\":\"srv-a\",\"region\":\"sa\"}', 600000000000)",
+    );
+    exec(
+        &query,
+        "INSERT INTO metrics (metric, value, tags, timestamp) VALUES ('mem.usage', 70.0, '{\"host\":\"srv-a\",\"region\":\"sa\"}', 0)",
+    );
+}
+
+pub fn assert_end_to_end_query_behavior(rt: &RedDBRuntime) {
+    let query = QueryUseCases::new(rt);
+
+    let active_high_score = exec(
+        &query,
+        "SELECT username FROM accounts WHERE status = 'active' AND score >= 80 ORDER BY username ASC",
+    );
+    let active_names = active_high_score
+        .result
+        .records
+        .iter()
+        .map(|record| text(record, "username"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        active_names,
+        vec!["alice".to_string(), "bob".to_string()],
+        "post-mutation filtered account query should match expected rows"
+    );
+
+    let accounts = exec(
+        &query,
+        "SELECT username, status, tier FROM accounts ORDER BY username ASC",
+    );
+    let account_rows = accounts
+        .result
+        .records
+        .iter()
+        .map(|record| {
+            (
+                text(record, "username"),
+                text(record, "status"),
+                text(record, "tier"),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        account_rows,
+        vec![
+            (
+                "alice".to_string(),
+                "active".to_string(),
+                "team".to_string(),
+            ),
+            (
+                "bob".to_string(),
+                "active".to_string(),
+                "enterprise".to_string(),
+            ),
+            (
+                "dora".to_string(),
+                "suspended".to_string(),
+                "basic".to_string(),
+            ),
+        ],
+        "account rows should reflect insert/update/delete mutations"
+    );
+
+    let grouped_accounts = exec(
+        &query,
+        "SELECT status, count(*) AS total FROM accounts GROUP BY status ORDER BY status ASC",
+    );
+    let grouped_rows = grouped_accounts
+        .result
+        .records
+        .iter()
+        .map(|record| (text(record, "status"), uint(record, "total")))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        grouped_rows,
+        vec![("active".to_string(), 2), ("suspended".to_string(), 1)],
+        "GROUP BY over accounts should reflect the final state"
+    );
+
+    let docs = exec(&query, "SELECT slug, title FROM docs ORDER BY slug ASC");
+    let doc_rows = docs
+        .result
+        .records
+        .iter()
+        .map(|record| (text(record, "slug"), text(record, "title")))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        doc_rows,
+        vec![
+            ("faq".to_string(), "FAQ".to_string()),
+            ("guide".to_string(), "Guide".to_string()),
+        ],
+        "document collection should reflect delete + insert mutations"
+    );
+
+    let settings = exec(&query, "SELECT key, value FROM settings ORDER BY key ASC");
+    let setting_rows = settings
+        .result
+        .records
+        .iter()
+        .map(|record| {
+            (
+                text(record, "key"),
+                value_repr(record.get("value").expect("setting should have value")),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        setting_rows,
+        vec![
+            ("feature_flag".to_string(), "false".to_string()),
+            ("max_retries".to_string(), "5".to_string()),
+        ],
+        "KV collection should reflect the final values"
+    );
+
+    let queue_len = exec(&query, "QUEUE LEN workflow");
+    assert_eq!(
+        uint(&queue_len.result.records[0], "len"),
+        0,
+        "workflow queue should be empty after the claimed message is acked"
+    );
+
+    let queue_pending = exec(&query, "QUEUE PENDING workflow GROUP workers");
+    assert!(
+        queue_pending.result.records.is_empty(),
+        "workflow pending list should be empty after ack"
+    );
+
+    let metrics = exec(
+        &query,
+        "SELECT metric, time_bucket(5m) AS bucket, avg(value) AS avg_value, count(*) AS samples FROM metrics GROUP BY metric, time_bucket(5m) ORDER BY metric ASC, bucket ASC",
+    );
+    let metric_rows = metrics
+        .result
+        .records
+        .iter()
+        .map(|record| {
+            (
+                text(record, "metric"),
+                uint(record, "bucket"),
+                float(record, "avg_value"),
+                uint(record, "samples"),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        metric_rows,
+        vec![
+            ("cpu.usage".to_string(), 0, 15.0, 2),
+            ("cpu.usage".to_string(), FIVE_MINUTES_NS, 30.0, 1),
+            ("cpu.usage".to_string(), 600_000_000_000, 50.0, 1),
+            ("mem.usage".to_string(), 0, 70.0, 1),
+        ],
+        "time-series aggregation should reflect inserted points"
+    );
+
+    let gateway = graph_node_id(rt, "network", "gateway");
+    let app = graph_node_id(rt, "network", "app");
+    let cache = graph_node_id(rt, "network", "cache");
+
+    let shortest = exec(
+        &query,
+        &format!(
+            "GRAPH SHORTEST_PATH '{}' TO '{}' ALGORITHM dijkstra",
+            gateway, cache
+        ),
+    );
+    assert_eq!(
+        uint(&shortest.result.records[0], "hop_count"),
+        2,
+        "gateway -> cache should resolve through the app node"
+    );
+    assert_eq!(
+        float(&shortest.result.records[0], "total_weight"),
+        1.5,
+        "gateway -> app -> cache should weigh 1.5 total"
+    );
+
+    let neighborhood = exec(&query, &format!("GRAPH NEIGHBORHOOD '{}' DEPTH 1", app));
+    let mut seen = neighborhood
+        .result
+        .records
+        .iter()
+        .map(|record| text(record, "label"))
+        .collect::<Vec<_>>();
+    seen.sort();
+    assert!(
+        seen.contains(&"cache".to_string()),
+        "graph neighborhood should include the inserted cache node"
+    );
+    assert!(
+        seen.contains(&"db".to_string()),
+        "graph neighborhood should still include the original db node"
+    );
+
+    let vectors = exec(
+        &query,
+        "VECTOR SEARCH embeddings SIMILAR TO [1.0, 0.0] LIMIT 2",
+    );
+    assert_eq!(
+        vectors.result.records.len(),
+        2,
+        "vector search should return the top two matches"
+    );
+    let vector_contents = vectors
+        .result
+        .records
+        .iter()
+        .map(|record| text(record, "content"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        vector_contents.first().map(String::as_str),
+        Some("gateway guide"),
+        "the exact vector should remain the top result"
+    );
+    assert!(
+        vector_contents.contains(&"gateway followup".to_string()),
+        "the inserted near-neighbor vector should rank in the top two"
+    );
+}
+
 pub fn assert_sql_function_queries(rt: &RedDBRuntime) {
     let query = QueryUseCases::new(rt);
 

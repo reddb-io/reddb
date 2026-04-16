@@ -11,6 +11,141 @@ fn runtime_pool_lock(runtime: &RedDBRuntime) -> std::sync::MutexGuard<'_, PoolSt
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+fn cache_scope_insert(scopes: &mut HashSet<String>, name: &str) {
+    if name.is_empty() || name.starts_with("__subq_") || is_universal_query_source(name) {
+        return;
+    }
+    scopes.insert(name.to_string());
+}
+
+fn collect_table_source_scopes(scopes: &mut HashSet<String>, query: &TableQuery) {
+    match query.source.as_ref() {
+        Some(crate::storage::query::ast::TableSource::Name(name)) => {
+            cache_scope_insert(scopes, name)
+        }
+        Some(crate::storage::query::ast::TableSource::Subquery(subquery)) => {
+            collect_query_expr_result_cache_scopes(scopes, subquery);
+        }
+        None => cache_scope_insert(scopes, &query.table),
+    }
+}
+
+fn collect_vector_source_scopes(
+    scopes: &mut HashSet<String>,
+    source: &crate::storage::query::ast::VectorSource,
+) {
+    match source {
+        crate::storage::query::ast::VectorSource::Reference { collection, .. } => {
+            cache_scope_insert(scopes, collection);
+        }
+        crate::storage::query::ast::VectorSource::Subquery(subquery) => {
+            collect_query_expr_result_cache_scopes(scopes, subquery);
+        }
+        crate::storage::query::ast::VectorSource::Literal(_)
+        | crate::storage::query::ast::VectorSource::Text(_) => {}
+    }
+}
+
+fn collect_path_selector_scopes(
+    scopes: &mut HashSet<String>,
+    selector: &crate::storage::query::ast::NodeSelector,
+) {
+    if let crate::storage::query::ast::NodeSelector::ByRow { table, .. } = selector {
+        cache_scope_insert(scopes, table);
+    }
+}
+
+fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &QueryExpr) {
+    match expr {
+        QueryExpr::Table(query) => collect_table_source_scopes(scopes, query),
+        QueryExpr::Join(query) => {
+            collect_query_expr_result_cache_scopes(scopes, &query.left);
+            collect_query_expr_result_cache_scopes(scopes, &query.right);
+        }
+        QueryExpr::Path(query) => {
+            collect_path_selector_scopes(scopes, &query.from);
+            collect_path_selector_scopes(scopes, &query.to);
+        }
+        QueryExpr::Vector(query) => {
+            cache_scope_insert(scopes, &query.collection);
+            collect_vector_source_scopes(scopes, &query.query_vector);
+        }
+        QueryExpr::Hybrid(query) => {
+            collect_query_expr_result_cache_scopes(scopes, &query.structured);
+            cache_scope_insert(scopes, &query.vector.collection);
+            collect_vector_source_scopes(scopes, &query.vector.query_vector);
+        }
+        QueryExpr::Insert(query) => cache_scope_insert(scopes, &query.table),
+        QueryExpr::Update(query) => cache_scope_insert(scopes, &query.table),
+        QueryExpr::Delete(query) => cache_scope_insert(scopes, &query.table),
+        QueryExpr::CreateTable(query) => cache_scope_insert(scopes, &query.name),
+        QueryExpr::DropTable(query) => cache_scope_insert(scopes, &query.name),
+        QueryExpr::AlterTable(query) => cache_scope_insert(scopes, &query.name),
+        QueryExpr::CreateIndex(query) => cache_scope_insert(scopes, &query.table),
+        QueryExpr::DropIndex(query) => cache_scope_insert(scopes, &query.table),
+        QueryExpr::CreateTimeSeries(query) => cache_scope_insert(scopes, &query.name),
+        QueryExpr::DropTimeSeries(query) => cache_scope_insert(scopes, &query.name),
+        QueryExpr::CreateQueue(query) => cache_scope_insert(scopes, &query.name),
+        QueryExpr::DropQueue(query) => cache_scope_insert(scopes, &query.name),
+        QueryExpr::QueueCommand(query) => match query {
+            QueueCommand::Push { queue, .. }
+            | QueueCommand::Pop { queue, .. }
+            | QueueCommand::Peek { queue, .. }
+            | QueueCommand::Len { queue }
+            | QueueCommand::Purge { queue }
+            | QueueCommand::GroupCreate { queue, .. }
+            | QueueCommand::GroupRead { queue, .. }
+            | QueueCommand::Pending { queue, .. }
+            | QueueCommand::Claim { queue, .. }
+            | QueueCommand::Ack { queue, .. }
+            | QueueCommand::Nack { queue, .. } => cache_scope_insert(scopes, queue),
+        },
+        QueryExpr::CreateTree(query) => cache_scope_insert(scopes, &query.collection),
+        QueryExpr::DropTree(query) => cache_scope_insert(scopes, &query.collection),
+        QueryExpr::TreeCommand(query) => match query {
+            TreeCommand::Insert { collection, .. }
+            | TreeCommand::Move { collection, .. }
+            | TreeCommand::Delete { collection, .. }
+            | TreeCommand::Validate { collection, .. }
+            | TreeCommand::Rebalance { collection, .. } => cache_scope_insert(scopes, collection),
+        },
+        QueryExpr::SearchCommand(query) => match query {
+            SearchCommand::Similar { collection, .. }
+            | SearchCommand::Hybrid { collection, .. }
+            | SearchCommand::SpatialRadius { collection, .. }
+            | SearchCommand::SpatialBbox { collection, .. }
+            | SearchCommand::SpatialNearest { collection, .. } => {
+                cache_scope_insert(scopes, collection);
+            }
+            SearchCommand::Text { collection, .. }
+            | SearchCommand::Multimodal { collection, .. }
+            | SearchCommand::Index { collection, .. }
+            | SearchCommand::Context { collection, .. } => {
+                if let Some(collection) = collection.as_deref() {
+                    cache_scope_insert(scopes, collection);
+                }
+            }
+        },
+        QueryExpr::Ask(query) => {
+            if let Some(collection) = query.collection.as_deref() {
+                cache_scope_insert(scopes, collection);
+            }
+        }
+        QueryExpr::ExplainAlter(query) => cache_scope_insert(scopes, &query.target.name),
+        QueryExpr::Graph(_)
+        | QueryExpr::GraphCommand(_)
+        | QueryExpr::ProbabilisticCommand(_)
+        | QueryExpr::SetConfig { .. }
+        | QueryExpr::ShowConfig { .. } => {}
+    }
+}
+
+fn query_expr_result_cache_scopes(expr: &QueryExpr) -> HashSet<String> {
+    let mut scopes = HashSet::new();
+    collect_query_expr_result_cache_scopes(&mut scopes, expr);
+    scopes
+}
+
 impl RedDBRuntime {
     pub fn in_memory() -> RedDBResult<Self> {
         Self::with_options(RedDBOptions::in_memory())
@@ -55,6 +190,7 @@ impl RedDBRuntime {
                     HashMap::new(),
                     std::collections::VecDeque::new(),
                 )),
+                queue_message_locks: parking_lot::RwLock::new(HashMap::new()),
                 planner_dirty_tables: parking_lot::RwLock::new(HashSet::new()),
                 ec_registry: Arc::new(crate::ec::config::EcRegistry::new()),
                 ec_worker: crate::ec::worker::EcWorker::new(),
@@ -1185,9 +1321,9 @@ impl RedDBRuntime {
         // ── Result cache: return cached result if still fresh (30s TTL) ──
         {
             let cache = self.inner.result_cache.read();
-            if let Some((result, cached_at)) = cache.0.get(query) {
-                if cached_at.elapsed().as_secs() < 30 {
-                    return Ok(result.clone());
+            if let Some(entry) = cache.0.get(query) {
+                if entry.cached_at.elapsed().as_secs() < 30 {
+                    return Ok(entry.result.clone());
                 }
             }
         }
@@ -1304,6 +1440,7 @@ impl RedDBRuntime {
             }
         };
         let statement = query_expr_name(&expr);
+        let result_cache_scopes = query_expr_result_cache_scopes(&expr);
 
         let query_result = match expr {
             QueryExpr::Graph(_) | QueryExpr::Path(_) => {
@@ -1502,7 +1639,11 @@ impl RedDBRuntime {
                 }
                 map.insert(
                     query.to_string(),
-                    (result.clone(), std::time::Instant::now()),
+                    RuntimeResultCacheEntry {
+                        result: result.clone(),
+                        cached_at: std::time::Instant::now(),
+                        scopes: result_cache_scopes,
+                    },
                 );
                 while map.len() > 1000 {
                     if let Some(oldest) = order.pop_front() {
@@ -1671,13 +1812,13 @@ impl RedDBRuntime {
         cache.1.clear();
     }
 
-    /// Invalidate only result cache entries whose query string references `table`.
-    /// Cheaper than a full clear: concurrent reads on other tables keep their cached results.
+    /// Invalidate only result cache entries that declared a dependency on `table`.
+    /// Cheaper than a full clear: unrelated tables keep their cached results.
     pub(crate) fn invalidate_result_cache_for_table(&self, table: &str) {
         let mut cache = self.inner.result_cache.write();
         let (ref mut map, ref mut order) = *cache;
-        map.retain(|key, _| !key.contains(table));
-        order.retain(|key| !key.contains(table));
+        map.retain(|_, entry| !entry.scopes.contains(table));
+        order.retain(|key| map.contains_key(key));
     }
 
     pub(crate) fn invalidate_plan_cache(&self) {

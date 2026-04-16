@@ -153,20 +153,20 @@ impl RedDb {
                 Ok(out)
             }
             Backend::Grpc(client) => {
-                let mut total: u64 = 0;
+                let mut encoded = Vec::with_capacity(payloads.len());
                 for item in payloads.iter() {
                     let dict = item
                         .downcast::<PyDict>()
                         .map_err(|_| err("INVALID_PARAMS", "bulk_insert payloads must be dicts"))?;
-                    let json_payload = pydict_to_json_str(dict)?;
-                    crate::get_runtime()
-                        .block_on(async {
-                            let mut guard = client.lock().expect("client poisoned");
-                            guard.create_row_entity(collection, &json_payload).await
-                        })
-                        .map_err(|e| err("QUERY_ERROR", e.to_string()))?;
-                    total += 1;
+                    encoded.push(pydict_to_json_str(dict)?);
                 }
+                let total = crate::get_runtime()
+                    .block_on(async {
+                        let mut guard = client.lock().expect("client poisoned");
+                        guard.bulk_create_rows(collection, encoded).await
+                    })
+                    .map_err(|e| err("QUERY_ERROR", e.to_string()))?
+                    .count;
                 let out = PyDict::new(py);
                 out.set_item("affected", total)?;
                 Ok(out)

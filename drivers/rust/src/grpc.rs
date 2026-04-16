@@ -82,7 +82,7 @@ impl GrpcClient {
     }
 
     pub async fn bulk_insert(&self, collection: &str, payloads: &[JsonValue]) -> Result<u64> {
-        let mut total: u64 = 0;
+        let mut encoded = Vec::with_capacity(payloads.len());
         for payload in payloads {
             if payload.as_object().is_none() {
                 return Err(ClientError::new(
@@ -90,17 +90,16 @@ impl GrpcClient {
                     "bulk_insert payloads must be JSON objects".to_string(),
                 ));
             }
-            let json_payload = payload.to_json_string();
-            {
-                let mut guard = self.inner.lock().await;
-                guard
-                    .create_row_entity(collection, &json_payload)
-                    .await
-                    .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?;
-            }
-            total += 1;
+            encoded.push(payload.to_json_string());
         }
-        Ok(total)
+        let reply = {
+            let mut guard = self.inner.lock().await;
+            guard
+                .bulk_create_rows(collection, encoded)
+                .await
+                .map_err(|e| ClientError::new(ErrorCode::QueryError, e.to_string()))?
+        };
+        Ok(reply.count)
     }
 
     pub async fn delete(&self, collection: &str, id: &str) -> Result<u64> {

@@ -2,6 +2,8 @@
 
 RedDB is configured through three layers: CLI flags, environment variables, and the `red_config` KV store. All runtime settings can be managed via HTTP without restart.
 
+If you need the terminology for router, transport, embedded mode, and the `red` binary, read [Modes and Transports](/getting-started/modes-and-transports.md) first.
+
 ## Server Flags
 
 ```bash
@@ -11,27 +13,48 @@ red server [flags]
 | Flag | Short | Description | Default |
 |:-----|:------|:------------|:--------|
 | `--path` | `-d` | Persistent database file path (omit for in-memory) | `./data/reddb.rdb` |
-| `--bind` | `-b` | Legacy single-transport bind address `host:port` | `127.0.0.1:50051` |
+| `--bind` | `-b` | Routed front-door bind address when no explicit transports are selected; otherwise legacy single-transport bind address | router `127.0.0.1:5050` |
 | `--grpc` | | Enable the gRPC API | disabled unless selected explicitly or by default fallback |
 | `--http` | | Enable the HTTP API | `false` |
 | `--grpc-bind` | | Explicit gRPC bind address `host:port` | |
 | `--http-bind` | | Explicit HTTP bind address `host:port` | |
+| `--wire-bind` | | Explicit wire TCP bind address `host:port` | |
+| `--wire-tls-bind` | | Explicit wire TLS bind address `host:port` | |
+| `--wire-tls-cert` | | TLS certificate PEM for `--wire-tls-bind` | auto-generated if omitted |
+| `--wire-tls-key` | | TLS private key PEM for `--wire-tls-bind` | auto-generated if omitted |
 | `--role` | `-r` | Replication role: `standalone`, `primary`, `replica` | `standalone` |
 | `--primary-addr` | | Primary gRPC address for replica mode | |
 | `--read-only` | | Open database in read-only mode | `false` |
 | `--no-create-if-missing` | | Fail if database file doesn't exist | `false` |
 | `--vault` | | Enable encrypted auth vault | `false` |
 
-Recommended pattern:
+Recommended patterns:
 
 ```bash
+# Simplest local default: one router port that accepts HTTP, gRPC, and wire
+red server --path ./data/reddb.rdb
+```
+
+```bash
+# Explicit HTTP + gRPC listeners
 red server \
   --path ./data/reddb.rdb \
   --grpc-bind 127.0.0.1:50051 \
   --http-bind 127.0.0.1:8080
 ```
 
-Use `--bind` only when you want a single transport and do not care about the other one.
+```bash
+# Dedicated wire listener
+red server \
+  --path ./data/reddb.rdb \
+  --wire-bind 127.0.0.1:5051
+```
+
+Rules of thumb:
+
+- Use plain `red server --path ...` when you want the default router on `127.0.0.1:5050`.
+- Use `--grpc-bind` and `--http-bind` when you want explicit public listener addresses.
+- Use `--bind` only when you intentionally want the legacy single-transport style or the default router front-door.
 
 ## Storage Modes
 
@@ -66,7 +89,7 @@ RedDB supports three deployment profiles, each with different operational charac
 | Profile | Use Case | Characteristics |
 |:--------|:---------|:----------------|
 | **Embedded** | Library usage inside a Rust process | Direct function calls, no network, lowest latency |
-| **Server** | Standalone database server | HTTP/gRPC transport, connection pool, full operational surface |
+| **Server** | Standalone database server | Router, HTTP, gRPC, and optional wire transport, connection pool, full operational surface |
 | **Serverless** | Edge/function workloads | Attach/warmup/reclaim lifecycle, ephemeral connections |
 
 Query the active profile:

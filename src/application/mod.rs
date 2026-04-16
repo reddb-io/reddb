@@ -20,8 +20,8 @@ pub use catalog::CatalogUseCases;
 pub use entity::{
     CreateDocumentInput, CreateEdgeInput, CreateEntityOutput, CreateKvInput,
     CreateNodeEmbeddingInput, CreateNodeGraphLinkInput, CreateNodeInput, CreateNodeTableLinkInput,
-    CreateRowInput, CreateRowsBatchInput, CreateTimeSeriesPointInput, CreateVectorInput, DeleteEntityInput,
-    DeleteEntityOutput, EntityUseCases, PatchEntityInput, PatchEntityOperation,
+    CreateRowInput, CreateRowsBatchInput, CreateTimeSeriesPointInput, CreateVectorInput,
+    DeleteEntityInput, DeleteEntityOutput, EntityUseCases, PatchEntityInput, PatchEntityOperation,
     PatchEntityOperationType,
 };
 pub use graph::{

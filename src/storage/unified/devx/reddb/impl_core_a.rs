@@ -1,4 +1,35 @@
 use super::*;
+use crate::api::DurabilityMode;
+
+fn store_config_from_options(options: &RedDBOptions) -> UnifiedStoreConfig {
+    let mut config = UnifiedStoreConfig::default()
+        .with_durability_mode(options.durability_mode)
+        .with_group_commit(options.group_commit);
+
+    if let Ok(value) = std::env::var("REDDB_DURABILITY") {
+        if let Some(mode) = DurabilityMode::from_str(&value) {
+            config = config.with_durability_mode(mode);
+        }
+    }
+
+    let mut group_commit = config.group_commit;
+    if let Ok(value) = std::env::var("REDDB_GROUP_COMMIT_WINDOW_MS") {
+        if let Ok(parsed) = value.parse::<u64>() {
+            group_commit.window_ms = parsed.max(1);
+        }
+    }
+    if let Ok(value) = std::env::var("REDDB_GROUP_COMMIT_MAX_STATEMENTS") {
+        if let Ok(parsed) = value.parse::<usize>() {
+            group_commit.max_statements = parsed.max(1);
+        }
+    }
+    if let Ok(value) = std::env::var("REDDB_GROUP_COMMIT_MAX_WAL_BYTES") {
+        if let Ok(parsed) = value.parse::<u64>() {
+            group_commit.max_wal_bytes = parsed.max(1);
+        }
+    }
+    config.with_group_commit(group_commit)
+}
 
 impl RedDB {
     fn remote_head_key(options: &RedDBOptions) -> String {
@@ -106,6 +137,7 @@ impl RedDB {
         }
 
         let path_buf = options.resolved_path("data.rdb");
+        let store_config = store_config_from_options(options);
         let (store, path, paged_mode) = if path_buf.exists() {
             if Self::is_binary_dump(&path_buf)? {
                 (
@@ -114,7 +146,11 @@ impl RedDB {
                     false,
                 )
             } else {
-                (UnifiedStore::open(&path_buf)?, Some(path_buf), true)
+                (
+                    UnifiedStore::open_with_config(&path_buf, store_config.clone())?,
+                    Some(path_buf),
+                    true,
+                )
             }
         } else {
             if !options.create_if_missing {
@@ -124,7 +160,11 @@ impl RedDB {
                 )
                 .into());
             }
-            (UnifiedStore::open(&path_buf)?, Some(path_buf), true)
+            (
+                UnifiedStore::open_with_config(&path_buf, store_config)?,
+                Some(path_buf),
+                true,
+            )
         };
 
         let remote_key = options.remote_key.clone();

@@ -216,7 +216,9 @@ pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<
 /// Borrowed version of `runtime_table_record_from_entity` — avoids cloning the full entity.
 /// Only the field values inserted into the record are cloned, not the entity struct itself.
 #[inline(never)]
-pub(super) fn runtime_table_record_from_entity_ref(entity: &UnifiedEntity) -> Option<UnifiedRecord> {
+pub(super) fn runtime_table_record_from_entity_ref(
+    entity: &UnifiedEntity,
+) -> Option<UnifiedRecord> {
     match &entity.data {
         EntityData::Row(row) => {
             let user_field_count = row

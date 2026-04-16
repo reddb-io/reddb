@@ -2,6 +2,11 @@
 
 Documents store semi-structured JSON payloads with optional metadata. They are ideal for configuration objects, event logs, API responses, and any data that doesn't fit a rigid table schema.
 
+> [!NOTE]
+> Documents are a first-class user-facing model, but they do not currently introduce a separate
+> native storage entity kind in the core unified engine. They are exposed as document semantics on
+> top of the unified collection layer.
+
 ## SQL First
 
 Documents are still queryable with SQL-style reads because RedDB flattens top-level fields from the document body into queryable columns.

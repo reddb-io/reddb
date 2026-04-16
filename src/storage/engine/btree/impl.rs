@@ -298,10 +298,15 @@ impl BTree {
                     }
                 }
 
-                // Free-space check: needs one u16 slot + the cell body.
+                // Free-space check: account for every slot appended in this
+                // batch even though `page.cell_count()` is only updated once
+                // at the end. Otherwise we can overrun the slot array into the
+                // cell area near the end of the page and persist bad offsets.
                 let cell_size = 4 + key.len() + value.len();
-                let needed = 2 + cell_size;
-                if leaf_free_bytes(&page) < needed {
+                let slot_end_after =
+                    LEAF_SLOT_ARRAY_OFFSET + (page.cell_count() as usize + inserted + 1) * 2;
+                let cells_start = leaf_cells_start(&page);
+                if slot_end_after + cell_size > cells_start {
                     break;
                 }
 
@@ -309,7 +314,6 @@ impl BTree {
                 // and push a new slot pointer. `page.cell_count()`
                 // still reflects the state before this inserted batch,
                 // so the new slot index is `cell_count + inserted`.
-                let cells_start = leaf_cells_start(&page);
                 let cell_offset = cells_start - cell_size;
                 {
                     let data = page.as_bytes_mut();

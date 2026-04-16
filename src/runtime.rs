@@ -597,6 +597,13 @@ impl Default for PoolState {
     }
 }
 
+#[derive(Debug, Clone)]
+struct RuntimeResultCacheEntry {
+    result: RuntimeQueryResult,
+    cached_at: std::time::Instant,
+    scopes: HashSet<String>,
+}
+
 struct RuntimeInner {
     db: Arc<RedDB>,
     layout: PhysicalLayout,
@@ -610,9 +617,12 @@ struct RuntimeInner {
     backup_scheduler: crate::replication::scheduler::BackupScheduler,
     query_cache: parking_lot::RwLock<crate::storage::query::planner::cache::PlanCache>,
     result_cache: parking_lot::RwLock<(
-        HashMap<String, (RuntimeQueryResult, std::time::Instant)>,
+        HashMap<String, RuntimeResultCacheEntry>,
         std::collections::VecDeque<String>,
     )>,
+    /// Process-local queue message locks used to emulate `SKIP LOCKED`-style
+    /// claim semantics for concurrent queue consumers inside this runtime.
+    queue_message_locks: parking_lot::RwLock<HashMap<String, Arc<parking_lot::Mutex<()>>>>,
     planner_dirty_tables: parking_lot::RwLock<HashSet<String>>,
     ec_registry: Arc<crate::ec::config::EcRegistry>,
     ec_worker: crate::ec::worker::EcWorker,
@@ -641,7 +651,6 @@ pub struct RuntimeConnection {
 
 mod expr_eval;
 mod graph_dsl;
-pub(crate) mod mutation;
 mod health_connection;
 mod impl_core;
 mod impl_ddl;
@@ -658,6 +667,7 @@ mod impl_timeseries;
 mod impl_tree;
 mod index_store;
 mod join_filter;
+pub(crate) mod mutation;
 mod probabilistic_store;
 pub(crate) mod query_exec;
 mod record_search;

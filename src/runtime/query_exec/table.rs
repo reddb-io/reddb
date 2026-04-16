@@ -296,8 +296,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                                         table_alias,
                                     ),
                                 });
-                            let explicit_cols =
-                                extract_select_column_names(&effective_projections);
+                            let explicit_cols = extract_select_column_names(&effective_projections);
                             // ── COVERED QUERY: cross-index bitmap path ───────────
                             // If every projected column is the eq_col whose value we
                             // already have from the filter predicate, skip entity fetch.
@@ -470,15 +469,16 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 && effective_having.is_none()
                 && query.order_by.is_empty()
                 && explicit_cols.iter().all(|proj_col| {
-                    eq_candidates.iter().any(|(eq_col, _, _)| eq_col == proj_col)
+                    eq_candidates
+                        .iter()
+                        .any(|(eq_col, _, _)| eq_col == proj_col)
                 });
             if is_covered {
                 // Build a single template record from eq_candidates values.
                 // All result rows are identical (same equality predicates).
                 let mut template = UnifiedRecord::with_capacity(explicit_cols.len());
                 for proj_col in &explicit_cols {
-                    if let Some((_, _, val)) =
-                        eq_candidates.iter().find(|(c, _, _)| c == proj_col)
+                    if let Some((_, _, val)) = eq_candidates.iter().find(|(c, _, _)| c == proj_col)
                     {
                         template.set(proj_col, val.clone());
                     }
@@ -859,7 +859,8 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 };
                 if let Some(record) = record {
                     if requires_filter_recheck {
-                        let Some(filter_record) = runtime_table_record_from_entity(entity.clone()) else {
+                        let Some(filter_record) = runtime_table_record_from_entity(entity.clone())
+                        else {
                             continue;
                         };
                         if super::super::join_filter::evaluate_runtime_filter_with_db(

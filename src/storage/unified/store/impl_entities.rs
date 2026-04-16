@@ -15,12 +15,16 @@ impl UnifiedStore {
         };
 
         let fv = self.format_version();
+        let manager = self
+            .get_collection(collection)
+            .ok_or_else(|| StoreError::CollectionNotFound(collection.to_string()))?;
         let serialized: Vec<(Vec<u8>, Vec<u8>)> = entities
             .iter()
             .map(|entity| {
+                let metadata = manager.get_metadata(entity.id);
                 (
                     entity.id.raw().to_be_bytes().to_vec(),
-                    Self::serialize_entity(entity, fv),
+                    Self::serialize_entity_record(entity, metadata.as_ref(), fv),
                 )
             })
             .collect();
@@ -29,6 +33,7 @@ impl UnifiedStore {
         let btree = btree_indices
             .entry(collection.to_string())
             .or_insert_with(|| BTree::new(Arc::clone(pager)));
+        let root_before = btree.root_page_id();
 
         for (key, value) in serialized {
             match btree.insert(&key, &value) {
@@ -45,23 +50,42 @@ impl UnifiedStore {
                 }
             }
         }
-
-        pager
-            .flush()
-            .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+        let root_after = btree.root_page_id();
+        drop(btree_indices);
+        if root_before != root_after {
+            self.mark_paged_registry_dirty();
+        }
+        let actions = entities
+            .iter()
+            .map(|entity| {
+                let metadata = manager.get_metadata(entity.id);
+                StoreWalAction::upsert_entity(
+                    collection,
+                    entity,
+                    metadata.as_ref(),
+                    self.format_version(),
+                )
+            })
+            .collect::<Vec<_>>();
+        self.finish_paged_write(actions)?;
 
         Ok(())
     }
 
     /// Insert a label→entity_id mapping into the graph label index.
-    fn update_graph_label_index(&self, collection: &str, label: &str, entity_id: EntityId) {
+    pub(crate) fn update_graph_label_index(
+        &self,
+        collection: &str,
+        label: &str,
+        entity_id: EntityId,
+    ) {
         let key = (collection.to_string(), label.to_string());
         let mut idx = self.graph_label_index.write();
         idx.entry(key).or_default().push(entity_id);
     }
 
     /// Remove a specific entity_id from the graph label index (called on delete).
-    fn remove_from_graph_label_index(&self, collection: &str, entity_id: EntityId) {
+    pub(crate) fn remove_from_graph_label_index(&self, collection: &str, entity_id: EntityId) {
         let mut idx = self.graph_label_index.write();
         for ((col, _), ids) in idx.iter_mut() {
             if col == collection {
@@ -72,7 +96,11 @@ impl UnifiedStore {
         idx.retain(|_, ids| !ids.is_empty());
     }
 
-    fn remove_from_graph_label_index_batch(&self, collection: &str, entity_ids: &[EntityId]) {
+    pub(crate) fn remove_from_graph_label_index_batch(
+        &self,
+        collection: &str,
+        entity_ids: &[EntityId],
+    ) {
         if entity_ids.is_empty() {
             return;
         }
@@ -104,7 +132,10 @@ impl UnifiedStore {
         }
 
         let manager = SegmentManager::with_config(&name, self.config.manager_config.clone());
-        collections.insert(name, Arc::new(manager));
+        collections.insert(name.clone(), Arc::new(manager));
+        drop(collections);
+        self.mark_paged_registry_dirty();
+        self.finish_paged_write([StoreWalAction::CreateCollection { name }])?;
 
         Ok(())
     }
@@ -130,6 +161,7 @@ impl UnifiedStore {
             self.config.manager_config.clone(),
         ));
         collections.insert(name, Arc::clone(&manager));
+        self.mark_paged_registry_dirty();
         manager
     }
 
@@ -244,7 +276,10 @@ impl UnifiedStore {
             !entity_ids.iter().any(|id| id == target_id)
         });
 
-        self.collections.write().remove(name);
+        self.mark_paged_registry_dirty();
+        self.finish_paged_write([StoreWalAction::DropCollection {
+            name: name.to_string(),
+        }])?;
 
         Ok(())
     }
@@ -286,17 +321,25 @@ impl UnifiedStore {
         }
 
         // Also insert into B-tree index if pager is active
+        let mut registry_dirty = false;
         if let Some(pager) = &self.pager {
             if let Some(entity) = manager.get(id) {
                 let mut btree_indices = self.btree_indices.write();
                 let btree = btree_indices
                     .entry(collection.to_string())
                     .or_insert_with(|| BTree::new(Arc::clone(pager)));
+                let root_before = btree.root_page_id();
 
                 let key = id.raw().to_be_bytes();
-                let value = Self::serialize_entity(&entity, self.format_version());
+                let metadata = manager.get_metadata(id);
+                let value = Self::serialize_entity_record(
+                    &entity,
+                    metadata.as_ref(),
+                    self.format_version(),
+                );
                 // Ignore duplicate key errors (update scenario)
                 let _ = btree.insert(&key, &value);
+                registry_dirty = root_before != btree.root_page_id();
             }
         }
 
@@ -306,6 +349,23 @@ impl UnifiedStore {
                 self.index_cross_refs(&entity, collection)?;
             }
         }
+
+        let actions = manager
+            .get(id)
+            .map(|entity| {
+                let metadata = manager.get_metadata(id);
+                vec![StoreWalAction::upsert_entity(
+                    collection,
+                    &entity,
+                    metadata.as_ref(),
+                    self.format_version(),
+                )]
+            })
+            .unwrap_or_default();
+        if registry_dirty {
+            self.mark_paged_registry_dirty();
+        }
+        self.finish_paged_write(actions)?;
 
         Ok(id)
     }
@@ -375,7 +435,7 @@ impl UnifiedStore {
                     .map(|e| {
                         (
                             e.id.raw().to_be_bytes().to_vec(),
-                            Self::serialize_entity(e, fv),
+                            Self::serialize_entity_record(e, None, fv),
                         )
                     })
                     .collect(),
@@ -410,7 +470,9 @@ impl UnifiedStore {
         //
         // The flag is only honoured when self.pager is None (in-memory / ephemeral).
         let skip_btree_requested = matches!(
-            std::env::var("REDDB_BULK_SKIP_PERSIST_UNSAFE").ok().as_deref(),
+            std::env::var("REDDB_BULK_SKIP_PERSIST_UNSAFE")
+                .ok()
+                .as_deref(),
             Some("1") | Some("true") | Some("on")
         );
         // Honour the flag only when there is no durable pager.
@@ -443,23 +505,41 @@ impl UnifiedStore {
         let mut t_btree_insert = std::time::Duration::ZERO;
         let mut t_flush = std::time::Duration::ZERO;
         if !skip_btree {
-            if let (Some(pager), Some(batch)) = (&self.pager, serialized) {
+            if let (Some(pager), Some(batch)) = (&self.pager, serialized.as_ref()) {
                 let t0 = std::time::Instant::now();
                 let mut btree_indices = self.btree_indices.write();
                 let btree = btree_indices
                     .entry(collection.to_string())
                     .or_insert_with(|| BTree::new(Arc::clone(pager)));
+                let root_before = btree.root_page_id();
                 t_btree_lock = t0.elapsed();
 
                 let t0 = std::time::Instant::now();
                 let _ = btree.bulk_insert_sorted(&batch);
                 t_btree_insert = t0.elapsed();
+                let registry_dirty = root_before != btree.root_page_id();
 
                 let t0 = std::time::Instant::now();
-                let _ = pager.flush();
+                if registry_dirty {
+                    self.mark_paged_registry_dirty();
+                }
                 t_flush = t0.elapsed();
             }
         }
+
+        let actions = serialized
+            .as_ref()
+            .map(|batch| {
+                batch
+                    .iter()
+                    .map(|(_key, record)| StoreWalAction::UpsertEntityRecord {
+                        collection: collection.to_string(),
+                        record: record.clone(),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        self.finish_paged_write(actions)?;
 
         if trace {
             eprintln!(
@@ -520,16 +600,28 @@ impl UnifiedStore {
         }
 
         // Also insert into B-tree index if pager is active
+        let mut registry_dirty = false;
         if let Some(pager) = &self.pager {
             if let Some(entity) = manager.get(id) {
                 let mut btree_indices = self.btree_indices.write();
                 let btree = btree_indices
                     .entry(collection.to_string())
                     .or_insert_with(|| BTree::new(Arc::clone(pager)));
+                let root_before = btree.root_page_id();
 
                 let key = id.raw().to_be_bytes();
-                let value = Self::serialize_entity(&entity, self.format_version());
-                let _ = btree.insert(&key, &value);
+                let metadata = manager.get_metadata(id);
+                let value = Self::serialize_entity_record(
+                    &entity,
+                    metadata.as_ref(),
+                    self.format_version(),
+                );
+                btree.insert(&key, &value).map_err(|e| {
+                    StoreError::Io(std::io::Error::other(format!(
+                        "B-tree insert error while inserting '{collection}'/{id}: {e}"
+                    )))
+                })?;
+                registry_dirty = root_before != btree.root_page_id();
             }
         }
 
@@ -538,6 +630,23 @@ impl UnifiedStore {
                 self.index_cross_refs(&entity, collection)?;
             }
         }
+
+        let actions = manager
+            .get(id)
+            .map(|entity| {
+                let metadata = manager.get_metadata(id);
+                vec![StoreWalAction::upsert_entity(
+                    collection,
+                    &entity,
+                    metadata.as_ref(),
+                    self.format_version(),
+                )]
+            })
+            .unwrap_or_default();
+        if registry_dirty {
+            self.mark_paged_registry_dirty();
+        }
+        self.finish_paged_write(actions)?;
 
         Ok(id)
     }
@@ -562,7 +671,9 @@ impl UnifiedStore {
             if let Some(btree) = btree_indices.get(collection) {
                 let key = id.raw().to_be_bytes();
                 if let Ok(Some(value)) = btree.get(&key) {
-                    if let Ok(entity) = Self::deserialize_entity(&value, self.format_version()) {
+                    if let Ok((entity, _)) =
+                        Self::deserialize_entity_record(&value, self.format_version())
+                    {
                         return Some(entity);
                     }
                 }
@@ -631,11 +742,14 @@ impl UnifiedStore {
         }
 
         // Remove from B-tree index if active
+        let mut registry_dirty = false;
         if self.pager.is_some() {
             let btree_indices = self.btree_indices.read();
             if let Some(btree) = btree_indices.get(collection) {
+                let root_before = btree.root_page_id();
                 let key = id.raw().to_be_bytes();
                 let _ = btree.delete(&key);
+                registry_dirty = root_before != btree.root_page_id();
             }
         }
 
@@ -644,6 +758,14 @@ impl UnifiedStore {
 
         // Remove from graph label index
         self.remove_from_graph_label_index(collection, id);
+
+        if registry_dirty {
+            self.mark_paged_registry_dirty();
+        }
+        self.finish_paged_write([StoreWalAction::DeleteEntityRecord {
+            collection: collection.to_string(),
+            entity_id: id.raw(),
+        }])?;
 
         Ok(true)
     }
@@ -673,18 +795,32 @@ impl UnifiedStore {
             return Ok(deleted_ids);
         }
 
+        let mut registry_dirty = false;
         if self.pager.is_some() {
             let btree_indices = self.btree_indices.read();
             if let Some(btree) = btree_indices.get(collection) {
+                let root_before = btree.root_page_id();
                 for id in &deleted_ids {
                     let key = id.raw().to_be_bytes();
                     let _ = btree.delete(&key);
                 }
+                registry_dirty = root_before != btree.root_page_id();
             }
         }
 
         self.unindex_cross_refs_batch(&deleted_ids)?;
         self.remove_from_graph_label_index_batch(collection, &deleted_ids);
+        if registry_dirty {
+            self.mark_paged_registry_dirty();
+        }
+        let actions = deleted_ids
+            .iter()
+            .map(|id| StoreWalAction::DeleteEntityRecord {
+                collection: collection.to_string(),
+                entity_id: id.raw(),
+            })
+            .collect::<Vec<_>>();
+        self.finish_paged_write(actions)?;
 
         Ok(deleted_ids)
     }
@@ -700,7 +836,11 @@ impl UnifiedStore {
             .get_collection(collection)
             .ok_or_else(|| StoreError::CollectionNotFound(collection.to_string()))?;
 
-        Ok(manager.set_metadata(id, metadata)?)
+        manager.set_metadata(id, metadata)?;
+        if let Some(entity) = manager.get(id) {
+            self.persist_entities_to_pager(collection, std::slice::from_ref(&entity))?;
+        }
+        Ok(())
     }
 
     /// Get metadata for an entity
@@ -747,23 +887,28 @@ impl UnifiedStore {
             return Err(StoreError::TooManyRefs(source_id));
         }
 
+        let mut registry_dirty = false;
         {
             let mut forward = self.cross_refs.write();
             let refs = forward.entry(source_id).or_default();
-            if !refs.iter().any(|(id, kind, coll)| {
+            let inserted = !refs.iter().any(|(id, kind, coll)| {
                 *id == target_id && *kind == ref_type && coll == target_collection
-            }) {
+            });
+            if inserted {
                 refs.push((target_id, ref_type, target_collection.to_string()));
+                registry_dirty = true;
             }
         }
 
         {
             let mut reverse = self.reverse_refs.write();
             let refs = reverse.entry(target_id).or_default();
-            if !refs.iter().any(|(id, kind, coll)| {
+            let inserted = !refs.iter().any(|(id, kind, coll)| {
                 *id == source_id && *kind == ref_type && coll == source_collection
-            }) {
+            });
+            if inserted {
                 refs.push((source_id, ref_type, source_collection.to_string()));
+                registry_dirty = true;
             }
         }
 
@@ -781,7 +926,19 @@ impl UnifiedStore {
                     weight,
                 );
                 entity.add_cross_ref(cross_ref);
-                let _ = source_manager.update(entity);
+                let _ = source_manager.update(entity.clone());
+                registry_dirty = true;
+                self.persist_entities_to_pager(source_collection, std::slice::from_ref(&entity))?;
+            }
+        }
+
+        if registry_dirty {
+            self.mark_paged_registry_dirty();
+            if matches!(
+                self.config.durability_mode,
+                crate::api::DurabilityMode::Strict
+            ) {
+                self.flush_paged_state()?;
             }
         }
 
@@ -866,6 +1023,7 @@ impl UnifiedStore {
         entity: &UnifiedEntity,
         collection: &str,
     ) -> Result<(), StoreError> {
+        let mut registry_dirty = false;
         for cross_ref in entity.cross_refs() {
             if cross_ref.target_collection.is_empty() {
                 continue;
@@ -873,35 +1031,43 @@ impl UnifiedStore {
             {
                 let mut forward = self.cross_refs.write();
                 let refs = forward.entry(cross_ref.source).or_default();
-                if !refs.iter().any(|(id, kind, coll)| {
+                let inserted = !refs.iter().any(|(id, kind, coll)| {
                     *id == cross_ref.target
                         && *kind == cross_ref.ref_type
                         && coll == &cross_ref.target_collection
-                }) {
+                });
+                if inserted {
                     refs.push((
                         cross_ref.target,
                         cross_ref.ref_type,
                         cross_ref.target_collection.clone(),
                     ));
+                    registry_dirty = true;
                 }
             }
 
             {
                 let mut reverse = self.reverse_refs.write();
                 let refs = reverse.entry(cross_ref.target).or_default();
-                if !refs.iter().any(|(id, kind, coll)| {
+                let inserted = !refs.iter().any(|(id, kind, coll)| {
                     *id == cross_ref.source && *kind == cross_ref.ref_type && coll == collection
-                }) {
+                });
+                if inserted {
                     refs.push((cross_ref.source, cross_ref.ref_type, collection.to_string()));
+                    registry_dirty = true;
                 }
             }
+        }
+
+        if registry_dirty {
+            self.mark_paged_registry_dirty();
         }
 
         Ok(())
     }
 
     /// Remove cross-references for an entity
-    fn unindex_cross_refs(&self, id: EntityId) -> Result<(), StoreError> {
+    pub(crate) fn unindex_cross_refs(&self, id: EntityId) -> Result<(), StoreError> {
         // Remove forward refs
         self.cross_refs.write().remove(&id);
 
@@ -911,11 +1077,12 @@ impl UnifiedStore {
             refs.retain(|(source, _, _)| *source != id);
         }
         reverse.remove(&id);
+        self.mark_paged_registry_dirty();
 
         Ok(())
     }
 
-    fn unindex_cross_refs_batch(&self, ids: &[EntityId]) -> Result<(), StoreError> {
+    pub(crate) fn unindex_cross_refs_batch(&self, ids: &[EntityId]) -> Result<(), StoreError> {
         if ids.is_empty() {
             return Ok(());
         }
@@ -936,6 +1103,7 @@ impl UnifiedStore {
             }
             reverse.retain(|target, refs| !id_set.contains(target) && !refs.is_empty());
         }
+        self.mark_paged_registry_dirty();
 
         Ok(())
     }

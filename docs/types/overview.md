@@ -45,6 +45,11 @@ When a field has domain semantics, switch from plain `Text` to a native type.
 - `Lang2`, `Lang5`
 - `Currency`
 
+### Financial-native
+
+- `AssetCode` — validated asset identifier for fiat or crypto symbols such as `USD`, `BTC`, `ETH`, `USDT`
+- `Money` — exact monetary value stored as integer minor units + explicit scale + asset code
+
 ### Geo-native
 
 - `Latitude`, `Longitude`, `GeoPoint`
@@ -92,6 +97,7 @@ In this model, you get semantic validation on write instead of post-processing s
 1. Start with standard types while modeling quickly.
 2. Promote hot or error-prone fields to native types (`Text` -> `Email`, `Text` -> `Ipv4`, etc.).
 3. Add reference types only when you need explicit cross-model links.
+4. For financial values, prefer `Money` or an explicit `amount_minor + scale + asset_code` schema over `Float`.
 
 ## Rust API Example
 

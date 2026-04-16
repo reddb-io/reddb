@@ -318,6 +318,42 @@ mod tests {
     }
 
     #[test]
+    fn test_paged_mode_survives_multiple_reopens() {
+        let (_guard, path) = temp_path("paged_multi_reopen");
+
+        let store = UnifiedStore::open(&path).unwrap();
+        store.set_config_tree(
+            "red.system",
+            &crate::json!({
+                "hostname": "test-host",
+                "arch": "x86_64",
+                "started_at": 123_u64
+            }),
+        );
+        let initial = store
+            .get_collection("red_config")
+            .map(|m| m.query_all(|_| true).len())
+            .unwrap_or(0);
+        assert!(initial >= 3);
+        drop(store);
+
+        let reopened = UnifiedStore::open(&path).unwrap();
+        let first_reopen = reopened
+            .get_collection("red_config")
+            .map(|m| m.query_all(|_| true).len())
+            .unwrap_or(0);
+        assert_eq!(first_reopen, initial);
+        drop(reopened);
+
+        let reopened_again = UnifiedStore::open(&path).unwrap();
+        let second_reopen = reopened_again
+            .get_collection("red_config")
+            .map(|m| m.query_all(|_| true).len())
+            .unwrap_or(0);
+        assert_eq!(second_reopen, initial);
+    }
+
+    #[test]
     fn test_global_ids_unique_across_collections() {
         let store = UnifiedStore::new();
 

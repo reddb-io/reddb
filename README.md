@@ -10,6 +10,13 @@
   <a href="https://www.npmjs.com/package/reddb-cli"><img src="https://img.shields.io/npm/v/reddb-cli?style=flat-square&label=npm" alt="npm"></a>
 </p>
 
+> [!IMPORTANT]
+> In RedDB, a `collection` is the named logical container for data. Tables, documents, key-value, graphs,
+> vectors, time-series, and queues are the user-facing models or semantics you use on top of collections.
+> A collection is not a separate hierarchy layer that contains multiple tables and documents beneath it.
+> Instead, `users` can be a collection used as a table, `events` can be a collection used for documents,
+> and `config` can be a collection used as KV. Some models can also coexist in the same collection.
+
 ---
 
 ## The Killer Feature: `ASK`
@@ -25,6 +32,9 @@ One command. RedDB searches across tables, graphs, vectors, documents, and key-v
 ## 7 Data Models, 1 Engine
 
 Stop running Postgres + Neo4j + Pinecone + Redis + Mongo + InfluxDB + RabbitMQ. RedDB unifies them.
+
+The key mental model is simple: the model is how you work with the data, and the collection is where
+that data lives.
 
 ```sql
 -- Relational rows

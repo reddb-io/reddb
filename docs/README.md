@@ -2,6 +2,13 @@
 
 > The AI-first multi-model database. Ask questions in plain language, search semantically, and query tables, documents, graphs, vectors, and key-value data from one engine.
 
+> [!IMPORTANT]
+> In RedDB, a `collection` is the named logical container for data. Tables, documents, KV, graphs, vectors,
+> time-series, and queues are the data-model semantics you use on top of collections. A collection does not
+> sit above tables and documents as a separate hierarchy layer. Instead, `users` can be a collection used as
+> a table, `events` can be a collection used for documents, and `config` can be a collection used as KV.
+> Some models can also coexist in the same collection when that fits the workload.
+
 ## Ask your database anything
 
 RedDB has a built-in AI layer. You write a question, RedDB searches for relevant context across every collection, sends it to an LLM, and returns a synthesized answer. No external pipelines. No glue code.
@@ -56,9 +63,14 @@ INSERT INTO incidents (title, body) VALUES ('SSH brute force', 'Detected 500 fai
   WITH AUTO EMBED (body) USING openai
 ```
 
-## Five data models, one runtime
+## Seven user-facing data models, one runtime
 
-You do not need a SQL store, a document store, a graph database, a vector database, and a KV cache. RedDB keeps all five in one process.
+You do not need a SQL store, a document store, a graph database, a vector database, a KV cache,
+plus separate time-series and queue infrastructure. RedDB keeps all seven user-facing models in one
+process.
+
+The key naming rule is simple: the model is how you work with the data, and the collection is where
+that data lives.
 
 | Model | Use case | Example query |
 |:------|:---------|:--------------|
@@ -67,6 +79,12 @@ You do not need a SQL store, a document store, a graph database, a vector databa
 | Key-Value | Config, sessions, feature flags | `GET config/max_retries` |
 | Graphs | Relationships, traversals, analytics | `GRAPH SHORTEST_PATH FROM 'A' TO 'Z' IN network` |
 | Vectors | Embeddings, semantic search, RAG | `SEARCH SIMILAR [0.12, 0.91, 0.44] IN embeddings K 5` |
+| Time-Series | Metrics, telemetry, bucketed aggregations | `SELECT avg(value) FROM cpu_metrics GROUP BY time_bucket(5m)` |
+| Queues | Jobs, retries, consumer groups, DLQ | `QUEUE READ tasks GROUP workers CONSUMER worker1 COUNT 5` |
+
+For the distinction between user-facing models, native persisted entity kinds, and supporting
+structures such as indexes and probabilistic sketches, see
+[Data Model Overview](/data-models/overview.md).
 
 ## Six query languages
 
@@ -83,9 +101,10 @@ g.V().hasLabel('user').has('active', true).values('name')
 FIND users who logged in this week
 ```
 
-## 7 data models, 1 engine
+## Native time-series and queues
 
-Tables, documents, graphs, vectors, key-value, **time-series**, and **queues** -- all in one file.
+Time-series and queues are not just naming conventions. They are dedicated models with their own
+runtime semantics and persistence paths.
 
 ```sql
 -- Time-series with retention and compression
@@ -141,10 +160,12 @@ QUEUE PUSH tasks {job: 'email', to: 'alice@co.com', template: 'welcome'}
 
 The same engine runs embedded in your Rust binary, as an HTTP/gRPC server, or as an MCP tool server for AI agents.
 
+If the terms `binary`, `embedded`, `gRPC`, `wire`, and `router` feel overloaded, read [Modes and Transports](/getting-started/modes-and-transports.md) first. That page defines the vocabulary used in the rest of the docs.
+
 | Mode | Best for | Access path |
 |:-----|:---------|:------------|
 | Embedded | Local-first apps, CLIs, edge binaries | `RedDB::open("./data.rdb")` in Rust |
-| Server | Shared databases, service-to-service traffic | HTTP or gRPC |
+| Server | Shared databases, service-to-service traffic | Router, HTTP, gRPC, or wire |
 | Agent tooling | AI workflows, MCP-compatible agents | CLI or MCP server |
 
 ## Install

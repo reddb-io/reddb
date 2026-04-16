@@ -4,6 +4,8 @@
 
 **ASK questions. SEARCH everything. One engine for tables, docs, graphs, vectors, and KV.**
 
+`collection` is the named container. Tables, docs, KV, graphs, vectors, time-series, and queues are the models you use inside that container.
+
 Built in Rust. 11 AI providers. 6 query languages. 48 data types.
 
 ```sql

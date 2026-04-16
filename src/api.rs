@@ -21,6 +21,9 @@ pub const DEFAULT_EXPORT_RETENTION: usize = 16;
 
 pub const REDDB_PROTOCOL_VERSION: &str = "reddb-v2";
 pub const REDDB_FORMAT_VERSION: u32 = 2;
+pub const DEFAULT_GROUP_COMMIT_WINDOW_MS: u64 = 1;
+pub const DEFAULT_GROUP_COMMIT_MAX_STATEMENTS: usize = 128;
+pub const DEFAULT_GROUP_COMMIT_MAX_WAL_BYTES: u64 = 1024 * 1024;
 
 pub type RedDBResult<T> = Result<T, RedDBError>;
 
@@ -34,6 +37,52 @@ pub enum StorageMode {
 impl StorageMode {
     pub const fn is_persistent(self) -> bool {
         matches!(self, Self::Persistent)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum DurabilityMode {
+    #[default]
+    Strict,
+    WalDurableGrouped,
+}
+
+impl DurabilityMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Strict => "strict",
+            Self::WalDurableGrouped => "wal_durable_grouped",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        let normalized = value.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "strict" => Some(Self::Strict),
+            "wal_durable_grouped"
+            | "wal-durable-grouped"
+            | "grouped"
+            | "wal_grouped"
+            | "wal-grouped" => Some(Self::WalDurableGrouped),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GroupCommitOptions {
+    pub window_ms: u64,
+    pub max_statements: usize,
+    pub max_wal_bytes: u64,
+}
+
+impl Default for GroupCommitOptions {
+    fn default() -> Self {
+        Self {
+            window_ms: DEFAULT_GROUP_COMMIT_WINDOW_MS,
+            max_statements: DEFAULT_GROUP_COMMIT_MAX_STATEMENTS,
+            max_wal_bytes: DEFAULT_GROUP_COMMIT_MAX_WAL_BYTES,
+        }
     }
 }
 
@@ -103,6 +152,8 @@ pub struct RedDBOptions {
     pub read_only: bool,
     pub create_if_missing: bool,
     pub verify_checksums: bool,
+    pub durability_mode: DurabilityMode,
+    pub group_commit: GroupCommitOptions,
     pub auto_checkpoint_pages: u32,
     pub cache_pages: usize,
     pub snapshot_retention: usize,
@@ -129,6 +180,8 @@ impl fmt::Debug for RedDBOptions {
             .field("read_only", &self.read_only)
             .field("create_if_missing", &self.create_if_missing)
             .field("verify_checksums", &self.verify_checksums)
+            .field("durability_mode", &self.durability_mode)
+            .field("group_commit", &self.group_commit)
             .field("auto_checkpoint_pages", &self.auto_checkpoint_pages)
             .field("cache_pages", &self.cache_pages)
             .field("snapshot_retention", &self.snapshot_retention)
@@ -152,6 +205,8 @@ impl Clone for RedDBOptions {
             read_only: self.read_only,
             create_if_missing: self.create_if_missing,
             verify_checksums: self.verify_checksums,
+            durability_mode: self.durability_mode,
+            group_commit: self.group_commit,
             auto_checkpoint_pages: self.auto_checkpoint_pages,
             cache_pages: self.cache_pages,
             snapshot_retention: self.snapshot_retention,
@@ -175,6 +230,8 @@ impl Default for RedDBOptions {
             read_only: false,
             create_if_missing: true,
             verify_checksums: true,
+            durability_mode: DurabilityMode::Strict,
+            group_commit: GroupCommitOptions::default(),
             auto_checkpoint_pages: 1000,
             cache_pages: 10_000,
             snapshot_retention: DEFAULT_SNAPSHOT_RETENTION,
@@ -249,6 +306,26 @@ impl RedDBOptions {
 
     pub fn with_auto_checkpoint(mut self, pages: u32) -> Self {
         self.auto_checkpoint_pages = pages;
+        self
+    }
+
+    pub fn with_durability_mode(mut self, mode: DurabilityMode) -> Self {
+        self.durability_mode = mode;
+        self
+    }
+
+    pub fn with_group_commit_window_ms(mut self, window_ms: u64) -> Self {
+        self.group_commit.window_ms = window_ms.max(1);
+        self
+    }
+
+    pub fn with_group_commit_max_statements(mut self, max_statements: usize) -> Self {
+        self.group_commit.max_statements = max_statements.max(1);
+        self
+    }
+
+    pub fn with_group_commit_max_wal_bytes(mut self, max_wal_bytes: u64) -> Self {
+        self.group_commit.max_wal_bytes = max_wal_bytes.max(1);
         self
     }
 

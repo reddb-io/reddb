@@ -2,6 +2,11 @@
 
 This guide gets RedDB running, writes multiple data shapes, and shows how to query them back.
 
+Before you start, keep one rule in mind: in RedDB, a `collection` is the named logical container, and
+rows, documents, nodes, edges, vectors, KV entries, time-series points, and queue messages are the
+entity shapes or model semantics stored in collections. `hosts`, `network`, and `embeddings` below are
+collection names, not separate databases or folders above the models.
+
 ## 1. Start RedDB
 
 Start RedDB with both remote APIs in one process:

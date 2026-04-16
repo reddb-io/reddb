@@ -198,6 +198,7 @@ struct PreparedStatementRegistry {
     // parking_lot::RwLock never poisons on panic — safe to use without unwrap().
     map: parking_lot::RwLock<std::collections::HashMap<u64, GrpcPreparedStatement>>,
     next_id: std::sync::atomic::AtomicU64,
+    get_count: std::sync::atomic::AtomicU64,
 }
 
 impl PreparedStatementRegistry {
@@ -205,14 +206,11 @@ impl PreparedStatementRegistry {
         Arc::new(Self {
             map: parking_lot::RwLock::new(std::collections::HashMap::new()),
             next_id: std::sync::atomic::AtomicU64::new(1),
+            get_count: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
-    fn prepare(
-        &self,
-        shape: crate::storage::query::ast::QueryExpr,
-        parameter_count: usize,
-    ) -> u64 {
+    fn prepare(&self, shape: crate::storage::query::ast::QueryExpr, parameter_count: usize) -> u64 {
         use std::sync::atomic::Ordering;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let mut map = self.map.write();
@@ -233,20 +231,22 @@ impl PreparedStatementRegistry {
         &self,
         id: u64,
     ) -> Option<(std::sync::Arc<crate::storage::query::ast::QueryExpr>, usize)> {
-        // Probabilistic eviction (1-in-256) to handle long-lived servers that
-        // prepare once and execute many times without ever calling prepare() again.
-        if self.next_id.load(std::sync::atomic::Ordering::Relaxed) % 256 == 0 {
+        // Periodic eviction on execute/get traffic so long-lived servers that
+        // prepare once and execute many times still age out stale statements.
+        let get_count = self
+            .get_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        if get_count % 256 == 0 {
             let mut map = self.map.write();
             self.evict_old_locked(&mut map);
         }
         let map = self.map.read();
-        map.get(&id).map(|s| (std::sync::Arc::clone(&s.shape), s.parameter_count))
+        map.get(&id)
+            .map(|s| (std::sync::Arc::clone(&s.shape), s.parameter_count))
     }
 
-    fn evict_old_locked(
-        &self,
-        map: &mut std::collections::HashMap<u64, GrpcPreparedStatement>,
-    ) {
+    fn evict_old_locked(&self, map: &mut std::collections::HashMap<u64, GrpcPreparedStatement>) {
         let threshold = std::time::Duration::from_secs(3600);
         map.retain(|_, v| v.created_at.elapsed() < threshold);
     }

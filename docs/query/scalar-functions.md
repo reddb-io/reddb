@@ -79,6 +79,68 @@ SELECT item, ROUND(price) AS rounded_price FROM products
 
 ---
 
+## Financial Functions
+
+These functions work with the native `Money` and `AssetCode` types.
+
+| Function | Arguments | Returns | Description |
+|:---------|:----------|:--------|:------------|
+| `MONEY(text)` | Single text value | `Money` | Parse a money literal such as `'BTC 0.125'` or `'USD:1.23'` |
+| `MONEY(asset, amount)` | Asset + amount | `Money` | Build a `Money` value from two arguments |
+| `MONEY_ASSET(money)` | `Money` | `AssetCode` | Extract the asset code |
+| `MONEY_MINOR(money)` | `Money` | `BigInt` | Extract integer minor units |
+| `MONEY_SCALE(money)` | `Money` | `Integer` | Extract the explicit decimal scale |
+
+### Accepted `MONEY(...)` Forms
+
+```sql
+MONEY('BRL 10.99')
+MONEY('0.00012345 BTC')
+MONEY('USD:1.23')
+MONEY('BTC', '0.125')
+MONEY(asset_code, amount_text)
+```
+
+### Examples
+
+```sql
+-- Construct a Money value inline
+SELECT MONEY('BTC 0.125') AS balance
+FROM wallets
+LIMIT 1
+```
+
+```sql
+-- Build from separate fields
+SELECT wallet_id,
+       MONEY(asset_code, amount_text) AS balance
+FROM imported_wallets
+```
+
+```sql
+-- Extract native fields from a Money column
+SELECT wallet_id,
+       MONEY_ASSET(balance) AS asset,
+       MONEY_MINOR(balance) AS minor_units,
+       MONEY_SCALE(balance) AS scale
+FROM wallets
+```
+
+```sql
+-- Filter on extracted parts
+SELECT wallet_id, balance
+FROM wallets
+WHERE MONEY_ASSET(balance) = 'USDT'
+```
+
+### Notes
+
+- `Money` stores exact values as `asset_code + minor_units + scale`.
+- This avoids float rounding in storage and query evaluation.
+- `MONEY_MINOR(...)` is the right function when you need exact integer arithmetic or stable ordering over stored units.
+
+---
+
 ## General Functions
 
 | Function | Arguments | Returns | Description |

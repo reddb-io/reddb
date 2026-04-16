@@ -666,7 +666,6 @@ fn dispatch_method(
         //
         // This mirrors the PostgreSQL extended-query protocol semantics and is the
         // server-side half of the client driver's `PreparedStatement` abstraction.
-
         "prepare" => {
             use crate::storage::query::modes::parse_multi;
             use crate::storage::query::planner::shape::parameterize_query_expr;
@@ -675,20 +674,29 @@ fn dispatch_method(
                 error_code::INVALID_PARAMS,
                 "missing 'sql' string".to_string(),
             ))?;
-            let parsed = parse_multi(sql)
-                .map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
-            let (shape, parameter_count) = if let Some(prepared) = parameterize_query_expr(&parsed) {
+            let parsed = parse_multi(sql).map_err(|e| (error_code::QUERY_ERROR, e.to_string()))?;
+            let (shape, parameter_count) = if let Some(prepared) = parameterize_query_expr(&parsed)
+            {
                 (prepared.shape, prepared.parameter_count)
             } else {
                 (parsed, 0)
             };
             let id = session.next_prepared_id;
             session.next_prepared_id = session.next_prepared_id.saturating_add(1);
-            session.prepared.insert(id, StdioPreparedStatement { shape, parameter_count });
+            session.prepared.insert(
+                id,
+                StdioPreparedStatement {
+                    shape,
+                    parameter_count,
+                },
+            );
             Ok(Value::Object(
                 [
                     ("prepared_id".to_string(), Value::Number(id as f64)),
-                    ("parameter_count".to_string(), Value::Number(parameter_count as f64)),
+                    (
+                        "parameter_count".to_string(),
+                        Value::Number(parameter_count as f64),
+                    ),
                 ]
                 .into_iter()
                 .collect(),
@@ -703,7 +711,10 @@ fn dispatch_method(
                 .get("prepared_id")
                 .and_then(Value::as_f64)
                 .map(|n| n as u64)
-                .ok_or((error_code::INVALID_PARAMS, "missing 'prepared_id'".to_string()))?;
+                .ok_or((
+                    error_code::INVALID_PARAMS,
+                    "missing 'prepared_id'".to_string(),
+                ))?;
 
             let stmt = session.prepared.get(&id).ok_or((
                 error_code::QUERY_ERROR,
@@ -728,10 +739,7 @@ fn dispatch_method(
             }
 
             // Convert JSON bind values to SchemaValue.
-            let binds: Vec<SV> = binds_json
-                .iter()
-                .map(json_value_to_schema_value)
-                .collect();
+            let binds: Vec<SV> = binds_json.iter().map(json_value_to_schema_value).collect();
 
             // Bind literals into the parameterized shape.
             let expr = if stmt.parameter_count == 0 {
@@ -1781,19 +1789,30 @@ mod tests {
     fn prepare_and_execute_prepared_statement() {
         let rt = make_runtime();
         // Create table + insert a row
-        let _ = handle(&rt, r#"{"jsonrpc":"2.0","id":1,"method":"query","params":{"sql":"CREATE TABLE ps_test (n INTEGER)"}}"#);
-        let _ = handle(&rt, r#"{"jsonrpc":"2.0","id":2,"method":"query","params":{"sql":"INSERT INTO ps_test (n) VALUES (42)"}}"#);
+        let _ = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":1,"method":"query","params":{"sql":"CREATE TABLE ps_test (n INTEGER)"}}"#,
+        );
+        let _ = handle(
+            &rt,
+            r#"{"jsonrpc":"2.0","id":2,"method":"query","params":{"sql":"INSERT INTO ps_test (n) VALUES (42)"}}"#,
+        );
 
         with_session(&rt, |call, _| {
             // Prepare a parameterized SELECT.
-            let prep = call(r#"{"jsonrpc":"2.0","id":3,"method":"prepare","params":{"sql":"SELECT n FROM ps_test WHERE n = 42"}}"#);
+            let prep = call(
+                r#"{"jsonrpc":"2.0","id":3,"method":"prepare","params":{"sql":"SELECT n FROM ps_test WHERE n = 42"}}"#,
+            );
             assert!(prep.contains("\"prepared_id\""), "prepare response: {prep}");
 
             // Extract the prepared_id.
             let id: u64 = {
                 let v: crate::json::Value = crate::json::from_str(&prep).expect("json");
                 let result = v.get("result").expect("result");
-                result.get("prepared_id").and_then(|n| n.as_f64()).expect("prepared_id") as u64
+                result
+                    .get("prepared_id")
+                    .and_then(|n| n.as_f64())
+                    .expect("prepared_id") as u64
             };
 
             // Execute with the bind value for the parameterized literal.
@@ -1801,7 +1820,10 @@ mod tests {
                 r#"{{"jsonrpc":"2.0","id":4,"method":"execute_prepared","params":{{"prepared_id":{id},"binds":[42]}}}}"#
             ));
             // Response uses "rows" key (see query_result_to_json).
-            assert!(exec.contains("\"rows\""), "execute_prepared response: {exec}");
+            assert!(
+                exec.contains("\"rows\""),
+                "execute_prepared response: {exec}"
+            );
             assert!(exec.contains("42"), "expected row with n=42 in: {exec}");
         });
     }

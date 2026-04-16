@@ -7,8 +7,8 @@ use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-use crate::application::ports::RuntimeEntityPort;
 use super::protocol::*;
+use crate::application::ports::RuntimeEntityPort;
 use crate::runtime::RedDBRuntime;
 use crate::storage::query::sql_lowering::effective_table_filter;
 use crate::storage::schema::Value;
@@ -393,10 +393,7 @@ fn handle_bulk_insert(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
         rows.push(input);
     }
 
-    match runtime.create_rows_batch(crate::application::CreateRowsBatchInput {
-        collection,
-        rows,
-    }) {
+    match runtime.create_rows_batch(crate::application::CreateRowsBatchInput { collection, rows }) {
         Ok(outputs) => {
             let count = outputs.len() as u64;
             let mut resp = Vec::with_capacity(13);
@@ -531,10 +528,7 @@ fn handle_bulk_insert_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> 
         });
     }
 
-    match runtime.create_rows_batch(crate::application::CreateRowsBatchInput {
-        collection,
-        rows,
-    }) {
+    match runtime.create_rows_batch(crate::application::CreateRowsBatchInput { collection, rows }) {
         Ok(outputs) => {
             let count = outputs.len() as u64;
             let mut resp = Vec::with_capacity(13);

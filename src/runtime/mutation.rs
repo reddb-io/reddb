@@ -18,12 +18,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::storage::schema::Value;
 use crate::storage::unified::devx::refs::{NodeRef, VectorRef};
 use crate::storage::unified::{
     entity::{CrossRef, EntityData, EntityId, EntityKind, RefType, RowData, UnifiedEntity},
     Metadata, MetadataValue, UnifiedStore,
 };
-use crate::storage::schema::Value;
 use crate::{RedDBError, RedDBResult};
 
 /// One row queued for insertion, already schema-normalised and
@@ -81,11 +81,18 @@ impl<'rt> MutationEngine<'rt> {
         let db = self.runtime.db();
 
         // Build entity — same logic as BatchBuilder::add_row
-        let entity = build_table_entity(self.store.as_ref(), &collection, row.fields.clone(), &row.node_links, &row.vector_links);
+        let entity = build_table_entity(
+            self.store.as_ref(),
+            &collection,
+            row.fields.clone(),
+            &row.node_links,
+            &row.vector_links,
+        );
 
         // Write. `insert_auto` internally runs preprocessors, context index,
         // and cross-ref indexing — no need to repeat them here.
-        let id = self.store
+        let id = self
+            .store
             .insert_auto(&collection, entity)
             .map_err(|e| RedDBError::Internal(format!("{e:?}")))?;
 
@@ -117,7 +124,11 @@ impl<'rt> MutationEngine<'rt> {
 
     // ── Kernel: batch (micro and bulk share the same code path) ──────────
 
-    fn append_batch(&self, collection: String, rows: Vec<MutationRow>) -> RedDBResult<MutationResult> {
+    fn append_batch(
+        &self,
+        collection: String,
+        rows: Vec<MutationRow>,
+    ) -> RedDBResult<MutationResult> {
         let n = rows.len();
 
         // Separate fields for index maintenance before moving into entities.
@@ -138,7 +149,8 @@ impl<'rt> MutationEngine<'rt> {
         }
 
         // Single lock acquisition for the entire batch.
-        let ids = self.store
+        let ids = self
+            .store
             .bulk_insert(&collection, entities)
             .map_err(|e| RedDBError::Internal(format!("{e:?}")))?;
 
@@ -162,7 +174,9 @@ impl<'rt> MutationEngine<'rt> {
 
             // Context index + cross-refs
             if let Some(entity) = self.store.get(&collection, id) {
-                self.store.context_index().index_entity(&collection, &entity);
+                self.store
+                    .context_index()
+                    .index_entity(&collection, &entity);
                 let _ = self.store.index_cross_refs(&entity, &collection);
             }
 
@@ -203,7 +217,7 @@ fn build_table_entity(
     let id = store.next_entity_id();
     let kind = EntityKind::TableRow {
         table: Arc::from(collection),
-        row_id: 0,  // assigned by SegmentManager::bulk_insert
+        row_id: 0, // assigned by SegmentManager::bulk_insert
     };
 
     let mut row = RowData::new(fields.iter().map(|(_, v)| v.clone()).collect());

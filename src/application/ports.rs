@@ -5,9 +5,8 @@ use crate::application::entity::{
     apply_patch_operations_to_vector_fields, json_to_metadata_value, json_to_storage_value,
     metadata_from_json, metadata_to_json, CreateDocumentInput, CreateEdgeInput, CreateEntityOutput,
     CreateKvInput, CreateNodeInput, CreateRowInput, CreateRowsBatchInput,
-    CreateTimeSeriesPointInput, CreateVectorInput,
-    DeleteEntityInput, DeleteEntityOutput, PatchEntityInput, PatchEntityOperation,
-    PatchEntityOperationType,
+    CreateTimeSeriesPointInput, CreateVectorInput, DeleteEntityInput, DeleteEntityOutput,
+    PatchEntityInput, PatchEntityOperation, PatchEntityOperationType,
 };
 use crate::application::schema::{
     CreateTableInput, CreateTimeSeriesInput, DropTableInput, DropTimeSeriesInput,
@@ -121,8 +120,10 @@ pub trait RuntimeQueryPort {
 
 pub trait RuntimeEntityPort {
     fn create_row(&self, input: CreateRowInput) -> RedDBResult<CreateEntityOutput>;
-    fn create_rows_batch(&self, input: CreateRowsBatchInput)
-        -> RedDBResult<Vec<CreateEntityOutput>>;
+    fn create_rows_batch(
+        &self,
+        input: CreateRowsBatchInput,
+    ) -> RedDBResult<Vec<CreateEntityOutput>>;
     fn create_node(&self, input: CreateNodeInput) -> RedDBResult<CreateEntityOutput>;
     fn create_edge(&self, input: CreateEdgeInput) -> RedDBResult<CreateEntityOutput>;
     fn create_vector(&self, input: CreateVectorInput) -> RedDBResult<CreateEntityOutput>;

@@ -181,12 +181,12 @@ impl RedDBServer {
         }
 
         let count = rows.len();
-        if let Err(err) = self
-            .entity_use_cases()
-            .create_rows_batch(crate::application::CreateRowsBatchInput {
-                collection: collection.to_string(),
-                rows,
-            })
+        if let Err(err) =
+            self.entity_use_cases()
+                .create_rows_batch(crate::application::CreateRowsBatchInput {
+                    collection: collection.to_string(),
+                    rows,
+                })
         {
             return json_error(400, err.to_string());
         }

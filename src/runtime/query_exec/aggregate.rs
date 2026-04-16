@@ -11,6 +11,7 @@
 //! `execute_runtime_table_query` when any projection is an aggregate
 //! function.
 
+use super::filter_compiled::{classify_field, EntityColumnResolver};
 use crate::api::{RedDBError, RedDBResult};
 use crate::runtime::join_filter::{
     eval_projection_value_with_db, evaluate_runtime_filter_with_db, field_ref_name,
@@ -20,7 +21,6 @@ use crate::runtime::runtime_table_record_from_entity_ref;
 use crate::storage::query::ast::{
     BinOp, CompareOp, Expr, FieldRef, Filter, OrderByClause, Projection, Span, UnaryOp,
 };
-use super::filter_compiled::{classify_field, EntityColumnResolver};
 use crate::storage::query::sql_lowering::{
     effective_table_filter, effective_table_group_by_exprs, effective_table_having_filter,
     effective_table_projections, expr_to_projection as lower_expr_to_projection,
@@ -139,10 +139,7 @@ pub(crate) fn execute_aggregate_query(
             .iter()
             .map(|expr| {
                 // TIME_BUCKET grouping requires a record (timestamp arithmetic).
-                if parse_time_bucket_group_expr(
-                    &group_expr_key(expr).unwrap_or_default(),
-                )
-                .is_some()
+                if parse_time_bucket_group_expr(&group_expr_key(expr).unwrap_or_default()).is_some()
                 {
                     return None;
                 }
@@ -168,8 +165,7 @@ pub(crate) fn execute_aggregate_query(
         Vec::new()
     };
     // True iff every GROUP BY field can be read directly from the entity.
-    let group_by_all_fast =
-        has_group_by && group_by_kinds.iter().all(|k| k.is_some());
+    let group_by_all_fast = has_group_by && group_by_kinds.iter().all(|k| k.is_some());
 
     // ── Aggregate argument fast path ─────────────────────────────────────
     // For projections like SUM(amount), COUNT(id), MIN(price) the argument
@@ -291,15 +287,21 @@ pub(crate) fn execute_aggregate_query(
                     } else {
                         // Shouldn't happen (group_by_all_fast is true) but
                         // fall back gracefully.
-                        let Some(rec) = get_or_make_record!() else { return true; };
-                        let Some(v) = resolve_group_by_value(db, expr, rec) else { return true; };
+                        let Some(rec) = get_or_make_record!() else {
+                            return true;
+                        };
+                        let Some(v) = resolve_group_by_value(db, expr, rec) else {
+                            return true;
+                        };
                         values.push(v);
                     }
                 }
                 values
             } else {
                 // Slow path: at least one complex GROUP BY expr.
-                let Some(rec) = get_or_make_record!() else { return true; };
+                let Some(rec) = get_or_make_record!() else {
+                    return true;
+                };
                 let mut values = Vec::with_capacity(effective_group_by.len());
                 for group_expr in &effective_group_by {
                     let Some(value) = resolve_group_by_value(db, group_expr, rec) else {
@@ -344,9 +346,13 @@ pub(crate) fn execute_aggregate_query(
 
         // Accumulate values — slot-indexed, zero HashMap/String overhead per row.
         for (proj_idx, proj) in all_aggregate_projections.iter().enumerate() {
-            let Projection::Function(func, args) = proj else { continue; };
+            let Projection::Function(func, args) = proj else {
+                continue;
+            };
             let func_name = base_function_name(func);
-            if !is_aggregate_function(func_name) { continue; }
+            if !is_aggregate_function(func_name) {
+                continue;
+            }
 
             let slot = match agg_plan.proj_slots.get(proj_idx) {
                 Some(s) => s,
@@ -354,7 +360,9 @@ pub(crate) fn execute_aggregate_query(
             };
 
             // COUNT(*) — already counted above.
-            if matches!(slot, ProjSlot::CountStar) { continue; }
+            if matches!(slot, ProjSlot::CountStar) {
+                continue;
+            }
 
             // Resolve argument value: entity fast path first, then record.
             let val = if let Some(kind) = agg_arg_kinds.get(proj_idx).and_then(|k| k.as_ref()) {
@@ -394,10 +402,18 @@ pub(crate) fn execute_aggregate_query(
                     }
                 }
                 ProjSlot::Min(idx) => {
-                    update_extreme_value_slot(&mut state.mins[*idx], &val, std::cmp::Ordering::Less);
+                    update_extreme_value_slot(
+                        &mut state.mins[*idx],
+                        &val,
+                        std::cmp::Ordering::Less,
+                    );
                 }
                 ProjSlot::Max(idx) => {
-                    update_extreme_value_slot(&mut state.maxs[*idx], &val, std::cmp::Ordering::Greater);
+                    update_extreme_value_slot(
+                        &mut state.maxs[*idx],
+                        &val,
+                        std::cmp::Ordering::Greater,
+                    );
                 }
                 ProjSlot::AllValues(idx) => {
                     if let Some(n) = num {
@@ -1152,8 +1168,8 @@ fn aggregate_projection_result_slotted(
                 Value::Null
             } else {
                 values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let index = ((pct * (values.len() as f64 - 1.0)).round() as usize)
-                    .min(values.len() - 1);
+                let index =
+                    ((pct * (values.len() as f64 - 1.0)).round() as usize).min(values.len() - 1);
                 Value::Float(values[index])
             }
         }
@@ -1163,8 +1179,8 @@ fn aggregate_projection_result_slotted(
             if values.is_empty() {
                 Value::Null
             } else {
-                let separator = resolve_static_projection_text(args.get(1))
-                    .unwrap_or_else(|| ", ".to_string());
+                let separator =
+                    resolve_static_projection_text(args.get(1)).unwrap_or_else(|| ", ".to_string());
                 Value::Text(values.join(separator.as_str()))
             }
         }
@@ -1530,16 +1546,16 @@ enum GroupKeyPart {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(usize)]
 enum AggStorageGroup {
-    SumCount   = 0,  // sums + sum_agg_counts (+sum_squares for STDDEV/VARIANCE)
-    Count      = 1,  // count_only (COUNT(col))
-    Min        = 2,
-    Max        = 3,
-    AllValues  = 4,  // MEDIAN, PERCENTILE
-    Concat     = 5,  // GROUP_CONCAT, STRING_AGG
-    First      = 6,
-    Last       = 7,
-    Array      = 8,  // ARRAY_AGG
-    Distinct   = 9,  // COUNT_DISTINCT
+    SumCount = 0, // sums + sum_agg_counts (+sum_squares for STDDEV/VARIANCE)
+    Count = 1,    // count_only (COUNT(col))
+    Min = 2,
+    Max = 3,
+    AllValues = 4, // MEDIAN, PERCENTILE
+    Concat = 5,    // GROUP_CONCAT, STRING_AGG
+    First = 6,
+    Last = 7,
+    Array = 8,    // ARRAY_AGG
+    Distinct = 9, // COUNT_DISTINCT
 }
 
 fn func_storage_group(func_name: &str) -> Option<AggStorageGroup> {
@@ -1668,22 +1684,24 @@ impl CompiledAggPlan {
         CompiledAggPlan {
             proj_slots,
             n_sum_count: counters[0],
-            n_count:     counters[1],
-            n_min:       counters[2],
-            n_max:       counters[3],
+            n_count: counters[1],
+            n_min: counters[2],
+            n_max: counters[3],
             n_all_values: counters[4],
-            n_concat:    counters[5],
-            n_first:     counters[6],
-            n_last:      counters[7],
-            n_array:     counters[8],
-            n_distinct:  counters[9],
+            n_concat: counters[5],
+            n_first: counters[6],
+            n_last: counters[7],
+            n_array: counters[8],
+            n_distinct: counters[9],
             result_slot_map: slot_key_to_idx,
         }
     }
 
     /// Look up the slot index for a result-building call.
     fn slot_for(&self, group: AggStorageGroup, col_name: &str) -> Option<usize> {
-        self.result_slot_map.get(&(group, col_name.to_string())).copied()
+        self.result_slot_map
+            .get(&(group, col_name.to_string()))
+            .copied()
     }
 }
 
@@ -1732,7 +1750,11 @@ struct AggregateGroup {
     state: SlottedAggState,
 }
 
-pub(super) fn update_extreme_value_slot(slot: &mut Option<Value>, candidate: &Value, ordering: std::cmp::Ordering) {
+pub(super) fn update_extreme_value_slot(
+    slot: &mut Option<Value>,
+    candidate: &Value,
+    ordering: std::cmp::Ordering,
+) {
     if matches!(candidate, Value::Null) {
         return;
     }
@@ -1895,9 +1917,9 @@ mod agg_spill_codec {
                 let n = u32::from_le_bytes(nb) as usize;
                 let mut buf = vec![0u8; n];
                 r.read_exact(&mut buf)?;
-                Value::from_bytes(&buf)
-                    .map(|(v, _)| v)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
+                Value::from_bytes(&buf).map(|(v, _)| v).map_err(|e| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
+                })
             }
             _ => Ok(Value::Null),
         }
@@ -2111,7 +2133,10 @@ mod agg_spill_codec {
             }
             5 => {
                 let family = tag_to_family(r_u8(r).map_err(SpillError::Io)?)?;
-                Ok(CanonicalKey::Text(family, r_str(r).map_err(SpillError::Io)?))
+                Ok(CanonicalKey::Text(
+                    family,
+                    r_str(r).map_err(SpillError::Io)?,
+                ))
             }
             6 => {
                 let family = tag_to_family(r_u8(r).map_err(SpillError::Io)?)?;
@@ -2180,25 +2205,33 @@ mod agg_spill_codec {
     fn w_vec_f64<W: Write>(w: &mut W, v: &[f64]) -> std::io::Result<usize> {
         w.write_all(&(v.len() as u32).to_le_bytes())?;
         let mut t = 4;
-        for &f in v { t += w_f64(w, f)?; }
+        for &f in v {
+            t += w_f64(w, f)?;
+        }
         Ok(t)
     }
     fn r_vec_f64<R: Read>(r: &mut R) -> std::io::Result<Vec<f64>> {
         let n = r_len(r)?;
         let mut v = Vec::with_capacity(n);
-        for _ in 0..n { v.push(r_f64(r)?); }
+        for _ in 0..n {
+            v.push(r_f64(r)?);
+        }
         Ok(v)
     }
     fn w_vec_u64<W: Write>(w: &mut W, v: &[u64]) -> std::io::Result<usize> {
         w.write_all(&(v.len() as u32).to_le_bytes())?;
         let mut t = 4;
-        for &n in v { t += w_u64(w, n)?; }
+        for &n in v {
+            t += w_u64(w, n)?;
+        }
         Ok(t)
     }
     fn r_vec_u64<R: Read>(r: &mut R) -> std::io::Result<Vec<u64>> {
         let n = r_len(r)?;
         let mut v = Vec::with_capacity(n);
-        for _ in 0..n { v.push(r_u64(r)?); }
+        for _ in 0..n {
+            v.push(r_u64(r)?);
+        }
         Ok(v)
     }
     fn w_vec_option_val<W: Write>(w: &mut W, v: &[Option<Value>]) -> std::io::Result<usize> {
@@ -2206,7 +2239,10 @@ mod agg_spill_codec {
         let mut t = 4;
         for opt in v {
             match opt {
-                None => { w.write_all(&[0u8])?; t += 1; }
+                None => {
+                    w.write_all(&[0u8])?;
+                    t += 1;
+                }
                 Some(val) => {
                     w.write_all(&[1u8])?;
                     t += 1 + w_val(w, val)?;
@@ -2227,25 +2263,33 @@ mod agg_spill_codec {
     fn w_vec_val<W: Write>(w: &mut W, v: &[Value]) -> std::io::Result<usize> {
         w.write_all(&(v.len() as u32).to_le_bytes())?;
         let mut t = 4;
-        for val in v { t += w_val(w, val)?; }
+        for val in v {
+            t += w_val(w, val)?;
+        }
         Ok(t)
     }
     fn r_vec_val<R: Read>(r: &mut R) -> std::io::Result<Vec<Value>> {
         let n = r_len(r)?;
         let mut v = Vec::with_capacity(n);
-        for _ in 0..n { v.push(r_val(r)?); }
+        for _ in 0..n {
+            v.push(r_val(r)?);
+        }
         Ok(v)
     }
     fn w_vec_vec_f64<W: Write>(w: &mut W, v: &[Vec<f64>]) -> std::io::Result<usize> {
         w.write_all(&(v.len() as u32).to_le_bytes())?;
         let mut t = 4;
-        for inner in v { t += w_vec_f64(w, inner)?; }
+        for inner in v {
+            t += w_vec_f64(w, inner)?;
+        }
         Ok(t)
     }
     fn r_vec_vec_f64<R: Read>(r: &mut R) -> std::io::Result<Vec<Vec<f64>>> {
         let n = r_len(r)?;
         let mut v = Vec::with_capacity(n);
-        for _ in 0..n { v.push(r_vec_f64(r)?); }
+        for _ in 0..n {
+            v.push(r_vec_f64(r)?);
+        }
         Ok(v)
     }
     fn w_vec_vec_str<W: Write>(w: &mut W, v: &[Vec<String>]) -> std::io::Result<usize> {
@@ -2254,7 +2298,9 @@ mod agg_spill_codec {
         for inner in v {
             w.write_all(&(inner.len() as u32).to_le_bytes())?;
             t += 4;
-            for s in inner { t += w_str(w, s)?; }
+            for s in inner {
+                t += w_str(w, s)?;
+            }
         }
         Ok(t)
     }
@@ -2264,7 +2310,9 @@ mod agg_spill_codec {
         for _ in 0..n {
             let m = r_len(r)?;
             let mut inner = Vec::with_capacity(m);
-            for _ in 0..m { inner.push(r_str(r)?); }
+            for _ in 0..m {
+                inner.push(r_str(r)?);
+            }
             v.push(inner);
         }
         Ok(v)
@@ -2272,13 +2320,17 @@ mod agg_spill_codec {
     fn w_vec_vec_val<W: Write>(w: &mut W, v: &[Vec<Value>]) -> std::io::Result<usize> {
         w.write_all(&(v.len() as u32).to_le_bytes())?;
         let mut t = 4;
-        for inner in v { t += w_vec_val(w, inner)?; }
+        for inner in v {
+            t += w_vec_val(w, inner)?;
+        }
         Ok(t)
     }
     fn r_vec_vec_val<R: Read>(r: &mut R) -> std::io::Result<Vec<Vec<Value>>> {
         let n = r_len(r)?;
         let mut v = Vec::with_capacity(n);
-        for _ in 0..n { v.push(r_vec_val(r)?); }
+        for _ in 0..n {
+            v.push(r_vec_val(r)?);
+        }
         Ok(v)
     }
     fn w_vec_option_set_str<W: Write>(
@@ -2289,20 +2341,23 @@ mod agg_spill_codec {
         let mut t = 4;
         for opt in v {
             match opt {
-                None => { w.write_all(&[0u8])?; t += 1; }
+                None => {
+                    w.write_all(&[0u8])?;
+                    t += 1;
+                }
                 Some(set) => {
                     w.write_all(&[1u8])?;
                     w.write_all(&(set.len() as u32).to_le_bytes())?;
                     t += 5;
-                    for s in set { t += w_str(w, s)?; }
+                    for s in set {
+                        t += w_str(w, s)?;
+                    }
                 }
             }
         }
         Ok(t)
     }
-    fn r_vec_option_set_str<R: Read>(
-        r: &mut R,
-    ) -> std::io::Result<Vec<Option<HashSet<String>>>> {
+    fn r_vec_option_set_str<R: Read>(r: &mut R) -> std::io::Result<Vec<Option<HashSet<String>>>> {
         let n = r_len(r)?;
         let mut v = Vec::with_capacity(n);
         for _ in 0..n {
@@ -2312,7 +2367,9 @@ mod agg_spill_codec {
             } else {
                 let m = r_len(r)?;
                 let mut set = HashSet::with_capacity(m);
-                for _ in 0..m { set.insert(r_str(r)?); }
+                for _ in 0..m {
+                    set.insert(r_str(r)?);
+                }
                 v.push(Some(set));
             }
         }
@@ -2426,18 +2483,18 @@ mod agg_spill_codec {
             Ok(Some(AggregateGroup {
                 group_values,
                 state: SlottedAggState {
-                    count:         r_u64(r).map_err(SpillError::Io)?,
-                    sums:          r_vec_f64(r).map_err(SpillError::Io)?,
+                    count: r_u64(r).map_err(SpillError::Io)?,
+                    sums: r_vec_f64(r).map_err(SpillError::Io)?,
                     sum_agg_counts: r_vec_u64(r).map_err(SpillError::Io)?,
-                    sum_squares:   r_vec_f64(r).map_err(SpillError::Io)?,
-                    count_only:    r_vec_u64(r).map_err(SpillError::Io)?,
-                    mins:          r_vec_option_val(r).map_err(SpillError::Io)?,
-                    maxs:          r_vec_option_val(r).map_err(SpillError::Io)?,
-                    all_values:    r_vec_vec_f64(r).map_err(SpillError::Io)?,
+                    sum_squares: r_vec_f64(r).map_err(SpillError::Io)?,
+                    count_only: r_vec_u64(r).map_err(SpillError::Io)?,
+                    mins: r_vec_option_val(r).map_err(SpillError::Io)?,
+                    maxs: r_vec_option_val(r).map_err(SpillError::Io)?,
+                    all_values: r_vec_vec_f64(r).map_err(SpillError::Io)?,
                     concat_values: r_vec_vec_str(r).map_err(SpillError::Io)?,
-                    first_values:  r_vec_option_val(r).map_err(SpillError::Io)?,
-                    last_values:   r_vec_option_val(r).map_err(SpillError::Io)?,
-                    array_values:  r_vec_vec_val(r).map_err(SpillError::Io)?,
+                    first_values: r_vec_option_val(r).map_err(SpillError::Io)?,
+                    last_values: r_vec_option_val(r).map_err(SpillError::Io)?,
+                    array_values: r_vec_vec_val(r).map_err(SpillError::Io)?,
                     distinct_sets: r_vec_option_set_str(r).map_err(SpillError::Io)?,
                 },
             }))
@@ -2453,22 +2510,33 @@ mod agg_spill_codec {
             let o = other.state;
             s.count += o.count;
             for (i, v) in o.sums.into_iter().enumerate() {
-                if i < s.sums.len() { s.sums[i] += v; }
+                if i < s.sums.len() {
+                    s.sums[i] += v;
+                }
             }
             for (i, v) in o.sum_agg_counts.into_iter().enumerate() {
-                if i < s.sum_agg_counts.len() { s.sum_agg_counts[i] += v; }
+                if i < s.sum_agg_counts.len() {
+                    s.sum_agg_counts[i] += v;
+                }
             }
             for (i, v) in o.sum_squares.into_iter().enumerate() {
-                if i < s.sum_squares.len() { s.sum_squares[i] += v; }
+                if i < s.sum_squares.len() {
+                    s.sum_squares[i] += v;
+                }
             }
             for (i, v) in o.count_only.into_iter().enumerate() {
-                if i < s.count_only.len() { s.count_only[i] += v; }
+                if i < s.count_only.len() {
+                    s.count_only[i] += v;
+                }
             }
             for (i, candidate) in o.mins.into_iter().enumerate() {
                 if i < s.mins.len() {
                     if let Some(c) = candidate {
                         super::update_extreme_value_slot(
-                            &mut s.mins[i], &c, std::cmp::Ordering::Less);
+                            &mut s.mins[i],
+                            &c,
+                            std::cmp::Ordering::Less,
+                        );
                     }
                 }
             }
@@ -2476,15 +2544,22 @@ mod agg_spill_codec {
                 if i < s.maxs.len() {
                     if let Some(c) = candidate {
                         super::update_extreme_value_slot(
-                            &mut s.maxs[i], &c, std::cmp::Ordering::Greater);
+                            &mut s.maxs[i],
+                            &c,
+                            std::cmp::Ordering::Greater,
+                        );
                     }
                 }
             }
             for (i, v) in o.all_values.into_iter().enumerate() {
-                if i < s.all_values.len() { s.all_values[i].extend(v); }
+                if i < s.all_values.len() {
+                    s.all_values[i].extend(v);
+                }
             }
             for (i, v) in o.concat_values.into_iter().enumerate() {
-                if i < s.concat_values.len() { s.concat_values[i].extend(v); }
+                if i < s.concat_values.len() {
+                    s.concat_values[i].extend(v);
+                }
             }
             // FIRST: keep self (first batch wins)
             for (i, v) in o.first_values.into_iter().enumerate() {
@@ -2499,7 +2574,9 @@ mod agg_spill_codec {
                 }
             }
             for (i, v) in o.array_values.into_iter().enumerate() {
-                if i < s.array_values.len() { s.array_values[i].extend(v); }
+                if i < s.array_values.len() {
+                    s.array_values[i].extend(v);
+                }
             }
             for (i, set_opt) in o.distinct_sets.into_iter().enumerate() {
                 if i < s.distinct_sets.len() {

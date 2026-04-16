@@ -2,6 +2,11 @@
 
 The key-value interface provides fast, direct access to data by key. It is ideal for caches, feature flags, session storage, and any lookup-by-name pattern.
 
+> [!NOTE]
+> KV is a first-class user-facing model, but it does not currently introduce a separate native
+> storage entity kind in the core unified engine. It is exposed through dedicated KV APIs and
+> query semantics on top of the unified collection layer.
+
 ## SQL First
 
 Even though KV has a direct key-based API, the underlying data is still queryable.

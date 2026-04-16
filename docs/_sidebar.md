@@ -3,6 +3,7 @@
   - [Installation](/getting-started/installation.md)
   - [Quick Start](/getting-started/quick-start.md)
   - [Connect](/getting-started/connect.md)
+  - [Modes and Transports](/getting-started/modes-and-transports.md)
   - [Configuration](/getting-started/configuration.md)
 
 - **AI & LLM**
@@ -28,6 +29,7 @@
   - [Multi-Mode (Gremlin, SPARQL, NL)](/query/multi-mode.md)
 
 - **Data Models**
+  - [Overview](/data-models/overview.md)
   - [Tables & Rows](/data-models/tables.md)
   - [Documents](/data-models/documents.md)
   - [Key-Value](/data-models/key-value.md)

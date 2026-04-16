@@ -204,12 +204,14 @@ impl BatchBuilder {
 
             for (id, metadata) in ids.iter().zip(metadata_items.into_iter()) {
                 if !metadata.is_empty() {
-                    let _ = self
-                        .store
-                        .set_metadata(&collection, *id, Metadata::with_fields(metadata));
+                    let _ =
+                        self.store
+                            .set_metadata(&collection, *id, Metadata::with_fields(metadata));
                 }
                 if let Some(entity) = self.store.get(&collection, *id) {
-                    self.store.context_index().index_entity(&collection, &entity);
+                    self.store
+                        .context_index()
+                        .index_entity(&collection, &entity);
                     let _ = self.store.index_cross_refs(&entity, &collection);
                 }
                 inserted_rows.push(*id);

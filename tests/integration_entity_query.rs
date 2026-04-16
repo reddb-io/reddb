@@ -1068,6 +1068,25 @@ fn test_select_universal_from_any() {
     );
 }
 
+#[test]
+fn test_scalar_length_without_from_returns_single_row() {
+    let rt = rt();
+    let query = QueryUseCases::new(&rt);
+
+    let result = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT LENGTH('josé') AS chars".into(),
+        })
+        .expect("scalar SELECT without FROM should succeed");
+
+    assert_eq!(result.result.records.len(), 1);
+    match result.result.records[0].values.get("chars") {
+        Some(Value::Integer(value)) => assert_eq!(*value, 4),
+        Some(Value::UnsignedInteger(value)) => assert_eq!(*value, 4),
+        other => panic!("expected chars=4, got {other:?}"),
+    }
+}
+
 // 17. test_select_universal_with_filter
 #[test]
 fn test_select_universal_with_filter() {
@@ -2697,4 +2716,339 @@ fn finding_1_select_after_bulk_insert_persistent_reopen() {
     let _ = std::fs::remove_file(format!("{path_str}-dwb"));
     let _ = std::fs::remove_file(format!("{path_str}-hdr"));
     let _ = std::fs::remove_file(format!("{path_str}-meta"));
+}
+
+#[test]
+fn test_direct_node_create_rejects_reserved_tree_metadata() {
+    let rt = rt();
+    let entity = EntityUseCases::new(&rt);
+
+    let err = entity
+        .create_node(CreateNodeInput {
+            collection: "tree_guard_nodes".into(),
+            label: "bad-node".into(),
+            node_type: Some("Host".into()),
+            properties: vec![],
+            metadata: vec![("red.tree.name".into(), MetadataValue::String("org".into()))],
+            embeddings: vec![],
+            table_links: vec![],
+            node_links: vec![],
+        })
+        .expect_err("generic node create must reject reserved tree metadata");
+
+    assert!(
+        err.to_string().contains("reserved for managed trees"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn test_direct_edge_create_rejects_reserved_tree_label() {
+    let rt = rt();
+    let entity = EntityUseCases::new(&rt);
+
+    let left = entity
+        .create_node(CreateNodeInput {
+            collection: "tree_guard_edges".into(),
+            label: "left".into(),
+            node_type: Some("Host".into()),
+            properties: vec![],
+            metadata: vec![],
+            embeddings: vec![],
+            table_links: vec![],
+            node_links: vec![],
+        })
+        .expect("left node should be created");
+    let right = entity
+        .create_node(CreateNodeInput {
+            collection: "tree_guard_edges".into(),
+            label: "right".into(),
+            node_type: Some("Host".into()),
+            properties: vec![],
+            metadata: vec![],
+            embeddings: vec![],
+            table_links: vec![],
+            node_links: vec![],
+        })
+        .expect("right node should be created");
+
+    let err = entity
+        .create_edge(CreateEdgeInput {
+            collection: "tree_guard_edges".into(),
+            label: "TREE_CHILD".into(),
+            from: left.id,
+            to: right.id,
+            weight: Some(1.0),
+            properties: vec![],
+            metadata: vec![],
+        })
+        .expect_err("generic edge create must reject reserved tree label");
+
+    assert!(
+        err.to_string().contains("reserved for managed trees"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn test_direct_edge_create_rejects_reserved_tree_metadata() {
+    let rt = rt();
+    let entity = EntityUseCases::new(&rt);
+
+    let left = entity
+        .create_node(CreateNodeInput {
+            collection: "tree_guard_edge_metadata".into(),
+            label: "left".into(),
+            node_type: Some("Host".into()),
+            properties: vec![],
+            metadata: vec![],
+            embeddings: vec![],
+            table_links: vec![],
+            node_links: vec![],
+        })
+        .expect("left node should be created");
+    let right = entity
+        .create_node(CreateNodeInput {
+            collection: "tree_guard_edge_metadata".into(),
+            label: "right".into(),
+            node_type: Some("Host".into()),
+            properties: vec![],
+            metadata: vec![],
+            embeddings: vec![],
+            table_links: vec![],
+            node_links: vec![],
+        })
+        .expect("right node should be created");
+
+    let err = entity
+        .create_edge(CreateEdgeInput {
+            collection: "tree_guard_edge_metadata".into(),
+            label: "connects".into(),
+            from: left.id,
+            to: right.id,
+            weight: Some(1.0),
+            properties: vec![],
+            metadata: vec![("red.tree.child_index".into(), MetadataValue::Int(0))],
+        })
+        .expect_err("generic edge create must reject reserved tree metadata");
+
+    assert!(
+        err.to_string().contains("reserved for managed trees"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn test_direct_patch_rejects_reserved_tree_metadata() {
+    let rt = rt();
+    let entity = EntityUseCases::new(&rt);
+
+    let created = entity
+        .create_node(CreateNodeInput {
+            collection: "tree_guard_patch".into(),
+            label: "safe".into(),
+            node_type: Some("Host".into()),
+            properties: vec![],
+            metadata: vec![],
+            embeddings: vec![],
+            table_links: vec![],
+            node_links: vec![],
+        })
+        .expect("safe node should be created");
+
+    let err = entity
+        .patch(PatchEntityInput {
+            collection: "tree_guard_patch".into(),
+            id: created.id,
+            payload: JsonValue::Object(Default::default()),
+            operations: vec![PatchEntityOperation {
+                op: PatchEntityOperationType::Set,
+                path: vec!["metadata".into(), "red.tree.name".into()],
+                value: Some(JsonValue::String("org".into())),
+            }],
+        })
+        .expect_err("generic patch must reject reserved tree metadata");
+
+    assert!(
+        err.to_string().contains("reserved for managed trees"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn test_select_config_function_accepts_bare_path_and_default() {
+    let rt = rt();
+    let query = QueryUseCases::new(&rt);
+
+    query
+        .execute(ExecuteQueryInput {
+            query: "SET CONFIG red.ai.default.provider = 'groq'".into(),
+        })
+        .expect("SET CONFIG should succeed");
+
+    let configured = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT CONFIG(red.ai.default.provider, openai) AS provider".into(),
+        })
+        .expect("scalar CONFIG() select should succeed");
+
+    assert_eq!(configured.result.records.len(), 1);
+    match configured.result.records[0].values.get("provider") {
+        Some(Value::Text(value)) => assert_eq!(value, "groq"),
+        other => panic!("expected configured provider text, got {:?}", other),
+    }
+
+    let fallback = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT CONFIG(red.ai.default.missing, openai) AS provider".into(),
+        })
+        .expect("CONFIG() fallback select should succeed");
+
+    assert_eq!(fallback.result.records.len(), 1);
+    match fallback.result.records[0].values.get("provider") {
+        Some(Value::Text(value)) => assert_eq!(value, "openai"),
+        other => panic!("expected fallback provider text, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_kv_function_filters_rows_and_uses_bare_default() {
+    let rt = rt();
+    let entity = EntityUseCases::new(&rt);
+    let query = QueryUseCases::new(&rt);
+
+    entity
+        .create_kv(CreateKvInput {
+            collection: "cfg_lookup".into(),
+            key: "default.role".into(),
+            value: Value::Text("admin".into()),
+            metadata: vec![],
+        })
+        .expect("create_kv should succeed");
+
+    for (name, role) in [("Alice", "admin"), ("Bob", "guest"), ("Cara", "admin")] {
+        entity
+            .create_row(CreateRowInput {
+                collection: "kv_fn_users".into(),
+                fields: vec![
+                    ("name".into(), Value::Text(name.into())),
+                    ("role".into(), Value::Text(role.into())),
+                    ("tier".into(), Value::Text("basic".into())),
+                ],
+                metadata: vec![],
+                node_links: vec![],
+                vector_links: vec![],
+            })
+            .expect("create_row should succeed");
+    }
+
+    let admins = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT name FROM kv_fn_users WHERE role = KV(cfg_lookup, default.role, guest) ORDER BY name ASC".into(),
+        })
+        .expect("SELECT with KV() should succeed");
+
+    let admin_names = admins
+        .result
+        .records
+        .iter()
+        .map(|record| match record.values.get("name") {
+            Some(Value::Text(value)) => value.clone(),
+            other => panic!("expected name text, got {:?}", other),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(admin_names, vec!["Alice".to_string(), "Cara".to_string()]);
+
+    let guests = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT name FROM kv_fn_users WHERE role = KV(cfg_lookup, missing.role, guest) ORDER BY name ASC".into(),
+        })
+        .expect("SELECT with KV() fallback should succeed");
+
+    let guest_names = guests
+        .result
+        .records
+        .iter()
+        .map(|record| match record.values.get("name") {
+            Some(Value::Text(value)) => value.clone(),
+            other => panic!("expected name text, got {:?}", other),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(guest_names, vec!["Bob".to_string()]);
+}
+
+#[test]
+fn test_update_accepts_config_assignment_and_kv_filter() {
+    let rt = rt();
+    let entity = EntityUseCases::new(&rt);
+    let query = QueryUseCases::new(&rt);
+
+    entity
+        .create_kv(CreateKvInput {
+            collection: "cfg_update".into(),
+            key: "default.role".into(),
+            value: Value::Text("admin".into()),
+            metadata: vec![],
+        })
+        .expect("create_kv should succeed");
+
+    query
+        .execute(ExecuteQueryInput {
+            query: "SET CONFIG red.users.default.tier = 'premium'".into(),
+        })
+        .expect("SET CONFIG should succeed");
+
+    for (name, role) in [("Alice", "admin"), ("Bob", "guest"), ("Cara", "admin")] {
+        entity
+            .create_row(CreateRowInput {
+                collection: "kv_update_users".into(),
+                fields: vec![
+                    ("name".into(), Value::Text(name.into())),
+                    ("role".into(), Value::Text(role.into())),
+                    ("tier".into(), Value::Text("basic".into())),
+                ],
+                metadata: vec![],
+                node_links: vec![],
+                vector_links: vec![],
+            })
+            .expect("create_row should succeed");
+    }
+
+    query
+        .execute(ExecuteQueryInput {
+            query: "UPDATE kv_update_users SET tier = CONFIG(red.users.default.tier, free) WHERE role = KV(cfg_update, default.role, guest)".into(),
+        })
+        .expect("UPDATE with CONFIG()/KV() should succeed");
+
+    let result = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT name, tier FROM kv_update_users ORDER BY name ASC".into(),
+        })
+        .expect("SELECT after UPDATE should succeed");
+
+    let tiers = result
+        .result
+        .records
+        .iter()
+        .map(|record| {
+            let name = match record.values.get("name") {
+                Some(Value::Text(value)) => value.clone(),
+                other => panic!("expected name text, got {:?}", other),
+            };
+            let tier = match record.values.get("tier") {
+                Some(Value::Text(value)) => value.clone(),
+                other => panic!("expected tier text, got {:?}", other),
+            };
+            (name, tier)
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        tiers,
+        vec![
+            ("Alice".to_string(), "premium".to_string()),
+            ("Bob".to_string(), "basic".to_string()),
+            ("Cara".to_string(), "premium".to_string()),
+        ]
+    );
 }

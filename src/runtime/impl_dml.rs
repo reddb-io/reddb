@@ -8,8 +8,8 @@
 
 use crate::application::entity::{
     AppliedEntityMutation, CreateDocumentInput, CreateEdgeInput, CreateKvInput, CreateNodeInput,
-    CreateRowInput, CreateRowsBatchInput, CreateVectorInput, DeleteEntityInput, PatchEntityOperation,
-    PatchEntityOperationType, RowUpdateColumnRule, RowUpdateContractPlan,
+    CreateRowInput, CreateRowsBatchInput, CreateVectorInput, DeleteEntityInput,
+    PatchEntityOperation, PatchEntityOperationType, RowUpdateColumnRule, RowUpdateContractPlan,
 };
 use crate::application::ports::{
     build_row_update_contract_plan, normalize_row_update_assignment_with_plan,
@@ -206,7 +206,8 @@ impl RedDBRuntime {
                         ensure_non_tree_reserved_metadata_entries(&metadata)?;
                         let (columns, values) = pairwise_columns_values(&node_values);
                         let label = find_column_value_string(&columns, &values, "label")?;
-                        let node_type = find_column_value_opt_string(&columns, &values, "node_type");
+                        let node_type =
+                            find_column_value_opt_string(&columns, &values, "node_type");
                         let properties = extract_remaining_properties(
                             &columns,
                             &values,

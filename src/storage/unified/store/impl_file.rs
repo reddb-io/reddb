@@ -122,9 +122,9 @@ impl UnifiedStore {
                     if pos + 4 > buf.len() {
                         return Err("Truncated entity record length".into());
                     }
-                    let record_len = u32::from_le_bytes([
-                        buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3],
-                    ]) as usize;
+                    let record_len =
+                        u32::from_le_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]])
+                            as usize;
                     pos += 4;
                     if pos + record_len > buf.len() {
                         return Err("Truncated entity record payload".into());
@@ -132,9 +132,8 @@ impl UnifiedStore {
                     let record_bytes = &buf[pos..pos + record_len];
                     pos += record_len;
 
-                    let (entity, metadata) =
-                        Self::deserialize_entity_record(record_bytes, version)
-                            .map_err(|e| format!("Entity record deserialization error: {e}"))?;
+                    let (entity, metadata) = Self::deserialize_entity_record(record_bytes, version)
+                        .map_err(|e| format!("Entity record deserialization error: {e}"))?;
 
                     store.insert_auto(&name, entity.clone())?;
 
@@ -208,9 +207,9 @@ impl UnifiedStore {
         // Magic bytes "RDST"
         buf.extend_from_slice(STORE_MAGIC);
 
-        // Version (6 — includes CRC32 footer, queue tails, timeseries tags,
-        // and vector content persistence)
-        buf.extend_from_slice(&STORE_VERSION_V6.to_le_bytes());
+        // Version (7 — includes entity-record metadata alongside the V6
+        // CRC/footer, queue tail, timeseries tag, and vector persistence work).
+        buf.extend_from_slice(&STORE_VERSION_V7.to_le_bytes());
 
         // Get all collections
         let collections = self.collections.read();

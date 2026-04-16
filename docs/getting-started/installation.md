@@ -1,6 +1,16 @@
 # Installation
 
-RedDB ships as a single binary called `red`. In JavaScript and TypeScript, use the `reddb` driver package in application code and `reddb-cli` only as the npm CLI launcher.
+RedDB ships as a single executable called `red`.
+
+That executable is the **`red` binary**, not the same thing as:
+
+- the embedded Rust mode
+- the wire binary protocol
+- the binary `.rdb` file format
+
+In JavaScript and TypeScript, use the `reddb` driver package in application code and `reddb-cli` only as the npm CLI launcher.
+
+If you want the terminology first, read [Modes and Transports](/getting-started/modes-and-transports.md).
 
 ## Install from GitHub Releases
 
@@ -171,4 +181,4 @@ sudo ./scripts/install-systemd-service.sh \
 
 ## Next step
 
-After installation, go to [Connect](/getting-started/connect.md) to choose HTTP, gRPC, CLI, or embedded mode.
+After installation, go to [Modes and Transports](/getting-started/modes-and-transports.md) to choose between embedded mode, the standalone `red` process, router, HTTP, gRPC, wire, and stdio bridge usage.
