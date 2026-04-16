@@ -304,6 +304,10 @@ pub enum DataType {
     /// C3 TOAST: zstd-compressed binary blob (> TOAST_THRESHOLD bytes).
     /// In-memory representation is always `Value::Blob`.
     BlobZstd = 52,
+    /// General asset code (fiat or crypto), validated and normalized uppercase text
+    AssetCode = 53,
+    /// Monetary amount represented as minor units + scale + asset code
+    Money = 54,
 }
 
 /// Type categories used by the Fase 3 coercion resolver. Mirrors
@@ -402,6 +406,8 @@ impl DataType {
             | DataType::Lang2
             | DataType::Lang5
             | DataType::Currency
+            | DataType::AssetCode
+            | DataType::Money
             | DataType::Enum => TypeCategory::Domain,
             DataType::Uuid => TypeCategory::Uuid,
             DataType::Secret | DataType::Password => TypeCategory::Opaque,
@@ -511,6 +517,8 @@ impl DataType {
             50 => Some(DataType::Password),
             51 => Some(DataType::TextZstd),
             52 => Some(DataType::BlobZstd),
+            53 => Some(DataType::AssetCode),
+            54 => Some(DataType::Money),
             _ => None,
         }
     }
@@ -570,6 +578,8 @@ impl DataType {
             "LANG2" => DataType::Lang2,
             "LANG5" => DataType::Lang5,
             "CURRENCY" => DataType::Currency,
+            "ASSETCODE" | "ASSET_CODE" | "ASSET" => DataType::AssetCode,
+            "MONEY" => DataType::Money,
             "ENUM" => DataType::Enum,
             "ARRAY" => DataType::Array,
             "KEYREF" => DataType::KeyRef,
@@ -632,6 +642,8 @@ impl DataType {
             DataType::Currency => Some(3),    // [u8; 3]
             DataType::ColorAlpha => Some(4),  // [u8; 4]
             DataType::BigInt => Some(8),      // i64
+            DataType::AssetCode => None,      // variable-length normalized code
+            DataType::Money => None,          // variable-length asset + scale + i64
             DataType::KeyRef => None,         // variable-length (collection + key)
             DataType::DocRef => None,         // variable-length (collection + u64)
             DataType::TableRef => None,       // variable-length (table name)
@@ -678,6 +690,7 @@ impl DataType {
                 | DataType::Lang2
                 | DataType::Lang5
                 | DataType::Currency
+                | DataType::AssetCode
                 | DataType::BigInt
                 | DataType::KeyRef
                 | DataType::DocRef
@@ -705,6 +718,7 @@ impl DataType {
                 | DataType::Latitude
                 | DataType::Longitude
                 | DataType::BigInt
+                | DataType::AssetCode
         )
     }
 }
@@ -754,6 +768,8 @@ impl fmt::Display for DataType {
             DataType::Lang2 => write!(f, "LANG2"),
             DataType::Lang5 => write!(f, "LANG5"),
             DataType::Currency => write!(f, "CURRENCY"),
+            DataType::AssetCode => write!(f, "ASSET_CODE"),
+            DataType::Money => write!(f, "MONEY"),
             DataType::ColorAlpha => write!(f, "COLOR_ALPHA"),
             DataType::BigInt => write!(f, "BIGINT"),
             DataType::KeyRef => write!(f, "KEY_REF"),
@@ -855,6 +871,14 @@ pub enum Value {
     Lang5([u8; 5]),
     /// Currency code 3-letter
     Currency([u8; 3]),
+    /// General asset code, normalized uppercase text
+    AssetCode(String),
+    /// Monetary amount stored as integer minor units plus explicit scale and asset code
+    Money {
+        asset_code: String,
+        minor_units: i64,
+        scale: u8,
+    },
     /// RGBA color with alpha
     ColorAlpha([u8; 4]),
     /// Big integer (same as Integer but with distinct type for schema clarity)
@@ -955,6 +979,16 @@ impl std::hash::Hash for Value {
             Value::Lang2(v) => v.hash(state),
             Value::Lang5(v) => v.hash(state),
             Value::Currency(v) => v.hash(state),
+            Value::AssetCode(v) => v.hash(state),
+            Value::Money {
+                asset_code,
+                minor_units,
+                scale,
+            } => {
+                asset_code.hash(state);
+                minor_units.hash(state);
+                scale.hash(state);
+            }
             Value::ColorAlpha(v) => v.hash(state),
             Value::BigInt(v) => v.hash(state),
             Value::KeyRef(c, k) => {
@@ -1019,6 +1053,8 @@ impl Value {
             Value::Lang2(_) => DataType::Lang2,
             Value::Lang5(_) => DataType::Lang5,
             Value::Currency(_) => DataType::Currency,
+            Value::AssetCode(_) => DataType::AssetCode,
+            Value::Money { .. } => DataType::Money,
             Value::ColorAlpha(_) => DataType::ColorAlpha,
             Value::BigInt(_) => DataType::BigInt,
             Value::KeyRef(..) => DataType::KeyRef,
@@ -1281,6 +1317,24 @@ impl Value {
             Value::Currency(c) => {
                 buf.push(DataType::Currency.to_byte());
                 buf.extend_from_slice(c);
+            }
+            Value::AssetCode(code) => {
+                buf.push(DataType::AssetCode.to_byte());
+                let bytes = code.as_bytes();
+                write_varint(&mut buf, bytes.len() as u64);
+                buf.extend_from_slice(bytes);
+            }
+            Value::Money {
+                asset_code,
+                minor_units,
+                scale,
+            } => {
+                buf.push(DataType::Money.to_byte());
+                let bytes = asset_code.as_bytes();
+                write_varint(&mut buf, bytes.len() as u64);
+                buf.extend_from_slice(bytes);
+                buf.push(*scale);
+                buf.extend_from_slice(&minor_units.to_le_bytes());
             }
             Value::ColorAlpha(rgba) => {
                 buf.push(DataType::ColorAlpha.to_byte());
@@ -1741,6 +1795,36 @@ impl Value {
                 offset += 3;
                 Value::Currency(c)
             }
+            DataType::AssetCode => {
+                let (len, len_bytes) = read_varint(&data[offset..])?;
+                offset += len_bytes;
+                if data.len() < offset + len as usize {
+                    return Err(ValueError::TruncatedData);
+                }
+                let code = String::from_utf8(data[offset..offset + len as usize].to_vec())
+                    .map_err(|_| ValueError::InvalidUtf8)?;
+                offset += len as usize;
+                Value::AssetCode(code)
+            }
+            DataType::Money => {
+                let (len, len_bytes) = read_varint(&data[offset..])?;
+                offset += len_bytes;
+                if data.len() < offset + len as usize + 1 + 8 {
+                    return Err(ValueError::TruncatedData);
+                }
+                let asset_code = String::from_utf8(data[offset..offset + len as usize].to_vec())
+                    .map_err(|_| ValueError::InvalidUtf8)?;
+                offset += len as usize;
+                let scale = data[offset];
+                offset += 1;
+                let minor_units = i64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
+                offset += 8;
+                Value::Money {
+                    asset_code,
+                    minor_units,
+                    scale,
+                }
+            }
             DataType::ColorAlpha => {
                 if data.len() < offset + 4 {
                     return Err(ValueError::TruncatedData);
@@ -1963,7 +2047,7 @@ impl Value {
                     total_secs % 60
                 )
             }
-            Value::Decimal(v) => format!("{:.4}", *v as f64 / 10_000.0),
+            Value::Decimal(v) => format_scaled_i64(*v, 4),
             Value::EnumValue(i) => format!("enum({})", i),
             Value::Array(elems) => {
                 let items: Vec<String> = elems.iter().map(|e| e.display_string()).collect();
@@ -2033,6 +2117,12 @@ impl Value {
             Value::Lang2(c) => String::from_utf8_lossy(c).to_string(),
             Value::Lang5(c) => String::from_utf8_lossy(c).to_string(),
             Value::Currency(c) => String::from_utf8_lossy(c).to_string(),
+            Value::AssetCode(code) => code.clone(),
+            Value::Money {
+                asset_code,
+                minor_units,
+                scale,
+            } => format!("{} {}", asset_code, format_scaled_i64(*minor_units, *scale)),
             Value::ColorAlpha([r, g, b, a]) => format!("#{:02X}{:02X}{:02X}{:02X}", r, g, b, a),
             Value::BigInt(v) => v.to_string(),
             Value::KeyRef(c, k) => format!("{}:{}", c, k),
@@ -2042,6 +2132,24 @@ impl Value {
             other => format!("{}", other),
         }
     }
+}
+
+fn format_scaled_i64(value: i64, scale: u8) -> String {
+    let negative = value < 0;
+    let abs = (value as i128).abs();
+    if scale == 0 {
+        return if negative {
+            format!("-{}", abs)
+        } else {
+            abs.to_string()
+        };
+    }
+
+    let divisor = 10_i128.pow(scale as u32);
+    let whole = abs / divisor;
+    let frac = abs % divisor;
+    let sign = if negative { "-" } else { "" };
+    format!("{}{}.{:0width$}", sign, whole, frac, width = scale as usize)
 }
 
 impl fmt::Display for Value {
@@ -2107,7 +2215,7 @@ impl fmt::Display for Value {
                     total_secs % 60
                 )
             }
-            Value::Decimal(v) => write!(f, "{:.4}", *v as f64 / 10_000.0),
+            Value::Decimal(v) => write!(f, "{}", format_scaled_i64(*v, 4)),
             Value::EnumValue(i) => write!(f, "enum({})", i),
             Value::Array(elems) => {
                 write!(f, "[")?;
@@ -2190,6 +2298,17 @@ impl fmt::Display for Value {
             Value::Lang2(c) => write!(f, "{}", String::from_utf8_lossy(c)),
             Value::Lang5(c) => write!(f, "{}", String::from_utf8_lossy(c)),
             Value::Currency(c) => write!(f, "{}", String::from_utf8_lossy(c)),
+            Value::AssetCode(code) => write!(f, "{}", code),
+            Value::Money {
+                asset_code,
+                minor_units,
+                scale,
+            } => write!(
+                f,
+                "{} {}",
+                asset_code,
+                format_scaled_i64(*minor_units, *scale)
+            ),
             Value::ColorAlpha([r, g, b, a]) => write!(f, "#{:02X}{:02X}{:02X}{:02X}", r, g, b, a),
             Value::BigInt(v) => write!(f, "{}", v),
             Value::KeyRef(c, k) => write!(f, "key_ref:{}:{}", c, k),

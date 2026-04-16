@@ -302,6 +302,9 @@ impl JoinReorderingPass {
             | QueryExpr::CreateQueue(_)
             | QueryExpr::DropQueue(_)
             | QueryExpr::QueueCommand(_)
+            | QueryExpr::CreateTree(_)
+            | QueryExpr::DropTree(_)
+            | QueryExpr::TreeCommand(_)
             | QueryExpr::ExplainAlter(_) => 1.0,
         }
     }

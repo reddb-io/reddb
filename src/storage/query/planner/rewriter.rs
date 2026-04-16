@@ -203,6 +203,9 @@ impl RewriteRule for NormalizeRule {
             | QueryExpr::CreateQueue(_)
             | QueryExpr::DropQueue(_)
             | QueryExpr::QueueCommand(_)
+            | QueryExpr::CreateTree(_)
+            | QueryExpr::DropTree(_)
+            | QueryExpr::TreeCommand(_)
             | QueryExpr::ExplainAlter(_)) => other,
         }
     }
@@ -276,6 +279,9 @@ impl RewriteRule for SimplifyFiltersRule {
             | QueryExpr::CreateQueue(_)
             | QueryExpr::DropQueue(_)
             | QueryExpr::QueueCommand(_)
+            | QueryExpr::CreateTree(_)
+            | QueryExpr::DropTree(_)
+            | QueryExpr::TreeCommand(_)
             | QueryExpr::ExplainAlter(_)) => other,
         }
     }
@@ -308,6 +314,9 @@ impl RewriteRule for SimplifyFiltersRule {
             | QueryExpr::CreateQueue(_)
             | QueryExpr::DropQueue(_)
             | QueryExpr::QueueCommand(_)
+            | QueryExpr::CreateTree(_)
+            | QueryExpr::DropTree(_)
+            | QueryExpr::TreeCommand(_)
             | QueryExpr::ExplainAlter(_) => false,
         }
     }

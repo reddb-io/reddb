@@ -104,6 +104,8 @@ pub fn coerce(
         DataType::Lang2 => parse_lang2(input),
         DataType::Lang5 => parse_lang5(input),
         DataType::Currency => parse_currency(input),
+        DataType::AssetCode => parse_asset_code(input),
+        DataType::Money => parse_money(input),
         DataType::ColorAlpha => parse_color_alpha(input),
         DataType::BigInt => input
             .parse::<i64>()
@@ -241,8 +243,74 @@ fn parse_time(input: &str) -> Result<Value, String> {
 }
 
 fn parse_decimal(input: &str) -> Result<Value, String> {
-    let f: f64 = input.parse().map_err(|_| "invalid decimal")?;
-    Ok(Value::Decimal((f * 10_000.0) as i64))
+    let scaled = parse_fixed_scale_decimal(input, 4)?;
+    Ok(Value::Decimal(scaled))
+}
+
+fn parse_fixed_scale_decimal(input: &str, scale: u8) -> Result<i64, String> {
+    let (negative, whole, frac) = parse_decimal_parts(input)?;
+    if frac.len() > scale as usize {
+        return Err(format!(
+            "decimal supports at most {} fractional digits",
+            scale
+        ));
+    }
+    let mut digits = String::new();
+    digits.push_str(whole);
+    digits.push_str(frac);
+    for _ in frac.len()..scale as usize {
+        digits.push('0');
+    }
+    signed_i64_from_digits(negative, &digits)
+}
+
+fn parse_normalized_decimal(input: &str) -> Result<(i64, u8), String> {
+    let (negative, whole, frac) = parse_decimal_parts(input)?;
+    let normalized_frac = frac.trim_end_matches('0');
+    let mut digits = String::new();
+    digits.push_str(whole);
+    digits.push_str(normalized_frac);
+    let minor_units = signed_i64_from_digits(negative, &digits)?;
+    Ok((minor_units, normalized_frac.len() as u8))
+}
+
+fn parse_decimal_parts(input: &str) -> Result<(bool, &str, &str), String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("invalid decimal".into());
+    }
+
+    let (negative, body) = match trimmed.as_bytes()[0] {
+        b'+' => (false, &trimmed[1..]),
+        b'-' => (true, &trimmed[1..]),
+        _ => (false, trimmed),
+    };
+
+    if body.is_empty() || body.matches('.').count() > 1 {
+        return Err("invalid decimal".into());
+    }
+
+    let (whole_raw, frac) = body.split_once('.').unwrap_or((body, ""));
+    let whole = if whole_raw.is_empty() { "0" } else { whole_raw };
+    if !whole.bytes().all(|b| b.is_ascii_digit()) || !frac.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("invalid decimal".into());
+    }
+    if whole == "0" && frac.is_empty() && whole_raw.is_empty() {
+        return Err("invalid decimal".into());
+    }
+    Ok((negative, whole, frac))
+}
+
+fn signed_i64_from_digits(negative: bool, digits: &str) -> Result<i64, String> {
+    let normalized = digits.trim_start_matches('0');
+    if normalized.is_empty() {
+        return Ok(0);
+    }
+    let magnitude = normalized
+        .parse::<i128>()
+        .map_err(|_| "decimal is out of range".to_string())?;
+    let signed = if negative { -magnitude } else { magnitude };
+    i64::try_from(signed).map_err(|_| "decimal is out of range".to_string())
 }
 
 fn parse_enum(input: &str, variants: &[String]) -> Result<Value, String> {
@@ -472,6 +540,61 @@ fn parse_currency(input: &str) -> Result<Value, String> {
     }
     let bytes = upper.as_bytes();
     Ok(Value::Currency([bytes[0], bytes[1], bytes[2]]))
+}
+
+fn parse_asset_code(input: &str) -> Result<Value, String> {
+    Ok(Value::AssetCode(normalize_asset_code(input)?))
+}
+
+fn parse_money(input: &str) -> Result<Value, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("money must be '<ASSET> <AMOUNT>' or '<AMOUNT> <ASSET>'".into());
+    }
+
+    let (left, right) = if let Some((a, b)) = trimmed.split_once(':') {
+        (a.trim(), b.trim())
+    } else {
+        let parts: Vec<&str> = trimmed.split_ascii_whitespace().collect();
+        if parts.len() != 2 {
+            return Err("money must be '<ASSET> <AMOUNT>' or '<AMOUNT> <ASSET>'".into());
+        }
+        (parts[0], parts[1])
+    };
+
+    if let (Ok(asset_code), Ok((minor_units, scale))) =
+        (normalize_asset_code(left), parse_normalized_decimal(right))
+    {
+        return Ok(Value::Money {
+            asset_code,
+            minor_units,
+            scale,
+        });
+    }
+
+    if let (Ok((minor_units, scale)), Ok(asset_code)) =
+        (parse_normalized_decimal(left), normalize_asset_code(right))
+    {
+        return Ok(Value::Money {
+            asset_code,
+            minor_units,
+            scale,
+        });
+    }
+
+    Err("money must combine a valid asset code and decimal amount".into())
+}
+
+fn normalize_asset_code(input: &str) -> Result<String, String> {
+    let normalized = input.trim().to_ascii_uppercase();
+    let valid_len = (2..=16).contains(&normalized.len());
+    let valid_chars = normalized
+        .bytes()
+        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_' | b'.'));
+    if !valid_len || !valid_chars {
+        return Err("asset code must be 2-16 ASCII chars using A-Z, 0-9, '-', '_' or '.'".into());
+    }
+    Ok(normalized)
 }
 
 fn parse_color_alpha(input: &str) -> Result<Value, String> {
@@ -987,6 +1110,13 @@ mod tests {
         let bytes = val.to_bytes();
         let (recovered, _) = Value::from_bytes(&bytes).unwrap();
         assert_eq!(val, recovered);
+        assert_eq!(recovered, Value::Decimal(999_900));
+        assert_eq!(recovered.display_string(), "99.9900");
+    }
+
+    #[test]
+    fn test_coerce_decimal_rejects_too_many_fraction_digits() {
+        assert!(coerce("1.23456", DataType::Decimal, None).is_err());
     }
 
     #[test]
@@ -1261,6 +1391,85 @@ mod tests {
     #[test]
     fn test_coerce_currency_invalid() {
         assert!(coerce("US", DataType::Currency, None).is_err());
+    }
+
+    // --- AssetCode ---
+
+    #[test]
+    fn test_coerce_asset_code_valid() {
+        let val = coerce("usdt", DataType::AssetCode, None).unwrap();
+        assert_eq!(val, Value::AssetCode("USDT".to_string()));
+    }
+
+    #[test]
+    fn test_coerce_asset_code_invalid_chars() {
+        assert!(coerce("btc/usd", DataType::AssetCode, None).is_err());
+    }
+
+    #[test]
+    fn test_coerce_asset_code_roundtrip() {
+        let val = coerce("steth", DataType::AssetCode, None).unwrap();
+        let bytes = val.to_bytes();
+        let (recovered, _) = Value::from_bytes(&bytes).unwrap();
+        assert_eq!(recovered, Value::AssetCode("STETH".to_string()));
+        assert_eq!(recovered.display_string(), "STETH");
+    }
+
+    // --- Money ---
+
+    #[test]
+    fn test_coerce_money_asset_amount() {
+        let val = coerce("BRL 10.99", DataType::Money, None).unwrap();
+        assert_eq!(
+            val,
+            Value::Money {
+                asset_code: "BRL".to_string(),
+                minor_units: 1099,
+                scale: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn test_coerce_money_amount_asset() {
+        let val = coerce("0.00012345 BTC", DataType::Money, None).unwrap();
+        assert_eq!(
+            val,
+            Value::Money {
+                asset_code: "BTC".to_string(),
+                minor_units: 12345,
+                scale: 8,
+            }
+        );
+    }
+
+    #[test]
+    fn test_coerce_money_normalizes_trailing_zeroes() {
+        let val = coerce("USD:1.2300", DataType::Money, None).unwrap();
+        assert_eq!(
+            val,
+            Value::Money {
+                asset_code: "USD".to_string(),
+                minor_units: 123,
+                scale: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn test_coerce_money_roundtrip() {
+        let val = coerce("ETH 1.500", DataType::Money, None).unwrap();
+        let bytes = val.to_bytes();
+        let (recovered, _) = Value::from_bytes(&bytes).unwrap();
+        assert_eq!(
+            recovered,
+            Value::Money {
+                asset_code: "ETH".to_string(),
+                minor_units: 15,
+                scale: 1,
+            }
+        );
+        assert_eq!(recovered.display_string(), "ETH 1.5");
     }
 
     // --- ColorAlpha ---

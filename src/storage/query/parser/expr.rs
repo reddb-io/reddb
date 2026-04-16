@@ -88,6 +88,7 @@ fn keyword_function_name(token: &Token) -> Option<&'static str> {
         Token::Last => Some("LAST"),
         Token::Left => Some("LEFT"),
         Token::Right => Some("RIGHT"),
+        Token::Kv => Some("KV"),
         _ => None,
     }
 }

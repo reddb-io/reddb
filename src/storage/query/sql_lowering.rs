@@ -552,6 +552,28 @@ pub fn case_condition_projection(condition: Expr) -> Projection {
 pub fn fold_expr_to_value(expr: Expr) -> Result<Value, String> {
     match expr {
         Expr::Literal { value, .. } => Ok(value),
+        Expr::FunctionCall { name, args, .. } => {
+            if (name.eq_ignore_ascii_case("PASSWORD") || name.eq_ignore_ascii_case("SECRET"))
+                && args.len() == 1
+            {
+                let plaintext = match fold_expr_to_value(args.into_iter().next().unwrap())? {
+                    Value::Text(text) => text,
+                    other => {
+                        return Err(format!(
+                            "{name}() expects a string literal argument, got {other:?}"
+                        ))
+                    }
+                };
+                return Ok(if name.eq_ignore_ascii_case("PASSWORD") {
+                    Value::Password(format!("@@plain@@{plaintext}"))
+                } else {
+                    Value::Secret(format!("@@plain@@{plaintext}").into_bytes())
+                });
+            }
+            Err(format!(
+                "expression is not a foldable literal: FunctionCall({name})"
+            ))
+        }
         Expr::UnaryOp { op, operand, .. } => {
             let inner = fold_expr_to_value(*operand)?;
             match (op, inner) {

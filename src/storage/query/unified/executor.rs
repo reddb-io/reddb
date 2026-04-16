@@ -149,6 +149,9 @@ impl UnifiedExecutor {
             | QueryExpr::CreateQueue(_)
             | QueryExpr::DropQueue(_)
             | QueryExpr::QueueCommand(_)
+            | QueryExpr::CreateTree(_)
+            | QueryExpr::DropTree(_)
+            | QueryExpr::TreeCommand(_)
             | QueryExpr::ExplainAlter(_) => Err(ExecutionError::new(
                 "DML/DDL/Command statements are not supported in UnifiedExecutor",
             )),
@@ -336,6 +339,9 @@ impl UnifiedExecutor {
             | QueryExpr::CreateQueue(_)
             | QueryExpr::DropQueue(_)
             | QueryExpr::QueueCommand(_)
+            | QueryExpr::CreateTree(_)
+            | QueryExpr::DropTree(_)
+            | QueryExpr::TreeCommand(_)
             | QueryExpr::ExplainAlter(_) => Err(ExecutionError::new(
                 "DML/DDL/Command statements are not supported in UnifiedExecutor",
             )),

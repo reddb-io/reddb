@@ -1113,6 +1113,70 @@ pub(super) fn analytics_job_from_json(value: &JsonValue) -> io::Result<PhysicalA
     })
 }
 
+pub(super) fn tree_definition_to_json(definition: &PhysicalTreeDefinition) -> JsonValue {
+    let mut object = Map::new();
+    object.insert(
+        "collection".to_string(),
+        JsonValue::String(definition.collection.clone()),
+    );
+    object.insert(
+        "name".to_string(),
+        JsonValue::String(definition.name.clone()),
+    );
+    object.insert("root_id".to_string(), json_u64(definition.root_id));
+    object.insert(
+        "default_max_children".to_string(),
+        JsonValue::Number(definition.default_max_children as f64),
+    );
+    object.insert(
+        "ordered_children".to_string(),
+        JsonValue::Bool(definition.ordered_children),
+    );
+    object.insert(
+        "ownership".to_string(),
+        JsonValue::String(definition.ownership.clone()),
+    );
+    object.insert(
+        "auto_fix_mode".to_string(),
+        JsonValue::String(definition.auto_fix_mode.clone()),
+    );
+    object.insert(
+        "created_at_unix_ms".to_string(),
+        json_u128(definition.created_at_unix_ms),
+    );
+    object.insert(
+        "updated_at_unix_ms".to_string(),
+        json_u128(definition.updated_at_unix_ms),
+    );
+    JsonValue::Object(object)
+}
+
+pub(super) fn tree_definition_from_json(value: &JsonValue) -> io::Result<PhysicalTreeDefinition> {
+    let object = expect_object(value, "tree definition")?;
+    Ok(PhysicalTreeDefinition {
+        collection: json_string_required(object, "collection")?,
+        name: json_string_required(object, "name")?,
+        root_id: json_u64_required(object, "root_id")?,
+        default_max_children: json_usize_required(object, "default_max_children")?,
+        ordered_children: object
+            .get("ordered_children")
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(true),
+        ownership: object
+            .get("ownership")
+            .and_then(JsonValue::as_str)
+            .unwrap_or("owned")
+            .to_string(),
+        auto_fix_mode: object
+            .get("auto_fix_mode")
+            .and_then(JsonValue::as_str)
+            .unwrap_or("conservative")
+            .to_string(),
+        created_at_unix_ms: json_u128_required(object, "created_at_unix_ms")?,
+        updated_at_unix_ms: json_u128_required(object, "updated_at_unix_ms")?,
+    })
+}
+
 pub(super) fn index_kind_from_str(value: &str) -> io::Result<IndexKind> {
     match value {
         "btree" => Ok(IndexKind::BTree),

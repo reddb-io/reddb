@@ -1650,7 +1650,11 @@ impl RedDBRuntime {
                     },
                 )
             }))
-            .map_err(|err| crate::RedDBError::Query(err.to_string()))
+            .map_err(|err| crate::RedDBError::Query(err.to_string()))?;
+
+        let entities: Vec<_> = applied.iter().map(|item| item.entity.clone()).collect();
+        store.persist_entities_to_pager(collection, &entities)
+            .map_err(|err| crate::RedDBError::Internal(err.to_string()))
     }
 
     pub(crate) fn flush_applied_entity_mutation(

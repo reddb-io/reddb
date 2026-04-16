@@ -17,14 +17,25 @@
 //!   to Expr for scalar projection bodies.
 
 use super::join_filter::{compare_runtime_values, evaluate_runtime_filter, resolve_runtime_field};
-use crate::storage::query::ast::{BinOp, Expr, Filter, UnaryOp};
+use crate::storage::query::ast::{BinOp, Expr, FieldRef, Filter, UnaryOp};
 use crate::storage::query::unified::UnifiedRecord;
 use crate::storage::schema::Value;
+use crate::storage::RedDB;
 
 /// Evaluate an `Expr` against a record and return its resulting
 /// `Value`, or `None` if the expression cannot be resolved (missing
 /// column, type mismatch, unsupported feature for this phase).
 pub(super) fn evaluate_runtime_expr(
+    expr: &Expr,
+    record: &UnifiedRecord,
+    table_name: Option<&str>,
+    table_alias: Option<&str>,
+) -> Option<Value> {
+    evaluate_runtime_expr_with_db(None, expr, record, table_name, table_alias)
+}
+
+pub(super) fn evaluate_runtime_expr_with_db(
+    db: Option<&RedDB>,
     expr: &Expr,
     record: &UnifiedRecord,
     table_name: Option<&str>,
@@ -48,7 +59,7 @@ pub(super) fn evaluate_runtime_expr(
             operand,
             span: _,
         } => {
-            let v = evaluate_runtime_expr(operand, record, table_name, table_alias)?;
+            let v = evaluate_runtime_expr_with_db(db, operand, record, table_name, table_alias)?;
             match op {
                 UnaryOp::Neg => negate_value(&v),
                 UnaryOp::Not => match v {
@@ -69,30 +80,36 @@ pub(super) fn evaluate_runtime_expr(
             // skipped when the result is already determined.
             match op {
                 BinOp::And => {
-                    let l = evaluate_runtime_expr(lhs, record, table_name, table_alias)?;
+                    let l =
+                        evaluate_runtime_expr_with_db(db, lhs, record, table_name, table_alias)?;
                     if let Value::Boolean(false) = l {
                         return Some(Value::Boolean(false));
                     }
-                    let r = evaluate_runtime_expr(rhs, record, table_name, table_alias)?;
+                    let r =
+                        evaluate_runtime_expr_with_db(db, rhs, record, table_name, table_alias)?;
                     match (l, r) {
                         (Value::Boolean(a), Value::Boolean(b)) => Some(Value::Boolean(a && b)),
                         _ => None,
                     }
                 }
                 BinOp::Or => {
-                    let l = evaluate_runtime_expr(lhs, record, table_name, table_alias)?;
+                    let l =
+                        evaluate_runtime_expr_with_db(db, lhs, record, table_name, table_alias)?;
                     if let Value::Boolean(true) = l {
                         return Some(Value::Boolean(true));
                     }
-                    let r = evaluate_runtime_expr(rhs, record, table_name, table_alias)?;
+                    let r =
+                        evaluate_runtime_expr_with_db(db, rhs, record, table_name, table_alias)?;
                     match (l, r) {
                         (Value::Boolean(a), Value::Boolean(b)) => Some(Value::Boolean(a || b)),
                         _ => None,
                     }
                 }
                 _ => {
-                    let l = evaluate_runtime_expr(lhs, record, table_name, table_alias)?;
-                    let r = evaluate_runtime_expr(rhs, record, table_name, table_alias)?;
+                    let l =
+                        evaluate_runtime_expr_with_db(db, lhs, record, table_name, table_alias)?;
+                    let r =
+                        evaluate_runtime_expr_with_db(db, rhs, record, table_name, table_alias)?;
                     apply_binop(*op, l, r)
                 }
             }
@@ -103,7 +120,7 @@ pub(super) fn evaluate_runtime_expr(
             target,
             span: _,
         } => {
-            let v = evaluate_runtime_expr(inner, record, table_name, table_alias)?;
+            let v = evaluate_runtime_expr_with_db(db, inner, record, table_name, table_alias)?;
             Some(runtime_cast(&v, *target))
         }
 
@@ -112,6 +129,13 @@ pub(super) fn evaluate_runtime_expr(
             args,
             span: _,
         } => {
+            let upper = name.to_uppercase();
+            if upper == "CONFIG" {
+                return evaluate_runtime_config_function(db, args, record, table_name, table_alias);
+            }
+            if upper == "KV" {
+                return evaluate_runtime_kv_function(db, args, record, table_name, table_alias);
+            }
             // For Week 3 we route through the existing evaluate_scalar_function
             // dispatcher, which speaks the legacy Projection::Function
             // argument convention (Column("LIT:…"), Column("TYPE:…"), etc.).
@@ -120,13 +144,12 @@ pub(super) fn evaluate_runtime_expr(
             let mut arg_values: Vec<Value> = Vec::with_capacity(args.len());
             for arg in args {
                 arg_values.push(
-                    evaluate_runtime_expr(arg, record, table_name, table_alias)
+                    evaluate_runtime_expr_with_db(db, arg, record, table_name, table_alias)
                         .unwrap_or(Value::Null),
                 );
             }
             // Uppercase the function name so CASE-insensitive lookups
             // match the legacy is_scalar_function table.
-            let upper = name.to_uppercase();
             dispatch_builtin_function(&upper, &arg_values)
         }
 
@@ -136,13 +159,20 @@ pub(super) fn evaluate_runtime_expr(
             span: _,
         } => {
             for (cond, then_val) in branches {
-                let cond_val = evaluate_runtime_expr(cond, record, table_name, table_alias);
+                let cond_val =
+                    evaluate_runtime_expr_with_db(db, cond, record, table_name, table_alias);
                 if matches!(cond_val, Some(Value::Boolean(true))) {
-                    return evaluate_runtime_expr(then_val, record, table_name, table_alias);
+                    return evaluate_runtime_expr_with_db(
+                        db,
+                        then_val,
+                        record,
+                        table_name,
+                        table_alias,
+                    );
                 }
             }
             if let Some(else_expr) = else_ {
-                evaluate_runtime_expr(else_expr, record, table_name, table_alias)
+                evaluate_runtime_expr_with_db(db, else_expr, record, table_name, table_alias)
             } else {
                 Some(Value::Null)
             }
@@ -153,7 +183,7 @@ pub(super) fn evaluate_runtime_expr(
             negated,
             span: _,
         } => {
-            let v = evaluate_runtime_expr(operand, record, table_name, table_alias);
+            let v = evaluate_runtime_expr_with_db(db, operand, record, table_name, table_alias);
             let is_null = matches!(v, None | Some(Value::Null));
             Some(Value::Boolean(if *negated { !is_null } else { is_null }))
         }
@@ -164,10 +194,12 @@ pub(super) fn evaluate_runtime_expr(
             negated,
             span: _,
         } => {
-            let t = evaluate_runtime_expr(target, record, table_name, table_alias)?;
+            let t = evaluate_runtime_expr_with_db(db, target, record, table_name, table_alias)?;
             let mut hit = false;
             for v in values {
-                if let Some(candidate) = evaluate_runtime_expr(v, record, table_name, table_alias) {
+                if let Some(candidate) =
+                    evaluate_runtime_expr_with_db(db, v, record, table_name, table_alias)
+                {
                     if compare_runtime_values(
                         &t,
                         &candidate,
@@ -188,9 +220,9 @@ pub(super) fn evaluate_runtime_expr(
             negated,
             span: _,
         } => {
-            let t = evaluate_runtime_expr(target, record, table_name, table_alias)?;
-            let lo = evaluate_runtime_expr(low, record, table_name, table_alias)?;
-            let hi = evaluate_runtime_expr(high, record, table_name, table_alias)?;
+            let t = evaluate_runtime_expr_with_db(db, target, record, table_name, table_alias)?;
+            let lo = evaluate_runtime_expr_with_db(db, low, record, table_name, table_alias)?;
+            let hi = evaluate_runtime_expr_with_db(db, high, record, table_name, table_alias)?;
             let in_range =
                 compare_runtime_values(&t, &lo, crate::storage::query::ast::CompareOp::Ge)
                     && compare_runtime_values(&t, &hi, crate::storage::query::ast::CompareOp::Le);
@@ -211,6 +243,106 @@ pub(super) fn evaluate_filter_as_bool(
     table_alias: Option<&str>,
 ) -> bool {
     evaluate_runtime_filter(record, filter, table_name, table_alias)
+}
+
+pub(super) fn lookup_latest_kv_value(db: &RedDB, collection: &str, key: &str) -> Option<Value> {
+    let manager = db.store().get_collection(collection)?;
+    let mut latest_id: u64 = 0;
+    let mut latest_value: Option<Value> = None;
+    manager.for_each_entity(|entity| {
+        let Some(row) = entity.data.as_row() else {
+            return true;
+        };
+        let entry_key = row.get_field("key").and_then(|value| match value {
+            Value::Text(text) => Some(text.as_str()),
+            _ => None,
+        });
+        if entry_key == Some(key) && entity.id.raw() >= latest_id {
+            latest_id = entity.id.raw();
+            latest_value = Some(row.get_field("value").cloned().unwrap_or(Value::Null));
+        }
+        true
+    });
+    latest_value
+}
+
+fn evaluate_runtime_config_function(
+    db: Option<&RedDB>,
+    args: &[Expr],
+    record: &UnifiedRecord,
+    table_name: Option<&str>,
+    table_alias: Option<&str>,
+) -> Option<Value> {
+    let key = expr_path_text(args.first()?)?;
+    if let Some(db) = db {
+        if let Some(value) = lookup_latest_kv_value(db, "red_config", &key) {
+            return Some(value);
+        }
+    }
+    args.get(1)
+        .and_then(|expr| special_default_expr_value(db, expr, record, table_name, table_alias))
+        .or(Some(Value::Null))
+}
+
+fn evaluate_runtime_kv_function(
+    db: Option<&RedDB>,
+    args: &[Expr],
+    record: &UnifiedRecord,
+    table_name: Option<&str>,
+    table_alias: Option<&str>,
+) -> Option<Value> {
+    let collection = expr_path_text(args.first()?)?;
+    let key = expr_path_text(args.get(1)?)?;
+    if let Some(db) = db {
+        if let Some(value) = lookup_latest_kv_value(db, &collection, &key) {
+            return Some(value);
+        }
+    }
+    args.get(2)
+        .and_then(|expr| special_default_expr_value(db, expr, record, table_name, table_alias))
+        .or(Some(Value::Null))
+}
+
+fn special_default_expr_value(
+    db: Option<&RedDB>,
+    expr: &Expr,
+    record: &UnifiedRecord,
+    table_name: Option<&str>,
+    table_alias: Option<&str>,
+) -> Option<Value> {
+    match expr {
+        Expr::Column { field, .. } => field_ref_path_text(field).map(Value::Text),
+        _ => evaluate_runtime_expr_with_db(db, expr, record, table_name, table_alias),
+    }
+}
+
+fn expr_path_text(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Column { field, .. } => field_ref_path_text(field),
+        Expr::Literal { value, .. } => literal_path_text(value),
+        _ => None,
+    }
+}
+
+fn field_ref_path_text(field: &FieldRef) -> Option<String> {
+    match field {
+        FieldRef::TableColumn { table, column } => Some(if table.is_empty() {
+            column.clone()
+        } else {
+            format!("{table}.{column}")
+        }),
+        FieldRef::NodeProperty { alias, property } => Some(format!("{alias}.{property}")),
+        FieldRef::EdgeProperty { alias, property } => Some(format!("{alias}.{property}")),
+        FieldRef::NodeId { alias } => Some(format!("{alias}.id")),
+    }
+}
+
+fn literal_path_text(value: &Value) -> Option<String> {
+    if matches!(value, Value::Null) {
+        None
+    } else {
+        Some(value.display_string())
+    }
 }
 
 fn negate_value(v: &Value) -> Option<Value> {
@@ -559,7 +691,59 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
                 plain, hash,
             )))
         }
+        "MONEY" => money_from_args(args),
+        "MONEY_ASSET" => match args.first()? {
+            Value::Money { asset_code, .. } => Some(Value::AssetCode(asset_code.clone())),
+            _ => Some(Value::Null),
+        },
+        "MONEY_MINOR" => match args.first()? {
+            Value::Money { minor_units, .. } => Some(Value::BigInt(*minor_units)),
+            _ => Some(Value::Null),
+        },
+        "MONEY_SCALE" => match args.first()? {
+            Value::Money { scale, .. } => Some(Value::Integer(i64::from(*scale))),
+            _ => Some(Value::Null),
+        },
         _ => None,
+    }
+}
+
+fn money_from_args(args: &[Value]) -> Option<Value> {
+    let input = match args {
+        [single] => money_arg_text(single)?,
+        [left, right] => format!("{} {}", money_arg_text(left)?, money_arg_text(right)?),
+        _ => return Some(Value::Null),
+    };
+    match crate::storage::schema::coerce::coerce(
+        &input,
+        crate::storage::schema::DataType::Money,
+        None,
+    ) {
+        Ok(value) => Some(value),
+        Err(_) if args.len() == 2 => {
+            let reversed = format!(
+                "{} {}",
+                money_arg_text(&args[1])?,
+                money_arg_text(&args[0])?
+            );
+            crate::storage::schema::coerce::coerce(
+                &reversed,
+                crate::storage::schema::DataType::Money,
+                None,
+            )
+            .ok()
+        }
+        Err(_) => Some(Value::Null),
+    }
+}
+
+fn money_arg_text(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::Text(text) => Some(text.clone()),
+        Value::AssetCode(code) => Some(code.clone()),
+        Value::Currency(code) => Some(String::from_utf8_lossy(code).to_string()),
+        other => Some(other.display_string()),
     }
 }
 
@@ -727,5 +911,52 @@ fn trim_text(text: &str, chars: Option<&str>, left: bool, right: bool) -> String
             (false, true) => text.trim_end().to_string(),
             (false, false) => text.to_string(),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dispatch_builtin_function;
+    use crate::storage::schema::Value;
+
+    #[test]
+    fn test_money_constructor_two_args() {
+        let value = dispatch_builtin_function(
+            "MONEY",
+            &[
+                Value::AssetCode("BTC".to_string()),
+                Value::Text("0.125".to_string()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            value,
+            Value::Money {
+                asset_code: "BTC".to_string(),
+                minor_units: 125,
+                scale: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn test_money_extractors() {
+        let money = Value::Money {
+            asset_code: "USDT".to_string(),
+            minor_units: 12345,
+            scale: 2,
+        };
+        assert_eq!(
+            dispatch_builtin_function("MONEY_ASSET", std::slice::from_ref(&money)).unwrap(),
+            Value::AssetCode("USDT".to_string())
+        );
+        assert_eq!(
+            dispatch_builtin_function("MONEY_MINOR", std::slice::from_ref(&money)).unwrap(),
+            Value::BigInt(12345)
+        );
+        assert_eq!(
+            dispatch_builtin_function("MONEY_SCALE", std::slice::from_ref(&money)).unwrap(),
+            Value::Integer(2)
+        );
     }
 }

@@ -119,6 +119,9 @@ const ARGS_FOUR_FLOATS: &[DataType] = &[
 ];
 const ARGS_TIME_BUCKET: &[DataType] = &[DataType::Text, DataType::Timestamp];
 const ARGS_VERIFY_PWD: &[DataType] = &[DataType::Password, DataType::Text];
+const ARGS_MONEY: &[DataType] = &[DataType::Money];
+const ARGS_ONE_TEXT: &[DataType] = &[DataType::Text];
+const ARGS_TWO_TEXT_ANY: &[DataType] = &[DataType::Text, DataType::Text];
 
 /// The static function catalog. Append-only; removing a row is a
 /// breaking change that may invalidate cached plans referencing
@@ -585,6 +588,41 @@ pub const FUNCTION_CATALOG: &[FunctionEntry] = &[
         ARGS_VERIFY_PWD,
         DataType::Boolean,
         FunctionKind::Volatile,
+        false,
+    ),
+    entry(
+        "MONEY",
+        ARGS_ONE_TEXT,
+        DataType::Money,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "MONEY",
+        ARGS_TWO_TEXT_ANY,
+        DataType::Money,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "MONEY_ASSET",
+        ARGS_MONEY,
+        DataType::AssetCode,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "MONEY_MINOR",
+        ARGS_MONEY,
+        DataType::BigInt,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "MONEY_SCALE",
+        ARGS_MONEY,
+        DataType::Integer,
+        FunctionKind::Scalar,
         false,
     ),
     // Two-floats variant used by some places (legacy dual-arg form).

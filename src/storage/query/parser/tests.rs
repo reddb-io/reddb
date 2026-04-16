@@ -5,7 +5,7 @@ use crate::storage::engine::graph_store::{GraphEdgeType, GraphNodeType};
 use crate::storage::engine::vector_metadata::MetadataValue;
 use crate::storage::query::ast::{
     CompareOp, DistanceMetric, EdgeDirection, FieldRef, Filter, FusionStrategy, JoinType,
-    MetadataFilter, Projection, QueueCommand, TableQuery, VectorSource,
+    MetadataFilter, Projection, QueueCommand, TableQuery, TreeCommand, TreePosition, VectorSource,
 };
 
 #[test]
@@ -104,6 +104,19 @@ fn test_parse_cast_literal_integer() {
     assert_eq!(name, "CAST");
     assert!(matches!(&args[0], Projection::Column(c) if c == "LIT:42"));
     assert!(matches!(&args[1], Projection::Column(c) if c == "TYPE:TEXT"));
+}
+
+#[test]
+fn test_parse_money_scalar_function() {
+    let query = parse("SELECT MONEY('BTC 0.125') FROM wallets").unwrap();
+    let QueryExpr::Table(tq) = query else {
+        panic!("Expected TableQuery");
+    };
+    let Projection::Function(name, args) = &tq.columns[0] else {
+        panic!("Expected Function");
+    };
+    assert_eq!(name, "MONEY");
+    assert_eq!(args.len(), 1);
 }
 
 #[test]
@@ -1060,6 +1073,35 @@ fn test_parse_insert_mixed_types() {
             iq.values[0][2],
             crate::storage::schema::Value::Boolean(true)
         ));
+    } else {
+        panic!("Expected InsertQuery");
+    }
+}
+
+#[test]
+fn test_parse_insert_with_password_literal_constructor() {
+    let query =
+        parse("INSERT INTO accounts (username, pw) VALUES ('alice', PASSWORD('MyP@ss123'))")
+            .unwrap();
+    if let QueryExpr::Insert(iq) = query {
+        assert_eq!(
+            iq.values[0][1],
+            crate::storage::schema::Value::Password("@@plain@@MyP@ss123".to_string())
+        );
+    } else {
+        panic!("Expected InsertQuery");
+    }
+}
+
+#[test]
+fn test_parse_insert_with_secret_literal_constructor() {
+    let query =
+        parse("INSERT INTO creds (name, token) VALUES ('stripe', SECRET('sk_live_abc'))").unwrap();
+    if let QueryExpr::Insert(iq) = query {
+        assert_eq!(
+            iq.values[0][1],
+            crate::storage::schema::Value::Secret(b"@@plain@@sk_live_abc".to_vec())
+        );
     } else {
         panic!("Expected InsertQuery");
     }
@@ -2391,6 +2433,70 @@ fn test_parse_queue_claim() {
         assert_eq!(min_idle_ms, 60000);
     } else {
         panic!("Expected QueueCommand::Claim");
+    }
+}
+
+#[test]
+fn test_parse_create_tree() {
+    let query = parse(
+        "CREATE TREE org IN forest ROOT LABEL company TYPE root PROPERTIES {name: 'Acme'} MAX_CHILDREN 3",
+    )
+    .unwrap();
+    if let QueryExpr::CreateTree(tree) = query {
+        assert_eq!(tree.name, "org");
+        assert_eq!(tree.collection, "forest");
+        assert_eq!(tree.root.label, "company");
+        assert_eq!(tree.root.node_type.as_deref(), Some("root"));
+        assert_eq!(tree.default_max_children, 3);
+        assert_eq!(tree.root.properties.len(), 1);
+        assert_eq!(tree.root.properties[0].0, "name");
+    } else {
+        panic!("Expected CreateTreeQuery");
+    }
+}
+
+#[test]
+fn test_parse_tree_insert() {
+    let query = parse(
+        "TREE INSERT INTO forest.org PARENT 42 LABEL team TYPE branch PROPERTIES {name: 'A'} METADATA {owner: 'ops'} MAX_CHILDREN 5 POSITION FIRST",
+    )
+    .unwrap();
+    if let QueryExpr::TreeCommand(TreeCommand::Insert {
+        collection,
+        tree_name,
+        parent_id,
+        node,
+        position,
+    }) = query
+    {
+        assert_eq!(collection, "forest");
+        assert_eq!(tree_name, "org");
+        assert_eq!(parent_id, 42);
+        assert_eq!(node.label, "team");
+        assert_eq!(node.node_type.as_deref(), Some("branch"));
+        assert_eq!(node.max_children, Some(5));
+        assert_eq!(node.properties.len(), 1);
+        assert_eq!(node.metadata.len(), 1);
+        assert_eq!(position, TreePosition::First);
+    } else {
+        panic!("Expected TreeCommand::Insert");
+    }
+}
+
+#[test]
+fn test_parse_tree_rebalance_dry_run() {
+    let query = parse("TREE REBALANCE forest.org DRY RUN").unwrap();
+    if let QueryExpr::TreeCommand(TreeCommand::Rebalance {
+        collection,
+        tree_name,
+        dry_run,
+    }) = query
+    {
+        assert_eq!(collection, "forest");
+        assert_eq!(tree_name, "org");
+        assert!(dry_run);
+    } else {
+        panic!("Expected TreeCommand::Rebalance");
     }
 }
 

@@ -52,6 +52,7 @@ mod queue;
 mod search_commands;
 mod table;
 mod timeseries;
+mod tree;
 mod vector;
 
 #[cfg(test)]

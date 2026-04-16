@@ -235,6 +235,13 @@ pub const CAST_CATALOG: &[CastEntry] = &[
     entry(DataType::Text, DataType::Color, CastContext::Explicit, true),
     entry(
         DataType::Text,
+        DataType::AssetCode,
+        CastContext::Explicit,
+        true,
+    ),
+    entry(DataType::Text, DataType::Money, CastContext::Explicit, true),
+    entry(
+        DataType::Text,
         DataType::IpAddr,
         CastContext::Explicit,
         true,

@@ -411,6 +411,8 @@ fn literal_type(v: &Value) -> DataType {
         Value::Lang2(_) => DataType::Lang2,
         Value::Lang5(_) => DataType::Lang5,
         Value::Currency(_) => DataType::Currency,
+        Value::AssetCode(_) => DataType::AssetCode,
+        Value::Money { .. } => DataType::Money,
         Value::Color(_) => DataType::Color,
         Value::ColorAlpha(_) => DataType::ColorAlpha,
         Value::Email(_) => DataType::Email,
@@ -442,6 +444,10 @@ fn resolve_function_return_type(name: &str, arg_types: &[DataType]) -> DataType 
         // return type is always text even when the catalog match is
         // intentionally loose.
         "CONCAT" | "CONCAT_WS" | "QUOTE_LITERAL" => DataType::Text,
+        "MONEY" => DataType::Money,
+        "MONEY_ASSET" => DataType::AssetCode,
+        "MONEY_MINOR" => DataType::BigInt,
+        "MONEY_SCALE" => DataType::Integer,
         // COALESCE is effectively `anycompatible`: ignore NULL/unknown
         // args, then widen left-to-right using the implicit-cast graph.
         "COALESCE" => resolve_coalesce_return_type(arg_types),

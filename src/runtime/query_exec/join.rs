@@ -50,7 +50,8 @@ pub(crate) fn execute_runtime_canonical_join_node(
             let mut records = execute_runtime_canonical_join_child(db, node, query)?;
             if let Some(filter) = effective_join_filter(query).as_ref() {
                 records.retain(|record| {
-                    evaluate_runtime_join_filter(
+                    evaluate_runtime_join_filter_with_db(
+                        Some(db),
                         record,
                         filter,
                         left_table_name,
@@ -66,7 +67,8 @@ pub(crate) fn execute_runtime_canonical_join_node(
             let mut records = execute_runtime_canonical_join_child(db, node, query)?;
             if !query.order_by.is_empty() {
                 records.sort_by(|left, right| {
-                    compare_runtime_join_order(
+                    compare_runtime_join_order_with_db(
+                        Some(db),
                         left,
                         right,
                         &query.order_by,
@@ -100,7 +102,8 @@ pub(crate) fn execute_runtime_canonical_join_node(
             Ok(records
                 .iter()
                 .map(|record| {
-                    project_runtime_join_record(
+                    project_runtime_join_record_with_db(
+                        Some(db),
                         record,
                         &effective_projections,
                         left_table_name,
@@ -275,6 +278,9 @@ pub(crate) fn runtime_join_table_context(
         | QueryExpr::CreateQueue(_)
         | QueryExpr::DropQueue(_)
         | QueryExpr::QueueCommand(_)
+        | QueryExpr::CreateTree(_)
+        | QueryExpr::DropTree(_)
+        | QueryExpr::TreeCommand(_)
         | QueryExpr::ExplainAlter(_) => (None, None),
     };
 
@@ -326,6 +332,26 @@ pub(crate) fn project_runtime_join_record(
     right_table_name: Option<&str>,
     right_table_alias: Option<&str>,
 ) -> UnifiedRecord {
+    project_runtime_join_record_with_db(
+        None,
+        source,
+        projections,
+        left_table_name,
+        left_table_alias,
+        right_table_name,
+        right_table_alias,
+    )
+}
+
+pub(crate) fn project_runtime_join_record_with_db(
+    db: Option<&RedDB>,
+    source: &UnifiedRecord,
+    projections: &[Projection],
+    left_table_name: Option<&str>,
+    left_table_alias: Option<&str>,
+    right_table_name: Option<&str>,
+    right_table_alias: Option<&str>,
+) -> UnifiedRecord {
     let select_all = projections.is_empty()
         || projections
             .iter()
@@ -365,7 +391,8 @@ pub(crate) fn project_runtime_join_record(
                 right_table_alias,
             ),
             Projection::Expression(filter, _) => {
-                Some(Value::Boolean(evaluate_runtime_join_filter(
+                Some(Value::Boolean(evaluate_runtime_join_filter_with_db(
+                    db,
                     source,
                     filter,
                     left_table_name,
@@ -374,7 +401,9 @@ pub(crate) fn project_runtime_join_record(
                     right_table_alias,
                 )))
             }
-            Projection::Function(_, _) => Some(Value::Null),
+            Projection::Function(name, args) => {
+                super::super::join_filter::evaluate_scalar_function_with_db(db, name, args, source)
+            }
             Projection::All => None,
         };
 
@@ -385,6 +414,26 @@ pub(crate) fn project_runtime_join_record(
 }
 
 pub(crate) fn evaluate_runtime_join_filter(
+    record: &UnifiedRecord,
+    filter: &Filter,
+    left_table_name: Option<&str>,
+    left_table_alias: Option<&str>,
+    right_table_name: Option<&str>,
+    right_table_alias: Option<&str>,
+) -> bool {
+    evaluate_runtime_join_filter_with_db(
+        None,
+        record,
+        filter,
+        left_table_name,
+        left_table_alias,
+        right_table_name,
+        right_table_alias,
+    )
+}
+
+pub(crate) fn evaluate_runtime_join_filter_with_db(
+    db: Option<&RedDB>,
     record: &UnifiedRecord,
     filter: &Filter,
     left_table_name: Option<&str>,
@@ -444,13 +493,15 @@ pub(crate) fn evaluate_runtime_join_filter(
             // scope — join-scoped field references embed their own
             // table qualifier, so the walker resolves them via
             // resolve_runtime_field's qualified-column path.
-            let l = super::super::expr_eval::evaluate_runtime_expr(
+            let l = super::super::expr_eval::evaluate_runtime_expr_with_db(
+                db,
                 lhs,
                 record,
                 left_table_name,
                 left_table_alias,
             );
-            let r = super::super::expr_eval::evaluate_runtime_expr(
+            let r = super::super::expr_eval::evaluate_runtime_expr_with_db(
+                db,
                 rhs,
                 record,
                 left_table_name,
@@ -462,14 +513,16 @@ pub(crate) fn evaluate_runtime_join_filter(
             }
         }
         Filter::And(left, right) => {
-            evaluate_runtime_join_filter(
+            evaluate_runtime_join_filter_with_db(
+                db,
                 record,
                 left,
                 left_table_name,
                 left_table_alias,
                 right_table_name,
                 right_table_alias,
-            ) && evaluate_runtime_join_filter(
+            ) && evaluate_runtime_join_filter_with_db(
+                db,
                 record,
                 right,
                 left_table_name,
@@ -479,14 +532,16 @@ pub(crate) fn evaluate_runtime_join_filter(
             )
         }
         Filter::Or(left, right) => {
-            evaluate_runtime_join_filter(
+            evaluate_runtime_join_filter_with_db(
+                db,
                 record,
                 left,
                 left_table_name,
                 left_table_alias,
                 right_table_name,
                 right_table_alias,
-            ) || evaluate_runtime_join_filter(
+            ) || evaluate_runtime_join_filter_with_db(
+                db,
                 record,
                 right,
                 left_table_name,
@@ -495,7 +550,8 @@ pub(crate) fn evaluate_runtime_join_filter(
                 right_table_alias,
             )
         }
-        Filter::Not(inner) => !evaluate_runtime_join_filter(
+        Filter::Not(inner) => !evaluate_runtime_join_filter_with_db(
+            db,
             record,
             inner,
             left_table_name,
@@ -608,23 +664,66 @@ pub(crate) fn compare_runtime_join_order(
     right_table_name: Option<&str>,
     right_table_alias: Option<&str>,
 ) -> Ordering {
+    compare_runtime_join_order_with_db(
+        None,
+        left,
+        right,
+        clauses,
+        left_table_name,
+        left_table_alias,
+        right_table_name,
+        right_table_alias,
+    )
+}
+
+pub(crate) fn compare_runtime_join_order_with_db(
+    db: Option<&RedDB>,
+    left: &UnifiedRecord,
+    right: &UnifiedRecord,
+    clauses: &[OrderByClause],
+    left_table_name: Option<&str>,
+    left_table_alias: Option<&str>,
+    right_table_name: Option<&str>,
+    right_table_alias: Option<&str>,
+) -> Ordering {
     for clause in clauses {
-        let left_value = resolve_runtime_join_field(
-            left,
-            &clause.field,
-            left_table_name,
-            left_table_alias,
-            right_table_name,
-            right_table_alias,
-        );
-        let right_value = resolve_runtime_join_field(
-            right,
-            &clause.field,
-            left_table_name,
-            left_table_alias,
-            right_table_name,
-            right_table_alias,
-        );
+        let (left_value, right_value) = if let Some(ref expr) = clause.expr {
+            (
+                super::super::expr_eval::evaluate_runtime_expr_with_db(
+                    db,
+                    expr,
+                    left,
+                    left_table_name,
+                    left_table_alias,
+                ),
+                super::super::expr_eval::evaluate_runtime_expr_with_db(
+                    db,
+                    expr,
+                    right,
+                    left_table_name,
+                    left_table_alias,
+                ),
+            )
+        } else {
+            (
+                resolve_runtime_join_field(
+                    left,
+                    &clause.field,
+                    left_table_name,
+                    left_table_alias,
+                    right_table_name,
+                    right_table_alias,
+                ),
+                resolve_runtime_join_field(
+                    right,
+                    &clause.field,
+                    left_table_name,
+                    left_table_alias,
+                    right_table_name,
+                    right_table_alias,
+                ),
+            )
+        };
         let ordering = compare_runtime_optional_values(
             left_value.as_ref(),
             right_value.as_ref(),

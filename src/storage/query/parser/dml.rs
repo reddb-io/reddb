@@ -252,10 +252,11 @@ impl<'a> Parser<'a> {
             let col = self.expect_ident()?;
             self.expect(Token::Eq)?;
             let expr = self.parse_expr()?;
-            let val = fold_expr_to_value(expr.clone())
-                .map_err(|msg| ParseError::new(msg, self.position()))?;
+            let folded = fold_expr_to_value(expr.clone()).ok();
             assignment_exprs.push((col.clone(), expr));
-            assignments.push((col, val));
+            if let Some(val) = folded {
+                assignments.push((col.clone(), val));
+            }
             if !self.consume(&Token::Comma)? {
                 break;
             }

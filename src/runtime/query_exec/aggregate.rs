@@ -1867,6 +1867,7 @@ mod agg_spill_codec {
         let mut tag = [0u8];
         r.read_exact(&mut tag)?;
         match tag[0] {
+            0 => Ok(Value::Null),
             1 => {
                 let mut b = [0u8];
                 r.read_exact(&mut b)?;

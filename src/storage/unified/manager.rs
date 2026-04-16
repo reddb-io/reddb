@@ -503,27 +503,33 @@ impl SegmentManager {
 
     /// Update an entity
     pub fn update(&self, entity: UnifiedEntity) -> Result<(), SegmentError> {
+        let entity_id = entity.id;
+        let mut entity = Some(entity);
+
         // Try growing segment directly (covers bulk-inserted entities without entity_segment map)
         if let Some(growing_arc) = self.growing.read().as_ref() {
             let mut growing = growing_arc.write();
-            if growing.contains(entity.id) && growing.state().is_writable() {
-                return growing.update(entity);
+            if growing.contains(entity_id) && growing.state().is_writable() {
+                return growing.update(entity.take().expect("entity already moved"));
             }
         }
 
         // Try entity_segment mapping for individually inserted entities
-        let segment_id = self.entity_segment.read().get(&entity.id).copied();
+        let segment_id = self.entity_segment.read().get(&entity_id).copied();
         if let Some(seg_id) = segment_id {
             if let Some(growing_arc) = self.growing.read().as_ref() {
                 let mut growing = growing_arc.write();
                 if growing.id() == seg_id && growing.state().is_writable() {
-                    return growing.update(entity);
+                    return growing.update(entity.take().expect("entity already moved"));
                 }
             }
-            return Err(SegmentError::NotWritable);
         }
 
-        Err(SegmentError::NotFound(entity.id))
+        if let Some(entity) = entity.take() {
+            return self.rewrite_sealed_entity_into_growing(entity, None);
+        }
+
+        Err(SegmentError::NotFound(entity_id))
     }
 
     /// Update an entity and, optionally, replace its metadata while holding
@@ -561,7 +567,6 @@ impl SegmentManager {
                     return Ok(());
                 }
             }
-            return Err(SegmentError::NotWritable);
         }
 
         if let Some(entity) = entity.take() {
@@ -579,25 +584,37 @@ impl SegmentManager {
         entity: UnifiedEntity,
         modified_columns: &[String],
     ) -> Result<(), SegmentError> {
+        let entity_id = entity.id;
+        let mut entity = Some(entity);
+
         if let Some(growing_arc) = self.growing.read().as_ref() {
             let mut growing = growing_arc.write();
-            if growing.contains(entity.id) && growing.state().is_writable() {
-                return growing.update_hot(entity, modified_columns);
+            if growing.contains(entity_id) && growing.state().is_writable() {
+                return growing.update_hot(
+                    entity.take().expect("entity already moved"),
+                    modified_columns,
+                );
             }
         }
 
-        let segment_id = self.entity_segment.read().get(&entity.id).copied();
+        let segment_id = self.entity_segment.read().get(&entity_id).copied();
         if let Some(seg_id) = segment_id {
             if let Some(growing_arc) = self.growing.read().as_ref() {
                 let mut growing = growing_arc.write();
                 if growing.id() == seg_id && growing.state().is_writable() {
-                    return growing.update_hot(entity, modified_columns);
+                    return growing.update_hot(
+                        entity.take().expect("entity already moved"),
+                        modified_columns,
+                    );
                 }
             }
-            return Err(SegmentError::NotWritable);
         }
 
-        Err(SegmentError::NotFound(entity.id))
+        if let Some(entity) = entity.take() {
+            return self.rewrite_sealed_entity_into_growing(entity, None);
+        }
+
+        Err(SegmentError::NotFound(entity_id))
     }
 
     /// HOT-update an entity and, optionally, replace its metadata while
@@ -640,7 +657,6 @@ impl SegmentManager {
                     return Ok(());
                 }
             }
-            return Err(SegmentError::NotWritable);
         }
 
         if let Some(entity) = entity.take() {
@@ -714,7 +730,6 @@ impl SegmentManager {
                     return Ok(deleted);
                 }
             }
-            return Err(SegmentError::NotWritable);
         }
 
         // Fallback: entity is in a sealed segment (bulk-inserted, not in entity_segment map).
@@ -812,6 +827,10 @@ impl SegmentManager {
             }
         }
 
+        if let Some(segment_arc) = self.find_sealed_segment_arc(id) {
+            return segment_arc.read().get_metadata(id);
+        }
+
         None
     }
 
@@ -836,8 +855,10 @@ impl SegmentManager {
                     return growing.set_metadata(id, metadata);
                 }
             }
+        }
 
-            return Err(SegmentError::NotWritable);
+        if let Some(entity) = self.get(id) {
+            return self.rewrite_sealed_entity_into_growing(entity, Some(&metadata));
         }
 
         Err(SegmentError::NotFound(id))

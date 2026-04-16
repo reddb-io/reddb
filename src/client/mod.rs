@@ -36,6 +36,12 @@ pub struct CreatedEntity {
 }
 
 #[derive(Debug, Clone)]
+pub struct BulkCreateStatus {
+    pub ok: bool,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone)]
 pub struct OperationStatus {
     pub ok: bool,
     pub message: String,
@@ -193,6 +199,23 @@ impl RedDBClient {
             ok: reply.ok,
             id: reply.id,
             entity_json: reply.entity_json,
+        })
+    }
+
+    pub async fn bulk_create_rows(
+        &mut self,
+        collection: &str,
+        payload_json: Vec<String>,
+    ) -> Result<BulkCreateStatus, Box<dyn std::error::Error>> {
+        let req = self.auth_request(JsonBulkCreateRequest {
+            collection: collection.to_string(),
+            payload_json,
+        });
+        let resp = self.inner.bulk_create_rows(req).await?;
+        let reply = resp.into_inner();
+        Ok(BulkCreateStatus {
+            ok: reply.ok,
+            count: reply.count,
         })
     }
 

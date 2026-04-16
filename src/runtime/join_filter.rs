@@ -560,6 +560,26 @@ pub(super) fn project_runtime_record(
     document_projection: bool,
     entity_projection: bool,
 ) -> UnifiedRecord {
+    project_runtime_record_with_db(
+        None,
+        source,
+        projections,
+        table_name,
+        table_alias,
+        document_projection,
+        entity_projection,
+    )
+}
+
+pub(super) fn project_runtime_record_with_db(
+    db: Option<&RedDB>,
+    source: &UnifiedRecord,
+    projections: &[Projection],
+    table_name: Option<&str>,
+    table_alias: Option<&str>,
+    document_projection: bool,
+    entity_projection: bool,
+) -> UnifiedRecord {
     let select_all = projections.is_empty()
         || projections
             .iter()
@@ -604,14 +624,11 @@ pub(super) fn project_runtime_record(
             Projection::Field(field, _) => {
                 resolve_runtime_field(source, field, table_name, table_alias)
             }
-            Projection::Expression(filter, _) => Some(Value::Boolean(evaluate_runtime_filter(
-                source,
-                filter,
-                table_name,
-                table_alias,
-            ))),
+            Projection::Expression(filter, _) => Some(Value::Boolean(
+                evaluate_runtime_filter_with_db(db, source, filter, table_name, table_alias),
+            )),
             Projection::Function(ref name, ref args) => {
-                evaluate_scalar_function(name, args, source)
+                evaluate_scalar_function_with_db(db, name, args, source)
             }
             Projection::All => None,
         };
@@ -725,6 +742,16 @@ pub(super) fn evaluate_runtime_filter(
     table_name: Option<&str>,
     table_alias: Option<&str>,
 ) -> bool {
+    evaluate_runtime_filter_with_db(None, record, filter, table_name, table_alias)
+}
+
+pub(super) fn evaluate_runtime_filter_with_db(
+    db: Option<&RedDB>,
+    record: &UnifiedRecord,
+    filter: &Filter,
+    table_name: Option<&str>,
+    table_alias: Option<&str>,
+) -> bool {
     match filter {
         Filter::Compare { field, op, value } => {
             resolve_runtime_field(record, field, table_name, table_alias)
@@ -750,22 +777,36 @@ pub(super) fn evaluate_runtime_filter(
             // resulting Values. Missing / null operands collapse to
             // false so the predicate acts like SQL three-valued
             // logic's UNKNOWN → not-matched.
-            let l = super::expr_eval::evaluate_runtime_expr(lhs, record, table_name, table_alias);
-            let r = super::expr_eval::evaluate_runtime_expr(rhs, record, table_name, table_alias);
+            let l = super::expr_eval::evaluate_runtime_expr_with_db(
+                db,
+                lhs,
+                record,
+                table_name,
+                table_alias,
+            );
+            let r = super::expr_eval::evaluate_runtime_expr_with_db(
+                db,
+                rhs,
+                record,
+                table_name,
+                table_alias,
+            );
             match (l, r) {
                 (Some(lv), Some(rv)) => compare_runtime_values(&lv, &rv, *op),
                 _ => false,
             }
         }
         Filter::And(left, right) => {
-            evaluate_runtime_filter(record, left, table_name, table_alias)
-                && evaluate_runtime_filter(record, right, table_name, table_alias)
+            evaluate_runtime_filter_with_db(db, record, left, table_name, table_alias)
+                && evaluate_runtime_filter_with_db(db, record, right, table_name, table_alias)
         }
         Filter::Or(left, right) => {
-            evaluate_runtime_filter(record, left, table_name, table_alias)
-                || evaluate_runtime_filter(record, right, table_name, table_alias)
+            evaluate_runtime_filter_with_db(db, record, left, table_name, table_alias)
+                || evaluate_runtime_filter_with_db(db, record, right, table_name, table_alias)
         }
-        Filter::Not(inner) => !evaluate_runtime_filter(record, inner, table_name, table_alias),
+        Filter::Not(inner) => {
+            !evaluate_runtime_filter_with_db(db, record, inner, table_name, table_alias)
+        }
         Filter::IsNull(field) => resolve_runtime_field(record, field, table_name, table_alias)
             .map(|value| value == Value::Null)
             .unwrap_or(true),
@@ -825,6 +866,17 @@ pub(super) fn compare_runtime_order(
     table_name: Option<&str>,
     table_alias: Option<&str>,
 ) -> Ordering {
+    compare_runtime_order_with_db(None, left, right, clauses, table_name, table_alias)
+}
+
+pub(super) fn compare_runtime_order_with_db(
+    db: Option<&RedDB>,
+    left: &UnifiedRecord,
+    right: &UnifiedRecord,
+    clauses: &[OrderByClause],
+    table_name: Option<&str>,
+    table_alias: Option<&str>,
+) -> Ordering {
     for clause in clauses {
         // Fase 1.6: when the ORDER BY item is an expression (CAST,
         // arithmetic, CASE, etc.), evaluate it against each record
@@ -833,8 +885,20 @@ pub(super) fn compare_runtime_order(
         // common case.
         let (left_value, right_value) = if let Some(ref expr) = clause.expr {
             (
-                super::expr_eval::evaluate_runtime_expr(expr, left, table_name, table_alias),
-                super::expr_eval::evaluate_runtime_expr(expr, right, table_name, table_alias),
+                super::expr_eval::evaluate_runtime_expr_with_db(
+                    db,
+                    expr,
+                    left,
+                    table_name,
+                    table_alias,
+                ),
+                super::expr_eval::evaluate_runtime_expr_with_db(
+                    db,
+                    expr,
+                    right,
+                    table_name,
+                    table_alias,
+                ),
             )
         } else {
             (
@@ -890,6 +954,16 @@ pub(super) fn sort_records_by_order_by(
     table_name: Option<&str>,
     table_alias: Option<&str>,
 ) {
+    sort_records_by_order_by_with_db(None, records, order_by, table_name, table_alias)
+}
+
+pub(super) fn sort_records_by_order_by_with_db(
+    db: Option<&RedDB>,
+    records: &mut Vec<UnifiedRecord>,
+    order_by: &[OrderByClause],
+    table_name: Option<&str>,
+    table_alias: Option<&str>,
+) {
     if order_by.is_empty() || records.len() < 2 {
         return;
     }
@@ -905,7 +979,13 @@ pub(super) fn sort_records_by_order_by(
                 .iter()
                 .map(|clause| {
                     let v = if let Some(ref expr) = clause.expr {
-                        super::expr_eval::evaluate_runtime_expr(expr, rec, table_name, table_alias)
+                        super::expr_eval::evaluate_runtime_expr_with_db(
+                            db,
+                            expr,
+                            rec,
+                            table_name,
+                            table_alias,
+                        )
                     } else {
                         resolve_runtime_field(rec, &clause.field, table_name, table_alias)
                     };
@@ -1333,7 +1413,7 @@ pub(super) fn runtime_value_text(value: &Value) -> Option<String> {
                 total_secs % 60
             ))
         }
-        Value::Decimal(v) => Some(format!("{:.4}", *v as f64 / 10_000.0)),
+        Value::Decimal(v) => Some(Value::Decimal(*v).display_string()),
         Value::EnumValue(i) => Some(format!("enum({})", i)),
         Value::Array(_) => None,
         Value::TimestampMs(ms) => Some(ms.to_string()),
@@ -1369,6 +1449,8 @@ pub(super) fn runtime_value_text(value: &Value) -> Option<String> {
         Value::Lang2(c) => Some(String::from_utf8_lossy(c).to_string()),
         Value::Lang5(c) => Some(String::from_utf8_lossy(c).to_string()),
         Value::Currency(c) => Some(String::from_utf8_lossy(c).to_string()),
+        Value::AssetCode(code) => Some(code.clone()),
+        Value::Money { .. } => Some(value.display_string()),
         Value::ColorAlpha([r, g, b, a]) => Some(format!("#{:02X}{:02X}{:02X}{:02X}", r, g, b, a)),
         Value::BigInt(v) => Some(v.to_string()),
         Value::KeyRef(col, key) => Some(format!("{}:{}", col, key)),
@@ -1575,12 +1657,39 @@ pub(super) fn query_expr_name(expr: &QueryExpr) -> &'static str {
         QueryExpr::CreateQueue(_) => "create_queue",
         QueryExpr::DropQueue(_) => "drop_queue",
         QueryExpr::QueueCommand(_) => "queue_command",
+        QueryExpr::CreateTree(_) => "create_tree",
+        QueryExpr::DropTree(_) => "drop_tree",
+        QueryExpr::TreeCommand(_) => "tree_command",
         QueryExpr::ExplainAlter(_) => "explain_alter",
     }
 }
 
 /// Evaluate a scalar function on a record's values.
 fn evaluate_scalar_function(
+    name: &str,
+    args: &[Projection],
+    source: &UnifiedRecord,
+) -> Option<Value> {
+    evaluate_scalar_function_with_db(None, name, args, source)
+}
+
+pub(super) fn evaluate_scalar_function_with_db(
+    db: Option<&RedDB>,
+    name: &str,
+    args: &[Projection],
+    source: &UnifiedRecord,
+) -> Option<Value> {
+    let func_name = name.split(':').next().unwrap_or(name);
+    if func_name.eq_ignore_ascii_case("CONFIG") {
+        return evaluate_projection_config_function(db, args, source);
+    }
+    if func_name.eq_ignore_ascii_case("KV") {
+        return evaluate_projection_kv_function(db, args, source);
+    }
+    evaluate_scalar_function_legacy(name, args, source)
+}
+
+fn evaluate_scalar_function_legacy(
     name: &str,
     args: &[Projection],
     source: &UnifiedRecord,
@@ -1890,7 +1999,60 @@ fn evaluate_scalar_function(
                 &plain, &hash,
             )))
         }
+        "MONEY" => money_from_scalar_args(args, source),
+        "MONEY_ASSET" => match resolve_scalar_arg(args, 0, source)? {
+            Value::Money { asset_code, .. } => Some(Value::AssetCode(asset_code)),
+            _ => Some(Value::Null),
+        },
+        "MONEY_MINOR" => match resolve_scalar_arg(args, 0, source)? {
+            Value::Money { minor_units, .. } => Some(Value::BigInt(minor_units)),
+            _ => Some(Value::Null),
+        },
+        "MONEY_SCALE" => match resolve_scalar_arg(args, 0, source)? {
+            Value::Money { scale, .. } => Some(Value::Integer(i64::from(scale))),
+            _ => Some(Value::Null),
+        },
         _ => Some(Value::Null),
+    }
+}
+
+fn money_from_scalar_args(args: &[Projection], source: &UnifiedRecord) -> Option<Value> {
+    let input = match args {
+        [single] => money_arg_text(resolve_scalar_arg(std::slice::from_ref(single), 0, source)?)?,
+        [left, right] => {
+            let lhs = money_arg_text(resolve_scalar_arg(args, 0, source)?)?;
+            let rhs = money_arg_text(resolve_scalar_arg(args, 1, source)?)?;
+            format!("{} {}", lhs, rhs)
+        }
+        _ => return Some(Value::Null),
+    };
+    match crate::storage::schema::coerce::coerce(
+        &input,
+        crate::storage::schema::DataType::Money,
+        None,
+    ) {
+        Ok(value) => Some(value),
+        Err(_) if args.len() == 2 => {
+            let lhs = money_arg_text(resolve_scalar_arg(args, 1, source)?)?;
+            let rhs = money_arg_text(resolve_scalar_arg(args, 0, source)?)?;
+            crate::storage::schema::coerce::coerce(
+                &format!("{} {}", lhs, rhs),
+                crate::storage::schema::DataType::Money,
+                None,
+            )
+            .ok()
+        }
+        Err(_) => Some(Value::Null),
+    }
+}
+
+fn money_arg_text(value: Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::Text(text) => Some(text),
+        Value::AssetCode(code) => Some(code),
+        Value::Currency(code) => Some(String::from_utf8_lossy(&code).to_string()),
+        other => Some(other.display_string()),
     }
 }
 
@@ -2066,6 +2228,75 @@ pub(super) fn eval_projection_value(proj: &Projection, source: &UnifiedRecord) -
             source, filter, None, None,
         ))),
         Projection::All => None,
+    }
+}
+
+pub(super) fn eval_projection_value_with_db(
+    db: Option<&RedDB>,
+    proj: &Projection,
+    source: &UnifiedRecord,
+) -> Option<Value> {
+    match proj {
+        Projection::Function(name, inner_args) => {
+            evaluate_scalar_function_with_db(db, name, inner_args, source)
+        }
+        Projection::Expression(filter, _) => Some(Value::Boolean(evaluate_runtime_filter_with_db(
+            db, source, filter, None, None,
+        ))),
+        _ => eval_projection_value(proj, source),
+    }
+}
+
+fn evaluate_projection_config_function(
+    db: Option<&RedDB>,
+    args: &[Projection],
+    source: &UnifiedRecord,
+) -> Option<Value> {
+    let key = projection_path_text(args.first()?)?;
+    if let Some(db) = db {
+        if let Some(value) = super::expr_eval::lookup_latest_kv_value(db, "red_config", &key) {
+            return Some(value);
+        }
+    }
+    args.get(1)
+        .and_then(|arg| projection_default_value_with_db(db, arg, source))
+        .or(Some(Value::Null))
+}
+
+fn evaluate_projection_kv_function(
+    db: Option<&RedDB>,
+    args: &[Projection],
+    source: &UnifiedRecord,
+) -> Option<Value> {
+    let collection = projection_path_text(args.first()?)?;
+    let key = projection_path_text(args.get(1)?)?;
+    if let Some(db) = db {
+        if let Some(value) = super::expr_eval::lookup_latest_kv_value(db, &collection, &key) {
+            return Some(value);
+        }
+    }
+    args.get(2)
+        .and_then(|arg| projection_default_value_with_db(db, arg, source))
+        .or(Some(Value::Null))
+}
+
+fn projection_path_text(projection: &Projection) -> Option<String> {
+    match projection {
+        Projection::Field(field, _) => Some(field_ref_name(field)),
+        Projection::Column(column) => column.strip_prefix("LIT:").map(|text| text.to_string()),
+        Projection::Alias(column, _) => Some(column.clone()),
+        _ => None,
+    }
+}
+
+fn projection_default_value_with_db(
+    db: Option<&RedDB>,
+    projection: &Projection,
+    source: &UnifiedRecord,
+) -> Option<Value> {
+    match projection {
+        Projection::Field(field, _) => Some(Value::Text(field_ref_name(field))),
+        _ => eval_projection_value_with_db(db, projection, source),
     }
 }
 

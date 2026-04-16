@@ -1,6 +1,58 @@
 use super::*;
 
 impl UnifiedStore {
+    pub(crate) fn persist_entities_to_pager(
+        &self,
+        collection: &str,
+        entities: &[UnifiedEntity],
+    ) -> Result<(), StoreError> {
+        if entities.is_empty() {
+            return Ok(());
+        }
+
+        let Some(pager) = &self.pager else {
+            return Ok(());
+        };
+
+        let fv = self.format_version();
+        let serialized: Vec<(Vec<u8>, Vec<u8>)> = entities
+            .iter()
+            .map(|entity| {
+                (
+                    entity.id.raw().to_be_bytes().to_vec(),
+                    Self::serialize_entity(entity, fv),
+                )
+            })
+            .collect();
+
+        let mut btree_indices = self.btree_indices.write();
+        let btree = btree_indices
+            .entry(collection.to_string())
+            .or_insert_with(|| BTree::new(Arc::clone(pager)));
+
+        for (key, value) in serialized {
+            match btree.insert(&key, &value) {
+                Ok(_) => {}
+                Err(BTreeError::DuplicateKey) => {
+                    let _ = btree.delete(&key);
+                    let _ = btree.insert(&key, &value);
+                }
+                Err(e) => {
+                    return Err(StoreError::Io(std::io::Error::other(format!(
+                        "B-tree insert error: {}",
+                        e
+                    ))));
+                }
+            }
+        }
+
+        pager
+            .flush()
+            .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+
+        Ok(())
+    }
+
     /// Insert a label→entity_id mapping into the graph label index.
     fn update_graph_label_index(&self, collection: &str, label: &str, entity_id: EntityId) {
         let key = (collection.to_string(), label.to_string());
@@ -573,6 +625,11 @@ impl UnifiedStore {
             .get_collection(collection)
             .ok_or_else(|| StoreError::CollectionNotFound(collection.to_string()))?;
 
+        let deleted = manager.delete(id)?;
+        if !deleted {
+            return Ok(false);
+        }
+
         // Remove from B-tree index if active
         if self.pager.is_some() {
             let btree_indices = self.btree_indices.read();
@@ -588,7 +645,7 @@ impl UnifiedStore {
         // Remove from graph label index
         self.remove_from_graph_label_index(collection, id);
 
-        Ok(manager.delete(id)?)
+        Ok(true)
     }
 
     pub fn delete_batch(

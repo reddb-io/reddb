@@ -603,6 +603,8 @@ fn approximate_value_size(value: &Value) -> usize {
         Value::Country2(_) | Value::Lang2(_) => 2,
         Value::Country3(_) | Value::Currency(_) => 3,
         Value::Lang5(_) | Value::ColorAlpha(_) => 5,
+        Value::AssetCode(code) => code.len(),
+        Value::Money { asset_code, .. } => asset_code.len() + 9,
         Value::BigInt(_) => 8,
         Value::KeyRef(collection, key) => collection.len() + key.len(),
         Value::IpAddr(_) => 16,

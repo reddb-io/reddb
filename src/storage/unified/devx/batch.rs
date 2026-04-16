@@ -6,12 +6,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::super::{
-    EntityData, EntityId, EntityKind, GraphNodeKind, Metadata, MetadataValue, NodeData,
-    UnifiedEntity, UnifiedStore, VectorData,
+    CrossRef, EntityData, EntityId, EntityKind, GraphNodeKind, Metadata, MetadataValue, NodeData,
+    RefType, RowData, UnifiedEntity, UnifiedStore, VectorData,
 };
 use super::error::DevXError;
 use super::{run_preprocessors, SharedPreprocessors};
 use crate::storage::schema::Value;
+use crate::storage::unified::devx::refs::{NodeRef, VectorRef};
 
 /// Batch operations for high-performance bulk inserts
 pub struct BatchBuilder {
@@ -86,6 +87,46 @@ impl BatchBuilder {
         self
     }
 
+    /// Add a table row to the batch.
+    pub fn add_row(
+        mut self,
+        collection: impl Into<String>,
+        fields: Vec<(String, Value)>,
+        metadata: HashMap<String, MetadataValue>,
+        node_links: Vec<NodeRef>,
+        vector_links: Vec<VectorRef>,
+    ) -> Self {
+        let collection = collection.into();
+        let id = self.store.next_entity_id();
+        let kind = EntityKind::TableRow {
+            table: Arc::from(collection.as_str()),
+            row_id: 0,
+        };
+
+        let mut row = RowData::new(fields.iter().map(|(_, value)| value.clone()).collect());
+        row.named = Some(fields.into_iter().collect());
+        let mut entity = UnifiedEntity::new(id, kind, EntityData::Row(row));
+        for node_ref in node_links {
+            entity.add_cross_ref(CrossRef::new(
+                id,
+                node_ref.node_id,
+                node_ref.collection,
+                RefType::RowToNode,
+            ));
+        }
+        for vector_ref in vector_links {
+            entity.add_cross_ref(CrossRef::new(
+                id,
+                vector_ref.vector_id,
+                vector_ref.collection,
+                RefType::RowToVector,
+            ));
+        }
+
+        self.rows.push((collection, entity, metadata));
+        self
+    }
+
     /// Execute the batch
     pub fn execute(self) -> Result<BatchResult, DevXError> {
         let mut inserted_nodes = Vec::new();
@@ -135,17 +176,43 @@ impl BatchBuilder {
             }
         }
 
-        // Insert rows
-        for (collection, mut entity, metadata) in self.rows {
-            let id = entity.id;
-            run_preprocessors(&self.preprocessors, &mut entity)?;
-            if self.store.insert_auto(&collection, entity).is_ok() {
-                if !metadata.is_empty() {
-                    let _ =
-                        self.store
-                            .set_metadata(&collection, id, Metadata::with_fields(metadata));
+        // Insert rows. Keep them on the same physical bulk-insert path used by
+        // other frontends, while still running preprocessors and post-insert
+        // metadata/context/cross-ref maintenance exactly once per row.
+        let mut rows = self.rows.into_iter().peekable();
+        while let Some((collection, mut first_entity, first_metadata)) = rows.next() {
+            let mut entities = Vec::new();
+            let mut metadata_items = Vec::new();
+            run_preprocessors(&self.preprocessors, &mut first_entity)?;
+            entities.push(first_entity);
+            metadata_items.push(first_metadata);
+
+            while let Some((next_collection, _, _)) = rows.peek() {
+                if next_collection != &collection {
+                    break;
                 }
-                inserted_rows.push(id);
+                let (_, mut entity, metadata) = rows.next().expect("peeked row missing");
+                run_preprocessors(&self.preprocessors, &mut entity)?;
+                entities.push(entity);
+                metadata_items.push(metadata);
+            }
+
+            let ids = self
+                .store
+                .bulk_insert(&collection, entities)
+                .map_err(|err| DevXError::Storage(format!("{err:?}")))?;
+
+            for (id, metadata) in ids.iter().zip(metadata_items.into_iter()) {
+                if !metadata.is_empty() {
+                    let _ = self
+                        .store
+                        .set_metadata(&collection, *id, Metadata::with_fields(metadata));
+                }
+                if let Some(entity) = self.store.get(&collection, *id) {
+                    self.store.context_index().index_entity(&collection, &entity);
+                    let _ = self.store.index_cross_refs(&entity, &collection);
+                }
+                inserted_rows.push(*id);
             }
         }
 

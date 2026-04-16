@@ -7,22 +7,113 @@
 //! applied.
 
 use crate::application::entity::{
-    CreateDocumentInput, CreateEdgeInput, CreateKvInput, CreateNodeInput, CreateRowInput,
-    CreateVectorInput, DeleteEntityInput, PatchEntityInput, PatchEntityOperation,
-    PatchEntityOperationType,
+    AppliedEntityMutation, CreateDocumentInput, CreateEdgeInput, CreateKvInput, CreateNodeInput,
+    CreateRowInput, CreateRowsBatchInput, CreateVectorInput, DeleteEntityInput, PatchEntityOperation,
+    PatchEntityOperationType, RowUpdateColumnRule, RowUpdateContractPlan,
 };
-use crate::application::ports::RuntimeEntityPort;
+use crate::application::ports::{
+    build_row_update_contract_plan, normalize_row_update_assignment_with_plan,
+    normalize_row_update_value_for_rule, RuntimeEntityPort,
+};
 use crate::application::ttl_payload::has_internal_ttl_metadata;
 use crate::presentation::entity_json::storage_value_to_json;
+use crate::storage::query::ast::Expr;
 use crate::storage::query::sql_lowering::{
-    effective_delete_filter, effective_insert_rows, effective_update_filter,
+    effective_delete_filter, effective_insert_rows, effective_update_filter, fold_expr_to_value,
 };
 use crate::storage::unified::MetadataValue;
 use crate::storage::Metadata;
 
 use super::*;
 
+const UPDATE_APPLY_CHUNK_SIZE: usize = 2048;
+const TREE_CHILD_EDGE_LABEL: &str = "TREE_CHILD";
+const TREE_METADATA_PREFIX: &str = "red.tree.";
+
+#[derive(Clone)]
+struct CompiledUpdateAssignment {
+    column: String,
+    expr: Expr,
+    metadata_key: Option<&'static str>,
+    row_rule: Option<RowUpdateColumnRule>,
+}
+
+struct CompiledUpdatePlan {
+    static_field_assignments: Vec<(String, Value)>,
+    static_metadata_assignments: Vec<(String, MetadataValue)>,
+    dynamic_assignments: Vec<CompiledUpdateAssignment>,
+    row_contract_plan: Option<RowUpdateContractPlan>,
+    row_modified_columns: Vec<String>,
+    row_touches_unique_columns: bool,
+}
+
+#[derive(Default)]
+struct MaterializedUpdateAssignments {
+    dynamic_field_assignments: Vec<(String, Value)>,
+    dynamic_metadata_assignments: Vec<(String, MetadataValue)>,
+}
+
 impl RedDBRuntime {
+    fn delete_entities_batch(&self, collection: &str, ids: &[EntityId]) -> RedDBResult<u64> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+
+        let store = self.db().store();
+        let deleted_ids = store
+            .delete_batch(collection, ids)
+            .map_err(|err| RedDBError::Internal(err.to_string()))?;
+        if deleted_ids.is_empty() {
+            return Ok(0);
+        }
+
+        for id in &deleted_ids {
+            store.context_index().remove_entity(*id);
+            self.cdc_emit(
+                crate::replication::cdc::ChangeOperation::Delete,
+                collection,
+                id.raw(),
+                "entity",
+            );
+        }
+
+        Ok(deleted_ids.len() as u64)
+    }
+
+    fn flush_update_chunk(&self, applied: &[AppliedEntityMutation]) {
+        if applied.is_empty() {
+            return;
+        }
+
+        let store = self.db().store();
+        if applied.iter().any(|item| item.context_index_dirty) {
+            store.context_index().index_entities(
+                &applied[0].collection,
+                applied
+                    .iter()
+                    .filter(|item| item.context_index_dirty)
+                    .map(|item| &item.entity),
+            );
+        }
+
+        self.cdc_emit_prebuilt_batch(
+            crate::replication::cdc::ChangeOperation::Update,
+            "entity",
+            applied.iter().map(|item| {
+                (
+                    item.collection.as_str(),
+                    &item.entity,
+                    item.metadata.as_ref(),
+                )
+            }),
+            false,
+        );
+    }
+
+    fn persist_update_chunk(&self, applied: &[AppliedEntityMutation]) -> RedDBResult<()> {
+        self.persist_applied_entity_mutations(applied)
+    }
+
     /// Execute INSERT INTO table [entity_type] (cols) VALUES (vals), ...
     ///
     /// Each row in `query.values` is zipped with `query.columns` to produce a
@@ -44,164 +135,195 @@ impl RedDBRuntime {
             .collection_contract(&query.table)
             .map(|contract| contract.declared_model);
 
-        for row_values in &effective_rows {
-            if row_values.len() != query.columns.len() {
-                return Err(RedDBError::Query(format!(
-                    "INSERT column count ({}) does not match value count ({})",
-                    query.columns.len(),
-                    row_values.len()
-                )));
+        if matches!(query.entity_type, InsertEntityType::Row)
+            && !matches!(
+                declared_model,
+                Some(crate::catalog::CollectionModel::TimeSeries)
+            )
+        {
+            let mut rows = Vec::with_capacity(effective_rows.len());
+            for row_values in &effective_rows {
+                if row_values.len() != query.columns.len() {
+                    return Err(RedDBError::Query(format!(
+                        "INSERT column count ({}) does not match value count ({})",
+                        query.columns.len(),
+                        row_values.len()
+                    )));
+                }
+                let (fields, mut metadata) =
+                    split_insert_metadata(self, &query.columns, row_values)?;
+                merge_with_clauses(
+                    &mut metadata,
+                    query.ttl_ms,
+                    query.expires_at_ms,
+                    &query.with_metadata,
+                );
+                rows.push(CreateRowInput {
+                    collection: query.table.clone(),
+                    fields,
+                    metadata,
+                    node_links: Vec::new(),
+                    vector_links: Vec::new(),
+                });
             }
+            inserted_count = self
+                .create_rows_batch(CreateRowsBatchInput {
+                    collection: query.table.clone(),
+                    rows,
+                })?
+                .len() as u64;
+        } else {
+            for row_values in &effective_rows {
+                if row_values.len() != query.columns.len() {
+                    return Err(RedDBError::Query(format!(
+                        "INSERT column count ({}) does not match value count ({})",
+                        query.columns.len(),
+                        row_values.len()
+                    )));
+                }
 
-            match query.entity_type {
-                InsertEntityType::Row => {
-                    let (fields, mut metadata) =
-                        split_insert_metadata(self, &query.columns, row_values)?;
-                    merge_with_clauses(
-                        &mut metadata,
-                        query.ttl_ms,
-                        query.expires_at_ms,
-                        &query.with_metadata,
-                    );
-                    if matches!(
-                        declared_model,
-                        Some(crate::catalog::CollectionModel::TimeSeries)
-                    ) {
+                match query.entity_type {
+                    InsertEntityType::Row => {
+                        let (fields, mut metadata) =
+                            split_insert_metadata(self, &query.columns, row_values)?;
+                        merge_with_clauses(
+                            &mut metadata,
+                            query.ttl_ms,
+                            query.expires_at_ms,
+                            &query.with_metadata,
+                        );
                         self.insert_timeseries_point(&query.table, fields, metadata)?;
-                    } else {
-                        let input = CreateRowInput {
+                    }
+                    InsertEntityType::Node => {
+                        let (node_values, mut metadata) =
+                            split_insert_metadata(self, &query.columns, row_values)?;
+                        merge_with_clauses(
+                            &mut metadata,
+                            query.ttl_ms,
+                            query.expires_at_ms,
+                            &query.with_metadata,
+                        );
+                        ensure_non_tree_reserved_metadata_entries(&metadata)?;
+                        let (columns, values) = pairwise_columns_values(&node_values);
+                        let label = find_column_value_string(&columns, &values, "label")?;
+                        let node_type = find_column_value_opt_string(&columns, &values, "node_type");
+                        let properties = extract_remaining_properties(
+                            &columns,
+                            &values,
+                            &["label", "node_type"],
+                        );
+                        let input = CreateNodeInput {
                             collection: query.table.clone(),
-                            fields,
+                            label,
+                            node_type,
+                            properties,
+                            metadata,
+                            embeddings: Vec::new(),
+                            table_links: Vec::new(),
+                            node_links: Vec::new(),
+                        };
+                        self.create_node(input)?;
+                    }
+                    InsertEntityType::Edge => {
+                        let (edge_values, mut metadata) =
+                            split_insert_metadata(self, &query.columns, row_values)?;
+                        merge_with_clauses(
+                            &mut metadata,
+                            query.ttl_ms,
+                            query.expires_at_ms,
+                            &query.with_metadata,
+                        );
+                        ensure_non_tree_reserved_metadata_entries(&metadata)?;
+                        let (columns, values) = pairwise_columns_values(&edge_values);
+                        let label = find_column_value_string(&columns, &values, "label")?;
+                        ensure_non_tree_structural_edge_label(&label)?;
+                        let from_id = find_column_value_u64(&columns, &values, "from")?;
+                        let to_id = find_column_value_u64(&columns, &values, "to")?;
+                        let weight = find_column_value_f32_opt(&columns, &values, "weight");
+                        let properties = extract_remaining_properties(
+                            &columns,
+                            &values,
+                            &["label", "from", "to", "weight"],
+                        );
+                        let input = CreateEdgeInput {
+                            collection: query.table.clone(),
+                            label,
+                            from: EntityId::new(from_id),
+                            to: EntityId::new(to_id),
+                            weight,
+                            properties,
+                            metadata,
+                        };
+                        self.create_edge(input)?;
+                    }
+                    InsertEntityType::Vector => {
+                        let (vector_values, mut metadata) =
+                            split_insert_metadata(self, &query.columns, row_values)?;
+                        merge_with_clauses(
+                            &mut metadata,
+                            query.ttl_ms,
+                            query.expires_at_ms,
+                            &query.with_metadata,
+                        );
+                        let (columns, values) = pairwise_columns_values(&vector_values);
+                        let dense = find_column_value_vec_f32(&columns, &values, "dense")?;
+                        let content = find_column_value_opt_string(&columns, &values, "content");
+                        let input = CreateVectorInput {
+                            collection: query.table.clone(),
+                            dense,
+                            content,
+                            metadata,
+                            link_row: None,
+                            link_node: None,
+                        };
+                        self.create_vector(input)?;
+                    }
+                    InsertEntityType::Document => {
+                        let (document_values, mut metadata) =
+                            split_insert_metadata(self, &query.columns, row_values)?;
+                        merge_with_clauses(
+                            &mut metadata,
+                            query.ttl_ms,
+                            query.expires_at_ms,
+                            &query.with_metadata,
+                        );
+                        let (columns, values) = pairwise_columns_values(&document_values);
+                        let body_str = find_column_value_string(&columns, &values, "body")?;
+                        let body: crate::json::Value = crate::json::from_str(&body_str)
+                            .map_err(|e| RedDBError::Query(format!("invalid JSON body: {e}")))?;
+                        let input = CreateDocumentInput {
+                            collection: query.table.clone(),
+                            body,
                             metadata,
                             node_links: Vec::new(),
                             vector_links: Vec::new(),
                         };
-                        self.create_row(input)?;
+                        self.create_document(input)?;
+                    }
+                    InsertEntityType::Kv => {
+                        let (kv_values, mut metadata) =
+                            split_insert_metadata(self, &query.columns, row_values)?;
+                        merge_with_clauses(
+                            &mut metadata,
+                            query.ttl_ms,
+                            query.expires_at_ms,
+                            &query.with_metadata,
+                        );
+                        let (columns, values) = pairwise_columns_values(&kv_values);
+                        let key = find_column_value_string(&columns, &values, "key")?;
+                        let value = find_column_value(&columns, &values, "value")?;
+                        let input = CreateKvInput {
+                            collection: query.table.clone(),
+                            key,
+                            value,
+                            metadata,
+                        };
+                        self.create_kv(input)?;
                     }
                 }
-                InsertEntityType::Node => {
-                    let (node_values, mut metadata) =
-                        split_insert_metadata(self, &query.columns, row_values)?;
-                    merge_with_clauses(
-                        &mut metadata,
-                        query.ttl_ms,
-                        query.expires_at_ms,
-                        &query.with_metadata,
-                    );
-                    let (columns, values) = pairwise_columns_values(&node_values);
-                    let label = find_column_value_string(&columns, &values, "label")?;
-                    let node_type = find_column_value_opt_string(&columns, &values, "node_type");
-                    let properties =
-                        extract_remaining_properties(&columns, &values, &["label", "node_type"]);
-                    let input = CreateNodeInput {
-                        collection: query.table.clone(),
-                        label,
-                        node_type,
-                        properties,
-                        metadata,
-                        embeddings: Vec::new(),
-                        table_links: Vec::new(),
-                        node_links: Vec::new(),
-                    };
-                    self.create_node(input)?;
-                }
-                InsertEntityType::Edge => {
-                    let (edge_values, mut metadata) =
-                        split_insert_metadata(self, &query.columns, row_values)?;
-                    merge_with_clauses(
-                        &mut metadata,
-                        query.ttl_ms,
-                        query.expires_at_ms,
-                        &query.with_metadata,
-                    );
-                    let (columns, values) = pairwise_columns_values(&edge_values);
-                    let label = find_column_value_string(&columns, &values, "label")?;
-                    let from_id = find_column_value_u64(&columns, &values, "from")?;
-                    let to_id = find_column_value_u64(&columns, &values, "to")?;
-                    let weight = find_column_value_f32_opt(&columns, &values, "weight");
-                    let properties = extract_remaining_properties(
-                        &columns,
-                        &values,
-                        &["label", "from", "to", "weight"],
-                    );
-                    let input = CreateEdgeInput {
-                        collection: query.table.clone(),
-                        label,
-                        from: EntityId::new(from_id),
-                        to: EntityId::new(to_id),
-                        weight,
-                        properties,
-                        metadata,
-                    };
-                    self.create_edge(input)?;
-                }
-                InsertEntityType::Vector => {
-                    let (vector_values, mut metadata) =
-                        split_insert_metadata(self, &query.columns, row_values)?;
-                    merge_with_clauses(
-                        &mut metadata,
-                        query.ttl_ms,
-                        query.expires_at_ms,
-                        &query.with_metadata,
-                    );
-                    let (columns, values) = pairwise_columns_values(&vector_values);
-                    let dense = find_column_value_vec_f32(&columns, &values, "dense")?;
-                    let content = find_column_value_opt_string(&columns, &values, "content");
-                    let input = CreateVectorInput {
-                        collection: query.table.clone(),
-                        dense,
-                        content,
-                        metadata,
-                        link_row: None,
-                        link_node: None,
-                    };
-                    self.create_vector(input)?;
-                }
-                InsertEntityType::Document => {
-                    let (document_values, mut metadata) =
-                        split_insert_metadata(self, &query.columns, row_values)?;
-                    merge_with_clauses(
-                        &mut metadata,
-                        query.ttl_ms,
-                        query.expires_at_ms,
-                        &query.with_metadata,
-                    );
-                    let (columns, values) = pairwise_columns_values(&document_values);
-                    let body_str = find_column_value_string(&columns, &values, "body")?;
-                    let body: crate::json::Value = crate::json::from_str(&body_str)
-                        .map_err(|e| RedDBError::Query(format!("invalid JSON body: {e}")))?;
-                    let input = CreateDocumentInput {
-                        collection: query.table.clone(),
-                        body,
-                        metadata,
-                        node_links: Vec::new(),
-                        vector_links: Vec::new(),
-                    };
-                    self.create_document(input)?;
-                }
-                InsertEntityType::Kv => {
-                    let (kv_values, mut metadata) =
-                        split_insert_metadata(self, &query.columns, row_values)?;
-                    merge_with_clauses(
-                        &mut metadata,
-                        query.ttl_ms,
-                        query.expires_at_ms,
-                        &query.with_metadata,
-                    );
-                    let (columns, values) = pairwise_columns_values(&kv_values);
-                    let key = find_column_value_string(&columns, &values, "key")?;
-                    let value = find_column_value(&columns, &values, "value")?;
-                    let input = CreateKvInput {
-                        collection: query.table.clone(),
-                        key,
-                        value,
-                        metadata,
-                    };
-                    self.create_kv(input)?;
-                }
-            }
 
-            inserted_count += 1;
+                inserted_count += 1;
+            }
         }
 
         // Auto-embed pipeline: generate embeddings for specified fields
@@ -341,8 +463,10 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &UpdateQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        let db = self.db();
         let store = self.inner.db.store();
         let effective_filter = effective_update_filter(query);
+        let compiled_plan = self.compile_update_plan(query)?;
 
         // ── FAST PATH: UPDATE ... WHERE _entity_id = N ──
         // Direct entity lookup instead of full collection scan.
@@ -351,14 +475,16 @@ impl RedDBRuntime {
                 .get_collection(&query.table)
                 .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
             if let Some(entity) = manager.get(EntityId::new(entity_id)) {
-                let operations = self.build_update_operations(query)?;
-                let input = PatchEntityInput {
-                    collection: query.table.clone(),
-                    id: entity.id,
-                    payload: crate::json::Value::Null,
-                    operations,
-                };
-                self.patch_entity(input)?;
+                let assignments =
+                    self.materialize_update_assignments_for_entity(query, &entity, &compiled_plan)?;
+                let applied = self.apply_materialized_update_for_entity(
+                    query.table.clone(),
+                    entity,
+                    &compiled_plan,
+                    assignments,
+                )?;
+                self.persist_update_chunk(std::slice::from_ref(&applied))?;
+                self.flush_update_chunk(&[applied]);
                 self.note_table_write(&query.table);
                 return Ok(RuntimeQueryResult::dml_result(
                     raw_query.to_string(),
@@ -395,20 +521,97 @@ impl RedDBRuntime {
                 let manager = store
                     .get_collection(&query.table)
                     .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
-                let operations = self.build_update_operations(query)?;
                 let mut affected: u64 = 0;
-                for eid in entity_ids {
-                    if manager.get(eid).is_some() {
-                        let input = PatchEntityInput {
-                            collection: query.table.clone(),
-                            id: eid,
-                            payload: crate::json::Value::Null,
-                            operations: operations.clone(),
-                        };
-                        if self.patch_entity(input).is_ok() {
-                            affected += 1;
+                let table_name = query.table.as_str();
+                for chunk in entity_ids.chunks(UPDATE_APPLY_CHUNK_SIZE) {
+                    let mut applied_chunk = Vec::with_capacity(chunk.len());
+                    for entity in manager.get_many(chunk).into_iter().flatten() {
+                        if !query_exec::evaluate_entity_filter_with_db(
+                            Some(db.as_ref()),
+                            &entity,
+                            filter,
+                            table_name,
+                            table_name,
+                        ) {
+                            continue;
                         }
+                        let assignments = self.materialize_update_assignments_for_entity(
+                            query,
+                            &entity,
+                            &compiled_plan,
+                        )?;
+                        applied_chunk.push(self.apply_materialized_update_for_entity(
+                            query.table.clone(),
+                            entity,
+                            &compiled_plan,
+                            assignments,
+                        )?);
                     }
+                    self.persist_update_chunk(&applied_chunk)?;
+                    affected += applied_chunk.len() as u64;
+                    self.flush_update_chunk(&applied_chunk);
+                }
+                if affected > 0 {
+                    self.note_table_write(&query.table);
+                }
+                return Ok(RuntimeQueryResult::dml_result(
+                    raw_query.to_string(),
+                    affected,
+                    "update",
+                    "runtime-dml",
+                ));
+            }
+        }
+
+        // ── SORTED-INDEX PATH: UPDATE ... WHERE range/between/in predicate ──
+        // Reuses the same sorted-index candidate generation as SELECT, then
+        // rechecks the full filter before applying the update so compound
+        // predicates remain correct.
+        if let Some(ref filter) = effective_filter {
+            let idx_store = self.index_store_ref();
+            if let Some(entity_ids) =
+                query_exec::try_sorted_index_lookup(filter, &query.table, idx_store, None)
+            {
+                if entity_ids.is_empty() {
+                    return Ok(RuntimeQueryResult::dml_result(
+                        raw_query.to_string(),
+                        0,
+                        "update",
+                        "runtime-dml",
+                    ));
+                }
+                let manager = store
+                    .get_collection(&query.table)
+                    .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
+                let mut affected: u64 = 0;
+                let table_name = query.table.as_str();
+                for chunk in entity_ids.chunks(UPDATE_APPLY_CHUNK_SIZE) {
+                    let mut applied_chunk = Vec::with_capacity(chunk.len());
+                    for entity in manager.get_many(chunk).into_iter().flatten() {
+                        if !query_exec::evaluate_entity_filter_with_db(
+                            Some(db.as_ref()),
+                            &entity,
+                            filter,
+                            table_name,
+                            table_name,
+                        ) {
+                            continue;
+                        }
+                        let assignments = self.materialize_update_assignments_for_entity(
+                            query,
+                            &entity,
+                            &compiled_plan,
+                        )?;
+                        applied_chunk.push(self.apply_materialized_update_for_entity(
+                            query.table.clone(),
+                            entity,
+                            &compiled_plan,
+                            assignments,
+                        )?);
+                    }
+                    self.persist_update_chunk(&applied_chunk)?;
+                    affected += applied_chunk.len() as u64;
+                    self.flush_update_chunk(&applied_chunk);
                 }
                 if affected > 0 {
                     self.note_table_write(&query.table);
@@ -426,37 +629,75 @@ impl RedDBRuntime {
             .get_collection(&query.table)
             .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
 
-        // Collect matching entity IDs using fast entity-level filter (no UnifiedRecord)
+        // Collect matching entity IDs first while holding only read locks, then
+        // fetch/apply in bounded chunks so bulk UPDATEs don't clone the whole
+        // matching set at once.
         let mut ids_to_update = Vec::new();
         let table_name = query.table.as_str();
+        if let Some(ref filter) = effective_filter {
+            let mut owned_zone_preds = Vec::new();
+            query_exec::extract_zone_predicates(filter, &mut owned_zone_preds);
+            let zone_preds: Vec<_> = owned_zone_preds
+                .iter()
+                .map(|(column, value, kind)| {
+                    (
+                        column.as_str(),
+                        match kind {
+                            crate::storage::unified::segment::ZoneColPredKind::Eq => {
+                                crate::storage::unified::segment::ZoneColPred::Eq(value)
+                            }
+                            crate::storage::unified::segment::ZoneColPredKind::Gt => {
+                                crate::storage::unified::segment::ZoneColPred::Gt(value)
+                            }
+                            crate::storage::unified::segment::ZoneColPredKind::Gte => {
+                                crate::storage::unified::segment::ZoneColPred::Gte(value)
+                            }
+                            crate::storage::unified::segment::ZoneColPredKind::Lt => {
+                                crate::storage::unified::segment::ZoneColPred::Lt(value)
+                            }
+                            crate::storage::unified::segment::ZoneColPredKind::Lte => {
+                                crate::storage::unified::segment::ZoneColPred::Lte(value)
+                            }
+                        },
+                    )
+                })
+                .collect();
 
-        manager.for_each_entity(|entity| {
-            let matches = match &effective_filter {
-                Some(filter) => {
-                    query_exec::evaluate_entity_filter(entity, filter, table_name, table_name)
+            manager.for_each_entity_zoned(&zone_preds, |entity| {
+                if query_exec::evaluate_entity_filter_with_db(
+                    Some(db.as_ref()),
+                    entity,
+                    filter,
+                    table_name,
+                    table_name,
+                ) {
+                    ids_to_update.push(entity.id);
                 }
-                None => true,
-            };
-            if matches {
+                true
+            });
+        } else {
+            manager.for_each_entity(|entity| {
                 ids_to_update.push(entity.id);
-            }
-            true
-        });
+                true
+            });
+        }
 
-        // Apply updates in batch — build operations once, apply to each entity
         let mut affected: u64 = 0;
-        let operations_template = self.build_update_operations(query)?;
-
-        for id in ids_to_update {
-            let input = PatchEntityInput {
-                collection: query.table.clone(),
-                id,
-                payload: crate::json::Value::Null,
-                operations: operations_template.clone(),
-            };
-            if self.patch_entity(input).is_ok() {
-                affected += 1;
+        for chunk in ids_to_update.chunks(UPDATE_APPLY_CHUNK_SIZE) {
+            let mut applied_chunk = Vec::with_capacity(chunk.len());
+            for entity in manager.get_many(chunk).into_iter().flatten() {
+                let assignments =
+                    self.materialize_update_assignments_for_entity(query, &entity, &compiled_plan)?;
+                applied_chunk.push(self.apply_materialized_update_for_entity(
+                    query.table.clone(),
+                    entity,
+                    &compiled_plan,
+                    assignments,
+                )?);
             }
+            self.persist_update_chunk(&applied_chunk)?;
+            affected += applied_chunk.len() as u64;
+            self.flush_update_chunk(&applied_chunk);
         }
 
         if affected > 0 {
@@ -471,55 +712,186 @@ impl RedDBRuntime {
         ))
     }
 
-    /// Build patch operations from an UPDATE query's assignments.
-    fn build_update_operations(
-        &self,
-        query: &UpdateQuery,
-    ) -> RedDBResult<Vec<PatchEntityOperation>> {
-        let mut operations: Vec<PatchEntityOperation> = query
-            .assignments
-            .iter()
-            .map(|(col, val)| {
-                if let Some(metadata_key) = resolve_sql_ttl_metadata_key(col) {
-                    let metadata_value = sql_literal_to_metadata_value(metadata_key, val)?;
-                    Ok(PatchEntityOperation {
-                        op: PatchEntityOperationType::Set,
-                        path: vec!["metadata".to_string(), metadata_key.to_string()],
-                        value: Some(metadata_value_to_json(&metadata_value)),
-                    })
+    fn compile_update_plan(&self, query: &UpdateQuery) -> RedDBResult<CompiledUpdatePlan> {
+        let mut static_field_assignments = Vec::new();
+        let mut static_metadata_assignments = Vec::new();
+        let mut dynamic_assignments = Vec::new();
+        let row_contract_plan = build_row_update_contract_plan(&self.db(), &query.table)?;
+        let mut row_modified_columns = Vec::new();
+
+        for (column, expr) in &query.assignment_exprs {
+            let metadata_key = resolve_sql_ttl_metadata_key(column);
+            if let Ok(value) = fold_expr_to_value(expr.clone()) {
+                if let Some(metadata_key) = metadata_key {
+                    static_metadata_assignments.push((
+                        metadata_key.to_string(),
+                        sql_literal_to_metadata_value(metadata_key, &value)?,
+                    ));
                 } else {
-                    let json_val = storage_value_to_json(val);
-                    Ok(PatchEntityOperation {
-                        op: PatchEntityOperationType::Set,
-                        path: vec!["fields".to_string(), col.clone()],
-                        value: Some(json_val),
-                    })
+                    static_field_assignments.push((
+                        column.clone(),
+                        normalize_row_update_assignment_with_plan(
+                            &query.table,
+                            column,
+                            value,
+                            row_contract_plan.as_ref(),
+                        )?,
+                    ));
+                    row_modified_columns.push(column.clone());
                 }
+                continue;
+            }
+
+            dynamic_assignments.push(CompiledUpdateAssignment {
+                column: column.clone(),
+                expr: expr.clone(),
+                metadata_key,
+                row_rule: if metadata_key.is_none() {
+                    if let Some(plan) = row_contract_plan.as_ref() {
+                        if plan.timestamps_enabled
+                            && (column == "created_at" || column == "updated_at")
+                        {
+                            return Err(RedDBError::Query(format!(
+                                "collection '{}' manages '{}' automatically — do not set it in UPDATE",
+                                query.table, column
+                            )));
+                        }
+                        if let Some(rule) = plan.declared_rules.get(column) {
+                            Some(rule.clone())
+                        } else if plan.strict_schema {
+                            return Err(RedDBError::Query(format!(
+                                "collection '{}' is strict and does not allow undeclared fields: {}",
+                                query.table, column
+                            )));
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                },
+            });
+            if metadata_key.is_none() {
+                row_modified_columns.push(column.clone());
+            }
+        }
+
+        let row_modified_columns = dedupe_update_columns(row_modified_columns);
+        let row_touches_unique_columns = row_contract_plan.as_ref().is_some_and(|plan| {
+            row_modified_columns.iter().any(|column| {
+                plan.unique_columns
+                    .keys()
+                    .any(|unique| unique.eq_ignore_ascii_case(column))
             })
-            .collect::<RedDBResult<Vec<_>>>()?;
+        });
 
         if let Some(ttl_ms) = query.ttl_ms {
-            operations.push(PatchEntityOperation {
-                op: PatchEntityOperationType::Set,
-                path: vec!["metadata".to_string(), "_ttl_ms".to_string()],
-                value: Some(crate::json::Value::Number(ttl_ms as f64)),
-            });
+            static_metadata_assignments
+                .push(("_ttl_ms".to_string(), metadata_u64_to_value(ttl_ms)));
         }
         if let Some(expires_at_ms) = query.expires_at_ms {
-            operations.push(PatchEntityOperation {
-                op: PatchEntityOperationType::Set,
-                path: vec!["metadata".to_string(), "_expires_at".to_string()],
-                value: Some(crate::json::Value::Number(expires_at_ms as f64)),
-            });
+            static_metadata_assignments.push((
+                "_expires_at".to_string(),
+                metadata_u64_to_value(expires_at_ms),
+            ));
         }
         for (key, val) in &query.with_metadata {
-            operations.push(PatchEntityOperation {
-                op: PatchEntityOperationType::Set,
-                path: vec!["metadata".to_string(), key.clone()],
-                value: Some(storage_value_to_json(val)),
-            });
+            static_metadata_assignments.push((key.clone(), storage_value_to_metadata_value(val)));
         }
-        Ok(operations)
+
+        Ok(CompiledUpdatePlan {
+            static_field_assignments,
+            static_metadata_assignments,
+            dynamic_assignments,
+            row_contract_plan,
+            row_modified_columns,
+            row_touches_unique_columns,
+        })
+    }
+
+    fn materialize_update_assignments_for_entity(
+        &self,
+        query: &UpdateQuery,
+        entity: &UnifiedEntity,
+        compiled_plan: &CompiledUpdatePlan,
+    ) -> RedDBResult<MaterializedUpdateAssignments> {
+        let mut assignments = MaterializedUpdateAssignments::default();
+        let mut record: Option<UnifiedRecord> = None;
+
+        for assignment in &compiled_plan.dynamic_assignments {
+            if record.is_none() {
+                record = runtime_any_record_from_entity_ref(entity);
+            }
+            let Some(record) = record.as_ref() else {
+                return Err(RedDBError::Query(format!(
+                    "UPDATE could not materialize runtime record for entity {} in '{}'",
+                    entity.id.raw(),
+                    query.table
+                )));
+            };
+            let value = super::expr_eval::evaluate_runtime_expr_with_db(
+                Some(self.inner.db.as_ref()),
+                &assignment.expr,
+                record,
+                Some(query.table.as_str()),
+                Some(query.table.as_str()),
+            )
+            .ok_or_else(|| {
+                RedDBError::Query(format!(
+                    "failed to evaluate UPDATE expression for column '{}'",
+                    assignment.column
+                ))
+            })?;
+
+            if let Some(metadata_key) = assignment.metadata_key {
+                assignments.dynamic_metadata_assignments.push((
+                    metadata_key.to_string(),
+                    sql_literal_to_metadata_value(metadata_key, &value)?,
+                ));
+            } else {
+                assignments.dynamic_field_assignments.push((
+                    assignment.column.clone(),
+                    normalize_row_update_value_for_rule(
+                        &query.table,
+                        value,
+                        assignment.row_rule.as_ref(),
+                    )?,
+                ));
+            }
+        }
+
+        Ok(assignments)
+    }
+
+    fn apply_materialized_update_for_entity(
+        &self,
+        collection: String,
+        entity: UnifiedEntity,
+        compiled_plan: &CompiledUpdatePlan,
+        assignments: MaterializedUpdateAssignments,
+    ) -> RedDBResult<AppliedEntityMutation> {
+        if matches!(entity.data, EntityData::Row(_)) {
+            return self.apply_loaded_sql_update_row_core(
+                collection,
+                entity,
+                &compiled_plan.static_field_assignments,
+                assignments.dynamic_field_assignments,
+                &compiled_plan.static_metadata_assignments,
+                assignments.dynamic_metadata_assignments,
+                compiled_plan.row_contract_plan.as_ref(),
+                &compiled_plan.row_modified_columns,
+                compiled_plan.row_touches_unique_columns,
+            );
+        }
+
+        self.apply_loaded_patch_entity_core(
+            collection,
+            entity,
+            crate::json::Value::Null,
+            build_patch_operations_from_materialized_assignments(compiled_plan, assignments),
+        )
     }
 
     /// Execute DELETE FROM table WHERE filter
@@ -528,6 +900,7 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &DeleteQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        let db = self.db();
         let store = self.inner.db.store();
         let effective_filter = effective_delete_filter(query);
 
@@ -563,18 +936,69 @@ impl RedDBRuntime {
             if let Some(entity_ids) =
                 query_exec::try_hash_eq_lookup(filter, &query.table, idx_store)
             {
+                let manager = store
+                    .get_collection(&query.table)
+                    .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
+                let table_name = query.table.as_str();
                 let mut affected: u64 = 0;
-                for eid in entity_ids {
-                    if self
-                        .delete_entity(DeleteEntityInput {
-                            collection: query.table.clone(),
-                            id: eid,
-                        })
-                        .is_ok()
-                    {
-                        affected += 1;
+                let mut batch_ids = Vec::with_capacity(entity_ids.len());
+                for entity in manager.get_many(&entity_ids).into_iter().flatten() {
+                    if !query_exec::evaluate_entity_filter_with_db(
+                        Some(db.as_ref()),
+                        &entity,
+                        filter,
+                        table_name,
+                        table_name,
+                    ) {
+                        continue;
                     }
+                    batch_ids.push(entity.id);
                 }
+                affected += self.delete_entities_batch(&query.table, &batch_ids)?;
+                if affected > 0 {
+                    self.note_table_write(&query.table);
+                }
+                return Ok(RuntimeQueryResult::dml_result(
+                    raw_query.to_string(),
+                    affected,
+                    "delete",
+                    "runtime-dml",
+                ));
+            }
+        }
+
+        if let Some(ref filter) = effective_filter {
+            let idx_store = self.index_store_ref();
+            if let Some(entity_ids) =
+                query_exec::try_sorted_index_lookup(filter, &query.table, idx_store, None)
+            {
+                if entity_ids.is_empty() {
+                    return Ok(RuntimeQueryResult::dml_result(
+                        raw_query.to_string(),
+                        0,
+                        "delete",
+                        "runtime-dml",
+                    ));
+                }
+                let manager = store
+                    .get_collection(&query.table)
+                    .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
+                let table_name = query.table.as_str();
+                let mut affected: u64 = 0;
+                let mut batch_ids = Vec::with_capacity(entity_ids.len());
+                for entity in manager.get_many(&entity_ids).into_iter().flatten() {
+                    if !query_exec::evaluate_entity_filter_with_db(
+                        Some(db.as_ref()),
+                        &entity,
+                        filter,
+                        table_name,
+                        table_name,
+                    ) {
+                        continue;
+                    }
+                    batch_ids.push(entity.id);
+                }
+                affected += self.delete_entities_batch(&query.table, &batch_ids)?;
                 if affected > 0 {
                     self.note_table_write(&query.table);
                 }
@@ -594,26 +1018,57 @@ impl RedDBRuntime {
         let mut ids_to_delete = Vec::new();
 
         let table_name = query.table.as_str();
-        manager.for_each_entity(|entity| {
-            let matches = match &effective_filter {
-                Some(filter) => {
-                    query_exec::evaluate_entity_filter(entity, filter, table_name, table_name)
+        if let Some(ref filter) = effective_filter {
+            let mut owned_zone_preds = Vec::new();
+            query_exec::extract_zone_predicates(filter, &mut owned_zone_preds);
+            let zone_preds: Vec<_> = owned_zone_preds
+                .iter()
+                .map(|(column, value, kind)| {
+                    (
+                        column.as_str(),
+                        match kind {
+                            crate::storage::unified::segment::ZoneColPredKind::Eq => {
+                                crate::storage::unified::segment::ZoneColPred::Eq(value)
+                            }
+                            crate::storage::unified::segment::ZoneColPredKind::Gt => {
+                                crate::storage::unified::segment::ZoneColPred::Gt(value)
+                            }
+                            crate::storage::unified::segment::ZoneColPredKind::Gte => {
+                                crate::storage::unified::segment::ZoneColPred::Gte(value)
+                            }
+                            crate::storage::unified::segment::ZoneColPredKind::Lt => {
+                                crate::storage::unified::segment::ZoneColPred::Lt(value)
+                            }
+                            crate::storage::unified::segment::ZoneColPredKind::Lte => {
+                                crate::storage::unified::segment::ZoneColPred::Lte(value)
+                            }
+                        },
+                    )
+                })
+                .collect();
+
+            manager.for_each_entity_zoned(&zone_preds, |entity| {
+                if query_exec::evaluate_entity_filter_with_db(
+                    Some(db.as_ref()),
+                    entity,
+                    filter,
+                    table_name,
+                    table_name,
+                ) {
+                    ids_to_delete.push(entity.id);
                 }
-                None => true,
-            };
-            if matches {
+                true
+            });
+        } else {
+            manager.for_each_entity(|entity| {
                 ids_to_delete.push(entity.id);
-            }
-            true
-        });
+                true
+            });
+        }
 
         let mut affected: u64 = 0;
-        for id in ids_to_delete {
-            self.delete_entity(DeleteEntityInput {
-                collection: query.table.clone(),
-                id,
-            })?;
-            affected += 1;
+        for chunk in ids_to_delete.chunks(UPDATE_APPLY_CHUNK_SIZE) {
+            affected += self.delete_entities_batch(&query.table, chunk)?;
         }
 
         if affected > 0 {
@@ -627,6 +1082,69 @@ impl RedDBRuntime {
             "runtime-dml",
         ))
     }
+}
+
+fn build_patch_operations_from_materialized_assignments(
+    compiled_plan: &CompiledUpdatePlan,
+    assignments: MaterializedUpdateAssignments,
+) -> Vec<PatchEntityOperation> {
+    let mut operations = Vec::with_capacity(
+        compiled_plan.static_field_assignments.len()
+            + compiled_plan.static_metadata_assignments.len()
+            + assignments.dynamic_field_assignments.len()
+            + assignments.dynamic_metadata_assignments.len(),
+    );
+
+    for (column, value) in &compiled_plan.static_field_assignments {
+        operations.push(PatchEntityOperation {
+            op: PatchEntityOperationType::Set,
+            path: vec!["fields".to_string(), column.clone()],
+            value: Some(storage_value_to_json(&value)),
+        });
+    }
+
+    for (column, value) in assignments.dynamic_field_assignments {
+        operations.push(PatchEntityOperation {
+            op: PatchEntityOperationType::Set,
+            path: vec!["fields".to_string(), column],
+            value: Some(storage_value_to_json(&value)),
+        });
+    }
+
+    for (key, value) in &compiled_plan.static_metadata_assignments {
+        operations.push(PatchEntityOperation {
+            op: PatchEntityOperationType::Set,
+            path: vec!["metadata".to_string(), key.clone()],
+            value: Some(metadata_value_to_json(&value)),
+        });
+    }
+
+    for (key, value) in assignments.dynamic_metadata_assignments {
+        operations.push(PatchEntityOperation {
+            op: PatchEntityOperationType::Set,
+            path: vec!["metadata".to_string(), key],
+            value: Some(metadata_value_to_json(&value)),
+        });
+    }
+
+    operations
+}
+
+fn dedupe_update_columns(mut columns: Vec<String>) -> Vec<String> {
+    if columns.is_empty() {
+        return columns;
+    }
+
+    let mut unique = Vec::with_capacity(columns.len());
+    for column in columns.drain(..) {
+        if !unique
+            .iter()
+            .any(|existing: &String| existing.eq_ignore_ascii_case(&column))
+        {
+            unique.push(column);
+        }
+    }
+    unique
 }
 
 // =============================================================================
@@ -799,6 +1317,35 @@ fn apply_collection_default_ttl_metadata(
             MetadataValue::Timestamp(default_ttl_ms)
         },
     ));
+}
+
+fn ensure_non_tree_reserved_metadata_entries(
+    metadata: &[(String, MetadataValue)],
+) -> RedDBResult<()> {
+    for (key, _) in metadata {
+        ensure_non_tree_reserved_metadata_key(key)?;
+    }
+    Ok(())
+}
+
+fn ensure_non_tree_reserved_metadata_key(key: &str) -> RedDBResult<()> {
+    if key.starts_with(TREE_METADATA_PREFIX) {
+        return Err(RedDBError::Query(format!(
+            "metadata key '{}' is reserved for managed trees",
+            key
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_non_tree_structural_edge_label(label: &str) -> RedDBResult<()> {
+    if label.eq_ignore_ascii_case(TREE_CHILD_EDGE_LABEL) {
+        return Err(RedDBError::Query(format!(
+            "edge label '{}' is reserved for managed trees",
+            TREE_CHILD_EDGE_LABEL
+        )));
+    }
+    Ok(())
 }
 
 fn pairwise_columns_values(pairs: &[(String, Value)]) -> (Vec<String>, Vec<Value>) {
@@ -1133,6 +1680,59 @@ fn metadata_value_to_json(value: &MetadataValue) -> crate::json::Value {
                 .collect();
             JV::Array(refs)
         }
+    }
+}
+
+fn storage_value_to_metadata_value(value: &Value) -> MetadataValue {
+    match value {
+        Value::Null => MetadataValue::Null,
+        Value::Boolean(value) => MetadataValue::Bool(*value),
+        Value::Integer(value) => MetadataValue::Int(*value),
+        Value::UnsignedInteger(value) => metadata_u64_to_value(*value),
+        Value::Float(value) => MetadataValue::Float(*value),
+        Value::Text(value) => MetadataValue::String(value.clone()),
+        Value::Blob(value) => MetadataValue::Bytes(value.clone()),
+        Value::Timestamp(value) => {
+            if *value >= 0 {
+                metadata_u64_to_value(*value as u64)
+            } else {
+                MetadataValue::Int(*value)
+            }
+        }
+        Value::TimestampMs(value) => {
+            if *value >= 0 {
+                metadata_u64_to_value(*value as u64)
+            } else {
+                MetadataValue::Int(*value)
+            }
+        }
+        Value::Json(value) => MetadataValue::String(String::from_utf8_lossy(value).into_owned()),
+        Value::Uuid(value) => MetadataValue::String(format!("{value:?}")),
+        Value::Date(value) => MetadataValue::String(value.to_string()),
+        Value::Time(value) => MetadataValue::String(value.to_string()),
+        Value::Decimal(value) => MetadataValue::String(value.to_string()),
+        Value::Ipv4(value) => MetadataValue::String(format!(
+            "{}.{}.{}.{}",
+            (value >> 24) & 0xFF,
+            (value >> 16) & 0xFF,
+            (value >> 8) & 0xFF,
+            value & 0xFF
+        )),
+        Value::Port(value) => MetadataValue::Int(i64::from(*value)),
+        Value::Latitude(value) => MetadataValue::Float(*value as f64 / 1_000_000.0),
+        Value::Longitude(value) => MetadataValue::Float(*value as f64 / 1_000_000.0),
+        Value::GeoPoint(lat, lon) => MetadataValue::Geo {
+            lat: *lat as f64 / 1_000_000.0,
+            lon: *lon as f64 / 1_000_000.0,
+        },
+        Value::BigInt(value) => MetadataValue::String(value.to_string()),
+        Value::TableRef(value) => MetadataValue::String(value.clone()),
+        Value::PageRef(value) => MetadataValue::Int(*value as i64),
+        Value::Password(value) => MetadataValue::String(value.clone()),
+        Value::Array(values) => {
+            MetadataValue::Array(values.iter().map(storage_value_to_metadata_value).collect())
+        }
+        _ => MetadataValue::String(value.to_string()),
     }
 }
 

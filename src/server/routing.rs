@@ -716,6 +716,29 @@ impl RedDBServer {
                     };
                 }
                 if method == "POST" {
+                    if let Some(collection) = collection_from_action_path(&path, "trees") {
+                        return self.handle_create_tree(collection, body);
+                    }
+                    if let Some((collection, tree_name)) =
+                        collection_tree_action_path(&path, "nodes")
+                    {
+                        return self.handle_tree_insert_node(collection, tree_name, body);
+                    }
+                    if let Some((collection, tree_name)) =
+                        collection_tree_action_path(&path, "move")
+                    {
+                        return self.handle_tree_move(collection, tree_name, body);
+                    }
+                    if let Some((collection, tree_name)) =
+                        collection_tree_action_path(&path, "validate")
+                    {
+                        return self.handle_tree_validate(collection, tree_name);
+                    }
+                    if let Some((collection, tree_name)) =
+                        collection_tree_action_path(&path, "rebalance")
+                    {
+                        return self.handle_tree_rebalance(collection, tree_name, body);
+                    }
                     if let Some(collection) = collection_from_action_path(&path, "bulk/documents") {
                         return self.handle_bulk_create(
                             collection,
@@ -882,6 +905,13 @@ impl RedDBServer {
                     }
                 }
                 if method == "DELETE" {
+                    if let Some((collection, tree_name, node_id)) = collection_tree_node_path(&path)
+                    {
+                        return self.handle_tree_delete_node(collection, tree_name, node_id);
+                    }
+                    if let Some((collection, tree_name)) = collection_tree_bare_path(&path) {
+                        return self.handle_drop_tree(collection, tree_name);
+                    }
                     // DDL: DELETE /collections/:name
                     if let Some(name) = collection_from_bare_path(&path) {
                         return self.handle_drop_collection(name);
@@ -1011,6 +1041,48 @@ fn collection_entity_path(path: &str) -> Option<(&str, u64)> {
         None
     } else {
         Some((collection, id))
+    }
+}
+
+fn collection_tree_bare_path(path: &str) -> Option<(&str, &str)> {
+    let prefix = "/collections/";
+    let trimmed = path.strip_prefix(prefix)?;
+    let (collection, tree_name) = trimmed.split_once("/trees/")?;
+    let collection = collection.trim_matches('/');
+    let tree_name = tree_name.trim_matches('/');
+    if collection.is_empty() || tree_name.is_empty() || tree_name.contains('/') {
+        None
+    } else {
+        Some((collection, tree_name))
+    }
+}
+
+fn collection_tree_action_path<'a>(path: &'a str, action: &str) -> Option<(&'a str, &'a str)> {
+    let prefix = "/collections/";
+    let suffix = format!("/{action}");
+    let trimmed = path.strip_prefix(prefix)?.strip_suffix(&suffix)?;
+    let (collection, tree_name) = trimmed.split_once("/trees/")?;
+    let collection = collection.trim_matches('/');
+    let tree_name = tree_name.trim_matches('/');
+    if collection.is_empty() || tree_name.is_empty() || tree_name.contains('/') {
+        None
+    } else {
+        Some((collection, tree_name))
+    }
+}
+
+fn collection_tree_node_path(path: &str) -> Option<(&str, &str, u64)> {
+    let prefix = "/collections/";
+    let trimmed = path.strip_prefix(prefix)?;
+    let (head, node_id) = trimmed.split_once("/nodes/")?;
+    let (collection, tree_name) = head.split_once("/trees/")?;
+    let collection = collection.trim_matches('/');
+    let tree_name = tree_name.trim_matches('/');
+    let node_id = node_id.trim_matches('/').parse::<u64>().ok()?;
+    if collection.is_empty() || tree_name.is_empty() || tree_name.contains('/') {
+        None
+    } else {
+        Some((collection, tree_name, node_id))
     }
 }
 

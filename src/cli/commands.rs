@@ -70,8 +70,8 @@ pub fn all_commands() -> Vec<CommandDef> {
     vec![
     CommandDef {
       name: "server",
-      summary: "Start the database server",
-      usage: "red server [--grpc] [--http] [--grpc-bind 127.0.0.1:50051] [--http-bind 127.0.0.1:8080] [--path ./data/reddb.rdb]",
+      summary: "Start the database server (router/HTTP/gRPC/wire)",
+      usage: "red server [--grpc] [--http] [--grpc-bind 127.0.0.1:50051] [--http-bind 127.0.0.1:8080] [--wire-bind 127.0.0.1:5051] [--path ./data/reddb.rdb]",
       flags: server_flags(),
     },
     CommandDef {
@@ -107,7 +107,7 @@ pub fn all_commands() -> Vec<CommandDef> {
     CommandDef {
       name: "health",
       summary: "Run a health check against the server",
-      usage: "red health [--bind 0.0.0.0:6380]",
+      usage: "red health [--bind 127.0.0.1:5050] [--grpc|--http]",
       flags: health_flags(),
     },
     CommandDef {
@@ -187,8 +187,9 @@ pub fn main_help_text() -> String {
     out.push('\n');
 
     out.push_str("Examples:\n");
-    out.push_str("  red server --grpc --path ./data/reddb.rdb --bind 127.0.0.1:50051\n");
+    out.push_str("  red server --path ./data/reddb.rdb\n");
     out.push_str("  red server --grpc-bind 127.0.0.1:50051 --http-bind 127.0.0.1:8080 --path ./data/reddb.rdb\n");
+    out.push_str("  red server --wire-bind 127.0.0.1:5051 --path ./data/reddb.rdb\n");
     out.push_str("  sudo red service install --binary /usr/local/bin/red --grpc-bind 0.0.0.0:50051 --http-bind 0.0.0.0:8080 --path /var/lib/reddb/data.rdb\n");
     out.push_str("  red replica --primary-addr http://primary:50051 --path ./data/replica.rdb\n");
     out.push_str("  red query \"SELECT * FROM users\"\n");
@@ -202,8 +203,8 @@ pub fn main_help_text() -> String {
     out.push_str("  red auth create-api-key alice --name \"ci-token\" --role write\n");
     out.push_str("  red auth list-users\n");
     out.push_str("  red auth login alice --password secret\n");
-    out.push_str("  red connect localhost:6380\n");
-    out.push_str("  red connect --query \"SELECT * FROM users\" localhost:6380\n");
+    out.push_str("  red connect 127.0.0.1:5050\n");
+    out.push_str("  red connect --query \"SELECT * FROM users\" 127.0.0.1:5050\n");
     out.push('\n');
 
     out.push_str("Run 'red <command> --help' for more information on a command.\n");
@@ -270,11 +271,18 @@ fn server_flags() -> Vec<FlagSchema> {
             .with_default("./data/reddb.rdb"),
         FlagSchema::new("bind")
             .with_short('b')
-            .with_description("Bind address (host:port) for legacy single-transport mode"),
+            .with_description("Bind address (host:port) for the routed front-door or legacy single-transport mode"),
         FlagSchema::boolean("grpc").with_description("Enable the gRPC API"),
         FlagSchema::boolean("http").with_description("Serve the HTTP API"),
         FlagSchema::new("grpc-bind").with_description("Explicit gRPC bind address (host:port)"),
         FlagSchema::new("http-bind").with_description("Explicit HTTP bind address (host:port)"),
+        FlagSchema::new("wire-bind").with_description("Explicit wire TCP bind address (host:port)"),
+        FlagSchema::new("wire-tls-bind")
+            .with_description("Explicit wire TLS bind address (host:port)"),
+        FlagSchema::new("wire-tls-cert")
+            .with_description("Path to TLS certificate PEM for wire TLS"),
+        FlagSchema::new("wire-tls-key")
+            .with_description("Path to TLS private key PEM for wire TLS"),
         FlagSchema::new("role")
             .with_short('r')
             .with_description("Replication role")
@@ -301,11 +309,12 @@ fn replica_flags() -> Vec<FlagSchema> {
             .with_default("./data/reddb.rdb"),
         FlagSchema::new("bind")
             .with_short('b')
-            .with_description("Bind address (host:port) for legacy single-transport mode"),
+            .with_description("Bind address (host:port) for the routed front-door or legacy single-transport mode"),
         FlagSchema::boolean("grpc").with_description("Enable the gRPC API"),
         FlagSchema::boolean("http").with_description("Serve the HTTP API"),
         FlagSchema::new("grpc-bind").with_description("Explicit gRPC bind address (host:port)"),
         FlagSchema::new("http-bind").with_description("Explicit HTTP bind address (host:port)"),
+        FlagSchema::new("wire-bind").with_description("Explicit wire TCP bind address (host:port)"),
         FlagSchema::new("vault")
             .with_description("Enable encrypted auth vault (reserved pages in main .rdb file)")
             .with_default("false"),
@@ -332,7 +341,7 @@ fn service_flags() -> Vec<FlagSchema> {
             .with_default("/var/lib/reddb/data.rdb"),
         FlagSchema::new("bind")
             .with_short('b')
-            .with_description("Bind address (host:port) for legacy single-transport mode"),
+            .with_description("Bind address (host:port) for the routed front-door or legacy single-transport mode"),
         FlagSchema::boolean("grpc").with_description("Enable the gRPC API in the service"),
         FlagSchema::boolean("http").with_description("Install an HTTP service"),
         FlagSchema::new("grpc-bind").with_description("Explicit gRPC bind address (host:port)"),

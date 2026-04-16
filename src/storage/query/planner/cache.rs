@@ -164,6 +164,21 @@ impl PlanCache {
         self
     }
 
+    /// Read-only cache probe — no LRU promotion, no mutation.
+    ///
+    /// Use this with a `read()` lock in the hot query path so concurrent
+    /// readers don't serialize on a write lock. Falls back to `None` when
+    /// the entry is expired or has a pending replan; the caller must then
+    /// re-acquire a `write()` lock and call `get()` to handle eviction and
+    /// miss insertion.
+    pub fn peek(&self, key: &str) -> Option<&CachedPlan> {
+        let entry = self.entries.get(key)?;
+        if entry.needs_replan() || entry.is_expired(self.ttl) {
+            return None;
+        }
+        Some(entry)
+    }
+
     /// Get a cached plan by key
     pub fn get(&mut self, key: &str) -> Option<&CachedPlan> {
         if self

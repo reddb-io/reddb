@@ -614,7 +614,10 @@ impl MetadataStore {
                     self.entries
                         .iter()
                         .filter(|(_, entry)| {
-                            entry.get(key).map(|candidate| candidate.matches_eq(value)).unwrap_or(false)
+                            entry
+                                .get(key)
+                                .map(|candidate| candidate.matches_eq(value))
+                                .unwrap_or(false)
                         })
                         .map(|(id, _)| *id)
                         .collect()
@@ -629,7 +632,10 @@ impl MetadataStore {
                 self.entries
                     .iter()
                     .filter(|(_, entry)| {
-                        entry.get(key).map(|candidate| !candidate.matches_eq(value)).unwrap_or(true)
+                        entry
+                            .get(key)
+                            .map(|candidate| !candidate.matches_eq(value))
+                            .unwrap_or(true)
                     })
                     .map(|(id, _)| *id)
                     .collect()
@@ -642,7 +648,8 @@ impl MetadataStore {
                     self.entries
                         .iter()
                         .filter(|(_, entry)| {
-                            entry.get(key)
+                            entry
+                                .get(key)
                                 .and_then(|candidate| candidate.compare(value))
                                 .map(|ord| ord == std::cmp::Ordering::Greater)
                                 .unwrap_or(false)
@@ -658,7 +665,8 @@ impl MetadataStore {
                     self.entries
                         .iter()
                         .filter(|(_, entry)| {
-                            entry.get(key)
+                            entry
+                                .get(key)
                                 .and_then(|candidate| candidate.compare(value))
                                 .map(|ord| ord != std::cmp::Ordering::Less)
                                 .unwrap_or(false)
@@ -674,7 +682,8 @@ impl MetadataStore {
                     self.entries
                         .iter()
                         .filter(|(_, entry)| {
-                            entry.get(key)
+                            entry
+                                .get(key)
                                 .and_then(|candidate| candidate.compare(value))
                                 .map(|ord| ord == std::cmp::Ordering::Less)
                                 .unwrap_or(false)
@@ -690,7 +699,8 @@ impl MetadataStore {
                     self.entries
                         .iter()
                         .filter(|(_, entry)| {
-                            entry.get(key)
+                            entry
+                                .get(key)
                                 .and_then(|candidate| candidate.compare(value))
                                 .map(|ord| ord != std::cmp::Ordering::Greater)
                                 .unwrap_or(false)
@@ -700,18 +710,21 @@ impl MetadataStore {
                 }),
             MetadataFilter::In(key, values) => {
                 if let Some(index) = self.indexes.get(key) {
-                    if let Some(result) = values.iter().try_fold(HashSet::new(), |mut acc, value| {
-                        let ids = index.exact_match_ids(value)?;
-                        acc.extend(ids);
-                        Some(acc)
-                    }) {
+                    if let Some(result) =
+                        values.iter().try_fold(HashSet::new(), |mut acc, value| {
+                            let ids = index.exact_match_ids(value)?;
+                            acc.extend(ids);
+                            Some(acc)
+                        })
+                    {
                         return result;
                     }
                 }
                 self.entries
                     .iter()
                     .filter(|(_, entry)| {
-                        entry.get(key)
+                        entry
+                            .get(key)
                             .map(|candidate| values.iter().any(|value| candidate.matches_eq(value)))
                             .unwrap_or(false)
                     })
@@ -734,8 +747,11 @@ impl MetadataStore {
                 self.entries
                     .iter()
                     .filter(|(_, entry)| {
-                        entry.get(key)
-                            .map(|candidate| !values.iter().any(|value| candidate.matches_eq(value)))
+                        entry
+                            .get(key)
+                            .map(|candidate| {
+                                !values.iter().any(|value| candidate.matches_eq(value))
+                            })
                             .unwrap_or(true)
                     })
                     .map(|(id, _)| *id)

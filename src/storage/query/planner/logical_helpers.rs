@@ -397,6 +397,9 @@ pub(crate) fn join_expr_exposes_field_table(expr: &QueryExpr, table: &str) -> bo
         | QueryExpr::CreateQueue(_)
         | QueryExpr::DropQueue(_)
         | QueryExpr::QueueCommand(_)
+        | QueryExpr::CreateTree(_)
+        | QueryExpr::DropTree(_)
+        | QueryExpr::TreeCommand(_)
         | QueryExpr::ExplainAlter(_) => false,
     }
 }
@@ -706,6 +709,9 @@ pub(crate) fn query_expr_kind(expr: &QueryExpr) -> &'static str {
         QueryExpr::CreateQueue(_) => "create_queue",
         QueryExpr::DropQueue(_) => "drop_queue",
         QueryExpr::QueueCommand(_) => "queue_command",
+        QueryExpr::CreateTree(_) => "create_tree",
+        QueryExpr::DropTree(_) => "drop_tree",
+        QueryExpr::TreeCommand(_) => "tree_command",
         QueryExpr::ExplainAlter(_) => "explain_alter",
     }
 }
@@ -750,7 +756,7 @@ pub(crate) fn summarize_value(value: &Value) -> String {
         ),
         Value::Date(days) => format!("date({})", days),
         Value::Time(ms) => format!("time({})", ms),
-        Value::Decimal(v) => format!("{:.4}", *v as f64 / 10_000.0),
+        Value::Decimal(v) => Value::Decimal(*v).display_string(),
         Value::EnumValue(i) => format!("enum({})", i),
         Value::Array(elems) => format!("array({})", elems.len()),
         Value::TimestampMs(ms) => format!("timestamp_ms({})", ms),
@@ -786,6 +792,8 @@ pub(crate) fn summarize_value(value: &Value) -> String {
         Value::Lang2(c) => format!("lang({})", String::from_utf8_lossy(c)),
         Value::Lang5(c) => format!("lang({})", String::from_utf8_lossy(c)),
         Value::Currency(c) => format!("currency({})", String::from_utf8_lossy(c)),
+        Value::AssetCode(code) => format!("asset_code({})", code),
+        Value::Money { .. } => format!("money({})", value.display_string()),
         Value::ColorAlpha([r, g, b, a]) => format!("#{:02X}{:02X}{:02X}{:02X}", r, g, b, a),
         Value::BigInt(v) => format!("bigint({})", v),
         Value::KeyRef(col, key) => format!("key_ref({}:{})", col, key),

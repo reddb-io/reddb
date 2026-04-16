@@ -1165,6 +1165,35 @@ impl UnifiedStore {
                 *pos += len;
                 Value::Password(hash)
             }
+            50 => {
+                let len = Self::read_varu32_safe(buf, pos)?;
+                let code = String::from_utf8(buf[*pos..*pos + len].to_vec())?;
+                *pos += len;
+                Value::AssetCode(code)
+            }
+            51 => {
+                let len = Self::read_varu32_safe(buf, pos)?;
+                let asset_code = String::from_utf8(buf[*pos..*pos + len].to_vec())?;
+                *pos += len;
+                let scale = buf[*pos];
+                *pos += 1;
+                let minor_units = i64::from_le_bytes([
+                    buf[*pos],
+                    buf[*pos + 1],
+                    buf[*pos + 2],
+                    buf[*pos + 3],
+                    buf[*pos + 4],
+                    buf[*pos + 5],
+                    buf[*pos + 6],
+                    buf[*pos + 7],
+                ]);
+                *pos += 8;
+                Value::Money {
+                    asset_code,
+                    minor_units,
+                    scale,
+                }
+            }
             // C3 TOAST: compressed Text (0x85) and Blob (0x86).
             0x85 => {
                 let orig_len = Self::read_varu32_safe(buf, pos)?;
@@ -1420,6 +1449,22 @@ impl UnifiedStore {
             Value::Currency(c) => {
                 buf.push(41);
                 buf.extend_from_slice(c);
+            }
+            Value::AssetCode(code) => {
+                buf.push(50);
+                write_varu32(buf, code.len() as u32);
+                buf.extend_from_slice(code.as_bytes());
+            }
+            Value::Money {
+                asset_code,
+                minor_units,
+                scale,
+            } => {
+                buf.push(51);
+                write_varu32(buf, asset_code.len() as u32);
+                buf.extend_from_slice(asset_code.as_bytes());
+                buf.push(*scale);
+                buf.extend_from_slice(&minor_units.to_le_bytes());
             }
             Value::ColorAlpha(rgba) => {
                 buf.push(42);

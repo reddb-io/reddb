@@ -11,6 +11,9 @@ use crate::storage::unified::MetadataValue;
 use crate::storage::EntityId;
 use crate::{RedDBError, RedDBResult};
 
+const TREE_CHILD_EDGE_LABEL: &str = "TREE_CHILD";
+const TREE_METADATA_PREFIX: &str = "red.tree.";
+
 pub(crate) fn parse_create_row_input(
     collection: String,
     payload: &JsonValue,
@@ -92,6 +95,7 @@ pub(crate) fn parse_create_node_input(
                     .get("edge_label")
                     .and_then(JsonValue::as_str)
                     .unwrap_or("RELATED_TO");
+                ensure_non_tree_structural_edge_label(edge_label)?;
                 let weight = object
                     .get("weight")
                     .and_then(JsonValue::as_f64)
@@ -130,6 +134,7 @@ pub(crate) fn parse_create_edge_input(
         .ok_or_else(|| {
             RedDBError::Query("payload must contain a string field named 'label'".to_string())
         })?;
+    ensure_non_tree_structural_edge_label(label)?;
     let from = parse_required_u64_json(payload, "from", "edge create payload")?;
     let to = parse_required_u64_json(payload, "to", "edge create payload")?;
 
@@ -228,12 +233,33 @@ fn parse_metadata_entries(payload: &JsonValue) -> RedDBResult<Vec<(String, Metad
     if let Some(metadata) = payload.get("metadata").and_then(JsonValue::as_object) {
         out.reserve(metadata.len());
         for (key, value) in metadata {
+            ensure_non_tree_reserved_metadata_key(key)?;
             out.push((key.clone(), json_to_metadata_value(value)?));
         }
     }
     out.extend(parse_top_level_ttl_metadata_entries(payload)?);
 
     Ok(out)
+}
+
+fn ensure_non_tree_reserved_metadata_key(key: &str) -> RedDBResult<()> {
+    if key.starts_with(TREE_METADATA_PREFIX) {
+        return Err(RedDBError::Query(format!(
+            "metadata key '{}' is reserved for managed trees",
+            key
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_non_tree_structural_edge_label(label: &str) -> RedDBResult<()> {
+    if label.eq_ignore_ascii_case(TREE_CHILD_EDGE_LABEL) {
+        return Err(RedDBError::Query(format!(
+            "edge label '{}' is reserved for managed trees",
+            TREE_CHILD_EDGE_LABEL
+        )));
+    }
+    Ok(())
 }
 
 fn parse_node_embeddings(payload: &JsonValue) -> RedDBResult<Vec<CreateNodeEmbeddingInput>> {

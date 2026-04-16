@@ -150,14 +150,12 @@ impl RedDBServer {
         json_response(200, JsonValue::Object(object))
     }
 
-    /// Fast bulk insert for rows — uses page-based writer when pager available.
+    /// Fast bulk insert for rows through the canonical runtime batch path.
     pub(crate) fn handle_bulk_create_rows_fast(
         &self,
         collection: &str,
         body: Vec<u8>,
     ) -> HttpResponse {
-        use crate::storage::schema::Value;
-
         let payload = match parse_json_body_allow_empty(&body) {
             Ok(payload) => payload,
             Err(response) => return response,
@@ -169,77 +167,28 @@ impl RedDBServer {
             return json_error(400, "field 'items' cannot be empty");
         }
 
-        // Parse all items into entities using the columnar RowData
-        // path: one shared `Arc<Vec<String>>` schema taken from the
-        // first row, one shared `Arc<str>` table name, `Vec<Value>`
-        // per row. This skips `items.len()` HashMap allocations and
-        // `items.len() * ncols` string clones relative to the
-        // named-only representation.
-        let table: Arc<str> = Arc::from(collection);
-        let mut schema_arc: Option<Arc<Vec<String>>> = None;
-        let mut entities = Vec::with_capacity(items.len());
-        for item in items {
-            let fields = match item.get("fields").and_then(|f| f.as_object()) {
-                Some(f) => f,
-                None => return json_error(400, "each item must have a 'fields' object"),
-            };
-            let schema = match &schema_arc {
-                Some(s) => Arc::clone(s),
-                None => {
-                    let names: Vec<String> = fields.keys().cloned().collect();
-                    let arc = Arc::new(names);
-                    schema_arc = Some(Arc::clone(&arc));
-                    arc
+        let mut rows = Vec::with_capacity(items.len());
+        for (index, item) in items.iter().enumerate() {
+            match crate::application::entity_payload::parse_create_row_input(
+                collection.to_string(),
+                item,
+            ) {
+                Ok(input) => rows.push(input),
+                Err(err) => {
+                    return json_error(400, format!("bulk item {index} failed: {err}"));
                 }
-            };
-            let mut columns = Vec::with_capacity(schema.len());
-            for name in schema.iter() {
-                let val = match fields.get(name) {
-                    Some(v) => v,
-                    None => {
-                        columns.push(Value::Null);
-                        continue;
-                    }
-                };
-                let value = match val {
-                    JsonValue::String(s) => Value::Text(s.clone()),
-                    JsonValue::Number(n) => {
-                        if n.fract().abs() < f64::EPSILON {
-                            Value::Integer(*n as i64)
-                        } else {
-                            Value::Float(*n)
-                        }
-                    }
-                    JsonValue::Bool(b) => Value::Boolean(*b),
-                    JsonValue::Null => Value::Null,
-                    _ => Value::Text(format!("{val}")),
-                };
-                columns.push(value);
             }
-            entities.push(crate::storage::UnifiedEntity::new(
-                crate::storage::EntityId::new(0),
-                crate::storage::EntityKind::TableRow {
-                    table: Arc::clone(&table),
-                    row_id: 0,
-                },
-                crate::storage::EntityData::Row(crate::storage::RowData {
-                    columns,
-                    named: None,
-                    schema: Some(schema),
-                }),
-            ));
         }
 
-        // Single write path: `store.bulk_insert` drives the segment
-        // manager + persistent B-tree together, and the slotted leaf
-        // layout keeps it O(M) per entry. The old `PageBulkWriter`
-        // fast path wrote an orphaned page chain that no index
-        // pointed at, while still calling `store.bulk_insert` for
-        // queryability — BASELINE.md Finding #2 doubly paid.
-        let store = self.runtime.db().store();
-        let count = entities.len();
-        if let Err(e) = store.bulk_insert(collection, entities) {
-            return json_error(500, format!("bulk insert error: {e}"));
+        let count = rows.len();
+        if let Err(err) = self
+            .entity_use_cases()
+            .create_rows_batch(crate::application::CreateRowsBatchInput {
+                collection: collection.to_string(),
+                rows,
+            })
+        {
+            return json_error(400, err.to_string());
         }
 
         let mut object = Map::new();
@@ -458,5 +407,319 @@ impl RedDBServer {
             Ok(_) => json_error(404, format!("entity not found: {id}")),
             Err(err) => json_error(400, err.to_string()),
         }
+    }
+
+    pub(crate) fn handle_create_tree(&self, collection: &str, body: Vec<u8>) -> HttpResponse {
+        let payload = match parse_json_body_allow_empty(&body) {
+            Ok(payload) => payload,
+            Err(response) => return response,
+        };
+        let Some(name) = json_string_field(&payload, "name") else {
+            return json_error(400, "field 'name' is required");
+        };
+        let Some(root_payload) = payload.get("root") else {
+            return json_error(400, "field 'root' is required");
+        };
+        let root = match parse_tree_node_input(root_payload, false) {
+            Ok(node) => node,
+            Err(err) => return json_error(400, err),
+        };
+        let default_max_children = payload
+            .get("default_max_children")
+            .or_else(|| payload.get("max_children"))
+            .and_then(JsonValue::as_i64)
+            .and_then(|value| usize::try_from(value).ok())
+            .filter(|value| *value > 0);
+        let Some(default_max_children) = default_max_children else {
+            return json_error(
+                400,
+                "field 'default_max_children' must be a positive integer",
+            );
+        };
+        let input = crate::application::CreateTreeInput {
+            collection: collection.to_string(),
+            name,
+            root,
+            default_max_children,
+            if_not_exists: json_bool_field(&payload, "if_not_exists").unwrap_or(false),
+        };
+
+        match self.tree_use_cases().create_tree(input) {
+            Ok(result) => json_response(
+                200,
+                crate::presentation::query_result_json::runtime_query_json(&result, &None, &None),
+            ),
+            Err(err) => json_error(400, err.to_string()),
+        }
+    }
+
+    pub(crate) fn handle_drop_tree(&self, collection: &str, tree_name: &str) -> HttpResponse {
+        match self
+            .tree_use_cases()
+            .drop_tree(crate::application::DropTreeInput {
+                collection: collection.to_string(),
+                name: tree_name.to_string(),
+                if_exists: false,
+            }) {
+            Ok(result) => json_response(
+                200,
+                crate::presentation::query_result_json::runtime_query_json(&result, &None, &None),
+            ),
+            Err(err @ RedDBError::NotFound(_)) => json_error(404, err.to_string()),
+            Err(err) => json_error(400, err.to_string()),
+        }
+    }
+
+    pub(crate) fn handle_tree_insert_node(
+        &self,
+        collection: &str,
+        tree_name: &str,
+        body: Vec<u8>,
+    ) -> HttpResponse {
+        let payload = match parse_json_body_allow_empty(&body) {
+            Ok(payload) => payload,
+            Err(response) => return response,
+        };
+        let parent_id = payload
+            .get("parent_id")
+            .and_then(JsonValue::as_i64)
+            .and_then(|value| u64::try_from(value).ok())
+            .filter(|value| *value > 0);
+        let Some(parent_id) = parent_id else {
+            return json_error(400, "field 'parent_id' must be a positive integer");
+        };
+        let node_payload = payload.get("node").unwrap_or(&payload);
+        let node = match parse_tree_node_input(node_payload, true) {
+            Ok(node) => node,
+            Err(err) => return json_error(400, err),
+        };
+        let position = match parse_tree_position_input(&payload) {
+            Ok(position) => position,
+            Err(err) => return json_error(400, err),
+        };
+
+        match self
+            .tree_use_cases()
+            .insert_node(crate::application::InsertTreeNodeInput {
+                collection: collection.to_string(),
+                tree_name: tree_name.to_string(),
+                parent_id,
+                node,
+                position,
+            }) {
+            Ok(result) => json_response(
+                200,
+                crate::presentation::query_result_json::runtime_query_json(&result, &None, &None),
+            ),
+            Err(err @ RedDBError::NotFound(_)) => json_error(404, err.to_string()),
+            Err(err) => json_error(400, err.to_string()),
+        }
+    }
+
+    pub(crate) fn handle_tree_move(
+        &self,
+        collection: &str,
+        tree_name: &str,
+        body: Vec<u8>,
+    ) -> HttpResponse {
+        let payload = match parse_json_body_allow_empty(&body) {
+            Ok(payload) => payload,
+            Err(response) => return response,
+        };
+        let node_id = payload
+            .get("node_id")
+            .and_then(JsonValue::as_i64)
+            .and_then(|value| u64::try_from(value).ok())
+            .filter(|value| *value > 0);
+        let parent_id = payload
+            .get("parent_id")
+            .and_then(JsonValue::as_i64)
+            .and_then(|value| u64::try_from(value).ok())
+            .filter(|value| *value > 0);
+        let Some(node_id) = node_id else {
+            return json_error(400, "field 'node_id' must be a positive integer");
+        };
+        let Some(parent_id) = parent_id else {
+            return json_error(400, "field 'parent_id' must be a positive integer");
+        };
+        let position = match parse_tree_position_input(&payload) {
+            Ok(position) => position,
+            Err(err) => return json_error(400, err),
+        };
+
+        match self
+            .tree_use_cases()
+            .move_node(crate::application::MoveTreeNodeInput {
+                collection: collection.to_string(),
+                tree_name: tree_name.to_string(),
+                node_id,
+                parent_id,
+                position,
+            }) {
+            Ok(result) => json_response(
+                200,
+                crate::presentation::query_result_json::runtime_query_json(&result, &None, &None),
+            ),
+            Err(err @ RedDBError::NotFound(_)) => json_error(404, err.to_string()),
+            Err(err) => json_error(400, err.to_string()),
+        }
+    }
+
+    pub(crate) fn handle_tree_delete_node(
+        &self,
+        collection: &str,
+        tree_name: &str,
+        node_id: u64,
+    ) -> HttpResponse {
+        match self
+            .tree_use_cases()
+            .delete_node(crate::application::DeleteTreeNodeInput {
+                collection: collection.to_string(),
+                tree_name: tree_name.to_string(),
+                node_id,
+            }) {
+            Ok(result) => json_response(
+                200,
+                crate::presentation::query_result_json::runtime_query_json(&result, &None, &None),
+            ),
+            Err(err @ RedDBError::NotFound(_)) => json_error(404, err.to_string()),
+            Err(err) => json_error(400, err.to_string()),
+        }
+    }
+
+    pub(crate) fn handle_tree_validate(&self, collection: &str, tree_name: &str) -> HttpResponse {
+        match self
+            .tree_use_cases()
+            .validate(crate::application::ValidateTreeInput {
+                collection: collection.to_string(),
+                tree_name: tree_name.to_string(),
+            }) {
+            Ok(result) => json_response(
+                200,
+                crate::presentation::query_result_json::runtime_query_json(&result, &None, &None),
+            ),
+            Err(err @ RedDBError::NotFound(_)) => json_error(404, err.to_string()),
+            Err(err) => json_error(400, err.to_string()),
+        }
+    }
+
+    pub(crate) fn handle_tree_rebalance(
+        &self,
+        collection: &str,
+        tree_name: &str,
+        body: Vec<u8>,
+    ) -> HttpResponse {
+        let payload = match parse_json_body_allow_empty(&body) {
+            Ok(payload) => payload,
+            Err(response) => return response,
+        };
+        match self
+            .tree_use_cases()
+            .rebalance(crate::application::RebalanceTreeInput {
+                collection: collection.to_string(),
+                tree_name: tree_name.to_string(),
+                dry_run: json_bool_field(&payload, "dry_run").unwrap_or(false),
+            }) {
+            Ok(result) => json_response(
+                200,
+                crate::presentation::query_result_json::runtime_query_json(&result, &None, &None),
+            ),
+            Err(err @ RedDBError::NotFound(_)) => json_error(404, err.to_string()),
+            Err(err) => json_error(400, err.to_string()),
+        }
+    }
+}
+
+fn parse_tree_node_input(
+    payload: &JsonValue,
+    allow_max_children: bool,
+) -> Result<crate::application::TreeNodeInput, String> {
+    let JsonValue::Object(object) = payload else {
+        return Err("tree node payload must be a JSON object".to_string());
+    };
+    let label = object
+        .get("label")
+        .and_then(JsonValue::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| "field 'label' is required".to_string())?;
+    let node_type = object
+        .get("node_type")
+        .or_else(|| object.get("type"))
+        .and_then(JsonValue::as_str)
+        .map(str::to_string);
+
+    let properties = object
+        .get("properties")
+        .map(parse_tree_properties)
+        .transpose()?
+        .unwrap_or_default();
+    let metadata = object
+        .get("metadata")
+        .map(parse_tree_metadata)
+        .transpose()?
+        .unwrap_or_default();
+    let max_children = if allow_max_children {
+        object
+            .get("max_children")
+            .and_then(JsonValue::as_i64)
+            .and_then(|value| usize::try_from(value).ok())
+    } else {
+        None
+    };
+
+    Ok(crate::application::TreeNodeInput {
+        label,
+        node_type,
+        properties,
+        metadata,
+        max_children,
+    })
+}
+
+fn parse_tree_properties(payload: &JsonValue) -> Result<Vec<(String, Value)>, String> {
+    let JsonValue::Object(object) = payload else {
+        return Err("field 'properties' must be an object".to_string());
+    };
+    object
+        .iter()
+        .map(|(key, value)| {
+            crate::application::entity::json_to_storage_value(value)
+                .map(|value| (key.clone(), value))
+                .map_err(|err| format!("invalid property '{}': {}", key, err))
+        })
+        .collect()
+}
+
+fn parse_tree_metadata(payload: &JsonValue) -> Result<Vec<(String, MetadataValue)>, String> {
+    let JsonValue::Object(object) = payload else {
+        return Err("field 'metadata' must be an object".to_string());
+    };
+    object
+        .iter()
+        .map(|(key, value)| {
+            crate::application::entity::json_to_metadata_value(value)
+                .map(|value| (key.clone(), value))
+                .map_err(|err| format!("invalid metadata '{}': {}", key, err))
+        })
+        .collect()
+}
+
+fn parse_tree_position_input(
+    payload: &JsonValue,
+) -> Result<crate::application::TreePositionInput, String> {
+    match payload.get("position") {
+        None | Some(JsonValue::Null) => Ok(crate::application::TreePositionInput::Last),
+        Some(JsonValue::String(value)) if value.eq_ignore_ascii_case("first") => {
+            Ok(crate::application::TreePositionInput::First)
+        }
+        Some(JsonValue::String(value)) if value.eq_ignore_ascii_case("last") => {
+            Ok(crate::application::TreePositionInput::Last)
+        }
+        Some(JsonValue::Number(value)) if *value >= 0.0 && value.fract().abs() < f64::EPSILON => {
+            Ok(crate::application::TreePositionInput::Index(
+                *value as usize,
+            ))
+        }
+        Some(_) => Err("field 'position' must be 'first', 'last', or an integer".to_string()),
     }
 }

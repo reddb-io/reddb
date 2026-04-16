@@ -68,6 +68,9 @@ impl PhysicalMetadataFile {
             analytics_jobs: previous
                 .map(|previous| previous.analytics_jobs.clone())
                 .unwrap_or_default(),
+            tree_definitions: previous
+                .map(|previous| previous.tree_definitions.clone())
+                .unwrap_or_default(),
             collection_ttl_defaults_ms: previous
                 .map(|previous| previous.collection_ttl_defaults_ms.clone())
                 .unwrap_or_default(),
@@ -329,6 +332,15 @@ impl PhysicalMetadataFile {
             ),
         );
         root.insert(
+            "tree_definitions".to_string(),
+            JsonValue::Array(
+                self.tree_definitions
+                    .iter()
+                    .map(tree_definition_to_json)
+                    .collect(),
+            ),
+        );
+        root.insert(
             "collection_ttl_defaults_ms".to_string(),
             JsonValue::Object(
                 self.collection_ttl_defaults_ms
@@ -421,6 +433,17 @@ impl PhysicalMetadataFile {
                     values
                         .iter()
                         .map(analytics_job_from_json)
+                        .collect::<io::Result<Vec<_>>>()
+                })
+                .transpose()?
+                .unwrap_or_default(),
+            tree_definitions: object
+                .get("tree_definitions")
+                .and_then(JsonValue::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .map(tree_definition_from_json)
                         .collect::<io::Result<Vec<_>>>()
                 })
                 .transpose()?

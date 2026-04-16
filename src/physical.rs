@@ -365,6 +365,19 @@ pub struct PhysicalAnalyticsJob {
 }
 
 #[derive(Debug, Clone)]
+pub struct PhysicalTreeDefinition {
+    pub collection: String,
+    pub name: String,
+    pub root_id: u64,
+    pub default_max_children: usize,
+    pub ordered_children: bool,
+    pub ownership: String,
+    pub auto_fix_mode: String,
+    pub created_at_unix_ms: u128,
+    pub updated_at_unix_ms: u128,
+}
+
+#[derive(Debug, Clone)]
 pub struct PhysicalMetadataFile {
     pub protocol_version: String,
     pub generated_at_unix_ms: u128,
@@ -376,6 +389,7 @@ pub struct PhysicalMetadataFile {
     pub indexes: Vec<PhysicalIndexState>,
     pub graph_projections: Vec<PhysicalGraphProjection>,
     pub analytics_jobs: Vec<PhysicalAnalyticsJob>,
+    pub tree_definitions: Vec<PhysicalTreeDefinition>,
     pub collection_ttl_defaults_ms: BTreeMap<String, u64>,
     pub collection_contracts: Vec<CollectionContract>,
     pub exports: Vec<ExportDescriptor>,

@@ -160,6 +160,24 @@ pub(crate) fn storage_value_to_json(value: &Value) -> JsonValue {
         Value::Lang2(c) => JsonValue::String(String::from_utf8_lossy(c).to_string()),
         Value::Lang5(c) => JsonValue::String(String::from_utf8_lossy(c).to_string()),
         Value::Currency(c) => JsonValue::String(String::from_utf8_lossy(c).to_string()),
+        Value::AssetCode(code) => JsonValue::String(code.clone()),
+        Value::Money {
+            asset_code,
+            minor_units,
+            scale,
+        } => {
+            let mut object = Map::new();
+            object.insert(
+                "asset_code".to_string(),
+                JsonValue::String(asset_code.clone()),
+            );
+            object.insert(
+                "minor_units".to_string(),
+                JsonValue::Number(*minor_units as f64),
+            );
+            object.insert("scale".to_string(), JsonValue::Number(*scale as f64));
+            JsonValue::Object(object)
+        }
         Value::ColorAlpha([r, g, b, a]) => {
             JsonValue::String(format!("#{:02X}{:02X}{:02X}{:02X}", r, g, b, a))
         }

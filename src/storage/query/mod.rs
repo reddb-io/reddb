@@ -78,11 +78,12 @@ pub use analyzer::{
 };
 pub use ast::{
     AlterOperation, AlterTableQuery, CompareOp, CreateColumnDef, CreateTableQuery,
-    CreateTimeSeriesQuery, CteDefinition, CteQueryBuilder, DeleteQuery, DropTableQuery,
-    DropTimeSeriesQuery, EdgeDirection, EdgePattern, FieldRef, Filter as AstFilter, GraphCommand,
-    GraphPattern, GraphQuery, InsertEntityType, InsertQuery, JoinCondition, JoinQuery, JoinType,
-    NodePattern, NodeSelector, OrderByClause, PathQuery, Projection, QueryExpr, QueryWithCte,
-    SearchCommand, SelectItem, TableQuery, UpdateQuery, WithClause,
+    CreateTimeSeriesQuery, CreateTreeQuery, CteDefinition, CteQueryBuilder, DeleteQuery,
+    DropTableQuery, DropTimeSeriesQuery, DropTreeQuery, EdgeDirection, EdgePattern, FieldRef,
+    Filter as AstFilter, GraphCommand, GraphPattern, GraphQuery, InsertEntityType, InsertQuery,
+    JoinCondition, JoinQuery, JoinType, NodePattern, NodeSelector, OrderByClause, PathQuery,
+    Projection, QueryExpr, QueryWithCte, SearchCommand, SelectItem, TableQuery, TreeCommand,
+    TreeNodeSpec, TreePosition, UpdateQuery, WithClause,
 };
 pub use engine::{
     Binding, BindingBuilder, BindingIterator, Op, OpBGP, OpDisjunction, OpDistinct, OpExtend,

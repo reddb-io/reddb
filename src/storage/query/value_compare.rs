@@ -53,6 +53,8 @@ fn value_type_tag(v: &Value) -> u8 {
         Value::PageRef(_) => 47,
         Value::Secret(_) => 48,
         Value::Password(_) => 49,
+        Value::AssetCode(_) => 50,
+        Value::Money { .. } => 51,
     }
 }
 

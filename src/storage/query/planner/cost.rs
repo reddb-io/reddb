@@ -307,6 +307,9 @@ impl CostEstimator {
             | QueryExpr::CreateQueue(_)
             | QueryExpr::DropQueue(_)
             | QueryExpr::QueueCommand(_)
+            | QueryExpr::CreateTree(_)
+            | QueryExpr::DropTree(_)
+            | QueryExpr::TreeCommand(_)
             | QueryExpr::ExplainAlter(_) => PlanCost::new(1.0, 1.0, 0.0),
         }
     }
@@ -340,6 +343,9 @@ impl CostEstimator {
             | QueryExpr::CreateQueue(_)
             | QueryExpr::DropQueue(_)
             | QueryExpr::QueueCommand(_)
+            | QueryExpr::CreateTree(_)
+            | QueryExpr::DropTree(_)
+            | QueryExpr::TreeCommand(_)
             | QueryExpr::ExplainAlter(_) => CardinalityEstimate::new(1.0, 1.0),
         }
     }

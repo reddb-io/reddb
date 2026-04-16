@@ -28,11 +28,12 @@ use crate::storage::engine::{
 };
 use crate::storage::query::ast::{
     AlterOperation, AlterTableQuery, CompareOp, CreateIndexQuery, CreateQueueQuery,
-    CreateTableQuery, CreateTimeSeriesQuery, DeleteQuery, DropIndexQuery, DropQueueQuery,
-    DropTableQuery, DropTimeSeriesQuery, ExplainAlterQuery, ExplainFormat, FieldRef, Filter,
-    FusionStrategy, GraphCommand, HybridQuery, IndexMethod, InsertEntityType, InsertQuery,
-    JoinQuery, JoinType, OrderByClause, ProbabilisticCommand, Projection, QueryExpr, QueueCommand,
-    QueueSide, SearchCommand, TableQuery, UpdateQuery, VectorQuery, VectorSource,
+    CreateTableQuery, CreateTimeSeriesQuery, CreateTreeQuery, DeleteQuery, DropIndexQuery,
+    DropQueueQuery, DropTableQuery, DropTimeSeriesQuery, DropTreeQuery, ExplainAlterQuery,
+    ExplainFormat, FieldRef, Filter, FusionStrategy, GraphCommand, HybridQuery, IndexMethod,
+    InsertEntityType, InsertQuery, JoinQuery, JoinType, OrderByClause, ProbabilisticCommand,
+    Projection, QueryExpr, QueueCommand, QueueSide, SearchCommand, TableQuery, TreeCommand,
+    UpdateQuery, VectorQuery, VectorSource,
 };
 use crate::storage::query::is_universal_entity_source as is_universal_query_source;
 use crate::storage::query::modes::{detect_mode, parse_multi, QueryMode};
@@ -612,6 +613,7 @@ struct RuntimeInner {
         HashMap<String, (RuntimeQueryResult, std::time::Instant)>,
         std::collections::VecDeque<String>,
     )>,
+    planner_dirty_tables: parking_lot::RwLock<HashSet<String>>,
     ec_registry: Arc<crate::ec::config::EcRegistry>,
     ec_worker: crate::ec::worker::EcWorker,
     /// Optional AuthStore — injected by server boot when auth is
@@ -639,6 +641,7 @@ pub struct RuntimeConnection {
 
 mod expr_eval;
 mod graph_dsl;
+pub(crate) mod mutation;
 mod health_connection;
 mod impl_core;
 mod impl_ddl;
@@ -652,6 +655,7 @@ mod impl_probabilistic;
 mod impl_queue;
 mod impl_search;
 mod impl_timeseries;
+mod impl_tree;
 mod index_store;
 mod join_filter;
 mod probabilistic_store;

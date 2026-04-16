@@ -1,6 +1,59 @@
 use super::*;
 
 impl RedDB {
+    pub fn tree_definitions(&self) -> Vec<crate::physical::PhysicalTreeDefinition> {
+        self.physical_metadata()
+            .map(|metadata| metadata.tree_definitions)
+            .unwrap_or_default()
+    }
+
+    pub fn tree_definition(
+        &self,
+        collection: &str,
+        name: &str,
+    ) -> Option<crate::physical::PhysicalTreeDefinition> {
+        self.tree_definitions()
+            .into_iter()
+            .find(|definition| definition.collection == collection && definition.name == name)
+    }
+
+    pub fn save_tree_definition(
+        &self,
+        definition: crate::physical::PhysicalTreeDefinition,
+    ) -> Result<crate::physical::PhysicalTreeDefinition, Box<dyn std::error::Error>> {
+        self.update_physical_metadata(|metadata| {
+            if let Some(existing) = metadata.tree_definitions.iter_mut().find(|existing| {
+                existing.collection == definition.collection && existing.name == definition.name
+            }) {
+                *existing = definition.clone();
+            } else {
+                metadata.tree_definitions.push(definition.clone());
+            }
+            metadata.tree_definitions.sort_by(|left, right| {
+                left.collection
+                    .cmp(&right.collection)
+                    .then_with(|| left.name.cmp(&right.name))
+            });
+            definition.clone()
+        })
+    }
+
+    pub fn remove_tree_definition(
+        &self,
+        collection: &str,
+        name: &str,
+    ) -> Result<Option<crate::physical::PhysicalTreeDefinition>, Box<dyn std::error::Error>> {
+        self.update_physical_metadata(|metadata| {
+            metadata
+                .tree_definitions
+                .iter()
+                .position(|definition| {
+                    definition.collection == collection && definition.name == name
+                })
+                .map(|index| metadata.tree_definitions.remove(index))
+        })
+    }
+
     pub fn collection_default_ttl_ms(&self, collection: &str) -> Option<u64> {
         self.collection_ttl_defaults_ms
             .read()

@@ -7,11 +7,12 @@ use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+use crate::application::ports::RuntimeEntityPort;
 use super::protocol::*;
 use crate::runtime::RedDBRuntime;
 use crate::storage::query::sql_lowering::effective_table_filter;
 use crate::storage::schema::Value;
-use crate::storage::unified::{EntityData, EntityId, EntityKind};
+use crate::storage::unified::{EntityData, EntityId};
 
 /// Start the wire protocol TCP listener (plaintext).
 pub async fn start_wire_listener(
@@ -376,81 +377,28 @@ fn handle_bulk_insert(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
         json_payloads.push(json_str);
     }
 
-    // Execute bulk insert via existing gRPC path.
-    //
-    // Optimization: build the columnar `RowData` representation with a
-    // SHARED schema taken from the first row. All subsequent rows reuse
-    // the same `Arc<Vec<String>>` and a shared `Arc<str>` for the table
-    // name — no per-row HashMap, no per-cell string clones. Rows whose
-    // keyset differs from the first are skipped to preserve the shape.
-    let store = runtime.db().store();
-    let mut entities = Vec::with_capacity(nrows);
-    let table: Arc<str> = Arc::from(collection.as_str());
-    let mut schema_arc: Option<Arc<Vec<String>>> = None;
-
+    let mut rows = Vec::with_capacity(nrows);
     for json_str in &json_payloads {
         let parsed: crate::json::Value = match crate::json::from_str(json_str) {
             Ok(v) => v,
             Err(e) => return make_error(format!("JSON parse: {e}").as_bytes()),
         };
-        let fields = match parsed.get("fields").and_then(|f| f.as_object()) {
-            Some(f) => f,
-            None => return make_error(b"missing 'fields' object"),
+        let input = match crate::application::entity_payload::parse_create_row_input(
+            collection.clone(),
+            &parsed,
+        ) {
+            Ok(input) => input,
+            Err(err) => return make_error(format!("bulk insert: {err}").as_bytes()),
         };
-
-        // On the first row, freeze the column order as the schema.
-        let schema = match &schema_arc {
-            Some(s) => Arc::clone(s),
-            None => {
-                let names: Vec<String> = fields.keys().cloned().collect();
-                let arc = Arc::new(names);
-                schema_arc = Some(Arc::clone(&arc));
-                arc
-            }
-        };
-
-        let mut columns = Vec::with_capacity(schema.len());
-        for name in schema.iter() {
-            let val = match fields.get(name) {
-                Some(v) => v,
-                None => {
-                    columns.push(Value::Null);
-                    continue;
-                }
-            };
-            let value = match val {
-                crate::json::Value::String(s) => Value::Text(s.clone()),
-                crate::json::Value::Number(n) => {
-                    if n.fract().abs() < f64::EPSILON {
-                        Value::Integer(*n as i64)
-                    } else {
-                        Value::Float(*n)
-                    }
-                }
-                crate::json::Value::Bool(b) => Value::Boolean(*b),
-                crate::json::Value::Null => Value::Null,
-                _ => Value::Null,
-            };
-            columns.push(value);
-        }
-
-        entities.push(crate::storage::unified::UnifiedEntity::new(
-            EntityId::new(0),
-            EntityKind::TableRow {
-                table: Arc::clone(&table),
-                row_id: 0,
-            },
-            EntityData::Row(crate::storage::unified::RowData {
-                columns,
-                named: None,
-                schema: Some(schema),
-            }),
-        ));
+        rows.push(input);
     }
 
-    match store.bulk_insert(&collection, entities) {
-        Ok(ids) => {
-            let count = ids.len() as u64;
+    match runtime.create_rows_batch(crate::application::CreateRowsBatchInput {
+        collection,
+        rows,
+    }) {
+        Ok(outputs) => {
+            let count = outputs.len() as u64;
             let mut resp = Vec::with_capacity(13);
             write_frame_header(&mut resp, MSG_BULK_OK, 8);
             resp.extend_from_slice(&count.to_le_bytes());
@@ -560,41 +508,35 @@ fn handle_bulk_insert_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> 
         Err(msg) => return make_error(msg.as_bytes()),
     };
 
-    // Decode rows into entities using the columnar `RowData` path:
-    // one shared `Arc<Vec<String>>` for column names, one shared
-    // `Arc<str>` for the table, and `Vec<Value>` per row — zero
-    // HashMap allocations, zero per-cell string clones.
-    let table: Arc<str> = Arc::from(collection.as_str());
-    let schema: Arc<Vec<String>> = Arc::new(col_names);
-    let mut entities = Vec::with_capacity(nrows);
+    let mut rows = Vec::with_capacity(nrows);
     for _ in 0..nrows {
-        let mut columns = Vec::with_capacity(ncols);
+        let mut fields = Vec::with_capacity(ncols);
         for _ in 0..ncols {
             let value = match try_decode_value(payload, &mut pos) {
                 Ok(value) => value,
                 Err(err) => return make_error(format!("binary bulk: {err}").as_bytes()),
             };
-            columns.push(value);
+            let field_name = col_names
+                .get(fields.len())
+                .cloned()
+                .unwrap_or_else(|| format!("col_{}", fields.len()));
+            fields.push((field_name, value));
         }
-        entities.push(crate::storage::unified::UnifiedEntity::new(
-            EntityId::new(0),
-            EntityKind::TableRow {
-                table: Arc::clone(&table),
-                row_id: 0,
-            },
-            EntityData::Row(crate::storage::unified::RowData {
-                columns,
-                named: None,
-                schema: Some(Arc::clone(&schema)),
-            }),
-        ));
+        rows.push(crate::application::CreateRowInput {
+            collection: collection.clone(),
+            fields,
+            metadata: Vec::new(),
+            node_links: Vec::new(),
+            vector_links: Vec::new(),
+        });
     }
 
-    // Bulk insert
-    let store = runtime.db().store();
-    match store.bulk_insert(&collection, entities) {
-        Ok(ids) => {
-            let count = ids.len() as u64;
+    match runtime.create_rows_batch(crate::application::CreateRowsBatchInput {
+        collection,
+        rows,
+    }) {
+        Ok(outputs) => {
+            let count = outputs.len() as u64;
             let mut resp = Vec::with_capacity(13);
             write_frame_header(&mut resp, MSG_BULK_OK, 8);
             resp.extend_from_slice(&count.to_le_bytes());

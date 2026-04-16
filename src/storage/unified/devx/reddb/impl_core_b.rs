@@ -892,6 +892,10 @@ impl RedDB {
                     "metadata.analytics_jobs",
                     metadata.analytics_jobs.len().to_string(),
                 );
+                report = report.with_diagnostic(
+                    "metadata.tree_definitions",
+                    metadata.tree_definitions.len().to_string(),
+                );
             } else if self.options.mode == StorageMode::Persistent {
                 report.issue(
                     "metadata",

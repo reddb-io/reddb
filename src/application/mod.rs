@@ -12,6 +12,7 @@ pub mod query;
 pub(crate) mod query_payload;
 pub mod schema;
 pub(crate) mod serverless_payload;
+pub mod tree;
 pub(crate) mod ttl_payload;
 
 pub use admin::{AdminUseCases, ServerlessAnalyticsWarmupTarget, ServerlessWarmupPlan};
@@ -19,7 +20,7 @@ pub use catalog::CatalogUseCases;
 pub use entity::{
     CreateDocumentInput, CreateEdgeInput, CreateEntityOutput, CreateKvInput,
     CreateNodeEmbeddingInput, CreateNodeGraphLinkInput, CreateNodeInput, CreateNodeTableLinkInput,
-    CreateRowInput, CreateTimeSeriesPointInput, CreateVectorInput, DeleteEntityInput,
+    CreateRowInput, CreateRowsBatchInput, CreateTimeSeriesPointInput, CreateVectorInput, DeleteEntityInput,
     DeleteEntityOutput, EntityUseCases, PatchEntityInput, PatchEntityOperation,
     PatchEntityOperationType,
 };
@@ -32,7 +33,7 @@ pub use graph::{
 pub use native::{InspectNativeArtifactInput, NativeUseCases, RuntimeReadiness};
 pub use ports::{
     RuntimeAdminPort, RuntimeCatalogPort, RuntimeEntityPort, RuntimeGraphPort, RuntimeNativePort,
-    RuntimeQueryPort, RuntimeSchemaPort,
+    RuntimeQueryPort, RuntimeSchemaPort, RuntimeTreePort,
 };
 pub use query::{
     ExecuteQueryInput, ExplainQueryInput, QueryUseCases, ScanCollectionInput, SearchContextInput,
@@ -42,4 +43,8 @@ pub use query::{
 pub use schema::{
     CreateTableColumnInput, CreateTableInput, CreateTimeSeriesInput, DropTableInput,
     DropTimeSeriesInput, SchemaUseCases,
+};
+pub use tree::{
+    CreateTreeInput, DeleteTreeNodeInput, DropTreeInput, InsertTreeNodeInput, MoveTreeNodeInput,
+    RebalanceTreeInput, TreeNodeInput, TreePositionInput, TreeUseCases, ValidateTreeInput,
 };

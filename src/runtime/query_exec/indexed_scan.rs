@@ -37,8 +37,6 @@ pub(crate) fn try_sorted_index_lookup(
             if !idx_store.sorted.has_index(table, col) {
                 return None;
             }
-            let lo = super::super::index_store::value_to_sorted_key(low)?;
-            let hi = super::super::index_store::value_to_sorted_key(high)?;
             // Use the effective cap: query LIMIT if present, otherwise a static break-even
             // cap. For BETWEEN on a 1M-row table with ~16% selectivity (~160K matches),
             // the sorted-index path (160K BTree traversal + 160K HashMap lookups) outperforms
@@ -47,9 +45,19 @@ pub(crate) fn try_sorted_index_lookup(
             // At >200K matches the parallel full-scan wins on cache locality.
             const BREAK_EVEN_CAP: usize = 200_000;
             let cap = limit.unwrap_or(BREAK_EVEN_CAP + 1);
-            let ids = idx_store
-                .sorted
-                .range_lookup_limited(table, col, lo, hi, cap)?;
+            let ids = if let (Some(lo), Some(hi)) = (
+                super::super::index_store::value_to_sorted_key(low),
+                super::super::index_store::value_to_sorted_key(high),
+            ) {
+                idx_store
+                    .sorted
+                    .range_lookup_limited(table, col, lo, hi, cap)
+                    .or_else(|| {
+                        try_mixed_integral_between_lookup(table, col, low, high, idx_store, cap)
+                    })?
+            } else {
+                try_mixed_integral_between_lookup(table, col, low, high, idx_store, cap)?
+            };
             if limit.is_none() && ids.len() > BREAK_EVEN_CAP {
                 return None; // Full scan cheaper for very large result sets without LIMIT
             }
@@ -68,24 +76,31 @@ pub(crate) fn try_sorted_index_lookup(
             if !idx_store.sorted.has_index(table, col) {
                 return None;
             }
-            let threshold = super::super::index_store::value_to_sorted_key(value)?;
             // Same cap logic as BETWEEN above.
             const BREAK_EVEN_CAP: usize = 200_000;
             let cap = limit.unwrap_or(BREAK_EVEN_CAP + 1);
-            let ids = match *op {
-                CompareOp::Lt => idx_store
-                    .sorted
-                    .lt_lookup_limited(table, col, threshold, cap)?,
-                CompareOp::Le => idx_store
-                    .sorted
-                    .le_lookup_limited(table, col, threshold, cap)?,
-                CompareOp::Gt => idx_store
-                    .sorted
-                    .gt_lookup_limited(table, col, threshold, cap)?,
-                CompareOp::Ge => idx_store
-                    .sorted
-                    .ge_lookup_limited(table, col, threshold, cap)?,
-                _ => unreachable!("non-range compare op guarded above"),
+            let ids = if let Some(threshold) = super::super::index_store::value_to_sorted_key(value)
+            {
+                let direct = match *op {
+                    CompareOp::Lt => idx_store
+                        .sorted
+                        .lt_lookup_limited(table, col, threshold, cap),
+                    CompareOp::Le => idx_store
+                        .sorted
+                        .le_lookup_limited(table, col, threshold, cap),
+                    CompareOp::Gt => idx_store
+                        .sorted
+                        .gt_lookup_limited(table, col, threshold, cap),
+                    CompareOp::Ge => idx_store
+                        .sorted
+                        .ge_lookup_limited(table, col, threshold, cap),
+                    _ => unreachable!("non-range compare op guarded above"),
+                };
+                direct.or_else(|| {
+                    try_mixed_integral_compare_lookup(table, col, *op, value, idx_store, cap)
+                })?
+            } else {
+                try_mixed_integral_compare_lookup(table, col, *op, value, idx_store, cap)?
             };
             if limit.is_none() && ids.len() > BREAK_EVEN_CAP {
                 return None; // Full scan cheaper for very large result sets without LIMIT
@@ -180,6 +195,210 @@ pub(crate) fn intersect_sorted_id_sets(
         }
     }
     result
+}
+
+type IntegralBoundsResult<T> = Result<Option<(T, T)>, ()>;
+
+fn try_mixed_integral_between_lookup(
+    table: &str,
+    column: &str,
+    low: &Value,
+    high: &Value,
+    idx_store: &IndexStore,
+    limit: usize,
+) -> Option<Vec<EntityId>> {
+    if !idx_store
+        .sorted
+        .supports_mixed_integral_ranges(table, column)
+    {
+        return None;
+    }
+
+    let signed_bounds = signed_between_bounds(low, high).ok()?;
+    let unsigned_bounds = unsigned_between_bounds(low, high).ok()?;
+    collect_integral_family_ranges(
+        table,
+        column,
+        signed_bounds,
+        unsigned_bounds,
+        idx_store,
+        limit,
+    )
+}
+
+fn try_mixed_integral_compare_lookup(
+    table: &str,
+    column: &str,
+    op: CompareOp,
+    value: &Value,
+    idx_store: &IndexStore,
+    limit: usize,
+) -> Option<Vec<EntityId>> {
+    if !idx_store
+        .sorted
+        .supports_mixed_integral_ranges(table, column)
+    {
+        return None;
+    }
+
+    let signed_bounds = signed_compare_bounds(op, value).ok()?;
+    let unsigned_bounds = unsigned_compare_bounds(op, value).ok()?;
+    collect_integral_family_ranges(
+        table,
+        column,
+        signed_bounds,
+        unsigned_bounds,
+        idx_store,
+        limit,
+    )
+}
+
+fn collect_integral_family_ranges(
+    table: &str,
+    column: &str,
+    signed_bounds: Option<(i64, i64)>,
+    unsigned_bounds: Option<(u64, u64)>,
+    idx_store: &IndexStore,
+    limit: usize,
+) -> Option<Vec<EntityId>> {
+    let mut ids = Vec::new();
+
+    if let Some((low, high)) = signed_bounds {
+        let remaining = limit.saturating_sub(ids.len());
+        if remaining > 0 {
+            let low = super::super::index_store::value_to_sorted_key(&Value::Integer(low))?;
+            let high = super::super::index_store::value_to_sorted_key(&Value::Integer(high))?;
+            ids.extend(
+                idx_store
+                    .sorted
+                    .range_lookup_limited_same_family(table, column, low, high, remaining)?,
+            );
+        }
+    }
+
+    if let Some((low, high)) = unsigned_bounds {
+        let remaining = limit.saturating_sub(ids.len());
+        if remaining > 0 {
+            let low = super::super::index_store::value_to_sorted_key(&Value::UnsignedInteger(low))?;
+            let high =
+                super::super::index_store::value_to_sorted_key(&Value::UnsignedInteger(high))?;
+            ids.extend(
+                idx_store
+                    .sorted
+                    .range_lookup_limited_same_family(table, column, low, high, remaining)?,
+            );
+        }
+    }
+
+    Some(ids)
+}
+
+fn signed_between_bounds(low: &Value, high: &Value) -> IntegralBoundsResult<i64> {
+    let lower = match low {
+        Value::Integer(value) => *value,
+        Value::UnsignedInteger(value) => match i64::try_from(*value) {
+            Ok(value) => value,
+            Err(_) => return Ok(None),
+        },
+        _ => return Err(()),
+    };
+    let upper = match high {
+        Value::Integer(value) => *value,
+        Value::UnsignedInteger(value) => (*value).min(i64::MAX as u64) as i64,
+        _ => return Err(()),
+    };
+    Ok((lower <= upper).then_some((lower, upper)))
+}
+
+fn unsigned_between_bounds(low: &Value, high: &Value) -> IntegralBoundsResult<u64> {
+    let lower = match low {
+        Value::Integer(value) if *value < 0 => 0,
+        Value::Integer(value) => *value as u64,
+        Value::UnsignedInteger(value) => *value,
+        _ => return Err(()),
+    };
+    let upper = match high {
+        Value::Integer(value) if *value < 0 => return Ok(None),
+        Value::Integer(value) => *value as u64,
+        Value::UnsignedInteger(value) => *value,
+        _ => return Err(()),
+    };
+    Ok((lower <= upper).then_some((lower, upper)))
+}
+
+fn signed_compare_bounds(op: CompareOp, value: &Value) -> IntegralBoundsResult<i64> {
+    match op {
+        CompareOp::Lt => match value {
+            Value::Integer(value) => match value.checked_sub(1) {
+                Some(upper) => Ok(Some((i64::MIN, upper))),
+                None => Ok(None),
+            },
+            Value::UnsignedInteger(0) => Ok(Some((i64::MIN, -1))),
+            Value::UnsignedInteger(value) => {
+                let upper = value.saturating_sub(1).min(i64::MAX as u64) as i64;
+                Ok(Some((i64::MIN, upper)))
+            }
+            _ => Err(()),
+        },
+        CompareOp::Le => match value {
+            Value::Integer(value) => Ok(Some((i64::MIN, *value))),
+            Value::UnsignedInteger(value) => {
+                Ok(Some((i64::MIN, (*value).min(i64::MAX as u64) as i64)))
+            }
+            _ => Err(()),
+        },
+        CompareOp::Gt => match value {
+            Value::Integer(value) => match value.checked_add(1) {
+                Some(lower) => Ok(Some((lower, i64::MAX))),
+                None => Ok(None),
+            },
+            Value::UnsignedInteger(value) if *value >= i64::MAX as u64 => Ok(None),
+            Value::UnsignedInteger(value) => Ok(Some(((*value as i64) + 1, i64::MAX))),
+            _ => Err(()),
+        },
+        CompareOp::Ge => match value {
+            Value::Integer(value) => Ok(Some((*value, i64::MAX))),
+            Value::UnsignedInteger(value) if *value > i64::MAX as u64 => Ok(None),
+            Value::UnsignedInteger(value) => Ok(Some((*value as i64, i64::MAX))),
+            _ => Err(()),
+        },
+        _ => Err(()),
+    }
+}
+
+fn unsigned_compare_bounds(op: CompareOp, value: &Value) -> IntegralBoundsResult<u64> {
+    match op {
+        CompareOp::Lt => match value {
+            Value::Integer(value) if *value <= 0 => Ok(None),
+            Value::Integer(value) => Ok(Some((0, (*value as u64) - 1))),
+            Value::UnsignedInteger(0) => Ok(None),
+            Value::UnsignedInteger(value) => Ok(Some((0, value - 1))),
+            _ => Err(()),
+        },
+        CompareOp::Le => match value {
+            Value::Integer(value) if *value < 0 => Ok(None),
+            Value::Integer(value) => Ok(Some((0, *value as u64))),
+            Value::UnsignedInteger(value) => Ok(Some((0, *value))),
+            _ => Err(()),
+        },
+        CompareOp::Gt => match value {
+            Value::Integer(value) if *value < 0 => Ok(Some((0, u64::MAX))),
+            Value::Integer(value) if *value == i64::MAX => {
+                Ok(Some((i64::MAX as u64 + 1, u64::MAX)))
+            }
+            Value::Integer(value) => Ok(Some(((*value as u64) + 1, u64::MAX))),
+            Value::UnsignedInteger(value) if *value == u64::MAX => Ok(None),
+            Value::UnsignedInteger(value) => Ok(Some((value + 1, u64::MAX))),
+            _ => Err(()),
+        },
+        CompareOp::Ge => match value {
+            Value::Integer(value) if *value < 0 => Ok(Some((0, u64::MAX))),
+            Value::Integer(value) => Ok(Some((*value as u64, u64::MAX))),
+            Value::UnsignedInteger(value) => Ok(Some((*value, u64::MAX))),
+            _ => Err(()),
+        },
+        _ => Err(()),
+    }
 }
 
 /// Covered-query optimization: when the filter is a simple range/IN predicate on a sorted

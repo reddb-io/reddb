@@ -13,7 +13,7 @@ pub(crate) use crate::application::{
     GraphTopologicalSortInput, GraphTraversalInput, GraphUseCases, InspectNativeArtifactInput,
     NativeUseCases, PatchEntityInput, PatchEntityOperation, PatchEntityOperationType,
     QueryUseCases, SearchHybridInput, SearchIvfInput, SearchMultimodalInput, SearchSimilarInput,
-    SearchTextInput,
+    SearchTextInput, TreeUseCases,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::io::{self, Read, Write};
@@ -219,6 +219,10 @@ impl RedDBServer {
 
     fn native_use_cases(&self) -> NativeUseCases<'_, RedDBRuntime> {
         NativeUseCases::new(&self.runtime)
+    }
+
+    fn tree_use_cases(&self) -> TreeUseCases<'_, RedDBRuntime> {
+        TreeUseCases::new(&self.runtime)
     }
 
     pub fn serve(&self) -> io::Result<()> {

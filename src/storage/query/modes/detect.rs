@@ -64,6 +64,7 @@ pub fn detect_mode(input: &str) -> QueryMode {
         || lower.starts_with("hybrid ")
         || lower.starts_with("graph ")
         || lower.starts_with("queue ")
+        || lower.starts_with("tree ")
         || lower.starts_with("search ")
         || lower.starts_with("ask ")
         || lower.starts_with("set config ")
@@ -185,6 +186,7 @@ mod tests {
             detect_mode("QUEUE GROUP CREATE tasks workers"),
             QueryMode::Sql
         );
+        assert_eq!(detect_mode("TREE VALIDATE forest.org"), QueryMode::Sql);
         assert_eq!(
             detect_mode("VECTOR SEARCH embeddings SIMILAR TO [1.0, 0.0] LIMIT 5"),
             QueryMode::Sql

@@ -55,6 +55,12 @@ pub enum QueryExpr {
     DropQueue(DropQueueQuery),
     /// QUEUE subcommand (PUSH, POP, PEEK, LEN, PURGE, GROUP, READ, ACK, NACK)
     QueueCommand(QueueCommand),
+    /// CREATE TREE name IN collection ROOT ... MAX_CHILDREN n
+    CreateTree(CreateTreeQuery),
+    /// DROP TREE name IN collection
+    DropTree(DropTreeQuery),
+    /// TREE subcommand (INSERT, MOVE, DELETE, VALIDATE, REBALANCE)
+    TreeCommand(TreeCommand),
     /// SET CONFIG key = value
     SetConfig { key: String, value: Value },
     /// SHOW CONFIG [prefix]
@@ -1057,7 +1063,9 @@ pub struct UpdateQuery {
     pub table: String,
     /// Canonical SQL assignments.
     pub assignment_exprs: Vec<(String, super::Expr)>,
-    /// Column-value assignments
+    /// Best-effort literal-only cache of assignments. Non-foldable expressions
+    /// are preserved exclusively in `assignment_exprs` and evaluated later
+    /// against the row pre-image by the runtime.
     pub assignments: Vec<(String, Value)>,
     /// Canonical SQL WHERE clause.
     pub where_expr: Option<super::Expr>,
@@ -1607,6 +1615,74 @@ pub enum QueueCommand {
         queue: String,
         group: String,
         message_id: String,
+    },
+}
+
+// ============================================================================
+// Tree DDL & Commands
+// ============================================================================
+
+#[derive(Debug, Clone)]
+pub struct TreeNodeSpec {
+    pub label: String,
+    pub node_type: Option<String>,
+    pub properties: Vec<(String, Value)>,
+    pub metadata: Vec<(String, Value)>,
+    pub max_children: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreePosition {
+    First,
+    Last,
+    Index(usize),
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateTreeQuery {
+    pub collection: String,
+    pub name: String,
+    pub root: TreeNodeSpec,
+    pub default_max_children: usize,
+    pub if_not_exists: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct DropTreeQuery {
+    pub collection: String,
+    pub name: String,
+    pub if_exists: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum TreeCommand {
+    Insert {
+        collection: String,
+        tree_name: String,
+        parent_id: u64,
+        node: TreeNodeSpec,
+        position: TreePosition,
+    },
+    Move {
+        collection: String,
+        tree_name: String,
+        node_id: u64,
+        parent_id: u64,
+        position: TreePosition,
+    },
+    Delete {
+        collection: String,
+        tree_name: String,
+        node_id: u64,
+    },
+    Validate {
+        collection: String,
+        tree_name: String,
+    },
+    Rebalance {
+        collection: String,
+        tree_name: String,
+        dry_run: bool,
     },
 }
 

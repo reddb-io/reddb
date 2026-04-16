@@ -1,4 +1,5 @@
 use super::*;
+use crate::storage::query::ast::{Expr, SelectItem};
 use crate::storage::query::sql_lowering::{
     effective_table_filter, effective_table_group_by_exprs, effective_table_having_filter,
     effective_table_projections,
@@ -22,9 +23,11 @@ mod vector;
 // reaches them via `crate::runtime::query_exec::X` (cross-module path,
 // not just super-path).
 pub(crate) use helpers::{
-    evaluate_entity_filter, extract_entity_id_from_filter, try_hash_eq_lookup,
+    evaluate_entity_filter, evaluate_entity_filter_with_db, extract_entity_id_from_filter,
+    extract_zone_predicates, try_hash_eq_lookup,
 };
 pub(super) use hybrid::execute_runtime_hybrid_query;
+pub(crate) use indexed_scan::try_sorted_index_lookup;
 pub(super) use join::execute_runtime_join_query;
 pub(super) use json_writers::execute_runtime_serialize_single_entity;
 pub(super) use vector::execute_runtime_vector_query;
@@ -45,6 +48,58 @@ pub(super) fn execute_runtime_table_query(
     let effective_filter = effective_table_filter(query);
     let effective_group_by = effective_table_group_by_exprs(query);
     let effective_having = effective_table_having_filter(query);
+
+    // Scalar SELECT without FROM: evaluate once against an empty row
+    // instead of scanning implicit universal records.
+    if table_query_is_implicit_scalar_select(query)
+        && !has_aggregate_projections(&effective_projections)
+        && effective_group_by.is_empty()
+        && effective_having.is_none()
+    {
+        let source = UnifiedRecord::new();
+        let filter_matches = effective_filter.as_ref().is_none_or(|filter| {
+            super::join_filter::evaluate_runtime_filter_with_db(
+                Some(db),
+                &source,
+                filter,
+                None,
+                None,
+            )
+        });
+        let mut records = if filter_matches {
+            vec![super::join_filter::project_runtime_record_with_db(
+                Some(db),
+                &source,
+                &effective_projections,
+                None,
+                None,
+                false,
+                false,
+            )]
+        } else {
+            Vec::new()
+        };
+
+        if let Some(offset) = query.offset {
+            let offset = offset as usize;
+            if offset >= records.len() {
+                records.clear();
+            } else {
+                records.drain(..offset);
+            }
+        }
+        if let Some(limit) = query.limit {
+            records.truncate(limit as usize);
+        }
+
+        let columns = projected_columns(&records, &effective_projections);
+        return Ok(UnifiedResult {
+            columns,
+            records,
+            stats: Default::default(),
+            pre_serialized_json: None,
+        });
+    }
 
     // ── AGGREGATE PATH: COUNT, AVG, SUM, MIN, MAX, GROUP BY ──
     if has_aggregate_projections(&effective_projections) {
@@ -114,6 +169,71 @@ pub(super) fn runtime_record_has_document_capability(record: &UnifiedRecord) -> 
                 .any(|capability| capability.trim() == "document")
         })
         .unwrap_or(false)
+}
+
+fn table_query_is_implicit_scalar_select(query: &TableQuery) -> bool {
+    query.table == "any"
+        && query.alias.is_none()
+        && query.source.is_none()
+        && !query.select_items.is_empty()
+        && query
+            .select_items
+            .iter()
+            .all(select_item_is_source_free_scalar)
+}
+
+fn select_item_is_source_free_scalar(item: &SelectItem) -> bool {
+    match item {
+        SelectItem::Wildcard => false,
+        SelectItem::Expr { expr, .. } => expr_is_source_free(expr),
+    }
+}
+
+fn expr_is_source_free(expr: &Expr) -> bool {
+    match expr {
+        Expr::Literal { .. } | Expr::Parameter { .. } => true,
+        Expr::Column { .. } => false,
+        Expr::UnaryOp { operand, .. } => expr_is_source_free(operand),
+        Expr::BinaryOp { lhs, rhs, .. } => expr_is_source_free(lhs) && expr_is_source_free(rhs),
+        Expr::Cast { inner, .. } => expr_is_source_free(inner),
+        Expr::FunctionCall { name, args, .. } => {
+            if name.eq_ignore_ascii_case("CONFIG") {
+                return (1..=2).contains(&args.len())
+                    && expr_is_path_like(&args[0])
+                    && args.get(1).is_none_or(|expr| {
+                        matches!(expr, Expr::Column { .. }) || expr_is_source_free(expr)
+                    });
+            }
+            if name.eq_ignore_ascii_case("KV") {
+                return (2..=3).contains(&args.len())
+                    && expr_is_path_like(&args[0])
+                    && expr_is_path_like(&args[1])
+                    && args.get(2).is_none_or(|expr| {
+                        matches!(expr, Expr::Column { .. }) || expr_is_source_free(expr)
+                    });
+            }
+            args.iter().all(expr_is_source_free)
+        }
+        Expr::Case {
+            branches, else_, ..
+        } => {
+            branches
+                .iter()
+                .all(|(cond, value)| expr_is_source_free(cond) && expr_is_source_free(value))
+                && else_.as_deref().is_none_or(expr_is_source_free)
+        }
+        Expr::IsNull { operand, .. } => expr_is_source_free(operand),
+        Expr::InList { target, values, .. } => {
+            expr_is_source_free(target) && values.iter().all(expr_is_source_free)
+        }
+        Expr::Between {
+            target, low, high, ..
+        } => expr_is_source_free(target) && expr_is_source_free(low) && expr_is_source_free(high),
+    }
+}
+
+fn expr_is_path_like(expr: &Expr) -> bool {
+    matches!(expr, Expr::Literal { .. } | Expr::Column { .. })
 }
 
 pub(super) fn evaluate_runtime_document_filter(

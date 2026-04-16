@@ -206,7 +206,7 @@ fn format_flag(flag: &Flag) -> String {
 /// Produce a minimal domain label from the domain name.
 fn domain_label(domain: &str) -> &str {
     match domain {
-        "server" => "Start the database server",
+        "server" => "Start the database server/router",
         "query" => "Execute queries",
         "insert" => "Insert entities",
         "get" => "Retrieve entities",

@@ -407,8 +407,8 @@ pub(super) fn runtime_any_record_from_entity(entity: UnifiedEntity) -> Option<Un
         (EntityKind::GraphEdge(edge_kind), EntityData::Edge(edge)) => {
             let mut record = UnifiedRecord::new();
             record.set("label", Value::Text(edge_kind.label));
-            record.set("from", Value::NodeRef(edge_kind.from_node));
-            record.set("to", Value::NodeRef(edge_kind.to_node));
+            record.set("from", Value::NodeRef(edge_kind.from_node.clone()));
+            record.set("to", Value::NodeRef(edge_kind.to_node.clone()));
             record.set("weight", Value::Float(edge.weight as f64));
             for (key, value) in edge.properties {
                 record.set(&key, value);
@@ -454,6 +454,104 @@ pub(super) fn runtime_any_record_from_entity(entity: UnifiedEntity) -> Option<Un
     record.set("red_sequence_id", Value::UnsignedInteger(sequence_id));
     set_runtime_entity_metadata(&mut record, entity_type, capabilities);
     apply_runtime_identity_hints(&mut record, &identity_entity);
+
+    Some(record)
+}
+
+pub(super) fn runtime_any_record_from_entity_ref(entity: &UnifiedEntity) -> Option<UnifiedRecord> {
+    let kind = &entity.kind;
+    let collection = kind.collection().to_string();
+    let storage_type = kind.storage_type().to_string();
+    let entity_id = entity.id.raw();
+    let created_at = entity.created_at;
+    let updated_at = entity.updated_at;
+    let sequence_id = entity.sequence_id;
+
+    let (entity_type, capabilities, mut record) = match (kind, &entity.data) {
+        (EntityKind::TableRow { row_id, .. }, EntityData::Row(row)) => {
+            let capabilities = runtime_row_capabilities(row);
+            let entity_type = runtime_row_entity_type(row);
+            let mut record = UnifiedRecord::new();
+            record.set("row_id", Value::UnsignedInteger(*row_id));
+            if let Some(named) = row.named.as_ref() {
+                for (key, value) in named {
+                    record.set(key, value.clone());
+                }
+            } else if let Some(schema) = row.schema.as_ref() {
+                for (name, value) in schema.iter().zip(row.columns.iter()) {
+                    record.set(name, value.clone());
+                }
+            } else {
+                for (index, value) in row.columns.iter().enumerate() {
+                    record.set(&format!("c{index}"), value.clone());
+                }
+            }
+            (entity_type, capabilities, record)
+        }
+        (EntityKind::GraphNode(node), EntityData::Node(node_data)) => {
+            let mut record = UnifiedRecord::new();
+            record.set("id", Value::UnsignedInteger(entity_id));
+            record.set("label", Value::Text(node.label.clone()));
+            record.set("node_type", Value::Text(node.node_type.clone()));
+            for (key, value) in &node_data.properties {
+                record.set(key, value.clone());
+            }
+            (
+                "graph_node",
+                runtime_record_capability_list(["graph", "graph_node"]),
+                record,
+            )
+        }
+        (EntityKind::GraphEdge(edge_kind), EntityData::Edge(edge)) => {
+            let mut record = UnifiedRecord::new();
+            record.set("label", Value::Text(edge_kind.label.clone()));
+            record.set("from", Value::NodeRef(edge_kind.from_node.clone()));
+            record.set("to", Value::NodeRef(edge_kind.to_node.clone()));
+            record.set("weight", Value::Float(edge.weight as f64));
+            for (key, value) in &edge.properties {
+                record.set(key, value.clone());
+            }
+            (
+                "graph_edge",
+                runtime_record_capability_list(["graph", "graph_edge"]),
+                record,
+            )
+        }
+        (EntityKind::Vector { .. }, EntityData::Vector(vector)) => {
+            let mut record = UnifiedRecord::new();
+            record.set(
+                "dimension",
+                Value::UnsignedInteger(vector.dense.len() as u64),
+            );
+            if let Some(content) = vector.content.as_ref() {
+                record.set("content", Value::Text(content.clone()));
+            }
+            (
+                "vector",
+                runtime_record_capability_list(["vector", "similarity", "embedding"]),
+                record,
+            )
+        }
+        (EntityKind::TimeSeriesPoint(_), EntityData::TimeSeries(ts)) => {
+            let mut record = UnifiedRecord::new();
+            append_timeseries_record_fields(&mut record, ts);
+            (
+                "timeseries",
+                runtime_record_capability_list(["document", "timeseries", "metric", "temporal"]),
+                record,
+            )
+        }
+        _ => return None,
+    };
+
+    record.set("red_entity_id", Value::UnsignedInteger(entity_id));
+    record.set("red_collection", Value::Text(collection));
+    record.set("red_kind", Value::Text(storage_type));
+    record.set("created_at", Value::UnsignedInteger(created_at));
+    record.set("updated_at", Value::UnsignedInteger(updated_at));
+    record.set("red_sequence_id", Value::UnsignedInteger(sequence_id));
+    set_runtime_entity_metadata(&mut record, entity_type, capabilities);
+    apply_runtime_identity_hints(&mut record, entity);
 
     Some(record)
 }

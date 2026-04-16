@@ -1500,6 +1500,21 @@ mod tests {
             }
             Self { saved }
         }
+
+        fn clear(keys: &[&'static str]) -> Self {
+            let mut saved = Vec::new();
+            let mut dedup = BTreeMap::new();
+            for key in keys {
+                dedup.insert(*key, ());
+            }
+            for (key, _) in dedup {
+                saved.push((key, std::env::var(key).ok()));
+                unsafe {
+                    std::env::remove_var(key);
+                }
+            }
+            Self { saved }
+        }
     }
 
     impl Drop for EnvGuard {
@@ -1519,6 +1534,12 @@ mod tests {
 
     #[test]
     fn resolve_server_binds_defaults_to_grpc() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::clear(&[
+            "REDDB_BIND_ADDR",
+            "REDDB_GRPC_BIND_ADDR",
+            "REDDB_HTTP_BIND_ADDR",
+        ]);
         let flags = HashMap::new();
         let (grpc_bind, http_bind) = resolve_server_binds(&flags).unwrap();
         assert_eq!(grpc_bind.as_deref(), Some("127.0.0.1:50051"));
@@ -1527,6 +1548,12 @@ mod tests {
 
     #[test]
     fn resolve_server_binds_supports_dual_stack_defaults() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::clear(&[
+            "REDDB_BIND_ADDR",
+            "REDDB_GRPC_BIND_ADDR",
+            "REDDB_HTTP_BIND_ADDR",
+        ]);
         let flags = HashMap::from([
             ("grpc".to_string(), bool_flag(true)),
             ("http".to_string(), bool_flag(true)),
@@ -1538,6 +1565,12 @@ mod tests {
 
     #[test]
     fn resolve_server_binds_rejects_ambiguous_legacy_bind() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::clear(&[
+            "REDDB_BIND_ADDR",
+            "REDDB_GRPC_BIND_ADDR",
+            "REDDB_HTTP_BIND_ADDR",
+        ]);
         let flags = HashMap::from([
             ("grpc".to_string(), bool_flag(true)),
             ("http".to_string(), bool_flag(true)),
@@ -1560,6 +1593,12 @@ mod tests {
 
     #[test]
     fn build_server_config_defaults_to_router_on_5050() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::clear(&[
+            "REDDB_BIND_ADDR",
+            "REDDB_GRPC_BIND_ADDR",
+            "REDDB_HTTP_BIND_ADDR",
+        ]);
         let flags = HashMap::new();
         let config = build_server_config(&flags, None).unwrap();
         assert_eq!(
@@ -1573,6 +1612,12 @@ mod tests {
 
     #[test]
     fn build_server_config_maps_legacy_bind_to_router_when_no_transport_is_selected() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::clear(&[
+            "REDDB_BIND_ADDR",
+            "REDDB_GRPC_BIND_ADDR",
+            "REDDB_HTTP_BIND_ADDR",
+        ]);
         let flags = HashMap::from([("bind".to_string(), str_flag("0.0.0.0:5050"))]);
         let config = build_server_config(&flags, None).unwrap();
         assert_eq!(config.router_bind_addr.as_deref(), Some("0.0.0.0:5050"));
@@ -1652,6 +1697,12 @@ mod tests {
 
     #[test]
     fn build_systemd_service_config_defaults_to_router_on_5050() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::clear(&[
+            "REDDB_BIND_ADDR",
+            "REDDB_GRPC_BIND_ADDR",
+            "REDDB_HTTP_BIND_ADDR",
+        ]);
         let flags = HashMap::new();
         let config = build_systemd_service_config(&flags).unwrap();
         assert_eq!(
@@ -1664,6 +1715,12 @@ mod tests {
 
     #[test]
     fn build_systemd_service_config_keeps_explicit_http_bind() {
+        let _lock = env_lock().lock().unwrap();
+        let _guard = EnvGuard::clear(&[
+            "REDDB_BIND_ADDR",
+            "REDDB_GRPC_BIND_ADDR",
+            "REDDB_HTTP_BIND_ADDR",
+        ]);
         let flags = HashMap::from([("http-bind".to_string(), str_flag("0.0.0.0:8080"))]);
         let config = build_systemd_service_config(&flags).unwrap();
         assert_eq!(config.router_bind_addr, None);

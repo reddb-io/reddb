@@ -632,7 +632,7 @@ impl RedDB {
                     total_secs % 60
                 ))
             }
-            Value::Decimal(v) => Some(format!("{:.4}", *v as f64 / 10_000.0)),
+            Value::Decimal(v) => Some(Value::Decimal(*v).display_string()),
             Value::EnumValue(i) => Some(format!("enum({})", i)),
             Value::Array(_) => None,
             Value::TimestampMs(ms) => Some(ms.to_string()),
@@ -668,6 +668,8 @@ impl RedDB {
             Value::Lang2(c) => Some(String::from_utf8_lossy(c).to_string()),
             Value::Lang5(c) => Some(String::from_utf8_lossy(c).to_string()),
             Value::Currency(c) => Some(String::from_utf8_lossy(c).to_string()),
+            Value::AssetCode(code) => Some(code.clone()),
+            Value::Money { .. } => Some(value.display_string()),
             Value::ColorAlpha([r, g, b, a]) => {
                 Some(format!("#{:02X}{:02X}{:02X}{:02X}", r, g, b, a))
             }

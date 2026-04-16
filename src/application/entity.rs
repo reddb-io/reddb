@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::application::ports::RuntimeEntityPort;
 use crate::json::{parse_json, to_vec as json_to_vec, Map, Value as JsonValue};
 use crate::presentation::entity_json::storage_value_to_json;
-use crate::storage::schema::Value;
+use crate::storage::schema::{DataType, Value};
 use crate::storage::unified::devx::refs::{NodeRef, TableRef, VectorRef};
 use crate::storage::unified::{Metadata, MetadataValue, RefTarget, SparseVector, VectorData};
 use crate::storage::{EntityId, UnifiedEntity};
@@ -16,12 +16,46 @@ pub struct CreateEntityOutput {
 }
 
 #[derive(Debug, Clone)]
+pub struct AppliedEntityMutation {
+    pub id: EntityId,
+    pub collection: String,
+    pub entity: UnifiedEntity,
+    pub metadata: Option<crate::storage::unified::Metadata>,
+    pub modified_columns: Vec<String>,
+    pub persist_metadata: bool,
+    pub context_index_dirty: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct RowUpdateColumnRule {
+    pub name: String,
+    pub data_type: DataType,
+    pub data_type_name: String,
+    pub not_null: bool,
+    pub enum_variants: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RowUpdateContractPlan {
+    pub timestamps_enabled: bool,
+    pub strict_schema: bool,
+    pub declared_rules: HashMap<String, RowUpdateColumnRule>,
+    pub unique_columns: HashMap<String, ()>,
+}
+
+#[derive(Debug, Clone)]
 pub struct CreateRowInput {
     pub collection: String,
     pub fields: Vec<(String, Value)>,
     pub metadata: Vec<(String, MetadataValue)>,
     pub node_links: Vec<NodeRef>,
     pub vector_links: Vec<VectorRef>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateRowsBatchInput {
+    pub collection: String,
+    pub rows: Vec<CreateRowInput>,
 }
 
 #[derive(Debug, Clone)]
@@ -149,6 +183,13 @@ impl<'a, P: RuntimeEntityPort + ?Sized> EntityUseCases<'a, P> {
 
     pub fn create_row(&self, input: CreateRowInput) -> RedDBResult<CreateEntityOutput> {
         self.runtime.create_row(input)
+    }
+
+    pub fn create_rows_batch(
+        &self,
+        input: CreateRowsBatchInput,
+    ) -> RedDBResult<Vec<CreateEntityOutput>> {
+        self.runtime.create_rows_batch(input)
     }
 
     pub fn create_node(&self, input: CreateNodeInput) -> RedDBResult<CreateEntityOutput> {

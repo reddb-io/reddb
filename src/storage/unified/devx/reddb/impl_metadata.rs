@@ -720,6 +720,9 @@ impl RedDB {
             collection_contracts: previous
                 .map(|metadata| metadata.collection_contracts.clone())
                 .unwrap_or_default(),
+            tree_definitions: previous
+                .map(|metadata| metadata.tree_definitions.clone())
+                .unwrap_or_default(),
             indexes,
             graph_projections,
             analytics_jobs,

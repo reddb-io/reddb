@@ -502,6 +502,20 @@ where
                 41u8.hash(hasher);
                 c.hash(hasher);
             }
+            Value::AssetCode(code) => {
+                50u8.hash(hasher);
+                code.hash(hasher);
+            }
+            Value::Money {
+                asset_code,
+                minor_units,
+                scale,
+            } => {
+                51u8.hash(hasher);
+                asset_code.hash(hasher);
+                minor_units.hash(hasher);
+                scale.hash(hasher);
+            }
             Value::ColorAlpha(rgba) => {
                 42u8.hash(hasher);
                 rgba.hash(hasher);

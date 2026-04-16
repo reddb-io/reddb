@@ -348,6 +348,8 @@ pub fn value_to_canonical_key(value: &Value) -> Option<CanonicalKey> {
             CanonicalKeyFamily::Currency,
             v.to_vec(),
         )),
+        Value::AssetCode(v) => Some(CanonicalKey::Text(CanonicalKeyFamily::Text, v.clone())),
+        Value::Money { .. } => None,
         Value::ColorAlpha(v) => Some(CanonicalKey::Bytes(
             CanonicalKeyFamily::ColorAlpha,
             v.to_vec(),

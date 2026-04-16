@@ -7,7 +7,7 @@
 //! the IndexStore finds the right index and returns matching entity IDs.
 
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Bound::{Excluded, Included, Unbounded};
 
 use crate::storage::schema::{value_to_canonical_key, CanonicalKey, CanonicalKeyFamily, Value};
@@ -41,6 +41,7 @@ pub struct SortedColumnIndex {
     /// disable range pushdown.
     range_family: Option<CanonicalKeyFamily>,
     has_mixed_families: bool,
+    families: BTreeSet<CanonicalKeyFamily>,
 }
 
 impl SortedColumnIndex {
@@ -49,10 +50,12 @@ impl SortedColumnIndex {
             entries: BTreeMap::new(),
             range_family: None,
             has_mixed_families: false,
+            families: BTreeSet::new(),
         }
     }
 
     pub fn insert(&mut self, key: CanonicalKey, entity_id: EntityId) {
+        self.families.insert(key.family());
         match self.range_family {
             Some(existing) if existing != key.family() => self.has_mixed_families = true,
             None => self.range_family = Some(key.family()),
@@ -67,6 +70,16 @@ impl SortedColumnIndex {
 
     pub fn supports_range_key(&self, key: &CanonicalKey) -> bool {
         self.range_enabled(key.family())
+    }
+
+    pub fn supports_mixed_integral_ranges(&self) -> bool {
+        !self.families.is_empty()
+            && self.families.iter().all(|family| {
+                matches!(
+                    family,
+                    CanonicalKeyFamily::Integer | CanonicalKeyFamily::UnsignedInteger
+                )
+            })
     }
 
     /// Range scan: returns all entity IDs where key is in [low, high].
@@ -127,6 +140,24 @@ impl SortedColumnIndex {
             return None;
         }
         if low > high {
+            return Some(Vec::new());
+        }
+        Some(self.collect_range_limited(low..=high, limit))
+    }
+
+    pub fn range_limited_same_family(
+        &self,
+        low: CanonicalKey,
+        high: CanonicalKey,
+        limit: usize,
+    ) -> Option<Vec<EntityId>> {
+        if low.family() != high.family() {
+            return None;
+        }
+        if low > high {
+            return Some(Vec::new());
+        }
+        if !self.families.contains(&low.family()) {
             return Some(Vec::new());
         }
         Some(self.collect_range_limited(low..=high, limit))
@@ -458,6 +489,21 @@ impl SortedIndexManager {
         indices.get(&key)?.range_limited(low, high, limit)
     }
 
+    pub(crate) fn range_lookup_limited_same_family(
+        &self,
+        collection: &str,
+        column: &str,
+        low: CanonicalKey,
+        high: CanonicalKey,
+        limit: usize,
+    ) -> Option<Vec<EntityId>> {
+        let indices = read_unpoisoned(&self.indices);
+        let key = (collection.to_string(), column.to_string());
+        indices
+            .get(&key)?
+            .range_limited_same_family(low, high, limit)
+    }
+
     pub(crate) fn gt_lookup_limited(
         &self,
         collection: &str,
@@ -695,6 +741,13 @@ impl SortedIndexManager {
     pub fn has_index(&self, collection: &str, column: &str) -> bool {
         let indices = read_unpoisoned(&self.indices);
         indices.contains_key(&(collection.to_string(), column.to_string()))
+    }
+
+    pub fn supports_mixed_integral_ranges(&self, collection: &str, column: &str) -> bool {
+        let indices = read_unpoisoned(&self.indices);
+        indices
+            .get(&(collection.to_string(), column.to_string()))
+            .is_some_and(SortedColumnIndex::supports_mixed_integral_ranges)
     }
 
     /// Insert one value into an existing sorted index.

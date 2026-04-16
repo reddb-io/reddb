@@ -99,52 +99,120 @@ impl ContextIndex {
 
     /// Index an entity — extracts tokens and field:value pairs into posting lists.
     pub fn index_entity(&self, collection: &str, entity: &UnifiedEntity) {
-        self.remove_entity(entity.id);
+        self.index_entities(collection, std::iter::once(entity));
+    }
 
-        let entity_tokens = extract_entity_tokens(entity);
-        let field_pairs = extract_field_lookup_pairs(entity);
+    /// Batch variant of `index_entity` that amortizes lock traffic across
+    /// multiple rewrites.
+    pub fn index_entities<'a, I>(&self, collection: &str, entities: I)
+    where
+        I: IntoIterator<Item = &'a UnifiedEntity>,
+    {
+        let collection = collection.to_string();
+        let prepared: Vec<(
+            u64,
+            EntityKeys,
+            Vec<(String, String)>,
+            Vec<(String, String)>,
+        )> = entities
+            .into_iter()
+            .map(|entity| {
+                let entity_tokens = extract_entity_tokens(entity);
+                let field_pairs = extract_field_lookup_pairs(entity);
+                let mut keys = EntityKeys::default();
+                keys.token_keys = entity_tokens
+                    .iter()
+                    .map(|(token, _)| token.clone())
+                    .collect();
+                keys.field_value_keys = field_pairs.clone();
+                (entity.id.raw(), keys, entity_tokens, field_pairs)
+            })
+            .collect();
 
-        let mut keys = EntityKeys::default();
+        if prepared.is_empty() {
+            return;
+        }
+
+        let previous_keys: Vec<(u64, EntityKeys)> = {
+            let mut reverse = self.reverse.write();
+            prepared
+                .iter()
+                .filter_map(|(entity_id, _, _, _)| {
+                    reverse.remove(entity_id).map(|keys| (*entity_id, keys))
+                })
+                .collect()
+        };
 
         {
             let mut index = self.tokens.write();
-            for (token, field) in &entity_tokens {
-                keys.token_keys.push(token.clone());
-                index
-                    .entry(token.clone())
-                    .or_default()
-                    .push(ContextPosting {
-                        entity_id: entity.id,
-                        collection: collection.to_string(),
-                        field: field.clone(),
-                    });
+            for (entity_id, keys) in &previous_keys {
+                let entity_id = EntityId::new(*entity_id);
+                for key in &keys.token_keys {
+                    if let Some(postings) = index.get_mut(key) {
+                        postings.retain(|posting| posting.entity_id != entity_id);
+                        if postings.is_empty() {
+                            index.remove(key);
+                        }
+                    }
+                }
+            }
+
+            for (entity_id, _, entity_tokens, _) in &prepared {
+                let entity_id = EntityId::new(*entity_id);
+                for (token, field) in entity_tokens {
+                    index
+                        .entry(token.clone())
+                        .or_default()
+                        .push(ContextPosting {
+                            entity_id,
+                            collection: collection.clone(),
+                            field: field.clone(),
+                        });
+                }
             }
         }
 
         {
             let mut index = self.field_values.write();
-            for (field, value_token) in &field_pairs {
-                keys.field_value_keys
-                    .push((field.clone(), value_token.clone()));
-                index
-                    .entry((field.clone(), value_token.clone()))
-                    .or_default()
-                    .push(ContextPosting {
-                        entity_id: entity.id,
-                        collection: collection.to_string(),
-                        field: field.clone(),
-                    });
+            for (entity_id, keys) in &previous_keys {
+                let entity_id = EntityId::new(*entity_id);
+                for key in &keys.field_value_keys {
+                    if let Some(postings) = index.get_mut(key) {
+                        postings.retain(|posting| posting.entity_id != entity_id);
+                        if postings.is_empty() {
+                            index.remove(key);
+                        }
+                    }
+                }
+            }
+
+            for (entity_id, _, _, field_pairs) in &prepared {
+                let entity_id = EntityId::new(*entity_id);
+                for (field, value_token) in field_pairs {
+                    index
+                        .entry((field.clone(), value_token.clone()))
+                        .or_default()
+                        .push(ContextPosting {
+                            entity_id,
+                            collection: collection.clone(),
+                            field: field.clone(),
+                        });
+                }
             }
         }
 
         {
             let mut reverse = self.reverse.write();
-            reverse.insert(entity.id.raw(), keys);
+            for (entity_id, keys, _, _) in &prepared {
+                reverse.insert(*entity_id, keys.clone());
+            }
         }
 
         {
             let mut indexed = self.indexed.write();
-            indexed.insert(entity.id.raw());
+            for (entity_id, _, _, _) in &prepared {
+                indexed.insert(*entity_id);
+            }
         }
     }
 

@@ -128,77 +128,40 @@ pub(crate) fn create_kv_reply(
 }
 
 /// Fast-path bulk insert for rows. Parses all JSONs up front, then calls
-/// store.bulk_insert() which acquires locks ONCE for the entire batch.
+/// the canonical runtime row-batch path so every transport shares the same
+/// validation, contract, indexing and persistence semantics.
 pub(crate) fn bulk_create_rows_fast(
     runtime: &GrpcRuntime,
     request: JsonBulkCreateRequest,
 ) -> Result<BulkEntityReply, Status> {
-    use crate::storage::schema::Value;
-    use crate::storage::unified::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
-
     if request.payload_json.is_empty() {
         return Err(Status::invalid_argument("payload_json cannot be empty"));
     }
 
     let collection = request.collection;
-    let n = request.payload_json.len();
-
-    // Phase 1: Parse all JSONs in bulk (no locks needed)
-    let mut entities = Vec::with_capacity(n);
+    let mut rows = Vec::with_capacity(request.payload_json.len());
     for payload_json in request.payload_json {
-        // Fast JSON parse — avoid double-allocation from parse_json_payload
-        let payload: crate::json::Value = crate::json::from_str(&payload_json)
-            .map_err(|e| Status::invalid_argument(format!("invalid JSON: {e}")))?;
-        let fields = match payload.get("fields").and_then(|f| f.as_object()) {
-            Some(f) => f,
-            None => return Err(Status::invalid_argument("missing 'fields' object")),
-        };
-
-        let mut named = std::collections::HashMap::with_capacity(fields.len());
-        for (key, val) in fields {
-            let value = match val {
-                crate::json::Value::String(s) => Value::Text(s.clone()),
-                crate::json::Value::Number(n) => {
-                    if n.fract().abs() < f64::EPSILON {
-                        Value::Integer(*n as i64)
-                    } else {
-                        Value::Float(*n)
-                    }
-                }
-                crate::json::Value::Bool(b) => Value::Boolean(*b),
-                crate::json::Value::Null => Value::Null,
-                _ => continue, // skip complex types for speed
-            };
-            named.insert(key.clone(), value);
-        }
-
-        entities.push(UnifiedEntity::new(
-            EntityId::new(0),
-            EntityKind::TableRow {
-                table: Arc::from(collection.as_str()),
-                row_id: 0,
-            },
-            EntityData::Row(RowData {
-                columns: Vec::new(),
-                named: Some(named),
-                schema: None,
-            }),
-        ));
+        let payload = parse_json_payload(&payload_json)?;
+        rows.push(
+            crate::application::entity_payload::parse_create_row_input(collection.clone(), &payload)
+                .map_err(entity_error_to_status)?,
+        );
     }
 
-    // Phase 2: Batch insert (single lock acquisition)
-    let store = runtime.runtime.db().store();
-    let ids = store
-        .bulk_insert(&collection, entities)
-        .map_err(|e| Status::internal(e.to_string()))?;
+    let outputs = runtime
+        .entity_use_cases()
+        .create_rows_batch(crate::application::CreateRowsBatchInput {
+            collection,
+            rows,
+        })
+        .map_err(entity_error_to_status)?;
 
-    // Phase 3: Build response
-    let items: Vec<_> = ids
+    let items: Vec<_> = outputs
         .iter()
-        .map(|id| EntityReply {
+        .map(|output| EntityReply {
             ok: true,
-            id: id.raw(),
-            entity_json: String::new(), // skip serialization for speed
+            id: output.id.raw(),
+            entity_json: String::new(),
         })
         .collect();
 
@@ -286,22 +249,11 @@ pub(crate) fn parse_json_payload(payload_json: &str) -> Result<JsonValue, Status
         .map_err(|err| Status::invalid_argument(format!("invalid payload_json: {err}")))
 }
 
-/// Binary bulk insert — ZERO JSON. Converts protobuf typed values
-/// directly into `UnifiedEntity`s and drops them into
-/// `store.bulk_insert`, which owns the full write path (segment
-/// manager + persistent B-tree + index maintenance).
+/// Binary bulk insert — ZERO JSON. Converts protobuf typed values into the
+/// canonical row batch input and hands execution to the shared runtime path.
 ///
-/// History: this used to run through a `PageBulkWriter` fast path as
-/// well, writing every row's cells directly to a disconnected chain
-/// of B-tree leaf pages AND to the segment manager. That double
-/// write did twice the serialization work, twice the flush work, and
-/// produced a stretch of orphaned pages on disk that no index
-/// pointed at — so queries never saw them. BASELINE.md Finding #2
-/// called it out as "the current design pays for both and gets the
-/// benefit of neither". We now commit to the single
-/// `store.bulk_insert` path: O(M) slotted leaf inserts keep it fast,
-/// and every row is immediately visible to the query engine via
-/// the segment manager.
+/// This keeps binary as just an encoding optimization; validation,
+/// uniqueness, index maintenance and persistence stay centralized.
 pub(crate) fn bulk_insert_binary(
     runtime: &GrpcRuntime,
     request: super::proto::BinaryBulkInsertRequest,
@@ -320,19 +272,11 @@ pub(crate) fn bulk_insert_binary(
     }
 
     let num_fields = request.field_names.len();
-    let store = runtime.runtime.db().store();
     let field_names: Vec<String> = request.field_names;
 
-    // Single pass: proto values → UnifiedEntity. No parallel
-    // `PageBulkWriter` chain. `store.bulk_insert` handles segment
-    // + B-tree together. We also remember a flattened `Vec<(name,
-    // value)>` per row so we can push each inserted entity through
-    // the secondary-index maintenance pipeline after its ID is known.
-    let mut entities = Vec::with_capacity(n);
-    let mut indexed_fields: Vec<Vec<(String, Value)>> = Vec::with_capacity(n);
+    let mut rows = Vec::with_capacity(n);
     for row in request.rows {
-        let mut named = std::collections::HashMap::with_capacity(num_fields);
-        let mut field_snapshot: Vec<(String, Value)> = Vec::with_capacity(num_fields);
+        let mut fields: Vec<(String, Value)> = Vec::with_capacity(num_fields);
         for (i, bval) in row.values.into_iter().enumerate() {
             if i >= num_fields {
                 break;
@@ -345,45 +289,29 @@ pub(crate) fn bulk_insert_binary(
                 Some(super::proto::binary_value::Kind::BlobValue(b)) => Value::Blob(b),
                 None => Value::Null,
             };
-            field_snapshot.push((field_names[i].clone(), value.clone()));
-            named.insert(field_names[i].clone(), value);
+            fields.push((field_names[i].clone(), value));
         }
-        indexed_fields.push(field_snapshot);
-
-        entities.push(crate::storage::unified::UnifiedEntity::new(
-            crate::storage::unified::EntityId::new(0),
-            crate::storage::unified::EntityKind::TableRow {
-                table: Arc::from(collection.as_str()),
-                row_id: 0,
-            },
-            crate::storage::unified::EntityData::Row(crate::storage::unified::RowData {
-                columns: Vec::new(),
-                named: Some(named),
-                schema: None,
-            }),
-        ));
+        rows.push(crate::application::CreateRowInput {
+            collection: collection.clone(),
+            fields,
+            metadata: Vec::new(),
+            node_links: Vec::new(),
+            vector_links: Vec::new(),
+        });
     }
 
-    let ids = store
-        .bulk_insert(&collection, entities)
-        .map_err(|e| Status::internal(e.to_string()))?;
-    let first_id = ids.first().map(|id| id.raw()).unwrap_or(0);
-
-    // Feed every inserted row to the secondary-index maintenance
-    // hook so that indexes registered BEFORE this bulk insert
-    // observe the new rows. Indexes created AFTER this call will
-    // pick them up via `CREATE INDEX`'s full scan.
-    for (id, fields) in ids.iter().zip(indexed_fields.iter()) {
-        runtime
-            .runtime
-            .index_store_ref()
-            .index_entity_insert(&collection, *id, fields)
-            .map_err(Status::internal)?;
-    }
+    let outputs = runtime
+        .entity_use_cases()
+        .create_rows_batch(crate::application::CreateRowsBatchInput {
+            collection,
+            rows,
+        })
+        .map_err(entity_error_to_status)?;
+    let first_id = outputs.first().map(|output| output.id.raw()).unwrap_or(0);
 
     Ok(super::proto::BulkInsertReply {
         ok: true,
-        count: ids.len() as u64,
+        count: outputs.len() as u64,
         first_id,
     })
 }

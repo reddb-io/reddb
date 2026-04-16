@@ -1099,6 +1099,8 @@ fn schema_data_type_str(data_type: crate::storage::schema::DataType) -> &'static
         crate::storage::schema::DataType::Lang2 => "lang2",
         crate::storage::schema::DataType::Lang5 => "lang5",
         crate::storage::schema::DataType::Currency => "currency",
+        crate::storage::schema::DataType::AssetCode => "asset_code",
+        crate::storage::schema::DataType::Money => "money",
         crate::storage::schema::DataType::ColorAlpha => "color_alpha",
         crate::storage::schema::DataType::BigInt => "bigint",
         crate::storage::schema::DataType::KeyRef => "keyref",

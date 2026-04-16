@@ -4,12 +4,17 @@ use crate::application::entity::{
     apply_patch_operations_to_json, apply_patch_operations_to_storage_map,
     apply_patch_operations_to_vector_fields, json_to_metadata_value, json_to_storage_value,
     metadata_from_json, metadata_to_json, CreateDocumentInput, CreateEdgeInput, CreateEntityOutput,
-    CreateKvInput, CreateNodeInput, CreateRowInput, CreateTimeSeriesPointInput, CreateVectorInput,
+    CreateKvInput, CreateNodeInput, CreateRowInput, CreateRowsBatchInput,
+    CreateTimeSeriesPointInput, CreateVectorInput,
     DeleteEntityInput, DeleteEntityOutput, PatchEntityInput, PatchEntityOperation,
     PatchEntityOperationType,
 };
 use crate::application::schema::{
     CreateTableInput, CreateTimeSeriesInput, DropTableInput, DropTimeSeriesInput,
+};
+use crate::application::tree::{
+    CreateTreeInput, DeleteTreeNodeInput, DropTreeInput, InsertTreeNodeInput, MoveTreeNodeInput,
+    RebalanceTreeInput, ValidateTreeInput,
 };
 use crate::catalog::{
     CatalogAnalyticsJobStatus, CatalogAttentionSummary, CatalogConsistencyReport,
@@ -116,6 +121,8 @@ pub trait RuntimeQueryPort {
 
 pub trait RuntimeEntityPort {
     fn create_row(&self, input: CreateRowInput) -> RedDBResult<CreateEntityOutput>;
+    fn create_rows_batch(&self, input: CreateRowsBatchInput)
+        -> RedDBResult<Vec<CreateEntityOutput>>;
     fn create_node(&self, input: CreateNodeInput) -> RedDBResult<CreateEntityOutput>;
     fn create_edge(&self, input: CreateEdgeInput) -> RedDBResult<CreateEntityOutput>;
     fn create_vector(&self, input: CreateVectorInput) -> RedDBResult<CreateEntityOutput>;
@@ -140,6 +147,16 @@ pub trait RuntimeSchemaPort {
     fn drop_table(&self, input: DropTableInput) -> RedDBResult<RuntimeQueryResult>;
     fn create_timeseries(&self, input: CreateTimeSeriesInput) -> RedDBResult<RuntimeQueryResult>;
     fn drop_timeseries(&self, input: DropTimeSeriesInput) -> RedDBResult<RuntimeQueryResult>;
+}
+
+pub trait RuntimeTreePort {
+    fn create_tree(&self, input: CreateTreeInput) -> RedDBResult<RuntimeQueryResult>;
+    fn drop_tree(&self, input: DropTreeInput) -> RedDBResult<RuntimeQueryResult>;
+    fn insert_tree_node(&self, input: InsertTreeNodeInput) -> RedDBResult<RuntimeQueryResult>;
+    fn move_tree_node(&self, input: MoveTreeNodeInput) -> RedDBResult<RuntimeQueryResult>;
+    fn delete_tree_node(&self, input: DeleteTreeNodeInput) -> RedDBResult<RuntimeQueryResult>;
+    fn validate_tree(&self, input: ValidateTreeInput) -> RedDBResult<RuntimeQueryResult>;
+    fn rebalance_tree(&self, input: RebalanceTreeInput) -> RedDBResult<RuntimeQueryResult>;
 }
 
 pub trait RuntimeAdminPort {
@@ -374,3 +391,6 @@ pub trait RuntimeGraphPort {
 
 #[path = "ports_impls.rs"]
 mod ports_impls;
+pub(crate) use ports_impls::build_row_update_contract_plan;
+pub(crate) use ports_impls::normalize_row_update_assignment_with_plan;
+pub(crate) use ports_impls::normalize_row_update_value_for_rule;

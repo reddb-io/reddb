@@ -1,9 +1,9 @@
 use crate::storage::query::ast::{
     AlterTableQuery, AskQuery, CreateIndexQuery, CreateQueueQuery, CreateTableQuery,
-    CreateTimeSeriesQuery, DeleteQuery, DropIndexQuery, DropQueueQuery, DropTableQuery,
-    DropTimeSeriesQuery, ExplainAlterQuery, GraphCommand, GraphQuery, HybridQuery, InsertQuery,
-    JoinQuery, PathQuery, ProbabilisticCommand, QueryExpr, QueueCommand, SearchCommand, TableQuery,
-    UpdateQuery, VectorQuery,
+    CreateTimeSeriesQuery, CreateTreeQuery, DeleteQuery, DropIndexQuery, DropQueueQuery,
+    DropTableQuery, DropTimeSeriesQuery, DropTreeQuery, ExplainAlterQuery, GraphCommand,
+    GraphQuery, HybridQuery, InsertQuery, JoinQuery, PathQuery, ProbabilisticCommand, QueryExpr,
+    QueueCommand, SearchCommand, TableQuery, TreeCommand, UpdateQuery, VectorQuery,
 };
 use crate::storage::query::parser::{ParseError, Parser};
 use crate::storage::query::Token;
@@ -32,6 +32,7 @@ pub enum FrontendStatement {
     Search(SearchCommand),
     Ask(AskQuery),
     QueueCommand(QueueCommand),
+    TreeCommand(TreeCommand),
     ProbabilisticCommand(ProbabilisticCommand),
 }
 
@@ -52,6 +53,8 @@ pub enum SqlCommand {
     DropTimeSeries(DropTimeSeriesQuery),
     CreateQueue(CreateQueueQuery),
     DropQueue(DropQueueQuery),
+    CreateTree(CreateTreeQuery),
+    DropTree(DropTreeQuery),
     Probabilistic(ProbabilisticCommand),
     SetConfig { key: String, value: Value },
     ShowConfig { prefix: Option<String> },
@@ -82,6 +85,8 @@ pub enum SqlSchemaCommand {
     DropTimeSeries(DropTimeSeriesQuery),
     CreateQueue(CreateQueueQuery),
     DropQueue(DropQueueQuery),
+    CreateTree(CreateTreeQuery),
+    DropTree(DropTreeQuery),
     Probabilistic(ProbabilisticCommand),
 }
 
@@ -129,6 +134,10 @@ impl SqlStatement {
             SqlStatement::Schema(SqlSchemaCommand::DropQueue(query)) => {
                 SqlCommand::DropQueue(query)
             }
+            SqlStatement::Schema(SqlSchemaCommand::CreateTree(query)) => {
+                SqlCommand::CreateTree(query)
+            }
+            SqlStatement::Schema(SqlSchemaCommand::DropTree(query)) => SqlCommand::DropTree(query),
             SqlStatement::Schema(SqlSchemaCommand::Probabilistic(command)) => {
                 SqlCommand::Probabilistic(command)
             }
@@ -158,6 +167,7 @@ impl FrontendStatement {
             FrontendStatement::Search(command) => QueryExpr::SearchCommand(command),
             FrontendStatement::Ask(query) => QueryExpr::Ask(query),
             FrontendStatement::QueueCommand(command) => QueryExpr::QueueCommand(command),
+            FrontendStatement::TreeCommand(command) => QueryExpr::TreeCommand(command),
             FrontendStatement::ProbabilisticCommand(command) => {
                 QueryExpr::ProbabilisticCommand(command)
             }
@@ -195,6 +205,8 @@ impl SqlCommand {
             SqlCommand::DropTimeSeries(query) => QueryExpr::DropTimeSeries(query),
             SqlCommand::CreateQueue(query) => QueryExpr::CreateQueue(query),
             SqlCommand::DropQueue(query) => QueryExpr::DropQueue(query),
+            SqlCommand::CreateTree(query) => QueryExpr::CreateTree(query),
+            SqlCommand::DropTree(query) => QueryExpr::DropTree(query),
             SqlCommand::Probabilistic(command) => QueryExpr::ProbabilisticCommand(command),
             SqlCommand::SetConfig { key, value } => QueryExpr::SetConfig { key, value },
             SqlCommand::ShowConfig { prefix } => QueryExpr::ShowConfig { prefix },
@@ -238,6 +250,10 @@ impl SqlCommand {
             SqlCommand::DropQueue(query) => {
                 SqlStatement::Schema(SqlSchemaCommand::DropQueue(query))
             }
+            SqlCommand::CreateTree(query) => {
+                SqlStatement::Schema(SqlSchemaCommand::CreateTree(query))
+            }
+            SqlCommand::DropTree(query) => SqlStatement::Schema(SqlSchemaCommand::DropTree(query)),
             SqlCommand::Probabilistic(command) => {
                 SqlStatement::Schema(SqlSchemaCommand::Probabilistic(command))
             }
@@ -326,6 +342,13 @@ impl<'a> Parser<'a> {
                     self.position(),
                 )),
             },
+            Token::Tree => match self.parse_tree_command()? {
+                QueryExpr::TreeCommand(command) => Ok(FrontendStatement::TreeCommand(command)),
+                other => Err(ParseError::new(
+                    format!("internal: TREE produced unexpected query kind {other:?}"),
+                    self.position(),
+                )),
+            },
             Token::Ident(name) if name.eq_ignore_ascii_case("HLL") => {
                 match self.parse_hll_command()? {
                     QueryExpr::ProbabilisticCommand(command) => {
@@ -363,7 +386,7 @@ impl<'a> Parser<'a> {
                 vec![
                     "SELECT", "MATCH", "PATH", "FROM", "VECTOR", "HYBRID", "INSERT", "UPDATE",
                     "DELETE", "CREATE", "DROP", "ALTER", "GRAPH", "SEARCH", "ASK", "QUEUE", "HLL",
-                    "SKETCH", "FILTER", "SET", "SHOW",
+                    "TREE", "SKETCH", "FILTER", "SET", "SHOW",
                 ],
                 other,
                 self.position(),
@@ -464,6 +487,15 @@ impl<'a> Parser<'a> {
                             self.position(),
                         )),
                     }
+                } else if self.check(&Token::Tree) {
+                    self.advance()?;
+                    match self.parse_create_tree_body()? {
+                        QueryExpr::CreateTree(query) => Ok(SqlCommand::CreateTree(query)),
+                        other => Err(ParseError::new(
+                            format!("internal: CREATE TREE produced unexpected kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
                 } else if matches!(self.peek(), Token::Ident(n) if
                     n.eq_ignore_ascii_case("HLL") ||
                     n.eq_ignore_ascii_case("SKETCH") ||
@@ -488,6 +520,7 @@ impl<'a> Parser<'a> {
                             "UNIQUE",
                             "TIMESERIES",
                             "QUEUE",
+                            "TREE",
                             "HLL",
                             "SKETCH",
                             "FILTER",
@@ -535,6 +568,15 @@ impl<'a> Parser<'a> {
                             self.position(),
                         )),
                     }
+                } else if self.check(&Token::Tree) {
+                    self.advance()?;
+                    match self.parse_drop_tree_body()? {
+                        QueryExpr::DropTree(query) => Ok(SqlCommand::DropTree(query)),
+                        other => Err(ParseError::new(
+                            format!("internal: DROP TREE produced unexpected kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
                 } else if matches!(self.peek(), Token::Ident(n) if
                     n.eq_ignore_ascii_case("HLL") ||
                     n.eq_ignore_ascii_case("SKETCH") ||
@@ -558,6 +600,7 @@ impl<'a> Parser<'a> {
                             "INDEX",
                             "TIMESERIES",
                             "QUEUE",
+                            "TREE",
                             "HLL",
                             "SKETCH",
                             "FILTER",
