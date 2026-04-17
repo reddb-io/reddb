@@ -123,6 +123,23 @@ pub(crate) fn persist_table_stats(store: &UnifiedStore, stats: &AnalyzedTableSta
             .map(mcv_arrays)
             .unwrap_or_else(|| (Vec::new(), Vec::new()));
 
+        // Cap each array to a per-array byte budget so the serialised
+        // stats row never exceeds the B-tree's `MAX_VALUE_SIZE`. Wide
+        // columns (long TEXT MCVs, JSON histogram bounds) used to
+        // overflow on bulk rebuild — see the storage engine's
+        // `B-tree bulk rebuild error: Value too large`. Truncating
+        // is loss-tolerant: planner accuracy degrades gracefully but
+        // the engine stays sound.
+        const PER_ARRAY_BYTE_BUDGET: usize = 256;
+        let hist_bounds = truncate_array_values_to_fit(hist_bounds, PER_ARRAY_BYTE_BUDGET);
+        let mcv_values = truncate_array_values_to_fit(mcv_values, PER_ARRAY_BYTE_BUDGET);
+        // mcv_freqs stays in lock-step with mcv_values — drop the same tail.
+        let mcv_freqs = if mcv_freqs.len() > mcv_values.len() {
+            mcv_freqs.into_iter().take(mcv_values.len()).collect()
+        } else {
+            mcv_freqs
+        };
+
         insert_stats_row(
             store,
             vec![
@@ -500,6 +517,48 @@ fn clear_existing_table_stats(store: &UnifiedStore, table: &str) {
     for entity in existing {
         let _ = store.delete(STATS_COLLECTION, entity.id);
     }
+}
+
+/// Conservative byte-size estimator for a `Value` — overcounts is
+/// fine, undercount would defeat the purpose. Used by
+/// `truncate_array_values_to_fit` to keep stats arrays within the
+/// engine's per-value budget.
+fn estimate_value_bytes(value: &Value) -> usize {
+    match value {
+        Value::Null | Value::Boolean(_) => 1,
+        Value::Integer(_)
+        | Value::UnsignedInteger(_)
+        | Value::TimestampMs(_)
+        | Value::Timestamp(_)
+        | Value::Duration(_)
+        | Value::Decimal(_) => 8,
+        Value::Float(_) => 8,
+        Value::Date(_) | Value::Time(_) => 4,
+        Value::Text(s) | Value::Email(s) | Value::Url(s) | Value::AssetCode(s)
+        | Value::NodeRef(s) | Value::EdgeRef(s) => s.len() + 4,
+        Value::Blob(b) | Value::Json(b) => b.len() + 4,
+        Value::Vector(v) => v.len() * 4 + 4,
+        Value::Array(items) => 4 + items.iter().map(estimate_value_bytes).sum::<usize>(),
+        // Pessimistic upper bound for the long tail of compact
+        // variants (Uuid, Color, Money, Cidr, GeoPoint, …). Cheap
+        // insurance — over-counting just truncates a touch sooner.
+        _ => 32,
+    }
+}
+
+/// Drop trailing entries until the array's estimated serialised size
+/// fits inside `byte_budget`. Lossy by design — callers (planner stats
+/// MCVs / histograms) prefer reduced fidelity over engine errors.
+fn truncate_array_values_to_fit(mut values: Vec<Value>, byte_budget: usize) -> Vec<Value> {
+    let mut total = 4usize; // outer Array overhead
+    for (idx, v) in values.iter().enumerate() {
+        total += estimate_value_bytes(v);
+        if total > byte_budget {
+            values.truncate(idx);
+            return values;
+        }
+    }
+    values
 }
 
 fn insert_stats_row(store: &UnifiedStore, fields: Vec<(String, Value)>) {
