@@ -60,14 +60,10 @@ Reuses existing `src/storage/transaction/lock.rs`.
 
 ## Phase 4 — Multi-row insert batching
 
-- [ ] **P4.T1** `UnifiedStore::insert_many` primitive
-  - Files: `src/storage/unified/store/impl_entities.rs`
-- [ ] **P4.T2** Fused index update path
-  - Files: `src/runtime/index_store.rs`
-- [ ] **P4.T3** gRPC `BulkInsertBinary` → `insert_many`
-  - Files: `src/wire/listener.rs`
-- [ ] **P4.T4** `COPY FROM` → `insert_many`
-  - Files: `src/runtime/impl_ddl.rs`, `tests/e2e_copy_from.rs` (new)
+- [x] **P4.T1** `UnifiedStore::bulk_insert` primitive (PRE-EXISTING, already wired via MutationEngine)
+- [x] **P4.T2** Fused index update path — `index_entity_insert_batch`, one registry lock per batch
+- [x] **P4.T3** gRPC `BulkInsertBinary` → `create_rows_batch` → MutationEngine (PRE-EXISTING)
+- [~] **P4.T4** `COPY FROM` wiring — deferred, executor already routes through MutationEngine; parser already batches
 - [ ] **P4 checkpoint** — `insert_bulk` ≤ 1.5× (composed with P2)
 
 ## Phase 5 — Lehman-Yao B-tree (REQUIRED)

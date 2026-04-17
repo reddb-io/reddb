@@ -1026,6 +1026,68 @@ impl IndexStore {
             .collect()
     }
 
+    /// Batched counterpart of `index_entity_insert`: takes a full
+    /// slice of `(EntityId, Vec<(String, Value)>)` pairs and walks
+    /// the index registry ONCE, then loops inside each registered
+    /// index. For an N-row insert with K indexes, this turns the
+    /// previous `N × K` registry-lock acquisitions into exactly one.
+    /// Matches the PG `heap_multi_insert` +  `ExecInsertIndexTuples`
+    /// fusion so bulk ingest doesn't pay per-row overhead.
+    pub fn index_entity_insert_batch(
+        &self,
+        collection: &str,
+        rows: &[(EntityId, Vec<(String, Value)>)],
+    ) -> Result<(), String> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let registry = self.registry.read();
+        for idx in registry.values() {
+            if idx.collection != collection {
+                continue;
+            }
+            let col = idx.columns.first().map(|s| s.as_str()).unwrap_or("");
+            for (entity_id, fields) in rows {
+                for (field_name, value) in fields {
+                    if field_name != col {
+                        continue;
+                    }
+                    let key = value_to_bytes(value);
+                    match idx.method {
+                        IndexMethodKind::Hash => {
+                            self.hash
+                                .insert(collection, &idx.name, key, *entity_id)
+                                .map_err(|err| err.to_string())?;
+                        }
+                        IndexMethodKind::Bitmap => {
+                            self.bitmap
+                                .insert(collection, col, *entity_id, &key)
+                                .map_err(|err| err.to_string())?;
+                        }
+                        IndexMethodKind::BTree => {
+                            if !self.sorted.has_index(collection, col) {
+                                return Err(format!(
+                                    "sorted index for collection '{collection}' column '{col}' was not found"
+                                ));
+                            }
+                            self.sorted.insert_one(collection, col, value, *entity_id);
+                            self.hash
+                                .insert(
+                                    collection,
+                                    &format!("{}_hash", idx.name),
+                                    key,
+                                    *entity_id,
+                                )
+                                .map_err(|err| err.to_string())?;
+                        }
+                        IndexMethodKind::Spatial => {}
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Insert one entity's relevant column values into every index
     /// registered on its collection. Called from the entity insert
     /// pipeline so that CREATE INDEX can land before or after the

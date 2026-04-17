@@ -192,20 +192,28 @@ impl<'rt> MutationEngine<'rt> {
                 let _ = self.store.set_metadata(&collection, id, meta);
             }
 
-            // Context index + cross-refs
+            // Context index + cross-refs (still per-row; these APIs
+            // don't expose a batch form yet).
             if let Some(entity) = self.store.get(&collection, id) {
                 self.store
                     .context_index()
                     .index_entity(&collection, &entity);
                 let _ = self.store.index_cross_refs(&entity, &collection);
             }
-
-            // Secondary indexes
-            self.runtime
-                .index_store_ref()
-                .index_entity_insert(&collection, id, &field_snapshots[i])
-                .map_err(RedDBError::Internal)?;
         }
+
+        // Secondary indexes: fused pass — one registry-lock acquisition
+        // for the whole batch instead of N (see `index_entity_insert_batch`
+        // in `runtime::index_store`). This is the P4.T2 win.
+        let index_rows: Vec<(EntityId, Vec<(String, Value)>)> = ids
+            .iter()
+            .zip(field_snapshots.iter().cloned())
+            .map(|(id, fields)| (*id, fields))
+            .collect();
+        self.runtime
+            .index_store_ref()
+            .index_entity_insert_batch(&collection, &index_rows)
+            .map_err(RedDBError::Internal)?;
 
         // CDC: emit once per entity but only ONE cache invalidation for the batch.
         // Previous code called cdc_emit() per row which triggered
