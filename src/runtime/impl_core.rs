@@ -937,9 +937,67 @@ fn query_expr_result_cache_scopes(expr: &QueryExpr) -> HashSet<String> {
     scopes
 }
 
+/// Read-side expression variants — SELECT / JOIN / Vector / Hybrid /
+/// Graph / Path + anything the unified executor treats as a query
+/// rather than a mutation. Non-read variants (Insert/Update/Delete,
+/// DDL, admin) skip the intent-lock acquisition path; their own
+/// dispatch arms will pick up the write / DDL modes in later tasks.
+fn is_read_expr(expr: &QueryExpr) -> bool {
+    matches!(
+        expr,
+        QueryExpr::Table(_)
+            | QueryExpr::Join(_)
+            | QueryExpr::Vector(_)
+            | QueryExpr::Hybrid(_)
+            | QueryExpr::Graph(_)
+            | QueryExpr::Path(_)
+            | QueryExpr::Ask(_)
+            | QueryExpr::SearchCommand(_)
+            | QueryExpr::GraphCommand(_)
+            | QueryExpr::QueueCommand(_)
+    )
+}
+
+/// Best-effort collection inventory for an expression. Used to pick
+/// `Collection(...)` resources for the intent-lock guard. Overshoots
+/// are fine (take an extra IS, benign); undershoots leak writes past
+/// DDL X locks, so err on the side of listing more names.
+fn collections_referenced(expr: &QueryExpr) -> Vec<String> {
+    let mut out = Vec::new();
+    walk_collections(expr, &mut out);
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn walk_collections(expr: &QueryExpr, out: &mut Vec<String>) {
+    match expr {
+        QueryExpr::Table(t) => out.push(t.table.clone()),
+        QueryExpr::Join(j) => {
+            walk_collections(&j.left, out);
+            walk_collections(&j.right, out);
+        }
+        QueryExpr::Insert(i) => out.push(i.table.clone()),
+        QueryExpr::Update(u) => out.push(u.table.clone()),
+        QueryExpr::Delete(d) => out.push(d.table.clone()),
+        // Vector / Hybrid / Graph / Path / commands reference
+        // collections through fields whose shape varies; without a
+        // uniform accessor we fall back to the global lock only —
+        // benign because every runtime path still holds (Global, IS).
+        _ => {}
+    }
+}
+
 impl RedDBRuntime {
     pub fn in_memory() -> RedDBResult<Self> {
         Self::with_options(RedDBOptions::in_memory())
+    }
+
+    /// Handle to the intent-lock manager for tests + introspection.
+    /// Production code acquires via `LockerGuard::new(rt.lock_manager())`
+    /// rather than touching the manager directly.
+    pub fn lock_manager(&self) -> std::sync::Arc<crate::storage::transaction::lock::LockManager> {
+        self.inner.lock_manager.clone()
     }
 
     #[inline(never)]
@@ -2477,6 +2535,40 @@ impl RedDBRuntime {
 
         let statement = query_expr_name(&expr);
         let result_cache_scopes = query_expr_result_cache_scopes(&expr);
+
+        // Phase 1.T3 perf-parity — intent-lock acquisition for reads.
+        // Gated on `concurrency.locking.enabled` so a bad interaction
+        // can be disabled via env / SET CONFIG without reverting the
+        // commit. Builds a `LockerGuard` with `(Global, IS)` plus one
+        // `(Collection, IS)` per table referenced in the expression;
+        // drops at end of dispatch so the lock is held only for this
+        // statement. Under Phase 1's contract, concurrent IX writers
+        // and concurrent DDL-X waiters both see the IS and behave
+        // correctly (IX/IS compatible, X/IS conflicts → waits).
+        let _lock_guard = if self
+            .config_bool("concurrency.locking.enabled", true)
+            && is_read_expr(&expr)
+        {
+            let mut g =
+                crate::runtime::locking::LockerGuard::new(self.inner.lock_manager.clone());
+            // Non-fatal on failure: if the lock manager is
+            // misbehaving we still want the query to run so the
+            // operator can SHOW CONFIG / SET CONFIG to disable.
+            // Errors land in the log via tracing.
+            let _ = g.acquire(
+                crate::runtime::locking::Resource::Global,
+                crate::storage::transaction::lock::LockMode::IntentShared,
+            );
+            for collection in collections_referenced(&expr) {
+                let _ = g.acquire(
+                    crate::runtime::locking::Resource::Collection(collection),
+                    crate::storage::transaction::lock::LockMode::IntentShared,
+                );
+            }
+            Some(g)
+        } else {
+            None
+        };
 
         let query_result = match expr {
             QueryExpr::Graph(_) | QueryExpr::Path(_) => {

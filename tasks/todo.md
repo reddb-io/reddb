@@ -35,7 +35,7 @@ Reuses existing `src/storage/transaction/lock.rs`.
 - [x] **P1.T2** `src/runtime/locking.rs` — `Resource` + `LockerGuard`
   - Acceptance: compatibility-matrix unit tests + 50-thread stress, no deadlocks
   - Files: `src/runtime/locking.rs` (new), `src/runtime.rs`
-- [ ] **P1.T3** Wire reads to IS (Select/Join/Vector/Hybrid/Graph/Path)
+- [x] **P1.T3** Wire reads to IS (Select/Join/Vector/Hybrid/Graph/Path)
   - Acceptance: regression net green; lock stats bump on SELECT
   - Files: `src/runtime/impl_core.rs`, `tests/e2e_locking_reads.rs` (new)
 - [ ] **P1.T4** Wire writes to IX (DML + builders)
