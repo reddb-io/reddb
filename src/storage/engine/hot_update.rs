@@ -55,6 +55,49 @@ pub struct HotUpdateDecision {
     pub page_free_space: usize,
 }
 
+/// Default for `storage.hot_update.max_chain_hops` — matches PG's
+/// `MAX_HEAP_TUPLE_CHAIN_LEN`. Kept in sync with the matrix entry.
+pub const DEFAULT_MAX_CHAIN_HOPS: usize = 32;
+
+/// Follow a t_ctid HOT chain from `start` up to `max_hops` times,
+/// invoking `resolve` to fetch the next version by entity id.
+/// Stops when `resolve` returns `None` (terminal version) or when
+/// the budget is exhausted (anomaly — a well-formed chain should
+/// never hit it, so the caller should log). Returns the tuple's
+/// final visible version to the caller.
+///
+/// Storage-layer page-local rewrite + chain construction lands in
+/// a later pass. This function is the policy-side reader counterpart
+/// so we don't have to retrofit callers later; today every chain
+/// is length 1 because the writer never mints a successor.
+pub fn follow_chain<F>(
+    start_id: crate::storage::unified::entity::EntityId,
+    max_hops: usize,
+    mut resolve: F,
+) -> crate::storage::unified::entity::EntityId
+where
+    F: FnMut(
+        crate::storage::unified::entity::EntityId,
+    ) -> Option<crate::storage::unified::entity::EntityId>,
+{
+    let hops_cap = max_hops.max(1);
+    let mut current = start_id;
+    for _hop in 0..hops_cap {
+        match resolve(current) {
+            Some(next) if next != current => current = next,
+            _ => return current,
+        }
+    }
+    // Bounded — prevents a malformed chain from looping forever.
+    // Returning the last known version is the conservative choice.
+    tracing::warn!(
+        entity_id = current.raw(),
+        max_hops = hops_cap,
+        "hot_update chain walker hit hop cap — likely malformed chain"
+    );
+    current
+}
+
 /// Pure decision function. Returns `can_hot=true` when both
 /// conditions hold; populates `indexed_blocker` when at least one
 /// modified column is indexed.

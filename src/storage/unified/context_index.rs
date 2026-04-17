@@ -84,6 +84,10 @@ pub struct ContextIndex {
     reverse: RwLock<HashMap<u64, EntityKeys>>,
     /// Set of currently indexed entity IDs (accurate count)
     indexed: RwLock<HashSet<u64>>,
+    /// Collections opted in via `CREATE TABLE ... WITH context_index = true`.
+    /// Writes to collections absent from this set are no-ops — OLTP tables
+    /// skip tokenisation + 3-way RwLock write storm entirely.
+    enabled_collections: RwLock<HashSet<String>>,
 }
 
 impl ContextIndex {
@@ -94,12 +98,29 @@ impl ContextIndex {
             field_values: RwLock::new(BTreeMap::new()),
             reverse: RwLock::new(HashMap::new()),
             indexed: RwLock::new(HashSet::new()),
+            enabled_collections: RwLock::new(HashSet::new()),
         }
+    }
+
+    /// Opt a collection in or out of context indexing. Driven by
+    /// `CREATE TABLE ... WITH context_index = true` at DDL time.
+    pub fn set_collection_enabled(&self, collection: &str, enabled: bool) {
+        let mut set = self.enabled_collections.write();
+        if enabled {
+            set.insert(collection.to_string());
+        } else {
+            set.remove(collection);
+        }
+    }
+
+    /// Whether writes to this collection should land in the index.
+    pub fn is_collection_enabled(&self, collection: &str) -> bool {
+        self.enabled_collections.read().contains(collection)
     }
 
     /// Index an entity — extracts tokens and field:value pairs into posting lists.
     pub fn index_entity(&self, collection: &str, entity: &UnifiedEntity) {
-        if context_index_disabled() {
+        if !self.is_collection_enabled(collection) {
             return;
         }
         self.index_entities(collection, std::iter::once(entity));
@@ -111,7 +132,7 @@ impl ContextIndex {
     where
         I: IntoIterator<Item = &'a UnifiedEntity>,
     {
-        if context_index_disabled() {
+        if !self.is_collection_enabled(collection) {
             return;
         }
         let collection = collection.to_string();
@@ -665,36 +686,6 @@ fn extract_field_lookup_pairs(entity: &UnifiedEntity) -> Vec<(String, String)> {
     pairs.into_iter().collect()
 }
 
-/// Perf escape hatch: `REDDB_DISABLE_CONTEXT_INDEX=1` skips the
-/// per-insert tokenisation + three-way RwLock write storm the
-/// context index does on every mutation.
-///
-/// Default is still "enabled" so `SEARCH CONTEXT` and `ASK` keep
-/// working out of the box. OLTP-only deployments that never query
-/// via the context index (point lookups, range scans, RLS-gated
-/// SELECTs) can flip the flag and recover the 40–60 % of insert
-/// latency the indexer costs. Result: up to ~2× faster inserts
-/// and ~1.5× faster batch writes at the cost of `SEARCH CONTEXT`
-/// returning empty.
-///
-/// Read once via a `OnceLock<AtomicBool>` so the check is a single
-/// relaxed atomic load on the hot path — cheap enough to be
-/// unconditional.
-fn context_index_disabled() -> bool {
-    use std::sync::atomic::{AtomicU8, Ordering};
-    use std::sync::OnceLock;
-
-    static CELL: OnceLock<AtomicU8> = OnceLock::new();
-    let atomic = CELL.get_or_init(|| {
-        let initial = match std::env::var("REDDB_DISABLE_CONTEXT_INDEX") {
-            Ok(v) if matches!(v.as_str(), "1" | "true" | "TRUE" | "yes") => 1,
-            _ => 0,
-        };
-        AtomicU8::new(initial)
-    });
-    atomic.load(Ordering::Relaxed) != 0
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -723,6 +714,7 @@ mod tests {
     #[test]
     fn test_index_and_search() {
         let index = ContextIndex::new();
+        index.set_collection_enabled("customers", true);
         let entity = make_row_entity(
             1,
             "customers",
@@ -742,6 +734,7 @@ mod tests {
     #[test]
     fn test_field_search() {
         let index = ContextIndex::new();
+        index.set_collection_enabled("customers", true);
         let entity = make_row_entity(
             42,
             "customers",
@@ -757,6 +750,7 @@ mod tests {
     #[test]
     fn test_remove_entity() {
         let index = ContextIndex::new();
+        index.set_collection_enabled("test", true);
         let entity = make_row_entity(1, "test", vec![("key", Value::Text("value".to_string()))]);
         index.index_entity("test", &entity);
 
@@ -769,6 +763,8 @@ mod tests {
     #[test]
     fn test_collection_filtering() {
         let index = ContextIndex::new();
+        index.set_collection_enabled("col_a", true);
+        index.set_collection_enabled("col_b", true);
         let e1 = make_row_entity(1, "col_a", vec![("name", Value::Text("Alice".to_string()))]);
         let e2 = make_row_entity(2, "col_b", vec![("name", Value::Text("Alice".to_string()))]);
         index.index_entity("col_a", &e1);
@@ -786,6 +782,7 @@ mod tests {
     #[test]
     fn test_stats() {
         let index = ContextIndex::new();
+        index.set_collection_enabled("test", true);
         let entity = make_row_entity(1, "test", vec![("k", Value::Text("v".to_string()))]);
         index.index_entity("test", &entity);
 

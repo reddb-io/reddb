@@ -67,6 +67,21 @@ pub struct TelemetryConfig {
     pub rotation_keep_days: u16,
     /// Service name stamped on every record under the `service` field.
     pub service_name: &'static str,
+
+    /// Per-invocation intent flags — set by the CLI parser to record
+    /// which fields the operator explicitly passed. The config merge
+    /// (red_config → CLI) uses these to decide whether a persisted
+    /// `red.logging.*` value should be promoted.
+    ///
+    /// Not serialised; always recomputed per process start.
+    pub level_explicit: bool,
+    pub format_explicit: bool,
+    pub rotation_keep_days_explicit: bool,
+    pub file_prefix_explicit: bool,
+    pub log_dir_explicit: bool,
+    /// `--no-log-file` was passed: file sink must stay off regardless
+    /// of `red.logging.dir`.
+    pub log_file_disabled: bool,
 }
 
 impl Default for TelemetryConfig {
@@ -78,6 +93,12 @@ impl Default for TelemetryConfig {
             format: LogFormat::Pretty,
             rotation_keep_days: 14,
             service_name: "reddb",
+            level_explicit: false,
+            format_explicit: false,
+            rotation_keep_days_explicit: false,
+            file_prefix_explicit: false,
+            log_dir_explicit: false,
+            log_file_disabled: false,
         }
     }
 }

@@ -45,6 +45,14 @@ pub enum DurabilityMode {
     #[default]
     Strict,
     WalDurableGrouped,
+    /// Fire-and-forget. Writers return as soon as the WAL record is
+    /// in the in-memory ring buffer — they do NOT wait for fsync.
+    /// The group-commit background thread still flushes on its
+    /// cadence, so committed-but-unflushed work is bounded by
+    /// `GroupCommitOptions::window_ms`. A crash inside the window
+    /// drops whatever wasn't flushed — matches PG's
+    /// `synchronous_commit=off` contract.
+    Async,
 }
 
 impl DurabilityMode {
@@ -52,6 +60,7 @@ impl DurabilityMode {
         match self {
             Self::Strict => "strict",
             Self::WalDurableGrouped => "wal_durable_grouped",
+            Self::Async => "async",
         }
     }
 
@@ -71,11 +80,10 @@ impl DurabilityMode {
             | "grouped"
             | "wal_grouped"
             | "wal-grouped" => Some(Self::WalDurableGrouped),
-            // "async" aliases to the same grouped sync path today.
-            // A true fire-and-forget async tier ships as a separate
-            // variant in a later pass; accept the name now so the
-            // config matrix / env overlay don't reject it outright.
-            "async" => Some(Self::WalDurableGrouped),
+            // Fire-and-forget async: writers return as soon as the
+            // WAL buffer accepts the record; background flusher runs
+            // on its configured cadence.
+            "async" | "fire_and_forget" | "fire-and-forget" => Some(Self::Async),
             _ => None,
         }
     }

@@ -31,10 +31,13 @@ impl<'a> Parser<'a> {
 
         let mut default_ttl_ms = None;
         let mut context_index_fields = Vec::new();
+        let mut context_index_enabled = false;
         let mut timestamps = false;
 
         while self.consume(&Token::With)? {
-            if self.consume_ident_ci("CONTEXT")? {
+            if self.consume_ident_ci("CONTEXT_INDEX")? {
+                context_index_enabled = self.parse_bool_assign()?;
+            } else if self.consume_ident_ci("CONTEXT")? {
                 // Consume INDEX token (reserved keyword)
                 if !self.consume(&Token::Index)? {
                     return Err(ParseError::expected(
@@ -52,6 +55,7 @@ impl<'a> Parser<'a> {
                     }
                 }
                 self.expect(Token::RParen)?;
+                context_index_enabled = true;
             } else if self.consume_ident_ci("TIMESTAMPS")? {
                 timestamps = self.parse_bool_assign()?;
             } else {
@@ -65,6 +69,7 @@ impl<'a> Parser<'a> {
             if_not_exists,
             default_ttl_ms,
             context_index_fields,
+            context_index_enabled,
             timestamps,
             partition_by: None,
             tenant_by: None,
@@ -96,11 +101,14 @@ impl<'a> Parser<'a> {
 
         let mut default_ttl_ms = None;
         let mut context_index_fields = Vec::new();
+        let mut context_index_enabled = false;
         let mut timestamps = false;
         let mut tenant_by: Option<String> = None;
 
         while self.consume(&Token::With)? {
-            if self.consume_ident_ci("CONTEXT")? {
+            if self.consume_ident_ci("CONTEXT_INDEX")? {
+                context_index_enabled = self.parse_bool_assign()?;
+            } else if self.consume_ident_ci("CONTEXT")? {
                 if !self.consume(&Token::Index)? {
                     return Err(ParseError::expected(
                         vec!["INDEX"],
@@ -117,6 +125,7 @@ impl<'a> Parser<'a> {
                     }
                 }
                 self.expect(Token::RParen)?;
+                context_index_enabled = true;
             } else if self.consume_ident_ci("TIMESTAMPS")? {
                 timestamps = self.parse_bool_assign()?;
             } else if self.consume_ident_ci("TENANT_BY")? {
@@ -195,6 +204,7 @@ impl<'a> Parser<'a> {
             if_not_exists,
             default_ttl_ms,
             context_index_fields,
+            context_index_enabled,
             timestamps,
             partition_by,
             tenant_by,

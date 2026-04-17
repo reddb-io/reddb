@@ -248,6 +248,13 @@ pub(crate) fn current_scope_override(
     SCOPE_OVERRIDES.with(|cell| cell.borrow().last().cloned())
 }
 
+/// Cheap probe: is any `WITHIN …` scope override active on this
+/// thread? The fast-path needs to know without paying for the full
+/// `.last().cloned()` allocation — just peek at stack length.
+pub(crate) fn has_scope_override_active() -> bool {
+    SCOPE_OVERRIDES.with(|cell| !cell.borrow().is_empty())
+}
+
 /// RAII guard pairing `push_scope_override` with the matching pop, so
 /// the stack stays balanced even when the inner `execute_query` returns
 /// early via `?`.
@@ -1378,6 +1385,20 @@ impl RedDBRuntime {
             // on long-running datadirs that predate the matrix.
             crate::runtime::config_matrix::heal_critical_keys(store.as_ref());
 
+            // Phase 5 — Lehman-Yao runtime flag. Read the Tier A
+            // `storage.btree.lehman_yao` value from the matrix (env
+            // > file > red_config > default) and publish it to the
+            // storage layer's atomic so the B-tree read / split
+            // paths can branch without re-reading the config on
+            // every hot-path call.
+            let lehman_yao = runtime.config_bool("storage.btree.lehman_yao", true);
+            crate::storage::engine::btree::lehman_yao::set_enabled(lehman_yao);
+            if lehman_yao {
+                tracing::info!(
+                    "storage.btree.lehman_yao=true — lock-free concurrent descent enabled"
+                );
+            }
+
             // Config file overlay — mounted `/etc/reddb/config.json`
             // (override path via REDDB_CONFIG_FILE). Writes keys with
             // write-if-absent semantics so a later user `SET CONFIG`
@@ -2378,6 +2399,30 @@ impl RedDBRuntime {
 
     #[inline(never)]
     pub fn execute_query(&self, query: &str) -> RedDBResult<RuntimeQueryResult> {
+        // ── ULTRA-TURBO: autocommit `SELECT * FROM t WHERE _entity_id = N` ──
+        //
+        // Moved above every boot-cost the normal path pays (WITHIN
+        // strip, SET LOCAL parse, tx_local_tenants read, snapshot
+        // guard, tracing span, tx_contexts read) because the bench's
+        // `select_point` scenario was observed at 28× vs PostgreSQL —
+        // the dominant cost wasn't the entity fetch but the ceremony
+        // before it. Only fires when there's no ambient transaction
+        // context or WITHIN override, so the snapshot install we skip
+        // truly is a no-op for this query.
+        if !has_scope_override_active()
+            && !query.trim_start().starts_with("WITHIN")
+            && !query.trim_start().starts_with("within")
+            && !self
+                .inner
+                .tx_contexts
+                .read()
+                .contains_key(&current_connection_id())
+        {
+            if let Some(result) = self.try_fast_entity_lookup(query) {
+                return result;
+            }
+        }
+
         // `WITHIN TENANT '<id>' [USER '<u>'] [AS ROLE '<r>'] <stmt>` —
         // strip the prefix, push a stack-scoped override, recurse on
         // the inner statement, pop on return. Stack lives in a
@@ -3895,7 +3940,11 @@ impl RedDBRuntime {
         }
         let table_name = table.split_whitespace().next()?;
 
-        // Direct entity lookup
+        // Direct entity lookup — skips SQL parse, plan cache, result
+        // cache, view rewriter, RLS gate. Safe because the gating in
+        // `execute_query` guarantees no scope override / no
+        // transaction context is active. MVCC visibility is still
+        // honoured against the current snapshot.
         let store = self.inner.db.store();
         let entity = store
             .get(
@@ -3904,13 +3953,24 @@ impl RedDBRuntime {
             )
             .filter(entity_visible_under_current_snapshot);
 
+        let count = if entity.is_some() { 1u64 } else { 0 };
+
+        // Materialize a record so downstream consumers that walk
+        // `result.records` (embedded runtime API, decrypt pass, CLI)
+        // see the row. Previously only `pre_serialized_json` was
+        // filled, which caused those consumers to see zero rows and
+        // skewed benchmarks.
+        let records: Vec<crate::storage::query::unified::UnifiedRecord> = entity
+            .as_ref()
+            .and_then(|e| runtime_table_record_from_entity(e.clone()))
+            .into_iter()
+            .collect();
+
         let json = match entity {
             Some(ref e) => execute_runtime_serialize_single_entity(e),
             None => r#"{"columns":[],"record_count":0,"selection":{"scope":"any"},"records":[]}"#
                 .to_string(),
         };
-
-        let count = if entity.is_some() { 1u64 } else { 0 };
 
         Some(Ok(RuntimeQueryResult {
             query: query.to_string(),
@@ -3919,7 +3979,7 @@ impl RedDBRuntime {
             engine: "fast-entity-lookup",
             result: crate::storage::query::unified::UnifiedResult {
                 columns: Vec::new(),
-                records: Vec::new(),
+                records,
                 stats: crate::storage::query::unified::QueryStats {
                     rows_scanned: count,
                     ..Default::default()

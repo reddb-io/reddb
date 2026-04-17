@@ -343,6 +343,10 @@ pub(super) fn collection_contract_to_json(contract: &CollectionContract) -> Json
         JsonValue::Bool(contract.timestamps_enabled),
     );
     object.insert(
+        "context_index_enabled".to_string(),
+        JsonValue::Bool(contract.context_index_enabled),
+    );
+    object.insert(
         "table_def".to_string(),
         contract
             .table_def
@@ -417,6 +421,13 @@ pub(super) fn collection_contract_from_json(value: &JsonValue) -> io::Result<Col
             .get("timestamps_enabled")
             .and_then(JsonValue::as_bool)
             .unwrap_or(false),
+        // Legacy sidecars written before per-table opt-in lack this key.
+        // Pre-PR behavior was "context index on unless REDDB_DISABLE_CONTEXT_INDEX";
+        // defaulting missing → true preserves that for existing tables on upgrade.
+        context_index_enabled: object
+            .get("context_index_enabled")
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(true),
     })
 }
 
@@ -1282,4 +1293,65 @@ pub(super) fn export_descriptor_from_json(value: &JsonValue) -> io::Result<Expor
         collection_count: json_usize_required(object, "collection_count")?,
         total_entities: json_usize_required(object, "total_entities")?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn minimal_contract_object(with_ctx_enabled: Option<bool>) -> JsonValue {
+        let mut obj = Map::new();
+        obj.insert("name".to_string(), JsonValue::String("docs".to_string()));
+        obj.insert(
+            "declared_model".to_string(),
+            JsonValue::String("row".to_string()),
+        );
+        obj.insert(
+            "schema_mode".to_string(),
+            JsonValue::String("open".to_string()),
+        );
+        obj.insert("origin".to_string(), JsonValue::String("user".to_string()));
+        obj.insert("version".to_string(), JsonValue::Number(1.0));
+        obj.insert("created_at_unix_ms".to_string(), JsonValue::Number(0.0));
+        obj.insert("updated_at_unix_ms".to_string(), JsonValue::Number(0.0));
+        obj.insert("default_ttl_ms".to_string(), JsonValue::Null);
+        obj.insert("table_def".to_string(), JsonValue::Null);
+        obj.insert(
+            "context_index_fields".to_string(),
+            JsonValue::Array(Vec::new()),
+        );
+        obj.insert(
+            "declared_columns".to_string(),
+            JsonValue::Array(Vec::new()),
+        );
+        obj.insert("timestamps_enabled".to_string(), JsonValue::Bool(false));
+        if let Some(v) = with_ctx_enabled {
+            obj.insert("context_index_enabled".to_string(), JsonValue::Bool(v));
+        }
+        JsonValue::Object(obj)
+    }
+
+    #[test]
+    fn legacy_sidecar_missing_context_index_defaults_true() {
+        let value = minimal_contract_object(None);
+        let contract = collection_contract_from_json(&value).expect("decode");
+        assert!(
+            contract.context_index_enabled,
+            "missing key must default to true to preserve pre-PR behavior on upgrade"
+        );
+    }
+
+    #[test]
+    fn explicit_context_index_false_is_respected() {
+        let value = minimal_contract_object(Some(false));
+        let contract = collection_contract_from_json(&value).expect("decode");
+        assert!(!contract.context_index_enabled);
+    }
+
+    #[test]
+    fn explicit_context_index_true_is_respected() {
+        let value = minimal_contract_object(Some(true));
+        let contract = collection_contract_from_json(&value).expect("decode");
+        assert!(contract.context_index_enabled);
+    }
 }

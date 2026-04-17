@@ -217,6 +217,18 @@ pub struct CollectionContract {
     /// `UnifiedEntity::created_at/updated_at` fields. `created_at` is
     /// immutable after insert; `updated_at` is bumped on every mutation.
     pub timestamps_enabled: bool,
+    /// Enabled by `CREATE TABLE ... WITH context_index = true` (or by
+    /// naming specific `context_index_fields`). When true, every INSERT
+    /// tokenises the row's text fields and populates the global context
+    /// index that backs `SEARCH CONTEXT` / `SEARCH SIMILAR TEXT` / `ASK`
+    /// (RAG). When false (default), inserts skip the tokenisation +
+    /// 3-way RwLock write storm entirely — ~800 ns faster per insert,
+    /// and SEARCH returns empty for this collection.
+    ///
+    /// Opt-in by design: pure OLTP tables (accounts, orders, events)
+    /// pay zero indexing tax; search-oriented tables (articles, docs)
+    /// flip the switch at CREATE time.
+    pub context_index_enabled: bool,
 }
 
 /// Canonical artifact lifecycle states.

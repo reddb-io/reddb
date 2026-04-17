@@ -23,6 +23,12 @@ const SEED_ROWS: usize = 5000;
 const LOOKUP_ITERS: usize = 50_000;
 
 fn main() {
+    let guard = pprof::ProfilerGuardBuilder::default()
+        .frequency(1000)
+        .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+        .build()
+        .expect("start profiler");
+
     // ── Setup ────────────────────────────────────────────────────
     let rt = RedDBRuntime::in_memory().expect("open in-memory runtime");
     let uc_entity = EntityUseCases::new(&rt);
@@ -188,4 +194,13 @@ fn main() {
         "  (p99/p50 ratio = {:.1}× — high ratio = stalls/GC pauses)",
         ins_p99 as f64 / ins_p50 as f64
     );
+
+    match guard.report().build() {
+        Ok(report) => {
+            let file = std::fs::File::create("flame-profile-hot.svg").expect("create svg");
+            report.flamegraph(file).expect("write flamegraph");
+            eprintln!("flame-profile-hot.svg written");
+        }
+        Err(err) => eprintln!("pprof report error: {err}"),
+    }
 }

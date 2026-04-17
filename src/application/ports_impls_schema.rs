@@ -43,7 +43,8 @@ impl RuntimeSchemaPort for RedDBRuntime {
             columns: columns.into_iter().map(to_create_column_def).collect(),
             if_not_exists,
             default_ttl_ms,
-            context_index_fields,
+            context_index_fields: context_index_fields.clone(),
+            context_index_enabled: !context_index_fields.is_empty(),
             timestamps,
             // Application-level `create_table` entry point does not yet
             // accept partition specs — callers that need partitions go

@@ -71,6 +71,14 @@ pub struct RedDB {
     vector_indexes: RwLock<HashMap<String, CachedVectorIndex>>,
     /// Default TTL policy declared at the collection level, in milliseconds.
     collection_ttl_defaults_ms: RwLock<HashMap<String, u64>>,
+    /// In-memory cache of collection contracts keyed by collection name.
+    /// Populated lazily from `physical_metadata()` and invalidated on
+    /// `save_collection_contract` / `remove_collection_contract`.
+    /// Avoids reparsing the whole PhysicalMetadataFile JSON on every
+    /// `collection_contract(name)` lookup — which happens 3× per insert
+    /// (ensure_model, enforce_uniqueness, normalize_fields) and dominated
+    /// the insert hot path at ~30%.
+    pub(crate) collection_contract_cache: RwLock<Option<Arc<HashMap<String, crate::physical::CollectionContract>>>>,
     /// Optional remote storage backend for snapshot transport.
     pub(crate) remote_backend: Option<Arc<dyn crate::storage::backend::RemoteBackend>>,
     /// Remote object key used by the remote backend.

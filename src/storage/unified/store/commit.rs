@@ -138,7 +138,10 @@ pub(crate) struct StoreCommitCoordinator {
 
 impl StoreCommitCoordinator {
     pub(crate) fn should_open(path: &Path, mode: DurabilityMode) -> bool {
-        matches!(mode, DurabilityMode::WalDurableGrouped) || path.exists()
+        matches!(
+            mode,
+            DurabilityMode::WalDurableGrouped | DurabilityMode::Async
+        ) || path.exists()
     }
 
     pub(crate) fn open(
@@ -155,7 +158,10 @@ impl StoreCommitCoordinator {
             Condvar::new(),
         ));
 
-        if matches!(mode, DurabilityMode::WalDurableGrouped) {
+        if matches!(
+            mode,
+            DurabilityMode::WalDurableGrouped | DurabilityMode::Async
+        ) {
             let wal_bg = Arc::clone(&wal);
             let state_bg = Arc::clone(&state);
             let window = Duration::from_millis(config.window_ms.max(1));
@@ -315,6 +321,22 @@ impl StoreCommitCoordinator {
     fn wait_until_durable(&self, target_lsn: u64, wal_bytes: u64) -> io::Result<()> {
         match self.mode {
             DurabilityMode::Strict => self.force_sync(),
+            // Async: record the pending target so the background
+            // flusher eventually covers it, but don't block the
+            // caller. Matches PG `synchronous_commit=off` semantics —
+            // crash inside the flush window loses unflushed commits.
+            DurabilityMode::Async => {
+                let (state_lock, cond) = &*self.state;
+                let mut state = state_lock
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                state.pending_target_lsn = state.pending_target_lsn.max(target_lsn);
+                state.pending_statements = state.pending_statements.saturating_add(1);
+                state.pending_wal_bytes = state.pending_wal_bytes.saturating_add(wal_bytes);
+                state.first_pending_at.get_or_insert_with(Instant::now);
+                cond.notify_all();
+                Ok(())
+            }
             DurabilityMode::WalDurableGrouped => {
                 let (state_lock, cond) = &*self.state;
                 let mut state = state_lock
@@ -445,7 +467,7 @@ impl UnifiedStore {
         let actions: Vec<StoreWalAction> = actions.into_iter().collect();
         match self.config.durability_mode {
             DurabilityMode::Strict => self.flush_paged_state(),
-            DurabilityMode::WalDurableGrouped => {
+            DurabilityMode::WalDurableGrouped | DurabilityMode::Async => {
                 if let Some(commit) = &self.commit {
                     commit.append_actions(&actions).map_err(StoreError::Io)?;
                     Ok(())

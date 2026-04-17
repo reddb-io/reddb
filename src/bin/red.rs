@@ -1585,20 +1585,29 @@ fn build_telemetry_config(
 
     if let Some(dir) = flag_string(flags, "log-dir").filter(|v| !v.is_empty()) {
         base.log_dir = Some(PathBuf::from(dir));
+        base.log_dir_explicit = true;
     }
     if flag_bool(flags, "no-log-file") {
         base.log_dir = None;
+        base.log_file_disabled = true;
     }
     if let Some(level) = flag_string(flags, "log-level").filter(|v| !v.is_empty()) {
         base.level_filter = level;
+        base.level_explicit = true;
     }
     if let Some(fmt) = flag_string(flags, "log-format").filter(|v| !v.is_empty()) {
         if let Some(parsed) = reddb::telemetry::LogFormat::parse(&fmt) {
             base.format = parsed;
+            base.format_explicit = true;
         }
+    }
+    if let Some(prefix) = flag_string(flags, "log-file-prefix").filter(|v| !v.is_empty()) {
+        base.file_prefix = prefix;
+        base.file_prefix_explicit = true;
     }
     if let Some(keep) = flag_string(flags, "log-keep-days").and_then(|v| v.parse::<u16>().ok()) {
         base.rotation_keep_days = keep;
+        base.rotation_keep_days_explicit = true;
     }
 
     base

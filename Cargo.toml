@@ -69,6 +69,7 @@ backend-d1 = []
 # (~10 transitive crates we don't need for our microbenches) and
 # the `cast` crate. We keep `html_reports` for local plots.
 criterion = { version = "0.5", default-features = false, features = ["html_reports", "plotters", "cargo_bench_support"] }
+pprof = { version = "0.14", features = ["flamegraph"] }
 
 [build-dependencies]
 tonic-build = "0.12"

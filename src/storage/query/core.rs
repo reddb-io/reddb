@@ -1387,6 +1387,11 @@ pub struct CreateTableQuery {
     pub default_ttl_ms: Option<u64>,
     /// Fields to prioritize in the context index (WITH CONTEXT INDEX ON (f1, f2))
     pub context_index_fields: Vec<String>,
+    /// Enables the global context index for this table
+    /// (`WITH context_index = true`). Default false — pure OLTP tables
+    /// skip the tokenisation / 3-way RwLock write storm on every insert.
+    /// Having `context_index_fields` non-empty also enables it implicitly.
+    pub context_index_enabled: bool,
     /// When true, CREATE TABLE implicitly adds two user-visible columns
     /// `created_at` and `updated_at` (BIGINT unix-ms). The runtime
     /// populates them from `UnifiedEntity::created_at/updated_at` on

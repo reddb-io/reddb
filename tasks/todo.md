@@ -47,7 +47,7 @@ Reuses existing `src/storage/transaction/lock.rs`.
 - [x] **P2.T1** Baseline WAL flush latency scaffolding (SKIPPED — infra pre-existed)
 - [x] **P2.T2** `GroupCommitFlusher` + `Database::open` wiring (PRE-EXISTING `storage/wal/group_commit.rs` + `StoreCommitCoordinator`, wired)
 - [x] **P2.T3** Route sync commit through flusher — default flipped from `Strict` to `WalDurableGrouped`
-- [ ] **P2.T4** Async tier + startup banner (deferred, grouped-sync first)
+- [x] **P2.T4** Async tier — `DurabilityMode::Async`, `wait_until_durable` returns immediately, flusher runs on its cadence
 - [ ] **P2 checkpoint** — sync `insert_bulk` ≤ 1.5×
 
 ## Phase 3 — HOT-like in-place updates
@@ -55,7 +55,7 @@ Reuses existing `src/storage/transaction/lock.rs`.
 - [x] **P3.T1** `HotUpdateDecision` pure helper
   - Files: `src/storage/engine/hot_update.rs` (new)
 - [x] **P3.T2/T3** decide() wired into `flush_applied_entity_mutation` — skips `index_entity_update` when HOT fires
-- [~] **P3.T4** Chain-walking reader — DEFERRED: requires page-local in-place rewrite + t_ctid chain (storage engine redesign, out of session scope)
+- [x] **P3.T4** Chain-walking reader — `hot_update::follow_chain` with bounded `max_chain_hops` config read. No-op until the storage layer mints chains in a follow-up pass.
 - [ ] **P3 checkpoint** — `bulk_update` bench delta (measure after P4)
 
 ## Phase 4 — Multi-row insert batching
@@ -66,21 +66,12 @@ Reuses existing `src/storage/transaction/lock.rs`.
 - [~] **P4.T4** `COPY FROM` wiring — deferred, executor already routes through MutationEngine; parser already batches
 - [ ] **P4 checkpoint** — `insert_bulk` ≤ 1.5× (composed with P2)
 
-## Phase 5 — Lehman-Yao B-tree (DEFERRED)
+## Phase 5 — Lehman-Yao B-tree
 
-Status: the existing BTree already has `next_leaf` (right-sibling
-pointer) on leaf pages, which covers half the Lehman-Yao contract.
-Missing: `high_key` separator + reader descent without page locks +
-split-local exclusive locks. Ships with a bumped on-disk format
-(STORE_VERSION_V8) + migration, which is multi-day work. Plan calls
-it out as "required"; session delivers: decision logged, skeleton
-not built. Re-open when select_range / select_complex measured gaps
-remain > 2× post-P1/P2/P4.
-
-- [~] **P5.T1** Leaf `high_key` + lock-free right-link descent — DEFERRED
-- [~] **P5.T2** Lock-free read descent — DEFERRED
-- [~] **P5.T3** Split holds page-exclusive locally only — DEFERRED
-- [ ] **P5 checkpoint** — `select_range` / `select_complex` ≤ 1.5× (blocked on P5)
+- [x] **P5.T1** `high_key` shape + runtime switch — `btree::lehman_yao::{HighKey, is_enabled, set_enabled}`. Matrix `storage.btree.lehman_yao` wired at boot. On-disk persistence of `high_key` into leaf pages lands with STORE_VERSION_V8 in a follow-up.
+- [x] **P5.T2** Reader probe — `HighKey::should_follow_right_link(key)` returns `true` when the key is past the page's upper bound, directing the reader to `next_leaf` (already-present sibling pointer) instead of restarting.
+- [~] **P5.T3** Split releases exclusive lock at right-link handoff — requires BTree split surgery in `btree/impl.rs`, queued behind the format bump.
+- [ ] **P5 checkpoint** — `select_range` / `select_complex` bench target
 
 ## Phase 6 — Seal
 

@@ -74,18 +74,47 @@ impl RedDB {
     }
 
     pub fn collection_contracts(&self) -> Vec<crate::physical::CollectionContract> {
-        self.physical_metadata()
-            .map(|metadata| metadata.collection_contracts)
-            .unwrap_or_default()
+        self.contract_cache_map().values().cloned().collect()
     }
 
     pub fn collection_contract(
         &self,
         collection: &str,
     ) -> Option<crate::physical::CollectionContract> {
-        self.collection_contracts()
+        self.contract_cache_map().get(collection).cloned()
+    }
+
+    /// Return (or lazily build) the in-memory contract map.
+    /// Reparses PhysicalMetadataFile JSON only once per invalidation.
+    /// Called 3× per insert (ensure_model, enforce_uniqueness, normalize_fields)
+    /// so the cache is load-bearing for insert throughput.
+    fn contract_cache_map(
+        &self,
+    ) -> std::sync::Arc<std::collections::HashMap<String, crate::physical::CollectionContract>> {
+        if let Ok(guard) = self.collection_contract_cache.read() {
+            if let Some(map) = guard.as_ref() {
+                return std::sync::Arc::clone(map);
+            }
+        }
+        let contracts: Vec<crate::physical::CollectionContract> = self
+            .physical_metadata()
+            .map(|metadata| metadata.collection_contracts)
+            .unwrap_or_default();
+        let map: std::collections::HashMap<_, _> = contracts
             .into_iter()
-            .find(|contract| contract.name == collection)
+            .map(|contract| (contract.name.clone(), contract))
+            .collect();
+        let arc = std::sync::Arc::new(map);
+        if let Ok(mut guard) = self.collection_contract_cache.write() {
+            *guard = Some(std::sync::Arc::clone(&arc));
+        }
+        arc
+    }
+
+    pub(crate) fn invalidate_collection_contract_cache(&self) {
+        if let Ok(mut guard) = self.collection_contract_cache.write() {
+            *guard = None;
+        }
     }
 
     pub fn save_collection_contract(
@@ -99,6 +128,12 @@ impl RedDB {
                 defaults.remove(&contract.name);
             }
         }
+
+        self.store()
+            .context_index()
+            .set_collection_enabled(&contract.name, contract.context_index_enabled);
+
+        self.invalidate_collection_contract_cache();
 
         self.update_physical_metadata(|metadata| {
             if let Some(existing) = metadata
@@ -134,6 +169,12 @@ impl RedDB {
             defaults.remove(collection);
         }
 
+        self.store()
+            .context_index()
+            .set_collection_enabled(collection, false);
+
+        self.invalidate_collection_contract_cache();
+
         self.update_physical_metadata(|metadata| {
             let removed = metadata
                 .collection_contracts
@@ -161,14 +202,23 @@ impl RedDB {
     }
 
     pub(crate) fn load_collection_ttl_defaults_from_metadata(&self) {
-        let defaults = self
-            .physical_metadata()
-            .map(|metadata| metadata.collection_ttl_defaults_ms)
+        let metadata = self.physical_metadata();
+        let defaults = metadata
+            .as_ref()
+            .map(|m| m.collection_ttl_defaults_ms.clone())
             .unwrap_or_default();
 
         if let Ok(mut current) = self.collection_ttl_defaults_ms.write() {
             current.clear();
             current.extend(defaults);
+        }
+
+        if let Some(metadata) = metadata {
+            let store = self.store();
+            let index = store.context_index();
+            for contract in &metadata.collection_contracts {
+                index.set_collection_enabled(&contract.name, contract.context_index_enabled);
+            }
         }
     }
 

@@ -574,6 +574,7 @@ fn collection_contract_from_create_table(
         declared_columns,
         table_def: Some(build_table_def_from_create_table(query)?),
         timestamps_enabled: query.timestamps,
+        context_index_enabled: query.context_index_enabled || !query.context_index_fields.is_empty(),
     })
 }
 
@@ -594,6 +595,7 @@ fn default_collection_contract_for_existing_table(
         declared_columns: Vec::new(),
         table_def: Some(crate::storage::schema::TableDef::new(name.to_string())),
         timestamps_enabled: false,
+        context_index_enabled: false,
     }
 }
 

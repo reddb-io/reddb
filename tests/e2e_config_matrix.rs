@@ -170,7 +170,7 @@ fn durability_sync_alias_maps_to_wal_durable_grouped() {
     );
     assert_eq!(
         DurabilityMode::from_str("async"),
-        Some(DurabilityMode::WalDurableGrouped) // temporary alias
+        Some(DurabilityMode::Async)
     );
 }
 

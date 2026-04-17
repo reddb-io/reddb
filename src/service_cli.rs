@@ -140,6 +140,13 @@ pub fn default_telemetry_for_path(path: Option<&std::path::Path>) -> crate::tele
         },
         rotation_keep_days: 14,
         service_name: "reddb",
+        // Implicit defaults — no CLI flag has claimed these values yet.
+        level_explicit: false,
+        format_explicit: false,
+        rotation_keep_days_explicit: false,
+        file_prefix_explicit: false,
+        log_dir_explicit: false,
+        log_file_disabled: false,
     }
 }
 
@@ -521,17 +528,11 @@ pub fn probe_listener(target: &str, timeout: Duration) -> bool {
 
 #[inline(never)]
 fn run_configured_servers(config: ServerCommandConfig) -> Result<(), String> {
-    // Phase 6 logging: install the global `tracing` subscriber before
-    // any listener subscribes. The returned guard lives for the
-    // duration of this function so the non-blocking file writer
-    // flushes on graceful shutdown.
-    let _telemetry_guard = config
-        .telemetry
-        .as_ref()
-        .cloned()
-        .or_else(|| Some(default_telemetry_for_path(config.path.as_deref())))
-        .and_then(crate::telemetry::init);
-
+    // Phase 6 logging is initialised inside each runner once the
+    // runtime is open — see `build_runtime_and_auth_store`. Going
+    // after DB open lets us read `red.logging.*` config keys out of
+    // the persistent red_config store and merge them with the CLI
+    // flags (flag > red_config > built-in default).
     if let Some(router_bind_addr) = config.router_bind_addr.clone() {
         return run_routed_server(config, router_bind_addr);
     }
@@ -556,10 +557,12 @@ fn run_configured_servers(config: ServerCommandConfig) -> Result<(), String> {
 #[inline(never)]
 fn run_routed_server(config: ServerCommandConfig, router_bind_addr: String) -> Result<(), String> {
     let workers = config.workers;
+    let cli_telemetry = config.telemetry.clone();
     let db_options = config.to_db_options();
     let rt_config = detect_runtime_config();
     let worker_threads = workers.unwrap_or(rt_config.suggested_workers);
-    let (runtime, auth_store) = build_runtime_and_auth_store(db_options)?;
+    let (runtime, auth_store, _telemetry_guard) =
+        build_runtime_and_auth_store(db_options, cli_telemetry)?;
 
     let http_listener = std::net::TcpListener::bind("127.0.0.1:0")
         .map_err(|err| format!("bind internal HTTP listener: {err}"))?;
@@ -729,6 +732,7 @@ fn resolve_wire_tls_config(
 fn run_wire_only_server(config: ServerCommandConfig, wire_addr: String) -> Result<(), String> {
     let rt_config = detect_runtime_config();
     let workers = config.workers.unwrap_or(rt_config.suggested_workers);
+    let cli_telemetry = config.telemetry.clone();
     let db_options = config.to_db_options();
 
     let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
@@ -738,8 +742,12 @@ fn run_wire_only_server(config: ServerCommandConfig, wire_addr: String) -> Resul
         .build()
         .map_err(|err| format!("tokio runtime: {err}"))?;
 
+    // Guard lives on the outer thread's stack so it outlives the
+    // tokio runtime — dropping it only after the listener returns
+    // flushes the file log writer.
+    let (runtime, _auth_store, _telemetry_guard) =
+        build_runtime_and_auth_store(db_options, cli_telemetry)?;
     tokio_runtime.block_on(async move {
-        let (runtime, _auth_store) = build_runtime_and_auth_store(db_options)?;
         let wire_rt = Arc::new(runtime);
         crate::wire::start_wire_listener(&wire_addr, wire_rt)
             .await
@@ -750,8 +758,47 @@ fn run_wire_only_server(config: ServerCommandConfig, wire_addr: String) -> Resul
 #[inline(never)]
 fn build_runtime_and_auth_store(
     db_options: RedDBOptions,
-) -> Result<(RedDBRuntime, Arc<AuthStore>), String> {
+    cli_telemetry: Option<crate::telemetry::TelemetryConfig>,
+) -> Result<
+    (
+        RedDBRuntime,
+        Arc<AuthStore>,
+        Option<crate::telemetry::TelemetryGuard>,
+    ),
+    String,
+> {
+    // Return the TelemetryGuard so server runners can bind it for
+    // their full lifetime. Dropping the guard tears down the
+    // non-blocking log writer thread and, because that writer is
+    // built with `.lossy(true)`, any subsequent log event routed to
+    // the file sink is silently dropped — so callers MUST keep the
+    // returned `Option<TelemetryGuard>` alive until shutdown.
+    build_runtime_with_telemetry(db_options, cli_telemetry)
+}
+
+/// Open the runtime, initialise structured logging from merged CLI +
+/// `red_config` settings, and return a guard the caller must keep
+/// alive for the server lifetime (drop flushes pending log writes).
+///
+/// Merge priority: CLI flag (explicit `Some`) beats `red.logging.*`
+/// in red_config, beats the built-in default. A CLI-flag value of
+/// `None` / empty means "inherit from config or default" — never
+/// "disable". The one exception is `--no-log-file` which forces
+/// `log_dir = None` regardless of config.
+pub(crate) fn build_runtime_with_telemetry(
+    db_options: RedDBOptions,
+    cli_telemetry: Option<crate::telemetry::TelemetryConfig>,
+) -> Result<(RedDBRuntime, Arc<AuthStore>, Option<crate::telemetry::TelemetryGuard>), String> {
     let runtime = RedDBRuntime::with_options(db_options.clone()).map_err(|err| err.to_string())?;
+
+    // Phase 6 logging: merge red_config overrides onto the CLI-built
+    // telemetry config, then install the global subscriber.
+    let merged = merge_telemetry_with_config(
+        cli_telemetry.unwrap_or_else(|| default_telemetry_for_path(db_options.data_path.as_deref())),
+        &runtime,
+    );
+    let telemetry_guard = crate::telemetry::init(merged);
+
     let auth_store =
         if db_options.auth.vault_enabled {
             let pager =
@@ -778,7 +825,158 @@ fn build_runtime_and_auth_store(
             .ok();
     }
 
-    Ok((runtime, auth_store))
+    Ok((runtime, auth_store, telemetry_guard))
+}
+
+/// Read `red.logging.*` keys from the persistent config store and
+/// merge them into the CLI-built `TelemetryConfig`. Merge priority:
+/// explicit CLI flag > red_config > built-in default.
+///
+/// The "was a flag passed" signal comes from the `*_explicit` bools
+/// on `TelemetryConfig`, populated by the CLI parser. This replaces
+/// an earlier equality-to-default heuristic that silently dropped
+/// config whenever the CLI-derived default diverged from
+/// `TelemetryConfig::default()` (e.g. path-derived `log_dir`,
+/// non-TTY `format`) and that silently overrode `--no-log-file`.
+fn merge_telemetry_with_config(
+    mut cli: crate::telemetry::TelemetryConfig,
+    runtime: &RedDBRuntime,
+) -> crate::telemetry::TelemetryConfig {
+    use crate::storage::schema::Value;
+
+    let store = runtime.db().store();
+
+    if !cli.level_explicit {
+        if let Some(Value::Text(v)) = store.get_config("red.logging.level") {
+            cli.level_filter = v;
+        }
+    }
+    if !cli.format_explicit {
+        if let Some(Value::Text(v)) = store.get_config("red.logging.format") {
+            if let Some(parsed) = crate::telemetry::LogFormat::parse(&v) {
+                cli.format = parsed;
+            }
+        }
+    }
+    if !cli.rotation_keep_days_explicit {
+        match store.get_config("red.logging.keep_days") {
+            Some(Value::Integer(n)) if n >= 0 && n <= u16::MAX as i64 => {
+                cli.rotation_keep_days = n as u16
+            }
+            Some(Value::UnsignedInteger(n)) if n <= u16::MAX as u64 => {
+                cli.rotation_keep_days = n as u16
+            }
+            Some(Value::Text(v)) => {
+                if let Ok(n) = v.parse::<u16>() {
+                    cli.rotation_keep_days = n;
+                }
+            }
+            _ => {}
+        }
+    }
+    if !cli.file_prefix_explicit {
+        if let Some(Value::Text(v)) = store.get_config("red.logging.file_prefix") {
+            if !v.is_empty() {
+                cli.file_prefix = v;
+            }
+        }
+    }
+    // --no-log-file is a kill-switch: config cannot resurrect the
+    // file sink. Explicit --log-dir also wins.
+    if !cli.log_dir_explicit && !cli.log_file_disabled {
+        if let Some(Value::Text(v)) = store.get_config("red.logging.dir") {
+            if !v.is_empty() {
+                cli.log_dir = Some(std::path::PathBuf::from(v));
+            }
+        }
+    }
+
+    cli
+}
+
+#[cfg(test)]
+mod telemetry_merge_tests {
+    use super::*;
+    use crate::telemetry::{LogFormat, TelemetryConfig};
+
+    fn fresh_runtime() -> RedDBRuntime {
+        RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime")
+    }
+
+    fn set_str(runtime: &RedDBRuntime, key: &str, value: &str) {
+        runtime
+            .db()
+            .store()
+            .set_config_tree(key, &crate::serde_json::Value::String(value.to_string()));
+    }
+
+    fn cli_base() -> TelemetryConfig {
+        // Emulate default_telemetry_for_path(Some(path)) on a non-TTY host:
+        // log_dir = Some(...), format = Json. Nothing marked explicit.
+        TelemetryConfig {
+            log_dir: Some(std::path::PathBuf::from("/tmp/reddb-default/logs")),
+            format: LogFormat::Json,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn config_log_dir_promoted_when_flag_absent() {
+        let runtime = fresh_runtime();
+        set_str(&runtime, "red.logging.dir", "/var/log/reddb");
+        let merged = merge_telemetry_with_config(cli_base(), &runtime);
+        assert_eq!(
+            merged.log_dir.as_deref(),
+            Some(std::path::Path::new("/var/log/reddb"))
+        );
+    }
+
+    #[test]
+    fn explicit_log_dir_wins_over_config() {
+        let runtime = fresh_runtime();
+        set_str(&runtime, "red.logging.dir", "/var/log/reddb");
+        let mut cli = cli_base();
+        cli.log_dir = Some(std::path::PathBuf::from("/custom/dir"));
+        cli.log_dir_explicit = true;
+        let merged = merge_telemetry_with_config(cli, &runtime);
+        assert_eq!(
+            merged.log_dir.as_deref(),
+            Some(std::path::Path::new("/custom/dir"))
+        );
+    }
+
+    #[test]
+    fn no_log_file_beats_config_log_dir() {
+        let runtime = fresh_runtime();
+        set_str(&runtime, "red.logging.dir", "/var/log/reddb");
+        let mut cli = cli_base();
+        cli.log_dir = None;
+        cli.log_file_disabled = true;
+        let merged = merge_telemetry_with_config(cli, &runtime);
+        assert!(merged.log_dir.is_none(), "--no-log-file must veto config dir");
+    }
+
+    #[test]
+    fn config_format_promoted_on_non_tty_default() {
+        // On non-TTY, default_telemetry_for_path yields format=Json even
+        // though TelemetryConfig::default() is Pretty. The old equality
+        // check silently dropped config here.
+        let runtime = fresh_runtime();
+        set_str(&runtime, "red.logging.format", "pretty");
+        let merged = merge_telemetry_with_config(cli_base(), &runtime);
+        assert_eq!(merged.format, LogFormat::Pretty);
+    }
+
+    #[test]
+    fn explicit_format_wins_over_config() {
+        let runtime = fresh_runtime();
+        set_str(&runtime, "red.logging.format", "pretty");
+        let mut cli = cli_base();
+        cli.format = LogFormat::Json;
+        cli.format_explicit = true;
+        let merged = merge_telemetry_with_config(cli, &runtime);
+        assert_eq!(merged.format, LogFormat::Json);
+    }
 }
 
 #[inline(never)]
@@ -799,7 +997,9 @@ fn build_http_server(
 
 #[inline(never)]
 fn run_http_server(config: ServerCommandConfig, bind_addr: String) -> Result<(), String> {
-    let (runtime, auth_store) = build_runtime_and_auth_store(config.to_db_options())?;
+    let cli_telemetry = config.telemetry.clone();
+    let (runtime, auth_store, _telemetry_guard) =
+        build_runtime_and_auth_store(config.to_db_options(), cli_telemetry)?;
     let server = build_http_server(runtime, auth_store, bind_addr.clone());
     tracing::info!(transport = "http", bind = %bind_addr, "listener online");
     server.serve().map_err(|err| err.to_string())
@@ -808,20 +1008,23 @@ fn run_http_server(config: ServerCommandConfig, bind_addr: String) -> Result<(),
 #[inline(never)]
 fn run_grpc_server(config: ServerCommandConfig, bind_addr: String) -> Result<(), String> {
     let workers = config.workers;
+    let cli_telemetry = config.telemetry.clone();
     let db_options = config.to_db_options();
     let rt_config = detect_runtime_config();
 
     let worker_threads = workers.unwrap_or(rt_config.suggested_workers);
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .worker_threads(worker_threads)
         .thread_stack_size(rt_config.stack_size)
         .build()
         .map_err(|err| format!("tokio runtime: {err}"))?;
 
-    runtime.block_on(async move {
-        let (runtime, auth_store) = build_runtime_and_auth_store(db_options)?;
+    // Guard lives on the outer stack so it outlives the tokio runtime.
+    let (runtime, auth_store, _telemetry_guard) =
+        build_runtime_and_auth_store(db_options, cli_telemetry)?;
+    tokio_runtime.block_on(async move {
 
         // Start wire protocol listeners (plaintext + TLS)
         spawn_wire_listeners(&config, &runtime);
@@ -856,10 +1059,12 @@ fn run_dual_server(
 ) -> Result<(), String> {
     let workers = config.workers;
     let wire_bind_addr = config.wire_bind_addr.clone();
+    let cli_telemetry = config.telemetry.clone();
     let db_options = config.to_db_options();
     let rt_config = detect_runtime_config();
     let worker_threads = workers.unwrap_or(rt_config.suggested_workers);
-    let (runtime, auth_store) = build_runtime_and_auth_store(db_options)?;
+    let (runtime, auth_store, _telemetry_guard) =
+        build_runtime_and_auth_store(db_options, cli_telemetry)?;
 
     let http_server =
         build_http_server(runtime.clone(), auth_store.clone(), http_bind_addr.clone());

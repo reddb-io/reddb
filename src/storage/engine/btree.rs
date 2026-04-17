@@ -232,6 +232,9 @@ pub struct BTree {
 
 #[path = "btree/impl.rs"]
 mod btree_impl;
+
+#[path = "btree/lehman_yao.rs"]
+pub mod lehman_yao;
 // ==================== Search Helpers ====================
 
 enum SearchResult {
