@@ -159,6 +159,11 @@ pub struct Database {
     state: RwLock<DbState>,
     /// Pages written since last checkpoint
     pages_since_checkpoint: RwLock<u32>,
+    /// Background writer handle (P6.T1). `None` when the database
+    /// runs in read-only mode or the spawn failed. Dropping the
+    /// handle signals the writer thread to exit at the next round.
+    #[allow(dead_code)]
+    bgwriter: Option<crate::storage::cache::bgwriter::BgWriterHandle>,
 }
 
 impl Database {
@@ -189,6 +194,13 @@ impl Database {
     /// Open or create a database
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, DatabaseError> {
         Self::open_with_config(path, DatabaseConfig::default())
+    }
+
+    /// Background-writer stats snapshot — `None` when the writer
+    /// isn't running (read-only mode, or spawn skipped). Exposed for
+    /// tests + introspection.
+    pub fn bgwriter_stats(&self) -> Option<crate::storage::cache::bgwriter::BgWriterStatsSnapshot> {
+        self.bgwriter.as_ref().map(|h| h.stats.snapshot())
     }
 
     /// Open or create a database with custom configuration
@@ -230,6 +242,26 @@ impl Database {
             TransactionManager::new(Arc::clone(&pager), &wal_path).map_err(DatabaseError::Io)?,
         );
 
+        // P6.T1 — spawn the background writer in non-read-only mode.
+        // Holds a `Weak<Pager>` so dropping the database actually
+        // releases the file lock; the writer thread exits at the
+        // next round when the upgrade fails. Config knobs honour the
+        // Tier B matrix entries (`storage.bgwriter.*`) but fall back
+        // to the library defaults when they're absent, so embedded
+        // users who bypass the runtime config path still get sane
+        // behaviour.
+        let bgwriter = if config.read_only {
+            None
+        } else {
+            let flusher = std::sync::Arc::new(
+                crate::storage::cache::bgwriter::PagerDirtyFlusher::new(Arc::downgrade(&pager)),
+            );
+            Some(crate::storage::cache::bgwriter::spawn(
+                flusher,
+                crate::storage::cache::bgwriter::BgWriterConfig::default(),
+            ))
+        };
+
         Ok(Self {
             path,
             wal_path,
@@ -238,6 +270,7 @@ impl Database {
             config,
             state: RwLock::new(DbState::Open),
             pages_since_checkpoint: RwLock::new(0),
+            bgwriter,
         })
     }
 

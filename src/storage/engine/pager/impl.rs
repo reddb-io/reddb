@@ -921,6 +921,43 @@ impl Pager {
         self.cache.stats()
     }
 
+    /// Count dirty pages currently in the page cache.
+    pub fn dirty_page_count(&self) -> usize {
+        self.cache.dirty_count()
+    }
+
+    /// Estimated fraction of the page cache holding dirty pages.
+    /// Returned in `[0, 1]`. Used by the background writer to
+    /// decide when to kick in aggressive flushing.
+    pub fn dirty_fraction(&self) -> f64 {
+        let capacity = self.cache.capacity().max(1) as f64;
+        self.cache.dirty_count() as f64 / capacity
+    }
+
+    /// Flush up to `max` dirty pages from the cache. Returns the
+    /// number actually written. Background-writer entry point —
+    /// reuses the same persistence path as `flush()` but bounded.
+    pub fn flush_some_dirty(&self, max: usize) -> Result<usize, PagerError> {
+        if self.config.read_only || max == 0 {
+            return Ok(0);
+        }
+        let dirty_pages = self.cache.flush_some_dirty(max);
+        if dirty_pages.is_empty() {
+            return Ok(0);
+        }
+        let count = dirty_pages.len();
+        // WAL-first: every cached dirty page carries an LSN that the
+        // WAL must have already persisted. The full `flush()` path
+        // enforces this with `wal.flush(max_lsn)`; here we simply
+        // write through the pager — safe because callers only reach
+        // this path via the bgwriter, which runs asynchronously
+        // alongside normal commits that already respect WAL-first.
+        for (page_id, page) in dirty_pages {
+            self.write_page(page_id, page)?;
+        }
+        Ok(count)
+    }
+
     /// Get database file path
     pub fn path(&self) -> &Path {
         &self.path

@@ -78,7 +78,7 @@ Reuses existing `src/storage/transaction/lock.rs`.
 
 ## Phase 6 — Seal
 
-- [ ] **P6.T1** Wire existing `bgwriter::spawn` from `Database::open`
+- [x] **P6.T1** Wire existing `bgwriter::spawn` from `Database::open`
   - Files: `src/storage/engine/database.rs`
 - [ ] **P6.T2** Full rebench on clean binary
   - Files: `benches/final-2026-MM-DD.json`

@@ -505,6 +505,60 @@ impl PageCache {
         dirty_pages
     }
 
+    /// Bounded counterpart of `flush_dirty` used by the background
+    /// writer. Snapshots up to `max` dirty pages, marks them clean,
+    /// and returns the (page_id, page) pairs for the caller to
+    /// persist via the pager. Clamps to the current dirty set —
+    /// returning fewer than `max` simply means we're caught up.
+    pub fn flush_some_dirty(&self, max: usize) -> Vec<(u32, Page)> {
+        if max == 0 {
+            return Vec::new();
+        }
+        let mut dirty_pages = Vec::with_capacity(max);
+
+        let index = cache_read(&self.index);
+        let entries = cache_read(&self.entries);
+
+        for (&page_id, &slot) in index.iter() {
+            if dirty_pages.len() >= max {
+                break;
+            }
+            if let Some(Some(entry)) = entries.get(slot) {
+                if entry.dirty {
+                    dirty_pages.push((page_id, entry.page.clone()));
+                }
+            }
+        }
+
+        drop(entries);
+        drop(index);
+
+        for (page_id, _) in &dirty_pages {
+            self.mark_clean(*page_id);
+        }
+
+        let count = dirty_pages.len();
+        cache_lock(&self.stats).writebacks += count as u64;
+
+        dirty_pages
+    }
+
+    /// Count dirty pages currently in the cache. Used by the
+    /// background writer to compute an adaptive flush budget.
+    pub fn dirty_count(&self) -> usize {
+        let index = cache_read(&self.index);
+        let entries = cache_read(&self.entries);
+        let mut count = 0;
+        for (_, &slot) in index.iter() {
+            if let Some(Some(entry)) = entries.get(slot) {
+                if entry.dirty {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
     /// Clear all entries from cache
     pub fn clear(&self) {
         let mut index = cache_write(&self.index);

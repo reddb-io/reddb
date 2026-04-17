@@ -123,6 +123,42 @@ pub trait DirtyPageFlusher: Send + Sync {
     fn flush_some(&self, max: usize) -> usize;
 }
 
+/// Production `DirtyPageFlusher` wrapping the engine's `Pager`.
+/// Holds the pager via `Weak` so dropping the database doesn't
+/// keep the file alive via the background thread; the writer
+/// exits at the next round when the upgrade fails.
+pub struct PagerDirtyFlusher {
+    pager: std::sync::Weak<crate::storage::engine::pager::Pager>,
+}
+
+impl PagerDirtyFlusher {
+    pub fn new(pager: std::sync::Weak<crate::storage::engine::pager::Pager>) -> Self {
+        Self { pager }
+    }
+}
+
+impl DirtyPageFlusher for PagerDirtyFlusher {
+    fn dirty_fraction(&self) -> f64 {
+        match self.pager.upgrade() {
+            Some(p) => p.dirty_fraction(),
+            None => 0.0,
+        }
+    }
+
+    fn flush_some(&self, max: usize) -> usize {
+        let Some(p) = self.pager.upgrade() else {
+            return 0;
+        };
+        match p.flush_some_dirty(max) {
+            Ok(n) => n,
+            Err(err) => {
+                tracing::warn!(error = ?err, "bgwriter flush_some_dirty failed");
+                0
+            }
+        }
+    }
+}
+
 /// Shutdown handle returned by `spawn`. Drop the handle (or
 /// call `stop()` explicitly) to signal the task to exit at
 /// the start of its next round.
