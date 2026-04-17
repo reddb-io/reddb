@@ -665,6 +665,13 @@ struct RuntimeInner {
     /// `xid=0` — identical to pre-MVCC behaviour.
     tx_contexts:
         parking_lot::RwLock<HashMap<u64, crate::storage::transaction::snapshot::TxnContext>>,
+    /// Intent-lock hierarchy (IS/IX/S/X) used to break the implicit
+    /// global-write serialisation in write paths. Populated at boot
+    /// with `concurrency.locking.deadlock_timeout_ms` from the matrix
+    /// and wired through DML/DDL dispatch in later P1 tasks.
+    /// Dormant until P1.T3 flips the read path to `(Global,IS) →
+    /// (Collection,IS)` and P1.T4/T5 pick up writes/DDL.
+    lock_manager: Arc<crate::storage::transaction::lock::LockManager>,
     /// Perf-parity env-var overrides (`REDDB_<UP_DOTTED_KEY>`).
     /// Populated once at boot, read by every config getter; takes
     /// precedence over the persisted red_config value so operators

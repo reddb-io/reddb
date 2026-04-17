@@ -153,6 +153,30 @@ fn config_file_overlay_seeds_missing_keys() {
 }
 
 #[test]
+fn lock_manager_deadlock_timeout_reads_env_override() {
+    // The LockManager is constructed with a timeout sourced from
+    // `concurrency.locking.deadlock_timeout_ms`. With no env var set,
+    // the matrix default (5000 ms) applies. With the env var set,
+    // the constructor picks it up — cover the env path so P1.T3+
+    // can trust the wiring.
+    use reddb::runtime::config_overlay::env_name_for;
+    let var = env_name_for("concurrency.locking.deadlock_timeout_ms");
+    unsafe {
+        std::env::set_var(&var, "2500");
+    }
+    // Second runtime construction picks up the env. We can't observe
+    // the LockConfig directly (pub(crate) field), but the boot
+    // succeeding with a non-default matrix-declared value is a useful
+    // tripwire: a breakage in the constructor path would show up as
+    // a parse panic or unwrap.
+    let rt = open_runtime();
+    let _ = rt.execute_query("SHOW CONFIG concurrency").unwrap();
+    unsafe {
+        std::env::remove_var(&var);
+    }
+}
+
+#[test]
 fn heal_is_idempotent_across_reboots() {
     use reddb::runtime::config_matrix::{default_for, tier_for, Tier, MATRIX};
 

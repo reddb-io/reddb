@@ -997,6 +997,29 @@ impl RedDBRuntime {
                 tx_contexts: parking_lot::RwLock::new(HashMap::new()),
                 tx_local_tenants: parking_lot::RwLock::new(HashMap::new()),
                 env_config_overrides: crate::runtime::config_overlay::collect_env_overrides(),
+                lock_manager: Arc::new({
+                    // Sourced from the matrix: Tier B key
+                    // `concurrency.locking.deadlock_timeout_ms`
+                    // (default 5000). Env var wins at boot so
+                    // operators can tune without touching red_config.
+                    let env = crate::runtime::config_overlay::collect_env_overrides();
+                    let timeout_ms = env
+                        .get("concurrency.locking.deadlock_timeout_ms")
+                        .and_then(|raw| raw.parse::<u64>().ok())
+                        .unwrap_or_else(|| {
+                            match crate::runtime::config_matrix::default_for(
+                                "concurrency.locking.deadlock_timeout_ms",
+                            ) {
+                                Some(crate::serde_json::Value::Number(n)) => n as u64,
+                                _ => 5000,
+                            }
+                        });
+                    let cfg = crate::storage::transaction::lock::LockConfig {
+                        default_timeout: std::time::Duration::from_millis(timeout_ms),
+                        ..Default::default()
+                    };
+                    crate::storage::transaction::lock::LockManager::new(cfg)
+                }),
                 rls_policies: parking_lot::RwLock::new(HashMap::new()),
                 rls_enabled_tables: parking_lot::RwLock::new(HashSet::new()),
                 foreign_tables: Arc::new(crate::storage::fdw::ForeignTableRegistry::with_builtins()),

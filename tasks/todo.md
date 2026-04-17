@@ -29,7 +29,7 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
 Reuses existing `src/storage/transaction/lock.rs`.
 
-- [ ] **P1.T1** `Arc<LockManager>` on `RuntimeInner`
+- [x] **P1.T1** `Arc<LockManager>` on `RuntimeInner`
   - Acceptance: dormant, config from matrix, regression net green
   - Files: `src/runtime.rs`, `src/runtime/impl_core.rs`
 - [ ] **P1.T2** `src/runtime/locking.rs` — `Resource` + `LockerGuard`
