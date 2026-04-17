@@ -603,6 +603,54 @@ impl RedDBRuntime {
         Ok(result)
     }
 
+    /// Phase 3 ASK tenant-scoped: per-entity gate applied to every
+    /// candidate surfaced by the three search tiers (field-index,
+    /// token-index, global scan).
+    ///
+    /// Returns `false` when either:
+    /// * MVCC hides the entity (uncommitted / aborted writer), or
+    /// * the entity's collection has RLS enabled AND either no
+    ///   policy matches the caller's role (deny-default) or a
+    ///   matching policy's `USING` predicate evaluates to false
+    ///   against this entity.
+    ///
+    /// `rls_cache` memoises the per-collection compiled filter so
+    /// each collection is resolved at most once per search call.
+    fn search_entity_allowed(
+        &self,
+        collection: &str,
+        entity: &UnifiedEntity,
+        snap_ctx: Option<&crate::runtime::impl_core::SnapshotContext>,
+        rls_cache: &mut HashMap<String, Option<crate::storage::query::ast::Filter>>,
+    ) -> bool {
+        use crate::runtime::impl_core::{entity_visible_with_context, rls_policy_filter};
+        use crate::storage::query::ast::PolicyAction;
+
+        // 1. MVCC visibility (Phase 1).
+        if !entity_visible_with_context(snap_ctx, entity) {
+            return false;
+        }
+
+        // 2. RLS gate — only evaluate when the table has it enabled.
+        if !self.is_rls_enabled(collection) {
+            return true;
+        }
+        let filter = rls_cache
+            .entry(collection.to_string())
+            .or_insert_with(|| rls_policy_filter(self, collection, PolicyAction::Select));
+        let Some(filter) = filter else {
+            // RLS on but no policy matches this role/action ⇒ deny.
+            return false;
+        };
+        super::query_exec::evaluate_entity_filter_with_db(
+            Some(&self.inner.db),
+            entity,
+            filter,
+            collection,
+            collection,
+        )
+    }
+
     pub fn search_context(&self, input: SearchContextInput) -> RedDBResult<ContextSearchResult> {
         let started = std::time::Instant::now();
         let result_limit = input.limit.unwrap_or(25).max(1);
@@ -620,6 +668,20 @@ impl RedDBRuntime {
                 "field 'query' cannot be empty".to_string(),
             ));
         }
+
+        // Phase 3 PG parity: RLS + tenancy gate the search corpus.
+        // `gate_entity(collection, entity)` applies:
+        //   1. MVCC visibility — hides tuples the current snapshot
+        //      shouldn't see (uncommitted writes, rolled-back xids).
+        //   2. RLS policy filter when the collection has RLS enabled.
+        //      Zero matching policies = deny (restrictive default),
+        //      same semantics as the SELECT path.
+        //
+        // Per-collection filter is cached so we only compute once per
+        // collection even if the scan touches thousands of entities.
+        let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
+        let mut rls_cache: HashMap<String, Option<crate::storage::query::ast::Filter>> =
+            HashMap::new();
 
         let store = self.inner.db.store();
         let collection_scope = runtime_search_collections(&self.inner.db, input.collections);
@@ -653,6 +715,14 @@ impl RedDBRuntime {
             for hit in hits {
                 if hit.score >= min_score {
                     if let Some(entity) = store.get(&hit.collection, hit.entity_id) {
+                        if !self.search_entity_allowed(
+                            &hit.collection,
+                            &entity,
+                            snap_ctx.as_ref(),
+                            &mut rls_cache,
+                        ) {
+                            continue;
+                        }
                         scored.entry(hit.entity_id.raw()).or_insert((
                             entity,
                             hit.score,
@@ -679,6 +749,14 @@ impl RedDBRuntime {
             for hit in hits {
                 if hit.score >= min_score {
                     if let Some(entity) = store.get(&hit.collection, hit.entity_id) {
+                        if !self.search_entity_allowed(
+                            &hit.collection,
+                            &entity,
+                            snap_ctx.as_ref(),
+                            &mut rls_cache,
+                        ) {
+                            continue;
+                        }
                         scored.entry(hit.entity_id.raw()).or_insert((
                             entity,
                             hit.score,
@@ -709,6 +787,14 @@ impl RedDBRuntime {
                     };
                     for entity in manager.query_all(|_| true) {
                         if scored.contains_key(&entity.id.raw()) {
+                            continue;
+                        }
+                        if !self.search_entity_allowed(
+                            collection_name,
+                            &entity,
+                            snap_ctx.as_ref(),
+                            &mut rls_cache,
+                        ) {
                             continue;
                         }
                         let entity_tokens = entity_tokens_for_search(&entity);
