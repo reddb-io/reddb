@@ -31,7 +31,6 @@ path = "src/bin/red.rs"
 aes-gcm = "0.10"
 hmac = "0.12"
 itoa = "1"
-ryu = "1"
 zstd = { version = "0.13", default-features = false }
 sha2 = "0.10"
 hex = "0.4"

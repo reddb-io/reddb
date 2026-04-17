@@ -187,9 +187,12 @@ pub(crate) fn write_value_bytes(buf: &mut Vec<u8>, value: &Value) {
         }
         Value::Float(f) => {
             if f.is_finite() {
-                let mut b = ryu::Buffer::new();
-                let s = b.format(*f);
-                buf.extend_from_slice(s.as_bytes());
+                // std::fmt gives shortest-round-trip output for f64
+                // via the same grisu-based algorithm that ryu used.
+                // Writing directly into `Vec<u8>` avoids an extra
+                // String allocation.
+                use std::io::Write;
+                let _ = write!(buf, "{}", f);
             } else {
                 buf.extend_from_slice(b"null");
             }
