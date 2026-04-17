@@ -996,6 +996,7 @@ impl RedDBRuntime {
                 ),
                 tx_contexts: parking_lot::RwLock::new(HashMap::new()),
                 tx_local_tenants: parking_lot::RwLock::new(HashMap::new()),
+                env_config_overrides: crate::runtime::config_overlay::collect_env_overrides(),
                 rls_policies: parking_lot::RwLock::new(HashMap::new()),
                 rls_enabled_tables: parking_lot::RwLock::new(HashSet::new()),
                 foreign_tables: Arc::new(crate::storage::fdw::ForeignTableRegistry::with_builtins()),
@@ -1218,6 +1219,16 @@ impl RedDBRuntime {
             // (durability.mode, concurrency.locking.enabled, …) even
             // on long-running datadirs that predate the matrix.
             crate::runtime::config_matrix::heal_critical_keys(store.as_ref());
+
+            // Config file overlay — mounted `/etc/reddb/config.json`
+            // (override path via REDDB_CONFIG_FILE). Writes keys with
+            // write-if-absent semantics so a later user `SET CONFIG`
+            // always wins. Missing file = silent no-op.
+            let overlay_path = crate::runtime::config_overlay::config_file_path();
+            let _ = crate::runtime::config_overlay::apply_config_file(
+                store.as_ref(),
+                &overlay_path,
+            );
         }
 
         // Start background maintenance thread (context index refresh +
@@ -1375,8 +1386,16 @@ impl RedDBRuntime {
     /// Resolve a boolean flag from `red_config`. Defaults to `default`
     /// when the key is missing or not coercible. If the same key has
     /// been written multiple times (SET CONFIG appends new rows), the
-    /// most recent entity wins.
+    /// most recent entity wins. Env-var overrides
+    /// (`REDDB_<UP_DOTTED>`) take highest precedence.
     pub(crate) fn config_bool(&self, key: &str, default: bool) -> bool {
+        if let Some(raw) = self.inner.env_config_overrides.get(key) {
+            if let Some(crate::storage::schema::Value::Boolean(b)) =
+                crate::runtime::config_overlay::coerce_env_value(key, raw)
+            {
+                return b;
+            }
+        }
         let store = self.inner.db.store();
         let Some(manager) = store.get_collection("red_config") else {
             return default;
@@ -1410,6 +1429,13 @@ impl RedDBRuntime {
     }
 
     pub(crate) fn config_u64(&self, key: &str, default: u64) -> u64 {
+        if let Some(raw) = self.inner.env_config_overrides.get(key) {
+            if let Some(crate::storage::schema::Value::UnsignedInteger(n)) =
+                crate::runtime::config_overlay::coerce_env_value(key, raw)
+            {
+                return n;
+            }
+        }
         let store = self.inner.db.store();
         let Some(manager) = store.get_collection("red_config") else {
             return default;
@@ -1443,6 +1469,9 @@ impl RedDBRuntime {
     }
 
     pub(crate) fn config_string(&self, key: &str, default: &str) -> String {
+        if let Some(raw) = self.inner.env_config_overrides.get(key) {
+            return raw.clone();
+        }
         let store = self.inner.db.store();
         let Some(manager) = store.get_collection("red_config") else {
             return default.to_string();

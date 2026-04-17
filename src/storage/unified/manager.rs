@@ -1305,12 +1305,24 @@ impl SegmentManager {
         ids
     }
 
-    /// Emit a lifecycle event
-    fn emit(&self, event: LifecycleEvent) {
-        self.events.write().push(event);
-    }
+    /// Emit a lifecycle event.
+    ///
+    /// Perf: this used to push onto a `RwLock<Vec<LifecycleEvent>>`
+    /// on every insert / delete / seal. Nobody consumes that vec
+    /// today (no subscription API, `drain_events` has no callers),
+    /// so the write lock + push was pure tax — and the vec grew
+    /// unbounded in long-running processes.
+    ///
+    /// Current behaviour: no-op. If we ever want the hooks back,
+    /// replace this with a bounded channel or an actual subscriber
+    /// registry; the callers (`insert`, `delete`, `maybe_seal_growing`)
+    /// already pass well-typed events.
+    #[inline]
+    #[allow(clippy::unused_self)]
+    fn emit(&self, _event: LifecycleEvent) {}
 
-    /// Drain events (for testing/monitoring)
+    /// Drain events. Kept for API compatibility; always returns
+    /// empty because `emit` no longer buffers.
     pub fn drain_events(&self) -> Vec<LifecycleEvent> {
         std::mem::take(&mut *self.events.write())
     }

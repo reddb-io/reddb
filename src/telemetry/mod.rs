@@ -16,10 +16,19 @@
 
 use std::path::PathBuf;
 
-use tracing_appender::non_blocking::WorkerGuard;
+use tracing_appender::non_blocking::{NonBlockingBuilder, WorkerGuard};
 use tracing_subscriber::fmt::writer::MakeWriterExt;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{fmt, EnvFilter, Registry};
+
+/// Non-blocking buffer size — higher than the `tracing-appender`
+/// default of 128k because under log-heavy bursts (bulk imports,
+/// CDC storms) 128k drops lines silently via `DropCurrent`.
+///
+/// 1M entries × ~200 bytes per event ≈ 200 MB worst-case RAM —
+/// fine for a server process, and dropped log lines are far more
+/// painful than the memory.
+const LOG_BUFFER_LINES: usize = 1_000_000;
 
 pub mod janitor;
 pub mod span;
@@ -73,10 +82,14 @@ impl Default for TelemetryConfig {
     }
 }
 
-/// Opaque handle that keeps the non-blocking log writer alive. Drop at
-/// process exit to flush buffered records.
+/// Opaque handle that keeps the non-blocking log writers alive.
+/// Drop at process exit to flush the buffered records for stderr
+/// AND the rotating file sink. Both writers run on their own
+/// dedicated background threads — the hot path only pushes onto
+/// an MPSC channel, never touches stdio syscalls directly.
 pub struct TelemetryGuard {
-    _worker: Option<WorkerGuard>,
+    _stderr_worker: Option<WorkerGuard>,
+    _file_worker: Option<WorkerGuard>,
 }
 
 /// Install the global `tracing` subscriber. Idempotent: if another
@@ -89,15 +102,17 @@ pub fn init(cfg: TelemetryConfig) -> Option<TelemetryGuard> {
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(&cfg.level_filter));
 
-    // stderr layer — format depends on cfg.format
-    let stderr_layer = fmt::layer()
-        .with_writer(std::io::stderr)
-        .with_target(true)
-        .with_thread_ids(false)
-        .with_thread_names(false);
+    // stderr — wrapped in `non_blocking` so the hot path never
+    // blocks on `write(2)` syscalls. A dedicated thread owns the
+    // stderr file descriptor and drains an MPSC channel; on a
+    // full buffer we'd rather drop a line than stall a request.
+    let (stderr_writer, stderr_worker) = NonBlockingBuilder::default()
+        .buffered_lines_limit(LOG_BUFFER_LINES)
+        .lossy(true)
+        .finish(std::io::stderr());
 
     // Optional file layer + worker guard
-    let (file_writer_opt, worker_guard) = match cfg.log_dir.as_ref() {
+    let (file_writer_opt, file_worker) = match cfg.log_dir.as_ref() {
         Some(dir) => {
             if let Err(err) = std::fs::create_dir_all(dir) {
                 // Surface the failure to stderr directly — the
@@ -111,7 +126,10 @@ pub fn init(cfg: TelemetryConfig) -> Option<TelemetryGuard> {
                 (None, None)
             } else {
                 let file_appender = tracing_appender::rolling::daily(dir, &cfg.file_prefix);
-                let (writer, guard) = tracing_appender::non_blocking(file_appender);
+                let (writer, guard) = NonBlockingBuilder::default()
+                    .buffered_lines_limit(LOG_BUFFER_LINES)
+                    .lossy(true)
+                    .finish(file_appender);
 
                 // Spawn retention janitor (if tokio runtime active).
                 if cfg.rotation_keep_days > 0 {
@@ -128,6 +146,11 @@ pub fn init(cfg: TelemetryConfig) -> Option<TelemetryGuard> {
     // keeps the type signatures tractable.
     let result = match cfg.format {
         LogFormat::Pretty => {
+            let stderr_layer = fmt::layer()
+                .with_writer(stderr_writer.clone())
+                .with_target(true)
+                .with_thread_ids(false)
+                .with_thread_names(false);
             let base = Registry::default().with(env_filter).with(stderr_layer);
             if let Some(writer) = file_writer_opt.clone() {
                 let file_layer = fmt::layer()
@@ -141,17 +164,13 @@ pub fn init(cfg: TelemetryConfig) -> Option<TelemetryGuard> {
         }
         LogFormat::Json => {
             let stderr_json = fmt::layer()
-                .with_writer(std::io::stderr)
+                .with_writer(stderr_writer.clone())
                 .with_target(true)
                 .with_thread_ids(false)
                 .with_thread_names(false)
                 .json()
                 .with_current_span(true)
                 .with_span_list(false);
-            // Build without the stderr_layer we defined above (it's
-            // pretty-only for the Pretty branch). JSON handling builds
-            // a fresh json-formatted layer.
-            drop(stderr_layer);
             let base = Registry::default().with(env_filter).with(stderr_json);
             if let Some(writer) = file_writer_opt {
                 let file_json = fmt::layer()
@@ -181,6 +200,7 @@ pub fn init(cfg: TelemetryConfig) -> Option<TelemetryGuard> {
     );
 
     Some(TelemetryGuard {
-        _worker: worker_guard,
+        _stderr_worker: Some(stderr_worker),
+        _file_worker: file_worker,
     })
 }

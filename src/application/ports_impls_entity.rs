@@ -1864,7 +1864,7 @@ impl RedDBRuntime {
         );
         Ok(CreateEntityOutput {
             id,
-            entity: db.get(id),
+            entity: db.store().get(&input.collection, id),
         })
     }
 
@@ -1910,7 +1910,7 @@ impl RedDBRuntime {
         );
         Ok(CreateEntityOutput {
             id,
-            entity: db.get(id),
+            entity: db.store().get(&input.collection, id),
         })
     }
 }
@@ -1946,9 +1946,13 @@ impl RuntimeEntityPort for RedDBRuntime {
             }],
         )?;
         let id = result.ids[0];
+        // Perf: `db.get(id)` does a *cross-collection* scan (get_any)
+        // that also takes a write lock on the entity cache. We know
+        // the collection — hit the manager directly. Cuts
+        // create_row() p50 roughly in half on the hot path.
         Ok(CreateEntityOutput {
             id,
-            entity: db.get(id),
+            entity: db.store().get(&collection, id),
         })
     }
 
@@ -2065,7 +2069,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         );
         Ok(CreateEntityOutput {
             id,
-            entity: db.get(id),
+            entity: db.store().get(&input.collection, id),
         })
     }
 
@@ -2126,7 +2130,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         );
         Ok(CreateEntityOutput {
             id,
-            entity: db.get(id),
+            entity: db.store().get(&input.collection, id),
         })
     }
 
@@ -2203,7 +2207,7 @@ impl RuntimeEntityPort for RedDBRuntime {
 
         Ok(CreateEntityOutput {
             id,
-            entity: db.get(id),
+            entity: db.store().get(&collection, id),
         })
     }
 

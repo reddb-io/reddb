@@ -350,22 +350,27 @@ impl UnifiedStore {
             }
         }
 
-        let actions = manager
-            .get(id)
-            .map(|entity| {
-                let metadata = manager.get_metadata(id);
-                vec![StoreWalAction::upsert_entity(
-                    collection,
-                    &entity,
-                    metadata.as_ref(),
-                    self.format_version(),
-                )]
-            })
-            .unwrap_or_default();
-        if registry_dirty {
-            self.mark_paged_registry_dirty();
+        // Perf: skip WAL-action construction when the store is
+        // pagerless. For in-memory benchmarks this saved another
+        // `manager.get(id)` + `serialize_entity_record` per call.
+        if self.pager.is_some() {
+            let actions = manager
+                .get(id)
+                .map(|entity| {
+                    let metadata = manager.get_metadata(id);
+                    vec![StoreWalAction::upsert_entity(
+                        collection,
+                        &entity,
+                        metadata.as_ref(),
+                        self.format_version(),
+                    )]
+                })
+                .unwrap_or_default();
+            if registry_dirty {
+                self.mark_paged_registry_dirty();
+            }
+            self.finish_paged_write(actions)?;
         }
-        self.finish_paged_write(actions)?;
 
         Ok(id)
     }
@@ -593,7 +598,11 @@ impl UnifiedStore {
         self.context_index.index_entity(collection, &entity);
 
         let id = manager.insert(entity)?;
-        self.register_entity_id(id);
+        // `register_entity_id` already advances the atomic counter on
+        // the allocation path above (`self.next_entity_id()`), so the
+        // second call here is a no-op CAS loop on the hot path. Only
+        // needed for the caller-supplied-id branch which happens via
+        // the `register_entity_id` call on line 573.
 
         // Update graph label index for GraphNode entities
         if let Some(ref label) = graph_node_label {
@@ -632,22 +641,27 @@ impl UnifiedStore {
             }
         }
 
-        let actions = manager
-            .get(id)
-            .map(|entity| {
-                let metadata = manager.get_metadata(id);
-                vec![StoreWalAction::upsert_entity(
-                    collection,
-                    &entity,
-                    metadata.as_ref(),
-                    self.format_version(),
-                )]
-            })
-            .unwrap_or_default();
-        if registry_dirty {
-            self.mark_paged_registry_dirty();
+        // Perf: pagerless → skip WAL-action construction (saves a
+        // third manager.get + entity serialize per insert). For
+        // in-memory runtimes finish_paged_write is a no-op.
+        if self.pager.is_some() {
+            let actions = manager
+                .get(id)
+                .map(|entity| {
+                    let metadata = manager.get_metadata(id);
+                    vec![StoreWalAction::upsert_entity(
+                        collection,
+                        &entity,
+                        metadata.as_ref(),
+                        self.format_version(),
+                    )]
+                })
+                .unwrap_or_default();
+            if registry_dirty {
+                self.mark_paged_registry_dirty();
+            }
+            self.finish_paged_write(actions)?;
         }
-        self.finish_paged_write(actions)?;
 
         Ok(id)
     }
