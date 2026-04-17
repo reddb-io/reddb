@@ -665,6 +665,12 @@ struct RuntimeInner {
     /// `xid=0` — identical to pre-MVCC behaviour.
     tx_contexts:
         parking_lot::RwLock<HashMap<u64, crate::storage::transaction::snapshot::TxnContext>>,
+    /// Perf-parity env-var overrides (`REDDB_<UP_DOTTED_KEY>`).
+    /// Populated once at boot, read by every config getter; takes
+    /// precedence over the persisted red_config value so operators
+    /// can hot-fix a bad config by restarting with a different env
+    /// var set. Keys are restricted to those declared in the matrix.
+    env_config_overrides: HashMap<String, String>,
     /// Transaction-local tenant override (`SET LOCAL TENANT '<id>'`).
     /// Keyed by connection id, mirroring `tx_contexts`. Lives only while
     /// a transaction is open — `COMMIT` / `ROLLBACK` evict the entry,
@@ -733,6 +739,7 @@ pub struct RuntimeConnection {
 }
 
 pub mod config_matrix;
+pub mod config_overlay;
 mod expr_eval;
 mod graph_dsl;
 mod health_connection;

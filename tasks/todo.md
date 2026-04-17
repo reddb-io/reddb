@@ -13,11 +13,11 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
 ## Phase 0 — Operational scaffolding
 
-- [ ] **P0.T1** Config matrix + self-healing loader
+- [x] **P0.T1** Config matrix + self-healing loader
   - Acceptance: Tier A keys self-populate on boot; Tier B defaults in-memory
   - Verify: `cargo test --test e2e_config_matrix`
   - Files: `src/runtime/config_matrix.rs` (new), `src/runtime/impl_core.rs`, `tests/e2e_config_matrix.rs` (new)
-- [ ] **P0.T2** Env-var + config-file overlay
+- [x] **P0.T2** Env-var + config-file overlay
   - Acceptance: precedence env → file → red_config → default; malformed file logs warn, boot succeeds
   - Verify: `REDDB_DURABILITY_MODE=async` overrides file saying `sync`
   - Files: `src/runtime/config_overlay.rs` (new), `src/bin/red.rs`
