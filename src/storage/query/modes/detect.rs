@@ -52,6 +52,28 @@ pub fn detect_mode(input: &str) -> QueryMode {
     }
 
     // SQL: SELECT, FROM, INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, GRAPH, SEARCH at start
+    // Plus transaction / admin one-word commands that have no trailing
+    // clause (BEGIN/COMMIT/ROLLBACK/SAVEPOINT/RELEASE/VACUUM/ANALYZE/
+    // RESET/TENANT/etc.) — matched by equality on the trimmed token.
+    let first_token = lower.split_whitespace().next().unwrap_or("");
+    if matches!(
+        first_token,
+        "begin"
+            | "start"
+            | "commit"
+            | "rollback"
+            | "savepoint"
+            | "release"
+            | "end"
+            | "vacuum"
+            | "analyze"
+            | "reset"
+            | "copy"
+            | "refresh"
+            | "explain"
+    ) {
+        return QueryMode::Sql;
+    }
     if lower.starts_with("select ")
         || lower.starts_with("from ")
         || lower.starts_with("insert ")
@@ -68,7 +90,9 @@ pub fn detect_mode(input: &str) -> QueryMode {
         || lower.starts_with("search ")
         || lower.starts_with("ask ")
         || lower.starts_with("set config ")
+        || lower.starts_with("set tenant")
         || lower.starts_with("show config")
+        || lower.starts_with("show tenant")
     {
         // But check if it's SPARQL-style SELECT with ?variable
         if lower.starts_with("select ") && lower.contains(" ?") {

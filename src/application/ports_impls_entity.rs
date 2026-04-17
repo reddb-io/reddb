@@ -928,6 +928,7 @@ fn data_type_name(data_type: DataType) -> &'static str {
         DataType::MacAddr => "macaddr",
         DataType::Vector => "vector",
         DataType::Nullable => "nullable",
+        DataType::Unknown => "unknown",
         DataType::Json => "json",
         DataType::Uuid => "uuid",
         DataType::NodeRef => "noderef",
@@ -1851,6 +1852,9 @@ impl RedDBRuntime {
         }
 
         let id = builder.save()?;
+        // Phase 1.1 MVCC universal: stamp xmin so concurrent snapshots
+        // don't see this node until the transaction commits.
+        self.stamp_xmin_if_in_txn(&input.collection, id);
         refresh_context_index(&db, &input.collection, id)?;
         self.cdc_emit(
             crate::replication::cdc::ChangeOperation::Insert,
@@ -1894,6 +1898,9 @@ impl RedDBRuntime {
         }
 
         let id = builder.save()?;
+        // Phase 1.1 MVCC universal: stamp xmin on the edge so other
+        // sessions don't follow it until COMMIT.
+        self.stamp_xmin_if_in_txn(&input.collection, id);
         refresh_context_index(&db, &input.collection, id)?;
         self.cdc_emit(
             crate::replication::cdc::ChangeOperation::Insert,
@@ -2046,6 +2053,9 @@ impl RuntimeEntityPort for RedDBRuntime {
         }
 
         let id = builder.save()?;
+        // Phase 1.1 MVCC universal: stamp xmin on the vector so
+        // concurrent ANN scans hide it until the transaction commits.
+        self.stamp_xmin_if_in_txn(&input.collection, id);
         refresh_context_index(&db, &input.collection, id)?;
         self.cdc_emit(
             crate::replication::cdc::ChangeOperation::Insert,
@@ -2105,6 +2115,8 @@ impl RuntimeEntityPort for RedDBRuntime {
         }
 
         let id = builder.save()?;
+        // Phase 1.1 MVCC universal: stamp xmin on the document.
+        self.stamp_xmin_if_in_txn(&input.collection, id);
         refresh_context_index(&db, &input.collection, id)?;
         self.cdc_emit(
             crate::replication::cdc::ChangeOperation::Insert,
@@ -2184,6 +2196,9 @@ impl RuntimeEntityPort for RedDBRuntime {
 
         let collection = input.collection;
         let id = self.insert_timeseries_point(&collection, fields, input.metadata)?;
+        // Phase 1.1 MVCC universal: stamp xmin on the point so
+        // concurrent range scans hide it until COMMIT.
+        self.stamp_xmin_if_in_txn(&collection, id);
         refresh_context_index(&db, &collection, id)?;
 
         Ok(CreateEntityOutput {

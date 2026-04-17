@@ -7,7 +7,7 @@ use super::super::ast::{
 use super::super::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
-use crate::storage::schema::{SqlTypeName, TypeModifier};
+use crate::storage::schema::{SqlTypeName, TypeModifier, Value};
 
 impl<'a> Parser<'a> {
     /// Parse: CREATE TABLE [IF NOT EXISTS] name (col1 TYPE [modifiers], ...)
@@ -557,7 +557,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Try to match IF NOT EXISTS sequence
-    pub(super) fn match_if_not_exists(&mut self) -> Result<bool, ParseError> {
+    pub(crate) fn match_if_not_exists(&mut self) -> Result<bool, ParseError> {
         if self.check(&Token::If) {
             self.advance()?;
             self.expect(Token::Not)?;
@@ -569,7 +569,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Try to match IF EXISTS sequence
-    pub(super) fn match_if_exists(&mut self) -> Result<bool, ParseError> {
+    pub(crate) fn match_if_exists(&mut self) -> Result<bool, ParseError> {
         if self.check(&Token::If) {
             self.advance()?;
             self.expect(Token::Exists)?;

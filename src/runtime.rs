@@ -754,6 +754,21 @@ use self::join_filter::*;
 use self::query_exec::*;
 use self::record_search::*;
 
+/// Re-exports for transports + tests that need per-connection
+/// isolation, tenant / auth thread-locals, and MVCC snapshot
+/// utilities. Mirrors what PG-wire / gRPC / HTTP middleware already
+/// call, and is enough to emulate independent connections in
+/// integration tests.
+pub mod mvcc {
+    pub use super::impl_core::{
+        capture_current_snapshot, clear_current_auth_identity, clear_current_connection_id,
+        clear_current_snapshot, clear_current_tenant, current_connection_id, current_tenant,
+        entity_visible_under_current_snapshot, entity_visible_with_context,
+        set_current_auth_identity, set_current_connection_id, set_current_snapshot,
+        set_current_tenant, SnapshotContext,
+    };
+}
+
 /// Public helpers re-exported for use by the presentation layer.
 pub mod record_search_helpers {
     use crate::storage::UnifiedEntity;

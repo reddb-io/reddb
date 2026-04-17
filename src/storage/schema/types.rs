@@ -197,6 +197,11 @@ fn split_type_modifiers(input: &str) -> Vec<String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum DataType {
+    /// Polymorphic / "any" placeholder. Used by function-catalog
+    /// signatures (e.g. `JSON_SET(json, path, value)` where `value`
+    /// accepts any scalar) so the resolver can skip concrete type
+    /// checking for that argument. Never appears in stored schemas.
+    Unknown = 0,
     /// Signed 64-bit integer
     Integer = 1,
     /// Unsigned 64-bit integer
@@ -421,7 +426,7 @@ impl DataType {
             | DataType::PageRef => TypeCategory::Reference,
             DataType::Vector => TypeCategory::Vector,
             DataType::Json => TypeCategory::Json,
-            DataType::Nullable => TypeCategory::Unknown,
+            DataType::Nullable | DataType::Unknown => TypeCategory::Unknown,
             // C3 TOAST compressed variants — same category as their uncompressed originals.
             // Callers see Value::Text / Value::Blob after decompression; the DataType is an
             // on-disk-only detail.
@@ -610,6 +615,7 @@ impl DataType {
             DataType::IpAddr => None, // 4 or 16 bytes
             DataType::Vector => None, // depends on dimensions
             DataType::Nullable => None,
+            DataType::Unknown => None,
             DataType::Json => None,
             // Cross-references (variable-length IDs)
             DataType::NodeRef => None,
@@ -738,6 +744,7 @@ impl fmt::Display for DataType {
             DataType::MacAddr => write!(f, "MACADDR"),
             DataType::Vector => write!(f, "VECTOR"),
             DataType::Nullable => write!(f, "NULLABLE"),
+            DataType::Unknown => write!(f, "UNKNOWN"),
             DataType::Json => write!(f, "JSON"),
             DataType::Uuid => write!(f, "UUID"),
             DataType::NodeRef => write!(f, "NODEREF"),
@@ -1915,6 +1922,12 @@ impl Value {
             }
             DataType::Nullable => {
                 // Nullable without inner type means null
+                Value::Null
+            }
+            DataType::Unknown => {
+                // Polymorphic placeholder — never stored on disk.
+                // Reaching here means corrupted data or a bug; treat
+                // as null to stay forward-compatible.
                 Value::Null
             }
             // C3 TOAST: zstd-compressed Text — transparent decompression.

@@ -1069,6 +1069,7 @@ fn schema_data_type_str(data_type: crate::storage::schema::DataType) -> &'static
         crate::storage::schema::DataType::MacAddr => "macaddr",
         crate::storage::schema::DataType::Vector => "vector",
         crate::storage::schema::DataType::Nullable => "nullable",
+        crate::storage::schema::DataType::Unknown => "unknown",
         crate::storage::schema::DataType::Json => "json",
         crate::storage::schema::DataType::Uuid => "uuid",
         crate::storage::schema::DataType::NodeRef => "noderef",

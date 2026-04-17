@@ -9,7 +9,14 @@ pub(super) fn materialize_graph_with_projection(
     projection: Option<&RuntimeGraphProjection>,
 ) -> RedDBResult<GraphStore> {
     let graph = GraphStore::new();
-    let entities = store.query_all(|_| true);
+    // Phase 1.2 MVCC universal: capture the current connection's
+    // snapshot before `query_all` spawns parallel scan threads — the
+    // thread-local CURRENT_SNAPSHOT does not propagate into spawned
+    // workers, so we hand the context to the filter closure by move.
+    let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
+    let entities = store.query_all(move |e| {
+        crate::runtime::impl_core::entity_visible_with_context(snap_ctx.as_ref(), e)
+    });
     let node_label_filters = projection
         .and_then(|projection| normalize_token_filter_list(projection.node_labels.clone()));
     let node_type_filters = projection

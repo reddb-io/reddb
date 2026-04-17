@@ -93,6 +93,19 @@ pub(crate) fn runtime_vector_matches(
 
     if effective_vector_filter(query).is_none() {
         let mut results = db.similar(&query.collection, vector, manager.count().max(1));
+        // Phase 1.2 MVCC universal: the ANN path (`db.similar`) bypasses
+        // the general scan filter, so post-filter the top-K list here
+        // against the connection's snapshot. Each `SimilarResult` owns
+        // its entity, so visibility is cheap (no extra fetch).
+        let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
+        if snap_ctx.is_some() {
+            results.retain(|r| {
+                crate::runtime::impl_core::entity_visible_with_context(
+                    snap_ctx.as_ref(),
+                    &r.entity,
+                )
+            });
+        }
         results.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)

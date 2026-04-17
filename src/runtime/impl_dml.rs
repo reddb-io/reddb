@@ -516,7 +516,7 @@ impl RedDBRuntime {
             find_timeseries_timestamp_ns(&columns, &values)?.unwrap_or_else(current_unix_ns);
         let tags = find_timeseries_tags(&columns, &values)?;
 
-        let entity = UnifiedEntity::new(
+        let mut entity = UnifiedEntity::new(
             EntityId::new(0),
             EntityKind::TimeSeriesPoint(Box::new(crate::storage::TimeSeriesPointKind {
                 series: collection.to_string(),
@@ -529,6 +529,11 @@ impl RedDBRuntime {
                 tags,
             }),
         );
+        // Phase 1.1 MVCC universal: stamp xmin inline (cheaper than
+        // the post-save hook when we already own the entity).
+        if let Some(xid) = self.current_xid() {
+            entity.set_xmin(xid);
+        }
 
         let store = self.inner.db.store();
         let id = store

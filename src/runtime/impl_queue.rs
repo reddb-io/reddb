@@ -225,7 +225,7 @@ impl RedDBRuntime {
                 }
 
                 let position = next_queue_position(store.as_ref(), queue, *side)?;
-                let entity = UnifiedEntity::new(
+                let mut entity = UnifiedEntity::new(
                     EntityId::new(0),
                     EntityKind::QueueMessage {
                         queue: queue.clone(),
@@ -240,6 +240,11 @@ impl RedDBRuntime {
                         acked: false,
                     }),
                 );
+                // Phase 1.1 MVCC universal: stamp xmin so other
+                // connections don't see this message until COMMIT.
+                if let Some(xid) = self.current_xid() {
+                    entity.set_xmin(xid);
+                }
                 let id = store
                     .insert_auto(queue, entity)
                     .map_err(|err| RedDBError::Internal(err.to_string()))?;
@@ -1073,8 +1078,18 @@ fn load_queue_message_views(
     let manager = store
         .get_collection(queue)
         .ok_or_else(|| RedDBError::NotFound(format!("queue '{}' not found", queue)))?;
+    // Phase 1.2 MVCC universal: capture before parallel scan. Messages
+    // inserted by another connection's open txn stay invisible to
+    // consumers until that txn commits (prevents phantom POPs).
+    let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
     Ok(manager
-        .query_all(|entity| matches!(entity.kind, EntityKind::QueueMessage { .. }))
+        .query_all(move |entity| {
+            matches!(entity.kind, EntityKind::QueueMessage { .. })
+                && crate::runtime::impl_core::entity_visible_with_context(
+                    snap_ctx.as_ref(),
+                    entity,
+                )
+        })
         .into_iter()
         .filter_map(queue_message_view_from_entity)
         .collect())
@@ -1237,6 +1252,35 @@ fn delete_message_with_state(
     queue: &str,
     message_id: EntityId,
 ) -> RedDBResult<()> {
+    // Phase 1.3 MVCC universal: when inside an open transaction,
+    // turn the ACK/DLQ-move into a tombstone instead of a physical
+    // delete. Other consumers keep seeing the message until COMMIT;
+    // ROLLBACK revives it. Autocommit ACK stays physical — same
+    // semantics as before.
+    if let Some(runtime) = runtime {
+        if let Some(xid) = runtime.current_xid() {
+            if let Some(manager) = store.get_collection(queue) {
+                if let Some(mut entity) = manager.get(message_id) {
+                    if entity.xmax == 0 {
+                        entity.set_xmax(xid);
+                        if manager.update(entity).is_ok() {
+                            let conn_id =
+                                crate::runtime::impl_core::current_connection_id();
+                            runtime.record_pending_tombstone(
+                                conn_id, queue, message_id, xid,
+                            );
+                            // Meta-row cleanup + lock release happen at
+                            // COMMIT via the tombstone drain pipeline;
+                            // here we only mark the message invisible.
+                            forget_queue_message_lock(runtime, queue, message_id);
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     remove_message_state(store, queue, message_id);
     store
         .delete(queue, message_id)

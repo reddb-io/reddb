@@ -59,7 +59,7 @@ thread_local! {
 /// its own nested-savepoint writes even though their xids exceed
 /// `snapshot.xid`.
 #[derive(Clone)]
-pub(crate) struct SnapshotContext {
+pub struct SnapshotContext {
     pub snapshot: crate::storage::transaction::snapshot::Snapshot,
     pub manager: Arc<crate::storage::transaction::snapshot::SnapshotManager>,
     pub own_xids: std::collections::HashSet<crate::storage::transaction::snapshot::Xid>,
@@ -68,13 +68,23 @@ pub(crate) struct SnapshotContext {
 /// Install a connection id on the current thread for the duration of a
 /// statement. Transaction state (`RuntimeInner::tx_contexts`) is keyed
 /// by this id so different connections can hold independent BEGINs.
-pub(crate) fn set_current_connection_id(id: u64) {
+///
+/// Pub so transports (PG wire, gRPC, HTTP per-request spawners) and
+/// tests can emulate per-connection isolation. Call it once when
+/// binding the connection's worker thread; pair with
+/// `clear_current_connection_id` on teardown.
+pub fn set_current_connection_id(id: u64) {
     CURRENT_CONN_ID.with(|c| c.set(id));
+}
+
+/// Reset the thread's connection id back to `0` (autocommit).
+pub fn clear_current_connection_id() {
+    CURRENT_CONN_ID.with(|c| c.set(0));
 }
 
 /// Read the connection id set by `set_current_connection_id`. Returns
 /// `0` when no wrapper installed one — auto-commit path.
-pub(crate) fn current_connection_id() -> u64 {
+pub fn current_connection_id() -> u64 {
     CURRENT_CONN_ID.with(|c| c.get())
 }
 
@@ -121,11 +131,11 @@ pub fn current_tenant() -> Option<String> {
 /// of one statement. Paired with `clear_current_snapshot()` — callers
 /// should prefer the `CurrentSnapshotGuard` RAII wrapper so early returns
 /// still clean up.
-pub(crate) fn set_current_snapshot(ctx: SnapshotContext) {
+pub fn set_current_snapshot(ctx: SnapshotContext) {
     CURRENT_SNAPSHOT.with(|cell| *cell.borrow_mut() = Some(ctx));
 }
 
-pub(crate) fn clear_current_snapshot() {
+pub fn clear_current_snapshot() {
     CURRENT_SNAPSHOT.with(|cell| *cell.borrow_mut() = None);
 }
 
@@ -163,7 +173,7 @@ impl Drop for CurrentSnapshotGuard {
 /// where `xmax_half_abort` re-grants visibility for tuples whose
 /// deleting transaction rolled back.
 #[inline]
-pub(crate) fn entity_visible_under_current_snapshot(
+pub fn entity_visible_under_current_snapshot(
     entity: &crate::storage::unified::entity::UnifiedEntity,
 ) -> bool {
     CURRENT_SNAPSHOT.with(|cell| {
@@ -196,7 +206,7 @@ pub(crate) fn xids_visible_under_current_snapshot(xmin: u64, xmax: u64) -> bool 
 /// can be moved into every worker closure. Worker threads do not
 /// inherit thread-locals, so calling `entity_visible_under_current_snapshot`
 /// from inside a spawned closure would silently skip the filter.
-pub(crate) fn capture_current_snapshot() -> Option<SnapshotContext> {
+pub fn capture_current_snapshot() -> Option<SnapshotContext> {
     CURRENT_SNAPSHOT.with(|cell| cell.borrow().clone())
 }
 
@@ -204,7 +214,7 @@ pub(crate) fn capture_current_snapshot() -> Option<SnapshotContext> {
 /// against a caller-provided context. Intended for parallel workers
 /// that captured the snapshot with `capture_current_snapshot()`.
 #[inline]
-pub(crate) fn entity_visible_with_context(
+pub fn entity_visible_with_context(
     ctx: Option<&SnapshotContext>,
     entity: &crate::storage::unified::entity::UnifiedEntity,
 ) -> bool {
@@ -2330,7 +2340,7 @@ impl RedDBRuntime {
                                 let pos = ctx
                                     .savepoints
                                     .iter()
-                                    .position(|(n, _)| n == &name)
+                                    .position(|(n, _)| n == name)
                                     .ok_or_else(|| {
                                         RedDBError::Internal(format!(
                                             "savepoint {name} does not exist"
@@ -2367,7 +2377,7 @@ impl RedDBRuntime {
                                 let pos = ctx
                                     .savepoints
                                     .iter()
-                                    .position(|(n, _)| n == &name)
+                                    .position(|(n, _)| n == name)
                                     .ok_or_else(|| {
                                         RedDBError::Internal(format!(
                                             "savepoint {name} does not exist"
@@ -3406,6 +3416,38 @@ impl RedDBRuntime {
         }
     }
 
+    /// Phase 1.1 MVCC universal: post-save hook that stamps `xmin` on a
+    /// freshly-inserted entity when the current connection holds an
+    /// open transaction. Used by graph / vector / queue / timeseries
+    /// write paths that go through the DevX builder API (`db.node(...)
+    /// .save()` and friends) — those live in the storage crate and
+    /// can't reach `current_xid()` without crossing layers, so the
+    /// application layer calls this helper right after `save()` to
+    /// finalise the MVCC stamp.
+    ///
+    /// Autocommit (outside BEGIN) is a no-op — no extra lookup or
+    /// write, so the non-transactional hot path stays untouched.
+    ///
+    /// Best-effort: if the collection or entity disappears between
+    /// the save and the stamp (concurrent DROP), we silently skip.
+    pub(crate) fn stamp_xmin_if_in_txn(
+        &self,
+        collection: &str,
+        id: crate::storage::unified::entity::EntityId,
+    ) {
+        let Some(xid) = self.current_xid() else {
+            return;
+        };
+        let store = self.inner.db.store();
+        let Some(manager) = store.get_collection(collection) else {
+            return;
+        };
+        if let Some(mut entity) = manager.get(id) {
+            entity.set_xmin(xid);
+            let _ = manager.update(entity);
+        }
+    }
+
     /// Revive tombstones stamped by `stamper_xid` or any sub-xid
     /// allocated after it (Phase 2.3.2e savepoint rollback). Any
     /// pending entries with `xid < stamper_xid` stay queued because
@@ -3485,6 +3527,28 @@ impl RedDBRuntime {
     /// the oldest-active xid when reclaiming dead tuples.
     pub fn snapshot_manager(&self) -> Arc<crate::storage::transaction::snapshot::SnapshotManager> {
         Arc::clone(&self.inner.snapshot_manager)
+    }
+
+    /// Own-tx xids (parent + open savepoints) for the current
+    /// connection. Transports + tests that build a `SnapshotContext`
+    /// manually (outside the `execute_query` scope) need this set so
+    /// the writer's own uncommitted tuples stay visible to self.
+    pub fn current_txn_own_xids(
+        &self,
+    ) -> std::collections::HashSet<crate::storage::transaction::snapshot::Xid> {
+        let mut set = std::collections::HashSet::new();
+        if let Some(ctx) = self
+            .inner
+            .tx_contexts
+            .read()
+            .get(&current_connection_id())
+        {
+            set.insert(ctx.xid);
+            for (_, sub) in &ctx.savepoints {
+                set.insert(*sub);
+            }
+        }
+        set
     }
 
     /// Access the shared `ForeignTableRegistry` (Phase 3.2 PG parity).

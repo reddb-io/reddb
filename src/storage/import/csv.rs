@@ -228,6 +228,7 @@ impl CsvImporter {
         );
         store
             .insert(&self.config.collection, entity)
+            .map(|_| ())
             .map_err(|e| format!("insert failed: {:?}", e))
     }
 }
