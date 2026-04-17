@@ -153,6 +153,28 @@ fn config_file_overlay_seeds_missing_keys() {
 }
 
 #[test]
+fn durability_sync_alias_maps_to_wal_durable_grouped() {
+    use reddb::api::DurabilityMode;
+
+    // Matrix default stores the key as "sync". `DurabilityMode::from_str`
+    // must accept that spelling and produce `WalDurableGrouped` — if
+    // it doesn't, the env overlay and the `REDDB_DURABILITY` path
+    // can't hand the matrix value into the store config.
+    assert_eq!(
+        DurabilityMode::from_str("sync"),
+        Some(DurabilityMode::WalDurableGrouped)
+    );
+    assert_eq!(
+        DurabilityMode::from_str("strict"),
+        Some(DurabilityMode::Strict)
+    );
+    assert_eq!(
+        DurabilityMode::from_str("async"),
+        Some(DurabilityMode::WalDurableGrouped) // temporary alias
+    );
+}
+
+#[test]
 fn lock_manager_deadlock_timeout_reads_env_override() {
     // The LockManager is constructed with a timeout sourced from
     // `concurrency.locking.deadlock_timeout_ms`. With no env var set,

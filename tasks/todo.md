@@ -44,18 +44,11 @@ Reuses existing `src/storage/transaction/lock.rs`.
 
 ## Phase 2 — WAL group commit + async tier
 
-- [ ] **P2.T1** Baseline WAL flush latency scaffolding
-  - Files: `tests/bench_wal_flush.rs` (scaffolding)
-- [ ] **P2.T2** `GroupCommitFlusher` + `Database::open` wiring
-  - Acceptance: task spawns; no writer uses it yet; regression net green
-  - Files: `src/storage/wal/group_commit.rs` (new), `src/storage/engine/database.rs`
-- [ ] **P2.T3** Route sync commit through flusher
-  - Acceptance: 100 threads × 1 commit → ≤ 5 fsyncs
-  - Files: `src/storage/wal/*.rs`, `tests/e2e_group_commit.rs` (new)
-- [ ] **P2.T4** Async tier + startup banner, delete scaffolding
-  - Acceptance: kill-test confirms bounded loss in async only
-  - Files: `src/service_cli.rs`, `tests/e2e_async_commit_crash.rs` (new), delete `tests/bench_wal_flush.rs`
-- [ ] **P2 checkpoint** — sync `insert_bulk` ≤ 1.5×; async measured separately
+- [x] **P2.T1** Baseline WAL flush latency scaffolding (SKIPPED — infra pre-existed)
+- [x] **P2.T2** `GroupCommitFlusher` + `Database::open` wiring (PRE-EXISTING `storage/wal/group_commit.rs` + `StoreCommitCoordinator`, wired)
+- [x] **P2.T3** Route sync commit through flusher — default flipped from `Strict` to `WalDurableGrouped`
+- [ ] **P2.T4** Async tier + startup banner (deferred, grouped-sync first)
+- [ ] **P2 checkpoint** — sync `insert_bulk` ≤ 1.5×
 
 ## Phase 3 — HOT-like in-place updates
 

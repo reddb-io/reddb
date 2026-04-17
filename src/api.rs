@@ -58,12 +58,24 @@ impl DurabilityMode {
     pub fn from_str(value: &str) -> Option<Self> {
         let normalized = value.trim().to_ascii_lowercase();
         match normalized.as_str() {
+            // Legacy / opt-out form. Every commit pays its own fsync.
             "strict" => Some(Self::Strict),
-            "wal_durable_grouped"
+            // Group-commit sync path — the perf-parity default. Matches
+            // PostgreSQL's `synchronous_commit=on` behaviour: the
+            // writer waits for durability, but fsyncs are batched
+            // across concurrent writers so a burst of N commits pays
+            // ~O(1) fsyncs instead of O(N).
+            "sync"
+            | "wal_durable_grouped"
             | "wal-durable-grouped"
             | "grouped"
             | "wal_grouped"
             | "wal-grouped" => Some(Self::WalDurableGrouped),
+            // "async" aliases to the same grouped sync path today.
+            // A true fire-and-forget async tier ships as a separate
+            // variant in a later pass; accept the name now so the
+            // config matrix / env overlay don't reject it outright.
+            "async" => Some(Self::WalDurableGrouped),
             _ => None,
         }
     }
@@ -230,7 +242,12 @@ impl Default for RedDBOptions {
             read_only: false,
             create_if_missing: true,
             verify_checksums: true,
-            durability_mode: DurabilityMode::Strict,
+            // Perf-parity default — `WalDurableGrouped` matches
+            // PostgreSQL's `synchronous_commit=on` behaviour while
+            // amortising fsync cost across concurrent writers. The
+            // legacy `Strict` tier (per-commit fsync) stays available
+            // via `durability.mode = "strict"` / `REDDB_DURABILITY=strict`.
+            durability_mode: DurabilityMode::WalDurableGrouped,
             group_commit: GroupCommitOptions::default(),
             auto_checkpoint_pages: 1000,
             cache_pages: 10_000,

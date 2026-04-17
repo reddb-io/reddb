@@ -260,7 +260,9 @@ impl Default for UnifiedStoreConfig {
             auto_index_refs: true,
             max_cross_refs: 1000,
             enable_wal: false,
-            durability_mode: DurabilityMode::Strict,
+            // Mirrors `RedDBOptions::default().durability_mode` — see
+            // `src/api.rs` for the rationale.
+            durability_mode: DurabilityMode::WalDurableGrouped,
             group_commit: GroupCommitOptions::default(),
             data_dir: None,
         }
