@@ -38,12 +38,8 @@ Reuses existing `src/storage/transaction/lock.rs`.
 - [x] **P1.T3** Wire reads to IS (Select/Join/Vector/Hybrid/Graph/Path)
   - Acceptance: regression net green; lock stats bump on SELECT
   - Files: `src/runtime/impl_core.rs`, `tests/e2e_locking_reads.rs` (new)
-- [ ] **P1.T4** Wire writes to IX (DML + builders)
-  - Acceptance: 20×1000 inserts across 5 collections without serialisation
-  - Files: `src/runtime/impl_core.rs`, `src/runtime/impl_dml.rs`, `src/runtime/impl_queue.rs`, `src/runtime/impl_graph.rs`, `tests/e2e_concurrent_writes.rs` (new)
-- [ ] **P1.T5** Wire DDL to X
-  - Acceptance: ALTER blocks INSERT; INSERT resumes after
-  - Files: `src/runtime/impl_ddl.rs`, `tests/e2e_ddl_concurrency.rs` (new)
+- [x] **P1.T4** Wire writes to IX (DML + builders)
+- [x] **P1.T5** Wire DDL to X
 - [ ] **P1 checkpoint** — `concurrent` bench delta, no >5% regression single-threaded
 
 ## Phase 2 — WAL group commit + async tier

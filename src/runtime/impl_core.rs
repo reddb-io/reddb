@@ -937,25 +937,82 @@ fn query_expr_result_cache_scopes(expr: &QueryExpr) -> HashSet<String> {
     scopes
 }
 
-/// Read-side expression variants — SELECT / JOIN / Vector / Hybrid /
-/// Graph / Path + anything the unified executor treats as a query
-/// rather than a mutation. Non-read variants (Insert/Update/Delete,
-/// DDL, admin) skip the intent-lock acquisition path; their own
-/// dispatch arms will pick up the write / DDL modes in later tasks.
-fn is_read_expr(expr: &QueryExpr) -> bool {
-    matches!(
-        expr,
+/// Pick the `(global_mode, collection_mode)` pair for an expression,
+/// or `None` for variants that opt out of intent-locking entirely
+/// (admin statements like `SHOW CONFIG`, transaction control, tenant
+/// toggles).
+///
+/// Phase-1 contract:
+/// - Reads  — `(IX-compatible) (Global, IS) → (Collection, IS)`
+/// - Writes — `(IX-compatible) (Global, IX) → (Collection, IX)`
+/// - DDL    — `(strong)        (Global, IX) → (Collection, X)`
+fn intent_lock_modes_for(
+    expr: &QueryExpr,
+) -> Option<(
+    crate::storage::transaction::lock::LockMode,
+    crate::storage::transaction::lock::LockMode,
+)> {
+    use crate::storage::transaction::lock::LockMode::{Exclusive, IntentExclusive, IntentShared};
+
+    match expr {
+        // Reads — IS / IS.
         QueryExpr::Table(_)
-            | QueryExpr::Join(_)
-            | QueryExpr::Vector(_)
-            | QueryExpr::Hybrid(_)
-            | QueryExpr::Graph(_)
-            | QueryExpr::Path(_)
-            | QueryExpr::Ask(_)
-            | QueryExpr::SearchCommand(_)
-            | QueryExpr::GraphCommand(_)
-            | QueryExpr::QueueCommand(_)
-    )
+        | QueryExpr::Join(_)
+        | QueryExpr::Vector(_)
+        | QueryExpr::Hybrid(_)
+        | QueryExpr::Graph(_)
+        | QueryExpr::Path(_)
+        | QueryExpr::Ask(_)
+        | QueryExpr::SearchCommand(_)
+        | QueryExpr::GraphCommand(_)
+        | QueryExpr::QueueCommand(_) => Some((IntentShared, IntentShared)),
+
+        // Writes — IX / IX. Non-tabular mutations (vector insert,
+        // graph node insert, queue push, timeseries point insert)
+        // don't carry their own dispatch arm here; they ride through
+        // the Insert variant or a command variant covered by the
+        // read-side arm above. P1.T4 expands only the TableQuery-ish
+        // writes; non-tabular kinds inherit when their DML variants
+        // land in later phases.
+        QueryExpr::Insert(_) | QueryExpr::Update(_) | QueryExpr::Delete(_) => {
+            Some((IntentExclusive, IntentExclusive))
+        }
+
+        // DDL — IX / X. A DDL against collection `c` blocks all
+        // other writers + readers on `c` but leaves other collections
+        // running (because Global stays IX, not X).
+        QueryExpr::CreateTable(_)
+        | QueryExpr::DropTable(_)
+        | QueryExpr::AlterTable(_)
+        | QueryExpr::CreateIndex(_)
+        | QueryExpr::DropIndex(_)
+        | QueryExpr::CreateTimeSeries(_)
+        | QueryExpr::DropTimeSeries(_)
+        | QueryExpr::CreateQueue(_)
+        | QueryExpr::DropQueue(_)
+        | QueryExpr::CreateTree(_)
+        | QueryExpr::DropTree(_)
+        | QueryExpr::CreatePolicy(_)
+        | QueryExpr::DropPolicy(_)
+        | QueryExpr::CreateView(_)
+        | QueryExpr::DropView(_)
+        | QueryExpr::RefreshMaterializedView(_)
+        | QueryExpr::CreateSchema(_)
+        | QueryExpr::DropSchema(_)
+        | QueryExpr::CreateSequence(_)
+        | QueryExpr::DropSequence(_)
+        | QueryExpr::CreateServer(_)
+        | QueryExpr::DropServer(_)
+        | QueryExpr::CreateForeignTable(_)
+        | QueryExpr::DropForeignTable(_) => Some((IntentExclusive, Exclusive)),
+
+        // Admin / control — skip intent locks. `SET TENANT`,
+        // `BEGIN / COMMIT / ROLLBACK`, `SET CONFIG`, `SHOW CONFIG`,
+        // `VACUUM`, etc. don't touch collection data the same way
+        // and the existing transaction layer already serialises the
+        // pieces that matter.
+        _ => None,
+    }
 }
 
 /// Best-effort collection inventory for an expression. Used to pick
@@ -980,10 +1037,30 @@ fn walk_collections(expr: &QueryExpr, out: &mut Vec<String>) {
         QueryExpr::Insert(i) => out.push(i.table.clone()),
         QueryExpr::Update(u) => out.push(u.table.clone()),
         QueryExpr::Delete(d) => out.push(d.table.clone()),
+
+        // DDL — include the target collection so DDL takes
+        // `(Collection, X)` and blocks concurrent readers / writers
+        // on the same collection. Other collections stay live
+        // because Global is still IX.
+        QueryExpr::CreateTable(q) => out.push(q.name.clone()),
+        QueryExpr::DropTable(q) => out.push(q.name.clone()),
+        QueryExpr::AlterTable(q) => out.push(q.name.clone()),
+        QueryExpr::CreateIndex(q) => out.push(q.table.clone()),
+        QueryExpr::DropIndex(q) => out.push(q.table.clone()),
+        QueryExpr::CreateTimeSeries(q) => out.push(q.name.clone()),
+        QueryExpr::DropTimeSeries(q) => out.push(q.name.clone()),
+        QueryExpr::CreateQueue(q) => out.push(q.name.clone()),
+        QueryExpr::DropQueue(q) => out.push(q.name.clone()),
+        QueryExpr::CreatePolicy(q) => out.push(q.table.clone()),
+        QueryExpr::CreateView(q) => out.push(q.name.clone()),
+        QueryExpr::DropView(q) => out.push(q.name.clone()),
+        QueryExpr::RefreshMaterializedView(q) => out.push(q.name.clone()),
+
         // Vector / Hybrid / Graph / Path / commands reference
         // collections through fields whose shape varies; without a
         // uniform accessor we fall back to the global lock only —
-        // benign because every runtime path still holds (Global, IS).
+        // benign because every runtime path still holds the global
+        // mode.
         _ => {}
     }
 }
@@ -2536,36 +2613,28 @@ impl RedDBRuntime {
         let statement = query_expr_name(&expr);
         let result_cache_scopes = query_expr_result_cache_scopes(&expr);
 
-        // Phase 1.T3 perf-parity — intent-lock acquisition for reads.
-        // Gated on `concurrency.locking.enabled` so a bad interaction
-        // can be disabled via env / SET CONFIG without reverting the
-        // commit. Builds a `LockerGuard` with `(Global, IS)` plus one
-        // `(Collection, IS)` per table referenced in the expression;
-        // drops at end of dispatch so the lock is held only for this
-        // statement. Under Phase 1's contract, concurrent IX writers
-        // and concurrent DDL-X waiters both see the IS and behave
-        // correctly (IX/IS compatible, X/IS conflicts → waits).
-        let _lock_guard = if self
-            .config_bool("concurrency.locking.enabled", true)
-            && is_read_expr(&expr)
-        {
-            let mut g =
-                crate::runtime::locking::LockerGuard::new(self.inner.lock_manager.clone());
-            // Non-fatal on failure: if the lock manager is
-            // misbehaving we still want the query to run so the
-            // operator can SHOW CONFIG / SET CONFIG to disable.
-            // Errors land in the log via tracing.
-            let _ = g.acquire(
-                crate::runtime::locking::Resource::Global,
-                crate::storage::transaction::lock::LockMode::IntentShared,
-            );
-            for collection in collections_referenced(&expr) {
-                let _ = g.acquire(
-                    crate::runtime::locking::Resource::Collection(collection),
-                    crate::storage::transaction::lock::LockMode::IntentShared,
+        // Phase 1 perf-parity — intent-lock acquisition. Reads take
+        // IS (T3), writes take IX (T4), DDL takes Collection X with
+        // Global IX (T5). Guard drops at end of dispatch so the lock
+        // holds only for one statement. Gated on
+        // `concurrency.locking.enabled` so the feature can be
+        // disabled via env / SET CONFIG without reverting.
+        let _lock_guard = if self.config_bool("concurrency.locking.enabled", true) {
+            intent_lock_modes_for(&expr).map(|(global_mode, coll_mode)| {
+                let mut g = crate::runtime::locking::LockerGuard::new(
+                    self.inner.lock_manager.clone(),
                 );
-            }
-            Some(g)
+                // Non-fatal on failure: a misbehaving lock manager
+                // shouldn't wedge queries. Errors surface via tracing.
+                let _ = g.acquire(crate::runtime::locking::Resource::Global, global_mode);
+                for collection in collections_referenced(&expr) {
+                    let _ = g.acquire(
+                        crate::runtime::locking::Resource::Collection(collection),
+                        coll_mode,
+                    );
+                }
+                g
+            })
         } else {
             None
         };
