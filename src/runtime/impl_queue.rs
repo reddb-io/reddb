@@ -215,7 +215,7 @@ impl RedDBRuntime {
                     )));
                 }
                 if let Some(max_size) = config.max_size {
-                    let current_len = load_queue_message_views(store.as_ref(), queue)?.len();
+                    let current_len = load_queue_message_views_with_runtime(Some(self), store.as_ref(), queue)?.len();
                     if current_len >= max_size {
                         return Err(RedDBError::Query(format!(
                             "queue '{}' is full (max_size={max_size})",
@@ -290,7 +290,7 @@ impl RedDBRuntime {
                     .into_iter()
                     .map(|entry| entry.message_id)
                     .collect::<HashSet<_>>();
-                let mut messages = load_queue_message_views(store.as_ref(), queue)?
+                let mut messages = load_queue_message_views_with_runtime(Some(self), store.as_ref(), queue)?
                     .into_iter()
                     .filter(|message| !pending_ids.contains(&message.id))
                     .collect::<Vec<_>>();
@@ -346,7 +346,7 @@ impl RedDBRuntime {
                     .into_iter()
                     .map(|entry| entry.message_id)
                     .collect::<HashSet<_>>();
-                let mut messages = load_queue_message_views(store.as_ref(), queue)?
+                let mut messages = load_queue_message_views_with_runtime(Some(self), store.as_ref(), queue)?
                     .into_iter()
                     .filter(|message| !pending_ids.contains(&message.id))
                     .collect::<Vec<_>>();
@@ -374,7 +374,7 @@ impl RedDBRuntime {
             QueueCommand::Len { queue } => {
                 let store = self.inner.db.store();
                 ensure_queue_exists(store.as_ref(), queue)?;
-                let count = load_queue_message_views(store.as_ref(), queue)?.len() as u64;
+                let count = load_queue_message_views_with_runtime(Some(self), store.as_ref(), queue)?.len() as u64;
                 let mut result = UnifiedResult::with_columns(vec!["len".into()]);
                 let mut record = UnifiedRecord::new();
                 record.set("len", Value::UnsignedInteger(count));
@@ -393,7 +393,7 @@ impl RedDBRuntime {
             QueueCommand::Purge { queue } => {
                 let store = self.inner.db.store();
                 ensure_queue_exists(store.as_ref(), queue)?;
-                let messages = load_queue_message_views(store.as_ref(), queue)?;
+                let messages = load_queue_message_views_with_runtime(Some(self), store.as_ref(), queue)?;
                 let count = messages.len();
                 for message in messages {
                     let message_lock = queue_message_lock_handle(self, queue, message.id);
@@ -451,7 +451,7 @@ impl RedDBRuntime {
                     .into_iter()
                     .map(|entry| entry.message_id)
                     .collect::<HashSet<_>>();
-                let mut messages = load_queue_message_views(store.as_ref(), queue)?
+                let mut messages = load_queue_message_views_with_runtime(Some(self), store.as_ref(), queue)?
                     .into_iter()
                     .filter(|message| {
                         !pending_ids.contains(&message.id) && !acked_ids.contains(&message.id)
@@ -1075,6 +1075,20 @@ fn load_queue_message_views(
     store: &UnifiedStore,
     queue: &str,
 ) -> RedDBResult<Vec<QueueMessageView>> {
+    load_queue_message_views_with_runtime(None, store, queue)
+}
+
+/// Kind-aware queue scan (Phase 2.5.5 RLS universal). When the
+/// caller has a `RedDBRuntime` reference, the gate also applies
+/// any `CREATE POLICY ... ON MESSAGES OF <queue>` predicate. In
+/// autocommit / embedded paths that only have the raw store (e.g.
+/// purge loops) we skip RLS because there's no session identity
+/// to match against.
+fn load_queue_message_views_with_runtime(
+    runtime: Option<&RedDBRuntime>,
+    store: &UnifiedStore,
+    queue: &str,
+) -> RedDBResult<Vec<QueueMessageView>> {
     let manager = store
         .get_collection(queue)
         .ok_or_else(|| RedDBError::NotFound(format!("queue '{}' not found", queue)))?;
@@ -1082,13 +1096,44 @@ fn load_queue_message_views(
     // inserted by another connection's open txn stay invisible to
     // consumers until that txn commits (prevents phantom POPs).
     let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
+    let rls_filter = runtime.and_then(|rt| {
+        crate::runtime::impl_core::rls_policy_filter_for_kind(
+            rt,
+            queue,
+            crate::storage::query::ast::PolicyAction::Select,
+            crate::storage::query::ast::PolicyTargetKind::Messages,
+        )
+    });
+    let rls_enabled_but_denied = runtime
+        .map(|rt| rt.is_rls_enabled(queue))
+        .unwrap_or(false)
+        && rls_filter.is_none()
+        && runtime.is_some();
+    if rls_enabled_but_denied {
+        // RLS on + no Messages policy for this role = deny-default.
+        return Ok(Vec::new());
+    }
+    let filter_arc = rls_filter.map(std::sync::Arc::new);
+    let rt_arc = runtime;
     Ok(manager
         .query_all(move |entity| {
-            matches!(entity.kind, EntityKind::QueueMessage { .. })
-                && crate::runtime::impl_core::entity_visible_with_context(
-                    snap_ctx.as_ref(),
+            if !matches!(entity.kind, EntityKind::QueueMessage { .. }) {
+                return false;
+            }
+            if !crate::runtime::impl_core::entity_visible_with_context(snap_ctx.as_ref(), entity)
+            {
+                return false;
+            }
+            if let (Some(filter), Some(rt)) = (filter_arc.as_ref(), rt_arc) {
+                return crate::runtime::query_exec::evaluate_entity_filter_with_db(
+                    Some(&rt.inner.db),
                     entity,
-                )
+                    filter,
+                    queue,
+                    queue,
+                );
+            }
+            true
         })
         .into_iter()
         .filter_map(queue_message_view_from_entity)

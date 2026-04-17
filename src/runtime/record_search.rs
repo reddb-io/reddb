@@ -548,6 +548,26 @@ pub(super) fn runtime_any_record_from_entity(entity: UnifiedEntity) -> Option<Un
                 record,
             )
         }
+        (EntityKind::QueueMessage { position, .. }, EntityData::QueueMessage(msg)) => {
+            // Phase 2.5.5 RLS universal: queue messages surface their
+            // `payload` Value, priority, attempts, ack state, and
+            // position so policies like
+            // `USING (payload.tenant = CURRENT_TENANT())` can reach
+            // the JSON payload via the dotted-path resolver.
+            let mut record = UnifiedRecord::new();
+            record.set("position", Value::UnsignedInteger(position));
+            record.set("payload", msg.payload);
+            record.set("attempts", Value::UnsignedInteger(msg.attempts as u64));
+            record.set("acked", Value::Boolean(msg.acked));
+            if let Some(priority) = msg.priority {
+                record.set("priority", Value::Integer(priority as i64));
+            }
+            (
+                "queue_message",
+                runtime_record_capability_list(["document", "queue", "message"]),
+                record,
+            )
+        }
         _ => return None,
     };
 

@@ -430,6 +430,25 @@ pub(crate) fn rls_policy_filter(
     table: &str,
     action: crate::storage::query::ast::PolicyAction,
 ) -> Option<crate::storage::query::ast::Filter> {
+    rls_policy_filter_for_kind(
+        runtime,
+        table,
+        action,
+        crate::storage::query::ast::PolicyTargetKind::Table,
+    )
+}
+
+/// Kind-aware policy filter combiner (Phase 2.5.5 RLS universal).
+/// Graph / vector / queue / timeseries scans pass the concrete kind;
+/// policies targeting other kinds are ignored. Legacy Table-scoped
+/// policies still apply cross-kind — callers register auto-tenancy
+/// policies as Table today.
+pub(crate) fn rls_policy_filter_for_kind(
+    runtime: &RedDBRuntime,
+    table: &str,
+    action: crate::storage::query::ast::PolicyAction,
+    kind: crate::storage::query::ast::PolicyTargetKind,
+) -> Option<crate::storage::query::ast::Filter> {
     use crate::storage::query::ast::Filter;
 
     if !runtime.inner.rls_enabled_tables.read().contains(table) {
@@ -437,7 +456,8 @@ pub(crate) fn rls_policy_filter(
     }
     let role = current_auth_identity().map(|(_, role)| role);
     let role_str = role.map(|r| r.as_str().to_string());
-    let policies = runtime.matching_rls_policies(table, role_str.as_deref(), action);
+    let policies =
+        runtime.matching_rls_policies_for_kind(table, role_str.as_deref(), action, kind);
     if policies.is_empty() {
         return None;
     }
@@ -3309,6 +3329,13 @@ impl RedDBRuntime {
             action: None, // None = ALL actions (SELECT/INSERT/UPDATE/DELETE)
             role: None,   // None = every role
             using: Box::new(policy_filter),
+            // Auto-tenancy defaults to Table targets. Collections of
+            // other kinds (graph / vector / queue / timeseries) that
+            // opt in via `ALTER ... ENABLE TENANCY` should use the
+            // matching kind — but for now we keep the auto-policy
+            // kind-agnostic so the evaluator can apply it to any
+            // entity living in the collection.
+            target_kind: crate::storage::query::ast::PolicyTargetKind::Table,
         };
 
         // Replace any prior auto-policy for this table (column rename).
@@ -3320,6 +3347,104 @@ impl RedDBRuntime {
             .rls_enabled_tables
             .write()
             .insert(table.to_string());
+
+        // Auto-build a hash index on the tenant column. Every read/write
+        // against a tenant-scoped table carries an implicit
+        // `col = CURRENT_TENANT()` predicate from the auto-policy, so an
+        // index on that column is on the hot path of every query. Without
+        // it, every SELECT/UPDATE/DELETE degrades to a full scan.
+        self.ensure_tenant_index(table, column);
+    }
+
+    /// Auto-create the hash index that backs the tenant-iso RLS predicate.
+    /// Skipped when:
+    ///   * the column is dotted (nested path — flat secondary indices
+    ///     don't cover those today; RLS still works via the policy)
+    ///   * `__tenant_idx_{table}` already exists (idempotent on rehydrate)
+    ///   * the user already registered an index whose first column matches
+    ///     (avoids redundant duplicates of a user-defined composite)
+    fn ensure_tenant_index(&self, table: &str, column: &str) {
+        if column.contains('.') {
+            return;
+        }
+        let index_name = format!("__tenant_idx_{table}");
+        let registry = self.inner.index_store.list_indices(table);
+        if registry.iter().any(|idx| idx.name == index_name) {
+            return;
+        }
+        if registry
+            .iter()
+            .any(|idx| idx.columns.first().map(|c| c.as_str()) == Some(column))
+        {
+            return;
+        }
+
+        let store = self.inner.db.store();
+        let Some(manager) = store.get_collection(table) else {
+            return;
+        };
+        let entities = manager.query_all(|_| true);
+        let entity_fields: Vec<(crate::storage::unified::EntityId, Vec<(String, crate::storage::schema::Value)>)> = entities
+            .iter()
+            .map(|e| {
+                let fields = match &e.data {
+                    crate::storage::EntityData::Row(row) => {
+                        if let Some(ref named) = row.named {
+                            named.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+                        } else if let Some(ref schema) = row.schema {
+                            schema
+                                .iter()
+                                .zip(row.columns.iter())
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect()
+                        } else {
+                            Vec::new()
+                        }
+                    }
+                    crate::storage::EntityData::Node(node) => node
+                        .properties
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                (e.id, fields)
+            })
+            .collect();
+
+        let columns = vec![column.to_string()];
+        if self
+            .inner
+            .index_store
+            .create_index(
+                &index_name,
+                table,
+                &columns,
+                super::index_store::IndexMethodKind::Hash,
+                false,
+                &entity_fields,
+            )
+            .is_err()
+        {
+            return;
+        }
+        self.inner
+            .index_store
+            .register(super::index_store::RegisteredIndex {
+                name: index_name,
+                collection: table.to_string(),
+                columns,
+                method: super::index_store::IndexMethodKind::Hash,
+                unique: false,
+            });
+        self.invalidate_plan_cache();
+    }
+
+    /// Drop the auto-generated tenant index, if one exists. Called from
+    /// `unregister_tenant_table` so DISABLE TENANCY / DROP TABLE clean up.
+    fn drop_tenant_index(&self, table: &str) {
+        let index_name = format!("__tenant_idx_{table}");
+        self.inner.index_store.drop_index(&index_name, table);
     }
 
     /// Retrieve the tenant column for a table, if any (Phase 2.5.4).
@@ -3338,6 +3463,7 @@ impl RedDBRuntime {
             .rls_policies
             .write()
             .remove(&(table.to_string(), "__tenant_iso".to_string()));
+        self.drop_tenant_index(table);
         // Only clear RLS enablement if no other policies remain.
         let has_other_policies = self
             .inner
@@ -3596,6 +3722,32 @@ impl RedDBRuntime {
         role: Option<&str>,
         action: crate::storage::query::ast::PolicyAction,
     ) -> Vec<crate::storage::query::ast::Filter> {
+        // Default kind = Table preserves the pre-Phase-2.5.5 behaviour:
+        // callers that don't name a kind only see Table-scoped
+        // policies (which is what execute SELECT / UPDATE / DELETE
+        // expect).
+        self.matching_rls_policies_for_kind(
+            table,
+            role,
+            action,
+            crate::storage::query::ast::PolicyTargetKind::Table,
+        )
+    }
+
+    /// Kind-aware variant used by cross-model scans (Phase 2.5.5).
+    ///
+    /// Graph scans request `Nodes` / `Edges`, vector ANN requests
+    /// `Vectors`, queue consumers request `Messages`, and timeseries
+    /// range scans request `Points`. Policies tagged with a
+    /// different kind are skipped so a graph-scoped policy doesn't
+    /// accidentally gate a table SELECT on the same collection.
+    pub fn matching_rls_policies_for_kind(
+        &self,
+        table: &str,
+        role: Option<&str>,
+        action: crate::storage::query::ast::PolicyAction,
+        kind: crate::storage::query::ast::PolicyTargetKind,
+    ) -> Vec<crate::storage::query::ast::Filter> {
         if !self.is_rls_enabled(table) {
             return Vec::new();
         }
@@ -3604,6 +3756,19 @@ impl RedDBRuntime {
             .iter()
             .filter_map(|((t, _), p)| {
                 if t != table {
+                    return None;
+                }
+                // Kind gate — Table policies also apply to every
+                // other kind *iff* the policy predicate evaluates
+                // against entity fields that exist uniformly; the
+                // caller's kind filter is the stricter check, so
+                // match literally. Auto-tenancy policies stamp
+                // Table and the caller passes the concrete kind —
+                // we allow Table policies to apply cross-kind for
+                // backwards compat.
+                if p.target_kind != kind
+                    && p.target_kind != crate::storage::query::ast::PolicyTargetKind::Table
+                {
                     return None;
                 }
                 // Action gate — `None` means "ALL" actions.

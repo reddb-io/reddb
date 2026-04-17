@@ -209,6 +209,42 @@ pub struct CreatePolicyQuery {
     pub role: Option<String>,
     /// Boolean predicate the row must satisfy.
     pub using: Box<Filter>,
+    /// Entity kind this policy targets (Phase 2.5.5 RLS universal).
+    /// `CREATE POLICY p ON t ...` defaults to `Table`; writing
+    /// `ON NODES OF g` / `ON VECTORS OF v` / `ON MESSAGES OF q` /
+    /// `ON POINTS OF ts` / `ON EDGES OF g` targets the matching
+    /// non-tabular kind. The evaluator filters polices by kind so
+    /// a graph policy only gates graph reads, vector policy only
+    /// gates vector reads, etc.
+    pub target_kind: PolicyTargetKind,
+}
+
+/// Which flavour of entity a policy governs (Phase 2.5.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PolicyTargetKind {
+    Table,
+    Nodes,
+    Edges,
+    Vectors,
+    Messages,
+    Points,
+    Documents,
+}
+
+impl PolicyTargetKind {
+    /// Lowercase identifier for UX — used in messages and the
+    /// `red_config.rls.policies.*` persistence key.
+    pub fn as_ident(&self) -> &'static str {
+        match self {
+            Self::Table => "table",
+            Self::Nodes => "nodes",
+            Self::Edges => "edges",
+            Self::Vectors => "vectors",
+            Self::Messages => "messages",
+            Self::Points => "points",
+            Self::Documents => "documents",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

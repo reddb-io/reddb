@@ -771,6 +771,7 @@ pub mod mvcc {
 
 /// Public helpers re-exported for use by the presentation layer.
 pub mod record_search_helpers {
+    use crate::storage::query::UnifiedRecord;
     use crate::storage::UnifiedEntity;
     use std::collections::BTreeSet;
 
@@ -778,5 +779,13 @@ pub mod record_search_helpers {
         entity: &UnifiedEntity,
     ) -> (&'static str, BTreeSet<String>) {
         super::record_search::runtime_entity_type_and_capabilities(entity)
+    }
+
+    /// Materialise any entity kind (TableRow, Node, Edge, Vector,
+    /// TimeSeriesPoint, QueueMessage) into a `UnifiedRecord` whose
+    /// `values` carry the native fields. Used by the RLS evaluator
+    /// when a non-table collection matches a `CompareExpr` policy.
+    pub fn any_record_from_entity(entity: UnifiedEntity) -> Option<UnifiedRecord> {
+        super::record_search::runtime_any_record_from_entity(entity)
     }
 }

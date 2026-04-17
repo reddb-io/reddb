@@ -714,11 +714,44 @@ impl<'a> Parser<'a> {
                         if_not_exists,
                     }))
                 } else if self.check(&Token::Policy) {
-                    // CREATE POLICY name ON table [FOR action] [TO role] USING (filter)
+                    // CREATE POLICY name ON <target> [FOR action] [TO role] USING (filter)
+                    //
+                    // <target> = table                       (Phase 2.5.2 default)
+                    //          | NODES    OF <collection>    (Phase 2.5.5 graph)
+                    //          | EDGES    OF <collection>
+                    //          | VECTORS  OF <collection>
+                    //          | MESSAGES OF <collection>
+                    //          | POINTS   OF <collection>    (timeseries)
+                    //          | DOCUMENTS OF <collection>
                     self.advance()?;
                     let name = self.expect_ident()?;
                     self.expect(Token::On)?;
-                    let table = self.expect_ident()?;
+
+                    let (target_kind, table) = {
+                        use crate::storage::query::ast::PolicyTargetKind;
+                        let kw = match self.peek() {
+                            Token::Ident(s) => Some(s.to_ascii_uppercase()),
+                            _ => None,
+                        };
+                        let kind = kw.as_deref().and_then(|k| match k {
+                            "NODES" => Some(PolicyTargetKind::Nodes),
+                            "EDGES" => Some(PolicyTargetKind::Edges),
+                            "VECTORS" => Some(PolicyTargetKind::Vectors),
+                            "MESSAGES" => Some(PolicyTargetKind::Messages),
+                            "POINTS" => Some(PolicyTargetKind::Points),
+                            "DOCUMENTS" => Some(PolicyTargetKind::Documents),
+                            _ => None,
+                        });
+                        if let Some(k) = kind {
+                            self.advance()?;
+                            self.expect(Token::Of)?;
+                            let coll = self.expect_ident()?;
+                            (k, coll)
+                        } else {
+                            let coll = self.expect_ident()?;
+                            (PolicyTargetKind::Table, coll)
+                        }
+                    };
 
                     let action = if self.consume(&Token::For)? {
                         let a = match self.peek() {
@@ -766,6 +799,7 @@ impl<'a> Parser<'a> {
                         action,
                         role,
                         using: Box::new(filter),
+                        target_kind,
                     }));
                 } else if self.check(&Token::Server) {
                     // CREATE SERVER [IF NOT EXISTS] name

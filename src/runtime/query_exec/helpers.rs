@@ -494,8 +494,21 @@ pub(crate) fn evaluate_entity_filter_with_db(
             // Correctness is preserved; selectivity at the scan layer
             // is lost. The planner's `filter_compiled` layer also
             // routes this variant through its `Fallback` opcode.
+            //
+            // Phase 2.5.5 RLS universal: non-TableRow entities (graph
+            // nodes, vectors, queue messages, timeseries points) need
+            // the `any` record builder so policy predicates can reach
+            // their native fields (node.properties, edge props,
+            // message.payload, vector.metadata, timeseries.tags).
             let Some(db) = db else { return true };
-            let Some(record) = runtime_table_record_from_entity(entity.clone()) else {
+            let table_record = runtime_table_record_from_entity(entity.clone());
+            let record = match table_record {
+                Some(r) => Some(r),
+                None => super::super::record_search_helpers::any_record_from_entity(
+                    entity.clone(),
+                ),
+            };
+            let Some(record) = record else {
                 return false;
             };
             super::super::join_filter::evaluate_runtime_filter_with_db(
