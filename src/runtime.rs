@@ -765,6 +765,7 @@ mod impl_timeseries;
 mod impl_tree;
 mod index_store;
 mod join_filter;
+pub mod locking;
 pub(crate) mod mutation;
 pub mod within_clause;
 mod probabilistic_store;

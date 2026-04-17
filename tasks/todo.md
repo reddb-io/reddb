@@ -32,7 +32,7 @@ Reuses existing `src/storage/transaction/lock.rs`.
 - [x] **P1.T1** `Arc<LockManager>` on `RuntimeInner`
   - Acceptance: dormant, config from matrix, regression net green
   - Files: `src/runtime.rs`, `src/runtime/impl_core.rs`
-- [ ] **P1.T2** `src/runtime/locking.rs` — `Resource` + `LockerGuard`
+- [x] **P1.T2** `src/runtime/locking.rs` — `Resource` + `LockerGuard`
   - Acceptance: compatibility-matrix unit tests + 50-thread stress, no deadlocks
   - Files: `src/runtime/locking.rs` (new), `src/runtime.rs`
 - [ ] **P1.T3** Wire reads to IS (Select/Join/Vector/Hybrid/Graph/Path)
