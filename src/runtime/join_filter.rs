@@ -1149,9 +1149,11 @@ pub(super) fn runtime_table_context_matches(
 }
 
 pub(super) fn resolve_runtime_document_path(record: &UnifiedRecord, path: &str) -> Option<Value> {
-    if !runtime_record_has_document_capability(record) {
-        return None;
-    }
+    // Phase 2 dotted tenancy: relax the document-capability gate so
+    // dotted paths resolve against JSON stored in `TEXT` columns too.
+    // The inner resolver returns None on non-JSON scalars, so the
+    // behaviour for non-document rows is unchanged — there's just no
+    // early exit based on the capability flag.
     let segments = parse_runtime_document_path(path);
     let (root, tail) = segments.split_first()?;
     let root_value = record.values.get(root)?;
@@ -1170,6 +1172,20 @@ pub(super) fn resolve_runtime_document_path_from_value(
         Value::Json(bytes) | Value::Blob(bytes) => {
             let json = crate::json::from_slice::<JsonValue>(bytes).ok()?;
             resolve_runtime_document_json_path(&json, path)
+        }
+        // Phase 2 dotted tenancy: users commonly declare JSON columns
+        // as `TEXT` and stash JSON strings — the FieldRef resolver
+        // tries to parse in that case so dotted paths (RLS policies,
+        // tenancy filters, JSONPath on text columns) work without
+        // forcing a column-type change.
+        Value::Text(raw) => {
+            let trimmed = raw.trim_start();
+            if trimmed.starts_with('{') || trimmed.starts_with('[') {
+                let json = crate::json::from_str::<JsonValue>(raw).ok()?;
+                resolve_runtime_document_json_path(&json, path)
+            } else {
+                None
+            }
         }
         _ => None,
     }

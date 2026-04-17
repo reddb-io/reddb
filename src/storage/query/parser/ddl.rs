@@ -164,15 +164,29 @@ impl<'a> Parser<'a> {
             None
         };
 
-        // Shorthand: `TENANT BY (col)` trailing clause (after partition
-        // spec if both are used). More ergonomic than the WITH form for
-        // a feature that's usually declared once.
+        // Shorthand: `TENANT BY (col)` or `TENANT BY (root.sub.path)`
+        // trailing clause (after partition spec if both are used).
+        //
+        // Dotted paths let non-table models declare tenancy over their
+        // natural nested structures — `metadata.tenant` for vectors,
+        // `payload.tenant` for queue messages, `tags.cluster` for
+        // timeseries, `properties.org` for graphs. The read-path
+        // resolver already navigates these paths via
+        // `resolve_runtime_document_path`; here we just store the
+        // dotted string and let the policy evaluator do the rest.
         if tenant_by.is_none() && self.consume_ident_ci("TENANT")? {
             self.expect(Token::By)?;
             self.expect(Token::LParen)?;
-            let col = self.expect_ident()?;
+            // Allow keyword-idents (`metadata`, `type`, `data`) as
+            // column names — SQL treats them as bare identifiers in
+            // this context.
+            let mut path = self.expect_ident_or_keyword()?;
+            while self.consume(&Token::Dot)? {
+                let next = self.expect_ident_or_keyword()?;
+                path = format!("{path}.{next}");
+            }
             self.expect(Token::RParen)?;
-            tenant_by = Some(col);
+            tenant_by = Some(path);
         }
 
         Ok(QueryExpr::CreateTable(CreateTableQuery {
@@ -304,9 +318,14 @@ impl<'a> Parser<'a> {
             if self.consume_ident_ci("TENANCY")? {
                 self.expect(Token::On)?;
                 self.expect(Token::LParen)?;
-                let col = self.expect_ident()?;
+                // Dotted paths allowed (`metadata.tenant`, `payload.org`).
+                let mut path = self.expect_ident()?;
+                while self.consume(&Token::Dot)? {
+                    let next = self.expect_ident_or_keyword()?;
+                    path = format!("{path}.{next}");
+                }
                 self.expect(Token::RParen)?;
-                Ok(AlterOperation::EnableTenancy { column: col })
+                Ok(AlterOperation::EnableTenancy { column: path })
             } else {
                 self.expect(Token::Row)?;
                 self.expect(Token::Level)?;

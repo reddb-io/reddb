@@ -74,7 +74,7 @@ impl RedDBRuntime {
         let Some(tenant_col) = self.tenant_column(&query.table) else {
             return Ok(None);
         };
-        // User already named the column — trust them.
+        // User already named the column (literal match) — trust them.
         if query
             .columns
             .iter()
@@ -82,6 +82,18 @@ impl RedDBRuntime {
         {
             return Ok(None);
         }
+
+        // Phase 2 PG parity: dotted-path tenancy. When `tenant_col` is a
+        // nested key like `headers.tenant` we operate on the root
+        // column (`headers`) and set / add the nested path inside its
+        // JSON value. If the user named the root column we mutate in
+        // place; otherwise we create a fresh JSON column for every row.
+        if let Some(dot_pos) = tenant_col.find('.') {
+            let (root, tail) = tenant_col.split_at(dot_pos);
+            let tail = &tail[1..]; // drop leading '.'
+            return self.inject_dotted_tenant(query, root, tail);
+        }
+
         let Some(tenant_id) = crate::runtime::impl_core::current_tenant() else {
             return Err(RedDBError::Query(format!(
                 "INSERT into tenant-scoped table '{}' requires an active tenant — \
@@ -102,6 +114,95 @@ impl RedDBRuntime {
                 span: crate::storage::query::ast::Span::synthetic(),
             });
         }
+        Ok(Some(augmented))
+    }
+
+    /// Dotted-path auto-fill — set `root.tail` to `CURRENT_TENANT()` on
+    /// every row. Mirrors `maybe_inject_tenant_column` but mutates
+    /// nested JSON instead of appending a flat column.
+    ///
+    /// Cases:
+    /// * Root column already in the INSERT list → mutate per-row JSON
+    ///   (parse, set path, re-serialize).
+    /// * Root column absent → create a fresh `{tail: tenant}` JSON
+    ///   object and append the root column to the INSERT.
+    fn inject_dotted_tenant(
+        &self,
+        query: &InsertQuery,
+        root: &str,
+        tail: &str,
+    ) -> RedDBResult<Option<InsertQuery>> {
+        let active_tenant = crate::runtime::impl_core::current_tenant();
+        let mut augmented = query.clone();
+        let root_idx = augmented
+            .columns
+            .iter()
+            .position(|c| c.eq_ignore_ascii_case(root));
+
+        if let Some(idx) = root_idx {
+            // User supplied the root column. Per-row: if the dotted
+            // tail is already present we trust the user (admin / bulk
+            // loader scenario); otherwise fill from the active
+            // tenant. An unbound tenant is only an error when some
+            // row actually needs filling.
+            for row in augmented.values.iter_mut() {
+                let Some(slot) = row.get_mut(idx) else {
+                    continue;
+                };
+                if dotted_tail_already_set(slot, tail) {
+                    continue;
+                }
+                let Some(tenant_id) = &active_tenant else {
+                    return Err(RedDBError::Query(format!(
+                        "INSERT into tenant-scoped table '{}' requires an active tenant — \
+                         run SET TENANT '<id>' first or set '{}.{}' explicitly in each row",
+                        query.table, root, tail
+                    )));
+                };
+                *slot = merge_dotted_tenant(slot.clone(), tail, tenant_id)?;
+            }
+            // Expression row is kept in sync by re-wrapping the
+            // mutated literal; the canonical path will re-evaluate
+            // against the same JSON shape.
+            for (row_idx, row) in augmented.value_exprs.iter_mut().enumerate() {
+                if let Some(slot) = row.get_mut(idx) {
+                    let new_value = augmented
+                        .values
+                        .get(row_idx)
+                        .and_then(|v| v.get(idx))
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    *slot = crate::storage::query::ast::Expr::Literal {
+                        value: new_value,
+                        span: crate::storage::query::ast::Span::synthetic(),
+                    };
+                }
+            }
+        } else {
+            // No root column in the INSERT list — auto-fill needs a
+            // bound tenant to synthesise one. Error loud so we never
+            // create a tenant-less row that RLS would then hide.
+            let Some(tenant_id) = &active_tenant else {
+                return Err(RedDBError::Query(format!(
+                    "INSERT into tenant-scoped table '{}' requires an active tenant — \
+                     run SET TENANT '<id>' first or name path '{}.{}' explicitly",
+                    query.table, root, tail
+                )));
+            };
+            // Create a fresh JSON column with only the tenant path set.
+            augmented.columns.push(root.to_string());
+            let fresh = merge_dotted_tenant(Value::Null, tail, tenant_id)?;
+            for row in augmented.values.iter_mut() {
+                row.push(fresh.clone());
+            }
+            for row in augmented.value_exprs.iter_mut() {
+                row.push(crate::storage::query::ast::Expr::Literal {
+                    value: fresh.clone(),
+                    span: crate::storage::query::ast::Span::synthetic(),
+                });
+            }
+        }
+
         Ok(Some(augmented))
     }
 
@@ -2008,4 +2109,117 @@ fn metadata_u64_to_value(value: u64) -> MetadataValue {
     } else {
         MetadataValue::Timestamp(value)
     }
+}
+
+/// Phase 2 PG parity: inspect a column value and return `true` when
+/// the dotted `tail` path is already present under it. Used by the
+/// tenant auto-fill so rows that already carry an explicit value
+/// (bulk import, admin insert on behalf of a tenant) are not
+/// double-stamped with the session's current_tenant().
+fn dotted_tail_already_set(value: &Value, tail: &str) -> bool {
+    let json = match value {
+        Value::Null => return false,
+        Value::Json(bytes) | Value::Blob(bytes) => {
+            match crate::json::from_slice::<crate::json::Value>(bytes) {
+                Ok(v) => v,
+                Err(_) => return false,
+            }
+        }
+        Value::Text(s) => {
+            let trimmed = s.trim_start();
+            if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
+                return false;
+            }
+            match crate::json::from_str::<crate::json::Value>(s) {
+                Ok(v) => v,
+                Err(_) => return false,
+            }
+        }
+        _ => return false,
+    };
+    let mut cursor = &json;
+    for seg in tail.split('.') {
+        match cursor {
+            crate::json::Value::Object(map) => match map.iter().find(|(k, _)| *k == seg) {
+                Some((_, v)) => cursor = v,
+                None => return false,
+            },
+            _ => return false,
+        }
+    }
+    !matches!(cursor, crate::json::Value::Null)
+}
+
+/// Phase 2 PG parity: take a column value (possibly Null / Text /
+/// Json) and return a `Value::Json` with the dotted `tail` path set
+/// to `tenant_id`. Preserves every pre-existing key.
+///
+/// Accepts:
+/// * `Value::Null`  → fresh `{tail: tenant_id}` object
+/// * `Value::Json(bytes)` → parse, navigate / create path, re-serialize
+/// * `Value::Text(s)` if `s` is valid JSON → same as Json
+/// * anything else → error (user supplied a scalar where we need
+///   a JSON container)
+fn merge_dotted_tenant(
+    current: Value,
+    tail: &str,
+    tenant_id: &str,
+) -> RedDBResult<Value> {
+    let mut root = match current {
+        Value::Null => crate::json::Value::Object(Default::default()),
+        Value::Json(bytes) | Value::Blob(bytes) => crate::json::from_slice(&bytes)
+            .map_err(|err| {
+                RedDBError::Query(format!(
+                    "tenant auto-fill: root column is not valid JSON ({err})"
+                ))
+            })?,
+        Value::Text(s) => {
+            if s.trim().is_empty() {
+                crate::json::Value::Object(Default::default())
+            } else {
+                crate::json::from_str::<crate::json::Value>(&s).map_err(|err| {
+                    RedDBError::Query(format!(
+                        "tenant auto-fill: text root is not valid JSON ({err})"
+                    ))
+                })?
+            }
+        }
+        other => {
+            return Err(RedDBError::Query(format!(
+                "tenant auto-fill: root column must be JSON / NULL, got {other:?}"
+            )));
+        }
+    };
+
+    // Navigate path segments, creating intermediate objects on demand.
+    let segments: Vec<&str> = tail.split('.').collect();
+    let mut cursor: &mut crate::json::Value = &mut root;
+    for (i, seg) in segments.iter().enumerate() {
+        let is_last = i + 1 == segments.len();
+        let map = match cursor {
+            crate::json::Value::Object(m) => m,
+            _ => {
+                return Err(RedDBError::Query(format!(
+                    "tenant auto-fill: segment '{seg}' is not inside an object"
+                )));
+            }
+        };
+        if is_last {
+            map.insert(
+                seg.to_string(),
+                crate::json::Value::String(tenant_id.to_string()),
+            );
+            break;
+        }
+        cursor = map
+            .entry(seg.to_string())
+            .or_insert_with(|| crate::json::Value::Object(Default::default()));
+    }
+
+    let bytes = crate::json::to_vec(&root).map_err(|err| {
+        RedDBError::Query(format!(
+            "tenant auto-fill: failed to re-serialize JSON ({err})"
+        ))
+    })?;
+    Ok(Value::Json(bytes))
 }

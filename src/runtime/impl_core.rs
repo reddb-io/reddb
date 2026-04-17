@@ -1835,9 +1835,26 @@ impl RedDBRuntime {
         }
 
         // ── Result cache: return cached result if still fresh (30s TTL) ──
+        //
+        // Phase 2.5.4: mix tenant id + auth identity into the cache
+        // key so an RLS/tenant-scoped query doesn't serve a prior
+        // session's filtered result to a different tenant. Same query
+        // string under `SET TENANT 'acme'` and `SET TENANT 'globex'`
+        // must resolve against distinct entries.
+        let cache_key_str = {
+            let tenant = current_tenant().unwrap_or_default();
+            let auth = current_auth_identity()
+                .map(|(u, r)| format!("{}|{:?}", u, r))
+                .unwrap_or_default();
+            if tenant.is_empty() && auth.is_empty() {
+                query.to_string()
+            } else {
+                format!("{query}\u{001e}{tenant}\u{001e}{auth}")
+            }
+        };
         {
             let cache = self.inner.result_cache.read();
-            if let Some(entry) = cache.0.get(query) {
+            if let Some(entry) = cache.0.get(&cache_key_str) {
                 if entry.cached_at.elapsed().as_secs() < 30 {
                     return Ok(entry.result.clone());
                 }
@@ -2942,11 +2959,12 @@ impl RedDBRuntime {
             {
                 let mut cache = self.inner.result_cache.write();
                 let (ref mut map, ref mut order) = *cache;
-                if !map.contains_key(query) {
-                    order.push_back(query.to_string());
+                // Use the tenant-aware cache key we computed at entry.
+                if !map.contains_key(&cache_key_str) {
+                    order.push_back(cache_key_str.clone());
                 }
                 map.insert(
-                    query.to_string(),
+                    cache_key_str.clone(),
                     RuntimeResultCacheEntry {
                         result: result.clone(),
                         cached_at: std::time::Instant::now(),
