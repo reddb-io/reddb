@@ -49,8 +49,11 @@ RUN apt-get update \
 
 COPY --from=builder --chown=10001:10001 /app/target/release/red /usr/local/bin/red
 
+RUN install -d -o 10001 -g 10001 -m 0755 /etc/reddb
+
 WORKDIR /data
 VOLUME /data
+VOLUME /etc/reddb
 
 # gRPC (50051) and HTTP (8080) ports
 EXPOSE 50051 8080
@@ -60,6 +63,23 @@ ENV REDDB_BIND_ADDR=0.0.0.0:50051
 ENV REDDB_GRPC_BIND_ADDR=0.0.0.0:50051
 ENV REDDB_HTTP_BIND_ADDR=0.0.0.0:8080
 ENV RUST_MIN_STACK=8388608
+
+# Perf-parity config overlay — see docs/engine/perf-bench.md.
+# RedDB self-heals the Tier A keys (durability.mode, concurrency.*,
+# storage.wal.*, storage.bgwriter.*, storage.btree.lehman_yao) on
+# first boot, so the image ships "opinionated by default" with no
+# explicit ENV needed.
+#
+# To override a key on a running container:
+#   docker run -e REDDB_DURABILITY_MODE=async -e REDDB_CONCURRENCY_LOCKING_ENABLED=true reddb
+#
+# To override via a mounted file instead:
+#   docker run -v ./my-config.json:/etc/reddb/config.json reddb
+# Format is JSON with dotted keys flattened: {"durability":{"mode":"async"}}
+#
+# REDDB_CONFIG_FILE overrides the default path if you need a
+# non-standard location.
+ENV REDDB_CONFIG_FILE=/etc/reddb/config.json
 
 # Set these to auto-create the first admin user on startup:
 # ENV REDDB_USERNAME=admin

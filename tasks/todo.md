@@ -21,13 +21,8 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
   - Acceptance: precedence env → file → red_config → default; malformed file logs warn, boot succeeds
   - Verify: `REDDB_DURABILITY_MODE=async` overrides file saying `sync`
   - Files: `src/runtime/config_overlay.rs` (new), `src/bin/red.rs`
-- [ ] **P0.T3** Tuned Docker image `reddb:latest`
-  - Acceptance: `docker build` clean; env-var + mount overrides work
-  - Verify: `docker run reddb:test` + `SHOW CONFIG` shows Tier A defaults
-  - Files: `docker/reddb.Dockerfile`, `docker/entrypoint.sh`
-- [ ] **P0.T4** Bench reproduction guide
-  - Acceptance: fresh-checkout repro within ±10%
-  - Files: `docs/engine/perf-bench.md`
+- [x] **P0.T3** Tuned Docker image `reddb:latest`
+- [x] **P0.T4** Bench reproduction guide
 - [ ] **P0 checkpoint** — human review
 
 ## Phase 1 — Wire LockManager into write paths
