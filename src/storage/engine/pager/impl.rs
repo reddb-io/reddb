@@ -692,8 +692,14 @@ impl Pager {
         // Update checksum
         page.update_checksum();
 
-        // Add to cache and mark dirty
-        self.cache.insert(page_id, page);
+        // Add to cache and mark dirty. If the cache had to evict a
+        // dirty entry, write it through immediately — the evicted
+        // page will never be flushed otherwise (same bug fixed in
+        // `allocate_page`).
+        if let Some(dirty_page) = self.cache.insert(page_id, page) {
+            let evicted_id = dirty_page.page_id();
+            self.write_page_raw(evicted_id, &dirty_page)?;
+        }
         self.cache.mark_dirty(page_id);
 
         Ok(())
@@ -708,8 +714,12 @@ impl Pager {
             return Err(PagerError::ReadOnly);
         }
 
-        // Add to cache and mark dirty (no checksum update)
-        self.cache.insert(page_id, page);
+        // Add to cache and mark dirty (no checksum update). Same
+        // eviction-write-through guard as `write_page`.
+        if let Some(dirty_page) = self.cache.insert(page_id, page) {
+            let evicted_id = dirty_page.page_id();
+            self.write_page_raw(evicted_id, &dirty_page)?;
+        }
         self.cache.mark_dirty(page_id);
 
         Ok(())
@@ -762,8 +772,21 @@ impl Pager {
 
         let page = Page::new(page_type, page_id);
 
-        // Write to cache
-        self.cache.insert(page_id, page.clone());
+        // Write to cache. The evicted page (if any) is dirty by
+        // definition — `cache.insert` only returns `Some` when it
+        // had to evict a dirty entry to make room. The previous
+        // version dropped that return value, which silently lost
+        // writes whenever a freshly-allocated page caused an LRU
+        // eviction. This shows up under heavy ingest as
+        // "B-tree insert error: Pager error: I/O error: failed to
+        // fill whole buffer" later, when something tries to read
+        // back the never-flushed page. Mirror `read_page`'s
+        // handling: write the evicted page through immediately so
+        // the on-disk image stays consistent.
+        if let Some(dirty_page) = self.cache.insert(page_id, page.clone()) {
+            let evicted_id = dirty_page.page_id();
+            self.write_page_raw(evicted_id, &dirty_page)?;
+        }
         self.cache.mark_dirty(page_id);
 
         Ok(page)
