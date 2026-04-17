@@ -602,7 +602,7 @@ impl<'a> Parser<'a> {
                 // Detect the VIEW path early so OR REPLACE / MATERIALIZED modifiers
                 // don't collide with other CREATE variants (TABLE, INDEX, etc.).
                 let mut or_replace = false;
-                if self.consume_ident_ci("OR")? {
+                if self.consume(&Token::Or)? || self.consume_ident_ci("OR")? {
                     let _ = self.consume_ident_ci("REPLACE")?;
                     or_replace = true;
                 }
@@ -611,8 +611,9 @@ impl<'a> Parser<'a> {
                     self.advance()?;
                     let if_not_exists = self.match_if_not_exists()?;
                     let name = self.expect_ident()?;
-                    // Expect `AS` (tokenised as an Ident for case-sensitivity).
-                    if !self.consume_ident_ci("AS")? {
+                    // Accept `AS` — the lexer promotes it to `Token::As`
+                    // (keyword) but some paths still see it as an ident.
+                    if !self.consume(&Token::As)? && !self.consume_ident_ci("AS")? {
                         return Err(ParseError::expected(
                             vec!["AS"],
                             self.peek(),

@@ -1992,6 +1992,13 @@ impl RedDBRuntime {
                 parsed
             }
         };
+
+        // Phase 5 PG parity: substitute any registered view name that
+        // appears in the expression with its stored body. Runs here
+        // (after parse, before dispatch) so the SQL entrypoint gets
+        // the same view resolution `execute_query_expr` already does.
+        let expr = self.rewrite_view_refs(expr);
+
         let statement = query_expr_name(&expr);
         let result_cache_scopes = query_expr_result_cache_scopes(&expr);
 
@@ -2620,7 +2627,10 @@ impl RedDBRuntime {
                 }
                 // Plan cache may have cached a plan that didn't know about this
                 // view — invalidate so future references pick up the new binding.
+                // Result cache gets flushed too: OR REPLACE must not serve a
+                // prior execution of the obsolete body.
                 self.invalidate_plan_cache();
+                self.invalidate_result_cache();
 
                 Ok(RuntimeQueryResult::ok_message(
                     query.to_string(),
@@ -2640,6 +2650,10 @@ impl RedDBRuntime {
                     // Try the materialised cache too — silent if absent.
                     self.inner.materialized_views.write().remove(&q.name);
                 }
+                // Drop any plan / result cache entries that baked the
+                // view body into their QueryExpr.
+                self.invalidate_plan_cache();
+                self.invalidate_result_cache();
                 if !existed && !q.if_exists {
                     return Err(RedDBError::Internal(format!(
                         "view {} does not exist",
@@ -3040,6 +3054,7 @@ impl RedDBRuntime {
     }
 
     fn rewrite_view_refs_inner(&self, expr: QueryExpr) -> QueryExpr {
+        use crate::storage::query::ast::{Filter, TableSource};
         match expr {
             QueryExpr::Table(mut tq) => {
                 // 1. If the TableSource is a subquery, recurse into it so
@@ -3047,10 +3062,8 @@ impl RedDBRuntime {
                 //    The legacy `table` field (set to a synthetic
                 //    "__subq_NNNN" sentinel) stays as-is so callers that
                 //    read it keep compiling.
-                if let Some(crate::storage::query::ast::TableSource::Subquery(body)) =
-                    tq.source.take()
-                {
-                    tq.source = Some(crate::storage::query::ast::TableSource::Subquery(Box::new(
+                if let Some(TableSource::Subquery(body)) = tq.source.take() {
+                    tq.source = Some(TableSource::Subquery(Box::new(
                         self.rewrite_view_refs_inner(*body),
                     )));
                     return QueryExpr::Table(tq);
@@ -3063,12 +3076,48 @@ impl RedDBRuntime {
                     let views = self.inner.views.read();
                     views.get(&tq.table).cloned()
                 };
-                if let Some(view) = maybe_view {
-                    // Recurse into the view body too — views may reference
-                    // other views or other foreign tables.
-                    self.rewrite_view_refs_inner((*view.query).clone())
-                } else {
-                    QueryExpr::Table(tq)
+                let Some(view) = maybe_view else {
+                    return QueryExpr::Table(tq);
+                };
+
+                // Recurse into the view body — views may reference other
+                // views. The recursion yields the final QueryExpr we need
+                // to merge the outer's filter / limit / offset into.
+                let inner_expr = self.rewrite_view_refs_inner((*view.query).clone());
+
+                // Phase 5: when the body is a Table we merge the outer
+                // TableQuery's WHERE / LIMIT / OFFSET into it so stacked
+                // views filter recursively. Non-table bodies (Search,
+                // Ask, Vector, Graph, Hybrid) can't meaningfully combine
+                // with an outer Table query today — return the body
+                // verbatim; outer predicates are lost. Full projection
+                // merge lands in Phase 5.2.
+                match inner_expr {
+                    QueryExpr::Table(mut inner_tq) => {
+                        if let Some(outer_filter) = tq.filter.take() {
+                            inner_tq.filter = Some(match inner_tq.filter.take() {
+                                Some(existing) => Filter::And(
+                                    Box::new(existing),
+                                    Box::new(outer_filter),
+                                ),
+                                None => outer_filter,
+                            });
+                        }
+                        if let Some(outer_limit) = tq.limit {
+                            inner_tq.limit = Some(match inner_tq.limit {
+                                Some(existing) => existing.min(outer_limit),
+                                None => outer_limit,
+                            });
+                        }
+                        if let Some(outer_offset) = tq.offset {
+                            inner_tq.offset = Some(match inner_tq.offset {
+                                Some(existing) => existing + outer_offset,
+                                None => outer_offset,
+                            });
+                        }
+                        QueryExpr::Table(inner_tq)
+                    }
+                    other => other,
                 }
             }
             QueryExpr::Join(mut jq) => {
