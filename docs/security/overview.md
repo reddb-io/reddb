@@ -52,12 +52,48 @@ This returns the admin user and an initial API key.
 |:-------|:-------|:------------|
 | API Key | `Authorization: Bearer <key>` | Persistent until revoked |
 | Session Token | `Authorization: Bearer <token>` | Expires after session |
+| Client Certificate (mTLS) | TLS handshake | Per-connection |
+| OAuth / OIDC JWT | `Authorization: Bearer <jwt>` | Token lifetime |
+
+### mTLS client certificates
+
+Enable the cert authenticator via `AuthConfig.cert`. Two modes map
+the certificate to a RedDB identity:
+
+- **`CommonName`** — the subject's CN is looked up against the user
+  registry
+- **`SanRfc822Name`** — the certificate's `subjectAltName rfc822Name`
+  extension is used as the username
+
+Optional OID-to-role mapping lets custom X.509 extensions carry the
+caller's RedDB role directly, avoiding a user-registry lookup.
+
+### OAuth / OIDC
+
+Enable the OAuth validator via `AuthConfig.oauth`. The validator
+accepts a pluggable `JwtVerifier` closure so you pick the signing
+algorithm and key source (JWKS, shared secret, HSM). Validates the
+standard `iss`, `aud`, `exp`, and `nbf` claims and maps a claim
+(default `preferred_username`) onto a RedDB identity.
+
+### Row-level security & tenancy
+
+Per-row authorization on top of authentication:
+
+- [Row Level Security](rls.md) — `CREATE POLICY` with USING
+  predicates, ENABLE / DISABLE ROW LEVEL SECURITY
+- [Multi-Tenancy](multi-tenancy.md) — `SET TENANT`, declarative
+  `TENANT BY (col)`, auto-RLS
 
 ## Security Features
 
 - **RBAC**: Role-based access control (admin, write, read)
 - **API Keys**: Persistent tokens for service accounts
 - **Session Tokens**: Time-limited tokens from login
+- **mTLS**: Client certificate authentication (CN / SAN / OID roles)
+- **OAuth / OIDC**: JWT bearer-token validation with pluggable verifier
+- **Row-Level Security**: Per-row predicates via CREATE POLICY
+- **Multi-Tenancy**: Declarative `TENANT BY` + session tenant handle
 - **Encrypted Vault**: Auth data and arbitrary `red.secret.*` KV pairs stored in encrypted pages
 - **Encryption at Rest**: AES-256-GCM page-level encryption
 - **Password Hashing**: Secure password storage

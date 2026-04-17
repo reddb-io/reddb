@@ -156,6 +156,36 @@ INSERT INTO logs (data) VALUES ({level: 'info', msg: 'deploy complete', meta: {e
 QUEUE PUSH tasks {job: 'email', to: 'alice@co.com', template: 'welcome'}
 ```
 
+## PostgreSQL-compatible
+
+Full transactions with savepoints, row-level security, declarative
+multi-tenancy, views, partitioning, and foreign data wrappers. Speaks
+the PostgreSQL wire protocol so existing clients (psql, pgAdmin,
+JDBC, pgx, psycopg) connect without changes.
+
+```sql
+-- transactions with savepoints
+BEGIN;
+INSERT INTO users (id, email) VALUES (1, 'a@b');
+SAVEPOINT try;
+DELETE FROM users WHERE id = 1;
+ROLLBACK TO SAVEPOINT try;   -- user 1 survives
+COMMIT;
+
+-- declarative multi-tenancy
+CREATE TABLE documents (id INT, content TEXT, tenant_id TEXT)
+  TENANT BY (tenant_id);
+SET TENANT 'acme';
+SELECT * FROM documents;     -- automatically scoped to 'acme'
+
+-- row-level security
+CREATE POLICY own_rows ON orders USING (customer_id = CURRENT_USER());
+ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
+```
+
+See [Transactions](/query/transactions.md), [Multi-Tenancy](/security/multi-tenancy.md),
+[Row Level Security](/security/rls.md), and [PostgreSQL Wire](/api/postgres-wire.md).
+
 ## Run anywhere
 
 The same engine runs embedded in your Rust binary, as an HTTP/gRPC server, or as an MCP tool server for AI agents.
