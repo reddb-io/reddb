@@ -138,7 +138,9 @@ impl BTree {
                     // Still the rightmost leaf. Try fast append.
                     if can_insert_leaf(&page, key, value) {
                         insert_into_leaf(&mut page, key, value)?;
-                        page.update_checksum();
+                        // Skip update_checksum here — pager.write_page
+                        // below recomputes it. Saves one CRC32 on 4KB
+                        // per insert on the hot append path.
                         let page_id = page.page_id();
                         // Update cached high_key
                         *self.rightmost_leaf.write().map_err(|e| {
@@ -185,7 +187,7 @@ impl BTree {
         // Try to insert into leaf
         if can_insert_leaf(&page, key, value) {
             insert_into_leaf(&mut page, key, value)?;
-            page.update_checksum();
+            // Skip update_checksum — pager.write_page recomputes it.
             let page_id = page.page_id();
             // If this is the rightmost leaf (right_sibling == 0), cache it.
             if leaf_right_sibling(&page) == 0 {

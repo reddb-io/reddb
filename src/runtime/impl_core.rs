@@ -4002,6 +4002,20 @@ impl RedDBRuntime {
     /// Invalidate only result cache entries that declared a dependency on `table`.
     /// Cheaper than a full clear: unrelated tables keep their cached results.
     pub(crate) fn invalidate_result_cache_for_table(&self, table: &str) {
+        // Hot-path probe: with a read lock, see if any cache entry
+        // even references this table. The bench's `bulk_update`
+        // pattern fires N independent UPDATE statements; each used
+        // to grab the result-cache write lock unconditionally,
+        // serialising the writers on this single mutex even though
+        // the cache is empty (no SELECT cached against the table).
+        // Read lock first → if no match, skip the write entirely.
+        {
+            let cache = self.inner.result_cache.read();
+            let (ref map, _) = *cache;
+            if map.is_empty() || !map.values().any(|entry| entry.scopes.contains(table)) {
+                return;
+            }
+        }
         let mut cache = self.inner.result_cache.write();
         let (ref mut map, ref mut order) = *cache;
         map.retain(|_, entry| !entry.scopes.contains(table));
@@ -4707,10 +4721,21 @@ impl RedDBRuntime {
     }
 
     pub(crate) fn note_table_write(&self, table: &str) {
-        self.inner
+        // Skip the write lock when the table is already marked
+        // dirty. With single-row UPDATEs in a loop this used to
+        // grab the planner_dirty_tables write lock N times even
+        // though the first call already flipped the flag.
+        let already_dirty = self
+            .inner
             .planner_dirty_tables
-            .write()
-            .insert(table.to_string());
+            .read()
+            .contains(table);
+        if !already_dirty {
+            self.inner
+                .planner_dirty_tables
+                .write()
+                .insert(table.to_string());
+        }
         self.invalidate_result_cache_for_table(table);
     }
 }
