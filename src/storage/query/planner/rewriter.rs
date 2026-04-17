@@ -198,6 +198,8 @@ impl RewriteRule for NormalizeRule {
             | QueryExpr::Ask(_)
             | QueryExpr::SetConfig { .. }
             | QueryExpr::ShowConfig { .. }
+            | QueryExpr::SetTenant(_)
+            | QueryExpr::ShowTenant
             | QueryExpr::CreateTimeSeries(_)
             | QueryExpr::DropTimeSeries(_)
             | QueryExpr::CreateQueue(_)
@@ -206,7 +208,23 @@ impl RewriteRule for NormalizeRule {
             | QueryExpr::CreateTree(_)
             | QueryExpr::DropTree(_)
             | QueryExpr::TreeCommand(_)
-            | QueryExpr::ExplainAlter(_)) => other,
+            | QueryExpr::ExplainAlter(_)
+            | QueryExpr::TransactionControl(_)
+            | QueryExpr::MaintenanceCommand(_)
+            | QueryExpr::CreateSchema(_)
+            | QueryExpr::DropSchema(_)
+            | QueryExpr::CreateSequence(_)
+            | QueryExpr::DropSequence(_)
+            | QueryExpr::CopyFrom(_)
+            | QueryExpr::CreateView(_)
+            | QueryExpr::DropView(_)
+            | QueryExpr::RefreshMaterializedView(_)
+            | QueryExpr::CreatePolicy(_)
+            | QueryExpr::DropPolicy(_)
+            | QueryExpr::CreateServer(_)
+            | QueryExpr::DropServer(_)
+            | QueryExpr::CreateForeignTable(_)
+            | QueryExpr::DropForeignTable(_)) => other,
         }
     }
 
@@ -274,6 +292,8 @@ impl RewriteRule for SimplifyFiltersRule {
             | QueryExpr::Ask(_)
             | QueryExpr::SetConfig { .. }
             | QueryExpr::ShowConfig { .. }
+            | QueryExpr::SetTenant(_)
+            | QueryExpr::ShowTenant
             | QueryExpr::CreateTimeSeries(_)
             | QueryExpr::DropTimeSeries(_)
             | QueryExpr::CreateQueue(_)
@@ -282,7 +302,23 @@ impl RewriteRule for SimplifyFiltersRule {
             | QueryExpr::CreateTree(_)
             | QueryExpr::DropTree(_)
             | QueryExpr::TreeCommand(_)
-            | QueryExpr::ExplainAlter(_)) => other,
+            | QueryExpr::ExplainAlter(_)
+            | QueryExpr::TransactionControl(_)
+            | QueryExpr::MaintenanceCommand(_)
+            | QueryExpr::CreateSchema(_)
+            | QueryExpr::DropSchema(_)
+            | QueryExpr::CreateSequence(_)
+            | QueryExpr::DropSequence(_)
+            | QueryExpr::CopyFrom(_)
+            | QueryExpr::CreateView(_)
+            | QueryExpr::DropView(_)
+            | QueryExpr::RefreshMaterializedView(_)
+            | QueryExpr::CreatePolicy(_)
+            | QueryExpr::DropPolicy(_)
+            | QueryExpr::CreateServer(_)
+            | QueryExpr::DropServer(_)
+            | QueryExpr::CreateForeignTable(_)
+            | QueryExpr::DropForeignTable(_)) => other,
         }
     }
 
@@ -309,6 +345,8 @@ impl RewriteRule for SimplifyFiltersRule {
             | QueryExpr::Ask(_)
             | QueryExpr::SetConfig { .. }
             | QueryExpr::ShowConfig { .. }
+            | QueryExpr::SetTenant(_)
+            | QueryExpr::ShowTenant
             | QueryExpr::CreateTimeSeries(_)
             | QueryExpr::DropTimeSeries(_)
             | QueryExpr::CreateQueue(_)
@@ -317,7 +355,23 @@ impl RewriteRule for SimplifyFiltersRule {
             | QueryExpr::CreateTree(_)
             | QueryExpr::DropTree(_)
             | QueryExpr::TreeCommand(_)
-            | QueryExpr::ExplainAlter(_) => false,
+            | QueryExpr::ExplainAlter(_)
+            | QueryExpr::TransactionControl(_)
+            | QueryExpr::MaintenanceCommand(_)
+            | QueryExpr::CreateSchema(_)
+            | QueryExpr::DropSchema(_)
+            | QueryExpr::CreateSequence(_)
+            | QueryExpr::DropSequence(_)
+            | QueryExpr::CopyFrom(_)
+            | QueryExpr::CreateView(_)
+            | QueryExpr::DropView(_)
+            | QueryExpr::RefreshMaterializedView(_)
+            | QueryExpr::CreatePolicy(_)
+            | QueryExpr::DropPolicy(_)
+            | QueryExpr::CreateServer(_)
+            | QueryExpr::DropServer(_)
+            | QueryExpr::CreateForeignTable(_)
+            | QueryExpr::DropForeignTable(_) => false,
         }
     }
 }

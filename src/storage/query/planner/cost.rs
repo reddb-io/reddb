@@ -302,6 +302,8 @@ impl CostEstimator {
             | QueryExpr::Ask(_)
             | QueryExpr::SetConfig { .. }
             | QueryExpr::ShowConfig { .. }
+            | QueryExpr::SetTenant(_)
+            | QueryExpr::ShowTenant
             | QueryExpr::CreateTimeSeries(_)
             | QueryExpr::DropTimeSeries(_)
             | QueryExpr::CreateQueue(_)
@@ -310,7 +312,23 @@ impl CostEstimator {
             | QueryExpr::CreateTree(_)
             | QueryExpr::DropTree(_)
             | QueryExpr::TreeCommand(_)
-            | QueryExpr::ExplainAlter(_) => PlanCost::new(1.0, 1.0, 0.0),
+            | QueryExpr::ExplainAlter(_)
+            | QueryExpr::TransactionControl(_)
+            | QueryExpr::MaintenanceCommand(_)
+            | QueryExpr::CreateSchema(_)
+            | QueryExpr::DropSchema(_)
+            | QueryExpr::CreateSequence(_)
+            | QueryExpr::DropSequence(_)
+            | QueryExpr::CopyFrom(_)
+            | QueryExpr::CreateView(_)
+            | QueryExpr::DropView(_)
+            | QueryExpr::RefreshMaterializedView(_)
+            | QueryExpr::CreatePolicy(_)
+            | QueryExpr::DropPolicy(_)
+            | QueryExpr::CreateServer(_)
+            | QueryExpr::DropServer(_)
+            | QueryExpr::CreateForeignTable(_)
+            | QueryExpr::DropForeignTable(_) => PlanCost::new(1.0, 1.0, 0.0),
         }
     }
 
@@ -338,6 +356,8 @@ impl CostEstimator {
             | QueryExpr::Ask(_)
             | QueryExpr::SetConfig { .. }
             | QueryExpr::ShowConfig { .. }
+            | QueryExpr::SetTenant(_)
+            | QueryExpr::ShowTenant
             | QueryExpr::CreateTimeSeries(_)
             | QueryExpr::DropTimeSeries(_)
             | QueryExpr::CreateQueue(_)
@@ -346,7 +366,23 @@ impl CostEstimator {
             | QueryExpr::CreateTree(_)
             | QueryExpr::DropTree(_)
             | QueryExpr::TreeCommand(_)
-            | QueryExpr::ExplainAlter(_) => CardinalityEstimate::new(1.0, 1.0),
+            | QueryExpr::ExplainAlter(_)
+            | QueryExpr::TransactionControl(_)
+            | QueryExpr::MaintenanceCommand(_)
+            | QueryExpr::CreateSchema(_)
+            | QueryExpr::DropSchema(_)
+            | QueryExpr::CreateSequence(_)
+            | QueryExpr::DropSequence(_)
+            | QueryExpr::CopyFrom(_)
+            | QueryExpr::CreateView(_)
+            | QueryExpr::DropView(_)
+            | QueryExpr::RefreshMaterializedView(_)
+            | QueryExpr::CreatePolicy(_)
+            | QueryExpr::DropPolicy(_)
+            | QueryExpr::CreateServer(_)
+            | QueryExpr::DropServer(_)
+            | QueryExpr::CreateForeignTable(_)
+            | QueryExpr::DropForeignTable(_) => CardinalityEstimate::new(1.0, 1.0),
         }
     }
 

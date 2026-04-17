@@ -162,10 +162,7 @@ impl TemporalIndex {
         // Single state write-lock — covers BTree, BRIN ranges, count, correlation.
         {
             let mut s = self.state.write();
-            s.entries
-                .entry(handle.min_ts)
-                .or_default()
-                .push(handle);
+            s.entries.entry(handle.min_ts).or_default().push(handle);
             s.count += 1;
 
             // Correlation tracking: monotonic if min_ts didn't go backwards.
@@ -297,8 +294,9 @@ impl TemporalIndex {
         let mut seen: HashSet<(u64, u64)> = HashSet::new();
         for (win_min, win_max) in surviving_windows {
             let probe_end = win_max.min(end);
-            for (_, handles) in
-                s.entries.range((Bound::Included(win_min), Bound::Included(probe_end)))
+            for (_, handles) in s
+                .entries
+                .range((Bound::Included(win_min), Bound::Included(probe_end)))
             {
                 for h in handles {
                     if h.max_ts >= start && seen.insert((h.series_id, h.chunk_id)) {

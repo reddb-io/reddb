@@ -51,6 +51,13 @@ pub struct ChangeEvent {
     pub entity_id: u64,
     /// Entity kind (table, graph_node, graph_edge, vector, etc.)
     pub entity_kind: String,
+    /// For `Update` events, the list of column names whose values
+    /// changed (including added/removed columns). `None` when the
+    /// emitter didn't compute a damage vector (inserts, deletes, and
+    /// coarse-grained update paths that haven't been rewired yet).
+    /// Downstream CDC consumers can use this to skip replaying
+    /// updates that touched columns they don't care about.
+    pub changed_columns: Option<Vec<String>>,
 }
 
 /// Structured logical WAL record serialized into the replication buffer and
@@ -175,13 +182,31 @@ impl CdcBuffer {
         }
     }
 
-    /// Emit a change event into the buffer.
+    /// Emit a change event into the buffer. `changed_columns`
+    /// defaults to `None` for backwards compatibility; call sites
+    /// that have a damage vector available should use
+    /// [`Self::emit_with_columns`] instead.
     pub fn emit(
         &self,
         operation: ChangeOperation,
         collection: &str,
         entity_id: u64,
         entity_kind: &str,
+    ) -> u64 {
+        self.emit_with_columns(operation, collection, entity_id, entity_kind, None)
+    }
+
+    /// Emit a change event with an optional list of column names
+    /// that were affected. Use from update paths that have already
+    /// computed a [`RowDamageVector`](crate::application::entity::RowDamageVector)
+    /// so CDC consumers can filter by touched column without re-diffing.
+    pub fn emit_with_columns(
+        &self,
+        operation: ChangeOperation,
+        collection: &str,
+        entity_id: u64,
+        entity_kind: &str,
+        changed_columns: Option<Vec<String>>,
     ) -> u64 {
         let mut state = self.state.write().unwrap_or_else(|e| e.into_inner());
         state.current_lsn += 1;
@@ -197,6 +222,7 @@ impl CdcBuffer {
             collection: collection.to_string(),
             entity_id,
             entity_kind: entity_kind.to_string(),
+            changed_columns,
         };
 
         if state.events.len() >= self.max_size {
@@ -276,6 +302,30 @@ mod tests {
         assert_eq!(events[0].operation, ChangeOperation::Insert);
         assert_eq!(events[1].operation, ChangeOperation::Update);
         assert_eq!(events[2].operation, ChangeOperation::Delete);
+        // Backwards-compat emit should leave changed_columns None.
+        assert!(events[0].changed_columns.is_none());
+        assert!(events[1].changed_columns.is_none());
+    }
+
+    #[test]
+    fn test_emit_with_columns_propagates_damage_vector() {
+        let buf = CdcBuffer::new(100);
+        buf.emit_with_columns(
+            ChangeOperation::Update,
+            "users",
+            7,
+            "table",
+            Some(vec!["email".to_string(), "age".to_string()]),
+        );
+        buf.emit(ChangeOperation::Update, "users", 8, "table");
+
+        let events = buf.poll(0, 10);
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0].changed_columns.as_deref(),
+            Some(vec!["email".to_string(), "age".to_string()].as_slice())
+        );
+        assert!(events[1].changed_columns.is_none());
     }
 
     #[test]

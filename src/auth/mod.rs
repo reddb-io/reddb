@@ -11,9 +11,20 @@
 //! - User/Password login -> session token
 //! - API key -> direct auth with assigned role
 
+pub mod cert;
 pub mod middleware;
+pub mod oauth;
 pub mod store;
 pub mod vault;
+
+pub use cert::{
+    CertAuthConfig, CertAuthError, CertAuthenticator, CertIdentity, CertIdentityMode,
+    ParsedClientCert,
+};
+pub use oauth::{
+    DecodedJwt, Jwk, JwtClaims, JwtHeader, OAuthConfig, OAuthError, OAuthIdentity,
+    OAuthIdentityMode, OAuthValidator,
+};
 
 use std::fmt;
 
@@ -136,6 +147,12 @@ pub struct AuthConfig {
     /// AES-256-GCM encryption.  The encryption key is read from
     /// `REDDB_VAULT_KEY` env var or a passphrase.
     pub vault_enabled: bool,
+    /// Optional mTLS client-certificate auth policy (Phase 3.4 PG parity).
+    /// Disabled by default; TLS listeners opt-in per config.
+    pub cert: CertAuthConfig,
+    /// Optional OAuth/OIDC Bearer-token validator (Phase 3.4 PG parity).
+    /// Disabled by default.
+    pub oauth: OAuthConfig,
 }
 
 impl Default for AuthConfig {
@@ -146,6 +163,8 @@ impl Default for AuthConfig {
             require_auth: false,
             auto_encrypt_storage: false,
             vault_enabled: false,
+            cert: CertAuthConfig::default(),
+            oauth: OAuthConfig::default(),
         }
     }
 }

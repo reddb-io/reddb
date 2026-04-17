@@ -6,10 +6,19 @@ pub(super) fn scan_runtime_table_source_records(
     db: &RedDB,
     table: &str,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
+    use crate::runtime::impl_core::{
+        capture_current_snapshot, entity_visible_under_current_snapshot,
+        entity_visible_with_context,
+    };
+
     if is_universal_entity_source(table) {
+        // Cross-collection scan runs inside std::thread::scope — capture
+        // the snapshot so worker threads see the same MVCC view instead
+        // of defaulting to "no snapshot" (every row visible).
+        let snap_ctx = capture_current_snapshot();
         return Ok(db
             .store()
-            .query_all(|_| true)
+            .query_all(move |e| entity_visible_with_context(snap_ctx.as_ref(), e))
             .into_iter()
             .filter_map(|(_, entity)| runtime_any_record_from_entity(entity))
             .collect());
@@ -29,7 +38,9 @@ pub(super) fn scan_runtime_table_source_records(
         let mut entities: Vec<crate::storage::unified::entity::UnifiedEntity> =
             Vec::with_capacity(entity_count);
         manager.for_each_entity(|e| {
-            entities.push(e.clone());
+            if entity_visible_under_current_snapshot(e) {
+                entities.push(e.clone());
+            }
             true
         });
         let records = crate::storage::query::executors::parallel_scan::parallel_scan_default(
@@ -47,6 +58,9 @@ pub(super) fn scan_runtime_table_source_records(
     // Sequential path for smaller tables — avoids thread overhead.
     let mut records = Vec::new();
     manager.for_each_entity(|entity| {
+        if !entity_visible_under_current_snapshot(entity) {
+            return true;
+        }
         if let Some(record) = runtime_table_record_from_entity(entity.clone()) {
             records.push(record);
         }
@@ -62,6 +76,8 @@ pub(super) fn scan_runtime_table_with_bloom_hint(
     table: &str,
     key_hint: Option<&[u8]>,
 ) -> RedDBResult<(Vec<UnifiedRecord>, bool)> {
+    use crate::runtime::impl_core::entity_visible_under_current_snapshot;
+
     let manager = db
         .store()
         .get_collection(table)
@@ -70,6 +86,7 @@ pub(super) fn scan_runtime_table_with_bloom_hint(
     let (entities, pruned) = manager.query_with_bloom_hint(key_hint, |_| true);
     let records = entities
         .into_iter()
+        .filter(entity_visible_under_current_snapshot)
         .filter_map(runtime_table_record_from_entity)
         .collect();
     Ok((records, pruned))

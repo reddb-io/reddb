@@ -144,6 +144,8 @@ impl UnifiedExecutor {
             | QueryExpr::Ask(_)
             | QueryExpr::SetConfig { .. }
             | QueryExpr::ShowConfig { .. }
+            | QueryExpr::SetTenant(_)
+            | QueryExpr::ShowTenant
             | QueryExpr::CreateTimeSeries(_)
             | QueryExpr::DropTimeSeries(_)
             | QueryExpr::CreateQueue(_)
@@ -152,7 +154,23 @@ impl UnifiedExecutor {
             | QueryExpr::CreateTree(_)
             | QueryExpr::DropTree(_)
             | QueryExpr::TreeCommand(_)
-            | QueryExpr::ExplainAlter(_) => Err(ExecutionError::new(
+            | QueryExpr::ExplainAlter(_)
+            | QueryExpr::TransactionControl(_)
+            | QueryExpr::MaintenanceCommand(_)
+            | QueryExpr::CreateSchema(_)
+            | QueryExpr::DropSchema(_)
+            | QueryExpr::CreateSequence(_)
+            | QueryExpr::DropSequence(_)
+            | QueryExpr::CopyFrom(_)
+            | QueryExpr::CreateView(_)
+            | QueryExpr::DropView(_)
+            | QueryExpr::RefreshMaterializedView(_)
+            | QueryExpr::CreatePolicy(_)
+            | QueryExpr::DropPolicy(_)
+            | QueryExpr::CreateServer(_)
+            | QueryExpr::DropServer(_)
+            | QueryExpr::CreateForeignTable(_)
+            | QueryExpr::DropForeignTable(_) => Err(ExecutionError::new(
                 "DML/DDL/Command statements are not supported in UnifiedExecutor",
             )),
         }
@@ -334,6 +352,8 @@ impl UnifiedExecutor {
             | QueryExpr::Ask(_)
             | QueryExpr::SetConfig { .. }
             | QueryExpr::ShowConfig { .. }
+            | QueryExpr::SetTenant(_)
+            | QueryExpr::ShowTenant
             | QueryExpr::CreateTimeSeries(_)
             | QueryExpr::DropTimeSeries(_)
             | QueryExpr::CreateQueue(_)
@@ -342,7 +362,23 @@ impl UnifiedExecutor {
             | QueryExpr::CreateTree(_)
             | QueryExpr::DropTree(_)
             | QueryExpr::TreeCommand(_)
-            | QueryExpr::ExplainAlter(_) => Err(ExecutionError::new(
+            | QueryExpr::ExplainAlter(_)
+            | QueryExpr::TransactionControl(_)
+            | QueryExpr::MaintenanceCommand(_)
+            | QueryExpr::CreateSchema(_)
+            | QueryExpr::DropSchema(_)
+            | QueryExpr::CreateSequence(_)
+            | QueryExpr::DropSequence(_)
+            | QueryExpr::CopyFrom(_)
+            | QueryExpr::CreateView(_)
+            | QueryExpr::DropView(_)
+            | QueryExpr::RefreshMaterializedView(_)
+            | QueryExpr::CreatePolicy(_)
+            | QueryExpr::DropPolicy(_)
+            | QueryExpr::CreateServer(_)
+            | QueryExpr::DropServer(_)
+            | QueryExpr::CreateForeignTable(_)
+            | QueryExpr::DropForeignTable(_) => Err(ExecutionError::new(
                 "DML/DDL/Command statements are not supported in UnifiedExecutor",
             )),
         }

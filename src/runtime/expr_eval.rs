@@ -645,6 +645,28 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
             .or(Some(Value::Null)),
         "NOW" | "CURRENT_TIMESTAMP" => Some(Value::TimestampMs(current_unix_ms())),
         "CURRENT_DATE" => Some(Value::Date((current_unix_ms() / 86_400_000) as i32)),
+        // Phase 2.5.3 multi-tenancy: reads the thread-local session
+        // tenant installed by `SET TENANT 'id'` or transport
+        // middleware. Returns NULL when no tenant is bound so RLS
+        // policies like `USING (tenant_id = CURRENT_TENANT())` deny
+        // every row for unauthenticated / unscoped sessions.
+        "CURRENT_TENANT" => Some(
+            crate::runtime::impl_core::current_tenant()
+                .map(Value::Text)
+                .unwrap_or(Value::Null),
+        ),
+        // PG-style session identity scalars — read the auth thread-local
+        // installed by the transport layer. Anonymous callers get NULL.
+        "CURRENT_USER" | "SESSION_USER" | "USER" => Some(
+            crate::runtime::impl_core::current_auth_identity()
+                .map(|(u, _)| Value::Text(u))
+                .unwrap_or(Value::Null),
+        ),
+        "CURRENT_ROLE" => Some(
+            crate::runtime::impl_core::current_auth_identity()
+                .map(|(_, r)| Value::Text(format!("{r:?}").to_lowercase()))
+                .unwrap_or(Value::Null),
+        ),
         "TIME_BUCKET" => {
             let bucket_ns = time_bucket_duration(args.first()?)?;
             let timestamp_ns = args.get(1).and_then(value_to_bucket_timestamp_ns)?;
@@ -704,8 +726,268 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
             Value::Money { scale, .. } => Some(Value::Integer(i64::from(*scale))),
             _ => Some(Value::Null),
         },
+        // ─────────────────────────────────────────────────────────────
+        // JSON functions (Phase 1.4 PG parity).
+        //
+        // Accepts Value::Json, Value::Text (parsed as JSON), or returns
+        // Value::Null when the input is not valid JSON.
+        // ─────────────────────────────────────────────────────────────
+        "JSON_EXTRACT" => json_extract_impl(args.first()?, args.get(1)?, /*as_text=*/ false),
+        "JSON_EXTRACT_TEXT" => {
+            json_extract_impl(args.first()?, args.get(1)?, /*as_text=*/ true)
+        }
+        "JSON_SET" => json_set_impl(args.first()?, args.get(1)?, args.get(2)?),
+        "JSON_ARRAY_LENGTH" => {
+            let v = value_to_json(args.first()?)?;
+            match v {
+                crate::serde_json::Value::Array(a) => Some(Value::Integer(a.len() as i64)),
+                _ => Some(Value::Null),
+            }
+        }
+        "JSON_TYPEOF" => {
+            let v = value_to_json(args.first()?)?;
+            let name = match v {
+                crate::serde_json::Value::Null => "null",
+                crate::serde_json::Value::Bool(_) => "boolean",
+                crate::serde_json::Value::Number(_) => "number",
+                crate::serde_json::Value::String(_) => "string",
+                crate::serde_json::Value::Array(_) => "array",
+                crate::serde_json::Value::Object(_) => "object",
+            };
+            Some(Value::Text(name.to_string()))
+        }
+        "JSON_VALID" => {
+            let text = match args.first()? {
+                Value::Text(s) => s.clone(),
+                Value::Json(b) => String::from_utf8_lossy(b).to_string(),
+                _ => return Some(Value::Boolean(false)),
+            };
+            Some(Value::Boolean(
+                crate::serde_json::from_str::<crate::serde_json::Value>(&text).is_ok(),
+            ))
+        }
+        "JSON_ARRAY" => {
+            let arr: Vec<crate::serde_json::Value> = args.iter().map(value_as_json).collect();
+            let json = crate::serde_json::Value::Array(arr);
+            Some(Value::Json(json.to_string_compact().into_bytes()))
+        }
+        "JSON_OBJECT" => {
+            // Args come as interleaved (key, value, key, value, ...).
+            if args.len() % 2 != 0 {
+                return Some(Value::Null);
+            }
+            let mut map = crate::serde_json::Map::new();
+            for pair in args.chunks_exact(2) {
+                let key = match &pair[0] {
+                    Value::Text(s) => s.clone(),
+                    other => other.display_string(),
+                };
+                map.insert(key, value_as_json(&pair[1]));
+            }
+            let json = crate::serde_json::Value::Object(map);
+            Some(Value::Json(json.to_string_compact().into_bytes()))
+        }
         _ => None,
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// JSON scalar helpers (Phase 1.4 PG parity)
+// ─────────────────────────────────────────────────────────────────────
+
+/// Parse a scalar argument into a JSON value. `Value::Json` bytes are
+/// decoded; `Value::Text` is parsed. Anything else returns None so
+/// callers propagate Null.
+fn value_to_json(value: &Value) -> Option<crate::serde_json::Value> {
+    match value {
+        Value::Null => Some(crate::serde_json::Value::Null),
+        Value::Json(bytes) => {
+            let text = String::from_utf8_lossy(bytes);
+            crate::serde_json::from_str(&text).ok()
+        }
+        Value::Text(s) => crate::serde_json::from_str(s).ok(),
+        _ => None,
+    }
+}
+
+/// Convert any scalar to the JSON representation used by JSON_ARRAY /
+/// JSON_OBJECT / JSON_SET. Non-JSON-native types fall back to their
+/// display string.
+fn value_as_json(value: &Value) -> crate::serde_json::Value {
+    match value {
+        Value::Null => crate::serde_json::Value::Null,
+        Value::Boolean(b) => crate::serde_json::Value::Bool(*b),
+        Value::Integer(n) => crate::serde_json::Value::Number(*n as f64),
+        Value::UnsignedInteger(n) => crate::serde_json::Value::Number(*n as f64),
+        Value::BigInt(n) => crate::serde_json::Value::Number(*n as f64),
+        Value::Float(n) => crate::serde_json::Value::Number(*n),
+        Value::Text(s) => crate::serde_json::Value::String(s.clone()),
+        Value::Json(bytes) => {
+            let text = String::from_utf8_lossy(bytes);
+            crate::serde_json::from_str(&text)
+                .unwrap_or_else(|_| crate::serde_json::Value::String(text.into_owned()))
+        }
+        other => crate::serde_json::Value::String(other.display_string()),
+    }
+}
+
+/// Parse a `$.a.b[0]` path into a sequence of (field | index) steps.
+/// Returns None on unrecognised syntax.
+enum JsonPathStep<'a> {
+    Field(&'a str),
+    Index(usize),
+}
+
+fn parse_json_path(path: &str) -> Option<Vec<JsonPathStep<'_>>> {
+    let path = path.trim();
+    let rest = path.strip_prefix('$').unwrap_or(path);
+    let mut steps = Vec::new();
+    let bytes = rest.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'.' => {
+                i += 1;
+                let start = i;
+                while i < bytes.len() && bytes[i] != b'.' && bytes[i] != b'[' {
+                    i += 1;
+                }
+                if start == i {
+                    return None;
+                }
+                let field = std::str::from_utf8(&bytes[start..i]).ok()?;
+                steps.push(JsonPathStep::Field(field));
+            }
+            b'[' => {
+                i += 1;
+                let start = i;
+                while i < bytes.len() && bytes[i] != b']' {
+                    i += 1;
+                }
+                if i >= bytes.len() {
+                    return None;
+                }
+                let idx: usize = std::str::from_utf8(&bytes[start..i]).ok()?.parse().ok()?;
+                i += 1; // skip ']'
+                steps.push(JsonPathStep::Index(idx));
+            }
+            _ => return None,
+        }
+    }
+    Some(steps)
+}
+
+/// Traverse a JSON value along the path. Returns None if any step misses.
+fn json_path_get<'a>(
+    root: &'a crate::serde_json::Value,
+    steps: &[JsonPathStep<'_>],
+) -> Option<&'a crate::serde_json::Value> {
+    let mut cur = root;
+    for step in steps {
+        match (step, cur) {
+            (JsonPathStep::Field(name), crate::serde_json::Value::Object(map)) => {
+                cur = map.get(*name)?;
+            }
+            (JsonPathStep::Index(idx), crate::serde_json::Value::Array(arr)) => {
+                cur = arr.get(*idx)?;
+            }
+            _ => return None,
+        }
+    }
+    Some(cur)
+}
+
+fn json_extract_impl(input: &Value, path: &Value, as_text: bool) -> Option<Value> {
+    let path_str = match path {
+        Value::Text(s) => s.clone(),
+        _ => return Some(Value::Null),
+    };
+    let json = value_to_json(input)?;
+    let steps = parse_json_path(&path_str)?;
+    let target = json_path_get(&json, &steps)?;
+    if as_text {
+        // Unquoted scalar text, JSON for containers.
+        match target {
+            crate::serde_json::Value::String(s) => Some(Value::Text(s.clone())),
+            crate::serde_json::Value::Null => Some(Value::Null),
+            crate::serde_json::Value::Bool(b) => Some(Value::Text(b.to_string())),
+            crate::serde_json::Value::Number(n) => Some(Value::Text(n.to_string())),
+            other => Some(Value::Text(other.to_string_compact())),
+        }
+    } else {
+        // JSON-serialised representation (strings come back quoted).
+        Some(Value::Text(target.to_string_compact()))
+    }
+}
+
+/// Walk along a JSON path, mutably creating missing container nodes. The
+/// final step writes `new_value` into its parent (object field or array
+/// slot). Arrays grow with nulls when the index exceeds the current length.
+fn json_set_impl(input: &Value, path: &Value, new_value: &Value) -> Option<Value> {
+    let path_str = match path {
+        Value::Text(s) => s.clone(),
+        _ => return Some(Value::Null),
+    };
+    let mut json = value_to_json(input).unwrap_or(crate::serde_json::Value::Null);
+    let steps = parse_json_path(&path_str)?;
+    if steps.is_empty() {
+        // Root replacement.
+        let replaced = value_as_json(new_value);
+        return Some(Value::Json(replaced.to_string_compact().into_bytes()));
+    }
+    // Walk + insert; use a simple recursive helper so we can own the mutation path.
+    fn walk(
+        node: &mut crate::serde_json::Value,
+        steps: &[JsonPathStep<'_>],
+        idx: usize,
+        new_value: &crate::serde_json::Value,
+    ) -> bool {
+        if idx == steps.len() {
+            *node = new_value.clone();
+            return true;
+        }
+        match (&steps[idx], node) {
+            (JsonPathStep::Field(name), crate::serde_json::Value::Object(map)) => {
+                let entry = map
+                    .entry(name.to_string())
+                    .or_insert(crate::serde_json::Value::Null);
+                walk(entry, steps, idx + 1, new_value)
+            }
+            (JsonPathStep::Field(name), other) => {
+                // Coerce non-object into object to keep the path alive.
+                let mut new_map = crate::serde_json::Map::new();
+                new_map.insert(name.to_string(), crate::serde_json::Value::Null);
+                *other = crate::serde_json::Value::Object(new_map);
+                if let crate::serde_json::Value::Object(map) = other {
+                    let entry = map.get_mut(*name).unwrap();
+                    walk(entry, steps, idx + 1, new_value)
+                } else {
+                    false
+                }
+            }
+            (JsonPathStep::Index(i), crate::serde_json::Value::Array(arr)) => {
+                while arr.len() <= *i {
+                    arr.push(crate::serde_json::Value::Null);
+                }
+                walk(&mut arr[*i], steps, idx + 1, new_value)
+            }
+            (JsonPathStep::Index(i), other) => {
+                let mut arr = Vec::with_capacity(i + 1);
+                arr.resize(*i + 1, crate::serde_json::Value::Null);
+                *other = crate::serde_json::Value::Array(arr);
+                if let crate::serde_json::Value::Array(arr) = other {
+                    walk(&mut arr[*i], steps, idx + 1, new_value)
+                } else {
+                    false
+                }
+            }
+        }
+    }
+    let new_json = value_as_json(new_value);
+    if !walk(&mut json, &steps, 0, &new_json) {
+        return Some(Value::Null);
+    }
+    Some(Value::Json(json.to_string_compact().into_bytes()))
 }
 
 fn money_from_args(args: &[Value]) -> Option<Value> {
@@ -958,5 +1240,163 @@ mod tests {
             dispatch_builtin_function("MONEY_SCALE", std::slice::from_ref(&money)).unwrap(),
             Value::Integer(2)
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // JSON functions (Phase 1.4 PG parity)
+    // ─────────────────────────────────────────────────────────────
+
+    fn json_text(s: &str) -> Value {
+        Value::Text(s.to_string())
+    }
+
+    #[test]
+    fn json_extract_scalar_and_nested() {
+        let doc = json_text(r#"{"a":1,"b":{"c":"hello","d":[10,20,30]}}"#);
+        // Top-level scalar.
+        assert_eq!(
+            dispatch_builtin_function("JSON_EXTRACT", &[doc.clone(), json_text("$.a")]).unwrap(),
+            Value::Text("1".to_string())
+        );
+        // Nested string (quoted for JSON_EXTRACT).
+        assert_eq!(
+            dispatch_builtin_function("JSON_EXTRACT", &[doc.clone(), json_text("$.b.c")]).unwrap(),
+            Value::Text("\"hello\"".to_string())
+        );
+        // Unquoted via JSON_EXTRACT_TEXT.
+        assert_eq!(
+            dispatch_builtin_function("JSON_EXTRACT_TEXT", &[doc.clone(), json_text("$.b.c")])
+                .unwrap(),
+            Value::Text("hello".to_string())
+        );
+        // Array index.
+        assert_eq!(
+            dispatch_builtin_function("JSON_EXTRACT_TEXT", &[doc.clone(), json_text("$.b.d[1]")])
+                .unwrap(),
+            Value::Text("20".to_string())
+        );
+        // Missing path → Null.
+        assert_eq!(
+            dispatch_builtin_function("JSON_EXTRACT", &[doc, json_text("$.missing")]).unwrap(),
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn json_array_length_and_typeof() {
+        let arr = json_text(r#"[1,2,3,4]"#);
+        assert_eq!(
+            dispatch_builtin_function("JSON_ARRAY_LENGTH", &[arr.clone()]).unwrap(),
+            Value::Integer(4)
+        );
+        assert_eq!(
+            dispatch_builtin_function("JSON_TYPEOF", &[arr]).unwrap(),
+            Value::Text("array".to_string())
+        );
+        assert_eq!(
+            dispatch_builtin_function("JSON_TYPEOF", &[json_text(r#"{"k":1}"#)]).unwrap(),
+            Value::Text("object".to_string())
+        );
+        assert_eq!(
+            dispatch_builtin_function("JSON_TYPEOF", &[json_text("null")]).unwrap(),
+            Value::Text("null".to_string())
+        );
+    }
+
+    #[test]
+    fn json_valid_accepts_and_rejects() {
+        assert_eq!(
+            dispatch_builtin_function("JSON_VALID", &[json_text(r#"{"a":1}"#)]).unwrap(),
+            Value::Boolean(true)
+        );
+        assert_eq!(
+            dispatch_builtin_function("JSON_VALID", &[json_text("not json")]).unwrap(),
+            Value::Boolean(false)
+        );
+    }
+
+    #[test]
+    fn json_array_and_object_builders() {
+        // JSON_ARRAY(1, "x", true) → [1,"x",true]
+        let arr = dispatch_builtin_function(
+            "JSON_ARRAY",
+            &[
+                Value::Integer(1),
+                Value::Text("x".to_string()),
+                Value::Boolean(true),
+            ],
+        )
+        .unwrap();
+        if let Value::Json(bytes) = arr {
+            let text = String::from_utf8(bytes).unwrap();
+            assert_eq!(text, r#"[1,"x",true]"#);
+        } else {
+            panic!("expected Json value");
+        }
+
+        // JSON_OBJECT("k1", 1, "k2", "v") → {"k1":1,"k2":"v"}
+        let obj = dispatch_builtin_function(
+            "JSON_OBJECT",
+            &[
+                Value::Text("k1".to_string()),
+                Value::Integer(1),
+                Value::Text("k2".to_string()),
+                Value::Text("v".to_string()),
+            ],
+        )
+        .unwrap();
+        if let Value::Json(bytes) = obj {
+            let text = String::from_utf8(bytes).unwrap();
+            // Map keeps insertion order via BTreeMap (sorted alphabetically).
+            assert_eq!(text, r#"{"k1":1,"k2":"v"}"#);
+        } else {
+            panic!("expected Json value");
+        }
+    }
+
+    #[test]
+    fn json_set_updates_existing_and_creates_new() {
+        let doc = json_text(r#"{"a":1,"b":{"c":"x"}}"#);
+
+        // Update existing nested field.
+        let out = dispatch_builtin_function(
+            "JSON_SET",
+            &[
+                doc.clone(),
+                json_text("$.b.c"),
+                Value::Text("new".to_string()),
+            ],
+        )
+        .unwrap();
+        if let Value::Json(bytes) = out {
+            let text = String::from_utf8(bytes).unwrap();
+            // JSON_EXTRACT_TEXT on result must return "new".
+            let extracted = dispatch_builtin_function(
+                "JSON_EXTRACT_TEXT",
+                &[Value::Text(text), json_text("$.b.c")],
+            )
+            .unwrap();
+            assert_eq!(extracted, Value::Text("new".to_string()));
+        } else {
+            panic!("expected Json");
+        }
+
+        // Create a new nested path.
+        let out = dispatch_builtin_function(
+            "JSON_SET",
+            &[doc, json_text("$.new.deep"), Value::Integer(42)],
+        )
+        .unwrap();
+        if let Value::Json(bytes) = out {
+            let text = String::from_utf8(bytes).unwrap();
+            let extracted = dispatch_builtin_function(
+                "JSON_EXTRACT_TEXT",
+                &[Value::Text(text), json_text("$.new.deep")],
+            )
+            .unwrap();
+            assert_eq!(extracted, Value::Text("42".to_string()));
+        } else {
+            panic!("expected Json");
+        }
     }
 }

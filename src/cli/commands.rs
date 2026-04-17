@@ -147,6 +147,30 @@ pub fn all_commands() -> Vec<CommandDef> {
       flags: connect_flags(),
     },
     CommandDef {
+      name: "dump",
+      summary: "Export one or all collections as JSONL for backup/migration",
+      usage: "red dump [--path file] [--collection NAME] [-o FILE]",
+      flags: dump_flags(),
+    },
+    CommandDef {
+      name: "restore",
+      summary: "Import a previously dumped JSONL file into the database",
+      usage: "red restore [--path file] -i FILE [--collection NAME]",
+      flags: restore_flags(),
+    },
+    CommandDef {
+      name: "pitr-list",
+      summary: "List available point-in-time restore points from a snapshot archive",
+      usage: "red pitr-list --snapshot-prefix DIR --wal-prefix DIR",
+      flags: pitr_list_flags(),
+    },
+    CommandDef {
+      name: "pitr-restore",
+      summary: "Restore a database to a specific point in time from snapshots + WAL archive",
+      usage: "red pitr-restore --target-time UNIX_MS --dest PATH --snapshot-prefix DIR --wal-prefix DIR",
+      flags: pitr_restore_flags(),
+    },
+    CommandDef {
       name: "version",
       summary: "Show RedDB version information",
       usage: "red version",
@@ -276,13 +300,17 @@ fn server_flags() -> Vec<FlagSchema> {
         FlagSchema::boolean("http").with_description("Serve the HTTP API"),
         FlagSchema::new("grpc-bind").with_description("Explicit gRPC bind address (host:port)"),
         FlagSchema::new("http-bind").with_description("Explicit HTTP bind address (host:port)"),
-        FlagSchema::new("wire-bind").with_description("Explicit wire TCP bind address (host:port)"),
+        FlagSchema::new("wire-bind")
+            .with_description("Explicit wire bind address (host:port or unix:///path/to/socket)"),
         FlagSchema::new("wire-tls-bind")
             .with_description("Explicit wire TLS bind address (host:port)"),
         FlagSchema::new("wire-tls-cert")
             .with_description("Path to TLS certificate PEM for wire TLS"),
         FlagSchema::new("wire-tls-key")
             .with_description("Path to TLS private key PEM for wire TLS"),
+        FlagSchema::new("pg-bind").with_description(
+            "PostgreSQL wire protocol bind address (enables psql / JDBC / DBeaver clients)",
+        ),
         FlagSchema::new("role")
             .with_short('r')
             .with_description("Replication role")
@@ -314,7 +342,8 @@ fn replica_flags() -> Vec<FlagSchema> {
         FlagSchema::boolean("http").with_description("Serve the HTTP API"),
         FlagSchema::new("grpc-bind").with_description("Explicit gRPC bind address (host:port)"),
         FlagSchema::new("http-bind").with_description("Explicit HTTP bind address (host:port)"),
-        FlagSchema::new("wire-bind").with_description("Explicit wire TCP bind address (host:port)"),
+        FlagSchema::new("wire-bind")
+            .with_description("Explicit wire bind address (host:port or unix:///path/to/socket)"),
         FlagSchema::new("vault")
             .with_description("Enable encrypted auth vault (reserved pages in main .rdb file)")
             .with_default("false"),
@@ -384,6 +413,56 @@ fn health_flags() -> Vec<FlagSchema> {
             .with_description("Server address; defaults by transport"),
         FlagSchema::boolean("grpc").with_description("Probe a gRPC listener (default transport)"),
         FlagSchema::boolean("http").with_description("Probe an HTTP listener"),
+    ]
+}
+
+fn dump_flags() -> Vec<FlagSchema> {
+    vec![
+        FlagSchema::new("path")
+            .with_description("Local database file to dump from")
+            .with_default("./data/reddb.rdb"),
+        FlagSchema::new("collection")
+            .with_short('c')
+            .with_description("Single collection to dump (omit for all)"),
+        FlagSchema::new("output")
+            .with_short('o')
+            .with_description("Destination file (defaults to stdout)"),
+    ]
+}
+
+fn restore_flags() -> Vec<FlagSchema> {
+    vec![
+        FlagSchema::new("path")
+            .with_description("Local database file to restore into")
+            .with_default("./data/reddb.rdb"),
+        FlagSchema::new("input")
+            .with_short('i')
+            .with_description("Dump file to read (required)"),
+        FlagSchema::new("collection")
+            .with_short('c')
+            .with_description("Override target collection name"),
+    ]
+}
+
+fn pitr_list_flags() -> Vec<FlagSchema> {
+    vec![
+        FlagSchema::new("snapshot-prefix")
+            .with_description("Directory (or remote prefix) holding .snapshot files"),
+        FlagSchema::new("wal-prefix")
+            .with_description("Directory (or remote prefix) holding archived WAL segments"),
+    ]
+}
+
+fn pitr_restore_flags() -> Vec<FlagSchema> {
+    vec![
+        FlagSchema::new("target-time")
+            .with_description("Recovery target — UNIX ms (0 = latest available)"),
+        FlagSchema::new("dest")
+            .with_description("Destination database file path for the restored DB"),
+        FlagSchema::new("snapshot-prefix")
+            .with_description("Directory (or remote prefix) holding .snapshot files"),
+        FlagSchema::new("wal-prefix")
+            .with_description("Directory (or remote prefix) holding archived WAL segments"),
     ]
 }
 

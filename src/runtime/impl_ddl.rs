@@ -63,14 +63,63 @@ impl RedDBRuntime {
         self.refresh_table_planner_stats(&query.name);
         self.invalidate_result_cache();
 
+        // Partition metadata (Phase 2.2 PG parity).
+        //
+        // When the CREATE TABLE carries a `PARTITION BY RANGE|LIST|HASH (col)`
+        // clause, stamp the partition config into `red_config` under
+        // `partition.{table}.{by,column}`. Children are registered separately
+        // via `ALTER TABLE parent ATTACH PARTITION child ...`.
+        if let Some(spec) = &query.partition_by {
+            let kind_str = match spec.kind {
+                crate::storage::query::ast::PartitionKind::Range => "range",
+                crate::storage::query::ast::PartitionKind::List => "list",
+                crate::storage::query::ast::PartitionKind::Hash => "hash",
+            };
+            store.set_config_tree(
+                &format!("partition.{}.by", query.name),
+                &crate::serde_json::Value::String(kind_str.to_string()),
+            );
+            store.set_config_tree(
+                &format!("partition.{}.column", query.name),
+                &crate::serde_json::Value::String(spec.column.clone()),
+            );
+        }
+
+        // Table-scoped multi-tenancy (Phase 2.5.4).
+        //
+        // `CREATE TABLE t (...) TENANT BY (col)` declaration:
+        //   1. Persists the `tenant_tables.{table}.column` marker so
+        //      INSERTs can auto-fill and future opens re-hydrate.
+        //   2. Registers the table in the in-memory `tenant_tables`
+        //      HashMap used by the DML auto-fill path.
+        //   3. Installs an implicit RLS policy equivalent to
+        //      `USING (col = CURRENT_TENANT())` across all actions.
+        //   4. Flips `rls_enabled_tables` on so the policy applies.
+        if let Some(col) = &query.tenant_by {
+            store.set_config_tree(
+                &format!("tenant_tables.{}.column", query.name),
+                &crate::serde_json::Value::String(col.clone()),
+            );
+            self.register_tenant_table(&query.name, col);
+        }
+
         let ttl_suffix = query
             .default_ttl_ms
             .map(|ttl_ms| format!(" with default TTL {}ms", ttl_ms))
             .unwrap_or_default();
 
+        let tenant_suffix = query
+            .tenant_by
+            .as_ref()
+            .map(|col| format!(" (tenant-scoped by {col})"))
+            .unwrap_or_default();
+
         Ok(RuntimeQueryResult::ok_message(
             raw_query.to_string(),
-            &format!("table '{}' created{}", query.name, ttl_suffix),
+            &format!(
+                "table '{}' created{}{}",
+                query.name, ttl_suffix, tenant_suffix
+            ),
             "create",
         ))
     }
@@ -167,6 +216,73 @@ impl RedDBRuntime {
                 }
                 AlterOperation::RenameColumn { from, to } => {
                     messages.push(format!("column '{}' renamed to '{}'", from, to));
+                }
+                AlterOperation::AttachPartition { child, bound } => {
+                    // Persist child → parent binding in red_config so the
+                    // future planner-side pruner can enumerate children and
+                    // evaluate their bounds.
+                    store.set_config_tree(
+                        &format!("partition.{}.children.{}", query.name, child),
+                        &crate::serde_json::Value::String(bound.clone()),
+                    );
+                    messages.push(format!(
+                        "partition '{child}' attached to '{}' ({bound})",
+                        query.name
+                    ));
+                }
+                AlterOperation::DetachPartition { child } => {
+                    store.set_config_tree(
+                        &format!("partition.{}.children.{}", query.name, child),
+                        &crate::serde_json::Value::Null,
+                    );
+                    messages.push(format!(
+                        "partition '{child}' detached from '{}'",
+                        query.name
+                    ));
+                }
+                AlterOperation::EnableRowLevelSecurity => {
+                    self.inner
+                        .rls_enabled_tables
+                        .write()
+                        .insert(query.name.clone());
+                    // Persist flag so RLS survives restart via red_config.
+                    store.set_config_tree(
+                        &format!("rls.enabled.{}", query.name),
+                        &crate::serde_json::Value::Bool(true),
+                    );
+                    self.invalidate_plan_cache();
+                    messages.push(format!("row level security enabled on '{}'", query.name));
+                }
+                AlterOperation::DisableRowLevelSecurity => {
+                    self.inner.rls_enabled_tables.write().remove(&query.name);
+                    store.set_config_tree(
+                        &format!("rls.enabled.{}", query.name),
+                        &crate::serde_json::Value::Null,
+                    );
+                    self.invalidate_plan_cache();
+                    messages.push(format!("row level security disabled on '{}'", query.name));
+                }
+                // Phase 2.5.4: retrofit tenancy onto an existing table.
+                AlterOperation::EnableTenancy { column } => {
+                    store.set_config_tree(
+                        &format!("tenant_tables.{}.column", query.name),
+                        &crate::serde_json::Value::String(column.clone()),
+                    );
+                    self.register_tenant_table(&query.name, column);
+                    self.invalidate_plan_cache();
+                    messages.push(format!(
+                        "tenancy enabled on '{}' by column '{column}'",
+                        query.name
+                    ));
+                }
+                AlterOperation::DisableTenancy => {
+                    store.set_config_tree(
+                        &format!("tenant_tables.{}.column", query.name),
+                        &crate::serde_json::Value::Null,
+                    );
+                    self.unregister_tenant_table(&query.name);
+                    self.invalidate_plan_cache();
+                    messages.push(format!("tenancy disabled on '{}'", query.name));
                 }
             }
         }
@@ -622,6 +738,16 @@ fn apply_alter_operations_to_contract(
                     }
                 }
             }
+            // Partition ops don't touch the column contract — metadata is
+            // persisted separately via `red_config.partition.*`.
+            AlterOperation::AttachPartition { .. } | AlterOperation::DetachPartition { .. } => {}
+            // RLS toggles don't touch the column contract — flag is persisted
+            // separately via `red_config.rls.enabled.{table}` and enforced
+            // through the in-memory `rls_enabled_tables` set.
+            AlterOperation::EnableRowLevelSecurity | AlterOperation::DisableRowLevelSecurity => {}
+            // Phase 2.5.4: tenancy toggles persist via `red_config.tenant_tables.*`
+            // and are enforced through `tenant_tables` + RLS auto-policy.
+            AlterOperation::EnableTenancy { .. } | AlterOperation::DisableTenancy => {}
         }
     }
 }

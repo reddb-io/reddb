@@ -917,6 +917,356 @@ fn main() {
             });
         }
 
+        "dump" => {
+            // red dump [--path file] [--collection NAME] [-o FILE]
+            //
+            // JSONL format: one `{"collection": "...", "fields": {...}}` per
+            // line. `restore` reads the same format back. When --collection
+            // is not provided, every collection in the database is dumped.
+            let json_mode = wants_json(&result.flags);
+            let rt = open_local_runtime(&result.flags).unwrap_or_else(|err| {
+                if json_mode {
+                    json_error("dump", &err);
+                }
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            });
+            let store = rt.db().store();
+            let targets: Vec<String> = match flag_string(&result.flags, "collection") {
+                Some(name) if !name.is_empty() => vec![name],
+                _ => store.list_collections(),
+            };
+            let output_path = flag_string(&result.flags, "output");
+
+            let mut buf = String::new();
+            let mut total_rows = 0usize;
+            for collection in &targets {
+                let manager = match store.get_collection(collection) {
+                    Some(m) => m,
+                    None => continue,
+                };
+                for entity in manager.query_all(|_| true) {
+                    let mut row_obj = reddb::json::Map::new();
+                    if let reddb::storage::EntityData::Row(ref row) = entity.data {
+                        if let Some(named) = &row.named {
+                            for (k, v) in named {
+                                row_obj
+                                    .insert(k.clone(), reddb::json::Value::String(v.to_string()));
+                            }
+                        }
+                    }
+                    let mut wrapper = reddb::json::Map::new();
+                    wrapper.insert(
+                        "collection".to_string(),
+                        reddb::json::Value::String(collection.clone()),
+                    );
+                    wrapper.insert("fields".to_string(), reddb::json::Value::Object(row_obj));
+                    let line = reddb::json::Value::Object(wrapper).to_string_compact();
+                    buf.push_str(&line);
+                    buf.push('\n');
+                    total_rows += 1;
+                }
+            }
+
+            match output_path {
+                Some(path) if !path.is_empty() => {
+                    if let Err(e) = std::fs::write(&path, &buf) {
+                        if json_mode {
+                            json_error("dump", &format!("write failed: {e}"));
+                        }
+                        eprintln!("write failed: {e}");
+                        std::process::exit(1);
+                    }
+                    if json_mode {
+                        json_ok(
+                            "dump",
+                            &format!(
+                                "{{\"path\":\"{}\",\"rows\":{},\"collections\":{}}}",
+                                path,
+                                total_rows,
+                                targets.len()
+                            ),
+                        );
+                    } else {
+                        println!(
+                            "dumped {} rows from {} collection(s) to {}",
+                            total_rows,
+                            targets.len(),
+                            path
+                        );
+                    }
+                }
+                _ => {
+                    // Stdout stream.
+                    print!("{}", buf);
+                    if json_mode {
+                        json_ok(
+                            "dump",
+                            &format!(
+                                "{{\"rows\":{},\"collections\":{}}}",
+                                total_rows,
+                                targets.len()
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+
+        "restore" => {
+            // red restore [--path file] -i FILE [--collection NAME]
+            //
+            // Reads JSONL produced by `red dump`. Each line has a `collection`
+            // and a `fields` object — we rebuild an INSERT per row. The
+            // --collection flag overrides the embedded collection name,
+            // useful for renames or partial imports.
+            let json_mode = wants_json(&result.flags);
+            let input_path = match flag_string(&result.flags, "input") {
+                Some(p) if !p.is_empty() => p,
+                _ => {
+                    if json_mode {
+                        json_error("restore", "--input / -i is required");
+                    }
+                    eprintln!("Usage: red restore -i FILE [--collection NAME] [--path DB]");
+                    std::process::exit(1);
+                }
+            };
+            let override_collection = flag_string(&result.flags, "collection");
+
+            let file_text = std::fs::read_to_string(&input_path).unwrap_or_else(|e| {
+                if json_mode {
+                    json_error("restore", &format!("read failed: {e}"));
+                }
+                eprintln!("read failed: {e}");
+                std::process::exit(1);
+            });
+
+            let rt = open_local_runtime(&result.flags).unwrap_or_else(|err| {
+                if json_mode {
+                    json_error("restore", &err);
+                }
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            });
+
+            let mut restored = 0usize;
+            let mut errors = 0usize;
+            for (line_no, line) in file_text.lines().enumerate() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let parsed: reddb::json::Value = match reddb::json::from_str(trimmed) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        errors += 1;
+                        eprintln!("line {}: invalid JSON", line_no + 1);
+                        continue;
+                    }
+                };
+                let (collection, fields) = match &parsed {
+                    reddb::json::Value::Object(map) => {
+                        let coll = override_collection.clone().or_else(|| {
+                            map.get("collection")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                        });
+                        let fields = map.get("fields").cloned();
+                        match (coll, fields) {
+                            (Some(c), Some(f)) => (c, f),
+                            _ => {
+                                errors += 1;
+                                continue;
+                            }
+                        }
+                    }
+                    _ => {
+                        errors += 1;
+                        continue;
+                    }
+                };
+                // Build INSERT INTO {collection} (cols) VALUES (vals)
+                let obj = match fields {
+                    reddb::json::Value::Object(m) => m,
+                    _ => {
+                        errors += 1;
+                        continue;
+                    }
+                };
+                let mut cols = Vec::new();
+                let mut vals = Vec::new();
+                for (k, v) in obj.iter() {
+                    cols.push(k.clone());
+                    vals.push(match v {
+                        reddb::json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+                        reddb::json::Value::Number(n) => n.to_string(),
+                        reddb::json::Value::Bool(b) => b.to_string(),
+                        reddb::json::Value::Null => "NULL".to_string(),
+                        other => format!("'{}'", other.to_string_compact().replace('\'', "''")),
+                    });
+                }
+                let sql = format!(
+                    "INSERT INTO {} ({}) VALUES ({})",
+                    collection,
+                    cols.join(", "),
+                    vals.join(", ")
+                );
+                match rt.execute_query(&sql) {
+                    Ok(_) => restored += 1,
+                    Err(e) => {
+                        errors += 1;
+                        eprintln!("line {}: {}", line_no + 1, e);
+                    }
+                }
+            }
+            checkpoint_local_runtime(&rt);
+
+            if json_mode {
+                json_ok(
+                    "restore",
+                    &format!("{{\"restored\":{},\"errors\":{}}}", restored, errors),
+                );
+            } else {
+                println!("restored {} rows ({} errors)", restored, errors);
+            }
+        }
+
+        "pitr-list" => {
+            // red pitr-list --snapshot-prefix DIR --wal-prefix DIR
+            //
+            // Enumerate restore points by reading the snapshot archive.
+            // Phase 2.4 uses the LocalBackend adapter so callers point at a
+            // filesystem directory; remote backends (S3/Turso/D1) hook in
+            // the same way once credentials are threaded through the CLI.
+            let json_mode = wants_json(&result.flags);
+            let snapshot_prefix = flag_string(&result.flags, "snapshot-prefix")
+                .unwrap_or_else(|| "./data/snapshots".to_string());
+            let wal_prefix = flag_string(&result.flags, "wal-prefix")
+                .unwrap_or_else(|| "./data/wal-archive".to_string());
+
+            let backend = std::sync::Arc::new(reddb::storage::backend::local::LocalBackend)
+                as std::sync::Arc<dyn reddb::storage::backend::RemoteBackend>;
+            let pitr =
+                reddb::storage::wal::PointInTimeRecovery::new(backend, snapshot_prefix, wal_prefix);
+
+            match pitr.list_restore_points() {
+                Ok(points) => {
+                    if json_mode {
+                        let mut out = String::from("[");
+                        for (i, p) in points.iter().enumerate() {
+                            if i > 0 {
+                                out.push(',');
+                            }
+                            out.push_str(&format!(
+                                "{{\"snapshot_id\":{},\"snapshot_time\":{},\"wal_segments\":{},\"latest_recoverable_time\":{}}}",
+                                p.snapshot_id,
+                                p.snapshot_time,
+                                p.wal_segment_count,
+                                p.latest_recoverable_time
+                            ));
+                        }
+                        out.push(']');
+                        json_ok("pitr-list", &out);
+                    } else if points.is_empty() {
+                        println!("no restore points found");
+                    } else {
+                        println!(
+                            "{:<15} {:<24} {:<14} {:<24}",
+                            "snapshot_id",
+                            "snapshot_time (unix ms)",
+                            "wal_segments",
+                            "latest_recoverable_time"
+                        );
+                        for p in &points {
+                            println!(
+                                "{:<15} {:<24} {:<14} {:<24}",
+                                p.snapshot_id,
+                                p.snapshot_time,
+                                p.wal_segment_count,
+                                p.latest_recoverable_time
+                            );
+                        }
+                    }
+                }
+                Err(err) => {
+                    if json_mode {
+                        json_error("pitr-list", &err.to_string());
+                    }
+                    eprintln!("pitr-list error: {err}");
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        "pitr-restore" => {
+            // red pitr-restore --target-time UNIX_MS --dest PATH
+            //                  --snapshot-prefix DIR --wal-prefix DIR
+            //
+            // Picks the latest snapshot whose `snapshot_time <= target_time`,
+            // downloads it into --dest, then replays WAL segments until
+            // target_time. target_time=0 means "replay everything available".
+            let json_mode = wants_json(&result.flags);
+            let target_time: u64 = flag_string(&result.flags, "target-time")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let dest = match flag_string(&result.flags, "dest") {
+                Some(p) if !p.is_empty() => p,
+                _ => {
+                    if json_mode {
+                        json_error("pitr-restore", "--dest is required");
+                    }
+                    eprintln!(
+                        "Usage: red pitr-restore --dest PATH --target-time MS \
+                               --snapshot-prefix DIR --wal-prefix DIR"
+                    );
+                    std::process::exit(1);
+                }
+            };
+            let snapshot_prefix = flag_string(&result.flags, "snapshot-prefix")
+                .unwrap_or_else(|| "./data/snapshots".to_string());
+            let wal_prefix = flag_string(&result.flags, "wal-prefix")
+                .unwrap_or_else(|| "./data/wal-archive".to_string());
+
+            let backend = std::sync::Arc::new(reddb::storage::backend::local::LocalBackend)
+                as std::sync::Arc<dyn reddb::storage::backend::RemoteBackend>;
+            let pitr =
+                reddb::storage::wal::PointInTimeRecovery::new(backend, snapshot_prefix, wal_prefix);
+
+            match pitr.restore_to(target_time, std::path::Path::new(&dest)) {
+                Ok(res) => {
+                    if json_mode {
+                        json_ok(
+                            "pitr-restore",
+                            &format!(
+                                "{{\"snapshot_used\":{},\"wal_segments_replayed\":{},\"records_applied\":{},\"recovered_to_lsn\":{},\"recovered_to_time\":{}}}",
+                                res.snapshot_used,
+                                res.wal_segments_replayed,
+                                res.records_applied,
+                                res.recovered_to_lsn,
+                                res.recovered_to_time
+                            ),
+                        );
+                    } else {
+                        println!(
+                            "restored to {} at lsn {} (snapshot {}, {} WAL segments, {} records applied)",
+                            res.recovered_to_time,
+                            res.recovered_to_lsn,
+                            res.snapshot_used,
+                            res.wal_segments_replayed,
+                            res.records_applied,
+                        );
+                    }
+                }
+                Err(err) => {
+                    if json_mode {
+                        json_error("pitr-restore", &err.to_string());
+                    }
+                    eprintln!("pitr-restore error: {err}");
+                    std::process::exit(1);
+                }
+            }
+        }
+
         _ => {
             if wants_json(&result.flags) {
                 json_error("unknown", &format!("Unknown command: {}", cmd));
@@ -1201,6 +1551,8 @@ fn build_server_config(
         .filter(|v| !v.is_empty())
         .map(PathBuf::from);
 
+    let pg_bind_addr = flag_string(flags, "pg-bind").filter(|v| !v.is_empty());
+
     Ok(ServerCommandConfig {
         path,
         router_bind_addr,
@@ -1210,6 +1562,7 @@ fn build_server_config(
         wire_tls_bind_addr,
         wire_tls_cert,
         wire_tls_key,
+        pg_bind_addr,
         create_if_missing: !flag_bool(flags, "no-create-if-missing"),
         read_only: flag_bool(flags, "read-only"),
         role,

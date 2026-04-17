@@ -3,6 +3,246 @@ use crate::application::entity::metadata_to_json;
 use crate::replication::cdc::ChangeRecord;
 use crate::replication::logical::{ApplyMode, LogicalChangeApplier};
 
+thread_local! {
+    /// Current connection id for the executing statement. Set by the
+    /// per-connection wrapper (stdio/gRPC handlers) before dispatching
+    /// into `execute_query`; falls back to `0` for embedded callers.
+    static CURRENT_CONN_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+
+    /// Authenticated user + role for the executing statement (Phase 2.5.2
+    /// RLS enforcement). Set by the transport middleware after validating
+    /// credentials (password / cert / oauth); unset means "anonymous" /
+    /// "embedded" — RLS policies degrade to the role-agnostic subset.
+    ///
+    /// `None` skips RLS injection entirely; `Some((username, role))`
+    /// passes `role` to `matching_rls_policies(table, Some(role), action)`.
+    static CURRENT_AUTH_IDENTITY: std::cell::RefCell<Option<(String, crate::auth::Role)>> =
+        const { std::cell::RefCell::new(None) };
+
+    /// MVCC snapshot scoped to the currently-executing statement (Phase
+    /// 2.3.2d PG parity). `execute_query` captures it on entry and drops
+    /// it on exit; every scan consults it via
+    /// `entity_visible_under_current_snapshot` to hide tuples whose xmin
+    /// hasn't committed or whose xmax already has.
+    ///
+    /// `None` means "pre-MVCC semantics" — the read path returns every
+    /// tuple regardless of xmin/xmax. All embedded callers that bypass
+    /// `execute_query` see this default.
+    static CURRENT_SNAPSHOT: std::cell::RefCell<Option<SnapshotContext>> =
+        const { std::cell::RefCell::new(None) };
+
+    /// Session-scoped tenant id for the current connection (Phase 2.5.3
+    /// multi-tenancy). Populated by `SET TENANT 'id'` or by transport
+    /// middleware after resolving tenant from auth claims. Read by the
+    /// `CURRENT_TENANT()` scalar function — RLS policies typically
+    /// combine it as `USING (tenant_id = CURRENT_TENANT())` to scope
+    /// every query to one tenant.
+    ///
+    /// `None` means "no tenant bound" — `CURRENT_TENANT()` returns
+    /// NULL, and RLS policies that gate on it hide every row.
+    static CURRENT_TENANT_ID: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Snapshot + manager pair used for read-path visibility checks.
+///
+/// The manager is needed in addition to the snapshot because `aborted`
+/// state mutates after the snapshot is captured — a ROLLBACK by a
+/// committed-at-capture-time writer must still hide its tuples. Keeping
+/// the Arc around is O(pointer) and the RwLock reads on `is_aborted`
+/// are cheap (HashSet lookup under a parking_lot read guard).
+///
+/// `own_xids` (Phase 2.3.2e) lists the xids belonging to the current
+/// connection's transaction — the parent xid plus every open
+/// savepoint sub-xid. The visibility rule promotes rows stamped with
+/// these xids to "always visible (unless aborted)" so the writer sees
+/// its own nested-savepoint writes even though their xids exceed
+/// `snapshot.xid`.
+#[derive(Clone)]
+pub(crate) struct SnapshotContext {
+    pub snapshot: crate::storage::transaction::snapshot::Snapshot,
+    pub manager: Arc<crate::storage::transaction::snapshot::SnapshotManager>,
+    pub own_xids: std::collections::HashSet<crate::storage::transaction::snapshot::Xid>,
+}
+
+/// Install a connection id on the current thread for the duration of a
+/// statement. Transaction state (`RuntimeInner::tx_contexts`) is keyed
+/// by this id so different connections can hold independent BEGINs.
+pub(crate) fn set_current_connection_id(id: u64) {
+    CURRENT_CONN_ID.with(|c| c.set(id));
+}
+
+/// Read the connection id set by `set_current_connection_id`. Returns
+/// `0` when no wrapper installed one — auto-commit path.
+pub(crate) fn current_connection_id() -> u64 {
+    CURRENT_CONN_ID.with(|c| c.get())
+}
+
+/// Install the authenticated identity for the current thread (Phase 2.5.2
+/// RLS enforcement). Transport layers call this right after resolving
+/// auth so the query dispatch can fold RLS policies into the filter.
+pub fn set_current_auth_identity(username: String, role: crate::auth::Role) {
+    CURRENT_AUTH_IDENTITY.with(|cell| *cell.borrow_mut() = Some((username, role)));
+}
+
+/// Clear the thread-local auth identity. Transports call this after the
+/// statement completes so pooled threads don't leak identities across
+/// requests.
+pub fn clear_current_auth_identity() {
+    CURRENT_AUTH_IDENTITY.with(|cell| *cell.borrow_mut() = None);
+}
+
+/// Read the current-thread auth identity. `None` when no transport
+/// installed one (embedded mode / anonymous access).
+pub(crate) fn current_auth_identity() -> Option<(String, crate::auth::Role)> {
+    CURRENT_AUTH_IDENTITY.with(|cell| cell.borrow().clone())
+}
+
+/// Install the session tenant id for the current thread (Phase 2.5.3
+/// multi-tenancy). Called by `SET TENANT 'id'` dispatch and by
+/// transport middleware that resolves tenant from auth claims (e.g.
+/// JWT `tenant` claim, HTTP header, subdomain).
+pub fn set_current_tenant(tenant_id: String) {
+    CURRENT_TENANT_ID.with(|cell| *cell.borrow_mut() = Some(tenant_id));
+}
+
+/// Clear the current-thread tenant — `CURRENT_TENANT()` will then
+/// return NULL and any RLS policy gated on it will hide every row.
+pub fn clear_current_tenant() {
+    CURRENT_TENANT_ID.with(|cell| *cell.borrow_mut() = None);
+}
+
+/// Read the current-thread tenant id. `None` when no tenant was bound.
+pub fn current_tenant() -> Option<String> {
+    CURRENT_TENANT_ID.with(|cell| cell.borrow().clone())
+}
+
+/// Install the MVCC snapshot used by the current thread for the duration
+/// of one statement. Paired with `clear_current_snapshot()` — callers
+/// should prefer the `CurrentSnapshotGuard` RAII wrapper so early returns
+/// still clean up.
+pub(crate) fn set_current_snapshot(ctx: SnapshotContext) {
+    CURRENT_SNAPSHOT.with(|cell| *cell.borrow_mut() = Some(ctx));
+}
+
+pub(crate) fn clear_current_snapshot() {
+    CURRENT_SNAPSHOT.with(|cell| *cell.borrow_mut() = None);
+}
+
+/// Drop-guard that restores the previous snapshot on scope exit. Safe to
+/// nest — each statement saves the caller's snapshot and puts it back
+/// instead of blindly clearing, so a top-level `execute_query` called
+/// from inside another statement dispatch (e.g. vector source subqueries)
+/// doesn't strip visibility from the outer scan.
+pub(crate) struct CurrentSnapshotGuard {
+    previous: Option<SnapshotContext>,
+}
+
+impl CurrentSnapshotGuard {
+    pub(crate) fn install(ctx: SnapshotContext) -> Self {
+        let previous = CURRENT_SNAPSHOT.with(|cell| cell.borrow().clone());
+        set_current_snapshot(ctx);
+        Self { previous }
+    }
+}
+
+impl Drop for CurrentSnapshotGuard {
+    fn drop(&mut self) {
+        CURRENT_SNAPSHOT.with(|cell| *cell.borrow_mut() = self.previous.take());
+    }
+}
+
+/// Is this entity visible under the current thread's MVCC snapshot?
+///
+/// Returns `true` (no filtering) when no snapshot is installed — that
+/// path is used by embedded callers and by operations that intentionally
+/// bypass MVCC (VACUUM, snapshot export, admin introspection).
+///
+/// When a snapshot is installed the result is
+///   `snapshot.sees(xmin, xmax) && !mgr.is_aborted(xmin) && !xmax_half_abort`
+/// where `xmax_half_abort` re-grants visibility for tuples whose
+/// deleting transaction rolled back.
+#[inline]
+pub(crate) fn entity_visible_under_current_snapshot(
+    entity: &crate::storage::unified::entity::UnifiedEntity,
+) -> bool {
+    CURRENT_SNAPSHOT.with(|cell| {
+        let guard = cell.borrow();
+        let Some(ctx) = guard.as_ref() else {
+            return true;
+        };
+        visibility_check(ctx, entity.xmin, entity.xmax)
+    })
+}
+
+/// Direct visibility check from raw `(xmin, xmax)` — bypasses the
+/// entity borrow for callers that already decomposed the tuple (e.g.
+/// pre-materialized scan caches). Same semantics as
+/// `entity_visible_under_current_snapshot`.
+#[inline]
+pub(crate) fn xids_visible_under_current_snapshot(xmin: u64, xmax: u64) -> bool {
+    CURRENT_SNAPSHOT.with(|cell| {
+        let guard = cell.borrow();
+        let Some(ctx) = guard.as_ref() else {
+            return true;
+        };
+        visibility_check(ctx, xmin, xmax)
+    })
+}
+
+/// Clone the current thread's snapshot context. Parallel scan paths
+/// (`query_all_zoned` with `std::thread::scope`) call this on the main
+/// thread *before* spawning workers so the captured `SnapshotContext`
+/// can be moved into every worker closure. Worker threads do not
+/// inherit thread-locals, so calling `entity_visible_under_current_snapshot`
+/// from inside a spawned closure would silently skip the filter.
+pub(crate) fn capture_current_snapshot() -> Option<SnapshotContext> {
+    CURRENT_SNAPSHOT.with(|cell| cell.borrow().clone())
+}
+
+/// Apply the same visibility rules used by the thread-local helpers
+/// against a caller-provided context. Intended for parallel workers
+/// that captured the snapshot with `capture_current_snapshot()`.
+#[inline]
+pub(crate) fn entity_visible_with_context(
+    ctx: Option<&SnapshotContext>,
+    entity: &crate::storage::unified::entity::UnifiedEntity,
+) -> bool {
+    match ctx {
+        Some(ctx) => visibility_check(ctx, entity.xmin, entity.xmax),
+        None => true,
+    }
+}
+
+#[inline]
+fn visibility_check(ctx: &SnapshotContext, xmin: u64, xmax: u64) -> bool {
+    // Writer aborted → tuple never existed from any future reader's view.
+    // Checked *before* the own-xids fast path so an aborted own-sub-xid
+    // (rolled-back savepoint) stays hidden from the parent.
+    if xmin != 0 && ctx.manager.is_aborted(xmin) {
+        return false;
+    }
+    // Deleter aborted → treat xmax as unset; fall back to xmin-only check.
+    let effective_xmax = if xmax != 0 && ctx.manager.is_aborted(xmax) {
+        0
+    } else {
+        xmax
+    };
+    // Phase 2.3.2e: own-tx writes are always visible to the connection
+    // that stamped them, even when xmin/xmax exceed `snapshot.xid` (as
+    // happens for sub-xids allocated by SAVEPOINT after BEGIN).
+    let own_xmin = xmin != 0 && ctx.own_xids.contains(&xmin);
+    let own_xmax = effective_xmax != 0 && ctx.own_xids.contains(&effective_xmax);
+    if own_xmax {
+        // This connection deleted the row via this xid — hide it from self.
+        return false;
+    }
+    if own_xmin {
+        return true;
+    }
+    ctx.snapshot.sees(xmin, effective_xmax)
+}
+
 fn runtime_pool_lock(runtime: &RedDBRuntime) -> std::sync::MutexGuard<'_, PoolState> {
     runtime
         .inner
@@ -132,12 +372,206 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
             }
         }
         QueryExpr::ExplainAlter(query) => cache_scope_insert(scopes, &query.target.name),
+        QueryExpr::MaintenanceCommand(cmd) => match cmd {
+            crate::storage::query::ast::MaintenanceCommand::Vacuum { target, .. }
+            | crate::storage::query::ast::MaintenanceCommand::Analyze { target } => {
+                if let Some(t) = target {
+                    cache_scope_insert(scopes, t);
+                }
+            }
+        },
+        QueryExpr::CopyFrom(cmd) => cache_scope_insert(scopes, &cmd.table),
+        QueryExpr::CreateView(cmd) => {
+            cache_scope_insert(scopes, &cmd.name);
+            // Invalidating the view should also invalidate its dependencies.
+            collect_query_expr_result_cache_scopes(scopes, &cmd.query);
+        }
+        QueryExpr::DropView(cmd) => cache_scope_insert(scopes, &cmd.name),
+        QueryExpr::RefreshMaterializedView(cmd) => cache_scope_insert(scopes, &cmd.name),
+        QueryExpr::CreatePolicy(cmd) => cache_scope_insert(scopes, &cmd.table),
+        QueryExpr::DropPolicy(cmd) => cache_scope_insert(scopes, &cmd.table),
+        QueryExpr::CreateServer(_) | QueryExpr::DropServer(_) => {}
+        QueryExpr::CreateForeignTable(cmd) => cache_scope_insert(scopes, &cmd.name),
+        QueryExpr::DropForeignTable(cmd) => cache_scope_insert(scopes, &cmd.name),
         QueryExpr::Graph(_)
         | QueryExpr::GraphCommand(_)
         | QueryExpr::ProbabilisticCommand(_)
         | QueryExpr::SetConfig { .. }
-        | QueryExpr::ShowConfig { .. } => {}
+        | QueryExpr::ShowConfig { .. }
+        | QueryExpr::SetTenant(_)
+        | QueryExpr::ShowTenant
+        | QueryExpr::TransactionControl(_)
+        | QueryExpr::CreateSchema(_)
+        | QueryExpr::DropSchema(_)
+        | QueryExpr::CreateSequence(_)
+        | QueryExpr::DropSequence(_) => {}
     }
+}
+
+/// Combine matching RLS policies for a table + action into a single
+/// `Filter` suitable for AND-ing into a caller's `WHERE` clause.
+///
+/// Returns `None` when RLS is disabled or no policy admits the caller's
+/// role — callers use that to short-circuit the mutation (for DELETE /
+/// UPDATE we simply skip the operation, which PG expresses as "no rows
+/// match the policy + predicate combination").
+pub(crate) fn rls_policy_filter(
+    runtime: &RedDBRuntime,
+    table: &str,
+    action: crate::storage::query::ast::PolicyAction,
+) -> Option<crate::storage::query::ast::Filter> {
+    use crate::storage::query::ast::Filter;
+
+    if !runtime.inner.rls_enabled_tables.read().contains(table) {
+        return None;
+    }
+    let role = current_auth_identity().map(|(_, role)| role);
+    let role_str = role.map(|r| r.as_str().to_string());
+    let policies = runtime.matching_rls_policies(table, role_str.as_deref(), action);
+    if policies.is_empty() {
+        return None;
+    }
+    policies
+        .into_iter()
+        .reduce(|acc, f| Filter::Or(Box::new(acc), Box::new(f)))
+}
+
+/// Returns true when the table has RLS enforcement enabled. Convenience
+/// shortcut so DML paths can gate the AND-combine work without reaching
+/// into `runtime.inner.rls_enabled_tables` directly.
+pub(crate) fn rls_is_enabled(runtime: &RedDBRuntime, table: &str) -> bool {
+    runtime.inner.rls_enabled_tables.read().contains(table)
+}
+
+/// RLS policy injection (Phase 2.5.2 PG parity).
+///
+/// Fetch every matching policy for the current thread-local role and
+/// fold them into the query's filter. Semantics mirror PostgreSQL:
+///
+/// * Multiple policies on the same table combine with **OR** — a row is
+///   visible if *any* policy admits it.
+/// * The combined policy predicate is **AND**-ed into the caller's
+///   existing `WHERE` clause so explicit predicates continue to trim
+///   the policy-allowed set.
+/// * No matching policies + RLS enabled = zero rows (PG's
+///   restrictive-default). Callers get `None` and return an empty
+///   `UnifiedResult` without ever dispatching the scan.
+///
+/// This runs only when `RuntimeInner::rls_enabled_tables` already
+/// contains the table name — callers gate the hot path upfront to
+/// avoid the lock acquisition on tables without RLS.
+///
+/// Returns `None` when no policy admits the current role; returns
+/// `Some(mutated_table)` with policy filters folded in otherwise.
+fn inject_rls_filters(
+    runtime: &RedDBRuntime,
+    mut table: crate::storage::query::ast::TableQuery,
+) -> Option<crate::storage::query::ast::TableQuery> {
+    use crate::storage::query::ast::{Filter, PolicyAction};
+
+    // `None` role falls through to policies with no `TO role` clause.
+    let role = current_auth_identity().map(|(_, role)| role);
+    let role_str = role.map(|r| r.as_str().to_string());
+    let policies =
+        runtime.matching_rls_policies(&table.table, role_str.as_deref(), PolicyAction::Select);
+
+    if policies.is_empty() {
+        // RLS enabled + no policy match = deny everything. Signal the
+        // caller to short-circuit with an empty result set.
+        return None;
+    }
+
+    // Combine policy predicates with OR (PG's permissive default).
+    let combined = policies
+        .into_iter()
+        .reduce(|acc, f| Filter::Or(Box::new(acc), Box::new(f)))
+        .expect("policies non-empty");
+
+    // AND into the caller's existing filter.
+    table.filter = Some(match table.filter.take() {
+        Some(existing) => Filter::And(Box::new(existing), Box::new(combined)),
+        None => combined,
+    });
+    Some(table)
+}
+
+/// Foreign-table post-scan filter application (Phase 3.2.2 PG parity).
+///
+/// Phase 3.2 FDW wrappers don't advertise filter pushdown, so the runtime
+/// applies `WHERE` / `ORDER BY` / `LIMIT` / `OFFSET` after the wrapper
+/// materialises all rows. Projections are best-effort — when the query
+/// lists explicit columns we keep only those; a `SELECT *` keeps every
+/// wrapper-emitted field verbatim.
+///
+/// When a wrapper later opts into pushdown (`supports_pushdown = true`)
+/// the runtime will pass the compiled filter down instead of post-filtering.
+fn apply_foreign_table_filters(
+    records: Vec<crate::storage::query::unified::UnifiedRecord>,
+    query: &crate::storage::query::ast::TableQuery,
+) -> crate::storage::query::unified::UnifiedResult {
+    use crate::storage::query::sql_lowering::{
+        effective_table_filter, effective_table_projections,
+    };
+    use crate::storage::query::unified::UnifiedResult;
+
+    let filter = effective_table_filter(query);
+    let projections = effective_table_projections(query);
+
+    // Step 1 — WHERE. Reuse the cross-store evaluator so the semantics
+    // match native-collection queries (same operators, same NULL handling).
+    let mut filtered: Vec<_> = records
+        .into_iter()
+        .filter(|record| match &filter {
+            Some(f) => {
+                super::join_filter::evaluate_runtime_filter_with_db(None, record, f, None, None)
+            }
+            None => true,
+        })
+        .collect();
+
+    // Step 2 — LIMIT / OFFSET. Applied after filter to match SQL semantics.
+    if let Some(offset) = query.offset {
+        let offset = offset as usize;
+        if offset >= filtered.len() {
+            filtered.clear();
+        } else {
+            filtered.drain(0..offset);
+        }
+    }
+    if let Some(limit) = query.limit {
+        filtered.truncate(limit as usize);
+    }
+
+    // Step 3 — columns list. `SELECT *` (no explicit projections) keeps
+    // the wrapper's column set; an explicit list trims to those names.
+    let columns: Vec<String> = if projections.is_empty() {
+        filtered
+            .first()
+            .map(|r| r.values.keys().cloned().collect())
+            .unwrap_or_default()
+    } else {
+        projections
+            .iter()
+            .map(super::join_filter::projection_name)
+            .collect()
+    };
+
+    let mut result = UnifiedResult::empty();
+    result.columns = columns;
+    result.records = filtered;
+    result
+}
+
+/// Collect every concrete table reference inside a `QueryExpr`.
+///
+/// Used by view bookkeeping (dependency tracking for materialised
+/// invalidation) and any other rewriter that needs to know the base
+/// tables a query pulls from. Does not descend into projections/filters;
+/// only the `FROM` side.
+pub(crate) fn collect_table_refs(expr: &QueryExpr) -> Vec<String> {
+    let mut scopes: HashSet<String> = HashSet::new();
+    collect_query_expr_result_cache_scopes(&mut scopes, expr);
+    scopes.into_iter().collect()
 }
 
 fn query_expr_result_cache_scopes(expr: &QueryExpr) -> HashSet<String> {
@@ -196,6 +630,19 @@ impl RedDBRuntime {
                 ec_worker: crate::ec::worker::EcWorker::new(),
                 auth_store: parking_lot::RwLock::new(None),
                 commit_lock: Mutex::new(()),
+                views: parking_lot::RwLock::new(HashMap::new()),
+                materialized_views: parking_lot::RwLock::new(
+                    crate::storage::cache::result::MaterializedViewCache::new(),
+                ),
+                snapshot_manager: Arc::new(
+                    crate::storage::transaction::snapshot::SnapshotManager::new(),
+                ),
+                tx_contexts: parking_lot::RwLock::new(HashMap::new()),
+                rls_policies: parking_lot::RwLock::new(HashMap::new()),
+                rls_enabled_tables: parking_lot::RwLock::new(HashSet::new()),
+                foreign_tables: Arc::new(crate::storage::fdw::ForeignTableRegistry::with_builtins()),
+                pending_tombstones: parking_lot::RwLock::new(HashMap::new()),
+                tenant_tables: parking_lot::RwLock::new(HashMap::new()),
             }),
         };
 
@@ -213,6 +660,11 @@ impl RedDBRuntime {
             .unwrap_or(0)
             .max(runtime.config_u64("red.config.timeline.last_archived_lsn", 0));
         runtime.inner.cdc.set_current_lsn(restored_cdc_lsn);
+
+        // Phase 2.5.4: replay `tenant_tables.{table}.column` markers so
+        // tables declared via `TENANT BY (col)` survive restart. Each
+        // entry re-registers the auto-policy and flips RLS on again.
+        runtime.rehydrate_tenant_tables();
         if let Some(repl) = &runtime.inner.db.replication {
             repl.wal_buffer.set_current_lsn(restored_cdc_lsn);
         }
@@ -851,14 +1303,44 @@ impl RedDBRuntime {
         metadata: Option<&crate::storage::Metadata>,
         invalidate_cache: bool,
     ) {
+        self.cdc_emit_prebuilt_with_columns(
+            operation,
+            collection,
+            entity,
+            entity_kind,
+            metadata,
+            invalidate_cache,
+            None,
+        )
+    }
+
+    /// `cdc_emit_prebuilt` plus the list of column names whose values
+    /// changed on this update. Callers that have already computed a
+    /// `RowDamageVector` pass it here so downstream CDC consumers can
+    /// filter events by touched column without re-diffing.
+    /// `changed_columns` is only meaningful for `Update` operations —
+    /// insert and delete events ignore it.
+    pub(crate) fn cdc_emit_prebuilt_with_columns(
+        &self,
+        operation: crate::replication::cdc::ChangeOperation,
+        collection: &str,
+        entity: &UnifiedEntity,
+        entity_kind: &str,
+        metadata: Option<&crate::storage::Metadata>,
+        invalidate_cache: bool,
+        changed_columns: Option<Vec<String>>,
+    ) {
         if invalidate_cache {
             self.invalidate_result_cache();
         }
 
-        let lsn = self
-            .inner
-            .cdc
-            .emit(operation, collection, entity.id.raw(), entity_kind);
+        let lsn = self.inner.cdc.emit_with_columns(
+            operation,
+            collection,
+            entity.id.raw(),
+            entity_kind,
+            changed_columns,
+        );
 
         if let Some(ref primary) = self.inner.db.replication {
             let store = self.inner.db.store();
@@ -1313,6 +1795,30 @@ impl RedDBRuntime {
 
     #[inline(never)]
     pub fn execute_query(&self, query: &str) -> RedDBResult<RuntimeQueryResult> {
+        // Phase 2.3.2d: install the MVCC snapshot for this statement so
+        // every downstream scan sees a consistent row set. Dropped at
+        // function exit — `CurrentSnapshotGuard` restores the caller's
+        // snapshot (if any) on every return path, including early errors.
+        //
+        // Phase 2.3.2e: own-tx xids (parent + open savepoints) hitch a
+        // ride on the context so visibility_check can always reveal
+        // the current connection's own writes.
+        let own_xids = {
+            let mut set = std::collections::HashSet::new();
+            if let Some(ctx) = self.inner.tx_contexts.read().get(&current_connection_id()) {
+                set.insert(ctx.xid);
+                for (_, sub) in &ctx.savepoints {
+                    set.insert(*sub);
+                }
+            }
+            set
+        };
+        let _snapshot_guard = CurrentSnapshotGuard::install(SnapshotContext {
+            snapshot: self.current_snapshot(),
+            manager: Arc::clone(&self.inner.snapshot_manager),
+            own_xids,
+        });
+
         // ── TURBO: bypass SQL parse for SELECT * FROM x WHERE _entity_id = N ──
         if let Some(result) = self.try_fast_entity_lookup(query) {
             return result;
@@ -1465,19 +1971,82 @@ impl RedDBRuntime {
                     statement_type: "select",
                 })
             }
-            QueryExpr::Table(table) => Ok(RuntimeQueryResult {
-                query: query.to_string(),
-                mode,
-                statement,
-                engine: "runtime-table",
-                result: execute_runtime_table_query(
-                    &self.inner.db,
-                    &table,
-                    Some(&self.inner.index_store),
-                )?,
-                affected_rows: 0,
-                statement_type: "select",
-            }),
+            QueryExpr::Table(table) => {
+                // Foreign-table intercept (Phase 3.2.2 PG parity).
+                //
+                // When the referenced table matches a `CREATE FOREIGN TABLE`
+                // registration, short-circuit into the FDW scan. Phase 3.2
+                // wrappers don't yet support pushdown, so filters/projections
+                // apply post-scan via `apply_foreign_table_filters` — good
+                // enough for correctness; perf work lands in 3.2.3.
+                if self.inner.foreign_tables.is_foreign_table(&table.table) {
+                    let records = self
+                        .inner
+                        .foreign_tables
+                        .scan(&table.table)
+                        .map_err(|e| RedDBError::Internal(e.to_string()))?;
+                    let result = apply_foreign_table_filters(records, &table);
+                    return Ok(RuntimeQueryResult {
+                        query: query.to_string(),
+                        mode,
+                        statement,
+                        engine: "runtime-fdw",
+                        result,
+                        affected_rows: 0,
+                        statement_type: "select",
+                    });
+                }
+
+                // Row-Level Security enforcement (Phase 2.5.2 PG parity).
+                //
+                // When RLS is enabled on this table, fetch every policy
+                // that applies to the current (role, SELECT) pair and
+                // fold them into the query's WHERE clause: policies
+                // OR-combine (any of them admitting the row is enough),
+                // then AND into the caller's existing filter.
+                //
+                // Anonymous callers (no thread-local identity) pass
+                // `role = None`; policies with a specific `TO role`
+                // clause skip, but `TO PUBLIC` policies still apply.
+                //
+                // When `inject_rls_filters` returns `None` the table has
+                // RLS enabled but no policy admits the caller's role —
+                // short-circuit with an empty result set instead of
+                // synthesising a contradiction filter.
+                let table_with_rls = if self.inner.rls_enabled_tables.read().contains(&table.table)
+                {
+                    match inject_rls_filters(self, table) {
+                        Some(t) => t,
+                        None => {
+                            let empty = crate::storage::query::unified::UnifiedResult::empty();
+                            return Ok(RuntimeQueryResult {
+                                query: query.to_string(),
+                                mode,
+                                statement,
+                                engine: "runtime-table-rls",
+                                result: empty,
+                                affected_rows: 0,
+                                statement_type: "select",
+                            });
+                        }
+                    }
+                } else {
+                    table
+                };
+                Ok(RuntimeQueryResult {
+                    query: query.to_string(),
+                    mode,
+                    statement,
+                    engine: "runtime-table",
+                    result: execute_runtime_table_query(
+                        &self.inner.db,
+                        &table_with_rls,
+                        Some(&self.inner.index_store),
+                    )?,
+                    affected_rows: 0,
+                    statement_type: "select",
+                })
+            }
             QueryExpr::Join(join) => Ok(RuntimeQueryResult {
                 query: query.to_string(),
                 mode,
@@ -1609,6 +2178,735 @@ impl RedDBRuntime {
                     statement_type: "select",
                 })
             }
+            // Session-local multi-tenancy handle (Phase 2.5.3).
+            //
+            // SET TENANT 'id' / SET TENANT NULL / RESET TENANT — writes
+            // the thread-local; SHOW TENANT returns it. Paired with the
+            // CURRENT_TENANT() scalar for use in RLS policies.
+            QueryExpr::SetTenant(ref value) => {
+                match value {
+                    Some(id) => set_current_tenant(id.clone()),
+                    None => clear_current_tenant(),
+                }
+                Ok(RuntimeQueryResult::ok_message(
+                    query.to_string(),
+                    &match value {
+                        Some(id) => format!("tenant set: {id}"),
+                        None => "tenant cleared".to_string(),
+                    },
+                    "set_tenant",
+                ))
+            }
+            QueryExpr::ShowTenant => {
+                let mut result =
+                    UnifiedResult::with_columns(vec!["tenant".into()]);
+                let mut record = UnifiedRecord::new();
+                record.set(
+                    "tenant",
+                    current_tenant()
+                        .map(Value::Text)
+                        .unwrap_or(Value::Null),
+                );
+                result.push(record);
+                Ok(RuntimeQueryResult {
+                    query: query.to_string(),
+                    mode,
+                    statement: "show_tenant",
+                    engine: "runtime-tenant",
+                    result,
+                    affected_rows: 0,
+                    statement_type: "select",
+                })
+            }
+            // Transaction control (Phase 2.3 PG parity).
+            //
+            // BEGIN allocates a real `Xid` and stores a `TxnContext` keyed by
+            // the current connection's id. COMMIT/ROLLBACK release it through
+            // the `SnapshotManager` so future snapshots see the correct set of
+            // active/aborted transactions.
+            //
+            // Tuple stamping (xmin/xmax) and read-path visibility filtering
+            // land in Phase 2.3.2 — this dispatch only manages the snapshot
+            // registry. Statements running outside a TxnContext still behave
+            // as autocommit (xid=0 → visible to every snapshot).
+            QueryExpr::TransactionControl(ref ctl) => {
+                use crate::storage::query::ast::TxnControl;
+                use crate::storage::transaction::snapshot::{TxnContext, Xid};
+                use crate::storage::transaction::IsolationLevel;
+
+                // Phase 2.3 keys transactions by a thread-local connection id.
+                // The stdio/gRPC paths wire a real per-connection id later;
+                // for embedded use (one RedDBRuntime per process-ish caller)
+                // we fall back to a deterministic placeholder.
+                let conn_id = current_connection_id();
+
+                let (kind, msg) = match ctl {
+                    TxnControl::Begin => {
+                        let mgr = Arc::clone(&self.inner.snapshot_manager);
+                        let xid = mgr.begin();
+                        let snapshot = mgr.snapshot(xid);
+                        let ctx = TxnContext {
+                            xid,
+                            isolation: IsolationLevel::SnapshotIsolation,
+                            snapshot,
+                            savepoints: Vec::new(),
+                        };
+                        self.inner.tx_contexts.write().insert(conn_id, ctx);
+                        ("begin", format!("BEGIN — xid={xid} (snapshot isolation)"))
+                    }
+                    TxnControl::Commit => {
+                        let ctx = self.inner.tx_contexts.write().remove(&conn_id);
+                        match ctx {
+                            Some(ctx) => {
+                                // Phase 2.3.2e: commit every open sub-xid
+                                // so they also become visible. Their
+                                // work is promoted to the parent txn's
+                                // result exactly like a RELEASE would
+                                // have done.
+                                for (_, sub) in &ctx.savepoints {
+                                    self.inner.snapshot_manager.commit(*sub);
+                                }
+                                self.inner.snapshot_manager.commit(ctx.xid);
+                                // Phase 2.3.2b: physically remove tuples the txn
+                                // marked for deletion. Before commit the rows
+                                // only had their xmax stamped — now the
+                                // deletion is durable.
+                                self.finalize_pending_tombstones(conn_id);
+                                ("commit", format!("COMMIT — xid={} committed", ctx.xid))
+                            }
+                            None => (
+                                "commit",
+                                "COMMIT outside transaction — no-op (autocommit)".to_string(),
+                            ),
+                        }
+                    }
+                    TxnControl::Rollback => {
+                        let ctx = self.inner.tx_contexts.write().remove(&conn_id);
+                        match ctx {
+                            Some(ctx) => {
+                                // Phase 2.3.2e: abort every open sub-xid
+                                // too so their writes stay hidden.
+                                for (_, sub) in &ctx.savepoints {
+                                    self.inner.snapshot_manager.rollback(*sub);
+                                }
+                                self.inner.snapshot_manager.rollback(ctx.xid);
+                                // Phase 2.3.2b: tuples that the txn had
+                                // xmax-stamped become live again — wipe xmax
+                                // back to 0 so later snapshots see them.
+                                self.revive_pending_tombstones(conn_id);
+                                ("rollback", format!("ROLLBACK — xid={} aborted", ctx.xid))
+                            }
+                            None => (
+                                "rollback",
+                                "ROLLBACK outside transaction — no-op (autocommit)".to_string(),
+                            ),
+                        }
+                    }
+                    // Phase 2.3.2e: savepoints map onto sub-xids. Each
+                    // SAVEPOINT allocates a fresh xid and pushes it
+                    // onto the per-txn stack so subsequent writes can
+                    // be selectively rolled back. RELEASE pops without
+                    // aborting; ROLLBACK TO aborts the sub-xid (and
+                    // any nested ones) + revives their tombstones.
+                    TxnControl::Savepoint(name) => {
+                        let mgr = Arc::clone(&self.inner.snapshot_manager);
+                        let mut guard = self.inner.tx_contexts.write();
+                        match guard.get_mut(&conn_id) {
+                            Some(ctx) => {
+                                let sub = mgr.begin();
+                                ctx.savepoints.push((name.clone(), sub));
+                                ("savepoint", format!("SAVEPOINT {name} — sub_xid={sub}"))
+                            }
+                            None => (
+                                "savepoint",
+                                "SAVEPOINT outside transaction — no-op".to_string(),
+                            ),
+                        }
+                    }
+                    TxnControl::ReleaseSavepoint(name) => {
+                        let mut guard = self.inner.tx_contexts.write();
+                        match guard.get_mut(&conn_id) {
+                            Some(ctx) => {
+                                let pos = ctx
+                                    .savepoints
+                                    .iter()
+                                    .position(|(n, _)| n == &name)
+                                    .ok_or_else(|| {
+                                        RedDBError::Internal(format!(
+                                            "savepoint {name} does not exist"
+                                        ))
+                                    })?;
+                                // RELEASE pops the named savepoint and
+                                // any nested ones. Their sub-xids are
+                                // left in snapshot_manager.active so
+                                // they commit together with the parent
+                                // (PG semantics: released savepoints
+                                // still contribute their work).
+                                let released = ctx.savepoints.len() - pos;
+                                ctx.savepoints.truncate(pos);
+                                (
+                                    "release_savepoint",
+                                    format!("RELEASE SAVEPOINT {name} — {released} level(s)"),
+                                )
+                            }
+                            None => (
+                                "release_savepoint",
+                                "RELEASE outside transaction — no-op".to_string(),
+                            ),
+                        }
+                    }
+                    TxnControl::RollbackToSavepoint(name) => {
+                        let mgr = Arc::clone(&self.inner.snapshot_manager);
+                        // Splice out the savepoint + nested ones under
+                        // a narrow lock, then run the snapshot-manager
+                        // + tombstone side-effects without the tx map
+                        // held so nothing re-enters.
+                        let drop_result: Option<(Xid, Vec<Xid>)> = {
+                            let mut guard = self.inner.tx_contexts.write();
+                            if let Some(ctx) = guard.get_mut(&conn_id) {
+                                let pos = ctx
+                                    .savepoints
+                                    .iter()
+                                    .position(|(n, _)| n == &name)
+                                    .ok_or_else(|| {
+                                        RedDBError::Internal(format!(
+                                            "savepoint {name} does not exist"
+                                        ))
+                                    })?;
+                                let savepoint_xid = ctx.savepoints[pos].1;
+                                let aborted: Vec<Xid> = ctx
+                                    .savepoints
+                                    .split_off(pos)
+                                    .into_iter()
+                                    .map(|(_, x)| x)
+                                    .collect();
+                                Some((savepoint_xid, aborted))
+                            } else {
+                                None
+                            }
+                        };
+
+                        match drop_result {
+                            Some((savepoint_xid, aborted)) => {
+                                for x in &aborted {
+                                    mgr.rollback(*x);
+                                }
+                                let revived = self.revive_tombstones_since(conn_id, savepoint_xid);
+                                (
+                                    "rollback_to_savepoint",
+                                    format!(
+                                        "ROLLBACK TO SAVEPOINT {name} — aborted {} sub_xid(s), revived {revived} tombstone(s)",
+                                        aborted.len()
+                                    ),
+                                )
+                            }
+                            None => (
+                                "rollback_to_savepoint",
+                                "ROLLBACK TO outside transaction — no-op".to_string(),
+                            ),
+                        }
+                    }
+                };
+                Ok(RuntimeQueryResult::ok_message(
+                    query.to_string(),
+                    &msg,
+                    kind,
+                ))
+            }
+            // Schema + Sequence DDL (Phase 1.3 PG parity).
+            //
+            // Schemas are lightweight logical namespaces: a CREATE SCHEMA call
+            // just registers the name in `red_config` under `schema.{name}`.
+            // Table lookups still happen by collection name; clients using
+            // `schema.table` qualified names collapse to collection `schema.table`.
+            //
+            // Sequences persist a 64-bit counter + metadata (start, increment)
+            // in `red_config` under `sequence.{name}.*`. Scalar callers
+            // `nextval('name')` / `currval('name')` arrive with the MVCC phase
+            // once we have a proper mutating-function dispatch path; for now the
+            // DDL just establishes the catalog entry so clients don't error.
+            QueryExpr::CreateSchema(ref q) => {
+                let store = self.inner.db.store();
+                let key = format!("schema.{}", q.name);
+                if store.get_config(&key).is_some() {
+                    if q.if_not_exists {
+                        return Ok(RuntimeQueryResult::ok_message(
+                            query.to_string(),
+                            &format!("schema {} already exists — skipped", q.name),
+                            "create_schema",
+                        ));
+                    }
+                    return Err(RedDBError::Internal(format!(
+                        "schema {} already exists",
+                        q.name
+                    )));
+                }
+                store.set_config_tree(&key, &crate::serde_json::Value::Bool(true));
+                Ok(RuntimeQueryResult::ok_message(
+                    query.to_string(),
+                    &format!("schema {} created", q.name),
+                    "create_schema",
+                ))
+            }
+            QueryExpr::DropSchema(ref q) => {
+                let store = self.inner.db.store();
+                let key = format!("schema.{}", q.name);
+                let existed = store.get_config(&key).is_some();
+                if !existed && !q.if_exists {
+                    return Err(RedDBError::Internal(format!(
+                        "schema {} does not exist",
+                        q.name
+                    )));
+                }
+                // Remove marker from red_config via set to null.
+                store.set_config_tree(&key, &crate::serde_json::Value::Null);
+                let suffix = if q.cascade {
+                    " (CASCADE accepted — tables untouched)"
+                } else {
+                    ""
+                };
+                Ok(RuntimeQueryResult::ok_message(
+                    query.to_string(),
+                    &format!("schema {} dropped{}", q.name, suffix),
+                    "drop_schema",
+                ))
+            }
+            QueryExpr::CreateSequence(ref q) => {
+                let store = self.inner.db.store();
+                let base = format!("sequence.{}", q.name);
+                let start_key = format!("{base}.start");
+                let incr_key = format!("{base}.increment");
+                let curr_key = format!("{base}.current");
+                if store.get_config(&start_key).is_some() {
+                    if q.if_not_exists {
+                        return Ok(RuntimeQueryResult::ok_message(
+                            query.to_string(),
+                            &format!("sequence {} already exists — skipped", q.name),
+                            "create_sequence",
+                        ));
+                    }
+                    return Err(RedDBError::Internal(format!(
+                        "sequence {} already exists",
+                        q.name
+                    )));
+                }
+                // Persist start + increment, and set current so the first
+                // nextval returns `start`.
+                let initial_current = q.start - q.increment;
+                store.set_config_tree(
+                    &start_key,
+                    &crate::serde_json::Value::Number(q.start as f64),
+                );
+                store.set_config_tree(
+                    &incr_key,
+                    &crate::serde_json::Value::Number(q.increment as f64),
+                );
+                store.set_config_tree(
+                    &curr_key,
+                    &crate::serde_json::Value::Number(initial_current as f64),
+                );
+                Ok(RuntimeQueryResult::ok_message(
+                    query.to_string(),
+                    &format!(
+                        "sequence {} created (start={}, increment={})",
+                        q.name, q.start, q.increment
+                    ),
+                    "create_sequence",
+                ))
+            }
+            QueryExpr::DropSequence(ref q) => {
+                let store = self.inner.db.store();
+                let base = format!("sequence.{}", q.name);
+                let existed = store.get_config(&format!("{base}.start")).is_some();
+                if !existed && !q.if_exists {
+                    return Err(RedDBError::Internal(format!(
+                        "sequence {} does not exist",
+                        q.name
+                    )));
+                }
+                for k in ["start", "increment", "current"] {
+                    store.set_config_tree(&format!("{base}.{k}"), &crate::serde_json::Value::Null);
+                }
+                Ok(RuntimeQueryResult::ok_message(
+                    query.to_string(),
+                    &format!("sequence {} dropped", q.name),
+                    "drop_sequence",
+                ))
+            }
+            // Views — CREATE [MATERIALIZED] VIEW (Phase 2.1 PG parity).
+            //
+            // The view definition is stored in-memory on RuntimeInner (not
+            // persisted). SELECTs that reference the view name will substitute
+            // the stored `QueryExpr` via `resolve_view_reference` during
+            // planning (same entry point used by table-name resolution).
+            //
+            // Materialized views additionally allocate a slot in
+            // `MaterializedViewCache`; a REFRESH repopulates that slot.
+            QueryExpr::CreateView(ref q) => {
+                let mut views = self.inner.views.write();
+                if views.contains_key(&q.name) && !q.or_replace {
+                    if q.if_not_exists {
+                        return Ok(RuntimeQueryResult::ok_message(
+                            query.to_string(),
+                            &format!("view {} already exists — skipped", q.name),
+                            "create_view",
+                        ));
+                    }
+                    return Err(RedDBError::Internal(format!(
+                        "view {} already exists",
+                        q.name
+                    )));
+                }
+                views.insert(q.name.clone(), Arc::new(q.clone()));
+                drop(views);
+
+                // Materialized view: register cache slot (data is empty until REFRESH).
+                if q.materialized {
+                    use crate::storage::cache::result::{MaterializedViewDef, RefreshPolicy};
+                    let def = MaterializedViewDef {
+                        name: q.name.clone(),
+                        query: format!("<parsed view {}>", q.name),
+                        dependencies: collect_table_refs(&q.query),
+                        refresh: RefreshPolicy::Manual,
+                    };
+                    self.inner.materialized_views.write().register(def);
+                }
+                // Plan cache may have cached a plan that didn't know about this
+                // view — invalidate so future references pick up the new binding.
+                self.invalidate_plan_cache();
+
+                Ok(RuntimeQueryResult::ok_message(
+                    query.to_string(),
+                    &format!(
+                        "{}view {} created",
+                        if q.materialized { "materialized " } else { "" },
+                        q.name
+                    ),
+                    "create_view",
+                ))
+            }
+            QueryExpr::DropView(ref q) => {
+                let mut views = self.inner.views.write();
+                let existed = views.remove(&q.name).is_some();
+                drop(views);
+                if q.materialized || existed {
+                    // Try the materialised cache too — silent if absent.
+                    self.inner.materialized_views.write().remove(&q.name);
+                }
+                if !existed && !q.if_exists {
+                    return Err(RedDBError::Internal(format!(
+                        "view {} does not exist",
+                        q.name
+                    )));
+                }
+                self.invalidate_plan_cache();
+                Ok(RuntimeQueryResult::ok_message(
+                    query.to_string(),
+                    &format!("view {} dropped", q.name),
+                    "drop_view",
+                ))
+            }
+            QueryExpr::RefreshMaterializedView(ref q) => {
+                // Look up the view definition, execute its underlying query,
+                // and stash the serialized result in the materialised cache.
+                let view = {
+                    let views = self.inner.views.read();
+                    views.get(&q.name).cloned()
+                };
+                let view = match view {
+                    Some(v) => v,
+                    None => {
+                        return Err(RedDBError::Internal(format!(
+                            "view {} does not exist",
+                            q.name
+                        )))
+                    }
+                };
+                if !view.materialized {
+                    return Err(RedDBError::Internal(format!(
+                        "view {} is not materialized — REFRESH requires \
+                         CREATE MATERIALIZED VIEW",
+                        q.name
+                    )));
+                }
+                // Execute the underlying query fresh.
+                let inner_result = self.execute_query_expr((*view.query).clone())?;
+                // Cache data = JSON-serialised result (opaque blob; read path
+                // returns it verbatim for now).
+                let serialized = format!("{:?}", inner_result.result);
+                self.inner
+                    .materialized_views
+                    .write()
+                    .refresh(&q.name, serialized.into_bytes());
+                Ok(RuntimeQueryResult::ok_message(
+                    query.to_string(),
+                    &format!("materialized view {} refreshed", q.name),
+                    "refresh_materialized_view",
+                ))
+            }
+            // Row Level Security (Phase 2.5 PG parity).
+            //
+            // Policies live in an in-memory registry keyed by (table, name).
+            // Enforcement (AND-ing the policy's USING clause into every
+            // query's WHERE for the table) arrives in Phase 2.5.2 via the
+            // filter compiler; this dispatch only manages the catalog.
+            QueryExpr::CreatePolicy(ref q) => {
+                let key = (q.table.clone(), q.name.clone());
+                self.inner
+                    .rls_policies
+                    .write()
+                    .insert(key, Arc::new(q.clone()));
+                self.invalidate_plan_cache();
+                Ok(RuntimeQueryResult::ok_message(
+                    query.to_string(),
+                    &format!("policy {} on {} created", q.name, q.table),
+                    "create_policy",
+                ))
+            }
+            QueryExpr::DropPolicy(ref q) => {
+                let removed = self
+                    .inner
+                    .rls_policies
+                    .write()
+                    .remove(&(q.table.clone(), q.name.clone()))
+                    .is_some();
+                if !removed && !q.if_exists {
+                    return Err(RedDBError::Internal(format!(
+                        "policy {} on {} does not exist",
+                        q.name, q.table
+                    )));
+                }
+                self.invalidate_plan_cache();
+                Ok(RuntimeQueryResult::ok_message(
+                    query.to_string(),
+                    &format!("policy {} on {} dropped", q.name, q.table),
+                    "drop_policy",
+                ))
+            }
+            // Foreign Data Wrappers (Phase 3.2 PG parity).
+            //
+            // CREATE SERVER / CREATE FOREIGN TABLE register into the shared
+            // `ForeignTableRegistry`. The read path consults that registry
+            // before dispatching a SELECT — when the table name matches a
+            // registered foreign table, we forward the scan to the wrapper
+            // and skip the normal collection lookup.
+            //
+            // Phase 3.2 is in-memory only; persistence across restarts is a
+            // 3.2.2 follow-up that mirrors the view registry pattern.
+            QueryExpr::CreateServer(ref q) => {
+                use crate::storage::fdw::FdwOptions;
+                let registry = Arc::clone(&self.inner.foreign_tables);
+                if registry.server(&q.name).is_some() {
+                    if q.if_not_exists {
+                        return Ok(RuntimeQueryResult::ok_message(
+                            query.to_string(),
+                            &format!("server {} already exists — skipped", q.name),
+                            "create_server",
+                        ));
+                    }
+                    return Err(RedDBError::Internal(format!(
+                        "server {} already exists",
+                        q.name
+                    )));
+                }
+                let mut opts = FdwOptions::new();
+                for (k, v) in &q.options {
+                    opts.values.insert(k.clone(), v.clone());
+                }
+                registry
+                    .create_server(&q.name, &q.wrapper, opts)
+                    .map_err(|e| RedDBError::Internal(e.to_string()))?;
+                Ok(RuntimeQueryResult::ok_message(
+                    query.to_string(),
+                    &format!("server {} created (wrapper {})", q.name, q.wrapper),
+                    "create_server",
+                ))
+            }
+            QueryExpr::DropServer(ref q) => {
+                let existed = self.inner.foreign_tables.drop_server(&q.name);
+                if !existed && !q.if_exists {
+                    return Err(RedDBError::Internal(format!(
+                        "server {} does not exist",
+                        q.name
+                    )));
+                }
+                Ok(RuntimeQueryResult::ok_message(
+                    query.to_string(),
+                    &format!(
+                        "server {} dropped{}",
+                        q.name,
+                        if q.cascade { " (cascade)" } else { "" }
+                    ),
+                    "drop_server",
+                ))
+            }
+            QueryExpr::CreateForeignTable(ref q) => {
+                use crate::storage::fdw::{FdwOptions, ForeignColumn, ForeignTable};
+                let registry = Arc::clone(&self.inner.foreign_tables);
+                if registry.foreign_table(&q.name).is_some() {
+                    if q.if_not_exists {
+                        return Ok(RuntimeQueryResult::ok_message(
+                            query.to_string(),
+                            &format!("foreign table {} already exists — skipped", q.name),
+                            "create_foreign_table",
+                        ));
+                    }
+                    return Err(RedDBError::Internal(format!(
+                        "foreign table {} already exists",
+                        q.name
+                    )));
+                }
+                let mut opts = FdwOptions::new();
+                for (k, v) in &q.options {
+                    opts.values.insert(k.clone(), v.clone());
+                }
+                let columns: Vec<ForeignColumn> = q
+                    .columns
+                    .iter()
+                    .map(|c| ForeignColumn {
+                        name: c.name.clone(),
+                        data_type: c.data_type.clone(),
+                        not_null: c.not_null,
+                    })
+                    .collect();
+                registry
+                    .create_foreign_table(ForeignTable {
+                        name: q.name.clone(),
+                        server_name: q.server.clone(),
+                        columns,
+                        options: opts,
+                    })
+                    .map_err(|e| RedDBError::Internal(e.to_string()))?;
+                self.invalidate_plan_cache();
+                Ok(RuntimeQueryResult::ok_message(
+                    query.to_string(),
+                    &format!("foreign table {} created (server {})", q.name, q.server),
+                    "create_foreign_table",
+                ))
+            }
+            QueryExpr::DropForeignTable(ref q) => {
+                let existed = self.inner.foreign_tables.drop_foreign_table(&q.name);
+                if !existed && !q.if_exists {
+                    return Err(RedDBError::Internal(format!(
+                        "foreign table {} does not exist",
+                        q.name
+                    )));
+                }
+                self.invalidate_plan_cache();
+                Ok(RuntimeQueryResult::ok_message(
+                    query.to_string(),
+                    &format!("foreign table {} dropped", q.name),
+                    "drop_foreign_table",
+                ))
+            }
+            // COPY table FROM 'path' (Phase 1.5 PG parity).
+            //
+            // Stream CSV rows through the shared `CsvImporter`. The collection
+            // is auto-created on first insert (via `insert_auto`-style path);
+            // VACUUM/ANALYZE afterwards is up to the caller.
+            QueryExpr::CopyFrom(ref q) => {
+                use crate::storage::import::{CsvConfig, CsvImporter};
+                let store = self.inner.db.store();
+                let cfg = CsvConfig {
+                    collection: q.table.clone(),
+                    has_header: q.has_header,
+                    delimiter: q.delimiter.map(|c| c as u8).unwrap_or(b','),
+                    ..CsvConfig::default()
+                };
+                let importer = CsvImporter::new(cfg);
+                let stats = importer
+                    .import_file(&q.path, store.as_ref())
+                    .map_err(|e| RedDBError::Internal(format!("COPY failed: {e}")))?;
+                // Tables are written → invalidate cached plans / result cache.
+                self.note_table_write(&q.table);
+                Ok(RuntimeQueryResult::ok_message(
+                    query.to_string(),
+                    &format!(
+                        "COPY imported {} rows into {} ({} errors skipped, {}ms)",
+                        stats.records_imported, q.table, stats.errors_skipped, stats.duration_ms
+                    ),
+                    "copy_from",
+                ))
+            }
+            // Maintenance commands (Phase 1.2 PG parity).
+            //
+            // - VACUUM [FULL] [table]: refreshes planner stats for the target
+            //   collection(s) and — when FULL — triggers a full pager persist
+            //   (flushes dirty pages + fsync). Also invalidates the result cache
+            //   so subsequent reads re-execute against the freshly compacted
+            //   storage. RedDB's segment/btree GC runs continuously via the
+            //   background lifecycle; explicit space reclamation for sealed
+            //   segments arrives with Phase 2.3 (MVCC + dead-tuple reclamation).
+            // - ANALYZE [table]: reruns `analyze_collection` +
+            //   `persist_table_stats` via `refresh_table_planner_stats` so the
+            //   planner has fresh histograms, distinct estimates, null counts.
+            //
+            // Both commands accept an optional target; omitting the target
+            // iterates every collection in the store.
+            QueryExpr::MaintenanceCommand(ref cmd) => {
+                use crate::storage::query::ast::MaintenanceCommand as Mc;
+                let store = self.inner.db.store();
+                let (kind, msg) = match cmd {
+                    Mc::Analyze { target } => {
+                        let targets: Vec<String> = match target {
+                            Some(t) => vec![t.clone()],
+                            None => store.list_collections(),
+                        };
+                        for t in &targets {
+                            self.refresh_table_planner_stats(t);
+                        }
+                        (
+                            "analyze",
+                            format!("ANALYZE refreshed stats for {} table(s)", targets.len()),
+                        )
+                    }
+                    Mc::Vacuum { target, full } => {
+                        let targets: Vec<String> = match target {
+                            Some(t) => vec![t.clone()],
+                            None => store.list_collections(),
+                        };
+                        // Stats refresh covers every target (same as ANALYZE).
+                        for t in &targets {
+                            self.refresh_table_planner_stats(t);
+                        }
+                        // FULL forces a pager persist (dirty-page flush + fsync).
+                        // Regular VACUUM relies on the background writer / segment
+                        // lifecycle so the command is non-blocking.
+                        let persisted = if *full {
+                            match store.persist() {
+                                Ok(()) => true,
+                                Err(e) => {
+                                    return Err(RedDBError::Internal(format!(
+                                        "VACUUM FULL persist failed: {e:?}"
+                                    )));
+                                }
+                            }
+                        } else {
+                            false
+                        };
+                        // Result cache depended on pre-vacuum state.
+                        self.invalidate_result_cache();
+                        (
+                            "vacuum",
+                            format!(
+                                "VACUUM{} processed {} table(s){}",
+                                if *full { " FULL" } else { "" },
+                                targets.len(),
+                                if persisted {
+                                    " (pages flushed to disk)"
+                                } else {
+                                    ""
+                                }
+                            ),
+                        )
+                    }
+                };
+                Ok(RuntimeQueryResult::ok_message(
+                    query.to_string(),
+                    &msg,
+                    kind,
+                ))
+            }
         };
 
         // Decrypt Value::Secret columns in-place before caching, so
@@ -1664,6 +2962,11 @@ impl RedDBRuntime {
     ///
     /// Applies secret decryption on SELECT results, identical to `execute_query`.
     pub(crate) fn execute_query_expr(&self, expr: QueryExpr) -> RedDBResult<RuntimeQueryResult> {
+        // View rewrite (Phase 2.1): substitute any `QueryExpr::Table(tq)`
+        // whose `tq.table` matches a registered view with the view's
+        // underlying query. Safe to call even when no views are registered.
+        let expr = self.rewrite_view_refs(expr);
+
         let statement = query_expr_name(&expr);
         let mode = detect_mode(statement);
         let query_str = statement;
@@ -1674,6 +2977,61 @@ impl RedDBRuntime {
             self.apply_secret_decryption(&mut r);
         }
         Ok(r)
+    }
+
+    /// Walk a `QueryExpr` and replace `QueryExpr::Table(tq)` nodes whose
+    /// `tq.table` matches a registered view name with the view's stored
+    /// body. Recurses through joins so `SELECT ... FROM t JOIN myview ...`
+    /// resolves correctly. Pure operation — no side effects.
+    fn rewrite_view_refs(&self, expr: QueryExpr) -> QueryExpr {
+        // Fast path: no views registered → return original expression.
+        if self.inner.views.read().is_empty() {
+            return expr;
+        }
+        self.rewrite_view_refs_inner(expr)
+    }
+
+    fn rewrite_view_refs_inner(&self, expr: QueryExpr) -> QueryExpr {
+        match expr {
+            QueryExpr::Table(mut tq) => {
+                // 1. If the TableSource is a subquery, recurse into it so
+                //    `SELECT ... FROM (SELECT ... FROM myview) t` expands.
+                //    The legacy `table` field (set to a synthetic
+                //    "__subq_NNNN" sentinel) stays as-is so callers that
+                //    read it keep compiling.
+                if let Some(crate::storage::query::ast::TableSource::Subquery(body)) =
+                    tq.source.take()
+                {
+                    tq.source = Some(crate::storage::query::ast::TableSource::Subquery(Box::new(
+                        self.rewrite_view_refs_inner(*body),
+                    )));
+                    return QueryExpr::Table(tq);
+                }
+
+                // 2. Restore the source field (took it above for match).
+                // When the source was `None` or `TableSource::Name(_)`, the
+                // real lookup key is `tq.table` — check the view registry.
+                let maybe_view = {
+                    let views = self.inner.views.read();
+                    views.get(&tq.table).cloned()
+                };
+                if let Some(view) = maybe_view {
+                    // Recurse into the view body too — views may reference
+                    // other views or other foreign tables.
+                    self.rewrite_view_refs_inner((*view.query).clone())
+                } else {
+                    QueryExpr::Table(tq)
+                }
+            }
+            QueryExpr::Join(mut jq) => {
+                jq.left = Box::new(self.rewrite_view_refs_inner(*jq.left));
+                jq.right = Box::new(self.rewrite_view_refs_inner(*jq.right));
+                QueryExpr::Join(jq)
+            }
+            // Other variants don't carry nested QueryExpr that can reference
+            // a view by table name. Return as-is.
+            other => other,
+        }
     }
 
     /// Internal dispatch: route a `QueryExpr` to the appropriate executor.
@@ -1772,10 +3130,12 @@ impl RedDBRuntime {
 
         // Direct entity lookup
         let store = self.inner.db.store();
-        let entity = store.get(
-            table_name,
-            crate::storage::unified::EntityId::new(entity_id),
-        );
+        let entity = store
+            .get(
+                table_name,
+                crate::storage::unified::EntityId::new(entity_id),
+            )
+            .filter(entity_visible_under_current_snapshot);
 
         let json = match entity {
             Some(ref e) => execute_runtime_serialize_single_entity(e),
@@ -1829,6 +3189,357 @@ impl RedDBRuntime {
         let store = self.inner.db.store();
         crate::storage::query::planner::stats_catalog::clear_table_stats(store.as_ref(), table);
         self.invalidate_plan_cache();
+    }
+
+    /// Replay `tenant_tables.*.column` keys from red_config at boot so
+    /// `CREATE TABLE ... TENANT BY (col)` declarations persist across
+    /// restarts (Phase 2.5.4). Reads every row of the `red_config`
+    /// collection, picks the keys matching the tenant-marker shape,
+    /// and calls `register_tenant_table` for each.
+    ///
+    /// Safe no-op when `red_config` doesn't exist (first boot on a
+    /// fresh datadir).
+    pub(crate) fn rehydrate_tenant_tables(&self) {
+        let store = self.inner.db.store();
+        let Some(manager) = store.get_collection("red_config") else {
+            return;
+        };
+        // Replay in insertion order (SegmentManager iteration). Multiple
+        // toggles on the same table leave several rows behind — the
+        // last one processed wins because each register/unregister
+        // call overwrites the in-memory state.
+        for entity in manager.query_all(|_| true) {
+            let crate::storage::unified::entity::EntityData::Row(row) = &entity.data else {
+                continue;
+            };
+            let Some(named) = &row.named else { continue };
+            let Some(crate::storage::schema::Value::Text(key)) = named.get("key") else {
+                continue;
+            };
+            // Shape: tenant_tables.{table}.column
+            let Some(rest) = key.strip_prefix("tenant_tables.") else {
+                continue;
+            };
+            let Some((table, suffix)) = rest.rsplit_once('.') else {
+                continue;
+            };
+            if suffix != "column" {
+                continue;
+            }
+            match named.get("value") {
+                Some(crate::storage::schema::Value::Text(column)) => {
+                    self.register_tenant_table(table, column);
+                }
+                // Null / missing value = DISABLE TENANCY marker.
+                Some(crate::storage::schema::Value::Null) | None => {
+                    self.unregister_tenant_table(table);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Register a table as tenant-scoped (Phase 2.5.4). Installs the
+    /// in-memory column mapping, the implicit RLS policy, and enables
+    /// row-level security on the table. Idempotent — re-registering
+    /// the same `(table, column)` replaces the prior auto-policy.
+    pub fn register_tenant_table(&self, table: &str, column: &str) {
+        use crate::storage::query::ast::{
+            CompareOp, CreatePolicyQuery, Expr, FieldRef, Filter, Span,
+        };
+        self.inner
+            .tenant_tables
+            .write()
+            .insert(table.to_string(), column.to_string());
+
+        // Build the policy: col = CURRENT_TENANT()
+        // Uses CompareExpr so the comparison happens at runtime against
+        // the thread-local tenant value read by the CURRENT_TENANT
+        // scalar. Spans are synthetic — there's no source location for
+        // an auto-generated policy.
+        let lhs = Expr::Column {
+            field: FieldRef::TableColumn {
+                table: table.to_string(),
+                column: column.to_string(),
+            },
+            span: Span::synthetic(),
+        };
+        let rhs = Expr::FunctionCall {
+            name: "CURRENT_TENANT".to_string(),
+            args: Vec::new(),
+            span: Span::synthetic(),
+        };
+        let policy_filter = Filter::CompareExpr {
+            lhs,
+            op: CompareOp::Eq,
+            rhs,
+        };
+
+        let policy = CreatePolicyQuery {
+            name: "__tenant_iso".to_string(),
+            table: table.to_string(),
+            action: None, // None = ALL actions (SELECT/INSERT/UPDATE/DELETE)
+            role: None,   // None = every role
+            using: Box::new(policy_filter),
+        };
+
+        // Replace any prior auto-policy for this table (column rename).
+        self.inner.rls_policies.write().insert(
+            (table.to_string(), "__tenant_iso".to_string()),
+            Arc::new(policy),
+        );
+        self.inner
+            .rls_enabled_tables
+            .write()
+            .insert(table.to_string());
+    }
+
+    /// Retrieve the tenant column for a table, if any (Phase 2.5.4).
+    /// Used by the INSERT auto-fill path to know which column to
+    /// populate with `current_tenant()` when the user didn't name it.
+    pub fn tenant_column(&self, table: &str) -> Option<String> {
+        self.inner.tenant_tables.read().get(table).cloned()
+    }
+
+    /// Remove a table's tenant registration (Phase 2.5.4). Called by
+    /// DROP TABLE / ALTER TABLE DISABLE TENANCY. Removes the auto-policy
+    /// but leaves any user-installed explicit policies intact.
+    pub fn unregister_tenant_table(&self, table: &str) {
+        self.inner.tenant_tables.write().remove(table);
+        self.inner
+            .rls_policies
+            .write()
+            .remove(&(table.to_string(), "__tenant_iso".to_string()));
+        // Only clear RLS enablement if no other policies remain.
+        let has_other_policies = self
+            .inner
+            .rls_policies
+            .read()
+            .keys()
+            .any(|(t, _)| t == table);
+        if !has_other_policies {
+            self.inner.rls_enabled_tables.write().remove(table);
+        }
+    }
+
+    /// Record that the running transaction has marked `id` in `collection`
+    /// for deletion (Phase 2.3.2b MVCC tombstones). `stamper_xid` is the
+    /// xid that was written into `xmax` — either the parent txn xid or
+    /// the innermost savepoint sub-xid. Savepoint rollback filters by
+    /// this xid to revive only its own tombstones.
+    pub(crate) fn record_pending_tombstone(
+        &self,
+        conn_id: u64,
+        collection: &str,
+        id: crate::storage::unified::entity::EntityId,
+        stamper_xid: crate::storage::transaction::snapshot::Xid,
+    ) {
+        self.inner
+            .pending_tombstones
+            .write()
+            .entry(conn_id)
+            .or_default()
+            .push((collection.to_string(), id, stamper_xid));
+    }
+
+    /// Flush tombstones on COMMIT — tuples are physically removed from
+    /// storage. Safe to call with an empty list (no-op).
+    pub(crate) fn finalize_pending_tombstones(&self, conn_id: u64) {
+        let Some(pending) = self.inner.pending_tombstones.write().remove(&conn_id) else {
+            return;
+        };
+        if pending.is_empty() {
+            return;
+        }
+
+        // Group by collection so every batch issues a single `delete_batch`.
+        let mut grouped: HashMap<String, Vec<crate::storage::unified::entity::EntityId>> =
+            HashMap::new();
+        for (collection, id, _xid) in pending {
+            grouped.entry(collection).or_default().push(id);
+        }
+
+        let store = self.inner.db.store();
+        for (collection, ids) in grouped {
+            if let Err(err) = store.delete_batch(&collection, &ids) {
+                // Best-effort: COMMIT already succeeded at the MVCC level
+                // (xmax keeps the row hidden), so log and move on. A
+                // later VACUUM will reclaim the storage.
+                eprintln!(
+                    "pending tombstone delete_batch failed for {collection}: {err}; \
+                     rows stay xmax-stamped (reader-invisible) until VACUUM"
+                );
+                continue;
+            }
+            for id in &ids {
+                store.context_index().remove_entity(*id);
+                self.cdc_emit(
+                    crate::replication::cdc::ChangeOperation::Delete,
+                    &collection,
+                    id.raw(),
+                    "entity",
+                );
+            }
+        }
+    }
+
+    /// Revive tombstones on ROLLBACK — reset `xmax` to 0 so the tuples
+    /// become visible again to future snapshots. Best-effort: a row
+    /// already reclaimed by a concurrent VACUUM stays gone, but VACUUM
+    /// never reclaims tuples whose xmax is still referenced by any
+    /// active snapshot, so this case is only reachable via external
+    /// storage corruption.
+    pub(crate) fn revive_pending_tombstones(&self, conn_id: u64) {
+        let Some(pending) = self.inner.pending_tombstones.write().remove(&conn_id) else {
+            return;
+        };
+
+        let store = self.inner.db.store();
+        for (collection, id, _xid) in pending {
+            let Some(manager) = store.get_collection(&collection) else {
+                continue;
+            };
+            if let Some(mut entity) = manager.get(id) {
+                entity.set_xmax(0);
+                let _ = manager.update(entity);
+            }
+        }
+    }
+
+    /// Revive tombstones stamped by `stamper_xid` or any sub-xid
+    /// allocated after it (Phase 2.3.2e savepoint rollback). Any
+    /// pending entries with `xid < stamper_xid` stay queued because
+    /// they belong to the enclosing scope — they'll either flush on
+    /// COMMIT or revive on an outer ROLLBACK TO SAVEPOINT.
+    ///
+    /// Returns the number of tuples whose `xmax` was wiped back to 0.
+    pub(crate) fn revive_tombstones_since(&self, conn_id: u64, stamper_xid: u64) -> usize {
+        let mut guard = self.inner.pending_tombstones.write();
+        let Some(pending) = guard.get_mut(&conn_id) else {
+            return 0;
+        };
+
+        let store = self.inner.db.store();
+        let mut revived = 0usize;
+        pending.retain(|(collection, id, xid)| {
+            if *xid < stamper_xid {
+                // Stamped before the savepoint — keep in queue.
+                return true;
+            }
+            if let Some(manager) = store.get_collection(collection) {
+                if let Some(mut entity) = manager.get(*id) {
+                    entity.set_xmax(0);
+                    let _ = manager.update(entity);
+                    revived += 1;
+                }
+            }
+            false
+        });
+        if pending.is_empty() {
+            guard.remove(&conn_id);
+        }
+        revived
+    }
+
+    /// Return the snapshot the current connection should use for visibility
+    /// checks (Phase 2.3 PG parity).
+    ///
+    /// * If the connection is inside a BEGIN-wrapped transaction, reuse
+    ///   the snapshot stored in its `TxnContext`.
+    /// * Otherwise (autocommit), capture a fresh snapshot tied to an
+    ///   implicit xid=0 — the read path treats pre-MVCC rows as always
+    ///   visible so this degrades to "see everything committed".
+    pub fn current_snapshot(&self) -> crate::storage::transaction::snapshot::Snapshot {
+        let conn_id = current_connection_id();
+        if let Some(ctx) = self.inner.tx_contexts.read().get(&conn_id).cloned() {
+            return ctx.snapshot;
+        }
+        // Autocommit: take a fresh snapshot bounded by `peek_next_xid` so
+        // every already-committed xid (which is strictly less) passes the
+        // `xmin <= snap.xid` gate, while concurrently-active xids land in
+        // the `in_progress` set and stay hidden until they commit. Using
+        // xid=0 would incorrectly hide every MVCC-stamped tuple.
+        let high_water = self.inner.snapshot_manager.peek_next_xid();
+        self.inner.snapshot_manager.snapshot(high_water)
+    }
+
+    /// Xid of the current connection's active transaction, or `None` when
+    /// running outside a BEGIN/COMMIT block. Write paths call this to
+    /// decide whether to stamp `xmin`/`xmax` on tuples.
+    /// Phase 2.3.2e: when a savepoint is open, `writer_xid` returns the
+    /// sub-xid so new writes can be selectively rolled back. Otherwise
+    /// the parent txn's xid is returned, matching pre-savepoint
+    /// behaviour. Callers that need the enclosing *transaction* xid
+    /// (e.g. VACUUM min-active calculations) should read `ctx.xid`
+    /// directly.
+    pub fn current_xid(&self) -> Option<crate::storage::transaction::snapshot::Xid> {
+        let conn_id = current_connection_id();
+        self.inner
+            .tx_contexts
+            .read()
+            .get(&conn_id)
+            .map(|ctx| ctx.writer_xid())
+    }
+
+    /// Access the shared `SnapshotManager` — useful for VACUUM to compute
+    /// the oldest-active xid when reclaiming dead tuples.
+    pub fn snapshot_manager(&self) -> Arc<crate::storage::transaction::snapshot::SnapshotManager> {
+        Arc::clone(&self.inner.snapshot_manager)
+    }
+
+    /// Access the shared `ForeignTableRegistry` (Phase 3.2 PG parity).
+    ///
+    /// Callers use this to check whether a table name is a registered
+    /// foreign table (`registry.is_foreign_table(name)`) and, if so, to
+    /// scan it (`registry.scan(name)`). The read-path rewriter consults
+    /// this before dispatching into native-collection lookup.
+    pub fn foreign_tables(&self) -> Arc<crate::storage::fdw::ForeignTableRegistry> {
+        Arc::clone(&self.inner.foreign_tables)
+    }
+
+    /// Is Row-Level Security enabled for this table? (Phase 2.5 PG parity)
+    pub fn is_rls_enabled(&self, table: &str) -> bool {
+        self.inner.rls_enabled_tables.read().contains(table)
+    }
+
+    /// Collect the USING predicates that apply to this `(table, role, action)`.
+    ///
+    /// Returned filters should be OR-combined (a row passes RLS when *any*
+    /// matching policy accepts it) and then AND-ed into the query's WHERE.
+    /// When the table has RLS disabled this returns an empty Vec — callers
+    /// can fast-path back to the unfiltered read.
+    pub fn matching_rls_policies(
+        &self,
+        table: &str,
+        role: Option<&str>,
+        action: crate::storage::query::ast::PolicyAction,
+    ) -> Vec<crate::storage::query::ast::Filter> {
+        if !self.is_rls_enabled(table) {
+            return Vec::new();
+        }
+        let policies = self.inner.rls_policies.read();
+        policies
+            .iter()
+            .filter_map(|((t, _), p)| {
+                if t != table {
+                    return None;
+                }
+                // Action gate — `None` means "ALL" actions.
+                if let Some(a) = p.action {
+                    if a != action {
+                        return None;
+                    }
+                }
+                // Role gate — `None` means "any role".
+                if let Some(p_role) = p.role.as_deref() {
+                    match role {
+                        Some(r) if r == p_role => {}
+                        _ => return None,
+                    }
+                }
+                Some((*p.using).clone())
+            })
+            .collect()
     }
 
     pub(crate) fn refresh_table_planner_stats(&self, table: &str) {

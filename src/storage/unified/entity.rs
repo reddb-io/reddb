@@ -524,6 +524,21 @@ pub struct UnifiedEntity {
     /// at compile time. If `entity.field_bloom & required_bloom != required_bloom`,
     /// the entity cannot match and is skipped before any HashMap probe.
     pub field_bloom: u64,
+    /// MVCC creation transaction ID (Phase 2.3 PG parity).
+    ///
+    /// `0` means "pre-MVCC" / auto-commit — visible to every snapshot. When
+    /// a BEGIN-wrapped INSERT runs, it stamps `xmin` with the transaction's
+    /// snapshot id so other concurrent transactions only see the row after
+    /// the writer commits (snapshot isolation semantics).
+    ///
+    /// Visibility rule: `xmin <= snapshot.xid && (xmax == 0 || xmax > snapshot.xid)`.
+    pub xmin: u64,
+    /// MVCC deletion transaction ID (Phase 2.3 PG parity).
+    ///
+    /// `0` means "live". Set to the deleting transaction's snapshot id on
+    /// DELETE/UPDATE (row is kept until VACUUM reclaims it). Snapshots with
+    /// `xid < xmax` still see the row; newer snapshots skip it.
+    pub xmax: u64,
     /// Optional auxiliary data (embeddings, cross-refs).
     /// None for most table rows — saves 40 bytes/entity.
     aux: Option<Box<EntityAux>>,
@@ -629,8 +644,48 @@ impl UnifiedEntity {
             data,
             sequence_id: 0,
             field_bloom,
+            // Pre-MVCC default: xmin/xmax = 0 means visible to every snapshot.
+            // Transactional writers stamp real snapshot IDs after allocation.
+            xmin: 0,
+            xmax: 0,
             aux: None,
         }
+    }
+
+    /// MVCC visibility check (Phase 2.3 PG parity).
+    ///
+    /// Returns `true` when this tuple is visible under the provided
+    /// snapshot xid. Pre-MVCC rows (`xmin == 0`, `xmax == 0`) are visible
+    /// to every snapshot — preserves full compatibility with existing
+    /// data inserted before the MVCC headers existed.
+    ///
+    /// Snapshot isolation rule:
+    ///   - `xmin == 0 || xmin <= snapshot_xid`  (creator committed before snapshot)
+    ///   - `xmax == 0 || xmax > snapshot_xid`   (deleter committed after snapshot)
+    #[inline]
+    pub fn is_visible(&self, snapshot_xid: u64) -> bool {
+        if self.xmin != 0 && self.xmin > snapshot_xid {
+            return false;
+        }
+        if self.xmax != 0 && self.xmax <= snapshot_xid {
+            return false;
+        }
+        true
+    }
+
+    /// Stamp `xmin` (creation transaction ID). Called by the runtime on
+    /// INSERT inside an active transaction.
+    #[inline]
+    pub fn set_xmin(&mut self, xid: u64) {
+        self.xmin = xid;
+    }
+
+    /// Stamp `xmax` (deletion transaction ID). Called by the runtime on
+    /// DELETE/UPDATE inside an active transaction — the tuple survives
+    /// until VACUUM reclaims it.
+    #[inline]
+    pub fn set_xmax(&mut self, xid: u64) {
+        self.xmax = xid;
     }
 
     /// Create a table row entity

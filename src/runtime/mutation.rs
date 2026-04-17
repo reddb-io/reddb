@@ -81,13 +81,24 @@ impl<'rt> MutationEngine<'rt> {
         let db = self.runtime.db();
 
         // Build entity — same logic as BatchBuilder::add_row
-        let entity = build_table_entity(
+        let mut entity = build_table_entity(
             self.store.as_ref(),
             &collection,
             row.fields.clone(),
             &row.node_links,
             &row.vector_links,
         );
+
+        // MVCC xmin stamping (Phase 2.3.2a PG parity).
+        //
+        // When this INSERT runs inside a BEGIN-wrapped transaction, stamp
+        // the tuple with the current xid so other snapshots hide it until
+        // the transaction commits. Outside a transaction `current_xid()`
+        // returns `None` and xmin stays at 0 — the pre-MVCC "always
+        // visible" default preserved for backwards compatibility.
+        if let Some(xid) = self.runtime.current_xid() {
+            entity.set_xmin(xid);
+        }
 
         // Write. `insert_auto` internally runs preprocessors, context index,
         // and cross-ref indexing — no need to repeat them here.
@@ -136,16 +147,25 @@ impl<'rt> MutationEngine<'rt> {
         let mut metadata_batch: Vec<Vec<(String, MetadataValue)>> = Vec::with_capacity(n);
         let mut entities: Vec<UnifiedEntity> = Vec::with_capacity(n);
 
+        // Resolve the current transaction xid once — every entity in this
+        // batch shares it. `None` (autocommit) leaves xmin at 0, which
+        // the visibility checker treats as "always visible" (pre-MVCC).
+        let current_xid = self.runtime.current_xid();
+
         for row in rows {
             field_snapshots.push(row.fields.clone());
             metadata_batch.push(row.metadata);
-            entities.push(build_table_entity(
+            let mut entity = build_table_entity(
                 self.store.as_ref(),
                 &collection,
                 row.fields,
                 &row.node_links,
                 &row.vector_links,
-            ));
+            );
+            if let Some(xid) = current_xid {
+                entity.set_xmin(xid);
+            }
+            entities.push(entity);
         }
 
         // Single lock acquisition for the entire batch.

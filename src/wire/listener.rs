@@ -39,6 +39,37 @@ pub async fn start_wire_listener_on(
     }
 }
 
+/// Start the wire protocol listener on a Unix domain socket (Phase 1.7 PG parity).
+///
+/// Accepts connections from `unix://path` URLs or plain filesystem paths.
+/// Existing socket files are removed before bind (parallel to PG's behaviour).
+/// Connection handling reuses `handle_connection`, which is generic over any
+/// `AsyncRead + AsyncWrite` stream.
+#[cfg(unix)]
+pub async fn start_wire_unix_listener(
+    socket_path: &str,
+    runtime: Arc<RedDBRuntime>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use tokio::net::UnixListener;
+
+    // Normalise: strip `unix://` prefix if caller passed a URL.
+    let path: &str = socket_path.strip_prefix("unix://").unwrap_or(socket_path);
+
+    // Remove stale socket file so bind() doesn't fail with EADDRINUSE.
+    let _ = std::fs::remove_file(path);
+    let listener = UnixListener::bind(path)?;
+    eprintln!("red server (wire) listening on unix://{path}");
+    loop {
+        let (stream, _addr) = listener.accept().await?;
+        let rt = runtime.clone();
+        tokio::spawn(async move {
+            if let Err(e) = handle_connection(stream, rt).await {
+                eprintln!("wire unix connection error: {e}");
+            }
+        });
+    }
+}
+
 /// Start the wire protocol TCP listener with TLS encryption.
 pub async fn start_wire_tls_listener(
     bind_addr: &str,

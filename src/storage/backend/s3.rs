@@ -16,6 +16,10 @@
 //! Uses `curl` via `std::process::Command` for HTTP transport. This avoids pulling in a
 //! TLS library while remaining universally available on all target platforms.
 //!
+//! Cross-platform note: the null device path differs per OS (`/dev/null` on
+//! Unix, `NUL` on Windows). `null_device()` below picks the right one so
+//! `curl -o` discards response bodies correctly on every platform.
+//!
 //! # Example
 //! ```ignore
 //! use reddb::storage::backend::s3::{S3Backend, S3Config};
@@ -213,6 +217,21 @@ impl S3Backend {
         cmd.output()
             .map_err(|e| BackendError::Transport(format!("curl not available: {e}")))
     }
+
+    /// Platform-specific "null device" for `curl -o`. On Unix it's
+    /// `/dev/null`; on Windows it's `NUL`. Callers that pass this to
+    /// the `-o` flag get discarded response bodies on every platform.
+    #[inline]
+    fn null_device() -> &'static str {
+        #[cfg(windows)]
+        {
+            "NUL"
+        }
+        #[cfg(not(windows))]
+        {
+            "/dev/null"
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -296,7 +315,7 @@ impl RemoteBackend for S3Backend {
         cmd.arg("-sf")
             .arg("-I") // HEAD request
             .arg("-o")
-            .arg("/dev/null");
+            .arg(Self::null_device());
         for (k, v) in &headers {
             cmd.arg("-H").arg(format!("{k}: {v}"));
         }
@@ -328,7 +347,7 @@ impl RemoteBackend for S3Backend {
             .arg("-X")
             .arg("DELETE")
             .arg("-o")
-            .arg("/dev/null");
+            .arg(Self::null_device());
         for (k, v) in &headers {
             cmd.arg("-H").arg(format!("{k}: {v}"));
         }

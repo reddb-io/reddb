@@ -175,6 +175,17 @@ impl RedDB {
             _ => None,
         };
 
+        // Initialise quorum coordinator alongside primary replication.
+        // Async mode (default) is the historical behaviour — wait-for-quorum
+        // returns instantly so no write path changes are required. Sync /
+        // Regions modes kick in only when the caller overrides the config.
+        let quorum = replication.as_ref().map(|primary| {
+            Arc::new(crate::replication::quorum::QuorumCoordinator::new(
+                Arc::clone(primary),
+                options.replication.quorum.clone(),
+            ))
+        });
+
         Self {
             store: Arc::new(store),
             preprocessors: Arc::new(RwLock::new(Vec::new())),
@@ -187,6 +198,7 @@ impl RedDB {
             remote_backend: options.remote_backend.clone(),
             remote_key,
             replication,
+            quorum,
             ec_registry: std::sync::Arc::new(crate::ec::config::EcRegistry::new()),
         }
         .with_initialized_metadata()

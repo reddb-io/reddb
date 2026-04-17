@@ -1075,6 +1075,104 @@ impl IndexStore {
         }
         Ok(())
     }
+
+    /// Mirror of `index_entity_insert` for the delete path. Removes the
+    /// row from every secondary index registered on its collection. Index
+    /// misses are tolerated (index may have been dropped between fetch
+    /// and delete) — only structural errors propagate.
+    pub fn index_entity_delete(
+        &self,
+        collection: &str,
+        entity_id: EntityId,
+        fields: &[(String, Value)],
+    ) -> Result<(), String> {
+        let registry = self.registry.read();
+        for idx in registry.values() {
+            if idx.collection != collection {
+                continue;
+            }
+            let col = idx.columns.first().map(|s| s.as_str()).unwrap_or("");
+            for (field_name, value) in fields {
+                if field_name == col {
+                    let key = value_to_bytes(value);
+                    match idx.method {
+                        IndexMethodKind::Hash => {
+                            // Missing index on delete is non-fatal.
+                            let _ = self.hash.remove(collection, &idx.name, &key, entity_id);
+                        }
+                        IndexMethodKind::Bitmap => {
+                            let _ = self.bitmap.remove(collection, col, entity_id);
+                        }
+                        IndexMethodKind::BTree => {
+                            self.sorted.delete_one(collection, col, value, entity_id);
+                            let _ = self.hash.remove(
+                                collection,
+                                &format!("{}_hash", idx.name),
+                                &key,
+                                entity_id,
+                            );
+                        }
+                        IndexMethodKind::Spatial => {}
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply an update to every secondary index registered on the
+    /// collection. For each indexed column, if the value changed, deletes
+    /// the entry under the old key and inserts under the new key. Columns
+    /// that are absent from `new_fields` (typed as set-to-NULL) are
+    /// removed from the index. New indexed columns appearing only in
+    /// `new_fields` get inserted.
+    pub fn index_entity_update(
+        &self,
+        collection: &str,
+        entity_id: EntityId,
+        old_fields: &[(String, Value)],
+        new_fields: &[(String, Value)],
+    ) -> Result<(), String> {
+        // Snapshot the indexed columns once to avoid holding the registry
+        // lock across delete/insert sub-calls (those re-acquire it).
+        let indexed_cols: std::collections::HashSet<String> = {
+            let registry = self.registry.read();
+            registry
+                .values()
+                .filter(|idx| idx.collection == collection)
+                .filter_map(|idx| idx.columns.first().cloned())
+                .collect()
+        };
+        if indexed_cols.is_empty() {
+            return Ok(());
+        }
+
+        // Compute the full damage-vector once, then filter to the
+        // indexed columns. Drops the previous O(indexed × old.len)
+        // pairwise scan to a single pass over old + new.
+        let damage = crate::application::entity::row_damage_vector(old_fields, new_fields);
+
+        for (col, old_value, new_value) in &damage.changed {
+            if !indexed_cols.contains(col) {
+                continue;
+            }
+            self.index_entity_delete(collection, entity_id, &[(col.clone(), old_value.clone())])?;
+            self.index_entity_insert(collection, entity_id, &[(col.clone(), new_value.clone())])?;
+        }
+        for (col, old_value) in &damage.removed {
+            if !indexed_cols.contains(col) {
+                continue;
+            }
+            self.index_entity_delete(collection, entity_id, &[(col.clone(), old_value.clone())])?;
+        }
+        for (col, new_value) in &damage.added {
+            if !indexed_cols.contains(col) {
+                continue;
+            }
+            self.index_entity_insert(collection, entity_id, &[(col.clone(), new_value.clone())])?;
+        }
+        Ok(())
+    }
 }
 
 impl Default for IndexStore {
@@ -1217,5 +1315,200 @@ mod tests {
 
         assert!(err.contains("idx_email"));
         assert!(err.contains("users"));
+    }
+
+    /// Helper that fully provisions a hash index on `users.email` with
+    /// the matching registry entry — the realistic state after a
+    /// `CREATE INDEX` call.
+    fn provision_hash_index(store: &IndexStore) {
+        store
+            .create_index(
+                "idx_email",
+                "users",
+                &["email".to_string()],
+                IndexMethodKind::Hash,
+                false,
+                &[],
+            )
+            .unwrap();
+        store.register(RegisteredIndex {
+            name: "idx_email".to_string(),
+            collection: "users".to_string(),
+            columns: vec!["email".to_string()],
+            method: IndexMethodKind::Hash,
+            unique: false,
+        });
+    }
+
+    #[test]
+    fn test_index_entity_delete_removes_row_from_hash_index() {
+        let store = IndexStore::new();
+        provision_hash_index(&store);
+        let id = EntityId::new(7);
+        let key = ("email".to_string(), Value::Text("a@b.com".to_string()));
+
+        store
+            .index_entity_insert("users", id, &[key.clone()])
+            .unwrap();
+        assert_eq!(
+            ids(&store.hash_lookup("users", "idx_email", b"a@b.com").unwrap()),
+            vec![7]
+        );
+
+        store
+            .index_entity_delete("users", id, &[key.clone()])
+            .unwrap();
+        assert!(store
+            .hash_lookup("users", "idx_email", b"a@b.com")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn test_index_entity_delete_tolerates_missing_index() {
+        // No backing hash index exists — delete must still return Ok
+        // (deleting from a dropped index is a non-fatal no-op).
+        let store = IndexStore::new();
+        store.register(RegisteredIndex {
+            name: "idx_email".to_string(),
+            collection: "users".to_string(),
+            columns: vec!["email".to_string()],
+            method: IndexMethodKind::Hash,
+            unique: false,
+        });
+        store
+            .index_entity_delete(
+                "users",
+                EntityId::new(1),
+                &[("email".to_string(), Value::Text("a@b.com".to_string()))],
+            )
+            .expect("delete must tolerate a missing backing index");
+    }
+
+    #[test]
+    fn test_index_entity_update_moves_row_to_new_key() {
+        let store = IndexStore::new();
+        provision_hash_index(&store);
+        let id = EntityId::new(11);
+        let old = ("email".to_string(), Value::Text("old@x.com".to_string()));
+        let new = ("email".to_string(), Value::Text("new@x.com".to_string()));
+
+        store
+            .index_entity_insert("users", id, &[old.clone()])
+            .unwrap();
+
+        store
+            .index_entity_update("users", id, &[old.clone()], &[new.clone()])
+            .unwrap();
+
+        // Lookup under old key returns nothing, new key returns the id.
+        assert!(store
+            .hash_lookup("users", "idx_email", b"old@x.com")
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            ids(&store
+                .hash_lookup("users", "idx_email", b"new@x.com")
+                .unwrap()),
+            vec![11]
+        );
+    }
+
+    #[test]
+    fn test_index_entity_update_skips_unchanged_columns() {
+        // Update where the indexed column value didn't change must
+        // leave the index untouched (no spurious delete + reinsert).
+        let store = IndexStore::new();
+        provision_hash_index(&store);
+        let id = EntityId::new(13);
+        let same = ("email".to_string(), Value::Text("a@b.com".to_string()));
+
+        store
+            .index_entity_insert("users", id, &[same.clone()])
+            .unwrap();
+        store
+            .index_entity_update("users", id, &[same.clone()], &[same.clone()])
+            .unwrap();
+        assert_eq!(
+            ids(&store.hash_lookup("users", "idx_email", b"a@b.com").unwrap()),
+            vec![13]
+        );
+    }
+
+    #[test]
+    fn test_index_entity_update_indexes_newly_added_column() {
+        // Column present only in `new_fields` (was absent in `old`)
+        // must be inserted into the index via the damage_vector.added
+        // bucket.
+        let store = IndexStore::new();
+        provision_hash_index(&store);
+        let id = EntityId::new(17);
+        let old: Vec<(String, Value)> = vec![]; // email wasn't set before
+        let new = vec![("email".to_string(), Value::Text("fresh@x.com".to_string()))];
+
+        store.index_entity_update("users", id, &old, &new).unwrap();
+
+        assert_eq!(
+            ids(&store
+                .hash_lookup("users", "idx_email", b"fresh@x.com")
+                .unwrap()),
+            vec![17]
+        );
+    }
+
+    #[test]
+    fn test_index_entity_update_removes_dropped_column() {
+        // Column present in `old_fields` but absent from `new_fields`
+        // (SET email = NULL / DROP column) must be removed via the
+        // damage_vector.removed bucket.
+        let store = IndexStore::new();
+        provision_hash_index(&store);
+        let id = EntityId::new(19);
+        let old = vec![("email".to_string(), Value::Text("bye@x.com".to_string()))];
+        let new: Vec<(String, Value)> = vec![]; // email dropped
+
+        store.index_entity_insert("users", id, &old).unwrap();
+        assert_eq!(
+            ids(&store
+                .hash_lookup("users", "idx_email", b"bye@x.com")
+                .unwrap()),
+            vec![19]
+        );
+
+        store.index_entity_update("users", id, &old, &new).unwrap();
+
+        assert!(store
+            .hash_lookup("users", "idx_email", b"bye@x.com")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn test_index_entity_update_ignores_non_indexed_column_changes() {
+        // Changing a column that isn't registered in the index
+        // registry must be a no-op — touch the index zero times.
+        let store = IndexStore::new();
+        provision_hash_index(&store); // only idx_email is registered
+        let id = EntityId::new(23);
+
+        let insert = vec![("email".to_string(), Value::Text("a@b.com".to_string()))];
+        store.index_entity_insert("users", id, &insert).unwrap();
+
+        // Update only changes `age` (not registered). email unchanged.
+        let old = vec![
+            ("email".to_string(), Value::Text("a@b.com".to_string())),
+            ("age".to_string(), Value::Integer(30)),
+        ];
+        let new = vec![
+            ("email".to_string(), Value::Text("a@b.com".to_string())),
+            ("age".to_string(), Value::Integer(31)),
+        ];
+        store.index_entity_update("users", id, &old, &new).unwrap();
+
+        // Index is still intact under the unchanged email key.
+        assert_eq!(
+            ids(&store.hash_lookup("users", "idx_email", b"a@b.com").unwrap()),
+            vec![23]
+        );
     }
 }

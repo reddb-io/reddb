@@ -54,9 +54,90 @@ struct MaterializedUpdateAssignments {
 }
 
 impl RedDBRuntime {
+    /// Phase 2.5.4: inject `CURRENT_TENANT()` into an INSERT when the
+    /// target table is tenant-scoped and the user's column list does
+    /// not already name the tenant column.
+    ///
+    /// Returns:
+    /// * `Ok(None)` — no injection needed (non-tenant table, or user
+    ///   supplied the column explicitly). Caller uses the original
+    ///   query unchanged.
+    /// * `Ok(Some(augmented))` — a cloned query with the tenant column
+    ///   + literal value appended to every row.
+    /// * `Err(..)` — table is tenant-scoped but no tenant is bound to
+    ///   the current session. Fails loudly so callers don't produce
+    ///   rows that RLS would then hide on read.
+    fn maybe_inject_tenant_column(
+        &self,
+        query: &InsertQuery,
+    ) -> RedDBResult<Option<InsertQuery>> {
+        let Some(tenant_col) = self.tenant_column(&query.table) else {
+            return Ok(None);
+        };
+        // User already named the column — trust them.
+        if query
+            .columns
+            .iter()
+            .any(|c| c.eq_ignore_ascii_case(&tenant_col))
+        {
+            return Ok(None);
+        }
+        let Some(tenant_id) = crate::runtime::impl_core::current_tenant() else {
+            return Err(RedDBError::Query(format!(
+                "INSERT into tenant-scoped table '{}' requires an active tenant — \
+                 run SET TENANT '<id>' first or name column '{}' explicitly",
+                query.table, tenant_col
+            )));
+        };
+
+        let mut augmented = query.clone();
+        augmented.columns.push(tenant_col);
+        let lit = Value::Text(tenant_id.clone());
+        for row in augmented.values.iter_mut() {
+            row.push(lit.clone());
+        }
+        for row in augmented.value_exprs.iter_mut() {
+            row.push(crate::storage::query::ast::Expr::Literal {
+                value: lit.clone(),
+                span: crate::storage::query::ast::Span::synthetic(),
+            });
+        }
+        Ok(Some(augmented))
+    }
+
     fn delete_entities_batch(&self, collection: &str, ids: &[EntityId]) -> RedDBResult<u64> {
         if ids.is_empty() {
             return Ok(0);
+        }
+
+        // Phase 2.3.2b: when the DELETE is running inside a BEGIN-wrapped
+        // transaction, stamp xmax instead of physically removing the
+        // tuple so concurrent snapshots keep seeing the row until this
+        // txn commits. COMMIT drains `pending_tombstones` and does the
+        // real delete_batch; ROLLBACK resets xmax back to 0.
+        if let Some(xid) = self.current_xid() {
+            let store = self.db().store();
+            let Some(manager) = store.get_collection(collection) else {
+                return Ok(0);
+            };
+            let conn_id = crate::runtime::impl_core::current_connection_id();
+            let mut marked: u64 = 0;
+            for &id in ids {
+                let Some(mut entity) = manager.get(id) else {
+                    continue;
+                };
+                // Skip if this tuple was already tombstoned by a prior
+                // statement in the same txn — idempotent DELETE.
+                if entity.xmax != 0 {
+                    continue;
+                }
+                entity.set_xmax(xid);
+                if manager.update(entity).is_ok() {
+                    self.record_pending_tombstone(conn_id, collection, id, xid);
+                    marked += 1;
+                }
+            }
+            return Ok(marked);
         }
 
         let store = self.db().store();
@@ -123,6 +204,23 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &InsertQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        // Phase 2.5.4 table-scoped tenancy: if the target table is
+        // tenant-scoped and the user didn't name the tenant column,
+        // auto-inject it with the thread-local `CURRENT_TENANT()`
+        // value. When the column is named explicitly we trust the
+        // caller (useful for admin tooling that writes on behalf of
+        // specific tenants). An unbound tenant on an implicit-fill
+        // path errors up front rather than producing a row the RLS
+        // policy would silently hide.
+        let augmented_owned;
+        let query = match self.maybe_inject_tenant_column(query)? {
+            Some(new_q) => {
+                augmented_owned = new_q;
+                &augmented_owned
+            }
+            None => query,
+        };
+
         let mut inserted_count: u64 = 0;
         let effective_rows =
             effective_insert_rows(query).map_err(|msg| RedDBError::Query(msg.to_string()))?;
@@ -464,6 +562,43 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &UpdateQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        // Row-Level Security enforcement (Phase 2.5.2 PG parity).
+        //
+        // Same pattern as DELETE — gate the UPDATE by the per-role
+        // `FOR UPDATE` policy set. No admitting policy = zero rows
+        // affected. Callers outside an RLS-enabled table fall through
+        // unchanged.
+        if crate::runtime::impl_core::rls_is_enabled(self, &query.table) {
+            let rls_filter = crate::runtime::impl_core::rls_policy_filter(
+                self,
+                &query.table,
+                crate::storage::query::ast::PolicyAction::Update,
+            );
+            let Some(policy) = rls_filter else {
+                return Ok(RuntimeQueryResult::dml_result(
+                    raw_query.to_string(),
+                    0,
+                    "update",
+                    "runtime-dml-rls",
+                ));
+            };
+            let mut augmented = query.clone();
+            augmented.filter = Some(match augmented.filter.take() {
+                Some(existing) => {
+                    crate::storage::query::ast::Filter::And(Box::new(existing), Box::new(policy))
+                }
+                None => policy,
+            });
+            return self.execute_update_inner(raw_query, &augmented);
+        }
+        self.execute_update_inner(raw_query, query)
+    }
+
+    fn execute_update_inner(
+        &self,
+        raw_query: &str,
+        query: &UpdateQuery,
+    ) -> RedDBResult<RuntimeQueryResult> {
         let db = self.db();
         let store = self.inner.db.store();
         let effective_filter = effective_update_filter(query);
@@ -665,6 +800,9 @@ impl RedDBRuntime {
                 .collect();
 
             manager.for_each_entity_zoned(&zone_preds, |entity| {
+                if !crate::runtime::impl_core::entity_visible_under_current_snapshot(entity) {
+                    return true;
+                }
                 if query_exec::evaluate_entity_filter_with_db(
                     Some(db.as_ref()),
                     entity,
@@ -678,7 +816,9 @@ impl RedDBRuntime {
             });
         } else {
             manager.for_each_entity(|entity| {
-                ids_to_update.push(entity.id);
+                if crate::runtime::impl_core::entity_visible_under_current_snapshot(entity) {
+                    ids_to_update.push(entity.id);
+                }
                 true
             });
         }
@@ -901,6 +1041,47 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &DeleteQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        // Row-Level Security enforcement (Phase 2.5.2 PG parity).
+        //
+        // When the table has RLS enabled, gate the DELETE by the
+        // per-role policy set: mutations only touch rows that *every*
+        // matching `FOR DELETE` policy would accept. No policies =>
+        // zero rows affected (PG restrictive-default).
+        if crate::runtime::impl_core::rls_is_enabled(self, &query.table) {
+            let rls_filter = crate::runtime::impl_core::rls_policy_filter(
+                self,
+                &query.table,
+                crate::storage::query::ast::PolicyAction::Delete,
+            );
+            let Some(policy) = rls_filter else {
+                return Ok(RuntimeQueryResult::dml_result(
+                    raw_query.to_string(),
+                    0,
+                    "delete",
+                    "runtime-dml-rls",
+                ));
+            };
+            // Fold the policy predicate into the user's WHERE before
+            // dispatching — the remainder of this function reads the
+            // filter from `query` via `effective_delete_filter`, which
+            // respects the updated value.
+            let mut augmented = query.clone();
+            augmented.filter = Some(match augmented.filter.take() {
+                Some(existing) => {
+                    crate::storage::query::ast::Filter::And(Box::new(existing), Box::new(policy))
+                }
+                None => policy,
+            });
+            return self.execute_delete_inner(raw_query, &augmented);
+        }
+        self.execute_delete_inner(raw_query, query)
+    }
+
+    fn execute_delete_inner(
+        &self,
+        raw_query: &str,
+        query: &DeleteQuery,
+    ) -> RedDBResult<RuntimeQueryResult> {
         let db = self.db();
         let store = self.inner.db.store();
         let effective_filter = effective_delete_filter(query);
@@ -1049,6 +1230,9 @@ impl RedDBRuntime {
                 .collect();
 
             manager.for_each_entity_zoned(&zone_preds, |entity| {
+                if !crate::runtime::impl_core::entity_visible_under_current_snapshot(entity) {
+                    return true;
+                }
                 if query_exec::evaluate_entity_filter_with_db(
                     Some(db.as_ref()),
                     entity,
@@ -1062,7 +1246,9 @@ impl RedDBRuntime {
             });
         } else {
             manager.for_each_entity(|entity| {
-                ids_to_delete.push(entity.id);
+                if crate::runtime::impl_core::entity_visible_under_current_snapshot(entity) {
+                    ids_to_delete.push(entity.id);
+                }
                 true
             });
         }

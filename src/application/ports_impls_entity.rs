@@ -54,6 +54,30 @@ fn refresh_context_index(
     Ok(())
 }
 
+/// Pull `(name, value)` pairs for every named column on a row entity.
+/// Returns empty if the entity is not a row, or if the row carries
+/// neither a `named` map nor a `schema` Arc — both of those mean the
+/// names aren't recoverable here, so secondary-index maintenance has
+/// nothing to act on. Used by the delete + update paths.
+pub(crate) fn entity_row_fields_snapshot(
+    entity: &crate::storage::UnifiedEntity,
+) -> Vec<(String, Value)> {
+    let crate::storage::EntityData::Row(row) = &entity.data else {
+        return Vec::new();
+    };
+    if let Some(named) = &row.named {
+        return named.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    }
+    if let Some(schema) = &row.schema {
+        return schema
+            .iter()
+            .zip(row.columns.iter())
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+    }
+    Vec::new()
+}
+
 fn ensure_collection_model_contract(
     db: &crate::storage::unified::devx::RedDB,
     collection: &str,
@@ -1085,6 +1109,9 @@ impl RedDBRuntime {
     ) -> RedDBResult<AppliedEntityMutation> {
         let id = entity.id;
         let operations = normalize_ttl_patch_operations(operations)?;
+        // Snapshot pre-patch row fields for the secondary-index hook —
+        // empty for non-row entities, which is the desired no-op.
+        let pre_mutation_fields = entity_row_fields_snapshot(&entity);
 
         let db = self.db();
         let store = db.store();
@@ -1534,6 +1561,7 @@ impl RedDBRuntime {
             modified_columns,
             persist_metadata: metadata_changed,
             context_index_dirty,
+            pre_mutation_fields,
         })
     }
 
@@ -1565,6 +1593,11 @@ impl RedDBRuntime {
         let mut metadata_changed = false;
         let mut modified_columns = row_modified_columns_template.to_vec();
         let mut context_index_dirty = !modified_columns.is_empty();
+
+        // Snapshot OLD field values BEFORE applying the assignments —
+        // the secondary-index maintenance hook needs both before/after to
+        // delete-then-insert under changed indexed columns.
+        let pre_mutation_fields = entity_row_fields_snapshot(&entity);
 
         let crate::storage::EntityData::Row(row) = &mut entity.data else {
             return Err(crate::RedDBError::Query(
@@ -1619,6 +1652,7 @@ impl RedDBRuntime {
             modified_columns,
             persist_metadata: metadata_changed,
             context_index_dirty,
+            pre_mutation_fields,
         })
     }
 
@@ -1668,13 +1702,48 @@ impl RedDBRuntime {
                 .context_index()
                 .index_entity(&applied.collection, &applied.entity);
         }
-        self.cdc_emit_prebuilt(
+        // Secondary-index maintenance for SQL UPDATE / JSON-Patch flows.
+        // Skip when pre_mutation_fields is empty (entity wasn't a row, or
+        // didn't carry recoverable column names) — there's nothing to
+        // delete-then-insert in that case.
+        //
+        // Also build the CDC damage vector here so downstream consumers
+        // see which columns changed without re-diffing.
+        let mut changed_columns: Option<Vec<String>> = None;
+        if !applied.pre_mutation_fields.is_empty() {
+            let post = entity_row_fields_snapshot(&applied.entity);
+            if !post.is_empty() {
+                let damage = crate::application::entity::row_damage_vector(
+                    &applied.pre_mutation_fields,
+                    &post,
+                );
+                if !damage.is_empty() {
+                    changed_columns = Some(
+                        damage
+                            .touched_columns()
+                            .into_iter()
+                            .map(str::to_string)
+                            .collect(),
+                    );
+                }
+                self.index_store_ref()
+                    .index_entity_update(
+                        &applied.collection,
+                        applied.id,
+                        &applied.pre_mutation_fields,
+                        &post,
+                    )
+                    .map_err(crate::RedDBError::Internal)?;
+            }
+        }
+        self.cdc_emit_prebuilt_with_columns(
             crate::replication::cdc::ChangeOperation::Update,
             &applied.collection,
             &applied.entity,
             "entity",
             applied.metadata.as_ref(),
             true,
+            changed_columns,
         );
         Ok(())
     }
@@ -2195,6 +2264,14 @@ impl RuntimeEntityPort for RedDBRuntime {
 
     fn delete_entity(&self, input: DeleteEntityInput) -> RedDBResult<DeleteEntityOutput> {
         let store = self.db().store();
+        // Snapshot row fields before delete so we can mirror the removal
+        // into every secondary index. The fetch is best-effort: if the
+        // entity is already gone, the delete below is a no-op anyway.
+        let pre_delete_fields = store
+            .get(&input.collection, input.id)
+            .as_ref()
+            .map(entity_row_fields_snapshot)
+            .unwrap_or_default();
         // Store delete first (source of truth). Crash between here and index removal
         // leaves the entity invisible to most queries but recoverable; the reverse
         // (remove index first, then crash) leaves the entity permanently orphaned.
@@ -2203,6 +2280,13 @@ impl RuntimeEntityPort for RedDBRuntime {
             .map_err(|err| crate::RedDBError::Internal(err.to_string()))?;
         if deleted {
             store.context_index().remove_entity(input.id);
+            // Secondary index maintenance — surface only registry-shape
+            // errors; missing-index removals are tolerated inside the call.
+            if !pre_delete_fields.is_empty() {
+                self.index_store_ref()
+                    .index_entity_delete(&input.collection, input.id, &pre_delete_fields)
+                    .map_err(crate::RedDBError::Internal)?;
+            }
             self.cdc_emit(
                 crate::replication::cdc::ChangeOperation::Delete,
                 &input.collection,

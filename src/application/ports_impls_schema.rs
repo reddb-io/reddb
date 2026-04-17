@@ -45,6 +45,12 @@ impl RuntimeSchemaPort for RedDBRuntime {
             default_ttl_ms,
             context_index_fields,
             timestamps,
+            // Application-level `create_table` entry point does not yet
+            // accept partition specs — callers that need partitions go
+            // through the SQL parser path.
+            partition_by: None,
+            // Same for tenant_by — declared via SQL parser only.
+            tenant_by: None,
         };
         RedDBRuntime::execute_create_table(self, &raw_query, &query)
     }

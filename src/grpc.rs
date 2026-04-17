@@ -156,11 +156,7 @@ impl RedDBGrpcServer {
     pub async fn serve(&self) -> Result<(), Box<dyn std::error::Error>> {
         let addr = self.options.bind_addr.parse()?;
         tonic::transport::Server::builder()
-            .add_service(
-                RedDbServer::new(self.grpc_runtime())
-                    .max_decoding_message_size(256 * 1024 * 1024)
-                    .max_encoding_message_size(256 * 1024 * 1024),
-            )
+            .add_service(Self::configured_service(self.grpc_runtime()))
             .serve(addr)
             .await?;
         Ok(())
@@ -174,14 +170,23 @@ impl RedDBGrpcServer {
         let listener = tokio::net::TcpListener::from_std(listener)?;
         let incoming = TcpListenerStream::new(listener);
         tonic::transport::Server::builder()
-            .add_service(
-                RedDbServer::new(self.grpc_runtime())
-                    .max_decoding_message_size(256 * 1024 * 1024)
-                    .max_encoding_message_size(256 * 1024 * 1024),
-            )
+            .add_service(Self::configured_service(self.grpc_runtime()))
             .serve_with_incoming(incoming)
             .await?;
         Ok(())
+    }
+
+    fn configured_service(runtime: GrpcRuntime) -> RedDbServer<GrpcRuntime> {
+        // Advertise zstd + gzip so clients can opt in. Server compresses
+        // outbound replies with zstd; sticking to a single send codec keeps
+        // CPU predictable while still accepting either on inbound.
+        use tonic::codec::CompressionEncoding;
+        RedDbServer::new(runtime)
+            .max_decoding_message_size(256 * 1024 * 1024)
+            .max_encoding_message_size(256 * 1024 * 1024)
+            .accept_compressed(CompressionEncoding::Zstd)
+            .accept_compressed(CompressionEncoding::Gzip)
+            .send_compressed(CompressionEncoding::Zstd)
     }
 }
 

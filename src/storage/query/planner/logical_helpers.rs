@@ -392,6 +392,8 @@ pub(crate) fn join_expr_exposes_field_table(expr: &QueryExpr, table: &str) -> bo
         | QueryExpr::Ask(_)
         | QueryExpr::SetConfig { .. }
         | QueryExpr::ShowConfig { .. }
+        | QueryExpr::SetTenant(_)
+        | QueryExpr::ShowTenant
         | QueryExpr::CreateTimeSeries(_)
         | QueryExpr::DropTimeSeries(_)
         | QueryExpr::CreateQueue(_)
@@ -400,7 +402,23 @@ pub(crate) fn join_expr_exposes_field_table(expr: &QueryExpr, table: &str) -> bo
         | QueryExpr::CreateTree(_)
         | QueryExpr::DropTree(_)
         | QueryExpr::TreeCommand(_)
-        | QueryExpr::ExplainAlter(_) => false,
+        | QueryExpr::ExplainAlter(_)
+        | QueryExpr::TransactionControl(_)
+        | QueryExpr::MaintenanceCommand(_)
+        | QueryExpr::CreateSchema(_)
+        | QueryExpr::DropSchema(_)
+        | QueryExpr::CreateSequence(_)
+        | QueryExpr::DropSequence(_)
+        | QueryExpr::CopyFrom(_)
+        | QueryExpr::CreateView(_)
+        | QueryExpr::DropView(_)
+        | QueryExpr::RefreshMaterializedView(_)
+        | QueryExpr::CreatePolicy(_)
+        | QueryExpr::DropPolicy(_)
+        | QueryExpr::CreateServer(_)
+        | QueryExpr::DropServer(_)
+        | QueryExpr::CreateForeignTable(_)
+        | QueryExpr::DropForeignTable(_) => false,
     }
 }
 
@@ -704,6 +722,8 @@ pub(crate) fn query_expr_kind(expr: &QueryExpr) -> &'static str {
         QueryExpr::Ask(_) => "ask",
         QueryExpr::SetConfig { .. } => "set_config",
         QueryExpr::ShowConfig { .. } => "show_config",
+        QueryExpr::SetTenant(_) => "set_tenant",
+        QueryExpr::ShowTenant => "show_tenant",
         QueryExpr::CreateTimeSeries(_) => "create_timeseries",
         QueryExpr::DropTimeSeries(_) => "drop_timeseries",
         QueryExpr::CreateQueue(_) => "create_queue",
@@ -713,6 +733,22 @@ pub(crate) fn query_expr_kind(expr: &QueryExpr) -> &'static str {
         QueryExpr::DropTree(_) => "drop_tree",
         QueryExpr::TreeCommand(_) => "tree_command",
         QueryExpr::ExplainAlter(_) => "explain_alter",
+        QueryExpr::TransactionControl(_) => "transaction_control",
+        QueryExpr::MaintenanceCommand(_) => "maintenance_command",
+        QueryExpr::CreateSchema(_) => "create_schema",
+        QueryExpr::DropSchema(_) => "drop_schema",
+        QueryExpr::CreateSequence(_) => "create_sequence",
+        QueryExpr::DropSequence(_) => "drop_sequence",
+        QueryExpr::CopyFrom(_) => "copy_from",
+        QueryExpr::CreateView(_) => "create_view",
+        QueryExpr::DropView(_) => "drop_view",
+        QueryExpr::RefreshMaterializedView(_) => "refresh_materialized_view",
+        QueryExpr::CreatePolicy(_) => "create_policy",
+        QueryExpr::DropPolicy(_) => "drop_policy",
+        QueryExpr::CreateServer(_) => "create_server",
+        QueryExpr::DropServer(_) => "drop_server",
+        QueryExpr::CreateForeignTable(_) => "create_foreign_table",
+        QueryExpr::DropForeignTable(_) => "drop_foreign_table",
     }
 }
 

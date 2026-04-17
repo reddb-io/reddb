@@ -2579,3 +2579,537 @@ fn test_parse_hll_commands() {
         )
     ));
 }
+
+#[test]
+fn test_parse_transaction_control() {
+    use crate::storage::query::ast::TxnControl;
+
+    // BEGIN (bare)
+    assert!(matches!(
+        parse("BEGIN").unwrap(),
+        QueryExpr::TransactionControl(TxnControl::Begin)
+    ));
+    // BEGIN WORK
+    assert!(matches!(
+        parse("BEGIN WORK").unwrap(),
+        QueryExpr::TransactionControl(TxnControl::Begin)
+    ));
+    // BEGIN TRANSACTION
+    assert!(matches!(
+        parse("BEGIN TRANSACTION").unwrap(),
+        QueryExpr::TransactionControl(TxnControl::Begin)
+    ));
+    // START TRANSACTION
+    assert!(matches!(
+        parse("START TRANSACTION").unwrap(),
+        QueryExpr::TransactionControl(TxnControl::Begin)
+    ));
+
+    // COMMIT + COMMIT WORK + COMMIT TRANSACTION
+    for s in ["COMMIT", "COMMIT WORK", "COMMIT TRANSACTION"] {
+        assert!(
+            matches!(
+                parse(s).unwrap(),
+                QueryExpr::TransactionControl(TxnControl::Commit)
+            ),
+            "failed for {s}"
+        );
+    }
+
+    // ROLLBACK + ROLLBACK WORK + ROLLBACK TRANSACTION
+    for s in ["ROLLBACK", "ROLLBACK WORK", "ROLLBACK TRANSACTION"] {
+        assert!(
+            matches!(
+                parse(s).unwrap(),
+                QueryExpr::TransactionControl(TxnControl::Rollback)
+            ),
+            "failed for {s}"
+        );
+    }
+
+    // SAVEPOINT name
+    if let QueryExpr::TransactionControl(TxnControl::Savepoint(name)) =
+        parse("SAVEPOINT sp1").unwrap()
+    {
+        assert_eq!(name, "sp1");
+    } else {
+        panic!("Expected Savepoint");
+    }
+
+    // RELEASE SAVEPOINT name
+    if let QueryExpr::TransactionControl(TxnControl::ReleaseSavepoint(name)) =
+        parse("RELEASE SAVEPOINT sp1").unwrap()
+    {
+        assert_eq!(name, "sp1");
+    } else {
+        panic!("Expected ReleaseSavepoint");
+    }
+    // RELEASE name (without SAVEPOINT keyword — PG accepts both)
+    if let QueryExpr::TransactionControl(TxnControl::ReleaseSavepoint(name)) =
+        parse("RELEASE sp2").unwrap()
+    {
+        assert_eq!(name, "sp2");
+    } else {
+        panic!("Expected ReleaseSavepoint");
+    }
+
+    // ROLLBACK TO SAVEPOINT name
+    if let QueryExpr::TransactionControl(TxnControl::RollbackToSavepoint(name)) =
+        parse("ROLLBACK TO SAVEPOINT sp1").unwrap()
+    {
+        assert_eq!(name, "sp1");
+    } else {
+        panic!("Expected RollbackToSavepoint");
+    }
+    // ROLLBACK TO name (without SAVEPOINT keyword)
+    if let QueryExpr::TransactionControl(TxnControl::RollbackToSavepoint(name)) =
+        parse("ROLLBACK TO sp3").unwrap()
+    {
+        assert_eq!(name, "sp3");
+    } else {
+        panic!("Expected RollbackToSavepoint");
+    }
+}
+
+#[test]
+fn test_parse_maintenance_commands() {
+    use crate::storage::query::ast::MaintenanceCommand as Mc;
+
+    // VACUUM (no target)
+    if let QueryExpr::MaintenanceCommand(Mc::Vacuum { target, full }) = parse("VACUUM").unwrap() {
+        assert_eq!(target, None);
+        assert!(!full);
+    } else {
+        panic!("Expected Vacuum");
+    }
+
+    // VACUUM users (table target)
+    if let QueryExpr::MaintenanceCommand(Mc::Vacuum { target, full }) =
+        parse("VACUUM users").unwrap()
+    {
+        assert_eq!(target, Some("users".to_string()));
+        assert!(!full);
+    } else {
+        panic!("Expected Vacuum");
+    }
+
+    // VACUUM FULL
+    if let QueryExpr::MaintenanceCommand(Mc::Vacuum { target, full }) =
+        parse("VACUUM FULL").unwrap()
+    {
+        assert_eq!(target, None);
+        assert!(full);
+    } else {
+        panic!("Expected Vacuum FULL");
+    }
+
+    // VACUUM FULL users
+    if let QueryExpr::MaintenanceCommand(Mc::Vacuum { target, full }) =
+        parse("VACUUM FULL users").unwrap()
+    {
+        assert_eq!(target, Some("users".to_string()));
+        assert!(full);
+    } else {
+        panic!("Expected Vacuum FULL users");
+    }
+
+    // ANALYZE (no target)
+    if let QueryExpr::MaintenanceCommand(Mc::Analyze { target }) = parse("ANALYZE").unwrap() {
+        assert_eq!(target, None);
+    } else {
+        panic!("Expected Analyze");
+    }
+
+    // ANALYZE users
+    if let QueryExpr::MaintenanceCommand(Mc::Analyze { target }) = parse("ANALYZE users").unwrap() {
+        assert_eq!(target, Some("users".to_string()));
+    } else {
+        panic!("Expected Analyze users");
+    }
+}
+
+#[test]
+fn test_parse_schema_and_sequence_ddl() {
+    // CREATE SCHEMA
+    if let QueryExpr::CreateSchema(q) = parse("CREATE SCHEMA app").unwrap() {
+        assert_eq!(q.name, "app");
+        assert!(!q.if_not_exists);
+    } else {
+        panic!("Expected CreateSchema");
+    }
+    if let QueryExpr::CreateSchema(q) = parse("CREATE SCHEMA IF NOT EXISTS app").unwrap() {
+        assert_eq!(q.name, "app");
+        assert!(q.if_not_exists);
+    } else {
+        panic!("Expected CreateSchema IF NOT EXISTS");
+    }
+
+    // DROP SCHEMA
+    if let QueryExpr::DropSchema(q) = parse("DROP SCHEMA app").unwrap() {
+        assert_eq!(q.name, "app");
+        assert!(!q.if_exists);
+        assert!(!q.cascade);
+    } else {
+        panic!("Expected DropSchema");
+    }
+    if let QueryExpr::DropSchema(q) = parse("DROP SCHEMA IF EXISTS app CASCADE").unwrap() {
+        assert_eq!(q.name, "app");
+        assert!(q.if_exists);
+        assert!(q.cascade);
+    } else {
+        panic!("Expected DropSchema IF EXISTS CASCADE");
+    }
+
+    // CREATE SEQUENCE — bare
+    if let QueryExpr::CreateSequence(q) = parse("CREATE SEQUENCE s1").unwrap() {
+        assert_eq!(q.name, "s1");
+        assert_eq!(q.start, 1);
+        assert_eq!(q.increment, 1);
+        assert!(!q.if_not_exists);
+    } else {
+        panic!("Expected CreateSequence");
+    }
+
+    // CREATE SEQUENCE with START and INCREMENT
+    if let QueryExpr::CreateSequence(q) =
+        parse("CREATE SEQUENCE s1 START WITH 100 INCREMENT BY 5").unwrap()
+    {
+        assert_eq!(q.name, "s1");
+        assert_eq!(q.start, 100);
+        assert_eq!(q.increment, 5);
+    } else {
+        panic!("Expected CreateSequence with START/INCREMENT");
+    }
+
+    // Order agnostic (INCREMENT before START)
+    if let QueryExpr::CreateSequence(q) = parse("CREATE SEQUENCE s1 INCREMENT 3 START 10").unwrap()
+    {
+        assert_eq!(q.start, 10);
+        assert_eq!(q.increment, 3);
+    } else {
+        panic!("Expected CreateSequence reversed order");
+    }
+
+    // IF NOT EXISTS
+    if let QueryExpr::CreateSequence(q) = parse("CREATE SEQUENCE IF NOT EXISTS s1").unwrap() {
+        assert!(q.if_not_exists);
+    } else {
+        panic!("Expected CreateSequence IF NOT EXISTS");
+    }
+
+    // DROP SEQUENCE
+    if let QueryExpr::DropSequence(q) = parse("DROP SEQUENCE s1").unwrap() {
+        assert_eq!(q.name, "s1");
+        assert!(!q.if_exists);
+    } else {
+        panic!("Expected DropSequence");
+    }
+    if let QueryExpr::DropSequence(q) = parse("DROP SEQUENCE IF EXISTS s1").unwrap() {
+        assert!(q.if_exists);
+    } else {
+        panic!("Expected DropSequence IF EXISTS");
+    }
+}
+
+#[test]
+fn test_parse_copy_from_csv() {
+    // Basic COPY: no options.
+    if let QueryExpr::CopyFrom(q) = parse("COPY users FROM '/tmp/u.csv'").unwrap() {
+        assert_eq!(q.table, "users");
+        assert_eq!(q.path, "/tmp/u.csv");
+        assert!(!q.has_header);
+        assert_eq!(q.delimiter, None);
+    } else {
+        panic!("Expected CopyFrom");
+    }
+
+    // Short form with HEADER + DELIMITER outside WITH.
+    if let QueryExpr::CopyFrom(q) =
+        parse("COPY users FROM '/tmp/u.csv' DELIMITER ';' HEADER").unwrap()
+    {
+        assert_eq!(q.table, "users");
+        assert_eq!(q.delimiter, Some(';'));
+        assert!(q.has_header);
+    } else {
+        panic!("Expected CopyFrom with short options");
+    }
+
+    // PG-style WITH block.
+    if let QueryExpr::CopyFrom(q) =
+        parse("COPY users FROM '/tmp/u.csv' WITH (FORMAT = csv, HEADER = true, DELIMITER = ',')")
+            .unwrap()
+    {
+        assert_eq!(q.delimiter, Some(','));
+        assert!(q.has_header);
+    } else {
+        panic!("Expected CopyFrom with WITH block");
+    }
+}
+
+#[test]
+fn test_parse_view_ddl() {
+    // CREATE VIEW
+    if let QueryExpr::CreateView(q) =
+        parse("CREATE VIEW active_users AS SELECT * FROM users").unwrap()
+    {
+        assert_eq!(q.name, "active_users");
+        assert!(!q.materialized);
+        assert!(!q.if_not_exists);
+        assert!(!q.or_replace);
+        // Body must be a Table query pointing at `users`.
+        if let QueryExpr::Table(tq) = *q.query {
+            assert_eq!(tq.table, "users");
+        } else {
+            panic!("Expected Table body");
+        }
+    } else {
+        panic!("Expected CreateView");
+    }
+
+    // CREATE OR REPLACE VIEW
+    if let QueryExpr::CreateView(q) = parse("CREATE OR REPLACE VIEW v AS SELECT id FROM t").unwrap()
+    {
+        assert!(q.or_replace);
+        assert!(!q.materialized);
+    } else {
+        panic!("Expected CreateView OR REPLACE");
+    }
+
+    // CREATE MATERIALIZED VIEW IF NOT EXISTS
+    if let QueryExpr::CreateView(q) =
+        parse("CREATE MATERIALIZED VIEW IF NOT EXISTS mv AS SELECT id FROM t").unwrap()
+    {
+        assert!(q.materialized);
+        assert!(q.if_not_exists);
+    } else {
+        panic!("Expected CreateView MATERIALIZED IF NOT EXISTS");
+    }
+
+    // DROP VIEW
+    if let QueryExpr::DropView(q) = parse("DROP VIEW v").unwrap() {
+        assert_eq!(q.name, "v");
+        assert!(!q.materialized);
+        assert!(!q.if_exists);
+    } else {
+        panic!("Expected DropView");
+    }
+
+    // DROP MATERIALIZED VIEW IF EXISTS
+    if let QueryExpr::DropView(q) = parse("DROP MATERIALIZED VIEW IF EXISTS mv").unwrap() {
+        assert!(q.materialized);
+        assert!(q.if_exists);
+    } else {
+        panic!("Expected DropView MATERIALIZED IF EXISTS");
+    }
+
+    // REFRESH MATERIALIZED VIEW
+    if let QueryExpr::RefreshMaterializedView(q) = parse("REFRESH MATERIALIZED VIEW mv").unwrap() {
+        assert_eq!(q.name, "mv");
+    } else {
+        panic!("Expected RefreshMaterializedView");
+    }
+}
+
+#[test]
+fn test_parse_partitioning_ddl() {
+    use crate::storage::query::ast::{AlterOperation, PartitionKind};
+
+    // CREATE TABLE with PARTITION BY RANGE
+    if let QueryExpr::CreateTable(t) =
+        parse("CREATE TABLE events (id INT, ts INT) PARTITION BY RANGE (ts)").unwrap()
+    {
+        assert_eq!(t.name, "events");
+        let spec = t.partition_by.expect("partition_by should be set");
+        assert_eq!(spec.kind, PartitionKind::Range);
+        assert_eq!(spec.column, "ts");
+    } else {
+        panic!("Expected CreateTable with PARTITION BY RANGE");
+    }
+
+    // CREATE TABLE with PARTITION BY LIST
+    if let QueryExpr::CreateTable(t) =
+        parse("CREATE TABLE logs (region TEXT) PARTITION BY LIST (region)").unwrap()
+    {
+        let spec = t.partition_by.unwrap();
+        assert_eq!(spec.kind, PartitionKind::List);
+        assert_eq!(spec.column, "region");
+    } else {
+        panic!("Expected LIST partition");
+    }
+
+    // CREATE TABLE with PARTITION BY HASH
+    if let QueryExpr::CreateTable(t) =
+        parse("CREATE TABLE shards (uid INT) PARTITION BY HASH (uid)").unwrap()
+    {
+        let spec = t.partition_by.unwrap();
+        assert_eq!(spec.kind, PartitionKind::Hash);
+    } else {
+        panic!("Expected HASH partition");
+    }
+
+    // ALTER TABLE ... ATTACH PARTITION
+    if let QueryExpr::AlterTable(q) =
+        parse("ALTER TABLE events ATTACH PARTITION events_2024 FOR VALUES FROM (2024) TO (2025)")
+            .unwrap()
+    {
+        assert_eq!(q.name, "events");
+        match &q.operations[0] {
+            AlterOperation::AttachPartition { child, bound } => {
+                assert_eq!(child, "events_2024");
+                assert!(bound.contains("FROM"));
+                assert!(bound.contains("TO"));
+            }
+            other => panic!("Expected AttachPartition, got {:?}", other),
+        }
+    } else {
+        panic!("Expected AlterTable");
+    }
+
+    // ALTER TABLE ... DETACH PARTITION
+    if let QueryExpr::AlterTable(q) =
+        parse("ALTER TABLE events DETACH PARTITION events_2024").unwrap()
+    {
+        match &q.operations[0] {
+            AlterOperation::DetachPartition { child } => {
+                assert_eq!(child, "events_2024");
+            }
+            other => panic!("Expected DetachPartition, got {:?}", other),
+        }
+    } else {
+        panic!("Expected AlterTable");
+    }
+}
+
+#[test]
+fn test_parse_row_level_security_ddl() {
+    use crate::storage::query::ast::{AlterOperation, PolicyAction};
+
+    // CREATE POLICY
+    if let QueryExpr::CreatePolicy(q) =
+        parse("CREATE POLICY owner_only ON users USING (owner_id = 1)").unwrap()
+    {
+        assert_eq!(q.name, "owner_only");
+        assert_eq!(q.table, "users");
+        assert_eq!(q.action, None);
+        assert_eq!(q.role, None);
+    } else {
+        panic!("Expected CreatePolicy");
+    }
+
+    // CREATE POLICY with action + role
+    if let QueryExpr::CreatePolicy(q) =
+        parse("CREATE POLICY readonly ON t FOR SELECT TO analytics USING (public = 1)").unwrap()
+    {
+        assert_eq!(q.action, Some(PolicyAction::Select));
+        assert_eq!(q.role.as_deref(), Some("analytics"));
+    } else {
+        panic!("Expected CreatePolicy with action + role");
+    }
+
+    // DROP POLICY
+    if let QueryExpr::DropPolicy(q) = parse("DROP POLICY owner_only ON users").unwrap() {
+        assert_eq!(q.name, "owner_only");
+        assert_eq!(q.table, "users");
+        assert!(!q.if_exists);
+    } else {
+        panic!("Expected DropPolicy");
+    }
+
+    // DROP POLICY IF EXISTS
+    if let QueryExpr::DropPolicy(q) = parse("DROP POLICY IF EXISTS p ON t").unwrap() {
+        assert!(q.if_exists);
+    } else {
+        panic!("Expected DropPolicy IF EXISTS");
+    }
+
+    // ALTER TABLE ENABLE ROW LEVEL SECURITY
+    if let QueryExpr::AlterTable(q) = parse("ALTER TABLE users ENABLE ROW LEVEL SECURITY").unwrap()
+    {
+        assert!(matches!(
+            q.operations[0],
+            AlterOperation::EnableRowLevelSecurity
+        ));
+    } else {
+        panic!("Expected ENABLE ROW LEVEL SECURITY");
+    }
+
+    // ALTER TABLE DISABLE ROW LEVEL SECURITY
+    if let QueryExpr::AlterTable(q) = parse("ALTER TABLE users DISABLE ROW LEVEL SECURITY").unwrap()
+    {
+        assert!(matches!(
+            q.operations[0],
+            AlterOperation::DisableRowLevelSecurity
+        ));
+    } else {
+        panic!("Expected DISABLE ROW LEVEL SECURITY");
+    }
+}
+
+#[test]
+fn test_parse_fdw_ddl() {
+    // CREATE SERVER
+    if let QueryExpr::CreateServer(q) =
+        parse("CREATE SERVER mycsv FOREIGN DATA WRAPPER csv OPTIONS (base_path '/data')").unwrap()
+    {
+        assert_eq!(q.name, "mycsv");
+        assert_eq!(q.wrapper, "csv");
+        assert_eq!(q.options.len(), 1);
+        assert_eq!(q.options[0].0, "base_path");
+        assert_eq!(q.options[0].1, "/data");
+    } else {
+        panic!("Expected CreateServer");
+    }
+
+    // CREATE SERVER with IF NOT EXISTS + multiple options
+    if let QueryExpr::CreateServer(q) =
+        parse("CREATE SERVER IF NOT EXISTS s2 FOREIGN DATA WRAPPER csv OPTIONS (a 'x', b 'y')")
+            .unwrap()
+    {
+        assert!(q.if_not_exists);
+        assert_eq!(q.options.len(), 2);
+    } else {
+        panic!("Expected CreateServer IF NOT EXISTS");
+    }
+
+    // DROP SERVER
+    if let QueryExpr::DropServer(q) = parse("DROP SERVER mycsv").unwrap() {
+        assert_eq!(q.name, "mycsv");
+        assert!(!q.if_exists);
+        assert!(!q.cascade);
+    } else {
+        panic!("Expected DropServer");
+    }
+
+    // DROP SERVER IF EXISTS ... CASCADE
+    if let QueryExpr::DropServer(q) = parse("DROP SERVER IF EXISTS mycsv CASCADE").unwrap() {
+        assert!(q.if_exists);
+        assert!(q.cascade);
+    } else {
+        panic!("Expected DropServer IF EXISTS CASCADE");
+    }
+
+    // CREATE FOREIGN TABLE
+    if let QueryExpr::CreateForeignTable(q) = parse(
+        "CREATE FOREIGN TABLE users (id INT, name TEXT) SERVER mycsv OPTIONS (path 'users.csv')",
+    )
+    .unwrap()
+    {
+        assert_eq!(q.name, "users");
+        assert_eq!(q.server, "mycsv");
+        assert_eq!(q.columns.len(), 2);
+        assert_eq!(q.columns[0].name, "id");
+        assert_eq!(q.columns[1].name, "name");
+        assert_eq!(q.options.len(), 1);
+        assert_eq!(q.options[0].0, "path");
+    } else {
+        panic!("Expected CreateForeignTable");
+    }
+
+    // DROP FOREIGN TABLE
+    if let QueryExpr::DropForeignTable(q) = parse("DROP FOREIGN TABLE IF EXISTS users").unwrap() {
+        assert_eq!(q.name, "users");
+        assert!(q.if_exists);
+    } else {
+        panic!("Expected DropForeignTable");
+    }
+}

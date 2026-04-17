@@ -127,6 +127,9 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     if let Some(entity_id) = extract_entity_id_from_filter(&effective_filter) {
         let store = db.store();
         if let Some(entity) = store.get(&query.table, EntityId::new(entity_id)) {
+            if !crate::runtime::impl_core::entity_visible_under_current_snapshot(&entity) {
+                return Ok(Vec::new());
+            }
             return Ok(runtime_table_record_from_entity(entity)
                 .into_iter()
                 .collect());
@@ -228,6 +231,9 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             for entity_opt in entities.into_iter().flatten() {
                 if records.len() >= limit {
                     break;
+                }
+                if !crate::runtime::impl_core::entity_visible_under_current_snapshot(&entity_opt) {
+                    continue;
                 }
                 if compiled_filter.evaluate(&entity_opt) {
                     let record_opt = if lean {
@@ -363,6 +369,11 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                             for entity_opt in entities.into_iter().flatten() {
                                 if records.len() >= limit {
                                     break;
+                                }
+                                if !crate::runtime::impl_core::entity_visible_under_current_snapshot(
+                                    &entity_opt,
+                                ) {
+                                    continue;
                                 }
                                 if compiled_filter
                                     .as_ref()
@@ -527,6 +538,9 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 if records.len() >= limit {
                     break;
                 }
+                if !crate::runtime::impl_core::entity_visible_under_current_snapshot(&entity_opt) {
+                    continue;
+                }
                 if compiled_filter.evaluate(&entity_opt) {
                     let record_opt = if lean {
                         super::super::record_search::runtime_table_record_lean(entity_opt)
@@ -681,6 +695,11 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                             if records.len() >= limit {
                                 break;
                             }
+                            if !crate::runtime::impl_core::entity_visible_under_current_snapshot(
+                                &entity_opt,
+                            ) {
+                                continue;
+                            }
                             if compiled_filter
                                 .as_ref()
                                 .map_or(true, |cf| cf.evaluate(&entity_opt))
@@ -828,7 +847,15 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
 
         let mut records: Vec<UnifiedRecord> = Vec::new();
         if use_parallel {
-            let matching = manager.query_all_zoned(&zone_preds, |entity| compiled.evaluate(entity));
+            // Parallel scan spawns worker threads that don't inherit the
+            // main thread's CURRENT_SNAPSHOT thread-local. Capture the
+            // context here so each closure invocation (on any thread) runs
+            // the same MVCC visibility gate.
+            let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
+            let matching = manager.query_all_zoned(&zone_preds, |entity| {
+                crate::runtime::impl_core::entity_visible_with_context(snap_ctx.as_ref(), entity)
+                    && compiled.evaluate(entity)
+            });
             for entity in &matching {
                 let record = if !select_cols.is_empty() {
                     if let Some(ref idx_map) = schema_col_indices {
@@ -881,6 +908,9 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             manager.for_each_entity_zoned(&zone_preds, |entity| {
                 if records.len() >= limit {
                     return false; // stop iteration
+                }
+                if !crate::runtime::impl_core::entity_visible_under_current_snapshot(entity) {
+                    return true; // skip hidden tuple, keep scanning
                 }
                 if compiled.evaluate(entity) {
                     let record = if !select_cols.is_empty() {
@@ -1027,6 +1057,9 @@ pub(crate) fn execute_runtime_canonical_table_node(
             if let Some(entity_id) = extract_entity_id_from_filter(&effective_filter) {
                 let store = db.store();
                 if let Some(entity) = store.get(&context.query.table, EntityId::new(entity_id)) {
+                    if !crate::runtime::impl_core::entity_visible_under_current_snapshot(&entity) {
+                        return Ok(Vec::new());
+                    }
                     return Ok(runtime_table_record_from_entity(entity)
                         .into_iter()
                         .collect());
@@ -1098,6 +1131,9 @@ pub(crate) fn execute_runtime_canonical_table_node(
                     if records.len() >= limit {
                         return false;
                     }
+                    if !crate::runtime::impl_core::entity_visible_under_current_snapshot(entity) {
+                        return true;
+                    }
                     if compiled.evaluate(entity) {
                         let record = if !select_cols.is_empty() {
                             if let Some(ref idx_map) = schema_col_indices {
@@ -1164,6 +1200,9 @@ pub(crate) fn execute_runtime_canonical_table_node(
             if let Some(entity_id) = extract_entity_id_from_filter(&effective_filter) {
                 let store = db.store();
                 if let Some(entity) = store.get(&context.query.table, EntityId::new(entity_id)) {
+                    if !crate::runtime::impl_core::entity_visible_under_current_snapshot(&entity) {
+                        return Ok(Vec::new());
+                    }
                     return Ok(runtime_table_record_from_entity(entity)
                         .into_iter()
                         .collect());

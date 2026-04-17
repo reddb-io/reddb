@@ -24,6 +24,98 @@ pub struct AppliedEntityMutation {
     pub modified_columns: Vec<String>,
     pub persist_metadata: bool,
     pub context_index_dirty: bool,
+    /// Snapshot of the row's named fields BEFORE the mutation was
+    /// applied. Carried so the post-write secondary-index hook can
+    /// `delete(old) + insert(new)` for changed indexed columns.
+    /// Empty when the entity isn't a row or the row carried neither a
+    /// `named` map nor a `schema` Arc.
+    pub pre_mutation_fields: Vec<(String, Value)>,
+}
+
+/// Damage-vector for a row update: the minimal diff between the
+/// pre-mutation and post-mutation field state. Downstream consumers
+/// (secondary-index maintainer, CDC emitter, eventually the pager's
+/// in-place update path) work off this struct so they only touch
+/// columns that actually changed.
+///
+/// Future work (Fase 5): the pager can decide whether `changed` fits
+/// in the existing cell's slotted footprint and patch bytes in place
+/// instead of rewriting the whole row.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RowDamageVector {
+    /// Columns present in both `old` and `new` whose value differs.
+    /// `(column, old_value, new_value)`.
+    pub changed: Vec<(String, Value, Value)>,
+    /// Columns present in `new` but not in `old`.
+    pub added: Vec<(String, Value)>,
+    /// Columns present in `old` but not in `new`.
+    pub removed: Vec<(String, Value)>,
+}
+
+impl RowDamageVector {
+    /// True when no columns changed, were added, or were removed.
+    /// Callers can short-circuit index/CDC/in-place work when this
+    /// holds.
+    pub fn is_empty(&self) -> bool {
+        self.changed.is_empty() && self.added.is_empty() && self.removed.is_empty()
+    }
+
+    /// Names of every column the update touched. Equivalent to the
+    /// current `modified_columns` list carried on `AppliedEntityMutation`
+    /// but computed from the ground truth of old/new rather than
+    /// from what the SQL executor thinks it wrote.
+    pub fn touched_columns(&self) -> Vec<&str> {
+        let mut out: Vec<&str> =
+            Vec::with_capacity(self.changed.len() + self.added.len() + self.removed.len());
+        out.extend(self.changed.iter().map(|(c, _, _)| c.as_str()));
+        out.extend(self.added.iter().map(|(c, _)| c.as_str()));
+        out.extend(self.removed.iter().map(|(c, _)| c.as_str()));
+        out
+    }
+}
+
+/// Compute the damage-vector between an old and new row snapshot.
+/// Both inputs are field lists (as carried by `CreateRowInput` and
+/// `AppliedEntityMutation.pre_mutation_fields`); the order of fields
+/// is not significant. Columns present in both sides with identical
+/// values don't appear in any bucket.
+pub fn row_damage_vector(
+    old_fields: &[(String, Value)],
+    new_fields: &[(String, Value)],
+) -> RowDamageVector {
+    // HashMap<&str, &Value> keyed by column name for O(1) membership
+    // checks. Both inputs are expected to be small (tens of columns),
+    // so the allocation overhead is negligible vs the O(N*M) pairwise
+    // comparison we'd otherwise need.
+    let old_map: HashMap<&str, &Value> = old_fields.iter().map(|(k, v)| (k.as_str(), v)).collect();
+    let new_map: HashMap<&str, &Value> = new_fields.iter().map(|(k, v)| (k.as_str(), v)).collect();
+
+    let mut changed = Vec::new();
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+
+    for (name, new_value) in &new_map {
+        match old_map.get(name) {
+            Some(old_value) if old_value == new_value => {}
+            Some(old_value) => changed.push((
+                (*name).to_string(),
+                (*old_value).clone(),
+                (*new_value).clone(),
+            )),
+            None => added.push(((*name).to_string(), (*new_value).clone())),
+        }
+    }
+    for (name, old_value) in &old_map {
+        if !new_map.contains_key(name) {
+            removed.push(((*name).to_string(), (*old_value).clone()));
+        }
+    }
+
+    RowDamageVector {
+        changed,
+        added,
+        removed,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -912,4 +1004,97 @@ fn format_mac(bytes: &[u8; 6]) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect::<Vec<_>>()
         .join(":")
+}
+
+#[cfg(test)]
+mod damage_vector_tests {
+    use super::*;
+
+    fn s(n: &str) -> String {
+        n.to_string()
+    }
+
+    #[test]
+    fn identical_rows_produce_empty_vector() {
+        let old = vec![
+            (s("name"), Value::Text(s("alice"))),
+            (s("age"), Value::Integer(30)),
+        ];
+        let new = old.clone();
+        let dv = row_damage_vector(&old, &new);
+        assert!(dv.is_empty());
+        assert!(dv.touched_columns().is_empty());
+    }
+
+    #[test]
+    fn detects_changed_column_only() {
+        let old = vec![
+            (s("name"), Value::Text(s("alice"))),
+            (s("age"), Value::Integer(30)),
+        ];
+        let new = vec![
+            (s("name"), Value::Text(s("alice"))),
+            (s("age"), Value::Integer(31)),
+        ];
+        let dv = row_damage_vector(&old, &new);
+        assert_eq!(dv.changed.len(), 1);
+        assert_eq!(dv.changed[0].0, "age");
+        assert!(dv.added.is_empty());
+        assert!(dv.removed.is_empty());
+        assert_eq!(dv.touched_columns(), vec!["age"]);
+    }
+
+    #[test]
+    fn detects_added_and_removed_columns() {
+        let old = vec![
+            (s("name"), Value::Text(s("alice"))),
+            (s("nickname"), Value::Text(s("al"))),
+        ];
+        let new = vec![
+            (s("name"), Value::Text(s("alice"))),
+            (s("email"), Value::Text(s("a@x.com"))),
+        ];
+        let dv = row_damage_vector(&old, &new);
+        assert!(dv.changed.is_empty());
+        assert_eq!(dv.added.len(), 1);
+        assert_eq!(dv.added[0].0, "email");
+        assert_eq!(dv.removed.len(), 1);
+        assert_eq!(dv.removed[0].0, "nickname");
+    }
+
+    #[test]
+    fn field_order_does_not_affect_diff() {
+        // `(name, age)` and `(age, name)` with identical values should
+        // diff as empty — column order is a presentation concern.
+        let old = vec![
+            (s("name"), Value::Text(s("bob"))),
+            (s("age"), Value::Integer(42)),
+        ];
+        let new = vec![
+            (s("age"), Value::Integer(42)),
+            (s("name"), Value::Text(s("bob"))),
+        ];
+        assert!(row_damage_vector(&old, &new).is_empty());
+    }
+
+    #[test]
+    fn mixed_changed_added_removed() {
+        let old = vec![
+            (s("a"), Value::Integer(1)),
+            (s("b"), Value::Integer(2)),
+            (s("gone"), Value::Text(s("x"))),
+        ];
+        let new = vec![
+            (s("a"), Value::Integer(10)),     // changed
+            (s("b"), Value::Integer(2)),      // unchanged
+            (s("new"), Value::Boolean(true)), // added
+        ];
+        let dv = row_damage_vector(&old, &new);
+        assert_eq!(dv.changed.len(), 1);
+        assert_eq!(dv.added.len(), 1);
+        assert_eq!(dv.removed.len(), 1);
+        let mut touched: Vec<&str> = dv.touched_columns();
+        touched.sort();
+        assert_eq!(touched, vec!["a", "gone", "new"]);
+    }
 }

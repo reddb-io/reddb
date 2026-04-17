@@ -77,6 +77,14 @@ pub struct RedDB {
     pub(crate) remote_key: Option<String>,
     /// Primary replication state (only present when role is Primary).
     pub(crate) replication: Option<Arc<PrimaryReplication>>,
+    /// Quorum coordinator for multi-region commits (Phase 2.6 PG parity).
+    ///
+    /// Only present when role is Primary. Write path calls
+    /// `quorum.wait_for_quorum(lsn)` after appending to the primary WAL
+    /// to block until the configured quorum of replicas has acked. When
+    /// the config is `Async` (default), this returns instantly — same
+    /// semantics as pre-Phase-2.6 RedDB.
+    pub(crate) quorum: Option<Arc<crate::replication::quorum::QuorumCoordinator>>,
     /// Eventual consistency registry (embedded mode support).
     pub(crate) ec_registry: Arc<crate::ec::config::EcRegistry>,
 }

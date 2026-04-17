@@ -102,8 +102,11 @@ pub(crate) fn runtime_vector_matches(
         return Ok(results);
     }
 
+    let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
     let mut results: Vec<SimilarResult> = manager
-        .query_all(|_| true)
+        .query_all(|entity| {
+            crate::runtime::impl_core::entity_visible_with_context(snap_ctx.as_ref(), entity)
+        })
         .into_iter()
         .filter_map(|entity| {
             let score = runtime_entity_vector_similarity(&entity, vector);

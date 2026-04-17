@@ -109,3 +109,50 @@ jobs:
       - name: Tear down stack
         if: always()
         run: docker compose down -v
+
+  windows:
+    # Phase 3.6 PG parity — verify RedDB compiles + passes the core unit
+    # test suite on Windows. Excludes Linux-only integration tests
+    # (systemd install, mmap, Unix sockets) via cfg gates in the source.
+    name: Windows (build + unit tests)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: '28.x'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-rust-1.91.0
+          cache-on-failure: "true"
+      - name: Check
+        run: cargo check --locked --all
+      - name: Unit tests
+        # Skip integration tests that hit Unix-only facilities (systemd,
+        # mmap, /proc). --lib stays within the library crate.
+        run: cargo test --locked --lib
+
+  macos:
+    # Mirror of the Windows job for Darwin; keeps the cross-platform
+    # story complete. Same scope — library build + unit tests.
+    name: macOS (build + unit tests)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: '28.x'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-rust-1.91.0
+          cache-on-failure: "true"
+      - name: Check
+        run: cargo check --locked --all
+      - name: Unit tests
+        run: cargo test --locked --lib

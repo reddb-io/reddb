@@ -2769,7 +2769,7 @@ async fn auth_change_password(
     let auth = self.resolve_auth(request.metadata());
     let caller_username = match &auth {
         AuthResult::Authenticated { username, .. } => username.clone(),
-        _ => return Err(Status::unauthenticated("authentication required")),
+        _ => return Err(Status::unauthenticated("authentication required".to_string())),
     };
 
     let payload = parse_json_payload(&request.into_inner().payload_json)?;
@@ -2804,11 +2804,20 @@ async fn auth_who_am_i(
 
     let mut map = Map::new();
     match &auth {
-        AuthResult::Authenticated { username, role } => {
+        AuthResult::Authenticated {
+            username,
+            role,
+            source,
+        } => {
             map.insert("authenticated".into(), JsonValue::Bool(true));
             map.insert("username".into(), JsonValue::String(username.clone()));
             map.insert("role".into(), JsonValue::String(role.as_str().to_string()));
-            map.insert("auth_method".into(), JsonValue::String("token".to_string()));
+            let method = match source {
+                crate::auth::middleware::AuthSource::Password => "token",
+                crate::auth::middleware::AuthSource::ClientCert => "client_cert",
+                crate::auth::middleware::AuthSource::Oauth => "oauth",
+            };
+            map.insert("auth_method".into(), JsonValue::String(method.to_string()));
         }
         AuthResult::Anonymous => {
             map.insert("authenticated".into(), JsonValue::Bool(false));

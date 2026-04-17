@@ -628,6 +628,38 @@ impl CompiledEntityFilter {
         }
         pop!(true)
     }
+
+    /// Evaluate the filter against a batch of entities. Appends the
+    /// result of each row to `out` in the order it was scanned.
+    ///
+    /// This is a simple loop over [`Self::evaluate`] — the compiled
+    /// opcodes already avoid per-row allocation, so the only win from
+    /// a batch API today is letting the executor amortize its own
+    /// per-row setup across a larger inner loop. Future work: teach
+    /// the compiler to emit SIMD-capable kernels for the trivially
+    /// vectorizable `Compare` and `InSet` opcodes and widen `out` to
+    /// a roaring bitmap. The signature here is forward-compatible.
+    #[inline]
+    pub fn evaluate_batch(&self, entities: &[&UnifiedEntity], out: &mut Vec<bool>) {
+        out.reserve(entities.len());
+        for e in entities {
+            out.push(self.evaluate(e));
+        }
+    }
+
+    /// Convenience wrapper: run the batch evaluator and return only
+    /// the indices where the filter matched. Caller owns the
+    /// resulting vec. Reuses [`Self::evaluate_batch`] so future
+    /// vectorization benefits this path automatically.
+    #[inline]
+    pub fn matching_indices(&self, entities: &[&UnifiedEntity]) -> Vec<usize> {
+        let mut mask = Vec::with_capacity(entities.len());
+        self.evaluate_batch(entities, &mut mask);
+        mask.iter()
+            .enumerate()
+            .filter_map(|(i, &hit)| if hit { Some(i) } else { None })
+            .collect()
+    }
 }
 
 /// For DocumentPath fields the fast resolver returns None, so
@@ -1067,4 +1099,64 @@ mod tests {
     // — those already have ~hundreds of WHERE-clause assertions, and
     // wiring `CompiledEntityFilter` into table.rs runs every one of
     // them through this path.
+
+    fn make_row_entity(id: u64, columns: Vec<(String, Value)>) -> UnifiedEntity {
+        let kind = crate::storage::EntityKind::TableRow {
+            table: std::sync::Arc::from("users"),
+            row_id: id as u32,
+        };
+        let cols: Vec<Value> = columns.iter().map(|(_, v)| v.clone()).collect();
+        let names: Vec<String> = columns.iter().map(|(k, _)| k.clone()).collect();
+        let row = crate::storage::unified::entity::RowData::with_names(cols, names);
+        UnifiedEntity::new(
+            crate::storage::EntityId::new(id),
+            kind,
+            crate::storage::EntityData::Row(row),
+        )
+    }
+
+    #[test]
+    fn evaluate_batch_matches_per_row_results() {
+        let filter = Filter::Compare {
+            field: FieldRef::TableColumn {
+                table: String::new(),
+                column: "age".to_string(),
+            },
+            op: CompareOp::Gt,
+            value: Value::Integer(30),
+        };
+        let compiled = CompiledEntityFilter::compile(&filter, "users", "u");
+        let entities = vec![
+            make_row_entity(1, vec![("age".to_string(), Value::Integer(25))]),
+            make_row_entity(2, vec![("age".to_string(), Value::Integer(40))]),
+            make_row_entity(3, vec![("age".to_string(), Value::Integer(31))]),
+            make_row_entity(4, vec![("age".to_string(), Value::Integer(30))]),
+        ];
+        let refs: Vec<&UnifiedEntity> = entities.iter().collect();
+
+        let mut mask = Vec::new();
+        compiled.evaluate_batch(&refs, &mut mask);
+        assert_eq!(mask, vec![false, true, true, false]);
+
+        let indices = compiled.matching_indices(&refs);
+        assert_eq!(indices, vec![1, 2]);
+    }
+
+    #[test]
+    fn evaluate_batch_on_empty_slice_is_noop() {
+        let filter = Filter::Compare {
+            field: FieldRef::TableColumn {
+                table: String::new(),
+                column: "age".to_string(),
+            },
+            op: CompareOp::Eq,
+            value: Value::Integer(1),
+        };
+        let compiled = CompiledEntityFilter::compile(&filter, "users", "u");
+        let entities: Vec<&UnifiedEntity> = Vec::new();
+        let mut mask = Vec::new();
+        compiled.evaluate_batch(&entities, &mut mask);
+        assert!(mask.is_empty());
+        assert!(compiled.matching_indices(&entities).is_empty());
+    }
 }

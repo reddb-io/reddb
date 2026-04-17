@@ -249,6 +249,9 @@ pub(crate) fn execute_aggregate_query(
     let mut spill_err: Option<String> = None;
 
     manager.for_each_entity(|entity| {
+        if !crate::runtime::impl_core::entity_visible_under_current_snapshot(entity) {
+            return true;
+        }
         if let Some(c) = compiled_filter.as_ref() {
             if !c.evaluate(entity) {
                 return true;

@@ -1,6 +1,40 @@
 use super::*;
 
 impl RedDB {
+    /// Access the quorum coordinator (Phase 2.6 PG parity).
+    ///
+    /// `None` when this instance is not a primary. Write paths call
+    /// `quorum.wait_for_quorum(lsn)` after the primary WAL commit to
+    /// block until the configured replica quorum has acked; `Async`
+    /// mode (default) returns instantly so no behavioural change.
+    pub fn quorum_coordinator(
+        &self,
+    ) -> Option<&Arc<crate::replication::quorum::QuorumCoordinator>> {
+        self.quorum.as_ref()
+    }
+
+    /// Wait for the configured replica quorum on a given LSN.
+    ///
+    /// Convenience wrapper that returns `Ok(())` when:
+    /// * there is no quorum coordinator (non-primary instance), OR
+    /// * the coordinator is in `Async` mode (historical behaviour).
+    ///
+    /// Callers in the write path (INSERT/UPDATE/DELETE dispatch) invoke
+    /// this after logging the commit record. Returning `Err` signals
+    /// that replication did NOT reach quorum — the primary still has
+    /// the record but the client ack should be deferred or rejected.
+    pub fn wait_for_replication_quorum(
+        &self,
+        target_lsn: u64,
+    ) -> Result<(), crate::replication::QuorumError> {
+        match &self.quorum {
+            Some(q) => q.wait_for_quorum(target_lsn),
+            None => Ok(()),
+        }
+    }
+}
+
+impl RedDB {
     pub(crate) fn native_registry_summary_from_metadata(
         &self,
         metadata: &PhysicalMetadataFile,

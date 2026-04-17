@@ -237,6 +237,11 @@ pub struct ReplicaState {
     pub id: String,
     pub last_acked_lsn: u64,
     pub connected_at_unix_ms: u128,
+    /// Region identifier declared by the replica at handshake time
+    /// (Phase 2.6 multi-region PG parity). `None` until the replica
+    /// handshake extension lands in 2.6.2; the quorum coordinator's
+    /// region-binding map covers the in-process case meanwhile.
+    pub region: Option<String>,
 }
 
 /// Primary replication manager.
@@ -258,6 +263,15 @@ impl PrimaryReplication {
     }
 
     pub fn register_replica(&self, id: String) -> u64 {
+        self.register_replica_with_region(id, None)
+    }
+
+    /// Register a replica with an explicit region tag (Phase 2.6 multi-region).
+    ///
+    /// Preferred when the replica handshake declares a region — the quorum
+    /// coordinator uses this field to decide whether the replica counts
+    /// toward a `QuorumMode::Regions` commit.
+    pub fn register_replica_with_region(&self, id: String, region: Option<String>) -> u64 {
         let lsn = self.wal_buffer.current_lsn();
         let state = ReplicaState {
             id,
@@ -266,6 +280,7 @@ impl PrimaryReplication {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis(),
+            region,
         };
         let mut replicas = self.replicas.write().unwrap_or_else(|e| e.into_inner());
         replicas.push(state);

@@ -76,6 +76,10 @@ pub struct ServerCommandConfig {
     pub wire_tls_cert: Option<PathBuf>,
     /// Path to TLS key PEM
     pub wire_tls_key: Option<PathBuf>,
+    /// PostgreSQL wire protocol bind address (Phase 3.1 PG parity).
+    /// When set the server accepts psql / JDBC / DBeaver clients on
+    /// this port via the v3 protocol. Defaults to None (disabled).
+    pub pg_bind_addr: Option<String>,
     pub create_if_missing: bool,
     pub read_only: bool,
     pub role: String,
@@ -256,6 +260,15 @@ WantedBy=multi-user.target\n",
     )
 }
 
+/// Install a systemd unit + start the service.
+///
+/// Linux-only. The helper shells out to `systemctl`, `useradd`,
+/// `groupadd`, `install`, `getent`, and `id` — none of which exist on
+/// Windows or macOS. The Windows/macOS branch returns a hard error so
+/// callers (the CLI) surface a clear message instead of a confusing
+/// syscall failure. A proper Windows-service equivalent (sc.exe /
+/// NSSM) is a Phase 3.6 follow-up.
+#[cfg(target_os = "linux")]
 pub fn install_systemd_service(config: &SystemdServiceConfig) -> Result<(), String> {
     ensure_root()?;
     ensure_command_available("systemctl")?;
@@ -317,6 +330,19 @@ pub fn install_systemd_service(config: &SystemdServiceConfig) -> Result<(), Stri
     Ok(())
 }
 
+/// Non-Linux fallback — systemd is Linux-specific. Keep the signature
+/// identical so callers compile on every platform; surface a clear
+/// error at runtime. Windows/macOS service-manager integration is a
+/// Phase 3.6 follow-up (sc.exe + NSSM on Windows, launchd on macOS).
+#[cfg(not(target_os = "linux"))]
+pub fn install_systemd_service(_config: &SystemdServiceConfig) -> Result<(), String> {
+    Err("systemd install is Linux-only — use sc.exe (Windows) or \
+         launchd (macOS) to install the service manually using the \
+         unit printed by `red service print-unit`"
+        .to_string())
+}
+
+#[cfg(target_os = "linux")]
 fn ensure_root() -> Result<(), String> {
     let output = Command::new("id")
         .arg("-u")
@@ -332,6 +358,7 @@ fn ensure_root() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn ensure_command_available(command: &str) -> Result<(), String> {
     let status = Command::new("sh")
         .args(["-lc", &format!("command -v {command} >/dev/null 2>&1")])
@@ -344,6 +371,7 @@ fn ensure_command_available(command: &str) -> Result<(), String> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn ensure_executable(path: &std::path::Path) -> Result<(), String> {
     let metadata = std::fs::metadata(path)
         .map_err(|err| format!("binary not found '{}': {err}", path.display()))?;
@@ -363,6 +391,7 @@ fn ensure_executable(path: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn command_success<const N: usize>(program: &str, args: [&str; N]) -> Result<bool, String> {
     Command::new(program)
         .args(args)
@@ -371,6 +400,7 @@ fn command_success<const N: usize>(program: &str, args: [&str; N]) -> Result<boo
         .map_err(|err| format!("failed to run {program}: {err}"))
 }
 
+#[cfg(target_os = "linux")]
 fn run_command<const N: usize>(program: &str, args: [&str; N]) -> Result<(), String> {
     let output = Command::new(program)
         .args(args)
@@ -568,10 +598,22 @@ fn run_routed_server(config: ServerCommandConfig, router_bind_addr: String) -> R
 
 /// Spawn wire protocol listeners (plaintext + TLS) as background tokio tasks.
 fn spawn_wire_listeners(config: &ServerCommandConfig, runtime: &RedDBRuntime) {
-    // Plaintext wire
+    // Plaintext wire — TCP or Unix socket
     if let Some(wire_addr) = config.wire_bind_addr.clone() {
         let wire_rt = Arc::new(runtime.clone());
         tokio::spawn(async move {
+            // Address starting with `unix://` or an absolute filesystem path
+            // switches to Unix domain sockets (Phase 1.7 PG parity).
+            #[cfg(unix)]
+            {
+                if wire_addr.starts_with("unix://") || wire_addr.starts_with('/') {
+                    if let Err(e) = crate::wire::start_wire_unix_listener(&wire_addr, wire_rt).await
+                    {
+                        eprintln!("wire unix listener error: {e}");
+                    }
+                    return;
+                }
+            }
             if let Err(e) = crate::wire::start_wire_listener(&wire_addr, wire_rt).await {
                 eprintln!("wire listener error: {e}");
             }
@@ -595,6 +637,27 @@ fn spawn_wire_listeners(config: &ServerCommandConfig, runtime: &RedDBRuntime) {
             }
             Err(e) => eprintln!("wire TLS config error: {e}"),
         }
+    }
+}
+
+/// Spawn the PostgreSQL wire-protocol listener (Phase 3.1 PG parity).
+///
+/// Only runs when `--pg-bind` is supplied. Uses the v3 protocol so
+/// psql, JDBC drivers, DBeaver, etc. can connect directly. Runs
+/// alongside the native wire listener; the two transports do not
+/// share a port.
+fn spawn_pg_listener(config: &ServerCommandConfig, runtime: &RedDBRuntime) {
+    if let Some(pg_addr) = config.pg_bind_addr.clone() {
+        let rt = Arc::new(runtime.clone());
+        tokio::spawn(async move {
+            let cfg = crate::wire::PgWireConfig {
+                bind_addr: pg_addr,
+                ..Default::default()
+            };
+            if let Err(e) = crate::wire::start_pg_wire_listener(cfg, rt).await {
+                eprintln!("pg wire listener error: {e}");
+            }
+        });
     }
 }
 
@@ -721,6 +784,9 @@ fn run_grpc_server(config: ServerCommandConfig, bind_addr: String) -> Result<(),
         // Start wire protocol listeners (plaintext + TLS)
         spawn_wire_listeners(&config, &runtime);
 
+        // Start PostgreSQL wire listener when --pg-bind is configured.
+        spawn_pg_listener(&config, &runtime);
+
         let server = RedDBGrpcServer::with_options(
             runtime,
             GrpcServerOptions {
@@ -773,6 +839,9 @@ fn run_dual_server(
     tokio_runtime.block_on(async move {
         // Start wire protocol listeners (plaintext + TLS)
         spawn_wire_listeners(&config, &runtime);
+
+        // Start PostgreSQL wire listener when --pg-bind is configured.
+        spawn_pg_listener(&config, &runtime);
 
         let server = RedDBGrpcServer::with_options(
             runtime,

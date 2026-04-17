@@ -65,6 +65,17 @@ pub enum QueryExpr {
     SetConfig { key: String, value: Value },
     /// SHOW CONFIG [prefix]
     ShowConfig { prefix: Option<String> },
+    /// `SET TENANT 'id'` / `SET TENANT = 'id'` / `RESET TENANT`
+    ///
+    /// Session-scoped multi-tenancy handle. Populates a per-connection
+    /// thread-local that `CURRENT_TENANT()` reads and that RLS
+    /// policies combine with via `USING (tenant_id = CURRENT_TENANT())`.
+    /// `None` clears the current tenant (RESET TENANT or SET TENANT
+    /// NULL). Unlike `SetConfig` this is *not* persisted to red_config —
+    /// it lives for the connection's lifetime only.
+    SetTenant(Option<String>),
+    /// `SHOW TENANT` — returns the thread-local tenant id (or NULL).
+    ShowTenant,
     /// EXPLAIN ALTER FOR CREATE TABLE name (...) [FORMAT JSON]
     ///
     /// Pure read command that diffs the embedded `CREATE TABLE`
@@ -76,6 +87,243 @@ pub enum QueryExpr {
     /// framework's migration generator and any other client that
     /// wants reddb to own the schema-diff rules.
     ExplainAlter(ExplainAlterQuery),
+    /// Transaction control: BEGIN, COMMIT, ROLLBACK, SAVEPOINT, RELEASE, ROLLBACK TO.
+    ///
+    /// Phase 1.1 (PG parity): parser + dispatch are wired so clients (psql, JDBC, etc.)
+    /// can issue these statements without errors. Real isolation/atomicity semantics
+    /// arrive with Phase 2.3 MVCC. Until then statements behave as autocommit (each
+    /// DML is its own transaction); BEGIN/COMMIT/ROLLBACK return success but do NOT
+    /// provide rollback-on-failure guarantees across multiple statements.
+    TransactionControl(TxnControl),
+    /// Maintenance commands: VACUUM [FULL] [table], ANALYZE [table].
+    ///
+    /// Phase 1.2 (PG parity): `VACUUM` triggers segment/page flush + planner stats
+    /// refresh. `ANALYZE` refreshes planner statistics (histograms, null counts,
+    /// distinct estimates). Both accept an optional table target; omitting the
+    /// target iterates every collection.
+    MaintenanceCommand(MaintenanceCommand),
+    /// `CREATE SCHEMA [IF NOT EXISTS] name`
+    ///
+    /// Phase 1.3 (PG parity): schemas are logical namespaces stored in
+    /// `red_config` under the key `schema.{name}`. Tables created inside a
+    /// schema use `schema.table` qualified names (collection name = "schema.table").
+    CreateSchema(CreateSchemaQuery),
+    /// `DROP SCHEMA [IF EXISTS] name [CASCADE]`
+    DropSchema(DropSchemaQuery),
+    /// `CREATE SEQUENCE [IF NOT EXISTS] name [START [WITH] n] [INCREMENT [BY] n]`
+    ///
+    /// Phase 1.3 (PG parity): sequences are 64-bit monotonic counters persisted
+    /// in `red_config` under the key `sequence.{name}`. Values are produced by
+    /// the scalar functions `nextval('name')` and `currval('name')`.
+    CreateSequence(CreateSequenceQuery),
+    /// `DROP SEQUENCE [IF EXISTS] name`
+    DropSequence(DropSequenceQuery),
+    /// `COPY table FROM 'path' [WITH ...]` — CSV import (Phase 1.5 PG parity).
+    ///
+    /// Supported options: `DELIMITER c`, `HEADER [true|false]`. Rows stream
+    /// into the named collection via the `CsvImporter`.
+    CopyFrom(CopyFromQuery),
+    /// `CREATE [OR REPLACE] [MATERIALIZED] VIEW [IF NOT EXISTS] name AS SELECT ...`
+    ///
+    /// Phase 2.1 (PG parity): views are stored as `view.{name}` entries in
+    /// `red_config`. Materialized views additionally allocate a slot in the
+    /// shared `MaterializedViewCache`; `REFRESH MATERIALIZED VIEW` re-runs
+    /// the underlying query and repopulates the cache.
+    CreateView(CreateViewQuery),
+    /// `DROP [MATERIALIZED] VIEW [IF EXISTS] name`
+    DropView(DropViewQuery),
+    /// `REFRESH MATERIALIZED VIEW name`
+    ///
+    /// Re-executes the view's query and writes the result into the cache.
+    RefreshMaterializedView(RefreshMaterializedViewQuery),
+    /// `CREATE POLICY name ON table [FOR action] [TO role] USING (filter)`
+    ///
+    /// Phase 2.5 (PG parity): row-level security policy definition.
+    /// Evaluated at read time — when the table has RLS enabled, all
+    /// matching policies for the current role are combined with OR and
+    /// AND-ed into the query's WHERE clause.
+    CreatePolicy(CreatePolicyQuery),
+    /// `DROP POLICY [IF EXISTS] name ON table`
+    DropPolicy(DropPolicyQuery),
+    /// `CREATE SERVER name FOREIGN DATA WRAPPER kind OPTIONS (...)`
+    /// (Phase 3.2 PG parity). Registers a named foreign-data-wrapper
+    /// instance in the runtime's `ForeignTableRegistry`.
+    CreateServer(CreateServerQuery),
+    /// `DROP SERVER [IF EXISTS] name [CASCADE]`
+    DropServer(DropServerQuery),
+    /// `CREATE FOREIGN TABLE name (cols) SERVER srv OPTIONS (...)`
+    /// (Phase 3.2 PG parity). Makes `name` resolvable as a foreign table
+    /// via the parent server's `ForeignDataWrapper`.
+    CreateForeignTable(CreateForeignTableQuery),
+    /// `DROP FOREIGN TABLE [IF EXISTS] name`
+    DropForeignTable(DropForeignTableQuery),
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateServerQuery {
+    pub name: String,
+    /// Wrapper kind declared in `FOREIGN DATA WRAPPER <kind>`.
+    pub wrapper: String,
+    /// Generic `(key 'value', ...)` option bag.
+    pub options: Vec<(String, String)>,
+    pub if_not_exists: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct DropServerQuery {
+    pub name: String,
+    pub if_exists: bool,
+    pub cascade: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateForeignTableQuery {
+    pub name: String,
+    pub server: String,
+    pub columns: Vec<ForeignColumnDef>,
+    pub options: Vec<(String, String)>,
+    pub if_not_exists: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ForeignColumnDef {
+    pub name: String,
+    pub data_type: String,
+    pub not_null: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct DropForeignTableQuery {
+    pub name: String,
+    pub if_exists: bool,
+}
+
+/// Row-level security policy definition.
+#[derive(Debug, Clone)]
+pub struct CreatePolicyQuery {
+    pub name: String,
+    pub table: String,
+    /// Which action this policy gates. `None` = `ALL` (applies to all four).
+    pub action: Option<PolicyAction>,
+    /// Role the policy applies to. `None` = all roles.
+    pub role: Option<String>,
+    /// Boolean predicate the row must satisfy.
+    pub using: Box<Filter>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyAction {
+    Select,
+    Insert,
+    Update,
+    Delete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropPolicyQuery {
+    pub name: String,
+    pub table: String,
+    pub if_exists: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateViewQuery {
+    pub name: String,
+    /// Parsed `SELECT ...` body. Stored as a boxed `QueryExpr` so the
+    /// runtime can substitute the tree directly when a query references
+    /// this view (no re-parsing per read).
+    pub query: Box<QueryExpr>,
+    pub materialized: bool,
+    pub if_not_exists: bool,
+    /// `CREATE OR REPLACE VIEW` — overwrites any existing definition.
+    pub or_replace: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropViewQuery {
+    pub name: String,
+    pub materialized: bool,
+    pub if_exists: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefreshMaterializedViewQuery {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopyFromQuery {
+    pub table: String,
+    pub path: String,
+    pub format: CopyFormat,
+    pub delimiter: Option<char>,
+    pub has_header: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyFormat {
+    Csv,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateSchemaQuery {
+    pub name: String,
+    pub if_not_exists: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropSchemaQuery {
+    pub name: String,
+    pub if_exists: bool,
+    pub cascade: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateSequenceQuery {
+    pub name: String,
+    pub if_not_exists: bool,
+    /// First value produced by `nextval`. Default 1.
+    pub start: i64,
+    /// Added to the current value on each `nextval`. Default 1.
+    pub increment: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropSequenceQuery {
+    pub name: String,
+    pub if_exists: bool,
+}
+
+/// Transaction-control statement variants. See [`QueryExpr::TransactionControl`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TxnControl {
+    /// `BEGIN [WORK | TRANSACTION]`, `START TRANSACTION`
+    Begin,
+    /// `COMMIT [WORK | TRANSACTION]`, `END`
+    Commit,
+    /// `ROLLBACK [WORK | TRANSACTION]`
+    Rollback,
+    /// `SAVEPOINT name`
+    Savepoint(String),
+    /// `RELEASE [SAVEPOINT] name`
+    ReleaseSavepoint(String),
+    /// `ROLLBACK TO [SAVEPOINT] name`
+    RollbackToSavepoint(String),
+}
+
+/// Maintenance command variants. See [`QueryExpr::MaintenanceCommand`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MaintenanceCommand {
+    /// `VACUUM [FULL] [table]`
+    ///
+    /// Triggers segment compaction and planner stats refresh. `FULL` additionally
+    /// forces a full pager sync. Target `None` applies to every collection.
+    Vacuum { target: Option<String>, full: bool },
+    /// `ANALYZE [table]`
+    ///
+    /// Refreshes planner statistics (histogram, distinct estimates, null counts).
+    /// Target `None` re-analyzes every collection.
+    Analyze { target: Option<String> },
 }
 
 /// AST node for `EXPLAIN ALTER FOR <CreateTableStmt> [FORMAT JSON]`.
@@ -1109,6 +1357,47 @@ pub struct CreateTableQuery {
     /// every write; `created_at` is immutable after insert.
     /// Enabled via `WITH timestamps = true` in the DDL.
     pub timestamps: bool,
+    /// Partitioning spec (Phase 2.2 PG parity).
+    ///
+    /// When present the table is the *parent* of a partition tree — every
+    /// child partition is registered via `ALTER TABLE ... ATTACH PARTITION`.
+    /// Phase 2.2 stops at registry-only: queries against a partitioned
+    /// parent don't auto-rewrite as UNION yet (Phase 4 adds pruning).
+    pub partition_by: Option<PartitionSpec>,
+    /// Table-scoped multi-tenancy declaration (Phase 2.5.4).
+    ///
+    /// Syntax: `CREATE TABLE t (...) WITH (tenant_by = 'col_name')` or
+    /// the shorthand `CREATE TABLE t (...) TENANT BY (col_name)`. The
+    /// runtime treats the named column as the tenant discriminator and
+    /// automatically:
+    ///
+    /// 1. Registers the table → column mapping so INSERTs that omit the
+    ///    column get `CURRENT_TENANT()` auto-filled.
+    /// 2. Installs an implicit RLS policy equivalent to
+    ///    `USING (col = CURRENT_TENANT())` for SELECT/UPDATE/DELETE/INSERT.
+    /// 3. Flips `rls_enabled_tables` on so the policy actually applies.
+    ///
+    /// None leaves the table non-tenant-scoped — callers manage tenancy
+    /// manually via explicit CREATE POLICY if they want it.
+    pub tenant_by: Option<String>,
+}
+
+/// `PARTITION BY RANGE|LIST|HASH (column)` clause.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartitionSpec {
+    pub kind: PartitionKind,
+    /// Partition key column(s). Simple single-column for Phase 2.2.
+    pub column: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PartitionKind {
+    /// `PARTITION BY RANGE(col)` — children bind `FOR VALUES FROM (a) TO (b)`.
+    Range,
+    /// `PARTITION BY LIST(col)` — children bind `FOR VALUES IN (v1, v2, ...)`.
+    List,
+    /// `PARTITION BY HASH(col)` — children bind `FOR VALUES WITH (MODULUS m, REMAINDER r)`.
+    Hash,
 }
 
 /// Column definition for CREATE TABLE
@@ -1165,6 +1454,40 @@ pub enum AlterOperation {
     DropColumn(String),
     /// RENAME COLUMN from TO to
     RenameColumn { from: String, to: String },
+    /// `ATTACH PARTITION child FOR VALUES ...` (Phase 2.2 PG parity).
+    ///
+    /// Binds an existing child table to the parent partitioned table.
+    /// The `bound` string captures the raw bound expression so the
+    /// runtime can round-trip it back into `red_config` without a
+    /// dedicated per-kind AST.
+    AttachPartition {
+        child: String,
+        /// Human-readable bound string, e.g. `FROM (2024-01-01) TO (2025-01-01)`
+        /// or `IN (1, 2, 3)` or `WITH (MODULUS 4, REMAINDER 0)`.
+        bound: String,
+    },
+    /// `DETACH PARTITION child`
+    DetachPartition { child: String },
+    /// `ENABLE ROW LEVEL SECURITY` (Phase 2.5 PG parity).
+    ///
+    /// Flips the table into RLS-enforced mode. Reads against the table
+    /// will be filtered by every matching `CREATE POLICY` (for the
+    /// current role) combined with `AND`.
+    EnableRowLevelSecurity,
+    /// `DISABLE ROW LEVEL SECURITY` — disables enforcement; policies
+    /// remain defined but are ignored until re-enabled.
+    DisableRowLevelSecurity,
+    /// `ENABLE TENANCY ON (col)` (Phase 2.5.4 PG parity-ish).
+    ///
+    /// Retrofit a tenant-scoped declaration onto an existing table —
+    /// registers the column, installs the auto `__tenant_iso` RLS
+    /// policy, and flips RLS on. Equivalent to re-running
+    /// `CREATE TABLE ... TENANT BY (col)` minus the schema creation.
+    EnableTenancy { column: String },
+    /// `DISABLE TENANCY` — tears down the auto-policy and clears the
+    /// tenancy registration. User-defined policies on the table are
+    /// untouched; RLS stays enabled if any survive.
+    DisableTenancy,
 }
 
 // ============================================================================

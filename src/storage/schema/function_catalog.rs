@@ -123,6 +123,21 @@ const ARGS_MONEY: &[DataType] = &[DataType::Money];
 const ARGS_ONE_TEXT: &[DataType] = &[DataType::Text];
 const ARGS_TWO_TEXT_ANY: &[DataType] = &[DataType::Text, DataType::Text];
 
+// JSON function signatures (Phase 1.4 PG parity).
+//
+// RedDB accepts both Text and Json inputs interchangeably — the evaluator
+// parses text on the fly. We list the Text overload in the catalog so
+// existing text-column calls resolve without a cast; an explicit Json
+// overload is included for schemas that actually use the Json type.
+const ARGS_JSON_TEXT: &[DataType] = &[DataType::Text];
+const ARGS_JSON_JSON: &[DataType] = &[DataType::Json];
+const ARGS_JSON_EXTRACT_TEXT: &[DataType] = &[DataType::Text, DataType::Text];
+const ARGS_JSON_EXTRACT_JSON: &[DataType] = &[DataType::Json, DataType::Text];
+// JSON_SET takes (json, path, value). Value type is Unknown — the evaluator
+// coerces any scalar at runtime (int, float, bool, text, or another json).
+const ARGS_JSON_SET_TEXT: &[DataType] = &[DataType::Text, DataType::Text, DataType::Unknown];
+const ARGS_JSON_SET_JSON: &[DataType] = &[DataType::Json, DataType::Text, DataType::Unknown];
+
 /// The static function catalog. Append-only; removing a row is a
 /// breaking change that may invalidate cached plans referencing
 /// the function. Each block is grouped by category for readability.
@@ -530,6 +545,37 @@ pub const FUNCTION_CATALOG: &[FunctionEntry] = &[
         FunctionKind::Volatile,
         false,
     ),
+    // Phase 2.5.3 multi-tenancy + PG session identity scalars. Marked
+    // Volatile so the planner cannot constant-fold them across rows
+    // — the thread-local value is hot-swappable per statement.
+    entry(
+        "CURRENT_TENANT",
+        ARGS_NONE,
+        DataType::Text,
+        FunctionKind::Volatile,
+        false,
+    ),
+    entry(
+        "CURRENT_USER",
+        ARGS_NONE,
+        DataType::Text,
+        FunctionKind::Volatile,
+        false,
+    ),
+    entry(
+        "SESSION_USER",
+        ARGS_NONE,
+        DataType::Text,
+        FunctionKind::Volatile,
+        false,
+    ),
+    entry(
+        "CURRENT_ROLE",
+        ARGS_NONE,
+        DataType::Text,
+        FunctionKind::Volatile,
+        false,
+    ),
     entry(
         "TIME_BUCKET",
         ARGS_TIME_BUCKET,
@@ -632,6 +678,116 @@ pub const FUNCTION_CATALOG: &[FunctionEntry] = &[
         DataType::Float,
         FunctionKind::Scalar,
         false,
+    ),
+    // ─────────────────────────────────────────────────────────────
+    // Scalar — JSON (Phase 1.4 PG parity)
+    // ─────────────────────────────────────────────────────────────
+    //
+    // JSON_EXTRACT(json_or_text, path) → Text
+    //   Returns the value at `path` serialised as JSON text. Scalar strings
+    //   come back with surrounding quotes; scalar numbers/booleans come back
+    //   as bare tokens. Returns NULL when the path does not resolve.
+    entry(
+        "JSON_EXTRACT",
+        ARGS_JSON_EXTRACT_TEXT,
+        DataType::Text,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "JSON_EXTRACT",
+        ARGS_JSON_EXTRACT_JSON,
+        DataType::Text,
+        FunctionKind::Scalar,
+        false,
+    ),
+    // JSON_EXTRACT_TEXT(json_or_text, path) → Text
+    //   Same as JSON_EXTRACT but strings come back unquoted (PG `->>` style).
+    entry(
+        "JSON_EXTRACT_TEXT",
+        ARGS_JSON_EXTRACT_TEXT,
+        DataType::Text,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "JSON_EXTRACT_TEXT",
+        ARGS_JSON_EXTRACT_JSON,
+        DataType::Text,
+        FunctionKind::Scalar,
+        false,
+    ),
+    // JSON_SET(json_or_text, path, value) → Json
+    //   Immutable update — returns a new JSON blob with `value` written at `path`.
+    //   Creates missing parent objects/arrays on the path.
+    entry(
+        "JSON_SET",
+        ARGS_JSON_SET_TEXT,
+        DataType::Json,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "JSON_SET",
+        ARGS_JSON_SET_JSON,
+        DataType::Json,
+        FunctionKind::Scalar,
+        false,
+    ),
+    // JSON_ARRAY_LENGTH(json) → Integer
+    entry(
+        "JSON_ARRAY_LENGTH",
+        ARGS_JSON_TEXT,
+        DataType::Integer,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "JSON_ARRAY_LENGTH",
+        ARGS_JSON_JSON,
+        DataType::Integer,
+        FunctionKind::Scalar,
+        false,
+    ),
+    // JSON_TYPEOF(json) → Text ("null" | "boolean" | "number" | "string" | "array" | "object")
+    entry(
+        "JSON_TYPEOF",
+        ARGS_JSON_TEXT,
+        DataType::Text,
+        FunctionKind::Scalar,
+        false,
+    ),
+    entry(
+        "JSON_TYPEOF",
+        ARGS_JSON_JSON,
+        DataType::Text,
+        FunctionKind::Scalar,
+        false,
+    ),
+    // JSON_VALID(text) → Boolean — returns true if the argument parses.
+    entry(
+        "JSON_VALID",
+        ARGS_TEXT,
+        DataType::Boolean,
+        FunctionKind::Scalar,
+        false,
+    ),
+    // JSON_ARRAY(any*) → Json — variadic array constructor.
+    // Resolver uses arg_types[0] as the template; Unknown means "any scalar".
+    entry(
+        "JSON_ARRAY",
+        &[DataType::Unknown],
+        DataType::Json,
+        FunctionKind::Scalar,
+        true,
+    ),
+    // JSON_OBJECT(key, value, ...) → Json — variadic k/v pair object constructor.
+    entry(
+        "JSON_OBJECT",
+        &[DataType::Unknown],
+        DataType::Json,
+        FunctionKind::Scalar,
+        true,
     ),
 ];
 

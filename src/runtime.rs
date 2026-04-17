@@ -637,6 +637,81 @@ struct RuntimeInner {
     /// make progress between commits. Remote/gRPC commits use a separate
     /// server-side serialization mechanism and do not touch this lock.
     commit_lock: Mutex<()>,
+    /// View registry (Phase 2.1 PG parity).
+    ///
+    /// Holds the parsed `SELECT` body for every view created via
+    /// `CREATE [MATERIALIZED] VIEW`. Queries that reference a view name
+    /// substitute the stored `QueryExpr` at execution time. Materialized
+    /// views additionally back onto the shared `MaterializedViewCache`
+    /// (see `RuntimeInner::materialized_views`).
+    ///
+    /// This is in-memory only in Phase 2.1 — view definitions do not
+    /// survive a restart. Persistence is a Phase 3 follow-up.
+    views: parking_lot::RwLock<HashMap<String, Arc<crate::storage::query::ast::CreateViewQuery>>>,
+    materialized_views: parking_lot::RwLock<crate::storage::cache::result::MaterializedViewCache>,
+    /// MVCC snapshot manager (Phase 2.3 PG parity).
+    ///
+    /// Allocates monotonic `xid`s on BEGIN and tracks the active/aborted
+    /// sets used by `Snapshot::sees` to filter tuples by visibility. Each
+    /// query evaluates `entity.is_visible(snapshot.xid)` — pre-MVCC rows
+    /// (`xmin == 0`) stay visible to every snapshot, preserving backward
+    /// compatibility with data written before the xid fields existed.
+    snapshot_manager: Arc<crate::storage::transaction::snapshot::SnapshotManager>,
+    /// Connection → active transaction context map (Phase 2.3 PG parity).
+    ///
+    /// Keyed by connection id from `RuntimeConnection`. Populated on BEGIN,
+    /// cleared on COMMIT/ROLLBACK. When a statement executes outside a
+    /// transaction (autocommit path) no entry exists and writes stamp
+    /// `xid=0` — identical to pre-MVCC behaviour.
+    tx_contexts:
+        parking_lot::RwLock<HashMap<u64, crate::storage::transaction::snapshot::TxnContext>>,
+    /// Row-level security policies (Phase 2.5 PG parity).
+    ///
+    /// Keyed by `(table_name, policy_name)`; the set of tables with RLS
+    /// enforcement toggled on lives in `rls_enabled_tables`. Filter
+    /// enforcement hooks into the read path via `collect_rls_filters()`
+    /// — see `runtime::impl_core`.
+    rls_policies: parking_lot::RwLock<
+        HashMap<(String, String), Arc<crate::storage::query::ast::CreatePolicyQuery>>,
+    >,
+    rls_enabled_tables: parking_lot::RwLock<HashSet<String>>,
+    /// Foreign Data Wrapper registry (Phase 3.2 PG parity).
+    ///
+    /// Maps server names → wrapper instances and foreign-table names →
+    /// definitions. Queries referencing a registered foreign table are
+    /// re-routed to `ForeignTableRegistry::scan` by the read-path
+    /// rewriter; reads against unknown names fall through to the native
+    /// collection lookup.
+    foreign_tables: Arc<crate::storage::fdw::ForeignTableRegistry>,
+    /// Per-connection list of tuples marked for deletion by the current
+    /// transaction (Phase 2.3.2b MVCC tombstones + 2.3.2e savepoints).
+    /// Each entry is `(collection, entity_id, stamper_xid)` — the xid
+    /// that stamped xmax on the tuple. For a plain transaction the
+    /// stamper equals `ctx.xid`; with savepoints the stamper equals
+    /// the innermost open sub-xid so ROLLBACK TO SAVEPOINT can revive
+    /// only the matching subset. COMMIT drains the whole conn list
+    /// and physical-deletes; ROLLBACK (whole-tx) revives them all;
+    /// ROLLBACK TO SAVEPOINT revives those with `stamper_xid >=
+    /// savepoint_xid`. Autocommit DELETE bypasses this map.
+    pending_tombstones: parking_lot::RwLock<
+        HashMap<
+            u64,
+            Vec<(
+                String,
+                crate::storage::unified::entity::EntityId,
+                crate::storage::transaction::snapshot::Xid,
+            )>,
+        >,
+    >,
+    /// Table-scoped tenancy registry (Phase 2.5.4).
+    ///
+    /// Maps `table_name → tenant_column`. DML auto-fill looks here to
+    /// inject `CURRENT_TENANT()` on INSERTs that omit the column, and
+    /// DDL keeps the in-memory registry in sync with the
+    /// `tenant_tables.*` keys in red_config. Read-side enforcement
+    /// piggy-backs on the existing RLS infrastructure: every entry
+    /// installs an implicit `col = CURRENT_TENANT()` policy.
+    tenant_tables: parking_lot::RwLock<HashMap<String, String>>,
 }
 
 #[derive(Clone)]

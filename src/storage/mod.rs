@@ -30,6 +30,9 @@ pub mod transaction;
 // Page Cache (SIEVE Algorithm)
 pub mod cache;
 
+// Foreign Data Wrappers (Phase 3.2 PG parity)
+pub mod fdw;
+
 // SQLite Import/Compatibility Layer
 pub mod import;
 

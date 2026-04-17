@@ -14,7 +14,7 @@ impl GrpcRuntime {
         if self.auth_store.is_enabled() {
             if let Some(token) = token {
                 if let Some((username, role)) = self.auth_store.validate_token(token) {
-                    return AuthResult::Authenticated { username, role };
+                    return AuthResult::password(username, role);
                 }
                 // Token was provided but invalid -- if require_auth is on, deny.
                 if self.auth_store.config().require_auth {

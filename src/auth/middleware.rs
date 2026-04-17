@@ -3,17 +3,35 @@
 //! Provides the [`AuthResult`] type and [`check_permission`] function used by
 //! the gRPC and HTTP layers to decide whether an incoming request is allowed.
 
-use super::Role;
+use super::{CertIdentity, OAuthIdentity, Role};
 
 // ---------------------------------------------------------------------------
 // AuthResult
 // ---------------------------------------------------------------------------
 
+/// How the caller's identity was established.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthSource {
+    /// Classic password / API-key / session cookie path.
+    Password,
+    /// mTLS client certificate (Phase 3.4 PG parity).
+    ClientCert,
+    /// OAuth/OIDC Bearer token (Phase 3.4 PG parity).
+    Oauth,
+}
+
 /// Outcome of auth validation for an incoming request.
 #[derive(Debug, Clone)]
 pub enum AuthResult {
     /// Fully authenticated with RBAC.
-    Authenticated { username: String, role: Role },
+    Authenticated {
+        username: String,
+        role: Role,
+        /// Which auth path produced this identity. Defaults to
+        /// `Password` for callers that haven't been updated to set it
+        /// explicitly, keeping backwards compatibility.
+        source: AuthSource,
+    },
     /// No credentials provided.
     Anonymous,
     /// Credentials were provided but rejected.
@@ -21,11 +39,48 @@ pub enum AuthResult {
 }
 
 impl AuthResult {
+    /// Back-compat constructor for password auth — callers that predate
+    /// the `AuthSource` field can keep passing `(user, role)`.
+    pub fn password(username: impl Into<String>, role: Role) -> Self {
+        Self::Authenticated {
+            username: username.into(),
+            role,
+            source: AuthSource::Password,
+        }
+    }
+
+    /// Build an `AuthResult` from a validated client certificate.
+    pub fn from_cert(id: CertIdentity) -> Self {
+        Self::Authenticated {
+            username: id.username,
+            role: id.role,
+            source: AuthSource::ClientCert,
+        }
+    }
+
+    /// Build an `AuthResult` from a validated OAuth/OIDC token.
+    pub fn from_oauth(id: OAuthIdentity) -> Self {
+        Self::Authenticated {
+            username: id.username,
+            role: id.role,
+            source: AuthSource::Oauth,
+        }
+    }
+
     /// Short description suitable for logging.
     pub fn summary(&self) -> String {
         match self {
-            Self::Authenticated { username, role } => {
-                format!("user={username} role={role}")
+            Self::Authenticated {
+                username,
+                role,
+                source,
+            } => {
+                let src = match source {
+                    AuthSource::Password => "pwd",
+                    AuthSource::ClientCert => "cert",
+                    AuthSource::Oauth => "oauth",
+                };
+                format!("user={username} role={role} via={src}")
             }
             Self::Anonymous => "anonymous".to_string(),
             Self::Denied(reason) => format!("denied: {reason}"),
@@ -86,6 +141,7 @@ mod tests {
         let auth = AuthResult::Authenticated {
             username: "root".into(),
             role: Role::Admin,
+            source: AuthSource::Password,
         };
         assert!(check_permission(&auth, false, false).is_ok());
         assert!(check_permission(&auth, true, false).is_ok());
@@ -98,6 +154,7 @@ mod tests {
         let auth = AuthResult::Authenticated {
             username: "writer".into(),
             role: Role::Write,
+            source: AuthSource::Password,
         };
         assert!(check_permission(&auth, false, false).is_ok());
         assert!(check_permission(&auth, true, false).is_ok());
@@ -109,6 +166,7 @@ mod tests {
         let auth = AuthResult::Authenticated {
             username: "reader".into(),
             role: Role::Read,
+            source: AuthSource::Password,
         };
         assert!(check_permission(&auth, false, false).is_ok());
         assert!(check_permission(&auth, true, false).is_err());
@@ -136,6 +194,7 @@ mod tests {
         let auth = AuthResult::Authenticated {
             username: "alice".into(),
             role: Role::Admin,
+            source: AuthSource::Password,
         };
         assert!(auth.summary().contains("alice"));
         assert!(auth.is_authenticated());

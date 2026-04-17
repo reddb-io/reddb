@@ -2,7 +2,7 @@
 
 use super::super::ast::{
     AlterOperation, AlterTableQuery, CreateColumnDef, CreateTableQuery, DropTableQuery,
-    ExplainAlterQuery, ExplainFormat, QueryExpr,
+    ExplainAlterQuery, ExplainFormat, PartitionKind, PartitionSpec, QueryExpr,
 };
 use super::super::lexer::Token;
 use super::error::ParseError;
@@ -66,6 +66,8 @@ impl<'a> Parser<'a> {
             default_ttl_ms,
             context_index_fields,
             timestamps,
+            partition_by: None,
+            tenant_by: None,
         }))
     }
 
@@ -95,6 +97,7 @@ impl<'a> Parser<'a> {
         let mut default_ttl_ms = None;
         let mut context_index_fields = Vec::new();
         let mut timestamps = false;
+        let mut tenant_by: Option<String> = None;
 
         while self.consume(&Token::With)? {
             if self.consume_ident_ci("CONTEXT")? {
@@ -116,9 +119,60 @@ impl<'a> Parser<'a> {
                 self.expect(Token::RParen)?;
             } else if self.consume_ident_ci("TIMESTAMPS")? {
                 timestamps = self.parse_bool_assign()?;
+            } else if self.consume_ident_ci("TENANT_BY")? {
+                // `WITH (tenant_by = 'col')` form — accepts `=` optional
+                // and expects a string literal column name.
+                let _ = self.consume(&Token::Eq)?;
+                let value = self.parse_literal_value()?;
+                match value {
+                    Value::Text(col) => tenant_by = Some(col),
+                    other => {
+                        return Err(ParseError::new(
+                            format!(
+                                "WITH tenant_by expects a text literal, got {other:?}"
+                            ),
+                            self.position(),
+                        ));
+                    }
+                }
             } else {
                 default_ttl_ms = self.parse_create_table_ttl_clause()?;
             }
+        }
+
+        // Optional `PARTITION BY RANGE|LIST|HASH (col)` clause (Phase 2.2).
+        let partition_by = if self.consume(&Token::Partition)? {
+            self.expect(Token::By)?;
+            let kind = if self.consume(&Token::Range)? {
+                PartitionKind::Range
+            } else if self.consume(&Token::List)? {
+                PartitionKind::List
+            } else if self.consume(&Token::Hash)? {
+                PartitionKind::Hash
+            } else {
+                return Err(ParseError::expected(
+                    vec!["RANGE", "LIST", "HASH"],
+                    self.peek(),
+                    self.position(),
+                ));
+            };
+            self.expect(Token::LParen)?;
+            let column = self.expect_ident()?;
+            self.expect(Token::RParen)?;
+            Some(PartitionSpec { kind, column })
+        } else {
+            None
+        };
+
+        // Shorthand: `TENANT BY (col)` trailing clause (after partition
+        // spec if both are used). More ergonomic than the WITH form for
+        // a feature that's usually declared once.
+        if tenant_by.is_none() && self.consume_ident_ci("TENANT")? {
+            self.expect(Token::By)?;
+            self.expect(Token::LParen)?;
+            let col = self.expect_ident()?;
+            self.expect(Token::RParen)?;
+            tenant_by = Some(col);
         }
 
         Ok(QueryExpr::CreateTable(CreateTableQuery {
@@ -128,6 +182,8 @@ impl<'a> Parser<'a> {
             default_ttl_ms,
             context_index_fields,
             timestamps,
+            partition_by,
+            tenant_by,
         }))
     }
 
@@ -221,13 +277,74 @@ impl<'a> Parser<'a> {
             self.expect(Token::To)?;
             let to = self.expect_ident()?;
             Ok(AlterOperation::RenameColumn { from, to })
+        } else if self.consume(&Token::Attach)? {
+            // ATTACH PARTITION child FOR VALUES ...
+            self.expect(Token::Partition)?;
+            let child = self.expect_ident()?;
+            self.expect(Token::For)?;
+            // Accept `VALUES` as an ident since the grammar doesn't have it
+            // as a reserved keyword everywhere. Collect the remaining tokens
+            // as a raw bound string for round-trip persistence.
+            if !self.consume_ident_ci("VALUES")? && !self.consume(&Token::Values)? {
+                return Err(ParseError::expected(
+                    vec!["VALUES"],
+                    self.peek(),
+                    self.position(),
+                ));
+            }
+            let bound = self.collect_remaining_tokens_as_string()?;
+            Ok(AlterOperation::AttachPartition { child, bound })
+        } else if self.consume(&Token::Detach)? {
+            // DETACH PARTITION child
+            self.expect(Token::Partition)?;
+            let child = self.expect_ident()?;
+            Ok(AlterOperation::DetachPartition { child })
+        } else if self.consume(&Token::Enable)? {
+            // ENABLE ROW LEVEL SECURITY  |  ENABLE TENANCY ON (col)
+            if self.consume_ident_ci("TENANCY")? {
+                self.expect(Token::On)?;
+                self.expect(Token::LParen)?;
+                let col = self.expect_ident()?;
+                self.expect(Token::RParen)?;
+                Ok(AlterOperation::EnableTenancy { column: col })
+            } else {
+                self.expect(Token::Row)?;
+                self.expect(Token::Level)?;
+                self.expect(Token::Security)?;
+                Ok(AlterOperation::EnableRowLevelSecurity)
+            }
+        } else if self.consume(&Token::Disable)? {
+            // DISABLE ROW LEVEL SECURITY  |  DISABLE TENANCY
+            if self.consume_ident_ci("TENANCY")? {
+                Ok(AlterOperation::DisableTenancy)
+            } else {
+                self.expect(Token::Row)?;
+                self.expect(Token::Level)?;
+                self.expect(Token::Security)?;
+                Ok(AlterOperation::DisableRowLevelSecurity)
+            }
         } else {
             Err(ParseError::expected(
-                vec!["ADD", "DROP", "RENAME"],
+                vec![
+                    "ADD", "DROP", "RENAME", "ATTACH", "DETACH", "ENABLE", "DISABLE",
+                ],
                 self.peek(),
                 self.position(),
             ))
         }
+    }
+
+    /// Capture remaining tokens as a display-joined string.
+    ///
+    /// Used by `ATTACH PARTITION ... FOR VALUES <bound>` to round-trip the
+    /// bound clause into storage without needing a dedicated per-kind AST.
+    fn collect_remaining_tokens_as_string(&mut self) -> Result<String, ParseError> {
+        let mut parts: Vec<String> = Vec::new();
+        while !self.check(&Token::Eof) && !self.check(&Token::Comma) {
+            parts.push(self.peek().to_string());
+            self.advance()?;
+        }
+        Ok(parts.join(" "))
     }
 
     /// Parse a single column definition: name TYPE [NOT NULL] [DEFAULT=val] [COMPRESS:N] [UNIQUE] [PRIMARY KEY]
