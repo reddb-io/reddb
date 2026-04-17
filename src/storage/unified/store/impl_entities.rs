@@ -609,35 +609,43 @@ impl UnifiedStore {
             self.update_graph_label_index(collection, label, id);
         }
 
-        // Also insert into B-tree index if pager is active
-        let mut registry_dirty = false;
-        if let Some(pager) = &self.pager {
-            if let Some(entity) = manager.get(id) {
-                let mut btree_indices = self.btree_indices.write();
-                let btree = btree_indices
-                    .entry(collection.to_string())
-                    .or_insert_with(|| BTree::new(Arc::clone(pager)));
-                let root_before = btree.root_page_id();
+        // Fetch the persisted entity once and reuse across btree insert,
+        // cross-ref indexing, and WAL-action construction. Previously this
+        // path did 3× manager.get(id), each cloning the entity — ~62 samples
+        // of UnifiedEntity::clone in the insert hot path.
+        let needs_entity = self.pager.is_some() || self.config.auto_index_refs;
+        let persisted = if needs_entity { manager.get(id) } else { None };
+        let persisted_metadata = if needs_entity {
+            manager.get_metadata(id)
+        } else {
+            None
+        };
 
-                let key = id.raw().to_be_bytes();
-                let metadata = manager.get_metadata(id);
-                let value = Self::serialize_entity_record(
-                    &entity,
-                    metadata.as_ref(),
-                    self.format_version(),
-                );
-                btree.insert(&key, &value).map_err(|e| {
-                    StoreError::Io(std::io::Error::other(format!(
-                        "B-tree insert error while inserting '{collection}'/{id}: {e}"
-                    )))
-                })?;
-                registry_dirty = root_before != btree.root_page_id();
-            }
+        let mut registry_dirty = false;
+        if let (Some(pager), Some(entity)) = (&self.pager, persisted.as_ref()) {
+            let mut btree_indices = self.btree_indices.write();
+            let btree = btree_indices
+                .entry(collection.to_string())
+                .or_insert_with(|| BTree::new(Arc::clone(pager)));
+            let root_before = btree.root_page_id();
+
+            let key = id.raw().to_be_bytes();
+            let value = Self::serialize_entity_record(
+                entity,
+                persisted_metadata.as_ref(),
+                self.format_version(),
+            );
+            btree.insert(&key, &value).map_err(|e| {
+                StoreError::Io(std::io::Error::other(format!(
+                    "B-tree insert error while inserting '{collection}'/{id}: {e}"
+                )))
+            })?;
+            registry_dirty = root_before != btree.root_page_id();
         }
 
         if self.config.auto_index_refs {
-            if let Some(entity) = manager.get(id) {
-                self.index_cross_refs(&entity, collection)?;
+            if let Some(entity) = persisted.as_ref() {
+                self.index_cross_refs(entity, collection)?;
             }
         }
 
@@ -645,14 +653,13 @@ impl UnifiedStore {
         // third manager.get + entity serialize per insert). For
         // in-memory runtimes finish_paged_write is a no-op.
         if self.pager.is_some() {
-            let actions = manager
-                .get(id)
+            let actions = persisted
+                .as_ref()
                 .map(|entity| {
-                    let metadata = manager.get_metadata(id);
                     vec![StoreWalAction::upsert_entity(
                         collection,
-                        &entity,
-                        metadata.as_ref(),
+                        entity,
+                        persisted_metadata.as_ref(),
                         self.format_version(),
                     )]
                 })

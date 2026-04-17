@@ -15,7 +15,7 @@ fn store_config_from_options(options: &RedDBOptions) -> UnifiedStoreConfig {
     let mut group_commit = config.group_commit;
     if let Ok(value) = std::env::var("REDDB_GROUP_COMMIT_WINDOW_MS") {
         if let Ok(parsed) = value.parse::<u64>() {
-            group_commit.window_ms = parsed.max(1);
+            group_commit.window_ms = parsed;
         }
     }
     if let Ok(value) = std::env::var("REDDB_GROUP_COMMIT_MAX_STATEMENTS") {

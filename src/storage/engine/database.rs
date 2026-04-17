@@ -242,15 +242,21 @@ impl Database {
             TransactionManager::new(Arc::clone(&pager), &wal_path).map_err(DatabaseError::Io)?,
         );
 
-        // P6.T1 — spawn the background writer in non-read-only mode.
-        // Holds a `Weak<Pager>` so dropping the database actually
-        // releases the file lock; the writer thread exits at the
-        // next round when the upgrade fails. Config knobs honour the
-        // Tier B matrix entries (`storage.bgwriter.*`) but fall back
-        // to the library defaults when they're absent, so embedded
-        // users who bypass the runtime config path still get sane
-        // behaviour.
-        let bgwriter = if config.read_only {
+        // P6.T1 — bgwriter wiring is gated behind `REDDB_BGWRITER=1`
+        // for now. The current `PagerDirtyFlusher::flush_some` calls
+        // `write_page` directly without enforcing WAL-first ordering;
+        // bench `update_single` triggered "B-tree insert error: Pager
+        // error: I/O error: failed to fill whole buffer" when the
+        // background flusher raced with the foreground commit on the
+        // same dirty page. Off by default until the flusher is
+        // taught to respect the per-page LSN gate the commit path
+        // uses (max_lsn → wal.flush(max_lsn) → write_page).
+        let bgwriter = if config.read_only
+            || !matches!(
+                std::env::var("REDDB_BGWRITER").ok().as_deref(),
+                Some("1") | Some("true") | Some("on")
+            )
+        {
             None
         } else {
             let flusher = std::sync::Arc::new(

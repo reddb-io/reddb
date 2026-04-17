@@ -30,7 +30,9 @@ fn main() {
         .expect("start profiler");
 
     // ── Setup ────────────────────────────────────────────────────
-    let rt = RedDBRuntime::in_memory().expect("open in-memory runtime");
+    // Default `in_memory()` now uses window_ms=0 (see api.rs) so
+    // single-writer workloads don't pay the 1ms group-commit timer.
+    let rt = RedDBRuntime::in_memory().expect("open runtime");
     let uc_entity = EntityUseCases::new(&rt);
     let uc_query = QueryUseCases::new(&rt);
 

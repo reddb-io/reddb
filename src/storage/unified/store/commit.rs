@@ -164,7 +164,14 @@ impl StoreCommitCoordinator {
         ) {
             let wal_bg = Arc::clone(&wal);
             let state_bg = Arc::clone(&state);
-            let window = Duration::from_millis(config.window_ms.max(1));
+            // window_ms == 0 is a valid configuration meaning "no wait" —
+            // flush on every wakeup. Under single-writer workloads the
+            // batching window adds pure latency (no one to batch with)
+            // while capping individual insert throughput at ~1000 ops/s
+            // for window_ms=1. Concurrent writers still batch naturally
+            // via the Mutex<WalWriter> contention path even with
+            // window_ms=0.
+            let window = Duration::from_millis(config.window_ms);
             let max_statements = config.max_statements.max(1);
             let max_wal_bytes = config.max_wal_bytes.max(1);
             std::thread::spawn(move || {
@@ -387,7 +394,8 @@ impl StoreCommitCoordinator {
                     return;
                 }
 
-                let immediate = guard.pending_statements >= max_statements
+                let immediate = window.is_zero()
+                    || guard.pending_statements >= max_statements
                     || guard.pending_wal_bytes >= max_wal_bytes;
 
                 if !immediate {

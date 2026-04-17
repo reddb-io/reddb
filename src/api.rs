@@ -21,7 +21,19 @@ pub const DEFAULT_EXPORT_RETENTION: usize = 16;
 
 pub const REDDB_PROTOCOL_VERSION: &str = "reddb-v2";
 pub const REDDB_FORMAT_VERSION: u32 = 2;
-pub const DEFAULT_GROUP_COMMIT_WINDOW_MS: u64 = 1;
+/// Default group-commit window.
+///
+/// `0` = "no wait" — the background flusher fsyncs as soon as any
+/// writer's pending commit arrives. Under single-writer workloads a
+/// non-zero window would be pure latency (no one to batch with),
+/// capping individual commit throughput at ~1000/s for window=1.
+/// Concurrent writers still batch naturally via the `Mutex<WalWriter>`
+/// contention path without needing an explicit timer.
+///
+/// Operators with many concurrent clients can raise this (e.g. 1-5ms)
+/// to amortise fsync cost across a bigger batch — at the cost of p99
+/// tail latency going up by the window size.
+pub const DEFAULT_GROUP_COMMIT_WINDOW_MS: u64 = 0;
 pub const DEFAULT_GROUP_COMMIT_MAX_STATEMENTS: usize = 128;
 pub const DEFAULT_GROUP_COMMIT_MAX_WAL_BYTES: u64 = 1024 * 1024;
 
@@ -340,7 +352,9 @@ impl RedDBOptions {
     }
 
     pub fn with_group_commit_window_ms(mut self, window_ms: u64) -> Self {
-        self.group_commit.window_ms = window_ms.max(1);
+        // `0` is a legitimate setting — "no wait, fsync on every wakeup".
+        // See `DEFAULT_GROUP_COMMIT_WINDOW_MS` docs for the tradeoff.
+        self.group_commit.window_ms = window_ms;
         self
     }
 
