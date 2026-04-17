@@ -2,6 +2,79 @@
 
 All notable changes to RedDB are documented here. Dates are ISO-8601 (UTC-3).
 
+## 2026-04-17 — Structured Logging with `tracing` + File Rotation
+
+Replaces ~140 ad-hoc `eprintln!` sites with a `tracing` /
+`tracing-subscriber` / `tracing-appender` pipeline. Every server
+event now carries levels, timestamps, and correlation fields
+(`conn_id`, `tenant`, `transport`, `bind`, `peer`, `err`) that ops
+tools can filter on.
+
+### Features
+
+- `reddb::telemetry::{init, TelemetryConfig, LogFormat,
+  TelemetryGuard}` — façade over tracing-subscriber. Two layers:
+  stderr (pretty / JSON) and optional daily-rotating file written
+  via `tracing-appender`, both sharing the same `EnvFilter`.
+- Background janitor (`telemetry::janitor::spawn`) purges rotated
+  files older than `--log-keep-days` every hour. Silent no-op when
+  no tokio runtime is active.
+- `span::query_span`, `span::connection_span`, `span::listener_span`
+  — pull `conn_id` / `tenant` out of the existing thread-locals and
+  stamp them on every event inside the span.
+- Server / gRPC / HTTP / wire / PG-wire / Unix-socket / MCP startup
+  messages migrated to `tracing::info!` with structured `transport`
+  + `bind` fields. Connection errors now emit `tracing::warn!` with
+  `peer` and `err` fields.
+- `auth::store` bootstrap and vault persist errors emit structured
+  warnings so operators can grep for `target=reddb::auth` in JSON
+  output.
+- `execute_query` wrapped in a `query` span — every downstream log
+  inherits `conn_id`, `tenant`, `query_len` automatically.
+
+### CLI flags
+
+Added to `red server`:
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--log-dir <path>` | `<--path parent>/logs` | Directory for rotating log files |
+| `--log-level <level>` | `info` | trace/debug/info/warn/error or `RUST_LOG` expression |
+| `--log-format <fmt>` | `pretty` on TTY, `json` otherwise | `pretty` \| `json` |
+| `--log-keep-days <N>` | `14` | Retention count for rotated files |
+| `--no-log-file` | off | stderr-only mode |
+
+`RUST_LOG` overrides `--log-level` when set.
+
+### Embedded mode
+
+The library never installs a subscriber itself. Embedders either
+call `reddb::telemetry::init` to reuse the same config surface as
+the server, or keep their own `tracing-subscriber` pipeline. Docs
+at `docs/api/embedded.md#logging`.
+
+### Dependencies
+
+Adds `tracing = "0.1"`, `tracing-subscriber = "0.3"` (with
+`env-filter`, `fmt`, `json`, `ansi`, `registry` features),
+`tracing-appender = "0.2"`. ~80 KB stripped.
+
+### Scope explicitly deferred
+
+- Test-only `println!` / `eprintln!` inside `#[cfg(test)]` blocks
+  (`storage/engine/algorithms/mod.rs`, `storage/primitives/*.rs`)
+  left alone — they're expected benchmark output.
+- CLI user-facing `println!` in `bin/red.rs` and `client/repl.rs`
+  unchanged — that's command output on stdout, not operational
+  logging.
+- Metrics (Prometheus) and distributed tracing (OTEL) are separate
+  plans, though `tracing` is the foundation for both.
+
+Commits: [Phase 1 logging infra + Phase 2 server migration + Phase 3
+storage noise + Phase 4 correlation spans + Phase 5 docs — bundled].
+
+---
+
 ## 2026-04-17 — RedDB-Native Extensions (Cross-Model Feature Lift)
 
 Takes every PG parity feature from the morning's bundle and extends

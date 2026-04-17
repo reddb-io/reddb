@@ -306,14 +306,14 @@ pub fn run_remote(endpoint: &str, token: Option<String>) -> i32 {
     {
         Ok(rt) => rt,
         Err(e) => {
-            eprintln!("rpc: failed to build tokio runtime: {e}");
+            tracing::error!(err = %e, "rpc: failed to build tokio runtime");
             return 1;
         }
     };
     let client = match tokio_rt.block_on(RedDBClient::connect(endpoint, token)) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("rpc: failed to connect to {endpoint}: {e}");
+            tracing::error!(endpoint, err = %e, "rpc: failed to connect");
             return 1;
         }
     };

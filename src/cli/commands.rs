@@ -323,6 +323,23 @@ fn server_flags() -> Vec<FlagSchema> {
         FlagSchema::new("vault")
             .with_description("Enable encrypted auth vault (reserved pages in main .rdb file)")
             .with_default("false"),
+        FlagSchema::new("log-dir").with_description(
+            "Directory for rotating log files (defaults to the parent of --path / ./logs)",
+        ),
+        FlagSchema::new("log-level")
+            .with_description(
+                "Log level filter — trace / debug / info / warn / error, or a RUST_LOG expression",
+            )
+            .with_default("info"),
+        FlagSchema::new("log-format")
+            .with_description("Log output format")
+            .with_choices(&["pretty", "json"])
+            .with_default("pretty"),
+        FlagSchema::new("log-keep-days")
+            .with_description("Number of rotated log files to keep")
+            .with_default("14"),
+        FlagSchema::boolean("no-log-file")
+            .with_description("Disable rotating file logs (stderr only)"),
     ]
 }
 

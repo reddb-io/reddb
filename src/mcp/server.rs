@@ -63,17 +63,17 @@ impl McpServer {
         let mut reader = io::BufReader::new(stdin.lock());
         let mut writer = io::BufWriter::new(stdout.lock());
 
-        eprintln!("[reddb-mcp] server started, waiting for messages on stdin");
+        tracing::info!(target: "reddb::mcp", "server started, waiting for messages on stdin");
 
         loop {
             let payload = match protocol::read_payload(&mut reader) {
                 Ok(Some(p)) => p,
                 Ok(None) => {
-                    eprintln!("[reddb-mcp] stdin closed, shutting down");
+                    tracing::info!(target: "reddb::mcp", "stdin closed, shutting down");
                     break;
                 }
                 Err(e) => {
-                    eprintln!("[reddb-mcp] read error: {}", e);
+                    tracing::error!(target: "reddb::mcp", err = %e, "read error");
                     continue;
                 }
             };
@@ -81,7 +81,7 @@ impl McpServer {
             let request: JsonValue = match json_from_str(&payload) {
                 Ok(v) => v,
                 Err(e) => {
-                    eprintln!("[reddb-mcp] invalid JSON: {}", e);
+                    tracing::warn!(target: "reddb::mcp", err = %e, "invalid JSON");
                     let msg = protocol::build_error_message(None, -32700, "parse error");
                     let _ = protocol::write_message(&mut writer, &msg);
                     continue;
@@ -91,7 +91,7 @@ impl McpServer {
             let response = self.handle_message(&request);
             if let Some(resp) = response {
                 if let Err(e) = protocol::write_message(&mut writer, &resp) {
-                    eprintln!("[reddb-mcp] write error: {}", e);
+                    tracing::error!(target: "reddb::mcp", err = %e, "write error");
                     break;
                 }
             }

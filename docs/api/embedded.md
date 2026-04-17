@@ -191,3 +191,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 - services that want zero network hops between app code and storage
 
 If you need remote clients, shared access from multiple services, or a CLI REPL from another process, use server mode instead.
+
+## Logging — optional `tracing` initialisation
+
+RedDB emits structured logs through `tracing` but **never installs a
+subscriber itself** when used as a library. Your app owns the
+subscriber so RedDB's logs can share pipelines with the rest of your
+code.
+
+### Let RedDB configure it for you
+
+`reddb::telemetry::init(cfg)` sets up stderr + optional file rotation
+using the same helpers the `red` binary uses:
+
+```rust
+use reddb::telemetry::{init, LogFormat, TelemetryConfig};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Keep the guard alive for the whole process lifetime —
+    // dropping it flushes pending file writes.
+    let _telemetry_guard = init(TelemetryConfig {
+        log_dir: Some("./logs".into()),
+        file_prefix: "myapp.log".into(),
+        level_filter: "info,reddb=debug".into(),
+        format: LogFormat::Pretty,
+        rotation_keep_days: 7,
+        service_name: "myapp",
+    });
+
+    let db = reddb::RedDB::open("./data.rdb")?;
+    // ...
+    Ok(())
+}
+```
+
+### Use your own subscriber
+
+If your application already runs its own `tracing-subscriber::fmt` or
+`tracing-opentelemetry` pipeline, just don't call
+`reddb::telemetry::init`. Every `tracing::info!` / `warn!` inside
+RedDB gets routed through whichever subscriber you registered.
+
+`reddb::telemetry::init` is idempotent — if a subscriber is already
+installed, it returns `None` without panicking.
+
+### Fields to filter on
+
+RedDB stamps the following fields on spans it creates:
+
+| Span | Fields |
+|------|--------|
+| `query` | `conn_id`, `tenant`, `query_len` |
+| `conn` | `transport`, `peer` |
+| `listener` | `transport`, `bind` |
+
+Use `tracing-subscriber::EnvFilter` to silence or elevate per-target:
+
+```text
+RUST_LOG=warn,reddb::wire=debug,reddb::runtime=info
+```

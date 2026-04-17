@@ -482,8 +482,8 @@ impl UnifiedStore {
             // Flag was set but we ignored it because we have a real pager.
             static IGNORED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
             IGNORED.get_or_init(|| {
-                eprintln!(
-                    "[WARN] REDDB_BULK_SKIP_PERSIST_UNSAFE is set but a durable pager is \
+                tracing::warn!(
+                    "REDDB_BULK_SKIP_PERSIST_UNSAFE set but durable pager is \
                      active — flag ignored; bulk inserts will be persisted normally"
                 );
             });
@@ -491,9 +491,9 @@ impl UnifiedStore {
             // Ephemeral mode and flag is active — warn once.
             static WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
             WARNED.get_or_init(|| {
-                eprintln!(
-                    "[WARN] REDDB_BULK_SKIP_PERSIST_UNSAFE is set (ephemeral/no-pager mode) — \
-                     bulk inserts are NOT durable, data will be lost on restart"
+                tracing::warn!(
+                    "REDDB_BULK_SKIP_PERSIST_UNSAFE set (ephemeral/no-pager mode) — \
+                     bulk inserts NOT durable; data will be lost on restart"
                 );
             });
         }
@@ -542,16 +542,17 @@ impl UnifiedStore {
         self.finish_paged_write(actions)?;
 
         if trace {
-            eprintln!(
-                "bulk_insert n={n} total={:?} get_coll={:?} assign={:?} serialize={:?} manager={:?} btree_lock={:?} btree={:?} flush={:?}",
-                t_start.elapsed(),
-                t_get_coll,
-                t_assign_ids,
-                t_serialize,
-                t_manager,
-                t_btree_lock,
-                t_btree_insert,
-                t_flush,
+            tracing::debug!(
+                n,
+                total = ?t_start.elapsed(),
+                get_coll = ?t_get_coll,
+                assign = ?t_assign_ids,
+                serialize = ?t_serialize,
+                manager = ?t_manager,
+                btree_lock = ?t_btree_lock,
+                btree = ?t_btree_insert,
+                flush = ?t_flush,
+                "bulk_insert timing"
             );
         }
 

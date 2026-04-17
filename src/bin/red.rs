@@ -1553,6 +1553,10 @@ fn build_server_config(
 
     let pg_bind_addr = flag_string(flags, "pg-bind").filter(|v| !v.is_empty());
 
+    // Phase 6 logging: assemble the TelemetryConfig from --log-* flags,
+    // falling back to a path-derived default when flags are absent.
+    let telemetry = build_telemetry_config(flags, path.as_deref());
+
     Ok(ServerCommandConfig {
         path,
         router_bind_addr,
@@ -1569,7 +1573,35 @@ fn build_server_config(
         primary_addr: flag_string(flags, "primary-addr").filter(|value| !value.is_empty()),
         vault: flag_bool(flags, "vault"),
         workers,
+        telemetry: Some(telemetry),
     })
+}
+
+fn build_telemetry_config(
+    flags: &HashMap<String, FlagValue>,
+    db_path: Option<&std::path::Path>,
+) -> reddb::telemetry::TelemetryConfig {
+    let mut base = reddb::service_cli::default_telemetry_for_path(db_path);
+
+    if let Some(dir) = flag_string(flags, "log-dir").filter(|v| !v.is_empty()) {
+        base.log_dir = Some(PathBuf::from(dir));
+    }
+    if flag_bool(flags, "no-log-file") {
+        base.log_dir = None;
+    }
+    if let Some(level) = flag_string(flags, "log-level").filter(|v| !v.is_empty()) {
+        base.level_filter = level;
+    }
+    if let Some(fmt) = flag_string(flags, "log-format").filter(|v| !v.is_empty()) {
+        if let Some(parsed) = reddb::telemetry::LogFormat::parse(&fmt) {
+            base.format = parsed;
+        }
+    }
+    if let Some(keep) = flag_string(flags, "log-keep-days").and_then(|v| v.parse::<u16>().ok()) {
+        base.rotation_keep_days = keep;
+    }
+
+    base
 }
 
 fn build_systemd_service_config(

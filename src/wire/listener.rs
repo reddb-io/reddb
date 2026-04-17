@@ -20,7 +20,7 @@ pub async fn start_wire_listener(
     runtime: Arc<RedDBRuntime>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(bind_addr).await?;
-    eprintln!("red server (wire) listening on {bind_addr}");
+    tracing::info!(transport = "wire", bind = %bind_addr, "listener online");
     start_wire_listener_on(listener, runtime).await
 }
 
@@ -29,11 +29,12 @@ pub async fn start_wire_listener_on(
     runtime: Arc<RedDBRuntime>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
-        let (stream, _addr) = listener.accept().await?;
+        let (stream, peer) = listener.accept().await?;
         let rt = runtime.clone();
+        let peer_str = peer.to_string();
         tokio::spawn(async move {
             if let Err(e) = handle_connection(stream, rt).await {
-                eprintln!("wire connection error: {e}");
+                tracing::warn!(transport = "wire", peer = %peer_str, err = %e, "connection failed");
             }
         });
     }
@@ -58,13 +59,13 @@ pub async fn start_wire_unix_listener(
     // Remove stale socket file so bind() doesn't fail with EADDRINUSE.
     let _ = std::fs::remove_file(path);
     let listener = UnixListener::bind(path)?;
-    eprintln!("red server (wire) listening on unix://{path}");
+    tracing::info!(transport = "wire-unix", bind = %path, "listener online");
     loop {
         let (stream, _addr) = listener.accept().await?;
         let rt = runtime.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_connection(stream, rt).await {
-                eprintln!("wire unix connection error: {e}");
+                tracing::warn!(transport = "wire-unix", err = %e, "connection failed");
             }
         });
     }
@@ -78,7 +79,7 @@ pub async fn start_wire_tls_listener(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let acceptor = super::tls::build_tls_acceptor(tls_config)?;
     let listener = TcpListener::bind(bind_addr).await?;
-    eprintln!("red server (wire+tls) listening on {bind_addr}");
+    tracing::info!(transport = "wire+tls", bind = %bind_addr, "listener online");
     start_wire_tls_listener_on(listener, runtime, acceptor).await
 }
 
@@ -88,17 +89,23 @@ async fn start_wire_tls_listener_on(
     acceptor: tokio_rustls::TlsAcceptor,
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
-        let (tcp_stream, _addr) = listener.accept().await?;
+        let (tcp_stream, peer) = listener.accept().await?;
         let acceptor = acceptor.clone();
         let rt = runtime.clone();
+        let peer_str = peer.to_string();
         tokio::spawn(async move {
             match acceptor.accept(tcp_stream).await {
                 Ok(tls_stream) => {
                     if let Err(e) = handle_connection(tls_stream, rt).await {
-                        eprintln!("wire+tls connection error: {e}");
+                        tracing::warn!(transport = "wire+tls", peer = %peer_str, err = %e, "connection failed");
                     }
                 }
-                Err(e) => eprintln!("wire TLS handshake failed: {e}"),
+                Err(e) => tracing::warn!(
+                    transport = "wire+tls",
+                    peer = %peer_str,
+                    err = %e,
+                    "TLS handshake failed"
+                ),
             }
         });
     }

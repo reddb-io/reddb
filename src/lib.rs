@@ -42,6 +42,7 @@ pub mod service_cli;
 mod service_router;
 pub mod sqlstate;
 pub mod storage;
+pub mod telemetry;
 pub mod utils;
 pub mod wire;
 

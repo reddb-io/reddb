@@ -222,18 +222,23 @@ impl AuthStore {
 
         match self.bootstrap(&username, &password) {
             Ok(result) => {
-                eprintln!(
-                    "[reddb] bootstrapped admin user '{}' from REDDB_USERNAME/REDDB_PASSWORD",
-                    username
+                tracing::info!(
+                    username = %username,
+                    "bootstrapped admin user from REDDB_USERNAME/REDDB_PASSWORD"
                 );
                 if let Some(ref cert) = result.certificate {
+                    // Certificate must be readable by the operator — keep it
+                    // in the log stream but print raw to stderr too so it
+                    // survives even if the log file gets rotated.
                     eprintln!("[reddb] CERTIFICATE: {}", cert);
-                    eprintln!("[reddb] Save this certificate — it is the ONLY way to unseal the vault after restart.");
+                    tracing::warn!(
+                        "vault certificate issued — save it: ONLY way to unseal after restart"
+                    );
                 }
                 Some(result)
             }
             Err(e) => {
-                eprintln!("[reddb] env bootstrap failed: {e}");
+                tracing::error!(err = %e, "env bootstrap failed");
                 None
             }
         }
@@ -252,7 +257,7 @@ impl AuthStore {
         if let (Some(ref vault), Some(ref pager)) = (&*vault_guard, &self.pager) {
             let state = self.snapshot();
             if let Err(e) = vault.save(pager, &state) {
-                eprintln!("[reddb] vault persist failed: {e}");
+                tracing::error!(err = %e, "vault persist failed");
             }
         }
     }

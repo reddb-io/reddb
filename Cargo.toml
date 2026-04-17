@@ -48,6 +48,15 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = "2"
 rcgen = "0.13"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = [
+    "env-filter",
+    "fmt",
+    "json",
+    "ansi",
+    "registry",
+] }
+tracing-appender = "0.2"
 
 [features]
 default = []

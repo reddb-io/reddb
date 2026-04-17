@@ -51,18 +51,25 @@ pub async fn start_pg_wire_listener(
     runtime: Arc<RedDBRuntime>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(&config.bind_addr).await?;
-    eprintln!(
-        "red server (postgres wire) listening on {}",
-        config.bind_addr
+    tracing::info!(
+        transport = "pg-wire",
+        bind = %config.bind_addr,
+        "listener online"
     );
     let cfg = Arc::new(config);
     loop {
-        let (stream, _addr) = listener.accept().await?;
+        let (stream, peer) = listener.accept().await?;
         let rt = Arc::clone(&runtime);
         let cfg = Arc::clone(&cfg);
+        let peer_str = peer.to_string();
         tokio::spawn(async move {
             if let Err(e) = handle_connection(stream, rt, cfg).await {
-                eprintln!("pg wire connection error: {e}");
+                tracing::warn!(
+                    transport = "pg-wire",
+                    peer = %peer_str,
+                    err = %e,
+                    "connection failed"
+                );
             }
         });
     }

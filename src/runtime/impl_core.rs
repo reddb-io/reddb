@@ -122,9 +122,173 @@ pub fn clear_current_tenant() {
     CURRENT_TENANT_ID.with(|cell| *cell.borrow_mut() = None);
 }
 
-/// Read the current-thread tenant id. `None` when no tenant was bound.
+/// Read the current-thread tenant id, applying overrides in priority order:
+///   1. `WITHIN TENANT '<id>' …` per-statement override (highest)
+///   2. `SET LOCAL TENANT '<id>'` transaction-local override (consulted
+///      only when the current connection has an open transaction)
+///   3. `SET TENANT '<id>'` session-level thread-local
+///   4. `None` (deny-default for RLS).
+///
+/// The transaction-local layer is read through the runtime; an embedded
+/// helper crate that has no `RedDBRuntime` access still gets correct
+/// behaviour for layers 1, 3, and 4.
 pub fn current_tenant() -> Option<String> {
-    CURRENT_TENANT_ID.with(|cell| cell.borrow().clone())
+    let inherited = CURRENT_TENANT_ID.with(|cell| cell.borrow().clone());
+    if let Some(over) = current_scope_override() {
+        if over.tenant.is_active() {
+            return over.tenant.resolve(inherited);
+        }
+    }
+    if let Some(tx_local) = current_tx_local_tenant() {
+        return tx_local;
+    }
+    inherited
+}
+
+thread_local! {
+    /// Snapshot of the active connection's `tx_local_tenants` entry for
+    /// the current `execute_query` call. Outer `Some(_)` means "a
+    /// transaction-local tenant override is active for this call";
+    /// inner is the override's value (`Some(s)` overrides to `s`,
+    /// `None` overrides to NULL/cleared). Refreshed at the top of every
+    /// `execute_query` invocation and cleared by the RAII guard on
+    /// return so pooled connections cannot leak the override past the
+    /// statement that owns it.
+    static TX_LOCAL_TENANT: std::cell::RefCell<Option<Option<String>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn current_tx_local_tenant() -> Option<Option<String>> {
+    TX_LOCAL_TENANT.with(|cell| cell.borrow().clone())
+}
+
+/// Recognise `SET LOCAL TENANT '<id>'` / `SET LOCAL TENANT NULL` —
+/// returns `Ok(Some(Some(id)))` for an explicit value, `Ok(Some(None))`
+/// for an explicit NULL clear, `Ok(None)` when the input is not a
+/// `SET LOCAL TENANT` statement at all, and `Err` when the prefix
+/// matches but the value is malformed.
+fn parse_set_local_tenant(query: &str) -> RedDBResult<Option<Option<String>>> {
+    let mut tokens = query.split_ascii_whitespace();
+    let Some(w1) = tokens.next() else {
+        return Ok(None);
+    };
+    if !w1.eq_ignore_ascii_case("SET") {
+        return Ok(None);
+    }
+    let Some(w2) = tokens.next() else {
+        return Ok(None);
+    };
+    if !w2.eq_ignore_ascii_case("LOCAL") {
+        return Ok(None);
+    }
+    let Some(w3) = tokens.next() else {
+        return Ok(None);
+    };
+    if !w3.eq_ignore_ascii_case("TENANT") {
+        return Ok(None);
+    }
+    let rest: String = tokens.collect::<Vec<_>>().join(" ");
+    let rest = rest.trim().trim_end_matches(';').trim();
+    let value_str = rest.strip_prefix('=').map(|s| s.trim()).unwrap_or(rest);
+    if value_str.is_empty() {
+        return Err(RedDBError::Query(
+            "SET LOCAL TENANT expects a string literal or NULL".to_string(),
+        ));
+    }
+    if value_str.eq_ignore_ascii_case("NULL") {
+        return Ok(Some(None));
+    }
+    if value_str.starts_with('\'') && value_str.ends_with('\'') && value_str.len() >= 2 {
+        let inner = &value_str[1..value_str.len() - 1];
+        return Ok(Some(Some(inner.to_string())));
+    }
+    Err(RedDBError::Query(format!(
+        "SET LOCAL TENANT expects a string literal or NULL, got `{value_str}`"
+    )))
+}
+
+pub(crate) struct TxLocalTenantGuard;
+
+impl TxLocalTenantGuard {
+    pub fn install(value: Option<Option<String>>) -> Self {
+        TX_LOCAL_TENANT.with(|cell| *cell.borrow_mut() = value);
+        Self
+    }
+}
+
+impl Drop for TxLocalTenantGuard {
+    fn drop(&mut self) {
+        TX_LOCAL_TENANT.with(|cell| *cell.borrow_mut() = None);
+    }
+}
+
+thread_local! {
+    /// Stack of `WITHIN ... <stmt>` overrides active on the current
+    /// thread. Every entry corresponds to one in-flight `execute_query`
+    /// call that started with a `WITHIN` prefix; the entry is pushed
+    /// before dispatch and popped before the call returns. The stack
+    /// shape supports nested invocations (e.g. a view body that itself
+    /// re-enters execute_query).
+    static SCOPE_OVERRIDES: std::cell::RefCell<Vec<crate::runtime::within_clause::ScopeOverride>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn push_scope_override(over: crate::runtime::within_clause::ScopeOverride) {
+    SCOPE_OVERRIDES.with(|cell| cell.borrow_mut().push(over));
+}
+
+pub(crate) fn pop_scope_override() {
+    SCOPE_OVERRIDES.with(|cell| {
+        cell.borrow_mut().pop();
+    });
+}
+
+pub(crate) fn current_scope_override(
+) -> Option<crate::runtime::within_clause::ScopeOverride> {
+    SCOPE_OVERRIDES.with(|cell| cell.borrow().last().cloned())
+}
+
+/// RAII guard pairing `push_scope_override` with the matching pop, so
+/// the stack stays balanced even when the inner `execute_query` returns
+/// early via `?`.
+pub(crate) struct ScopeOverrideGuard;
+
+impl ScopeOverrideGuard {
+    pub fn install(over: crate::runtime::within_clause::ScopeOverride) -> Self {
+        push_scope_override(over);
+        Self
+    }
+}
+
+impl Drop for ScopeOverrideGuard {
+    fn drop(&mut self) {
+        pop_scope_override();
+    }
+}
+
+/// Read the current-thread auth identity, honouring per-statement
+/// `WITHIN ... USER '<u>' AS ROLE '<r>'` overrides. The override only
+/// supplies projected strings — it never grants additional privilege —
+/// so callers that need to make authorisation decisions must read from
+/// the underlying `current_auth_identity()` directly.
+pub(crate) fn current_user_projected() -> Option<String> {
+    let inherited = current_auth_identity().map(|(u, _)| u);
+    if let Some(over) = current_scope_override() {
+        if over.user.is_active() {
+            return over.user.resolve(inherited);
+        }
+    }
+    inherited
+}
+
+pub(crate) fn current_role_projected() -> Option<String> {
+    let inherited = current_auth_identity().map(|(_, r)| format!("{r:?}").to_lowercase());
+    if let Some(over) = current_scope_override() {
+        if over.role.is_active() {
+            return over.role.resolve(inherited);
+        }
+    }
+    inherited
 }
 
 /// Install the MVCC snapshot used by the current thread for the duration
@@ -473,6 +637,92 @@ pub(crate) fn rls_is_enabled(runtime: &RedDBRuntime, table: &str) -> bool {
     runtime.inner.rls_enabled_tables.read().contains(table)
 }
 
+/// Per-entity gate used by the graph materialiser for `GraphNode`
+/// entities. RLS is checked against the source collection with
+/// `kind = Nodes`, which `matching_rls_policies_for_kind` resolves to
+/// either `Nodes`-targeted policies or legacy `Table`-targeted ones
+/// (for back-compat with auto-tenancy declarations). Cached per
+/// collection so big graphs only resolve the policy chain once.
+fn node_passes_rls(
+    runtime: &RedDBRuntime,
+    collection: &str,
+    role: Option<&str>,
+    cache: &mut std::collections::HashMap<String, Option<crate::storage::query::ast::Filter>>,
+    entity: &crate::storage::unified::entity::UnifiedEntity,
+) -> bool {
+    use crate::storage::query::ast::{Filter, PolicyAction, PolicyTargetKind};
+
+    if !runtime.inner.rls_enabled_tables.read().contains(collection) {
+        return true;
+    }
+    let filter = cache.entry(collection.to_string()).or_insert_with(|| {
+        let policies = runtime.matching_rls_policies_for_kind(
+            collection,
+            role,
+            PolicyAction::Select,
+            PolicyTargetKind::Nodes,
+        );
+        if policies.is_empty() {
+            None
+        } else {
+            policies
+                .into_iter()
+                .reduce(|acc, f| Filter::Or(Box::new(acc), Box::new(f)))
+        }
+    });
+    let Some(filter) = filter else {
+        return false;
+    };
+    crate::runtime::query_exec::evaluate_entity_filter_with_db(
+        Some(&runtime.inner.db),
+        entity,
+        filter,
+        collection,
+        collection,
+    )
+}
+
+/// Edge counterpart of `node_passes_rls`. Same caching strategy with
+/// `kind = Edges`.
+fn edge_passes_rls(
+    runtime: &RedDBRuntime,
+    collection: &str,
+    role: Option<&str>,
+    cache: &mut std::collections::HashMap<String, Option<crate::storage::query::ast::Filter>>,
+    entity: &crate::storage::unified::entity::UnifiedEntity,
+) -> bool {
+    use crate::storage::query::ast::{Filter, PolicyAction, PolicyTargetKind};
+
+    if !runtime.inner.rls_enabled_tables.read().contains(collection) {
+        return true;
+    }
+    let filter = cache.entry(collection.to_string()).or_insert_with(|| {
+        let policies = runtime.matching_rls_policies_for_kind(
+            collection,
+            role,
+            PolicyAction::Select,
+            PolicyTargetKind::Edges,
+        );
+        if policies.is_empty() {
+            None
+        } else {
+            policies
+                .into_iter()
+                .reduce(|acc, f| Filter::Or(Box::new(acc), Box::new(f)))
+        }
+    });
+    let Some(filter) = filter else {
+        return false;
+    };
+    crate::runtime::query_exec::evaluate_entity_filter_with_db(
+        Some(&runtime.inner.db),
+        entity,
+        filter,
+        collection,
+        collection,
+    )
+}
+
 /// RLS policy injection (Phase 2.5.2 PG parity).
 ///
 /// Fetch every matching policy for the current thread-local role and
@@ -523,6 +773,83 @@ fn inject_rls_filters(
         None => combined,
     });
     Some(table)
+}
+
+/// Apply per-table RLS to a `JoinQuery` by folding each side's policy
+/// predicate into the join's outer filter. Walking the merged record
+/// at the join layer (rather than mutating the per-side scan filter)
+/// keeps the planner's strategy choice and per-side index selection
+/// undisturbed — the policy predicate uses the qualified `t.col` form
+/// that resolves cleanly against the merged record's keys.
+///
+/// Returns `None` when any leaf has RLS enabled and no policy admits
+/// the caller — the join short-circuits to an empty result.
+fn inject_rls_into_join(
+    runtime: &RedDBRuntime,
+    mut join: crate::storage::query::ast::JoinQuery,
+) -> Option<crate::storage::query::ast::JoinQuery> {
+    use crate::storage::query::ast::Filter;
+
+    let mut policy_filters: Vec<Filter> = Vec::new();
+    if !collect_join_side_policy(runtime, join.left.as_ref(), &mut policy_filters) {
+        return None;
+    }
+    if !collect_join_side_policy(runtime, join.right.as_ref(), &mut policy_filters) {
+        return None;
+    }
+
+    if policy_filters.is_empty() {
+        return Some(join);
+    }
+
+    let combined = policy_filters
+        .into_iter()
+        .reduce(|acc, f| Filter::And(Box::new(acc), Box::new(f)))
+        .expect("policy_filters non-empty");
+
+    join.filter = Some(match join.filter.take() {
+        Some(existing) => Filter::And(Box::new(existing), Box::new(combined)),
+        None => combined,
+    });
+
+    Some(join)
+}
+
+/// For each `Table` leaf reachable through nested joins, append the
+/// RLS-policy filter (combined with OR across that side's matching
+/// policies) into `out`. Returns `false` when a side has RLS enabled
+/// but no policy admits the caller — the join must short-circuit.
+fn collect_join_side_policy(
+    runtime: &RedDBRuntime,
+    expr: &crate::storage::query::ast::QueryExpr,
+    out: &mut Vec<crate::storage::query::ast::Filter>,
+) -> bool {
+    use crate::storage::query::ast::{Filter, PolicyAction, QueryExpr};
+    match expr {
+        QueryExpr::Table(t) => {
+            if !runtime.inner.rls_enabled_tables.read().contains(&t.table) {
+                return true;
+            }
+            let role = current_auth_identity().map(|(_, role)| role);
+            let role_str = role.map(|r| r.as_str().to_string());
+            let policies =
+                runtime.matching_rls_policies(&t.table, role_str.as_deref(), PolicyAction::Select);
+            if policies.is_empty() {
+                return false;
+            }
+            let combined = policies
+                .into_iter()
+                .reduce(|acc, f| Filter::Or(Box::new(acc), Box::new(f)))
+                .expect("policies non-empty");
+            out.push(combined);
+            true
+        }
+        QueryExpr::Join(inner) => {
+            collect_join_side_policy(runtime, inner.left.as_ref(), out)
+                && collect_join_side_policy(runtime, inner.right.as_ref(), out)
+        }
+        _ => true,
+    }
 }
 
 /// Foreign-table post-scan filter application (Phase 3.2.2 PG parity).
@@ -668,6 +995,7 @@ impl RedDBRuntime {
                     crate::storage::transaction::snapshot::SnapshotManager::new(),
                 ),
                 tx_contexts: parking_lot::RwLock::new(HashMap::new()),
+                tx_local_tenants: parking_lot::RwLock::new(HashMap::new()),
                 rls_policies: parking_lot::RwLock::new(HashMap::new()),
                 rls_enabled_tables: parking_lot::RwLock::new(HashSet::new()),
                 foreign_tables: Arc::new(crate::storage::fdw::ForeignTableRegistry::with_builtins()),
@@ -1823,8 +2151,91 @@ impl RedDBRuntime {
         }
     }
 
+    /// Execute a query under a typed scope override without embedding
+    /// the tenant / user / role values into the SQL string. Use this
+    /// from transport middleware (HTTP / gRPC / worker loops) where the
+    /// scope is resolved from auth claims and the SQL is a parameterised
+    /// template — avoids the string-concat injection risk of building
+    /// `WITHIN TENANT '<id>' …` manually, and is drop-in compatible with
+    /// prepared statements that didn't know about tenancy.
+    ///
+    /// Precedence matches the `WITHIN` clause: the passed `scope`
+    /// overrides `SET LOCAL TENANT`, which overrides `SET TENANT`.
+    /// The override is pushed on the thread-local scope stack for the
+    /// duration of the call and popped on return — pool-shared
+    /// connections cannot leak it across requests.
+    pub fn execute_query_with_scope(
+        &self,
+        query: &str,
+        scope: crate::runtime::within_clause::ScopeOverride,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        if scope.is_empty() {
+            return self.execute_query(query);
+        }
+        let _scope_guard = ScopeOverrideGuard::install(scope);
+        self.execute_query(query)
+    }
+
     #[inline(never)]
     pub fn execute_query(&self, query: &str) -> RedDBResult<RuntimeQueryResult> {
+        // `WITHIN TENANT '<id>' [USER '<u>'] [AS ROLE '<r>'] <stmt>` —
+        // strip the prefix, push a stack-scoped override, recurse on
+        // the inner statement, pop on return. Stack lives in a
+        // thread-local but is balanced by the RAII guard, so a
+        // pool-shared connection cannot leak the override across
+        // requests and an early `?` return still pops cleanly.
+        match crate::runtime::within_clause::try_strip_within_prefix(query) {
+            Ok(Some((scope, inner))) => {
+                let _scope_guard = ScopeOverrideGuard::install(scope);
+                return self.execute_query(inner);
+            }
+            Ok(None) => {}
+            Err(msg) => return Err(RedDBError::Query(msg)),
+        }
+
+        // `SET LOCAL TENANT '<id>'` — write the per-transaction tenant
+        // override and return. Outside a transaction the statement is
+        // an error (matches PG semantics: SET LOCAL only takes effect
+        // within an active transaction).
+        if let Some(value) = parse_set_local_tenant(query)? {
+            let conn_id = current_connection_id();
+            if !self.inner.tx_contexts.read().contains_key(&conn_id) {
+                return Err(RedDBError::Query(
+                    "SET LOCAL TENANT requires an active transaction".to_string(),
+                ));
+            }
+            self.inner
+                .tx_local_tenants
+                .write()
+                .insert(conn_id, value.clone());
+            return Ok(RuntimeQueryResult::ok_message(
+                query.to_string(),
+                &match &value {
+                    Some(id) => format!("local tenant set: {id}"),
+                    None => "local tenant cleared".to_string(),
+                },
+                "set_local_tenant",
+            ));
+        }
+
+        // Refresh the thread-local snapshot of this connection's
+        // tx-local tenant so `current_tenant()` deep in expr eval can
+        // read it without crossing back into the runtime. Guard pops
+        // on return — even early errors via `?` clean up.
+        let _tx_local_guard = {
+            let conn_id = current_connection_id();
+            let snap = self.inner.tx_local_tenants.read().get(&conn_id).cloned();
+            TxLocalTenantGuard::install(snap)
+        };
+
+        // Phase 6 logging: enter a span stamped with conn_id / tenant
+        // / query_len. Every downstream tracing::info!/warn!/error!
+        // inherits these fields — no need to thread them manually
+        // through storage/scan layers. Entered AFTER the WITHIN /
+        // SET LOCAL TENANT resolution above so the span reflects the
+        // effective scope for this statement.
+        let _log_span = crate::telemetry::span::query_span(query).entered();
+
         // Phase 2.3.2d: install the MVCC snapshot for this statement so
         // every downstream scan sees a consistent row set. Dropped at
         // function exit — `CurrentSnapshotGuard` restores the caller's
@@ -2004,9 +2415,15 @@ impl RedDBRuntime {
 
         let query_result = match expr {
             QueryExpr::Graph(_) | QueryExpr::Path(_) => {
-                let graph = materialize_graph(self.inner.db.store().as_ref())?;
-                let node_properties =
-                    materialize_graph_node_properties(self.inner.db.store().as_ref())?;
+                // Apply MVCC visibility + RLS gate while materialising the
+                // graph: every node entity is screened against the source
+                // collection's policy chain (basic and `Nodes`-targeted)
+                // and dropped when the caller's tenant / role doesn't
+                // admit it. Edges are pruned automatically because the
+                // graph builder skips edges whose endpoints aren't in
+                // `allowed_nodes`.
+                let (graph, node_properties) =
+                    self.materialize_graph_with_rls()?;
                 let result =
                     crate::storage::query::unified::UnifiedExecutor::execute_on_with_node_properties(
                         &graph,
@@ -2101,15 +2518,39 @@ impl RedDBRuntime {
                     statement_type: "select",
                 })
             }
-            QueryExpr::Join(join) => Ok(RuntimeQueryResult {
-                query: query.to_string(),
-                mode,
-                statement,
-                engine: "runtime-join",
-                result: execute_runtime_join_query(&self.inner.db, &join)?,
-                affected_rows: 0,
-                statement_type: "select",
-            }),
+            QueryExpr::Join(join) => {
+                // Fold per-table RLS filters into each `QueryExpr::Table`
+                // leaf of the join tree before executing. Without this
+                // the join executor scans both tables raw and ignores
+                // policies — a `WITHIN TENANT 'x'` against a join of
+                // two tenant-scoped tables would leak cross-tenant rows.
+                // When any leaf has RLS enabled and zero matching policy,
+                // short-circuit to an empty join result instead of
+                // emitting a contradiction filter.
+                let join_with_rls = match inject_rls_into_join(self, join) {
+                    Some(j) => j,
+                    None => {
+                        return Ok(RuntimeQueryResult {
+                            query: query.to_string(),
+                            mode,
+                            statement,
+                            engine: "runtime-join-rls",
+                            result: crate::storage::query::unified::UnifiedResult::empty(),
+                            affected_rows: 0,
+                            statement_type: "select",
+                        });
+                    }
+                };
+                Ok(RuntimeQueryResult {
+                    query: query.to_string(),
+                    mode,
+                    statement,
+                    engine: "runtime-join",
+                    result: execute_runtime_join_query(&self.inner.db, &join_with_rls)?,
+                    affected_rows: 0,
+                    statement_type: "select",
+                })
+            }
             QueryExpr::Vector(vector) => Ok(RuntimeQueryResult {
                 query: query.to_string(),
                 mode,
@@ -2309,6 +2750,8 @@ impl RedDBRuntime {
                         ("begin", format!("BEGIN — xid={xid} (snapshot isolation)"))
                     }
                     TxnControl::Commit => {
+                        // SET LOCAL TENANT ends with the transaction.
+                        self.inner.tx_local_tenants.write().remove(&conn_id);
                         let ctx = self.inner.tx_contexts.write().remove(&conn_id);
                         match ctx {
                             Some(ctx) => {
@@ -2335,6 +2778,7 @@ impl RedDBRuntime {
                         }
                     }
                     TxnControl::Rollback => {
+                        self.inner.tx_local_tenants.write().remove(&conn_id);
                         let ctx = self.inner.tx_contexts.write().remove(&conn_id);
                         match ctx {
                             Some(ctx) => {
@@ -3607,6 +4051,129 @@ impl RedDBRuntime {
                 let _ = manager.update(entity);
             }
         }
+    }
+
+    /// Materialise the entire graph store while applying MVCC visibility
+    /// AND per-collection RLS to each candidate node and edge. Mirrors
+    /// `materialize_graph` but routes every entity through the same
+    /// gate the SELECT path uses, with the correct `PolicyTargetKind`
+    /// per entity kind (`Nodes` for graph nodes, `Edges` for graph
+    /// edges). Returns the filtered `GraphStore` plus the
+    /// `node_id → properties` map the executor needs for `RETURN n.*`
+    /// projections.
+    fn materialize_graph_with_rls(
+        &self,
+    ) -> RedDBResult<(
+        crate::storage::engine::GraphStore,
+        std::collections::HashMap<String, std::collections::HashMap<String, crate::storage::schema::Value>>,
+    )> {
+        use crate::storage::engine::GraphStore;
+        use crate::storage::query::ast::{PolicyAction, PolicyTargetKind};
+        use crate::storage::unified::entity::{EntityData, EntityKind};
+        use std::collections::{HashMap, HashSet};
+
+        let store = self.inner.db.store();
+        let snap_ctx = capture_current_snapshot();
+        let role = current_auth_identity().map(|(_, r)| r.as_str().to_string());
+
+        let graph = GraphStore::new();
+        let mut node_properties: HashMap<String, HashMap<String, crate::storage::schema::Value>> =
+            HashMap::new();
+        let mut allowed_nodes: HashSet<String> = HashSet::new();
+
+        // Per-collection cached compiled filters — Nodes-kind for
+        // first pass, Edges-kind for the second. None entries mean
+        // "RLS enabled, zero matching policy → deny all of this kind".
+        let mut node_rls: HashMap<String, Option<crate::storage::query::ast::Filter>> =
+            HashMap::new();
+        let mut edge_rls: HashMap<String, Option<crate::storage::query::ast::Filter>> =
+            HashMap::new();
+
+        let collections = store.list_collections();
+
+        // First pass — gather nodes.
+        for collection in &collections {
+            let Some(manager) = store.get_collection(collection) else {
+                continue;
+            };
+            let entities = manager.query_all(|_| true);
+            for entity in entities {
+                if !entity_visible_with_context(snap_ctx.as_ref(), &entity) {
+                    continue;
+                }
+                let EntityKind::GraphNode(ref node) = entity.kind else {
+                    continue;
+                };
+                if !node_passes_rls(
+                    self,
+                    collection,
+                    role.as_deref(),
+                    &mut node_rls,
+                    &entity,
+                ) {
+                    continue;
+                }
+                let id_str = entity.id.raw().to_string();
+                graph
+                    .add_node(&id_str, &node.label, super::graph_node_type(&node.node_type))
+                    .map_err(|err| RedDBError::Query(err.to_string()))?;
+                allowed_nodes.insert(id_str.clone());
+                if let EntityData::Node(node_data) = &entity.data {
+                    node_properties.insert(id_str, node_data.properties.clone());
+                }
+            }
+        }
+
+        // Second pass — gather edges. An edge appears only when both
+        // endpoint nodes survived the RLS pass AND the edge itself
+        // passes its own RLS gate.
+        for collection in &collections {
+            let Some(manager) = store.get_collection(collection) else {
+                continue;
+            };
+            let entities = manager.query_all(|_| true);
+            for entity in entities {
+                if !entity_visible_with_context(snap_ctx.as_ref(), &entity) {
+                    continue;
+                }
+                let EntityKind::GraphEdge(ref edge) = entity.kind else {
+                    continue;
+                };
+                if !allowed_nodes.contains(&edge.from_node)
+                    || !allowed_nodes.contains(&edge.to_node)
+                {
+                    continue;
+                }
+                if !edge_passes_rls(
+                    self,
+                    collection,
+                    role.as_deref(),
+                    &mut edge_rls,
+                    &entity,
+                ) {
+                    continue;
+                }
+                let weight = match &entity.data {
+                    EntityData::Edge(e) => e.weight,
+                    _ => edge.weight as f32 / 1000.0,
+                };
+                graph
+                    .add_edge(
+                        &edge.from_node,
+                        &edge.to_node,
+                        super::graph_edge_type(&edge.label),
+                        weight,
+                    )
+                    .map_err(|err| RedDBError::Query(err.to_string()))?;
+            }
+        }
+
+        // Suppress unused-PolicyAction/PolicyTargetKind warnings — both
+        // are used inside the helper closures via the per-kind helpers
+        // declared at the bottom of this file.
+        let _ = (PolicyAction::Select, PolicyTargetKind::Nodes);
+
+        Ok((graph, node_properties))
     }
 
     /// Phase 1.1 MVCC universal: post-save hook that stamps `xmin` on a

@@ -45,17 +45,20 @@ pub(crate) async fn serve_tcp_router(
     config: TcpProtocolRouterConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(&config.bind_addr).await?;
-    eprintln!(
-        "red server (router) listening on {} [grpc/http/wire]",
-        config.bind_addr
+    tracing::info!(
+        transport = "router",
+        bind = %config.bind_addr,
+        protocols = "grpc/http/wire",
+        "listener online"
     );
 
     loop {
-        let (stream, _) = listener.accept().await?;
+        let (stream, peer) = listener.accept().await?;
         let router = config.clone();
+        let peer_str = peer.to_string();
         tokio::spawn(async move {
             if let Err(err) = proxy_routed_connection(stream, router).await {
-                eprintln!("router connection error: {err}");
+                tracing::warn!(transport = "router", peer = %peer_str, err = %err, "connection failed");
             }
         });
     }

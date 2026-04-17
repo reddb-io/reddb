@@ -56,6 +56,85 @@ Rules of thumb:
 - Use `--grpc-bind` and `--http-bind` when you want explicit public listener addresses.
 - Use `--bind` only when you intentionally want the legacy single-transport style or the default router front-door.
 
+## Logging
+
+RedDB uses structured logging via `tracing` + `tracing-subscriber`.
+Every request carries correlation fields (connection id, transaction
+xid, tenant, authenticated user) through spans, so ops teams can
+filter noise in prod and debug MVCC/RLS issues without grepping by
+hand.
+
+### Flags
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--log-dir <path>` | parent dir of `--path` + `/logs` | Directory for rotating daily log files |
+| `--log-level <level>` | `info` | trace / debug / info / warn / error (or RUST_LOG expression) |
+| `--log-format <fmt>` | `pretty` on TTY, `json` otherwise | `pretty` (coloured) or `json` (NDJSON) |
+| `--log-keep-days <N>` | `14` | How many rotated files to keep — janitor purges older |
+| `--no-log-file` | off | Disables file output, stderr-only |
+
+### Behaviour
+
+- stderr always receives logs (pretty or JSON per `--log-format`)
+- When `--log-dir` resolves to a writable path, a daily-rotating file
+  appender also writes `reddb.log.YYYY-MM-DD` into that dir; a
+  background janitor runs every hour purging files older than
+  `--log-keep-days`
+- `RUST_LOG` overrides `--log-level` when set (standard
+  `tracing-subscriber::EnvFilter` syntax)
+- Fields stamped on every record when available: `conn_id`,
+  `tenant`, `query_len`, `transport`, `bind`, `peer`, `err`
+
+### Examples
+
+**Default server** — stderr pretty, rotating files next to the DB:
+
+```bash
+red server --path /var/lib/reddb/data.rdb
+# tail -f /var/lib/reddb/logs/reddb.log.2026-04-17
+```
+
+**Production JSON** to ship to Loki / ELK / Datadog:
+
+```bash
+red server --path /var/lib/reddb/data.rdb \
+  --log-format json --log-level info
+```
+
+**Noisy debug** for a specific subsystem:
+
+```bash
+RUST_LOG=reddb::wire=debug,reddb::runtime=info red server --path ...
+```
+
+**Stderr-only** (container with external log collector):
+
+```bash
+red server --path ./data.rdb --no-log-file --log-format json
+```
+
+### NDJSON example
+
+```json
+{"timestamp":"2026-04-17T13:42:01.123Z","level":"INFO","fields":{"transport":"wire","bind":"127.0.0.1:50080","message":"listener online"},"target":"reddb::wire::listener"}
+{"timestamp":"2026-04-17T13:42:05.456Z","level":"INFO","span":{"conn_id":7,"tenant":"acme","query_len":28,"name":"query"},"fields":{"message":"listener online"},"target":"reddb::runtime::impl_core"}
+```
+
+Correlation via `jq`:
+
+```bash
+jq -c 'select(.span.conn_id == 7)' reddb.log.2026-04-17
+jq -c 'select(.span.tenant == "acme" and .level == "ERROR")' reddb.log.2026-04-17
+```
+
+### Embedded mode
+
+The library does not install the global subscriber — embedders own
+it. Call `reddb::telemetry::init(cfg)` once at startup with your
+`TelemetryConfig` (same shape as the server flags) and keep the
+returned guard alive for the process lifetime.
+
 ## Storage Modes
 
 ### In-Memory

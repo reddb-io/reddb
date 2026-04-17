@@ -217,10 +217,10 @@ impl Database {
         if wal_path.exists() && !config.read_only {
             let recovery_result = Checkpointer::recover(&pager, &wal_path)?;
             if recovery_result.pages_checkpointed > 0 {
-                // Log recovery info (in production, use proper logging)
-                eprintln!(
-                    "RedDB: Recovered {} transactions, {} pages from WAL",
-                    recovery_result.transactions_processed, recovery_result.pages_checkpointed
+                tracing::info!(
+                    transactions = recovery_result.transactions_processed,
+                    pages = recovery_result.pages_checkpointed,
+                    "WAL recovery applied"
                 );
             }
         }
@@ -342,7 +342,7 @@ impl Database {
 
         // Wait for active transactions to complete
         if self.tx_manager.has_active_transactions() {
-            eprintln!("RedDB: Warning - closing with active transactions");
+            tracing::warn!("closing database with active transactions");
         }
 
         // Final checkpoint if not read-only

@@ -87,6 +87,9 @@ pub struct ServerCommandConfig {
     pub vault: bool,
     /// Override worker thread count (None = auto-detect from CPUs)
     pub workers: Option<usize>,
+    /// Telemetry config (Phase 6 logging). `None` falls back to the
+    /// built-in default derived from `path` + stderr-only.
+    pub telemetry: Option<crate::telemetry::TelemetryConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -111,6 +114,32 @@ impl SystemdServiceConfig {
 
     pub fn unit_path(&self) -> PathBuf {
         PathBuf::from(format!("/etc/systemd/system/{}.service", self.service_name))
+    }
+}
+
+/// Build a sane default `TelemetryConfig` from a server path when the
+/// caller didn't set one explicitly. Writes rotating logs into the
+/// parent directory of the DB file (or `./logs` for in-memory /
+/// pathless runs). Level defaults to `info`, pretty stderr format.
+pub fn default_telemetry_for_path(path: Option<&std::path::Path>) -> crate::telemetry::TelemetryConfig {
+    let log_dir = match path {
+        Some(p) => p
+            .parent()
+            .map(|parent| parent.join("logs"))
+            .or_else(|| Some(std::path::PathBuf::from("./logs"))),
+        None => None, // in-memory — no file, stderr-only
+    };
+    crate::telemetry::TelemetryConfig {
+        log_dir,
+        file_prefix: "reddb.log".to_string(),
+        level_filter: std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
+        format: if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+            crate::telemetry::LogFormat::Pretty
+        } else {
+            crate::telemetry::LogFormat::Json
+        },
+        rotation_keep_days: 14,
+        service_name: "reddb",
     }
 }
 
@@ -187,9 +216,9 @@ fn configure_remote_backend_from_env(options: &mut RedDBOptions) {
             }
             #[cfg(not(feature = "backend-s3"))]
             {
-                eprintln!(
-                    "warning: REDDB_REMOTE_BACKEND={} requested but binary was built without backend-s3",
-                    backend
+                tracing::warn!(
+                    backend = %backend,
+                    "REDDB_REMOTE_BACKEND requested but binary was built without backend-s3"
                 );
             }
         }
@@ -492,6 +521,17 @@ pub fn probe_listener(target: &str, timeout: Duration) -> bool {
 
 #[inline(never)]
 fn run_configured_servers(config: ServerCommandConfig) -> Result<(), String> {
+    // Phase 6 logging: install the global `tracing` subscriber before
+    // any listener subscribes. The returned guard lives for the
+    // duration of this function so the non-blocking file writer
+    // flushes on graceful shutdown.
+    let _telemetry_guard = config
+        .telemetry
+        .as_ref()
+        .cloned()
+        .or_else(|| Some(default_telemetry_for_path(config.path.as_deref())))
+        .and_then(crate::telemetry::init);
+
     if let Some(router_bind_addr) = config.router_bind_addr.clone() {
         return run_routed_server(config, router_bind_addr);
     }
@@ -564,7 +604,7 @@ fn run_routed_server(config: ServerCommandConfig, router_bind_addr: String) -> R
         );
         tokio::spawn(async move {
             if let Err(err) = grpc_server.serve_on(grpc_listener).await {
-                eprintln!("gRPC backend error: {err}");
+                tracing::error!(err = %err, "gRPC backend error");
             }
         });
 
@@ -577,13 +617,15 @@ fn run_routed_server(config: ServerCommandConfig, router_bind_addr: String) -> R
         let wire_rt = Arc::new(runtime);
         tokio::spawn(async move {
             if let Err(err) = crate::wire::start_wire_listener_on(wire_listener, wire_rt).await {
-                eprintln!("wire backend error: {err}");
+                tracing::error!(err = %err, "wire backend error");
             }
         });
 
-        eprintln!(
-            "red server (router) bootstrapping on {} [cpus={}, workers={}]",
-            router_bind_addr, rt_config.available_cpus, worker_threads
+        tracing::info!(
+            bind = %router_bind_addr,
+            cpus = rt_config.available_cpus,
+            workers = worker_threads,
+            "router bootstrapping"
         );
         serve_tcp_router(TcpProtocolRouterConfig {
             bind_addr: router_bind_addr,
@@ -609,13 +651,13 @@ fn spawn_wire_listeners(config: &ServerCommandConfig, runtime: &RedDBRuntime) {
                 if wire_addr.starts_with("unix://") || wire_addr.starts_with('/') {
                     if let Err(e) = crate::wire::start_wire_unix_listener(&wire_addr, wire_rt).await
                     {
-                        eprintln!("wire unix listener error: {e}");
+                        tracing::error!(err = %e, "wire unix listener error");
                     }
                     return;
                 }
             }
             if let Err(e) = crate::wire::start_wire_listener(&wire_addr, wire_rt).await {
-                eprintln!("wire listener error: {e}");
+                tracing::error!(err = %e, "wire listener error");
             }
         });
     }
@@ -631,11 +673,11 @@ fn spawn_wire_listeners(config: &ServerCommandConfig, runtime: &RedDBRuntime) {
                         crate::wire::start_wire_tls_listener(&wire_tls_addr, wire_rt, &tls_cfg)
                             .await
                     {
-                        eprintln!("wire+tls listener error: {e}");
+                        tracing::error!(err = %e, "wire+tls listener error");
                     }
                 });
             }
-            Err(e) => eprintln!("wire TLS config error: {e}"),
+            Err(e) => tracing::error!(err = %e, "wire TLS config error"),
         }
     }
 }
@@ -655,7 +697,7 @@ fn spawn_pg_listener(config: &ServerCommandConfig, runtime: &RedDBRuntime) {
                 ..Default::default()
             };
             if let Err(e) = crate::wire::start_pg_wire_listener(cfg, rt).await {
-                eprintln!("pg wire listener error: {e}");
+                tracing::error!(err = %e, "pg wire listener error");
             }
         });
     }
@@ -759,7 +801,7 @@ fn build_http_server(
 fn run_http_server(config: ServerCommandConfig, bind_addr: String) -> Result<(), String> {
     let (runtime, auth_store) = build_runtime_and_auth_store(config.to_db_options())?;
     let server = build_http_server(runtime, auth_store, bind_addr.clone());
-    eprintln!("red server (HTTP) listening on {bind_addr}");
+    tracing::info!(transport = "http", bind = %bind_addr, "listener online");
     server.serve().map_err(|err| err.to_string())
 }
 
@@ -795,9 +837,12 @@ fn run_grpc_server(config: ServerCommandConfig, bind_addr: String) -> Result<(),
             auth_store,
         );
 
-        eprintln!(
-            "red server (gRPC) listening on {} [cpus={}, workers={}]",
-            bind_addr, rt_config.available_cpus, worker_threads
+        tracing::info!(
+            transport = "grpc",
+            bind = %bind_addr,
+            cpus = rt_config.available_cpus,
+            workers = worker_threads,
+            "listener online"
         );
         server.serve().await.map_err(|err| err.to_string())
     })
@@ -851,10 +896,13 @@ fn run_dual_server(
             auth_store,
         );
 
-        eprintln!("red server (HTTP) listening on {}", http_bind_addr);
-        eprintln!(
-            "red server (gRPC) listening on {} [cpus={}, workers={}]",
-            grpc_bind_addr, rt_config.available_cpus, worker_threads
+        tracing::info!(transport = "http", bind = %http_bind_addr, "listener online");
+        tracing::info!(
+            transport = "grpc",
+            bind = %grpc_bind_addr,
+            cpus = rt_config.available_cpus,
+            workers = worker_threads,
+            "listener online"
         );
         server.serve().await.map_err(|err| err.to_string())
     })

@@ -67,14 +67,14 @@ pub fn auto_generate_cert(dir: &Path) -> Result<WireTlsConfig, Box<dyn std::erro
 
     // If files already exist, reuse them
     if cert_path.exists() && key_path.exists() {
-        eprintln!("wire TLS: reusing existing cert at {}", cert_path.display());
+        tracing::info!(cert = %cert_path.display(), "wire TLS: reusing existing cert");
         return Ok(WireTlsConfig {
             cert_path,
             key_path,
         });
     }
 
-    eprintln!("wire TLS: generating self-signed certificate...");
+    tracing::info!("wire TLS: generating self-signed certificate");
     let (cert_pem, key_pem) = generate_self_signed_cert("localhost")?;
 
     std::fs::create_dir_all(dir)?;
@@ -88,10 +88,10 @@ pub fn auto_generate_cert(dir: &Path) -> Result<WireTlsConfig, Box<dyn std::erro
         std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
     }
 
-    eprintln!(
-        "wire TLS: cert={} key={}",
-        cert_path.display(),
-        key_path.display()
+    tracing::info!(
+        cert = %cert_path.display(),
+        key = %key_path.display(),
+        "wire TLS: wrote self-signed cert"
     );
 
     Ok(WireTlsConfig {
