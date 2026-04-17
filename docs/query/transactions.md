@@ -5,6 +5,25 @@ and full MVCC visibility. Every connection can open a transaction,
 nest savepoints, and roll back to any level without affecting other
 connections.
 
+A single `BEGIN / COMMIT` is atomic across every data model — not
+just tables. Graph nodes, vectors, queue messages, and timeseries
+points all carry `xmin` / `xmax` headers and honour the same
+visibility rules, so one transaction can span all of them.
+
+```sql
+BEGIN;
+INSERT INTO orders (id, total) VALUES (1, 100);
+INSERT INTO social NODE (label, name) VALUES ('User', 'alice');
+INSERT VECTOR INTO embeddings (id, dense) VALUES (1, [...]);
+QUEUE PUSH fulfillment {order_id: 1};
+COMMIT;
+-- every mutation becomes visible at the same moment; ROLLBACK
+-- reverts all four
+```
+
+PostgreSQL has no graphs or vectors. Neo4j has no queues. Kafka has no
+MVCC. RedDB does all of this natively.
+
 ## Quick reference
 
 | Statement | Effect |
@@ -91,6 +110,19 @@ it up".
 3. On `ROLLBACK` (or `ROLLBACK TO SAVEPOINT`), `xmax` is wiped back to
    0 so the row reappears for every snapshot that opens after the
    rollback.
+
+Queue `ACK` (via `QUEUE POP`) inside a transaction behaves the same
+way: the message is tombstoned rather than removed, so other
+consumers still see it until the txn commits. If the txn rolls back,
+the message reappears in the queue automatically.
+
+```sql
+BEGIN;
+QUEUE POP jobs;               -- tombstones the message for this session
+-- business logic fails
+ROLLBACK;
+-- message is visible again for the next consumer
+```
 
 Autocommit `DELETE` (without `BEGIN`) still physically removes the row
 immediately — no tombstone overhead for one-shot deletes.

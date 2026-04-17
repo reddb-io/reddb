@@ -8,16 +8,21 @@ evaluated per-row against session state.
 
 ```sql
 CREATE POLICY policy_name
-  ON table_name
+  ON [<kind> OF] table_or_collection_name
   [FOR SELECT|INSERT|UPDATE|DELETE|ALL]
   [TO role_name]
   USING (predicate_expression);
 
-DROP POLICY [IF EXISTS] policy_name ON table_name;
+DROP POLICY [IF EXISTS] policy_name ON collection_name;
 
-ALTER TABLE table_name ENABLE  ROW LEVEL SECURITY;
-ALTER TABLE table_name DISABLE ROW LEVEL SECURITY;
+ALTER TABLE collection_name ENABLE  ROW LEVEL SECURITY;
+ALTER TABLE collection_name DISABLE ROW LEVEL SECURITY;
 ```
+
+`<kind>` is one of `NODES`, `EDGES`, `VECTORS`, `MESSAGES`, `POINTS`,
+`DOCUMENTS`, or `TABLE` (default). Kind-scoped policies only gate
+the matching entity kind — a `NODES` policy never filters a table
+SELECT on the same collection.
 
 Policies are inert until `ENABLE ROW LEVEL SECURITY` is run on the
 table. Once enabled, **every** matching action is filtered by every
@@ -107,6 +112,46 @@ CREATE POLICY cancel_own_pending
 
 ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
 ```
+
+### Per-entity-kind policies
+
+RLS works across every data model, not just tables. Target the kind
+explicitly with `ON <kind> OF <collection>`:
+
+```sql
+-- graph nodes
+CREATE POLICY own_nodes ON NODES OF social
+  USING (properties.owner = CURRENT_USER());
+
+-- graph edges
+CREATE POLICY my_relations ON EDGES OF social
+  USING (properties.visibility = 'public');
+
+-- vector collections (metadata-scoped)
+CREATE POLICY tenant_vecs ON VECTORS OF articles
+  USING (metadata.tenant = CURRENT_TENANT());
+
+-- queue messages (payload-scoped)
+CREATE POLICY my_jobs ON MESSAGES OF jobs
+  USING (payload.user_id = CURRENT_USER());
+
+-- timeseries points (tag-scoped)
+CREATE POLICY my_hosts ON POINTS OF metrics
+  USING (tags.host IN (SELECT host FROM my_hosts));
+
+ALTER TABLE jobs ENABLE ROW LEVEL SECURITY;
+```
+
+The predicate evaluates against the entity's native fields —
+`properties` for nodes/edges, `metadata` for vectors, `payload`
+JSON for queue messages, `tags` for timeseries points. Dotted
+paths work on any of them (same resolver as
+[Multi-Tenancy dotted paths](multi-tenancy.md#dotted-paths—json-native-tenancy)).
+
+Legacy `TABLE` policies on the same collection still apply to
+non-tabular reads for backwards compatibility — `CREATE TABLE ...
+TENANT BY (col)` installs its auto-policy under `TABLE` and the
+evaluator applies it to any kind.
 
 ## Session context in policies
 

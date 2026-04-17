@@ -2,6 +2,134 @@
 
 All notable changes to RedDB are documented here. Dates are ISO-8601 (UTC-3).
 
+## 2026-04-17 — RedDB-Native Extensions (Cross-Model Feature Lift)
+
+Takes every PG parity feature from the morning's bundle and extends
+it across the other entity kinds (graph, vector, queue, timeseries)
+so the RedDB idiom feels unified rather than table-centric.
+
+### MVCC Universal — cross-model atomic transactions
+
+Commit: [`7e80a60`](https://github.com/forattini-dev/reddb/commit/7e80a60)
+
+- `stamp_xmin_if_in_txn` post-save hook on `RedDBRuntime` — stamps
+  `xmin` on graph nodes / edges, vectors, documents, queue messages,
+  and timeseries points as they leave the DevX builder API, without
+  crossing the storage ↔ runtime layer boundary
+- Visibility filter wired into every non-table scan:
+  `graph_dsl::materialize_graph_with_projection`, queue
+  `load_queue_message_views`, vector ANN (`db.similar()`)
+  post-filter — all use the same `capture_current_snapshot()` /
+  `entity_visible_with_context()` pair that tables use
+- `delete_message_with_state` turns queue ACK into an MVCC
+  tombstone when running inside a transaction (revived by
+  `ROLLBACK`, flushed by `COMMIT`)
+- `runtime::mvcc` pub re-export module so transports (PG wire,
+  gRPC, HTTP) and integration tests can emulate per-connection
+  isolation
+- `detect_mode` now recognises `BEGIN` / `COMMIT` / `ROLLBACK` /
+  `SAVEPOINT` / `RELEASE` / `VACUUM` / `ANALYZE` / `RESET` as
+  bare-token SQL commands
+
+**Impact:** one `BEGIN` spans tables + graphs + vectors + queues +
+timeseries atomically. PG has no graphs/vectors. Neo4j has no
+queues. Kafka has no MVCC. RedDB does all of it natively.
+
+### ASK tenant-scoped — RLS in the RAG pipeline
+
+Commit: [`c08cb3f`](https://github.com/forattini-dev/reddb/commit/c08cb3f)
+
+- `search_entity_allowed(collection, entity, snap_ctx, rls_cache)` —
+  per-entity gate wired into all three tiers of `search_context`
+  (field-index, token-index, global scan)
+- Restrictive default: RLS enabled + zero matching policy ⇒ deny.
+  The LLM never reasons over rows the caller cannot see
+- Acme session asking over a global corpus transparently filters to
+  acme-tagged rows; globex gets its own view
+
+### Tenancy dotted paths — JSON-native tenant discriminators
+
+Commit: [`5a8ce89`](https://github.com/forattini-dev/reddb/commit/5a8ce89)
+
+- `TENANT BY (root.sub.path)` on `CREATE TABLE` and
+  `ALTER TABLE t ENABLE TENANCY ON (root.sub)` — arbitrary depth
+- Root segment accepts keyword idents (`meta`, `data`, `tags`) that
+  would otherwise tokenise as reserved words
+- Evaluator parses `Value::Text` starting with `{` or `[` as JSON
+  too — users who stash JSON in TEXT columns get the same
+  filtering as declared JSON
+- `merge_dotted_tenant` and `dotted_tail_already_set` helpers keep
+  INSERT auto-fill idempotent: existing root JSON is merged
+  in-place, missing root is synthesised as `{tail: tenant_id}`,
+  explicit user values are trusted
+- Result cache key now mixes tenant + auth identity — previously a
+  `SELECT` filtered for acme would be served back to globex when
+  the query string matched
+
+### RLS universal per entity kind
+
+Commit: [`55e928d`](https://github.com/forattini-dev/reddb/commit/55e928d)
+
+- Grammar: `CREATE POLICY ... ON NODES|EDGES|VECTORS|MESSAGES|POINTS|DOCUMENTS OF <collection>`.
+  The bare `ON <collection>` form still defaults to `TABLE` for
+  backwards compatibility
+- `PolicyTargetKind` stamped on every stored policy;
+  `matching_rls_policies_for_kind` + `rls_policy_filter_for_kind`
+  filter by kind when the scan path supplies one
+- `runtime_any_record_from_entity` now materialises `QueueMessage`
+  entities so policies like
+  `USING (payload.tenant = CURRENT_TENANT())` can reach the JSON
+  payload via the dotted-path resolver
+- `evaluate_entity_filter_with_db` falls back to the any-record
+  builder when the TableRow-only path returns `None` — non-tabular
+  collections now actually evaluate policies instead of denying
+  by default
+- Queue scan calls `rls_policy_filter_for_kind(queue, Select, Messages)`
+  — `ON MESSAGES OF` policies gate POP / LEN / PEEK; deny-default
+  when RLS is on and no MESSAGES policy matches the role
+
+### Views end-to-end + stacked filter merge
+
+Commit: [`0353c6a`](https://github.com/forattini-dev/reddb/commit/0353c6a)
+
+- Parser: accept both `Token::As` / `Token::Or` and their ident
+  forms — `CREATE OR REPLACE VIEW … AS …` was erroring at the
+  first token because the lexer promotes both to keyword tokens
+- `execute_query` (raw SQL entry) now calls `rewrite_view_refs`
+  before dispatch, mirroring `execute_query_expr`. Views
+  previously only resolved through the prepared-statement path
+- Stacked view rewrite: when a view body is itself a `TableQuery`,
+  the outer query's `WHERE` (AND-combined), `LIMIT` (min), and
+  `OFFSET` (added) are merged into the body instead of being
+  silently dropped. `CREATE VIEW b AS SELECT * FROM a WHERE y;
+  SELECT * FROM b WHERE z` now applies both predicates
+- CREATE / DROP VIEW invalidate plan + result caches. `OR REPLACE`
+  no longer serves stale rows from the obsolete body
+- MATERIALIZED VIEW + REFRESH execute the body end-to-end
+
+### Test coverage
+
+Eleven end-to-end integration tests added, all green:
+
+- `tests/e2e_cross_model_tx.rs` — 3 tests (graph / queue /
+  multi-model atomic rollback)
+- `tests/e2e_ask_tenant_scoped.rs` — 1 test (ASK corpus filtering)
+- `tests/e2e_tenancy_dotted.rs` — 3 tests (reads, auto-fill
+  missing root, merge existing JSON root)
+- `tests/e2e_rls_universal.rs` — 1 test (MESSAGES-of-queue policy)
+- `tests/e2e_views.rs` — 3 tests (filtered body, stacked, REFRESH)
+
+### Housekeeping
+
+- `DataType::Unknown` variant added — function catalog already
+  referenced it for the polymorphic `JSON_SET(json, path, value)`
+  third argument, blocking `cargo check`
+- `match_if_exists` / `match_if_not_exists` widened to `pub(crate)`
+  so the `sql.rs` parser router can reach them
+- `src/storage/import/csv.rs` return-type mismatch (`.map(|_| ())`)
+
+---
+
 ## 2026-04-17 — PostgreSQL Feature Parity (19 categories)
 
 One bundled release closing every category on the PG parity matrix we

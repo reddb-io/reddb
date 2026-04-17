@@ -18,7 +18,13 @@ SELECT count(*) FROM active_users;
 SELECT * FROM active_users WHERE last_seen > '2026-01-01';
 ```
 
-`CREATE OR REPLACE VIEW` updates an existing definition:
+Outer `WHERE`, `LIMIT`, and `OFFSET` clauses merge into the view's
+body — a `SELECT * FROM active_users WHERE last_seen > '2026-01-01'`
+evaluates `status = 'active' AND last_seen > '2026-01-01'` against
+the base table, not a two-pass scan.
+
+`CREATE OR REPLACE VIEW` updates an existing definition and flushes
+the plan / result caches so subsequent queries see the new body:
 
 ```sql
 CREATE OR REPLACE VIEW active_users AS
@@ -27,10 +33,26 @@ CREATE OR REPLACE VIEW active_users AS
   WHERE status = 'active' AND deleted_at IS NULL;
 ```
 
-Drop:
+Drop (also clears caches):
 
 ```sql
 DROP VIEW [IF EXISTS] active_users;
+```
+
+### Stacked views
+
+Views can reference other views. The rewriter merges each outer
+predicate into the body recursively, so filters compose cleanly:
+
+```sql
+CREATE VIEW error_events AS
+  SELECT * FROM events WHERE severity = 'error';
+
+CREATE VIEW auth_errors AS
+  SELECT * FROM error_events WHERE module = 'auth';
+
+SELECT * FROM auth_errors;
+-- evaluates severity = 'error' AND module = 'auth' on events
 ```
 
 ### Nested views

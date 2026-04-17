@@ -57,6 +57,46 @@ CREATE TABLE users (...)
   WITH (tenant_by = 'tenant_id');
 ```
 
+### Dotted paths — JSON-native tenancy
+
+`TENANT BY (col)` also accepts dotted paths so you can store the
+tenant discriminator inside a JSON column, a graph node's
+properties, a queue message's payload, or a timeseries tag map.
+
+```sql
+-- tenant inside a JSON column
+CREATE TABLE events (id INT, meta TEXT)
+  TENANT BY (meta.tenant);
+
+-- same pattern works on any non-table kind via RLS policies
+CREATE POLICY tenant_vecs ON VECTORS OF articles
+  USING (metadata.tenant = CURRENT_TENANT());
+
+CREATE POLICY tenant_jobs ON MESSAGES OF jobs
+  USING (payload.tenant = CURRENT_TENANT());
+```
+
+INSERT auto-fill handles the nested case too:
+
+```sql
+SET TENANT 'acme';
+
+-- no root column supplied → auto-creates {"tenant": "acme"}
+INSERT INTO events (id) VALUES (1);
+
+-- user provides the root but omits the tenant key → merge
+INSERT INTO events (id, meta) VALUES (2, '{"trace_id": "abc"}');
+-- stored: {"trace_id": "abc", "tenant": "acme"}
+
+-- user provides the full path → trusted, no overwrite (admin
+-- bulk-load from CSV on behalf of multiple tenants)
+INSERT INTO events (id, meta) VALUES (3, '{"tenant": "globex"}');
+```
+
+The dotted-path resolver is lenient: columns declared as `TEXT`
+but containing JSON strings are parsed transparently, so you don't
+have to change column types to adopt tenancy.
+
 ### Auto-fill on INSERT
 
 ```sql
