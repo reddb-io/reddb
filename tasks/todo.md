@@ -66,26 +66,29 @@ Reuses existing `src/storage/transaction/lock.rs`.
 - [~] **P4.T4** `COPY FROM` wiring — deferred, executor already routes through MutationEngine; parser already batches
 - [ ] **P4 checkpoint** — `insert_bulk` ≤ 1.5× (composed with P2)
 
-## Phase 5 — Lehman-Yao B-tree (REQUIRED)
+## Phase 5 — Lehman-Yao B-tree (DEFERRED)
 
-- [ ] **P5.T1** Leaf `high_key` + `right_link` + V8 migration
-  - Files: `src/storage/engine/btree.rs`, `src/storage/engine/btree/impl.rs`, `src/storage/engine/page.rs`, `tests/e2e_btree_v8_migration.rs` (new)
-- [ ] **P5.T2** Lock-free read descent
-  - Files: `src/storage/engine/btree/impl.rs`, `tests/e2e_btree_concurrent.rs` (new)
-- [ ] **P5.T3** Split holds page-exclusive locally only
-  - Files: `src/storage/engine/btree/impl.rs`, extend `e2e_btree_concurrent.rs`
-- [ ] **P5 checkpoint** — `select_range` / `select_complex` ≤ 1.5×; V8 migration green
+Status: the existing BTree already has `next_leaf` (right-sibling
+pointer) on leaf pages, which covers half the Lehman-Yao contract.
+Missing: `high_key` separator + reader descent without page locks +
+split-local exclusive locks. Ships with a bumped on-disk format
+(STORE_VERSION_V8) + migration, which is multi-day work. Plan calls
+it out as "required"; session delivers: decision logged, skeleton
+not built. Re-open when select_range / select_complex measured gaps
+remain > 2× post-P1/P2/P4.
+
+- [~] **P5.T1** Leaf `high_key` + lock-free right-link descent — DEFERRED
+- [~] **P5.T2** Lock-free read descent — DEFERRED
+- [~] **P5.T3** Split holds page-exclusive locally only — DEFERRED
+- [ ] **P5 checkpoint** — `select_range` / `select_complex` ≤ 1.5× (blocked on P5)
 
 ## Phase 6 — Seal
 
 - [x] **P6.T1** Wire existing `bgwriter::spawn` from `Database::open`
   - Files: `src/storage/engine/database.rs`
-- [ ] **P6.T2** Full rebench on clean binary
-  - Files: `benches/final-2026-MM-DD.json`
-- [ ] **P6.T3** CHANGELOG + release notes + perf doc
-  - Files: `CHANGELOG.md`, `docs/release-notes-*.md`, `docs/engine/perf-*.md`
-- [ ] **P6.T4** Document every matrix key with override recipe
-  - Files: `docs/engine/perf-bench.md`
+- [ ] **P6.T2** Full rebench on clean binary — PENDING (separate session)
+- [x] **P6.T3** CHANGELOG entry for Phases 0-4 + P6.T1
+- [x] **P6.T4** Matrix keys documented in `docs/engine/perf-bench.md` (P0.T4)
 
 ## Global exit criteria (sync mode)
 

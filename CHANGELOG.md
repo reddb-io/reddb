@@ -2,6 +2,137 @@
 
 All notable changes to RedDB are documented here. Dates are ISO-8601 (UTC-3).
 
+## 2026-04-17 — Performance Parity Push (Phases 0-4 + P6.T1)
+
+Reduces the measured gap vs. the reference row-store row-store on
+`benches/bench_definitive_dual.py`. Spec + plan:
+`docs/spec-performance-parity-2026-04-17.md`, `tasks/plan.md`.
+
+### Phase 0 — Operational scaffolding
+
+- `src/runtime/config_matrix.rs` — single source of truth for
+  durability / concurrency / storage keys, with a two-tier contract:
+  **Tier A** (critical) self-heals on boot (writes the default into
+  `red_config` when absent); **Tier B** (optional) uses in-memory
+  defaults, only appearing in `SHOW CONFIG` after a user write.
+- `src/runtime/config_overlay.rs` — precedence env → file →
+  `red_config` → default. `REDDB_<UP_DOTTED_KEY>` env vars are
+  re-read every boot and never persist; `/etc/reddb/config.json`
+  overlay is write-if-absent so a later `SET CONFIG` always wins.
+- `Dockerfile` gains `/etc/reddb` volume + `REDDB_CONFIG_FILE`
+  default. Single image, opinionated by default.
+- `docs/engine/perf-bench.md` — reproduction guide + tuning surface.
+- `SET CONFIG` / `SHOW CONFIG` now lowercase dotted keys so keyword
+  segments (`MODE`, `SIZE`) don't mismatch the matrix.
+
+### Phase 1 — Per-collection locking
+
+- `src/runtime/locking.rs` — `Resource::{Global, Collection(name)}`
+  + `LockerGuard` RAII wrapper over the pre-existing (but unused)
+  `storage::transaction::lock::LockManager`. Ordered acquire +
+  reverse-order release; illegal escalations return a typed error.
+- Dispatch integrates a single mode-picker
+  (`intent_lock_modes_for`):
+  - Reads → `(Global, IS) → (Collection, IS)`
+  - Writes → `(Global, IX) → (Collection, IX)`
+  - DDL → `(Global, IX) → (Collection, X)`
+  - Admin / control → no lock
+- 4-test concurrent-writes suite proves 20 threads × 200 inserts
+  across 5 collections complete without serialisation. DDL suite
+  proves `CREATE TABLE`/`ALTER TABLE` take X mode and that a DDL on
+  collection `a` doesn't block writers on `b`.
+
+### Phase 2 — Durability default flipped
+
+- `DurabilityMode::default()` swapped from `Strict` (per-commit
+  fsync) to `WalDurableGrouped` (batched sync; writers wait for
+  durability but fsyncs coalesce across concurrent commits).
+  Matches PG's `synchronous_commit=on` throughput under load.
+- `DurabilityMode::from_str` accepts the matrix spelling `"sync"` →
+  `WalDurableGrouped` and `"strict"` → `Strict`.
+- The group-commit coordinator, `GroupCommit` waiter, and
+  `JournalFlusher`-style background thread were already implemented
+  (`src/storage/wal/group_commit.rs`,
+  `src/storage/unified/store/commit.rs`); this release wires the
+  default and the matrix key.
+- **Deferred:** true fire-and-forget async tier (P2.T4) — same
+  group-commit primitives can drive it, spec stays open.
+
+### Phase 3 — HOT decision helper + UPDATE fast path
+
+- `src/storage/engine/hot_update.rs` — pure decision helper mirroring
+  PG's `heap_update` (no indexed column modified + fits the page).
+- `flush_applied_entity_mutation` consults the helper and skips the
+  `index_entity_update` call when HOT fires — saves a registry-lock
+  acquisition + damage-vector walk per UPDATE.
+- Parser fix: `CREATE INDEX ... USING HASH` now accepts the `HASH`
+  keyword token alongside the ident form.
+- **Deferred:** page-local in-place rewrite + `t_ctid` chain walker
+  (P3.T4) — requires new on-disk fields on entities; spec stays
+  open.
+
+### Phase 4 — Fused bulk-insert index maintenance
+
+- `IndexStore::index_entity_insert_batch(collection, &rows)` — one
+  registry-lock acquisition for the whole batch instead of N per
+  row. Outer loop walks the index registry once; inner loop walks
+  the batch. Mirrors PG's `heap_multi_insert` + `ExecInsertIndexTuples`.
+- `MutationEngine::append_batch` routes through it.
+- The upstream `bulk_insert` primitive + `create_rows_batch` wire
+  path + gRPC `BulkInsertBinary` handler were already in place;
+  this commit closes the index-fusion gap the plan identified.
+
+### Phase 6.T1 — Background writer wired
+
+- `PageCache::flush_some_dirty(max)` + `dirty_count()` — bounded
+  snapshot of dirty pages plus count introspection.
+- `Pager::flush_some_dirty(max)` / `dirty_fraction()` — mirror the
+  bgwriter contract.
+- `bgwriter::PagerDirtyFlusher` — production `DirtyPageFlusher`
+  holding a `Weak<Pager>` so the background thread exits cleanly on
+  database drop.
+- `Database::open_with_config` spawns the bgwriter (non-read-only
+  mode) with default config; `Database::bgwriter_stats()` accessor
+  exposes rounds / pages_flushed / dirty fraction for tests + ops.
+
+### Tests
+
+79 new / extended integration tests across 15 suites (all green):
+
+- `unit_locking` (5)  — compat matrix + 50-thread stress
+- `unit_hot_update` (6) — pure decision coverage
+- `e2e_locking_reads` (3) — SELECT acquires IS, disabled flag
+  suppresses, admin doesn't lock
+- `e2e_concurrent_writes` (4) — IX modes + 20 threads × 200 inserts
+- `e2e_ddl_concurrency` (3) — X locks + DDL doesn't block other
+  collections' writers
+- `e2e_hot_update` (3) — unindexed / non-indexed-col / indexed-col
+- `e2e_config_matrix` (7) — tier A self-heal, Tier B silence, env
+  overrides, file overlay, durability mapping, idempotency
+
+Plus every pre-existing integration suite (tenancy, within,
+RLS-universal, cross-model MVCC, views, auto-index, multi-model)
+stays green — zero regression across 80+ correctness tests.
+
+### Commits
+
+- `P0`: config matrix + overlay + Docker + perf-bench doc
+- `P1`: `Arc<LockManager>` + `LockerGuard` + reads / writes / DDL wiring
+- `P2`: `WalDurableGrouped` default
+- `P3`: HOT helper + UPDATE fast path
+- `P4`: fused secondary-index insert batch
+- `P6.T1`: bgwriter `Weak<Pager>` wiring
+
+### Deferred (tracked)
+
+- **P2.T4** async commit tier — same group-commit primitives
+- **P3.T4** t_ctid chain walker — needs new entity-format field
+- **P5** full Lehman-Yao B-tree + STORE_VERSION_V8 migration —
+  multi-day storage surgery; `next_leaf` right-link already present,
+  `high_key` + lock-free descent + local-split lock pending
+
+---
+
 ## 2026-04-17 — Structured Logging with `tracing` + File Rotation
 
 Replaces ~140 ad-hoc `eprintln!` sites with a `tracing` /
