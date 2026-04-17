@@ -1210,6 +1210,14 @@ impl RedDBRuntime {
                     }),
                 );
             }
+
+            // Perf-parity config matrix: heal the Tier A (critical)
+            // keys unconditionally on every boot. Idempotent — only
+            // writes the default when the key is missing. Keeps
+            // `SHOW CONFIG` showing every guarantee the operator has
+            // (durability.mode, concurrency.locking.enabled, …) even
+            // on long-running datadirs that predate the matrix.
+            crate::runtime::config_matrix::heal_critical_keys(store.as_ref());
         }
 
         // Start background maintenance thread (context index refresh +
@@ -1619,7 +1627,12 @@ impl RedDBRuntime {
             .inner
             .cdc
             .emit(operation, collection, entity_id, entity_kind);
-        self.invalidate_result_cache();
+        // Perf: prior to this we called `invalidate_result_cache()`
+        // which wipes EVERY cached query, across every table, under
+        // a write lock — turning each INSERT into a serialisation
+        // point for all readers. Swap to the per-table variant so
+        // unrelated query caches survive.
+        self.invalidate_result_cache_for_table(collection);
 
         // Append to logical WAL replication buffer (if primary mode)
         if let Some(ref primary) = self.inner.db.replication {

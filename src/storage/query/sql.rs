@@ -1082,6 +1082,11 @@ impl<'a> Parser<'a> {
                         let next = self.expect_ident_or_keyword()?;
                         full_key = format!("{full_key}.{next}");
                     }
+                    // Normalise to lowercase so keyword segments
+                    // (`MODE`, `SIZE`, …) returned in their canonical
+                    // uppercase form don't mismatch the lowercase keys
+                    // the config matrix and SHOW CONFIG use.
+                    let full_key = full_key.to_ascii_lowercase();
                     self.expect(Token::Eq)?;
                     let value = self.parse_literal_value()?;
                     Ok(SqlCommand::SetConfig {
@@ -1131,8 +1136,19 @@ impl<'a> Parser<'a> {
             Token::Ident(name) if name.eq_ignore_ascii_case("SHOW") => {
                 self.advance()?;
                 if self.consume_ident_ci("CONFIG")? {
+                    // Accept dotted prefixes the same way SET CONFIG does
+                    // (`SHOW CONFIG durability.mode`), and empty prefix
+                    // (`SHOW CONFIG`) for a catalog-wide listing.
                     let prefix = if !self.check(&Token::Eof) {
-                        Some(self.expect_ident()?)
+                        let first = self.expect_ident()?;
+                        let mut full = first;
+                        while self.consume(&Token::Dot)? {
+                            let next = self.expect_ident_or_keyword()?;
+                            full = format!("{full}.{next}");
+                        }
+                        // Match SET CONFIG: lowercase so keyword segments
+                        // come out consistent with the stored keys.
+                        Some(full.to_ascii_lowercase())
                     } else {
                         None
                     };
