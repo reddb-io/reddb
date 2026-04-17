@@ -113,6 +113,7 @@ fn ensure_collection_model_contract(
         table_def: matches!(requested_model, crate::catalog::CollectionModel::Table)
             .then(|| crate::storage::schema::TableDef::new(collection.to_string())),
         timestamps_enabled: false,
+        context_index_enabled: false,
     })
     .map(|_| ())
     .map_err(|err| crate::RedDBError::Internal(err.to_string()))
@@ -1727,14 +1728,53 @@ impl RedDBRuntime {
                             .collect(),
                     );
                 }
-                self.index_store_ref()
-                    .index_entity_update(
-                        &applied.collection,
-                        applied.id,
-                        &applied.pre_mutation_fields,
-                        &post,
-                    )
-                    .map_err(crate::RedDBError::Internal)?;
+
+                // HOT-like fast path (P3.T2/T3): when no modified
+                // column is covered by a secondary index, skip the
+                // `index_entity_update` call entirely. The function
+                // would short-circuit internally, but the call still
+                // reads the registry lock + walks the damage vector
+                // — avoiding it saves a few microseconds per UPDATE.
+                // Page-local replace + t_ctid chain support (true
+                // HOT) lives in a follow-up storage spec.
+                let indexed_cols: std::collections::HashSet<String> = self
+                    .index_store_ref()
+                    .list_indices(applied.collection.as_str())
+                    .into_iter()
+                    .filter_map(|idx| idx.columns.first().cloned())
+                    .collect();
+                let modified_cols: std::collections::HashSet<String> = damage
+                    .touched_columns()
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect();
+                let decision = crate::storage::engine::hot_update::decide(
+                    &crate::storage::engine::hot_update::HotUpdateInputs {
+                        collection: applied.collection.as_str(),
+                        indexed_columns: &indexed_cols,
+                        modified_columns: &modified_cols,
+                        // The storage layer currently handles fit via
+                        // the segment abstraction; we bypass the
+                        // page-size check here.
+                        new_tuple_size: 0,
+                        page_free_space: usize::MAX,
+                    },
+                );
+                if !decision.can_hot {
+                    self.index_store_ref()
+                        .index_entity_update(
+                            &applied.collection,
+                            applied.id,
+                            &applied.pre_mutation_fields,
+                            &post,
+                        )
+                        .map_err(crate::RedDBError::Internal)?;
+                } else {
+                    tracing::debug!(
+                        collection = %applied.collection,
+                        "hot_update fast-path: skipped index_entity_update"
+                    );
+                }
             }
         }
         self.cdc_emit_prebuilt_with_columns(

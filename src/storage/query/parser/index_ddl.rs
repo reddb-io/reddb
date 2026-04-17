@@ -76,9 +76,18 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    /// Parse index method identifier: HASH | BTREE | BITMAP | RTREE
+    /// Parse index method identifier: HASH | BTREE | BITMAP | RTREE.
+    /// `HASH` is also a reserved keyword token, so we match both the
+    /// keyword form and the ident form — otherwise `USING HASH`
+    /// fails with "Unexpected token: HASH" even though the parser
+    /// lists HASH as an expected option.
     fn parse_index_method(&mut self) -> Result<IndexMethod, ParseError> {
-        match self.peek().clone() {
+        let peeked = self.peek().clone();
+        if matches!(peeked, Token::Hash) {
+            self.advance()?;
+            return Ok(IndexMethod::Hash);
+        }
+        match peeked {
             Token::Ident(ref name) => {
                 let method = match name.to_ascii_uppercase().as_str() {
                     "HASH" => IndexMethod::Hash,

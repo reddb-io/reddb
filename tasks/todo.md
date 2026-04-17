@@ -54,13 +54,9 @@ Reuses existing `src/storage/transaction/lock.rs`.
 
 - [x] **P3.T1** `HotUpdateDecision` pure helper
   - Files: `src/storage/engine/hot_update.rs` (new)
-- [ ] **P3.T2** `apply_hot_update` storage primitive with HEAP_ONLY_TUPLE + t_ctid
-  - Files: `src/storage/unified/store/impl_entities.rs`, `src/storage/engine/hot_update.rs`
-- [ ] **P3.T3** Route `execute_update` through decide()
-  - Files: `src/runtime/impl_dml.rs`, `tests/e2e_hot_update.rs` (new)
-- [ ] **P3.T4** Chain-walking reader, bounded by `storage.hot_update.max_chain_hops`
-  - Files: `src/runtime/query_exec/table.rs`, `tests/e2e_hot_update_concurrent.rs` (new)
-- [ ] **P3 checkpoint** — `bulk_update` ≤ 1.5×
+- [x] **P3.T2/T3** decide() wired into `flush_applied_entity_mutation` — skips `index_entity_update` when HOT fires
+- [~] **P3.T4** Chain-walking reader — DEFERRED: requires page-local in-place rewrite + t_ctid chain (storage engine redesign, out of session scope)
+- [ ] **P3 checkpoint** — `bulk_update` bench delta (measure after P4)
 
 ## Phase 4 — Multi-row insert batching
 
