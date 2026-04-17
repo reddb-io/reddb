@@ -204,6 +204,187 @@ ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
 
 See [Row Level Security](rls.md) for the full policy grammar.
 
+## Tenants are not entities
+
+There is no `CREATE TENANT` command and no internal tenant registry.
+A "tenant" is an opaque string carried by `current_tenant()`; it
+springs into existence the moment a row is inserted with that value
+and disappears when the last row referencing it is deleted. Two
+consequences:
+
+1. **No spelling protection** — `'acme'` and `'Acme'` are different
+   tenants. RLS will happily isolate them as such. If you need
+   canonical IDs, enforce them at the application layer or via a
+   catalog table (below).
+2. **No tenant lifecycle hooks** — there is no "tenant created" /
+   "tenant deleted" event. Provisioning, billing, and quota tracking
+   live in your application or a catalog table you manage.
+
+### The catalog pattern
+
+The recommended layout for a SaaS deployment:
+
+```sql
+-- Catalog: NOT tenant-scoped. The application owns it. One row per
+-- customer. Use whatever discriminator you want (UUID, slug, …).
+CREATE TABLE tenants (
+  id          TEXT PRIMARY KEY,
+  display_name TEXT,
+  plan         TEXT,
+  created_at   TIMESTAMP DEFAULT NOW()
+);
+
+-- Data tables: tenant-scoped. Reference the catalog by convention
+-- (RedDB has no foreign keys yet — wire the integrity check in your
+-- service layer).
+CREATE TABLE orders (
+  id        INT,
+  amount    DECIMAL,
+  tenant_id TEXT
+) TENANT BY (tenant_id);
+```
+
+Provisioning a new customer becomes:
+
+```sql
+INSERT INTO tenants (id, display_name, plan) VALUES ('acme', 'Acme Corp', 'pro');
+
+WITHIN TENANT 'acme' INSERT INTO orders (id, amount) VALUES (1, 100);
+```
+
+The `tenants` row gives admin tooling something to enumerate; the
+catalog is invisible to RLS so admins always see every customer
+regardless of their session tenant.
+
+## Cold-start (no tenant bound)
+
+When a connection has no `SET TENANT`, no `SET LOCAL TENANT`, and no
+`WITHIN TENANT '…'` prefix on the statement:
+
+| Operation                             | Result                                    |
+|---------------------------------------|-------------------------------------------|
+| `SELECT` on a `TENANT BY` table       | 0 rows (RLS deny-default)                 |
+| `UPDATE` / `DELETE` on a `TENANT BY` table | Affects 0 rows (RLS gate)            |
+| `INSERT` into a `TENANT BY` table without naming the tenant column | **Error** — loud failure |
+| `INSERT` into a `TENANT BY` table naming the tenant column explicitly | Succeeds — uses the named value |
+| Any operation on a non-tenant table   | Works normally                            |
+
+Why deny-default: `current_tenant()` returns `NULL`, so the auto-policy
+predicate becomes `tenant_id = NULL`. Per SQL three-valued logic that
+evaluates to `UNKNOWN`, never `TRUE`, so no row passes the filter. The
+behaviour matches every other RLS policy gated on a missing identity.
+
+The loud INSERT error is intentional — silently writing rows with
+`NULL` tenant ids would leak into a "global" bucket no other session
+could see. Better to fail and force the caller to pick a tenant.
+
+To bootstrap the first tenant from an unscoped admin session:
+
+```sql
+-- Either: name the column explicitly (no SET TENANT needed)
+INSERT INTO orders (id, amount, tenant_id) VALUES (1, 100, 'acme');
+
+-- Or: bind the tenant first
+SET TENANT 'acme';
+INSERT INTO orders (id, amount) VALUES (2, 200);
+```
+
+The catalog table is the natural seed point — it has no `TENANT BY`,
+so admins can populate it freely and then switch into the new
+tenant's scope to seed the data tables.
+
+## Per-statement & transaction-scoped overrides
+
+Three layers can carry a tenant binding, in order of precedence
+(highest wins):
+
+1. **`WITHIN TENANT '<id>' [USER '<u>'] [AS ROLE '<r>'] <stmt>`** —
+   single-statement override. Stack-scoped via an RAII guard, so a
+   pool-shared connection cannot leak the binding to the next
+   request and an early `?` return still pops cleanly. Designed for
+   stateless SaaS APIs where one connection serves many tenants.
+
+   ```sql
+   WITHIN TENANT 'acme' SELECT * FROM orders;
+   WITHIN TENANT 'acme' UPDATE orders SET status='paid' WHERE id=1;
+   WITHIN TENANT 'acme' USER 'filipe' AS ROLE 'admin'
+     SELECT * FROM audit_log;          -- USER/ROLE project into
+                                       -- CURRENT_USER / CURRENT_ROLE
+                                       -- without granting privilege
+   WITHIN TENANT NULL SELECT * FROM orders;   -- explicit clear
+   ```
+
+2. **`SET LOCAL TENANT '<id>'`** — transaction-local override. Only
+   valid inside an active transaction; auto-evicted on `COMMIT` or
+   `ROLLBACK`. Useful when several statements in a transaction must
+   share a tenant binding without repeating `WITHIN` on each:
+
+   ```sql
+   BEGIN;
+   SET LOCAL TENANT 'acme';
+   INSERT INTO orders (id, amount) VALUES (3, 300);
+   UPDATE orders SET status='paid' WHERE id=3;
+   COMMIT;     -- override gone, session tenant resumes
+   ```
+
+3. **`SET TENANT '<id>'` / `RESET TENANT` / `SET TENANT NULL`** —
+   session-level binding via thread-local. Persists for the
+   connection's lifetime. Best when one connection serves one tenant
+   for its whole lifecycle (worker per tenant, dedicated pool).
+
+`USER` and `AS ROLE` overrides only affect the values returned by
+`CURRENT_USER` / `CURRENT_ROLE()` inside SQL — they do **not** elevate
+RBAC privileges. The connection's real identity (set via
+`set_current_auth_identity` from a transport layer) still gates DDL,
+vault access, and other admin operations.
+
+## Multi-model coverage
+
+| Model           | Tenant filter via `ON <coll>` policy | `WITHIN TENANT '…'` works |
+|-----------------|--------------------------------------|---------------------------|
+| Tables (SELECT/UPDATE/DELETE/INSERT) | ✓                              | ✓                         |
+| JOINs of tenant-scoped tables        | ✓                              | ✓                         |
+| Queue MESSAGES (LEN / POP / PEEK)    | ✓                              | ✓                         |
+| Timeseries POINTS (SELECT)           | ✓ (`ON <ts>` form)             | ✓                         |
+| Graph NODES / EDGES (MATCH)          | ✗ (executor does not gate)     | ✗                         |
+| Vectors (SIMILAR / SEARCH)           | ✓ (post-filter)                | ✓                         |
+
+The `CREATE POLICY ON NODES OF / ON POINTS OF / ON MESSAGES OF / ON
+VECTORS OF` *kind-targeted* form is parsed and stored for every
+collection kind, but only the queue MESSAGES read path queries the
+kind-targeted policy registry today. Tables, timeseries, and vectors
+read the *basic* `ON <coll>` (kind=Table) form — use that form for
+SaaS-style tenant isolation. Graph MATCH currently ignores both forms
+(tracked as a gap).
+
+## Auto-index on the tenant column
+
+Declaring `TENANT BY (col)` automatically creates a hash index named
+`__tenant_idx_{table}` on the discriminator column. Since the
+auto-policy adds `col = CURRENT_TENANT()` to every read/write, that
+column is on the hot path of every query — without an index the
+filter degrades to a full scan. The index is skipped when:
+
+- the tenant column is dotted (`metadata.tenant`) — flat secondary
+  indices don't cover nested paths today
+- a user-defined index already covers the column as its leading key
+- the index already exists (idempotent across boot rehydrate)
+
+`ALTER TABLE … DISABLE TENANCY` and `DROP TABLE` clean it up.
+
+## Debugging
+
+| Statement              | Returns                                           |
+|------------------------|---------------------------------------------------|
+| `SHOW TENANT`          | The currently bound tenant id, or `NULL`          |
+| `SELECT CURRENT_TENANT()` | Same value, usable in expressions              |
+| `SELECT CURRENT_USER()`   | Projected user (override or auth identity)     |
+| `SELECT CURRENT_ROLE()`   | Projected role (override or auth identity)     |
+
+When a query unexpectedly returns zero rows on a `TENANT BY` table,
+check `SHOW TENANT` first — an unbound session is the most common
+cause and the deny-default explains the silent empty result.
+
 ## See also
 
 - [Row Level Security](rls.md)

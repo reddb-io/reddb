@@ -65,23 +65,31 @@ pub(crate) fn extract_entity_id_from_filter(
     }
 }
 
-/// Extract a bloom filter key hint from a PK/ID equality filter ONLY.
+/// Extract a bloom filter key hint from an internal-PK equality filter.
 ///
-/// Bloom filters only index entity IDs and primary keys. Using them for
-/// general column values causes incorrect pruning (false negatives).
-/// Restricted to: _entity_id, row_id, id, key.
+/// The segment-level bloom only indexes RedDB's synthetic
+/// `red_entity_id` column — every entity is hashed into the bloom by
+/// that key on insert. User-declared columns named `id`, `row_id`, or
+/// `key` are NOT guaranteed to be in the bloom (they're application
+/// data, not engine-managed PKs); treating them as bloom-keyed
+/// produced false-negative pruning that silently dropped every row
+/// matching `WHERE id = N` against tables whose `id` column was just
+/// a regular user field.
+///
+/// Restricted to `red_entity_id` so the bloom probe is always sound.
+/// User-PK pruning belongs in a separate code path tied to actual
+/// PRIMARY KEY metadata or registered index hints.
 pub(crate) fn extract_bloom_key_for_pk(
     filter: &crate::storage::query::ast::Filter,
 ) -> Option<Vec<u8>> {
     use crate::storage::query::ast::{CompareOp, FieldRef, Filter};
     match filter {
         Filter::Compare { field, op, value } if *op == CompareOp::Eq => {
-            // Only use bloom for PK/ID fields
             let field_name = match field {
                 FieldRef::TableColumn { column, .. } => column.as_str(),
                 _ => return None,
             };
-            if !matches!(field_name, "red_entity_id" | "row_id" | "id" | "key") {
+            if field_name != "red_entity_id" {
                 return None;
             }
             let key = match value {

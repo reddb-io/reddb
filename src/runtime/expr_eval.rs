@@ -655,16 +655,17 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
                 .map(Value::Text)
                 .unwrap_or(Value::Null),
         ),
-        // PG-style session identity scalars — read the auth thread-local
-        // installed by the transport layer. Anonymous callers get NULL.
+        // Session identity scalars — `WITHIN ... USER '<u>' AS ROLE '<r>'`
+        // overrides win over the transport-installed thread-local.
+        // Anonymous callers with no override get NULL.
         "CURRENT_USER" | "SESSION_USER" | "USER" => Some(
-            crate::runtime::impl_core::current_auth_identity()
-                .map(|(u, _)| Value::Text(u))
+            crate::runtime::impl_core::current_user_projected()
+                .map(Value::Text)
                 .unwrap_or(Value::Null),
         ),
         "CURRENT_ROLE" => Some(
-            crate::runtime::impl_core::current_auth_identity()
-                .map(|(_, r)| Value::Text(format!("{r:?}").to_lowercase()))
+            crate::runtime::impl_core::current_role_projected()
+                .map(Value::Text)
                 .unwrap_or(Value::Null),
         ),
         "TIME_BUCKET" => {

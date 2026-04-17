@@ -665,6 +665,14 @@ struct RuntimeInner {
     /// `xid=0` — identical to pre-MVCC behaviour.
     tx_contexts:
         parking_lot::RwLock<HashMap<u64, crate::storage::transaction::snapshot::TxnContext>>,
+    /// Transaction-local tenant override (`SET LOCAL TENANT '<id>'`).
+    /// Keyed by connection id, mirroring `tx_contexts`. Lives only while
+    /// a transaction is open — `COMMIT` / `ROLLBACK` evict the entry,
+    /// returning the connection to whichever session-level tenant
+    /// (`SET TENANT 'x'`) was active before the transaction began.
+    /// Wins over the session value but loses to a per-statement
+    /// `WITHIN TENANT '<id>' …` override on the same call.
+    tx_local_tenants: parking_lot::RwLock<HashMap<u64, Option<String>>>,
     /// Row-level security policies (Phase 2.5 PG parity).
     ///
     /// Keyed by `(table_name, policy_name)`; the set of tables with RLS
@@ -743,6 +751,7 @@ mod impl_tree;
 mod index_store;
 mod join_filter;
 pub(crate) mod mutation;
+pub mod within_clause;
 mod probabilistic_store;
 pub(crate) mod query_exec;
 mod record_search;

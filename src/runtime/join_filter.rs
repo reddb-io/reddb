@@ -2046,6 +2046,41 @@ fn evaluate_scalar_function_legacy(
             Value::Money { scale, .. } => Some(Value::Integer(i64::from(scale))),
             _ => Some(Value::Null),
         },
+        // Session-context scalars — match the `expr_eval` filter-side
+        // dispatcher so `SELECT CURRENT_TENANT(), CURRENT_USER, …`
+        // (no FROM, scalar projection path) returns the same values
+        // RLS policies see in their predicates. Honours `WITHIN …`,
+        // `SET LOCAL TENANT`, and `SET TENANT` overrides via the
+        // shared accessors.
+        "CURRENT_TENANT" => Some(
+            crate::runtime::impl_core::current_tenant()
+                .map(Value::Text)
+                .unwrap_or(Value::Null),
+        ),
+        "CURRENT_USER" | "SESSION_USER" | "USER" => Some(
+            crate::runtime::impl_core::current_user_projected()
+                .map(Value::Text)
+                .unwrap_or(Value::Null),
+        ),
+        "CURRENT_ROLE" => Some(
+            crate::runtime::impl_core::current_role_projected()
+                .map(Value::Text)
+                .unwrap_or(Value::Null),
+        ),
+        "NOW" | "CURRENT_TIMESTAMP" => {
+            let ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            Some(Value::TimestampMs(ms))
+        }
+        "CURRENT_DATE" => {
+            let ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            Some(Value::Date((ms / 86_400_000) as i32))
+        }
         _ => Some(Value::Null),
     }
 }
