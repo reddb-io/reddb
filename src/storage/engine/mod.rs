@@ -37,6 +37,7 @@ pub mod freelist;
 pub mod graph_store;
 pub mod graph_table_index;
 pub mod hnsw;
+pub mod hot_update;
 pub mod hybrid;
 pub mod ivf;
 pub mod page;

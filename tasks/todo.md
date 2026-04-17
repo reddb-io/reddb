@@ -52,7 +52,7 @@ Reuses existing `src/storage/transaction/lock.rs`.
 
 ## Phase 3 — HOT-like in-place updates
 
-- [ ] **P3.T1** `HotUpdateDecision` pure helper
+- [x] **P3.T1** `HotUpdateDecision` pure helper
   - Files: `src/storage/engine/hot_update.rs` (new)
 - [ ] **P3.T2** `apply_hot_update` storage primitive with HEAP_ONLY_TUPLE + t_ctid
   - Files: `src/storage/unified/store/impl_entities.rs`, `src/storage/engine/hot_update.rs`
