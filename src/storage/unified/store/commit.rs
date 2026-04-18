@@ -579,7 +579,7 @@ impl UnifiedStore {
             let mut btree_indices = self.btree_indices.write();
             let btree = btree_indices
                 .entry(collection.to_string())
-                .or_insert_with(|| BTree::new(Arc::clone(pager)));
+                .or_insert_with(|| Arc::new(BTree::new(Arc::clone(pager))));
             let root_before = btree.root_page_id();
             let key = entity.id.raw().to_be_bytes();
             match btree.insert(&key, record) {

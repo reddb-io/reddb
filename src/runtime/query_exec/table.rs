@@ -144,7 +144,22 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
     // the main execution path only looked at hash (equality) indices,
     // so `WHERE age BETWEEN 30 AND 40` always fell through to a full
     // scan even when a BTREE index on `age` existed.
-    if let (Some(idx_store), Some(ref filter)) = (index_store, &effective_filter) {
+    //
+    // BUT: for `WHERE city='X' AND age > Y`, a bare sorted lookup on
+    // `age` returns almost the entire table (e.g. `age > 18` = 99% of
+    // rows). The real win is intersecting with the hash index on city
+    // (5% of rows). Skip the sorted-only path when the filter has a
+    // hash-indexed equality AND a sorted range predicate — the
+    // cross-index bitmap block below does the right thing.
+    let has_cross_index_candidate = index_store
+        .zip(effective_filter.as_ref())
+        .and_then(|(idx_store, filter)| {
+            extract_cross_index_predicates(filter, &query.table, idx_store)
+        })
+        .is_some();
+    if let (Some(idx_store), Some(ref filter), false) =
+        (index_store, &effective_filter, has_cross_index_candidate)
+    {
         let trace = std::env::var("REDDB_INDEX_TRACE").ok().as_deref() == Some("1");
         let sorted_res = try_sorted_index_lookup(
             filter,
@@ -199,24 +214,41 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
             // Re-apply the full filter — when the filter is a compound AND, the
             // sorted lookup used only the range predicate to narrow candidates.
             // Residual predicates (equality, other ranges) must be checked here.
+            //
+            // But: when the filter is a *leaf* predicate (single Between /
+            // Compare / In on a sorted-indexed column) the sorted lookup
+            // already returned exactly the matching ids — every candidate
+            // passes the residual check by construction. Skipping the
+            // re-compile + re-evaluate shaves ~20% off range/filtered
+            // scans on `SELECT * WHERE age BETWEEN X AND Y`.
             let table_name = query.table.as_str();
             let table_alias = query.alias.as_deref().unwrap_or(table_name);
-            let schema_arc = db
-                .store()
-                .get_collection(table_name)
-                .and_then(|m| m.column_schema());
-            let compiled_filter = match schema_arc.as_ref() {
-                Some(schema) => super::filter_compiled::CompiledEntityFilter::compile_with_schema(
-                    filter,
-                    table_name,
-                    table_alias,
-                    schema.as_ref(),
-                ),
-                None => super::filter_compiled::CompiledEntityFilter::compile(
-                    filter,
-                    table_name,
-                    table_alias,
-                ),
+            let filter_fully_covered = matches!(
+                filter,
+                crate::storage::query::ast::Filter::Between { .. }
+                    | crate::storage::query::ast::Filter::Compare { .. }
+                    | crate::storage::query::ast::Filter::In { .. }
+            );
+            let compiled_filter = if filter_fully_covered {
+                None
+            } else {
+                let schema_arc = db
+                    .store()
+                    .get_collection(table_name)
+                    .and_then(|m| m.column_schema());
+                Some(match schema_arc.as_ref() {
+                    Some(schema) => super::filter_compiled::CompiledEntityFilter::compile_with_schema(
+                        filter,
+                        table_name,
+                        table_alias,
+                        schema.as_ref(),
+                    ),
+                    None => super::filter_compiled::CompiledEntityFilter::compile(
+                        filter,
+                        table_name,
+                        table_alias,
+                    ),
+                })
             };
             let store = db.store();
             // Use lean materialization (skip red_* system fields) when SELECT *
@@ -235,15 +267,18 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 if !crate::runtime::impl_core::entity_visible_under_current_snapshot(&entity_opt) {
                     continue;
                 }
-                if compiled_filter.evaluate(&entity_opt) {
-                    let record_opt = if lean {
-                        super::super::record_search::runtime_table_record_lean(entity_opt)
-                    } else {
-                        runtime_table_record_from_entity_projected(entity_opt, &explicit_cols)
-                    };
-                    if let Some(record) = record_opt {
-                        records.push(record);
+                if let Some(cf) = compiled_filter.as_ref() {
+                    if !cf.evaluate(&entity_opt) {
+                        continue;
                     }
+                }
+                let record_opt = if lean {
+                    super::super::record_search::runtime_table_record_lean(entity_opt)
+                } else {
+                    runtime_table_record_from_entity_projected(entity_opt, &explicit_cols)
+                };
+                if let Some(record) = record_opt {
+                    records.push(record);
                 }
             }
             return Ok(records);

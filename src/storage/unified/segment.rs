@@ -472,8 +472,23 @@ impl GrowingSegment {
                         return false;
                     }
                 }
+                // Also walk the HashMap — entities added via per-row
+                // `insert()` after flat mode was initialized land there.
+                for entity in self.entities.values() {
+                    if !f(entity) {
+                        return false;
+                    }
+                }
             } else {
                 for entity in &self.flat_entities {
+                    if self.deleted.contains(&entity.id) {
+                        continue;
+                    }
+                    if !f(entity) {
+                        return false;
+                    }
+                }
+                for entity in self.entities.values() {
                     if self.deleted.contains(&entity.id) {
                         continue;
                     }
@@ -545,13 +560,19 @@ impl GrowingSegment {
         }
         if self.use_flat {
             let raw = id.raw();
-            if raw < self.base_entity_id {
-                return false;
+            if raw >= self.base_entity_id {
+                let idx = (raw - self.base_entity_id) as usize;
+                if self
+                    .flat_entities
+                    .get(idx)
+                    .is_some_and(|entity| entity.id == id)
+                {
+                    return true;
+                }
             }
-            let idx = (raw - self.base_entity_id) as usize;
-            self.flat_entities
-                .get(idx)
-                .is_some_and(|entity| entity.id == id)
+            // Same fallback as `get()` — entities added via `insert()`
+            // after flat mode was initialized live only in the HashMap.
+            self.entities.contains_key(&id)
         } else {
             self.entities.contains_key(&id)
         }
@@ -1244,11 +1265,18 @@ impl UnifiedSegment for GrowingSegment {
         }
         if self.use_flat {
             let raw = id.raw();
-            if raw < self.base_entity_id {
-                return None;
+            if raw >= self.base_entity_id {
+                let idx = (raw - self.base_entity_id) as usize;
+                if let Some(entity) = self.flat_entities.get(idx).filter(|e| e.id == id) {
+                    return Some(entity);
+                }
             }
-            let idx = (raw - self.base_entity_id) as usize;
-            self.flat_entities.get(idx).filter(|e| e.id == id)
+            // Fall through: once flat mode is initialized by a bulk_insert,
+            // subsequent per-row `insert()` calls still write into the
+            // HashMap (see the impl below) so reads must check both. Without
+            // this fallback, a post-bulk single-row insert silently
+            // disappears from `get()` / `query_all()`.
+            self.entities.get(&id)
         } else {
             self.entities.get(&id)
         }
@@ -1260,11 +1288,20 @@ impl UnifiedSegment for GrowingSegment {
         }
         if self.use_flat {
             let raw = id.raw();
-            if raw < self.base_entity_id {
-                return None;
+            if raw >= self.base_entity_id {
+                let idx = (raw - self.base_entity_id) as usize;
+                if self
+                    .flat_entities
+                    .get(idx)
+                    .map(|e| e.id == id)
+                    .unwrap_or(false)
+                {
+                    return self.flat_entities.get_mut(idx);
+                }
             }
-            let idx = (raw - self.base_entity_id) as usize;
-            self.flat_entities.get_mut(idx).filter(|e| e.id == id)
+            // Fall through to HashMap for entities inserted via
+            // per-row `insert()` after flat mode was activated.
+            self.entities.get_mut(&id)
         } else {
             self.entities.get_mut(&id)
         }
@@ -1433,7 +1470,10 @@ impl UnifiedSegment for GrowingSegment {
 
     fn iter(&self) -> Box<dyn Iterator<Item = &UnifiedEntity> + '_> {
         let base: Box<dyn Iterator<Item = &UnifiedEntity>> = if self.use_flat {
-            Box::new(self.flat_entities.iter())
+            // Chain flat entities (from bulk_insert) with any entities
+            // that landed in the HashMap via per-row `insert()` after
+            // flat mode was activated.
+            Box::new(self.flat_entities.iter().chain(self.entities.values()))
         } else {
             Box::new(self.entities.values())
         };
@@ -1446,33 +1486,48 @@ impl UnifiedSegment for GrowingSegment {
 
     fn iter_kind(&self, kind_filter: &str) -> Box<dyn Iterator<Item = &UnifiedEntity> + '_> {
         let ids = self.kind_index.get(kind_filter).cloned();
-        Box::new(self.entities.values().filter(move |e| {
-            if self.deleted.contains(&e.id) {
-                return false;
-            }
-            if let Some(ref ids) = ids {
-                ids.contains(&e.id)
-            } else {
-                false
-            }
-        }))
+        // In flat mode entities live in `flat_entities`, not `entities` —
+        // chain both so iter_kind doesn't drop bulk-inserted entities.
+        let flat: Box<dyn Iterator<Item = &UnifiedEntity>> = if self.use_flat {
+            Box::new(self.flat_entities.iter())
+        } else {
+            Box::new(std::iter::empty())
+        };
+        Box::new(
+            flat.chain(self.entities.values())
+                .filter(move |e| {
+                    if self.deleted.contains(&e.id) {
+                        return false;
+                    }
+                    if let Some(ref ids) = ids {
+                        ids.contains(&e.id)
+                    } else {
+                        false
+                    }
+                }),
+        )
     }
 
     fn filter_metadata(
         &self,
         filters: &[(String, super::metadata::MetadataFilter)],
     ) -> Vec<EntityId> {
-        // For growing segments, we iterate and filter
-        self.entities
-            .keys()
+        // For growing segments, we iterate and filter. In flat mode the
+        // IDs live in `flat_entities`, not `entities`, so chain both.
+        let flat_ids: Box<dyn Iterator<Item = EntityId> + '_> = if self.use_flat {
+            Box::new(self.flat_entities.iter().map(|e| e.id))
+        } else {
+            Box::new(std::iter::empty())
+        };
+        flat_ids
+            .chain(self.entities.keys().copied())
             .filter(|id| {
                 if self.deleted.contains(id) {
                     return false;
                 }
-                let metadata = self.metadata.get_all(**id);
+                let metadata = self.metadata.get_all(*id);
                 metadata.matches_all(filters)
             })
-            .copied()
             .collect()
     }
 }

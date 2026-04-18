@@ -680,13 +680,65 @@ pub(super) fn projected_columns(
 }
 
 pub(super) fn collect_visible_columns(records: &[UnifiedRecord]) -> Vec<String> {
-    let mut columns = BTreeSet::new();
-    for record in records {
-        for key in visible_value_keys(record) {
-            columns.insert(key);
+    // Uniform-schema fast path: for table-row result sets every record
+    // carries the same key set. Sample the first record, then spot-check
+    // a few more. If everything matches, return the sampled keys — we
+    // skip iterating the remaining ~thousands of records and their
+    // HashSet churn. This was the dominant cost on SELECT * workloads
+    // (~32% of query time after the cross-index fix).
+    if let Some(first) = records.first() {
+        let mut seen: std::collections::HashSet<&str> =
+            std::collections::HashSet::with_capacity(first.values.len());
+        let mut keys: Vec<String> = Vec::with_capacity(first.values.len());
+        for key in first.values.keys() {
+            if !key.starts_with('_') && seen.insert(key.as_str()) {
+                keys.push(key.clone());
+            }
+        }
+
+        // Spot-check up to 8 records spread across the result — cheap
+        // insurance against uniform-looking prefixes. If any record has
+        // an extra key, fall through to the full scan.
+        let n = records.len();
+        let step = (n / 8).max(1);
+        let mut uniform = true;
+        let mut idx = step;
+        while idx < n {
+            let rec = &records[idx];
+            for key in rec.values.keys() {
+                if key.starts_with('_') {
+                    continue;
+                }
+                if !seen.contains(key.as_str()) {
+                    uniform = false;
+                    break;
+                }
+            }
+            if !uniform {
+                break;
+            }
+            idx += step;
+        }
+
+        if uniform {
+            keys.sort();
+            return keys;
         }
     }
-    columns.into_iter().collect()
+
+    // Fallback: original HashSet-dedup scan across all records. Handles
+    // ragged-schema rows (document collections, schemaless inserts).
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for record in records {
+        for key in record.values.keys() {
+            if !key.starts_with('_') && !seen.contains(key) {
+                seen.insert(key.clone());
+            }
+        }
+    }
+    let mut columns: Vec<String> = seen.into_iter().collect();
+    columns.sort();
+    columns
 }
 
 pub(super) fn visible_value_keys(record: &UnifiedRecord) -> Vec<String> {

@@ -455,6 +455,32 @@ pub(crate) fn try_hash_eq_lookup(
     table: &str,
     idx_store: &super::super::index_store::IndexStore,
 ) -> Option<Vec<crate::storage::unified::entity::EntityId>> {
+    use crate::storage::query::ast::{FieldRef, Filter};
+
+    // `WHERE col IN (v1, v2, ...)` — one hash lookup per value, union the
+    // id sets. Cheap per-value because each lookup is O(1) in the HashMap
+    // bucket. Without this path `WHERE id IN (...)` falls through to a
+    // full scan, which is catastrophic for bulk_update batches.
+    if let Filter::In { field, values } = filter {
+        let col = match field {
+            FieldRef::TableColumn { column, .. } => column.as_str(),
+            _ => return None,
+        };
+        let idx = idx_store.find_index_for_column(table, col)?;
+        let mut ids = Vec::new();
+        for value in values {
+            let bytes = match value {
+                Value::Text(s) => s.as_bytes().to_vec(),
+                Value::Integer(n) => n.to_le_bytes().to_vec(),
+                Value::UnsignedInteger(n) => n.to_le_bytes().to_vec(),
+                _ => return None,
+            };
+            let lookup = idx_store.hash_lookup(table, &idx.name, &bytes).ok()?;
+            ids.extend(lookup);
+        }
+        return Some(ids);
+    }
+
     let (col, val_bytes) = extract_index_candidate(filter)?;
     let idx = idx_store.find_index_for_column(table, &col)?;
     idx_store.hash_lookup(table, &idx.name, &val_bytes).ok()

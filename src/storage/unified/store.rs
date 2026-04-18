@@ -441,8 +441,13 @@ pub struct UnifiedStore {
     pager: Option<Arc<Pager>>,
     /// Database file path (for paged mode)
     db_path: Option<PathBuf>,
-    /// B-tree indices for O(log n) entity lookups by ID (per collection)
-    btree_indices: RwLock<HashMap<String, BTree>>,
+    /// B-tree indices for O(log n) entity lookups by ID (per collection).
+    /// Stored as `Arc<BTree>` so hot-path callers can clone the handle out
+    /// under a read lock and release the map-level lock before doing the
+    /// actual insert — previously the outer RwLock was held for the whole
+    /// btree mutation, serialising every concurrent insert across every
+    /// collection into one global write lock.
+    btree_indices: RwLock<HashMap<String, Arc<BTree>>>,
     /// Cross-structure context index for unified search
     context_index: ContextIndex,
     /// Hot entity cache — LRU for frequently accessed entities by ID

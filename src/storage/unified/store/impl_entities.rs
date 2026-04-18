@@ -32,7 +32,7 @@ impl UnifiedStore {
         let mut btree_indices = self.btree_indices.write();
         let btree = btree_indices
             .entry(collection.to_string())
-            .or_insert_with(|| BTree::new(Arc::clone(pager)));
+            .or_insert_with(|| Arc::new(BTree::new(Arc::clone(pager))));
         let root_before = btree.root_page_id();
 
         for (key, value) in serialized {
@@ -327,7 +327,7 @@ impl UnifiedStore {
                 let mut btree_indices = self.btree_indices.write();
                 let btree = btree_indices
                     .entry(collection.to_string())
-                    .or_insert_with(|| BTree::new(Arc::clone(pager)));
+                    .or_insert_with(|| Arc::new(BTree::new(Arc::clone(pager))));
                 let root_before = btree.root_page_id();
 
                 let key = id.raw().to_be_bytes();
@@ -515,7 +515,7 @@ impl UnifiedStore {
                 let mut btree_indices = self.btree_indices.write();
                 let btree = btree_indices
                     .entry(collection.to_string())
-                    .or_insert_with(|| BTree::new(Arc::clone(pager)));
+                    .or_insert_with(|| Arc::new(BTree::new(Arc::clone(pager))));
                 let root_before = btree.root_page_id();
                 t_btree_lock = t0.elapsed();
 
@@ -622,25 +622,23 @@ impl UnifiedStore {
         };
 
         let mut registry_dirty = false;
-        if let (Some(pager), Some(entity)) = (&self.pager, persisted.as_ref()) {
-            let mut btree_indices = self.btree_indices.write();
-            let btree = btree_indices
-                .entry(collection.to_string())
-                .or_insert_with(|| BTree::new(Arc::clone(pager)));
-            let root_before = btree.root_page_id();
+        if let (Some(_pager), Some(entity)) = (&self.pager, persisted.as_ref()) {
+            if let Some(btree) = self.get_or_create_btree(collection) {
+                let root_before = btree.root_page_id();
 
-            let key = id.raw().to_be_bytes();
-            let value = Self::serialize_entity_record(
-                entity,
-                persisted_metadata.as_ref(),
-                self.format_version(),
-            );
-            btree.insert(&key, &value).map_err(|e| {
-                StoreError::Io(std::io::Error::other(format!(
-                    "B-tree insert error while inserting '{collection}'/{id}: {e}"
-                )))
-            })?;
-            registry_dirty = root_before != btree.root_page_id();
+                let key = id.raw().to_be_bytes();
+                let value = Self::serialize_entity_record(
+                    entity,
+                    persisted_metadata.as_ref(),
+                    self.format_version(),
+                );
+                btree.insert(&key, &value).map_err(|e| {
+                    StoreError::Io(std::io::Error::other(format!(
+                        "B-tree insert error while inserting '{collection}'/{id}: {e}"
+                    )))
+                })?;
+                registry_dirty = root_before != btree.root_page_id();
+            }
         }
 
         if self.config.auto_index_refs {
