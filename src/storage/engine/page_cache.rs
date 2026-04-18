@@ -175,21 +175,25 @@ impl PageCache {
         };
         drop(index);
 
-        // Get entry and mark as visited
+        // Get entry and mark as visited. Clone the page under a read
+        // lock; upgrade to a write lock *only* if the visited bit
+        // actually needs flipping. Hot-loop reads of an already-visited
+        // page (e.g. BTree inserts hammering the rightmost leaf) can
+        // then stay on the read lock — a second write lock per insert
+        // was one of the costliest steps on `insert_sequential`.
         let entries = cache_read(&self.entries);
         if let Some(entry) = entries.get(slot).and_then(|e| e.as_ref()) {
-            // Mark as visited (SIEVE)
-            // Note: In a truly concurrent implementation, this would use atomics
             let page = entry.page.clone();
+            let needs_mark = !entry.visited;
             drop(entries);
 
-            // Update visited bit
-            let mut entries = cache_write(&self.entries);
-            if let Some(Some(entry)) = entries.get_mut(slot) {
-                entry.visited = true;
+            if needs_mark {
+                let mut entries = cache_write(&self.entries);
+                if let Some(Some(entry)) = entries.get_mut(slot) {
+                    entry.visited = true;
+                }
             }
 
-            // Update stats
             cache_lock(&self.stats).hits += 1;
 
             Some(page)
