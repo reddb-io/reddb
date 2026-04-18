@@ -434,6 +434,54 @@ fn can_insert_leaf(page: &Page, key: &[u8], value: &[u8]) -> bool {
 /// Insert `(key, value)` into the slotted leaf in O(log M) search +
 /// O(M) slot-array memmove. Cell data is appended at the tail of the
 /// free area (backward from `free_end`); the slot pointer is inserted
+/// Overwrite the value portion of cell at `index` in-place. Valid when
+/// `new_value.len() <= existing_value.len()` — the caller
+/// (typically `BTree::upsert`) checks this before calling.
+///
+/// Same-length writes are trivial (byte copy). Shrinks update the cell's
+/// `v_len` header and leave the trailing bytes as dead space until the
+/// page is naturally rewritten; the slotted layout keeps cells
+/// addressable by their own offset+len so the gap is harmless.
+///
+/// Fixed-size column updates (SET score = X on a typed schema) hit this
+/// path, avoiding the delete + re-insert + rebalance cycle that
+/// dominates bulk_update.
+pub(crate) fn overwrite_leaf_value(
+    page: &mut Page,
+    index: usize,
+    new_value: &[u8],
+) -> BTreeResult<()> {
+    let cell_offset = leaf_read_slot(page, index)?;
+    let data = page.as_bytes();
+    if cell_offset + 4 > data.len() {
+        return Err(BTreeError::Corrupted(
+            "leaf cell header out of bounds".into(),
+        ));
+    }
+    let k_len = u16::from_le_bytes([data[cell_offset], data[cell_offset + 1]]) as usize;
+    let old_v_len = u16::from_le_bytes([data[cell_offset + 2], data[cell_offset + 3]]) as usize;
+    if new_value.len() > old_v_len {
+        return Err(BTreeError::Corrupted(
+            "overwrite_leaf_value: new value larger than slot".into(),
+        ));
+    }
+    let value_start = cell_offset + 4 + k_len;
+    if value_start + new_value.len() > data.len() {
+        return Err(BTreeError::Corrupted(
+            "leaf cell value out of bounds".into(),
+        ));
+    }
+    let data = page.as_bytes_mut();
+    // Update the v_len header if the value shrank. read_leaf_cell reads
+    // v_len from this header so the shortened value deserializes correctly.
+    if new_value.len() != old_v_len {
+        let new_len = new_value.len() as u16;
+        data[cell_offset + 2..cell_offset + 4].copy_from_slice(&new_len.to_le_bytes());
+    }
+    data[value_start..value_start + new_value.len()].copy_from_slice(new_value);
+    Ok(())
+}
+
 /// at the sorted position.
 fn insert_into_leaf(page: &mut Page, key: &[u8], value: &[u8]) -> BTreeResult<()> {
     // 1. Binary search the slot array to find the insertion index.

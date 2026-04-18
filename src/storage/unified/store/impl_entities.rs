@@ -36,19 +36,18 @@ impl UnifiedStore {
         let root_before = btree.root_page_id();
 
         for (key, value) in serialized {
-            match btree.insert(&key, &value) {
-                Ok(_) => {}
-                Err(BTreeError::DuplicateKey) => {
-                    let _ = btree.delete(&key);
-                    let _ = btree.insert(&key, &value);
-                }
-                Err(e) => {
-                    return Err(StoreError::Io(std::io::Error::other(format!(
-                        "B-tree insert error: {}",
-                        e
-                    ))));
-                }
-            }
+            // `upsert` is a fast path for UPDATE: when the key exists
+            // and the new serialized entity is the same length as the
+            // old one (the overwhelming case for fixed-schema tables)
+            // it rewrites the leaf cell value in place — no delete,
+            // no rebalance, one page write. Falls back to
+            // `delete + insert` when the size changes.
+            btree.upsert(&key, &value).map_err(|e| {
+                StoreError::Io(std::io::Error::other(format!(
+                    "B-tree upsert error: {}",
+                    e
+                )))
+            })?;
         }
         let root_after = btree.root_page_id();
         drop(btree_indices);
