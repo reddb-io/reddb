@@ -249,6 +249,12 @@ pub(super) fn lookup_latest_kv_value(db: &RedDB, collection: &str, key: &str) ->
     let manager = db.store().get_collection(collection)?;
     let mut latest_id: u64 = 0;
     let mut latest_value: Option<Value> = None;
+    // The parser rebuilds dotted paths by concatenating token display
+    // strings; any segment that collides with a SQL keyword (DEFAULT,
+    // LEFT, IN, …) comes back uppercase, but SET CONFIG stores keys
+    // lowercase. Normalise here so CONFIG(red.ai.default.provider)
+    // matches the key persisted by SET CONFIG.
+    let key_lc = key.to_ascii_lowercase();
     manager.for_each_entity(|entity| {
         let Some(row) = entity.data.as_row() else {
             return true;
@@ -257,7 +263,7 @@ pub(super) fn lookup_latest_kv_value(db: &RedDB, collection: &str, key: &str) ->
             Value::Text(text) => Some(text.as_str()),
             _ => None,
         });
-        if entry_key == Some(key) && entity.id.raw() >= latest_id {
+        if entry_key == Some(key_lc.as_str()) && entity.id.raw() >= latest_id {
             latest_id = entity.id.raw();
             latest_value = Some(row.get_field("value").cloned().unwrap_or(Value::Null));
         }

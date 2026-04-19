@@ -2876,7 +2876,6 @@ fn test_direct_patch_rejects_reserved_tree_metadata() {
 }
 
 #[test]
-#[ignore = "SET CONFIG -> CONFIG() roundtrip bug (pre-existing): stored value not found by CONFIG(), falls back to default. Reproduces on 4b8d01d baseline. Needs dedicated fix."]
 fn test_select_config_function_accepts_bare_path_and_default() {
     let rt = rt();
     let query = QueryUseCases::new(&rt);
@@ -2979,7 +2978,6 @@ fn test_kv_function_filters_rows_and_uses_bare_default() {
 }
 
 #[test]
-#[ignore = "UPDATE with CONFIG()/KV() dynamic RHS fails to propagate stored value — same root cause as test_select_config_function_accepts_bare_path_and_default (pre-existing)."]
 fn test_update_accepts_config_assignment_and_kv_filter() {
     let rt = rt();
     let entity = EntityUseCases::new(&rt);
