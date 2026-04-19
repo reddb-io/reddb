@@ -1304,13 +1304,16 @@ mod tests {
         obj.insert("name".to_string(), JsonValue::String("docs".to_string()));
         obj.insert(
             "declared_model".to_string(),
-            JsonValue::String("row".to_string()),
+            JsonValue::String("table".to_string()),
         );
         obj.insert(
             "schema_mode".to_string(),
-            JsonValue::String("open".to_string()),
+            JsonValue::String("dynamic".to_string()),
         );
-        obj.insert("origin".to_string(), JsonValue::String("user".to_string()));
+        obj.insert(
+            "origin".to_string(),
+            JsonValue::String("explicit".to_string()),
+        );
         obj.insert("version".to_string(), JsonValue::Number(1.0));
         obj.insert("created_at_unix_ms".to_string(), JsonValue::Number(0.0));
         obj.insert("updated_at_unix_ms".to_string(), JsonValue::Number(0.0));

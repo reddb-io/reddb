@@ -930,7 +930,10 @@ fn json_extract_impl(input: &Value, path: &Value, as_text: bool) -> Option<Value
     };
     let json = value_to_json(input)?;
     let steps = parse_json_path(&path_str)?;
-    let target = json_path_get(&json, &steps)?;
+    let Some(target) = json_path_get(&json, &steps) else {
+        // Missing path → SQL NULL, not function failure.
+        return Some(Value::Null);
+    };
     if as_text {
         // Unquoted scalar text, JSON for containers.
         match target {
