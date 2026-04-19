@@ -1,7 +1,8 @@
 //! DML SQL Parser: INSERT, UPDATE, DELETE
 
 use super::super::ast::{
-    AskQuery, DeleteQuery, Expr, Filter, InsertEntityType, InsertQuery, QueryExpr, UpdateQuery,
+    AskQuery, DeleteQuery, Expr, Filter, InsertEntityType, InsertQuery, QueryExpr, ReturningItem,
+    UpdateQuery,
 };
 use super::super::lexer::Token;
 use super::error::ParseError;
@@ -67,10 +68,10 @@ impl<'a> Parser<'a> {
             }
         }
 
-        let returning = self.consume(&Token::Returning)?;
-
         // Parse optional WITH clauses
         let (ttl_ms, expires_at_ms, with_metadata, auto_embed) = self.parse_with_clauses()?;
+
+        let returning = self.parse_returning_clause()?;
 
         Ok(QueryExpr::Insert(InsertQuery {
             table,
@@ -271,6 +272,8 @@ impl<'a> Parser<'a> {
 
         let (ttl_ms, expires_at_ms, with_metadata, _auto_embed) = self.parse_with_clauses()?;
 
+        let returning = self.parse_returning_clause()?;
+
         Ok(QueryExpr::Update(UpdateQuery {
             table,
             assignment_exprs,
@@ -280,6 +283,7 @@ impl<'a> Parser<'a> {
             ttl_ms,
             expires_at_ms,
             with_metadata,
+            returning,
         }))
     }
 
@@ -297,11 +301,42 @@ impl<'a> Parser<'a> {
 
         let where_expr = filter.as_ref().map(filter_to_expr);
 
+        let returning = self.parse_returning_clause()?;
+
         Ok(QueryExpr::Delete(DeleteQuery {
             table,
             where_expr,
             filter,
+            returning,
         }))
+    }
+
+    /// Parse optional `RETURNING (* | col [, col ...])` clause.
+    /// Returns `None` if no RETURNING token, errors if RETURNING is present
+    /// but not followed by `*` or a non-empty column list.
+    fn parse_returning_clause(&mut self) -> Result<Option<Vec<ReturningItem>>, ParseError> {
+        if !self.consume(&Token::Returning)? {
+            return Ok(None);
+        }
+        if self.consume(&Token::Star)? {
+            return Ok(Some(vec![ReturningItem::All]));
+        }
+        let mut items = Vec::new();
+        loop {
+            let col = self.expect_ident_or_keyword()?;
+            items.push(ReturningItem::Column(col));
+            if !self.consume(&Token::Comma)? {
+                break;
+            }
+        }
+        if items.is_empty() {
+            return Err(ParseError::expected(
+                vec!["*", "column name"],
+                self.peek(),
+                self.position(),
+            ));
+        }
+        Ok(Some(items))
     }
 
     /// Parse: ASK 'question' [USING provider] [MODEL 'model'] [DEPTH n] [LIMIT n] [COLLECTION col]

@@ -1020,7 +1020,7 @@ fn test_parse_insert_single_row() {
         assert_eq!(iq.columns, vec!["ip", "hostname"]);
         assert_eq!(iq.values.len(), 1);
         assert_eq!(iq.values[0].len(), 2);
-        assert!(!iq.returning);
+        assert!(iq.returning.is_none());
     } else {
         panic!("Expected InsertQuery");
     }
@@ -1045,13 +1045,101 @@ fn test_parse_insert_multi_row() {
 }
 
 #[test]
-fn test_parse_insert_with_returning() {
+fn test_parse_insert_returning_star() {
     let query =
-        parse("INSERT INTO hosts (ip, hostname) VALUES ('10.0.0.1', 'web01') RETURNING").unwrap();
+        parse("INSERT INTO hosts (ip, hostname) VALUES ('10.0.0.1', 'web01') RETURNING *")
+            .unwrap();
     if let QueryExpr::Insert(iq) = query {
-        assert!(iq.returning);
+        let items = iq.returning.as_ref().expect("RETURNING parsed");
+        assert_eq!(items.len(), 1);
+        assert!(matches!(
+            items[0],
+            crate::storage::query::ast::ReturningItem::All
+        ));
     } else {
         panic!("Expected InsertQuery");
+    }
+}
+
+#[test]
+fn test_parse_insert_returning_columns() {
+    let query = parse(
+        "INSERT INTO hosts (ip, hostname) VALUES ('10.0.0.1', 'web01') RETURNING ip, hostname",
+    )
+    .unwrap();
+    if let QueryExpr::Insert(iq) = query {
+        let items = iq.returning.as_ref().expect("RETURNING parsed");
+        assert_eq!(items.len(), 2);
+        match &items[0] {
+            crate::storage::query::ast::ReturningItem::Column(c) => assert_eq!(c, "ip"),
+            other => panic!("expected column, got {other:?}"),
+        }
+        match &items[1] {
+            crate::storage::query::ast::ReturningItem::Column(c) => assert_eq!(c, "hostname"),
+            other => panic!("expected column, got {other:?}"),
+        }
+    } else {
+        panic!("Expected InsertQuery");
+    }
+}
+
+#[test]
+fn test_parse_insert_bare_returning_errors() {
+    let err = parse("INSERT INTO hosts (ip) VALUES ('10.0.0.1') RETURNING");
+    assert!(err.is_err(), "bare RETURNING must require * or column list");
+}
+
+#[test]
+fn test_parse_update_returning_star() {
+    let query = parse("UPDATE hosts SET hostname = 'x' WHERE ip = '10.0.0.1' RETURNING *")
+        .unwrap();
+    if let QueryExpr::Update(uq) = query {
+        let items = uq.returning.as_ref().expect("RETURNING parsed");
+        assert_eq!(items.len(), 1);
+        assert!(matches!(
+            items[0],
+            crate::storage::query::ast::ReturningItem::All
+        ));
+    } else {
+        panic!("Expected UpdateQuery");
+    }
+}
+
+#[test]
+fn test_parse_update_returning_columns() {
+    let query =
+        parse("UPDATE hosts SET hostname = 'x' WHERE id = 1 RETURNING id, hostname").unwrap();
+    if let QueryExpr::Update(uq) = query {
+        let items = uq.returning.as_ref().expect("RETURNING parsed");
+        assert_eq!(items.len(), 2);
+    } else {
+        panic!("Expected UpdateQuery");
+    }
+}
+
+#[test]
+fn test_parse_delete_returning_star() {
+    let query = parse("DELETE FROM hosts WHERE id = 1 RETURNING *").unwrap();
+    if let QueryExpr::Delete(dq) = query {
+        let items = dq.returning.as_ref().expect("RETURNING parsed");
+        assert_eq!(items.len(), 1);
+        assert!(matches!(
+            items[0],
+            crate::storage::query::ast::ReturningItem::All
+        ));
+    } else {
+        panic!("Expected DeleteQuery");
+    }
+}
+
+#[test]
+fn test_parse_delete_returning_columns() {
+    let query = parse("DELETE FROM hosts WHERE id = 1 RETURNING id, hostname").unwrap();
+    if let QueryExpr::Delete(dq) = query {
+        let items = dq.returning.as_ref().expect("RETURNING parsed");
+        assert_eq!(items.len(), 2);
+    } else {
+        panic!("Expected DeleteQuery");
     }
 }
 

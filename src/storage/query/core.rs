@@ -1304,6 +1304,15 @@ pub enum InsertEntityType {
     Kv,
 }
 
+/// An item in a RETURNING clause: either `*` (all columns) or a named column.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReturningItem {
+    /// RETURNING *
+    All,
+    /// RETURNING col
+    Column(String),
+}
+
 /// INSERT INTO table (columns) VALUES (row1), (row2), ... [WITH TTL duration] [WITH METADATA (k=v)]
 #[derive(Debug, Clone)]
 pub struct InsertQuery {
@@ -1317,8 +1326,8 @@ pub struct InsertQuery {
     pub value_exprs: Vec<Vec<super::Expr>>,
     /// Rows of values (each inner Vec is one row)
     pub values: Vec<Vec<Value>>,
-    /// Whether to return inserted rows
-    pub returning: bool,
+    /// Optional RETURNING clause items.
+    pub returning: Option<Vec<ReturningItem>>,
     /// Optional TTL in milliseconds (from WITH TTL clause)
     pub ttl_ms: Option<u64>,
     /// Optional absolute expiration (from WITH EXPIRES AT clause)
@@ -1361,6 +1370,8 @@ pub struct UpdateQuery {
     pub expires_at_ms: Option<u64>,
     /// Optional metadata key-value pairs (from WITH METADATA clause)
     pub with_metadata: Vec<(String, Value)>,
+    /// Optional RETURNING clause items.
+    pub returning: Option<Vec<ReturningItem>>,
 }
 
 /// DELETE FROM table WHERE filter
@@ -1372,6 +1383,8 @@ pub struct DeleteQuery {
     pub where_expr: Option<super::Expr>,
     /// Optional WHERE filter
     pub filter: Option<Filter>,
+    /// Optional RETURNING clause items.
+    pub returning: Option<Vec<ReturningItem>>,
 }
 
 /// CREATE TABLE name (columns)
