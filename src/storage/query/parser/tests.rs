@@ -1047,8 +1047,7 @@ fn test_parse_insert_multi_row() {
 #[test]
 fn test_parse_insert_returning_star() {
     let query =
-        parse("INSERT INTO hosts (ip, hostname) VALUES ('10.0.0.1', 'web01') RETURNING *")
-            .unwrap();
+        parse("INSERT INTO hosts (ip, hostname) VALUES ('10.0.0.1', 'web01') RETURNING *").unwrap();
     if let QueryExpr::Insert(iq) = query {
         let items = iq.returning.as_ref().expect("RETURNING parsed");
         assert_eq!(items.len(), 1);
@@ -1091,8 +1090,7 @@ fn test_parse_insert_bare_returning_errors() {
 
 #[test]
 fn test_parse_update_returning_star() {
-    let query = parse("UPDATE hosts SET hostname = 'x' WHERE ip = '10.0.0.1' RETURNING *")
-        .unwrap();
+    let query = parse("UPDATE hosts SET hostname = 'x' WHERE ip = '10.0.0.1' RETURNING *").unwrap();
     if let QueryExpr::Update(uq) = query {
         let items = uq.returning.as_ref().expect("RETURNING parsed");
         assert_eq!(items.len(), 1);

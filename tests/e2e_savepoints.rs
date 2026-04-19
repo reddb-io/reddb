@@ -27,9 +27,15 @@ fn savepoint_release_keeps_inner_writes() {
 
     exec(&rt, "CREATE TABLE sp_release (id INT, label TEXT)");
     exec(&rt, "BEGIN");
-    exec(&rt, "INSERT INTO sp_release (id, label) VALUES (1, 'outer')");
+    exec(
+        &rt,
+        "INSERT INTO sp_release (id, label) VALUES (1, 'outer')",
+    );
     exec(&rt, "SAVEPOINT sp1");
-    exec(&rt, "INSERT INTO sp_release (id, label) VALUES (2, 'inner')");
+    exec(
+        &rt,
+        "INSERT INTO sp_release (id, label) VALUES (2, 'inner')",
+    );
     exec(&rt, "RELEASE SAVEPOINT sp1");
     exec(&rt, "COMMIT");
 
@@ -52,9 +58,15 @@ fn rollback_to_savepoint_discards_inner_writes() {
 
     exec(&rt, "CREATE TABLE sp_rollback (id INT, label TEXT)");
     exec(&rt, "BEGIN");
-    exec(&rt, "INSERT INTO sp_rollback (id, label) VALUES (1, 'keep')");
+    exec(
+        &rt,
+        "INSERT INTO sp_rollback (id, label) VALUES (1, 'keep')",
+    );
     exec(&rt, "SAVEPOINT sp1");
-    exec(&rt, "INSERT INTO sp_rollback (id, label) VALUES (2, 'drop')");
+    exec(
+        &rt,
+        "INSERT INTO sp_rollback (id, label) VALUES (2, 'drop')",
+    );
     exec(&rt, "ROLLBACK TO SAVEPOINT sp1");
     exec(&rt, "COMMIT");
 

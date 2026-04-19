@@ -13,9 +13,7 @@ use std::thread;
 use std::time::Duration;
 
 fn rt() -> Arc<RedDBRuntime> {
-    Arc::new(
-        RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("in-memory runtime"),
-    )
+    Arc::new(RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("in-memory runtime"))
 }
 
 fn eval_bool(rt: &RedDBRuntime, sql: &str) -> bool {
@@ -101,9 +99,7 @@ fn unlock_all_drops_every_held_lock() {
     assert!(eval_bool(&rt, "SELECT pg_try_advisory_lock(20)"));
     assert!(eval_bool(&rt, "SELECT pg_try_advisory_lock(30)"));
 
-    let result = rt
-        .execute_query("SELECT pg_advisory_unlock_all()")
-        .unwrap();
+    let result = rt.execute_query("SELECT pg_advisory_unlock_all()").unwrap();
     match result.result.records[0].values.values().next().unwrap() {
         Value::Integer(n) => assert_eq!(*n, 3, "released 3 locks"),
         other => panic!("expected integer count, got {other:?}"),

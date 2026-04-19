@@ -651,17 +651,17 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
         }
         "PG_TRY_ADVISORY_LOCK" => {
             let key = value_as_i64(args.first()?)?;
-            Some(Value::Boolean(
-                crate::auth::locks::global()
-                    .try_acquire(key, crate::runtime::impl_core::current_connection_id()),
-            ))
+            Some(Value::Boolean(crate::auth::locks::global().try_acquire(
+                key,
+                crate::runtime::impl_core::current_connection_id(),
+            )))
         }
         "PG_ADVISORY_UNLOCK" => {
             let key = value_as_i64(args.first()?)?;
-            Some(Value::Boolean(
-                crate::auth::locks::global()
-                    .release(key, crate::runtime::impl_core::current_connection_id()),
-            ))
+            Some(Value::Boolean(crate::auth::locks::global().release(
+                key,
+                crate::runtime::impl_core::current_connection_id(),
+            )))
         }
         "PG_ADVISORY_UNLOCK_ALL" => {
             let dropped = crate::auth::locks::global()

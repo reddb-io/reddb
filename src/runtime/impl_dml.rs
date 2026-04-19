@@ -1470,9 +1470,7 @@ fn build_returning_result(
     snapshots: &[Vec<(String, Value)>],
     outputs: Option<&[crate::application::entity::CreateEntityOutput]>,
 ) -> UnifiedResult {
-    let project_all = items
-        .iter()
-        .any(|it| matches!(it, ReturningItem::All));
+    let project_all = items.iter().any(|it| matches!(it, ReturningItem::All));
 
     let mut columns: Vec<String> = if project_all {
         let mut cols: Vec<String> = Vec::new();

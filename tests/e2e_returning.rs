@@ -28,7 +28,10 @@ fn returning_star_on_insert_returns_inserted_row() {
     let rec = &result.result.records[0];
     let name = rec.values.get("name").expect("name column present");
     let age = rec.values.get("age").expect("age column present");
-    assert!(matches!(name, Value::Text(s) if s == "alice"), "got {name:?}");
+    assert!(
+        matches!(name, Value::Text(s) if s == "alice"),
+        "got {name:?}"
+    );
     assert!(matches!(age, Value::Integer(30)), "got {age:?}");
     assert!(
         rec.values.get("red_entity_id").is_some(),
