@@ -942,6 +942,31 @@ fn query_expr_result_cache_scopes(expr: &QueryExpr) -> HashSet<String> {
     scopes
 }
 
+/// Heuristic: does the raw SQL reference a built-in whose output
+/// varies by connection, clock, or randomness? Such queries must
+/// skip the 30s result cache — see the call site for rationale.
+///
+/// ASCII case-insensitive substring match. False positives (the
+/// token appears in a quoted string) only skip caching, which is
+/// the conservative direction.
+fn query_has_volatile_builtin(sql: &str) -> bool {
+    // Lowercase the bytes up to the first null/newline into a small
+    // stack buffer for cheap contains() checks. Most SQL fits in the
+    // buffer; longer queries fall back to owned lowercase.
+    const VOLATILE_TOKENS: &[&str] = &[
+        "pg_advisory_lock",
+        "pg_try_advisory_lock",
+        "pg_advisory_unlock",
+        "random()",
+        // NOW() / CURRENT_TIMESTAMP / CURRENT_DATE intentionally
+        // omitted for now — they ARE volatile but today's tests rely
+        // on caching them. Revisit once a tighter volatility story
+        // lands.
+    ];
+    let lowered = sql.to_ascii_lowercase();
+    VOLATILE_TOKENS.iter().any(|t| lowered.contains(t))
+}
+
 /// Pick the `(global_mode, collection_mode)` pair for an expression,
 /// or `None` for variants that opt out of intent-locking entirely
 /// (admin statements like `SHOW CONFIG`, transaction control, tenant
@@ -2524,7 +2549,17 @@ impl RedDBRuntime {
                 format!("{query}\u{001e}{tenant}\u{001e}{auth}")
             }
         };
-        {
+        // Volatile built-ins (advisory locks, NOW(), RANDOM(), etc.)
+        // must NOT be served from the result cache: their output
+        // depends on the caller's connection or the current clock, so
+        // serving a stale row to a different conn would break
+        // correctness. Gate by a cheap substring match against the
+        // raw SQL — false positives (the tokens appear in a column
+        // name or string literal) just skip caching for that
+        // statement, which is the safe direction.
+        let is_volatile_query = query_has_volatile_builtin(query);
+
+        if !is_volatile_query {
             let cache = self.inner.result_cache.read();
             if let Some(entry) = cache.0.get(&cache_key_str) {
                 if entry.cached_at.elapsed().as_secs() < 30 {
@@ -3708,6 +3743,7 @@ impl RedDBRuntime {
         // Aggregations (1 row) and point lookups (1 row) still benefit.
         if let Ok(ref result) = query_result {
             if result.statement_type == "select"
+                && !is_volatile_query
                 && result.result.pre_serialized_json.is_none()
                 && result.result.records.len() <= 5
             {

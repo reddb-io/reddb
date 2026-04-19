@@ -12,6 +12,7 @@
 //! - API key -> direct auth with assigned role
 
 pub mod cert;
+pub mod locks;
 pub mod middleware;
 pub mod oauth;
 pub mod store;

@@ -2127,6 +2127,31 @@ fn evaluate_scalar_function_legacy(
                 .map(Value::Text)
                 .unwrap_or(Value::Null),
         ),
+        "PG_ADVISORY_LOCK" => {
+            let key = value_as_i64(&resolve_scalar_arg(args, 0, source)?)?;
+            crate::auth::locks::global()
+                .acquire(key, crate::runtime::impl_core::current_connection_id());
+            Some(Value::Null)
+        }
+        "PG_TRY_ADVISORY_LOCK" => {
+            let key = value_as_i64(&resolve_scalar_arg(args, 0, source)?)?;
+            Some(Value::Boolean(
+                crate::auth::locks::global()
+                    .try_acquire(key, crate::runtime::impl_core::current_connection_id()),
+            ))
+        }
+        "PG_ADVISORY_UNLOCK" => {
+            let key = value_as_i64(&resolve_scalar_arg(args, 0, source)?)?;
+            Some(Value::Boolean(
+                crate::auth::locks::global()
+                    .release(key, crate::runtime::impl_core::current_connection_id()),
+            ))
+        }
+        "PG_ADVISORY_UNLOCK_ALL" => {
+            let dropped = crate::auth::locks::global()
+                .release_all(crate::runtime::impl_core::current_connection_id());
+            Some(Value::Integer(dropped as i64))
+        }
         "NOW" | "CURRENT_TIMESTAMP" => {
             let ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
