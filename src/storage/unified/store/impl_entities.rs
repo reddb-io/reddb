@@ -18,7 +18,7 @@ impl UnifiedStore {
         let manager = self
             .get_collection(collection)
             .ok_or_else(|| StoreError::CollectionNotFound(collection.to_string()))?;
-        let serialized: Vec<(Vec<u8>, Vec<u8>)> = entities
+        let mut serialized: Vec<(Vec<u8>, Vec<u8>)> = entities
             .iter()
             .map(|entity| {
                 let metadata = manager.get_metadata(entity.id);
@@ -28,6 +28,8 @@ impl UnifiedStore {
                 )
             })
             .collect();
+        // u64 IDs encoded as big-endian — lex order = numeric order.
+        serialized.sort_by(|a, b| a.0.cmp(&b.0));
 
         let mut btree_indices = self.btree_indices.write();
         let btree = btree_indices
@@ -35,20 +37,15 @@ impl UnifiedStore {
             .or_insert_with(|| Arc::new(BTree::new(Arc::clone(pager))));
         let root_before = btree.root_page_id();
 
-        for (key, value) in serialized {
-            // `upsert` is a fast path for UPDATE: when the key exists
-            // and the new serialized entity is the same length as the
-            // old one (the overwhelming case for fixed-schema tables)
-            // it rewrites the leaf cell value in place — no delete,
-            // no rebalance, one page write. Falls back to
-            // `delete + insert` when the size changes.
-            btree.upsert(&key, &value).map_err(|e| {
-                StoreError::Io(std::io::Error::other(format!(
-                    "B-tree upsert error: {}",
-                    e
-                )))
-            })?;
-        }
+        // Walks each distinct leaf once, applies all in-place overwrites
+        // that belong there under one read+write. Keys that miss or grow
+        // fall back to the per-key `upsert` path internally.
+        btree.upsert_batch_sorted(&serialized).map_err(|e| {
+            StoreError::Io(std::io::Error::other(format!(
+                "B-tree upsert error: {}",
+                e
+            )))
+        })?;
         let root_after = btree.root_page_id();
         drop(btree_indices);
         if root_before != root_after {

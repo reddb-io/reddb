@@ -263,6 +263,76 @@ impl BTree {
         self.insert(key, value)
     }
 
+    /// Batch upsert for sorted keys landing in a small set of leaves.
+    ///
+    /// Walks to each leaf once, applies every same-or-shrink in-place
+    /// overwrite that belongs there, writes the page once, then moves
+    /// on. Keys that miss or whose new value grows fall back to the
+    /// generic single-key `upsert` path — correctness identical,
+    /// structural re-layout handled there.
+    ///
+    /// Callers pass lex-sorted `(key, value)` pairs. For the entity
+    /// UPDATE path, IDs are big-endian so u64 ordering = lex ordering.
+    pub fn upsert_batch_sorted(&self, items: &[(Vec<u8>, Vec<u8>)]) -> BTreeResult<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let root_id = self.root_page_id();
+        if root_id == 0 {
+            for (k, v) in items {
+                self.upsert(k, v)?;
+            }
+            return Ok(());
+        }
+
+        let mut current_leaf: Option<(u32, Page, bool)> = None; // (leaf_id, page, dirty)
+        for (key, value) in items {
+            // Locate the leaf for this key. If it matches the leaf we
+            // already have in hand, reuse the in-memory page.
+            let (leaf_id, _path) = self.find_leaf(root_id, key)?;
+            if current_leaf.as_ref().map(|(id, _, _)| *id) != Some(leaf_id) {
+                if let Some((id, page, dirty)) = current_leaf.take() {
+                    if dirty {
+                        self.pager.write_page(id, page)?;
+                    }
+                }
+                let page = self.pager.read_page(leaf_id)?;
+                current_leaf = Some((leaf_id, page, false));
+            }
+
+            let applied_in_place = {
+                let (_, page, dirty) = current_leaf.as_mut().expect("set above");
+                if let SearchResult::Found(pos) = search_leaf(page, key)? {
+                    let (_, old_value) = read_leaf_cell(page, pos)?;
+                    if value.len() <= old_value.len() {
+                        overwrite_leaf_value(page, pos, value)?;
+                        *dirty = true;
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            };
+            if !applied_in_place {
+                if let Some((id, page, dirty)) = current_leaf.take() {
+                    if dirty {
+                        self.pager.write_page(id, page)?;
+                    }
+                }
+                self.upsert(key, value)?;
+            }
+        }
+
+        if let Some((id, page, dirty)) = current_leaf.take() {
+            if dirty {
+                self.pager.write_page(id, page)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Bulk insert for sorted key-value pairs.
     ///
     /// Optimized for monotonically increasing keys (e.g. entity IDs):
