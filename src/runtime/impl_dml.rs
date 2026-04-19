@@ -17,12 +17,15 @@ use crate::application::ports::{
 };
 use crate::application::ttl_payload::has_internal_ttl_metadata;
 use crate::presentation::entity_json::storage_value_to_json;
-use crate::storage::query::ast::Expr;
+use crate::storage::query::ast::{Expr, ReturningItem};
 use crate::storage::query::sql_lowering::{
     effective_delete_filter, effective_insert_rows, effective_update_filter, fold_expr_to_value,
 };
+use crate::storage::query::unified::{sys_key_red_entity_id, UnifiedRecord, UnifiedResult};
 use crate::storage::unified::MetadataValue;
 use crate::storage::Metadata;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use super::*;
 
@@ -331,6 +334,14 @@ impl RedDBRuntime {
             .collection_contract(&query.table)
             .map(|contract| contract.declared_model);
 
+        let mut returning_snapshots: Option<Vec<Vec<(String, Value)>>> =
+            if query.returning.is_some() {
+                Some(Vec::with_capacity(effective_rows.len()))
+            } else {
+                None
+            };
+        let mut returning_result: Option<UnifiedResult> = None;
+
         if matches!(query.entity_type, InsertEntityType::Row)
             && !matches!(
                 declared_model,
@@ -354,6 +365,9 @@ impl RedDBRuntime {
                     query.expires_at_ms,
                     &query.with_metadata,
                 );
+                if let Some(snaps) = returning_snapshots.as_mut() {
+                    snaps.push(fields.clone());
+                }
                 rows.push(CreateRowInput {
                     collection: query.table.clone(),
                     fields,
@@ -362,13 +376,24 @@ impl RedDBRuntime {
                     vector_links: Vec::new(),
                 });
             }
-            inserted_count = self
-                .create_rows_batch(CreateRowsBatchInput {
-                    collection: query.table.clone(),
-                    rows,
-                })?
-                .len() as u64;
+            let outputs = self.create_rows_batch(CreateRowsBatchInput {
+                collection: query.table.clone(),
+                rows,
+            })?;
+            inserted_count = outputs.len() as u64;
+
+            if let (Some(items), Some(snaps)) =
+                (query.returning.as_ref(), returning_snapshots.take())
+            {
+                returning_result = Some(build_returning_result(items, &snaps, Some(&outputs)));
+            }
         } else {
+            if query.returning.is_some() {
+                return Err(RedDBError::Query(
+                    "RETURNING is not yet supported for this INSERT path (only plain table rows)"
+                        .to_string(),
+                ));
+            }
             for row_values in &effective_rows {
                 if row_values.len() != query.columns.len() {
                     return Err(RedDBError::Query(format!(
@@ -589,12 +614,16 @@ impl RedDBRuntime {
             self.note_table_write(&query.table);
         }
 
-        Ok(RuntimeQueryResult::dml_result(
+        let mut result = RuntimeQueryResult::dml_result(
             raw_query.to_string(),
             inserted_count,
             "insert",
             "runtime-dml",
-        ))
+        );
+        if let Some(returning) = returning_result {
+            result.result = returning;
+        }
+        Ok(result)
     }
 
     pub(crate) fn insert_timeseries_point(
@@ -665,6 +694,11 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &UpdateQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        if query.returning.is_some() {
+            return Err(RedDBError::Query(
+                "RETURNING on UPDATE is parsed but not yet executed (T4.3 pending)".to_string(),
+            ));
+        }
         // Row-Level Security enforcement (Phase 2.5.2 PG parity).
         //
         // Same pattern as DELETE — gate the UPDATE by the per-role
@@ -1144,6 +1178,11 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &DeleteQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        if query.returning.is_some() {
+            return Err(RedDBError::Query(
+                "RETURNING on DELETE is parsed but not yet executed (T4.3 pending)".to_string(),
+            ));
+        }
         // Row-Level Security enforcement (Phase 2.5.2 PG parity).
         //
         // When the table has RLS enabled, gate the DELETE by the
@@ -1418,6 +1457,77 @@ fn build_patch_operations_from_materialized_assignments(
     }
 
     operations
+}
+
+/// Build a `UnifiedResult` from the rows affected by a DML statement plus
+/// its `RETURNING` clause. Each snapshot is a list of (column, value) pairs
+/// for one affected row; `outputs`, when provided, supplies the engine-
+/// assigned entity id for the same row (INSERT path). Projection honours
+/// the RETURNING items: `*` expands to every snapshot column plus
+/// `red_entity_id` when available.
+fn build_returning_result(
+    items: &[ReturningItem],
+    snapshots: &[Vec<(String, Value)>],
+    outputs: Option<&[crate::application::entity::CreateEntityOutput]>,
+) -> UnifiedResult {
+    let project_all = items
+        .iter()
+        .any(|it| matches!(it, ReturningItem::All));
+
+    let mut columns: Vec<String> = if project_all {
+        let mut cols: Vec<String> = Vec::new();
+        if outputs.is_some() {
+            cols.push("red_entity_id".to_string());
+        }
+        if let Some(first) = snapshots.first() {
+            for (name, _) in first {
+                cols.push(name.clone());
+            }
+        }
+        cols
+    } else {
+        items
+            .iter()
+            .filter_map(|it| match it {
+                ReturningItem::Column(c) => Some(c.clone()),
+                ReturningItem::All => None,
+            })
+            .collect()
+    };
+    // Guarantee unique order-preserving column list.
+    {
+        let mut seen = std::collections::HashSet::new();
+        columns.retain(|c| seen.insert(c.clone()));
+    }
+
+    let id_key = sys_key_red_entity_id();
+    let mut records: Vec<UnifiedRecord> = Vec::with_capacity(snapshots.len());
+    for (idx, snap) in snapshots.iter().enumerate() {
+        let mut values: HashMap<Arc<str>, Value> = HashMap::with_capacity(columns.len());
+        if let Some(outs) = outputs {
+            if let Some(out) = outs.get(idx) {
+                values.insert(Arc::clone(&id_key), Value::Integer(out.id.raw() as i64));
+            }
+        }
+        for (name, val) in snap {
+            values.insert(Arc::from(name.as_str()), val.clone());
+        }
+        let mut rec = UnifiedRecord::default();
+        // Only keep projected columns on the record.
+        for col in &columns {
+            if let Some(v) = values.get(col.as_str()) {
+                rec.values.insert(Arc::from(col.as_str()), v.clone());
+            }
+        }
+        records.push(rec);
+    }
+
+    UnifiedResult {
+        columns,
+        records,
+        stats: Default::default(),
+        pre_serialized_json: None,
+    }
 }
 
 fn dedupe_update_columns(mut columns: Vec<String>) -> Vec<String> {
