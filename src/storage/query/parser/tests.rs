@@ -3132,7 +3132,6 @@ fn test_parse_row_level_security_ddl() {
 }
 
 #[test]
-#[ignore = "CREATE SERVER / FOREIGN DATA WRAPPER DDL not yet wired in parser — tracked under PLAN-NEW.md feature gap"]
 fn test_parse_fdw_ddl() {
     // CREATE SERVER
     if let QueryExpr::CreateServer(q) =

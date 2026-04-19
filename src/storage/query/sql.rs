@@ -393,7 +393,17 @@ impl<'a> Parser<'a> {
         self.expect(Token::LParen)?;
         let mut out: Vec<(String, String)> = Vec::new();
         loop {
-            let key = self.expect_ident()?;
+            // Option keys frequently collide with reserved words
+            // (`path`, `format`, `delimiter`, `header`, …) — accept
+            // the keyword form and lowercase it so downstream
+            // option-name matching stays case-insensitive.
+            let was_ident = matches!(self.peek(), Token::Ident(_));
+            let raw = self.expect_ident_or_keyword()?;
+            let key = if was_ident {
+                raw
+            } else {
+                raw.to_ascii_lowercase()
+            };
             // Value is a single-quoted string literal.
             let value = self.parse_string()?;
             out.push((key, value));
