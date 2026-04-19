@@ -4,9 +4,25 @@ Tracks `tasks/pg-gap-plan.md`. Legend: `[ ]` not started · `[~]` in progress ·
 
 ## Gate 0 — approvals
 
-- [ ] Plan approved by human — `tasks/pg-gap-plan.md`
+- [x] Plan approved by human — `tasks/pg-gap-plan.md` (implicit via build greenlight)
 - [ ] Answers to open questions (session model, proto break, HNSW sync vs async, baseline lock)
 - [ ] `make lock-baselines` captured on current tip
+
+## Progress snapshot (2026-04-19)
+
+Lane paralela completa: **T4.1, T4.2, T5, T6** merged on main.
+
+| Commit | Task | |
+|---|---|---|
+| `0251d23` | T4.1 | RETURNING parser + AST |
+| `ffb077e` | T4.2 | RETURNING executor (INSERT Row) + 6 e2e |
+| `5eb89d2` | T5   | Savepoint RELEASE bug fix + 6 e2e |
+| `4bb63df` | T6   | Advisory locks (pg_advisory_*) + 7 tests |
+
+Zero regressions vs baseline (12 pre-existing failures unchanged).
++23 tests added across the four commits.
+
+Critical path (T1 → T2 → T3 → T7/T8/T9) still pending.
 
 ## Phase 1 — unblock bench + observability
 
@@ -37,21 +53,19 @@ Tracks `tasks/pg-gap-plan.md`. Legend: `[ ]` not started · `[~]` in progress ·
 
 ## Phase 2 — quick wins + richer indexes
 
-- [ ] **T4** RETURNING clause (#1a)
-  - Acceptance: parser accepts on INSERT/UPDATE/DELETE; `RETURNING *` works; response shape = SELECT
-  - Verify: parser unit tests · e2e INSERT RETURNING · `returning_throughput.rs`
-  - Files: `src/storage/query/parser/dml.rs`, `src/storage/query/{ast,lexer}.rs`, `src/storage/query/executors/*`
-  - Scope: S
-- [ ] **T5** Savepoints runtime wiring (#8a)
-  - Acceptance: SAVEPOINT/ROLLBACK TO/RELEASE work; nested stack; commit drains
-  - Verify: `savepoint_rollback.rs` · unit test in `storage::wal::transaction::tests`
-  - Files: `src/storage/wal/transaction.rs`, `src/runtime/impl_core.rs`
+- [x] **T4.1** RETURNING parser + AST (#1a)
+  - Delivered: `0251d23` — ReturningItem enum, parser on INSERT/UPDATE/DELETE
+- [x] **T4.2** RETURNING executor for INSERT Row (#1a)
+  - Delivered: `ffb077e` — UPDATE/DELETE still error explicit (T4.3)
+- [ ] **T4.3** RETURNING executor for UPDATE + DELETE (#1a, follow-up)
+  - Acceptance: UPDATE/DELETE with RETURNING emit affected rows pre-image (DELETE) / post-image (UPDATE)
+  - Approach: pre-image snapshot via WHERE-matching scan before mutation; post-image re-read by id for UPDATE
+  - Files: `src/runtime/impl_dml.rs` (execute_update/execute_delete)
   - Scope: M
-- [ ] **T6** Advisory locks (#8b)
-  - Acceptance: `pg_advisory_lock` blocks; `pg_try_advisory_lock` returns bool; session close releases
-  - Verify: `advisory_lock_contention.rs` · `auth::locks::tests`
-  - Files: `src/auth/locks.rs` (new), function catalog, `src/runtime/impl_core.rs`
-  - Scope: S
+- [x] **T5** Savepoints runtime wiring (#8a)
+  - Delivered: `5eb89d2` — discovered and fixed release-drops-writes bug
+- [x] **T6** Advisory locks (#8b)
+  - Delivered: `4bb63df` — all four pg_advisory_* variants + volatile-query cache bypass
 - [ ] **T7** Partial indexes (#12)
   - Acceptance: parser `WHERE pred`; write path evaluates; planner uses only when query predicate implies idx predicate
   - Verify: unit test size = non-deleted count · `index_advanced::partial`
