@@ -949,6 +949,35 @@ fn query_expr_result_cache_scopes(expr: &QueryExpr) -> HashSet<String> {
 /// ASCII case-insensitive substring match. False positives (the
 /// token appears in a quoted string) only skip caching, which is
 /// the conservative direction.
+/// If `sql` starts with `EXPLAIN` followed by a non-`ALTER` token,
+/// return the trimmed inner statement; otherwise `None`.
+///
+/// `EXPLAIN ALTER FOR CREATE TABLE ...` is a separate schema-diff
+/// command handled inside the normal SQL parser, so we leave it
+/// alone here.
+fn strip_explain_prefix(sql: &str) -> Option<&str> {
+    let trimmed = sql.trim_start();
+    let (head, rest) = trimmed.split_at(
+        trimmed
+            .find(|c: char| c.is_whitespace())
+            .unwrap_or(trimmed.len()),
+    );
+    if !head.eq_ignore_ascii_case("EXPLAIN") {
+        return None;
+    }
+    let rest = rest.trim_start();
+    if rest.is_empty() {
+        return None;
+    }
+    // Peek the next token — if ALTER, defer to the existing
+    // EXPLAIN ALTER FOR path.
+    let next_head_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
+    if rest[..next_head_end].eq_ignore_ascii_case("ALTER") {
+        return None;
+    }
+    Some(rest)
+}
+
 fn query_has_volatile_builtin(sql: &str) -> bool {
     // Lowercase the bytes up to the first null/newline into a small
     // stack buffer for cheap contains() checks. Most SQL fits in the
@@ -2457,6 +2486,16 @@ impl RedDBRuntime {
             }
             Ok(None) => {}
             Err(msg) => return Err(RedDBError::Query(msg)),
+        }
+
+        // `EXPLAIN <stmt>` — introspection. Runs the planner on the
+        // inner statement (WITHOUT executing it) and returns the
+        // CanonicalLogicalNode tree as rows so the caller can see the
+        // operator shape and estimated cost. `EXPLAIN ALTER FOR ...`
+        // is a distinct schema-diff command and continues down the
+        // regular SQL path.
+        if let Some(inner) = strip_explain_prefix(query) {
+            return self.explain_as_rows(query, inner);
         }
 
         // `SET LOCAL TENANT '<id>'` — write the per-transaction tenant
@@ -4766,5 +4805,69 @@ impl RedDBRuntime {
                 .insert(table.to_string());
         }
         self.invalidate_result_cache_for_table(table);
+    }
+
+    /// Wrap the planner's `RuntimeQueryExplain` as rows on a
+    /// `RuntimeQueryResult` so callers over the SQL interface see the
+    /// plan tree in the same shape a SELECT produces.
+    ///
+    /// Columns: `op`, `source`, `est_rows`, `est_cost`, `depth`.
+    /// Nodes are walked depth-first; `depth` counts from 0 at the
+    /// root so a text renderer can indent without re-walking.
+    fn explain_as_rows(&self, raw_query: &str, inner_sql: &str) -> RedDBResult<RuntimeQueryResult> {
+        let explain = self.explain_query(inner_sql)?;
+
+        let columns = vec![
+            "op".to_string(),
+            "source".to_string(),
+            "est_rows".to_string(),
+            "est_cost".to_string(),
+            "depth".to_string(),
+        ];
+
+        let mut records: Vec<crate::storage::query::unified::UnifiedRecord> = Vec::new();
+        walk_plan_node(&explain.logical_plan.root, 0, &mut records);
+
+        let result = crate::storage::query::unified::UnifiedResult {
+            columns,
+            records,
+            stats: Default::default(),
+            pre_serialized_json: None,
+        };
+
+        Ok(RuntimeQueryResult {
+            query: raw_query.to_string(),
+            mode: explain.mode,
+            statement: "explain",
+            engine: "runtime-explain",
+            result,
+            affected_rows: 0,
+            statement_type: "select",
+        })
+    }
+}
+
+fn walk_plan_node(
+    node: &crate::storage::query::planner::CanonicalLogicalNode,
+    depth: usize,
+    out: &mut Vec<crate::storage::query::unified::UnifiedRecord>,
+) {
+    use std::sync::Arc;
+    let mut rec = crate::storage::query::unified::UnifiedRecord::default();
+    rec.values
+        .insert(Arc::from("op"), Value::Text(node.operator.clone()));
+    rec.values.insert(
+        Arc::from("source"),
+        node.source.clone().map(Value::Text).unwrap_or(Value::Null),
+    );
+    rec.values
+        .insert(Arc::from("est_rows"), Value::Float(node.estimated_rows));
+    rec.values
+        .insert(Arc::from("est_cost"), Value::Float(node.operator_cost));
+    rec.values
+        .insert(Arc::from("depth"), Value::Integer(depth as i64));
+    out.push(rec);
+    for child in &node.children {
+        walk_plan_node(child, depth + 1, out);
     }
 }

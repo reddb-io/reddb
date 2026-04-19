@@ -146,9 +146,12 @@ impl<'a> Parser<'a> {
             ));
         }
 
-        // Parse COLLECTION
+        // Parse COLLECTION — tolerate collection names that collide
+        // with reserved keywords (e.g. `data`, `text`, `nodes`) by
+        // falling back to `expect_ident_or_keyword` and lowercasing the
+        // keyword form so the stored name matches the source casing.
         self.expect(Token::Collection)?;
-        let collection = self.expect_ident()?;
+        let collection = self.expect_collection_name()?;
 
         // Optional LIMIT
         let limit = if self.consume(&Token::Limit)? {
@@ -223,6 +226,20 @@ impl<'a> Parser<'a> {
             limit,
             exact,
         }))
+    }
+
+    /// Collection/index names frequently collide with reserved words
+    /// (`data`, `text`, `nodes`, `edges`, …). Accept either a plain
+    /// identifier or a keyword, lowercasing the keyword form so the
+    /// stored name matches the source spelling.
+    fn expect_collection_name(&mut self) -> Result<String, ParseError> {
+        let was_ident = matches!(self.peek(), Token::Ident(_));
+        let raw = self.expect_ident_or_keyword()?;
+        Ok(if was_ident {
+            raw
+        } else {
+            raw.to_ascii_lowercase()
+        })
     }
 
     fn expect_search_ident(&mut self, expected: &str) -> Result<(), ParseError> {

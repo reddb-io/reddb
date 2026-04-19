@@ -1840,7 +1840,6 @@ fn test_parse_search_text_minimal() {
 }
 
 #[test]
-#[ignore = "SEARCH HYBRID grammar not yet wired in parser — tracked under PLAN-NEW.md feature gap"]
 fn test_parse_search_hybrid() {
     let query =
         parse("SEARCH HYBRID SIMILAR [0.1, 0.2] TEXT 'query string' COLLECTION data LIMIT 15")
@@ -1862,7 +1861,6 @@ fn test_parse_search_hybrid() {
 }
 
 #[test]
-#[ignore = "SEARCH HYBRID grammar not yet wired in parser — tracked under PLAN-NEW.md feature gap"]
 fn test_parse_search_hybrid_text_only() {
     let query = parse("SEARCH HYBRID TEXT 'query' COLLECTION data").unwrap();
     if let QueryExpr::SearchCommand(crate::storage::query::ast::SearchCommand::Hybrid {
@@ -1879,7 +1877,6 @@ fn test_parse_search_hybrid_text_only() {
 }
 
 #[test]
-#[ignore = "SEARCH HYBRID grammar not yet wired in parser — tracked under PLAN-NEW.md feature gap"]
 fn test_parse_search_hybrid_vector_only() {
     let query = parse("SEARCH HYBRID SIMILAR [1, 2, 3] COLLECTION data").unwrap();
     if let QueryExpr::SearchCommand(crate::storage::query::ast::SearchCommand::Hybrid {
