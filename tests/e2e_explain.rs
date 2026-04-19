@@ -112,9 +112,14 @@ fn explain_alter_still_routes_to_schema_diff() {
         result.err()
     );
     let r = result.unwrap();
-    assert_ne!(
-        r.statement, "explain",
-        "EXPLAIN ALTER must not use the plan-tree shape"
+    // Both my new EXPLAIN and the existing EXPLAIN ALTER set
+    // statement="explain", so distinguish by the column shape: the
+    // schema-diff command reports ["table","format","diff"], while
+    // the plan-tree shape is ["op","source","est_rows","est_cost","depth"].
+    assert_eq!(
+        r.result.columns,
+        vec!["table", "format", "diff"],
+        "EXPLAIN ALTER must route to the schema-diff shape"
     );
 }
 
@@ -126,7 +131,7 @@ fn explain_indexed_select_mentions_index_or_scan_op() {
         &rt,
         "INSERT INTO users (id, email) VALUES (1, 'a@x'), (2, 'b@x')",
     );
-    exec(&rt, "CREATE INDEX ON users (email)");
+    exec(&rt, "CREATE INDEX idx_users_email ON users (email)");
 
     let result = rt
         .execute_query("EXPLAIN SELECT id FROM users WHERE email = 'a@x'")

@@ -513,7 +513,12 @@ impl<'a> Parser<'a> {
                 let mut map = crate::json::Map::new();
                 if !self.check(&Token::RBrace) {
                     loop {
-                        // Key: string or identifier
+                        // Key: string or identifier. Reserved-word
+                        // keys (`level`, `msg`, `type`, …) fall through
+                        // to `expect_ident_or_keyword`, which returns
+                        // the canonical UPPERCASE spelling; lowercase
+                        // that path so the JSON object preserves the
+                        // source casing.
                         let key = match self.peek().clone() {
                             Token::String(s) => {
                                 self.advance()?;
@@ -523,7 +528,7 @@ impl<'a> Parser<'a> {
                                 self.advance()?;
                                 s
                             }
-                            _ => self.expect_ident_or_keyword()?,
+                            _ => self.expect_ident_or_keyword()?.to_ascii_lowercase(),
                         };
                         // Separator: ':' or '='
                         if !self.consume(&Token::Colon)? {

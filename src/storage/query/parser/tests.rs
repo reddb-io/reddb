@@ -2299,7 +2299,6 @@ fn test_parse_create_table_with_ttl_and_context_index() {
 // ========================================================================
 
 #[test]
-#[ignore = "inline JSON-object literal in VALUES not yet wired in parser — tracked under PLAN-NEW.md feature gap"]
 fn test_parse_insert_with_inline_json_object() {
     let query = parse("INSERT INTO logs (data) VALUES ({level: 'info', msg: 'hello'})").unwrap();
     if let QueryExpr::Insert(iq) = query {
