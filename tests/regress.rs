@@ -55,7 +55,7 @@ fn format_runtime_result(result: &RuntimeQueryResult) -> String {
             .result
             .records
             .first()
-            .map(|record| record.values.keys().cloned().collect())
+            .map(|record| record.values.keys().map(|k| k.to_string()).collect())
             .unwrap_or_default();
         columns.sort();
         columns
@@ -68,7 +68,7 @@ fn format_runtime_result(result: &RuntimeQueryResult) -> String {
             columns
                 .iter()
                 .map(|column| {
-                    format_regress_value(record.values.get(column).unwrap_or(&Value::Null))
+                    format_regress_value(record.values.get(column.as_str()).unwrap_or(&Value::Null))
                 })
                 .collect::<Vec<_>>()
         })

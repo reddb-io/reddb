@@ -1412,43 +1412,32 @@ pub(super) fn apply_runtime_identity_hints(record: &mut UnifiedRecord, entity: &
         };
 
         if let Some(value) = value {
+            let link_key: std::sync::Arc<str> = std::sync::Arc::from("_linked_identity");
             match cross_ref.ref_type {
                 RefType::VectorToRow | RefType::NodeToRow => {
                     record
                         .values
-                        .insert("_source_row".to_string(), value.clone());
-                    record
-                        .values
-                        .entry("_linked_identity".to_string())
-                        .or_insert(value);
+                        .insert(std::sync::Arc::from("_source_row"), value.clone());
+                    record.values.entry(link_key).or_insert(value);
                 }
                 RefType::VectorToNode | RefType::RowToNode => {
                     record
                         .values
-                        .insert("_source_node".to_string(), value.clone());
-                    record
-                        .values
-                        .entry("_linked_identity".to_string())
-                        .or_insert(value);
+                        .insert(std::sync::Arc::from("_source_node"), value.clone());
+                    record.values.entry(link_key).or_insert(value);
                 }
                 RefType::RowToEdge | RefType::EdgeToVector => {
                     record
                         .values
-                        .insert("_source_edge".to_string(), value.clone());
-                    record
-                        .values
-                        .entry("_linked_identity".to_string())
-                        .or_insert(value);
+                        .insert(std::sync::Arc::from("_source_edge"), value.clone());
+                    record.values.entry(link_key).or_insert(value);
                 }
                 _ => {
                     record
                         .values
-                        .entry("_source_entity".to_string())
+                        .entry(std::sync::Arc::from("_source_entity"))
                         .or_insert(value.clone());
-                    record
-                        .values
-                        .entry("_linked_identity".to_string())
-                        .or_insert(value);
+                    record.values.entry(link_key).or_insert(value);
                 }
             }
         }
@@ -1584,9 +1573,12 @@ pub(super) fn merge_hybrid_records(
 
     if let Some(vector_record) = vector {
         for (key, value) in &vector_record.values {
-            if let Some(existing) = merged.values.get(key) {
+            let key_str: &str = key;
+            if let Some(existing) = merged.values.get(key_str) {
                 if existing != value {
-                    merged.values.insert(format!("vector.{key}"), value.clone());
+                    merged
+                        .values
+                        .insert(std::sync::Arc::from(format!("vector.{key_str}")), value.clone());
                 }
             } else {
                 merged.values.insert(key.clone(), value.clone());
@@ -1637,11 +1629,12 @@ pub(super) fn merge_join_records(
 
     if let Some(right_record) = right {
         for (key, value) in &right_record.values {
-            if merged.values.contains_key(key) {
+            let key_str: &str = key;
+            if merged.values.contains_key(key_str) {
                 if let Some(prefix) = right_prefix {
                     merged
                         .values
-                        .insert(format!("{prefix}.{key}"), value.clone());
+                        .insert(std::sync::Arc::from(format!("{prefix}.{key_str}")), value.clone());
                 }
             } else {
                 merged.values.insert(key.clone(), value.clone());

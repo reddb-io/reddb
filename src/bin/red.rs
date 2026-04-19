@@ -106,8 +106,8 @@ fn format_result_pretty(result: &reddb::runtime::RuntimeQueryResult) -> String {
         return out;
     }
     for (i, record) in result.result.records.iter().enumerate() {
-        let mut entries: Vec<(&String, &reddb::storage::schema::Value)> =
-            record.values.iter().collect();
+        let mut entries: Vec<(&str, &reddb::storage::schema::Value)> =
+            record.values.iter().map(|(k, v)| (k.as_ref(), v)).collect();
         entries.sort_by(|a, b| a.0.cmp(b.0));
         let mut line = format!("{}.", i + 1);
         for (key, value) in entries {
@@ -145,8 +145,8 @@ fn format_result_json(result: &reddb::runtime::RuntimeQueryResult) -> String {
             out.push(',');
         }
         out.push('{');
-        let mut entries: Vec<(&String, &reddb::storage::schema::Value)> =
-            record.values.iter().collect();
+        let mut entries: Vec<(&str, &reddb::storage::schema::Value)> =
+            record.values.iter().map(|(k, v)| (k.as_ref(), v)).collect();
         entries.sort_by(|a, b| a.0.cmp(b.0));
         for (j, (key, value)) in entries.iter().enumerate() {
             if j > 0 {

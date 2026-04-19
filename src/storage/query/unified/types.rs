@@ -76,11 +76,17 @@ impl UnifiedResult {
     }
 }
 
-/// A single result record containing mixed data
+/// A single result record containing mixed data.
+///
+/// Keys are `Arc<str>` so interned column names (system fields,
+/// shared schema strings) can be reused across millions of records
+/// without heap allocation — each `Arc::clone` is a single atomic
+/// increment. `HashMap<Arc<str>, V>` lookups still work with `&str`
+/// queries because `Arc<str>: Borrow<str>` and both hash identically.
 #[derive(Debug, Clone, Default)]
 pub struct UnifiedRecord {
     /// Column values (for table data)
-    pub values: HashMap<String, Value>,
+    pub values: HashMap<Arc<str>, Value>,
     /// Matched nodes (for graph data)
     pub nodes: HashMap<String, MatchedNode>,
     /// Matched edges (for graph data)
@@ -89,6 +95,25 @@ pub struct UnifiedRecord {
     pub paths: Vec<GraphPath>,
     /// Vector search results
     pub vector_results: Vec<VectorSearchResult>,
+}
+
+/// Interned system-field column name. For a 4500-row `SELECT *` scan
+/// these keys used to allocate 13.5k fresh `String`s per query; now
+/// the pool of three stays resident and each record pays only an
+/// atomic refcount bump.
+pub fn sys_key_red_entity_id() -> Arc<str> {
+    static KEY: std::sync::OnceLock<Arc<str>> = std::sync::OnceLock::new();
+    Arc::clone(KEY.get_or_init(|| Arc::from("red_entity_id")))
+}
+
+pub fn sys_key_created_at() -> Arc<str> {
+    static KEY: std::sync::OnceLock<Arc<str>> = std::sync::OnceLock::new();
+    Arc::clone(KEY.get_or_init(|| Arc::from("created_at")))
+}
+
+pub fn sys_key_updated_at() -> Arc<str> {
+    static KEY: std::sync::OnceLock<Arc<str>> = std::sync::OnceLock::new();
+    Arc::clone(KEY.get_or_init(|| Arc::from("updated_at")))
 }
 
 impl UnifiedRecord {
@@ -110,15 +135,25 @@ impl UnifiedRecord {
         }
     }
 
-    /// Set a column value
+    /// Set a column value. Allocates an `Arc<str>` for the key; hot-path
+    /// callers with a pre-interned key should prefer [`set_arc`].
     pub fn set(&mut self, column: &str, value: Value) {
-        self.values.insert(column.to_string(), value);
+        self.values.insert(Arc::from(column), value);
     }
 
-    /// Set a column value from an already-owned String key — avoids the
-    /// `to_string()` clone in hot-path callers that already hold a `String`.
+    /// Set a column value from an already-owned String key — one less
+    /// copy than `set(&column, v)` (promotes the String's buffer to
+    /// `Arc<str>` without reallocating the bytes).
     #[inline]
     pub fn set_owned(&mut self, column: String, value: Value) {
+        self.values.insert(Arc::from(column.into_boxed_str()), value);
+    }
+
+    /// Set a column value using a pre-interned key. Zero allocation —
+    /// just an atomic refcount bump. Used by the scan lean path for
+    /// system fields like `red_entity_id`.
+    #[inline]
+    pub fn set_arc(&mut self, column: Arc<str>, value: Value) {
         self.values.insert(column, value);
     }
 

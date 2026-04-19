@@ -1103,7 +1103,7 @@ mod tests {
     fn make_row_entity(id: u64, columns: Vec<(String, Value)>) -> UnifiedEntity {
         let kind = crate::storage::EntityKind::TableRow {
             table: std::sync::Arc::from("users"),
-            row_id: id as u32,
+            row_id: id,
         };
         let cols: Vec<Value> = columns.iter().map(|(_, v)| v.clone()).collect();
         let names: Vec<String> = columns.iter().map(|(k, _)| k.clone()).collect();

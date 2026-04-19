@@ -153,7 +153,7 @@ impl HybridExecutor {
         for (_key, mut record, score) in scored {
             record
                 .values
-                .insert("_hybrid_score".to_string(), Value::Float(score as f64));
+                .insert(Arc::from("_hybrid_score"), Value::Float(score as f64));
             result.push(record);
         }
 
@@ -372,7 +372,7 @@ impl HybridExecutor {
             if let Some(mut record) = record_map.remove(&key) {
                 record
                     .values
-                    .insert("_rrf_score".to_string(), Value::Float(score));
+                    .insert(Arc::from("_rrf_score"), Value::Float(score));
                 result.push(record);
             }
         }
@@ -470,7 +470,7 @@ impl HybridExecutor {
         for (_key, mut record, score) in sorted {
             record
                 .values
-                .insert("_union_score".to_string(), Value::Float(score as f64));
+                .insert(Arc::from("_union_score"), Value::Float(score as f64));
             result.push(record);
         }
 
@@ -569,10 +569,10 @@ impl InMemoryHybridExecutor {
     /// Add a structured record
     pub fn add_record(&mut self, id: u64, values: HashMap<String, Value>) {
         let mut record = UnifiedRecord::new();
-        record.values = values;
+        record.values = values.into_iter().map(|(k, v)| (Arc::from(k), v)).collect();
         record
             .values
-            .insert("id".to_string(), Value::Integer(id as i64));
+            .insert(Arc::from("id"), Value::Integer(id as i64));
         self.records.insert(id, record);
     }
 
@@ -653,7 +653,7 @@ impl InMemoryHybridExecutor {
         for (_key, mut record, score) in scored {
             record
                 .values
-                .insert("_hybrid_score".to_string(), Value::Float(score as f64));
+                .insert(Arc::from("_hybrid_score"), Value::Float(score as f64));
             result.push(record);
         }
 
@@ -734,7 +734,7 @@ impl InMemoryHybridExecutor {
         for (_key, mut record, score) in scored {
             record
                 .values
-                .insert("_rrf_score".to_string(), Value::Float(score));
+                .insert(Arc::from("_rrf_score"), Value::Float(score));
             result.push(record);
         }
 

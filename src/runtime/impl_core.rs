@@ -911,7 +911,7 @@ fn apply_foreign_table_filters(
     let columns: Vec<String> = if projections.is_empty() {
         filtered
             .first()
-            .map(|r| r.values.keys().cloned().collect())
+            .map(|r| r.values.keys().map(|k| k.to_string()).collect())
             .unwrap_or_default()
     } else {
         projections

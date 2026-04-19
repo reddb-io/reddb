@@ -132,12 +132,12 @@ impl VectorExecutor {
             // Add basic values to record
             record
                 .values
-                .insert("id".to_string(), Value::Integer(sr.id as i64));
+                .insert(Arc::from("id"), Value::Integer(sr.id as i64));
             record
                 .values
-                .insert("distance".to_string(), Value::Float(sr.distance as f64));
+                .insert(Arc::from("distance"), Value::Float(sr.distance as f64));
             record.values.insert(
-                "collection".to_string(),
+                Arc::from("collection"),
                 Value::Text(query.collection.clone()),
             );
 
@@ -400,12 +400,12 @@ impl InMemoryVectorExecutor {
 
             record
                 .values
-                .insert("id".to_string(), Value::Integer(vector_id as i64));
+                .insert(Arc::from("id"), Value::Integer(vector_id as i64));
             record
                 .values
-                .insert("distance".to_string(), Value::Float(dist as f64));
+                .insert(Arc::from("distance"), Value::Float(dist as f64));
             record.values.insert(
-                "collection".to_string(),
+                Arc::from("collection"),
                 Value::Text(query.collection.clone()),
             );
             record.vector_results.push(vsr);

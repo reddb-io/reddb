@@ -807,6 +807,8 @@ mod tests {
             require_auth: true,
             auto_encrypt_storage: false,
             vault_enabled: false,
+            cert: Default::default(),
+            oauth: Default::default(),
         }
     }
 

@@ -456,7 +456,7 @@ fn encode_result(result: &crate::runtime::RuntimeQueryResult) -> Vec<u8> {
     let columns: Vec<String> = if !result.result.columns.is_empty() {
         result.result.columns.clone()
     } else if let Some(first) = records.first() {
-        first.values.keys().cloned().collect()
+        first.values.keys().map(|k| k.to_string()).collect()
     } else {
         Vec::new()
     };
@@ -475,7 +475,7 @@ fn encode_result(result: &crate::runtime::RuntimeQueryResult) -> Vec<u8> {
     // Row data
     for record in records {
         for col in &columns {
-            let value = record.values.get(col).unwrap_or(&Value::Null);
+            let value = record.values.get(col.as_str()).unwrap_or(&Value::Null);
             encode_value(&mut payload, value);
         }
     }

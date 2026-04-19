@@ -592,8 +592,8 @@ pub(super) fn project_runtime_record_with_db(
 
     if select_all {
         for key in visible_value_keys(source) {
-            if let Some(value) = source.values.get(&key) {
-                record.values.insert(key, value.clone());
+            if let Some(value) = source.values.get(key.as_str()) {
+                record.values.insert(std::sync::Arc::from(key), value.clone());
             }
         }
     }
@@ -633,7 +633,9 @@ pub(super) fn project_runtime_record_with_db(
             Projection::All => None,
         };
 
-        record.values.insert(label, value.unwrap_or(Value::Null));
+        record
+            .values
+            .insert(std::sync::Arc::from(label), value.unwrap_or(Value::Null));
     }
 
     record
@@ -691,14 +693,12 @@ pub(super) fn collect_visible_columns(records: &[UnifiedRecord]) -> Vec<String> 
             std::collections::HashSet::with_capacity(first.values.len());
         let mut keys: Vec<String> = Vec::with_capacity(first.values.len());
         for key in first.values.keys() {
-            if !key.starts_with('_') && seen.insert(key.as_str()) {
-                keys.push(key.clone());
+            let k: &str = key;
+            if !k.starts_with('_') && seen.insert(k) {
+                keys.push(k.to_string());
             }
         }
 
-        // Spot-check up to 8 records spread across the result — cheap
-        // insurance against uniform-looking prefixes. If any record has
-        // an extra key, fall through to the full scan.
         let n = records.len();
         let step = (n / 8).max(1);
         let mut uniform = true;
@@ -706,10 +706,11 @@ pub(super) fn collect_visible_columns(records: &[UnifiedRecord]) -> Vec<String> 
         while idx < n {
             let rec = &records[idx];
             for key in rec.values.keys() {
-                if key.starts_with('_') {
+                let k: &str = key;
+                if k.starts_with('_') {
                     continue;
                 }
-                if !seen.contains(key.as_str()) {
+                if !seen.contains(k) {
                     uniform = false;
                     break;
                 }
@@ -726,13 +727,12 @@ pub(super) fn collect_visible_columns(records: &[UnifiedRecord]) -> Vec<String> 
         }
     }
 
-    // Fallback: original HashSet-dedup scan across all records. Handles
-    // ragged-schema rows (document collections, schemaless inserts).
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for record in records {
         for key in record.values.keys() {
-            if !key.starts_with('_') && !seen.contains(key) {
-                seen.insert(key.clone());
+            let k: &str = key;
+            if !k.starts_with('_') && !seen.contains(k) {
+                seen.insert(k.to_string());
             }
         }
     }
@@ -745,8 +745,14 @@ pub(super) fn visible_value_keys(record: &UnifiedRecord) -> Vec<String> {
     let mut keys: Vec<String> = record
         .values
         .keys()
-        .filter(|key| !key.starts_with('_'))
-        .cloned()
+        .filter_map(|key| {
+            let k: &str = key;
+            if k.starts_with('_') {
+                None
+            } else {
+                Some(k.to_string())
+            }
+        })
         .collect();
     keys.sort();
     keys
@@ -1129,7 +1135,7 @@ pub(super) fn resolve_runtime_field(
     match field {
         FieldRef::TableColumn { table, column } => {
             if !table.is_empty() {
-                if let Some(value) = record.values.get(&format!("{table}.{column}")) {
+                if let Some(value) = record.values.get(format!("{table}.{column}").as_str()) {
                     return Some(value.clone());
                 }
 
@@ -1142,12 +1148,12 @@ pub(super) fn resolve_runtime_field(
 
             record
                 .values
-                .get(column)
+                .get(column.as_str())
                 .cloned()
                 .or_else(|| resolve_runtime_document_path(record, column))
         }
         FieldRef::NodeProperty { alias, property } => {
-            if let Some(value) = record.values.get(&format!("{alias}.{property}")) {
+            if let Some(value) = record.values.get(format!("{alias}.{property}").as_str()) {
                 return Some(value.clone());
             }
 
@@ -1160,7 +1166,7 @@ pub(super) fn resolve_runtime_field(
             }
         }
         FieldRef::EdgeProperty { alias, property } => {
-            if let Some(value) = record.values.get(&format!("{alias}.{property}")) {
+            if let Some(value) = record.values.get(format!("{alias}.{property}").as_str()) {
                 return Some(value.clone());
             }
 
@@ -1179,7 +1185,7 @@ pub(super) fn resolve_runtime_field(
             .nodes
             .get(alias)
             .map(|node| Value::NodeRef(node.id.clone()))
-            .or_else(|| record.values.get(&format!("{alias}.id")).cloned()),
+            .or_else(|| record.values.get(format!("{alias}.id").as_str()).cloned()),
     }
 }
 
@@ -1208,7 +1214,7 @@ pub(super) fn resolve_runtime_document_path(record: &UnifiedRecord, path: &str) 
     // early exit based on the capability flag.
     let segments = parse_runtime_document_path(path);
     let (root, tail) = segments.split_first()?;
-    let root_value = record.values.get(root)?;
+    let root_value = record.values.get(root.as_str())?;
     resolve_runtime_document_path_from_value(root_value, tail)
 }
 
@@ -2338,9 +2344,9 @@ pub(super) fn eval_projection_value(proj: &Projection, source: &UnifiedRecord) -
                 }
                 return Some(Value::Text(lit_val.to_string()));
             }
-            source.values.get(col).cloned()
+            source.values.get(col.as_str()).cloned()
         }
-        Projection::Alias(col, _) => source.values.get(col).cloned(),
+        Projection::Alias(col, _) => source.values.get(col.as_str()).cloned(),
         Projection::Field(field, _) => resolve_runtime_field(source, field, None, None),
         Projection::Function(name, inner_args) => {
             evaluate_scalar_function(name, inner_args, source)
@@ -2586,7 +2592,7 @@ fn resolve_geo_arg(arg: &Projection, source: &UnifiedRecord) -> Option<(f64, f64
                 }
             }
             // Column reference → look up in record values
-            let val = source.values.get(col)?;
+            let val = source.values.get(col.as_str())?;
             match val {
                 Value::GeoPoint(lat_micro, lon_micro) => Some((
                     crate::geo::micro_to_deg(*lat_micro),

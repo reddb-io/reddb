@@ -239,7 +239,7 @@ fn unified_record_json(record: &UnifiedRecord) -> JsonValue {
                 .iter()
                 .map(|(key, value)| {
                     (
-                        key.clone(),
+                        key.to_string(),
                         crate::presentation::entity_json::storage_value_to_json(value),
                     )
                 })

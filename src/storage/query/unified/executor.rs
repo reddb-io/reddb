@@ -763,7 +763,7 @@ impl UnifiedExecutor {
     /// Get a value for join condition
     fn get_join_value(&self, field: &FieldRef, record: &UnifiedRecord) -> Option<Value> {
         match field {
-            FieldRef::TableColumn { column, .. } => record.values.get(column).cloned(),
+            FieldRef::TableColumn { column, .. } => record.values.get(column.as_str()).cloned(),
             FieldRef::NodeId { alias } => record
                 .nodes
                 .get(alias)
