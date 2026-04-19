@@ -116,6 +116,36 @@ pub fn sys_key_updated_at() -> Arc<str> {
     Arc::clone(KEY.get_or_init(|| Arc::from("updated_at")))
 }
 
+pub fn sys_key_row_id() -> Arc<str> {
+    static KEY: std::sync::OnceLock<Arc<str>> = std::sync::OnceLock::new();
+    Arc::clone(KEY.get_or_init(|| Arc::from("row_id")))
+}
+
+pub fn sys_key_red_collection() -> Arc<str> {
+    static KEY: std::sync::OnceLock<Arc<str>> = std::sync::OnceLock::new();
+    Arc::clone(KEY.get_or_init(|| Arc::from("red_collection")))
+}
+
+pub fn sys_key_red_kind() -> Arc<str> {
+    static KEY: std::sync::OnceLock<Arc<str>> = std::sync::OnceLock::new();
+    Arc::clone(KEY.get_or_init(|| Arc::from("red_kind")))
+}
+
+pub fn sys_key_red_sequence_id() -> Arc<str> {
+    static KEY: std::sync::OnceLock<Arc<str>> = std::sync::OnceLock::new();
+    Arc::clone(KEY.get_or_init(|| Arc::from("red_sequence_id")))
+}
+
+pub fn sys_key_red_entity_type() -> Arc<str> {
+    static KEY: std::sync::OnceLock<Arc<str>> = std::sync::OnceLock::new();
+    Arc::clone(KEY.get_or_init(|| Arc::from("red_entity_type")))
+}
+
+pub fn sys_key_red_capabilities() -> Arc<str> {
+    static KEY: std::sync::OnceLock<Arc<str>> = std::sync::OnceLock::new();
+    Arc::clone(KEY.get_or_init(|| Arc::from("red_capabilities")))
+}
+
 impl UnifiedRecord {
     /// Create an empty record
     pub fn new() -> Self {
