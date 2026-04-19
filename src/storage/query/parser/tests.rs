@@ -2819,7 +2819,6 @@ fn test_parse_maintenance_commands() {
 }
 
 #[test]
-#[ignore = "CREATE SCHEMA / CREATE SEQUENCE DDL not yet wired in parser — tracked under PLAN-NEW.md feature gap"]
 fn test_parse_schema_and_sequence_ddl() {
     // CREATE SCHEMA
     if let QueryExpr::CreateSchema(q) = parse("CREATE SCHEMA app").unwrap() {
@@ -2903,7 +2902,6 @@ fn test_parse_schema_and_sequence_ddl() {
 }
 
 #[test]
-#[ignore = "COPY ... WITH (...) PG-style option block not yet wired in parser — short-form still works; tracked under PLAN-NEW.md"]
 fn test_parse_copy_from_csv() {
     // Basic COPY: no options.
     if let QueryExpr::CopyFrom(q) = parse("COPY users FROM '/tmp/u.csv'").unwrap() {

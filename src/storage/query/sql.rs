@@ -873,10 +873,12 @@ impl<'a> Parser<'a> {
                     // Loop over optional clauses in any order.
                     loop {
                         if self.consume(&Token::Start)? {
-                            let _ = self.consume_ident_ci("WITH")?;
+                            // Accept `START 100` or `START WITH 100`.
+                            let _ = self.consume(&Token::With)? || self.consume_ident_ci("WITH")?;
                             start = self.parse_integer()?;
                         } else if self.consume(&Token::Increment)? {
-                            let _ = self.consume_ident_ci("BY")?;
+                            // Accept `INCREMENT 5` or `INCREMENT BY 5`.
+                            let _ = self.consume(&Token::By)? || self.consume_ident_ci("BY")?;
                             increment = self.parse_integer()?;
                         } else {
                             break;
@@ -1254,21 +1256,37 @@ impl<'a> Parser<'a> {
                 let format = CopyFormat::Csv;
 
                 // Optional `WITH (FORMAT csv, HEADER true, DELIMITER ',')` block.
-                if self.consume_ident_ci("WITH")? {
+                // `WITH` is a reserved keyword token — accept both the keyword
+                // form and the ident form that non-CTE callers sometimes emit.
+                if self.consume(&Token::With)? || self.consume_ident_ci("WITH")? {
                     self.expect(Token::LParen)?;
                     loop {
-                        if self.consume_ident_ci("FORMAT")? {
+                        if self.consume(&Token::Format)? || self.consume_ident_ci("FORMAT")? {
                             let _ = self.consume(&Token::Eq)?;
                             // Only CSV for now — accept the ident and move on.
                             let _ = self.expect_ident()?;
                         } else if self.consume(&Token::Header)? {
                             let _ = self.consume(&Token::Eq)?;
-                            has_header = if let Token::Ident(n) = self.peek() {
-                                let v = n.eq_ignore_ascii_case("true");
-                                self.advance()?;
-                                v
-                            } else {
-                                true
+                            // Accept `HEADER`, `HEADER = true`, `HEADER = false`,
+                            // or an ident spelling of true/false.
+                            has_header = match self.peek().clone() {
+                                Token::True => {
+                                    self.advance()?;
+                                    true
+                                }
+                                Token::False => {
+                                    self.advance()?;
+                                    false
+                                }
+                                Token::Ident(ref n) if n.eq_ignore_ascii_case("true") => {
+                                    self.advance()?;
+                                    true
+                                }
+                                Token::Ident(ref n) if n.eq_ignore_ascii_case("false") => {
+                                    self.advance()?;
+                                    false
+                                }
+                                _ => true,
                             };
                         } else if self.consume(&Token::Delimiter)? {
                             let _ = self.consume(&Token::Eq)?;
