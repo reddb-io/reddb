@@ -14,7 +14,7 @@
 //!
 //! # References
 //!
-//! - Turso `core/storage/page_cache.rs:24-80` - PageCacheEntry with ref_bit
+//! - Turso `core/storage/page_cache.rs:24-80` - PageCacheShardEntry with ref_bit
 //! - Turso `core/storage/page_cache.rs:129-150` - advance_clock_hand()
 //! - "SIEVE is Simpler than LRU" (NSDI '24)
 
@@ -94,7 +94,7 @@ impl CacheStats {
 /// SIEVE-based page cache
 ///
 /// Thread-safe page cache using the SIEVE eviction algorithm.
-pub struct PageCache {
+pub struct PageCacheShard {
     /// Maximum number of pages to cache
     capacity: usize,
     /// Page ID -> Entry index mapping
@@ -111,7 +111,7 @@ pub struct PageCache {
     stats: Mutex<CacheStats>,
 }
 
-impl PageCache {
+impl PageCacheShard {
     /// Create a new page cache with specified capacity
     pub fn new(capacity: usize) -> Self {
         let capacity = capacity.max(MIN_CACHE_CAPACITY);
@@ -588,6 +588,161 @@ impl PageCache {
     }
 }
 
+impl Default for PageCacheShard {
+    fn default() -> Self {
+        Self::with_default_capacity()
+    }
+}
+
+/// Number of independent `PageCacheShard`s inside a `PageCache`. Must
+/// be a power of two so `page_id & (NUM_SHARDS - 1)` is a valid shard
+/// index. 8 was picked to cover typical bench concurrency (16 workers)
+/// without making each shard's own SIEVE queue too small; bumping to
+/// 16 is safe if profiling ever shows shard-level contention.
+const NUM_SHARDS: usize = 8;
+
+/// Sharded page cache.
+///
+/// Routes each `page_id` to one of `NUM_SHARDS` independent
+/// [`PageCacheShard`]s by the low bits of the id. Readers and writers
+/// for disjoint pages hit different shards and do not contend on the
+/// shard-internal RwLocks/Mutexes. Each shard runs its own SIEVE
+/// eviction loop over `capacity / NUM_SHARDS` slots; hot/cold
+/// asymmetry across shards is accepted in exchange for the
+/// contention win.
+pub struct PageCache {
+    shards: Box<[PageCacheShard]>,
+    capacity: usize,
+}
+
+impl PageCache {
+    pub fn new(capacity: usize) -> Self {
+        // Keep every shard above MIN_CACHE_CAPACITY so the inner
+        // SIEVE invariants stay valid even when callers pass tiny
+        // totals (tests frequently do).
+        let per_shard = capacity.div_ceil(NUM_SHARDS).max(MIN_CACHE_CAPACITY);
+        let total = per_shard * NUM_SHARDS;
+        let shards: Vec<PageCacheShard> =
+            (0..NUM_SHARDS).map(|_| PageCacheShard::new(per_shard)).collect();
+        Self {
+            shards: shards.into_boxed_slice(),
+            capacity: total,
+        }
+    }
+
+    pub fn with_default_capacity() -> Self {
+        Self::new(DEFAULT_CACHE_CAPACITY)
+    }
+
+    #[inline]
+    fn shard_for(&self, page_id: u32) -> &PageCacheShard {
+        &self.shards[(page_id as usize) & (NUM_SHARDS - 1)]
+    }
+
+    pub fn len(&self) -> usize {
+        self.shards.iter().map(|s| s.len()).sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.shards.iter().all(|s| s.is_empty())
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    pub fn stats(&self) -> CacheStats {
+        let mut agg = CacheStats::default();
+        for s in self.shards.iter() {
+            let cs = s.stats();
+            agg.hits += cs.hits;
+            agg.misses += cs.misses;
+            agg.evictions += cs.evictions;
+            agg.writebacks += cs.writebacks;
+        }
+        agg
+    }
+
+    pub fn reset_stats(&self) {
+        for s in self.shards.iter() {
+            s.reset_stats();
+        }
+    }
+
+    pub fn get(&self, page_id: u32) -> Option<Page> {
+        self.shard_for(page_id).get(page_id)
+    }
+
+    pub fn insert(&self, page_id: u32, page: Page) -> Option<Page> {
+        self.shard_for(page_id).insert(page_id, page)
+    }
+
+    pub fn mark_dirty(&self, page_id: u32) {
+        self.shard_for(page_id).mark_dirty(page_id)
+    }
+
+    pub fn mark_clean(&self, page_id: u32) {
+        self.shard_for(page_id).mark_clean(page_id)
+    }
+
+    pub fn pin(&self, page_id: u32) -> bool {
+        self.shard_for(page_id).pin(page_id)
+    }
+
+    pub fn unpin(&self, page_id: u32) -> bool {
+        self.shard_for(page_id).unpin(page_id)
+    }
+
+    pub fn remove(&self, page_id: u32) -> Option<Page> {
+        self.shard_for(page_id).remove(page_id)
+    }
+
+    pub fn contains(&self, page_id: u32) -> bool {
+        self.shard_for(page_id).contains(page_id)
+    }
+
+    pub fn flush_dirty(&self) -> Vec<(u32, Page)> {
+        let mut out = Vec::new();
+        for s in self.shards.iter() {
+            out.extend(s.flush_dirty());
+        }
+        out
+    }
+
+    pub fn flush_some_dirty(&self, max: usize) -> Vec<(u32, Page)> {
+        if max == 0 {
+            return Vec::new();
+        }
+        let mut out = Vec::with_capacity(max);
+        for s in self.shards.iter() {
+            if out.len() >= max {
+                break;
+            }
+            let budget = max - out.len();
+            out.extend(s.flush_some_dirty(budget));
+        }
+        out
+    }
+
+    pub fn dirty_count(&self) -> usize {
+        self.shards.iter().map(|s| s.dirty_count()).sum()
+    }
+
+    pub fn clear(&self) {
+        for s in self.shards.iter() {
+            s.clear();
+        }
+    }
+
+    pub fn page_ids(&self) -> Vec<u32> {
+        let mut out = Vec::with_capacity(self.len());
+        for s in self.shards.iter() {
+            out.extend(s.page_ids());
+        }
+        out
+    }
+}
+
 impl Default for PageCache {
     fn default() -> Self {
         Self::with_default_capacity()
@@ -605,7 +760,7 @@ mod tests {
 
     #[test]
     fn test_cache_basic() {
-        let cache = PageCache::new(100);
+        let cache = PageCacheShard::new(100);
 
         assert!(cache.is_empty());
         assert_eq!(cache.capacity(), 100);
@@ -626,7 +781,7 @@ mod tests {
 
     #[test]
     fn test_cache_eviction() {
-        let cache = PageCache::new(4);
+        let cache = PageCacheShard::new(4);
 
         // Fill cache
         for i in 0..4 {
@@ -645,7 +800,7 @@ mod tests {
 
     #[test]
     fn test_cache_sieve_visited() {
-        let cache = PageCache::new(4);
+        let cache = PageCacheShard::new(4);
 
         // Fill cache
         for i in 0..4 {
@@ -665,7 +820,7 @@ mod tests {
 
     #[test]
     fn test_cache_dirty() {
-        let cache = PageCache::new(100);
+        let cache = PageCacheShard::new(100);
 
         cache.insert(1, make_page(1));
         cache.mark_dirty(1);
@@ -681,7 +836,7 @@ mod tests {
 
     #[test]
     fn test_cache_pin() {
-        let cache = PageCache::new(2);
+        let cache = PageCacheShard::new(2);
 
         cache.insert(1, make_page(1));
         cache.insert(2, make_page(2));
@@ -701,7 +856,7 @@ mod tests {
 
     #[test]
     fn test_cache_remove() {
-        let cache = PageCache::new(100);
+        let cache = PageCacheShard::new(100);
 
         cache.insert(1, make_page(1));
         assert!(cache.contains(1));
@@ -713,7 +868,7 @@ mod tests {
 
     #[test]
     fn test_cache_stats() {
-        let cache = PageCache::new(100);
+        let cache = PageCacheShard::new(100);
 
         cache.insert(1, make_page(1));
 
@@ -732,7 +887,7 @@ mod tests {
 
     #[test]
     fn test_cache_clear() {
-        let cache = PageCache::new(100);
+        let cache = PageCacheShard::new(100);
 
         for i in 0..50 {
             cache.insert(i, make_page(i));
@@ -746,7 +901,7 @@ mod tests {
 
     #[test]
     fn test_cache_update_existing() {
-        let cache = PageCache::new(100);
+        let cache = PageCacheShard::new(100);
 
         let mut page1 = make_page(1);
         page1.as_bytes_mut()[100] = 0xAA;
@@ -766,7 +921,7 @@ mod tests {
 
     #[test]
     fn test_cache_recovers_after_index_lock_poisoning() {
-        let cache = std::sync::Arc::new(PageCache::new(8));
+        let cache = std::sync::Arc::new(PageCacheShard::new(8));
         let poison_target = std::sync::Arc::clone(&cache);
         let _ = std::thread::spawn(move || {
             let _guard = poison_target
@@ -784,7 +939,7 @@ mod tests {
 
     #[test]
     fn test_cache_recovers_after_stats_lock_poisoning() {
-        let cache = std::sync::Arc::new(PageCache::new(8));
+        let cache = std::sync::Arc::new(PageCacheShard::new(8));
         let poison_target = std::sync::Arc::clone(&cache);
         let _ = std::thread::spawn(move || {
             let _guard = poison_target
