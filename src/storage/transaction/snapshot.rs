@@ -92,6 +92,12 @@ pub struct TxnContext {
     /// together with the parent. Empty stack means "writes use `xid`
     /// directly", matching pre-savepoint behaviour.
     pub savepoints: Vec<(String, Xid)>,
+    /// Sub-xids popped by `RELEASE SAVEPOINT` that should still commit
+    /// alongside the parent. PG semantics: released subtxns keep their
+    /// writes — they're promoted to parent-visible at COMMIT. Stored
+    /// separately from `savepoints` so their names are gone (cannot be
+    /// rolled back or released again) while their xids remain trackable.
+    pub released_sub_xids: Vec<Xid>,
 }
 
 impl TxnContext {

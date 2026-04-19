@@ -3007,6 +3007,7 @@ impl RedDBRuntime {
                             isolation: IsolationLevel::SnapshotIsolation,
                             snapshot,
                             savepoints: Vec::new(),
+                            released_sub_xids: Vec::new(),
                         };
                         self.inner.tx_contexts.write().insert(conn_id, ctx);
                         ("begin", format!("BEGIN — xid={xid} (snapshot isolation)"))
@@ -3023,6 +3024,9 @@ impl RedDBRuntime {
                                 // result exactly like a RELEASE would
                                 // have done.
                                 for (_, sub) in &ctx.savepoints {
+                                    self.inner.snapshot_manager.commit(*sub);
+                                }
+                                for sub in &ctx.released_sub_xids {
                                     self.inner.snapshot_manager.commit(*sub);
                                 }
                                 self.inner.snapshot_manager.commit(ctx.xid);
@@ -3047,6 +3051,9 @@ impl RedDBRuntime {
                                 // Phase 2.3.2e: abort every open sub-xid
                                 // too so their writes stay hidden.
                                 for (_, sub) in &ctx.savepoints {
+                                    self.inner.snapshot_manager.rollback(*sub);
+                                }
+                                for sub in &ctx.released_sub_xids {
                                     self.inner.snapshot_manager.rollback(*sub);
                                 }
                                 self.inner.snapshot_manager.rollback(ctx.xid);
@@ -3097,13 +3104,20 @@ impl RedDBRuntime {
                                         ))
                                     })?;
                                 // RELEASE pops the named savepoint and
-                                // any nested ones. Their sub-xids are
-                                // left in snapshot_manager.active so
-                                // they commit together with the parent
-                                // (PG semantics: released savepoints
-                                // still contribute their work).
+                                // any nested ones. Their sub-xids move
+                                // to `released_sub_xids` so they commit
+                                // (or roll back) alongside the parent
+                                // xid — PG semantics: released
+                                // savepoints still contribute their
+                                // work, but their names are gone.
                                 let released = ctx.savepoints.len() - pos;
-                                ctx.savepoints.truncate(pos);
+                                let popped: Vec<Xid> = ctx
+                                    .savepoints
+                                    .split_off(pos)
+                                    .into_iter()
+                                    .map(|(_, x)| x)
+                                    .collect();
+                                ctx.released_sub_xids.extend(popped);
                                 (
                                     "release_savepoint",
                                     format!("RELEASE SAVEPOINT {name} — {released} level(s)"),
