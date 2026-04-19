@@ -137,9 +137,7 @@ impl<'a> Parser<'a> {
                     Value::Text(col) => tenant_by = Some(col),
                     other => {
                         return Err(ParseError::new(
-                            format!(
-                                "WITH tenant_by expects a text literal, got {other:?}"
-                            ),
+                            format!("WITH tenant_by expects a text literal, got {other:?}"),
                             self.position(),
                         ));
                     }

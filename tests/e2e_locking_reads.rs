@@ -9,8 +9,7 @@
 use reddb::{RedDBOptions, RedDBRuntime};
 
 fn open_runtime() -> RedDBRuntime {
-    RedDBRuntime::with_options(RedDBOptions::in_memory())
-        .expect("runtime should open in-memory")
+    RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime should open in-memory")
 }
 
 fn exec(rt: &RedDBRuntime, sql: &str) {
@@ -22,7 +21,10 @@ fn exec(rt: &RedDBRuntime, sql: &str) {
 fn select_acquires_intent_shared_locks() {
     let rt = open_runtime();
     exec(&rt, "CREATE TABLE orders (id INT, amount INT)");
-    exec(&rt, "INSERT INTO orders (id, amount) VALUES (1, 100), (2, 200)");
+    exec(
+        &rt,
+        "INSERT INTO orders (id, amount) VALUES (1, 100), (2, 200)",
+    );
 
     let before = rt.lock_manager().stats();
     let _ = rt.execute_query("SELECT * FROM orders").unwrap();

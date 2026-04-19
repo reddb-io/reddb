@@ -18,8 +18,7 @@ use reddb::storage::EntityKind;
 use reddb::{RedDBOptions, RedDBRuntime};
 
 fn open_runtime() -> RedDBRuntime {
-    RedDBRuntime::with_options(RedDBOptions::in_memory())
-        .expect("runtime should open in-memory")
+    RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime should open in-memory")
 }
 
 fn exec(rt: &RedDBRuntime, sql: &str) {
@@ -131,8 +130,14 @@ fn cross_model_atomic_rollback() {
     // Conn A writes to multiple models in one txn, then rolls back.
     set_current_connection_id(808);
     exec(&rt, "BEGIN");
-    exec(&rt, "INSERT INTO users (id, email) VALUES (1, 'alice@x.com')");
-    exec(&rt, "QUEUE PUSH notifications {to: 'alice', type: 'welcome'}");
+    exec(
+        &rt,
+        "INSERT INTO users (id, email) VALUES (1, 'alice@x.com')",
+    );
+    exec(
+        &rt,
+        "QUEUE PUSH notifications {to: 'alice', type: 'welcome'}",
+    );
     exec(
         &rt,
         "INSERT INTO social NODE (label, name) VALUES ('User', 'alice')",

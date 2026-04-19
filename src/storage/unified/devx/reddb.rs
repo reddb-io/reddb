@@ -78,7 +78,8 @@ pub struct RedDB {
     /// `collection_contract(name)` lookup — which happens 3× per insert
     /// (ensure_model, enforce_uniqueness, normalize_fields) and dominated
     /// the insert hot path at ~30%.
-    pub(crate) collection_contract_cache: RwLock<Option<Arc<HashMap<String, crate::physical::CollectionContract>>>>,
+    pub(crate) collection_contract_cache:
+        RwLock<Option<Arc<HashMap<String, crate::physical::CollectionContract>>>>,
     /// Optional remote storage backend for snapshot transport.
     pub(crate) remote_backend: Option<Arc<dyn crate::storage::backend::RemoteBackend>>,
     /// Remote object key used by the remote backend.

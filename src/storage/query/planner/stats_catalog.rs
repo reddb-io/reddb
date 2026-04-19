@@ -534,8 +534,12 @@ fn estimate_value_bytes(value: &Value) -> usize {
         | Value::Decimal(_) => 8,
         Value::Float(_) => 8,
         Value::Date(_) | Value::Time(_) => 4,
-        Value::Text(s) | Value::Email(s) | Value::Url(s) | Value::AssetCode(s)
-        | Value::NodeRef(s) | Value::EdgeRef(s) => s.len() + 4,
+        Value::Text(s)
+        | Value::Email(s)
+        | Value::Url(s)
+        | Value::AssetCode(s)
+        | Value::NodeRef(s)
+        | Value::EdgeRef(s) => s.len() + 4,
         Value::Blob(b) | Value::Json(b) => b.len() + 4,
         Value::Vector(v) => v.len() * 4 + 4,
         Value::Array(items) => 4 + items.iter().map(estimate_value_bytes).sum::<usize>(),

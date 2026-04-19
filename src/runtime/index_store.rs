@@ -1072,12 +1072,7 @@ impl IndexStore {
                             }
                             self.sorted.insert_one(collection, col, value, *entity_id);
                             self.hash
-                                .insert(
-                                    collection,
-                                    &format!("{}_hash", idx.name),
-                                    key,
-                                    *entity_id,
-                                )
+                                .insert(collection, &format!("{}_hash", idx.name), key, *entity_id)
                                 .map_err(|err| err.to_string())?;
                         }
                         IndexMethodKind::Spatial => {}

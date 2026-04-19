@@ -9,8 +9,7 @@ use reddb::runtime::mvcc::{clear_current_connection_id, set_current_connection_i
 use reddb::{RedDBOptions, RedDBRuntime};
 
 fn open_runtime() -> RedDBRuntime {
-    RedDBRuntime::with_options(RedDBOptions::in_memory())
-        .expect("runtime should open in-memory")
+    RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime should open in-memory")
 }
 
 fn exec(rt: &RedDBRuntime, sql: &str) {
@@ -193,10 +192,7 @@ fn within_typed_api_works_with_queue() {
         "CREATE POLICY tenant_iso ON MESSAGES OF notifications \
          USING (payload.tenant = CURRENT_TENANT())",
     );
-    exec(
-        &rt,
-        "ALTER TABLE notifications ENABLE ROW LEVEL SECURITY",
-    );
+    exec(&rt, "ALTER TABLE notifications ENABLE ROW LEVEL SECURITY");
 
     exec(
         &rt,

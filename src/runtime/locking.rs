@@ -75,7 +75,11 @@ impl std::fmt::Display for AcquireError {
             Self::Deadlock(cycle) => write!(f, "deadlock detected (cycle: {cycle:?})"),
             Self::Timeout => f.write_str("lock acquire timed out"),
             Self::LockLimitExceeded => f.write_str("per-txn lock limit exceeded"),
-            Self::IncompatibleEscalation { resource, held, requested } => write!(
+            Self::IncompatibleEscalation {
+                resource,
+                held,
+                requested,
+            } => write!(
                 f,
                 "cannot escalate lock on {resource:?}: held={held:?} requested={requested:?}"
             ),

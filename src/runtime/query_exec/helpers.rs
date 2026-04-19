@@ -538,9 +538,7 @@ pub(crate) fn evaluate_entity_filter_with_db(
             let table_record = runtime_table_record_from_entity(entity.clone());
             let record = match table_record {
                 Some(r) => Some(r),
-                None => super::super::record_search_helpers::any_record_from_entity(
-                    entity.clone(),
-                ),
+                None => super::super::record_search_helpers::any_record_from_entity(entity.clone()),
             };
             let Some(record) = record else {
                 return false;

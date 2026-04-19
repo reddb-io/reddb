@@ -121,9 +121,7 @@ pub fn try_strip_within_prefix(input: &str) -> Result<Option<(ScopeOverride, &st
             // query string slice keeps the leading keyword intact.
             _ => {
                 if !tenant_seen {
-                    return Err(
-                        "WITHIN clause requires at least TENANT '<id>' (or NULL)".into()
-                    );
+                    return Err("WITHIN clause requires at least TENANT '<id>' (or NULL)".into());
                 }
                 let offset = spanned.start.offset as usize;
                 if offset > input.len() {
@@ -176,10 +174,9 @@ mod tests {
 
     #[test]
     fn parses_tenant_only() {
-        let (scope, inner) =
-            try_strip_within_prefix("WITHIN TENANT 'acme' SELECT * FROM x")
-                .unwrap()
-                .unwrap();
+        let (scope, inner) = try_strip_within_prefix("WITHIN TENANT 'acme' SELECT * FROM x")
+            .unwrap()
+            .unwrap();
         assert_eq!(scope.tenant, FieldOverride::Set("acme".into()));
         assert_eq!(scope.user, FieldOverride::Inherit);
         assert_eq!(scope.role, FieldOverride::Inherit);
@@ -214,18 +211,14 @@ mod tests {
 
     #[test]
     fn rejects_duplicate_clause() {
-        assert!(try_strip_within_prefix(
-            "WITHIN TENANT 'a' TENANT 'b' SELECT 1"
-        )
-        .is_err());
+        assert!(try_strip_within_prefix("WITHIN TENANT 'a' TENANT 'b' SELECT 1").is_err());
     }
 
     #[test]
     fn case_insensitive() {
-        let (scope, inner) =
-            try_strip_within_prefix("within tenant 'acme' select * from x")
-                .unwrap()
-                .unwrap();
+        let (scope, inner) = try_strip_within_prefix("within tenant 'acme' select * from x")
+            .unwrap()
+            .unwrap();
         assert_eq!(scope.tenant, FieldOverride::Set("acme".into()));
         assert_eq!(inner, "select * from x");
     }

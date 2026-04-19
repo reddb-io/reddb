@@ -12,8 +12,7 @@ use reddb::runtime::mvcc::{
 use reddb::{RedDBOptions, RedDBRuntime};
 
 fn open_runtime() -> RedDBRuntime {
-    RedDBRuntime::with_options(RedDBOptions::in_memory())
-        .expect("runtime should open in-memory")
+    RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime should open in-memory")
 }
 
 fn exec(rt: &RedDBRuntime, sql: &str) {
@@ -82,10 +81,7 @@ fn dotted_tenant_auto_fills_missing_root() {
 
     // INSERT without mentioning `headers` — auto-fill builds
     // `{"tenant": "acme"}` and appends it as the headers column.
-    exec(
-        &rt,
-        "INSERT INTO logs (id, msg) VALUES (1, 'started')",
-    );
+    exec(&rt, "INSERT INTO logs (id, msg) VALUES (1, 'started')");
 
     // Same session reads it back: visible because tenant matches.
     assert_eq!(row_count(&rt, "SELECT * FROM logs"), 1);

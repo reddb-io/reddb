@@ -14,8 +14,7 @@
 use reddb::{RedDBOptions, RedDBRuntime};
 
 fn open_runtime() -> RedDBRuntime {
-    RedDBRuntime::with_options(RedDBOptions::in_memory())
-        .expect("runtime should open in-memory")
+    RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime should open in-memory")
 }
 
 fn exec(rt: &RedDBRuntime, sql: &str) -> reddb::runtime::RuntimeQueryResult {
@@ -59,23 +58,21 @@ fn view_body_filters_rows_via_select_from_view() {
 
     // DROP VIEW cleans up.
     exec(&rt, "DROP VIEW active_users");
-    assert!(rt
-        .execute_query("SELECT * FROM active_users")
-        .is_err() || rt
-        .execute_query("SELECT * FROM active_users")
-        .unwrap()
-        .result
-        .records
-        .is_empty());
+    assert!(
+        rt.execute_query("SELECT * FROM active_users").is_err()
+            || rt
+                .execute_query("SELECT * FROM active_users")
+                .unwrap()
+                .result
+                .records
+                .is_empty()
+    );
 }
 
 #[test]
 fn materialized_view_refresh_executes_body() {
     let rt = open_runtime();
-    exec(
-        &rt,
-        "CREATE TABLE orders (id INT, total INT, status TEXT)",
-    );
+    exec(&rt, "CREATE TABLE orders (id INT, total INT, status TEXT)");
     exec(
         &rt,
         "INSERT INTO orders (id, total, status) VALUES \
@@ -103,7 +100,10 @@ fn materialized_view_refresh_executes_body() {
 #[test]
 fn view_chain_resolves_recursively() {
     let rt = open_runtime();
-    exec(&rt, "CREATE TABLE events (id INT, severity TEXT, module TEXT)");
+    exec(
+        &rt,
+        "CREATE TABLE events (id INT, severity TEXT, module TEXT)",
+    );
     exec(
         &rt,
         "INSERT INTO events (id, severity, module) VALUES \

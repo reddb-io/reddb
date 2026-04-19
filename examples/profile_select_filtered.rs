@@ -24,11 +24,10 @@ fn main() {
     let uc_e = EntityUseCases::new(&rt);
     let uc_q = QueryUseCases::new(&rt);
 
-    uc_q
-        .execute(ExecuteQueryInput {
-            query: "CREATE TABLE users (id INT, name TEXT, city TEXT, age INT, email TEXT)".into(),
-        })
-        .expect("ct");
+    uc_q.execute(ExecuteQueryInput {
+        query: "CREATE TABLE users (id INT, name TEXT, city TEXT, age INT, email TEXT)".into(),
+    })
+    .expect("ct");
 
     const CITIES: &[&str] = &["New York", "Los Angeles", "Chicago", "Houston", "Phoenix"];
     let t_seed = Instant::now();
@@ -64,16 +63,14 @@ fn main() {
     );
 
     // Build indices
-    uc_q
-        .execute(ExecuteQueryInput {
-            query: "CREATE INDEX idx_city ON users (city) USING HASH".into(),
-        })
-        .expect("idx_city");
-    uc_q
-        .execute(ExecuteQueryInput {
-            query: "CREATE INDEX idx_age ON users (age) USING BTREE".into(),
-        })
-        .expect("idx_age");
+    uc_q.execute(ExecuteQueryInput {
+        query: "CREATE INDEX idx_city ON users (city) USING HASH".into(),
+    })
+    .expect("idx_city");
+    uc_q.execute(ExecuteQueryInput {
+        query: "CREATE INDEX idx_age ON users (age) USING BTREE".into(),
+    })
+    .expect("idx_age");
 
     // EXPLAIN skipped — RedDB's EXPLAIN grammar differs; flamegraph
     // will reveal the plan shape instead.

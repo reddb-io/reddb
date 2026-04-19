@@ -13,9 +13,7 @@
 
 use std::time::Instant;
 
-use reddb::application::{
-    CreateRowInput, EntityUseCases, ExecuteQueryInput, QueryUseCases,
-};
+use reddb::application::{CreateRowInput, EntityUseCases, ExecuteQueryInput, QueryUseCases};
 use reddb::storage::schema::Value;
 use reddb::RedDBRuntime;
 
@@ -46,9 +44,7 @@ fn main() {
                     ("age".into(), Value::Integer(18 + (i % 63) as i64)),
                     (
                         "city".into(),
-                        Value::Text(
-                            ["NYC", "London", "Tokyo", "Paris", "Berlin"][i % 5].into(),
-                        ),
+                        Value::Text(["NYC", "London", "Tokyo", "Paris", "Berlin"][i % 5].into()),
                     ),
                     ("email".into(), Value::Text(format!("u{i}@t.com"))),
                     ("score".into(), Value::Float(i as f64 * 0.02)),
@@ -121,13 +117,7 @@ fn main() {
     let t_raw = Instant::now();
     for _ in 0..LOOKUP_ITERS {
         let t = Instant::now();
-        let _ = rt
-            .db()
-            .store()
-            .get(
-                "users5k",
-                reddb::EntityId::new(id),
-            );
+        let _ = rt.db().store().get("users5k", reddb::EntityId::new(id));
         raw_samples.push(t.elapsed().as_nanos() as u64);
         id = (id % SEED_ROWS as u64) + 1;
     }

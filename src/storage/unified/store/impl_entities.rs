@@ -41,10 +41,7 @@ impl UnifiedStore {
         // that belong there under one read+write. Keys that miss or grow
         // fall back to the per-key `upsert` path internally.
         btree.upsert_batch_sorted(&serialized).map_err(|e| {
-            StoreError::Io(std::io::Error::other(format!(
-                "B-tree upsert error: {}",
-                e
-            )))
+            StoreError::Io(std::io::Error::other(format!("B-tree upsert error: {}", e)))
         })?;
         let root_after = btree.root_page_id();
         drop(btree_indices);

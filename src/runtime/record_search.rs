@@ -124,7 +124,10 @@ pub(super) fn runtime_table_record_lean_ref(entity: &UnifiedEntity) -> Option<Un
     };
     if let Some(named) = &row.named {
         let mut record = UnifiedRecord::with_capacity(3 + named.len());
-        record.set_arc(sys_key_red_entity_id(), Value::UnsignedInteger(entity.id.raw()));
+        record.set_arc(
+            sys_key_red_entity_id(),
+            Value::UnsignedInteger(entity.id.raw()),
+        );
         record.set_arc(sys_key_created_at(), Value::UnsignedInteger(created_at));
         record.set_arc(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
         for (key, value) in named.iter() {
@@ -133,7 +136,10 @@ pub(super) fn runtime_table_record_lean_ref(entity: &UnifiedEntity) -> Option<Un
         Some(record)
     } else if let Some(schema) = &row.schema {
         let mut record = UnifiedRecord::with_capacity(3 + schema.len());
-        record.set_arc(sys_key_red_entity_id(), Value::UnsignedInteger(entity.id.raw()));
+        record.set_arc(
+            sys_key_red_entity_id(),
+            Value::UnsignedInteger(entity.id.raw()),
+        );
         record.set_arc(sys_key_created_at(), Value::UnsignedInteger(created_at));
         record.set_arc(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
         for (name, value) in schema.iter().zip(row.columns.iter()) {
@@ -142,7 +148,10 @@ pub(super) fn runtime_table_record_lean_ref(entity: &UnifiedEntity) -> Option<Un
         Some(record)
     } else {
         let mut record = UnifiedRecord::with_capacity(3 + row.columns.len());
-        record.set_arc(sys_key_red_entity_id(), Value::UnsignedInteger(entity.id.raw()));
+        record.set_arc(
+            sys_key_red_entity_id(),
+            Value::UnsignedInteger(entity.id.raw()),
+        );
         record.set_arc(sys_key_created_at(), Value::UnsignedInteger(created_at));
         record.set_arc(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
         for (i, value) in row.columns.iter().enumerate() {
@@ -162,7 +171,10 @@ pub(super) fn runtime_table_record_lean(entity: UnifiedEntity) -> Option<Unified
     };
     if let Some(named) = row.named {
         let mut record = UnifiedRecord::with_capacity(3 + named.len());
-        record.set_arc(sys_key_red_entity_id(), Value::UnsignedInteger(entity.id.raw()));
+        record.set_arc(
+            sys_key_red_entity_id(),
+            Value::UnsignedInteger(entity.id.raw()),
+        );
         record.set_arc(sys_key_created_at(), Value::UnsignedInteger(created_at));
         record.set_arc(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
         // `set_owned` consumes the already-heap-allocated String key
@@ -174,7 +186,10 @@ pub(super) fn runtime_table_record_lean(entity: UnifiedEntity) -> Option<Unified
         Some(record)
     } else if let Some(ref schema) = row.schema {
         let mut record = UnifiedRecord::with_capacity(3 + schema.len());
-        record.set_arc(sys_key_red_entity_id(), Value::UnsignedInteger(entity.id.raw()));
+        record.set_arc(
+            sys_key_red_entity_id(),
+            Value::UnsignedInteger(entity.id.raw()),
+        );
         record.set_arc(sys_key_created_at(), Value::UnsignedInteger(created_at));
         record.set_arc(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
         for (name, value) in schema.iter().zip(row.columns.into_iter()) {
@@ -183,7 +198,10 @@ pub(super) fn runtime_table_record_lean(entity: UnifiedEntity) -> Option<Unified
         Some(record)
     } else {
         let mut record = UnifiedRecord::with_capacity(3 + row.columns.len());
-        record.set_arc(sys_key_red_entity_id(), Value::UnsignedInteger(entity.id.raw()));
+        record.set_arc(
+            sys_key_red_entity_id(),
+            Value::UnsignedInteger(entity.id.raw()),
+        );
         record.set_arc(sys_key_created_at(), Value::UnsignedInteger(created_at));
         record.set_arc(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
         for (i, value) in row.columns.into_iter().enumerate() {
@@ -209,7 +227,10 @@ pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<
                 record.set_arc(sys_key_row_id(), Value::UnsignedInteger(*row_id));
             }
 
-            record.set_arc(sys_key_red_entity_id(), Value::UnsignedInteger(entity.id.raw()));
+            record.set_arc(
+                sys_key_red_entity_id(),
+                Value::UnsignedInteger(entity.id.raw()),
+            );
             record.set(
                 "red_collection",
                 Value::Text(entity.kind.collection().to_string()),
@@ -218,8 +239,14 @@ pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<
                 "red_kind",
                 Value::Text(entity.kind.storage_type().to_string()),
             );
-            record.set_arc(sys_key_created_at(), Value::UnsignedInteger(entity.created_at));
-            record.set_arc(sys_key_updated_at(), Value::UnsignedInteger(entity.updated_at));
+            record.set_arc(
+                sys_key_created_at(),
+                Value::UnsignedInteger(entity.created_at),
+            );
+            record.set_arc(
+                sys_key_updated_at(),
+                Value::UnsignedInteger(entity.updated_at),
+            );
             record.set(
                 "red_sequence_id",
                 Value::UnsignedInteger(entity.sequence_id),
@@ -228,7 +255,10 @@ pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<
             // Use fast capability string to avoid BTreeSet allocation
             let entity_type = runtime_row_entity_type(&row);
             let capabilities_str = runtime_row_capabilities_str(&row);
-            record.set_arc(sys_key_red_entity_type(), Value::Text(entity_type.to_string()));
+            record.set_arc(
+                sys_key_red_entity_type(),
+                Value::Text(entity_type.to_string()),
+            );
             record.set(
                 "red_capabilities",
                 Value::Text(capabilities_str.to_string()),
@@ -253,7 +283,10 @@ pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<
         }
         EntityData::TimeSeries(ts) => {
             let mut record = UnifiedRecord::with_capacity(12 + ts.tags.len());
-            record.set_arc(sys_key_red_entity_id(), Value::UnsignedInteger(entity.id.raw()));
+            record.set_arc(
+                sys_key_red_entity_id(),
+                Value::UnsignedInteger(entity.id.raw()),
+            );
             record.set(
                 "red_collection",
                 Value::Text(entity.kind.collection().to_string()),
@@ -262,13 +295,22 @@ pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<
                 "red_kind",
                 Value::Text(entity.kind.storage_type().to_string()),
             );
-            record.set_arc(sys_key_created_at(), Value::UnsignedInteger(entity.created_at));
-            record.set_arc(sys_key_updated_at(), Value::UnsignedInteger(entity.updated_at));
+            record.set_arc(
+                sys_key_created_at(),
+                Value::UnsignedInteger(entity.created_at),
+            );
+            record.set_arc(
+                sys_key_updated_at(),
+                Value::UnsignedInteger(entity.updated_at),
+            );
             record.set(
                 "red_sequence_id",
                 Value::UnsignedInteger(entity.sequence_id),
             );
-            record.set_arc(sys_key_red_entity_type(), Value::Text("timeseries".to_string()));
+            record.set_arc(
+                sys_key_red_entity_type(),
+                Value::Text("timeseries".to_string()),
+            );
             record.set(
                 "red_capabilities",
                 Value::Text("document,timeseries,metric,temporal".to_string()),
@@ -299,7 +341,10 @@ pub(super) fn runtime_table_record_from_entity_ref(
                 record.set_arc(sys_key_row_id(), Value::UnsignedInteger(*row_id));
             }
 
-            record.set_arc(sys_key_red_entity_id(), Value::UnsignedInteger(entity.id.raw()));
+            record.set_arc(
+                sys_key_red_entity_id(),
+                Value::UnsignedInteger(entity.id.raw()),
+            );
             record.set(
                 "red_collection",
                 Value::Text(entity.kind.collection().to_string()),
@@ -308,8 +353,14 @@ pub(super) fn runtime_table_record_from_entity_ref(
                 "red_kind",
                 Value::Text(entity.kind.storage_type().to_string()),
             );
-            record.set_arc(sys_key_created_at(), Value::UnsignedInteger(entity.created_at));
-            record.set_arc(sys_key_updated_at(), Value::UnsignedInteger(entity.updated_at));
+            record.set_arc(
+                sys_key_created_at(),
+                Value::UnsignedInteger(entity.created_at),
+            );
+            record.set_arc(
+                sys_key_updated_at(),
+                Value::UnsignedInteger(entity.updated_at),
+            );
             record.set(
                 "red_sequence_id",
                 Value::UnsignedInteger(entity.sequence_id),
@@ -317,7 +368,10 @@ pub(super) fn runtime_table_record_from_entity_ref(
 
             let entity_type = runtime_row_entity_type(row);
             let capabilities_str = runtime_row_capabilities_str(row);
-            record.set_arc(sys_key_red_entity_type(), Value::Text(entity_type.to_string()));
+            record.set_arc(
+                sys_key_red_entity_type(),
+                Value::Text(entity_type.to_string()),
+            );
             record.set(
                 "red_capabilities",
                 Value::Text(capabilities_str.to_string()),
@@ -341,7 +395,10 @@ pub(super) fn runtime_table_record_from_entity_ref(
         }
         EntityData::TimeSeries(ts) => {
             let mut record = UnifiedRecord::with_capacity(12 + ts.tags.len());
-            record.set_arc(sys_key_red_entity_id(), Value::UnsignedInteger(entity.id.raw()));
+            record.set_arc(
+                sys_key_red_entity_id(),
+                Value::UnsignedInteger(entity.id.raw()),
+            );
             record.set(
                 "red_collection",
                 Value::Text(entity.kind.collection().to_string()),
@@ -350,13 +407,22 @@ pub(super) fn runtime_table_record_from_entity_ref(
                 "red_kind",
                 Value::Text(entity.kind.storage_type().to_string()),
             );
-            record.set_arc(sys_key_created_at(), Value::UnsignedInteger(entity.created_at));
-            record.set_arc(sys_key_updated_at(), Value::UnsignedInteger(entity.updated_at));
+            record.set_arc(
+                sys_key_created_at(),
+                Value::UnsignedInteger(entity.created_at),
+            );
+            record.set_arc(
+                sys_key_updated_at(),
+                Value::UnsignedInteger(entity.updated_at),
+            );
             record.set(
                 "red_sequence_id",
                 Value::UnsignedInteger(entity.sequence_id),
             );
-            record.set_arc(sys_key_red_entity_type(), Value::Text("timeseries".to_string()));
+            record.set_arc(
+                sys_key_red_entity_type(),
+                Value::Text("timeseries".to_string()),
+            );
             record.set(
                 "red_capabilities",
                 Value::Text("document,timeseries,metric,temporal".to_string()),
@@ -384,7 +450,10 @@ pub(super) fn runtime_table_record_from_entity_projected(
             let mut record = UnifiedRecord::with_capacity(1 + columns.len());
 
             // Always include system fields needed for filtering
-            record.set_arc(sys_key_red_entity_id(), Value::UnsignedInteger(entity.id.raw()));
+            record.set_arc(
+                sys_key_red_entity_id(),
+                Value::UnsignedInteger(entity.id.raw()),
+            );
 
             if let Some(named) = row.named {
                 // Named path (single-insert entities): O(1) HashMap lookup per column.
@@ -419,7 +488,10 @@ pub(super) fn runtime_table_record_from_entity_projected(
         }
         EntityData::TimeSeries(ts) => {
             let mut record = UnifiedRecord::new();
-            record.set_arc(sys_key_red_entity_id(), Value::UnsignedInteger(entity.id.raw()));
+            record.set_arc(
+                sys_key_red_entity_id(),
+                Value::UnsignedInteger(entity.id.raw()),
+            );
 
             for col in columns {
                 match col.as_str() {
@@ -466,7 +538,10 @@ pub(super) fn runtime_table_record_with_col_indices(
         return None;
     }
     let mut record = UnifiedRecord::with_capacity(1 + idx_map.len());
-    record.set_arc(sys_key_red_entity_id(), Value::UnsignedInteger(entity.id.raw()));
+    record.set_arc(
+        sys_key_red_entity_id(),
+        Value::UnsignedInteger(entity.id.raw()),
+    );
     for &(ci, si) in idx_map {
         if let Some(value) = row.columns.get(si) {
             // Use set_owned to skip the hidden to_string() clone.
@@ -489,7 +564,10 @@ pub(super) fn runtime_table_record_from_entity_ref_projected(
     let row = entity.data.as_row()?;
 
     let mut record = UnifiedRecord::with_capacity(1 + columns.len());
-    record.set_arc(sys_key_red_entity_id(), Value::UnsignedInteger(entity.id.raw()));
+    record.set_arc(
+        sys_key_red_entity_id(),
+        Value::UnsignedInteger(entity.id.raw()),
+    );
 
     if let Some(ref named) = row.named {
         for col in columns {
@@ -626,7 +704,10 @@ pub(super) fn runtime_any_record_from_entity(entity: UnifiedEntity) -> Option<Un
     record.set_arc(sys_key_red_kind(), Value::Text(storage_type));
     record.set_arc(sys_key_created_at(), Value::UnsignedInteger(created_at));
     record.set_arc(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
-    record.set_arc(sys_key_red_sequence_id(), Value::UnsignedInteger(sequence_id));
+    record.set_arc(
+        sys_key_red_sequence_id(),
+        Value::UnsignedInteger(sequence_id),
+    );
     set_runtime_entity_metadata(&mut record, entity_type, capabilities);
     apply_runtime_identity_hints(&mut record, &identity_entity);
 
@@ -724,7 +805,10 @@ pub(super) fn runtime_any_record_from_entity_ref(entity: &UnifiedEntity) -> Opti
     record.set_arc(sys_key_red_kind(), Value::Text(storage_type));
     record.set_arc(sys_key_created_at(), Value::UnsignedInteger(created_at));
     record.set_arc(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
-    record.set_arc(sys_key_red_sequence_id(), Value::UnsignedInteger(sequence_id));
+    record.set_arc(
+        sys_key_red_sequence_id(),
+        Value::UnsignedInteger(sequence_id),
+    );
     set_runtime_entity_metadata(&mut record, entity_type, capabilities);
     apply_runtime_identity_hints(&mut record, entity);
 
@@ -761,7 +845,10 @@ pub(super) fn set_runtime_entity_metadata(
     capabilities: BTreeSet<String>,
 ) {
     let capabilities_text = capabilities.into_iter().collect::<Vec<_>>().join(",");
-    record.set_arc(sys_key_red_entity_type(), Value::Text(entity_type.to_string()));
+    record.set_arc(
+        sys_key_red_entity_type(),
+        Value::Text(entity_type.to_string()),
+    );
     record.set_arc(sys_key_red_capabilities(), Value::Text(capabilities_text));
 }
 
@@ -1149,8 +1236,14 @@ pub(super) fn runtime_vector_record_from_match(item: SimilarResult) -> UnifiedRe
         "red_kind",
         Value::Text(item.entity.kind.storage_type().to_string()),
     );
-    record.set_arc(sys_key_created_at(), Value::UnsignedInteger(item.entity.created_at));
-    record.set_arc(sys_key_updated_at(), Value::UnsignedInteger(item.entity.updated_at));
+    record.set_arc(
+        sys_key_created_at(),
+        Value::UnsignedInteger(item.entity.created_at),
+    );
+    record.set_arc(
+        sys_key_updated_at(),
+        Value::UnsignedInteger(item.entity.updated_at),
+    );
     record.set(
         "red_sequence_id",
         Value::UnsignedInteger(item.entity.sequence_id),
@@ -1581,9 +1674,10 @@ pub(super) fn merge_hybrid_records(
             let key_str: &str = key;
             if let Some(existing) = merged.values.get(key_str) {
                 if existing != value {
-                    merged
-                        .values
-                        .insert(std::sync::Arc::from(format!("vector.{key_str}")), value.clone());
+                    merged.values.insert(
+                        std::sync::Arc::from(format!("vector.{key_str}")),
+                        value.clone(),
+                    );
                 }
             } else {
                 merged.values.insert(key.clone(), value.clone());
@@ -1637,9 +1731,10 @@ pub(super) fn merge_join_records(
             let key_str: &str = key;
             if merged.values.contains_key(key_str) {
                 if let Some(prefix) = right_prefix {
-                    merged
-                        .values
-                        .insert(std::sync::Arc::from(format!("{prefix}.{key_str}")), value.clone());
+                    merged.values.insert(
+                        std::sync::Arc::from(format!("{prefix}.{key_str}")),
+                        value.clone(),
+                    );
                 }
             } else {
                 merged.values.insert(key.clone(), value.clone());

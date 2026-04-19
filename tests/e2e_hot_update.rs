@@ -12,8 +12,7 @@
 use reddb::{RedDBOptions, RedDBRuntime};
 
 fn open_runtime() -> RedDBRuntime {
-    RedDBRuntime::with_options(RedDBOptions::in_memory())
-        .expect("runtime should open in-memory")
+    RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime should open in-memory")
 }
 
 fn exec(rt: &RedDBRuntime, sql: &str) {
@@ -63,7 +62,10 @@ fn update_indexed_column_still_consistent() {
     let rt = open_runtime();
     exec(&rt, "CREATE TABLE users (id INT, email TEXT)");
     exec(&rt, "CREATE INDEX idx_email ON users (email) USING HASH");
-    exec(&rt, "INSERT INTO users (id, email) VALUES (1, 'a@x'), (2, 'b@x')");
+    exec(
+        &rt,
+        "INSERT INTO users (id, email) VALUES (1, 'a@x'), (2, 'b@x')",
+    );
 
     // Update `email` (indexed). HOT denied, fallback rebuilds index.
     exec(&rt, "UPDATE users SET email = 'NEW@x' WHERE id = 1");

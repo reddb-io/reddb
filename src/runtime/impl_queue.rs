@@ -215,7 +215,9 @@ impl RedDBRuntime {
                     )));
                 }
                 if let Some(max_size) = config.max_size {
-                    let current_len = load_queue_message_views_with_runtime(Some(self), store.as_ref(), queue)?.len();
+                    let current_len =
+                        load_queue_message_views_with_runtime(Some(self), store.as_ref(), queue)?
+                            .len();
                     if current_len >= max_size {
                         return Err(RedDBError::Query(format!(
                             "queue '{}' is full (max_size={max_size})",
@@ -290,10 +292,11 @@ impl RedDBRuntime {
                     .into_iter()
                     .map(|entry| entry.message_id)
                     .collect::<HashSet<_>>();
-                let mut messages = load_queue_message_views_with_runtime(Some(self), store.as_ref(), queue)?
-                    .into_iter()
-                    .filter(|message| !pending_ids.contains(&message.id))
-                    .collect::<Vec<_>>();
+                let mut messages =
+                    load_queue_message_views_with_runtime(Some(self), store.as_ref(), queue)?
+                        .into_iter()
+                        .filter(|message| !pending_ids.contains(&message.id))
+                        .collect::<Vec<_>>();
                 sort_queue_messages(&mut messages, &config, *side);
 
                 let mut result =
@@ -346,10 +349,11 @@ impl RedDBRuntime {
                     .into_iter()
                     .map(|entry| entry.message_id)
                     .collect::<HashSet<_>>();
-                let mut messages = load_queue_message_views_with_runtime(Some(self), store.as_ref(), queue)?
-                    .into_iter()
-                    .filter(|message| !pending_ids.contains(&message.id))
-                    .collect::<Vec<_>>();
+                let mut messages =
+                    load_queue_message_views_with_runtime(Some(self), store.as_ref(), queue)?
+                        .into_iter()
+                        .filter(|message| !pending_ids.contains(&message.id))
+                        .collect::<Vec<_>>();
                 sort_queue_messages(&mut messages, &config, QueueSide::Left);
 
                 let mut result =
@@ -374,7 +378,9 @@ impl RedDBRuntime {
             QueueCommand::Len { queue } => {
                 let store = self.inner.db.store();
                 ensure_queue_exists(store.as_ref(), queue)?;
-                let count = load_queue_message_views_with_runtime(Some(self), store.as_ref(), queue)?.len() as u64;
+                let count =
+                    load_queue_message_views_with_runtime(Some(self), store.as_ref(), queue)?.len()
+                        as u64;
                 let mut result = UnifiedResult::with_columns(vec!["len".into()]);
                 let mut record = UnifiedRecord::new();
                 record.set("len", Value::UnsignedInteger(count));
@@ -393,7 +399,8 @@ impl RedDBRuntime {
             QueueCommand::Purge { queue } => {
                 let store = self.inner.db.store();
                 ensure_queue_exists(store.as_ref(), queue)?;
-                let messages = load_queue_message_views_with_runtime(Some(self), store.as_ref(), queue)?;
+                let messages =
+                    load_queue_message_views_with_runtime(Some(self), store.as_ref(), queue)?;
                 let count = messages.len();
                 for message in messages {
                     let message_lock = queue_message_lock_handle(self, queue, message.id);
@@ -451,12 +458,13 @@ impl RedDBRuntime {
                     .into_iter()
                     .map(|entry| entry.message_id)
                     .collect::<HashSet<_>>();
-                let mut messages = load_queue_message_views_with_runtime(Some(self), store.as_ref(), queue)?
-                    .into_iter()
-                    .filter(|message| {
-                        !pending_ids.contains(&message.id) && !acked_ids.contains(&message.id)
-                    })
-                    .collect::<Vec<_>>();
+                let mut messages =
+                    load_queue_message_views_with_runtime(Some(self), store.as_ref(), queue)?
+                        .into_iter()
+                        .filter(|message| {
+                            !pending_ids.contains(&message.id) && !acked_ids.contains(&message.id)
+                        })
+                        .collect::<Vec<_>>();
                 sort_queue_messages(&mut messages, &config, QueueSide::Left);
 
                 let mut result = UnifiedResult::with_columns(vec![
@@ -1104,9 +1112,7 @@ fn load_queue_message_views_with_runtime(
             crate::storage::query::ast::PolicyTargetKind::Messages,
         )
     });
-    let rls_enabled_but_denied = runtime
-        .map(|rt| rt.is_rls_enabled(queue))
-        .unwrap_or(false)
+    let rls_enabled_but_denied = runtime.map(|rt| rt.is_rls_enabled(queue)).unwrap_or(false)
         && rls_filter.is_none()
         && runtime.is_some();
     if rls_enabled_but_denied {
@@ -1120,8 +1126,7 @@ fn load_queue_message_views_with_runtime(
             if !matches!(entity.kind, EntityKind::QueueMessage { .. }) {
                 return false;
             }
-            if !crate::runtime::impl_core::entity_visible_with_context(snap_ctx.as_ref(), entity)
-            {
+            if !crate::runtime::impl_core::entity_visible_with_context(snap_ctx.as_ref(), entity) {
                 return false;
             }
             if let (Some(filter), Some(rt)) = (filter_arc.as_ref(), rt_arc) {
@@ -1309,11 +1314,8 @@ fn delete_message_with_state(
                     if entity.xmax == 0 {
                         entity.set_xmax(xid);
                         if manager.update(entity).is_ok() {
-                            let conn_id =
-                                crate::runtime::impl_core::current_connection_id();
-                            runtime.record_pending_tombstone(
-                                conn_id, queue, message_id, xid,
-                            );
+                            let conn_id = crate::runtime::impl_core::current_connection_id();
+                            runtime.record_pending_tombstone(conn_id, queue, message_id, xid);
                             // Meta-row cleanup + lock release happen at
                             // COMMIT via the tombstone drain pipeline;
                             // here we only mark the message invisible.

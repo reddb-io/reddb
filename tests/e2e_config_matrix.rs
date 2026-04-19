@@ -7,8 +7,7 @@
 use reddb::{RedDBOptions, RedDBRuntime};
 
 fn open_runtime() -> RedDBRuntime {
-    RedDBRuntime::with_options(RedDBOptions::in_memory())
-        .expect("runtime should open in-memory")
+    RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime should open in-memory")
 }
 
 fn show_value(rt: &RedDBRuntime, key: &str) -> Option<String> {
@@ -136,13 +135,19 @@ fn config_file_overlay_seeds_missing_keys() {
 
     // Tier A key — healer got there first, file did NOT overwrite.
     let show_mode = show_value(&rt, "durability.mode").unwrap();
-    assert!(show_mode.contains("sync"), "expected matrix default: {show_mode}");
+    assert!(
+        show_mode.contains("sync"),
+        "expected matrix default: {show_mode}"
+    );
 
     // Tier B key — matrix did NOT self-heal it, so the file overlay's
     // value landed in red_config and is visible via SHOW CONFIG.
     let show_rows = show_value(&rt, "storage.bulk_insert.max_buffered_rows");
     assert!(
-        show_rows.as_deref().map(|s| s.contains("42")).unwrap_or(false),
+        show_rows
+            .as_deref()
+            .map(|s| s.contains("42"))
+            .unwrap_or(false),
         "file overlay should have seeded Tier B key: {show_rows:?}"
     );
 

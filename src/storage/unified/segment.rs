@@ -1493,19 +1493,16 @@ impl UnifiedSegment for GrowingSegment {
         } else {
             Box::new(std::iter::empty())
         };
-        Box::new(
-            flat.chain(self.entities.values())
-                .filter(move |e| {
-                    if self.deleted.contains(&e.id) {
-                        return false;
-                    }
-                    if let Some(ref ids) = ids {
-                        ids.contains(&e.id)
-                    } else {
-                        false
-                    }
-                }),
-        )
+        Box::new(flat.chain(self.entities.values()).filter(move |e| {
+            if self.deleted.contains(&e.id) {
+                return false;
+            }
+            if let Some(ref ids) = ids {
+                ids.contains(&e.id)
+            } else {
+                false
+            }
+        }))
     }
 
     fn filter_metadata(

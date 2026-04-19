@@ -176,7 +176,8 @@ impl UnifiedRecord {
     /// `Arc<str>` without reallocating the bytes).
     #[inline]
     pub fn set_owned(&mut self, column: String, value: Value) {
-        self.values.insert(Arc::from(column.into_boxed_str()), value);
+        self.values
+            .insert(Arc::from(column.into_boxed_str()), value);
     }
 
     /// Set a column value using a pre-interned key. Zero allocation —

@@ -90,7 +90,8 @@ impl RedDB {
     /// so the cache is load-bearing for insert throughput.
     fn contract_cache_map(
         &self,
-    ) -> std::sync::Arc<std::collections::HashMap<String, crate::physical::CollectionContract>> {
+    ) -> std::sync::Arc<std::collections::HashMap<String, crate::physical::CollectionContract>>
+    {
         if let Ok(guard) = self.collection_contract_cache.read() {
             if let Some(map) = guard.as_ref() {
                 return std::sync::Arc::clone(map);

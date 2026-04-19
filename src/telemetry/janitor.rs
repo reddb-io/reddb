@@ -38,12 +38,11 @@ pub fn spawn(dir: PathBuf, file_prefix: String, keep_days: u16) {
 }
 
 fn cleanup_once(dir: &std::path::Path, file_prefix: &str, keep_days: u16) {
-    let cutoff = match SystemTime::now().checked_sub(Duration::from_secs(
-        u64::from(keep_days) * 86_400,
-    )) {
-        Some(t) => t,
-        None => return,
-    };
+    let cutoff =
+        match SystemTime::now().checked_sub(Duration::from_secs(u64::from(keep_days) * 86_400)) {
+            Some(t) => t,
+            None => return,
+        };
 
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,

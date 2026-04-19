@@ -255,8 +255,7 @@ impl Database {
             || !matches!(
                 std::env::var("REDDB_BGWRITER").ok().as_deref(),
                 Some("1") | Some("true") | Some("on")
-            )
-        {
+            ) {
             None
         } else {
             let flusher = std::sync::Arc::new(

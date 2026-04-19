@@ -120,8 +120,8 @@ pub struct TelemetryGuard {
 /// RedDB embedders that want to own the subscriber should simply not
 /// call this.
 pub fn init(cfg: TelemetryConfig) -> Option<TelemetryGuard> {
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(&cfg.level_filter));
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cfg.level_filter));
 
     // stderr — wrapped in `non_blocking` so the hot path never
     // blocks on `write(2)` syscalls. A dedicated thread owns the

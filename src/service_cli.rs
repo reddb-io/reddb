@@ -121,7 +121,9 @@ impl SystemdServiceConfig {
 /// caller didn't set one explicitly. Writes rotating logs into the
 /// parent directory of the DB file (or `./logs` for in-memory /
 /// pathless runs). Level defaults to `info`, pretty stderr format.
-pub fn default_telemetry_for_path(path: Option<&std::path::Path>) -> crate::telemetry::TelemetryConfig {
+pub fn default_telemetry_for_path(
+    path: Option<&std::path::Path>,
+) -> crate::telemetry::TelemetryConfig {
     let log_dir = match path {
         Some(p) => p
             .parent()
@@ -788,13 +790,21 @@ fn build_runtime_and_auth_store(
 pub(crate) fn build_runtime_with_telemetry(
     db_options: RedDBOptions,
     cli_telemetry: Option<crate::telemetry::TelemetryConfig>,
-) -> Result<(RedDBRuntime, Arc<AuthStore>, Option<crate::telemetry::TelemetryGuard>), String> {
+) -> Result<
+    (
+        RedDBRuntime,
+        Arc<AuthStore>,
+        Option<crate::telemetry::TelemetryGuard>,
+    ),
+    String,
+> {
     let runtime = RedDBRuntime::with_options(db_options.clone()).map_err(|err| err.to_string())?;
 
     // Phase 6 logging: merge red_config overrides onto the CLI-built
     // telemetry config, then install the global subscriber.
     let merged = merge_telemetry_with_config(
-        cli_telemetry.unwrap_or_else(|| default_telemetry_for_path(db_options.data_path.as_deref())),
+        cli_telemetry
+            .unwrap_or_else(|| default_telemetry_for_path(db_options.data_path.as_deref())),
         &runtime,
     );
     let telemetry_guard = crate::telemetry::init(merged);
@@ -953,7 +963,10 @@ mod telemetry_merge_tests {
         cli.log_dir = None;
         cli.log_file_disabled = true;
         let merged = merge_telemetry_with_config(cli, &runtime);
-        assert!(merged.log_dir.is_none(), "--no-log-file must veto config dir");
+        assert!(
+            merged.log_dir.is_none(),
+            "--no-log-file must veto config dir"
+        );
     }
 
     #[test]
@@ -1025,7 +1038,6 @@ fn run_grpc_server(config: ServerCommandConfig, bind_addr: String) -> Result<(),
     let (runtime, auth_store, _telemetry_guard) =
         build_runtime_and_auth_store(db_options, cli_telemetry)?;
     tokio_runtime.block_on(async move {
-
         // Start wire protocol listeners (plaintext + TLS)
         spawn_wire_listeners(&config, &runtime);
 

@@ -383,7 +383,9 @@ pub(crate) fn project_runtime_join_record_with_db(
     if select_all {
         for key in visible_value_keys(source) {
             if let Some(value) = source.values.get(key.as_str()) {
-                record.values.insert(std::sync::Arc::from(key), value.clone());
+                record
+                    .values
+                    .insert(std::sync::Arc::from(key), value.clone());
             }
         }
     }

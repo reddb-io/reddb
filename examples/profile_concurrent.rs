@@ -30,9 +30,8 @@ fn main() {
     // loop in wait_until_durable so we can see the writer throughput
     // without group-commit coordination.
     opts.durability_mode = reddb::api::DurabilityMode::Async;
-    let rt: &'static RedDBRuntime = Box::leak(Box::new(
-        RedDBRuntime::with_options(opts).expect("rt"),
-    ));
+    let rt: &'static RedDBRuntime =
+        Box::leak(Box::new(RedDBRuntime::with_options(opts).expect("rt")));
 
     // Ensure collection exists
     let uc_e = EntityUseCases::new(rt);

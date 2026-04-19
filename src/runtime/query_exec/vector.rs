@@ -100,10 +100,7 @@ pub(crate) fn runtime_vector_matches(
         let snap_ctx = crate::runtime::impl_core::capture_current_snapshot();
         if snap_ctx.is_some() {
             results.retain(|r| {
-                crate::runtime::impl_core::entity_visible_with_context(
-                    snap_ctx.as_ref(),
-                    &r.entity,
-                )
+                crate::runtime::impl_core::entity_visible_with_context(snap_ctx.as_ref(), &r.entity)
             });
         }
         results.sort_by(|a, b| {

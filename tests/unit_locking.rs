@@ -49,10 +49,12 @@ fn compatible_intent_locks_do_not_block() {
     let m = mgr();
     let mut a = LockerGuard::new(m.clone());
     let mut b = LockerGuard::new(m);
-    a.acquire(Resource::Global, LockMode::IntentExclusive).unwrap();
+    a.acquire(Resource::Global, LockMode::IntentExclusive)
+        .unwrap();
     // Different txn takes IX on the same resource — IX/IX compatible,
     // acquire must not block indefinitely.
-    b.acquire(Resource::Global, LockMode::IntentExclusive).unwrap();
+    b.acquire(Resource::Global, LockMode::IntentExclusive)
+        .unwrap();
 }
 
 #[test]

@@ -11,11 +11,10 @@ fn main() {
     let uc_e = EntityUseCases::new(&rt);
     let uc_q = QueryUseCases::new(&rt);
 
-    uc_q
-        .execute(ExecuteQueryInput {
-            query: "CREATE TABLE t (id INT, name TEXT)".into(),
-        })
-        .expect("create");
+    uc_q.execute(ExecuteQueryInput {
+        query: "CREATE TABLE t (id INT, name TEXT)".into(),
+    })
+    .expect("create");
 
     // Test A: 100-row batch
     let rows: Vec<_> = (0..100u64)
@@ -37,14 +36,17 @@ fn main() {
         })
         .expect("a");
     let found_a = r.iter().filter(|o| o.entity.is_some()).count();
-    println!("A: 100-row batch -> {} entities returned, {} have entity populated", r.len(), found_a);
+    println!(
+        "A: 100-row batch -> {} entities returned, {} have entity populated",
+        r.len(),
+        found_a
+    );
 
     // CREATE INDEX between A and B
-    uc_q
-        .execute(ExecuteQueryInput {
-            query: "CREATE INDEX idx_name ON t (name) USING HASH".into(),
-        })
-        .expect("idx");
+    uc_q.execute(ExecuteQueryInput {
+        query: "CREATE INDEX idx_name ON t (name) USING HASH".into(),
+    })
+    .expect("idx");
 
     // Test B: create_rows_batch with 1-row
     for i in 10..13u64 {

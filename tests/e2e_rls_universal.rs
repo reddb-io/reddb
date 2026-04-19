@@ -11,8 +11,7 @@ use reddb::runtime::mvcc::{
 use reddb::{RedDBOptions, RedDBRuntime};
 
 fn open_runtime() -> RedDBRuntime {
-    RedDBRuntime::with_options(RedDBOptions::in_memory())
-        .expect("runtime should open in-memory")
+    RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime should open in-memory")
 }
 
 fn exec(rt: &RedDBRuntime, sql: &str) {
@@ -43,9 +42,7 @@ fn policy_on_messages_of_queue_gates_consumers() {
 
     // Acme consumer: only sees the acme message.
     set_current_tenant("acme".to_string());
-    let len = rt
-        .execute_query("QUEUE LEN jobs")
-        .expect("QUEUE LEN acme");
+    let len = rt.execute_query("QUEUE LEN jobs").expect("QUEUE LEN acme");
     let len_value = len
         .result
         .records

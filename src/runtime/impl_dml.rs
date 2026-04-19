@@ -67,10 +67,7 @@ impl RedDBRuntime {
     /// * `Err(..)` — table is tenant-scoped but no tenant is bound to
     ///   the current session. Fails loudly so callers don't produce
     ///   rows that RLS would then hide on read.
-    fn maybe_inject_tenant_column(
-        &self,
-        query: &InsertQuery,
-    ) -> RedDBResult<Option<InsertQuery>> {
+    fn maybe_inject_tenant_column(&self, query: &InsertQuery) -> RedDBResult<Option<InsertQuery>> {
         let Some(tenant_col) = self.tenant_column(&query.table) else {
             return Ok(None);
         };
@@ -2160,19 +2157,16 @@ fn dotted_tail_already_set(value: &Value, tail: &str) -> bool {
 /// * `Value::Text(s)` if `s` is valid JSON → same as Json
 /// * anything else → error (user supplied a scalar where we need
 ///   a JSON container)
-fn merge_dotted_tenant(
-    current: Value,
-    tail: &str,
-    tenant_id: &str,
-) -> RedDBResult<Value> {
+fn merge_dotted_tenant(current: Value, tail: &str, tenant_id: &str) -> RedDBResult<Value> {
     let mut root = match current {
         Value::Null => crate::json::Value::Object(Default::default()),
-        Value::Json(bytes) | Value::Blob(bytes) => crate::json::from_slice(&bytes)
-            .map_err(|err| {
+        Value::Json(bytes) | Value::Blob(bytes) => {
+            crate::json::from_slice(&bytes).map_err(|err| {
                 RedDBError::Query(format!(
                     "tenant auto-fill: root column is not valid JSON ({err})"
                 ))
-            })?,
+            })?
+        }
         Value::Text(s) => {
             if s.trim().is_empty() {
                 crate::json::Value::Object(Default::default())

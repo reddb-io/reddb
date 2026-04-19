@@ -237,12 +237,14 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                     .get_collection(table_name)
                     .and_then(|m| m.column_schema());
                 Some(match schema_arc.as_ref() {
-                    Some(schema) => super::filter_compiled::CompiledEntityFilter::compile_with_schema(
-                        filter,
-                        table_name,
-                        table_alias,
-                        schema.as_ref(),
-                    ),
+                    Some(schema) => {
+                        super::filter_compiled::CompiledEntityFilter::compile_with_schema(
+                            filter,
+                            table_name,
+                            table_alias,
+                            schema.as_ref(),
+                        )
+                    }
                     None => super::filter_compiled::CompiledEntityFilter::compile(
                         filter,
                         table_name,

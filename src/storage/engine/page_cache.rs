@@ -622,8 +622,9 @@ impl PageCache {
         // totals (tests frequently do).
         let per_shard = capacity.div_ceil(NUM_SHARDS).max(MIN_CACHE_CAPACITY);
         let total = per_shard * NUM_SHARDS;
-        let shards: Vec<PageCacheShard> =
-            (0..NUM_SHARDS).map(|_| PageCacheShard::new(per_shard)).collect();
+        let shards: Vec<PageCacheShard> = (0..NUM_SHARDS)
+            .map(|_| PageCacheShard::new(per_shard))
+            .collect();
         Self {
             shards: shards.into_boxed_slice(),
             capacity: total,

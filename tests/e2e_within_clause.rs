@@ -4,8 +4,7 @@
 use reddb::{RedDBOptions, RedDBRuntime};
 
 fn open_runtime() -> RedDBRuntime {
-    RedDBRuntime::with_options(RedDBOptions::in_memory())
-        .expect("runtime should open in-memory")
+    RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime should open in-memory")
 }
 
 fn exec(rt: &RedDBRuntime, sql: &str) {
@@ -44,8 +43,14 @@ fn within_tenant_auto_fills_insert() {
          TENANT BY (tenant_id)",
     );
 
-    exec(&rt, "WITHIN TENANT 'acme' INSERT INTO jobs (id, name) VALUES (1, 'a')");
-    exec(&rt, "WITHIN TENANT 'globex' INSERT INTO jobs (id, name) VALUES (2, 'b')");
+    exec(
+        &rt,
+        "WITHIN TENANT 'acme' INSERT INTO jobs (id, name) VALUES (1, 'a')",
+    );
+    exec(
+        &rt,
+        "WITHIN TENANT 'globex' INSERT INTO jobs (id, name) VALUES (2, 'b')",
+    );
 
     assert_eq!(rows(&rt, "WITHIN TENANT 'acme' SELECT * FROM jobs"), 1);
     assert_eq!(rows(&rt, "WITHIN TENANT 'globex' SELECT * FROM jobs"), 1);
@@ -88,10 +93,7 @@ fn within_overrides_set_tenant_for_one_call() {
     assert_eq!(rows(&rt, "SELECT * FROM t"), 1);
 
     // WITHIN overrides for this one call only…
-    assert_eq!(
-        rows(&rt, "WITHIN TENANT 'globex' SELECT * FROM t"),
-        1
-    );
+    assert_eq!(rows(&rt, "WITHIN TENANT 'globex' SELECT * FROM t"), 1);
     let r = rt
         .execute_query("WITHIN TENANT 'globex' SELECT id FROM t")
         .unwrap();
@@ -205,14 +207,14 @@ fn within_works_through_view() {
         "INSERT INTO leads (id, score, tenant_id) VALUES \
          (1, 10, 'acme'), (2, 90, 'acme'), (3, 50, 'globex')",
     );
-    exec(&rt, "CREATE VIEW hot_leads AS SELECT * FROM leads WHERE score > 20");
+    exec(
+        &rt,
+        "CREATE VIEW hot_leads AS SELECT * FROM leads WHERE score > 20",
+    );
 
     // View body is tenant-aware via RLS — WITHIN scopes both the view's
     // underlying scan and any outer predicates.
-    assert_eq!(
-        rows(&rt, "WITHIN TENANT 'acme' SELECT * FROM hot_leads"),
-        1
-    );
+    assert_eq!(rows(&rt, "WITHIN TENANT 'acme' SELECT * FROM hot_leads"), 1);
     assert_eq!(
         rows(&rt, "WITHIN TENANT 'globex' SELECT * FROM hot_leads"),
         1
@@ -249,7 +251,10 @@ fn within_does_not_elevate_actual_role() {
     // projection only affects RLS predicate eval — it cannot grant
     // DDL or vault privileges, which check the real identity instead.
     assert_eq!(
-        rows(&rt, "WITHIN TENANT 'acme' AS ROLE 'admin' SELECT * FROM secrets"),
+        rows(
+            &rt,
+            "WITHIN TENANT 'acme' AS ROLE 'admin' SELECT * FROM secrets"
+        ),
         1
     );
 }
@@ -267,14 +272,8 @@ fn within_inside_transaction() {
     set_current_connection_id(900);
 
     exec(&rt, "BEGIN");
-    exec(
-        &rt,
-        "WITHIN TENANT 'acme' INSERT INTO t (id) VALUES (1)",
-    );
-    exec(
-        &rt,
-        "WITHIN TENANT 'acme' INSERT INTO t (id) VALUES (2)",
-    );
+    exec(&rt, "WITHIN TENANT 'acme' INSERT INTO t (id) VALUES (1)");
+    exec(&rt, "WITHIN TENANT 'acme' INSERT INTO t (id) VALUES (2)");
     exec(&rt, "COMMIT");
 
     // Both rows visible under acme; none leaked to globex.
@@ -469,9 +468,7 @@ fn user_id_column_filter_works() {
     assert!(format!("{:?}", r.result.records).contains("Integer(10)"));
 
     exec(&rt, "UPDATE t SET val = 99 WHERE id = 1");
-    let r = rt
-        .execute_query("SELECT val FROM t WHERE id = 1")
-        .unwrap();
+    let r = rt.execute_query("SELECT val FROM t WHERE id = 1").unwrap();
     assert!(format!("{:?}", r.result.records).contains("Integer(99)"));
 }
 
@@ -481,9 +478,7 @@ fn within_malformed_returns_error() {
     exec(&rt, "CREATE TABLE t (id INT, tenant_id TEXT)");
 
     // Missing TENANT clause.
-    assert!(rt
-        .execute_query("WITHIN USER 'x' SELECT * FROM t")
-        .is_err());
+    assert!(rt.execute_query("WITHIN USER 'x' SELECT * FROM t").is_err());
 
     // No inner statement.
     assert!(rt.execute_query("WITHIN TENANT 'acme'").is_err());

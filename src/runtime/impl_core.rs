@@ -243,8 +243,7 @@ pub(crate) fn pop_scope_override() {
     });
 }
 
-pub(crate) fn current_scope_override(
-) -> Option<crate::runtime::within_clause::ScopeOverride> {
+pub(crate) fn current_scope_override() -> Option<crate::runtime::within_clause::ScopeOverride> {
     SCOPE_OVERRIDES.with(|cell| cell.borrow().last().cloned())
 }
 
@@ -627,8 +626,7 @@ pub(crate) fn rls_policy_filter_for_kind(
     }
     let role = current_auth_identity().map(|(_, role)| role);
     let role_str = role.map(|r| r.as_str().to_string());
-    let policies =
-        runtime.matching_rls_policies_for_kind(table, role_str.as_deref(), action, kind);
+    let policies = runtime.matching_rls_policies_for_kind(table, role_str.as_deref(), action, kind);
     if policies.is_empty() {
         return None;
     }
@@ -1404,10 +1402,8 @@ impl RedDBRuntime {
             // write-if-absent semantics so a later user `SET CONFIG`
             // always wins. Missing file = silent no-op.
             let overlay_path = crate::runtime::config_overlay::config_file_path();
-            let _ = crate::runtime::config_overlay::apply_config_file(
-                store.as_ref(),
-                &overlay_path,
-            );
+            let _ =
+                crate::runtime::config_overlay::apply_config_file(store.as_ref(), &overlay_path);
         }
 
         // Start background maintenance thread (context index refresh +
@@ -2666,9 +2662,8 @@ impl RedDBRuntime {
         // disabled via env / SET CONFIG without reverting.
         let _lock_guard = if self.config_bool("concurrency.locking.enabled", true) {
             intent_lock_modes_for(&expr).map(|(global_mode, coll_mode)| {
-                let mut g = crate::runtime::locking::LockerGuard::new(
-                    self.inner.lock_manager.clone(),
-                );
+                let mut g =
+                    crate::runtime::locking::LockerGuard::new(self.inner.lock_manager.clone());
                 // Non-fatal on failure: a misbehaving lock manager
                 // shouldn't wedge queries. Errors surface via tracing.
                 let _ = g.acquire(crate::runtime::locking::Resource::Global, global_mode);
@@ -2693,8 +2688,7 @@ impl RedDBRuntime {
                 // admit it. Edges are pruned automatically because the
                 // graph builder skips edges whose endpoints aren't in
                 // `allowed_nodes`.
-                let (graph, node_properties) =
-                    self.materialize_graph_with_rls()?;
+                let (graph, node_properties) = self.materialize_graph_with_rls()?;
                 let result =
                     crate::storage::query::unified::UnifiedExecutor::execute_on_with_node_properties(
                         &graph,
@@ -2964,14 +2958,11 @@ impl RedDBRuntime {
                 ))
             }
             QueryExpr::ShowTenant => {
-                let mut result =
-                    UnifiedResult::with_columns(vec!["tenant".into()]);
+                let mut result = UnifiedResult::with_columns(vec!["tenant".into()]);
                 let mut record = UnifiedRecord::new();
                 record.set(
                     "tenant",
-                    current_tenant()
-                        .map(Value::Text)
-                        .unwrap_or(Value::Null),
+                    current_tenant().map(Value::Text).unwrap_or(Value::Null),
                 );
                 result.push(record);
                 Ok(RuntimeQueryResult {
@@ -3811,10 +3802,9 @@ impl RedDBRuntime {
                     QueryExpr::Table(mut inner_tq) => {
                         if let Some(outer_filter) = tq.filter.take() {
                             inner_tq.filter = Some(match inner_tq.filter.take() {
-                                Some(existing) => Filter::And(
-                                    Box::new(existing),
-                                    Box::new(outer_filter),
-                                ),
+                                Some(existing) => {
+                                    Filter::And(Box::new(existing), Box::new(outer_filter))
+                                }
                                 None => outer_filter,
                             });
                         }
@@ -4177,7 +4167,10 @@ impl RedDBRuntime {
             return;
         };
         let entities = manager.query_all(|_| true);
-        let entity_fields: Vec<(crate::storage::unified::EntityId, Vec<(String, crate::storage::schema::Value)>)> = entities
+        let entity_fields: Vec<(
+            crate::storage::unified::EntityId,
+            Vec<(String, crate::storage::schema::Value)>,
+        )> = entities
             .iter()
             .map(|e| {
                 let fields = match &e.data {
@@ -4365,7 +4358,10 @@ impl RedDBRuntime {
         &self,
     ) -> RedDBResult<(
         crate::storage::engine::GraphStore,
-        std::collections::HashMap<String, std::collections::HashMap<String, crate::storage::schema::Value>>,
+        std::collections::HashMap<
+            String,
+            std::collections::HashMap<String, crate::storage::schema::Value>,
+        >,
     )> {
         use crate::storage::engine::GraphStore;
         use crate::storage::query::ast::{PolicyAction, PolicyTargetKind};
@@ -4404,18 +4400,16 @@ impl RedDBRuntime {
                 let EntityKind::GraphNode(ref node) = entity.kind else {
                     continue;
                 };
-                if !node_passes_rls(
-                    self,
-                    collection,
-                    role.as_deref(),
-                    &mut node_rls,
-                    &entity,
-                ) {
+                if !node_passes_rls(self, collection, role.as_deref(), &mut node_rls, &entity) {
                     continue;
                 }
                 let id_str = entity.id.raw().to_string();
                 graph
-                    .add_node(&id_str, &node.label, super::graph_node_type(&node.node_type))
+                    .add_node(
+                        &id_str,
+                        &node.label,
+                        super::graph_node_type(&node.node_type),
+                    )
                     .map_err(|err| RedDBError::Query(err.to_string()))?;
                 allowed_nodes.insert(id_str.clone());
                 if let EntityData::Node(node_data) = &entity.data {
@@ -4444,13 +4438,7 @@ impl RedDBRuntime {
                 {
                     continue;
                 }
-                if !edge_passes_rls(
-                    self,
-                    collection,
-                    role.as_deref(),
-                    &mut edge_rls,
-                    &entity,
-                ) {
+                if !edge_passes_rls(self, collection, role.as_deref(), &mut edge_rls, &entity) {
                     continue;
                 }
                 let weight = match &entity.data {
@@ -4597,12 +4585,7 @@ impl RedDBRuntime {
         &self,
     ) -> std::collections::HashSet<crate::storage::transaction::snapshot::Xid> {
         let mut set = std::collections::HashSet::new();
-        if let Some(ctx) = self
-            .inner
-            .tx_contexts
-            .read()
-            .get(&current_connection_id())
-        {
+        if let Some(ctx) = self.inner.tx_contexts.read().get(&current_connection_id()) {
             set.insert(ctx.xid);
             for (_, sub) in &ctx.savepoints {
                 set.insert(*sub);
@@ -4725,11 +4708,7 @@ impl RedDBRuntime {
         // dirty. With single-row UPDATEs in a loop this used to
         // grab the planner_dirty_tables write lock N times even
         // though the first call already flipped the flag.
-        let already_dirty = self
-            .inner
-            .planner_dirty_tables
-            .read()
-            .contains(table);
+        let already_dirty = self.inner.planner_dirty_tables.read().contains(table);
         if !already_dirty {
             self.inner
                 .planner_dirty_tables

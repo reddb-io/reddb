@@ -8,8 +8,7 @@
 use reddb::{RedDBOptions, RedDBRuntime};
 
 fn open_runtime() -> RedDBRuntime {
-    RedDBRuntime::with_options(RedDBOptions::in_memory())
-        .expect("runtime should open in-memory")
+    RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime should open in-memory")
 }
 
 fn exec(rt: &RedDBRuntime, sql: &str) {
@@ -57,7 +56,10 @@ fn create_table_without_tenant_by_does_not_create_index() {
 #[test]
 fn alter_enable_tenancy_creates_index_over_existing_data() {
     let rt = open_runtime();
-    exec(&rt, "CREATE TABLE invoices (id INT, total DECIMAL, org TEXT)");
+    exec(
+        &rt,
+        "CREATE TABLE invoices (id INT, total DECIMAL, org TEXT)",
+    );
     exec(
         &rt,
         "INSERT INTO invoices (id, total, org) VALUES (1, 100, 'acme'), (2, 200, 'globex')",

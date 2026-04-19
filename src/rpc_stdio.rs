@@ -505,8 +505,7 @@ fn dispatch_method(
                 .records
                 .first()
                 .map(|first| {
-                    let mut keys: Vec<&str> =
-                        first.values.keys().map(|k| k.as_ref()).collect();
+                    let mut keys: Vec<&str> = first.values.keys().map(|k| k.as_ref()).collect();
                     keys.sort();
                     keys.into_iter().map(|k| k.to_string()).collect()
                 })
@@ -1047,11 +1046,8 @@ fn insert_result_to_json(qr: &RuntimeQueryResult) -> Value {
 
 fn record_to_json_object(record: &UnifiedRecord) -> Value {
     let mut map = json::Map::new();
-    let mut entries: Vec<(&str, &SchemaValue)> = record
-        .values
-        .iter()
-        .map(|(k, v)| (k.as_ref(), v))
-        .collect();
+    let mut entries: Vec<(&str, &SchemaValue)> =
+        record.values.iter().map(|(k, v)| (k.as_ref(), v)).collect();
     entries.sort_by(|a, b| a.0.cmp(b.0));
     for (k, v) in entries {
         map.insert(k.to_string(), schema_value_to_json(v));

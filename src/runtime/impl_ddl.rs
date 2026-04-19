@@ -574,7 +574,8 @@ fn collection_contract_from_create_table(
         declared_columns,
         table_def: Some(build_table_def_from_create_table(query)?),
         timestamps_enabled: query.timestamps,
-        context_index_enabled: query.context_index_enabled || !query.context_index_fields.is_empty(),
+        context_index_enabled: query.context_index_enabled
+            || !query.context_index_fields.is_empty(),
     })
 }
 

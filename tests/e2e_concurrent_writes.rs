@@ -15,8 +15,7 @@ use std::thread;
 use reddb::{RedDBOptions, RedDBRuntime};
 
 fn open_runtime() -> RedDBRuntime {
-    RedDBRuntime::with_options(RedDBOptions::in_memory())
-        .expect("runtime should open in-memory")
+    RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("runtime should open in-memory")
 }
 
 fn exec(rt: &RedDBRuntime, sql: &str) {
@@ -96,9 +95,7 @@ fn twenty_threads_five_collections_do_not_deadlock() {
 
     // Sanity: every collection got rows from multiple threads.
     for c in 0..5 {
-        let r = rt
-            .execute_query(&format!("SELECT * FROM c{c}"))
-            .unwrap();
+        let r = rt.execute_query(&format!("SELECT * FROM c{c}")).unwrap();
         assert!(r.result.records.len() > 0, "c{c} empty");
     }
 }

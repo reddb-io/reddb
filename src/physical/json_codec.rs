@@ -1320,10 +1320,7 @@ mod tests {
             "context_index_fields".to_string(),
             JsonValue::Array(Vec::new()),
         );
-        obj.insert(
-            "declared_columns".to_string(),
-            JsonValue::Array(Vec::new()),
-        );
+        obj.insert("declared_columns".to_string(), JsonValue::Array(Vec::new()));
         obj.insert("timestamps_enabled".to_string(), JsonValue::Bool(false));
         if let Some(v) = with_ctx_enabled {
             obj.insert("context_index_enabled".to_string(), JsonValue::Bool(v));

@@ -187,9 +187,7 @@ impl SqlStatement {
             SqlStatement::Admin(SqlAdminCommand::ShowConfig { prefix }) => {
                 SqlCommand::ShowConfig { prefix }
             }
-            SqlStatement::Admin(SqlAdminCommand::SetTenant(value)) => {
-                SqlCommand::SetTenant(value)
-            }
+            SqlStatement::Admin(SqlAdminCommand::SetTenant(value)) => SqlCommand::SetTenant(value),
             SqlStatement::Admin(SqlAdminCommand::ShowTenant) => SqlCommand::ShowTenant,
             SqlStatement::Admin(SqlAdminCommand::TransactionControl(ctl)) => {
                 SqlCommand::TransactionControl(ctl)
@@ -1105,9 +1103,7 @@ impl<'a> Parser<'a> {
                             Value::Text(s) => Ok(SqlCommand::SetTenant(Some(s))),
                             Value::Null => Ok(SqlCommand::SetTenant(None)),
                             other => Err(ParseError::new(
-                                format!(
-                                    "SET TENANT expects a text literal or NULL, got {other:?}"
-                                ),
+                                format!("SET TENANT expects a text literal or NULL, got {other:?}"),
                                 self.position(),
                             )),
                         }

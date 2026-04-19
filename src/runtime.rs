@@ -767,12 +767,12 @@ mod index_store;
 mod join_filter;
 pub mod locking;
 pub(crate) mod mutation;
-pub mod within_clause;
 mod probabilistic_store;
 pub(crate) mod query_exec;
 mod record_search;
 pub mod schema_diff;
 pub mod snapshot_reuse;
+pub mod within_clause;
 
 pub use self::graph_dsl::*;
 use self::join_filter::*;
