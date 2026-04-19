@@ -105,6 +105,48 @@ pub(super) fn is_universal_entity_source(table: &str) -> bool {
 ///
 /// Used when the caller already knows the collection name and doesn't need
 /// the full metadata in the result (e.g. SELECT * range/filtered scans).
+/// Borrow-based variant of `runtime_table_record_lean` — used by scan
+/// hot paths (via `SegmentManager::for_each_id`) that can't afford the
+/// full `UnifiedEntity::clone`. Copies only the field values that land
+/// in the output record.
+#[inline]
+pub(super) fn runtime_table_record_lean_ref(entity: &UnifiedEntity) -> Option<UnifiedRecord> {
+    let created_at = entity.created_at;
+    let updated_at = entity.updated_at;
+    let row = match &entity.data {
+        EntityData::Row(row) => row,
+        _ => return None,
+    };
+    if let Some(named) = &row.named {
+        let mut record = UnifiedRecord::with_capacity(3 + named.len());
+        record.set("red_entity_id", Value::UnsignedInteger(entity.id.raw()));
+        record.set("created_at", Value::UnsignedInteger(created_at));
+        record.set("updated_at", Value::UnsignedInteger(updated_at));
+        for (key, value) in named.iter() {
+            record.set(key, value.clone());
+        }
+        Some(record)
+    } else if let Some(schema) = &row.schema {
+        let mut record = UnifiedRecord::with_capacity(3 + schema.len());
+        record.set("red_entity_id", Value::UnsignedInteger(entity.id.raw()));
+        record.set("created_at", Value::UnsignedInteger(created_at));
+        record.set("updated_at", Value::UnsignedInteger(updated_at));
+        for (name, value) in schema.iter().zip(row.columns.iter()) {
+            record.set(name, value.clone());
+        }
+        Some(record)
+    } else {
+        let mut record = UnifiedRecord::with_capacity(3 + row.columns.len());
+        record.set("red_entity_id", Value::UnsignedInteger(entity.id.raw()));
+        record.set("created_at", Value::UnsignedInteger(created_at));
+        record.set("updated_at", Value::UnsignedInteger(updated_at));
+        for (i, value) in row.columns.iter().enumerate() {
+            record.set(&format!("c{i}"), value.clone());
+        }
+        Some(record)
+    }
+}
+
 #[inline]
 pub(super) fn runtime_table_record_lean(entity: UnifiedEntity) -> Option<UnifiedRecord> {
     let created_at = entity.created_at;

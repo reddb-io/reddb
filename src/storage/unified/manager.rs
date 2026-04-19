@@ -439,6 +439,61 @@ impl SegmentManager {
         out
     }
 
+    /// Visitor-pattern batch fetch. Invokes `f(&UnifiedEntity, usize_index)`
+    /// for each id that resolves, never cloning the entity.
+    ///
+    /// Used by scan hot paths (select_range, select_filtered) that
+    /// materialize each entity into an output record and don't need
+    /// an owned `UnifiedEntity`. Eliminates ~20% of scan CPU spent in
+    /// `UnifiedEntity::clone` when `get_batch` is followed by
+    /// `runtime_table_record_lean(entity)`.
+    ///
+    /// The closure runs while the segment read lock is held, so it
+    /// must be short — avoid doing I/O or taking unrelated locks in
+    /// `f`.
+    pub fn for_each_id<F>(&self, ids: &[EntityId], mut f: F)
+    where
+        F: FnMut(usize, &UnifiedEntity),
+    {
+        let mut remaining: Vec<usize> = (0..ids.len()).collect();
+
+        if let Some(growing_arc) = self.growing.read().as_ref() {
+            let growing = if let Some(g) = growing_arc.try_read() {
+                g
+            } else {
+                growing_arc.read()
+            };
+            remaining.retain(|&i| {
+                if let Some(entity) = growing.get(ids[i]) {
+                    f(i, entity);
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+
+        if remaining.is_empty() {
+            return;
+        }
+
+        let sealed = self.sealed.read();
+        for segment in sealed.iter() {
+            if remaining.is_empty() {
+                break;
+            }
+            let seg = segment.read();
+            remaining.retain(|&i| {
+                if let Some(entity) = seg.get(ids[i]) {
+                    f(i, entity);
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+    }
+
     /// Scan all segments for an entity
     fn scan_for_entity(&self, id: EntityId) -> Option<UnifiedEntity> {
         // Check growing
