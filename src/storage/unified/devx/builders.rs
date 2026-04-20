@@ -651,7 +651,7 @@ impl KvBuilder {
             metadata,
         } = self;
 
-        let columns = vec![("key", Value::Text(key)), ("value", value)];
+        let columns = vec![("key", Value::text(key)), ("value", value)];
         let mut builder = RowBuilder::new(store, preprocessors, &collection, columns);
         for (k, v) in metadata {
             builder = builder.metadata(k, v);
@@ -799,7 +799,7 @@ fn json_value_to_storage_value(value: &JsonValue) -> Value {
                 Value::Float(*n)
             }
         }
-        JsonValue::String(s) => Value::Text(s.clone()),
+        JsonValue::String(s) => Value::text(s.clone()),
         JsonValue::Array(_) | JsonValue::Object(_) => match json_to_vec(value) {
             Ok(bytes) => Value::Json(bytes),
             Err(_) => Value::Null,

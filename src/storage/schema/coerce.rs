@@ -55,7 +55,7 @@ pub fn coerce_via_catalog(
     }
 
     // No catalog entry. Try legacy `coerce()` for backwards compat.
-    // Any `Value::Text(_)` succeeds via the legacy text parsers; other
+    // Any `Value::text(_)` succeeds via the legacy text parsers; other
     // shapes go through display_string + parse round-trip.
     coerce(&value.display_string(), target, enum_variants)
 }
@@ -90,7 +90,7 @@ pub fn coerce(
             .map(Value::Float)
             .map_err(|e| e.to_string()),
         DataType::Boolean => parse_boolean(input),
-        DataType::Text => Ok(Value::Text(input.to_string())),
+        DataType::Text => Ok(Value::text(input.to_string())),
         DataType::TimestampMs => parse_timestamp_ms(input),
         DataType::Ipv4 => parse_ipv4(input),
         DataType::Ipv6 => parse_ipv6(input),
@@ -118,7 +118,7 @@ pub fn coerce(
             .parse::<u32>()
             .map(Value::PageRef)
             .map_err(|e| e.to_string()),
-        _ => Ok(Value::Text(input.to_string())), // fallback for unsupported coercions
+        _ => Ok(Value::text(input.to_string())), // fallback for unsupported coercions
     }
 }
 
@@ -1045,7 +1045,7 @@ mod tests {
     #[test]
     fn test_coerce_text() {
         let val = coerce("anything goes", DataType::Text, None).unwrap();
-        assert_eq!(val, Value::Text("anything goes".to_string()));
+        assert_eq!(val, Value::text("anything goes".to_string()));
     }
 
     // --- Roundtrip: coerce then serialize then deserialize ---

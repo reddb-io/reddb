@@ -803,7 +803,7 @@ pub enum Value {
     /// 64-bit floating point
     Float(f64),
     /// UTF-8 text
-    Text(String),
+    Text(std::sync::Arc<str>),
     /// Binary data
     Blob(Vec<u8>),
     /// Boolean
@@ -1015,6 +1015,15 @@ impl std::hash::Hash for Value {
 }
 
 impl Value {
+    /// Construct a `Value::Text` from anything that can produce an
+    /// `Arc<str>` — `String`, `&str`, or an existing `Arc<str>`.
+    /// The drop-in migration helper for the old
+    /// `Value::text(String)` constructor style.
+    #[inline]
+    pub fn text(s: impl Into<std::sync::Arc<str>>) -> Self {
+        Value::text(s.into())
+    }
+
     /// Get the data type of this value
     pub fn data_type(&self) -> DataType {
         match self {
@@ -1443,7 +1452,7 @@ impl Value {
                 let s = String::from_utf8(data[offset..offset + len as usize].to_vec())
                     .map_err(|_| ValueError::InvalidUtf8)?;
                 offset += len as usize;
-                Value::Text(s)
+                Value::text(s)
             }
             DataType::Blob => {
                 let (len, varint_size) = read_varint(&data[offset..])?;
@@ -1947,7 +1956,7 @@ impl Value {
                     .map_err(|_| ValueError::InvalidUtf8)?;
                 offset += comp_len as usize;
                 let s = String::from_utf8(out).map_err(|_| ValueError::InvalidUtf8)?;
-                Value::Text(s)
+                Value::text(s)
             }
             // C3 TOAST: zstd-compressed Blob — same pattern as TextZstd.
             DataType::BlobZstd => {
@@ -2598,7 +2607,7 @@ mod tests {
 
     #[test]
     fn test_value_text() {
-        let value = Value::Text("Hello, RedDB!".to_string());
+        let value = Value::text("Hello, RedDB!".to_string());
         let bytes = value.to_bytes();
         let (recovered, size) = Value::from_bytes(&bytes).unwrap();
         assert_eq!(value, recovered);
@@ -2676,7 +2685,7 @@ mod tests {
     fn test_row_roundtrip() {
         let row = Row::new(vec![
             Value::Integer(42),
-            Value::Text("example.com".to_string()),
+            Value::text("example.com".to_string()),
             Value::IpAddr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
             Value::Boolean(true),
             Value::Null,
@@ -2706,7 +2715,7 @@ mod tests {
         assert_eq!(format!("{}", Value::Null), "NULL");
         assert_eq!(format!("{}", Value::Integer(42)), "42");
         assert_eq!(format!("{}", Value::Boolean(true)), "true");
-        assert_eq!(format!("{}", Value::Text("hello".to_string())), "'hello'");
+        assert_eq!(format!("{}", Value::text("hello".to_string())), "'hello'");
     }
 
     #[test]
@@ -2838,8 +2847,8 @@ mod tests {
     #[test]
     fn test_value_array_nested_roundtrip() {
         let value = Value::Array(vec![
-            Value::Text("hello".to_string()),
-            Value::Text("world".to_string()),
+            Value::text("hello".to_string()),
+            Value::text("world".to_string()),
         ]);
         let bytes = value.to_bytes();
         let (recovered, size) = Value::from_bytes(&bytes).unwrap();

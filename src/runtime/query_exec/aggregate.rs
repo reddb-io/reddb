@@ -1184,7 +1184,7 @@ fn aggregate_projection_result_slotted(
             } else {
                 let separator =
                     resolve_static_projection_text(args.get(1)).unwrap_or_else(|| ", ".to_string());
-                Value::Text(values.join(separator.as_str()))
+                Value::text(values.join(separator.as_str()))
             }
         }
         "FIRST" => {
@@ -1913,7 +1913,7 @@ mod agg_spill_codec {
                 r.read_exact(&mut b)?;
                 Ok(Value::Float(f64::from_le_bytes(b)))
             }
-            5 => Ok(Value::Text(r_str(r)?)),
+            5 => Ok(Value::text(r_str(r)?)),
             255 => {
                 let mut nb = [0u8; 4];
                 r.read_exact(&mut nb)?;

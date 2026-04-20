@@ -472,31 +472,31 @@ mod tests {
         let metadata: HashMap<VectorId, HashMap<String, Value>> = [
             (
                 1,
-                [("category".to_string(), Value::Text("A".to_string()))]
+                [("category".to_string(), Value::text("A".to_string()))]
                     .into_iter()
                     .collect(),
             ),
             (
                 2,
-                [("category".to_string(), Value::Text("B".to_string()))]
+                [("category".to_string(), Value::text("B".to_string()))]
                     .into_iter()
                     .collect(),
             ),
             (
                 3,
-                [("category".to_string(), Value::Text("A".to_string()))]
+                [("category".to_string(), Value::text("A".to_string()))]
                     .into_iter()
                     .collect(),
             ),
             (
                 4,
-                [("category".to_string(), Value::Text("B".to_string()))]
+                [("category".to_string(), Value::text("B".to_string()))]
                     .into_iter()
                     .collect(),
             ),
             (
                 5,
-                [("category".to_string(), Value::Text("A".to_string()))]
+                [("category".to_string(), Value::text("A".to_string()))]
                     .into_iter()
                     .collect(),
             ),
@@ -504,7 +504,7 @@ mod tests {
         .into_iter()
         .collect();
 
-        let filter = Filter::eq("category", Value::Text("A".to_string()));
+        let filter = Filter::eq("category", Value::text("A".to_string()));
         let query = SimilarityQuery::new(DenseVector::new(vec![1.0, 0.0, 0.0]), 5)
             .with_filter(filter.clone());
 
@@ -525,7 +525,7 @@ mod tests {
         assert!(results.len() <= 3); // Only 3 vectors have category A
         for result in &results.results {
             if let Some(meta) = &result.metadata {
-                assert_eq!(meta.get("category"), Some(&Value::Text("A".to_string())));
+                assert_eq!(meta.get("category"), Some(&Value::text("A".to_string())));
             }
         }
     }

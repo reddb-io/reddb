@@ -138,7 +138,7 @@ mod tests {
                 }
                 EntityData::Row(row) => {
                     if let Some(named) = row.named.as_mut() {
-                        named.insert("status".to_string(), Value::Text("normalized".to_string()));
+                        named.insert("status".to_string(), Value::text("normalized".to_string()));
                     }
                 }
                 _ => {}
@@ -245,7 +245,7 @@ mod tests {
         db.add_preprocessor(Box::new(TestPreprocessor));
 
         let row_id = db
-            .row("scans", vec![("status", Value::Text("raw".to_string()))])
+            .row("scans", vec![("status", Value::text("raw".to_string()))])
             .save()
             .expect("row save should succeed");
 
@@ -254,7 +254,7 @@ mod tests {
             EntityData::Row(row) => {
                 assert_eq!(
                     row.get_field("status"),
-                    Some(&Value::Text("normalized".to_string()))
+                    Some(&Value::text("normalized".to_string()))
                 );
             }
             other => panic!("expected row entity, got {other:?}"),
@@ -267,7 +267,7 @@ mod tests {
         db.add_preprocessor(Box::new(TestPreprocessor));
 
         let mut properties = HashMap::new();
-        properties.insert("ip".to_string(), Value::Text("10.0.0.1".to_string()));
+        properties.insert("ip".to_string(), Value::text("10.0.0.1".to_string()));
 
         let batch = db
             .batch()

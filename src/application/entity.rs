@@ -339,7 +339,7 @@ pub(crate) fn json_to_storage_value(value: &JsonValue) -> RedDBResult<Value> {
                 Ok(Value::Float(*value))
             }
         }
-        JsonValue::String(value) => Ok(Value::Text(value.clone())),
+        JsonValue::String(value) => Ok(Value::text(value.clone())),
         JsonValue::Array(_) | JsonValue::Object(_) => json_to_vec(value)
             .map(Value::Json)
             .map_err(|err| RedDBError::Query(format!("failed to serialize JSON value: {err}"))),
@@ -1017,7 +1017,7 @@ mod damage_vector_tests {
     #[test]
     fn identical_rows_produce_empty_vector() {
         let old = vec![
-            (s("name"), Value::Text(s("alice"))),
+            (s("name"), Value::text(s("alice"))),
             (s("age"), Value::Integer(30)),
         ];
         let new = old.clone();
@@ -1029,11 +1029,11 @@ mod damage_vector_tests {
     #[test]
     fn detects_changed_column_only() {
         let old = vec![
-            (s("name"), Value::Text(s("alice"))),
+            (s("name"), Value::text(s("alice"))),
             (s("age"), Value::Integer(30)),
         ];
         let new = vec![
-            (s("name"), Value::Text(s("alice"))),
+            (s("name"), Value::text(s("alice"))),
             (s("age"), Value::Integer(31)),
         ];
         let dv = row_damage_vector(&old, &new);
@@ -1047,12 +1047,12 @@ mod damage_vector_tests {
     #[test]
     fn detects_added_and_removed_columns() {
         let old = vec![
-            (s("name"), Value::Text(s("alice"))),
-            (s("nickname"), Value::Text(s("al"))),
+            (s("name"), Value::text(s("alice"))),
+            (s("nickname"), Value::text(s("al"))),
         ];
         let new = vec![
-            (s("name"), Value::Text(s("alice"))),
-            (s("email"), Value::Text(s("a@x.com"))),
+            (s("name"), Value::text(s("alice"))),
+            (s("email"), Value::text(s("a@x.com"))),
         ];
         let dv = row_damage_vector(&old, &new);
         assert!(dv.changed.is_empty());
@@ -1067,12 +1067,12 @@ mod damage_vector_tests {
         // `(name, age)` and `(age, name)` with identical values should
         // diff as empty — column order is a presentation concern.
         let old = vec![
-            (s("name"), Value::Text(s("bob"))),
+            (s("name"), Value::text(s("bob"))),
             (s("age"), Value::Integer(42)),
         ];
         let new = vec![
             (s("age"), Value::Integer(42)),
-            (s("name"), Value::Text(s("bob"))),
+            (s("name"), Value::text(s("bob"))),
         ];
         assert!(row_damage_vector(&old, &new).is_empty());
     }
@@ -1082,7 +1082,7 @@ mod damage_vector_tests {
         let old = vec![
             (s("a"), Value::Integer(1)),
             (s("b"), Value::Integer(2)),
-            (s("gone"), Value::Text(s("x"))),
+            (s("gone"), Value::text(s("x"))),
         ];
         let new = vec![
             (s("a"), Value::Integer(10)),     // changed

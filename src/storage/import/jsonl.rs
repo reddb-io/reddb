@@ -510,15 +510,15 @@ fn json_to_value(jv: &JsonValue) -> Value {
                 Value::Float(*n)
             }
         }
-        JsonValue::String(s) => Value::Text(s.clone()),
-        JsonValue::Array(arr) => Value::Text(format!(
+        JsonValue::String(s) => Value::text(s.clone()),
+        JsonValue::Array(arr) => Value::text(format!(
             "[{}]",
             arr.iter()
                 .map(|v| value_to_string(&json_to_value(v)))
                 .collect::<Vec<_>>()
                 .join(",")
         )),
-        JsonValue::Object(_) => Value::Text("[object]".to_string()),
+        JsonValue::Object(_) => Value::text("[object]".to_string()),
     }
 }
 
@@ -596,7 +596,7 @@ mod tests {
         assert_eq!(json_to_value(&JsonValue::Number(2.5)), Value::Float(2.5));
         assert_eq!(
             json_to_value(&JsonValue::String("test".to_string())),
-            Value::Text("test".to_string())
+            Value::text("test".to_string())
         );
     }
 }

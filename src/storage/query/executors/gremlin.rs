@@ -825,7 +825,7 @@ impl GremlinExecutor {
                 }
                 TraverserElement::Value(v) => match v {
                     GremlinValue::String(s) => {
-                        record.set("_value", crate::storage::schema::Value::Text(s.clone()))
+                        record.set("_value", crate::storage::schema::Value::text(s.clone()))
                     }
                     GremlinValue::Integer(i) => {
                         record.set("_value", crate::storage::schema::Value::Integer(*i))

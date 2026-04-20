@@ -439,12 +439,12 @@ mod tests {
         let log = LogCollection::new(store, LogCollectionConfig::new("test_log"));
 
         let id1 = log.append_fields(vec![
-            ("level", Value::Text("info".into())),
-            ("message", Value::Text("hello".into())),
+            ("level", Value::text("info".into())),
+            ("message", Value::text("hello".into())),
         ]);
         let id2 = log.append_fields(vec![
-            ("level", Value::Text("error".into())),
-            ("message", Value::Text("oops".into())),
+            ("level", Value::text("error".into())),
+            ("message", Value::text("oops".into())),
         ]);
 
         assert!(id2.raw() > id1.raw());
@@ -485,7 +485,7 @@ mod tests {
 
         // Insert entries with known sizes (~30-50 bytes each)
         for i in 0..10 {
-            log.append_fields(vec![("msg", Value::Text(format!("entry-{}", i)))]);
+            log.append_fields(vec![("msg", Value::text(format!("entry-{}", i)))]);
         }
 
         let before = log.len();
@@ -509,7 +509,7 @@ mod tests {
 
         // Insert 3 — should stay in buffer (batch_size = 4)
         for _ in 0..3 {
-            log.append_fields(vec![("msg", Value::Text("buffered".into()))]);
+            log.append_fields(vec![("msg", Value::text("buffered".into()))]);
         }
 
         // Buffer not flushed yet — store might be empty

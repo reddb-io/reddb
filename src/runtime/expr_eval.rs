@@ -260,7 +260,7 @@ pub(super) fn lookup_latest_kv_value(db: &RedDB, collection: &str, key: &str) ->
             return true;
         };
         let entry_key = row.get_field("key").and_then(|value| match value {
-            Value::Text(text) => Some(text.as_str()),
+            Value::Text(text) => Some(text.as_ref()),
             _ => None,
         });
         if entry_key == Some(key_lc.as_str()) && entity.id.raw() >= latest_id {
@@ -364,7 +364,7 @@ fn apply_binop(op: BinOp, a: Value, b: Value) -> Option<Value> {
     use crate::storage::query::ast::CompareOp;
     match op {
         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => arith(op, a, b),
-        BinOp::Concat => Some(Value::Text(format!(
+        BinOp::Concat => Some(Value::text(format!(
             "{}{}",
             a.display_string(),
             b.display_string()
@@ -451,7 +451,7 @@ fn value_as_number(v: &Value) -> Option<(f64, bool)> {
 fn runtime_cast(src: &Value, target: crate::storage::schema::types::DataType) -> Value {
     use crate::storage::schema::types::DataType as DT;
     match (src, target) {
-        (v, DT::Text) => Value::Text(v.display_string()),
+        (v, DT::Text) => Value::text(v.display_string()),
         (Value::Integer(n), DT::Float) => Value::Float(*n as f64),
         (Value::Integer(n), DT::BigInt) => Value::BigInt(*n),
         (Value::Integer(n), DT::UnsignedInteger) if *n >= 0 => Value::UnsignedInteger(*n as u64),
@@ -483,11 +483,11 @@ fn runtime_cast(src: &Value, target: crate::storage::schema::types::DataType) ->
 fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
     match name {
         "UPPER" => match args.first()? {
-            Value::Text(s) => Some(Value::Text(s.to_uppercase())),
+            Value::Text(s) => Some(Value::text(s.to_uppercase())),
             other => Some(other.clone()),
         },
         "LOWER" => match args.first()? {
-            Value::Text(s) => Some(Value::Text(s.to_lowercase())),
+            Value::Text(s) => Some(Value::text(s.to_lowercase())),
             other => Some(other.clone()),
         },
         "LENGTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH" => match args.first()? {
@@ -514,14 +514,14 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
             match args.get(1)? {
                 Value::Text(pattern) if name == "SUBSTRING" && args.len() == 2 => {
                     Some(match substring_pattern_text(text, pattern) {
-                        Some(matched) => Value::Text(matched),
+                        Some(matched) => Value::text(matched),
                         None => Value::Null,
                     })
                 }
                 start_value => {
                     let start = value_as_i64(start_value)?;
                     let count = args.get(2).and_then(value_as_i64);
-                    Some(Value::Text(substring_text(text, start, count)?))
+                    Some(Value::text(substring_text(text, start, count)?))
                 }
             }
         }
@@ -543,10 +543,10 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
             };
             let chars = match args.get(1) {
                 None => None,
-                Some(Value::Text(chars)) => Some(chars.as_str()),
+                Some(Value::Text(chars)) => Some(chars.as_ref()),
                 Some(_) => return Some(Value::Null),
             };
-            Some(Value::Text(trim_text(text, chars, true, true)))
+            Some(Value::text(trim_text(text, chars, true, true)))
         }
         "LTRIM" => {
             let text = match args.first()? {
@@ -555,10 +555,10 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
             };
             let chars = match args.get(1) {
                 None => None,
-                Some(Value::Text(chars)) => Some(chars.as_str()),
+                Some(Value::Text(chars)) => Some(chars.as_ref()),
                 Some(_) => return Some(Value::Null),
             };
-            Some(Value::Text(trim_text(text, chars, true, false)))
+            Some(Value::text(trim_text(text, chars, true, false)))
         }
         "RTRIM" => {
             let text = match args.first()? {
@@ -567,12 +567,12 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
             };
             let chars = match args.get(1) {
                 None => None,
-                Some(Value::Text(chars)) => Some(chars.as_str()),
+                Some(Value::Text(chars)) => Some(chars.as_ref()),
                 Some(_) => return Some(Value::Null),
             };
-            Some(Value::Text(trim_text(text, chars, false, true)))
+            Some(Value::text(trim_text(text, chars, false, true)))
         }
-        "CONCAT" => Some(Value::Text(
+        "CONCAT" => Some(Value::text(
             args.iter()
                 .filter(|value| !matches!(value, Value::Null))
                 .map(Value::display_string)
@@ -581,9 +581,9 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
         "CONCAT_WS" => {
             let separator = match args.first()? {
                 Value::Null => return Some(Value::Null),
-                Value::Text(text) => text.as_str(),
+                Value::Text(text) => text.as_ref(),
                 other => {
-                    return Some(Value::Text(
+                    return Some(Value::text(
                         args.iter()
                             .skip(1)
                             .filter(|value| !matches!(value, Value::Null))
@@ -593,7 +593,7 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
                     ))
                 }
             };
-            Some(Value::Text(
+            Some(Value::text(
                 args.iter()
                     .skip(1)
                     .filter(|value| !matches!(value, Value::Null))
@@ -603,7 +603,7 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
             ))
         }
         "REVERSE" => match args.first()? {
-            Value::Text(text) => Some(Value::Text(text.chars().rev().collect())),
+            Value::Text(text) => Some(Value::text(text.chars().rev().collect())),
             _ => Some(Value::Null),
         },
         "LEFT" => {
@@ -612,7 +612,7 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
                 _ => return Some(Value::Null),
             };
             let count = value_as_i64(args.get(1)?)?;
-            Some(Value::Text(slice_left_text(text, count)))
+            Some(Value::text(slice_left_text(text, count)))
         }
         "RIGHT" => {
             let text = match args.first()? {
@@ -620,12 +620,12 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
                 _ => return Some(Value::Null),
             };
             let count = value_as_i64(args.get(1)?)?;
-            Some(Value::Text(slice_right_text(text, count)))
+            Some(Value::text(slice_right_text(text, count)))
         }
         "QUOTE_LITERAL" => match args.first()? {
             Value::Null => Some(Value::Null),
-            Value::Text(text) => Some(Value::Text(quote_literal_text(text))),
-            other => Some(Value::Text(quote_literal_text(&other.display_string()))),
+            Value::Text(text) => Some(Value::text(quote_literal_text(text))),
+            other => Some(Value::text(quote_literal_text(&other.display_string()))),
         },
         "ABS" => match args.first()? {
             Value::Integer(n) => Some(Value::Integer(n.abs())),
@@ -786,7 +786,7 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
                 crate::serde_json::Value::Array(_) => "array",
                 crate::serde_json::Value::Object(_) => "object",
             };
-            Some(Value::Text(name.to_string()))
+            Some(Value::text(name.to_string()))
         }
         "JSON_VALID" => {
             let text = match args.first()? {
@@ -943,15 +943,15 @@ fn json_extract_impl(input: &Value, path: &Value, as_text: bool) -> Option<Value
     if as_text {
         // Unquoted scalar text, JSON for containers.
         match target {
-            crate::serde_json::Value::String(s) => Some(Value::Text(s.clone())),
+            crate::serde_json::Value::String(s) => Some(Value::text(s.clone())),
             crate::serde_json::Value::Null => Some(Value::Null),
-            crate::serde_json::Value::Bool(b) => Some(Value::Text(b.to_string())),
-            crate::serde_json::Value::Number(n) => Some(Value::Text(n.to_string())),
-            other => Some(Value::Text(other.to_string_compact())),
+            crate::serde_json::Value::Bool(b) => Some(Value::text(b.to_string())),
+            crate::serde_json::Value::Number(n) => Some(Value::text(n.to_string())),
+            other => Some(Value::text(other.to_string_compact())),
         }
     } else {
         // JSON-serialised representation (strings come back quoted).
-        Some(Value::Text(target.to_string_compact()))
+        Some(Value::text(target.to_string_compact()))
     }
 }
 
@@ -1242,7 +1242,7 @@ mod tests {
             "MONEY",
             &[
                 Value::AssetCode("BTC".to_string()),
-                Value::Text("0.125".to_string()),
+                Value::text("0.125".to_string()),
             ],
         )
         .unwrap();
@@ -1282,7 +1282,7 @@ mod tests {
     // ─────────────────────────────────────────────────────────────
 
     fn json_text(s: &str) -> Value {
-        Value::Text(s.to_string())
+        Value::text(s.to_string())
     }
 
     #[test]
@@ -1291,24 +1291,24 @@ mod tests {
         // Top-level scalar.
         assert_eq!(
             dispatch_builtin_function("JSON_EXTRACT", &[doc.clone(), json_text("$.a")]).unwrap(),
-            Value::Text("1".to_string())
+            Value::text("1".to_string())
         );
         // Nested string (quoted for JSON_EXTRACT).
         assert_eq!(
             dispatch_builtin_function("JSON_EXTRACT", &[doc.clone(), json_text("$.b.c")]).unwrap(),
-            Value::Text("\"hello\"".to_string())
+            Value::text("\"hello\"".to_string())
         );
         // Unquoted via JSON_EXTRACT_TEXT.
         assert_eq!(
             dispatch_builtin_function("JSON_EXTRACT_TEXT", &[doc.clone(), json_text("$.b.c")])
                 .unwrap(),
-            Value::Text("hello".to_string())
+            Value::text("hello".to_string())
         );
         // Array index.
         assert_eq!(
             dispatch_builtin_function("JSON_EXTRACT_TEXT", &[doc.clone(), json_text("$.b.d[1]")])
                 .unwrap(),
-            Value::Text("20".to_string())
+            Value::text("20".to_string())
         );
         // Missing path → Null.
         assert_eq!(
@@ -1326,15 +1326,15 @@ mod tests {
         );
         assert_eq!(
             dispatch_builtin_function("JSON_TYPEOF", &[arr]).unwrap(),
-            Value::Text("array".to_string())
+            Value::text("array".to_string())
         );
         assert_eq!(
             dispatch_builtin_function("JSON_TYPEOF", &[json_text(r#"{"k":1}"#)]).unwrap(),
-            Value::Text("object".to_string())
+            Value::text("object".to_string())
         );
         assert_eq!(
             dispatch_builtin_function("JSON_TYPEOF", &[json_text("null")]).unwrap(),
-            Value::Text("null".to_string())
+            Value::text("null".to_string())
         );
     }
 
@@ -1357,7 +1357,7 @@ mod tests {
             "JSON_ARRAY",
             &[
                 Value::Integer(1),
-                Value::Text("x".to_string()),
+                Value::text("x".to_string()),
                 Value::Boolean(true),
             ],
         )
@@ -1373,10 +1373,10 @@ mod tests {
         let obj = dispatch_builtin_function(
             "JSON_OBJECT",
             &[
-                Value::Text("k1".to_string()),
+                Value::text("k1".to_string()),
                 Value::Integer(1),
-                Value::Text("k2".to_string()),
-                Value::Text("v".to_string()),
+                Value::text("k2".to_string()),
+                Value::text("v".to_string()),
             ],
         )
         .unwrap();
@@ -1399,7 +1399,7 @@ mod tests {
             &[
                 doc.clone(),
                 json_text("$.b.c"),
-                Value::Text("new".to_string()),
+                Value::text("new".to_string()),
             ],
         )
         .unwrap();
@@ -1408,10 +1408,10 @@ mod tests {
             // JSON_EXTRACT_TEXT on result must return "new".
             let extracted = dispatch_builtin_function(
                 "JSON_EXTRACT_TEXT",
-                &[Value::Text(text), json_text("$.b.c")],
+                &[Value::text(text), json_text("$.b.c")],
             )
             .unwrap();
-            assert_eq!(extracted, Value::Text("new".to_string()));
+            assert_eq!(extracted, Value::text("new".to_string()));
         } else {
             panic!("expected Json");
         }
@@ -1426,10 +1426,10 @@ mod tests {
             let text = String::from_utf8(bytes).unwrap();
             let extracted = dispatch_builtin_function(
                 "JSON_EXTRACT_TEXT",
-                &[Value::Text(text), json_text("$.new.deep")],
+                &[Value::text(text), json_text("$.new.deep")],
             )
             .unwrap();
-            assert_eq!(extracted, Value::Text("42".to_string()));
+            assert_eq!(extracted, Value::text("42".to_string()));
         } else {
             panic!("expected Json");
         }

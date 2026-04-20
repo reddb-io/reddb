@@ -471,7 +471,7 @@ pub fn filter_to_expr(filter: &Filter) -> Expr {
                     span: Span::synthetic(),
                 },
                 Expr::Literal {
-                    value: Value::Text(pattern.clone()),
+                    value: Value::text(pattern.clone()),
                     span: Span::synthetic(),
                 },
             ],
@@ -485,7 +485,7 @@ pub fn filter_to_expr(filter: &Filter) -> Expr {
                     span: Span::synthetic(),
                 },
                 Expr::Literal {
-                    value: Value::Text(prefix.clone()),
+                    value: Value::text(prefix.clone()),
                     span: Span::synthetic(),
                 },
             ],
@@ -499,7 +499,7 @@ pub fn filter_to_expr(filter: &Filter) -> Expr {
                     span: Span::synthetic(),
                 },
                 Expr::Literal {
-                    value: Value::Text(suffix.clone()),
+                    value: Value::text(suffix.clone()),
                     span: Span::synthetic(),
                 },
             ],
@@ -513,7 +513,7 @@ pub fn filter_to_expr(filter: &Filter) -> Expr {
                     span: Span::synthetic(),
                 },
                 Expr::Literal {
-                    value: Value::Text(substring.clone()),
+                    value: Value::text(substring.clone()),
                     span: Span::synthetic(),
                 },
             ],

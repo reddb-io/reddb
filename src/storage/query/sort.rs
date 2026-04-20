@@ -522,7 +522,7 @@ mod tests {
         type Row = (String, i64);
         let get_value = |row: &Row, col: &str| -> Value {
             match col {
-                "name" => Value::Text(row.0.clone()),
+                "name" => Value::text(row.0.clone()),
                 "age" => Value::Integer(row.1),
                 _ => Value::Null,
             }
@@ -548,8 +548,8 @@ mod tests {
         type Row = (String, String, i64); // (name, department, salary)
         let get_value = |row: &Row, col: &str| -> Value {
             match col {
-                "name" => Value::Text(row.0.clone()),
-                "department" => Value::Text(row.1.clone()),
+                "name" => Value::text(row.0.clone()),
+                "department" => Value::text(row.1.clone()),
                 "salary" => Value::Integer(row.2),
                 _ => Value::Null,
             }
@@ -658,8 +658,8 @@ mod tests {
 
         assert_eq!(
             key.compare(
-                &Value::Text("Alice".to_string()),
-                &Value::Text("Bob".to_string())
+                &Value::text("Alice".to_string()),
+                &Value::text("Bob".to_string())
             ),
             Ordering::Less
         );

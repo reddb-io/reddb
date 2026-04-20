@@ -232,7 +232,7 @@ pub fn extract_literal_bindings(sql: &str) -> Result<Vec<Value>, String> {
                 skip_next_numeric = false;
             }
             Token::String(s) => {
-                binds.push(Value::Text(s));
+                binds.push(Value::text(s));
                 skip_next_numeric = false;
             }
             Token::True => {

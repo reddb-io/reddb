@@ -104,7 +104,7 @@ impl RedDBRuntime {
 
         let mut augmented = query.clone();
         augmented.columns.push(tenant_col);
-        let lit = Value::Text(tenant_id.clone());
+        let lit = Value::text(tenant_id.clone());
         for row in augmented.values.iter_mut() {
             row.push(lit.clone());
         }
@@ -2358,7 +2358,7 @@ fn dotted_tail_already_set(value: &Value, tail: &str) -> bool {
 /// Accepts:
 /// * `Value::Null`  → fresh `{tail: tenant_id}` object
 /// * `Value::Json(bytes)` → parse, navigate / create path, re-serialize
-/// * `Value::Text(s)` if `s` is valid JSON → same as Json
+/// * `Value::text(s)` if `s` is valid JSON → same as Json
 /// * anything else → error (user supplied a scalar where we need
 ///   a JSON container)
 fn merge_dotted_tenant(current: Value, tail: &str, tenant_id: &str) -> RedDBResult<Value> {

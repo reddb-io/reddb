@@ -1508,7 +1508,7 @@ impl RedDBRuntime {
                 manager.for_each_entity(|entity| {
                     if let Some(row) = entity.data.as_row() {
                         let key = row.get_field("key").and_then(|v| match v {
-                            crate::storage::schema::Value::Text(s) => Some(s.as_str()),
+                            crate::storage::schema::Value::Text(s) => Some(s.as_ref()),
                             _ => None,
                         });
                         let val = row.get_field("value");
@@ -1634,7 +1634,7 @@ impl RedDBRuntime {
         manager.for_each_entity(|entity| {
             if let Some(row) = entity.data.as_row() {
                 let entry_key = row.get_field("key").and_then(|v| match v {
-                    crate::storage::schema::Value::Text(s) => Some(s.as_str()),
+                    crate::storage::schema::Value::Text(s) => Some(s.as_ref()),
                     _ => None,
                 });
                 if entry_key == Some(key) {
@@ -1644,7 +1644,7 @@ impl RedDBRuntime {
                         result = match row.get_field("value") {
                             Some(crate::storage::schema::Value::Boolean(b)) => *b,
                             Some(crate::storage::schema::Value::Text(s)) => {
-                                matches!(s.as_str(), "true" | "TRUE" | "True" | "1")
+                                matches!(s.as_ref(), "true" | "TRUE" | "True" | "1")
                             }
                             Some(crate::storage::schema::Value::Integer(n)) => *n != 0,
                             _ => default,
@@ -1674,7 +1674,7 @@ impl RedDBRuntime {
         manager.for_each_entity(|entity| {
             if let Some(row) = entity.data.as_row() {
                 let entry_key = row.get_field("key").and_then(|v| match v {
-                    crate::storage::schema::Value::Text(s) => Some(s.as_str()),
+                    crate::storage::schema::Value::Text(s) => Some(s.as_ref()),
                     _ => None,
                 });
                 if entry_key == Some(key) {
@@ -1710,7 +1710,7 @@ impl RedDBRuntime {
         manager.for_each_entity(|entity| {
             if let Some(row) = entity.data.as_row() {
                 let entry_key = row.get_field("key").and_then(|v| match v {
-                    crate::storage::schema::Value::Text(s) => Some(s.as_str()),
+                    crate::storage::schema::Value::Text(s) => Some(s.as_ref()),
                     _ => None,
                 });
                 if entry_key == Some(key) {
@@ -1807,7 +1807,7 @@ impl RedDBRuntime {
                         super::impl_dml::decrypt_secret_payload(&key, bytes.as_slice())
                     {
                         if let Ok(text) = String::from_utf8(plain) {
-                            *value = Value::Text(text);
+                            *value = Value::text(text);
                         }
                     }
                 }
@@ -2987,7 +2987,7 @@ impl RedDBRuntime {
                             let key_val = named.get("key").cloned().unwrap_or(Value::Null);
                             let val = named.get("value").cloned().unwrap_or(Value::Null);
                             let key_str = match &key_val {
-                                Value::Text(s) => s.as_str(),
+                                Value::Text(s) => s.as_ref(),
                                 _ => continue,
                             };
                             if let Some(ref pfx) = prefix {
@@ -4855,7 +4855,7 @@ fn walk_plan_node(
     use std::sync::Arc;
     let mut rec = crate::storage::query::unified::UnifiedRecord::default();
     rec.values
-        .insert(Arc::from("op"), Value::Text(node.operator.clone()));
+        .insert(Arc::from("op"), Value::text(node.operator.clone()));
     rec.values.insert(
         Arc::from("source"),
         node.source.clone().map(Value::Text).unwrap_or(Value::Null),

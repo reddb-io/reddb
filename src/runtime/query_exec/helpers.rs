@@ -15,7 +15,7 @@ use super::json_writers::timeseries_tags_json_value;
 use super::*;
 
 /// Extract the first equality condition from an AND filter for fast pre-filtering.
-/// For `WHERE city = 'NYC' AND age > 30`, returns Some(("city", Value::Text("NYC"))).
+/// For `WHERE city = 'NYC' AND age > 30`, returns Some(("city", Value::text("NYC"))).
 /// This lets us do a direct HashMap lookup before the full filter evaluation.
 pub(crate) fn extract_equality_prefilter(filter: &Filter) -> Option<(String, Value)> {
     use crate::storage::query::ast::{CompareOp, FieldRef};
@@ -299,12 +299,12 @@ pub(crate) fn resolve_entity_field<'a>(
             return Some(Cow::Owned(Value::UnsignedInteger(entity.sequence_id)));
         }
         "red_collection" => {
-            return Some(Cow::Owned(Value::Text(
+            return Some(Cow::Owned(Value::text(
                 entity.kind.collection().to_string(),
             )));
         }
         "red_kind" => {
-            return Some(Cow::Owned(Value::Text(
+            return Some(Cow::Owned(Value::text(
                 entity.kind.storage_type().to_string(),
             )));
         }
@@ -354,7 +354,7 @@ pub(crate) fn resolve_entity_field<'a>(
 
     if let EntityData::TimeSeries(ref ts) = entity.data {
         match column {
-            "metric" => return Some(Cow::Owned(Value::Text(ts.metric.clone()))),
+            "metric" => return Some(Cow::Owned(Value::text(ts.metric.clone()))),
             "timestamp_ns" => return Some(Cow::Owned(Value::UnsignedInteger(ts.timestamp_ns))),
             "timestamp" | "time" => {
                 return Some(Cow::Owned(Value::UnsignedInteger(ts.timestamp_ns)));
@@ -376,14 +376,14 @@ pub(crate) fn resolve_entity_field<'a>(
     // EntityKind fields (label, node_type, from_node, to_node)
     match &entity.kind {
         EntityKind::GraphNode(ref gn) => match column {
-            "label" => return Some(Cow::Owned(Value::Text(gn.label.to_string()))),
-            "node_type" => return Some(Cow::Owned(Value::Text(gn.node_type.to_string()))),
+            "label" => return Some(Cow::Owned(Value::text(gn.label.to_string()))),
+            "node_type" => return Some(Cow::Owned(Value::text(gn.node_type.to_string()))),
             _ => {}
         },
         EntityKind::GraphEdge(ref ge) => match column {
-            "label" => return Some(Cow::Owned(Value::Text(ge.label.to_string()))),
-            "from_node" => return Some(Cow::Owned(Value::Text(ge.from_node.to_string()))),
-            "to_node" => return Some(Cow::Owned(Value::Text(ge.to_node.to_string()))),
+            "label" => return Some(Cow::Owned(Value::text(ge.label.to_string()))),
+            "from_node" => return Some(Cow::Owned(Value::text(ge.from_node.to_string()))),
+            "to_node" => return Some(Cow::Owned(Value::text(ge.to_node.to_string()))),
             _ => {}
         },
         _ => {}

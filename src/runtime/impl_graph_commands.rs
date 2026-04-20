@@ -29,9 +29,9 @@ impl RedDBRuntime {
                 ]);
                 for visit in &res.nodes {
                     let mut record = UnifiedRecord::new();
-                    record.set("node_id", Value::Text(visit.node.id.clone()));
-                    record.set("label", Value::Text(visit.node.label.clone()));
-                    record.set("node_type", Value::Text(visit.node.node_type.clone()));
+                    record.set("node_id", Value::text(visit.node.id.clone()));
+                    record.set("label", Value::text(visit.node.label.clone()));
+                    record.set("node_type", Value::text(visit.node.node_type.clone()));
                     record.set("depth", Value::Integer(visit.depth as i64));
                     result.push(record);
                 }
@@ -63,8 +63,8 @@ impl RedDBRuntime {
                     "total_weight".into(),
                 ]);
                 let mut record = UnifiedRecord::new();
-                record.set("source", Value::Text(res.source));
-                record.set("target", Value::Text(res.target));
+                record.set("source", Value::text(res.source));
+                record.set("target", Value::text(res.target));
                 record.set("nodes_visited", Value::Integer(res.nodes_visited as i64));
                 record.set(
                     "negative_cycle_detected",
@@ -136,9 +136,9 @@ impl RedDBRuntime {
                 ]);
                 for visit in &res.visits {
                     let mut record = UnifiedRecord::new();
-                    record.set("node_id", Value::Text(visit.node.id.clone()));
-                    record.set("label", Value::Text(visit.node.label.clone()));
-                    record.set("node_type", Value::Text(visit.node.node_type.clone()));
+                    record.set("node_id", Value::text(visit.node.id.clone()));
+                    record.set("label", Value::text(visit.node.label.clone()));
+                    record.set("node_type", Value::text(visit.node.node_type.clone()));
                     record.set("depth", Value::Integer(visit.depth as i64));
                     result.push(record);
                 }
@@ -162,15 +162,15 @@ impl RedDBRuntime {
                 ]);
                 for score in &res.scores {
                     let mut record = UnifiedRecord::new();
-                    record.set("node_id", Value::Text(score.node.id.clone()));
-                    record.set("label", Value::Text(score.node.label.clone()));
+                    record.set("node_id", Value::text(score.node.id.clone()));
+                    record.set("label", Value::text(score.node.label.clone()));
                     record.set("score", Value::Float(score.score));
                     result.push(record);
                 }
                 for ds in &res.degree_scores {
                     let mut record = UnifiedRecord::new();
-                    record.set("node_id", Value::Text(ds.node.id.clone()));
-                    record.set("label", Value::Text(ds.node.label.clone()));
+                    record.set("node_id", Value::text(ds.node.id.clone()));
+                    record.set("label", Value::text(ds.node.label.clone()));
                     record.set("score", Value::Float(ds.total_degree as f64));
                     result.push(record);
                 }
@@ -195,7 +195,7 @@ impl RedDBRuntime {
                     UnifiedResult::with_columns(vec!["community_id".into(), "size".into()]);
                 for community in &res.communities {
                     let mut record = UnifiedRecord::new();
-                    record.set("community_id", Value::Text(community.id.clone()));
+                    record.set("community_id", Value::text(community.id.clone()));
                     record.set("size", Value::Integer(community.size as i64));
                     result.push(record);
                 }
@@ -216,7 +216,7 @@ impl RedDBRuntime {
                     UnifiedResult::with_columns(vec!["component_id".into(), "size".into()]);
                 for component in &res.components {
                     let mut record = UnifiedRecord::new();
-                    record.set("component_id", Value::Text(component.id.clone()));
+                    record.set("component_id", Value::text(component.id.clone()));
                     record.set("size", Value::Integer(component.size as i64));
                     result.push(record);
                 }
@@ -259,14 +259,14 @@ impl RedDBRuntime {
                 ]);
                 // First row: global coefficient
                 let mut global_record = UnifiedRecord::new();
-                global_record.set("node_id", Value::Text("__global__".into()));
-                global_record.set("label", Value::Text("global_clustering".into()));
+                global_record.set("node_id", Value::text("__global__".into()));
+                global_record.set("label", Value::text("global_clustering".into()));
                 global_record.set("score", Value::Float(res.global));
                 result.push(global_record);
                 for score in &res.local {
                     let mut record = UnifiedRecord::new();
-                    record.set("node_id", Value::Text(score.node.id.clone()));
-                    record.set("label", Value::Text(score.node.label.clone()));
+                    record.set("node_id", Value::text(score.node.id.clone()));
+                    record.set("label", Value::text(score.node.label.clone()));
                     record.set("score", Value::Float(score.score));
                     result.push(record);
                 }
@@ -290,8 +290,8 @@ impl RedDBRuntime {
                 for (i, node) in res.ordered_nodes.iter().enumerate() {
                     let mut record = UnifiedRecord::new();
                     record.set("order", Value::Integer(i as i64));
-                    record.set("node_id", Value::Text(node.id.clone()));
-                    record.set("label", Value::Text(node.label.clone()));
+                    record.set("node_id", Value::text(node.id.clone()));
+                    record.set("label", Value::text(node.label.clone()));
                     result.push(record);
                 }
                 Ok(RuntimeQueryResult {
@@ -541,10 +541,10 @@ impl RedDBRuntime {
                 for (entity, kind) in all_entities {
                     let mut record = UnifiedRecord::new();
                     record.set("entity_id", Value::UnsignedInteger(entity.entity.id.raw()));
-                    record.set("collection", Value::Text(entity.collection.clone()));
+                    record.set("collection", Value::text(entity.collection.clone()));
                     record.set("score", Value::Float(entity.score as f64));
-                    record.set("discovery", Value::Text(format!("{:?}", entity.discovery)));
-                    record.set("kind", Value::Text(kind.to_string()));
+                    record.set("discovery", Value::text(format!("{:?}", entity.discovery)));
+                    record.set("kind", Value::text(kind.to_string()));
                     result.push(record);
                 }
                 Ok(RuntimeQueryResult {

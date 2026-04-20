@@ -388,11 +388,11 @@ mod tests {
     fn mcv_beats_uniform_on_skewed_eq() {
         // One value (the boss) takes 50% of the table.
         let mcv = MostCommonValues::new(vec![
-            (ColumnValue::Text("boss".to_string()), 0.5),
-            (ColumnValue::Text("alice".to_string()), 0.05),
-            (ColumnValue::Text("bob".to_string()), 0.05),
+            (ColumnValue::text("boss".to_string()), 0.5),
+            (ColumnValue::text("alice".to_string()), 0.05),
+            (ColumnValue::text("bob".to_string()), 0.05),
         ]);
-        let boss = ColumnValue::Text("boss".to_string());
+        let boss = ColumnValue::text("boss".to_string());
         let freq = mcv.frequency_of(&boss).unwrap();
         // Equality on the boss row: 0.5, vs heuristic 0.01 → 50× better.
         assert_eq!(freq, 0.5);

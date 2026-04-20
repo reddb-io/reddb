@@ -1007,7 +1007,7 @@ mod tests {
             id,
             "users",
             100,
-            vec![Value::Text("alice".to_string()), Value::Integer(25)],
+            vec![Value::text("alice".to_string()), Value::Integer(25)],
         );
 
         assert!(entity.data.is_row());
@@ -1042,7 +1042,7 @@ mod tests {
             EntityId::new(1),
             "documents",
             1,
-            vec![Value::Text("Hello world".to_string())],
+            vec![Value::text("Hello world".to_string())],
         );
 
         entity.add_embedding(EmbeddingSlot::new(

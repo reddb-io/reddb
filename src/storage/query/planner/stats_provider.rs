@@ -457,8 +457,8 @@ mod tests {
     fn static_provider_serves_mcv_lists() {
         use super::super::histogram::{ColumnValue, MostCommonValues};
         let mcv = MostCommonValues::new(vec![
-            (ColumnValue::Text("admin".to_string()), 0.4),
-            (ColumnValue::Text("user".to_string()), 0.5),
+            (ColumnValue::text("admin".to_string()), 0.4),
+            (ColumnValue::text("user".to_string()), 0.5),
         ]);
         let p = StaticProvider::new().with_mcv("users", "role", mcv);
         let got = p.column_mcv("users", "role").unwrap();

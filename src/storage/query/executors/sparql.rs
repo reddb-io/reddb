@@ -674,14 +674,14 @@ impl SparqlExecutor {
                             if let Some(node) = self.graph.get_node(id) {
                                 record.set_node(col, MatchedNode::from_stored(&node));
                             }
-                            record.set(col, Value::Text(id.clone()));
+                            record.set(col, Value::text(id.clone()));
                         }
                         BoundValue::Edge(from, etype, to) => {
                             record.set_edge(col, MatchedEdge::from_tuple(from, *etype, to, 1.0));
-                            record.set(col, Value::Text(format!("{}->{}({:?})", from, to, etype)));
+                            record.set(col, Value::text(format!("{}->{}({:?})", from, to, etype)));
                         }
                         BoundValue::Literal(s) => {
-                            record.set(col, Value::Text(s.clone()));
+                            record.set(col, Value::text(s.clone()));
                         }
                         BoundValue::Integer(i) => {
                             record.set(col, Value::Integer(*i));

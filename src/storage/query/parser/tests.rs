@@ -1149,7 +1149,7 @@ fn test_parse_insert_mixed_types() {
         assert_eq!(iq.values[0].len(), 3);
         assert!(matches!(
             iq.values[0][0],
-            crate::storage::schema::Value::Text(_)
+            crate::storage::schema::Value::text(_)
         ));
         assert!(matches!(
             iq.values[0][1],
@@ -2418,7 +2418,7 @@ fn test_parse_queue_push() {
         assert_eq!(queue, "tasks");
         assert_eq!(
             value,
-            crate::storage::schema::Value::Text("hello world".to_string())
+            crate::storage::schema::Value::text("hello world".to_string())
         );
     } else {
         panic!("Expected QueueCommand::Push");

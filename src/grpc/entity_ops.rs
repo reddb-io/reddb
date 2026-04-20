@@ -103,7 +103,7 @@ pub(crate) fn create_kv_reply(
         .ok_or_else(|| Status::invalid_argument("field 'key' must be a string"))?
         .to_string();
     let value = match payload.get("value") {
-        Some(crate::serde_json::Value::String(s)) => crate::storage::schema::Value::Text(s.clone()),
+        Some(crate::serde_json::Value::String(s)) => crate::storage::schema::Value::text(s.clone()),
         Some(crate::serde_json::Value::Number(n)) => {
             if n.fract().abs() < f64::EPSILON {
                 crate::storage::schema::Value::Integer(*n as i64)
@@ -282,7 +282,7 @@ pub(crate) fn bulk_insert_binary(
                 break;
             }
             let value = match bval.kind {
-                Some(super::proto::binary_value::Kind::TextValue(s)) => Value::Text(s),
+                Some(super::proto::binary_value::Kind::TextValue(s)) => Value::text(s),
                 Some(super::proto::binary_value::Kind::IntValue(n)) => Value::Integer(n),
                 Some(super::proto::binary_value::Kind::FloatValue(f)) => Value::Float(f),
                 Some(super::proto::binary_value::Kind::BoolValue(b)) => Value::Boolean(b),

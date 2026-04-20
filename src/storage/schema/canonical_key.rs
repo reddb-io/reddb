@@ -119,7 +119,7 @@ impl CanonicalKey {
             Self::Unsigned(CanonicalKeyFamily::Port, v) => Value::Port(v as u16),
             Self::Unsigned(CanonicalKeyFamily::PageRef, v) => Value::PageRef(v as u32),
             Self::Float(bits) => Value::Float(f64::from_bits(bits)),
-            Self::Text(CanonicalKeyFamily::Text, v) => Value::Text(v),
+            Self::Text(CanonicalKeyFamily::Text, v) => Value::text(v),
             Self::Text(CanonicalKeyFamily::NodeRef, v) => Value::NodeRef(v),
             Self::Text(CanonicalKeyFamily::EdgeRef, v) => Value::EdgeRef(v),
             Self::Text(CanonicalKeyFamily::Email, v) => Value::Email(v),
@@ -400,7 +400,7 @@ mod tests {
 
     #[test]
     fn text_and_email_use_different_families() {
-        let text = value_to_canonical_key(&Value::Text("alice".to_string())).unwrap();
+        let text = value_to_canonical_key(&Value::text("alice".to_string())).unwrap();
         let email = value_to_canonical_key(&Value::Email("alice@example.com".to_string())).unwrap();
         assert_ne!(text.family(), email.family());
     }

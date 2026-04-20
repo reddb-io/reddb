@@ -2178,7 +2178,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         let fields = vec![
             (
                 "key".to_string(),
-                crate::storage::schema::Value::Text(input.key),
+                crate::storage::schema::Value::text(input.key),
             ),
             ("value".to_string(), input.value),
         ];
@@ -2206,7 +2206,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         let mut fields = vec![
             (
                 "metric".to_string(),
-                crate::storage::schema::Value::Text(input.metric),
+                crate::storage::schema::Value::text(input.metric),
             ),
             (
                 "value".to_string(),

@@ -174,7 +174,7 @@ impl MetadataValue {
             Self::Bool(b) => Value::Boolean(*b),
             Self::Int(i) => Value::Integer(*i),
             Self::Float(f) => Value::Float(*f),
-            Self::String(s) => Value::Text(s.clone()),
+            Self::String(s) => Value::text(s.clone()),
             Self::Bytes(b) => Value::Blob(b.clone()),
             Self::Array(_) | Self::Object(_) => {
                 // Arrays and Objects are serialized as JSON bytes
@@ -187,7 +187,7 @@ impl MetadataValue {
             }
             Self::Reference(r) => {
                 // Store reference as collection:id string
-                Value::Text(format!("{}:{}", r.collection(), r.entity_id().0))
+                Value::text(format!("{}:{}", r.collection(), r.entity_id().0))
             }
             Self::References(refs) => {
                 // Store multiple references as comma-separated string
@@ -195,7 +195,7 @@ impl MetadataValue {
                     .iter()
                     .map(|r| format!("{}:{}", r.collection(), r.entity_id().0))
                     .collect();
-                Value::Text(parts.join(","))
+                Value::text(parts.join(","))
             }
         }
     }

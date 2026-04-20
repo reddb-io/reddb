@@ -1065,7 +1065,7 @@ pub(super) fn sort_records_by_order_by_with_db(
                 // Both have abbreviated keys: fast u64 compare first
                 (Some(la), Some(ra), Some(Value::Text(ls)), Some(Value::Text(rs))) => {
                     match la.cmp(ra) {
-                        Ordering::Equal => ls.as_str().cmp(rs.as_str()),
+                        Ordering::Equal => ls.as_ref().cmp(rs.as_str()),
                         other => other,
                     }
                 }
@@ -1162,8 +1162,8 @@ pub(super) fn resolve_runtime_field(
             let node = record.nodes.get(alias)?;
             match property.as_str() {
                 "id" => Some(Value::NodeRef(node.id.clone())),
-                "label" => Some(Value::Text(node.label.clone())),
-                "type" | "node_type" => Some(Value::Text(format!("{:?}", node.node_type))),
+                "label" => Some(Value::text(node.label.clone())),
+                "type" | "node_type" => Some(Value::text(format!("{:?}", node.node_type))),
                 _ => node.properties.get(property).cloned(),
             }
         }
@@ -1177,7 +1177,7 @@ pub(super) fn resolve_runtime_field(
                 "from" | "source" => Some(Value::NodeRef(edge.from.clone())),
                 "to" | "target" => Some(Value::NodeRef(edge.to.clone())),
                 "type" | "edge_type" | "label" => {
-                    Some(Value::Text(format!("{:?}", edge.edge_type)))
+                    Some(Value::text(format!("{:?}", edge.edge_type)))
                 }
                 "weight" => Some(Value::Float(edge.weight as f64)),
                 _ => None,
@@ -1284,7 +1284,7 @@ pub(super) fn runtime_json_scalar_to_value(value: &JsonValue) -> Option<Value> {
         JsonValue::Null => Some(Value::Null),
         JsonValue::Bool(value) => Some(Value::Boolean(*value)),
         JsonValue::Number(value) => Some(Value::Float(*value)),
-        JsonValue::String(value) => Some(Value::Text(value.clone())),
+        JsonValue::String(value) => Some(Value::text(value.clone())),
         JsonValue::Array(_) | JsonValue::Object(_) => None,
     }
 }
@@ -1542,7 +1542,7 @@ pub(super) fn runtime_value_text(value: &Value) -> Option<String> {
 /// avoid cloning text values when comparing.
 pub(super) fn runtime_value_text_str(value: &Value) -> Option<&str> {
     match value {
-        Value::Text(s) => Some(s.as_str()),
+        Value::Text(s) => Some(s.as_ref()),
         Value::NodeRef(s) | Value::EdgeRef(s) | Value::TableRef(s) => Some(s.as_str()),
         Value::Email(s) | Value::Url(s) => Some(s.as_str()),
         _ => None,
@@ -1806,7 +1806,7 @@ fn evaluate_scalar_function_legacy(
                 }
                 out.push_str(&value.display_string());
             }
-            Some(Value::Text(out))
+            Some(Value::text(out))
         }
         "CASE" => {
             // CASE WHEN cond THEN val ... ELSE val END is encoded as
@@ -1890,14 +1890,14 @@ fn evaluate_scalar_function_legacy(
         "UPPER" => {
             let val = resolve_scalar_arg(args, 0, source)?;
             match val {
-                Value::Text(s) => Some(Value::Text(s.to_uppercase())),
+                Value::Text(s) => Some(Value::text(s.to_uppercase())),
                 _ => Some(val),
             }
         }
         "LOWER" => {
             let val = resolve_scalar_arg(args, 0, source)?;
             match val {
-                Value::Text(s) => Some(Value::Text(s.to_lowercase())),
+                Value::Text(s) => Some(Value::text(s.to_lowercase())),
                 _ => Some(val),
             }
         }
@@ -1934,7 +1934,7 @@ fn evaluate_scalar_function_legacy(
             match resolve_scalar_arg(args, 1, source)? {
                 Value::Text(pattern) if func_name == "SUBSTRING" && args.len() == 2 => {
                     Some(match substring_pattern_text(&text, &pattern) {
-                        Some(matched) => Value::Text(matched),
+                        Some(matched) => Value::text(matched),
                         None => Value::Null,
                     })
                 }
@@ -1943,7 +1943,7 @@ fn evaluate_scalar_function_legacy(
                     let count = args.get(2).and_then(|_| {
                         resolve_scalar_arg(args, 2, source).and_then(|value| value_as_i64(&value))
                     });
-                    Some(Value::Text(substring_text(&text, start, count)?))
+                    Some(Value::text(substring_text(&text, start, count)?))
                 }
             }
         }
@@ -1971,7 +1971,7 @@ fn evaluate_scalar_function_legacy(
                 Some(Value::Text(chars)) => Some(chars),
                 Some(_) => return Some(Value::Null),
             };
-            Some(Value::Text(trim_text(&text, chars.as_deref(), true, true)))
+            Some(Value::text(trim_text(&text, chars.as_deref(), true, true)))
         }
         "LTRIM" => {
             let text = match resolve_scalar_arg(args, 0, source)? {
@@ -1986,7 +1986,7 @@ fn evaluate_scalar_function_legacy(
                 Some(Value::Text(chars)) => Some(chars),
                 Some(_) => return Some(Value::Null),
             };
-            Some(Value::Text(trim_text(&text, chars.as_deref(), true, false)))
+            Some(Value::text(trim_text(&text, chars.as_deref(), true, false)))
         }
         "RTRIM" => {
             let text = match resolve_scalar_arg(args, 0, source)? {
@@ -2001,7 +2001,7 @@ fn evaluate_scalar_function_legacy(
                 Some(Value::Text(chars)) => Some(chars),
                 Some(_) => return Some(Value::Null),
             };
-            Some(Value::Text(trim_text(&text, chars.as_deref(), false, true)))
+            Some(Value::text(trim_text(&text, chars.as_deref(), false, true)))
         }
         "CONCAT_WS" => {
             let separator = match resolve_scalar_arg(args, 0, source)? {
@@ -2017,14 +2017,14 @@ fn evaluate_scalar_function_legacy(
                 }
                 parts.push(value.display_string());
             }
-            Some(Value::Text(parts.join(&separator)))
+            Some(Value::text(parts.join(&separator)))
         }
         "REVERSE" => {
             let text = match resolve_scalar_arg(args, 0, source)? {
                 Value::Text(text) => text,
                 _ => return Some(Value::Null),
             };
-            Some(Value::Text(text.chars().rev().collect()))
+            Some(Value::text(text.chars().rev().collect()))
         }
         "LEFT" => {
             let text = match resolve_scalar_arg(args, 0, source)? {
@@ -2033,7 +2033,7 @@ fn evaluate_scalar_function_legacy(
             };
             let count =
                 resolve_scalar_arg(args, 1, source).and_then(|value| value_as_i64(&value))?;
-            Some(Value::Text(slice_left_text(&text, count)))
+            Some(Value::text(slice_left_text(&text, count)))
         }
         "RIGHT" => {
             let text = match resolve_scalar_arg(args, 0, source)? {
@@ -2042,12 +2042,12 @@ fn evaluate_scalar_function_legacy(
             };
             let count =
                 resolve_scalar_arg(args, 1, source).and_then(|value| value_as_i64(&value))?;
-            Some(Value::Text(slice_right_text(&text, count)))
+            Some(Value::text(slice_right_text(&text, count)))
         }
         "QUOTE_LITERAL" => match resolve_scalar_arg(args, 0, source)? {
             Value::Null => Some(Value::Null),
-            Value::Text(text) => Some(Value::Text(quote_literal_text(&text))),
-            other => Some(Value::Text(quote_literal_text(&other.display_string()))),
+            Value::Text(text) => Some(Value::text(quote_literal_text(&text))),
+            other => Some(Value::text(quote_literal_text(&other.display_string()))),
         },
         "ABS" => {
             let val = resolve_scalar_arg(args, 0, source)?;
@@ -2320,7 +2320,7 @@ fn value_as_number(v: &Value) -> Option<NumOperand> {
 fn cast_value_to(src: &Value, target: crate::storage::schema::types::DataType) -> Value {
     use crate::storage::schema::types::DataType as DT;
     match (src, target) {
-        (v, DT::Text) => Value::Text(v.display_string()),
+        (v, DT::Text) => Value::text(v.display_string()),
         (Value::Integer(n), DT::Float) => Value::Float(*n as f64),
         (Value::Integer(n), DT::BigInt) => Value::BigInt(*n),
         (Value::Integer(n), DT::UnsignedInteger) if *n >= 0 => Value::UnsignedInteger(*n as u64),
@@ -2369,7 +2369,7 @@ pub(super) fn eval_projection_value(proj: &Projection, source: &UnifiedRecord) -
                 if let Ok(n) = lit_val.parse::<f64>() {
                     return Some(Value::Float(n));
                 }
-                return Some(Value::Text(lit_val.to_string()));
+                return Some(Value::text(lit_val.to_string()));
             }
             source.values.get(col.as_str()).cloned()
         }
@@ -2449,7 +2449,7 @@ fn projection_default_value_with_db(
     source: &UnifiedRecord,
 ) -> Option<Value> {
     match projection {
-        Projection::Field(field, _) => Some(Value::Text(field_ref_name(field))),
+        Projection::Field(field, _) => Some(Value::text(field_ref_name(field))),
         _ => eval_projection_value_with_db(db, projection, source),
     }
 }
@@ -2665,9 +2665,9 @@ mod tests {
         assert_eq!(
             evaluate_metadata_field_compare(
                 &field,
-                &Value::Text("table".to_string()),
+                &Value::text("table".to_string()),
                 CompareOp::Eq,
-                &Value::Text("TABLE".to_string()),
+                &Value::text("TABLE".to_string()),
             ),
             Some(true)
         );
@@ -2675,9 +2675,9 @@ mod tests {
         assert_eq!(
             evaluate_metadata_field_compare(
                 &field,
-                &Value::Text("graph_node".to_string()),
+                &Value::text("graph_node".to_string()),
                 CompareOp::Ne,
-                &Value::Text("GRAPH_NODE".to_string()),
+                &Value::text("GRAPH_NODE".to_string()),
             ),
             Some(false)
         );
@@ -2693,11 +2693,11 @@ mod tests {
         assert_eq!(
             evaluate_metadata_field_in(
                 &field,
-                &Value::Text("vector".to_string()),
+                &Value::text("vector".to_string()),
                 &[
-                    Value::Text("TABLE".to_string()),
-                    Value::Text("vector".to_string()),
-                    Value::Text("graph_node".to_string()),
+                    Value::text("TABLE".to_string()),
+                    Value::text("vector".to_string()),
+                    Value::text("graph_node".to_string()),
                 ],
             ),
             Some(true)
@@ -2706,10 +2706,10 @@ mod tests {
         assert_eq!(
             evaluate_metadata_field_in(
                 &field,
-                &Value::Text("document".to_string()),
+                &Value::text("document".to_string()),
                 &[
-                    Value::Text("TABLE".to_string()),
-                    Value::Text("GRAPH_NODE".to_string()),
+                    Value::text("TABLE".to_string()),
+                    Value::text("GRAPH_NODE".to_string()),
                 ],
             ),
             Some(false)
@@ -2726,9 +2726,9 @@ mod tests {
         assert_eq!(
             evaluate_metadata_field_compare(
                 &field,
-                &Value::Text("vector".to_string()),
+                &Value::text("vector".to_string()),
                 CompareOp::Gt,
-                &Value::Text("vector".to_string()),
+                &Value::text("vector".to_string()),
             ),
             Some(false)
         );
@@ -2740,7 +2740,7 @@ mod tests {
         let mut node_properties = HashMap::new();
         node_properties.insert(
             "nginx_version".to_string(),
-            Value::Text("1.22.1".to_string()),
+            Value::text("1.22.1".to_string()),
         );
         let node = MatchedNode {
             id: "svc:nginx:80".to_string(),
@@ -2753,7 +2753,7 @@ mod tests {
         let field = FieldRef::node_prop("svc", "nginx_version");
         assert_eq!(
             resolve_runtime_field(&record, &field, None, None),
-            Some(Value::Text("1.22.1".to_string()))
+            Some(Value::text("1.22.1".to_string()))
         );
     }
 

@@ -51,7 +51,7 @@ impl RedDBServer {
                         let k = named
                             .get("key")
                             .and_then(|v| match v {
-                                Value::Text(s) => Some(s.as_str()),
+                                Value::Text(s) => Some(s.as_ref()),
                                 _ => None,
                             })
                             .unwrap_or("");
@@ -104,7 +104,7 @@ impl RedDBServer {
                 let key = named
                     .get("key")
                     .and_then(|v| match v {
-                        Value::Text(s) => Some(s.as_str()),
+                        Value::Text(s) => Some(s.as_ref()),
                         _ => None,
                     })
                     .unwrap_or("");
@@ -193,7 +193,7 @@ impl RedDBServer {
         }
 
         let store_value = match &value {
-            JsonValue::String(s) => Value::Text(s.clone()),
+            JsonValue::String(s) => Value::text(s.clone()),
             JsonValue::Number(n) => {
                 if n.fract().abs() < f64::EPSILON {
                     Value::Integer(*n as i64)
@@ -203,7 +203,7 @@ impl RedDBServer {
             }
             JsonValue::Bool(b) => Value::Boolean(*b),
             JsonValue::Null => Value::Null,
-            other => Value::Text(crate::json::to_string(other).unwrap_or_default()),
+            other => Value::text(crate::json::to_string(other).unwrap_or_default()),
         };
 
         let _ = self
@@ -265,7 +265,7 @@ impl RedDBServer {
                 .entity_use_cases()
                 .delete_kv(RED_CONFIG_COLLECTION, key);
             let store_value = match value {
-                JsonValue::String(s) => Value::Text(s.clone()),
+                JsonValue::String(s) => Value::text(s.clone()),
                 JsonValue::Number(n) => {
                     if n.fract().abs() < f64::EPSILON {
                         Value::Integer(*n as i64)
@@ -275,7 +275,7 @@ impl RedDBServer {
                 }
                 JsonValue::Bool(b) => Value::Boolean(*b),
                 JsonValue::Null => Value::Null,
-                other => Value::Text(crate::json::to_string(other).unwrap_or_default()),
+                other => Value::text(crate::json::to_string(other).unwrap_or_default()),
             };
             if self
                 .entity_use_cases()
@@ -773,16 +773,16 @@ impl RedDBServer {
                 let create_result = self.entity_use_cases().create_row(CreateRowInput {
                     collection: save.collection.clone(),
                     fields: vec![
-                        (save.prompt_field.clone(), Value::Text(prompt.clone())),
+                        (save.prompt_field.clone(), Value::text(prompt.clone())),
                         (
                             save.response_field.clone(),
-                            Value::Text(response.output_text.clone()),
+                            Value::text(response.output_text.clone()),
                         ),
                         (
                             "provider".to_string(),
-                            Value::Text(provider.token().to_string()),
+                            Value::text(provider.token().to_string()),
                         ),
-                        ("model".to_string(), Value::Text(response.model.clone())),
+                        ("model".to_string(), Value::text(response.model.clone())),
                         ("index".to_string(), Value::Integer(index as i64)),
                     ],
                     metadata,
@@ -883,7 +883,7 @@ impl RedDBServer {
             match self.entity_use_cases().create_kv(CreateKvInput {
                 collection: RED_CONFIG_COLLECTION.to_string(),
                 key: key_name.clone(),
-                value: Value::Text(api_key.clone()),
+                value: Value::text(api_key.clone()),
                 metadata: metadata.clone(),
             }) {
                 Ok(output) => saved_keys.push((key_name, output.id.raw())),
@@ -900,7 +900,7 @@ impl RedDBServer {
             match self.entity_use_cases().create_kv(CreateKvInput {
                 collection: RED_CONFIG_COLLECTION.to_string(),
                 key: base_key.clone(),
-                value: Value::Text(api_base.clone()),
+                value: Value::text(api_base.clone()),
                 metadata: Vec::new(),
             }) {
                 Ok(output) => saved_keys.push((base_key, output.id.raw())),
@@ -945,7 +945,7 @@ impl RedDBServer {
             let _ = self.entity_use_cases().create_kv(CreateKvInput {
                 collection: RED_CONFIG_COLLECTION.to_string(),
                 key: "red.config.ai.default.provider".to_string(),
-                value: Value::Text(provider.token().to_string()),
+                value: Value::text(provider.token().to_string()),
                 metadata: Vec::new(),
             });
 
@@ -957,7 +957,7 @@ impl RedDBServer {
             let _ = self.entity_use_cases().create_kv(CreateKvInput {
                 collection: RED_CONFIG_COLLECTION.to_string(),
                 key: "red.config.ai.default.model".to_string(),
-                value: Value::Text(model.clone()),
+                value: Value::text(model.clone()),
                 metadata: Vec::new(),
             });
 
@@ -1292,13 +1292,13 @@ fn embedding_source_row_ref(
     let collection = source_collection
         .or_else(|| {
             record.get("red_collection").and_then(|value| match value {
-                Value::Text(value) if !value.trim().is_empty() => Some(value.as_str()),
+                Value::Text(value) if !value.trim().is_empty() => Some(value.as_ref()),
                 _ => None,
             })
         })
         .or_else(|| {
             record.get("_collection").and_then(|value| match value {
-                Value::Text(value) if !value.trim().is_empty() => Some(value.as_str()),
+                Value::Text(value) if !value.trim().is_empty() => Some(value.as_ref()),
                 _ => None,
             })
         })?;

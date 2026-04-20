@@ -186,7 +186,7 @@ impl UnifiedStore {
                     columns: Vec::new(),
                     named: Some(
                         [
-                            ("key".to_string(), crate::storage::schema::Value::Text(key)),
+                            ("key".to_string(), crate::storage::schema::Value::text(key)),
                             ("value".to_string(), value),
                         ]
                         .into_iter()
@@ -211,7 +211,7 @@ impl UnifiedStore {
                     let key_matches = named
                         .get("key")
                         .and_then(|v| match v {
-                            crate::storage::schema::Value::Text(s) => Some(s.as_str() == key),
+                            crate::storage::schema::Value::Text(s) => Some(s.as_ref() == key),
                             _ => None,
                         })
                         .unwrap_or(false);
@@ -1231,7 +1231,7 @@ fn flatten_config_json(
             }
         }
         crate::serde_json::Value::String(s) => {
-            out.push((prefix.to_string(), Value::Text(s.clone())));
+            out.push((prefix.to_string(), Value::text(s.clone())));
         }
         crate::serde_json::Value::Number(n) => {
             if n.fract().abs() < f64::EPSILON {
@@ -1248,7 +1248,7 @@ fn flatten_config_json(
         }
         crate::serde_json::Value::Array(arr) => {
             let json_str = crate::serde_json::to_string(value).unwrap_or_default();
-            out.push((prefix.to_string(), Value::Text(json_str)));
+            out.push((prefix.to_string(), Value::text(json_str)));
         }
     }
 }

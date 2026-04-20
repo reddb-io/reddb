@@ -787,15 +787,15 @@ mod tests {
 
         // Add structured records
         let mut vals1 = HashMap::new();
-        vals1.insert("name".to_string(), Value::Text("host1".to_string()));
+        vals1.insert("name".to_string(), Value::text("host1".to_string()));
         executor.add_record(1, vals1);
 
         let mut vals2 = HashMap::new();
-        vals2.insert("name".to_string(), Value::Text("host2".to_string()));
+        vals2.insert("name".to_string(), Value::text("host2".to_string()));
         executor.add_record(2, vals2);
 
         let mut vals3 = HashMap::new();
-        vals3.insert("name".to_string(), Value::Text("host3".to_string()));
+        vals3.insert("name".to_string(), Value::text("host3".to_string()));
         executor.add_record(3, vals3);
 
         // Add vectors (host3 is most similar to query)
@@ -839,7 +839,7 @@ mod tests {
         // Add records 1-5
         for i in 1..=5 {
             let mut vals = HashMap::new();
-            vals.insert("name".to_string(), Value::Text(format!("host{}", i)));
+            vals.insert("name".to_string(), Value::text(format!("host{}", i)));
             executor.add_record(i, vals);
         }
 
@@ -886,7 +886,7 @@ mod tests {
 
         for i in 1..=4 {
             let mut vals = HashMap::new();
-            vals.insert("name".to_string(), Value::Text(format!("host{}", i)));
+            vals.insert("name".to_string(), Value::text(format!("host{}", i)));
             executor.add_record(i, vals);
             executor.add_vector("hosts", i, vec![i as f32 * 0.25, 0.0], Some(i));
         }

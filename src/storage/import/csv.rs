@@ -57,7 +57,7 @@ pub struct CsvConfig {
     /// newlines. Default `"`. Doubled inside a field is an escaped quote.
     pub quote: u8,
     /// Empty (unquoted) fields map to `Value::Null` when true.
-    /// An empty quoted field (`""`) is always `Value::Text("")`.
+    /// An empty quoted field (`""`) is always `Value::text("")`.
     pub treat_empty_as_null: bool,
     /// Batch size (records processed per bulk-insert chunk).
     pub batch_size: usize,
@@ -324,7 +324,7 @@ fn coerce_field(raw: &str, treat_empty_as_null: bool) -> Value {
         return Value::Boolean(false);
     }
     // Fallback.
-    Value::Text(raw.to_string())
+    Value::text(raw.to_string())
 }
 
 #[cfg(test)]
@@ -388,9 +388,9 @@ mod tests {
         assert_eq!(coerce_field("False", true), Value::Boolean(false));
         assert_eq!(
             coerce_field("hello", true),
-            Value::Text("hello".to_string())
+            Value::text("hello".to_string())
         );
         assert_eq!(coerce_field("", true), Value::Null);
-        assert_eq!(coerce_field("", false), Value::Text(String::new()));
+        assert_eq!(coerce_field("", false), Value::text(String::new()));
     }
 }

@@ -1645,7 +1645,7 @@ mod tests {
             EntityId::new(1),
             "users",
             1,
-            vec![Value::Text("Alice".to_string())],
+            vec![Value::text("Alice".to_string())],
         );
 
         let id = segment.insert(entity).unwrap();
@@ -1665,7 +1665,7 @@ mod tests {
             EntityId::new(1),
             "users",
             1,
-            vec![Value::Text("Alice".to_string())],
+            vec![Value::text("Alice".to_string())],
         );
         segment.insert(entity).unwrap();
 
@@ -1731,7 +1731,7 @@ mod tests {
             EntityId::new(1),
             "hosts",
             1,
-            vec![Value::Text("192.168.1.1".to_string())],
+            vec![Value::text("192.168.1.1".to_string())],
         );
         entity1.add_cross_ref(CrossRef::new(
             EntityId::new(1),

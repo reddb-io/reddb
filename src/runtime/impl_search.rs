@@ -1250,9 +1250,9 @@ impl RedDBRuntime {
             "sources_count".into(),
         ]);
         let mut record = UnifiedRecord::new();
-        record.set("answer", Value::Text(answer));
-        record.set("provider", Value::Text(provider.token().to_string()));
-        record.set("model", Value::Text(model));
+        record.set("answer", Value::text(answer));
+        record.set("provider", Value::text(provider.token().to_string()));
+        record.set("model", Value::text(model));
         record.set("prompt_tokens", Value::Integer(prompt_tokens as i64));
         record.set(
             "completion_tokens",

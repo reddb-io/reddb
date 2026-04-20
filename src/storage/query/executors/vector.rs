@@ -101,7 +101,7 @@ impl VectorExecutor {
                     // Convert MetadataEntry to HashMap<String, Value>
                     let mut meta_map: HashMap<String, Value> = HashMap::new();
                     for (k, v) in &meta_entry.strings {
-                        meta_map.insert(k.clone(), Value::Text(v.clone()));
+                        meta_map.insert(k.clone(), Value::text(v.clone()));
                     }
                     for (k, v) in &meta_entry.integers {
                         meta_map.insert(k.clone(), Value::Integer(*v));
@@ -138,7 +138,7 @@ impl VectorExecutor {
                 .insert(Arc::from("distance"), Value::Float(sr.distance as f64));
             record.values.insert(
                 Arc::from("collection"),
-                Value::Text(query.collection.clone()),
+                Value::text(query.collection.clone()),
             );
 
             record.vector_results.push(vsr);
@@ -215,7 +215,7 @@ impl VectorExecutor {
 /// Convert MetadataValue to Value for unified results
 fn metadata_value_to_value(mv: MetadataValue) -> Value {
     match mv {
-        MetadataValue::String(s) => Value::Text(s),
+        MetadataValue::String(s) => Value::text(s),
         MetadataValue::Integer(i) => Value::Integer(i),
         MetadataValue::Float(f) => Value::Float(f),
         MetadataValue::Bool(b) => Value::Boolean(b),
@@ -406,7 +406,7 @@ impl InMemoryVectorExecutor {
                 .insert(Arc::from("distance"), Value::Float(dist as f64));
             record.values.insert(
                 Arc::from("collection"),
-                Value::Text(query.collection.clone()),
+                Value::text(query.collection.clone()),
             );
             record.vector_results.push(vsr);
             result.push(record);

@@ -283,7 +283,7 @@ impl Predicate {
             (FilterOp::IsNull, PredicateValue::None) => matches!(column_value, Value::Null),
             (FilterOp::IsNotNull, PredicateValue::None) => !matches!(column_value, Value::Null),
             (FilterOp::Contains, PredicateValue::Single(v)) => match (column_value, v) {
-                (Value::Text(haystack), Value::Text(needle)) => haystack.contains(needle.as_str()),
+                (Value::Text(haystack), Value::Text(needle)) => haystack.contains(needle.as_ref()),
                 _ => false,
             },
             (FilterOp::StartsWith, PredicateValue::Pattern(prefix)) => match column_value {
@@ -537,11 +537,11 @@ mod tests {
     fn make_row() -> impl Fn(&str) -> Option<Value> {
         |col: &str| -> Option<Value> {
             match col {
-                "name" => Some(Value::Text("Alice".to_string())),
+                "name" => Some(Value::text("Alice".to_string())),
                 "age" => Some(Value::Integer(25)),
                 "score" => Some(Value::Float(95.5)),
                 "active" => Some(Value::Boolean(true)),
-                "email" => Some(Value::Text("alice@example.com".to_string())),
+                "email" => Some(Value::text("alice@example.com".to_string())),
                 "nullable" => Some(Value::Null),
                 _ => None,
             }
@@ -550,16 +550,16 @@ mod tests {
 
     #[test]
     fn test_predicate_eq() {
-        let pred = Predicate::eq("name", Value::Text("Alice".to_string()));
-        assert!(pred.evaluate(&Value::Text("Alice".to_string())));
-        assert!(!pred.evaluate(&Value::Text("Bob".to_string())));
+        let pred = Predicate::eq("name", Value::text("Alice".to_string()));
+        assert!(pred.evaluate(&Value::text("Alice".to_string())));
+        assert!(!pred.evaluate(&Value::text("Bob".to_string())));
     }
 
     #[test]
     fn test_predicate_ne() {
-        let pred = Predicate::ne("name", Value::Text("Bob".to_string()));
-        assert!(pred.evaluate(&Value::Text("Alice".to_string())));
-        assert!(!pred.evaluate(&Value::Text("Bob".to_string())));
+        let pred = Predicate::ne("name", Value::text("Bob".to_string()));
+        assert!(pred.evaluate(&Value::text("Alice".to_string())));
+        assert!(!pred.evaluate(&Value::text("Bob".to_string())));
     }
 
     #[test]
@@ -609,38 +609,38 @@ mod tests {
         let pred = Predicate::in_list(
             "name",
             vec![
-                Value::Text("Alice".to_string()),
-                Value::Text("Bob".to_string()),
+                Value::text("Alice".to_string()),
+                Value::text("Bob".to_string()),
             ],
         );
-        assert!(pred.evaluate(&Value::Text("Alice".to_string())));
-        assert!(pred.evaluate(&Value::Text("Bob".to_string())));
-        assert!(!pred.evaluate(&Value::Text("Charlie".to_string())));
+        assert!(pred.evaluate(&Value::text("Alice".to_string())));
+        assert!(pred.evaluate(&Value::text("Bob".to_string())));
+        assert!(!pred.evaluate(&Value::text("Charlie".to_string())));
     }
 
     #[test]
     fn test_predicate_not_in() {
-        let pred = Predicate::not_in("name", vec![Value::Text("Alice".to_string())]);
-        assert!(!pred.evaluate(&Value::Text("Alice".to_string())));
-        assert!(pred.evaluate(&Value::Text("Bob".to_string())));
+        let pred = Predicate::not_in("name", vec![Value::text("Alice".to_string())]);
+        assert!(!pred.evaluate(&Value::text("Alice".to_string())));
+        assert!(pred.evaluate(&Value::text("Bob".to_string())));
     }
 
     #[test]
     fn test_predicate_like() {
         // % matches any sequence
         let pred = Predicate::like("email", "%@example.com");
-        assert!(pred.evaluate(&Value::Text("alice@example.com".to_string())));
-        assert!(pred.evaluate(&Value::Text("bob@example.com".to_string())));
-        assert!(!pred.evaluate(&Value::Text("alice@gmail.com".to_string())));
+        assert!(pred.evaluate(&Value::text("alice@example.com".to_string())));
+        assert!(pred.evaluate(&Value::text("bob@example.com".to_string())));
+        assert!(!pred.evaluate(&Value::text("alice@gmail.com".to_string())));
 
         // _ matches single char
         let pred2 = Predicate::like("name", "A_ice");
-        assert!(pred2.evaluate(&Value::Text("Alice".to_string())));
-        assert!(!pred2.evaluate(&Value::Text("Alicia".to_string())));
+        assert!(pred2.evaluate(&Value::text("Alice".to_string())));
+        assert!(!pred2.evaluate(&Value::text("Alicia".to_string())));
 
         // Combined
         let pred3 = Predicate::like("email", "a%@%.com");
-        assert!(pred3.evaluate(&Value::Text("alice@example.com".to_string())));
+        assert!(pred3.evaluate(&Value::text("alice@example.com".to_string())));
     }
 
     #[test]
@@ -653,30 +653,30 @@ mod tests {
     #[test]
     fn test_predicate_is_not_null() {
         let pred = Predicate::is_not_null("name");
-        assert!(pred.evaluate(&Value::Text("Alice".to_string())));
+        assert!(pred.evaluate(&Value::text("Alice".to_string())));
         assert!(!pred.evaluate(&Value::Null));
     }
 
     #[test]
     fn test_predicate_contains() {
-        let pred = Predicate::contains("email", Value::Text("@example".to_string()));
-        assert!(pred.evaluate(&Value::Text("alice@example.com".to_string())));
-        assert!(!pred.evaluate(&Value::Text("alice@gmail.com".to_string())));
+        let pred = Predicate::contains("email", Value::text("@example".to_string()));
+        assert!(pred.evaluate(&Value::text("alice@example.com".to_string())));
+        assert!(!pred.evaluate(&Value::text("alice@gmail.com".to_string())));
     }
 
     #[test]
     fn test_predicate_starts_with() {
         let pred = Predicate::starts_with("name", "Al");
-        assert!(pred.evaluate(&Value::Text("Alice".to_string())));
-        assert!(pred.evaluate(&Value::Text("Albert".to_string())));
-        assert!(!pred.evaluate(&Value::Text("Bob".to_string())));
+        assert!(pred.evaluate(&Value::text("Alice".to_string())));
+        assert!(pred.evaluate(&Value::text("Albert".to_string())));
+        assert!(!pred.evaluate(&Value::text("Bob".to_string())));
     }
 
     #[test]
     fn test_predicate_ends_with() {
         let pred = Predicate::ends_with("email", ".com");
-        assert!(pred.evaluate(&Value::Text("alice@example.com".to_string())));
-        assert!(!pred.evaluate(&Value::Text("alice@example.org".to_string())));
+        assert!(pred.evaluate(&Value::text("alice@example.com".to_string())));
+        assert!(!pred.evaluate(&Value::text("alice@example.org".to_string())));
     }
 
     #[test]
@@ -684,7 +684,7 @@ mod tests {
         let row = make_row();
 
         // Simple equality
-        let filter = Filter::eq("name", Value::Text("Alice".to_string()));
+        let filter = Filter::eq("name", Value::text("Alice".to_string()));
         assert!(filter.evaluate(&row));
 
         // Comparison
@@ -697,13 +697,13 @@ mod tests {
         let row = make_row();
 
         let filter = Filter::and(vec![
-            Filter::eq("name", Value::Text("Alice".to_string())),
+            Filter::eq("name", Value::text("Alice".to_string())),
             Filter::gt("age", Value::Integer(20)),
         ]);
         assert!(filter.evaluate(&row));
 
         let filter = Filter::and(vec![
-            Filter::eq("name", Value::Text("Alice".to_string())),
+            Filter::eq("name", Value::text("Alice".to_string())),
             Filter::gt("age", Value::Integer(30)), // Alice is 25, fails
         ]);
         assert!(!filter.evaluate(&row));
@@ -714,13 +714,13 @@ mod tests {
         let row = make_row();
 
         let filter = Filter::or(vec![
-            Filter::eq("name", Value::Text("Bob".to_string())), // Fails
+            Filter::eq("name", Value::text("Bob".to_string())), // Fails
             Filter::gt("age", Value::Integer(20)),              // Passes
         ]);
         assert!(filter.evaluate(&row));
 
         let filter = Filter::or(vec![
-            Filter::eq("name", Value::Text("Bob".to_string())),
+            Filter::eq("name", Value::text("Bob".to_string())),
             Filter::lt("age", Value::Integer(20)),
         ]);
         assert!(!filter.evaluate(&row));
@@ -730,10 +730,10 @@ mod tests {
     fn test_filter_not() {
         let row = make_row();
 
-        let filter = Filter::not(Filter::eq("name", Value::Text("Bob".to_string())));
+        let filter = Filter::not(Filter::eq("name", Value::text("Bob".to_string())));
         assert!(filter.evaluate(&row)); // Alice != Bob
 
-        let filter = Filter::not(Filter::eq("name", Value::Text("Alice".to_string())));
+        let filter = Filter::not(Filter::eq("name", Value::text("Alice".to_string())));
         assert!(!filter.evaluate(&row));
     }
 
@@ -741,7 +741,7 @@ mod tests {
     fn test_filter_chain() {
         let row = make_row();
 
-        let filter = Filter::eq("name", Value::Text("Alice".to_string()))
+        let filter = Filter::eq("name", Value::text("Alice".to_string()))
             .and_filter(Filter::gt("age", Value::Integer(20)))
             .and_filter(Filter::lt("age", Value::Integer(30)));
 
@@ -751,7 +751,7 @@ mod tests {
     #[test]
     fn test_filter_referenced_columns() {
         let filter = Filter::and(vec![
-            Filter::eq("name", Value::Text("Alice".to_string())),
+            Filter::eq("name", Value::text("Alice".to_string())),
             Filter::or(vec![
                 Filter::gt("age", Value::Integer(20)),
                 Filter::lt("score", Value::Float(100.0)),
@@ -777,18 +777,18 @@ mod tests {
     fn test_like_edge_cases() {
         // Empty pattern
         let pred = Predicate::like("text", "");
-        assert!(pred.evaluate(&Value::Text("".to_string())));
-        assert!(!pred.evaluate(&Value::Text("a".to_string())));
+        assert!(pred.evaluate(&Value::text("".to_string())));
+        assert!(!pred.evaluate(&Value::text("a".to_string())));
 
         // Only %
         let pred = Predicate::like("text", "%");
-        assert!(pred.evaluate(&Value::Text("anything".to_string())));
-        assert!(pred.evaluate(&Value::Text("".to_string())));
+        assert!(pred.evaluate(&Value::text("anything".to_string())));
+        assert!(pred.evaluate(&Value::text("".to_string())));
 
         // Multiple %
         let pred = Predicate::like("text", "a%b%c");
-        assert!(pred.evaluate(&Value::Text("abc".to_string())));
-        assert!(pred.evaluate(&Value::Text("aXXbYYc".to_string())));
-        assert!(!pred.evaluate(&Value::Text("ab".to_string())));
+        assert!(pred.evaluate(&Value::text("abc".to_string())));
+        assert!(pred.evaluate(&Value::text("aXXbYYc".to_string())));
+        assert!(!pred.evaluate(&Value::text("ab".to_string())));
     }
 }

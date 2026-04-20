@@ -289,7 +289,7 @@ fn tree_json_value_to_storage_value(value: &JsonValue) -> Result<Value, ParseErr
                 Value::Float(*value)
             }
         }
-        JsonValue::String(value) => Value::Text(value.clone()),
+        JsonValue::String(value) => Value::text(value.clone()),
         JsonValue::Array(_) | JsonValue::Object(_) => {
             Value::Json(crate::json::to_vec(value).map_err(|err| {
                 ParseError::new(

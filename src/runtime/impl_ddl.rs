@@ -360,9 +360,9 @@ impl RedDBRuntime {
             "diff".to_string(),
         ];
         let row = vec![
-            ("table".to_string(), Value::Text(query.target.name.clone())),
-            ("format".to_string(), Value::Text(format_label.to_string())),
-            ("diff".to_string(), Value::Text(rendered)),
+            ("table".to_string(), Value::text(query.target.name.clone())),
+            ("format".to_string(), Value::text(format_label.to_string())),
+            ("diff".to_string(), Value::text(rendered)),
         ];
 
         Ok(RuntimeQueryResult::ok_records(

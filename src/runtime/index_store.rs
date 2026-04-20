@@ -1262,35 +1262,35 @@ mod tests {
     fn test_sorted_key_supports_text_ranges() {
         let mut index = SortedColumnIndex::new();
         index.insert(
-            value_to_sorted_key(&Value::Text("alpha".to_string())).unwrap(),
+            value_to_sorted_key(&Value::text("alpha".to_string())).unwrap(),
             EntityId::new(1),
         );
         index.insert(
-            value_to_sorted_key(&Value::Text("bravo".to_string())).unwrap(),
+            value_to_sorted_key(&Value::text("bravo".to_string())).unwrap(),
             EntityId::new(2),
         );
         index.insert(
-            value_to_sorted_key(&Value::Text("charlie".to_string())).unwrap(),
+            value_to_sorted_key(&Value::text("charlie".to_string())).unwrap(),
             EntityId::new(3),
         );
 
         assert_eq!(
             ids(&index
-                .greater_than(value_to_sorted_key(&Value::Text("alpha".to_string())).unwrap())
+                .greater_than(value_to_sorted_key(&Value::text("alpha".to_string())).unwrap())
                 .unwrap()),
             vec![2, 3]
         );
         assert_eq!(
             ids(&index
-                .less_equal(value_to_sorted_key(&Value::Text("alpha".to_string())).unwrap())
+                .less_equal(value_to_sorted_key(&Value::text("alpha".to_string())).unwrap())
                 .unwrap()),
             vec![1]
         );
         assert_eq!(
             ids(&index
                 .range(
-                    value_to_sorted_key(&Value::Text("bravo".to_string())).unwrap(),
-                    value_to_sorted_key(&Value::Text("charlie".to_string())).unwrap(),
+                    value_to_sorted_key(&Value::text("bravo".to_string())).unwrap(),
+                    value_to_sorted_key(&Value::text("charlie".to_string())).unwrap(),
                 )
                 .unwrap()),
             vec![2, 3]
@@ -1334,7 +1334,7 @@ mod tests {
             ),
             (
                 EntityId::new(2),
-                vec![("mixed".to_string(), Value::Text("ten".to_string()))],
+                vec![("mixed".to_string(), Value::text("ten".to_string()))],
             ),
         ];
 
@@ -1366,7 +1366,7 @@ mod tests {
             .index_entity_insert(
                 "users",
                 EntityId::new(1),
-                &[("email".to_string(), Value::Text("a@b.com".to_string()))],
+                &[("email".to_string(), Value::text("a@b.com".to_string()))],
             )
             .expect_err("missing backing hash index should surface as an error");
 
@@ -1402,7 +1402,7 @@ mod tests {
         let store = IndexStore::new();
         provision_hash_index(&store);
         let id = EntityId::new(7);
-        let key = ("email".to_string(), Value::Text("a@b.com".to_string()));
+        let key = ("email".to_string(), Value::text("a@b.com".to_string()));
 
         store
             .index_entity_insert("users", id, &[key.clone()])
@@ -1437,7 +1437,7 @@ mod tests {
             .index_entity_delete(
                 "users",
                 EntityId::new(1),
-                &[("email".to_string(), Value::Text("a@b.com".to_string()))],
+                &[("email".to_string(), Value::text("a@b.com".to_string()))],
             )
             .expect("delete must tolerate a missing backing index");
     }
@@ -1447,8 +1447,8 @@ mod tests {
         let store = IndexStore::new();
         provision_hash_index(&store);
         let id = EntityId::new(11);
-        let old = ("email".to_string(), Value::Text("old@x.com".to_string()));
-        let new = ("email".to_string(), Value::Text("new@x.com".to_string()));
+        let old = ("email".to_string(), Value::text("old@x.com".to_string()));
+        let new = ("email".to_string(), Value::text("new@x.com".to_string()));
 
         store
             .index_entity_insert("users", id, &[old.clone()])
@@ -1478,7 +1478,7 @@ mod tests {
         let store = IndexStore::new();
         provision_hash_index(&store);
         let id = EntityId::new(13);
-        let same = ("email".to_string(), Value::Text("a@b.com".to_string()));
+        let same = ("email".to_string(), Value::text("a@b.com".to_string()));
 
         store
             .index_entity_insert("users", id, &[same.clone()])
@@ -1501,7 +1501,7 @@ mod tests {
         provision_hash_index(&store);
         let id = EntityId::new(17);
         let old: Vec<(String, Value)> = vec![]; // email wasn't set before
-        let new = vec![("email".to_string(), Value::Text("fresh@x.com".to_string()))];
+        let new = vec![("email".to_string(), Value::text("fresh@x.com".to_string()))];
 
         store.index_entity_update("users", id, &old, &new).unwrap();
 
@@ -1521,7 +1521,7 @@ mod tests {
         let store = IndexStore::new();
         provision_hash_index(&store);
         let id = EntityId::new(19);
-        let old = vec![("email".to_string(), Value::Text("bye@x.com".to_string()))];
+        let old = vec![("email".to_string(), Value::text("bye@x.com".to_string()))];
         let new: Vec<(String, Value)> = vec![]; // email dropped
 
         store.index_entity_insert("users", id, &old).unwrap();
@@ -1548,16 +1548,16 @@ mod tests {
         provision_hash_index(&store); // only idx_email is registered
         let id = EntityId::new(23);
 
-        let insert = vec![("email".to_string(), Value::Text("a@b.com".to_string()))];
+        let insert = vec![("email".to_string(), Value::text("a@b.com".to_string()))];
         store.index_entity_insert("users", id, &insert).unwrap();
 
         // Update only changes `age` (not registered). email unchanged.
         let old = vec![
-            ("email".to_string(), Value::Text("a@b.com".to_string())),
+            ("email".to_string(), Value::text("a@b.com".to_string())),
             ("age".to_string(), Value::Integer(30)),
         ];
         let new = vec![
-            ("email".to_string(), Value::Text("a@b.com".to_string())),
+            ("email".to_string(), Value::text("a@b.com".to_string())),
             ("age".to_string(), Value::Integer(31)),
         ];
         store.index_entity_update("users", id, &old, &new).unwrap();

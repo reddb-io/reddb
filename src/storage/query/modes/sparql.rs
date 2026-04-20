@@ -824,7 +824,7 @@ impl SparqlQuery {
                                 property: pred,
                             },
                             op: CompareOp::Eq,
-                            value: Value::Text(lit.clone()),
+                            value: Value::text(lit.clone()),
                         });
                     }
                 }
@@ -896,7 +896,7 @@ fn convert_sparql_filter(filter: &SparqlFilter) -> Option<Filter> {
     match filter {
         SparqlFilter::Compare(var, op, term) => {
             let value = match term {
-                SparqlTerm::Literal(s) => Value::Text(s.clone()),
+                SparqlTerm::Literal(s) => Value::text(s.clone()),
                 SparqlTerm::Number(n) => Value::Float(*n),
                 SparqlTerm::Boolean(b) => Value::Boolean(*b),
                 _ => return None,

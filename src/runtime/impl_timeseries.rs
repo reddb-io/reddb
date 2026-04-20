@@ -124,9 +124,9 @@ fn save_timeseries_metadata(
     let mut fields = HashMap::new();
     fields.insert(
         "kind".to_string(),
-        Value::Text("timeseries_config".to_string()),
+        Value::text("timeseries_config".to_string()),
     );
-    fields.insert("series".to_string(), Value::Text(query.name.clone()));
+    fields.insert("series".to_string(), Value::text(query.name.clone()));
     fields.insert(
         "retention_ms".to_string(),
         query
