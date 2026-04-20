@@ -180,6 +180,7 @@ pub use unified::{
     // Store - THE primary storage interface
     UnifiedStore,
     UnifiedStore as Store,
+    UnifiedStoreConfig,
     VectorData,
     // Query builders (for advanced use)
     VectorQueryBuilder,
