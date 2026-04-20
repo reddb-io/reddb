@@ -5,6 +5,14 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+
+/// Shorthand — `Arc<parking_lot::Mutex<WalWriter>>` avoids poisoning
+/// (one writer panicking mid-append used to taint every subsequent
+/// lock acquisition) and shaves a few syscalls off the fast path.
+/// The group-commit coordinator + writer threads all acquire this
+/// mutex in the hot insert path, so the unpoison/fast-park win
+/// compounds under 16-way concurrency.
+type WalMutex = parking_lot::Mutex<WalWriter>;
 use std::time::{Duration, Instant};
 
 static NEXT_STORE_TX_ID: AtomicU64 = AtomicU64::new(1);
@@ -132,7 +140,7 @@ pub(crate) struct StoreCommitCoordinator {
     mode: DurabilityMode,
     config: crate::api::GroupCommitOptions,
     wal_path: PathBuf,
-    wal: Arc<Mutex<WalWriter>>,
+    wal: Arc<WalMutex>,
     state: Arc<(Mutex<CommitState>, Condvar)>,
 }
 
@@ -152,7 +160,7 @@ impl StoreCommitCoordinator {
         let wal_path = wal_path.into();
         let wal = WalWriter::open(&wal_path)?;
         let initial_durable_lsn = wal.durable_lsn();
-        let wal = Arc::new(Mutex::new(wal));
+        let wal = Arc::new(WalMutex::new(wal));
         let state = Arc::new((
             Mutex::new(CommitState::new(initial_durable_lsn)),
             Condvar::new(),
@@ -201,10 +209,7 @@ impl StoreCommitCoordinator {
 
         let tx_id = NEXT_STORE_TX_ID.fetch_add(1, Ordering::SeqCst);
         let commit_lsn = {
-            let mut wal = self
-                .wal
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut wal = self.wal.lock();
             wal.append(&WalRecord::Begin { tx_id })?;
             let mut wal_bytes = 0u64;
             for action in actions {
@@ -229,10 +234,7 @@ impl StoreCommitCoordinator {
 
     pub(crate) fn force_sync(&self) -> io::Result<()> {
         {
-            let mut wal = self
-                .wal
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut wal = self.wal.lock();
             wal.sync()?;
             let durable = wal.durable_lsn();
             drop(wal);
@@ -252,10 +254,7 @@ impl StoreCommitCoordinator {
     }
 
     pub(crate) fn truncate(&self) -> io::Result<()> {
-        let mut wal = self
-            .wal
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut wal = self.wal.lock();
         wal.truncate()?;
         let durable = wal.durable_lsn();
         drop(wal);
@@ -371,7 +370,7 @@ impl StoreCommitCoordinator {
     }
 
     fn run_group_commit_loop(
-        wal: Arc<Mutex<WalWriter>>,
+        wal: Arc<WalMutex>,
         state: Arc<(Mutex<CommitState>, Condvar)>,
         window: Duration,
         max_statements: usize,
@@ -429,7 +428,7 @@ impl StoreCommitCoordinator {
             };
 
             let sync_result = {
-                let mut wal = wal.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                let mut wal = wal.lock();
                 wal.sync().map(|_| wal.durable_lsn())
             };
 
