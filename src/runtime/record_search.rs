@@ -6,6 +6,40 @@ use crate::storage::query::unified::{
     sys_key_updated_at,
 };
 
+/// Per-thread cache of composite schemas `[red_entity_id, created_at,
+/// updated_at, <user columns…>]`, keyed on the `Arc<Vec<String>>`
+/// identity of the underlying row schema. A 4.5k-row scan hits this
+/// cache on every row after the first, so the Arc<Vec<Arc<str>>>
+/// result is refcount-cloned instead of rebuilt.
+fn sys_schema_with_row_columns(
+    schema: &std::sync::Arc<Vec<String>>,
+) -> std::sync::Arc<Vec<std::sync::Arc<str>>> {
+    use std::cell::RefCell;
+    thread_local! {
+        static CACHE: RefCell<Option<(usize, std::sync::Arc<Vec<std::sync::Arc<str>>>)>> =
+            const { RefCell::new(None) };
+    }
+    let key = std::sync::Arc::as_ptr(schema) as usize;
+    CACHE.with(|c| {
+        let mut slot = c.borrow_mut();
+        if let Some((k, v)) = slot.as_ref() {
+            if *k == key {
+                return std::sync::Arc::clone(v);
+            }
+        }
+        let mut out: Vec<std::sync::Arc<str>> = Vec::with_capacity(3 + schema.len());
+        out.push(sys_key_red_entity_id());
+        out.push(sys_key_created_at());
+        out.push(sys_key_updated_at());
+        for name in schema.iter() {
+            out.push(std::sync::Arc::from(name.as_str()));
+        }
+        let arc = std::sync::Arc::new(out);
+        *slot = Some((key, std::sync::Arc::clone(&arc)));
+        arc
+    })
+}
+
 #[inline(never)]
 pub(super) fn scan_runtime_table_source_records(
     db: &RedDB,
@@ -135,17 +169,16 @@ pub(super) fn runtime_table_record_lean_ref(entity: &UnifiedEntity) -> Option<Un
         }
         Some(record)
     } else if let Some(schema) = &row.schema {
-        let mut record = UnifiedRecord::with_capacity(3 + schema.len());
-        record.set_arc(
-            sys_key_red_entity_id(),
-            Value::UnsignedInteger(entity.id.raw()),
-        );
-        record.set_arc(sys_key_created_at(), Value::UnsignedInteger(created_at));
-        record.set_arc(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
-        for (name, value) in schema.iter().zip(row.columns.iter()) {
-            record.set(name, value.clone());
-        }
-        Some(record)
+        // Columnar fast-path: build the record with the schema-shared
+        // Vec<Arc<str>> side-channel so 4.5k rows × N fields deallocate
+        // as one contiguous Vec each instead of a HashMap per record.
+        let sys_schema = sys_schema_with_row_columns(schema);
+        let mut values: Vec<Value> = Vec::with_capacity(sys_schema.len());
+        values.push(Value::UnsignedInteger(entity.id.raw()));
+        values.push(Value::UnsignedInteger(created_at));
+        values.push(Value::UnsignedInteger(updated_at));
+        values.extend(row.columns.iter().cloned());
+        Some(UnifiedRecord::from_columnar(sys_schema, values))
     } else {
         let mut record = UnifiedRecord::with_capacity(3 + row.columns.len());
         record.set_arc(
