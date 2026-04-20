@@ -13,6 +13,14 @@ use std::sync::{Arc, Condvar, Mutex};
 /// mutex in the hot insert path, so the unpoison/fast-park win
 /// compounds under 16-way concurrency.
 type WalMutex = parking_lot::Mutex<WalWriter>;
+
+/// Shorthand for the group-commit coordinator's state pair. Same
+/// non-poisoning + lighter-park motivation as `WalMutex`; writer
+/// threads `wait` on this condvar until the coordinator publishes a
+/// new `durable_lsn`, so the park cost shows up on every
+/// WalDurableGrouped transaction.
+type CommitStateMutex = parking_lot::Mutex<CommitState>;
+type CommitStateCondvar = parking_lot::Condvar;
 use std::time::{Duration, Instant};
 
 static NEXT_STORE_TX_ID: AtomicU64 = AtomicU64::new(1);
@@ -141,7 +149,7 @@ pub(crate) struct StoreCommitCoordinator {
     config: crate::api::GroupCommitOptions,
     wal_path: PathBuf,
     wal: Arc<WalMutex>,
-    state: Arc<(Mutex<CommitState>, Condvar)>,
+    state: Arc<(CommitStateMutex, CommitStateCondvar)>,
 }
 
 impl StoreCommitCoordinator {
@@ -162,8 +170,8 @@ impl StoreCommitCoordinator {
         let initial_durable_lsn = wal.durable_lsn();
         let wal = Arc::new(WalMutex::new(wal));
         let state = Arc::new((
-            Mutex::new(CommitState::new(initial_durable_lsn)),
-            Condvar::new(),
+            CommitStateMutex::new(CommitState::new(initial_durable_lsn)),
+            CommitStateCondvar::new(),
         ));
 
         if matches!(
@@ -239,9 +247,7 @@ impl StoreCommitCoordinator {
             let durable = wal.durable_lsn();
             drop(wal);
             let (state_lock, cond) = &*self.state;
-            let mut state = state_lock
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut state = state_lock.lock();
             state.durable_lsn = durable;
             state.pending_target_lsn = durable.max(state.pending_target_lsn);
             state.pending_statements = 0;
@@ -260,9 +266,7 @@ impl StoreCommitCoordinator {
         drop(wal);
 
         let (state_lock, cond) = &*self.state;
-        let mut state = state_lock
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = state_lock.lock();
         state.durable_lsn = durable;
         state.pending_target_lsn = durable;
         state.pending_statements = 0;
@@ -333,9 +337,7 @@ impl StoreCommitCoordinator {
             // crash inside the flush window loses unflushed commits.
             DurabilityMode::Async => {
                 let (state_lock, cond) = &*self.state;
-                let mut state = state_lock
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let mut state = state_lock.lock();
                 state.pending_target_lsn = state.pending_target_lsn.max(target_lsn);
                 state.pending_statements = state.pending_statements.saturating_add(1);
                 state.pending_wal_bytes = state.pending_wal_bytes.saturating_add(wal_bytes);
@@ -345,9 +347,7 @@ impl StoreCommitCoordinator {
             }
             DurabilityMode::WalDurableGrouped => {
                 let (state_lock, cond) = &*self.state;
-                let mut state = state_lock
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let mut state = state_lock.lock();
                 state.pending_target_lsn = state.pending_target_lsn.max(target_lsn);
                 state.pending_statements = state.pending_statements.saturating_add(1);
                 state.pending_wal_bytes = state.pending_wal_bytes.saturating_add(wal_bytes);
@@ -361,9 +361,9 @@ impl StoreCommitCoordinator {
                     if state.durable_lsn >= target_lsn {
                         return Ok(());
                     }
-                    state = cond
-                        .wait(state)
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    // parking_lot::Condvar mutates the guard in place —
+                    // no LockResult to unwrap, no poisoning to fold.
+                    cond.wait(&mut state);
                 }
             }
         }
@@ -371,7 +371,7 @@ impl StoreCommitCoordinator {
 
     fn run_group_commit_loop(
         wal: Arc<WalMutex>,
-        state: Arc<(Mutex<CommitState>, Condvar)>,
+        state: Arc<(CommitStateMutex, CommitStateCondvar)>,
         window: Duration,
         max_statements: usize,
         max_wal_bytes: u64,
@@ -379,14 +379,10 @@ impl StoreCommitCoordinator {
         let (state_lock, cond) = &*state;
         loop {
             let target_lsn = {
-                let mut guard = state_lock
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let mut guard = state_lock.lock();
 
                 while !guard.shutdown && guard.pending_target_lsn <= guard.durable_lsn {
-                    guard = cond
-                        .wait(guard)
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    cond.wait(&mut guard);
                 }
 
                 if guard.shutdown {
@@ -402,10 +398,10 @@ impl StoreCommitCoordinator {
                     let now = Instant::now();
                     if now < deadline {
                         let timeout = deadline.saturating_duration_since(now);
-                        let (next_guard, _) = cond
-                            .wait_timeout(guard, timeout)
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        guard = next_guard;
+                        // parking_lot `wait_for` mutates the guard and returns
+                        // a WaitTimeoutResult instead of (guard, result) like
+                        // std. No LockResult to unwrap, no poisoning.
+                        let _ = cond.wait_for(&mut guard, timeout);
                         if guard.shutdown {
                             return;
                         }
@@ -432,9 +428,7 @@ impl StoreCommitCoordinator {
                 wal.sync().map(|_| wal.durable_lsn())
             };
 
-            let mut guard = state_lock
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut guard = state_lock.lock();
             match sync_result {
                 Ok(durable_lsn) => {
                     guard.durable_lsn = durable_lsn.max(target_lsn);
@@ -455,10 +449,10 @@ impl StoreCommitCoordinator {
 impl Drop for StoreCommitCoordinator {
     fn drop(&mut self) {
         let (state_lock, cond) = &*self.state;
-        if let Ok(mut state) = state_lock.lock() {
-            state.shutdown = true;
-            cond.notify_all();
-        }
+        // parking_lot::Mutex::lock is infallible (no poisoning).
+        let mut state = state_lock.lock();
+        state.shutdown = true;
+        cond.notify_all();
     }
 }
 
