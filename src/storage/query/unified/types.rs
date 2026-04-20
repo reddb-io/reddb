@@ -245,9 +245,16 @@ impl UnifiedRecord {
 
     /// Get a column value. Checks columnar first (scan fast-path),
     /// then the HashMap so mutated records still resolve.
+    ///
+    /// When the columnar schema has duplicate names — e.g. the sys
+    /// key `created_at` plus a user column also named `created_at` —
+    /// the LAST occurrence wins. This mirrors the pre-refactor
+    /// `HashMap::insert` behaviour where a later `set(name, value)`
+    /// overwrote an earlier one, so scan output still shows the
+    /// user-provided value in preference to the system timestamp.
     pub fn get(&self, column: &str) -> Option<&Value> {
         if let Some(col) = &self.columnar {
-            if let Some(idx) = col.schema.iter().position(|k| &**k == column) {
+            if let Some(idx) = col.schema.iter().rposition(|k| &**k == column) {
                 return col.values.get(idx);
             }
         }

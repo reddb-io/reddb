@@ -691,12 +691,15 @@ pub(super) fn collect_visible_columns(records: &[UnifiedRecord]) -> Vec<String> 
     // HashSet churn. This was the dominant cost on SELECT * workloads
     // (~32% of query time after the cross-index fix).
     if let Some(first) = records.first() {
-        let mut seen: std::collections::HashSet<&str> =
-            std::collections::HashSet::with_capacity(first.values.len());
-        let mut keys: Vec<String> = Vec::with_capacity(first.values.len());
-        for key in first.values.keys() {
+        // column_names() merges columnar side-channel + HashMap so
+        // scan fast-path rows contribute their schema.
+        let first_cols = first.column_names();
+        let mut seen: std::collections::HashSet<String> =
+            std::collections::HashSet::with_capacity(first_cols.len());
+        let mut keys: Vec<String> = Vec::with_capacity(first_cols.len());
+        for key in &first_cols {
             let k: &str = key;
-            if !k.starts_with('_') && seen.insert(k) {
+            if !k.starts_with('_') && seen.insert(k.to_string()) {
                 keys.push(k.to_string());
             }
         }
@@ -707,8 +710,8 @@ pub(super) fn collect_visible_columns(records: &[UnifiedRecord]) -> Vec<String> 
         let mut idx = step;
         while idx < n {
             let rec = &records[idx];
-            for key in rec.values.keys() {
-                let k: &str = key;
+            for key in rec.column_names() {
+                let k: &str = &key;
                 if k.starts_with('_') {
                     continue;
                 }
@@ -731,8 +734,8 @@ pub(super) fn collect_visible_columns(records: &[UnifiedRecord]) -> Vec<String> 
 
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for record in records {
-        for key in record.values.keys() {
-            let k: &str = key;
+        for key in record.column_names() {
+            let k: &str = &key;
             if !k.starts_with('_') && !seen.contains(k) {
                 seen.insert(k.to_string());
             }

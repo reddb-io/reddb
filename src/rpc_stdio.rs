@@ -505,9 +505,13 @@ fn dispatch_method(
                 .records
                 .first()
                 .map(|first| {
-                    let mut keys: Vec<&str> = first.values.keys().map(|k| k.as_ref()).collect();
+                    let mut keys: Vec<String> = first
+                        .column_names()
+                        .into_iter()
+                        .map(|k| k.to_string())
+                        .collect();
                     keys.sort();
-                    keys.into_iter().map(|k| k.to_string()).collect()
+                    keys
                 })
                 .unwrap_or_default();
 
@@ -1001,12 +1005,13 @@ fn query_result_to_json(qr: &RuntimeQueryResult) -> Value {
 
     let mut columns = Vec::new();
     if let Some(first) = qr.result.records.first() {
-        let mut keys: Vec<&str> = first.values.keys().map(|k| k.as_ref()).collect();
-        keys.sort();
-        columns = keys
+        let mut keys: Vec<String> = first
+            .column_names()
             .into_iter()
-            .map(|k| Value::String(k.to_string()))
+            .map(|k| k.to_string())
             .collect();
+        keys.sort();
+        columns = keys.into_iter().map(Value::String).collect();
     }
     envelope.insert("columns".to_string(), Value::Array(columns));
 
@@ -1046,8 +1051,10 @@ fn insert_result_to_json(qr: &RuntimeQueryResult) -> Value {
 
 fn record_to_json_object(record: &UnifiedRecord) -> Value {
     let mut map = json::Map::new();
+    // iter_fields merges the columnar fast-path + HashMap so scan
+    // rows (columnar only) contribute their values.
     let mut entries: Vec<(&str, &SchemaValue)> =
-        record.values.iter().map(|(k, v)| (k.as_ref(), v)).collect();
+        record.iter_fields().map(|(k, v)| (k.as_ref(), v)).collect();
     entries.sort_by(|a, b| a.0.cmp(b.0));
     for (k, v) in entries {
         map.insert(k.to_string(), schema_value_to_json(v));

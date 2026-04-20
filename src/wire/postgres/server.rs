@@ -362,7 +362,14 @@ fn record_get<'a>(record: &'a UnifiedRecord, key: &str) -> Option<&'a Value> {
 /// RowDescription and match cells positionally. A stable ordering
 /// would require keeping an insertion-order index alongside `values`.
 fn record_field_names(record: &UnifiedRecord) -> Vec<String> {
-    record.values.keys().map(|k| k.to_string()).collect()
+    // `column_names()` merges the columnar scan side-channel with
+    // the HashMap so scan rows (which populate only columnar) still
+    // surface their field names in PG wire output.
+    record
+        .column_names()
+        .into_iter()
+        .map(|k| k.to_string())
+        .collect()
 }
 
 async fn send_error<S>(stream: &mut S, code: &str, message: &str) -> Result<(), PgWireError>

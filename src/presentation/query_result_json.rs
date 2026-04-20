@@ -235,8 +235,7 @@ fn unified_record_json(record: &UnifiedRecord) -> JsonValue {
         "values".to_string(),
         JsonValue::Object(
             record
-                .values
-                .iter()
+                .iter_fields()
                 .map(|(key, value)| {
                     (
                         key.to_string(),
