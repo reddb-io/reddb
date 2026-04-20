@@ -12,13 +12,13 @@ use crate::storage::schema::Value;
 
 impl From<&str> for Value {
     fn from(s: &str) -> Self {
-        Value::Text(s.to_string())
+        Value::text(s.to_string())
     }
 }
 
 impl From<String> for Value {
     fn from(s: String) -> Self {
-        Value::Text(s)
+        Value::text(s)
     }
 }
 

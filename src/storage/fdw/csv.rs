@@ -232,7 +232,7 @@ fn coerce_field(raw: &str, treat_empty_as_null: bool) -> Value {
     if raw.eq_ignore_ascii_case("false") {
         return Value::Boolean(false);
     }
-    Value::Text(raw.to_string())
+    Value::text(raw.to_string())
 }
 
 #[cfg(test)]
@@ -258,7 +258,7 @@ mod tests {
         let rows = wrapper.scan(server_state.as_ref(), &opts).unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].get("id"), Some(&Value::Integer(1)));
-        assert_eq!(rows[0].get("name"), Some(&Value::Text("Alice".to_string())));
+        assert_eq!(rows[0].get("name"), Some(&Value::text("Alice".to_string())));
     }
 
     #[test]
@@ -290,7 +290,7 @@ mod tests {
         opts.values.insert("delimiter".to_string(), ";".to_string());
         let rows = wrapper.scan(server_state.as_ref(), &opts).unwrap();
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[1].get("note"), Some(&Value::Text("world".to_string())));
+        assert_eq!(rows[1].get("note"), Some(&Value::text("world".to_string())));
     }
 
     #[test]

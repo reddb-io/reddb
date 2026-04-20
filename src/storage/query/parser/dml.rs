@@ -438,7 +438,7 @@ impl<'a> Parser<'a> {
             Token::String(s) => {
                 let s = s.clone();
                 self.advance()?;
-                Ok(Value::Text(s))
+                Ok(Value::text(s))
             }
             Token::Integer(n) => {
                 self.advance()?;

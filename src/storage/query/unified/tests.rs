@@ -73,7 +73,7 @@ fn test_unified_result() {
     let mut result = UnifiedResult::with_columns(vec!["ip".to_string(), "port".to_string()]);
 
     let mut record = UnifiedRecord::new();
-    record.set("ip", Value::Text("192.168.1.1".to_string()));
+    record.set("ip", Value::text("192.168.1.1".to_string()));
     record.set("port", Value::Integer(22));
 
     result.push(record);
@@ -81,7 +81,7 @@ fn test_unified_result() {
     assert_eq!(result.len(), 1);
     assert_eq!(
         result.records[0].get("ip"),
-        Some(&Value::Text("192.168.1.1".to_string()))
+        Some(&Value::text("192.168.1.1".to_string()))
     );
 }
 
@@ -115,7 +115,7 @@ fn test_graph_query_filter_custom_node_property() {
     let mut node_properties = HashMap::new();
     node_properties.insert(
         "host:1".to_string(),
-        HashMap::from([("os".to_string(), Value::Text("linux".to_string()))]),
+        HashMap::from([("os".to_string(), Value::text("linux".to_string()))]),
     );
 
     let graph = Arc::new(graph);
@@ -126,7 +126,7 @@ fn test_graph_query_filter_custom_node_property() {
         .node(
             super::super::ast::NodePattern::new("h")
                 .of_type(GraphNodeType::Host)
-                .with_property("os", CompareOp::Eq, Value::Text("linux".to_string())),
+                .with_property("os", CompareOp::Eq, Value::text("linux".to_string())),
         )
         .return_field(FieldRef::node_prop("h", "os"))
         .build();
@@ -135,7 +135,7 @@ fn test_graph_query_filter_custom_node_property() {
     assert_eq!(result.records.len(), 1);
     assert_eq!(
         result.records[0].get("h.os"),
-        Some(&Value::Text("linux".to_string()))
+        Some(&Value::text("linux".to_string()))
     );
 }
 
@@ -172,8 +172,8 @@ fn test_unified_record_operations() {
     let mut record = UnifiedRecord::new();
 
     // Test set and get
-    record.set("name", Value::Text("test".to_string()));
-    assert_eq!(record.get("name"), Some(&Value::Text("test".to_string())));
+    record.set("name", Value::text("test".to_string()));
+    assert_eq!(record.get("name"), Some(&Value::text("test".to_string())));
     assert_eq!(record.get("missing"), None);
 
     // Test set_node and get_node

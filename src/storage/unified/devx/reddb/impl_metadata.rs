@@ -224,7 +224,7 @@ impl RedDB {
     /// ```ignore
     /// let row = db.row("scans", vec![
     ///     ("timestamp", Value::Timestamp(now)),
-    ///     ("target", Value::Text("192.168.1.0/24".into())),
+    ///     ("target", Value::text("192.168.1.0/24".into())),
     ///     ("findings", Value::Integer(42)),
     /// ]).save()?;
     /// ```
@@ -260,7 +260,7 @@ impl RedDB {
     ///
     /// # Example
     /// ```ignore
-    /// let id = db.kv("config", "theme", Value::Text("dark".into()))
+    /// let id = db.kv("config", "theme", Value::text("dark".into()))
     ///     .metadata("updated_by", "admin")
     ///     .save()?;
     /// ```

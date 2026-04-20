@@ -88,7 +88,7 @@ mod tests {
             store.next_entity_id(),
             "hosts",
             1,
-            vec![Value::Text("192.168.1.1".to_string())],
+            vec![Value::text("192.168.1.1".to_string())],
         );
 
         let id = store.insert("hosts", entity).unwrap();
@@ -115,7 +115,7 @@ mod tests {
             store.next_entity_id(),
             "hosts",
             1,
-            vec![Value::Text("192.168.1.1".to_string())],
+            vec![Value::text("192.168.1.1".to_string())],
         );
         let host_id = store.insert_auto("hosts", host_entity).unwrap();
 
@@ -124,7 +124,7 @@ mod tests {
             store.next_entity_id(),
             "vulns",
             1,
-            vec![Value::Text("CVE-2024-1234".to_string())],
+            vec![Value::text("CVE-2024-1234".to_string())],
         );
         let vuln_id = store.insert_auto("vulns", vuln_entity).unwrap();
 
@@ -242,7 +242,7 @@ mod tests {
             store.next_entity_id(),
             "hosts",
             1,
-            vec![Value::Text("10.0.0.1".to_string())],
+            vec![Value::text("10.0.0.1".to_string())],
         );
         let row_id = store.insert_auto("hosts", row).unwrap();
 

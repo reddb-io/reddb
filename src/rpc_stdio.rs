@@ -1092,9 +1092,9 @@ fn json_value_to_schema_value(v: &Value) -> SchemaValue {
                 SchemaValue::Float(*n)
             }
         }
-        Value::String(s) => SchemaValue::Text(s.clone()),
+        Value::String(s) => SchemaValue::text(s.clone()),
         Value::Array(_) | Value::Object(_) => {
-            SchemaValue::Text(crate::json::to_string(v).unwrap_or_default())
+            SchemaValue::text(crate::json::to_string(v).unwrap_or_default())
         }
     }
 }

@@ -170,7 +170,7 @@ impl EcRegistry {
         manager.for_each_entity(|entity| {
             if let Some(row) = entity.data.as_row() {
                 let key = row.get_field("key").and_then(|v| match v {
-                    crate::storage::schema::Value::Text(s) => Some(s.as_str()),
+                    crate::storage::schema::Value::Text(s) => Some(s.as_ref()),
                     _ => None,
                 });
                 if let Some(k) = key {

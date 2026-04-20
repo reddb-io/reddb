@@ -1478,8 +1478,8 @@ async fn execute_prepared(
                             Value::Float(n)
                         }
                     }
-                    JsonValue::String(s) => Value::Text(s),
-                    other => Value::Text(json_to_string(&other).unwrap_or_default()),
+                    JsonValue::String(s) => Value::text(s),
+                    other => Value::text(json_to_string(&other).unwrap_or_default()),
                 })
         })
         .collect::<Result<Vec<_>, _>>()?;

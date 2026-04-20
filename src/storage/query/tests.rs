@@ -14,7 +14,7 @@ mod query_tests {
             .filter(Filter::compare(
                 FieldRef::column("h", "os"),
                 CompareOp::Eq,
-                Value::Text("Linux".to_string()),
+                Value::text("Linux".to_string()),
             ))
             .limit(100)
             .build();
@@ -225,7 +225,7 @@ mod query_tests {
             .filter(Filter::compare(
                 FieldRef::column("", "os"),
                 CompareOp::Eq,
-                Value::Text("Linux".to_string()),
+                Value::text("Linux".to_string()),
             ))
             .build();
 
@@ -250,7 +250,7 @@ mod query_tests {
             .filter(Filter::compare(
                 FieldRef::column("", "ip"),
                 CompareOp::Eq,
-                Value::Text("192.168.1.1".to_string()),
+                Value::text("192.168.1.1".to_string()),
             ))
             .build();
 

@@ -124,7 +124,7 @@ fn key_already_present(store: &UnifiedStore, key: &str) -> bool {
     manager.for_each_entity(|entity| {
         if let Some(row) = entity.data.as_row() {
             if let Some(crate::storage::schema::Value::Text(s)) = row.get_field("key") {
-                if s.as_str() == key {
+                if s.as_ref() == key {
                     found = true;
                     return false;
                 }
@@ -179,7 +179,7 @@ pub fn coerce_env_value(key: &str, raw: &str) -> Option<crate::storage::schema::
                 raw.parse::<f64>().ok().map(Value::Float)
             }
         }
-        JsonValue::String(_) => Some(Value::Text(raw.to_string())),
+        JsonValue::String(_) => Some(Value::text(raw.to_string())),
         _ => None,
     }
 }

@@ -263,15 +263,15 @@ impl RedDBRuntime {
                     "queue".into(),
                 ]);
                 let mut record = UnifiedRecord::new();
-                record.set("message_id", Value::Text(message_id_string(id)));
+                record.set("message_id", Value::text(message_id_string(id)));
                 record.set(
                     "side",
-                    Value::Text(match side {
+                    Value::text(match side {
                         QueueSide::Left => "left".to_string(),
                         QueueSide::Right => "right".to_string(),
                     }),
                 );
-                record.set("queue", Value::Text(queue.clone()));
+                record.set("queue", Value::text(queue.clone()));
                 result.push(record);
 
                 Ok(RuntimeQueryResult {
@@ -321,7 +321,7 @@ impl RedDBRuntime {
                     };
 
                     let mut record = UnifiedRecord::new();
-                    record.set("message_id", Value::Text(message_id_string(current.id)));
+                    record.set("message_id", Value::text(message_id_string(current.id)));
                     record.set("payload", current.payload.clone());
                     result.push(record);
                     delete_message_with_state(Some(self), store.as_ref(), queue, current.id)?;
@@ -360,7 +360,7 @@ impl RedDBRuntime {
                     UnifiedResult::with_columns(vec!["message_id".into(), "payload".into()]);
                 for message in messages.into_iter().take(*count) {
                     let mut record = UnifiedRecord::new();
-                    record.set("message_id", Value::Text(message_id_string(message.id)));
+                    record.set("message_id", Value::text(message_id_string(message.id)));
                     record.set("payload", message.payload);
                     result.push(record);
                 }
@@ -520,9 +520,9 @@ impl RedDBRuntime {
                     )?;
 
                     let mut record = UnifiedRecord::new();
-                    record.set("message_id", Value::Text(message_id_string(current.id)));
+                    record.set("message_id", Value::text(message_id_string(current.id)));
                     record.set("payload", current.payload);
-                    record.set("consumer", Value::Text(consumer.clone()));
+                    record.set("consumer", Value::text(consumer.clone()));
                     record.set(
                         "delivery_count",
                         Value::UnsignedInteger(u64::from(attempts)),
@@ -563,9 +563,9 @@ impl RedDBRuntime {
                     let mut record = UnifiedRecord::new();
                     record.set(
                         "message_id",
-                        Value::Text(message_id_string(entry.message_id)),
+                        Value::text(message_id_string(entry.message_id)),
                     );
-                    record.set("consumer", Value::Text(entry.consumer));
+                    record.set("consumer", Value::text(entry.consumer));
                     record.set(
                         "delivered_at_ns",
                         Value::UnsignedInteger(entry.delivered_at_ns),
@@ -670,10 +670,10 @@ impl RedDBRuntime {
                     let mut record = UnifiedRecord::new();
                     record.set(
                         "message_id",
-                        Value::Text(message_id_string(current.message_id)),
+                        Value::text(message_id_string(current.message_id)),
                     );
                     record.set("payload", payload);
-                    record.set("consumer", Value::Text(consumer.clone()));
+                    record.set("consumer", Value::text(consumer.clone()));
                     record.set(
                         "delivery_count",
                         Value::UnsignedInteger(u64::from(current.delivery_count.saturating_add(1))),
@@ -820,8 +820,8 @@ fn save_queue_config(
     });
 
     let mut fields = HashMap::new();
-    fields.insert("kind".to_string(), Value::Text("queue_config".to_string()));
-    fields.insert("queue".to_string(), Value::Text(queue.to_string()));
+    fields.insert("kind".to_string(), Value::text("queue_config".to_string()));
+    fields.insert("queue".to_string(), Value::text(queue.to_string()));
     fields.insert("priority".to_string(), Value::Boolean(config.priority));
     fields.insert(
         "max_size".to_string(),
@@ -895,9 +895,9 @@ fn load_queue_groups(store: &UnifiedStore, queue: &str) -> RedDBResult<Vec<Queue
 
 fn save_queue_group(store: &UnifiedStore, queue: &str, group: &str) -> RedDBResult<()> {
     let mut fields = HashMap::new();
-    fields.insert("kind".to_string(), Value::Text("queue_group".to_string()));
-    fields.insert("queue".to_string(), Value::Text(queue.to_string()));
-    fields.insert("group".to_string(), Value::Text(group.to_string()));
+    fields.insert("kind".to_string(), Value::text("queue_group".to_string()));
+    fields.insert("queue".to_string(), Value::text(queue.to_string()));
+    fields.insert("group".to_string(), Value::text(group.to_string()));
     fields.insert(
         "created_at_ns".to_string(),
         Value::UnsignedInteger(now_ns()),
@@ -961,14 +961,14 @@ fn save_queue_pending(
     });
 
     let mut fields = HashMap::new();
-    fields.insert("kind".to_string(), Value::Text("queue_pending".to_string()));
-    fields.insert("queue".to_string(), Value::Text(queue.to_string()));
-    fields.insert("group".to_string(), Value::Text(group.to_string()));
+    fields.insert("kind".to_string(), Value::text("queue_pending".to_string()));
+    fields.insert("queue".to_string(), Value::text(queue.to_string()));
+    fields.insert("group".to_string(), Value::text(group.to_string()));
     fields.insert(
         "message_id".to_string(),
         Value::UnsignedInteger(message_id.raw()),
     );
-    fields.insert("consumer".to_string(), Value::Text(consumer.to_string()));
+    fields.insert("consumer".to_string(), Value::text(consumer.to_string()));
     fields.insert(
         "delivered_at_ns".to_string(),
         Value::UnsignedInteger(delivered_at_ns),
@@ -1045,9 +1045,9 @@ fn save_queue_ack(
     }
 
     let mut fields = HashMap::new();
-    fields.insert("kind".to_string(), Value::Text("queue_ack".to_string()));
-    fields.insert("queue".to_string(), Value::Text(queue.to_string()));
-    fields.insert("group".to_string(), Value::Text(group.to_string()));
+    fields.insert("kind".to_string(), Value::text("queue_ack".to_string()));
+    fields.insert("queue".to_string(), Value::text(queue.to_string()));
+    fields.insert("group".to_string(), Value::text(group.to_string()));
     fields.insert(
         "message_id".to_string(),
         Value::UnsignedInteger(message_id.raw()),

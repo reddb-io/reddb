@@ -139,7 +139,7 @@ impl RedDBRuntime {
                     "memory_bytes".into(),
                 ]);
                 let mut record = UnifiedRecord::new();
-                record.set("name", Value::Text(name.clone()));
+                record.set("name", Value::text(name.clone()));
                 record.set("count", Value::UnsignedInteger(hll.count()));
                 record.set(
                     "memory_bytes",
@@ -307,7 +307,7 @@ impl RedDBRuntime {
                     "memory_bytes".into(),
                 ]);
                 let mut record = UnifiedRecord::new();
-                record.set("name", Value::Text(name.clone()));
+                record.set("name", Value::text(name.clone()));
                 record.set("width", Value::UnsignedInteger(sketch.width() as u64));
                 record.set("depth", Value::UnsignedInteger(sketch.depth() as u64));
                 record.set("total", Value::UnsignedInteger(sketch.total()));
@@ -477,7 +477,7 @@ impl RedDBRuntime {
                     "memory_bytes".into(),
                 ]);
                 let mut record = UnifiedRecord::new();
-                record.set("name", Value::Text(name.clone()));
+                record.set("name", Value::text(name.clone()));
                 record.set("count", Value::UnsignedInteger(filter.count() as u64));
                 record.set("load_factor", Value::Float(filter.load_factor()));
                 record.set(

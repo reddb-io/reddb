@@ -437,7 +437,7 @@ impl ParquetReader {
                         pos += 4;
                         if pos + len <= data.len() {
                             if let Ok(s) = std::str::from_utf8(&data[pos..pos + len]) {
-                                values.push(Value::Text(s.to_string()));
+                                values.push(Value::text(s.to_string()));
                             } else {
                                 values.push(Value::Blob(data[pos..pos + len].to_vec()));
                             }

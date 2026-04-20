@@ -214,7 +214,7 @@ impl RuntimeQueryResult {
     pub fn ok_message(query: String, message: &str, statement_type: &'static str) -> Self {
         let mut result = UnifiedResult::empty();
         let mut record = UnifiedRecord::new();
-        record.set("message", Value::Text(message.to_string()));
+        record.set("message", Value::text(message.to_string()));
         result.push(record);
         result.columns = vec!["message".to_string()];
 

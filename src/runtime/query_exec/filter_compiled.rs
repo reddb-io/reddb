@@ -239,10 +239,10 @@ pub(crate) fn resolve_kind<'a>(
         EntityFieldKind::SystemSequenceId => {
             Some(Cow::Owned(Value::UnsignedInteger(entity.sequence_id)))
         }
-        EntityFieldKind::SystemCollection => Some(Cow::Owned(Value::Text(
+        EntityFieldKind::SystemCollection => Some(Cow::Owned(Value::text(
             entity.kind.collection().to_string(),
         ))),
-        EntityFieldKind::SystemKind => Some(Cow::Owned(Value::Text(
+        EntityFieldKind::SystemKind => Some(Cow::Owned(Value::text(
             entity.kind.storage_type().to_string(),
         ))),
         EntityFieldKind::SystemRowId => {
@@ -311,7 +311,7 @@ fn resolve_timeseries_field<'a>(entity: &'a UnifiedEntity, name: &str) -> Option
         return None;
     };
     match name {
-        "metric" => Some(Cow::Owned(Value::Text(ts.metric.clone()))),
+        "metric" => Some(Cow::Owned(Value::text(ts.metric.clone()))),
         "timestamp_ns" | "timestamp" | "time" => {
             Some(Cow::Owned(Value::UnsignedInteger(ts.timestamp_ns)))
         }
@@ -949,7 +949,7 @@ mod tests {
                 column: "name".to_string(),
             },
             op: CompareOp::Eq,
-            value: Value::Text("alice".to_string()),
+            value: Value::text("alice".to_string()),
         };
         let compiled = CompiledEntityFilter::compile(&filter, "users", "u");
         assert_eq!(compiled.op_count(), 1);
@@ -1006,7 +1006,7 @@ mod tests {
                 column: "name".to_string(),
             },
             op: CompareOp::Eq,
-            value: Value::Text("alice".to_string()),
+            value: Value::text("alice".to_string()),
         };
         let c = CompiledEntityFilter::compile_with_schema(&f, "users", "u", &schema);
         assert_eq!(c.op_count(), 1);
@@ -1031,7 +1031,7 @@ mod tests {
                 column: "email".to_string(), // not in schema
             },
             op: CompareOp::Eq,
-            value: Value::Text("a@b.com".to_string()),
+            value: Value::text("a@b.com".to_string()),
         };
         let c = CompiledEntityFilter::compile_with_schema(&f, "users", "u", &schema);
         match &c.ops[0] {
@@ -1072,7 +1072,7 @@ mod tests {
                 column: "metric".to_string(),
             },
             op: CompareOp::Eq,
-            value: Value::Text("cpu.usage".to_string()),
+            value: Value::text("cpu.usage".to_string()),
         };
         let compiled = CompiledEntityFilter::compile(&filter, "metrics", "m");
         let entity = UnifiedEntity::new(

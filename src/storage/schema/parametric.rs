@@ -100,7 +100,7 @@ pub fn validate_varchar(
         // then re-checked. Caller can avoid the round-trip by
         // pre-coercing.
         other => {
-            return validate_varchar(&Value::Text(other.display_string()), max_len, mode);
+            return validate_varchar(&Value::text(other.display_string()), max_len, mode);
         }
     };
     let len = s.chars().count();
@@ -114,7 +114,7 @@ pub fn validate_varchar(
         }),
         VarcharMode::Truncate => {
             let truncated: String = s.chars().take(max_len as usize).collect();
-            Ok(Value::Text(truncated))
+            Ok(Value::text(truncated))
         }
     }
 }

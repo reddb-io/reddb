@@ -169,7 +169,7 @@ fn is_key_present(store: &UnifiedStore, key: &str) -> bool {
     manager.for_each_entity(|entity| {
         if let Some(row) = entity.data.as_row() {
             let entry_key = row.get_field("key").and_then(|v| match v {
-                crate::storage::schema::Value::Text(s) => Some(s.as_str()),
+                crate::storage::schema::Value::Text(s) => Some(s.as_ref()),
                 _ => None,
             });
             if entry_key == Some(key) {

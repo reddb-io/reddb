@@ -1377,8 +1377,8 @@ mod tests {
         let h = Histogram::equi_depth_from_sample(sample, 10);
 
         let mcv = MostCommonValues::new(vec![
-            (ColumnValue::Text("boss".to_string()), 0.5),
-            (ColumnValue::Text("intern".to_string()), 0.05),
+            (ColumnValue::text("boss".to_string()), 0.5),
+            (ColumnValue::text("intern".to_string()), 0.05),
         ]);
 
         Arc::new(
@@ -1404,7 +1404,7 @@ mod tests {
         let filter = AstFilter::Compare {
             field: FieldRef::column("people", "role"),
             op: CompareOp::Eq,
-            value: Value::Text("boss".to_string()),
+            value: Value::text("boss".to_string()),
         };
         // MCV says "boss" is 50% of the table → selectivity 0.5,
         // not the 0.01 heuristic.
@@ -1422,7 +1422,7 @@ mod tests {
         let filter = AstFilter::Compare {
             field: FieldRef::column("people", "role"),
             op: CompareOp::Eq,
-            value: Value::Text("staff".to_string()),
+            value: Value::text("staff".to_string()),
         };
         // 1 - 0.55 (mcv totals) = 0.45 spread across (distinct - 2)
         // distinct values. We don't have an exact distinct count, so
@@ -1438,7 +1438,7 @@ mod tests {
         let filter = AstFilter::Compare {
             field: FieldRef::column("people", "role"),
             op: CompareOp::Ne,
-            value: Value::Text("boss".to_string()),
+            value: Value::text("boss".to_string()),
         };
         let s = estimator.filter_selectivity(&filter, "people");
         // 1 - 0.5 == 0.5

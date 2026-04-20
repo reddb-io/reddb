@@ -951,7 +951,7 @@ fn bind_node_selector(selector: &NodeSelector, binds: &[Value]) -> Option<NodeSe
 fn parameterize_value_placeholder(next_index: &mut usize) -> Value {
     let index = *next_index;
     *next_index += 1;
-    Value::Text(format!("{VALUE_PARAM_PREFIX}{index}"))
+    Value::text(format!("{VALUE_PARAM_PREFIX}{index}"))
 }
 
 fn bind_value_placeholder(value: &Value, binds: &[Value]) -> Option<Value> {

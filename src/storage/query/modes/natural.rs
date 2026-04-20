@@ -603,7 +603,7 @@ impl NaturalQuery {
                 properties.push(AstPropertyFilter {
                     name: "id".to_string(),
                     op: CompareOp::Eq,
-                    value: Value::Text(value.clone()),
+                    value: Value::text(value.clone()),
                 });
             }
 
@@ -669,7 +669,7 @@ impl NaturalQuery {
                     property: filter.property.clone(),
                 },
                 op: filter.op,
-                value: Value::Text(filter.value.clone()),
+                value: Value::text(filter.value.clone()),
             });
         }
 

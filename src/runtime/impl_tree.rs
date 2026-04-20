@@ -140,9 +140,9 @@ impl RedDBRuntime {
             vec![vec![
                 (
                     "collection".to_string(),
-                    Value::Text(query.collection.clone()),
+                    Value::text(query.collection.clone()),
                 ),
-                ("tree_name".to_string(), Value::Text(query.name.clone())),
+                ("tree_name".to_string(), Value::text(query.name.clone())),
                 ("root_id".to_string(), Value::UnsignedInteger(root.id.raw())),
                 (
                     "default_max_children".to_string(),
@@ -315,9 +315,9 @@ impl RedDBRuntime {
             vec![vec![
                 (
                     "collection".to_string(),
-                    Value::Text(collection.to_string()),
+                    Value::text(collection.to_string()),
                 ),
-                ("tree_name".to_string(), Value::Text(tree_name.to_string())),
+                ("tree_name".to_string(), Value::text(tree_name.to_string())),
                 (
                     "node_id".to_string(),
                     Value::UnsignedInteger(created.id.raw()),
@@ -455,9 +455,9 @@ impl RedDBRuntime {
             vec![vec![
                 (
                     "collection".to_string(),
-                    Value::Text(collection.to_string()),
+                    Value::text(collection.to_string()),
                 ),
-                ("tree_name".to_string(), Value::Text(tree_name.to_string())),
+                ("tree_name".to_string(), Value::text(tree_name.to_string())),
                 ("node_id".to_string(), Value::UnsignedInteger(node_id.raw())),
                 (
                     "old_parent_id".to_string(),
@@ -557,9 +557,9 @@ impl RedDBRuntime {
             vec![vec![
                 (
                     "collection".to_string(),
-                    Value::Text(collection.to_string()),
+                    Value::text(collection.to_string()),
                 ),
-                ("tree_name".to_string(), Value::Text(tree_name.to_string())),
+                ("tree_name".to_string(), Value::text(tree_name.to_string())),
                 (
                     "deleted_root_id".to_string(),
                     Value::UnsignedInteger(node_id.raw()),
@@ -594,10 +594,10 @@ impl RedDBRuntime {
                 ],
                 vec![vec![
                     ("ok".to_string(), Value::Boolean(true)),
-                    ("code".to_string(), Value::Text("ok".to_string())),
+                    ("code".to_string(), Value::text("ok".to_string())),
                     (
                         "message".to_string(),
-                        Value::Text("tree is valid".to_string()),
+                        Value::text("tree is valid".to_string()),
                     ),
                     ("entity_id".to_string(), Value::Null),
                 ]],
@@ -611,8 +611,8 @@ impl RedDBRuntime {
             .map(|issue| {
                 vec![
                     ("ok".to_string(), Value::Boolean(false)),
-                    ("code".to_string(), Value::Text(issue.code.to_string())),
-                    ("message".to_string(), Value::Text(issue.message.clone())),
+                    ("code".to_string(), Value::text(issue.code.to_string())),
+                    ("message".to_string(), Value::text(issue.message.clone())),
                     (
                         "entity_id".to_string(),
                         issue

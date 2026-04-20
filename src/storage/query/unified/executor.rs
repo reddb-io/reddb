@@ -53,9 +53,9 @@ impl UnifiedExecutor {
 
     fn node_stored_property_value(node: &StoredNode, property: &str) -> Option<Value> {
         if let Some(properties) = match property {
-            "id" => Some(Value::Text(node.id.clone())),
-            "label" => Some(Value::Text(node.label.clone())),
-            "type" | "node_type" => Some(Value::Text(format!("{:?}", node.node_type))),
+            "id" => Some(Value::text(node.id.clone())),
+            "label" => Some(Value::text(node.label.clone())),
+            "type" | "node_type" => Some(Value::text(format!("{:?}", node.node_type))),
             _ => None,
         } {
             return Some(properties);
@@ -73,11 +73,11 @@ impl UnifiedExecutor {
 
     fn node_property_value_by_id(&self, node_id: &str, property: &str) -> Option<Value> {
         if property == "id" {
-            return Some(Value::Text(node_id.to_string()));
+            return Some(Value::text(node_id.to_string()));
         }
         if property == "label" {
             if let Some(node) = self.graph.get_node(node_id).as_ref() {
-                return Some(Value::Text(node.label.clone()));
+                return Some(Value::text(node.label.clone()));
             }
             return None;
         }
@@ -85,7 +85,7 @@ impl UnifiedExecutor {
             return self
                 .graph
                 .get_node(node_id)
-                .map(|node| Value::Text(format!("{:?}", node.node_type)));
+                .map(|node| Value::text(format!("{:?}", node.node_type)));
         }
         self.node_properties
             .get(node_id)
@@ -729,16 +729,16 @@ impl UnifiedExecutor {
     fn get_field_value(&self, field: &FieldRef, matched: &PatternMatch) -> Option<Value> {
         match field {
             FieldRef::NodeId { alias } => {
-                matched.nodes.get(alias).map(|n| Value::Text(n.id.clone()))
+                matched.nodes.get(alias).map(|n| Value::text(n.id.clone()))
             }
             FieldRef::NodeProperty { alias, property } => {
                 matched
                     .nodes
                     .get(alias)
                     .and_then(|n| match property.as_str() {
-                        "id" => Some(Value::Text(n.id.clone())),
-                        "label" => Some(Value::Text(n.label.clone())),
-                        "type" | "node_type" => Some(Value::Text(format!("{:?}", n.node_type))),
+                        "id" => Some(Value::text(n.id.clone())),
+                        "label" => Some(Value::text(n.label.clone())),
+                        "type" | "node_type" => Some(Value::text(format!("{:?}", n.node_type))),
                         _ => n.properties.get(property).cloned(),
                     })
             }
@@ -748,8 +748,8 @@ impl UnifiedExecutor {
                     .get(alias)
                     .and_then(|e| match property.as_str() {
                         "weight" => Some(Value::Float(e.weight as f64)),
-                        "from" => Some(Value::Text(e.from.clone())),
-                        "to" => Some(Value::Text(e.to.clone())),
+                        "from" => Some(Value::text(e.from.clone())),
+                        "to" => Some(Value::text(e.to.clone())),
                         _ => None,
                     })
             }
@@ -767,15 +767,15 @@ impl UnifiedExecutor {
             FieldRef::NodeId { alias } => record
                 .nodes
                 .get(alias)
-                .map(|node| Value::Text(node.id.clone())),
+                .map(|node| Value::text(node.id.clone())),
             FieldRef::NodeProperty { alias, property } => {
                 record
                     .nodes
                     .get(alias)
                     .and_then(|n| match property.as_str() {
-                        "id" => Some(Value::Text(n.id.clone())),
-                        "label" => Some(Value::Text(n.label.clone())),
-                        "type" | "node_type" => Some(Value::Text(format!("{:?}", n.node_type))),
+                        "id" => Some(Value::text(n.id.clone())),
+                        "label" => Some(Value::text(n.label.clone())),
+                        "type" | "node_type" => Some(Value::text(format!("{:?}", n.node_type))),
                         _ => n.properties.get(property).cloned(),
                     })
             }
@@ -785,8 +785,8 @@ impl UnifiedExecutor {
                     .get(alias)
                     .and_then(|e| match property.as_str() {
                         "weight" => Some(Value::Float(e.weight as f64)),
-                        "from" => Some(Value::Text(e.from.clone())),
-                        "to" => Some(Value::Text(e.to.clone())),
+                        "from" => Some(Value::text(e.from.clone())),
+                        "to" => Some(Value::text(e.to.clone())),
                         _ => None,
                     })
             }
@@ -813,16 +813,16 @@ impl UnifiedExecutor {
                 Projection::All => {
                     // For All projection, include all node basic info
                     for (alias, node) in &matched.nodes {
-                        record.set(&format!("{}.id", alias), Value::Text(node.id.clone()));
-                        record.set(&format!("{}.label", alias), Value::Text(node.label.clone()));
+                        record.set(&format!("{}.id", alias), Value::text(node.id.clone()));
+                        record.set(&format!("{}.label", alias), Value::text(node.label.clone()));
                     }
                 }
                 Projection::Column(col) => {
                     // Try to find a matching column in nodes
                     for node in matched.nodes.values() {
                         match col.as_str() {
-                            "id" => record.set(col, Value::Text(node.id.clone())),
-                            "label" => record.set(col, Value::Text(node.label.clone())),
+                            "id" => record.set(col, Value::text(node.id.clone())),
+                            "label" => record.set(col, Value::text(node.label.clone())),
                             _ => {}
                         }
                     }
@@ -830,8 +830,8 @@ impl UnifiedExecutor {
                 Projection::Alias(col, alias) => {
                     for node in matched.nodes.values() {
                         match col.as_str() {
-                            "id" => record.set(alias, Value::Text(node.id.clone())),
-                            "label" => record.set(alias, Value::Text(node.label.clone())),
+                            "id" => record.set(alias, Value::text(node.id.clone())),
+                            "label" => record.set(alias, Value::text(node.label.clone())),
                             _ => {}
                         }
                     }

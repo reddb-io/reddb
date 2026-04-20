@@ -678,15 +678,15 @@ mod tests {
 
         let mut record1 = UnifiedRecord::new();
         record1.set("id", Value::Integer(1));
-        record1.set("name", Value::Text("test".to_string()));
+        record1.set("name", Value::text("test".to_string()));
 
         let mut record2 = UnifiedRecord::new();
         record2.set("id", Value::Integer(1));
-        record2.set("name", Value::Text("test".to_string()));
+        record2.set("name", Value::text("test".to_string()));
 
         let mut record3 = UnifiedRecord::new();
         record3.set("id", Value::Integer(2));
-        record3.set("name", Value::Text("test".to_string()));
+        record3.set("name", Value::text("test".to_string()));
 
         // Same content should have same hash
         assert_eq!(
@@ -711,7 +711,7 @@ mod tests {
         record.set("bool_val", Value::Boolean(true));
         record.set("int_val", Value::Integer(42));
         record.set("float_val", Value::Float(2.5));
-        record.set("text_val", Value::Text("hello".to_string()));
+        record.set("text_val", Value::text("hello".to_string()));
         record.set("blob_val", Value::Blob(vec![1, 2, 3]));
         record.set("timestamp_val", Value::Timestamp(1234567890));
         record.set("duration_val", Value::Duration(5000));

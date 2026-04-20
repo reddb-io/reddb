@@ -89,8 +89,8 @@ pub(crate) fn persist_table_stats(store: &UnifiedStore, stats: &AnalyzedTableSta
     insert_stats_row(
         store,
         vec![
-            ("kind".to_string(), Value::Text("table".to_string())),
-            ("table".to_string(), Value::Text(stats.table.clone())),
+            ("kind".to_string(), Value::text("table".to_string())),
+            ("table".to_string(), Value::text(stats.table.clone())),
             (
                 "row_count".to_string(),
                 Value::UnsignedInteger(stats.row_count),
@@ -143,9 +143,9 @@ pub(crate) fn persist_table_stats(store: &UnifiedStore, stats: &AnalyzedTableSta
         insert_stats_row(
             store,
             vec![
-                ("kind".to_string(), Value::Text("column".to_string())),
-                ("table".to_string(), Value::Text(stats.table.clone())),
-                ("column".to_string(), Value::Text(column.name.clone())),
+                ("kind".to_string(), Value::text("column".to_string())),
+                ("table".to_string(), Value::text(stats.table.clone())),
+                ("column".to_string(), Value::text(column.name.clone())),
                 (
                     "distinct_count".to_string(),
                     Value::UnsignedInteger(column.distinct_count),
@@ -501,7 +501,7 @@ fn column_value_to_value(value: &ColumnValue) -> Value {
     match value {
         ColumnValue::Int(v) => Value::Integer(*v),
         ColumnValue::Float(v) => Value::Float(*v),
-        ColumnValue::Text(v) => Value::Text(v.clone()),
+        ColumnValue::Text(v) => Value::text(v.clone()),
     }
 }
 
@@ -583,7 +583,7 @@ fn insert_stats_row(store: &UnifiedStore, fields: Vec<(String, Value)>) {
 
 fn text_field<'a>(row: &'a RowData, field: &str) -> Option<&'a str> {
     row.get_field(field).and_then(|value| match value {
-        Value::Text(v) => Some(v.as_str()),
+        Value::Text(v) => Some(v.as_ref()),
         _ => None,
     })
 }

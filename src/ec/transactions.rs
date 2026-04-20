@@ -80,17 +80,17 @@ pub fn create_transaction(
 
     let mut named = std::collections::HashMap::new();
     named.insert("target_id".to_string(), Value::UnsignedInteger(target_id));
-    named.insert("field".to_string(), Value::Text(field.to_string()));
+    named.insert("field".to_string(), Value::text(field.to_string()));
     named.insert("value".to_string(), Value::Float(value));
     named.insert(
         "operation".to_string(),
-        Value::Text(operation.as_str().to_string()),
+        Value::text(operation.as_str().to_string()),
     );
     named.insert("timestamp".to_string(), Value::UnsignedInteger(timestamp));
-    named.insert("cohort_hour".to_string(), Value::Text(cohort));
+    named.insert("cohort_hour".to_string(), Value::text(cohort));
     named.insert("applied".to_string(), Value::Boolean(false));
     if let Some(src) = source {
-        named.insert("source".to_string(), Value::Text(src.to_string()));
+        named.insert("source".to_string(), Value::text(src.to_string()));
     }
 
     let entity = UnifiedEntity::new(

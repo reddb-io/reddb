@@ -226,7 +226,7 @@ impl<'a> Parser<'a> {
                     let duration = format!("{n}{}", unit.to_ascii_lowercase());
                     self.advance()?;
                     return Ok(Expr::Literal {
-                        value: Value::Text(duration),
+                        value: Value::text(duration),
                         span: Span::new(start, self.position()),
                     });
                 }
@@ -247,7 +247,7 @@ impl<'a> Parser<'a> {
             let text = s.clone();
             self.advance()?;
             return Ok(Expr::Literal {
-                value: Value::Text(text),
+                value: Value::text(text),
                 span: Span::new(start, self.position()),
             });
         }
@@ -767,7 +767,7 @@ mod tests {
         let e = parse("'hello'");
         match e {
             Expr::Literal {
-                value: Value::Text(ref s),
+                value: Value::text(ref s),
                 ..
             } if s == "hello" => {}
             other => panic!("expected Text(hello), got {other:?}"),
@@ -1040,7 +1040,7 @@ mod tests {
         assert_eq!(name.to_uppercase(), "TIME_BUCKET");
         assert_eq!(args.len(), 1);
         assert!(
-            matches!(&args[0], Expr::Literal { value: Value::Text(s), .. } if s == "5m"),
+            matches!(&args[0], Expr::Literal { value: Value::text(s), .. } if s == "5m"),
             "expected Text(\"5m\"), got {:?}",
             args[0]
         );

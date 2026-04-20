@@ -520,33 +520,33 @@ mod tests {
         let rows = vec![
             Row::new(vec![
                 Value::Integer(1),
-                Value::Text("Alice".to_string()),
+                Value::text("Alice".to_string()),
                 Value::Integer(30),
-                Value::Text("Engineering".to_string()),
+                Value::text("Engineering".to_string()),
             ]),
             Row::new(vec![
                 Value::Integer(2),
-                Value::Text("Bob".to_string()),
+                Value::text("Bob".to_string()),
                 Value::Integer(25),
-                Value::Text("Sales".to_string()),
+                Value::text("Sales".to_string()),
             ]),
             Row::new(vec![
                 Value::Integer(3),
-                Value::Text("Charlie".to_string()),
+                Value::text("Charlie".to_string()),
                 Value::Integer(35),
-                Value::Text("Engineering".to_string()),
+                Value::text("Engineering".to_string()),
             ]),
             Row::new(vec![
                 Value::Integer(4),
-                Value::Text("Diana".to_string()),
+                Value::text("Diana".to_string()),
                 Value::Integer(28),
-                Value::Text("HR".to_string()),
+                Value::text("HR".to_string()),
             ]),
             Row::new(vec![
                 Value::Integer(5),
-                Value::Text("Eve".to_string()),
+                Value::text("Eve".to_string()),
                 Value::Integer(32),
-                Value::Text("Engineering".to_string()),
+                Value::text("Engineering".to_string()),
             ]),
         ];
 
@@ -583,7 +583,7 @@ mod tests {
 
         let plan = QueryPlan::new("employees").filter(Filter::eq(
             "department",
-            Value::Text("Engineering".to_string()),
+            Value::text("Engineering".to_string()),
         ));
 
         let result = executor.execute(&plan).unwrap();
@@ -609,7 +609,7 @@ mod tests {
         let plan = QueryPlan::new("employees")
             .filter(Filter::eq(
                 "department",
-                Value::Text("Engineering".to_string()),
+                Value::text("Engineering".to_string()),
             ))
             .filter(Filter::ge("age", Value::Integer(30)));
 
@@ -629,11 +629,11 @@ mod tests {
         // Should be ordered: Bob (25), Diana (28), Alice (30), Eve (32), Charlie (35)
         assert_eq!(
             result.get_value(0, "name"),
-            Some(&Value::Text("Bob".to_string()))
+            Some(&Value::text("Bob".to_string()))
         );
         assert_eq!(
             result.get_value(4, "name"),
-            Some(&Value::Text("Charlie".to_string()))
+            Some(&Value::text("Charlie".to_string()))
         );
     }
 
@@ -647,11 +647,11 @@ mod tests {
 
         assert_eq!(
             result.get_value(0, "name"),
-            Some(&Value::Text("Charlie".to_string()))
+            Some(&Value::text("Charlie".to_string()))
         );
         assert_eq!(
             result.get_value(4, "name"),
-            Some(&Value::Text("Bob".to_string()))
+            Some(&Value::text("Bob".to_string()))
         );
     }
 
@@ -703,7 +703,7 @@ mod tests {
         let count = executor.count("employees", None).unwrap();
         assert_eq!(count, 5);
 
-        let filter = Filter::eq("department", Value::Text("Engineering".to_string()));
+        let filter = Filter::eq("department", Value::text("Engineering".to_string()));
         let count = executor.count("employees", Some(&filter)).unwrap();
         assert_eq!(count, 3);
     }
@@ -769,7 +769,7 @@ mod tests {
         let result = executor.execute(&plan).unwrap();
 
         for row in result.iter_rows() {
-            assert_eq!(row.get("name"), Some(&Value::Text("Alice".to_string())));
+            assert_eq!(row.get("name"), Some(&Value::text("Alice".to_string())));
             assert_eq!(row.get("age"), Some(&Value::Integer(30)));
         }
     }
@@ -781,7 +781,7 @@ mod tests {
         let plan = QueryPlan::new("employees")
             .filter(Filter::eq(
                 "department",
-                Value::Text("Engineering".to_string()),
+                Value::text("Engineering".to_string()),
             ))
             .limit(2);
 
@@ -798,9 +798,9 @@ mod tests {
 
         let new_row = Row::new(vec![
             Value::Integer(6),
-            Value::Text("Frank".to_string()),
+            Value::text("Frank".to_string()),
             Value::Integer(40),
-            Value::Text("Legal".to_string()),
+            Value::text("Legal".to_string()),
         ]);
 
         assert!(executor.insert("employees", new_row));

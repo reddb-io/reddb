@@ -1501,7 +1501,7 @@ mod tests {
             manager.next_entity_id(),
             "users",
             1,
-            vec![Value::Text("Alice".to_string())],
+            vec![Value::text("Alice".to_string())],
         );
 
         let id = manager.insert(entity).unwrap();
@@ -1578,7 +1578,7 @@ mod tests {
                 manager.next_entity_id(),
                 "hosts",
                 1,
-                vec![Value::Text("192.168.1.1".to_string())],
+                vec![Value::text("192.168.1.1".to_string())],
             ))
             .unwrap();
 

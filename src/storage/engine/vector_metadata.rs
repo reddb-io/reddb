@@ -112,7 +112,7 @@ impl From<bool> for MetadataValue {
 
 fn metadata_value_to_storage_value(value: &MetadataValue) -> Value {
     match value {
-        MetadataValue::String(s) => Value::Text(s.clone()),
+        MetadataValue::String(s) => Value::text(s.clone()),
         MetadataValue::Integer(i) => Value::Integer(*i),
         MetadataValue::Float(f) => Value::Float(*f),
         MetadataValue::Bool(b) => Value::Boolean(*b),

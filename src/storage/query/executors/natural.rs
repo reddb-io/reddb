@@ -249,7 +249,7 @@ impl NaturalExecutor {
                         record.set_node("related", MatchedNode::from_stored(&target_node));
                         record.set(
                             "relationship",
-                            crate::storage::schema::Value::Text(format!("{:?}", edge_type)),
+                            crate::storage::schema::Value::text(format!("{:?}", edge_type)),
                         );
                         result.push(record);
                     }
@@ -286,7 +286,7 @@ impl NaturalExecutor {
                 }
                 record.set(
                     "relationship",
-                    crate::storage::schema::Value::Text(format!("{:?}", edge_type)),
+                    crate::storage::schema::Value::text(format!("{:?}", edge_type)),
                 );
                 record.set("exists", crate::storage::schema::Value::Boolean(true));
                 record.set(
@@ -302,8 +302,8 @@ impl NaturalExecutor {
             // Report that no relationship was found
             let mut record = UnifiedRecord::new();
             record.set("exists", crate::storage::schema::Value::Boolean(false));
-            record.set("source", crate::storage::schema::Value::Text(source));
-            record.set("target", crate::storage::schema::Value::Text(target));
+            record.set("source", crate::storage::schema::Value::text(source));
+            record.set("target", crate::storage::schema::Value::text(target));
             result.push(record);
         }
 

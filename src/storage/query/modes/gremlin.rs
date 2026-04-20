@@ -826,7 +826,7 @@ impl GremlinTraversal {
                         node.properties.push(PropertyFilter {
                             name: "id".to_string(),
                             op: CompareOp::Eq,
-                            value: Value::Text(id.clone()),
+                            value: Value::text(id.clone()),
                         });
                     }
                     nodes.push(node);
@@ -858,7 +858,7 @@ impl GremlinTraversal {
                             field: field_ref,
                             op: CompareOp::Eq,
                             value: match val {
-                                GremlinValue::String(s) => Value::Text(s.clone()),
+                                GremlinValue::String(s) => Value::text(s.clone()),
                                 GremlinValue::Integer(i) => Value::Integer(*i),
                                 GremlinValue::Float(f) => Value::Float(*f),
                                 GremlinValue::Boolean(b) => Value::Boolean(*b),

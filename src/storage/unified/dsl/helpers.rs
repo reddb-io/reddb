@@ -35,7 +35,7 @@ pub fn get_entity_field(entity: &UnifiedEntity, field: &str) -> Option<Value> {
         EntityData::Row(row) => row.get_by_name(field).cloned(),
         EntityData::Vector(vec) => {
             if field == "content" {
-                vec.content.as_ref().map(|c| Value::Text(c.clone()))
+                vec.content.as_ref().map(|c| Value::text(c.clone()))
             } else {
                 None
             }

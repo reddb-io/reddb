@@ -719,8 +719,8 @@ mod tests {
             1,
             "customers",
             vec![
-                ("name", Value::Text("Alice".to_string())),
-                ("cpf", Value::Text("000.000.000-00".to_string())),
+                ("name", Value::text("Alice".to_string())),
+                ("cpf", Value::text("000.000.000-00".to_string())),
             ],
         );
         index.index_entity("customers", &entity);
@@ -738,7 +738,7 @@ mod tests {
         let entity = make_row_entity(
             42,
             "customers",
-            vec![("cpf", Value::Text("000.000.000-00".to_string()))],
+            vec![("cpf", Value::text("000.000.000-00".to_string()))],
         );
         index.index_entity("customers", &entity);
 
@@ -751,7 +751,7 @@ mod tests {
     fn test_remove_entity() {
         let index = ContextIndex::new();
         index.set_collection_enabled("test", true);
-        let entity = make_row_entity(1, "test", vec![("key", Value::Text("value".to_string()))]);
+        let entity = make_row_entity(1, "test", vec![("key", Value::text("value".to_string()))]);
         index.index_entity("test", &entity);
 
         assert!(!index.search("value", 10, None).is_empty());
@@ -765,8 +765,8 @@ mod tests {
         let index = ContextIndex::new();
         index.set_collection_enabled("col_a", true);
         index.set_collection_enabled("col_b", true);
-        let e1 = make_row_entity(1, "col_a", vec![("name", Value::Text("Alice".to_string()))]);
-        let e2 = make_row_entity(2, "col_b", vec![("name", Value::Text("Alice".to_string()))]);
+        let e1 = make_row_entity(1, "col_a", vec![("name", Value::text("Alice".to_string()))]);
+        let e2 = make_row_entity(2, "col_b", vec![("name", Value::text("Alice".to_string()))]);
         index.index_entity("col_a", &e1);
         index.index_entity("col_b", &e2);
 
@@ -783,7 +783,7 @@ mod tests {
     fn test_stats() {
         let index = ContextIndex::new();
         index.set_collection_enabled("test", true);
-        let entity = make_row_entity(1, "test", vec![("k", Value::Text("v".to_string()))]);
+        let entity = make_row_entity(1, "test", vec![("k", Value::text("v".to_string()))]);
         index.index_entity("test", &entity);
 
         let stats = index.stats();

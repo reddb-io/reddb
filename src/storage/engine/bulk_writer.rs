@@ -332,7 +332,7 @@ mod tests {
     #[test]
     fn test_serialize_row() {
         let row = vec![
-            Value::Text("Alice".to_string()),
+            Value::text("Alice".to_string()),
             Value::Integer(30),
             Value::Float(95.5),
             Value::Boolean(true),
@@ -348,12 +348,12 @@ mod tests {
     fn test_serialize_row_compact() {
         // A typical user row: name(text), email(text), age(int), city(text), score(float), ts(text)
         let row = vec![
-            Value::Text("User_123".to_string()),
-            Value::Text("user_123@test.com".to_string()),
+            Value::text("User_123".to_string()),
+            Value::text("user_123@test.com".to_string()),
             Value::Integer(35),
-            Value::Text("NYC".to_string()),
+            Value::text("NYC".to_string()),
             Value::Float(95.5),
-            Value::Text("2024-01-01".to_string()),
+            Value::text("2024-01-01".to_string()),
         ];
         let bytes = serialize_row(&row);
         // Should be very compact: ~60 bytes for a typical row

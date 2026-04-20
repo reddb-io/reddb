@@ -168,7 +168,7 @@ fn execute_kv_query(
                 table: Arc::from(query.collection.as_str()),
                 row_id: id.0,
             };
-            let key_val = Value::Text(key.clone());
+            let key_val = Value::text(key.clone());
             let columns = vec![key_val.clone(), value.clone()];
             let mut named = HashMap::new();
             named.insert("key".to_string(), key_val);

@@ -233,11 +233,11 @@ pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<
             );
             record.set(
                 "red_collection",
-                Value::Text(entity.kind.collection().to_string()),
+                Value::text(entity.kind.collection().to_string()),
             );
             record.set(
                 "red_kind",
-                Value::Text(entity.kind.storage_type().to_string()),
+                Value::text(entity.kind.storage_type().to_string()),
             );
             record.set_arc(
                 sys_key_created_at(),
@@ -257,11 +257,11 @@ pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<
             let capabilities_str = runtime_row_capabilities_str(&row);
             record.set_arc(
                 sys_key_red_entity_type(),
-                Value::Text(entity_type.to_string()),
+                Value::text(entity_type.to_string()),
             );
             record.set(
                 "red_capabilities",
-                Value::Text(capabilities_str.to_string()),
+                Value::text(capabilities_str.to_string()),
             );
 
             if let Some(named) = row.named {
@@ -289,11 +289,11 @@ pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<
             );
             record.set(
                 "red_collection",
-                Value::Text(entity.kind.collection().to_string()),
+                Value::text(entity.kind.collection().to_string()),
             );
             record.set(
                 "red_kind",
-                Value::Text(entity.kind.storage_type().to_string()),
+                Value::text(entity.kind.storage_type().to_string()),
             );
             record.set_arc(
                 sys_key_created_at(),
@@ -309,11 +309,11 @@ pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<
             );
             record.set_arc(
                 sys_key_red_entity_type(),
-                Value::Text("timeseries".to_string()),
+                Value::text("timeseries".to_string()),
             );
             record.set(
                 "red_capabilities",
-                Value::Text("document,timeseries,metric,temporal".to_string()),
+                Value::text("document,timeseries,metric,temporal".to_string()),
             );
             append_timeseries_record_fields(&mut record, &ts);
             Some(record)
@@ -347,11 +347,11 @@ pub(super) fn runtime_table_record_from_entity_ref(
             );
             record.set(
                 "red_collection",
-                Value::Text(entity.kind.collection().to_string()),
+                Value::text(entity.kind.collection().to_string()),
             );
             record.set(
                 "red_kind",
-                Value::Text(entity.kind.storage_type().to_string()),
+                Value::text(entity.kind.storage_type().to_string()),
             );
             record.set_arc(
                 sys_key_created_at(),
@@ -370,11 +370,11 @@ pub(super) fn runtime_table_record_from_entity_ref(
             let capabilities_str = runtime_row_capabilities_str(row);
             record.set_arc(
                 sys_key_red_entity_type(),
-                Value::Text(entity_type.to_string()),
+                Value::text(entity_type.to_string()),
             );
             record.set(
                 "red_capabilities",
-                Value::Text(capabilities_str.to_string()),
+                Value::text(capabilities_str.to_string()),
             );
 
             if let Some(named) = &row.named {
@@ -401,11 +401,11 @@ pub(super) fn runtime_table_record_from_entity_ref(
             );
             record.set(
                 "red_collection",
-                Value::Text(entity.kind.collection().to_string()),
+                Value::text(entity.kind.collection().to_string()),
             );
             record.set(
                 "red_kind",
-                Value::Text(entity.kind.storage_type().to_string()),
+                Value::text(entity.kind.storage_type().to_string()),
             );
             record.set_arc(
                 sys_key_created_at(),
@@ -421,11 +421,11 @@ pub(super) fn runtime_table_record_from_entity_ref(
             );
             record.set_arc(
                 sys_key_red_entity_type(),
-                Value::Text("timeseries".to_string()),
+                Value::text("timeseries".to_string()),
             );
             record.set(
                 "red_capabilities",
-                Value::Text("document,timeseries,metric,temporal".to_string()),
+                Value::text("document,timeseries,metric,temporal".to_string()),
             );
             append_timeseries_record_fields(&mut record, ts);
             Some(record)
@@ -495,7 +495,7 @@ pub(super) fn runtime_table_record_from_entity_projected(
 
             for col in columns {
                 match col.as_str() {
-                    "metric" => record.set("metric", Value::Text(ts.metric.clone())),
+                    "metric" => record.set("metric", Value::text(ts.metric.clone())),
                     "timestamp_ns" => {
                         record.set("timestamp_ns", Value::UnsignedInteger(ts.timestamp_ns))
                     }
@@ -626,8 +626,8 @@ pub(super) fn runtime_any_record_from_entity(entity: UnifiedEntity) -> Option<Un
         (EntityKind::GraphNode(node), EntityData::Node(node_data)) => {
             let mut record = UnifiedRecord::new();
             record.set("id", Value::UnsignedInteger(entity_id));
-            record.set("label", Value::Text(node.label));
-            record.set("node_type", Value::Text(node.node_type));
+            record.set("label", Value::text(node.label));
+            record.set("node_type", Value::text(node.node_type));
             for (key, value) in node_data.properties {
                 record.set(&key, value);
             }
@@ -639,7 +639,7 @@ pub(super) fn runtime_any_record_from_entity(entity: UnifiedEntity) -> Option<Un
         }
         (EntityKind::GraphEdge(edge_kind), EntityData::Edge(edge)) => {
             let mut record = UnifiedRecord::new();
-            record.set("label", Value::Text(edge_kind.label));
+            record.set("label", Value::text(edge_kind.label));
             record.set("from", Value::NodeRef(edge_kind.from_node.clone()));
             record.set("to", Value::NodeRef(edge_kind.to_node.clone()));
             record.set("weight", Value::Float(edge.weight as f64));
@@ -659,7 +659,7 @@ pub(super) fn runtime_any_record_from_entity(entity: UnifiedEntity) -> Option<Un
                 Value::UnsignedInteger(vector.dense.len() as u64),
             );
             if let Some(content) = vector.content {
-                record.set("content", Value::Text(content));
+                record.set("content", Value::text(content));
             }
             (
                 "vector",
@@ -700,8 +700,8 @@ pub(super) fn runtime_any_record_from_entity(entity: UnifiedEntity) -> Option<Un
     };
 
     record.set_arc(sys_key_red_entity_id(), Value::UnsignedInteger(entity_id));
-    record.set_arc(sys_key_red_collection(), Value::Text(collection));
-    record.set_arc(sys_key_red_kind(), Value::Text(storage_type));
+    record.set_arc(sys_key_red_collection(), Value::text(collection));
+    record.set_arc(sys_key_red_kind(), Value::text(storage_type));
     record.set_arc(sys_key_created_at(), Value::UnsignedInteger(created_at));
     record.set_arc(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
     record.set_arc(
@@ -747,8 +747,8 @@ pub(super) fn runtime_any_record_from_entity_ref(entity: &UnifiedEntity) -> Opti
         (EntityKind::GraphNode(node), EntityData::Node(node_data)) => {
             let mut record = UnifiedRecord::new();
             record.set("id", Value::UnsignedInteger(entity_id));
-            record.set("label", Value::Text(node.label.clone()));
-            record.set("node_type", Value::Text(node.node_type.clone()));
+            record.set("label", Value::text(node.label.clone()));
+            record.set("node_type", Value::text(node.node_type.clone()));
             for (key, value) in &node_data.properties {
                 record.set(key, value.clone());
             }
@@ -760,7 +760,7 @@ pub(super) fn runtime_any_record_from_entity_ref(entity: &UnifiedEntity) -> Opti
         }
         (EntityKind::GraphEdge(edge_kind), EntityData::Edge(edge)) => {
             let mut record = UnifiedRecord::new();
-            record.set("label", Value::Text(edge_kind.label.clone()));
+            record.set("label", Value::text(edge_kind.label.clone()));
             record.set("from", Value::NodeRef(edge_kind.from_node.clone()));
             record.set("to", Value::NodeRef(edge_kind.to_node.clone()));
             record.set("weight", Value::Float(edge.weight as f64));
@@ -780,7 +780,7 @@ pub(super) fn runtime_any_record_from_entity_ref(entity: &UnifiedEntity) -> Opti
                 Value::UnsignedInteger(vector.dense.len() as u64),
             );
             if let Some(content) = vector.content.as_ref() {
-                record.set("content", Value::Text(content.clone()));
+                record.set("content", Value::text(content.clone()));
             }
             (
                 "vector",
@@ -801,8 +801,8 @@ pub(super) fn runtime_any_record_from_entity_ref(entity: &UnifiedEntity) -> Opti
     };
 
     record.set_arc(sys_key_red_entity_id(), Value::UnsignedInteger(entity_id));
-    record.set_arc(sys_key_red_collection(), Value::Text(collection));
-    record.set_arc(sys_key_red_kind(), Value::Text(storage_type));
+    record.set_arc(sys_key_red_collection(), Value::text(collection));
+    record.set_arc(sys_key_red_kind(), Value::text(storage_type));
     record.set_arc(sys_key_created_at(), Value::UnsignedInteger(created_at));
     record.set_arc(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
     record.set_arc(
@@ -819,7 +819,7 @@ fn append_timeseries_record_fields(
     record: &mut UnifiedRecord,
     ts: &crate::storage::TimeSeriesData,
 ) {
-    record.set("metric", Value::Text(ts.metric.clone()));
+    record.set("metric", Value::text(ts.metric.clone()));
     record.set("timestamp_ns", Value::UnsignedInteger(ts.timestamp_ns));
     record.set("timestamp", Value::UnsignedInteger(ts.timestamp_ns));
     record.set("time", Value::UnsignedInteger(ts.timestamp_ns));
@@ -847,9 +847,9 @@ pub(super) fn set_runtime_entity_metadata(
     let capabilities_text = capabilities.into_iter().collect::<Vec<_>>().join(",");
     record.set_arc(
         sys_key_red_entity_type(),
-        Value::Text(entity_type.to_string()),
+        Value::text(entity_type.to_string()),
     );
-    record.set_arc(sys_key_red_capabilities(), Value::Text(capabilities_text));
+    record.set_arc(sys_key_red_capabilities(), Value::text(capabilities_text));
 }
 
 pub(super) fn runtime_record_capability_list<const N: usize>(
@@ -1051,7 +1051,7 @@ pub(super) fn resolve_runtime_vector_source(
 fn embed_runtime_vector_text(db: &RedDB, text: &str) -> RedDBResult<Vec<f32>> {
     let kv_getter = |key: &str| -> RedDBResult<Option<String>> {
         match db.get_kv("red_config", key) {
-            Some((Value::Text(value), _)) => Ok(Some(value)),
+            Some((Value::Text(value), _)) => Ok(Some(value.to_string())),
             Some(_) => Ok(None),
             None => Ok(None),
         }
@@ -1226,15 +1226,15 @@ pub(super) fn runtime_vector_record_from_match(item: SimilarResult) -> UnifiedRe
     record.set("vector_similarity", Value::Float(item.score as f64));
     record.set(
         "collection",
-        Value::Text(item.entity.kind.collection().to_string()),
+        Value::text(item.entity.kind.collection().to_string()),
     );
     record.set(
         "red_collection",
-        Value::Text(item.entity.kind.collection().to_string()),
+        Value::text(item.entity.kind.collection().to_string()),
     );
     record.set(
         "red_kind",
-        Value::Text(item.entity.kind.storage_type().to_string()),
+        Value::text(item.entity.kind.storage_type().to_string()),
     );
     record.set_arc(
         sys_key_created_at(),
@@ -1255,7 +1255,7 @@ pub(super) fn runtime_vector_record_from_match(item: SimilarResult) -> UnifiedRe
         EntityData::Vector(data) => {
             record.set("dimension", Value::UnsignedInteger(data.dense.len() as u64));
             if let Some(content) = data.content {
-                record.set("content", Value::Text(content));
+                record.set("content", Value::text(content));
             } else {
                 record.set("content", Value::Null);
             }
@@ -1283,7 +1283,7 @@ pub(super) fn runtime_vector_record_from_match(item: SimilarResult) -> UnifiedRe
         }
         EntityData::TimeSeries(ts) => {
             record.set("dimension", Value::Null);
-            record.set("metric", Value::Text(ts.metric));
+            record.set("metric", Value::text(ts.metric));
             record.set("timestamp_ns", Value::UnsignedInteger(ts.timestamp_ns));
             record.set("value", Value::Float(ts.value));
         }
@@ -1479,7 +1479,7 @@ pub(super) fn runtime_identity_fragment(value: &Value) -> Option<String> {
         Value::Integer(value) => Some(value.to_string()),
         Value::UnsignedInteger(value) => Some(value.to_string()),
         Value::Float(value) => Some(value.to_string()),
-        Value::Text(value) => Some(value.clone()),
+        Value::Text(value) => Some(value.to_string()),
         Value::NodeRef(value) => Some(value.clone()),
         Value::EdgeRef(value) => Some(value.clone()),
         Value::RowRef(table, row_id) => Some(format!("{table}:{row_id}")),
@@ -1503,7 +1503,7 @@ pub(super) fn apply_runtime_identity_hints(record: &mut UnifiedRecord, entity: &
                 "{}:{}",
                 cross_ref.target_collection, cross_ref.target
             ))),
-            _ => Some(Value::Text(format!(
+            _ => Some(Value::text(format!(
                 "{}:{}",
                 cross_ref.target_collection, cross_ref.target
             ))),
