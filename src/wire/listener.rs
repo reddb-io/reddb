@@ -184,15 +184,33 @@ fn handle_query(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
     }
 }
 
-/// Handle query with BINARY result encoding — zero JSON.
-/// Parses SQL, scans entities, encodes directly to wire binary.
+/// Handle a MSG_QUERY_BINARY request.
+///
+/// Historically this path had its own ad-hoc scan+encode loop that
+/// duplicated the runtime's filter/projection/index logic and only
+/// covered the `named` storage layout — every WHERE clause on a
+/// columnar (bulk-inserted) row returned 0 rows. Rather than keep
+/// two parallel SELECT implementations in sync, delegate to the
+/// same path `handle_query` uses: `runtime.execute_query` applies
+/// every optimiser + index path we have, and `encode_result` emits
+/// the identical `[ncols][cols][nrows][(tag+bytes)*]` binary format
+/// on the wire. The only observable difference between MSG_QUERY
+/// and MSG_QUERY_BINARY is the client-side intent marker — useful
+/// for routing/telemetry, but no longer a functional divergence.
 fn handle_query_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
+    handle_query(runtime, payload)
+}
+
+#[allow(dead_code)]
+fn _unused_binary_scan_loop_kept_for_reference(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
+    // Old custom-scan implementation retained as a reference for the
+    // filter-compiler + binary-encoder patterns; not linked into the
+    // wire dispatch.
     let sql = match std::str::from_utf8(payload) {
         Ok(s) => s,
         Err(_) => return make_error(b"invalid UTF-8"),
     };
 
-    // Parse SQL to get table query
     let expr = match crate::storage::query::modes::parse_multi(sql) {
         Ok(e) => e,
         Err(e) => return make_error(format!("parse: {e}").as_bytes()),
@@ -200,14 +218,12 @@ fn handle_query_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
 
     let table_query = match &expr {
         crate::storage::query::ast::QueryExpr::Table(tq) => tq,
-        // For non-table queries (UPDATE/DELETE etc), fall back to JSON path
         _ => return handle_query(runtime, payload),
     };
 
     let db = runtime.db();
     let store = db.store();
 
-    // Entity_id point lookup — single entity binary
     let effective_filter = effective_table_filter(table_query);
 
     if let Some(entity_id) =
@@ -219,7 +235,6 @@ fn handle_query_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
         };
     }
 
-    // Filtered scan — encode matching entities to binary directly
     let manager = match store.get_collection(&table_query.table) {
         Some(m) => m,
         None => return make_error(b"collection not found"),
@@ -230,7 +245,6 @@ fn handle_query_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
     let table_alias = table_query.alias.as_deref().unwrap_or(table_name);
     let limit = table_query.limit.unwrap_or(10000) as usize;
 
-    // First entity determines column schema
     let mut col_names: Option<Vec<String>> = None;
     let mut row_bufs: Vec<Vec<u8>> = Vec::new();
     let mut count = 0usize;
@@ -254,7 +268,6 @@ fn handle_query_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
             }
         }
 
-        // Initialize columns from first entity
         if col_names.is_none() {
             let mut cols = vec![
                 "red_entity_id".into(),
@@ -264,6 +277,8 @@ fn handle_query_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
             if let EntityData::Row(ref row) = entity.data {
                 if let Some(ref named) = row.named {
                     cols.extend(named.keys().cloned());
+                } else if let Some(ref schema) = row.schema {
+                    cols.extend(schema.iter().cloned());
                 }
             }
             col_names = Some(cols);
@@ -280,11 +295,7 @@ fn handle_query_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
                 "updated_at" => Value::UnsignedInteger(entity.updated_at),
                 other => {
                     if let EntityData::Row(ref r) = entity.data {
-                        r.named
-                            .as_ref()
-                            .and_then(|n| n.get(other))
-                            .cloned()
-                            .unwrap_or(Value::Null)
+                        r.get_field(other).cloned().unwrap_or(Value::Null)
                     } else {
                         Value::Null
                     }
@@ -297,7 +308,6 @@ fn handle_query_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
         true
     });
 
-    // Build response frame
     let cols = col_names.unwrap_or_default();
     let mut body = Vec::with_capacity(256 + count * 64);
     body.extend_from_slice(&(cols.len() as u16).to_le_bytes());
