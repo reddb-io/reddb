@@ -114,21 +114,52 @@ fn returning_on_update_is_rejected_for_now() {
 }
 
 #[test]
-fn returning_on_delete_is_rejected_for_now() {
+fn returning_star_on_delete_returns_pre_image() {
     let rt = rt();
     let q = QueryUseCases::new(&rt);
     q.execute(ExecuteQueryInput {
-        query: "INSERT INTO users (name, age) VALUES ('d', 1)".into(),
+        query: "INSERT INTO users (name, age) VALUES ('d1', 11), ('d2', 22)".into(),
     })
     .unwrap();
-    let err = q
+
+    let result = q
         .execute(ExecuteQueryInput {
-            query: "DELETE FROM users WHERE name = 'd' RETURNING *".into(),
+            query: "DELETE FROM users WHERE age = 11 RETURNING *".into(),
         })
-        .unwrap_err();
-    let msg = format!("{err}");
+        .expect("DELETE RETURNING *");
+    assert_eq!(result.affected_rows, 1);
+    assert_eq!(result.result.records.len(), 1);
+    let rec = &result.result.records[0];
+    assert!(matches!(rec.values.get("name"), Some(Value::Text(s)) if s == "d1"));
+    assert!(matches!(rec.values.get("age"), Some(Value::Integer(11))));
+
+    // Row is actually gone — a follow-up SELECT must not return it.
+    let after = q
+        .execute(ExecuteQueryInput {
+            query: "SELECT name FROM users".into(),
+        })
+        .unwrap();
+    assert_eq!(after.result.records.len(), 1);
+}
+
+#[test]
+fn returning_column_list_on_delete_projects_subset() {
+    let rt = rt();
+    let q = QueryUseCases::new(&rt);
+    q.execute(ExecuteQueryInput {
+        query: "INSERT INTO users (name, age) VALUES ('k', 9)".into(),
+    })
+    .unwrap();
+    let result = q
+        .execute(ExecuteQueryInput {
+            query: "DELETE FROM users WHERE name = 'k' RETURNING name".into(),
+        })
+        .unwrap();
+    assert_eq!(result.result.columns, vec!["name".to_string()]);
+    let rec = &result.result.records[0];
+    assert!(matches!(rec.values.get("name"), Some(Value::Text(s)) if s == "k"));
     assert!(
-        msg.contains("RETURNING on DELETE"),
-        "expected NotImplemented for DELETE RETURNING, got: {msg}"
+        rec.values.get("age").is_none(),
+        "age must not leak when not in RETURNING list"
     );
 }

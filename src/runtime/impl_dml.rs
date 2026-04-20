@@ -1178,10 +1178,46 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &DeleteQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
-        if query.returning.is_some() {
-            return Err(RedDBError::Query(
-                "RETURNING on DELETE is parsed but not yet executed (T4.3 pending)".to_string(),
-            ));
+        // RETURNING on DELETE: capture the pre-image via an internal
+        // SELECT that reuses the same WHERE, then run the delete with
+        // the RETURNING clause stripped, then project the captured
+        // rows through the requested items. The extra SELECT is a
+        // pragmatic MVP — a future pass can fuse the scan with the
+        // delete to avoid the second pass over the heap.
+        if let Some(items) = query.returning.clone() {
+            let select_sql = delete_to_select_sql(raw_query).ok_or_else(|| {
+                RedDBError::Query(
+                    "DELETE ... RETURNING: cannot rewrite query for pre-image scan".to_string(),
+                )
+            })?;
+            let captured = self.execute_query(&select_sql)?;
+
+            let mut inner_query = query.clone();
+            inner_query.returning = None;
+            let _ = self.execute_delete(raw_query, &inner_query)?;
+
+            let snapshots: Vec<Vec<(String, Value)>> = captured
+                .result
+                .records
+                .iter()
+                .map(|rec| {
+                    rec.values
+                        .iter()
+                        .map(|(k, v)| (k.as_ref().to_string(), v.clone()))
+                        .collect()
+                })
+                .collect();
+            let affected = snapshots.len() as u64;
+            let result = build_returning_result(&items, &snapshots, None);
+
+            let mut response = RuntimeQueryResult::dml_result(
+                raw_query.to_string(),
+                affected,
+                "delete",
+                "runtime-dml-returning",
+            );
+            response.result = result;
+            return Ok(response);
         }
         // Row-Level Security enforcement (Phase 2.5.2 PG parity).
         //
@@ -1457,6 +1493,66 @@ fn build_patch_operations_from_materialized_assignments(
     }
 
     operations
+}
+
+/// Rewrite `DELETE FROM <table> [WHERE …] [RETURNING …]` as
+/// `SELECT * FROM <table> [WHERE …]` so the delete executor can
+/// capture the pre-image before actually removing the rows. Returns
+/// `None` when the input does not start with `DELETE`.
+///
+/// Case-insensitive on the keywords. Preserves everything between
+/// the table name and the RETURNING clause, so WHERE / ORDER BY /
+/// LIMIT survive untouched. The RETURNING tail — if present — is
+/// truncated at the first top-level `RETURNING` token.
+fn delete_to_select_sql(sql: &str) -> Option<String> {
+    let trimmed = sql.trim_start();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !lowered.starts_with("delete ") && !lowered.starts_with("delete\t") {
+        return None;
+    }
+    // Find `FROM` after DELETE.
+    let from_idx = lowered.find(" from ")?;
+    let after_from = &trimmed[from_idx + " from ".len()..];
+    let after_from_lc = &lowered[from_idx + " from ".len()..];
+
+    // Cut off the RETURNING tail (a naive search — the RETURNING
+    // clause only appears once per statement at top level in our
+    // grammar). Matches whitespace-bounded tokens to avoid clipping
+    // `RETURNING` inside a string literal.
+    let mut body = after_from.to_string();
+    if let Some(pos) = find_top_level_keyword(after_from_lc, "returning") {
+        body.truncate(pos);
+    }
+    Some(format!("SELECT * FROM {}", body.trim_end()))
+}
+
+/// Find the byte offset of a whitespace-bounded keyword in a
+/// lowercased haystack, skipping matches inside single-quoted
+/// string literals. Naive — no escape handling — but enough for
+/// the shapes the DML parser emits.
+fn find_top_level_keyword(haystack: &str, needle: &str) -> Option<usize> {
+    let bytes = haystack.as_bytes();
+    let nlen = needle.len();
+    let mut i = 0usize;
+    let mut in_string = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'\'' {
+            in_string = !in_string;
+            i += 1;
+            continue;
+        }
+        if !in_string
+            && i + nlen <= bytes.len()
+            && &bytes[i..i + nlen] == needle.as_bytes()
+            && (i == 0 || bytes[i - 1].is_ascii_whitespace())
+            && (i + nlen == bytes.len() || bytes[i + nlen].is_ascii_whitespace())
+        {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Build a `UnifiedResult` from the rows affected by a DML statement plus
