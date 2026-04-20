@@ -623,7 +623,7 @@ impl RedDB {
 
     fn native_value_text(value: &Value) -> Option<String> {
         match value {
-            Value::Text(value) => Some(value.clone()),
+            Value::Text(value) => Some(value.to_string()),
             Value::Json(value) => String::from_utf8(value.clone()).ok(),
             Value::Blob(value) => String::from_utf8(value.clone()).ok(),
             Value::Integer(value) => Some(value.to_string()),

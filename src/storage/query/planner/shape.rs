@@ -1090,7 +1090,7 @@ fn bind_value_to_f32(value: &Value) -> Option<f32> {
 
 fn bind_value_to_metadata_value(value: &Value) -> Option<MetadataValue> {
     match value {
-        Value::Text(value) => Some(MetadataValue::String(value.clone())),
+        Value::Text(value) => Some(MetadataValue::String(value.to_string())),
         Value::Integer(value) => Some(MetadataValue::Integer(*value)),
         Value::UnsignedInteger(value) => i64::try_from(*value).ok().map(MetadataValue::Integer),
         Value::BigInt(value) => Some(MetadataValue::Integer(*value)),

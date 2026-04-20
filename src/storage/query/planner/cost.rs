@@ -886,8 +886,8 @@ fn column_value_from(v: &crate::storage::schema::Value) -> Option<super::histogr
         Value::Integer(i) | Value::BigInt(i) => Some(ColumnValue::Int(*i)),
         Value::UnsignedInteger(u) => Some(ColumnValue::Int(*u as i64)),
         Value::Float(f) if f.is_finite() => Some(ColumnValue::Float(*f)),
-        Value::Text(s)
-        | Value::Email(s)
+        Value::Text(s) => Some(ColumnValue::Text(s.to_string())),
+        Value::Email(s)
         | Value::Url(s)
         | Value::NodeRef(s)
         | Value::EdgeRef(s)
@@ -1377,8 +1377,8 @@ mod tests {
         let h = Histogram::equi_depth_from_sample(sample, 10);
 
         let mcv = MostCommonValues::new(vec![
-            (ColumnValue::text("boss".to_string()), 0.5),
-            (ColumnValue::text("intern".to_string()), 0.05),
+            (ColumnValue::Text("boss".to_string()), 0.5),
+            (ColumnValue::Text("intern".to_string()), 0.05),
         ]);
 
         Arc::new(

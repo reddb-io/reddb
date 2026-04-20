@@ -49,7 +49,7 @@ fn smoke_row_crud() {
     let out = uc.create_row(CreateRowInput {
         collection: "users".into(),
         fields: vec![
-            ("name".into(), Value::Text("Alice".into())),
+            ("name".into(), Value::text("Alice")),
             ("age".into(), Value::Integer(30)),
         ],
         metadata: vec![],
@@ -116,7 +116,7 @@ fn smoke_graph_crud() {
             collection: "network".into(),
             label: "host_a".into(),
             node_type: Some("Host".into()),
-            properties: vec![("ip".into(), Value::Text("192.168.1.1".into()))],
+            properties: vec![("ip".into(), Value::text("192.168.1.1"))],
             metadata: vec![],
             embeddings: vec![],
             table_links: vec![],
@@ -129,7 +129,7 @@ fn smoke_graph_crud() {
             collection: "network".into(),
             label: "host_b".into(),
             node_type: Some("Host".into()),
-            properties: vec![("ip".into(), Value::Text("10.0.0.1".into()))],
+            properties: vec![("ip".into(), Value::text("10.0.0.1"))],
             metadata: vec![],
             embeddings: vec![],
             table_links: vec![],
@@ -163,8 +163,8 @@ fn smoke_query_select() {
         .create_row(CreateRowInput {
             collection: "hosts".into(),
             fields: vec![
-                ("ip".into(), Value::Text("192.168.1.1".into())),
-                ("os".into(), Value::Text("Linux".into())),
+                ("ip".into(), Value::text("192.168.1.1")),
+                ("os".into(), Value::text("Linux")),
             ],
             metadata: vec![],
             node_links: vec![],
@@ -246,7 +246,7 @@ fn smoke_kv_crud() {
     let out = uc.create_kv(CreateKvInput {
         collection: "config".into(),
         key: "app.name".into(),
-        value: Value::Text("RedDB".into()),
+        value: Value::text("RedDB"),
         metadata: vec![],
     });
     assert!(out.is_ok(), "create_kv should succeed: {:?}", out.err());
@@ -258,7 +258,7 @@ fn smoke_kv_crud() {
     assert!(val.is_some(), "key should exist");
     let (value, _id) = val.unwrap();
     assert!(
-        matches!(value, Value::Text(ref s) if s == "RedDB"),
+        matches!(value, Value::Text(ref s) if &*&**s == "RedDB"),
         "value should be RedDB"
     );
 

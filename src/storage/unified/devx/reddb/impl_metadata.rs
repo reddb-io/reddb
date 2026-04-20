@@ -224,7 +224,7 @@ impl RedDB {
     /// ```ignore
     /// let row = db.row("scans", vec![
     ///     ("timestamp", Value::Timestamp(now)),
-    ///     ("target", Value::text("192.168.1.0/24".into())),
+    ///     ("target", Value::text("192.168.1.0/24")),
     ///     ("findings", Value::Integer(42)),
     /// ]).save()?;
     /// ```
@@ -260,7 +260,7 @@ impl RedDB {
     ///
     /// # Example
     /// ```ignore
-    /// let id = db.kv("config", "theme", Value::text("dark".into()))
+    /// let id = db.kv("config", "theme", Value::text("dark"))
     ///     .metadata("updated_by", "admin")
     ///     .save()?;
     /// ```
@@ -289,7 +289,7 @@ impl RedDB {
             if let EntityData::Row(ref row) = entity.data {
                 if let Some(ref named) = row.named {
                     if let Some(Value::Text(ref k)) = named.get("key") {
-                        if k == key {
+                        if &**k == key {
                             let value = named.get("value").cloned().unwrap_or(Value::Null);
                             return Some((value, entity.id));
                         }
@@ -1274,7 +1274,7 @@ impl RedDB {
             entity.data.as_row().is_some_and(|row| {
                 matches!(
                     row.get_field("kind"),
-                    Some(crate::storage::schema::Value::Text(kind)) if kind == "queue_pending"
+                    Some(crate::storage::schema::Value::Text(kind)) if &**kind == "queue_pending"
                 )
             })
         });

@@ -1395,7 +1395,7 @@ fn storage_value_to_tree_metadata(value: &Value) -> RedDBResult<MetadataValue> {
             }
         }
         Value::Float(value) => MetadataValue::Float(*value),
-        Value::Text(value) => MetadataValue::String(value.clone()),
+        Value::Text(value) => MetadataValue::String(value.to_string()),
         Value::Blob(value) => MetadataValue::Bytes(value.clone()),
         Value::Timestamp(value) => {
             if *value < 0 {

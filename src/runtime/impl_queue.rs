@@ -839,7 +839,7 @@ fn save_queue_config(
     );
     fields.insert(
         "dlq".to_string(),
-        config.dlq.clone().map(Value::Text).unwrap_or(Value::Null),
+        config.dlq.clone().map(Value::text).unwrap_or(Value::Null),
     );
     fields.insert(
         "max_attempts".to_string(),
@@ -1499,7 +1499,7 @@ fn message_id_string(message_id: EntityId) -> String {
 
 fn row_text(row: &RowData, field: &str) -> Option<String> {
     match row.get_field(field)?.clone() {
-        Value::Text(value) => Some(value),
+        Value::Text(value) => Some(value.to_string()),
         Value::NodeRef(value) => Some(value),
         Value::EdgeRef(value) => Some(value),
         Value::TableRef(value) => Some(value),

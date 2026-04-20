@@ -143,8 +143,8 @@ fn seed_comments(rt: &RedDBRuntime) {
                 .create_row(CreateRowInput {
                     collection: "comments".into(),
                     fields: vec![
-                        ("comment".into(), Value::Text(comment)),
-                        ("author".into(), Value::Text(format!("user-{index}"))),
+                        ("comment".into(), Value::text(comment)),
+                        ("author".into(), Value::text(format!("user-{index}"))),
                         ("category_id".into(), Value::Null),
                     ],
                     metadata: vec![],

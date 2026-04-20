@@ -259,8 +259,8 @@ impl RedDBRuntime {
                 ]);
                 // First row: global coefficient
                 let mut global_record = UnifiedRecord::new();
-                global_record.set("node_id", Value::text("__global__".into()));
-                global_record.set("label", Value::text("global_clustering".into()));
+                global_record.set("node_id", Value::text("__global__"));
+                global_record.set("label", Value::text("global_clustering"));
                 global_record.set("score", Value::Float(res.global));
                 result.push(global_record);
                 for score in &res.local {

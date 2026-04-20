@@ -1780,7 +1780,7 @@ fn merge_with_clauses(
     }
     for (key, value) in with_metadata {
         let meta_value = match value {
-            Value::Text(s) => MetadataValue::String(s.clone()),
+            Value::Text(s) => MetadataValue::String(s.to_string()),
             Value::Integer(n) => MetadataValue::Int(*n),
             Value::Float(n) => MetadataValue::Float(*n),
             Value::Boolean(b) => MetadataValue::Bool(*b),
@@ -1874,7 +1874,7 @@ fn find_column_value_string(
 ) -> RedDBResult<String> {
     let val = find_column_value(columns, values, name)?;
     match val {
-        Value::Text(s) => Ok(s),
+        Value::Text(s) => Ok(s.to_string()),
         Value::Integer(n) => Ok(n.to_string()),
         Value::Float(n) => Ok(n.to_string()),
         other => Err(RedDBError::Query(format!(
@@ -1908,7 +1908,7 @@ fn find_column_value_opt_string(
         if col.eq_ignore_ascii_case(name) {
             return match &values[i] {
                 Value::Null => None,
-                Value::Text(s) => Some(s.clone()),
+                Value::Text(s) => Some(s.to_string()),
                 Value::Integer(n) => Some(n.to_string()),
                 Value::Float(n) => Some(n.to_string()),
                 _ => None,
@@ -2184,7 +2184,7 @@ fn storage_value_to_metadata_value(value: &Value) -> MetadataValue {
         Value::Integer(value) => MetadataValue::Int(*value),
         Value::UnsignedInteger(value) => metadata_u64_to_value(*value),
         Value::Float(value) => MetadataValue::Float(*value),
-        Value::Text(value) => MetadataValue::String(value.clone()),
+        Value::Text(value) => MetadataValue::String(value.to_string()),
         Value::Blob(value) => MetadataValue::Bytes(value.clone()),
         Value::Timestamp(value) => {
             if *value >= 0 {

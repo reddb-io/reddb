@@ -1018,10 +1018,10 @@ impl Value {
     /// Construct a `Value::Text` from anything that can produce an
     /// `Arc<str>` — `String`, `&str`, or an existing `Arc<str>`.
     /// The drop-in migration helper for the old
-    /// `Value::text(String)` constructor style.
+    /// `Value::Text(String)` constructor style.
     #[inline]
     pub fn text(s: impl Into<std::sync::Arc<str>>) -> Self {
-        Value::text(s.into())
+        Value::Text(s.into())
     }
 
     /// Get the data type of this value

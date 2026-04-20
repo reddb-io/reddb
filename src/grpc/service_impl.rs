@@ -2225,7 +2225,7 @@ async fn ask(
     if let Some(record) = result.result.records.first() {
         if let Some(crate::storage::schema::Value::Text(answer)) = record.values.get("answer") {
             object.insert("ok".to_string(), crate::json::Value::Bool(true));
-            object.insert("answer".to_string(), crate::json::Value::String(answer.clone()));
+            object.insert("answer".to_string(), crate::json::Value::String(answer.to_string()));
         }
     }
     Ok(Response::new(json_payload_reply(crate::json::Value::Object(object))))

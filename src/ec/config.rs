@@ -214,15 +214,15 @@ impl EcRegistry {
                         });
                         let val = row.get_field("value");
                         if let (Some(k), Some(v)) = (key, val) {
-                            if k == format!("{}.reducer", prefix) {
+                            if &*k == format!("{}.reducer", prefix).as_str() {
                                 if let crate::storage::schema::Value::Text(s) = v {
                                     config.reducer = EcReducer::from_str(s);
                                 }
-                            } else if k == format!("{}.mode", prefix) {
+                            } else if &*k == format!("{}.mode", prefix).as_str() {
                                 if let crate::storage::schema::Value::Text(s) = v {
                                     config.mode = EcMode::from_str(s);
                                 }
-                            } else if k == format!("{}.interval_secs", prefix) {
+                            } else if &*k == format!("{}.interval_secs", prefix).as_str() {
                                 if let crate::storage::schema::Value::Integer(n) = v {
                                     config.consolidation_interval_secs = *n as u64;
                                 }

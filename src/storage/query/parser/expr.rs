@@ -767,9 +767,9 @@ mod tests {
         let e = parse("'hello'");
         match e {
             Expr::Literal {
-                value: Value::text(ref s),
+                value: Value::Text(ref s),
                 ..
-            } if s == "hello" => {}
+            } if s.as_ref() == "hello" => {}
             other => panic!("expected Text(hello), got {other:?}"),
         }
     }
@@ -1040,7 +1040,7 @@ mod tests {
         assert_eq!(name.to_uppercase(), "TIME_BUCKET");
         assert_eq!(args.len(), 1);
         assert!(
-            matches!(&args[0], Expr::Literal { value: Value::text(s), .. } if s == "5m"),
+            matches!(&args[0], Expr::Literal { value: Value::Text(s), .. } if s.as_ref() == "5m"),
             "expected Text(\"5m\"), got {:?}",
             args[0]
         );

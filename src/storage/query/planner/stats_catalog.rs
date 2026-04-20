@@ -422,8 +422,8 @@ fn value_to_histogram_value(value: &Value) -> Option<ColumnValue> {
         Value::Latitude(v) => Some(ColumnValue::Int(i64::from(*v))),
         Value::Longitude(v) => Some(ColumnValue::Int(i64::from(*v))),
         Value::Float(v) if v.is_finite() => Some(ColumnValue::Float(*v)),
-        Value::Text(v)
-        | Value::Email(v)
+        Value::Text(v) => Some(ColumnValue::Text(v.to_string())),
+        Value::Email(v)
         | Value::Url(v)
         | Value::NodeRef(v)
         | Value::EdgeRef(v)
@@ -534,8 +534,8 @@ fn estimate_value_bytes(value: &Value) -> usize {
         | Value::Decimal(_) => 8,
         Value::Float(_) => 8,
         Value::Date(_) | Value::Time(_) => 4,
-        Value::Text(s)
-        | Value::Email(s)
+        Value::Text(s) => s.len() + 4,
+        Value::Email(s)
         | Value::Url(s)
         | Value::AssetCode(s)
         | Value::NodeRef(s)
@@ -613,8 +613,8 @@ fn non_null_value(value: &Value) -> Option<Value> {
 
 fn value_debug_string(value: &Value) -> String {
     match value {
-        Value::Text(v)
-        | Value::Email(v)
+        Value::Text(v) => v.to_string(),
+        Value::Email(v)
         | Value::Url(v)
         | Value::NodeRef(v)
         | Value::EdgeRef(v)
@@ -644,8 +644,8 @@ fn approximate_value_size(value: &Value) -> usize {
         | Value::Longitude(_)
         | Value::PageRef(_) => 8,
         Value::Boolean(_) | Value::EnumValue(_) => 1,
-        Value::Text(v)
-        | Value::Email(v)
+        Value::Text(v) => v.len(),
+        Value::Email(v)
         | Value::Url(v)
         | Value::NodeRef(v)
         | Value::EdgeRef(v)

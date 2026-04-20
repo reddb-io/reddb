@@ -150,7 +150,7 @@ impl Q {
     /// let result = Q::kv("config").get("theme").execute(&store)?;
     ///
     /// // Set a value (upsert)
-    /// let result = Q::kv("config").set("theme", Value::text("dark".into())).execute(&store)?;
+    /// let result = Q::kv("config").set("theme", Value::text("dark")).execute(&store)?;
     ///
     /// // Delete a key
     /// let result = Q::kv("config").delete("theme").execute(&store)?;

@@ -29,7 +29,7 @@ fn exec(rt: &RedDBRuntime, sql: &str) -> reddb::runtime::RuntimeQueryResult {
 
 fn text(record: &UnifiedRecord, column: &str) -> String {
     match record.get(column) {
-        Some(Value::Text(value)) => value.clone(),
+        Some(Value::Text(value)) => value.to_string(),
         Some(Value::UnsignedInteger(value)) => value.to_string(),
         other => panic!("expected text-like value for {column}, got {other:?}"),
     }
@@ -58,7 +58,7 @@ fn payloads(result: &reddb::runtime::RuntimeQueryResult) -> Vec<String> {
         .records
         .iter()
         .map(|record| match record.get("payload") {
-            Some(Value::Text(value)) => value.clone(),
+            Some(Value::Text(value)) => value.to_string(),
             Some(Value::Json(bytes)) => {
                 let json: reddb::json::Value =
                     reddb::json::from_slice(bytes).expect("payload json should decode");
@@ -374,7 +374,7 @@ fn test_create_timeseries_persists_contract_and_downsample_metadata() {
             .data
             .as_row()
             .is_some_and(|row| match row.get_field("series") {
-                Some(Value::Text(series)) => series == "cpu_metrics",
+                Some(Value::Text(series)) => series.as_ref() == "cpu_metrics",
                 _ => false,
             })
     });
@@ -389,11 +389,14 @@ fn test_create_timeseries_persists_contract_and_downsample_metadata() {
             let rendered = values
                 .iter()
                 .map(|value| match value {
-                    Value::Text(text) => text.clone(),
+                    Value::Text(text) => text.to_string(),
                     other => panic!("unexpected policy value: {other:?}"),
                 })
                 .collect::<Vec<_>>();
-            assert_eq!(rendered, vec!["1h:5m:avg", "1d:1h:max"]);
+            assert_eq!(
+                rendered,
+                vec!["1h:5m:avg".to_string(), "1d:1h:max".to_string()]
+            );
         }
         other => panic!("expected downsample policy array, got {other:?}"),
     }

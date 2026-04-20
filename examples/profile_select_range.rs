@@ -38,8 +38,8 @@ fn main() {
                     collection: "users".into(),
                     fields: vec![
                         ("id".into(), Value::Integer(i as i64)),
-                        ("name".into(), Value::Text(format!("u{i}"))),
-                        ("city".into(), Value::Text(CITIES[i % CITIES.len()].into())),
+                        ("name".into(), Value::text(format!("u{i}"))),
+                        ("city".into(), Value::text(CITIES[i % CITIES.len()])),
                         ("age".into(), Value::Integer(18 + (i % 60) as i64)),
                     ],
                     metadata: vec![],

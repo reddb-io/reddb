@@ -673,7 +673,7 @@ fn render_projection_literal(value: &Value) -> String {
                 v.to_string()
             }
         }
-        Value::Text(v) => v.clone(),
+        Value::Text(v) => v.to_string(),
         Value::Boolean(true) => "true".to_string(),
         Value::Boolean(false) => "false".to_string(),
         other => other.to_string(),

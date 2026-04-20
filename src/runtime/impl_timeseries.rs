@@ -148,7 +148,7 @@ fn save_timeseries_metadata(
                 .downsample_policies
                 .iter()
                 .cloned()
-                .map(Value::Text)
+                .map(Value::text)
                 .collect(),
         ),
     );
@@ -180,8 +180,9 @@ fn remove_timeseries_metadata(store: &crate::storage::unified::UnifiedStore, ser
     };
     let rows = manager.query_all(|entity| {
         entity.data.as_row().is_some_and(|row| {
-            row.get_field("series")
-                .is_some_and(|value| matches!(value, Value::Text(candidate) if candidate == series))
+            row.get_field("series").is_some_and(
+                |value| matches!(value, Value::Text(candidate) if &**candidate == series),
+            )
         })
     });
     for row in rows {

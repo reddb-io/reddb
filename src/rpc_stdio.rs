@@ -1068,8 +1068,8 @@ fn schema_value_to_json(v: &SchemaValue) -> Value {
         | SchemaValue::Duration(n)
         | SchemaValue::Decimal(n) => Value::Number(*n as f64),
         SchemaValue::Password(_) | SchemaValue::Secret(_) => Value::String("***".to_string()),
-        SchemaValue::Text(s)
-        | SchemaValue::Email(s)
+        SchemaValue::Text(s) => Value::String(s.to_string()),
+        SchemaValue::Email(s)
         | SchemaValue::Url(s)
         | SchemaValue::NodeRef(s)
         | SchemaValue::EdgeRef(s) => Value::String(s.clone()),

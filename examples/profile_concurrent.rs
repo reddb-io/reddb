@@ -39,7 +39,7 @@ fn main() {
         collection: "users".into(),
         fields: vec![
             ("id".into(), Value::Integer(0)),
-            ("name".into(), Value::Text("seed".into())),
+            ("name".into(), Value::text("seed")),
         ],
         metadata: vec![],
         node_links: vec![],
@@ -63,7 +63,7 @@ fn main() {
                         collection: "users".into(),
                         fields: vec![
                             ("id".into(), Value::Integer(id as i64)),
-                            ("name".into(), Value::Text(format!("w{w}_i{i}"))),
+                            ("name".into(), Value::text(format!("w{w}_i{i}"))),
                             ("age".into(), Value::Integer(25)),
                         ],
                         metadata: vec![],

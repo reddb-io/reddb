@@ -116,7 +116,7 @@ fn value_to_json(v: &Value) -> JsonValue {
         Value::Integer(n) => JsonValue::Number(*n as f64),
         Value::UnsignedInteger(n) => JsonValue::Number(*n as f64),
         Value::Float(f) => JsonValue::Number(*f),
-        Value::Text(s) => JsonValue::String(s.clone()),
+        Value::Text(s) => JsonValue::String(s.to_string()),
         _ => JsonValue::String(format!("{:?}", v)),
     }
 }

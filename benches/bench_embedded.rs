@@ -42,7 +42,7 @@ fn bench_row_insert_batch(c: &mut Criterion) {
                 uc.create_row(CreateRowInput {
                     collection: "bench_rows_batch".into(),
                     fields: vec![
-                        ("name".into(), Value::Text(format!("User_{i}"))),
+                        ("name".into(), Value::text(format!("User_{i}"))),
                         ("age".into(), Value::Integer(20 + (i % 50) as i64)),
                         ("active".into(), Value::Boolean(i % 2 == 0)),
                     ],
@@ -88,7 +88,7 @@ fn bench_kv_get(c: &mut Criterion) {
         uc.create_kv(CreateKvInput {
             collection: "bench_kv_get".into(),
             key: format!("key_{i}"),
-            value: Value::Text(format!("value_{i}")),
+            value: Value::text(format!("value_{i}")),
             metadata: vec![],
         })
         .unwrap();
@@ -245,7 +245,7 @@ fn bench_query_select(c: &mut Criterion) {
             .create_row(CreateRowInput {
                 collection: "bench_select".into(),
                 fields: vec![
-                    ("name".into(), Value::Text(format!("User_{i}"))),
+                    ("name".into(), Value::text(format!("User_{i}"))),
                     ("age".into(), Value::Integer(18 + (i % 60) as i64)),
                 ],
                 metadata: vec![],
@@ -277,7 +277,7 @@ fn bench_query_select_filter(c: &mut Criterion) {
             .create_row(CreateRowInput {
                 collection: "bench_filter".into(),
                 fields: vec![
-                    ("name".into(), Value::Text(format!("User_{i}"))),
+                    ("name".into(), Value::text(format!("User_{i}"))),
                     ("age".into(), Value::Integer(18 + (i % 60) as i64)),
                 ],
                 metadata: vec![],
@@ -463,13 +463,13 @@ fn bench_query_5k_point(c: &mut Criterion) {
             .create_row(CreateRowInput {
                 collection: "users5k".into(),
                 fields: vec![
-                    ("name".into(), Value::Text(format!("User_{i}"))),
+                    ("name".into(), Value::text(format!("User_{i}"))),
                     ("age".into(), Value::Integer(18 + (i % 63) as i64)),
                     (
                         "city".into(),
                         Value::Text(["NYC", "London", "Tokyo", "Paris", "Berlin"][i % 5].into()),
                     ),
-                    ("email".into(), Value::Text(format!("u{i}@t.com"))),
+                    ("email".into(), Value::text(format!("u{i}@t.com"))),
                     ("score".into(), Value::Float(i as f64 * 0.02)),
                 ],
                 metadata: vec![],
@@ -500,7 +500,7 @@ fn bench_query_5k_range(c: &mut Criterion) {
             .create_row(CreateRowInput {
                 collection: "users5kr".into(),
                 fields: vec![
-                    ("name".into(), Value::Text(format!("User_{i}"))),
+                    ("name".into(), Value::text(format!("User_{i}"))),
                     ("age".into(), Value::Integer(18 + (i % 63) as i64)),
                     (
                         "city".into(),
@@ -533,7 +533,7 @@ fn bench_query_5k_filtered(c: &mut Criterion) {
             .create_row(CreateRowInput {
                 collection: "users5kf".into(),
                 fields: vec![
-                    ("name".into(), Value::Text(format!("User_{i}"))),
+                    ("name".into(), Value::text(format!("User_{i}"))),
                     ("age".into(), Value::Integer(18 + (i % 63) as i64)),
                     (
                         "city".into(),
@@ -730,7 +730,7 @@ fn bench_embedded_mixed_workload(c: &mut Criterion) {
             .create_row(CreateRowInput {
                 collection: "mixed_workload".into(),
                 fields: vec![
-                    ("name".into(), Value::Text(format!("Seed_{i}"))),
+                    ("name".into(), Value::text(format!("Seed_{i}"))),
                     ("score".into(), Value::Integer(i)),
                 ],
                 metadata: vec![],
@@ -747,7 +747,7 @@ fn bench_embedded_mixed_workload(c: &mut Criterion) {
                     .create_row(CreateRowInput {
                         collection: "mixed_workload".into(),
                         fields: vec![
-                            ("name".into(), Value::Text(format!("Mixed_{i}"))),
+                            ("name".into(), Value::text(format!("Mixed_{i}"))),
                             ("score".into(), Value::Integer(i + 1000)),
                         ],
                         metadata: vec![],

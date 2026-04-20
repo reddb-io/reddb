@@ -22,7 +22,7 @@ fn exec(rt: &RedDBRuntime, sql: &str) -> reddb::runtime::RuntimeQueryResult {
 
 fn text(record: &UnifiedRecord, column: &str) -> String {
     match record.get(column) {
-        Some(Value::Text(value)) => value.clone(),
+        Some(Value::Text(value)) => value.to_string(),
         other => panic!("expected text value for {column}, got {other:?}"),
     }
 }

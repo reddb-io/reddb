@@ -159,7 +159,7 @@ pub fn query_pending_transactions(
         let field = row
             .get_field("field")
             .and_then(|v| match v {
-                Value::Text(s) => Some(s.clone()),
+                Value::Text(s) => Some(s.to_string()),
                 _ => None,
             })
             .unwrap_or_default();
@@ -177,7 +177,7 @@ pub fn query_pending_transactions(
         let operation = row
             .get_field("operation")
             .and_then(|v| match v {
-                Value::Text(s) => EcOperation::from_str(s),
+                Value::Text(s) => EcOperation::from_str(s.as_ref()),
                 _ => None,
             })
             .unwrap_or(EcOperation::Add);
@@ -194,13 +194,13 @@ pub fn query_pending_transactions(
         let cohort_hour = row
             .get_field("cohort_hour")
             .and_then(|v| match v {
-                Value::Text(s) => Some(s.clone()),
+                Value::Text(s) => Some(s.to_string()),
                 _ => None,
             })
             .unwrap_or_default();
 
         let source = row.get_field("source").and_then(|v| match v {
-            Value::Text(s) => Some(s.clone()),
+            Value::Text(s) => Some(s.to_string()),
             _ => None,
         });
 

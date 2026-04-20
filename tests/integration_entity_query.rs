@@ -38,7 +38,7 @@ fn test_row_create_and_query() {
         let out = entity.create_row(CreateRowInput {
             collection: "users_create".into(),
             fields: vec![
-                ("name".into(), Value::Text(name.to_string())),
+                ("name".into(), Value::text(name.to_string())),
                 ("age".into(), Value::Integer(*age)),
             ],
             metadata: vec![],
@@ -100,8 +100,8 @@ fn test_row_patch_set() {
         .create_row(CreateRowInput {
             collection: "patch_set".into(),
             fields: vec![
-                ("name".into(), Value::Text("Alice".into())),
-                ("role".into(), Value::Text("developer".into())),
+                ("name".into(), Value::text("Alice")),
+                ("role".into(), Value::text("developer")),
             ],
             metadata: vec![],
             node_links: vec![],
@@ -135,7 +135,11 @@ fn test_row_patch_set() {
     let role_val = record.values.get("role");
     assert!(role_val.is_some(), "record should have 'role' field");
     match role_val.unwrap() {
-        Value::Text(s) => assert_eq!(s, "architect", "role should be 'architect' after patch"),
+        Value::Text(s) => assert_eq!(
+            s.as_ref(),
+            "architect",
+            "role should be 'architect' after patch"
+        ),
         other => panic!("expected Text('architect'), got {:?}", other),
     }
 }
@@ -151,9 +155,9 @@ fn test_row_patch_unset() {
         .create_row(CreateRowInput {
             collection: "patch_unset".into(),
             fields: vec![
-                ("name".into(), Value::Text("Bob".into())),
-                ("email".into(), Value::Text("bob@example.com".into())),
-                ("phone".into(), Value::Text("+1234567890".into())),
+                ("name".into(), Value::text("Bob")),
+                ("email".into(), Value::text("bob@example.com")),
+                ("phone".into(), Value::text("+1234567890")),
             ],
             metadata: vec![],
             node_links: vec![],
@@ -216,8 +220,8 @@ fn test_select_by_entity_id_sees_latest_updated_row_image() {
         .create_row(CreateRowInput {
             collection: "entity_id_latest".into(),
             fields: vec![
-                ("name".into(), Value::Text("Alice".into())),
-                ("role".into(), Value::Text("developer".into())),
+                ("name".into(), Value::text("Alice")),
+                ("role".into(), Value::text("developer")),
             ],
             metadata: vec![],
             node_links: vec![],
@@ -249,7 +253,7 @@ fn test_select_by_entity_id_sees_latest_updated_row_image() {
         "should return one updated row"
     );
     match result.result.records[0].values.get("role") {
-        Some(Value::Text(value)) => assert_eq!(value, "architect"),
+        Some(Value::Text(value)) => assert_eq!(value.as_ref(), "architect"),
         other => panic!("expected updated role, got {:?}", other),
     }
 }
@@ -265,7 +269,7 @@ fn test_row_patch_top_level_ttl_payload_expires_entity() {
     let out = entity
         .create_row(CreateRowInput {
             collection: "patch_ttl_payload".into(),
-            fields: vec![("name".into(), Value::Text("ttl-payload".into()))],
+            fields: vec![("name".into(), Value::text("ttl-payload"))],
             metadata: vec![],
             node_links: vec![],
             vector_links: vec![],
@@ -311,7 +315,7 @@ fn test_row_patch_public_ttl_operation_expires_entity() {
     let out = entity
         .create_row(CreateRowInput {
             collection: "patch_ttl_operation".into(),
-            fields: vec![("name".into(), Value::Text("ttl-op".into()))],
+            fields: vec![("name".into(), Value::text("ttl-op"))],
             metadata: vec![],
             node_links: vec![],
             vector_links: vec![],
@@ -357,7 +361,7 @@ fn test_row_delete() {
     let out = entity
         .create_row(CreateRowInput {
             collection: "delete_test".into(),
-            fields: vec![("name".into(), Value::Text("ToBeDeleted".into()))],
+            fields: vec![("name".into(), Value::text("ToBeDeleted"))],
             metadata: vec![],
             node_links: vec![],
             vector_links: vec![],
@@ -505,7 +509,7 @@ fn test_kv_set_get_delete() {
         let out = uc.create_kv(CreateKvInput {
             collection: "kv_crud".into(),
             key: format!("key_{}", i),
-            value: Value::Text(format!("value_{}", i)),
+            value: Value::text(format!("value_{}", i)),
             metadata: vec![],
         });
         assert!(
@@ -523,7 +527,7 @@ fn test_kv_set_get_delete() {
             .expect("get_kv should succeed")
             .expect("key should exist");
         match &val.0 {
-            Value::Text(s) => assert_eq!(s, &format!("value_{}", i)),
+            Value::Text(s) => assert_eq!(s.as_ref(), &format!("value_{}", i)),
             other => panic!("expected Text, got {:?}", other),
         }
     }
@@ -536,7 +540,7 @@ fn test_kv_set_get_delete() {
     uc.create_kv(CreateKvInput {
         collection: "kv_crud".into(),
         key: "key_0".into(),
-        value: Value::Text("overwritten".into()),
+        value: Value::text("overwritten"),
         metadata: vec![],
     })
     .expect("re-create with new value should succeed");
@@ -547,7 +551,7 @@ fn test_kv_set_get_delete() {
         .expect("get_kv should succeed")
         .expect("key should still exist");
     match &val.0 {
-        Value::Text(s) => assert_eq!(s, "overwritten", "value should be overwritten"),
+        Value::Text(s) => assert_eq!(s.as_ref(), "overwritten", "value should be overwritten"),
         other => panic!("expected Text('overwritten'), got {:?}", other),
     }
 
@@ -621,7 +625,7 @@ fn test_node_create_with_properties() {
         label: "server_alpha".into(),
         node_type: Some("Server".into()),
         properties: vec![
-            ("hostname".into(), Value::Text("alpha.example.com".into())),
+            ("hostname".into(), Value::text("alpha.example.com")),
             ("cpu_cores".into(), Value::Integer(16)),
             ("memory_gb".into(), Value::Float(64.0)),
             ("active".into(), Value::Boolean(true)),
@@ -662,7 +666,7 @@ fn test_edge_create_bidirectional() {
             collection: "edge_net".into(),
             label: "server_a".into(),
             node_type: Some("Server".into()),
-            properties: vec![("ip".into(), Value::Text("10.0.0.1".into()))],
+            properties: vec![("ip".into(), Value::text("10.0.0.1"))],
             metadata: vec![],
             embeddings: vec![],
             table_links: vec![],
@@ -675,7 +679,7 @@ fn test_edge_create_bidirectional() {
             collection: "edge_net".into(),
             label: "server_b".into(),
             node_type: Some("Server".into()),
-            properties: vec![("ip".into(), Value::Text("10.0.0.2".into()))],
+            properties: vec![("ip".into(), Value::text("10.0.0.2"))],
             metadata: vec![],
             embeddings: vec![],
             table_links: vec![],
@@ -868,8 +872,8 @@ fn test_select_with_filter() {
             .create_row(CreateRowInput {
                 collection: "filter_test".into(),
                 fields: vec![
-                    ("name".into(), Value::Text(name.to_string())),
-                    ("dept".into(), Value::Text(dept.to_string())),
+                    ("name".into(), Value::text(name.to_string())),
+                    ("dept".into(), Value::text(dept.to_string())),
                     ("age".into(), Value::Integer(*age)),
                 ],
                 metadata: vec![],
@@ -898,7 +902,7 @@ fn test_select_with_filter() {
     for record in &result.result.records {
         let dept = record.values.get("dept");
         match dept {
-            Some(Value::Text(s)) => assert_eq!(s, "engineering"),
+            Some(Value::Text(s)) => assert_eq!(s.as_ref(), "engineering"),
             other => panic!("expected dept='engineering', got {:?}", other),
         }
     }
@@ -917,7 +921,7 @@ fn test_select_with_order_by() {
             .create_row(CreateRowInput {
                 collection: "order_test".into(),
                 fields: vec![
-                    ("name".into(), Value::Text(format!("user_{}", i))),
+                    ("name".into(), Value::text(format!("user_{}", i))),
                     ("age".into(), Value::Integer(*age)),
                 ],
                 metadata: vec![],
@@ -972,7 +976,7 @@ fn test_select_with_limit_offset() {
                 collection: "paginate".into(),
                 fields: vec![
                     ("index".into(), Value::Integer(i)),
-                    ("name".into(), Value::Text(format!("item_{}", i))),
+                    ("name".into(), Value::text(format!("item_{}", i))),
                 ],
                 metadata: vec![],
                 node_links: vec![],
@@ -1021,7 +1025,7 @@ fn test_select_universal_from_any() {
     entity
         .create_row(CreateRowInput {
             collection: "universal_mix".into(),
-            fields: vec![("kind".into(), Value::Text("row".into()))],
+            fields: vec![("kind".into(), Value::text("row"))],
             metadata: vec![],
             node_links: vec![],
             vector_links: vec![],
@@ -1033,7 +1037,7 @@ fn test_select_universal_from_any() {
             collection: "universal_mix".into(),
             label: "node_one".into(),
             node_type: Some("Type".into()),
-            properties: vec![("kind".into(), Value::Text("node".into()))],
+            properties: vec![("kind".into(), Value::text("node"))],
             metadata: vec![],
             embeddings: vec![],
             table_links: vec![],
@@ -1347,8 +1351,8 @@ fn test_search_text() {
             .create_row(CreateRowInput {
                 collection: "text_search".into(),
                 fields: vec![
-                    ("title".into(), Value::Text(title.to_string())),
-                    ("description".into(), Value::Text(description.to_string())),
+                    ("title".into(), Value::text(title.to_string())),
+                    ("description".into(), Value::text(description.to_string())),
                 ],
                 metadata: vec![],
                 node_links: vec![],
@@ -1417,8 +1421,8 @@ fn test_node_with_embedding() {
         label: "concept_ai".into(),
         node_type: Some("Concept".into()),
         properties: vec![
-            ("name".into(), Value::Text("Artificial Intelligence".into())),
-            ("field".into(), Value::Text("computer_science".into())),
+            ("name".into(), Value::text("Artificial Intelligence")),
+            ("field".into(), Value::text("computer_science")),
         ],
         metadata: vec![],
         embeddings: vec![CreateNodeEmbeddingInput {
@@ -1465,7 +1469,7 @@ fn test_row_linked_to_node() {
             collection: "linked".into(),
             label: "product_alpha".into(),
             node_type: Some("Product".into()),
-            properties: vec![("sku".into(), Value::Text("SKU-001".into()))],
+            properties: vec![("sku".into(), Value::text("SKU-001"))],
             metadata: vec![],
             embeddings: vec![],
             table_links: vec![],
@@ -1477,10 +1481,7 @@ fn test_row_linked_to_node() {
         .create_row(CreateRowInput {
             collection: "linked".into(),
             fields: vec![
-                (
-                    "description".into(),
-                    Value::Text("Alpha product review".into()),
-                ),
+                ("description".into(), Value::text("Alpha product review")),
                 ("rating".into(), Value::Integer(5)),
             ],
             metadata: vec![],
@@ -1636,7 +1637,7 @@ fn test_sql_insert_edge_ttl_expiration() {
         collection: "ttl_edges".into(),
         label: "edge-node-a".into(),
         node_type: Some("Host".into()),
-        properties: vec![("name".into(), Value::Text("node-a".into()))],
+        properties: vec![("name".into(), Value::text("node-a"))],
         metadata: vec![],
         embeddings: vec![],
         table_links: vec![],
@@ -1651,7 +1652,7 @@ fn test_sql_insert_edge_ttl_expiration() {
         collection: "ttl_edges".into(),
         label: "edge-node-b".into(),
         node_type: Some("Host".into()),
-        properties: vec![("name".into(), Value::Text("node-b".into()))],
+        properties: vec![("name".into(), Value::text("node-b"))],
         metadata: vec![],
         embeddings: vec![],
         table_links: vec![],
@@ -1910,8 +1911,8 @@ fn test_create_table_with_ttl_applies_default_to_api_insert() {
     let inserted = entity.create_row(CreateRowInput {
         collection: "sessions".into(),
         fields: vec![
-            ("token".into(), Value::Text("t-1".into())),
-            ("user_id".into(), Value::Text("u-1".into())),
+            ("token".into(), Value::text("t-1")),
+            ("user_id".into(), Value::text("u-1")),
         ],
         metadata: vec![],
         node_links: vec![],
@@ -2081,7 +2082,7 @@ fn test_secret_encrypt_and_decrypt() {
     let tok_val = row.values.get("token").expect("token column present");
     assert_eq!(
         tok_val,
-        &Value::Text("sk_live_abc".to_string()),
+        &Value::text("sk_live_abc".to_string()),
         "auto_decrypt=true should surface plaintext, got {tok_val:?}"
     );
 
@@ -2188,8 +2189,8 @@ fn test_drop_table_cleans_contract_and_indices() {
         .create_row(CreateRowInput {
             collection: "drop_cleanup".into(),
             fields: vec![
-                ("id".into(), Value::Text("u-1".into())),
-                ("name".into(), Value::Text("alice".into())),
+                ("id".into(), Value::text("u-1")),
+                ("name".into(), Value::text("alice")),
             ],
             metadata: vec![],
             node_links: vec![],
@@ -2213,8 +2214,8 @@ fn test_drop_table_cleans_contract_and_indices() {
         .create_row(CreateRowInput {
             collection: "drop_cleanup".into(),
             fields: vec![
-                ("id".into(), Value::Text("u-1".into())),
-                ("email".into(), Value::Text("a@x.com".into())),
+                ("id".into(), Value::text("u-1")),
+                ("email".into(), Value::text("a@x.com")),
             ],
             metadata: vec![],
             node_links: vec![],
@@ -2227,8 +2228,8 @@ fn test_drop_table_cleans_contract_and_indices() {
     let dup = entity.create_row(CreateRowInput {
         collection: "drop_cleanup".into(),
         fields: vec![
-            ("id".into(), Value::Text("u-2".into())),
-            ("email".into(), Value::Text("a@x.com".into())),
+            ("id".into(), Value::text("u-2")),
+            ("email".into(), Value::text("a@x.com")),
         ],
         metadata: vec![],
         node_links: vec![],
@@ -2256,8 +2257,8 @@ fn test_primary_key_enforcement_rejects_duplicates() {
         .create_row(CreateRowInput {
             collection: "pk_users".into(),
             fields: vec![
-                ("id".into(), Value::Text("u-1".into())),
-                ("name".into(), Value::Text("alice".into())),
+                ("id".into(), Value::text("u-1")),
+                ("name".into(), Value::text("alice")),
             ],
             metadata: vec![],
             node_links: vec![],
@@ -2268,8 +2269,8 @@ fn test_primary_key_enforcement_rejects_duplicates() {
     let dup = entity.create_row(CreateRowInput {
         collection: "pk_users".into(),
         fields: vec![
-            ("id".into(), Value::Text("u-1".into())),
-            ("name".into(), Value::Text("alice-again".into())),
+            ("id".into(), Value::text("u-1")),
+            ("name".into(), Value::text("alice-again")),
         ],
         metadata: vec![],
         node_links: vec![],
@@ -2299,8 +2300,8 @@ fn test_unique_constraint_rejects_duplicates_allows_null() {
         .create_row(CreateRowInput {
             collection: "uq_users".into(),
             fields: vec![
-                ("id".into(), Value::Text("u-1".into())),
-                ("email".into(), Value::Text("a@x.com".into())),
+                ("id".into(), Value::text("u-1")),
+                ("email".into(), Value::text("a@x.com")),
             ],
             metadata: vec![],
             node_links: vec![],
@@ -2311,8 +2312,8 @@ fn test_unique_constraint_rejects_duplicates_allows_null() {
     let dup = entity.create_row(CreateRowInput {
         collection: "uq_users".into(),
         fields: vec![
-            ("id".into(), Value::Text("u-2".into())),
-            ("email".into(), Value::Text("a@x.com".into())),
+            ("id".into(), Value::text("u-2")),
+            ("email".into(), Value::text("a@x.com")),
         ],
         metadata: vec![],
         node_links: vec![],
@@ -2329,7 +2330,7 @@ fn test_unique_constraint_rejects_duplicates_allows_null() {
         .create_row(CreateRowInput {
             collection: "uq_users".into(),
             fields: vec![
-                ("id".into(), Value::Text("u-3".into())),
+                ("id".into(), Value::text("u-3")),
                 ("email".into(), Value::Null),
             ],
             metadata: vec![],
@@ -2341,7 +2342,7 @@ fn test_unique_constraint_rejects_duplicates_allows_null() {
         .create_row(CreateRowInput {
             collection: "uq_users".into(),
             fields: vec![
-                ("id".into(), Value::Text("u-4".into())),
+                ("id".into(), Value::text("u-4")),
                 ("email".into(), Value::Null),
             ],
             metadata: vec![],
@@ -2367,8 +2368,8 @@ fn test_patch_respects_unique_but_allows_self_update() {
         .create_row(CreateRowInput {
             collection: "patch_uq".into(),
             fields: vec![
-                ("id".into(), Value::Text("u-1".into())),
-                ("email".into(), Value::Text("a@x.com".into())),
+                ("id".into(), Value::text("u-1")),
+                ("email".into(), Value::text("a@x.com")),
             ],
             metadata: vec![],
             node_links: vec![],
@@ -2380,8 +2381,8 @@ fn test_patch_respects_unique_but_allows_self_update() {
         .create_row(CreateRowInput {
             collection: "patch_uq".into(),
             fields: vec![
-                ("id".into(), Value::Text("u-2".into())),
-                ("email".into(), Value::Text("b@x.com".into())),
+                ("id".into(), Value::text("u-2")),
+                ("email".into(), Value::text("b@x.com")),
             ],
             metadata: vec![],
             node_links: vec![],
@@ -2474,7 +2475,7 @@ fn test_with_timestamps_auto_populates_on_insert_and_update() {
     let out = entity
         .create_row(CreateRowInput {
             collection: "ts_auto".into(),
-            fields: vec![("name".into(), Value::Text("alice".into()))],
+            fields: vec![("name".into(), Value::text("alice"))],
             metadata: vec![],
             node_links: vec![],
             vector_links: vec![],
@@ -2560,7 +2561,7 @@ fn test_with_timestamps_rejects_user_set_created_at_on_insert() {
         .create_row(CreateRowInput {
             collection: "ts_guard".into(),
             fields: vec![
-                ("name".into(), Value::Text("bob".into())),
+                ("name".into(), Value::text("bob")),
                 ("created_at".into(), Value::UnsignedInteger(0)),
             ],
             metadata: vec![],
@@ -2609,7 +2610,7 @@ fn finding_1_select_after_bulk_insert_same_process_in_memory() {
                 collection: "f1_mem".into(),
                 fields: vec![
                     ("id".into(), Value::Integer((i as i64) + 1)),
-                    ("name".into(), Value::Text(format!("User_{i}"))),
+                    ("name".into(), Value::text(format!("User_{i}"))),
                     ("age".into(), Value::Integer(20 + (i as i64 % 50))),
                 ],
                 metadata: vec![],
@@ -2679,7 +2680,7 @@ fn finding_1_select_after_bulk_insert_persistent_reopen() {
                         collection: "f1_disk".into(),
                         fields: vec![
                             ("id".into(), Value::Integer((i as i64) + 1)),
-                            ("name".into(), Value::Text(format!("Row_{i}"))),
+                            ("name".into(), Value::text(format!("Row_{i}"))),
                         ],
                         metadata: vec![],
                         node_links: vec![],
@@ -2894,7 +2895,7 @@ fn test_select_config_function_accepts_bare_path_and_default() {
 
     assert_eq!(configured.result.records.len(), 1);
     match configured.result.records[0].values.get("provider") {
-        Some(Value::Text(value)) => assert_eq!(value, "groq"),
+        Some(Value::Text(value)) => assert_eq!(value.as_ref(), "groq"),
         other => panic!("expected configured provider text, got {:?}", other),
     }
 
@@ -2906,7 +2907,7 @@ fn test_select_config_function_accepts_bare_path_and_default() {
 
     assert_eq!(fallback.result.records.len(), 1);
     match fallback.result.records[0].values.get("provider") {
-        Some(Value::Text(value)) => assert_eq!(value, "openai"),
+        Some(Value::Text(value)) => assert_eq!(value.as_ref(), "openai"),
         other => panic!("expected fallback provider text, got {:?}", other),
     }
 }
@@ -2921,7 +2922,7 @@ fn test_kv_function_filters_rows_and_uses_bare_default() {
         .create_kv(CreateKvInput {
             collection: "cfg_lookup".into(),
             key: "default.role".into(),
-            value: Value::Text("admin".into()),
+            value: Value::text("admin"),
             metadata: vec![],
         })
         .expect("create_kv should succeed");
@@ -2931,9 +2932,9 @@ fn test_kv_function_filters_rows_and_uses_bare_default() {
             .create_row(CreateRowInput {
                 collection: "kv_fn_users".into(),
                 fields: vec![
-                    ("name".into(), Value::Text(name.into())),
-                    ("role".into(), Value::Text(role.into())),
-                    ("tier".into(), Value::Text("basic".into())),
+                    ("name".into(), Value::text(name)),
+                    ("role".into(), Value::text(role)),
+                    ("tier".into(), Value::text("basic")),
                 ],
                 metadata: vec![],
                 node_links: vec![],
@@ -2953,7 +2954,7 @@ fn test_kv_function_filters_rows_and_uses_bare_default() {
         .records
         .iter()
         .map(|record| match record.values.get("name") {
-            Some(Value::Text(value)) => value.clone(),
+            Some(Value::Text(value)) => value.to_string(),
             other => panic!("expected name text, got {:?}", other),
         })
         .collect::<Vec<_>>();
@@ -2970,7 +2971,7 @@ fn test_kv_function_filters_rows_and_uses_bare_default() {
         .records
         .iter()
         .map(|record| match record.values.get("name") {
-            Some(Value::Text(value)) => value.clone(),
+            Some(Value::Text(value)) => value.to_string(),
             other => panic!("expected name text, got {:?}", other),
         })
         .collect::<Vec<_>>();
@@ -2987,7 +2988,7 @@ fn test_update_accepts_config_assignment_and_kv_filter() {
         .create_kv(CreateKvInput {
             collection: "cfg_update".into(),
             key: "default.role".into(),
-            value: Value::Text("admin".into()),
+            value: Value::text("admin"),
             metadata: vec![],
         })
         .expect("create_kv should succeed");
@@ -3003,9 +3004,9 @@ fn test_update_accepts_config_assignment_and_kv_filter() {
             .create_row(CreateRowInput {
                 collection: "kv_update_users".into(),
                 fields: vec![
-                    ("name".into(), Value::Text(name.into())),
-                    ("role".into(), Value::Text(role.into())),
-                    ("tier".into(), Value::Text("basic".into())),
+                    ("name".into(), Value::text(name)),
+                    ("role".into(), Value::text(role)),
+                    ("tier".into(), Value::text("basic")),
                 ],
                 metadata: vec![],
                 node_links: vec![],
@@ -3032,11 +3033,11 @@ fn test_update_accepts_config_assignment_and_kv_filter() {
         .iter()
         .map(|record| {
             let name = match record.values.get("name") {
-                Some(Value::Text(value)) => value.clone(),
+                Some(Value::Text(value)) => value.to_string(),
                 other => panic!("expected name text, got {:?}", other),
             };
             let tier = match record.values.get("tier") {
-                Some(Value::Text(value)) => value.clone(),
+                Some(Value::Text(value)) => value.to_string(),
                 other => panic!("expected tier text, got {:?}", other),
             };
             (name, tier)

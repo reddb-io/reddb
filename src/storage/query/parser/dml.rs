@@ -498,7 +498,7 @@ impl<'a> Parser<'a> {
                             Value::Boolean(b) => crate::json::Value::Bool(*b),
                             Value::Integer(i) => crate::json::Value::Number(*i as f64),
                             Value::Float(f) => crate::json::Value::Number(*f),
-                            Value::Text(s) => crate::json::Value::String(s.clone()),
+                            Value::Text(s) => crate::json::Value::String(s.to_string()),
                             _ => crate::json::Value::Null,
                         })
                         .collect();
@@ -541,7 +541,7 @@ impl<'a> Parser<'a> {
                             Value::Boolean(b) => crate::json::Value::Bool(b),
                             Value::Integer(i) => crate::json::Value::Number(i as f64),
                             Value::Float(f) => crate::json::Value::Number(f),
-                            Value::Text(s) => crate::json::Value::String(s),
+                            Value::Text(s) => crate::json::Value::String(s.to_string()),
                             Value::Json(ref bytes) => {
                                 crate::json::from_slice(bytes).unwrap_or(crate::json::Value::Null)
                             }

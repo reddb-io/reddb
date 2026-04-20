@@ -1112,7 +1112,7 @@ impl<'a> Parser<'a> {
                     } else {
                         let value = self.parse_literal_value()?;
                         match value {
-                            Value::Text(s) => Ok(SqlCommand::SetTenant(Some(s))),
+                            Value::Text(s) => Ok(SqlCommand::SetTenant(Some(s.to_string()))),
                             Value::Null => Ok(SqlCommand::SetTenant(None)),
                             other => Err(ParseError::new(
                                 format!("SET TENANT expects a text literal or NULL, got {other:?}"),

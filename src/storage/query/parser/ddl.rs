@@ -134,7 +134,7 @@ impl<'a> Parser<'a> {
                 let _ = self.consume(&Token::Eq)?;
                 let value = self.parse_literal_value()?;
                 match value {
-                    Value::Text(col) => tenant_by = Some(col),
+                    Value::Text(col) => tenant_by = Some(col.to_string()),
                     other => {
                         return Err(ParseError::new(
                             format!("WITH tenant_by expects a text literal, got {other:?}"),

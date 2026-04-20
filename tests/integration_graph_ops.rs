@@ -38,7 +38,7 @@ fn make_node(uc: &EntityUseCases<'_, RedDBRuntime>, collection: &str, label: &st
             collection: collection.into(),
             label: label.into(),
             node_type: Some("Host".into()),
-            properties: vec![("name".into(), Value::Text(label.into()))],
+            properties: vec![("name".into(), Value::text(label))],
             metadata: vec![],
             embeddings: vec![],
             table_links: vec![],
@@ -594,7 +594,7 @@ fn test_catalog_collections() {
         entity
             .create_row(CreateRowInput {
                 collection: name.to_string(),
-                fields: vec![("key".into(), Value::Text("val".into()))],
+                fields: vec![("key".into(), Value::text("val"))],
                 metadata: vec![],
                 node_links: vec![],
                 vector_links: vec![],
@@ -834,7 +834,7 @@ fn test_large_batch_insert() {
                 collection: col.into(),
                 fields: vec![
                     ("idx".into(), Value::Integer(i)),
-                    ("label".into(), Value::Text(format!("row_{i}"))),
+                    ("label".into(), Value::text(format!("row_{i}"))),
                 ],
                 metadata: vec![],
                 node_links: vec![],

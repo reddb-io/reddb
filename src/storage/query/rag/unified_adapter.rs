@@ -398,7 +398,9 @@ impl UnifiedStoreAdapter {
         for (key, expected) in &filter.conditions {
             let prop_val = properties.get(key);
             let matches = match (prop_val, expected) {
-                (Some(Value::Text(s)), QueryCondition::Equals(QueryValue::String(exp))) => s == exp,
+                (Some(Value::Text(s)), QueryCondition::Equals(QueryValue::String(exp))) => {
+                    &**s == exp.as_str()
+                }
                 (Some(Value::Integer(i)), QueryCondition::Equals(QueryValue::Int(exp))) => {
                     *i == *exp
                 }

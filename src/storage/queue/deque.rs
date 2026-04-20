@@ -256,35 +256,35 @@ mod tests {
     #[test]
     fn test_queue_fifo() {
         let mut q = QueueStore::new(0);
-        q.push_back(Value::text("first".into()), None).unwrap();
-        q.push_back(Value::text("second".into()), None).unwrap();
-        q.push_back(Value::text("third".into()), None).unwrap();
+        q.push_back(Value::text("first"), None).unwrap();
+        q.push_back(Value::text("second"), None).unwrap();
+        q.push_back(Value::text("third"), None).unwrap();
 
         assert_eq!(q.len(), 3);
         let msg = q.pop_front().unwrap();
-        assert_eq!(msg.payload, Value::text("first".into()));
+        assert_eq!(msg.payload, Value::text("first"));
         let msg = q.pop_front().unwrap();
-        assert_eq!(msg.payload, Value::text("second".into()));
+        assert_eq!(msg.payload, Value::text("second"));
     }
 
     #[test]
     fn test_queue_lifo() {
         let mut q = QueueStore::new(0);
-        q.push_back(Value::text("first".into()), None).unwrap();
-        q.push_back(Value::text("second".into()), None).unwrap();
+        q.push_back(Value::text("first"), None).unwrap();
+        q.push_back(Value::text("second"), None).unwrap();
 
         let msg = q.pop_back().unwrap();
-        assert_eq!(msg.payload, Value::text("second".into()));
+        assert_eq!(msg.payload, Value::text("second"));
     }
 
     #[test]
     fn test_queue_lpush() {
         let mut q = QueueStore::new(0);
-        q.push_back(Value::text("middle".into()), None).unwrap();
-        q.push_front(Value::text("front".into()), None).unwrap();
+        q.push_back(Value::text("middle"), None).unwrap();
+        q.push_front(Value::text("front"), None).unwrap();
 
         let msg = q.pop_front().unwrap();
-        assert_eq!(msg.payload, Value::text("front".into()));
+        assert_eq!(msg.payload, Value::text("front"));
     }
 
     #[test]
@@ -299,25 +299,25 @@ mod tests {
     #[test]
     fn test_queue_priority() {
         let mut q = QueueStore::new_priority(0);
-        q.push_back(Value::text("low".into()), Some(1)).unwrap();
-        q.push_back(Value::text("high".into()), Some(10)).unwrap();
-        q.push_back(Value::text("medium".into()), Some(5)).unwrap();
+        q.push_back(Value::text("low"), Some(1)).unwrap();
+        q.push_back(Value::text("high"), Some(10)).unwrap();
+        q.push_back(Value::text("medium"), Some(5)).unwrap();
 
         // Highest priority should come first
         let msg = q.pop_front().unwrap();
-        assert_eq!(msg.payload, Value::text("high".into()));
+        assert_eq!(msg.payload, Value::text("high"));
         let msg = q.pop_front().unwrap();
-        assert_eq!(msg.payload, Value::text("medium".into()));
+        assert_eq!(msg.payload, Value::text("medium"));
         let msg = q.pop_front().unwrap();
-        assert_eq!(msg.payload, Value::text("low".into()));
+        assert_eq!(msg.payload, Value::text("low"));
     }
 
     #[test]
     fn test_queue_peek() {
         let mut q = QueueStore::new(0);
-        q.push_back(Value::text("a".into()), None).unwrap();
-        q.push_back(Value::text("b".into()), None).unwrap();
-        q.push_back(Value::text("c".into()), None).unwrap();
+        q.push_back(Value::text("a"), None).unwrap();
+        q.push_back(Value::text("b"), None).unwrap();
+        q.push_back(Value::text("c"), None).unwrap();
 
         let peeked = q.peek_front(2);
         assert_eq!(peeked.len(), 2);
@@ -350,7 +350,7 @@ mod tests {
     #[test]
     fn test_queue_attempts() {
         let mut q = QueueStore::new(0);
-        let seq = q.push_back(Value::text("msg".into()), None).unwrap();
+        let seq = q.push_back(Value::text("msg"), None).unwrap();
 
         assert_eq!(q.get(seq).unwrap().attempts, 0);
         q.increment_attempts(seq);

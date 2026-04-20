@@ -22,7 +22,7 @@ fn main() {
     let mut entities = Vec::with_capacity(N);
     for i in 0..N {
         let mut named = std::collections::HashMap::new();
-        named.insert("name".into(), Value::Text(format!("User_{i}")));
+        named.insert("name".into(), Value::text(format!("User_{i}")));
         named.insert("age".into(), Value::Integer((i % 80) as i64));
         named.insert("city".into(), Value::Text("NYC".into()));
         named.insert("score".into(), Value::Float((i as f64) / 100.0));

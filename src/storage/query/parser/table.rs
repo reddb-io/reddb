@@ -558,7 +558,7 @@ fn render_group_by_expr(expr: &Expr) -> Option<String> {
         }
         Expr::Literal { value, .. } => Some(match value {
             Value::Null => String::new(),
-            Value::Text(text) => text.clone(),
+            Value::Text(text) => text.to_string(),
             other => other.to_string(),
         }),
         _ => expr_to_projection(expr).map(|projection| match projection {

@@ -115,7 +115,7 @@ fn execute_kv_query(
                     if let EntityData::Row(ref row) = entity.data {
                         if let Some(ref named) = row.named {
                             if let Some(Value::Text(ref k)) = named.get("key") {
-                                if k == &key {
+                                if &**k == key.as_str() {
                                     matches.push(ScoredMatch {
                                         entity,
                                         score: 1.0,
@@ -149,7 +149,7 @@ fn execute_kv_query(
                     if let EntityData::Row(ref row) = entity.data {
                         if let Some(ref named) = row.named {
                             if let Some(Value::Text(ref k)) = named.get("key") {
-                                if k == &key {
+                                if &**k == key.as_str() {
                                     let _ = store.delete(&query.collection, entity.id);
                                     break;
                                 }
@@ -214,7 +214,7 @@ fn execute_kv_query(
                     if let EntityData::Row(ref row) = entity.data {
                         if let Some(ref named) = row.named {
                             if let Some(Value::Text(ref k)) = named.get("key") {
-                                if k == &key {
+                                if &**k == key.as_str() {
                                     let _ = store.delete(&query.collection, entity.id);
                                     deleted = true;
                                     break;

@@ -162,8 +162,8 @@ fn seed_comments(rt: &RedDBRuntime) {
                 .create_row(CreateRowInput {
                     collection: "comments".into(),
                     fields: vec![
-                        ("comment".into(), Value::Text(comment)),
-                        ("author".into(), Value::Text(format!("user-{index}"))),
+                        ("comment".into(), Value::text(comment)),
+                        ("author".into(), Value::text(format!("user-{index}"))),
                         ("category_id".into(), Value::Null),
                     ],
                     metadata: vec![],
@@ -576,7 +576,7 @@ fn e2e_comments_embedding_cluster_label_and_writeback() {
         .records
         .iter()
         .map(|record| match record.get("category_id") {
-            Some(Value::Text(value)) => value.clone(),
+            Some(Value::Text(value)) => value.to_string(),
             other => panic!("expected category_id text, got {other:?}"),
         })
         .collect::<Vec<_>>();

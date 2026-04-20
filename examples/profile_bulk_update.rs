@@ -36,7 +36,7 @@ fn main() {
                 collection: "users".into(),
                 fields: vec![
                     ("id".into(), Value::Integer(i as i64)),
-                    ("name".into(), Value::Text(format!("u{i}"))),
+                    ("name".into(), Value::text(format!("u{i}"))),
                     ("score".into(), Value::Float(0.0)),
                 ],
                 metadata: vec![],

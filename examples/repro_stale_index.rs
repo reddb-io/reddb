@@ -22,7 +22,7 @@ fn main() {
             collection: "t".into(),
             fields: vec![
                 ("id".into(), Value::Integer(i as i64)),
-                ("name".into(), Value::Text(format!("A{i}"))),
+                ("name".into(), Value::text(format!("A{i}"))),
             ],
             metadata: vec![],
             node_links: vec![],
@@ -57,7 +57,7 @@ fn main() {
                     collection: "t".into(),
                     fields: vec![
                         ("id".into(), Value::Integer(i as i64)),
-                        ("name".into(), Value::Text(format!("B{i}"))),
+                        ("name".into(), Value::text(format!("B{i}"))),
                     ],
                     metadata: vec![],
                     node_links: vec![],
@@ -79,7 +79,7 @@ fn main() {
             collection: "t".into(),
             fields: vec![
                 ("id".into(), Value::Integer(i as i64)),
-                ("name".into(), Value::Text(format!("C{i}"))),
+                ("name".into(), Value::text(format!("C{i}"))),
             ],
             metadata: vec![],
             node_links: vec![],

@@ -73,11 +73,8 @@ fn value_to_json_fragment(value: &reddb::storage::schema::Value) -> String {
             n.to_string()
         }
         Value::Password(_) | Value::Secret(_) => "\"***\"".to_string(),
-        Value::text(s)
-        | Value::Email(s)
-        | Value::Url(s)
-        | Value::NodeRef(s)
-        | Value::EdgeRef(s) => {
+        Value::Text(s) => format!("\"{}\"", json_escape(s.as_ref())),
+        Value::Email(s) | Value::Url(s) | Value::NodeRef(s) | Value::EdgeRef(s) => {
             format!("\"{}\"", json_escape(s))
         }
         other => format!("\"{}\"", json_escape(&format!("{other}"))),

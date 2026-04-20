@@ -529,7 +529,7 @@ fn value_to_string(v: &Value) -> String {
         Value::Integer(i) => i.to_string(),
         Value::UnsignedInteger(u) => u.to_string(),
         Value::Float(f) => f.to_string(),
-        Value::Text(s) => s.clone(),
+        Value::Text(s) => s.to_string(),
         Value::Blob(b) => format!("<{} bytes>", b.len()),
         _ => "?".to_string(),
     }

@@ -1149,7 +1149,7 @@ fn test_parse_insert_mixed_types() {
         assert_eq!(iq.values[0].len(), 3);
         assert!(matches!(
             iq.values[0][0],
-            crate::storage::schema::Value::text(_)
+            crate::storage::schema::Value::Text(_)
         ));
         assert!(matches!(
             iq.values[0][1],

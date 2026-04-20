@@ -425,8 +425,8 @@ pub(crate) fn execute_aggregate_query(
                 }
                 ProjSlot::Concat(idx) => {
                     if !matches!(val, Value::Null) {
-                        let text = match &val {
-                            Value::Text(s) => s.clone(),
+                        let text: String = match &val {
+                            Value::Text(s) => s.to_string(),
                             other => other.display_string(),
                         };
                         state.concat_values[*idx].push(text);
@@ -1064,7 +1064,7 @@ fn render_value_signature(value: &Value) -> String {
         Value::Float(value) => value.to_string(),
         Value::BigInt(value) => value.to_string(),
         Value::Decimal(value) => value.to_string(),
-        Value::Text(value) => value.clone(),
+        Value::Text(value) => value.to_string(),
         other => other.display_string(),
     }
 }
@@ -1339,7 +1339,7 @@ fn resolve_static_projection_text(arg: Option<&Projection>) -> Option<String> {
     let value = eval_projection_value_with_db(None, arg?, &record)?;
     Some(match value {
         Value::Null => String::new(),
-        Value::Text(text) => text,
+        Value::Text(text) => text.to_string(),
         other => other.display_string(),
     })
 }

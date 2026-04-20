@@ -858,7 +858,7 @@ fn merge_telemetry_with_config(
 
     if !cli.level_explicit {
         if let Some(Value::Text(v)) = store.get_config("red.logging.level") {
-            cli.level_filter = v;
+            cli.level_filter = v.to_string();
         }
     }
     if !cli.format_explicit {
@@ -887,7 +887,7 @@ fn merge_telemetry_with_config(
     if !cli.file_prefix_explicit {
         if let Some(Value::Text(v)) = store.get_config("red.logging.file_prefix") {
             if !v.is_empty() {
-                cli.file_prefix = v;
+                cli.file_prefix = v.to_string();
             }
         }
     }
@@ -896,7 +896,7 @@ fn merge_telemetry_with_config(
     if !cli.log_dir_explicit && !cli.log_file_disabled {
         if let Some(Value::Text(v)) = store.get_config("red.logging.dir") {
             if !v.is_empty() {
-                cli.log_dir = Some(std::path::PathBuf::from(v));
+                cli.log_dir = Some(std::path::PathBuf::from(v.as_ref()));
             }
         }
     }

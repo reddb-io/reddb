@@ -260,7 +260,7 @@ pub fn value_to_canonical_key(value: &Value) -> Option<CanonicalKey> {
         )),
         Value::Float(v) if v.is_finite() => Some(CanonicalKey::Float(v.to_bits())),
         Value::Float(_) => None,
-        Value::Text(v) => Some(CanonicalKey::Text(CanonicalKeyFamily::Text, v.clone())),
+        Value::Text(v) => Some(CanonicalKey::Text(CanonicalKeyFamily::Text, v.to_string())),
         Value::Blob(v) => Some(CanonicalKey::Bytes(CanonicalKeyFamily::Blob, v.clone())),
         Value::Boolean(v) => Some(CanonicalKey::Boolean(*v)),
         Value::Timestamp(v) => Some(CanonicalKey::Signed(CanonicalKeyFamily::Timestamp, *v)),

@@ -333,9 +333,9 @@ pub fn build_api_fixture(rt: &RedDBRuntime) {
         .create_row(CreateRowInput {
             collection: "accounts".into(),
             fields: vec![
-                ("id".into(), Value::Text("u1".into())),
-                ("username".into(), Value::Text("alice".into())),
-                ("status".into(), Value::Text("active".into())),
+                ("id".into(), Value::text("u1")),
+                ("username".into(), Value::text("alice")),
+                ("status".into(), Value::text("active")),
                 ("score".into(), Value::Float(91.5)),
             ],
             metadata: vec![],
@@ -347,10 +347,10 @@ pub fn build_api_fixture(rt: &RedDBRuntime) {
         .create_row(CreateRowInput {
             collection: "accounts".into(),
             fields: vec![
-                ("id".into(), Value::Text("u2".into())),
-                ("username".into(), Value::Text("bob".into())),
-                ("status".into(), Value::Text("suspended".into())),
-                ("tier".into(), Value::Text("enterprise".into())),
+                ("id".into(), Value::text("u2")),
+                ("username".into(), Value::text("bob")),
+                ("status".into(), Value::text("suspended")),
+                ("tier".into(), Value::text("enterprise")),
                 ("score".into(), Value::Float(72.0)),
             ],
             metadata: vec![],
@@ -362,10 +362,10 @@ pub fn build_api_fixture(rt: &RedDBRuntime) {
         .create_row(CreateRowInput {
             collection: "accounts".into(),
             fields: vec![
-                ("id".into(), Value::Text("u3".into())),
-                ("username".into(), Value::Text("carol".into())),
-                ("status".into(), Value::Text("active".into())),
-                ("tier".into(), Value::Text("pro".into())),
+                ("id".into(), Value::text("u3")),
+                ("username".into(), Value::text("carol")),
+                ("status".into(), Value::text("active")),
+                ("tier".into(), Value::text("pro")),
                 ("score".into(), Value::Float(88.25)),
             ],
             metadata: vec![],
@@ -431,7 +431,7 @@ pub fn build_api_fixture(rt: &RedDBRuntime) {
             collection: "network".into(),
             label: "gateway".into(),
             node_type: Some("Host".into()),
-            properties: vec![("role".into(), Value::Text("gateway".into()))],
+            properties: vec![("role".into(), Value::text("gateway"))],
             metadata: vec![],
             embeddings: vec![],
             table_links: vec![],
@@ -443,7 +443,7 @@ pub fn build_api_fixture(rt: &RedDBRuntime) {
             collection: "network".into(),
             label: "app".into(),
             node_type: Some("Host".into()),
-            properties: vec![("role".into(), Value::Text("application".into()))],
+            properties: vec![("role".into(), Value::text("application"))],
             metadata: vec![],
             embeddings: vec![],
             table_links: vec![],
@@ -455,7 +455,7 @@ pub fn build_api_fixture(rt: &RedDBRuntime) {
             collection: "network".into(),
             label: "db".into(),
             node_type: Some("Host".into()),
-            properties: vec![("role".into(), Value::Text("database".into()))],
+            properties: vec![("role".into(), Value::text("database"))],
             metadata: vec![],
             embeddings: vec![],
             table_links: vec![],
@@ -1291,7 +1291,7 @@ fn normalized_kv_collection(rt: &RedDBRuntime, collection: &str) -> Vec<(String,
         .map(|entity| {
             let fields = row_fields(&entity);
             let key = match fields.get("key") {
-                Some(Value::Text(value)) => value.clone(),
+                Some(Value::Text(value)) => value.to_string(),
                 other => panic!("kv key should be text, got {other:?}"),
             };
             let value = value_repr(
@@ -1454,7 +1454,7 @@ fn value_repr(value: &Value) -> String {
 
 fn text(record: &UnifiedRecord, column: &str) -> String {
     match record.get(column) {
-        Some(Value::Text(value)) => value.clone(),
+        Some(Value::Text(value)) => value.to_string(),
         Some(Value::UnsignedInteger(value)) => value.to_string(),
         Some(Value::Integer(value)) => value.to_string(),
         other => panic!("expected text-like value for {column}, got {other:?}"),

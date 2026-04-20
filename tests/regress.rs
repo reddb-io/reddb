@@ -86,8 +86,8 @@ fn extract_message(records: &[UnifiedRecord]) -> Option<String> {
 
 fn format_regress_value(value: &Value) -> String {
     match value {
-        Value::Text(text)
-        | Value::Email(text)
+        Value::Text(text) => text.to_string(),
+        Value::Email(text)
         | Value::Url(text)
         | Value::NodeRef(text)
         | Value::EdgeRef(text)

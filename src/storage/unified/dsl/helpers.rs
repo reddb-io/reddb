@@ -48,7 +48,7 @@ pub fn get_entity_field(entity: &UnifiedEntity, field: &str) -> Option<Value> {
 /// Match a filter against a value
 pub fn match_filter(value: &Option<Value>, op: &FilterOp, filter_value: &FilterValue) -> bool {
     match (value, op, filter_value) {
-        (Some(Value::Text(s)), FilterOp::Equals, FilterValue::String(fs)) => s == fs,
+        (Some(Value::Text(s)), FilterOp::Equals, FilterValue::String(fs)) => &**s == fs.as_str(),
         (Some(Value::Integer(i)), FilterOp::Equals, FilterValue::Int(fi)) => *i == *fi,
         (Some(Value::Float(f)), FilterOp::Equals, FilterValue::Float(ff)) => {
             (*f - *ff).abs() < 0.0001
@@ -165,7 +165,7 @@ pub fn extract_searchable_text(entity: &UnifiedEntity) -> String {
             for (k, v) in &node.properties {
                 parts.push(k.clone());
                 if let Value::Text(s) = v {
-                    parts.push(s.clone());
+                    parts.push(s.to_string());
                 }
             }
         }
@@ -173,14 +173,14 @@ pub fn extract_searchable_text(entity: &UnifiedEntity) -> String {
             for (k, v) in &edge.properties {
                 parts.push(k.clone());
                 if let Value::Text(s) = v {
-                    parts.push(s.clone());
+                    parts.push(s.to_string());
                 }
             }
         }
         EntityData::Row(row) => {
             for col in &row.columns {
                 if let Value::Text(s) = col {
-                    parts.push(s.clone());
+                    parts.push(s.to_string());
                 }
             }
         }

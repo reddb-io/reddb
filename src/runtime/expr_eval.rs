@@ -317,7 +317,7 @@ fn special_default_expr_value(
     table_alias: Option<&str>,
 ) -> Option<Value> {
     match expr {
-        Expr::Column { field, .. } => field_ref_path_text(field).map(Value::Text),
+        Expr::Column { field, .. } => field_ref_path_text(field).map(Value::text),
         _ => evaluate_runtime_expr_with_db(db, expr, record, table_name, table_alias),
     }
 }
@@ -603,7 +603,7 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
             ))
         }
         "REVERSE" => match args.first()? {
-            Value::Text(text) => Some(Value::text(text.chars().rev().collect())),
+            Value::Text(text) => Some(Value::text(text.chars().rev().collect::<String>())),
             _ => Some(Value::Null),
         },
         "LEFT" => {
@@ -683,7 +683,7 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
         // every row for unauthenticated / unscoped sessions.
         "CURRENT_TENANT" => Some(
             crate::runtime::impl_core::current_tenant()
-                .map(Value::Text)
+                .map(Value::text)
                 .unwrap_or(Value::Null),
         ),
         // Session identity scalars — `WITHIN ... USER '<u>' AS ROLE '<r>'`
@@ -691,12 +691,12 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
         // Anonymous callers with no override get NULL.
         "CURRENT_USER" | "SESSION_USER" | "USER" => Some(
             crate::runtime::impl_core::current_user_projected()
-                .map(Value::Text)
+                .map(Value::text)
                 .unwrap_or(Value::Null),
         ),
         "CURRENT_ROLE" => Some(
             crate::runtime::impl_core::current_role_projected()
-                .map(Value::Text)
+                .map(Value::text)
                 .unwrap_or(Value::Null),
         ),
         "TIME_BUCKET" => {
@@ -733,12 +733,13 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
         "VERIFY_PASSWORD" => {
             let stored = args.first()?;
             let candidate = args.get(1)?;
-            let hash = match stored {
-                Value::Password(hash) | Value::Text(hash) => hash,
+            let hash: &str = match stored {
+                Value::Password(hash) => hash.as_str(),
+                Value::Text(hash) => hash.as_ref(),
                 _ => return Some(Value::Boolean(false)),
             };
-            let plain = match candidate {
-                Value::Text(plain) => plain,
+            let plain: &str = match candidate {
+                Value::Text(plain) => plain.as_ref(),
                 _ => return Some(Value::Boolean(false)),
             };
             Some(Value::Boolean(crate::auth::store::verify_password(
@@ -789,8 +790,8 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
             Some(Value::text(name.to_string()))
         }
         "JSON_VALID" => {
-            let text = match args.first()? {
-                Value::Text(s) => s.clone(),
+            let text: String = match args.first()? {
+                Value::Text(s) => s.to_string(),
                 Value::Json(b) => String::from_utf8_lossy(b).to_string(),
                 _ => return Some(Value::Boolean(false)),
             };
@@ -810,8 +811,8 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
             }
             let mut map = crate::serde_json::Map::new();
             for pair in args.chunks_exact(2) {
-                let key = match &pair[0] {
-                    Value::Text(s) => s.clone(),
+                let key: String = match &pair[0] {
+                    Value::Text(s) => s.to_string(),
                     other => other.display_string(),
                 };
                 map.insert(key, value_as_json(&pair[1]));
@@ -853,7 +854,7 @@ fn value_as_json(value: &Value) -> crate::serde_json::Value {
         Value::UnsignedInteger(n) => crate::serde_json::Value::Number(*n as f64),
         Value::BigInt(n) => crate::serde_json::Value::Number(*n as f64),
         Value::Float(n) => crate::serde_json::Value::Number(*n),
-        Value::Text(s) => crate::serde_json::Value::String(s.clone()),
+        Value::Text(s) => crate::serde_json::Value::String(s.to_string()),
         Value::Json(bytes) => {
             let text = String::from_utf8_lossy(bytes);
             crate::serde_json::from_str(&text)
@@ -1057,7 +1058,7 @@ fn money_from_args(args: &[Value]) -> Option<Value> {
 fn money_arg_text(value: &Value) -> Option<String> {
     match value {
         Value::Null => None,
-        Value::Text(text) => Some(text.clone()),
+        Value::Text(text) => Some(text.to_string()),
         Value::AssetCode(code) => Some(code.clone()),
         Value::Currency(code) => Some(String::from_utf8_lossy(code).to_string()),
         other => Some(other.display_string()),

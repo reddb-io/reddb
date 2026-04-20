@@ -914,7 +914,7 @@ pub fn resolve_defaults_from_runtime(
     use crate::application::ports::RuntimeEntityPort;
     let kv_getter = |key: &str| -> crate::RedDBResult<Option<String>> {
         match runtime.get_kv("red_config", key)? {
-            Some((crate::storage::schema::Value::Text(s), _)) => Ok(Some(s)),
+            Some((crate::storage::schema::Value::Text(s), _)) => Ok(Some(s.to_string())),
             _ => Ok(None),
         }
     };
@@ -931,7 +931,7 @@ pub fn resolve_defaults_from_runtime_port<
 ) -> (AiProvider, String) {
     let kv_getter = |key: &str| -> crate::RedDBResult<Option<String>> {
         match runtime.get_kv("red_config", key)? {
-            Some((crate::storage::schema::Value::Text(s), _)) => Ok(Some(s)),
+            Some((crate::storage::schema::Value::Text(s), _)) => Ok(Some(s.to_string())),
             _ => Ok(None),
         }
     };
@@ -1040,7 +1040,7 @@ pub fn resolve_api_key_from_runtime(
     use crate::application::ports::RuntimeEntityPort;
     resolve_api_key(provider, credential_alias, |kv_key| {
         match runtime.get_kv("red_config", kv_key)? {
-            Some((crate::storage::schema::Value::Text(secret), _)) => Ok(Some(secret)),
+            Some((crate::storage::schema::Value::Text(secret), _)) => Ok(Some(secret.to_string())),
             Some(_) => Ok(None),
             None => Ok(None),
         }

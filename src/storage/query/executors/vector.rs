@@ -551,8 +551,8 @@ fn vector_subquery_reference(
         .first()
         .ok_or_else(|| ExecutionError::new("Vector subquery returned no rows"))?;
 
-    let collection = match record.values.get("collection") {
-        Some(Value::Text(collection)) => collection.clone(),
+    let collection: String = match record.values.get("collection") {
+        Some(Value::Text(collection)) => collection.to_string(),
         _ => default_collection.to_string(),
     };
 

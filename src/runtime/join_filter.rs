@@ -1065,7 +1065,7 @@ pub(super) fn sort_records_by_order_by_with_db(
                 // Both have abbreviated keys: fast u64 compare first
                 (Some(la), Some(ra), Some(Value::Text(ls)), Some(Value::Text(rs))) => {
                     match la.cmp(ra) {
-                        Ordering::Equal => ls.as_ref().cmp(rs.as_str()),
+                        Ordering::Equal => ls.as_ref().cmp(rs.as_ref()),
                         other => other,
                     }
                 }
@@ -1437,7 +1437,7 @@ fn value_as_i64(value: &Value) -> Option<i64> {
 
 pub(super) fn runtime_value_text(value: &Value) -> Option<String> {
     match value {
-        Value::Text(value) => Some(value.clone()),
+        Value::Text(value) => Some(value.to_string()),
         Value::NodeRef(value) => Some(value.clone()),
         Value::EdgeRef(value) => Some(value.clone()),
         Value::RowRef(table, row_id) => Some(format!("{table}:{row_id}")),
@@ -2004,9 +2004,9 @@ fn evaluate_scalar_function_legacy(
             Some(Value::text(trim_text(&text, chars.as_deref(), false, true)))
         }
         "CONCAT_WS" => {
-            let separator = match resolve_scalar_arg(args, 0, source)? {
+            let separator: String = match resolve_scalar_arg(args, 0, source)? {
                 Value::Null => return Some(Value::Null),
-                Value::Text(text) => text,
+                Value::Text(text) => text.to_string(),
                 other => other.display_string(),
             };
             let mut parts = Vec::new();
@@ -2024,7 +2024,7 @@ fn evaluate_scalar_function_legacy(
                 Value::Text(text) => text,
                 _ => return Some(Value::Null),
             };
-            Some(Value::text(text.chars().rev().collect()))
+            Some(Value::text(text.chars().rev().collect::<String>()))
         }
         "LEFT" => {
             let text = match resolve_scalar_arg(args, 0, source)? {
@@ -2080,13 +2080,13 @@ fn evaluate_scalar_function_legacy(
             // a Value::Password column. Returns a boolean.
             let stored = resolve_scalar_arg(args, 0, source)?;
             let candidate = resolve_scalar_arg(args, 1, source)?;
-            let hash = match stored {
+            let hash: String = match stored {
                 Value::Password(h) => h,
-                Value::Text(h) => h,
+                Value::Text(h) => h.to_string(),
                 _ => return Some(Value::Boolean(false)),
             };
-            let plain = match candidate {
-                Value::Text(s) => s,
+            let plain: String = match candidate {
+                Value::Text(s) => s.to_string(),
                 _ => return Some(Value::Boolean(false)),
             };
             Some(Value::Boolean(crate::auth::store::verify_password(
@@ -2114,17 +2114,17 @@ fn evaluate_scalar_function_legacy(
         // shared accessors.
         "CURRENT_TENANT" => Some(
             crate::runtime::impl_core::current_tenant()
-                .map(Value::Text)
+                .map(Value::text)
                 .unwrap_or(Value::Null),
         ),
         "CURRENT_USER" | "SESSION_USER" | "USER" => Some(
             crate::runtime::impl_core::current_user_projected()
-                .map(Value::Text)
+                .map(Value::text)
                 .unwrap_or(Value::Null),
         ),
         "CURRENT_ROLE" => Some(
             crate::runtime::impl_core::current_role_projected()
-                .map(Value::Text)
+                .map(Value::text)
                 .unwrap_or(Value::Null),
         ),
         "PG_ADVISORY_LOCK" => {
@@ -2203,7 +2203,7 @@ fn money_from_scalar_args(args: &[Projection], source: &UnifiedRecord) -> Option
 fn money_arg_text(value: Value) -> Option<String> {
     match value {
         Value::Null => None,
-        Value::Text(text) => Some(text),
+        Value::Text(text) => Some(text.to_string()),
         Value::AssetCode(code) => Some(code),
         Value::Currency(code) => Some(String::from_utf8_lossy(&code).to_string()),
         other => Some(other.display_string()),

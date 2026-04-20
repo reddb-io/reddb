@@ -1037,7 +1037,7 @@ fn value_to_coercion_input(value: &Value) -> Option<String> {
         Value::Integer(value) => Some(value.to_string()),
         Value::UnsignedInteger(value) => Some(value.to_string()),
         Value::Float(value) => Some(value.to_string()),
-        Value::Text(value) => Some(value.clone()),
+        Value::Text(value) => Some(value.to_string()),
         Value::Blob(value) => String::from_utf8(value.clone()).ok(),
         Value::Boolean(value) => Some(value.to_string()),
         Value::Timestamp(value) => Some(value.to_string()),
@@ -2267,7 +2267,7 @@ impl RuntimeEntityPort for RedDBRuntime {
             if let crate::storage::EntityData::Row(ref row) = entity.data {
                 if let Some(ref named) = row.named {
                     if let Some(crate::storage::schema::Value::Text(ref k)) = named.get("key") {
-                        if k == key {
+                        if &**k == key {
                             let value = named
                                 .get("value")
                                 .cloned()

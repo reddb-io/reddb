@@ -1515,7 +1515,7 @@ impl RedDBRuntime {
                         if key == Some("red.config.backup.enabled") {
                             backup_enabled = match val {
                                 Some(crate::storage::schema::Value::Boolean(true)) => true,
-                                Some(crate::storage::schema::Value::Text(s)) => s == "true",
+                                Some(crate::storage::schema::Value::Text(s)) => &**s == "true",
                                 _ => false,
                             };
                         } else if key == Some("red.config.backup.interval_secs") {
@@ -1720,7 +1720,7 @@ impl RedDBRuntime {
                         if let Some(crate::storage::schema::Value::Text(value)) =
                             row.get_field("value")
                         {
-                            result = value.clone();
+                            result = value.to_string();
                         }
                     }
                 }
@@ -2942,7 +2942,7 @@ impl RedDBRuntime {
             QueryExpr::SetConfig { ref key, ref value } => {
                 let store = self.inner.db.store();
                 let json_val = match value {
-                    Value::Text(s) => crate::serde_json::Value::String(s.clone()),
+                    Value::Text(s) => crate::serde_json::Value::String(s.to_string()),
                     Value::Integer(n) => crate::serde_json::Value::Number(*n as f64),
                     Value::Float(n) => crate::serde_json::Value::Number(*n),
                     Value::Boolean(b) => crate::serde_json::Value::Bool(*b),
@@ -3036,7 +3036,7 @@ impl RedDBRuntime {
                 let mut record = UnifiedRecord::new();
                 record.set(
                     "tenant",
-                    current_tenant().map(Value::Text).unwrap_or(Value::Null),
+                    current_tenant().map(Value::text).unwrap_or(Value::Null),
                 );
                 result.push(record);
                 Ok(RuntimeQueryResult {
@@ -4858,7 +4858,7 @@ fn walk_plan_node(
         .insert(Arc::from("op"), Value::text(node.operator.clone()));
     rec.values.insert(
         Arc::from("source"),
-        node.source.clone().map(Value::Text).unwrap_or(Value::Null),
+        node.source.clone().map(Value::text).unwrap_or(Value::Null),
     );
     rec.values
         .insert(Arc::from("est_rows"), Value::Float(node.estimated_rows));

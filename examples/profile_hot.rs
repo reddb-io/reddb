@@ -40,13 +40,13 @@ fn main() {
             .create_row(CreateRowInput {
                 collection: "users5k".into(),
                 fields: vec![
-                    ("name".into(), Value::Text(format!("User_{i}"))),
+                    ("name".into(), Value::text(format!("User_{i}"))),
                     ("age".into(), Value::Integer(18 + (i % 63) as i64)),
                     (
                         "city".into(),
-                        Value::Text(["NYC", "London", "Tokyo", "Paris", "Berlin"][i % 5].into()),
+                        Value::text(["NYC", "London", "Tokyo", "Paris", "Berlin"][i % 5]),
                     ),
-                    ("email".into(), Value::Text(format!("u{i}@t.com"))),
+                    ("email".into(), Value::text(format!("u{i}@t.com"))),
                     ("score".into(), Value::Float(i as f64 * 0.02)),
                 ],
                 metadata: vec![],
@@ -154,7 +154,7 @@ fn main() {
             .create_row(CreateRowInput {
                 collection: "users".into(),
                 fields: vec![
-                    ("name".into(), Value::Text(format!("User_{i}"))),
+                    ("name".into(), Value::text(format!("User_{i}"))),
                     ("age".into(), Value::Integer((i % 100) as i64)),
                 ],
                 metadata: vec![],

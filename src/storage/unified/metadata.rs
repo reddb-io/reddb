@@ -207,7 +207,7 @@ impl MetadataValue {
             Value::Boolean(b) => Self::Bool(*b),
             Value::Integer(i) => Self::Int(*i),
             Value::Float(f) => Self::Float(*f),
-            Value::Text(s) => Self::String(s.clone()),
+            Value::Text(s) => Self::String(s.to_string()),
             Value::Blob(b) => Self::Bytes(b.clone()),
             Value::Timestamp(t) => Self::Timestamp(*t as u64),
             Value::Json(_) => Self::Object(HashMap::new()), // Simplified

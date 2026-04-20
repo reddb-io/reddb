@@ -137,8 +137,8 @@ mod tests {
     #[test]
     fn test_or_two_eq_same_field_becomes_in() {
         let f = or(
-            eq("city", Value::text("NYC".into())),
-            eq("city", Value::text("LA".into())),
+            eq("city", Value::text("NYC")),
+            eq("city", Value::text("LA")),
         );
         let opt = optimize(f);
         match opt {
@@ -156,7 +156,7 @@ mod tests {
     #[test]
     fn test_or_different_fields_stays_or() {
         let f = or(
-            eq("city", Value::text("NYC".into())),
+            eq("city", Value::text("NYC")),
             eq("age", Value::Integer(30)),
         );
         let opt = optimize(f);
@@ -168,10 +168,10 @@ mod tests {
         // Or(Or(Eq(c,a), Eq(c,b)), Eq(c,c)) → In(c, [a,b,c])
         let f = or(
             or(
-                eq("status", Value::text("a".into())),
-                eq("status", Value::text("b".into())),
+                eq("status", Value::text("a")),
+                eq("status", Value::text("b")),
             ),
-            eq("status", Value::text("c".into())),
+            eq("status", Value::text("c")),
         );
         let opt = optimize(f);
         match opt {

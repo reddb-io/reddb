@@ -71,7 +71,7 @@ pub(crate) fn storage_value_to_json(value: &Value) -> JsonValue {
         Value::Integer(value) => JsonValue::Number(*value as f64),
         Value::UnsignedInteger(value) => JsonValue::Number(*value as f64),
         Value::Float(value) => JsonValue::Number(*value),
-        Value::Text(value) => JsonValue::String(value.clone()),
+        Value::Text(value) => JsonValue::String(value.to_string()),
         Value::Blob(value) => JsonValue::String(hex::encode(value)),
         Value::Boolean(value) => JsonValue::Bool(*value),
         Value::Timestamp(value) => JsonValue::Number(*value as f64),

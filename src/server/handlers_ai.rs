@@ -65,7 +65,7 @@ impl RedDBServer {
                 }
 
                 let json_val = match &value {
-                    Value::Text(s) => JsonValue::String(s.clone()),
+                    Value::Text(s) => JsonValue::String(s.to_string()),
                     Value::Integer(n) => JsonValue::Number(*n as f64),
                     Value::Float(n) => JsonValue::Number(*n),
                     Value::Boolean(b) => JsonValue::Bool(*b),
@@ -113,7 +113,7 @@ impl RedDBServer {
                 }
                 let value = named.get("value").cloned().unwrap_or(Value::Null);
                 let json_val = match &value {
-                    Value::Text(s) => JsonValue::String(s.clone()),
+                    Value::Text(s) => JsonValue::String(s.to_string()),
                     Value::Integer(n) => JsonValue::Number(*n as f64),
                     Value::Float(n) => JsonValue::Number(*n),
                     Value::Boolean(b) => JsonValue::Bool(*b),
@@ -1243,7 +1243,7 @@ impl RedDBServer {
                 .entity_use_cases()
                 .get_kv(RED_CONFIG_COLLECTION, kv_key)
             {
-                Ok(Some((Value::Text(secret), _))) => Ok(Some(secret)),
+                Ok(Some((Value::Text(secret), _))) => Ok(Some(secret.to_string())),
                 Ok(_) => Ok(None),
                 Err(err) => Err(crate::RedDBError::Query(format!(
                     "failed to read AI credential store: {err}"

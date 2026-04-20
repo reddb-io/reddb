@@ -138,11 +138,9 @@ fn explain_indexed_select_mentions_index_or_scan_op() {
         .expect("EXPLAIN SELECT with index");
 
     // At least one node references the target table in `source`.
-    let has_user_source = result
-        .result
-        .records
-        .iter()
-        .any(|rec| matches!(rec.values.get("source"), Some(Value::Text(s)) if s == "users"));
+    let has_user_source = result.result.records.iter().any(
+        |rec| matches!(rec.values.get("source"), Some(Value::Text(s)) if s.as_ref() == "users"),
+    );
     assert!(
         has_user_source,
         "plan should mention the `users` source somewhere; records={:?}",
