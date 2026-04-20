@@ -85,7 +85,10 @@ impl UnifiedResult {
 /// queries because `Arc<str>: Borrow<str>` and both hash identically.
 #[derive(Debug, Clone, Default)]
 pub struct UnifiedRecord {
-    /// Column values (for table data)
+    /// Column values (for table data). Scan hot paths populate the
+    /// columnar side-channel instead — `values` stays empty in that
+    /// case, and every accessor (`get`, `iter_fields`, `column_names`,
+    /// `contains_key`) transparently merges both sources.
     pub values: HashMap<Arc<str>, Value>,
     /// Matched nodes (for graph data)
     pub nodes: HashMap<String, MatchedNode>,
@@ -95,6 +98,25 @@ pub struct UnifiedRecord {
     pub paths: Vec<GraphPath>,
     /// Vector search results
     pub vector_results: Vec<VectorSearchResult>,
+    /// Columnar fast-path for scan-built records. When `Some`, every
+    /// HashMap per record (~2.3M drops on a 500-query × 4.5k-row scan)
+    /// becomes one contiguous `Vec<Value>` drop plus a refcount bump
+    /// on the shared schema. Mutation via `set*` migrates lazily to
+    /// the HashMap so the invariant "once mutated, columnar drops
+    /// out" is local to the writer.
+    columnar: Option<ColumnarRow>,
+}
+
+/// Schema-shared value layout for scan rows.
+///
+/// `schema` is an `Arc<Vec<Arc<str>>>` shared across every record in
+/// a single scan result (one alloc per query instead of per row).
+/// `values` is the parallel array; position `i` in `values`
+/// corresponds to `schema[i]`.
+#[derive(Debug, Clone)]
+pub struct ColumnarRow {
+    pub schema: Arc<Vec<Arc<str>>>,
+    pub values: Vec<Value>,
 }
 
 /// Interned system-field column name. For a 4500-row `SELECT *` scan
@@ -162,12 +184,43 @@ impl UnifiedRecord {
             edges: HashMap::new(),
             paths: Vec::new(),
             vector_results: Vec::new(),
+            columnar: None,
+        }
+    }
+
+    /// Build a record directly from a shared schema and a parallel
+    /// value array. No HashMap allocation — scan hot paths use this
+    /// to avoid the per-record bucket alloc + per-field hash cost.
+    pub fn from_columnar(schema: Arc<Vec<Arc<str>>>, values: Vec<Value>) -> Self {
+        Self {
+            values: HashMap::new(),
+            nodes: HashMap::new(),
+            edges: HashMap::new(),
+            paths: Vec::new(),
+            vector_results: Vec::new(),
+            columnar: Some(ColumnarRow { schema, values }),
+        }
+    }
+
+    /// If the record is columnar, copy its fields into the `values`
+    /// HashMap and drop the columnar representation. Called
+    /// automatically by every mutating `set*` so writers see a
+    /// single coherent store.
+    fn flatten_columnar(&mut self) {
+        if let Some(col) = self.columnar.take() {
+            if self.values.is_empty() {
+                self.values.reserve(col.schema.len());
+            }
+            for (k, v) in col.schema.iter().zip(col.values.into_iter()) {
+                self.values.insert(Arc::clone(k), v);
+            }
         }
     }
 
     /// Set a column value. Allocates an `Arc<str>` for the key; hot-path
     /// callers with a pre-interned key should prefer [`set_arc`].
     pub fn set(&mut self, column: &str, value: Value) {
+        self.flatten_columnar();
         self.values.insert(Arc::from(column), value);
     }
 
@@ -176,6 +229,7 @@ impl UnifiedRecord {
     /// `Arc<str>` without reallocating the bytes).
     #[inline]
     pub fn set_owned(&mut self, column: String, value: Value) {
+        self.flatten_columnar();
         self.values
             .insert(Arc::from(column.into_boxed_str()), value);
     }
@@ -185,12 +239,54 @@ impl UnifiedRecord {
     /// system fields like `red_entity_id`.
     #[inline]
     pub fn set_arc(&mut self, column: Arc<str>, value: Value) {
+        self.flatten_columnar();
         self.values.insert(column, value);
     }
 
-    /// Get a column value
+    /// Get a column value. Checks columnar first (scan fast-path),
+    /// then the HashMap so mutated records still resolve.
     pub fn get(&self, column: &str) -> Option<&Value> {
+        if let Some(col) = &self.columnar {
+            if let Some(idx) = col.schema.iter().position(|k| &**k == column) {
+                return col.values.get(idx);
+            }
+        }
         self.values.get(column)
+    }
+
+    /// Number of visible fields across both representations.
+    pub fn field_count(&self) -> usize {
+        let columnar_len = self.columnar.as_ref().map(|c| c.values.len()).unwrap_or(0);
+        columnar_len + self.values.len()
+    }
+
+    /// Whether the record has a field with this column name.
+    pub fn contains_column(&self, column: &str) -> bool {
+        self.get(column).is_some()
+    }
+
+    /// Iterate `(name, value)` pairs across columnar + HashMap.
+    /// Columnar rows come first in their schema order; HashMap rows
+    /// follow in arbitrary order. Consumers that need deterministic
+    /// ordering should sort by name.
+    pub fn iter_fields(&self) -> Box<dyn Iterator<Item = (&Arc<str>, &Value)> + '_> {
+        let col_iter = self
+            .columnar
+            .as_ref()
+            .into_iter()
+            .flat_map(|c| c.schema.iter().zip(c.values.iter()));
+        let hash_iter = self.values.iter();
+        Box::new(col_iter.chain(hash_iter))
+    }
+
+    /// Collect column names (both representations) in a Vec.
+    pub fn column_names(&self) -> Vec<Arc<str>> {
+        let mut out: Vec<Arc<str>> = Vec::with_capacity(self.field_count());
+        if let Some(col) = &self.columnar {
+            out.extend(col.schema.iter().cloned());
+        }
+        out.extend(self.values.keys().cloned());
+        out
     }
 
     /// Set a matched node
