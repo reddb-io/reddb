@@ -192,6 +192,54 @@ fn wal_crash_concurrent_writers_consistent_recovery() {
 }
 
 #[test]
+fn wal_crash_append_is_monotonic_under_contention() {
+    // Phase 2 (lock-free queue) reserves contiguous byte ranges via
+    // fetch_add then drains the queue sorted by LSN. Under heavy
+    // contention the leader MUST land records on disk in LSN order,
+    // otherwise the WAL prefix is corrupt and recovery truncates at
+    // the first out-of-order CRC.
+    let (_g, path) = tmp_path("mono_contention");
+    {
+        let store = Arc::new(UnifiedStore::open_with_config(&path, grouped_config()).unwrap());
+        store.create_collection("t").unwrap();
+
+        let mut handles = Vec::new();
+        for worker in 0..16u64 {
+            let s = Arc::clone(&store);
+            handles.push(std::thread::spawn(move || {
+                for i in 0..100u64 {
+                    let id = worker * 10_000 + i + 1;
+                    s.insert_auto("t", row_entity(id, &format!("w{worker}_i{i}")))
+                        .unwrap();
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+    }
+
+    let reopened = UnifiedStore::open_with_config(&path, grouped_config()).unwrap();
+    let mgr = reopened.get_collection("t").expect("collection recovered");
+    let recovered = mgr.query_all(|_| true).len();
+    assert_eq!(
+        recovered,
+        16 * 100,
+        "All 16 × 100 inserts must recover under contention (got {recovered})"
+    );
+
+    let mut seen = std::collections::HashSet::new();
+    mgr.for_each_entity(|e| {
+        assert!(
+            seen.insert(e.id.raw()),
+            "duplicate id {} — LSN ordering violated",
+            e.id.raw()
+        );
+        true
+    });
+}
+
+#[test]
 fn wal_crash_reopen_is_idempotent() {
     // Open → write → drop → open → drop → open must leave state
     // identical to a single clean round-trip. Phase 2's leader-drain

@@ -120,6 +120,34 @@ impl WalWriter {
         Ok(record_lsn)
     }
 
+    /// Write already-encoded bytes and advance the LSN counter to
+    /// match. Used by the lock-free append path: writers encode +
+    /// atomically reserve an LSN range outside this writer, the
+    /// group-commit coordinator drains the pending queue in LSN
+    /// order, then calls `append_bytes` for each batch.
+    ///
+    /// The bytes MUST be a valid `WalRecord::encode()` payload (or a
+    /// concatenation of such) — no structural validation happens
+    /// here. The caller is responsible for keeping the on-disk
+    /// byte offset synchronised with the externally-tracked LSN
+    /// counter; this method just appends and advances.
+    pub fn append_bytes(&mut self, bytes: &[u8]) -> io::Result<u64> {
+        self.file.write_all(bytes)?;
+        let record_lsn = self.current_lsn;
+        self.current_lsn += bytes.len() as u64;
+        Ok(record_lsn)
+    }
+
+    /// Rewind the writer's LSN counter to a specific value. Used
+    /// by the lock-free append path to resync the writer with the
+    /// externally-tracked `next_lsn` after a drain batch; the
+    /// coordinator knows the exact byte offset it just wrote to
+    /// and needs `current_lsn` to match so subsequent direct
+    /// callers of `append` stay consistent.
+    pub fn set_current_lsn(&mut self, lsn: u64) {
+        self.current_lsn = lsn;
+    }
+
     /// Force sync to disk.
     ///
     /// Drains the user-space [`BufWriter`] first, then calls
