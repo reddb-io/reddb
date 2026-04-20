@@ -453,51 +453,129 @@ fn handle_bulk_insert(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
     }
 }
 
+/// Per-column resolver built once per `encode_result` call. The row
+/// loop then dispatches via `&[ColumnResolver]` with one cheap
+/// lookup per cell instead of re-scanning the columnar schema for
+/// every (row, column) pair.
+enum ColumnResolver {
+    /// Direct index into every record's `columnar.values[]`. Valid
+    /// when the scan result shares a single `Arc<Vec<Arc<str>>>`
+    /// schema across records.
+    ColumnarIdx(usize),
+    /// HashMap fallback — records built via `set*` or mutated after
+    /// columnar construction.
+    HashMapKey(Arc<str>),
+}
+
+thread_local! {
+    /// Scratch buffer reused across `encode_result` calls on the same
+    /// task. Avoids a ~500 kB alloc + dealloc for every SELECT scan.
+    static ENCODE_SCRATCH: std::cell::RefCell<Vec<u8>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 fn encode_result(result: &crate::runtime::RuntimeQueryResult) -> Vec<u8> {
-    // For pre-serialized JSON results, we still need to encode as binary rows
-    // But the entity data is available via the query result records
     let records = &result.result.records;
 
-    // If pre_serialized_json is set but records is empty, we need entity-level access
-    // For now, encode available records as binary
-    let mut payload = Vec::with_capacity(256 + records.len() * 128);
-
-    // Collect column names from first record (or from result.columns)
-    let columns: Vec<String> = if !result.result.columns.is_empty() {
-        result.result.columns.clone()
-    } else if let Some(first) = records.first() {
-        // Use column_names() so the columnar side-channel (scan
-        // fast-path) contributes its schema even when values HashMap
-        // is empty. Direct `first.values.keys()` would miss it.
-        first
-            .column_names()
-            .into_iter()
-            .map(|k| k.to_string())
+    // Column name list. Prefer the executor's projected columns when
+    // populated; fall back to the first record's schema so scan rows
+    // with an empty `values` HashMap still surface their fields.
+    let columns: Vec<Arc<str>> = if !result.result.columns.is_empty() {
+        result
+            .result
+            .columns
+            .iter()
+            .map(|s| Arc::from(s.as_str()))
             .collect()
+    } else if let Some(first) = records.first() {
+        first.column_names()
     } else {
         Vec::new()
     };
 
-    // ncols
-    payload.extend_from_slice(&(columns.len() as u16).to_le_bytes());
+    // Pre-resolve each column against the first record's columnar
+    // schema. For scan outputs every record shares the same `Arc`
+    // pointer, so the resolver list is valid for every row; per-row
+    // encoding becomes an O(1) `values[idx]` per cell.
+    //
+    // Records built via `set*` (HashMap path) still resolve via the
+    // `HashMapKey` variant with a single HashMap lookup per cell —
+    // no worse than before the optimisation.
+    let first_schema_ptr = records
+        .first()
+        .and_then(|r| r.columnar_schema())
+        .map(|s| Arc::as_ptr(s) as usize);
+    let first_columnar = records.first().and_then(|r| r.columnar());
+    let resolvers: Vec<ColumnResolver> = columns
+        .iter()
+        .map(|col| match first_columnar.and_then(|c| {
+            c.schema
+                .iter()
+                .rposition(|k| k.as_ref() == col.as_ref())
+        }) {
+            Some(idx) => ColumnResolver::ColumnarIdx(idx),
+            None => ColumnResolver::HashMapKey(Arc::clone(col)),
+        })
+        .collect();
 
-    // Column names
-    for col in &columns {
-        encode_column_name(&mut payload, col);
-    }
+    // Scratch-buffer reuse. Size hint is a rough estimate (~130 B
+    // per row for typical 9-column integer+text rows); actual growth
+    // amortises over sustained query streams on the same worker.
+    let payload = ENCODE_SCRATCH.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        buf.clear();
+        buf.reserve(256 + records.len() * 128);
 
-    // nrows
-    payload.extend_from_slice(&(records.len() as u32).to_le_bytes());
-
-    // Row data
-    for record in records {
+        buf.extend_from_slice(&(columns.len() as u16).to_le_bytes());
         for col in &columns {
-            let value = record.get(col.as_str()).unwrap_or(&Value::Null);
-            encode_value(&mut payload, value);
+            encode_column_name(&mut buf, col);
         }
-    }
+        buf.extend_from_slice(&(records.len() as u32).to_le_bytes());
 
-    // Wrap in frame
+        for record in records {
+            // When the schema identity matches the first record's
+            // pointer, `ColumnarIdx(i)` is safe — we just reach
+            // into `record.columnar().unwrap().values[i]`. Otherwise
+            // fall back to the record-level `get` which covers
+            // heterogeneous schemas (happens when the executor
+            // mixes result shapes, e.g. a projection over UNION).
+            let same_schema = record
+                .columnar_schema()
+                .map(|s| Arc::as_ptr(s) as usize)
+                == first_schema_ptr
+                && first_schema_ptr.is_some();
+            if same_schema {
+                let col = record.columnar().expect("checked above");
+                for resolver in &resolvers {
+                    let val = match resolver {
+                        ColumnResolver::ColumnarIdx(i) => {
+                            col.values.get(*i).unwrap_or(&Value::Null)
+                        }
+                        ColumnResolver::HashMapKey(k) => {
+                            record.get(k.as_ref()).unwrap_or(&Value::Null)
+                        }
+                    };
+                    encode_value(&mut buf, val);
+                }
+            } else {
+                // Heterogeneous-schema fallback. Walk columns + the
+                // already-built resolver list in lockstep so each
+                // cell pays one `record.get` (same as pre-Phase-B
+                // behaviour) — no O(N²) pointer search.
+                for (col_name, resolver) in columns.iter().zip(resolvers.iter()) {
+                    let key: &str = match resolver {
+                        ColumnResolver::ColumnarIdx(_) => col_name.as_ref(),
+                        ColumnResolver::HashMapKey(k) => k.as_ref(),
+                    };
+                    let val = record.get(key).unwrap_or(&Value::Null);
+                    encode_value(&mut buf, val);
+                }
+            }
+        }
+
+        buf.clone()
+    });
+
     let mut resp = Vec::with_capacity(5 + payload.len());
     write_frame_header(&mut resp, MSG_RESULT, payload.len() as u32);
     resp.extend_from_slice(&payload);

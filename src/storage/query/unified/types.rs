@@ -296,6 +296,25 @@ impl UnifiedRecord {
         out
     }
 
+    /// Borrow the columnar side-channel, if any. Hot-path wire
+    /// encoders use this to resolve column-name → index **once** per
+    /// response, then index into `values[]` per row instead of paying
+    /// an `rposition` scan on every cell. Returns `None` when the
+    /// record was built via HashMap inserts.
+    #[inline]
+    pub fn columnar(&self) -> Option<&ColumnarRow> {
+        self.columnar.as_ref()
+    }
+
+    /// Return the `Arc<Vec<Arc<str>>>` schema pointer (for identity
+    /// comparison) when the record is columnar. Callers that want to
+    /// cache a schema-specific column-index map across records can
+    /// use `Arc::as_ptr(...)` on this value as the cache key.
+    #[inline]
+    pub fn columnar_schema(&self) -> Option<&Arc<Vec<Arc<str>>>> {
+        self.columnar.as_ref().map(|c| &c.schema)
+    }
+
     /// Set a matched node
     pub fn set_node(&mut self, alias: &str, node: MatchedNode) {
         self.nodes.insert(alias.to_string(), node);
