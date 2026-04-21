@@ -124,6 +124,14 @@ pub trait RuntimeEntityPort {
         &self,
         input: CreateRowsBatchInput,
     ) -> RedDBResult<Vec<CreateEntityOutput>>;
+    /// Fast path for bulk writers that only need the inserted ids — the
+    /// wire `MSG_BULK_INSERT_BINARY` handler only sends back a row count,
+    /// so it doesn't need a `store.get(id)` lookup per inserted entity.
+    /// Skipping those N lookups cuts ~20% off the insert_bulk hot path.
+    fn create_rows_batch_ids(
+        &self,
+        input: CreateRowsBatchInput,
+    ) -> RedDBResult<Vec<crate::storage::EntityId>>;
     fn create_node(&self, input: CreateNodeInput) -> RedDBResult<CreateEntityOutput>;
     fn create_edge(&self, input: CreateEdgeInput) -> RedDBResult<CreateEntityOutput>;
     fn create_vector(&self, input: CreateVectorInput) -> RedDBResult<CreateEntityOutput>;

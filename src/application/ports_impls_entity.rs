@@ -417,6 +417,24 @@ fn enforce_row_batch_uniqueness(
     collection: &str,
     rows: &[Vec<(String, Value)>],
 ) -> RedDBResult<()> {
+    let view: Vec<&[(String, Value)]> = rows.iter().map(|r| r.as_slice()).collect();
+    enforce_row_batch_uniqueness_view(db, collection, &view)
+}
+
+fn enforce_row_batch_uniqueness_refs(
+    db: &crate::storage::unified::devx::RedDB,
+    collection: &str,
+    rows: &[&Vec<(String, Value)>],
+) -> RedDBResult<()> {
+    let view: Vec<&[(String, Value)]> = rows.iter().map(|r| r.as_slice()).collect();
+    enforce_row_batch_uniqueness_view(db, collection, &view)
+}
+
+fn enforce_row_batch_uniqueness_view(
+    db: &crate::storage::unified::devx::RedDB,
+    collection: &str,
+    rows: &[&[(String, Value)]],
+) -> RedDBResult<()> {
     let Some(contract) = db.collection_contract(collection) else {
         return Ok(());
     };
@@ -2000,6 +2018,23 @@ impl RuntimeEntityPort for RedDBRuntime {
         &self,
         input: CreateRowsBatchInput,
     ) -> RedDBResult<Vec<CreateEntityOutput>> {
+        let db = self.db();
+        let collection = input.collection.clone();
+        let ids = self.create_rows_batch_ids(input)?;
+        let store = db.store();
+        Ok(ids
+            .into_iter()
+            .map(|id| CreateEntityOutput {
+                id,
+                entity: store.get(&collection, id),
+            })
+            .collect())
+    }
+
+    fn create_rows_batch_ids(
+        &self,
+        input: CreateRowsBatchInput,
+    ) -> RedDBResult<Vec<crate::storage::EntityId>> {
         if input.rows.is_empty() {
             return Ok(Vec::new());
         }
@@ -2009,7 +2044,6 @@ impl RuntimeEntityPort for RedDBRuntime {
         ensure_collection_model_contract(&db, &collection, crate::catalog::CollectionModel::Table)?;
 
         let mut prepared_rows = Vec::with_capacity(input.rows.len());
-        let mut uniqueness_rows = Vec::with_capacity(input.rows.len());
         for row in input.rows {
             if row.collection != collection {
                 return Err(crate::RedDBError::Query(format!(
@@ -2022,40 +2056,36 @@ impl RuntimeEntityPort for RedDBRuntime {
             apply_collection_default_ttl(&db, &collection, &mut metadata);
             let fields = normalize_row_fields_for_contract(&db, &collection, row.fields)?;
             enforce_row_uniqueness(&db, &collection, &fields, None)?;
-            uniqueness_rows.push(fields.clone());
             prepared_rows.push((fields, metadata, row.node_links, row.vector_links));
         }
 
-        enforce_row_batch_uniqueness(&db, &collection, &uniqueness_rows)?;
+        // Cross-row uniqueness needs a view of every row's fields. Build
+        // the reference slice by borrowing from `prepared_rows` to avoid
+        // the per-row clone the old path did.
+        let uniqueness_view: Vec<&Vec<(String, Value)>> =
+            prepared_rows.iter().map(|(f, _, _, _)| f).collect();
+        enforce_row_batch_uniqueness_refs(&db, &collection, &uniqueness_view)?;
 
-        // Route through MutationEngine: single bulk_insert + one CDC batch
-        // instead of N separate cdc_emit() calls (each acquires a write lock).
         let engine = self.mutation_engine();
         let mutation_rows: Vec<crate::runtime::mutation::MutationRow> = prepared_rows
             .into_iter()
-            .map(|(fields, metadata, node_links, vector_links)| {
-                crate::runtime::mutation::MutationRow {
-                    fields,
-                    metadata,
-                    node_links,
-                    vector_links,
-                }
-            })
+            .map(
+                |(fields, metadata, node_links, vector_links)| {
+                    crate::runtime::mutation::MutationRow {
+                        fields,
+                        metadata,
+                        node_links,
+                        vector_links,
+                    }
+                },
+            )
             .collect();
 
         let result = engine
-            .apply(collection.clone(), mutation_rows)
+            .apply(collection, mutation_rows)
             .map_err(|e| crate::RedDBError::Internal(e.to_string()))?;
 
-        let store = db.store();
-        Ok(result
-            .ids
-            .into_iter()
-            .map(|id| CreateEntityOutput {
-                id,
-                entity: store.get(&collection, id),
-            })
-            .collect())
+        Ok(result.ids)
     }
 
     fn create_node(&self, input: CreateNodeInput) -> RedDBResult<CreateEntityOutput> {

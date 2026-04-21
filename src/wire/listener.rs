@@ -441,9 +441,11 @@ fn handle_bulk_insert(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
         rows.push(input);
     }
 
-    match runtime.create_rows_batch(crate::application::CreateRowsBatchInput { collection, rows }) {
-        Ok(outputs) => {
-            let count = outputs.len() as u64;
+    match runtime
+        .create_rows_batch_ids(crate::application::CreateRowsBatchInput { collection, rows })
+    {
+        Ok(ids) => {
+            let count = ids.len() as u64;
             let mut resp = Vec::with_capacity(13);
             write_frame_header(&mut resp, MSG_BULK_OK, 8);
             resp.extend_from_slice(&count.to_le_bytes());
@@ -661,9 +663,11 @@ fn handle_bulk_insert_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> 
         });
     }
 
-    match runtime.create_rows_batch(crate::application::CreateRowsBatchInput { collection, rows }) {
-        Ok(outputs) => {
-            let count = outputs.len() as u64;
+    match runtime
+        .create_rows_batch_ids(crate::application::CreateRowsBatchInput { collection, rows })
+    {
+        Ok(ids) => {
+            let count = ids.len() as u64;
             let mut resp = Vec::with_capacity(13);
             write_frame_header(&mut resp, MSG_BULK_OK, 8);
             resp.extend_from_slice(&count.to_le_bytes());
