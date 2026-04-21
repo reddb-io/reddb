@@ -121,6 +121,12 @@ where
 {
     let mut header_buf = [0u8; 5]; // 4 bytes len + 1 byte msg_type
 
+    // Streaming-bulk session state. Populated by MSG_BULK_STREAM_START,
+    // appended to by each MSG_BULK_STREAM_ROWS, flushed and cleared
+    // by MSG_BULK_STREAM_COMMIT. One session per connection at a
+    // time — a second START before COMMIT returns an error.
+    let mut stream_session: Option<BulkStreamSession> = None;
+
     // Per-connection timing aggregation. Flushed every 500 requests
     // when REDDB_WIRE_TIMING=1 is set (bench mode only). Zero overhead
     // when the env flag is absent — we don't even sample.
@@ -178,6 +184,15 @@ where
             MSG_BULK_INSERT_PREVALIDATED => {
                 handle_bulk_insert_binary_prevalidated(&runtime, &payload)
             }
+            MSG_BULK_STREAM_START => handle_stream_start(&payload, &mut stream_session),
+            MSG_BULK_STREAM_ROWS => {
+                // STREAM_ROWS is the hot path — if the append succeeds we
+                // send NO response and the client pipelines the next
+                // frame. Only on error does the server reply (MSG_ERROR).
+                // Handler returns an empty Vec to signal "no response".
+                handle_stream_rows(&payload, &mut stream_session)
+            }
+            MSG_BULK_STREAM_COMMIT => handle_stream_commit(&runtime, &mut stream_session),
             _ => {
                 let mut resp = Vec::new();
                 let err = b"unknown message type";
@@ -197,8 +212,11 @@ where
             None
         };
 
-        // Send response
-        stream.write_all(&response).await?;
+        // Send response — empty vec means "no response" (used by the
+        // streaming-bulk hot path so clients pipeline next frame).
+        if !response.is_empty() {
+            stream.write_all(&response).await?;
+        }
 
         if let Some(t) = t_write {
             trace_write_ns += t.elapsed().as_nanos() as u64;
@@ -812,6 +830,140 @@ fn handle_bulk_insert_binary_prevalidated(runtime: &RedDBRuntime, payload: &[u8]
             resp
         }
         Err(e) => make_error(format!("prevalidated bulk insert: {e}").as_bytes()),
+    }
+}
+
+// ── Streaming bulk insert handlers ────────────────────────────────
+
+/// Per-connection session state for the streaming bulk protocol.
+/// Populated by MSG_BULK_STREAM_START, grown by each
+/// MSG_BULK_STREAM_ROWS, drained + cleared by MSG_BULK_STREAM_COMMIT.
+struct BulkStreamSession {
+    collection: String,
+    schema: std::sync::Arc<Vec<String>>,
+    rows: Vec<Vec<crate::storage::schema::Value>>,
+}
+
+/// `MSG_BULK_STREAM_START` payload: `[coll_len u16][coll bytes]
+/// [ncols u16]([name_len u16][name_bytes])*ncols`. Establishes the
+/// collection + schema for subsequent ROWS frames. Any in-flight
+/// session is aborted. Responds `MSG_BULK_STREAM_ACK` (empty body)
+/// on success, `MSG_ERROR` otherwise.
+fn handle_stream_start(payload: &[u8], session: &mut Option<BulkStreamSession>) -> Vec<u8> {
+    let mut pos = 0;
+    let coll_len = match read_u16(payload, &mut pos, "stream start: missing collection length") {
+        Ok(len) => len as usize,
+        Err(msg) => return make_error(msg.as_bytes()),
+    };
+    let collection = match read_string(
+        payload,
+        &mut pos,
+        coll_len,
+        "stream start: truncated collection name",
+        "stream start: invalid collection name",
+    ) {
+        Ok(s) => s,
+        Err(msg) => return make_error(msg.as_bytes()),
+    };
+
+    let ncols = match read_u16(payload, &mut pos, "stream start: missing column count") {
+        Ok(c) => c as usize,
+        Err(msg) => return make_error(msg.as_bytes()),
+    };
+    let mut names = Vec::with_capacity(ncols);
+    for _ in 0..ncols {
+        let name_len = match read_u16(payload, &mut pos, "stream start: missing column name length")
+        {
+            Ok(l) => l as usize,
+            Err(msg) => return make_error(msg.as_bytes()),
+        };
+        let name = match read_string(
+            payload,
+            &mut pos,
+            name_len,
+            "stream start: truncated column name",
+            "stream start: invalid column name",
+        ) {
+            Ok(s) => s,
+            Err(msg) => return make_error(msg.as_bytes()),
+        };
+        names.push(name);
+    }
+
+    *session = Some(BulkStreamSession {
+        collection,
+        schema: std::sync::Arc::new(names),
+        rows: Vec::new(),
+    });
+    let mut resp = Vec::with_capacity(5);
+    write_frame_header(&mut resp, MSG_BULK_STREAM_ACK, 0);
+    resp
+}
+
+/// `MSG_BULK_STREAM_ROWS` payload: `[nrows u32] ([val_tag u8 +
+/// val_data]*ncols)*nrows`. Columns are implicit from the session
+/// schema so the frame carries only values. Responds
+/// `MSG_BULK_STREAM_ACK` on success.
+fn handle_stream_rows(payload: &[u8], session: &mut Option<BulkStreamSession>) -> Vec<u8> {
+    let Some(state) = session.as_mut() else {
+        return make_error(b"stream rows: no active stream session (send MSG_BULK_STREAM_START first)");
+    };
+    let mut pos = 0;
+    let nrows = match read_u32(payload, &mut pos, "stream rows: missing row count") {
+        Ok(n) => n as usize,
+        Err(msg) => return make_error(msg.as_bytes()),
+    };
+    let ncols = state.schema.len();
+    state.rows.reserve(nrows);
+    for _ in 0..nrows {
+        let mut values = Vec::with_capacity(ncols);
+        for _ in 0..ncols {
+            let value = match try_decode_value(payload, &mut pos) {
+                Ok(v) => v,
+                Err(err) => return make_error(format!("stream rows: {err}").as_bytes()),
+            };
+            values.push(value);
+        }
+        state.rows.push(values);
+    }
+    // Success path emits NO response — the client pipelines the next
+    // ROWS / COMMIT frame without waiting. Errors above return
+    // `make_error(...)` so the client still sees a terminal response
+    // on failure.
+    Vec::new()
+}
+
+/// `MSG_BULK_STREAM_COMMIT` payload: empty. Finalises the streaming
+/// session: flushes the accumulated rows via
+/// `create_rows_batch_prevalidated_columnar` (the same fast path the
+/// one-shot MSG_BULK_INSERT_PREVALIDATED uses) and responds with
+/// `MSG_BULK_OK { count u64 }`. Session state is cleared whether
+/// the flush succeeds or fails.
+fn handle_stream_commit(
+    runtime: &RedDBRuntime,
+    session: &mut Option<BulkStreamSession>,
+) -> Vec<u8> {
+    let Some(state) = session.take() else {
+        return make_error(b"stream commit: no active stream session");
+    };
+    if state.rows.is_empty() {
+        let mut resp = Vec::with_capacity(13);
+        write_frame_header(&mut resp, MSG_BULK_OK, 8);
+        resp.extend_from_slice(&0u64.to_le_bytes());
+        return resp;
+    }
+    match runtime.create_rows_batch_prevalidated_columnar(
+        state.collection,
+        state.schema,
+        state.rows,
+    ) {
+        Ok(count) => {
+            let mut resp = Vec::with_capacity(13);
+            write_frame_header(&mut resp, MSG_BULK_OK, 8);
+            resp.extend_from_slice(&(count as u64).to_le_bytes());
+            resp
+        }
+        Err(e) => make_error(format!("stream commit: {e}").as_bytes()),
     }
 }
 

@@ -38,6 +38,37 @@ pub const MSG_QUERY_BINARY: u8 = 0x07;
 /// fall back to the safe path.
 pub const MSG_BULK_INSERT_PREVALIDATED: u8 = 0x08;
 
+// ── Streaming bulk insert (PG COPY-equivalent) ─────────────────────
+//
+// The prevalidated path (0x08) still pays one TCP round-trip per
+// batch. For a 25k-row typed_insert chunked at BULK_BATCH_SIZE=1000
+// that's 25 round-trips — each with its own 3ms wire latency and
+// full schema re-declaration. PG's COPY BINARY sends the schema
+// once and streams all rows in a single logical transaction, which
+// is why PG typed_insert hits 120k ops/s versus our ~11k.
+//
+// The streaming protocol closes that gap:
+//
+//   client → MSG_BULK_STREAM_START  (collection + schema, once)
+//   client → MSG_BULK_STREAM_ROWS   (nrows + row data, 1…N times)
+//   client → MSG_BULK_STREAM_COMMIT (empty; server finalises)
+//   server → MSG_BULK_OK            (total inserted count)
+//
+// Schema sent once, commit round-trip amortised across every ROWS
+// frame. Rows are accumulated server-side in one `Vec<Vec<Value>>`
+// and handed to the columnar pre-validated insert path as a single
+// batch — same server-side semantics as 0x08, just amortised wire
+// framing. If the caller needs lower peak memory it can still
+// split with a COMMIT per N rows.
+pub const MSG_BULK_STREAM_START: u8 = 0x09;
+pub const MSG_BULK_STREAM_ROWS: u8 = 0x0A;
+pub const MSG_BULK_STREAM_COMMIT: u8 = 0x0B;
+/// Intermediate ack sent back for START + ROWS frames so the
+/// client can pipeline safely (it always receives a frame per
+/// frame sent) without conflating progress with the terminal
+/// MSG_BULK_OK at COMMIT time.
+pub const MSG_BULK_STREAM_ACK: u8 = 0x0C;
+
 // --- Value type tags ---
 pub const VAL_NULL: u8 = 0;
 pub const VAL_I64: u8 = 1;
