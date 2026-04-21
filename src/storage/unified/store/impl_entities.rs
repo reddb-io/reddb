@@ -468,7 +468,12 @@ impl UnifiedStore {
                     Self::serialize_entity_record(e, None, fv),
                 )
             };
-            if entities.len() >= 1024 {
+            // Gate chosen to match the bench's `BULK_BATCH_SIZE=1000`.
+            // Rayon's dispatch overhead is ~30µs/batch — on a 15-col
+            // row serializing for ~40µs the break-even is around
+            // 200-300 rows on a 16-core host. Keep a safety margin
+            // at 512.
+            if entities.len() >= 512 {
                 use rayon::prelude::*;
                 Some(entities.par_iter().map(serial_map).collect())
             } else {

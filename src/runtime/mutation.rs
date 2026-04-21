@@ -167,12 +167,18 @@ impl<'rt> MutationEngine<'rt> {
             .any(|r| !r.node_links.is_empty() || !r.vector_links.is_empty());
         let needs_entity_fetch = ci_enabled || any_xrefs;
 
+        // Build the `Arc<str>` for the collection name once and clone
+        // it cheaply per row. Before this the per-row path did
+        // `Arc::from(collection: &str)` which allocates each time —
+        // 25 000 heap allocations on a bench bulk.
+        let table_arc: Arc<str> = Arc::from(collection.as_str());
+
         for row in rows {
             field_snapshots.push(row.fields.clone());
             metadata_batch.push(row.metadata);
-            let mut entity = build_table_entity(
+            let mut entity = build_table_entity_shared(
                 self.store.as_ref(),
-                &collection,
+                Arc::clone(&table_arc),
                 row.fields,
                 &row.node_links,
                 &row.vector_links,
@@ -266,13 +272,33 @@ fn build_table_entity(
     node_links: &[NodeRef],
     vector_links: &[VectorRef],
 ) -> UnifiedEntity {
+    build_table_entity_shared(store, Arc::from(collection), fields, node_links, vector_links)
+}
+
+/// Variant that takes an already-built `Arc<str>` for the collection
+/// name. Callers that batch-insert share ONE Arc across every row in
+/// the batch rather than paying 25k `Arc::from(&str)` allocations.
+fn build_table_entity_shared(
+    store: &UnifiedStore,
+    table: Arc<str>,
+    fields: Vec<(String, Value)>,
+    node_links: &[NodeRef],
+    vector_links: &[VectorRef],
+) -> UnifiedEntity {
     let id = store.next_entity_id();
     let kind = EntityKind::TableRow {
-        table: Arc::from(collection),
+        table,
         row_id: 0, // assigned by SegmentManager::bulk_insert
     };
 
-    let mut row = RowData::new(fields.iter().map(|(_, v)| v.clone()).collect());
+    // Only populate the `named` HashMap — `SegmentManager::bulk_insert`
+    // converts named→columnar for the entire batch under a single
+    // shared schema, so duplicating the values into `columns` here
+    // (the old code did `fields.iter().map(|(_, v)| v.clone()).collect()`)
+    // was 15 Value clones per 15-col row, i.e. 375 000 wasted clones
+    // on a 25k typed_insert bulk. The segment's columnar pass reads
+    // only from `named` and fills `columns` afterwards.
+    let mut row = RowData::new(Vec::new());
     row.named = Some(fields.into_iter().collect());
 
     let mut entity = UnifiedEntity::new(id, kind, EntityData::Row(row));
