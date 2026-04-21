@@ -48,19 +48,21 @@ impl UnifiedStore {
         if root_before != root_after {
             self.mark_paged_registry_dirty();
         }
-        let actions = entities
-            .iter()
-            .map(|entity| {
-                let metadata = manager.get_metadata(entity.id);
-                StoreWalAction::upsert_entity(
-                    collection,
-                    entity,
-                    metadata.as_ref(),
-                    self.format_version(),
-                )
-            })
-            .collect::<Vec<_>>();
-        self.finish_paged_write(actions)?;
+        // One WAL action covering the whole bulk. Previously each entity
+        // produced its own `UpsertEntityRecord` action, which then became
+        // its own `WalRecord::PageWrite` triple inside
+        // `StoreCommitCoordinator::append_actions` — N WAL records per
+        // bulk. The batched variant is one WAL record per bulk. The
+        // already-serialised records from the btree pass above are
+        // reused here so we don't re-run `serialize_entity_record` N
+        // times; replay applies upserts by id, so the sorted-by-id
+        // order is safe for WAL too.
+        let records: Vec<Vec<u8>> =
+            serialized.into_iter().map(|(_id, record)| record).collect();
+        self.finish_paged_write([StoreWalAction::BulkUpsertEntityRecords {
+            collection: collection.to_string(),
+            records,
+        }])?;
 
         Ok(())
     }

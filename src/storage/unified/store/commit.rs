@@ -33,6 +33,14 @@ pub(crate) enum StoreWalAction {
     DropCollection { name: String },
     UpsertEntityRecord { collection: String, record: Vec<u8> },
     DeleteEntityRecord { collection: String, entity_id: u64 },
+    /// Batched upsert — one WAL action carrying N serialized entity
+    /// records for the same collection. Saves the per-row Begin/
+    /// PageWrite/Commit framing overhead on the bulk insert hot path.
+    /// Replay applies every contained record in order.
+    BulkUpsertEntityRecords {
+        collection: String,
+        records: Vec<Vec<u8>>,
+    },
 }
 
 impl StoreWalAction {
@@ -73,6 +81,17 @@ impl StoreWalAction {
                 write_string(&mut out, collection);
                 out.extend_from_slice(&entity_id.to_le_bytes());
             }
+            Self::BulkUpsertEntityRecords {
+                collection,
+                records,
+            } => {
+                out.push(5);
+                write_string(&mut out, collection);
+                out.extend_from_slice(&(records.len() as u32).to_le_bytes());
+                for record in records {
+                    write_bytes(&mut out, record);
+                }
+            }
         }
         out
     }
@@ -109,6 +128,27 @@ impl StoreWalAction {
                 Ok(Self::DeleteEntityRecord {
                     collection,
                     entity_id,
+                })
+            }
+            5 => {
+                let collection = read_string(bytes, &mut pos)?;
+                if pos + 4 > bytes.len() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "bulk upsert wal action: missing record count",
+                    ));
+                }
+                let count =
+                    u32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]])
+                        as usize;
+                pos += 4;
+                let mut records = Vec::with_capacity(count);
+                for _ in 0..count {
+                    records.push(read_bytes(bytes, &mut pos)?);
+                }
+                Ok(Self::BulkUpsertEntityRecords {
+                    collection,
+                    records,
                 })
             }
             other => Err(io::Error::new(
@@ -644,6 +684,15 @@ impl UnifiedStore {
                 collection,
                 entity_id,
             } => self.apply_replayed_delete(collection, EntityId::new(*entity_id)),
+            StoreWalAction::BulkUpsertEntityRecords {
+                collection,
+                records,
+            } => {
+                for record in records {
+                    self.apply_replayed_upsert(collection, record)?;
+                }
+                Ok(())
+            }
         }
     }
 
