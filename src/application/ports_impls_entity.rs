@@ -2058,6 +2058,67 @@ impl RuntimeEntityPort for RedDBRuntime {
             .collect())
     }
 
+    fn create_rows_batch_prevalidated(
+        &self,
+        input: CreateRowsBatchInput,
+    ) -> RedDBResult<usize> {
+        if input.rows.is_empty() {
+            return Ok(0);
+        }
+
+        let db = self.db();
+        let collection = input.collection;
+        // Still verify the collection's declared model before we blast
+        // rows at it — this one-off check is O(1), independent of
+        // ncols, and catches schema-kind mismatches that the client
+        // can't always see.
+        ensure_collection_model_contract(&db, &collection, crate::catalog::CollectionModel::Table)?;
+
+        // Hoist the per-collection default TTL lookup out of the
+        // per-row loop — it only depends on the collection, not on
+        // individual rows, and the old path did one HashMap read per
+        // row (25k reads for a 25k typed_insert bulk). Fetch it once,
+        // apply to any row whose metadata doesn't already carry a TTL.
+        let default_ttl_ms = db.collection_default_ttl_ms(&collection);
+
+        let mutation_rows: Vec<crate::runtime::mutation::MutationRow> =
+            Vec::with_capacity(input.rows.len());
+        let mut mutation_rows = mutation_rows;
+        for row in input.rows {
+            if row.collection != collection {
+                return Err(crate::RedDBError::Query(format!(
+                    "batch row collection mismatch: expected '{}', got '{}'",
+                    collection, row.collection
+                )));
+            }
+            let mut metadata = row.metadata;
+            if let Some(ttl) = default_ttl_ms {
+                if !has_internal_ttl_metadata(&metadata) {
+                    metadata.push((
+                        "_ttl_ms".to_string(),
+                        if ttl <= i64::MAX as u64 {
+                            MetadataValue::Int(ttl as i64)
+                        } else {
+                            MetadataValue::Timestamp(ttl)
+                        },
+                    ));
+                }
+            }
+            mutation_rows.push(crate::runtime::mutation::MutationRow {
+                fields: row.fields,
+                metadata,
+                node_links: row.node_links,
+                vector_links: row.vector_links,
+            });
+        }
+
+        let engine = self.mutation_engine();
+        let result = engine
+            .apply(collection, mutation_rows)
+            .map_err(|e| crate::RedDBError::Internal(e.to_string()))?;
+        Ok(result.ids.len())
+    }
+
     fn create_node(&self, input: CreateNodeInput) -> RedDBResult<CreateEntityOutput> {
         ensure_non_tree_reserved_metadata_entries(&input.metadata)?;
         self.create_node_unchecked(input)

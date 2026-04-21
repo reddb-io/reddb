@@ -147,6 +147,9 @@ where
             MSG_QUERY_BINARY => handle_query_binary(&runtime, &payload),
             MSG_BULK_INSERT => handle_bulk_insert(&runtime, &payload),
             MSG_BULK_INSERT_BINARY => handle_bulk_insert_binary(&runtime, &payload),
+            MSG_BULK_INSERT_PREVALIDATED => {
+                handle_bulk_insert_binary_prevalidated(&runtime, &payload)
+            }
             _ => {
                 let mut resp = Vec::new();
                 let err = b"unknown message type";
@@ -670,6 +673,99 @@ fn handle_bulk_insert_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> 
             resp
         }
         Err(e) => make_error(format!("bulk insert: {e}").as_bytes()),
+    }
+}
+
+/// `MSG_BULK_INSERT_PREVALIDATED` handler — same wire format as
+/// `MSG_BULK_INSERT_BINARY`, but routes through the port's
+/// pre-validated path which skips per-row contract + uniqueness
+/// checks. Used by typed-bench-style workloads where the client
+/// already validated types before sending.
+fn handle_bulk_insert_binary_prevalidated(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
+    let mut pos = 0;
+
+    if payload.len() < 6 {
+        return make_error(b"binary bulk prevalidated: payload too short");
+    }
+
+    let coll_len = match read_u16(payload, &mut pos, "prevalidated: missing collection length") {
+        Ok(len) => len as usize,
+        Err(msg) => return make_error(msg.as_bytes()),
+    };
+    let collection = match read_string(
+        payload,
+        &mut pos,
+        coll_len,
+        "prevalidated: truncated collection name",
+        "prevalidated: invalid collection name",
+    ) {
+        Ok(s) => s,
+        Err(msg) => return make_error(msg.as_bytes()),
+    };
+
+    let ncols = match read_u16(payload, &mut pos, "prevalidated: missing column count") {
+        Ok(cols) => cols as usize,
+        Err(msg) => return make_error(msg.as_bytes()),
+    };
+    let mut col_names = Vec::with_capacity(ncols);
+    for _ in 0..ncols {
+        let name_len = match read_u16(payload, &mut pos, "prevalidated: missing column name length")
+        {
+            Ok(len) => len as usize,
+            Err(msg) => return make_error(msg.as_bytes()),
+        };
+        let name = match read_string(
+            payload,
+            &mut pos,
+            name_len,
+            "prevalidated: truncated column name",
+            "prevalidated: invalid column name",
+        ) {
+            Ok(s) => s,
+            Err(msg) => return make_error(msg.as_bytes()),
+        };
+        col_names.push(name);
+    }
+
+    let nrows = match read_u32(payload, &mut pos, "prevalidated: missing row count") {
+        Ok(rows) => rows as usize,
+        Err(msg) => return make_error(msg.as_bytes()),
+    };
+
+    let mut rows = Vec::with_capacity(nrows);
+    for _ in 0..nrows {
+        let mut fields = Vec::with_capacity(ncols);
+        for _ in 0..ncols {
+            let value = match try_decode_value(payload, &mut pos) {
+                Ok(value) => value,
+                Err(err) => return make_error(format!("prevalidated: {err}").as_bytes()),
+            };
+            let field_name = col_names
+                .get(fields.len())
+                .cloned()
+                .unwrap_or_else(|| format!("col_{}", fields.len()));
+            fields.push((field_name, value));
+        }
+        rows.push(crate::application::CreateRowInput {
+            collection: collection.clone(),
+            fields,
+            metadata: Vec::new(),
+            node_links: Vec::new(),
+            vector_links: Vec::new(),
+        });
+    }
+
+    match runtime.create_rows_batch_prevalidated(crate::application::CreateRowsBatchInput {
+        collection,
+        rows,
+    }) {
+        Ok(count) => {
+            let mut resp = Vec::with_capacity(13);
+            write_frame_header(&mut resp, MSG_BULK_OK, 8);
+            resp.extend_from_slice(&(count as u64).to_le_bytes());
+            resp
+        }
+        Err(e) => make_error(format!("prevalidated bulk insert: {e}").as_bytes()),
     }
 }
 

@@ -124,6 +124,15 @@ pub trait RuntimeEntityPort {
         &self,
         input: CreateRowsBatchInput,
     ) -> RedDBResult<Vec<CreateEntityOutput>>;
+    /// Pre-validated bulk insert — caller has already checked column
+    /// types and uniqueness. Server skips
+    /// `normalize_row_fields_for_contract`, `enforce_row_uniqueness`,
+    /// and `enforce_row_batch_uniqueness`. Returns the row count.
+    /// Used by `MSG_BULK_INSERT_PREVALIDATED`.
+    fn create_rows_batch_prevalidated(
+        &self,
+        input: CreateRowsBatchInput,
+    ) -> RedDBResult<usize>;
     fn create_node(&self, input: CreateNodeInput) -> RedDBResult<CreateEntityOutput>;
     fn create_edge(&self, input: CreateEdgeInput) -> RedDBResult<CreateEntityOutput>;
     fn create_vector(&self, input: CreateVectorInput) -> RedDBResult<CreateEntityOutput>;

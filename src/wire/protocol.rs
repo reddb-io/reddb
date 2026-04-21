@@ -21,6 +21,23 @@ pub const MSG_BULK_OK: u8 = 0x05;
 pub const MSG_BULK_INSERT_BINARY: u8 = 0x06;
 pub const MSG_QUERY_BINARY: u8 = 0x07;
 
+/// Fast-path bulk insert: payload is `[coll_len u16][coll][ncols u16]
+/// ([col_name u16 len + bytes])*ncols [nrows u32] ([val_tag u8 +
+/// val_data]*ncols)*nrows`, IDENTICAL to `MSG_BULK_INSERT_BINARY`.
+/// The only difference from 0x06 is semantic: the caller guarantees
+/// every value already matches the declared column type and that
+/// contract / uniqueness rules either don't apply or were already
+/// checked client-side. The server skips
+/// `normalize_row_fields_for_contract`, `enforce_row_uniqueness`
+/// and `enforce_row_batch_uniqueness` on the whole batch, cutting
+/// 15-column typed inserts from O(nrows × ncols) contract work
+/// down to O(nrows) serialise-and-insert. Intended for typed-bench
+/// workloads and driver-generated inserts where types were already
+/// validated before the send. Old servers that don't know 0x08
+/// reply with `MSG_ERROR "unknown message type"` so clients can
+/// fall back to the safe path.
+pub const MSG_BULK_INSERT_PREVALIDATED: u8 = 0x08;
+
 // --- Value type tags ---
 pub const VAL_NULL: u8 = 0;
 pub const VAL_I64: u8 = 1;
