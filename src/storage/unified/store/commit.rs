@@ -198,25 +198,49 @@ impl CommitState {
 /// mutex is ~200ns (just a Vec::push) — 65× shorter, so the mutex
 /// convoy on concurrent inserts disappears.
 pub(crate) struct WalAppendQueue {
-    pending: parking_lot::Mutex<Vec<(u64, Vec<u8>)>>,
-    next_lsn: AtomicU64,
+    /// Tuple of (monotonically-increasing LSN, pending-bytes vec)
+    /// protected by one mutex. Keeping the LSN reservation AND the
+    /// push under the same lock guarantees that every queue entry
+    /// is visible the moment its LSN is assigned — no gap between
+    /// `fetch_add` and `push` for the leader to spin on.
+    ///
+    /// Earlier versions reserved LSN with an `AtomicU64::fetch_add`
+    /// outside the lock; the leader drain observed reordered
+    /// `(lsn, bytes)` tuples whose pushes happened in a different
+    /// order than their fetch_add, creating "holes" in the LSN
+    /// sequence that the drain loop interpreted as "wait for the
+    /// missing enqueuer" — under tokio scheduling pressure the
+    /// missing enqueuer was preempted indefinitely and the
+    /// drain loop busy-waited forever (WAL stayed at 8 bytes).
+    pending: parking_lot::Mutex<WalQueueState>,
+}
+
+struct WalQueueState {
+    next_lsn: u64,
+    entries: Vec<(u64, Vec<u8>)>,
 }
 
 impl WalAppendQueue {
     fn new(initial_lsn: u64) -> Self {
         Self {
-            pending: parking_lot::Mutex::new(Vec::with_capacity(64)),
-            next_lsn: AtomicU64::new(initial_lsn),
+            pending: parking_lot::Mutex::new(WalQueueState {
+                next_lsn: initial_lsn,
+                entries: Vec::with_capacity(64),
+            }),
         }
     }
 
     /// Reserve an LSN range of `bytes.len()` bytes and push onto the
     /// queue. Returns the commit LSN (end of reserved range), which
-    /// the caller passes to `wait_until_durable`.
+    /// the caller passes to `wait_until_durable`. LSN assignment and
+    /// push happen under the same mutex — no gap for the drain loop
+    /// to busy-spin on.
     fn enqueue(&self, bytes: Vec<u8>) -> u64 {
         let len = bytes.len() as u64;
-        let start_lsn = self.next_lsn.fetch_add(len, Ordering::AcqRel);
-        self.pending.lock().push((start_lsn, bytes));
+        let mut state = self.pending.lock();
+        let start_lsn = state.next_lsn;
+        state.next_lsn = start_lsn + len;
+        state.entries.push((start_lsn, bytes));
         start_lsn + len
     }
 
@@ -224,24 +248,17 @@ impl WalAppendQueue {
     /// file mutex while writing the drained bytes so the on-disk
     /// layout matches the reserved LSN offsets.
     fn drain_sorted(&self) -> Vec<(u64, Vec<u8>)> {
-        let mut v = std::mem::take(&mut *self.pending.lock());
+        let mut state = self.pending.lock();
+        let mut v = std::mem::take(&mut state.entries);
+        drop(state);
         v.sort_by_key(|(lsn, _)| *lsn);
         v
     }
 
-    /// Push un-writable tail back onto the queue. The leader uses this
-    /// when `drain_sorted` contains a gap (an enqueuer reserved LSN
-    /// bytes via `fetch_add` but hasn't pushed yet). Those entries must
-    /// wait for the missing prefix rather than be discarded.
-    fn requeue(&self, items: Vec<(u64, Vec<u8>)>) {
-        if items.is_empty() {
-            return;
-        }
-        self.pending.lock().extend(items);
-    }
-
-    fn reserved_lsn(&self) -> u64 {
-        self.next_lsn.load(Ordering::Acquire)
+    /// Whether any entry is queued. Leader uses this to decide
+    /// whether to spin once more or go back to the condvar.
+    fn has_pending(&self) -> bool {
+        !self.pending.lock().entries.is_empty()
     }
 }
 
@@ -558,40 +575,21 @@ impl StoreCommitCoordinator {
                 guard.pending_target_lsn
             };
 
-            // PHASE 1 — drain pending byte batches from the lock-free
-            // queue. Writers can keep enqueuing during this (the
-            // queue uses its own mutex) so we don't stall them on the
-            // WAL file lock.
-            let mut batches = queue.drain_sorted();
+            // Drain all queued entries. Since `WalAppendQueue::enqueue`
+            // assigns LSN and pushes under a single mutex, the drained
+            // tuples are guaranteed to form a contiguous byte range
+            // starting at `wal.current_lsn()` — no gaps, no leftover
+            // handling.
+            let batches = queue.drain_sorted();
 
-            // PHASE 2 — write the contiguous LSN prefix starting at
-            // `wal.current_lsn()`. If there's a gap (a writer
-            // reserved bytes but hasn't pushed yet) we keep the
-            // written prefix, fsync it, and push the unwritable
-            // suffix back onto the queue so the next iteration can
-            // reassemble it once the missing enqueuer lands.
             let sync_result = {
                 let mut wal = wal.lock();
-                let mut last_write_lsn = wal.current_lsn();
                 let mut write_err: Option<io::Error> = None;
-                let mut leftover: Vec<(u64, Vec<u8>)> = Vec::new();
-                let mut iter = batches.drain(..);
-                for (lsn, bytes) in iter.by_ref() {
-                    if lsn != last_write_lsn {
-                        // Gap: keep this and everything after for next drain.
-                        leftover.push((lsn, bytes));
-                        break;
-                    }
+                for (_lsn, bytes) in batches {
                     if let Err(e) = wal.append_bytes(&bytes) {
                         write_err = Some(e);
-                        leftover.push((lsn, bytes));
                         break;
                     }
-                    last_write_lsn = wal.current_lsn();
-                }
-                leftover.extend(iter);
-                if !leftover.is_empty() {
-                    queue.requeue(leftover);
                 }
                 match write_err {
                     Some(e) => Err(e),
@@ -599,18 +597,17 @@ impl StoreCommitCoordinator {
                 }
             };
 
-            // Did the drained prefix cover the caller's target? If
-            // bytes remain in the queue (e.g. gap suffix, or a late
-            // enqueuer pushed after we drained), we must NOT bump
-            // `durable_lsn` past what actually hit disk — that would
-            // wake waiters whose bytes haven't been fsynced yet.
-            let had_pending = queue.pending.lock().len() > 0;
+            // Late enqueuers that arrived after our drain stay in the
+            // queue — don't clear the `pending_*` counters yet and
+            // don't claim we reached `target_lsn` unless the fsync
+            // actually covers it.
+            let more_pending = queue.has_pending();
 
             let mut guard = state_lock.lock();
             match sync_result {
                 Ok(durable_lsn) => {
                     guard.durable_lsn = durable_lsn;
-                    if !had_pending {
+                    if !more_pending {
                         guard.pending_statements = 0;
                         guard.pending_wal_bytes = 0;
                         guard.first_pending_at = None;
@@ -623,14 +620,6 @@ impl StoreCommitCoordinator {
                 }
             }
             cond.notify_all();
-            // If there's still pending work (gap suffix or late
-            // arrivals) loop again immediately without waiting on the
-            // condvar — the bytes are there, just need one more pass.
-            if had_pending {
-                drop(guard);
-                std::thread::yield_now();
-                continue;
-            }
         }
     }
 }
