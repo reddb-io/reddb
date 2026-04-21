@@ -121,7 +121,25 @@ where
 {
     let mut header_buf = [0u8; 5]; // 4 bytes len + 1 byte msg_type
 
+    // Per-connection timing aggregation. Flushed every 500 requests
+    // when REDDB_WIRE_TIMING=1 is set (bench mode only). Zero overhead
+    // when the env flag is absent — we don't even sample.
+    let trace = matches!(
+        std::env::var("REDDB_WIRE_TIMING").ok().as_deref(),
+        Some("1") | Some("true") | Some("on")
+    );
+    let mut trace_count: u64 = 0;
+    let mut trace_read_ns: u64 = 0;
+    let mut trace_process_ns: u64 = 0;
+    let mut trace_write_ns: u64 = 0;
+
     loop {
+        let t_read = if trace {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+
         // Read frame header
         match stream.read_exact(&mut header_buf).await {
             Ok(_) => {}
@@ -141,6 +159,16 @@ where
             stream.read_exact(&mut payload).await?;
         }
 
+        if let Some(t) = t_read {
+            trace_read_ns += t.elapsed().as_nanos() as u64;
+        }
+
+        let t_proc = if trace {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+
         // Process message
         let response = match msg_type {
             MSG_QUERY => handle_query(&runtime, &payload),
@@ -159,8 +187,35 @@ where
             }
         };
 
+        if let Some(t) = t_proc {
+            trace_process_ns += t.elapsed().as_nanos() as u64;
+        }
+
+        let t_write = if trace {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+
         // Send response
         stream.write_all(&response).await?;
+
+        if let Some(t) = t_write {
+            trace_write_ns += t.elapsed().as_nanos() as u64;
+        }
+
+        if trace {
+            trace_count += 1;
+            if trace_count % 500 == 0 {
+                eprintln!(
+                    "[wire-timing] requests={} avg_read_us={} avg_process_us={} avg_write_us={}",
+                    trace_count,
+                    trace_read_ns / trace_count / 1000,
+                    trace_process_ns / trace_count / 1000,
+                    trace_write_ns / trace_count / 1000,
+                );
+            }
+        }
     }
 }
 
