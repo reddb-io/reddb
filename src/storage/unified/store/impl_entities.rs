@@ -527,16 +527,19 @@ impl UnifiedStore {
             }
         }
 
+        // Fold 25k per-entity `UpsertEntityRecord` actions into one
+        // `BulkUpsertEntityRecords` — same on-disk semantics (replay
+        // applies each record by id), one `WalRecord::PageWrite`
+        // instead of N, and `record.clone()` drops out because we
+        // consume `serialized`.
         let actions = serialized
-            .as_ref()
             .map(|batch| {
-                batch
-                    .iter()
-                    .map(|(_key, record)| StoreWalAction::UpsertEntityRecord {
-                        collection: collection.to_string(),
-                        record: record.clone(),
-                    })
-                    .collect::<Vec<_>>()
+                let records: Vec<Vec<u8>> =
+                    batch.into_iter().map(|(_key, record)| record).collect();
+                vec![StoreWalAction::BulkUpsertEntityRecords {
+                    collection: collection.to_string(),
+                    records,
+                }]
             })
             .unwrap_or_default();
         self.finish_paged_write(actions)?;
