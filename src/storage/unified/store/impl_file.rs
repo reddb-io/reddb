@@ -19,6 +19,13 @@ impl UnifiedStore {
         EntityId::new(self.next_entity_id.fetch_add(1, Ordering::SeqCst))
     }
 
+    /// Reserve `n` contiguous global entity IDs with one fetch_add.
+    /// Caller assigns `id = EntityId::new(start + i)` per entity.
+    pub fn reserve_entity_ids(&self, n: u64) -> std::ops::Range<u64> {
+        let start = self.next_entity_id.fetch_add(n, Ordering::SeqCst);
+        start..start + n
+    }
+
     pub(crate) fn register_entity_id(&self, id: EntityId) {
         let candidate = id.raw().saturating_add(1);
         let mut current = self.next_entity_id.load(Ordering::SeqCst);

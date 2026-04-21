@@ -152,6 +152,21 @@ impl<'rt> MutationEngine<'rt> {
         // the visibility checker treats as "always visible" (pre-MVCC).
         let current_xid = self.runtime.current_xid();
 
+        // If this collection has no context index enabled AND no row
+        // carries node/vector links, the per-row `store.get(id)` in the
+        // post-write maintenance loop below is wasted work — both
+        // downstream indexers would no-op on the entity. Hoisting this
+        // check out of the loop lets us skip N lookups on the default
+        // OLTP insert path.
+        let ci_enabled = self
+            .store
+            .context_index()
+            .is_collection_enabled(&collection);
+        let any_xrefs = rows
+            .iter()
+            .any(|r| !r.node_links.is_empty() || !r.vector_links.is_empty());
+        let needs_entity_fetch = ci_enabled || any_xrefs;
+
         for row in rows {
             field_snapshots.push(row.fields.clone());
             metadata_batch.push(row.metadata);
@@ -193,12 +208,21 @@ impl<'rt> MutationEngine<'rt> {
             }
 
             // Context index + cross-refs (still per-row; these APIs
-            // don't expose a batch form yet).
-            if let Some(entity) = self.store.get(&collection, id) {
-                self.store
-                    .context_index()
-                    .index_entity(&collection, &entity);
-                let _ = self.store.index_cross_refs(&entity, &collection);
+            // don't expose a batch form yet). Skip the lookup entirely
+            // when the hoisted check says neither path has work to do —
+            // the default OLTP insert_bulk shape (no links, no context
+            // index) avoids N `store.get` walks this way.
+            if needs_entity_fetch {
+                if let Some(entity) = self.store.get(&collection, id) {
+                    if ci_enabled {
+                        self.store
+                            .context_index()
+                            .index_entity(&collection, &entity);
+                    }
+                    if any_xrefs {
+                        let _ = self.store.index_cross_refs(&entity, &collection);
+                    }
+                }
             }
         }
 

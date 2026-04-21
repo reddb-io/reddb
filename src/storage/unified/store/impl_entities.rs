@@ -391,21 +391,49 @@ impl UnifiedStore {
         let manager = self.get_or_create_collection(collection);
         let t_get_coll = t_start.elapsed();
 
-        // Assign IDs and per-table row_ids before serialization. Bulk insert
-        // must follow the same global ID semantics as insert()/insert_auto().
-        // `insert()`/`insert_auto()` already do this, but bulk_insert
-        // needs the same guarantee or SQL/system fields like `row_id`
-        // remain zero in the segment + serialized B-tree image.
+        // Assign IDs and per-table row_ids before serialization. Bulk
+        // insert must follow the same global ID semantics as
+        // insert()/insert_auto(). Reserve ID ranges in single fetch_add
+        // calls instead of one-per-entity. The overwhelming common case
+        // is "every entity comes in with id==0 and kind==TableRow with
+        // row_id==0" (the wire bulk insert path). Any entity that
+        // already carries an id or row_id falls back to the individual
+        // register_* path to preserve those semantics exactly.
         let t0 = std::time::Instant::now();
+        let n_missing_entity_ids = entities.iter().filter(|e| e.id.raw() == 0).count() as u64;
+        let n_missing_row_ids = entities
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.kind,
+                    EntityKind::TableRow { row_id: 0, .. }
+                )
+            })
+            .count() as u64;
+        let mut entity_id_range = if n_missing_entity_ids > 0 {
+            self.reserve_entity_ids(n_missing_entity_ids)
+        } else {
+            0..0
+        };
+        let mut row_id_range = if n_missing_row_ids > 0 {
+            manager.reserve_row_ids(n_missing_row_ids)
+        } else {
+            0..0
+        };
         for entity in &mut entities {
             if entity.id.raw() == 0 {
-                entity.id = self.next_entity_id();
+                let next = entity_id_range
+                    .next()
+                    .expect("reserved entity-id range exhausted");
+                entity.id = EntityId::new(next);
             } else {
                 self.register_entity_id(entity.id);
             }
             if let EntityKind::TableRow { ref mut row_id, .. } = entity.kind {
                 if *row_id == 0 {
-                    *row_id = manager.next_row_id();
+                    *row_id = row_id_range
+                        .next()
+                        .expect("reserved row-id range exhausted");
                 } else {
                     manager.register_row_id(*row_id);
                 }
@@ -425,21 +453,27 @@ impl UnifiedStore {
             })
             .collect();
 
-        // Pre-serialize for B-tree while we still have references
+        // Pre-serialize for B-tree while we still have references.
+        // `serialize_entity_record` is pure; with `n >= 1024` the
+        // rayon dispatch cost is amortised and the 16-core serialize
+        // fan-out becomes the biggest single win on insert_bulk. For
+        // smaller batches, stay serial — micro-batches pay more in
+        // work-stealing overhead than they save.
         let t0 = std::time::Instant::now();
         let serialized: Option<Vec<(Vec<u8>, Vec<u8>)>> = if self.pager.is_some() {
             let fv = self.format_version();
-            Some(
-                entities
-                    .iter()
-                    .map(|e| {
-                        (
-                            e.id.raw().to_be_bytes().to_vec(),
-                            Self::serialize_entity_record(e, None, fv),
-                        )
-                    })
-                    .collect(),
-            )
+            let serial_map = |e: &UnifiedEntity| {
+                (
+                    e.id.raw().to_be_bytes().to_vec(),
+                    Self::serialize_entity_record(e, None, fv),
+                )
+            };
+            if entities.len() >= 1024 {
+                use rayon::prelude::*;
+                Some(entities.par_iter().map(serial_map).collect())
+            } else {
+                Some(entities.iter().map(serial_map).collect())
+            }
         } else {
             None
         };

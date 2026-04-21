@@ -203,6 +203,14 @@ impl SegmentManager {
         self.next_row_id.fetch_add(1, Ordering::SeqCst)
     }
 
+    /// Reserve `n` contiguous per-table row IDs with one atomic
+    /// fetch_add. Caller assigns `row_id = start + i` per entity.
+    /// Saves N-1 atomic RMWs on bulk inserts (25k atomics → 1).
+    pub fn reserve_row_ids(&self, n: u64) -> std::ops::Range<u64> {
+        let start = self.next_row_id.fetch_add(n, Ordering::SeqCst);
+        start..start + n
+    }
+
     /// Advance the per-table row_id counter to at least `id + 1`.
     /// Called during load to restore the counter from existing data.
     pub fn register_row_id(&self, id: u64) {

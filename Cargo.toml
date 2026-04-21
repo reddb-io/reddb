@@ -41,6 +41,7 @@ prost = "0.13"
 ureq = { version = "2.10", default-features = false, features = ["tls"] }
 roaring = "0.10"
 parking_lot = "0.12"
+rayon = "1.10"
 rstar = "0.12"
 regex = "1"
 fs2 = "0.4"
