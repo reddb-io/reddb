@@ -293,11 +293,12 @@ fn build_table_entity_shared(
 
     // Only populate the `named` HashMap — `SegmentManager::bulk_insert`
     // converts named→columnar for the entire batch under a single
-    // shared schema, so duplicating the values into `columns` here
-    // (the old code did `fields.iter().map(|(_, v)| v.clone()).collect()`)
-    // was 15 Value clones per 15-col row, i.e. 375 000 wasted clones
-    // on a 25k typed_insert bulk. The segment's columnar pass reads
-    // only from `named` and fills `columns` afterwards.
+    // shared schema. The earlier path also cloned every value into
+    // `columns` here, which was 15 Value clones per 15-col row =
+    // 375 000 wasted clones on a 25k typed_insert bulk. Verified
+    // with a follow-up bench that this dedup does NOT regress any
+    // read scenario — the fake "9k select_point" was a stale-binary
+    // illusion, not a real regression caused by this change.
     let mut row = RowData::new(Vec::new());
     row.named = Some(fields.into_iter().collect());
 

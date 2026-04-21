@@ -133,6 +133,17 @@ pub trait RuntimeEntityPort {
         &self,
         input: CreateRowsBatchInput,
     ) -> RedDBResult<usize>;
+    /// Columnar pre-validated bulk insert — the wire handler
+    /// decoded straight into `Vec<Vec<Value>>` + a shared column-
+    /// name vector, no per-cell `(String, Value)` tuples allocated.
+    /// Avoids ~N×ncols String clones vs the tuple path. The schema
+    /// is shared across every row as a single `Arc<Vec<String>>`.
+    fn create_rows_batch_prevalidated_columnar(
+        &self,
+        collection: String,
+        column_names: std::sync::Arc<Vec<String>>,
+        rows: Vec<Vec<crate::storage::schema::Value>>,
+    ) -> RedDBResult<usize>;
     fn create_node(&self, input: CreateNodeInput) -> RedDBResult<CreateEntityOutput>;
     fn create_edge(&self, input: CreateEdgeInput) -> RedDBResult<CreateEntityOutput>;
     fn create_vector(&self, input: CreateVectorInput) -> RedDBResult<CreateEntityOutput>;

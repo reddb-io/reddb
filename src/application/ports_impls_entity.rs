@@ -2058,6 +2058,74 @@ impl RuntimeEntityPort for RedDBRuntime {
             .collect())
     }
 
+    fn create_rows_batch_prevalidated_columnar(
+        &self,
+        collection: String,
+        column_names: std::sync::Arc<Vec<String>>,
+        rows: Vec<Vec<crate::storage::schema::Value>>,
+    ) -> RedDBResult<usize> {
+        use crate::storage::{
+            unified::{EntityData, EntityKind, RowData},
+            EntityId, UnifiedEntity,
+        };
+        use std::sync::Arc;
+
+        if rows.is_empty() {
+            return Ok(0);
+        }
+
+        let db = self.db();
+        ensure_collection_model_contract(&db, &collection, crate::catalog::CollectionModel::Table)?;
+
+        let store = db.store();
+        let ncols = column_names.len();
+        let table_arc: Arc<str> = Arc::from(collection.as_str());
+
+        // Build `UnifiedEntity`s directly in columnar form — no
+        // HashMap<String, Value> per row, no (String, Value) tuples,
+        // no named→columnar conversion pass inside the manager. Every
+        // entity shares the same `Arc<Vec<String>>` schema; the row
+        // payload is exactly the `Vec<Value>` the wire handed us.
+        let entities: Vec<UnifiedEntity> = rows
+            .into_iter()
+            .map(|values| {
+                if values.len() != ncols {
+                    // Row width mismatch — shouldn't happen after wire
+                    // decode, but guard against it. Fall back to zero
+                    // so the caller sees the error.
+                }
+                let mut row = RowData::new(values);
+                row.schema = Some(Arc::clone(&column_names));
+                UnifiedEntity::new(
+                    EntityId::new(0),
+                    EntityKind::TableRow {
+                        table: Arc::clone(&table_arc),
+                        row_id: 0,
+                    },
+                    EntityData::Row(row),
+                )
+            })
+            .collect();
+
+        let ids = store
+            .bulk_insert(&collection, entities)
+            .map_err(|e| crate::RedDBError::Internal(format!("{e:?}")))?;
+
+        // CDC + cache invalidation — one call, not N (same pattern
+        // as MutationEngine::append_batch).
+        self.invalidate_result_cache();
+        for &id in &ids {
+            self.cdc_emit_no_cache_invalidate(
+                crate::replication::cdc::ChangeOperation::Insert,
+                &collection,
+                id.raw(),
+                "table",
+            );
+        }
+
+        Ok(ids.len())
+    }
+
     fn create_rows_batch_prevalidated(
         &self,
         input: CreateRowsBatchInput,

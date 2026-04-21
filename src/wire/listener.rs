@@ -787,33 +787,24 @@ fn handle_bulk_insert_binary_prevalidated(runtime: &RedDBRuntime, payload: &[u8]
         Err(msg) => return make_error(msg.as_bytes()),
     };
 
-    let mut rows = Vec::with_capacity(nrows);
+    // Columnar decode: one `Vec<Value>` per row, one shared
+    // `Arc<Vec<String>>` for the schema. Skips the N × ncols
+    // String clones + HashMap builds the tuple-based path did.
+    let schema = std::sync::Arc::new(col_names);
+    let mut rows: Vec<Vec<crate::storage::schema::Value>> = Vec::with_capacity(nrows);
     for _ in 0..nrows {
-        let mut fields = Vec::with_capacity(ncols);
+        let mut values = Vec::with_capacity(ncols);
         for _ in 0..ncols {
             let value = match try_decode_value(payload, &mut pos) {
-                Ok(value) => value,
+                Ok(v) => v,
                 Err(err) => return make_error(format!("prevalidated: {err}").as_bytes()),
             };
-            let field_name = col_names
-                .get(fields.len())
-                .cloned()
-                .unwrap_or_else(|| format!("col_{}", fields.len()));
-            fields.push((field_name, value));
+            values.push(value);
         }
-        rows.push(crate::application::CreateRowInput {
-            collection: collection.clone(),
-            fields,
-            metadata: Vec::new(),
-            node_links: Vec::new(),
-            vector_links: Vec::new(),
-        });
+        rows.push(values);
     }
 
-    match runtime.create_rows_batch_prevalidated(crate::application::CreateRowsBatchInput {
-        collection,
-        rows,
-    }) {
+    match runtime.create_rows_batch_prevalidated_columnar(collection, schema, rows) {
         Ok(count) => {
             let mut resp = Vec::with_capacity(13);
             write_frame_header(&mut resp, MSG_BULK_OK, 8);
