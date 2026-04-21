@@ -368,6 +368,14 @@ impl BTree {
             .map(|(k, v)| (k.as_slice(), v.as_slice()))
             .collect();
 
+        // After a filled leaf is written to disk, the next ascending
+        // key almost certainly belongs on the right-sibling leaf
+        // (leaves are linked via `leaf_right_sibling`). Cache the
+        // just-written leaf id so the next outer iteration can hop
+        // the sibling pointer in one page read instead of a full
+        // root-to-leaf walk. Any fallback to `self.insert` (which
+        // may split the tree) invalidates the hint.
+        let mut last_filled_leaf: Option<u32> = None;
         let mut i = 0;
         while i < items.len() {
             let root_id = self.root_page_id();
@@ -376,11 +384,36 @@ impl BTree {
                 let (k, v) = items[i];
                 self.insert(k, v)?;
                 i += 1;
+                last_filled_leaf = None;
                 continue;
             }
 
-            // Walk to the leaf for the current key, load once.
-            let (leaf_id, _path) = self.find_leaf(root_id, items[i].0)?;
+            // Try the right-sibling hop first. Valid when: (a) we have
+            // a cached last-filled leaf, (b) it points to a non-zero
+            // sibling, (c) the current key > sibling's last key (or
+            // the sibling is empty). Any mismatch → fall back to
+            // `find_leaf`.
+            let hint_leaf_id: Option<u32> = if let Some(prev) = last_filled_leaf {
+                let prev_page = self.pager.read_page(prev)?;
+                let sibling = leaf_right_sibling(&prev_page);
+                if sibling != 0 {
+                    let sib_page = self.pager.read_page(sibling)?;
+                    match leaf_high_key(&sib_page)? {
+                        None => Some(sibling), // empty sibling — free real estate
+                        Some(hk) if items[i].0 > hk.as_slice() => Some(sibling),
+                        Some(_) => None,
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let (leaf_id, _path) = match hint_leaf_id {
+                Some(id) => (id, Vec::new()),
+                None => self.find_leaf(root_id, items[i].0)?,
+            };
             let mut page = self.pager.read_page(leaf_id)?;
 
             // Snapshot the leaf's last key (via the O(1) slot lookup)
@@ -463,15 +496,20 @@ impl BTree {
                 page.update_checksum();
                 self.pager.write_page(leaf_id, page)?;
                 i += inserted;
+                // Remember this leaf; the next outer iteration will
+                // try its right sibling before re-walking from root.
+                last_filled_leaf = Some(leaf_id);
             } else {
                 // Couldn't fit even one entry via the fast path —
                 // either the leaf is full, or the next key belongs
                 // in the middle of the leaf. Delegate to the generic
                 // insert path which handles both splitting and
-                // mid-leaf positioning.
+                // mid-leaf positioning. Splits can invalidate the
+                // leaf-chain topology so drop the hint.
                 let (k, v) = items[i];
                 self.insert(k, v)?;
                 i += 1;
+                last_filled_leaf = None;
             }
         }
 
