@@ -328,22 +328,42 @@ pub(crate) fn execute_aggregate_query(
             Vec::new()
         };
 
-        // Spill to disk when adding a *new* key would exceed the local cap.
-        // Existing keys are always allowed (they don't grow the entry count).
-        if !groups.contains_key(&group_key) && groups.len() >= max_groups {
-            let batch = std::mem::take(&mut groups);
-            for (k, v) in batch {
-                if let Err(e) = spill_agg.accumulate(k, v) {
-                    spill_err = Some(format!("agg spill error: {e}"));
-                    return false; // stop iteration
+        // One-probe entry dispatch. The old code did `contains_key`
+        // (hash probe #1) + `entry()` (hash probe #2) on every row —
+        // doubling the HashMap cost on the hot aggregate hit path.
+        // Now: one probe, one match; the spill check only runs for
+        // Vacant entries and only when the map is already at cap.
+        use std::collections::hash_map::Entry;
+        let need_spill_check = groups.len() >= max_groups;
+        let group = match groups.entry(group_key) {
+            Entry::Occupied(occ) => occ.into_mut(),
+            Entry::Vacant(vac) => {
+                if need_spill_check {
+                    // Re-extract the key (consumed by the insert) and
+                    // flush every existing group to the spill file,
+                    // then start a fresh in-memory batch holding this
+                    // new group.
+                    let fresh_key = vac.key().clone();
+                    drop(vac);
+                    let batch = std::mem::take(&mut groups);
+                    for (k, v) in batch {
+                        if let Err(e) = spill_agg.accumulate(k, v) {
+                            spill_err = Some(format!("agg spill error: {e}"));
+                            return false; // stop iteration
+                        }
+                    }
+                    groups.entry(fresh_key).or_insert_with(|| AggregateGroup {
+                        group_values: group_values.clone(),
+                        state: SlottedAggState::new(&agg_plan),
+                    })
+                } else {
+                    vac.insert(AggregateGroup {
+                        group_values: group_values.clone(),
+                        state: SlottedAggState::new(&agg_plan),
+                    })
                 }
             }
-        }
-
-        let group = groups.entry(group_key).or_insert_with(|| AggregateGroup {
-            group_values: group_values.clone(),
-            state: SlottedAggState::new(&agg_plan),
-        });
+        };
         let state = &mut group.state;
         state.count += 1;
 
