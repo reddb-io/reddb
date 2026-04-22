@@ -382,6 +382,33 @@ impl RedDBRuntime {
             })?;
             inserted_count = outputs.len() as u64;
 
+            // Hypertable chunk routing: if this table was declared via
+            // CREATE HYPERTABLE, register each row's time-column value
+            // with the registry so chunk metadata (bounds, row counts,
+            // TTL eligibility) stays current. This is what lets
+            // HYPERTABLE_PRUNE_CHUNKS answer real questions + lets the
+            // retention daemon sweep expired chunks without scanning
+            // every row.
+            if let Some(spec) = self.inner.db.hypertables().get(&query.table) {
+                let time_col = &spec.time_column;
+                // Find the column's index in the INSERT column list.
+                if let Some(idx) = query.columns.iter().position(|c| c == time_col) {
+                    for row in &effective_rows {
+                        if let Some(Value::Integer(n) | Value::BigInt(n)) = row.get(idx) {
+                            if *n >= 0 {
+                                let _ = self
+                                    .inner
+                                    .db
+                                    .hypertables()
+                                    .route(&query.table, *n as u64);
+                            }
+                        } else if let Some(Value::UnsignedInteger(n)) = row.get(idx) {
+                            let _ = self.inner.db.hypertables().route(&query.table, *n);
+                        }
+                    }
+                }
+            }
+
             if let (Some(items), Some(snaps)) =
                 (query.returning.as_ref(), returning_snapshots.take())
             {

@@ -42,9 +42,19 @@ impl RedDBRuntime {
                 .db
                 .set_collection_default_ttl_ms(&query.name, ttl_ms);
         }
+        // CREATE HYPERTABLE declares the collection as a Table so
+        // INSERT goes through the row path (which now includes
+        // automatic chunk routing). Plain CREATE TIMESERIES keeps
+        // the native TimeSeries contract with its metric/value/tags
+        // column convention.
+        let contract = if query.hypertable.is_some() {
+            hypertable_collection_contract(query)
+        } else {
+            timeseries_collection_contract(query)
+        };
         self.inner
             .db
-            .save_collection_contract(timeseries_collection_contract(query))
+            .save_collection_contract(contract)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         save_timeseries_metadata(store.as_ref(), query)?;
 
@@ -213,6 +223,35 @@ fn remove_timeseries_metadata(store: &crate::storage::unified::UnifiedStore, ser
     });
     for row in rows {
         let _ = store.delete(TIMESERIES_META_COLLECTION, row.id);
+    }
+}
+
+fn hypertable_collection_contract(
+    query: &CreateTimeSeriesQuery,
+) -> crate::physical::CollectionContract {
+    let now = current_unix_ms();
+    crate::physical::CollectionContract {
+        name: query.name.clone(),
+        // Table model — rows go through the normal INSERT path,
+        // which now calls HypertableRegistry::route after each row
+        // lands. Hypertable-specific behaviour (chunk bounds, TTL
+        // sweeps) lives on the registry, not the contract.
+        declared_model: crate::catalog::CollectionModel::Table,
+        schema_mode: crate::catalog::SchemaMode::SemiStructured,
+        origin: crate::physical::ContractOrigin::Explicit,
+        version: 1,
+        created_at_unix_ms: now,
+        updated_at_unix_ms: now,
+        default_ttl_ms: query.retention_ms,
+        context_index_fields: Vec::new(),
+        declared_columns: Vec::new(),
+        table_def: None,
+        timestamps_enabled: false,
+        context_index_enabled: false,
+        // Hypertable data is conceptually immutable once the chunk
+        // seals. Reject UPDATE / DELETE at parse time and give the
+        // operator a clear message instead of silent coalescing.
+        append_only: true,
     }
 }
 

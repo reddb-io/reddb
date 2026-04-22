@@ -108,6 +108,83 @@ fn prune_narrow_window_keeps_nothing() {
 }
 
 #[test]
+fn prune_after_real_inserts_returns_expected_chunk() {
+    // End-to-end: CREATE HYPERTABLE, INSERT rows via SQL (routing
+    // happens automatically in execute_insert), then consult the
+    // pruner over SQL and verify only the overlapping chunk lands.
+    let rt = rt();
+    let q = QueryUseCases::new(&rt);
+    q.execute(ExecuteQueryInput {
+        query: "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1h'".into(),
+    })
+    .expect("create ok");
+
+    for hour in 0..3u64 {
+        q.execute(ExecuteQueryInput {
+            query: format!(
+                "INSERT INTO metrics (ts, load) VALUES ({}, {}.0)",
+                hour * HOUR_NS,
+                hour + 1
+            ),
+        })
+        .expect("insert");
+    }
+
+    let r = q
+        .execute(ExecuteQueryInput {
+            query: format!(
+                "SELECT HYPERTABLE_PRUNE_CHUNKS('metrics', {lo}, {hi}) AS kept",
+                lo = HOUR_NS,
+                hi = 2 * HOUR_NS,
+            ),
+        })
+        .expect("ok");
+    let kept = r.result.records[0].values.get("kept").expect("kept");
+    match kept {
+        Value::Array(v) => assert_eq!(v.len(), 1, "one overlapping chunk, got {v:?}"),
+        other => panic!("expected Array, got {other:?}"),
+    }
+}
+
+#[test]
+fn insert_routes_rows_into_chunks_automatically() {
+    // Proves the INSERT-time routing hook: new hypertable, insert
+    // rows at three different hours, verify three chunks exist
+    // without touching HypertableRegistry::route directly.
+    let rt = rt();
+    let q = QueryUseCases::new(&rt);
+    q.execute(ExecuteQueryInput {
+        query: "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1h'".into(),
+    })
+    .expect("create ok");
+
+    // Insert rows at ts = 0, ts = 1h, ts = 2h.
+    q.execute(ExecuteQueryInput {
+        query: "INSERT INTO metrics (ts, load) VALUES (0, 1.0)".into(),
+    })
+    .expect("ins1");
+    q.execute(ExecuteQueryInput {
+        query: format!("INSERT INTO metrics (ts, load) VALUES ({}, 2.0)", HOUR_NS),
+    })
+    .expect("ins2");
+    q.execute(ExecuteQueryInput {
+        query: format!(
+            "INSERT INTO metrics (ts, load) VALUES ({}, 3.0)",
+            2 * HOUR_NS
+        ),
+    })
+    .expect("ins3");
+
+    let db = rt.db();
+    let chunks = db.hypertables().show_chunks("metrics");
+    assert_eq!(
+        chunks.len(),
+        3,
+        "expected 3 chunks auto-allocated by INSERT, got {chunks:?}"
+    );
+}
+
+#[test]
 fn prune_unknown_hypertable_returns_null() {
     let rt = rt();
     let q = QueryUseCases::new(&rt);
