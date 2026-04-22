@@ -21,7 +21,6 @@ impl RedDBRuntime {
     ) -> RedDBResult<RuntimeQueryResult> {
         let store = self.inner.db.store();
         analyze_create_table(query).map_err(|err| RedDBError::Query(err.to_string()))?;
-
         // Check if the collection already exists.
         let exists = store.get_collection(&query.name).is_some();
         if exists {
@@ -41,12 +40,10 @@ impl RedDBRuntime {
         // Build and validate the contract before mutating storage so invalid
         // SQL types / duplicate columns do not leave partial side effects.
         let contract = collection_contract_from_create_table(query)?;
-
         // Create the collection.
         store
             .create_collection(&query.name)
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
-
         if let Some(default_ttl_ms) = query.default_ttl_ms {
             self.inner
                 .db
@@ -62,7 +59,6 @@ impl RedDBRuntime {
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         self.refresh_table_planner_stats(&query.name);
         self.invalidate_result_cache();
-
         // Partition metadata (Phase 2.2 PG parity).
         //
         // When the CREATE TABLE carries a `PARTITION BY RANGE|LIST|HASH (col)`

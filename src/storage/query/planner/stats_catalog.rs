@@ -85,7 +85,6 @@ pub(crate) fn analyze_entity_fields(
 pub(crate) fn persist_table_stats(store: &UnifiedStore, stats: &AnalyzedTableStats) {
     let _ = store.get_or_create_collection(STATS_COLLECTION);
     clear_existing_table_stats(store, &stats.table);
-
     insert_stats_row(
         store,
         vec![

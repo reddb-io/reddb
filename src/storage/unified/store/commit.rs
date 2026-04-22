@@ -273,6 +273,17 @@ impl WalAppendQueue {
     fn has_pending(&self) -> bool {
         !self.pending.lock().entries.is_empty()
     }
+
+    /// Reset the LSN cursor and discard any queued entries. Used
+    /// after `wal.truncate()` — the wal-side byte counter goes back
+    /// to the header size, so the queue (which tracks LSNs in the
+    /// same byte space) must follow or every subsequent enqueue
+    /// returns a target the drain loop can never reach.
+    fn reset(&self, next_lsn: u64) {
+        let mut state = self.pending.lock();
+        state.next_lsn = next_lsn;
+        state.entries.clear();
+    }
 }
 
 pub(crate) struct StoreCommitCoordinator {
@@ -430,7 +441,14 @@ impl StoreCommitCoordinator {
         let mut wal = self.wal.lock();
         wal.truncate()?;
         let durable = wal.durable_lsn();
+        let current = wal.current_lsn();
         drop(wal);
+
+        // Queue's next_lsn tracks byte offsets in the same space as
+        // wal.current_lsn. After truncate both must be reset together
+        // — otherwise enqueue returns a target_lsn in the old range
+        // that drain can never reach, and wait_until_durable hangs.
+        self.queue.reset(current);
 
         let (state_lock, cond) = &*self.state;
         let mut state = state_lock.lock();

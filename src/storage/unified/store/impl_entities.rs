@@ -624,10 +624,8 @@ impl UnifiedStore {
         } else {
             None
         };
-
         // Index into context index before consuming the entity
         self.context_index.index_entity(collection, &entity);
-
         let id = manager.insert(entity)?;
         // `register_entity_id` already advances the atomic counter on
         // the allocation path above (`self.next_entity_id()`), so the
@@ -639,7 +637,6 @@ impl UnifiedStore {
         if let Some(ref label) = graph_node_label {
             self.update_graph_label_index(collection, label, id);
         }
-
         // Fetch the persisted entity once and reuse across btree insert,
         // cross-ref indexing, and WAL-action construction. Previously this
         // path did 3× manager.get(id), each cloning the entity — ~62 samples
@@ -671,7 +668,6 @@ impl UnifiedStore {
                 registry_dirty = root_before != btree.root_page_id();
             }
         }
-
         if self.config.auto_index_refs {
             if let Some(entity) = persisted.as_ref() {
                 self.index_cross_refs(entity, collection)?;
@@ -698,7 +694,6 @@ impl UnifiedStore {
             }
             self.finish_paged_write(actions)?;
         }
-
         Ok(id)
     }
 
