@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::net::IpAddr;
+use std::sync::Arc;
 
 use super::Value;
 
@@ -71,7 +72,14 @@ pub enum CanonicalKey {
     Signed(CanonicalKeyFamily, i64),
     Unsigned(CanonicalKeyFamily, u64),
     Float(u64),
-    Text(CanonicalKeyFamily, String),
+    /// Text-kind values. `Arc<str>` instead of `String` so
+    /// `Value::Text(Arc<str>)` roundtrips free (Arc bump) rather than
+    /// allocating a new String per encode. Text-like variants built
+    /// from `String` (NodeRef, EdgeRef, Email, Url, TableRef,
+    /// Password) pay one Arc::from allocation at encode time — same
+    /// cost as the previous String clone. Net: GROUP BY over a
+    /// `TEXT` column stops paying N allocations per scan.
+    Text(CanonicalKeyFamily, Arc<str>),
     Bytes(CanonicalKeyFamily, Vec<u8>),
     PairTextU64(CanonicalKeyFamily, String, u64),
     PairTextText(CanonicalKeyFamily, String, String),
@@ -120,12 +128,12 @@ impl CanonicalKey {
             Self::Unsigned(CanonicalKeyFamily::PageRef, v) => Value::PageRef(v as u32),
             Self::Float(bits) => Value::Float(f64::from_bits(bits)),
             Self::Text(CanonicalKeyFamily::Text, v) => Value::text(v),
-            Self::Text(CanonicalKeyFamily::NodeRef, v) => Value::NodeRef(v),
-            Self::Text(CanonicalKeyFamily::EdgeRef, v) => Value::EdgeRef(v),
-            Self::Text(CanonicalKeyFamily::Email, v) => Value::Email(v),
-            Self::Text(CanonicalKeyFamily::Url, v) => Value::Url(v),
-            Self::Text(CanonicalKeyFamily::TableRef, v) => Value::TableRef(v),
-            Self::Text(CanonicalKeyFamily::Password, v) => Value::Password(v),
+            Self::Text(CanonicalKeyFamily::NodeRef, v) => Value::NodeRef(v.to_string()),
+            Self::Text(CanonicalKeyFamily::EdgeRef, v) => Value::EdgeRef(v.to_string()),
+            Self::Text(CanonicalKeyFamily::Email, v) => Value::Email(v.to_string()),
+            Self::Text(CanonicalKeyFamily::Url, v) => Value::Url(v.to_string()),
+            Self::Text(CanonicalKeyFamily::TableRef, v) => Value::TableRef(v.to_string()),
+            Self::Text(CanonicalKeyFamily::Password, v) => Value::Password(v.to_string()),
             Self::Bytes(CanonicalKeyFamily::Blob, v) => Value::Blob(v),
             Self::Bytes(CanonicalKeyFamily::MacAddr, v) => {
                 let mut out = [0u8; 6];
@@ -260,7 +268,7 @@ pub fn value_to_canonical_key(value: &Value) -> Option<CanonicalKey> {
         )),
         Value::Float(v) if v.is_finite() => Some(CanonicalKey::Float(v.to_bits())),
         Value::Float(_) => None,
-        Value::Text(v) => Some(CanonicalKey::Text(CanonicalKeyFamily::Text, v.to_string())),
+        Value::Text(v) => Some(CanonicalKey::Text(CanonicalKeyFamily::Text, v.clone())),
         Value::Blob(v) => Some(CanonicalKey::Bytes(CanonicalKeyFamily::Blob, v.clone())),
         Value::Boolean(v) => Some(CanonicalKey::Boolean(*v)),
         Value::Timestamp(v) => Some(CanonicalKey::Signed(CanonicalKeyFamily::Timestamp, *v)),
@@ -273,8 +281,14 @@ pub fn value_to_canonical_key(value: &Value) -> Option<CanonicalKey> {
         Value::Vector(_) => None,
         Value::Json(v) => Some(CanonicalKey::Bytes(CanonicalKeyFamily::Json, v.clone())),
         Value::Uuid(v) => Some(CanonicalKey::Bytes(CanonicalKeyFamily::Uuid, v.to_vec())),
-        Value::NodeRef(v) => Some(CanonicalKey::Text(CanonicalKeyFamily::NodeRef, v.clone())),
-        Value::EdgeRef(v) => Some(CanonicalKey::Text(CanonicalKeyFamily::EdgeRef, v.clone())),
+        Value::NodeRef(v) => Some(CanonicalKey::Text(
+            CanonicalKeyFamily::NodeRef,
+            Arc::from(v.as_str()),
+        )),
+        Value::EdgeRef(v) => Some(CanonicalKey::Text(
+            CanonicalKeyFamily::EdgeRef,
+            Arc::from(v.as_str()),
+        )),
         Value::VectorRef(collection, id) => Some(CanonicalKey::PairTextU64(
             CanonicalKeyFamily::VectorRef,
             collection.clone(),
@@ -286,8 +300,14 @@ pub fn value_to_canonical_key(value: &Value) -> Option<CanonicalKey> {
             *id,
         )),
         Value::Color(v) => Some(CanonicalKey::Bytes(CanonicalKeyFamily::Color, v.to_vec())),
-        Value::Email(v) => Some(CanonicalKey::Text(CanonicalKeyFamily::Email, v.clone())),
-        Value::Url(v) => Some(CanonicalKey::Text(CanonicalKeyFamily::Url, v.clone())),
+        Value::Email(v) => Some(CanonicalKey::Text(
+            CanonicalKeyFamily::Email,
+            Arc::from(v.as_str()),
+        )),
+        Value::Url(v) => Some(CanonicalKey::Text(
+            CanonicalKeyFamily::Url,
+            Arc::from(v.as_str()),
+        )),
         Value::Phone(v) => Some(CanonicalKey::Unsigned(CanonicalKeyFamily::Phone, *v)),
         Value::Semver(v) => Some(CanonicalKey::Unsigned(
             CanonicalKeyFamily::Semver,
@@ -348,7 +368,10 @@ pub fn value_to_canonical_key(value: &Value) -> Option<CanonicalKey> {
             CanonicalKeyFamily::Currency,
             v.to_vec(),
         )),
-        Value::AssetCode(v) => Some(CanonicalKey::Text(CanonicalKeyFamily::Text, v.clone())),
+        Value::AssetCode(v) => Some(CanonicalKey::Text(
+            CanonicalKeyFamily::Text,
+            Arc::from(v.as_str()),
+        )),
         Value::Money { .. } => None,
         Value::ColorAlpha(v) => Some(CanonicalKey::Bytes(
             CanonicalKeyFamily::ColorAlpha,
@@ -365,13 +388,19 @@ pub fn value_to_canonical_key(value: &Value) -> Option<CanonicalKey> {
             collection.clone(),
             *id,
         )),
-        Value::TableRef(v) => Some(CanonicalKey::Text(CanonicalKeyFamily::TableRef, v.clone())),
+        Value::TableRef(v) => Some(CanonicalKey::Text(
+            CanonicalKeyFamily::TableRef,
+            Arc::from(v.as_str()),
+        )),
         Value::PageRef(v) => Some(CanonicalKey::Unsigned(
             CanonicalKeyFamily::PageRef,
             *v as u64,
         )),
         Value::Secret(_) => None,
-        Value::Password(v) => Some(CanonicalKey::Text(CanonicalKeyFamily::Password, v.clone())),
+        Value::Password(v) => Some(CanonicalKey::Text(
+            CanonicalKeyFamily::Password,
+            Arc::from(v.as_str()),
+        )),
     }
 }
 

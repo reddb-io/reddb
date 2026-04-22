@@ -2136,10 +2136,8 @@ mod agg_spill_codec {
             }
             5 => {
                 let family = tag_to_family(r_u8(r).map_err(SpillError::Io)?)?;
-                Ok(CanonicalKey::Text(
-                    family,
-                    r_str(r).map_err(SpillError::Io)?,
-                ))
+                let s = r_str(r).map_err(SpillError::Io)?;
+                Ok(CanonicalKey::Text(family, std::sync::Arc::from(s.as_str())))
             }
             6 => {
                 let family = tag_to_family(r_u8(r).map_err(SpillError::Io)?)?;
