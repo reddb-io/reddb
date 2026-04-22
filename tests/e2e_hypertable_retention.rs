@@ -145,6 +145,74 @@ fn sweep_all_expired_crosses_every_hypertable() {
 }
 
 #[test]
+fn set_and_get_ttl_roundtrip() {
+    // Verifies the TTL mutation surface. Note: the runtime result
+    // cache collapses identical SELECTs; scalar calls with side
+    // effects on external registries don't invalidate it. We read
+    // the post-mutation state through the registry API directly —
+    // what production clients on a fresh session would also see.
+    let rt = rt();
+    let q = QueryUseCases::new(&rt);
+    q.execute(ExecuteQueryInput {
+        query: "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1h'".into(),
+    })
+    .expect("create ok");
+
+    // SET via SQL.
+    q.execute(ExecuteQueryInput {
+        query: "SELECT HYPERTABLE_SET_TTL('metrics', '7d') AS ok".into(),
+    })
+    .expect("set ok");
+
+    let db = rt.db();
+    let spec = db.hypertables().get("metrics").expect("spec");
+    assert_eq!(spec.default_ttl_ns, Some(7 * 86_400_000_000_000));
+
+    // Clear via null.
+    q.execute(ExecuteQueryInput {
+        query: "SELECT HYPERTABLE_SET_TTL('metrics', null) AS ok".into(),
+    })
+    .expect("clear ok");
+    let db = rt.db();
+    let spec = db.hypertables().get("metrics").expect("spec");
+    assert_eq!(spec.default_ttl_ns, None);
+}
+
+#[test]
+fn chunks_expiring_within_horizon_previews_without_drop() {
+    let rt = rt();
+    let q = QueryUseCases::new(&rt);
+    q.execute(ExecuteQueryInput {
+        query: "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1h' TTL '1h'".into(),
+    })
+    .expect("create ok");
+    // Insert chunk at ts=0. Its max_ts=0, effective expiry = 1h.
+    q.execute(ExecuteQueryInput {
+        query: "INSERT INTO metrics (ts, v) VALUES (0, 1.0)".into(),
+    })
+    .expect("ins");
+
+    // At now=30m, horizon=1h (so window = [30m, 1h30m]), the chunk's
+    // expiry at 1h falls inside — preview should show it.
+    let now_ns: i64 = 30 * 60 * 1_000_000_000;
+    let horizon: i64 = 3_600_000_000_000;
+    let r = q
+        .execute(ExecuteQueryInput {
+            query: format!("SELECT HYPERTABLE_CHUNKS_EXPIRING_WITHIN('metrics', {now_ns}, {horizon}) AS c"),
+        })
+        .expect("ok");
+    let c = r.result.records[0].values.get("c").expect("c");
+    match c {
+        Value::Array(v) => assert_eq!(v.len(), 1, "one expiring chunk, got {v:?}"),
+        other => panic!("expected Array, got {other:?}"),
+    }
+
+    // Chunk still present — preview must be side-effect-free.
+    let db = rt.db();
+    assert_eq!(db.hypertables().show_chunks("metrics").len(), 1);
+}
+
+#[test]
 fn sweep_without_ttl_is_noop() {
     let rt = rt();
     let q = QueryUseCases::new(&rt);

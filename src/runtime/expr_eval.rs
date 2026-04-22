@@ -195,6 +195,9 @@ pub(super) fn evaluate_runtime_expr_with_db(
                     | "HYPERTABLE_SWEEP_EXPIRED"
                     | "HYPERTABLE_SHOW_CHUNKS"
                     | "HYPERTABLE_SWEEP_ALL_EXPIRED"
+                    | "HYPERTABLE_SET_TTL"
+                    | "HYPERTABLE_GET_TTL"
+                    | "HYPERTABLE_CHUNKS_EXPIRING_WITHIN"
             ) {
                 if let Some(db) = db {
                     return dispatch_hypertable_retention(db, &upper, &arg_values);
@@ -877,6 +880,46 @@ fn dispatch_hypertable_retention(db: &RedDB, name: &str, args: &[Value]) -> Opti
                 });
             let dropped = registry.sweep_expired(&ht_name, now_ns).len();
             Some(Value::Integer(dropped as i64))
+        }
+        "HYPERTABLE_SET_TTL" => {
+            // HYPERTABLE_SET_TTL(name, duration | null)
+            let ttl_ns = match args.get(1)? {
+                Value::Null => None,
+                Value::Text(s) => Some(
+                    crate::storage::timeseries::retention::parse_duration_ns(s)?,
+                ),
+                Value::Integer(n) | Value::BigInt(n) if *n >= 0 => Some(*n as u64),
+                Value::UnsignedInteger(n) => Some(*n),
+                _ => return Some(Value::Null),
+            };
+            Some(Value::Boolean(registry.set_default_ttl_ns(&ht_name, ttl_ns)))
+        }
+        "HYPERTABLE_GET_TTL" => {
+            let spec = registry.get(&ht_name)?;
+            Some(match spec.default_ttl_ns {
+                Some(n) => Value::Integer(n as i64),
+                None => Value::Null,
+            })
+        }
+        "HYPERTABLE_CHUNKS_EXPIRING_WITHIN" => {
+            // HYPERTABLE_CHUNKS_EXPIRING_WITHIN(name, now_ns, horizon_ns)
+            let now_ns = match args.get(1)? {
+                Value::Integer(n) | Value::BigInt(n) => *n as u64,
+                Value::UnsignedInteger(n) => *n,
+                _ => return Some(Value::Null),
+            };
+            let horizon_ns = match args.get(2)? {
+                Value::Integer(n) | Value::BigInt(n) => *n as u64,
+                Value::UnsignedInteger(n) => *n,
+                _ => return Some(Value::Null),
+            };
+            let expiring = registry.chunks_expiring_within(&ht_name, now_ns, horizon_ns);
+            Some(Value::Array(
+                expiring
+                    .into_iter()
+                    .map(|c| Value::text(format!("{}:{}", c.id.hypertable, c.id.start_ns)))
+                    .collect(),
+            ))
         }
         _ => None,
     }
