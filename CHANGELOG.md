@@ -2,6 +2,103 @@
 
 All notable changes to RedDB are documented here. Dates are ISO-8601 (UTC-3).
 
+## 2026-04-22 — AI-first SQL surface + hypertable pipeline
+
+Multi-sprint push to make the "AI-first multi-model" pitch
+defensible from a user SQL session. Everything below is callable
+without touching the Rust API — the engines (ML registry, semantic
+cache, hypertable registry, continuous aggregate engine) now have
+scalar-function entry points alongside the existing library code.
+
+### AI / ML scalars (Sprint 1)
+
+- `ML_CLASSIFY(model, features)` / `ML_PREDICT_PROBA(model, features)`
+  — evaluate a registered classifier (logreg / naive bayes) against
+  a feature vector or array. Returns class id or probability array.
+- `MODEL_REGISTER(name, kind, weights_json [, hyperparams, metrics])`
+  / `MODEL_DROP(name)` — lifecycle for pre-trained weights. Serving
+  pipelines can ship JSON straight to production and activate via
+  SQL.
+- `EMBED(text [, provider])` — call the AI provider stack (OpenAI,
+  Ollama, Groq, OpenRouter, Together, Venice, Deepseek, HuggingFace,
+  or any OpenAI-compatible endpoint) to embed a text; returns
+  `Vector`. `NULL` when provider / api-key not configured — fail-
+  closed so a probe doesn't crash a query.
+- `SEMANTIC_CACHE_GET(ns, embedding)` /
+  `SEMANTIC_CACHE_PUT(ns, prompt, response, embedding)` — cosine-
+  similarity cache for LLM responses. Shared `RedDB`-scoped instance
+  so the cache is reachable from every session.
+- `LIST_MODELS()` / `SHOW_MODELS()` — introspection.
+
+Documented end-to-end in `docs/guides/rag-in-20-lines.md`.
+
+### Hypertables (Sprint 2)
+
+- `CREATE HYPERTABLE name TIME_COLUMN col CHUNK_INTERVAL 'dur'
+   [TTL 'dur'] [RETENTION N DAYS]` — TimescaleDB-style DDL. Writes
+  a Table-model contract and registers a `HypertableSpec`.
+- `DROP HYPERTABLE name` — clears the registry entry and drops the
+  backing collection.
+- **INSERT-time chunk routing**: each row inserted into a hypertable
+  is routed through `HypertableRegistry::route` so chunks allocate
+  on demand and their bounds / row counts stay current without
+  manual bookkeeping.
+- `LIST_HYPERTABLES()` / `SHOW_HYPERTABLES()` — list registered names.
+- `HYPERTABLE_PRUNE_CHUNKS(name, lo_ns, hi_ns)` — consult the
+  partition pruner primitive over real allocated chunks. Returns
+  the chunk names overlapping `[lo, hi)`. Exposes what the planner
+  will consult before a scan.
+
+### Continuous aggregates (Sprint 2)
+
+Full end-to-end via scalars:
+
+- `CA_REGISTER(name, source, bucket_dur, alias, agg, field [, lag,
+   max_interval])` — single-column aggregate, any of
+  `avg/min/max/sum/count/first/last`.
+- `CA_REFRESH(name [, now_ns])` — scans the source collection for
+  rows in the next safe window (bounded by `refresh_lag` and
+  `max_interval_per_job`), folds them into bucket state.
+- `CA_QUERY(name, bucket_start_ns, alias)` — reads the aggregated
+  value from any bucket.
+- `CA_STATE(name)` / `CA_LIST()` / `CA_DROP(name)`.
+
+`CREATE CONTINUOUS AGGREGATE ... AS SELECT ... GROUP BY
+time_bucket()` DDL form stays "planned" — the scalar surface
+covers the hot path today.
+
+### Schema
+
+- `CREATE TABLE t(...) WITH (append_only = true)` now parses — the
+  parenthesised form `WITH (k = v, k = v)` works everywhere the
+  legacy `WITH k = v` shorthand does.
+
+### Fixes
+
+- `StoreCommitCoordinator::truncate` now resets both `wal.durable_lsn`
+  **and** `WalAppendQueue.next_lsn` together. The previous mismatch
+  hung post-checkpoint inserts — 16 `rpc_stdio` tests were
+  `#[ignore]`-masked; all back on.
+
+### Docs
+
+- `docs/guides/rag-in-20-lines.md` — full RAG tutorial using the new
+  scalars + MODEL_REGISTER path.
+- `docs/data-models/overview.md` — plain-text "which model fits my
+  use case?" decision tree.
+- `docs/data-models/hypertables.md` — mental model, ASCII chunk
+  fan-out, INSERT routing, DROP, and pruning surface.
+- `docs/data-models/continuous-aggregates.md` — shipped SQL surface
+  documented alongside the planned DDL form.
+- `docs/README.md` — "When to reach for RedDB" table, honest about
+  fits (RAG, multi-model, inline ML) and misfits (heavy OLAP,
+  distributed sharding, PG-extension ecosystem).
+- `docs/query/search-commands.md`, `docs/data-models/graphs.md`,
+  `docs/query/graph-commands.md` — translate leftover
+  Portuguese-language sections to English.
+
+---
+
 ## 2026-04-22 — Performance & Stability
 
 Bundle of perf work (04-20/04-21), dep bump, and one runtime hang fix.
