@@ -8,6 +8,52 @@ use std::time::Duration;
 use crate::json::{parse_json, Map, Value as JsonValue};
 use crate::{RedDBError, RedDBResult};
 
+/// Shared HTTP helper for every outbound AI provider call. Centralises
+/// the ureq 3.x builder and error conversion. Returns
+/// `(status, body)` even on 4xx/5xx (via
+/// `http_status_as_error(false)`) so callers can format a
+/// provider-specific error without re-plumbing the 3.x error enum.
+fn http_post_json(
+    url: &str,
+    api_key: &str,
+    extra_headers: &[(&str, &str)],
+    payload: String,
+    read_timeout_secs: u64,
+) -> Result<(u16, String), String> {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(10)))
+        .timeout_send_request(Some(Duration::from_secs(30)))
+        .timeout_recv_response(Some(Duration::from_secs(read_timeout_secs)))
+        .timeout_recv_body(Some(Duration::from_secs(read_timeout_secs)))
+        .http_status_as_error(false)
+        .build()
+        .into();
+
+    let mut req = agent
+        .post(url)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json");
+    for (k, v) in extra_headers {
+        req = req.header(*k, *v);
+    }
+    let trimmed_key = api_key.trim();
+    if !trimmed_key.is_empty() {
+        req = req.header("Authorization", &format!("Bearer {}", trimmed_key));
+    }
+
+    match req.send(payload) {
+        Ok(mut resp) => {
+            let status = resp.status().as_u16();
+            let body = resp
+                .body_mut()
+                .read_to_string()
+                .map_err(|err| format!("failed to read response body: {err}"))?;
+            Ok((status, body))
+        }
+        Err(err) => Err(format!("{err}")),
+    }
+}
+
 pub const DEFAULT_OPENAI_EMBEDDING_MODEL: &str = "text-embedding-3-small";
 pub const DEFAULT_OPENAI_API_BASE: &str = "https://api.openai.com/v1";
 pub const DEFAULT_OPENAI_PROMPT_MODEL: &str = "gpt-4.1-mini";
@@ -81,41 +127,16 @@ pub fn openai_embeddings(request: OpenAiEmbeddingRequest) -> RedDBResult<OpenAiE
     let payload =
         build_openai_embedding_payload(&request.model, &request.inputs, request.dimensions);
 
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(10))
-        .timeout_read(Duration::from_secs(90))
-        .timeout_write(Duration::from_secs(30))
-        .build();
+    let (status, body) = http_post_json(&url, &request.api_key, &[], payload, 90)
+        .map_err(|err| RedDBError::Query(format!("OpenAI transport error: {err}")))?;
 
-    // Keyless providers (Ollama, Local, some self-hosted gateways) do
-    // not require an Authorization header — omit it when the caller
-    // supplies an empty key so those targets actually work.
-    let mut req = agent
-        .post(&url)
-        .set("Content-Type", "application/json")
-        .set("Accept", "application/json");
-    let api_key = request.api_key.trim();
-    if !api_key.is_empty() {
-        req = req.set("Authorization", &format!("Bearer {}", api_key));
+    if !(200..300).contains(&status) {
+        let message = openai_error_message(&body)
+            .unwrap_or_else(|| "OpenAI embeddings request failed".to_string());
+        return Err(RedDBError::Query(format!(
+            "OpenAI embeddings request failed (status {status}): {message}"
+        )));
     }
-    let response = req.send_string(&payload);
-
-    let body = match response {
-        Ok(ok) => ok
-            .into_string()
-            .map_err(|err| RedDBError::Query(format!("failed to read OpenAI response: {err}")))?,
-        Err(ureq::Error::Status(status, resp)) => {
-            let body = resp.into_string().unwrap_or_else(|_| "".to_string());
-            let message = openai_error_message(&body)
-                .unwrap_or_else(|| "OpenAI embeddings request failed".to_string());
-            return Err(RedDBError::Query(format!(
-                "OpenAI embeddings request failed (status {status}): {message}"
-            )));
-        }
-        Err(ureq::Error::Transport(err)) => {
-            return Err(RedDBError::Query(format!("OpenAI transport error: {err}")));
-        }
-    };
 
     parse_openai_embedding_response(&body)
 }
@@ -141,39 +162,16 @@ pub fn openai_prompt(request: OpenAiPromptRequest) -> RedDBResult<AiPromptRespon
         request.max_output_tokens,
     );
 
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(10))
-        .timeout_read(Duration::from_secs(120))
-        .timeout_write(Duration::from_secs(30))
-        .build();
+    let (status, body) = http_post_json(&url, &request.api_key, &[], payload, 120)
+        .map_err(|err| RedDBError::Query(format!("OpenAI transport error: {err}")))?;
 
-    // See openai_embeddings for the keyless-provider rationale.
-    let mut req = agent
-        .post(&url)
-        .set("Content-Type", "application/json")
-        .set("Accept", "application/json");
-    let api_key = request.api_key.trim();
-    if !api_key.is_empty() {
-        req = req.set("Authorization", &format!("Bearer {}", api_key));
+    if !(200..300).contains(&status) {
+        let message = openai_error_message(&body)
+            .unwrap_or_else(|| "OpenAI prompt request failed".to_string());
+        return Err(RedDBError::Query(format!(
+            "OpenAI prompt request failed (status {status}): {message}"
+        )));
     }
-    let response = req.send_string(&payload);
-
-    let body = match response {
-        Ok(ok) => ok
-            .into_string()
-            .map_err(|err| RedDBError::Query(format!("failed to read OpenAI response: {err}")))?,
-        Err(ureq::Error::Status(status, resp)) => {
-            let body = resp.into_string().unwrap_or_else(|_| "".to_string());
-            let message = openai_error_message(&body)
-                .unwrap_or_else(|| "OpenAI prompt request failed".to_string());
-            return Err(RedDBError::Query(format!(
-                "OpenAI prompt request failed (status {status}): {message}"
-            )));
-        }
-        Err(ureq::Error::Transport(err)) => {
-            return Err(RedDBError::Query(format!("OpenAI transport error: {err}")));
-        }
-    };
 
     parse_openai_prompt_response(&body, &request.model)
 }
@@ -201,38 +199,24 @@ pub fn anthropic_prompt(request: AnthropicPromptRequest) -> RedDBResult<AiPrompt
         request.max_output_tokens,
     );
 
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(10))
-        .timeout_read(Duration::from_secs(120))
-        .timeout_write(Duration::from_secs(30))
-        .build();
+    // Anthropic uses its own `x-api-key` header instead of
+    // `Authorization: Bearer`, so skip the shared helper's default
+    // auth header path — we pass an empty API key and set
+    // `x-api-key` via extra_headers instead.
+    let extra = [
+        ("x-api-key", request.api_key.as_str()),
+        ("anthropic-version", request.anthropic_version.as_str()),
+    ];
+    let (status, body) = http_post_json(&url, "", &extra, payload, 120)
+        .map_err(|err| RedDBError::Query(format!("Anthropic transport error: {err}")))?;
 
-    let response = agent
-        .post(&url)
-        .set("x-api-key", &request.api_key)
-        .set("anthropic-version", &request.anthropic_version)
-        .set("Content-Type", "application/json")
-        .set("Accept", "application/json")
-        .send_string(&payload);
-
-    let body = match response {
-        Ok(ok) => ok.into_string().map_err(|err| {
-            RedDBError::Query(format!("failed to read Anthropic response: {err}"))
-        })?,
-        Err(ureq::Error::Status(status, resp)) => {
-            let body = resp.into_string().unwrap_or_else(|_| "".to_string());
-            let message = anthropic_error_message(&body)
-                .unwrap_or_else(|| "Anthropic prompt request failed".to_string());
-            return Err(RedDBError::Query(format!(
-                "Anthropic prompt request failed (status {status}): {message}"
-            )));
-        }
-        Err(ureq::Error::Transport(err)) => {
-            return Err(RedDBError::Query(format!(
-                "Anthropic transport error: {err}"
-            )));
-        }
-    };
+    if !(200..300).contains(&status) {
+        let message = anthropic_error_message(&body)
+            .unwrap_or_else(|| "Anthropic prompt request failed".to_string());
+        return Err(RedDBError::Query(format!(
+            "Anthropic prompt request failed (status {status}): {message}"
+        )));
+    }
 
     parse_anthropic_prompt_response(&body, &request.model)
 }
@@ -1062,19 +1046,14 @@ pub fn huggingface_embeddings(
     let mut embeddings = Vec::with_capacity(inputs.len());
 
     for input in inputs {
-        let payload = crate::serde_json::json!({ "inputs": input });
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(Duration::from_secs(10))
-            .timeout_read(Duration::from_secs(90))
-            .build();
-        let response = agent
-            .post(&url)
-            .set("Authorization", &format!("Bearer {api_key}"))
-            .set("Content-Type", "application/json")
-            .send_bytes(&crate::serde_json::to_vec(&payload).unwrap_or_default())
+        let payload = crate::serde_json::json!({ "inputs": input }).to_string_compact();
+        let (status, body_str) = http_post_json(&url, api_key, &[], payload, 90)
             .map_err(|e| crate::RedDBError::Query(format!("HuggingFace API error: {e}")))?;
-
-        let body_str = response.into_string().unwrap_or_default();
+        if !(200..300).contains(&status) {
+            return Err(crate::RedDBError::Query(format!(
+                "HuggingFace API error (status {status}): {body_str}"
+            )));
+        }
         let body: JsonValue = crate::serde_json::from_str(&body_str).map_err(|e| {
             crate::RedDBError::Query(format!("HuggingFace response parse error: {e}"))
         })?;
@@ -1126,18 +1105,14 @@ pub fn huggingface_prompt(
         "parameters": JsonValue::Object(params)
     });
 
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(10))
-        .timeout_read(Duration::from_secs(120))
-        .build();
-    let response = agent
-        .post(&url)
-        .set("Authorization", &format!("Bearer {api_key}"))
-        .set("Content-Type", "application/json")
-        .send_bytes(&crate::serde_json::to_vec(&payload).unwrap_or_default())
-        .map_err(|e| crate::RedDBError::Query(format!("HuggingFace API error: {e}")))?;
-
-    let body_str = response.into_string().unwrap_or_default();
+    let (status, body_str) =
+        http_post_json(&url, api_key, &[], payload.to_string_compact(), 120)
+            .map_err(|e| crate::RedDBError::Query(format!("HuggingFace API error: {e}")))?;
+    if !(200..300).contains(&status) {
+        return Err(crate::RedDBError::Query(format!(
+            "HuggingFace API error (status {status}): {body_str}"
+        )));
+    }
     let body: JsonValue = crate::serde_json::from_str(&body_str)
         .map_err(|e| crate::RedDBError::Query(format!("HuggingFace response parse error: {e}")))?;
 

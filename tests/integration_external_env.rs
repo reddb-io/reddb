@@ -28,24 +28,29 @@ fn http_call(
     url: &str,
     payload: Option<&str>,
 ) -> Result<(u16, String), Box<dyn std::error::Error>> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(10))
-        .build();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(10)))
+        .http_status_as_error(false)
+        .build()
+        .into();
     let response = match method {
         "GET" => agent.get(url).call(),
         "POST" => {
-            let body = payload.unwrap_or("{}");
+            let body = payload.unwrap_or("{}").to_string();
             agent
                 .post(url)
-                .set("content-type", "application/json")
-                .send_string(body)
+                .header("content-type", "application/json")
+                .send(body)
         }
         other => panic!("unsupported method: {other}"),
     };
 
     match response {
-        Ok(resp) => Ok((resp.status(), resp.into_string()?)),
-        Err(ureq::Error::Status(code, resp)) => Ok((code, resp.into_string()?)),
+        Ok(mut resp) => {
+            let status = resp.status().as_u16();
+            let body = resp.body_mut().read_to_string()?;
+            Ok((status, body))
+        }
         Err(err) => Err(Box::new(err)),
     }
 }

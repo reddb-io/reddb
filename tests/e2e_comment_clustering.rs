@@ -126,18 +126,22 @@ fn spawn_reddb_http(rt: RedDBRuntime) -> String {
 }
 
 fn http_post_json(url: &str, payload: &JsonValue) -> JsonValue {
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(15))
-        .build();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(15)))
+        .http_status_as_error(false)
+        .build()
+        .into();
     let body = to_string(payload).expect("payload should serialize");
     let response = agent
         .post(url)
-        .set("content-type", "application/json")
-        .send_string(&body);
+        .header("content-type", "application/json")
+        .send(body);
 
     let body = match response {
-        Ok(resp) => resp.into_string().expect("response body should read"),
-        Err(ureq::Error::Status(_, resp)) => resp.into_string().expect("error body should read"),
+        Ok(mut resp) => resp
+            .body_mut()
+            .read_to_string()
+            .expect("response body should read"),
         Err(err) => panic!("http request failed: {url}\nerror: {err}"),
     };
     from_str(&body).expect("response should be valid json")
