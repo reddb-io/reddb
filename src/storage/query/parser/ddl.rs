@@ -108,46 +108,63 @@ impl<'a> Parser<'a> {
         let mut append_only = false;
 
         while self.consume(&Token::With)? {
-            if self.consume_ident_ci("CONTEXT_INDEX")? {
-                context_index_enabled = self.parse_bool_assign()?;
-            } else if self.consume_ident_ci("CONTEXT")? {
-                if !self.consume(&Token::Index)? {
-                    return Err(ParseError::expected(
-                        vec!["INDEX"],
-                        self.peek(),
-                        self.position(),
-                    ));
-                }
-                self.expect(Token::On)?;
-                self.expect(Token::LParen)?;
-                loop {
-                    context_index_fields.push(self.expect_ident()?);
-                    if !self.consume(&Token::Comma)? {
-                        break;
-                    }
-                }
-                self.expect(Token::RParen)?;
-                context_index_enabled = true;
-            } else if self.consume_ident_ci("TIMESTAMPS")? {
-                timestamps = self.parse_bool_assign()?;
-            } else if self.consume_ident_ci("APPEND_ONLY")? {
-                append_only = self.parse_bool_assign()?;
-            } else if self.consume_ident_ci("TENANT_BY")? {
-                // `WITH (tenant_by = 'col')` form — accepts `=` optional
-                // and expects a string literal column name.
-                let _ = self.consume(&Token::Eq)?;
-                let value = self.parse_literal_value()?;
-                match value {
-                    Value::Text(col) => tenant_by = Some(col.to_string()),
-                    other => {
-                        return Err(ParseError::new(
-                            format!("WITH tenant_by expects a text literal, got {other:?}"),
+            // Accept both spellings:
+            //   WITH key = value
+            //   WITH (key = value, key = value)
+            // Postgres / ClickHouse use the parenthesised form; the
+            // bare form is our legacy shorthand. The parenthesised
+            // form collects options separated by commas until `)`.
+            let has_parens = self.consume(&Token::LParen)?;
+
+            loop {
+                if self.consume_ident_ci("CONTEXT_INDEX")? {
+                    context_index_enabled = self.parse_bool_assign()?;
+                } else if self.consume_ident_ci("CONTEXT")? {
+                    if !self.consume(&Token::Index)? {
+                        return Err(ParseError::expected(
+                            vec!["INDEX"],
+                            self.peek(),
                             self.position(),
                         ));
                     }
+                    self.expect(Token::On)?;
+                    self.expect(Token::LParen)?;
+                    loop {
+                        context_index_fields.push(self.expect_ident()?);
+                        if !self.consume(&Token::Comma)? {
+                            break;
+                        }
+                    }
+                    self.expect(Token::RParen)?;
+                    context_index_enabled = true;
+                } else if self.consume_ident_ci("TIMESTAMPS")? {
+                    timestamps = self.parse_bool_assign()?;
+                } else if self.consume_ident_ci("APPEND_ONLY")? {
+                    append_only = self.parse_bool_assign()?;
+                } else if self.consume_ident_ci("TENANT_BY")? {
+                    // `WITH (tenant_by = 'col')` form — accepts `=` optional
+                    // and expects a string literal column name.
+                    let _ = self.consume(&Token::Eq)?;
+                    let value = self.parse_literal_value()?;
+                    match value {
+                        Value::Text(col) => tenant_by = Some(col.to_string()),
+                        other => {
+                            return Err(ParseError::new(
+                                format!("WITH tenant_by expects a text literal, got {other:?}"),
+                                self.position(),
+                            ));
+                        }
+                    }
+                } else {
+                    default_ttl_ms = self.parse_create_table_ttl_clause()?;
                 }
-            } else {
-                default_ttl_ms = self.parse_create_table_ttl_clause()?;
+                if has_parens {
+                    if self.consume(&Token::Comma)? {
+                        continue;
+                    }
+                    self.expect(Token::RParen)?;
+                }
+                break;
             }
         }
 
