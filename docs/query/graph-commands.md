@@ -62,10 +62,10 @@ GRAPH SHORTEST_PATH FROM 'alice' TO 'charlie' ALGORITHM dijkstra
 ```
 
 Algorithms:
-- `bfs`: menor caminho por número de saltos
-- `dijkstra`: menor caminho ponderado com pesos não-negativos
-- `astar`: busca guiada por heurística; atualmente usa heurística nula no runtime genérico
-- `bellman_ford`: suporta pesos negativos e detecta ciclos negativos
+- `bfs`: shortest path by hop count
+- `dijkstra`: weighted shortest path (non-negative weights)
+- `astar`: heuristic-guided search; the generic runtime currently uses a null heuristic
+- `bellman_ford`: supports negative weights and detects negative cycles
 
 ## GRAPH CENTRALITY
 

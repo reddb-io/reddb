@@ -104,7 +104,8 @@ SEARCH IVF [0.12, 0.91, 0.44] IN embeddings K 10 PROBES 3
 
 ## SEARCH MULTIMODAL
 
-Lookup global por chave em tabelas, documentos, key-values, vetores e grafos:
+Global key lookup that spans every data model — tables, documents,
+key-values, vectors, and graphs — in a single call:
 
 ```sql
 SEARCH MULTIMODAL 'passport: AB1234567' COLLECTION people LIMIT 20
@@ -112,13 +113,13 @@ SEARCH MULTIMODAL 'passport: AB1234567' COLLECTION people LIMIT 20
 
 ## SEARCH INDEX
 
-Lookup estruturado por índice global:
+Structured lookup via a declared global index:
 
 ```sql
 SEARCH INDEX passport VALUE 'AB1234567' COLLECTION people LIMIT 20
 ```
 
-Por padrão, o lookup é exato. Para modo mais flexível:
+Exact match by default. Use `FUZZY` for approximate lookups:
 
 ```sql
 SEARCH INDEX passport VALUE 'AB1234567' FUZZY LIMIT 20

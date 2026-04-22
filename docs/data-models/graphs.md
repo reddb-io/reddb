@@ -145,8 +145,8 @@ curl -X POST http://127.0.0.1:8080/graph/shortest-path \
 ```
 
 Algorithms:
-- `bfs`: menor caminho por saltos
-- `dijkstra`: menor caminho ponderado com pesos não-negativos
+- `bfs`: shortest path by hop count
+- `dijkstra`: weighted shortest path (non-negative weights)
 - `astar`: caminho mínimo guiado por heurística
 - `bellman_ford`: caminho mínimo com pesos negativos e detecção de ciclo negativo
 
