@@ -1795,7 +1795,7 @@ pub(super) fn evaluate_scalar_function_with_db(
     }
     if matches!(
         func_name.to_ascii_uppercase().as_str(),
-        "CA_REGISTER" | "CA_DROP" | "CA_STATE" | "CA_LIST"
+        "CA_REGISTER" | "CA_DROP" | "CA_STATE" | "CA_LIST" | "CA_REFRESH" | "CA_QUERY"
     ) {
         // Resolve every arg to a Value first, then route to the
         // expr_eval dispatcher so the two surfaces share exactly

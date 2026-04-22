@@ -89,6 +89,68 @@ fn drop_removes_aggregate_from_list() {
 }
 
 #[test]
+fn refresh_absorbs_rows_and_query_returns_aggregate() {
+    let rt = rt();
+    let q = QueryUseCases::new(&rt);
+
+    // Source collection with a `ts` (ns) column and a `load` float.
+    q.execute(ExecuteQueryInput {
+        query: "CREATE TABLE metrics (ts BIGINT, load DOUBLE)".into(),
+    })
+    .expect("create source ok");
+
+    // Two rows in the first bucket (ts=0 .. 5_000_000_000), both load values folded into avg.
+    q.execute(ExecuteQueryInput {
+        query: "INSERT INTO metrics (ts, load) VALUES (1000000000, 10.0)".into(),
+    })
+    .expect("insert row1");
+    q.execute(ExecuteQueryInput {
+        query: "INSERT INTO metrics (ts, load) VALUES (2000000000, 20.0)".into(),
+    })
+    .expect("insert row2");
+
+    // Register a 5-second bucket aggregate with lag 0 so every landed
+    // row is eligible.
+    q.execute(ExecuteQueryInput {
+        query: "SELECT CA_REGISTER('avg_load', 'metrics', '5s', \
+                'avg_load', 'avg', 'load', '0s', '365d') AS ok"
+            .into(),
+    })
+    .expect("register ok");
+
+    // Refresh with now_ns = 1 hour — both rows should land in bucket 0.
+    let now_ns: i64 = 3_600_000_000_000;
+    let r = q
+        .execute(ExecuteQueryInput {
+            query: format!("SELECT CA_REFRESH('avg_load', {now_ns}) AS absorbed"),
+        })
+        .expect("refresh ok");
+    let absorbed = r.result.records[0]
+        .values
+        .get("absorbed")
+        .expect("absorbed");
+    assert!(
+        matches!(absorbed, Value::Integer(n) if *n >= 2),
+        "expected >= 2 rows absorbed, got {absorbed:?}"
+    );
+
+    // CA_QUERY at bucket 0 should return 15.0 (avg of 10 + 20).
+    let r = q
+        .execute(ExecuteQueryInput {
+            query: "SELECT CA_QUERY('avg_load', 0, 'avg_load') AS v".into(),
+        })
+        .expect("query ok");
+    let v = r.result.records[0].values.get("v").expect("v");
+    match v {
+        Value::Float(f) => assert!(
+            (*f - 15.0).abs() < 0.01,
+            "expected ~15.0, got {f}"
+        ),
+        other => panic!("expected Float, got {other:?}"),
+    }
+}
+
+#[test]
 fn state_returns_null_for_unknown() {
     let rt = rt();
     let q = QueryUseCases::new(&rt);

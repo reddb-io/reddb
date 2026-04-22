@@ -167,7 +167,7 @@ pub(super) fn evaluate_runtime_expr_with_db(
             }
             if matches!(
                 upper.as_str(),
-                "CA_REGISTER" | "CA_DROP" | "CA_STATE" | "CA_LIST"
+                "CA_REGISTER" | "CA_DROP" | "CA_STATE" | "CA_LIST" | "CA_REFRESH" | "CA_QUERY"
             ) {
                 if let Some(db) = db {
                     return dispatch_ca_function(db, &upper, &arg_values);
@@ -801,6 +801,108 @@ fn dispatch_ca_function(db: &RedDB, name: &str, args: &[Value]) -> Option<Value>
                 .map(|s| Value::text(s.name))
                 .collect();
             Some(Value::Array(names))
+        }
+        "CA_REFRESH" => {
+            // CA_REFRESH(name [, now_ns]) — scans the source collection
+            // for row entities, extracts the timestamp column from the
+            // spec and every aggregated source_column, folds into
+            // buckets. `now_ns` defaults to wall-clock now.
+            let ca_name = match args.first()? {
+                Value::Text(s) => s.to_string(),
+                _ => return Some(Value::Null),
+            };
+            let now_ns = args
+                .get(1)
+                .and_then(|v| match v {
+                    Value::Integer(n) | Value::BigInt(n) => Some(*n as u64),
+                    Value::UnsignedInteger(n) => Some(*n),
+                    _ => None,
+                })
+                .unwrap_or_else(|| {
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos() as u64)
+                        .unwrap_or(0)
+                });
+
+            let specs = engine.list();
+            let spec = specs.into_iter().find(|s| s.name == ca_name)?;
+            let store = db.store();
+            let time_col = "ts".to_string();
+            let columns = spec.columns.clone();
+            let source_name = spec.source.clone();
+            let source_cb: crate::storage::timeseries::continuous_aggregate::ContinuousAggregateSource =
+                std::sync::Arc::new(move |src: &str, start: u64, end: u64| {
+                    let mut out = Vec::new();
+                    let Some(mgr) = store.get_collection(src) else {
+                        return out;
+                    };
+                    for entity in mgr.query_all(|_| true) {
+                        let crate::storage::unified::entity::EntityData::Row(row) = &entity.data
+                        else {
+                            continue;
+                        };
+                        let ts = match row.get_field(&time_col) {
+                            Some(Value::Integer(n) | Value::BigInt(n)) => *n as u64,
+                            Some(Value::UnsignedInteger(n)) => *n,
+                            _ => continue,
+                        };
+                        if ts < start || ts >= end {
+                            continue;
+                        }
+                        let mut values = std::collections::HashMap::new();
+                        for col in &columns {
+                            let v = row.get_field(&col.source_column).and_then(|v| match v {
+                                Value::Integer(n) | Value::BigInt(n) => Some(*n as f64),
+                                Value::UnsignedInteger(n) => Some(*n as f64),
+                                Value::Float(f) => Some(*f),
+                                _ => None,
+                            });
+                            if let Some(f) = v {
+                                values.insert(col.alias.clone(), f);
+                            }
+                        }
+                        out.push(
+                            crate::storage::timeseries::continuous_aggregate::RefreshPoint {
+                                ts_ns: ts,
+                                values,
+                            },
+                        );
+                    }
+                    out
+                });
+            let _ = source_name;
+            let absorbed = engine.refresh(&ca_name, now_ns, &source_cb);
+            Some(Value::Integer(absorbed as i64))
+        }
+        "CA_QUERY" => {
+            // CA_QUERY(name, bucket_start_ns, alias) — returns the
+            // aggregated value for a single bucket using the aggregator
+            // declared at registration time.
+            let ca_name = match args.first()? {
+                Value::Text(s) => s.to_string(),
+                _ => return Some(Value::Null),
+            };
+            let bucket_start = match args.get(1)? {
+                Value::Integer(n) | Value::BigInt(n) => *n as u64,
+                Value::UnsignedInteger(n) => *n,
+                _ => return Some(Value::Null),
+            };
+            let alias = match args.get(2)? {
+                Value::Text(s) => s.to_string(),
+                _ => return Some(Value::Null),
+            };
+            let state = engine.state(&ca_name)?;
+            let spec = engine.list().into_iter().find(|s| s.name == ca_name)?;
+            let agg = spec
+                .columns
+                .iter()
+                .find(|c| c.alias == alias)
+                .map(|c| c.agg)?;
+            state
+                .query(bucket_start, &alias, agg)
+                .map(Value::Float)
+                .or(Some(Value::Null))
         }
         _ => None,
     }
