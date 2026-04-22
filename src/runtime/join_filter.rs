@@ -1809,6 +1809,15 @@ pub(super) fn evaluate_scalar_function_with_db(
             &resolved,
         );
     }
+    if matches!(
+        func_name.to_ascii_uppercase().as_str(),
+        "LIST_HYPERTABLES" | "LIST_MODELS" | "SHOW_HYPERTABLES" | "SHOW_MODELS"
+    ) {
+        return super::expr_eval::dispatch_introspection_function_public(
+            db?,
+            &func_name.to_ascii_uppercase(),
+        );
+    }
     evaluate_scalar_function_legacy(name, args, source)
 }
 

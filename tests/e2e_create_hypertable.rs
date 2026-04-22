@@ -84,6 +84,44 @@ fn create_hypertable_backing_collection_exists() {
 }
 
 #[test]
+fn list_hypertables_surfaces_registered_entries() {
+    let rt = rt();
+    let q = QueryUseCases::new(&rt);
+    q.execute(ExecuteQueryInput {
+        query: "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1d'".into(),
+    })
+    .expect("ok");
+    q.execute(ExecuteQueryInput {
+        query: "CREATE HYPERTABLE events TIME_COLUMN ts CHUNK_INTERVAL '1h'".into(),
+    })
+    .expect("ok");
+    let r = q
+        .execute(ExecuteQueryInput {
+            query: "SELECT LIST_HYPERTABLES() AS names".into(),
+        })
+        .expect("list ok");
+    let names = r.result.records[0].values.get("names").expect("names");
+    use reddb::storage::schema::Value;
+    let arr = match names {
+        Value::Array(v) => v,
+        other => panic!("expected Array, got {other:?}"),
+    };
+    assert_eq!(arr.len(), 2, "two hypertables registered");
+    let mut got: Vec<String> = arr
+        .iter()
+        .filter_map(|v| {
+            if let Value::Text(s) = v {
+                Some(s.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+    got.sort();
+    assert_eq!(got, vec!["events".to_string(), "metrics".to_string()]);
+}
+
+#[test]
 fn drop_hypertable_removes_registry_entry() {
     let rt = rt();
     let q = QueryUseCases::new(&rt);

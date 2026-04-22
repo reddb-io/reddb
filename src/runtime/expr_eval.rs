@@ -174,6 +174,15 @@ pub(super) fn evaluate_runtime_expr_with_db(
                 }
                 return None;
             }
+            if matches!(
+                upper.as_str(),
+                "LIST_HYPERTABLES" | "LIST_MODELS" | "SHOW_HYPERTABLES" | "SHOW_MODELS"
+            ) {
+                if let Some(db) = db {
+                    return dispatch_introspection_function(db, &upper);
+                }
+                return None;
+            }
             // Uppercase the function name so CASE-insensitive lookups
             // match the legacy is_scalar_function table.
             dispatch_builtin_function(&upper, &arg_values)
@@ -660,6 +669,31 @@ fn embed_text(db: &RedDB, text: &str, provider_hint: Option<&str>) -> Option<Val
     match crate::ai::openai_embeddings(request) {
         Ok(resp) => resp.embeddings.into_iter().next().map(Value::Vector),
         Err(_) => None,
+    }
+}
+
+pub(super) fn dispatch_introspection_function_public(db: &RedDB, name: &str) -> Option<Value> {
+    dispatch_introspection_function(db, name)
+}
+
+fn dispatch_introspection_function(db: &RedDB, name: &str) -> Option<Value> {
+    match name {
+        "LIST_HYPERTABLES" | "SHOW_HYPERTABLES" => {
+            let names: Vec<Value> = db
+                .hypertables()
+                .list()
+                .into_iter()
+                .map(|s| Value::text(s.name))
+                .collect();
+            Some(Value::Array(names))
+        }
+        "LIST_MODELS" | "SHOW_MODELS" => {
+            let summaries = db.ml_runtime().registry().summaries().ok()?;
+            Some(Value::Array(
+                summaries.into_iter().map(|s| Value::text(s.name)).collect(),
+            ))
+        }
+        _ => None,
     }
 }
 
