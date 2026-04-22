@@ -110,6 +110,41 @@ fn sweep_expired_respects_ttl() {
 }
 
 #[test]
+fn sweep_all_expired_crosses_every_hypertable() {
+    // Two hypertables, both TTL '1h'; sweep_all should reclaim
+    // expired chunks across both in one call.
+    let rt = rt();
+    let q = QueryUseCases::new(&rt);
+    q.execute(ExecuteQueryInput {
+        query: "CREATE HYPERTABLE ht_a TIME_COLUMN ts CHUNK_INTERVAL '1h' TTL '1h'".into(),
+    })
+    .expect("ht_a");
+    q.execute(ExecuteQueryInput {
+        query: "CREATE HYPERTABLE ht_b TIME_COLUMN ts CHUNK_INTERVAL '1h' TTL '1h'".into(),
+    })
+    .expect("ht_b");
+    q.execute(ExecuteQueryInput {
+        query: "INSERT INTO ht_a (ts, v) VALUES (0, 1)".into(),
+    })
+    .expect("ins a");
+    q.execute(ExecuteQueryInput {
+        query: "INSERT INTO ht_b (ts, v) VALUES (0, 1)".into(),
+    })
+    .expect("ins b");
+    let now_ns = 3 * HOUR_NS;
+    let r = q
+        .execute(ExecuteQueryInput {
+            query: format!("SELECT HYPERTABLE_SWEEP_ALL_EXPIRED({now_ns}) AS n"),
+        })
+        .expect("sweep_all ok");
+    let n = r.result.records[0].values.get("n").expect("n");
+    assert!(
+        matches!(n, Value::Integer(n) if *n == 2),
+        "expected 2 chunks swept across both tables, got {n:?}"
+    );
+}
+
+#[test]
 fn sweep_without_ttl_is_noop() {
     let rt = rt();
     let q = QueryUseCases::new(&rt);

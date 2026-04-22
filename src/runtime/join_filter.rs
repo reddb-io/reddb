@@ -1829,6 +1829,7 @@ pub(super) fn evaluate_scalar_function_with_db(
         "HYPERTABLE_DROP_CHUNKS_BEFORE"
             | "HYPERTABLE_SWEEP_EXPIRED"
             | "HYPERTABLE_SHOW_CHUNKS"
+            | "HYPERTABLE_SWEEP_ALL_EXPIRED"
     ) {
         let resolved: Vec<Value> = (0..args.len())
             .map(|i| resolve_scalar_arg(args, i, source).unwrap_or(Value::Null))

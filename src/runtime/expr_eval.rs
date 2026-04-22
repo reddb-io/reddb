@@ -194,6 +194,7 @@ pub(super) fn evaluate_runtime_expr_with_db(
                 "HYPERTABLE_DROP_CHUNKS_BEFORE"
                     | "HYPERTABLE_SWEEP_EXPIRED"
                     | "HYPERTABLE_SHOW_CHUNKS"
+                    | "HYPERTABLE_SWEEP_ALL_EXPIRED"
             ) {
                 if let Some(db) = db {
                     return dispatch_hypertable_retention(db, &upper, &arg_values);
@@ -816,11 +817,33 @@ pub(super) fn dispatch_hypertable_retention_public(
 /// * `HYPERTABLE_SWEEP_EXPIRED(name [, now_ns])` — drops every chunk
 ///   whose effective TTL has fired. Returns the count.
 fn dispatch_hypertable_retention(db: &RedDB, name: &str, args: &[Value]) -> Option<Value> {
+    let registry = db.hypertables();
+
+    // HYPERTABLE_SWEEP_ALL_EXPIRED takes an optional now_ns and
+    // doesn't need a hypertable name — handle before the per-name
+    // dispatch path.
+    if name == "HYPERTABLE_SWEEP_ALL_EXPIRED" {
+        let now_ns = args
+            .first()
+            .and_then(|v| match v {
+                Value::Integer(n) | Value::BigInt(n) => Some(*n as u64),
+                Value::UnsignedInteger(n) => Some(*n),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0)
+            });
+        let dropped = registry.sweep_all_expired(now_ns).len();
+        return Some(Value::Integer(dropped as i64));
+    }
+
     let ht_name = match args.first()? {
         Value::Text(s) => s.to_string(),
         _ => return Some(Value::Null),
     };
-    let registry = db.hypertables();
     match name {
         "HYPERTABLE_SHOW_CHUNKS" => Some(Value::Array(
             registry
