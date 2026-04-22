@@ -159,7 +159,17 @@ impl<'rt> MutationEngine<'rt> {
         } else {
             Vec::new()
         };
-        let mut metadata_batch: Vec<Vec<(String, MetadataValue)>> = Vec::with_capacity(n);
+        // Pre-scan: if no row has metadata, skip the per-row
+        // `metadata_batch` vec (a Vec<(String, MetadataValue)> push +
+        // index accounting for nothing). For OLTP bulk inserts the
+        // common case is "rows without metadata" — the branch skips
+        // 25K zero-length Vec pushes per bench typed_insert batch.
+        let any_metadata = rows.iter().any(|r| !r.metadata.is_empty());
+        let mut metadata_batch: Vec<Vec<(String, MetadataValue)>> = if any_metadata {
+            Vec::with_capacity(n)
+        } else {
+            Vec::new()
+        };
         let mut entities: Vec<UnifiedEntity> = Vec::with_capacity(n);
 
         // Resolve the current transaction xid once — every entity in this
@@ -192,7 +202,9 @@ impl<'rt> MutationEngine<'rt> {
             if has_secondary_indexes {
                 field_snapshots.push(row.fields.clone());
             }
-            metadata_batch.push(row.metadata);
+            if any_metadata {
+                metadata_batch.push(row.metadata);
+            }
             let mut entity = build_table_entity_shared(
                 self.store.as_ref(),
                 Arc::clone(&table_arc),
@@ -221,29 +233,29 @@ impl<'rt> MutationEngine<'rt> {
         }
 
         // Post-write maintenance — per row but without extra lock round-trips.
-        for (i, &id) in ids.iter().enumerate() {
-            // Metadata
-            if !metadata_batch[i].is_empty() {
-                let meta = Metadata::with_fields(
-                    std::mem::take(&mut metadata_batch[i]).into_iter().collect(),
-                );
-                let _ = self.store.set_metadata(&collection, id, meta);
-            }
+        // When neither metadata nor entity-fetch applies (the
+        // common OLTP bulk-insert shape with no TTLs, no links, no
+        // context index) the whole loop disappears, taking the
+        // `ids.iter()` iteration cost with it.
+        if any_metadata || needs_entity_fetch {
+            for (i, &id) in ids.iter().enumerate() {
+                if any_metadata && !metadata_batch[i].is_empty() {
+                    let meta = Metadata::with_fields(
+                        std::mem::take(&mut metadata_batch[i]).into_iter().collect(),
+                    );
+                    let _ = self.store.set_metadata(&collection, id, meta);
+                }
 
-            // Context index + cross-refs (still per-row; these APIs
-            // don't expose a batch form yet). Skip the lookup entirely
-            // when the hoisted check says neither path has work to do —
-            // the default OLTP insert_bulk shape (no links, no context
-            // index) avoids N `store.get` walks this way.
-            if needs_entity_fetch {
-                if let Some(entity) = self.store.get(&collection, id) {
-                    if ci_enabled {
-                        self.store
-                            .context_index()
-                            .index_entity(&collection, &entity);
-                    }
-                    if any_xrefs {
-                        let _ = self.store.index_cross_refs(&entity, &collection);
+                if needs_entity_fetch {
+                    if let Some(entity) = self.store.get(&collection, id) {
+                        if ci_enabled {
+                            self.store
+                                .context_index()
+                                .index_entity(&collection, &entity);
+                        }
+                        if any_xrefs {
+                            let _ = self.store.index_cross_refs(&entity, &collection);
+                        }
                     }
                 }
             }
