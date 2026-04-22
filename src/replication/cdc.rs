@@ -271,12 +271,10 @@ impl CdcBuffer {
     pub fn set_current_lsn(&self, lsn: u64) {
         let mut current = self.next_lsn.load(Ordering::Acquire);
         while lsn > current {
-            match self.next_lsn.compare_exchange(
-                current,
-                lsn,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
+            match self
+                .next_lsn
+                .compare_exchange(current, lsn, Ordering::AcqRel, Ordering::Acquire)
+            {
                 Ok(_) => break,
                 Err(observed) => current = observed,
             }

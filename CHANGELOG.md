@@ -2,6 +2,93 @@
 
 All notable changes to RedDB are documented here. Dates are ISO-8601 (UTC-3).
 
+## 2026-04-22 — TimescaleDB + ClickHouse Parity Push
+
+Adds the foundations for competing directly with TimescaleDB (in
+time-series / log workloads) and ClickHouse (in columnar OLAP).
+Every item below ships as a library + unit tests; SQL parser wiring
+for the DDL surfaces lands alongside the corresponding feature in a
+follow-on sprint. See `/.claude/plans/eu-recebi-esta-review-serene-glade.md`
+for the full plan.
+
+### Time-series / logs
+
+- **Hypertables** (`src/storage/timeseries/hypertable.rs`) — chunk
+  auto-routing by timestamp, `show_chunks`, `drop_chunks_before`.
+- **Continuous aggregates** (`src/storage/timeseries/continuous_aggregate.rs`) —
+  incremental refresh driven by a `last_refreshed_bucket` watermark;
+  respects `refresh_lag` + `max_interval_per_job`.
+- **Retention daemon** (`src/storage/timeseries/retention.rs`) —
+  cooperative sweeper, backend-agnostic trait, observable stats.
+- **Partition TTL** (new) — `HypertableSpec::with_ttl("90d")` +
+  `HypertableRegistry::sweep_expired` + per-chunk overrides +
+  preview via `chunks_expiring_within`. Docs: `docs/data-models/partition-ttl.md`.
+- **Log pipeline** (`src/storage/timeseries/log_pipeline.rs`) —
+  `LogPipeline` bundles hypertable + retention + tail ring buffer;
+  `LogLine` struct with severity + labels + numeric fields + trace
+  IDs; `ingest_batch` / `tail_since` / `set_partition_ttl`.
+- **Log docs** (new) — `docs/guides/using-reddb-for-logs.md` (full
+  guide, ~400 lines) + `docs/guides/logs-quickstart.md`.
+
+### Compression
+
+- **T64 bit-packing** — integer codec for narrow-range columns.
+- **zstd per-chunk fallback** with leading-marker passthrough for
+  tiny inputs.
+- **`select_int_codec` heuristic** — picks DeltaOfDelta / T64 / Raw
+  by shape.
+- **Per-column codec pipeline** (`src/storage/unified/segment_codec.rs`) —
+  ColumnCodec enum (None / Lz4 / Zstd / Delta / DoubleDelta / Dict),
+  chain header serialisable. Adds `lz4_flex` (pure-Rust) dep.
+
+### Execution / OLAP
+
+- **ColumnBatch + operators** (`src/storage/query/batch/`) — typed
+  `ColumnVector` (Int64/Float64/Bool/Text + validity), filter /
+  project / aggregate batch operators, 2048-row vectors.
+- **SIMD reducers** (`src/storage/query/batch/simd.rs`) — AVX2
+  sum_f64 / sum_i64 / min_f64 / max_f64 / filter_gt_f64 with scalar
+  fallbacks, runtime-detected.
+- **Parallel reducers** (`src/storage/query/batch/parallel.rs`) —
+  rayon-driven `parallel_sum_f64` + `parallel_aggregate` with partial
+  group-by merge.
+
+### Planner primitives
+
+- **Partition pruning** (`src/storage/query/planner/partition_pruning.rs`) —
+  RANGE / LIST / HASH pruner with `PrunePredicate` AST, AND
+  tightening + OR widening + FNV hash + conservative fallback.
+- **Projections** (`src/storage/query/planner/projections.rs`) —
+  ClickHouse-style pre-aggregation matcher; picks narrowest-fit
+  projection; filter-signature compatibility check.
+
+### Aggregates
+
+- **T-Digest primitive** (`src/storage/primitives/tdigest.rs`) with
+  merging variant + compact loop.
+- **ClickHouse-parity aggregators** (`src/storage/query/engine/aggregates_extra.rs`) —
+  Uniq (HLL-backed), QuantileTDigest, Covariance (Welford + parallel
+  merge for corr / covar_pop / covar_samp), CountIf, SumAvgIf, Any,
+  AnyLast, GroupArray, `arrayJoin` helper.
+
+### Schema
+
+- **APPEND ONLY tables** (`CREATE TABLE ... APPEND ONLY`) — catalog
+  flag on `CollectionContract`; UPDATE / DELETE rejected at parse
+  time before RLS. Docs: `docs/data-models/append-only-tables.md`.
+
+### Docs
+
+- New data-model pages: `hypertables.md`, `continuous-aggregates.md`,
+  `append-only-tables.md`, `partition-ttl.md`.
+- New architecture pages: `competitive-positioning.md`,
+  `distributed-roadmap.md`.
+- New engine page: `columnar-execution.md`.
+- New guides: `using-reddb-for-logs.md`, `logs-quickstart.md`.
+- Updated: `docs/_sidebar.md`, `docs/data-models/overview.md`,
+  `docs/data-models/tables.md`, `docs/data-models/timeseries.md`,
+  `docs/reference/limitations.md`, `README.md`.
+
 ## 2026-04-17 — Performance Parity Push (Phases 0-4 + P6.T1)
 
 Reduces the measured gap vs. the reference row-store row-store on

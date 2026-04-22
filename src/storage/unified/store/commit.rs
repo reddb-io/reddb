@@ -29,10 +29,20 @@ const STORE_WAL_VERSION: u8 = 1;
 
 #[derive(Debug, Clone)]
 pub(crate) enum StoreWalAction {
-    CreateCollection { name: String },
-    DropCollection { name: String },
-    UpsertEntityRecord { collection: String, record: Vec<u8> },
-    DeleteEntityRecord { collection: String, entity_id: u64 },
+    CreateCollection {
+        name: String,
+    },
+    DropCollection {
+        name: String,
+    },
+    UpsertEntityRecord {
+        collection: String,
+        record: Vec<u8>,
+    },
+    DeleteEntityRecord {
+        collection: String,
+        entity_id: u64,
+    },
     /// Batched upsert — one WAL action carrying N serialized entity
     /// records for the same collection. Saves the per-row Begin/
     /// PageWrite/Commit framing overhead on the bulk insert hot path.
@@ -138,9 +148,12 @@ impl StoreWalAction {
                         "bulk upsert wal action: missing record count",
                     ));
                 }
-                let count =
-                    u32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]])
-                        as usize;
+                let count = u32::from_le_bytes([
+                    bytes[pos],
+                    bytes[pos + 1],
+                    bytes[pos + 2],
+                    bytes[pos + 3],
+                ]) as usize;
                 pos += 4;
                 let mut records = Vec::with_capacity(count);
                 for _ in 0..count {

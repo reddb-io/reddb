@@ -147,13 +147,40 @@ Time-series data uses a chunked storage model for efficiency:
 
 ## Retention Policies
 
+Three complementary knobs, strongest first:
+
 ```sql
-CREATE TIMESERIES sensor_data RETENTION 365 d
+-- (1) Partition TTL at CREATE time — declarative, O(1) chunk drop.
+CREATE HYPERTABLE sensor_metrics (ts BIGINT, value DOUBLE)
+  CHUNK_INTERVAL '1 day'
+  WITH (ttl = '365d');
+
+-- (2) Classic CREATE TIMESERIES RETENTION — single-collection shortcut.
+CREATE TIMESERIES sensor_data RETENTION 365 d;
+
+-- (3) Named retention policy on any time-bounded collection.
+SELECT add_retention_policy('sensor_metrics', INTERVAL '365 days');
 ```
 
-Duration units: `ms`, `s`, `m`, `h`, `d`
+Duration units accepted everywhere: `ms`, `s`, `m`, `h`, `d`.
 
-Data older than the retention period is automatically deleted during the maintenance cycle.
+The retention daemon sweeps policies on a configurable interval
+(`red.config.retention.interval_ms`) and drops expired chunks in
+constant time per chunk — no row-level scans. See
+[Partition TTL](./partition-ttl.md) for the full cost model and
+mixed-TTL / per-chunk override recipes.
+
+## Scaling out — hypertables + continuous aggregates
+
+`CREATE TIMESERIES` stays the lightest surface for a single stream.
+For workloads with many series, heavy analytics, or dashboards,
+graduate to:
+
+- [**Hypertables**](./hypertables.md) — auto chunking by time, O(1)
+  `drop_chunks`, multi-column schemas, partition TTL.
+- [**Continuous Aggregates**](./continuous-aggregates.md) —
+  incrementally materialised `time_bucket` rollups; dashboards hit
+  the rollup, not the raw chunks.
 
 > [!TIP]
 > If you skip `CREATE TIMESERIES` and insert into a brand-new collection directly, RedDB will
@@ -165,3 +192,7 @@ Data older than the retention period is automatically deleted during the mainten
 - [INSERT](/query/insert.md) -- Inserting data
 - [SELECT](/query/select.md) -- Querying data
 - [Tables](/data-models/tables.md) -- Structured row storage
+- [Hypertables](/data-models/hypertables.md) -- Time-range partitioning
+- [Continuous Aggregates](/data-models/continuous-aggregates.md) -- Incremental rollups
+- [Partition TTL](/data-models/partition-ttl.md) -- Declarative chunk expiry
+- [Using RedDB for Logs](/guides/using-reddb-for-logs.md) -- End-to-end log pipeline

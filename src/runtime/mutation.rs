@@ -272,7 +272,13 @@ fn build_table_entity(
     node_links: &[NodeRef],
     vector_links: &[VectorRef],
 ) -> UnifiedEntity {
-    build_table_entity_shared(store, Arc::from(collection), fields, node_links, vector_links)
+    build_table_entity_shared(
+        store,
+        Arc::from(collection),
+        fields,
+        node_links,
+        vector_links,
+    )
 }
 
 /// Variant that takes an already-built `Arc<str>` for the collection

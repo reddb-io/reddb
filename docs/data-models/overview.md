@@ -112,22 +112,30 @@ These are first-class commands and durable engine objects, but they are not coll
 Use this as the fast decision tree:
 
 - Need typed columns, constraints, and conventional SQL: use **Tables & Rows**.
+- Need tables where UPDATE/DELETE must be rejected (audit, ledger, events): use **Append-Only Tables**.
 - Need flexible JSON payloads: use **Documents**.
 - Need direct lookup by key: use **Key-Value**.
 - Need relationships, traversals, or graph analytics: use **Graphs**.
 - Need embedding similarity or semantic retrieval: use **Vectors**.
 - Need timestamp-first metrics with retention and downsampling: use **Time-Series**.
+- Need automatic chunk partitioning + `drop_chunks` + partition TTL: use **Hypertables**.
+- Need pre-aggregated dashboards with incremental refresh: use **Continuous Aggregates**.
 - Need job processing, retries, DLQ, or consumer groups: use **Queues & Deques**.
 - Need approximate counting or membership at low memory cost: use **Probabilistic Structures**.
 
 ## See Also
 
 - [Tables & Rows](/data-models/tables.md)
+- [Append-Only Tables](/data-models/append-only-tables.md)
 - [Documents](/data-models/documents.md)
 - [Key-Value](/data-models/key-value.md)
 - [Graphs](/data-models/graphs.md)
 - [Vectors & Embeddings](/data-models/vectors.md)
 - [Time-Series](/data-models/timeseries.md)
+- [Hypertables](/data-models/hypertables.md)
+- [Continuous Aggregates](/data-models/continuous-aggregates.md)
+- [Partition TTL](/data-models/partition-ttl.md)
 - [Queues & Deques](/data-models/queues.md)
 - [Probabilistic Structures](/data-models/probabilistic.md)
 - [CREATE INDEX](/query/create-index.md)
+- [Using RedDB for Logs](/guides/using-reddb-for-logs.md)

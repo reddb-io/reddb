@@ -57,8 +57,7 @@ impl UnifiedStore {
         // reused here so we don't re-run `serialize_entity_record` N
         // times; replay applies upserts by id, so the sorted-by-id
         // order is safe for WAL too.
-        let records: Vec<Vec<u8>> =
-            serialized.into_iter().map(|(_id, record)| record).collect();
+        let records: Vec<Vec<u8>> = serialized.into_iter().map(|(_id, record)| record).collect();
         self.finish_paged_write([StoreWalAction::BulkUpsertEntityRecords {
             collection: collection.to_string(),
             records,
@@ -403,12 +402,7 @@ impl UnifiedStore {
         let n_missing_entity_ids = entities.iter().filter(|e| e.id.raw() == 0).count() as u64;
         let n_missing_row_ids = entities
             .iter()
-            .filter(|e| {
-                matches!(
-                    e.kind,
-                    EntityKind::TableRow { row_id: 0, .. }
-                )
-            })
+            .filter(|e| matches!(e.kind, EntityKind::TableRow { row_id: 0, .. }))
             .count() as u64;
         let mut entity_id_range = if n_missing_entity_ids > 0 {
             self.reserve_entity_ids(n_missing_entity_ids)

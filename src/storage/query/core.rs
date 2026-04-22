@@ -1434,6 +1434,10 @@ pub struct CreateTableQuery {
     /// None leaves the table non-tenant-scoped — callers manage tenancy
     /// manually via explicit CREATE POLICY if they want it.
     pub tenant_by: Option<String>,
+    /// When true, UPDATE and DELETE on this table are rejected at
+    /// parse time. Corresponds to `CREATE TABLE ... APPEND ONLY` or
+    /// `WITH (append_only = true)`. Default false (mutable).
+    pub append_only: bool,
 }
 
 /// `PARTITION BY RANGE|LIST|HASH (column)` clause.

@@ -584,13 +584,13 @@ fn encode_result(result: &crate::runtime::RuntimeQueryResult) -> Vec<u8> {
     let first_columnar = records.first().and_then(|r| r.columnar());
     let resolvers: Vec<ColumnResolver> = columns
         .iter()
-        .map(|col| match first_columnar.and_then(|c| {
-            c.schema
-                .iter()
-                .rposition(|k| k.as_ref() == col.as_ref())
-        }) {
-            Some(idx) => ColumnResolver::ColumnarIdx(idx),
-            None => ColumnResolver::HashMapKey(Arc::clone(col)),
+        .map(|col| {
+            match first_columnar
+                .and_then(|c| c.schema.iter().rposition(|k| k.as_ref() == col.as_ref()))
+            {
+                Some(idx) => ColumnResolver::ColumnarIdx(idx),
+                None => ColumnResolver::HashMapKey(Arc::clone(col)),
+            }
         })
         .collect();
 
@@ -615,9 +615,7 @@ fn encode_result(result: &crate::runtime::RuntimeQueryResult) -> Vec<u8> {
             // fall back to the record-level `get` which covers
             // heterogeneous schemas (happens when the executor
             // mixes result shapes, e.g. a projection over UNION).
-            let same_schema = record
-                .columnar_schema()
-                .map(|s| Arc::as_ptr(s) as usize)
+            let same_schema = record.columnar_schema().map(|s| Arc::as_ptr(s) as usize)
                 == first_schema_ptr
                 && first_schema_ptr.is_some();
             if same_schema {
@@ -782,8 +780,11 @@ fn handle_bulk_insert_binary_prevalidated(runtime: &RedDBRuntime, payload: &[u8]
     };
     let mut col_names = Vec::with_capacity(ncols);
     for _ in 0..ncols {
-        let name_len = match read_u16(payload, &mut pos, "prevalidated: missing column name length")
-        {
+        let name_len = match read_u16(
+            payload,
+            &mut pos,
+            "prevalidated: missing column name length",
+        ) {
             Ok(len) => len as usize,
             Err(msg) => return make_error(msg.as_bytes()),
         };
@@ -872,8 +873,11 @@ fn handle_stream_start(payload: &[u8], session: &mut Option<BulkStreamSession>) 
     };
     let mut names = Vec::with_capacity(ncols);
     for _ in 0..ncols {
-        let name_len = match read_u16(payload, &mut pos, "stream start: missing column name length")
-        {
+        let name_len = match read_u16(
+            payload,
+            &mut pos,
+            "stream start: missing column name length",
+        ) {
             Ok(l) => l as usize,
             Err(msg) => return make_error(msg.as_bytes()),
         };
@@ -906,7 +910,9 @@ fn handle_stream_start(payload: &[u8], session: &mut Option<BulkStreamSession>) 
 /// `MSG_BULK_STREAM_ACK` on success.
 fn handle_stream_rows(payload: &[u8], session: &mut Option<BulkStreamSession>) -> Vec<u8> {
     let Some(state) = session.as_mut() else {
-        return make_error(b"stream rows: no active stream session (send MSG_BULK_STREAM_START first)");
+        return make_error(
+            b"stream rows: no active stream session (send MSG_BULK_STREAM_START first)",
+        );
     };
     let mut pos = 0;
     let nrows = match read_u32(payload, &mut pos, "stream rows: missing row count") {

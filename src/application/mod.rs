@@ -41,8 +41,8 @@ pub use query::{
     SearchTextInput,
 };
 pub use schema::{
-    CreateTableColumnInput, CreateTableInput, CreateTimeSeriesInput, DropTableInput,
-    DropTimeSeriesInput, SchemaUseCases,
+    CreateTableColumnInput, CreateTableInput, CreateTablePartitionKind, CreateTablePartitionSpec,
+    CreateTimeSeriesInput, DropTableInput, DropTimeSeriesInput, SchemaUseCases,
 };
 pub use tree::{
     CreateTreeInput, DeleteTreeNodeInput, DropTreeInput, InsertTreeNodeInput, MoveTreeNodeInput,

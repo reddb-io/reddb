@@ -167,6 +167,22 @@ CREATE TABLE sessions (
 ) WITH TTL 60m
 ```
 
+### Append-Only Tables
+
+When the table must reject `UPDATE` / `DELETE` at parse time (audit
+logs, financial ledgers, event streams), declare it append-only:
+
+```sql
+CREATE TABLE audit_log (id BIGINT, action TEXT) APPEND ONLY;
+-- or: WITH (append_only = true)
+```
+
+Any `UPDATE` / `DELETE` against the table fails immediately with a
+clear error pointing at the DDL. See
+[Append-Only Tables](/data-models/append-only-tables.md) for the
+full contract, RLS / RETURNING interactions, and when to pick this
+vs Log Collections vs Time-Series.
+
 ## Bulk Insert
 
 Insert many rows in a single request for better throughput:

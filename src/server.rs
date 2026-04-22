@@ -64,6 +64,7 @@ mod handlers_ops;
 mod handlers_query;
 mod handlers_replication;
 mod handlers_vector;
+pub mod ingest_pipeline;
 mod patch_support;
 mod request_body;
 mod routing;

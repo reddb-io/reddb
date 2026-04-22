@@ -208,6 +208,10 @@ fn timeseries_collection_contract(
         table_def: None,
         timestamps_enabled: false,
         context_index_enabled: false,
+        // Time-series collections are append-only by nature — the
+        // storage model forbids in-place UPDATE already, so the flag
+        // makes the catalog honest rather than changing semantics.
+        append_only: true,
     }
 }
 

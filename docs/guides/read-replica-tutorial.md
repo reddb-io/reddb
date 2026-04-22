@@ -1,12 +1,14 @@
 # Read Replica Tutorial
 
-> [!WARNING]
-> **Work in progress.** Replica-side WAL consumption is not yet
-> wired — a replica started via `red replica` will accept reads
-> but will not automatically ingest primary WAL segments. The
-> steps below describe the target workflow. For change propagation
-> today, poll `GET /changes?since=<lsn>` on the primary and apply
-> events on the replica side, or use scheduled snapshots.
+> [!NOTE]
+> **Replica-side WAL consumption is live.** A replica started via
+> `red replica --primary-addr ...` now polls `pull_wal_records`
+> over gRPC on the primary, applies records locally, and persists
+> `red.replication.last_applied_lsn` so restarts resume where they
+> stopped. See `RedDBRuntime::run_replica_loop` in
+> `src/runtime/impl_core.rs`. Automatic failover, synchronous
+> replication, and multi-replica quorum are separate follow-ons
+> and not yet wired.
 
 This guide shows the smallest useful primary + replica setup for RedDB.
 

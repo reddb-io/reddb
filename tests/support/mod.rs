@@ -326,6 +326,9 @@ pub fn build_api_fixture(rt: &RedDBRuntime) {
             default_ttl_ms: Some(ACCOUNTS_TTL_MS),
             context_index_fields: vec!["username".into(), "status".into()],
             timestamps: true,
+            partition_by: None,
+            tenant_by: None,
+            append_only: false,
         })
         .expect("api create_table accounts should succeed");
 

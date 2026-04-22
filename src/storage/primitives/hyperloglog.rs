@@ -21,6 +21,7 @@ const P: u32 = 14;
 const ALPHA: f64 = 0.7213 / (1.0 + 1.079 / NUM_REGISTERS as f64);
 
 /// HyperLogLog cardinality estimator
+#[derive(Debug, Clone)]
 pub struct HyperLogLog {
     /// Registers storing max leading zeros + 1
     registers: Vec<u8>,

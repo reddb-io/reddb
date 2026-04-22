@@ -576,6 +576,7 @@ fn collection_contract_from_create_table(
         timestamps_enabled: query.timestamps,
         context_index_enabled: query.context_index_enabled
             || !query.context_index_fields.is_empty(),
+        append_only: query.append_only,
     })
 }
 
@@ -597,6 +598,7 @@ fn default_collection_contract_for_existing_table(
         table_def: Some(crate::storage::schema::TableDef::new(name.to_string())),
         timestamps_enabled: false,
         context_index_enabled: false,
+        append_only: false,
     }
 }
 

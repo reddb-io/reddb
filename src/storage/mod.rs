@@ -59,6 +59,12 @@ pub mod timeseries;
 // Queue / Deque Storage
 pub mod queue;
 
+// Machine Learning registry + async job queue (ML Sprint 1 — scaffold).
+// Feature 5 (classifier), Feature 6 (symbolic regression), and the other
+// five ML capabilities all publish models/versions and submit training
+// jobs through this module.
+pub mod ml;
+
 // Query Engine (Filters, Sorting, Similarity Search)
 pub mod query;
 

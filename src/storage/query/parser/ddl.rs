@@ -73,6 +73,7 @@ impl<'a> Parser<'a> {
             timestamps,
             partition_by: None,
             tenant_by: None,
+            append_only: false,
         }))
     }
 
@@ -104,6 +105,7 @@ impl<'a> Parser<'a> {
         let mut context_index_enabled = false;
         let mut timestamps = false;
         let mut tenant_by: Option<String> = None;
+        let mut append_only = false;
 
         while self.consume(&Token::With)? {
             if self.consume_ident_ci("CONTEXT_INDEX")? {
@@ -128,6 +130,8 @@ impl<'a> Parser<'a> {
                 context_index_enabled = true;
             } else if self.consume_ident_ci("TIMESTAMPS")? {
                 timestamps = self.parse_bool_assign()?;
+            } else if self.consume_ident_ci("APPEND_ONLY")? {
+                append_only = self.parse_bool_assign()?;
             } else if self.consume_ident_ci("TENANT_BY")? {
                 // `WITH (tenant_by = 'col')` form — accepts `=` optional
                 // and expects a string literal column name.
@@ -171,6 +175,21 @@ impl<'a> Parser<'a> {
             None
         };
 
+        // Shorthand: trailing `APPEND ONLY` keyword pair (PG / ClickHouse
+        // style). Accepted after partition spec / tenant spec / or on
+        // its own. `WITH (append_only = true)` is the other form and
+        // handled above.
+        if !append_only && self.consume_ident_ci("APPEND")? {
+            if !self.consume_ident_ci("ONLY")? {
+                return Err(ParseError::expected(
+                    vec!["ONLY"],
+                    self.peek(),
+                    self.position(),
+                ));
+            }
+            append_only = true;
+        }
+
         // Shorthand: `TENANT BY (col)` or `TENANT BY (root.sub.path)`
         // trailing clause (after partition spec if both are used).
         //
@@ -206,6 +225,7 @@ impl<'a> Parser<'a> {
             timestamps,
             partition_by,
             tenant_by,
+            append_only,
         }))
     }
 

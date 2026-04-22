@@ -694,30 +694,47 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &UpdateQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
-        if query.returning.is_some() {
-            return Err(RedDBError::Query(
-                "RETURNING on UPDATE is parsed but not yet executed (T4.3 pending)".to_string(),
-            ));
+        // APPEND ONLY guard: reject before RLS / RETURNING work so the
+        // operator's immutability declaration is honoured uniformly
+        // and the error message points at the DDL rather than at a
+        // downstream symptom.
+        if let Some(contract) = self.db().collection_contract(&query.table) {
+            if contract.append_only {
+                return Err(RedDBError::Query(format!(
+                    "table '{}' is APPEND ONLY — UPDATE is rejected. \
+                     Drop the APPEND ONLY clause (ALTER TABLE ... SET APPEND_ONLY = false) \
+                     or insert a new row instead.",
+                    query.table
+                )));
+            }
         }
-        // Row-Level Security enforcement (Phase 2.5.2 PG parity).
-        //
-        // Same pattern as DELETE — gate the UPDATE by the per-role
-        // `FOR UPDATE` policy set. No admitting policy = zero rows
-        // affected. Callers outside an RLS-enabled table fall through
-        // unchanged.
-        if crate::runtime::impl_core::rls_is_enabled(self, &query.table) {
+
+        // Apply RLS augmentation first so every downstream path — plain
+        // UPDATE, UPDATE...RETURNING, the inner scan — observes the
+        // same policy-filtered target set. This prevents RETURNING
+        // from ever exposing rows the UPDATE policy would have
+        // denied.
+        let rls_gated = crate::runtime::impl_core::rls_is_enabled(self, &query.table);
+        let augmented_query: UpdateQuery;
+        let effective_query: &UpdateQuery = if rls_gated {
             let rls_filter = crate::runtime::impl_core::rls_policy_filter(
                 self,
                 &query.table,
                 crate::storage::query::ast::PolicyAction::Update,
             );
             let Some(policy) = rls_filter else {
-                return Ok(RuntimeQueryResult::dml_result(
+                // No admitting policy: zero rows affected, empty
+                // RETURNING (never leak rows the caller can't touch).
+                let mut response = RuntimeQueryResult::dml_result(
                     raw_query.to_string(),
                     0,
                     "update",
                     "runtime-dml-rls",
-                ));
+                );
+                if let Some(items) = query.returning.clone() {
+                    response.result = build_returning_result(&items, &[], None);
+                }
+                return Ok(response);
             };
             let mut augmented = query.clone();
             augmented.filter = Some(match augmented.filter.take() {
@@ -726,20 +743,64 @@ impl RedDBRuntime {
                 }
                 None => policy,
             });
-            return self.execute_update_inner(raw_query, &augmented);
+            augmented_query = augmented;
+            &augmented_query
+        } else {
+            query
+        };
+
+        // RETURNING wraps the inner executor and uses the touched-id
+        // list the inner reports so the post-image reflects exactly
+        // the rows the UPDATE actually mutated (not whatever a
+        // separate SELECT might have observed).
+        if let Some(items) = effective_query.returning.clone() {
+            let mut inner_query = effective_query.clone();
+            inner_query.returning = None;
+            let (mut response, touched_ids) =
+                self.execute_update_inner_tracked(raw_query, &inner_query)?;
+
+            let store = self.inner.db.store();
+            let snapshots: Vec<Vec<(String, Value)>> = if touched_ids.is_empty() {
+                Vec::new()
+            } else if let Some(manager) = store.get_collection(&effective_query.table) {
+                manager
+                    .get_many(&touched_ids)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|entity| entity_row_snapshot(&entity))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            response.result = build_returning_result(&items, &snapshots, None);
+            response.engine = "runtime-dml-returning";
+            return Ok(response);
         }
-        self.execute_update_inner(raw_query, query)
+
+        self.execute_update_inner(raw_query, effective_query)
     }
 
+    /// Back-compat shim: the older entry point ignored touched ids.
     fn execute_update_inner(
         &self,
         raw_query: &str,
         query: &UpdateQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        self.execute_update_inner_tracked(raw_query, query)
+            .map(|(res, _)| res)
+    }
+
+    fn execute_update_inner_tracked(
+        &self,
+        raw_query: &str,
+        query: &UpdateQuery,
+    ) -> RedDBResult<(RuntimeQueryResult, Vec<EntityId>)> {
         let db = self.db();
         let store = self.inner.db.store();
         let effective_filter = effective_update_filter(query);
         let compiled_plan = self.compile_update_plan(query)?;
+        let mut touched_ids: Vec<EntityId> = Vec::new();
 
         // ── FAST PATH: UPDATE ... WHERE _entity_id = N ──
         // Direct entity lookup instead of full collection scan.
@@ -756,21 +817,23 @@ impl RedDBRuntime {
                     &compiled_plan,
                     assignments,
                 )?;
+                touched_ids.push(applied.id);
                 self.persist_update_chunk(std::slice::from_ref(&applied))?;
                 self.flush_update_chunk(&[applied]);
                 self.note_table_write(&query.table);
-                return Ok(RuntimeQueryResult::dml_result(
-                    raw_query.to_string(),
-                    1,
-                    "update",
-                    "runtime-dml",
+                return Ok((
+                    RuntimeQueryResult::dml_result(
+                        raw_query.to_string(),
+                        1,
+                        "update",
+                        "runtime-dml",
+                    ),
+                    touched_ids,
                 ));
             }
-            return Ok(RuntimeQueryResult::dml_result(
-                raw_query.to_string(),
-                0,
-                "update",
-                "runtime-dml",
+            return Ok((
+                RuntimeQueryResult::dml_result(raw_query.to_string(), 0, "update", "runtime-dml"),
+                touched_ids,
             ));
         }
 
@@ -784,11 +847,14 @@ impl RedDBRuntime {
                 query_exec::try_hash_eq_lookup(filter, &query.table, idx_store)
             {
                 if entity_ids.is_empty() {
-                    return Ok(RuntimeQueryResult::dml_result(
-                        raw_query.to_string(),
-                        0,
-                        "update",
-                        "runtime-dml",
+                    return Ok((
+                        RuntimeQueryResult::dml_result(
+                            raw_query.to_string(),
+                            0,
+                            "update",
+                            "runtime-dml",
+                        ),
+                        touched_ids,
                     ));
                 }
                 let manager = store
@@ -813,12 +879,14 @@ impl RedDBRuntime {
                             &entity,
                             &compiled_plan,
                         )?;
-                        applied_chunk.push(self.apply_materialized_update_for_entity(
+                        let applied = self.apply_materialized_update_for_entity(
                             query.table.clone(),
                             entity,
                             &compiled_plan,
                             assignments,
-                        )?);
+                        )?;
+                        touched_ids.push(applied.id);
+                        applied_chunk.push(applied);
                     }
                     self.persist_update_chunk(&applied_chunk)?;
                     affected += applied_chunk.len() as u64;
@@ -827,11 +895,14 @@ impl RedDBRuntime {
                 if affected > 0 {
                     self.note_table_write(&query.table);
                 }
-                return Ok(RuntimeQueryResult::dml_result(
-                    raw_query.to_string(),
-                    affected,
-                    "update",
-                    "runtime-dml",
+                return Ok((
+                    RuntimeQueryResult::dml_result(
+                        raw_query.to_string(),
+                        affected,
+                        "update",
+                        "runtime-dml",
+                    ),
+                    touched_ids,
                 ));
             }
         }
@@ -846,11 +917,14 @@ impl RedDBRuntime {
                 query_exec::try_sorted_index_lookup(filter, &query.table, idx_store, None)
             {
                 if entity_ids.is_empty() {
-                    return Ok(RuntimeQueryResult::dml_result(
-                        raw_query.to_string(),
-                        0,
-                        "update",
-                        "runtime-dml",
+                    return Ok((
+                        RuntimeQueryResult::dml_result(
+                            raw_query.to_string(),
+                            0,
+                            "update",
+                            "runtime-dml",
+                        ),
+                        touched_ids,
                     ));
                 }
                 let manager = store
@@ -875,12 +949,14 @@ impl RedDBRuntime {
                             &entity,
                             &compiled_plan,
                         )?;
-                        applied_chunk.push(self.apply_materialized_update_for_entity(
+                        let applied = self.apply_materialized_update_for_entity(
                             query.table.clone(),
                             entity,
                             &compiled_plan,
                             assignments,
-                        )?);
+                        )?;
+                        touched_ids.push(applied.id);
+                        applied_chunk.push(applied);
                     }
                     self.persist_update_chunk(&applied_chunk)?;
                     affected += applied_chunk.len() as u64;
@@ -889,11 +965,14 @@ impl RedDBRuntime {
                 if affected > 0 {
                     self.note_table_write(&query.table);
                 }
-                return Ok(RuntimeQueryResult::dml_result(
-                    raw_query.to_string(),
-                    affected,
-                    "update",
-                    "runtime-dml",
+                return Ok((
+                    RuntimeQueryResult::dml_result(
+                        raw_query.to_string(),
+                        affected,
+                        "update",
+                        "runtime-dml",
+                    ),
+                    touched_ids,
                 ));
             }
         }
@@ -966,12 +1045,14 @@ impl RedDBRuntime {
             for entity in manager.get_many(chunk).into_iter().flatten() {
                 let assignments =
                     self.materialize_update_assignments_for_entity(query, &entity, &compiled_plan)?;
-                applied_chunk.push(self.apply_materialized_update_for_entity(
+                let applied = self.apply_materialized_update_for_entity(
                     query.table.clone(),
                     entity,
                     &compiled_plan,
                     assignments,
-                )?);
+                )?;
+                touched_ids.push(applied.id);
+                applied_chunk.push(applied);
             }
             self.persist_update_chunk(&applied_chunk)?;
             affected += applied_chunk.len() as u64;
@@ -982,11 +1063,14 @@ impl RedDBRuntime {
             self.note_table_write(&query.table);
         }
 
-        Ok(RuntimeQueryResult::dml_result(
-            raw_query.to_string(),
-            affected,
-            "update",
-            "runtime-dml",
+        Ok((
+            RuntimeQueryResult::dml_result(
+                raw_query.to_string(),
+                affected,
+                "update",
+                "runtime-dml",
+            ),
+            touched_ids,
         ))
     }
 
@@ -1178,6 +1262,18 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &DeleteQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        // APPEND ONLY guard — see execute_update for rationale.
+        if let Some(contract) = self.db().collection_contract(&query.table) {
+            if contract.append_only {
+                return Err(RedDBError::Query(format!(
+                    "table '{}' is APPEND ONLY — DELETE is rejected. \
+                     Drop the APPEND ONLY clause (ALTER TABLE ... SET APPEND_ONLY = false) \
+                     or use a retention policy / drop_chunks for time-series.",
+                    query.table
+                )));
+            }
+        }
+
         // RETURNING on DELETE: capture the pre-image via an internal
         // SELECT that reuses the same WHERE, then run the delete with
         // the RETURNING clause stripped, then project the captured
@@ -1504,6 +1600,29 @@ fn build_patch_operations_from_materialized_assignments(
 /// the table name and the RETURNING clause, so WHERE / ORDER BY /
 /// LIMIT survive untouched. The RETURNING tail — if present — is
 /// truncated at the first top-level `RETURNING` token.
+/// Snapshot a row entity into ordered (column, value) pairs for
+/// `RETURNING` projection. Non-row entities (documents, edges,
+/// timeseries etc.) currently return `None` — RETURNING on those
+/// paths is not yet wired.
+fn entity_row_snapshot(entity: &crate::storage::UnifiedEntity) -> Option<Vec<(String, Value)>> {
+    match &entity.data {
+        EntityData::Row(row) => {
+            if let Some(named) = &row.named {
+                Some(named.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            } else {
+                row.schema.as_ref().map(|schema| {
+                    schema
+                        .iter()
+                        .cloned()
+                        .zip(row.columns.iter().cloned())
+                        .collect()
+                })
+            }
+        }
+        _ => None,
+    }
+}
+
 fn delete_to_select_sql(sql: &str) -> Option<String> {
     let trimmed = sql.trim_start();
     let lowered = trimmed.to_ascii_lowercase();

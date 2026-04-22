@@ -95,10 +95,7 @@ async fn client_loop(addr: String, worker: usize) -> Vec<u64> {
             s.read_exact(&mut body).await.expect("body");
         }
         if msg_type == MSG_ERROR {
-            panic!(
-                "server error: {}",
-                String::from_utf8_lossy(&body)
-            );
+            panic!("server error: {}", String::from_utf8_lossy(&body));
         }
         debug_assert_eq!(msg_type, MSG_BULK_OK);
         lats.push(t0.elapsed().as_nanos() as u64);

@@ -66,11 +66,6 @@ pub struct AiPromptResponse {
 }
 
 pub fn openai_embeddings(request: OpenAiEmbeddingRequest) -> RedDBResult<OpenAiEmbeddingResponse> {
-    if request.api_key.trim().is_empty() {
-        return Err(RedDBError::Query(
-            "OpenAI API key cannot be empty".to_string(),
-        ));
-    }
     if request.model.trim().is_empty() {
         return Err(RedDBError::Query(
             "OpenAI embedding model cannot be empty".to_string(),
@@ -92,12 +87,18 @@ pub fn openai_embeddings(request: OpenAiEmbeddingRequest) -> RedDBResult<OpenAiE
         .timeout_write(Duration::from_secs(30))
         .build();
 
-    let response = agent
+    // Keyless providers (Ollama, Local, some self-hosted gateways) do
+    // not require an Authorization header — omit it when the caller
+    // supplies an empty key so those targets actually work.
+    let mut req = agent
         .post(&url)
-        .set("Authorization", &format!("Bearer {}", request.api_key))
         .set("Content-Type", "application/json")
-        .set("Accept", "application/json")
-        .send_string(&payload);
+        .set("Accept", "application/json");
+    let api_key = request.api_key.trim();
+    if !api_key.is_empty() {
+        req = req.set("Authorization", &format!("Bearer {}", api_key));
+    }
+    let response = req.send_string(&payload);
 
     let body = match response {
         Ok(ok) => ok
@@ -120,11 +121,6 @@ pub fn openai_embeddings(request: OpenAiEmbeddingRequest) -> RedDBResult<OpenAiE
 }
 
 pub fn openai_prompt(request: OpenAiPromptRequest) -> RedDBResult<AiPromptResponse> {
-    if request.api_key.trim().is_empty() {
-        return Err(RedDBError::Query(
-            "OpenAI API key cannot be empty".to_string(),
-        ));
-    }
     if request.model.trim().is_empty() {
         return Err(RedDBError::Query(
             "OpenAI prompt model cannot be empty".to_string(),
@@ -151,12 +147,16 @@ pub fn openai_prompt(request: OpenAiPromptRequest) -> RedDBResult<AiPromptRespon
         .timeout_write(Duration::from_secs(30))
         .build();
 
-    let response = agent
+    // See openai_embeddings for the keyless-provider rationale.
+    let mut req = agent
         .post(&url)
-        .set("Authorization", &format!("Bearer {}", request.api_key))
         .set("Content-Type", "application/json")
-        .set("Accept", "application/json")
-        .send_string(&payload);
+        .set("Accept", "application/json");
+    let api_key = request.api_key.trim();
+    if !api_key.is_empty() {
+        req = req.set("Authorization", &format!("Bearer {}", api_key));
+    }
+    let response = req.send_string(&payload);
 
     let body = match response {
         Ok(ok) => ok
@@ -1194,18 +1194,241 @@ pub fn local_prompt(_model_id: &str, _prompt: &str) -> crate::RedDBResult<AiProm
 }
 
 // ============================================================================
+// gRPC input collection — parity with HTTP /ai/embeddings
+// ============================================================================
+
+/// Collect embedding inputs from any of the three supported shapes.
+///
+/// * `input: "..."` — single string.
+/// * `inputs: ["...", ...]` — array of strings.
+/// * `source_query: "SELECT ..."` — runs a SQL query and projects
+///   either the named `source_field` from each row (source_mode =
+///   "row", default) or every string cell of every result row
+///   (source_mode = "result").
+fn grpc_collect_embedding_inputs(
+    runtime: &crate::runtime::RedDBRuntime,
+    payload: &JsonValue,
+) -> crate::RedDBResult<Vec<String>> {
+    if let Some(source_query) = payload
+        .get("source_query")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return grpc_collect_inputs_from_source_query(runtime, payload, source_query);
+    }
+
+    if let Some(arr) = payload.get("inputs").and_then(|v| v.as_array()) {
+        let mut out = Vec::with_capacity(arr.len());
+        for (idx, v) in arr.iter().enumerate() {
+            let text = v.as_str().ok_or_else(|| {
+                crate::RedDBError::Query(format!("field 'inputs[{idx}]' must be a string"))
+            })?;
+            if text.trim().is_empty() {
+                return Err(crate::RedDBError::Query(format!(
+                    "field 'inputs[{idx}]' cannot be empty"
+                )));
+            }
+            out.push(text.to_string());
+        }
+        if out.is_empty() {
+            return Err(crate::RedDBError::Query(
+                "field 'inputs' must be a non-empty array of strings".to_string(),
+            ));
+        }
+        return Ok(out);
+    }
+
+    if let Some(single) = payload
+        .get("input")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Ok(vec![single.to_string()]);
+    }
+
+    Err(crate::RedDBError::Query(
+        "provide either 'input', 'inputs', or 'source_query'".to_string(),
+    ))
+}
+
+fn grpc_collect_inputs_from_source_query(
+    runtime: &crate::runtime::RedDBRuntime,
+    payload: &JsonValue,
+    source_query: &str,
+) -> crate::RedDBResult<Vec<String>> {
+    let result = runtime
+        .execute_query(source_query)
+        .map_err(|err| crate::RedDBError::Query(format!("source_query failed: {err}")))?;
+
+    let source_mode = payload
+        .get("source_mode")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("row")
+        .to_ascii_lowercase();
+
+    let mut out: Vec<String> = Vec::new();
+    match source_mode.as_str() {
+        "row" => {
+            let field = payload
+                .get("source_field")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    crate::RedDBError::Query(
+                        "field 'source_field' is required when source_mode='row'".to_string(),
+                    )
+                })?;
+            for rec in &result.result.records {
+                for (key, value) in rec.values.iter() {
+                    if key.as_ref() == field {
+                        if let crate::storage::schema::Value::Text(text) = value {
+                            let trimmed = text.trim();
+                            if !trimmed.is_empty() {
+                                out.push(trimmed.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        "result" => {
+            for rec in &result.result.records {
+                for (_, value) in rec.values.iter() {
+                    if let crate::storage::schema::Value::Text(text) = value {
+                        let trimmed = text.trim();
+                        if !trimmed.is_empty() {
+                            out.push(trimmed.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        other => {
+            return Err(crate::RedDBError::Query(format!(
+                "field 'source_mode' must be 'row' or 'result' (got '{other}')"
+            )));
+        }
+    }
+
+    if out.is_empty() {
+        return Err(crate::RedDBError::Query(
+            "source_query produced zero non-empty text inputs".to_string(),
+        ));
+    }
+    Ok(out)
+}
+
+// ============================================================================
 // gRPC stubs — delegate to the same logic as HTTP handlers
 // ============================================================================
 
-/// gRPC stub for AI embeddings — returns not-yet-available until HTTP handler
-/// logic is extracted into shared functions.
+/// gRPC embeddings — shared entrypoint that mirrors the HTTP handler.
+///
+/// Accepts the same JSON payload shape as `POST /ai/embeddings`:
+///
+/// ```json
+/// { "provider": "openai", "model": "text-embedding-3-small",
+///   "inputs": ["hello", "world"], "credential": "optional-alias" }
+/// ```
+///
+/// Input shapes at parity with HTTP: `input` (single string),
+/// `inputs` (array of strings), and `source_query` (SQL that the
+/// runtime executes to materialise the input texts; `source_mode`
+/// = `row` needs `source_collection` + `source_field`, `result`
+/// uses the projected columns). Returns a JSON object with
+/// `provider`, `model`, `embeddings`, `prompt_tokens`,
+/// `total_tokens`. Non-OpenAI-compatible providers are rejected
+/// with a clear message, matching the HTTP handler.
 pub fn grpc_embeddings(
-    _runtime: &crate::runtime::RedDBRuntime,
-    _payload: &JsonValue,
+    runtime: &crate::runtime::RedDBRuntime,
+    payload: &JsonValue,
 ) -> crate::RedDBResult<JsonValue> {
-    Err(crate::RedDBError::FeatureNotEnabled(
-        "AI embeddings via gRPC requires HTTP endpoint; use POST /ai/embeddings".to_string(),
-    ))
+    let provider_name = payload
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("openai");
+    let provider = parse_provider(provider_name)?;
+    if !provider.is_openai_compatible() {
+        return Err(crate::RedDBError::Query(format!(
+            "embeddings are not yet available for provider '{}' via gRPC. \
+             Use an OpenAI-compatible provider (openai, groq, ollama, \
+             openrouter, together, venice, deepseek, or a custom base URL).",
+            provider.token()
+        )));
+    }
+
+    let inputs: Vec<String> = grpc_collect_embedding_inputs(runtime, payload)?;
+
+    let model = payload
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            std::env::var(format!(
+                "REDDB_{}_EMBEDDING_MODEL",
+                provider.token().to_ascii_uppercase()
+            ))
+            .ok()
+        })
+        .or_else(|| std::env::var("REDDB_OPENAI_EMBEDDING_MODEL").ok())
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| provider.default_embedding_model().to_string());
+
+    let credential = payload
+        .get("credential")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let api_key = resolve_api_key_from_runtime(&provider, credential.as_deref(), runtime)?;
+
+    let dimensions = payload
+        .get("dimensions")
+        .and_then(|v| v.as_i64())
+        .and_then(|v| usize::try_from(v).ok())
+        .filter(|v| *v > 0);
+
+    let response = openai_embeddings(OpenAiEmbeddingRequest {
+        api_key,
+        model,
+        inputs,
+        dimensions,
+        api_base: provider.resolve_api_base(),
+    })?;
+
+    let embeddings_json: Vec<JsonValue> = response
+        .embeddings
+        .into_iter()
+        .map(|vec| {
+            JsonValue::Array(
+                vec.into_iter()
+                    .map(|f| JsonValue::Number(f as f64))
+                    .collect(),
+            )
+        })
+        .collect();
+
+    let mut obj = Map::new();
+    obj.insert(
+        "provider".to_string(),
+        JsonValue::String(response.provider.to_string()),
+    );
+    obj.insert("model".to_string(), JsonValue::String(response.model));
+    obj.insert("embeddings".to_string(), JsonValue::Array(embeddings_json));
+    if let Some(pt) = response.prompt_tokens {
+        obj.insert("prompt_tokens".to_string(), JsonValue::Number(pt as f64));
+    }
+    if let Some(tt) = response.total_tokens {
+        obj.insert("total_tokens".to_string(), JsonValue::Number(tt as f64));
+    }
+    Ok(JsonValue::Object(obj))
 }
 
 /// gRPC stub for AI prompt.

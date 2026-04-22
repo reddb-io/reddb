@@ -153,14 +153,34 @@ ROLLBACK TO SAVEPOINT step_1 — aborted 1 sub_xid(s), revived 0 tombstone(s)
 COMMIT — xid=427 committed
 ```
 
+## Isolation levels
+
+`BEGIN` / `START TRANSACTION` accepts an optional `ISOLATION LEVEL`
+clause. All accepted modes run under the same snapshot engine today
+— the level is a PG compatibility shim:
+
+| Requested level       | Actual semantics                 |
+|-----------------------|----------------------------------|
+| `READ UNCOMMITTED`    | Snapshot (upgraded — we never expose dirty rows) |
+| `READ COMMITTED`      | Snapshot                         |
+| `REPEATABLE READ`     | Snapshot (PG maps RR→snapshot too) |
+| `SNAPSHOT`            | Snapshot                         |
+| _(omitted)_           | Snapshot (default)               |
+| `SERIALIZABLE`        | **Rejected** — see below         |
+
+`SERIALIZABLE` is rejected at parse time rather than silently
+degraded: real SSI (Serializable Snapshot Isolation with predicate
+locking) is a tracked future milestone, and quietly accepting the
+keyword while providing weaker guarantees would mislead callers
+who depend on the anomaly protection SSI provides. Switch the
+statement to `REPEATABLE READ` (or omit the clause) to use the
+current snapshot engine.
+
 ## Limitations
 
 - `UPDATE` overwrites the tuple in place rather than writing a new
   version. A `ROLLBACK TO SAVEPOINT` after an UPDATE cannot restore
   the pre-update value. INSERT and DELETE are fully reversible.
-- `SERIALIZABLE` isolation is accepted by the parser but downgrades to
-  `SNAPSHOT ISOLATION` semantics. Predicate locking for true
-  serializability is planned.
 - Phase 2.3 snapshots are in-process; crash recovery of in-flight
   transactions arrives with Phase 4.
 

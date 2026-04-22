@@ -29,6 +29,7 @@
 //! - **BindingIterator**: Lazy result stream
 //! - **QueryEngine**: Compiles, optimizes, and executes queries
 
+pub mod aggregates_extra;
 pub mod binding;
 pub mod iterator;
 pub mod op;

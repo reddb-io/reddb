@@ -347,6 +347,10 @@ pub(super) fn collection_contract_to_json(contract: &CollectionContract) -> Json
         JsonValue::Bool(contract.context_index_enabled),
     );
     object.insert(
+        "append_only".to_string(),
+        JsonValue::Bool(contract.append_only),
+    );
+    object.insert(
         "table_def".to_string(),
         contract
             .table_def
@@ -428,6 +432,12 @@ pub(super) fn collection_contract_from_json(value: &JsonValue) -> io::Result<Col
             .get("context_index_enabled")
             .and_then(JsonValue::as_bool)
             .unwrap_or(true),
+        // Legacy sidecars lack the append_only flag — default false
+        // (pre-feature behaviour: tables were always mutable).
+        append_only: object
+            .get("append_only")
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(false),
     })
 }
 

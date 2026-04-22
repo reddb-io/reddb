@@ -45,6 +45,7 @@
 pub mod analyze_cmd;
 pub mod analyzer;
 pub mod ast;
+pub mod batch;
 pub mod binary;
 pub mod engine;
 pub mod executor;

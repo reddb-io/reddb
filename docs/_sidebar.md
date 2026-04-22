@@ -35,17 +35,22 @@
 - **Data Models**
   - [Overview](/data-models/overview.md)
   - [Tables & Rows](/data-models/tables.md)
+  - [Append-Only Tables](/data-models/append-only-tables.md)
   - [Documents](/data-models/documents.md)
   - [Key-Value](/data-models/key-value.md)
   - [Graphs](/data-models/graphs.md)
   - [Vectors & Embeddings](/data-models/vectors.md)
   - [Time-Series](/data-models/timeseries.md)
+  - [Hypertables](/data-models/hypertables.md)
+  - [Continuous Aggregates](/data-models/continuous-aggregates.md)
+  - [Partition TTL](/data-models/partition-ttl.md)
   - [Queues & Deques](/data-models/queues.md)
   - [Probabilistic Structures](/data-models/probabilistic.md)
 
 - **APIs**
   - [gRPC API](/api/grpc.md)
   - [HTTP API](/api/http.md)
+  - [Ingest API (JSON / NDJSON / WS)](/api/ingest.md)
   - [PostgreSQL Wire](/api/postgres-wire.md)
   - [MCP (AI Agents)](/api/mcp.md)
   - [Embedded (Rust)](/api/embedded.md)
@@ -73,7 +78,13 @@
   - [File Format Anatomy](/engine/file-format.md)
   - [WAL & Recovery](/engine/wal.md)
   - [SIEVE Cache](/engine/cache.md)
+  - [Columnar Batch Execution](/engine/columnar-execution.md)
   - [Encryption at Rest](/engine/encryption.md)
+
+- **Architecture**
+  - [Collection Contract (ADR)](/architecture/collection-contract-adr.md)
+  - [Competitive Positioning](/architecture/competitive-positioning.md)
+  - [Distributed Roadmap](/architecture/distributed-roadmap.md)
 
 - **Vector Engine**
   - [HNSW Index](/vectors/hnsw.md)
@@ -130,6 +141,8 @@
   - [Geographic Operations](/guides/geo-operations.md)
   - [Vector Clustering](/guides/vector-clustering.md)
   - [Log Collections](/guides/log-collections.md)
+  - [Logs Quickstart](/guides/logs-quickstart.md)
+  - [Using RedDB for Logs](/guides/using-reddb-for-logs.md)
 
 - **Reference**
   - [Schema Definition](/reference/schema.md)

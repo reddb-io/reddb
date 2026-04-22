@@ -33,7 +33,10 @@ const COLLECTION: &str = "typed_bench";
 fn make_row(id: u64) -> CreateRowInput {
     let fields = vec![
         ("id".into(), Value::UnsignedInteger(id)),
-        ("ip".into(), Value::text(format!("10.0.{}.{}", id / 256, id % 256))),
+        (
+            "ip".into(),
+            Value::text(format!("10.0.{}.{}", id / 256, id % 256)),
+        ),
         (
             "mac".into(),
             Value::text(format!(
@@ -44,15 +47,15 @@ fn make_row(id: u64) -> CreateRowInput {
             )),
         ),
         ("port".into(), Value::Integer((id % 65535) as i64)),
-        (
-            "email".into(),
-            Value::text(format!("user{id}@example.com")),
-        ),
+        ("email".into(), Value::text(format!("user{id}@example.com"))),
         (
             "uuid".into(),
             Value::text(format!("{:016x}-0000-0000-0000-{:012x}", id, id)),
         ),
-        ("phone".into(), Value::text(format!("+1-555-{:07}", id % 10_000_000))),
+        (
+            "phone".into(),
+            Value::text(format!("+1-555-{:07}", id % 10_000_000)),
+        ),
         (
             "url".into(),
             Value::text(format!("https://example.com/{id}")),
@@ -95,8 +98,7 @@ fn main() {
     // real server (Docker bench hits it at 6k ops/s). This harness
     // isolates the per-row CPU cost for 15-column typed rows.
     opts.durability_mode = DurabilityMode::Async;
-    let runtime: Arc<RedDBRuntime> =
-        Arc::new(RedDBRuntime::with_options(opts).expect("runtime"));
+    let runtime: Arc<RedDBRuntime> = Arc::new(RedDBRuntime::with_options(opts).expect("runtime"));
 
     // Seed the collection via one small insert so the table exists
     // before the measured batches start.
@@ -111,9 +113,8 @@ fn main() {
     let t_total = Instant::now();
     for b in 0..N_BATCHES {
         let base = (b * BATCH_SIZE + 1) as u64;
-        let rows: Vec<CreateRowInput> = (0..BATCH_SIZE)
-            .map(|i| make_row(base + i as u64))
-            .collect();
+        let rows: Vec<CreateRowInput> =
+            (0..BATCH_SIZE).map(|i| make_row(base + i as u64)).collect();
         let t0 = Instant::now();
         let n = runtime
             .create_rows_batch_prevalidated(CreateRowsBatchInput {
@@ -134,7 +135,10 @@ fn main() {
     let p99 = per_batch_ms[per_batch_ms.len() * 99 / 100];
 
     println!("=== typed_insert in-process ===");
-    println!("batches   {N_BATCHES} × {BATCH_SIZE} rows = {} rows", N_BATCHES * BATCH_SIZE);
+    println!(
+        "batches   {N_BATCHES} × {BATCH_SIZE} rows = {} rows",
+        N_BATCHES * BATCH_SIZE
+    );
     println!("wall      {:.2}s", wall.as_secs_f64());
     println!("ops/s     {:.0}", total_rows / wall.as_secs_f64());
     println!("p50 batch {:>7.2} ms", p50);

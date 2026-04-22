@@ -150,10 +150,27 @@ impl<'a, P: RuntimeQueryPort + crate::application::ports::RuntimeEntityPort + ?S
                         crate::ai::parse_provider(&name)?
                     }
                 };
+                // Gate non-OpenAI-compatible providers before we spend
+                // cycles resolving a key — Anthropic has no embeddings
+                // endpoint, HuggingFace uses a different wire shape,
+                // Local needs the `local-models` feature flag.
+                if !provider.is_openai_compatible() {
+                    return Err(crate::RedDBError::Query(format!(
+                        "SEARCH SIMILAR: embeddings are not yet available for provider '{}'. \
+                         Use an OpenAI-compatible provider (openai, groq, ollama, openrouter, \
+                         together, venice, deepseek, or a custom base URL).",
+                        provider.token()
+                    )));
+                }
                 let api_key = self.runtime.resolve_semantic_api_key(&provider)?;
-                let model = std::env::var("REDDB_OPENAI_EMBEDDING_MODEL")
-                    .ok()
-                    .unwrap_or_else(|| provider.default_embedding_model().to_string());
+                let model = std::env::var(format!(
+                    "REDDB_{}_EMBEDDING_MODEL",
+                    provider.token().to_ascii_uppercase()
+                ))
+                .ok()
+                .or_else(|| std::env::var("REDDB_OPENAI_EMBEDDING_MODEL").ok())
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or_else(|| provider.default_embedding_model().to_string());
                 let response = crate::ai::openai_embeddings(crate::ai::OpenAiEmbeddingRequest {
                     api_key,
                     model,

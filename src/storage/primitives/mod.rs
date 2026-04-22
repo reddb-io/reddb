@@ -20,6 +20,7 @@ pub mod ids;
 pub mod mmap;
 pub mod serializer;
 pub mod split_block_bloom;
+pub mod tdigest;
 
 // Re-export commonly used types
 pub use bloom::{BloomFilter, BloomFilterBuilder};
@@ -36,3 +37,4 @@ pub use ids::{
 #[cfg(unix)]
 pub use mmap::{MadviseAdvice, MmapFile};
 pub use serializer::{Record, Serializer};
+pub use tdigest::TDigest;

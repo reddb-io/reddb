@@ -1,4 +1,6 @@
 use super::*;
+use crate::application::schema::{CreateTablePartitionKind, CreateTablePartitionSpec};
+use crate::storage::query::ast::{PartitionKind, PartitionSpec};
 use crate::storage::query::{
     CreateColumnDef, CreateTableQuery, CreateTimeSeriesQuery, DropTableQuery, DropTimeSeriesQuery,
 };
@@ -27,6 +29,21 @@ fn to_create_column_def(
     }
 }
 
+fn to_partition_kind(kind: CreateTablePartitionKind) -> PartitionKind {
+    match kind {
+        CreateTablePartitionKind::Range => PartitionKind::Range,
+        CreateTablePartitionKind::List => PartitionKind::List,
+        CreateTablePartitionKind::Hash => PartitionKind::Hash,
+    }
+}
+
+fn to_partition_spec(spec: CreateTablePartitionSpec) -> PartitionSpec {
+    PartitionSpec {
+        kind: to_partition_kind(spec.kind),
+        column: spec.column,
+    }
+}
+
 impl RuntimeSchemaPort for RedDBRuntime {
     fn create_table(&self, input: CreateTableInput) -> RedDBResult<RuntimeQueryResult> {
         let CreateTableInput {
@@ -36,6 +53,9 @@ impl RuntimeSchemaPort for RedDBRuntime {
             default_ttl_ms,
             context_index_fields,
             timestamps,
+            partition_by,
+            tenant_by,
+            append_only,
         } = input;
         let raw_query = api_query("create_table", &name);
         let query = CreateTableQuery {
@@ -46,12 +66,9 @@ impl RuntimeSchemaPort for RedDBRuntime {
             context_index_fields: context_index_fields.clone(),
             context_index_enabled: !context_index_fields.is_empty(),
             timestamps,
-            // Application-level `create_table` entry point does not yet
-            // accept partition specs — callers that need partitions go
-            // through the SQL parser path.
-            partition_by: None,
-            // Same for tenant_by — declared via SQL parser only.
-            tenant_by: None,
+            partition_by: partition_by.map(to_partition_spec),
+            tenant_by,
+            append_only,
         };
         RedDBRuntime::execute_create_table(self, &raw_query, &query)
     }

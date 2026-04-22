@@ -56,6 +56,13 @@ PUT config.theme = 'dark'
 CREATE TIMESERIES cpu_metrics RETENTION 90 d
 INSERT INTO cpu_metrics (metric, value, tags) VALUES ('cpu.idle', 95.2, '{"host":"srv1"}')
 
+-- Hypertables + partition TTL + continuous aggregates (logs / events / telemetry)
+CREATE HYPERTABLE access_log (ts BIGINT, service TEXT, status INT, latency_ms INT)
+  CHUNK_INTERVAL '1 day' WITH (ttl = '90d');
+
+-- Append-only tables (audit, ledger, immutable events)
+CREATE TABLE audit_log (id BIGINT, action TEXT) APPEND ONLY
+
 -- Message queues (FIFO, priority, consumer groups)
 CREATE QUEUE tasks MAX_SIZE 10000
 QUEUE PUSH tasks '{"job":"process","id":123}'
@@ -63,6 +70,10 @@ QUEUE POP tasks
 ```
 
 Same file. Same engine. Same query language.
+
+Want to use RedDB as your log store? Start with the
+[Logs Quickstart](./docs/guides/logs-quickstart.md) or the full
+[Using RedDB for Logs](./docs/guides/using-reddb-for-logs.md) guide.
 
 ---
 
@@ -91,19 +102,24 @@ RedDB retrieves context from every data model, feeds it to the LLM, and gives yo
 
 Swap providers with a keyword. No code changes.
 
-| Provider | Keyword | API Key Required |
-|:---------|:--------|:-----------------|
-| OpenAI | `openai` | Yes |
-| Anthropic | `anthropic` | Yes |
-| Groq | `groq` | Yes |
-| OpenRouter | `openrouter` | Yes |
-| Together | `together` | Yes |
-| Venice | `venice` | Yes |
-| DeepSeek | `deepseek` | Yes |
-| HuggingFace | `huggingface` | Yes |
-| Ollama | `ollama` | No (local) |
-| Local | `local` | No |
-| Custom URL | `https://...` | Configurable |
+| Provider    | Keyword        | API Key | ASK / Prompt | Embeddings |
+|:------------|:---------------|:-------:|:------------:|:----------:|
+| OpenAI      | `openai`       | Yes     | ✅           | ✅         |
+| Anthropic   | `anthropic`    | Yes     | ✅           | —          |
+| Groq        | `groq`         | Yes     | ✅           | ✅         |
+| OpenRouter  | `openrouter`   | Yes     | ✅           | ✅         |
+| Together    | `together`     | Yes     | ✅           | ✅         |
+| Venice      | `venice`       | Yes     | ✅           | ✅         |
+| DeepSeek    | `deepseek`     | Yes     | ✅           | ✅         |
+| HuggingFace | `huggingface`  | Yes     | ✅           | —          |
+| Ollama      | `ollama`       | No      | ✅           | ✅         |
+| Local       | `local`        | No      | feature-gated | feature-gated |
+| Custom URL  | `https://...`  | depends | ✅           | ✅         |
+
+Embeddings flow through the OpenAI-compatible `/embeddings` endpoint —
+Anthropic has no embeddings product today, HuggingFace uses a
+different wire shape (a separate client is on the roadmap), and
+`local` requires building with the `local-models` feature flag.
 
 ```sql
 ASK 'summarize alerts' USING groq MODEL 'llama-3.3-70b-versatile'

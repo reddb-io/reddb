@@ -229,6 +229,14 @@ pub struct CollectionContract {
     /// pay zero indexing tax; search-oriented tables (articles, docs)
     /// flip the switch at CREATE time.
     pub context_index_enabled: bool,
+    /// Enabled by `CREATE TABLE ... APPEND ONLY` or `WITH
+    /// (append_only = true)`. When true, the runtime rejects
+    /// `UPDATE` and `DELETE` against this collection at parse time
+    /// with a clear error — the operator's immutability intent
+    /// becomes a first-class catalog fact rather than an RLS-shaped
+    /// approximation. Default `false` so legacy DDL keeps its
+    /// mutable semantics.
+    pub append_only: bool,
 }
 
 /// Canonical artifact lifecycle states.

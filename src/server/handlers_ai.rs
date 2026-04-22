@@ -444,19 +444,37 @@ impl RedDBServer {
             Ok(provider) => provider,
             Err(err) => return json_error(400, err),
         };
-        if provider != AiProvider::OpenAi {
+        // OpenAI-compatible providers (Groq, Ollama, OpenRouter, Together,
+        // Venice, DeepSeek, Custom, OpenAI itself) all speak the same
+        // `POST /embeddings` shape, so we route them through the shared
+        // transport. Non-compatible providers (Anthropic has no
+        // embeddings endpoint today, HuggingFace uses a different
+        // shape, Local needs the `local-models` feature flag) are
+        // rejected with a clear, provider-specific message.
+        if !provider.is_openai_compatible() {
             return json_error(
                 400,
-                "unsupported provider for embeddings; only 'openai' is currently supported",
+                format!(
+                    "embeddings are not yet available for provider '{}'. \
+                     Use an OpenAI-compatible provider (openai, groq, ollama, \
+                     openrouter, together, venice, deepseek, or a custom base URL).",
+                    provider.token()
+                ),
             );
         }
 
         let model = json_string_field(&payload, "model").unwrap_or_else(|| {
-            std::env::var("REDDB_OPENAI_EMBEDDING_MODEL")
-                .ok()
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty())
-                .unwrap_or_else(|| crate::ai::DEFAULT_OPENAI_EMBEDDING_MODEL.to_string())
+            // Provider-specific embedding model env var first, then generic
+            // fallback, then the provider's compiled-in default.
+            std::env::var(format!(
+                "REDDB_{}_EMBEDDING_MODEL",
+                provider.token().to_ascii_uppercase()
+            ))
+            .ok()
+            .or_else(|| std::env::var("REDDB_OPENAI_EMBEDDING_MODEL").ok())
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| provider.default_embedding_model().to_string())
         });
         let dimensions = match payload
             .get("dimensions")

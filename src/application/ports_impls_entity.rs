@@ -114,6 +114,9 @@ fn ensure_collection_model_contract(
             .then(|| crate::storage::schema::TableDef::new(collection.to_string())),
         timestamps_enabled: false,
         context_index_enabled: false,
+        // Implicit contracts are created on first write — mutability
+        // is the default until the operator runs explicit DDL.
+        append_only: false,
     })
     .map(|_| ())
     .map_err(|err| crate::RedDBError::Internal(err.to_string()))
@@ -2126,10 +2129,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         Ok(ids.len())
     }
 
-    fn create_rows_batch_prevalidated(
-        &self,
-        input: CreateRowsBatchInput,
-    ) -> RedDBResult<usize> {
+    fn create_rows_batch_prevalidated(&self, input: CreateRowsBatchInput) -> RedDBResult<usize> {
         if input.rows.is_empty() {
             return Ok(0);
         }

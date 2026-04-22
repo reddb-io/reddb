@@ -1172,11 +1172,70 @@ impl<'a> Parser<'a> {
                 }
             }
             // Transaction control statements (Phase 1.1 PG parity).
-            // BEGIN [WORK | TRANSACTION], START TRANSACTION
+            // BEGIN [WORK | TRANSACTION] [ISOLATION LEVEL <mode>]
+            // START TRANSACTION [ISOLATION LEVEL <mode>]
+            //
+            // We only implement SNAPSHOT ISOLATION (our default). We
+            // accept READ UNCOMMITTED / READ COMMITTED / REPEATABLE
+            // READ / SNAPSHOT as PG-compatible no-ops, but reject
+            // SERIALIZABLE outright — the previous behaviour of
+            // silently degrading to snapshot made the parser
+            // dishonest. Real SSI (Serializable Snapshot Isolation)
+            // is tracked as a future milestone.
             Token::Begin | Token::Start => {
                 self.advance()?;
-                // Optional trailing WORK / TRANSACTION keywords.
                 let _ = self.consume(&Token::Work)? || self.consume(&Token::Transaction)?;
+                // Optional ISOLATION LEVEL clause.
+                if self.consume_ident_ci("ISOLATION")? {
+                    self.expect(Token::Level)?;
+                    // The level identifier can span multiple words
+                    // (READ UNCOMMITTED / READ COMMITTED / REPEATABLE
+                    // READ). Collect them case-insensitively.
+                    let mut parts: Vec<String> = Vec::new();
+                    if self.consume_ident_ci("READ")? {
+                        parts.push("READ".to_string());
+                        if self.consume_ident_ci("UNCOMMITTED")? {
+                            parts.push("UNCOMMITTED".to_string());
+                        } else if self.consume_ident_ci("COMMITTED")? {
+                            parts.push("COMMITTED".to_string());
+                        } else {
+                            return Err(ParseError::expected(
+                                vec!["UNCOMMITTED", "COMMITTED"],
+                                self.peek(),
+                                self.position(),
+                            ));
+                        }
+                    } else if self.consume_ident_ci("REPEATABLE")? {
+                        parts.push("REPEATABLE".to_string());
+                        if !self.consume_ident_ci("READ")? {
+                            return Err(ParseError::expected(
+                                vec!["READ"],
+                                self.peek(),
+                                self.position(),
+                            ));
+                        }
+                        parts.push("READ".to_string());
+                    } else if self.consume_ident_ci("SNAPSHOT")? {
+                        parts.push("SNAPSHOT".to_string());
+                    } else if self.consume_ident_ci("SERIALIZABLE")? {
+                        return Err(ParseError::new(
+                            "ISOLATION LEVEL SERIALIZABLE is not yet supported — reddb \
+                             currently provides SNAPSHOT ISOLATION (which PG calls \
+                             REPEATABLE READ). Use REPEATABLE READ / SNAPSHOT / \
+                             READ COMMITTED, or omit ISOLATION LEVEL for the default."
+                                .to_string(),
+                            self.position(),
+                        ));
+                    } else {
+                        return Err(ParseError::expected(
+                            vec!["READ", "REPEATABLE", "SNAPSHOT", "SERIALIZABLE"],
+                            self.peek(),
+                            self.position(),
+                        ));
+                    }
+                    // All accepted modes map to our snapshot engine today.
+                    let _ = parts;
+                }
                 Ok(SqlCommand::TransactionControl(TxnControl::Begin))
             }
             // COMMIT [WORK | TRANSACTION]

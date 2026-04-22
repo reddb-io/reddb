@@ -1,6 +1,11 @@
 # ADR: Collection Contract as the Authoritative Logical Catalog
 
-Status: Proposed
+Status: Accepted (Phase 1 landed — see `src/catalog.rs`,
+`collection_contract` lookups across `runtime/impl_*.rs`).
+Remaining gaps: richer index declarations, cross-collection FK
+constraints, and full lifecycle metadata are tracked as follow-on
+work but the core contract is now the source of truth for model,
+schema mode, columns, default TTL, and timestamps.
 
 ## Context
 
