@@ -1793,6 +1793,22 @@ pub(super) fn evaluate_scalar_function_with_db(
     ) {
         return evaluate_ml_scalar(db?, &func_name.to_ascii_uppercase(), args, source);
     }
+    if matches!(
+        func_name.to_ascii_uppercase().as_str(),
+        "CA_REGISTER" | "CA_DROP" | "CA_STATE" | "CA_LIST"
+    ) {
+        // Resolve every arg to a Value first, then route to the
+        // expr_eval dispatcher so the two surfaces share exactly
+        // one code path.
+        let resolved: Vec<Value> = (0..args.len())
+            .map(|i| resolve_scalar_arg(args, i, source).unwrap_or(Value::Null))
+            .collect();
+        return super::expr_eval::dispatch_ca_function_public(
+            db?,
+            &func_name.to_ascii_uppercase(),
+            &resolved,
+        );
+    }
     evaluate_scalar_function_legacy(name, args, source)
 }
 

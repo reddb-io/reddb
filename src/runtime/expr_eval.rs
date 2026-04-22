@@ -165,6 +165,15 @@ pub(super) fn evaluate_runtime_expr_with_db(
                 }
                 return None;
             }
+            if matches!(
+                upper.as_str(),
+                "CA_REGISTER" | "CA_DROP" | "CA_STATE" | "CA_LIST"
+            ) {
+                if let Some(db) = db {
+                    return dispatch_ca_function(db, &upper, &arg_values);
+                }
+                return None;
+            }
             // Uppercase the function name so CASE-insensitive lookups
             // match the legacy is_scalar_function table.
             dispatch_builtin_function(&upper, &arg_values)
@@ -651,6 +660,115 @@ fn embed_text(db: &RedDB, text: &str, provider_hint: Option<&str>) -> Option<Val
     match crate::ai::openai_embeddings(request) {
         Ok(resp) => resp.embeddings.into_iter().next().map(Value::Vector),
         Err(_) => None,
+    }
+}
+
+pub(super) fn dispatch_ca_function_public(
+    db: &RedDB,
+    name: &str,
+    args: &[Value],
+) -> Option<Value> {
+    dispatch_ca_function(db, name, args)
+}
+
+fn dispatch_ca_function(db: &RedDB, name: &str, args: &[Value]) -> Option<Value> {
+    use crate::storage::timeseries::continuous_aggregate::{
+        ContinuousAggregateColumn, ContinuousAggregateSpec,
+    };
+    use crate::storage::timeseries::AggregationType;
+
+    let engine = db.continuous_aggregates();
+
+    match name {
+        "CA_REGISTER" => {
+            // CA_REGISTER(name, source, bucket_duration, alias, agg, field
+            //             [, refresh_lag, max_interval])
+            let ca_name = match args.first()? {
+                Value::Text(s) => s.to_string(),
+                _ => return Some(Value::Null),
+            };
+            let source = match args.get(1)? {
+                Value::Text(s) => s.to_string(),
+                _ => return Some(Value::Null),
+            };
+            let bucket = match args.get(2)? {
+                Value::Text(s) => s.to_string(),
+                _ => return Some(Value::Null),
+            };
+            let alias = match args.get(3)? {
+                Value::Text(s) => s.to_string(),
+                _ => return Some(Value::Null),
+            };
+            let agg = match args.get(4)? {
+                Value::Text(s) => AggregationType::from_str(s)?,
+                _ => return Some(Value::Null),
+            };
+            let field = match args.get(5)? {
+                Value::Text(s) => s.to_string(),
+                _ => return Some(Value::Null),
+            };
+            let lag = args
+                .get(6)
+                .and_then(|v| match v {
+                    Value::Text(s) => Some(s.to_string()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| "0s".to_string());
+            let max_interval = args
+                .get(7)
+                .and_then(|v| match v {
+                    Value::Text(s) => Some(s.to_string()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| "365d".to_string());
+
+            let spec = ContinuousAggregateSpec::from_durations(
+                ca_name,
+                source,
+                &bucket,
+                vec![ContinuousAggregateColumn {
+                    alias,
+                    source_column: field,
+                    agg,
+                }],
+                &lag,
+                &max_interval,
+            )?;
+            engine.register(spec);
+            Some(Value::Boolean(true))
+        }
+        "CA_DROP" => {
+            let ca_name = match args.first()? {
+                Value::Text(s) => s.to_string(),
+                _ => return Some(Value::Null),
+            };
+            engine.drop_aggregate(&ca_name);
+            Some(Value::Boolean(true))
+        }
+        "CA_STATE" => {
+            // Returns a JSON-ish summary — buckets count + last refreshed.
+            let ca_name = match args.first()? {
+                Value::Text(s) => s.to_string(),
+                _ => return Some(Value::Null),
+            };
+            match engine.state(&ca_name) {
+                Some(state) => Some(Value::text(format!(
+                    "{{\"last_refreshed_bucket_ns\":{},\"bucket_count\":{}}}",
+                    state.last_refreshed_bucket_ns(),
+                    state.bucket_count()
+                ))),
+                None => Some(Value::Null),
+            }
+        }
+        "CA_LIST" => {
+            let names: Vec<Value> = engine
+                .list()
+                .into_iter()
+                .map(|s| Value::text(s.name))
+                .collect();
+            Some(Value::Array(names))
+        }
+        _ => None,
     }
 }
 

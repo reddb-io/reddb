@@ -204,6 +204,7 @@ impl RedDB {
             ml_runtime: std::sync::OnceLock::new(),
             semantic_cache: std::sync::OnceLock::new(),
             hypertables: std::sync::OnceLock::new(),
+            continuous_aggregates: std::sync::OnceLock::new(),
         }
         .with_initialized_metadata()
     }

@@ -1428,6 +1428,19 @@ impl RedDB {
             .get_or_init(|| Arc::new(crate::storage::timeseries::HypertableRegistry::new()))
     }
 
+    /// Lazily-initialised continuous-aggregate engine. Populated by
+    /// `CA_REGISTER` and read by `CA_REFRESH` / `CA_STATE` scalars.
+    pub fn continuous_aggregates(
+        &self,
+    ) -> &Arc<crate::storage::timeseries::continuous_aggregate::ContinuousAggregateEngine>
+    {
+        self.continuous_aggregates.get_or_init(|| {
+            Arc::new(
+                crate::storage::timeseries::continuous_aggregate::ContinuousAggregateEngine::new(),
+            )
+        })
+    }
+
     pub(crate) fn is_binary_dump(path: &Path) -> Result<bool, std::io::Error> {
         let mut file = File::open(path)?;
         let mut magic = [0u8; 4];

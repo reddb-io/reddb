@@ -112,6 +112,12 @@ pub struct RedDB {
     /// exist.
     pub(crate) hypertables:
         std::sync::OnceLock<Arc<crate::storage::timeseries::HypertableRegistry>>,
+    /// Continuous-aggregate engine — populated by `CA_REGISTER` and
+    /// queried by `CA_REFRESH` / `CA_STATE` scalars. Same lazy shape
+    /// as the other engine handles.
+    pub(crate) continuous_aggregates: std::sync::OnceLock<
+        Arc<crate::storage::timeseries::continuous_aggregate::ContinuousAggregateEngine>,
+    >,
 }
 
 /// A cached HNSW index together with the entity count at build time.
