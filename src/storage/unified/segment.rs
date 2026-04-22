@@ -1109,10 +1109,21 @@ impl GrowingSegment {
             self.use_flat = true;
         }
 
-        // Collect (col, value) pairs for zone updates BEFORE the mutable borrow
-        // on `kind_set` is released (Rust can't split field borrows through `self`).
-        // Use RowData::iter_fields() so both named and columnar rows feed pruning.
-        let mut zone_updates: Vec<(String, Value)> = Vec::new();
+        // Collect zone-update values per column position, not per
+        // (row, col). The old code did `col.to_string()` + HashMap
+        // probe per cell — 15 cols × 25k rows = 375K String
+        // allocations per bulk_insert call for the typed_insert bench.
+        //
+        // New shape: accumulate `Vec<Value>` per column index; after
+        // the scan, walk each non-empty column exactly once, resolve
+        // its name via the shared schema, and apply all observations
+        // under a single HashMap entry. 375K allocs → ~ncols allocs.
+        let mut columnar_zone_updates: Vec<Vec<Value>> = Vec::new();
+        let mut columnar_schema: Option<std::sync::Arc<Vec<String>>> = None;
+        // Named-row fallback (non-prevalidated path) still uses the
+        // per-cell vec — these rows don't share a schema, so there's
+        // no columnar shortcut.
+        let mut named_zone_updates: Vec<(String, Value)> = Vec::new();
 
         if self.use_flat {
             self.flat_entities.reserve(n);
@@ -1121,11 +1132,25 @@ impl GrowingSegment {
                 let id = entity.id;
                 kind_set.insert(id);
                 ids.push(id);
-                // Collect zone data from this entity
                 if let EntityData::Row(row) = &entity.data {
-                    for (col, val) in row.iter_fields() {
-                        if !matches!(val, Value::Null) {
-                            zone_updates.push((col.to_string(), val.clone()));
+                    if row.schema.is_some() && !row.columns.is_empty() {
+                        if columnar_zone_updates.is_empty() {
+                            columnar_zone_updates =
+                                vec![Vec::with_capacity(n); row.columns.len()];
+                            columnar_schema = row.schema.clone();
+                        }
+                        for (ci, val) in row.columns.iter().enumerate() {
+                            if !matches!(val, Value::Null) {
+                                if let Some(bucket) = columnar_zone_updates.get_mut(ci) {
+                                    bucket.push(val.clone());
+                                }
+                            }
+                        }
+                    } else {
+                        for (col, val) in row.iter_fields() {
+                            if !matches!(val, Value::Null) {
+                                named_zone_updates.push((col.to_string(), val.clone()));
+                            }
                         }
                     }
                 }
@@ -1143,7 +1168,7 @@ impl GrowingSegment {
                 if let EntityData::Row(row) = &entity.data {
                     for (col, val) in row.iter_fields() {
                         if !matches!(val, Value::Null) {
-                            zone_updates.push((col.to_string(), val.clone()));
+                            named_zone_updates.push((col.to_string(), val.clone()));
                         }
                     }
                 }
@@ -1152,9 +1177,38 @@ impl GrowingSegment {
             self.entities.extend(pairs);
         }
 
-        // Apply zone updates now that kind_set borrow is released
+        // Apply zone updates now that kind_set borrow is released.
+        // Columnar path: one `col_zones.entry` call per column (not
+        // per cell). Named-fallback path: unchanged.
         let _ = kind_set;
-        for (col, val) in zone_updates {
+        if !columnar_zone_updates.is_empty() {
+            let schema = columnar_schema.as_ref();
+            for (ci, values) in columnar_zone_updates.into_iter().enumerate() {
+                if values.is_empty() {
+                    continue;
+                }
+                let Some(col_name) = schema.and_then(|s| s.get(ci)) else {
+                    continue;
+                };
+                // Enter the HashMap once per column. `raw_entry_mut`
+                // avoids the String::clone when the column already
+                // exists in the map — but that's nightly-only, so we
+                // pay one `clone()` per call-per-column (ncols total)
+                // instead of the old ncols×nrows.
+                let mut iter = values.into_iter();
+                if let Some(first) = iter.next() {
+                    let zone = self
+                        .col_zones
+                        .entry(col_name.clone())
+                        .and_modify(|z| z.update(&first))
+                        .or_insert_with(|| ColZone::new(first));
+                    for v in iter {
+                        zone.update(&v);
+                    }
+                }
+            }
+        }
+        for (col, val) in named_zone_updates {
             self.col_zones
                 .entry(col)
                 .and_modify(|z| z.update(&val))
