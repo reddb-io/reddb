@@ -1824,6 +1824,19 @@ pub(super) fn evaluate_scalar_function_with_db(
             .collect();
         return super::expr_eval::dispatch_hypertable_prune_public(db?, &resolved);
     }
+    if matches!(
+        func_name.to_ascii_uppercase().as_str(),
+        "MODEL_REGISTER" | "MODEL_DROP"
+    ) {
+        let resolved: Vec<Value> = (0..args.len())
+            .map(|i| resolve_scalar_arg(args, i, source).unwrap_or(Value::Null))
+            .collect();
+        return super::expr_eval::dispatch_model_function_public(
+            db?,
+            &func_name.to_ascii_uppercase(),
+            &resolved,
+        );
+    }
     evaluate_scalar_function_legacy(name, args, source)
 }
 

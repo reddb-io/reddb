@@ -189,6 +189,12 @@ pub(super) fn evaluate_runtime_expr_with_db(
                 }
                 return None;
             }
+            if matches!(upper.as_str(), "MODEL_REGISTER" | "MODEL_DROP") {
+                if let Some(db) = db {
+                    return dispatch_model_function(db, &upper, &arg_values);
+                }
+                return None;
+            }
             // Uppercase the function name so CASE-insensitive lookups
             // match the legacy is_scalar_function table.
             dispatch_builtin_function(&upper, &arg_values)
@@ -675,6 +681,94 @@ fn embed_text(db: &RedDB, text: &str, provider_hint: Option<&str>) -> Option<Val
     match crate::ai::openai_embeddings(request) {
         Ok(resp) => resp.embeddings.into_iter().next().map(Value::Vector),
         Err(_) => None,
+    }
+}
+
+pub(super) fn dispatch_model_function_public(
+    db: &RedDB,
+    name: &str,
+    args: &[Value],
+) -> Option<Value> {
+    dispatch_model_function(db, name, args)
+}
+
+/// `MODEL_REGISTER(name, kind, weights_json [, hyperparams_json, metrics_json])` —
+/// appends a new version to the model registry and activates it.
+/// `kind` is `'logreg'` or `'nb'` and is stored inside
+/// `hyperparams_json` for ML_CLASSIFY to decode.
+///
+/// `MODEL_DROP(name)` — archives every version and clears activation.
+fn dispatch_model_function(db: &RedDB, name: &str, args: &[Value]) -> Option<Value> {
+    use crate::storage::ml::ModelVersion;
+
+    match name {
+        "MODEL_REGISTER" => {
+            let model_name = match args.first()? {
+                Value::Text(s) => s.to_string(),
+                _ => return Some(Value::Null),
+            };
+            let kind = match args.get(1)? {
+                Value::Text(s) => s.to_ascii_lowercase(),
+                _ => return Some(Value::Null),
+            };
+            let weights_json = match args.get(2)? {
+                Value::Text(s) => s.to_string(),
+                _ => return Some(Value::Null),
+            };
+            let hyperparams_json = match args.get(3) {
+                Some(Value::Text(s)) => {
+                    // Caller-supplied hyperparams; stamp `kind` in if
+                    // not already there so downstream decoding picks
+                    // the right classifier.
+                    if s.contains("\"kind\"") {
+                        s.to_string()
+                    } else if s.trim() == "{}" || s.trim().is_empty() {
+                        format!("{{\"kind\":\"{kind}\"}}")
+                    } else {
+                        let trimmed = s.trim_start_matches('{').to_string();
+                        format!("{{\"kind\":\"{kind}\",{trimmed}")
+                    }
+                }
+                _ => format!("{{\"kind\":\"{kind}\"}}"),
+            };
+            let metrics_json = match args.get(4) {
+                Some(Value::Text(s)) => s.to_string(),
+                _ => "{}".to_string(),
+            };
+
+            let version = ModelVersion {
+                model: model_name.clone(),
+                version: 0,
+                weights_blob: weights_json.into_bytes(),
+                hyperparams_json,
+                metrics_json,
+                training_data_hash: None,
+                training_sql: None,
+                parent_version: None,
+                created_at_ms: 0,
+                created_by: None,
+                archived: false,
+            };
+            let v = db
+                .ml_runtime()
+                .registry()
+                .register_version(model_name, version, /*make_active=*/ true)
+                .ok()?;
+            Some(Value::Integer(v as i64))
+        }
+        "MODEL_DROP" => {
+            let model_name = match args.first()? {
+                Value::Text(s) => s.to_string(),
+                _ => return Some(Value::Null),
+            };
+            let reg = db.ml_runtime().registry();
+            let versions = reg.list_versions(&model_name).ok()?;
+            for v in versions {
+                let _ = reg.archive_version(&model_name, v.version);
+            }
+            Some(Value::Boolean(true))
+        }
+        _ => None,
     }
 }
 

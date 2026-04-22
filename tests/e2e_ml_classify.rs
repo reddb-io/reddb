@@ -174,6 +174,81 @@ fn embed_returns_null_without_provider_config() {
 }
 
 #[test]
+fn model_register_then_classify_roundtrip() {
+    // Register a pre-trained classifier via SQL and classify against
+    // it without touching the Rust API. Exercises MODEL_REGISTER +
+    // ML_CLASSIFY in one session.
+    let rt = rt();
+    // First train a local classifier so we have real weights.
+    let mut model = LogisticRegression::new(LogisticRegressionConfig {
+        learning_rate: 0.1,
+        l2_penalty: 0.0,
+        epochs: 50,
+        shuffle_seed: 42,
+    });
+    let mut examples = Vec::new();
+    for i in 0..40 {
+        let a = (i as f32) * 0.1;
+        examples.push(TrainingExample {
+            features: vec![a, 0.0],
+            label: 0,
+        });
+        examples.push(TrainingExample {
+            features: vec![0.0, a],
+            label: 1,
+        });
+    }
+    model.fit(&examples);
+    let weights_json = model.to_json();
+
+    let q = QueryUseCases::new(&rt);
+    let sql = format!(
+        "SELECT MODEL_REGISTER('sql_reg_model', 'logreg', '{}') AS v",
+        weights_json.replace('\'', "''")
+    );
+    let r = q
+        .execute(ExecuteQueryInput { query: sql })
+        .expect("register ok");
+    let v = r.result.records[0].values.get("v").expect("v");
+    assert!(
+        matches!(v, Value::Integer(n) if *n >= 1),
+        "expected version id >= 1, got {v:?}"
+    );
+
+    // Now classify against the registered model.
+    let r = q
+        .execute(ExecuteQueryInput {
+            query: "SELECT ML_CLASSIFY('sql_reg_model', [0.1, 3.0]) AS cls".into(),
+        })
+        .expect("classify ok");
+    let cls = r.result.records[0].values.get("cls").expect("cls");
+    assert!(
+        matches!(cls, Value::Integer(1)),
+        "expected class 1, got {cls:?}"
+    );
+}
+
+#[test]
+fn model_drop_archives_versions() {
+    let rt = rt();
+    train_and_register(&rt, "drop_me");
+    let q = QueryUseCases::new(&rt);
+    q.execute(ExecuteQueryInput {
+        query: "SELECT MODEL_DROP('drop_me') AS ok".into(),
+    })
+    .expect("drop ok");
+
+    // After drop, classification should return Null (no active version).
+    let r = q
+        .execute(ExecuteQueryInput {
+            query: "SELECT ML_CLASSIFY('drop_me', [1.0, 2.0]) AS cls".into(),
+        })
+        .expect("ok");
+    let cls = r.result.records[0].values.get("cls").expect("cls");
+    assert!(matches!(cls, Value::Null), "expected Null, got {cls:?}");
+}
+
+#[test]
 fn semantic_cache_miss_returns_null() {
     let rt = rt();
     let q = QueryUseCases::new(&rt);
