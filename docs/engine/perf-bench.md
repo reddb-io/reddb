@@ -9,6 +9,14 @@ The guide accompanies the perf-parity push planned in
 Every perf-focused commit records its delta against the baseline
 captured with this setup.
 
+> **Note — numbers below are the 04-17 snapshot.** Several 04-20/04-21
+> perf landings are not yet re-measured here: streaming bulk wire
+> protocol (~3× typed_insert), columnar pre-validated insert, CDC
+> split lock, lock-free WAL append queue, batched bulk WAL actions,
+> B-tree right-sibling hop on sorted bulk insert, parallel row
+> serialize with batched id reservation, and wire encode column-index
+> caching. Re-run the harness against `main` to refresh — follow-up.
+
 ## Prerequisites
 
 - Docker ≥ 24 with Buildx (`docker buildx version`)

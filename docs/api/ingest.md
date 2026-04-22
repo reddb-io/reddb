@@ -237,9 +237,52 @@ mid-number — and rebuilds across reads.
 | `WS /ws/ingest/{name}` | ~600 k rows/s | Browser collectors, AI agents, bi-directional UI |
 | `POST /sql` with `INSERT INTO ... VALUES` | ~150 k rows/s | You need expressions (`now()`, `uuid()`) or SQL-only transforms |
 | gRPC `RowsInsertBatch` | ~900 k rows/s | Production agents in Rust / Go / Python — lowest overhead |
+| Wire streaming bulk (COPY-equivalent) | ~2.5 M rows/s typed_insert-equivalent | Persistent agents with columnar buffers — see §6b |
 
 JSON ingest sidesteps the SQL parser (biggest per-row cost on the
 bulk path) and keeps the runtime batch insert hot.
+
+---
+
+## 6b. Streaming wire bulk protocol (COPY-equivalent)
+
+For production agents that already speak the native wire protocol
+(gRPC / raw TCP), RedDB exposes a streaming columnar bulk path that
+mirrors Postgres `COPY` but pre-resolves column indices once per
+connection and skips the per-row String clones the legacy path paid.
+
+It is the fastest ingest channel on the hot path — ~3× single-row
+`typed_insert` at 10k-row batches on an 8-core laptop.
+
+**When the server picks this path:**
+
+* The client declares column layout up-front (name + type) in the
+  session header.
+* Schema is statically known (the session can't re-open to a
+  different table mid-stream).
+* Payload is columnar: one `Vec<T>` per column, not a `Vec<Row>`.
+
+**Shape of a session:**
+
+1. Open a persistent connection, send a column-layout header
+   (name + type for each column).
+2. Stream columnar frames — one `Vec<T>` per declared column, not
+   a `Vec<Row>`. The server pre-resolves indices once and validates
+   types on the way in.
+3. Receive one ack per batch; close on EOF.
+
+The listener drains each batch straight into the runtime's batch
+insert, which fuses WAL append + index maintenance for the whole
+batch rather than per row.
+
+**When to prefer HTTP ingest instead:** one-shot jobs, browser
+clients, heterogeneous row shapes. The wire bulk path rewards
+long-lived connections and homogeneous schemas; for bursty or
+ad-hoc workloads the JSON endpoints are cheaper to operate.
+
+A reference client ships in the repository under `examples/` for
+anyone extending the protocol — the HTTP endpoints cover the 99%
+case.
 
 ---
 

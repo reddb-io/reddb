@@ -104,6 +104,59 @@ The key insight: page writes are **idempotent** (last-write-wins), so replaying 
 
 ---
 
+## Grouped Durability Internals
+
+The `WalDurableGrouped` mode (the default since the 04-17 perf push)
+coalesces fsyncs across concurrent writers without serialising them
+on the WAL writer mutex.
+
+### Lock-free append queue
+
+Writers enqueue pre-encoded blobs into a `WalAppendQueue`. Each
+enqueue assigns an LSN range (`next_lsn .. next_lsn + blob.len()`)
+and pushes under a single mutex — reservation and push are atomic,
+so the drain loop never sees holes. The blob is built outside every
+lock.
+
+```
+writer_a ──encode──► enqueue(blob_a) ──► LSN=[100,300)
+writer_b ──encode──► enqueue(blob_b) ──► LSN=[300,550)
+writer_c ──encode──► enqueue(blob_c) ──► LSN=[550,700)
+                                       │
+                        drain_sorted() ▼
+                                  append+fsync once
+                             durable_lsn = 700
+                             (all three waiters wake)
+```
+
+### Group-commit coordinator
+
+A dedicated background thread waits on a condvar until writers have
+pushed enough data past the current durable LSN, then drains the
+queue (all contiguous entries), appends every batch to the WAL
+file, fsyncs **once**, and advances the durable LSN. Waiters block
+on the same condvar and wake the moment their own target LSN
+becomes durable.
+
+### Batched bulk inserts
+
+Bulk inserts emit a single WAL action carrying every row, so a
+10k-row bulk produces one WAL record, not 10k. Replay iterates the
+inner records under the same transaction id.
+
+### Truncate invariant
+
+After a checkpoint completes, the WAL truncates back to its header
+offset. The durability state **and** the append queue's LSN cursor
+reset together to the post-truncate position. Both live in the same
+byte-offset space — resetting only the WAL leaves the queue
+handing out LSNs in the old range, and every subsequent writer
+blocks forever waiting on a target the drain loop can never reach.
+A regression guard in the rpc_stdio test suite catches any future
+drift.
+
+---
+
 ## Durability Guarantees
 
 | Mode | Durability | Performance |

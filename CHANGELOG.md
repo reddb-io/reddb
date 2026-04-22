@@ -2,6 +2,58 @@
 
 All notable changes to RedDB are documented here. Dates are ISO-8601 (UTC-3).
 
+## 2026-04-22 — Performance & Stability
+
+Bundle of perf work (04-20/04-21), dep bump, and one runtime hang fix.
+
+### Wire / ingest
+
+- **Streaming bulk wire protocol** — Postgres `COPY`-equivalent
+  columnar stream over a persistent connection. ~3× `typed_insert`
+  on 10k-row batches. See [Ingest API §6b](/api/ingest.md).
+- **Columnar pre-validated insert path** — skips the N×ncols
+  `String` clones the legacy wire bulk path paid.
+- **Wire encode** — column indices are resolved once per result set
+  and the output buffer is reused across rows.
+
+### CDC
+
+- **Split CDC lock** — concurrent CDC observers no longer serialise
+  on a single mutex.
+
+### WAL / durability
+
+- **Lock-free append queue** for `WalDurableGrouped` mode. Writers
+  enqueue pre-encoded blobs under one mutex; a group-commit
+  coordinator drains in LSN order and fsyncs once per batch.
+  Documented in [WAL & Recovery](/engine/wal.md).
+- **Batched bulk inserts** — one WAL action per bulk op, not N.
+- **Phase C busy-spin deadlock fix** under tokio preemption.
+- **Truncate invariant** — the append queue's LSN cursor now
+  resets alongside the WAL on checkpoint truncate. Fixes a hang
+  where post-checkpoint inserts enqueued a target LSN in the old
+  space the drain could never reach. All 16 previously-ignored
+  `rpc_stdio` tests are back on.
+
+### B-tree
+
+- **Right-sibling hop** on sorted bulk insert — after filling a
+  leaf the cursor advances via the sibling pointer instead of
+  re-descending from the root. Hot path for the wire bulk protocol
+  and the time-series chunk writer.
+
+### Dependencies
+
+- Rust 1.95.0 (toolchain)
+- `tonic` 0.14 (split into `tonic-prost` + `tonic-prost-build`),
+  `prost` 0.14
+- `ureq` 3.3 with `rustls` feature (sync-only API); HTTP helpers
+  consolidated
+- `hmac` 0.13, `sha2` 0.11, `lz4_flex` 0.13, `roaring` 0.11,
+  `rayon` 1.12, `rcgen` 0.14, `criterion` 0.8, `pprof` 0.15
+
+---
+
 ## 2026-04-22 — TimescaleDB + ClickHouse Parity Push
 
 Adds the foundations for competing directly with TimescaleDB (in

@@ -48,6 +48,15 @@ flowchart TB
 | Delete | O(log n) | Delete with page merges |
 | Ordered iteration | O(n) | Full scan in key order |
 
+## Bulk Insert Fast Path
+
+When the incoming keys are already sorted (the wire bulk protocol
+and time-series chunk writer both guarantee this), the B-tree
+streams them into leaves without re-descending from the root per
+key. When a leaf fills up, the cursor hops to the right sibling via
+the sibling pointer and keeps filling — root-to-leaf traversal
+only happens once per split, not once per key.
+
 ## Page Splits
 
 When a leaf node is full, it splits into two nodes:
