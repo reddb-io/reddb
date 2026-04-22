@@ -280,6 +280,17 @@ impl RedDBRuntime {
                     self.invalidate_plan_cache();
                     messages.push(format!("tenancy disabled on '{}'", query.name));
                 }
+                AlterOperation::SetAppendOnly(on) => {
+                    // Contract is the single source of truth for the
+                    // UPDATE/DELETE parse-time guard. The flag lands
+                    // below via `apply_alter_operations_to_contract`;
+                    // here we only publish the human-readable message.
+                    messages.push(format!(
+                        "append_only {} on '{}'",
+                        if *on { "enabled" } else { "disabled" },
+                        query.name
+                    ));
+                }
             }
         }
 
@@ -749,6 +760,9 @@ fn apply_alter_operations_to_contract(
             // Phase 2.5.4: tenancy toggles persist via `red_config.tenant_tables.*`
             // and are enforced through `tenant_tables` + RLS auto-policy.
             AlterOperation::EnableTenancy { .. } | AlterOperation::DisableTenancy => {}
+            AlterOperation::SetAppendOnly(on) => {
+                contract.append_only = *on;
+            }
         }
     }
 }

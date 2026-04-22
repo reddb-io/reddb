@@ -122,6 +122,50 @@ fn non_append_only_table_keeps_mutable_semantics() {
 }
 
 #[test]
+fn alter_table_set_append_only_flips_on() {
+    // Start mutable. UPDATE works. Flip to append-only. UPDATE fails.
+    let rt = rt();
+    let q = QueryUseCases::new(&rt);
+    exec(&q, "CREATE TABLE flips (id INT, v TEXT)");
+    exec(&q, "INSERT INTO flips (id, v) VALUES (1, 'a')");
+    exec(&q, "UPDATE flips SET v = 'b' WHERE id = 1");
+    // Now enable append-only via ALTER TABLE.
+    exec(&q, "ALTER TABLE flips SET APPEND_ONLY = true");
+    let err = exec_err(&q, "UPDATE flips SET v = 'c' WHERE id = 1");
+    assert!(err.contains("APPEND ONLY"), "error should cite flag: {err}");
+
+    // Row unchanged: last successful UPDATE set v='b'.
+    let sel = q
+        .execute(ExecuteQueryInput {
+            query: "SELECT v FROM flips WHERE id = 1".into(),
+        })
+        .unwrap();
+    let v = sel.result.records[0].values.get("v").unwrap().to_string();
+    assert!(v.contains('b'), "v expected 'b', got {v}");
+}
+
+#[test]
+fn alter_table_unset_append_only_re_enables_mutations() {
+    let rt = rt();
+    let q = QueryUseCases::new(&rt);
+    exec(&q, "CREATE TABLE switch (id INT, v TEXT) APPEND ONLY");
+    exec(&q, "INSERT INTO switch (id, v) VALUES (1, 'x')");
+    // Append-only rejects UPDATE.
+    exec_err(&q, "UPDATE switch SET v = 'y' WHERE id = 1");
+    // Flip the flag off.
+    exec(&q, "ALTER TABLE switch SET APPEND_ONLY = false");
+    // Now UPDATE must succeed.
+    exec(&q, "UPDATE switch SET v = 'y' WHERE id = 1");
+    let sel = q
+        .execute(ExecuteQueryInput {
+            query: "SELECT v FROM switch WHERE id = 1".into(),
+        })
+        .unwrap();
+    let v = sel.result.records[0].values.get("v").unwrap().to_string();
+    assert!(v.contains('y'), "v expected 'y', got {v}");
+}
+
+#[test]
 fn append_only_still_allows_select_and_insert_returning() {
     let rt = rt();
     let q = QueryUseCases::new(&rt);

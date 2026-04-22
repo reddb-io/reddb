@@ -1546,6 +1546,11 @@ pub enum AlterOperation {
     /// tenancy registration. User-defined policies on the table are
     /// untouched; RLS stays enabled if any survive.
     DisableTenancy,
+    /// `SET APPEND_ONLY = true|false` — flips the catalog flag.
+    /// Setting `true` rejects all future UPDATE/DELETE at parse-time
+    /// guard; setting `false` re-enables them. Existing rows are
+    /// untouched either way — this is a purely declarative switch.
+    SetAppendOnly(bool),
 }
 
 // ============================================================================

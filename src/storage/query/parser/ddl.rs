@@ -387,10 +387,22 @@ impl<'a> Parser<'a> {
                 self.expect(Token::Security)?;
                 Ok(AlterOperation::DisableRowLevelSecurity)
             }
+        } else if self.consume(&Token::Set)? || self.consume_ident_ci("SET")? {
+            // SET APPEND_ONLY = true|false
+            if self.consume_ident_ci("APPEND_ONLY")? {
+                let on = self.parse_bool_assign()?;
+                Ok(AlterOperation::SetAppendOnly(on))
+            } else {
+                Err(ParseError::expected(
+                    vec!["APPEND_ONLY"],
+                    self.peek(),
+                    self.position(),
+                ))
+            }
         } else {
             Err(ParseError::expected(
                 vec![
-                    "ADD", "DROP", "RENAME", "ATTACH", "DETACH", "ENABLE", "DISABLE",
+                    "ADD", "DROP", "RENAME", "ATTACH", "DETACH", "ENABLE", "DISABLE", "SET",
                 ],
                 self.peek(),
                 self.position(),
