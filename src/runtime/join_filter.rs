@@ -1826,6 +1826,21 @@ pub(super) fn evaluate_scalar_function_with_db(
     }
     if matches!(
         func_name.to_ascii_uppercase().as_str(),
+        "HYPERTABLE_DROP_CHUNKS_BEFORE"
+            | "HYPERTABLE_SWEEP_EXPIRED"
+            | "HYPERTABLE_SHOW_CHUNKS"
+    ) {
+        let resolved: Vec<Value> = (0..args.len())
+            .map(|i| resolve_scalar_arg(args, i, source).unwrap_or(Value::Null))
+            .collect();
+        return super::expr_eval::dispatch_hypertable_retention_public(
+            db?,
+            &func_name.to_ascii_uppercase(),
+            &resolved,
+        );
+    }
+    if matches!(
+        func_name.to_ascii_uppercase().as_str(),
         "MODEL_REGISTER" | "MODEL_DROP"
     ) {
         let resolved: Vec<Value> = (0..args.len())

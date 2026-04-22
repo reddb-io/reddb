@@ -189,6 +189,17 @@ pub(super) fn evaluate_runtime_expr_with_db(
                 }
                 return None;
             }
+            if matches!(
+                upper.as_str(),
+                "HYPERTABLE_DROP_CHUNKS_BEFORE"
+                    | "HYPERTABLE_SWEEP_EXPIRED"
+                    | "HYPERTABLE_SHOW_CHUNKS"
+            ) {
+                if let Some(db) = db {
+                    return dispatch_hypertable_retention(db, &upper, &arg_values);
+                }
+                return None;
+            }
             if matches!(upper.as_str(), "MODEL_REGISTER" | "MODEL_DROP") {
                 if let Some(db) = db {
                     return dispatch_model_function(db, &upper, &arg_values);
@@ -786,6 +797,66 @@ pub(super) fn dispatch_hypertable_prune_public(
     args: &[Value],
 ) -> Option<Value> {
     dispatch_hypertable_prune(db, args)
+}
+
+pub(super) fn dispatch_hypertable_retention_public(
+    db: &RedDB,
+    name: &str,
+    args: &[Value],
+) -> Option<Value> {
+    dispatch_hypertable_retention(db, name, args)
+}
+
+/// Retention + introspection scalars on top of HypertableRegistry.
+///
+/// * `HYPERTABLE_SHOW_CHUNKS(name)` — array of `"name:start_ns"` for
+///   every chunk of the hypertable.
+/// * `HYPERTABLE_DROP_CHUNKS_BEFORE(name, cutoff_ns)` — drops every
+///   chunk whose `max_ts_ns <= cutoff`. Returns the drop count.
+/// * `HYPERTABLE_SWEEP_EXPIRED(name [, now_ns])` — drops every chunk
+///   whose effective TTL has fired. Returns the count.
+fn dispatch_hypertable_retention(db: &RedDB, name: &str, args: &[Value]) -> Option<Value> {
+    let ht_name = match args.first()? {
+        Value::Text(s) => s.to_string(),
+        _ => return Some(Value::Null),
+    };
+    let registry = db.hypertables();
+    match name {
+        "HYPERTABLE_SHOW_CHUNKS" => Some(Value::Array(
+            registry
+                .show_chunks(&ht_name)
+                .into_iter()
+                .map(|c| Value::text(format!("{}:{}", c.id.hypertable, c.id.start_ns)))
+                .collect(),
+        )),
+        "HYPERTABLE_DROP_CHUNKS_BEFORE" => {
+            let cutoff = match args.get(1)? {
+                Value::Integer(n) | Value::BigInt(n) => *n as u64,
+                Value::UnsignedInteger(n) => *n,
+                _ => return Some(Value::Null),
+            };
+            let dropped = registry.drop_chunks_before(&ht_name, cutoff).len();
+            Some(Value::Integer(dropped as i64))
+        }
+        "HYPERTABLE_SWEEP_EXPIRED" => {
+            let now_ns = args
+                .get(1)
+                .and_then(|v| match v {
+                    Value::Integer(n) | Value::BigInt(n) => Some(*n as u64),
+                    Value::UnsignedInteger(n) => Some(*n),
+                    _ => None,
+                })
+                .unwrap_or_else(|| {
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos() as u64)
+                        .unwrap_or(0)
+                });
+            let dropped = registry.sweep_expired(&ht_name, now_ns).len();
+            Some(Value::Integer(dropped as i64))
+        }
+        _ => None,
+    }
 }
 
 fn dispatch_hypertable_prune(db: &RedDB, args: &[Value]) -> Option<Value> {
