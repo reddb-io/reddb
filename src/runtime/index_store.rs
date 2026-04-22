@@ -1043,39 +1043,35 @@ impl IndexStore {
         }
         let registry = self.registry.read();
 
-        // Pre-build: column_name → [indexes targeting that column].
-        // The old loop was O(indexes × rows × cols) because it
-        // iterated every (idx, row, col) triple and compared strings.
-        // For 3 indexes × 25K rows × 15 cols that's 1.1M iterations
-        // of `field_name != col` before any real work. Now we walk
-        // each row's fields once and probe the small col→indexes
-        // map — O(rows × cols) total iteration, one hash probe per
-        // field.
-        let mut col_to_indexes: std::collections::HashMap<&str, Vec<&RegisteredIndex>> =
-            std::collections::HashMap::new();
-        for idx in registry.values() {
-            if idx.collection != collection {
-                continue;
-            }
-            let col = idx.columns.first().map(|s| s.as_str()).unwrap_or("");
-            col_to_indexes.entry(col).or_default().push(idx);
-        }
-        if col_to_indexes.is_empty() {
+        // Pre-collect the index list for this collection once so the
+        // hot loop isn't re-scanning the whole registry per row.
+        let relevant: Vec<&RegisteredIndex> = registry
+            .values()
+            .filter(|idx| idx.collection == collection)
+            .collect();
+        if relevant.is_empty() {
             return Ok(());
         }
 
-        for (entity_id, fields) in rows {
-            for (field_name, value) in fields {
-                let Some(idxs) = col_to_indexes.get(field_name.as_str()) else {
-                    continue;
-                };
-                let key = value_to_bytes(value);
-                for idx in idxs {
-                    let col = idx.columns.first().map(|s| s.as_str()).unwrap_or("");
+        // For each index, walk rows × fields but `break` as soon as
+        // the matching column is found — every field name appears
+        // at most once per row, so we average O(ncols/2) iterations
+        // per (row, index) instead of O(ncols). Beats the
+        // HashMap-pre-build shape when indexes < cols (the common
+        // OLTP schema), because the inner `break` keeps string
+        // compares short and amortised.
+        for idx in &relevant {
+            let col = idx.columns.first().map(|s| s.as_str()).unwrap_or("");
+            for (entity_id, fields) in rows {
+                for (field_name, value) in fields {
+                    if field_name != col {
+                        continue;
+                    }
+                    let key = value_to_bytes(value);
                     match idx.method {
                         IndexMethodKind::Hash => {
                             self.hash
-                                .insert(collection, &idx.name, key.clone(), *entity_id)
+                                .insert(collection, &idx.name, key, *entity_id)
                                 .map_err(|err| err.to_string())?;
                         }
                         IndexMethodKind::Bitmap => {
@@ -1091,16 +1087,14 @@ impl IndexStore {
                             }
                             self.sorted.insert_one(collection, col, value, *entity_id);
                             self.hash
-                                .insert(
-                                    collection,
-                                    &format!("{}_hash", idx.name),
-                                    key.clone(),
-                                    *entity_id,
-                                )
+                                .insert(collection, &format!("{}_hash", idx.name), key, *entity_id)
                                 .map_err(|err| err.to_string())?;
                         }
                         IndexMethodKind::Spatial => {}
                     }
+                    // Column names are unique per row — early-exit
+                    // the inner field scan.
+                    break;
                 }
             }
         }
