@@ -84,6 +84,32 @@ fn create_hypertable_backing_collection_exists() {
 }
 
 #[test]
+fn drop_hypertable_removes_registry_entry() {
+    let rt = rt();
+    let q = QueryUseCases::new(&rt);
+    q.execute(ExecuteQueryInput {
+        query: "CREATE HYPERTABLE metrics TIME_COLUMN ts CHUNK_INTERVAL '1d'".into(),
+    })
+    .expect("create ok");
+    let db = rt.db();
+    assert!(db.hypertables().get("metrics").is_some());
+
+    q.execute(ExecuteQueryInput {
+        query: "DROP HYPERTABLE metrics".into(),
+    })
+    .expect("drop ok");
+    let db = rt.db();
+    assert!(
+        db.hypertables().get("metrics").is_none(),
+        "registry should be cleared after DROP HYPERTABLE"
+    );
+    assert!(
+        db.store().get_collection("metrics").is_none(),
+        "backing collection should be gone after DROP HYPERTABLE"
+    );
+}
+
+#[test]
 fn plain_create_timeseries_does_not_register_hypertable() {
     let rt = rt();
     let q = QueryUseCases::new(&rt);

@@ -114,6 +114,10 @@ impl RedDBRuntime {
                 query.name
             )));
         }
+        // Remove from the hypertable registry before dropping the
+        // underlying collection — the registry lookup is cheap and
+        // staying consistent is the point of having a separate call.
+        let _ = self.inner.db.hypertables().unregister(&query.name);
         store
             .drop_collection(&query.name)
             .map_err(|e| RedDBError::Internal(e.to_string()))?;

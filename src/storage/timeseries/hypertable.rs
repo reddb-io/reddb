@@ -249,6 +249,18 @@ impl HypertableRegistry {
         guard.specs.values().cloned().collect()
     }
 
+    /// Drop a hypertable from the registry. Returns the removed spec
+    /// when present, or `None` for unknown names. Callers drop the
+    /// backing collection separately — this is registry housekeeping
+    /// only.
+    pub fn unregister(&self, name: &str) -> Option<HypertableSpec> {
+        let mut guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard.specs.remove(name)
+    }
+
     /// Route a write: returns the `ChunkId` the row belongs in,
     /// allocating the chunk on first write. `None` when the
     /// hypertable is unknown.

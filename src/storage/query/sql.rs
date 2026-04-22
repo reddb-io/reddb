@@ -984,6 +984,19 @@ impl<'a> Parser<'a> {
                             self.position(),
                         )),
                     }
+                } else if matches!(self.peek(), Token::Ident(s) if s.eq_ignore_ascii_case("HYPERTABLE"))
+                {
+                    // DROP HYPERTABLE name reuses the same AST as
+                    // DROP TIMESERIES — runtime clears the registry
+                    // entry *and* drops the backing collection.
+                    self.advance()?;
+                    match self.parse_drop_timeseries_body()? {
+                        QueryExpr::DropTimeSeries(query) => Ok(SqlCommand::DropTimeSeries(query)),
+                        other => Err(ParseError::new(
+                            format!("internal: DROP HYPERTABLE produced unexpected kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
                 } else if self.check(&Token::Queue) {
                     self.advance()?;
                     match self.parse_drop_queue_body()? {
