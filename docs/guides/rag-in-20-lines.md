@@ -84,6 +84,28 @@ SELECT SEMANTIC_CACHE_PUT(
 Next time the same (or near-identical) question arrives, the cache
 short-circuits the embed → retrieve → generate loop.
 
+## Bringing your own model
+
+If you already have trained weights (e.g. a logistic-regression
+classifier fine-tuned elsewhere), register them with the model
+registry via SQL and then classify inline:
+
+```sql
+SELECT MODEL_REGISTER(
+  'intent_clf', 'logreg',
+  '{"weights":[[...]], "biases":[...], "num_features":384, ...}'
+) AS version_id;
+
+SELECT ML_CLASSIFY('intent_clf', EMBED(user_message)) AS intent
+FROM   chat_turns;
+```
+
+`MODEL_REGISTER` takes JSON produced by the classifier's own
+serialisation (`LogisticRegression::to_json()`), so you can train
+models in any Rust harness, smoke-test them, and ship the JSON to
+production without a side-car service. `MODEL_DROP(name)` archives
+every version when you're done.
+
 ## What you get for free
 
 | You don't have to | Because |

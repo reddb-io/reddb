@@ -11,7 +11,44 @@ This is the core abstraction TimescaleDB pioneered as
 RedDB's implementation is purpose-built for the time-axis:
 incremental refresh is the default, not an add-on.
 
-## Declaration
+## SQL surface (shipped today)
+
+Five scalar functions expose the engine end-to-end — register an
+aggregate, refresh it from the source, and query any bucket:
+
+```sql
+-- 1. Register — single-column shape:
+--    (name, source_table, bucket_duration, alias, agg, field,
+--     [refresh_lag, max_interval])
+SELECT CA_REGISTER('five_min_load', 'metrics', '5m',
+                   'avg_load', 'avg', 'load',
+                   '1m', '1d') AS ok;
+
+-- 2. Refresh — scans `metrics` for rows whose `ts` falls in the
+--    next safe window, folds them into bucket state. now_ns is
+--    optional (wall-clock by default).
+SELECT CA_REFRESH('five_min_load') AS absorbed;
+
+-- 3. Query — read any bucket's aggregated value.
+SELECT CA_QUERY('five_min_load', 0, 'avg_load') AS avg_load;
+
+-- 4. Introspect.
+SELECT CA_LIST();            -- => ['five_min_load']
+SELECT CA_STATE('five_min_load');
+-- => '{"last_refreshed_bucket_ns":…,"bucket_count":…}'
+
+-- 5. Drop.
+SELECT CA_DROP('five_min_load') AS ok;
+```
+
+Supported aggregation types: `avg`, `min`, `max`, `sum`, `count`,
+`first`, `last`. Multi-column aggregates use the same engine but
+require one `CA_REGISTER` call per column today — the
+`CREATE CONTINUOUS AGGREGATE ... AS SELECT ...` DDL form (which
+registers every column declared in the SELECT list in one statement)
+is tracked as a follow-up.
+
+## DDL form (planned)
 
 ```sql
 CREATE CONTINUOUS AGGREGATE five_min_load

@@ -2,6 +2,36 @@
 
 RedDB exposes multiple kinds of "structure", and they are not all the same thing.
 
+## Which model fits my use case?
+
+```text
+  Is the data a sequence of timestamped measurements?
+  ├─ yes ─── Query by time window + aggregate?
+  │          ├─ yes ─── [Time-Series] + [Hypertables] + [Continuous Aggregates]
+  │          └─ no ──── [Time-Series] (raw append + downsample)
+  │
+  Is the data a point-in-time record with a stable schema?
+  ├─ yes ─── Need typed columns + joins?
+  │          ├─ yes ─── [Tables]
+  │          └─ no, schema-free payload ─── [Documents]
+  │
+  Is the access pattern key → value?
+  ├─ yes ─── [Key-Value]
+  │
+  Is it a queue of jobs / events for workers?
+  ├─ yes ─── [Queues]
+  │
+  Do you need similarity search over embeddings?
+  ├─ yes ─── [Vectors]  (optionally combined with [Graphs] for RAG)
+  │
+  Are relationships between entities first-class?
+  ├─ yes ─── [Graphs]
+```
+
+Most non-trivial workloads combine two or three of these on the same
+data; see [Competitive Positioning](/architecture/competitive-positioning.md)
+for why that's the RedDB advantage.
+
 The most important naming rule is this: a `collection` is the named logical container, while tables,
 documents, KV, graphs, vectors, time-series, and queues are user-facing data models or semantics used
 on top of collections. RedDB does not use a hierarchy where a collection contains multiple tables and
