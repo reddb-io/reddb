@@ -183,6 +183,12 @@ pub(super) fn evaluate_runtime_expr_with_db(
                 }
                 return None;
             }
+            if upper.as_str() == "HYPERTABLE_PRUNE_CHUNKS" {
+                if let Some(db) = db {
+                    return dispatch_hypertable_prune(db, &arg_values);
+                }
+                return None;
+            }
             // Uppercase the function name so CASE-insensitive lookups
             // match the legacy is_scalar_function table.
             dispatch_builtin_function(&upper, &arg_values)
@@ -674,6 +680,75 @@ fn embed_text(db: &RedDB, text: &str, provider_hint: Option<&str>) -> Option<Val
 
 pub(super) fn dispatch_introspection_function_public(db: &RedDB, name: &str) -> Option<Value> {
     dispatch_introspection_function(db, name)
+}
+
+/// `HYPERTABLE_PRUNE_CHUNKS(name, lo_ns, hi_ns)` — returns the chunk
+/// start timestamps that overlap `[lo_ns, hi_ns)` for the given
+/// hypertable. Exposes the partition-pruning primitive over real
+/// allocated chunks. Uses RANGE semantics (the only kind hypertables
+/// have today).
+pub(super) fn dispatch_hypertable_prune_public(
+    db: &RedDB,
+    args: &[Value],
+) -> Option<Value> {
+    dispatch_hypertable_prune(db, args)
+}
+
+fn dispatch_hypertable_prune(db: &RedDB, args: &[Value]) -> Option<Value> {
+    use crate::storage::query::planner::partition_pruning::{
+        prune_range, PruneKind, PrunePartitioning, PrunePredicate, PruneOp, PruneValue,
+        RangeChild,
+    };
+
+    let ht_name = match args.first()? {
+        Value::Text(s) => s.to_string(),
+        _ => return Some(Value::Null),
+    };
+    let lo = match args.get(1)? {
+        Value::Integer(n) | Value::BigInt(n) => *n as u64,
+        Value::UnsignedInteger(n) => *n,
+        _ => return Some(Value::Null),
+    };
+    let hi = match args.get(2)? {
+        Value::Integer(n) | Value::BigInt(n) => *n as u64,
+        Value::UnsignedInteger(n) => *n,
+        _ => return Some(Value::Null),
+    };
+
+    let registry = db.hypertables();
+    let spec = registry.get(&ht_name)?;
+    let chunks = registry.show_chunks(&ht_name);
+
+    // Build RangeChild list — one per chunk — then feed the predicate
+    // `spec.time_column >= lo AND spec.time_column < hi` to the
+    // existing pruner primitive.
+    let children: Vec<RangeChild> = chunks
+        .iter()
+        .map(|c| RangeChild {
+            name: format!("{}:{}", c.id.hypertable, c.id.start_ns),
+            low: Some(PruneValue::Int(c.id.start_ns as i64)),
+            high_exclusive: Some(PruneValue::Int(c.end_ns_exclusive as i64)),
+        })
+        .collect();
+
+    let partitioning = PrunePartitioning {
+        kind: PruneKind::Range,
+        column: spec.time_column.clone(),
+    };
+    let pred = PrunePredicate::And(vec![
+        PrunePredicate::Compare {
+            column: spec.time_column.clone(),
+            op: PruneOp::GtEq,
+            value: PruneValue::Int(lo as i64),
+        },
+        PrunePredicate::Compare {
+            column: spec.time_column.clone(),
+            op: PruneOp::Lt,
+            value: PruneValue::Int(hi as i64),
+        },
+    ]);
+    let kept = prune_range(&partitioning, &children, &pred);
+    Some(Value::Array(kept.into_iter().map(Value::text).collect()))
 }
 
 fn dispatch_introspection_function(db: &RedDB, name: &str) -> Option<Value> {
