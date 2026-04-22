@@ -1394,6 +1394,33 @@ impl RedDB {
         self.store.clone()
     }
 
+    /// Lazily-initialised ML runtime. First caller wins; subsequent
+    /// callers observe the same instance. The runtime is created
+    /// with an in-memory persistence backend by default — production
+    /// deployments that need durable model state will swap this for
+    /// a store-backed backend when the persistence integration lands.
+    pub fn ml_runtime(&self) -> &crate::storage::ml::MlRuntime {
+        self.ml_runtime.get_or_init(|| {
+            crate::storage::ml::MlRuntime::in_memory(std::sync::Arc::new(
+                // No-op work fn — the SQL scalars call predict
+                // synchronously; async training jobs come in a later
+                // sprint alongside `CREATE MODEL`.
+                |_handle| Ok(String::new()),
+            ))
+        })
+    }
+
+    /// Shared semantic cache for `SEMANTIC_CACHE_*` scalars. Uses
+    /// default config until a `SET SEMANTIC_CACHE` admin surface
+    /// lands.
+    pub fn semantic_cache(&self) -> &Arc<crate::storage::ml::SemanticCache> {
+        self.semantic_cache.get_or_init(|| {
+            Arc::new(crate::storage::ml::SemanticCache::new(
+                crate::storage::ml::SemanticCacheConfig::default(),
+            ))
+        })
+    }
+
     pub(crate) fn is_binary_dump(path: &Path) -> Result<bool, std::io::Error> {
         let mut file = File::open(path)?;
         let mut magic = [0u8; 4];

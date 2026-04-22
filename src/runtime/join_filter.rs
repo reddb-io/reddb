@@ -1783,6 +1783,12 @@ pub(super) fn evaluate_scalar_function_with_db(
     if func_name.eq_ignore_ascii_case("KV") {
         return evaluate_projection_kv_function(db, args, source);
     }
+    if matches!(
+        func_name.to_ascii_uppercase().as_str(),
+        "ML_CLASSIFY" | "ML_PREDICT_PROBA" | "SEMANTIC_CACHE_GET" | "SEMANTIC_CACHE_PUT"
+    ) {
+        return evaluate_ml_scalar(db?, &func_name.to_ascii_uppercase(), args, source);
+    }
     evaluate_scalar_function_legacy(name, args, source)
 }
 
@@ -2353,6 +2359,80 @@ fn resolve_scalar_arg(args: &[Projection], index: usize, source: &UnifiedRecord)
     eval_projection_value(arg, source)
 }
 
+/// Parse the `@RL:` sentinel payload written by
+/// `sql_lowering::serialize_value_json`. Handles arrays `[...]`, vectors
+/// `V[...]`, and scalar fallbacks. Not a full JSON parser — only
+/// covers the shapes the serializer emits.
+fn parse_rl_literal(payload: &str) -> Option<Value> {
+    let trimmed = payload.trim();
+    if let Some(inner) = trimmed.strip_prefix("V[").and_then(|s| s.strip_suffix(']')) {
+        let mut out = Vec::new();
+        if !inner.trim().is_empty() {
+            for part in inner.split(',') {
+                out.push(part.trim().parse::<f32>().ok()?);
+            }
+        }
+        return Some(Value::Vector(out));
+    }
+    if let Some(inner) = trimmed.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+        let mut out = Vec::new();
+        if !inner.trim().is_empty() {
+            for part in split_top_level(inner) {
+                out.push(parse_rl_atom(part.trim())?);
+            }
+        }
+        return Some(Value::Array(out));
+    }
+    parse_rl_atom(trimmed)
+}
+
+fn parse_rl_atom(s: &str) -> Option<Value> {
+    if s == "null" {
+        return Some(Value::Null);
+    }
+    if s == "true" {
+        return Some(Value::Boolean(true));
+    }
+    if s == "false" {
+        return Some(Value::Boolean(false));
+    }
+    if let Some(inner) = s.strip_prefix('"').and_then(|x| x.strip_suffix('"')) {
+        return Some(Value::text(inner.replace("\\\"", "\"").replace("\\\\", "\\")));
+    }
+    if s.starts_with('[') || s.starts_with("V[") {
+        return parse_rl_literal(s);
+    }
+    if let Ok(n) = s.parse::<i64>() {
+        return Some(Value::Integer(n));
+    }
+    if let Ok(f) = s.parse::<f64>() {
+        return Some(Value::Float(f));
+    }
+    None
+}
+
+fn split_top_level(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    let bytes = s.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'[' => depth += 1,
+            b']' => depth -= 1,
+            b',' if depth == 0 => {
+                out.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if start <= s.len() {
+        out.push(&s[start..]);
+    }
+    out
+}
+
 /// Evaluate a single Projection node into a Value for scalar-function
 /// argument resolution. Handles:
 /// - `Projection::Column` with the `LIT:<literal>` / raw column conventions,
@@ -2365,6 +2445,15 @@ pub(super) fn eval_projection_value(proj: &Projection, source: &UnifiedRecord) -
             if let Some(lit_val) = col.strip_prefix("LIT:") {
                 if lit_val.is_empty() {
                     return Some(Value::Null);
+                }
+                // Composite sentinel — Array/Vector/Blob roundtrip via
+                // JSON-ish encoding (see `serialize_value_json` in
+                // `sql_lowering`). Preserves shape across the
+                // Projection-based legacy scalar dispatcher.
+                if let Some(payload) = lit_val.strip_prefix("@RL:") {
+                    if let Some(v) = parse_rl_literal(payload) {
+                        return Some(v);
+                    }
                 }
                 if let Ok(n) = lit_val.parse::<i64>() {
                     return Some(Value::Integer(n));
@@ -2402,6 +2491,135 @@ pub(super) fn eval_projection_value_with_db(
         ))),
         _ => eval_projection_value(proj, source),
     }
+}
+
+/// Handle ML_CLASSIFY / ML_PREDICT_PROBA / SEMANTIC_CACHE_* scalars.
+///
+/// Calling convention:
+/// - `ML_CLASSIFY(model_name, features)` — `features` is either a
+///   `Value::Vector(Vec<f32>)` or a `Value::Array(Vec<numeric>)`.
+///   Returns the predicted class id as `Value::Integer`, or `Null`
+///   when the model is unknown / features shape mismatch.
+/// - `ML_PREDICT_PROBA(model_name, features)` — same shapes; returns
+///   a `Value::Array(Vec<Float>)` of per-class probabilities.
+/// - `SEMANTIC_CACHE_GET(namespace, embedding)` — returns the cached
+///   response `Value::Text` if cosine similarity ≥ the cache's
+///   configured threshold; `Value::Null` otherwise. `namespace` is
+///   reserved for future per-tenant isolation; currently shared.
+/// - `SEMANTIC_CACHE_PUT(namespace, prompt, response, embedding)` —
+///   inserts. Returns `Value::Boolean(true)` on success.
+fn evaluate_ml_scalar(
+    db: &RedDB,
+    name: &str,
+    args: &[Projection],
+    source: &UnifiedRecord,
+) -> Option<Value> {
+    match name {
+        "ML_CLASSIFY" => ml_classify(db, args, source, /*probas=*/ false),
+        "ML_PREDICT_PROBA" => ml_classify(db, args, source, /*probas=*/ true),
+        "SEMANTIC_CACHE_GET" => semantic_cache_get(db, args, source),
+        "SEMANTIC_CACHE_PUT" => semantic_cache_put(db, args, source),
+        _ => None,
+    }
+}
+
+fn resolve_feature_vector(args: &[Projection], idx: usize, source: &UnifiedRecord) -> Option<Vec<f32>> {
+    let val = resolve_scalar_arg(args, idx, source)?;
+    match val {
+        Value::Vector(v) => Some(v),
+        Value::Array(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                let n = value_as_number(&item)?;
+                out.push(n.as_f64() as f32);
+            }
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
+fn ml_classify(
+    db: &RedDB,
+    args: &[Projection],
+    source: &UnifiedRecord,
+    probas: bool,
+) -> Option<Value> {
+    let model_name = match resolve_scalar_arg(args, 0, source)? {
+        Value::Text(s) => s.to_string(),
+        _ => return None,
+    };
+    let features = resolve_feature_vector(args, 1, source)?;
+
+    let version = db.ml_runtime().registry().get_active(&model_name).ok()??;
+    // Model kind is stamped into `hyperparams_json` as `{"kind":"logreg"|"nb", ...}`.
+    // Fall back to `logreg` when unset (pre-existing models only ever
+    // registered logreg).
+    let kind = parse_model_kind(&version.hyperparams_json);
+    let weights_json = std::str::from_utf8(&version.weights_blob).ok()?;
+
+    use crate::storage::ml::classifier::IncrementalClassifier;
+    let (class, probs) = match kind.as_str() {
+        "nb" | "naive_bayes" => {
+            let m = crate::storage::ml::classifier::MultinomialNaiveBayes::from_json(weights_json)?;
+            (m.predict(&features), m.predict_proba(&features))
+        }
+        _ => {
+            let m = crate::storage::ml::classifier::LogisticRegression::from_json(weights_json)?;
+            (m.predict(&features), m.predict_proba(&features))
+        }
+    };
+
+    if probas {
+        Some(Value::Array(
+            probs.into_iter().map(|p| Value::Float(p as f64)).collect(),
+        ))
+    } else {
+        class.map(|c| Value::Integer(c as i64))
+    }
+}
+
+fn parse_model_kind(hyperparams_json: &str) -> String {
+    crate::serde_json::from_str::<crate::serde_json::Value>(hyperparams_json)
+        .ok()
+        .as_ref()
+        .and_then(|v| v.get("kind"))
+        .and_then(|k| k.as_str())
+        .unwrap_or("logreg")
+        .to_ascii_lowercase()
+}
+
+fn semantic_cache_get(
+    db: &RedDB,
+    args: &[Projection],
+    source: &UnifiedRecord,
+) -> Option<Value> {
+    // args[0] = namespace (reserved, currently ignored)
+    let _ns = resolve_scalar_arg(args, 0, source)?;
+    let embedding = resolve_feature_vector(args, 1, source)?;
+    match db.semantic_cache().lookup(&embedding) {
+        Some(response) => Some(Value::text(response)),
+        None => Some(Value::Null),
+    }
+}
+
+fn semantic_cache_put(
+    db: &RedDB,
+    args: &[Projection],
+    source: &UnifiedRecord,
+) -> Option<Value> {
+    let _ns = resolve_scalar_arg(args, 0, source)?;
+    let prompt = match resolve_scalar_arg(args, 1, source)? {
+        Value::Text(s) => s.to_string(),
+        other => other.display_string(),
+    };
+    let response = match resolve_scalar_arg(args, 2, source)? {
+        Value::Text(s) => s.to_string(),
+        other => other.display_string(),
+    };
+    let embedding = resolve_feature_vector(args, 3, source)?;
+    db.semantic_cache().insert(prompt, response, embedding, None);
+    Some(Value::Boolean(true))
 }
 
 fn evaluate_projection_config_function(

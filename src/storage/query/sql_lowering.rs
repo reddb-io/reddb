@@ -676,7 +676,49 @@ fn render_projection_literal(value: &Value) -> String {
         Value::Text(v) => v.to_string(),
         Value::Boolean(true) => "true".to_string(),
         Value::Boolean(false) => "false".to_string(),
+        // Composite values (arrays, vectors, blobs) would lose fidelity
+        // going through `Display` — `Vec<Value>` turns into
+        // "<vector dim=N>". Use a JSON sentinel so the reader in
+        // `eval_projection_value` can round-trip the exact Value.
+        Value::Array(_) | Value::Vector(_) | Value::Json(_) | Value::Blob(_) => {
+            format!("@RL:{}", serialize_value_json(value))
+        }
         other => other.to_string(),
+    }
+}
+
+fn serialize_value_json(value: &Value) -> String {
+    // Uses `crate::serde_json` which is already a workspace dep.
+    match value {
+        Value::Array(items) => {
+            let mut out = String::from("[");
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&serialize_value_json(item));
+            }
+            out.push(']');
+            out
+        }
+        Value::Vector(items) => {
+            let mut out = String::from("V[");
+            for (i, f) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&f.to_string());
+            }
+            out.push(']');
+            out
+        }
+        Value::Integer(n) | Value::BigInt(n) => n.to_string(),
+        Value::UnsignedInteger(n) => n.to_string(),
+        Value::Float(f) => f.to_string(),
+        Value::Text(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
+        Value::Boolean(b) => b.to_string(),
+        Value::Null => "null".to_string(),
+        other => format!("\"{}\"", other.to_string().replace('"', "\\\"")),
     }
 }
 

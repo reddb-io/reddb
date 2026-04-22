@@ -96,6 +96,16 @@ pub struct RedDB {
     pub(crate) quorum: Option<Arc<crate::replication::quorum::QuorumCoordinator>>,
     /// Eventual consistency registry (embedded mode support).
     pub(crate) ec_registry: Arc<crate::ec::config::EcRegistry>,
+    /// Lazily-initialised ML runtime (model registry + job queue +
+    /// semantic cache). Created on first access by the SQL layer so
+    /// `ML_CLASSIFY`, `SEMANTIC_CACHE_GET/PUT`, and friends have a
+    /// shared handle without forcing every instantiation path to
+    /// know about it.
+    pub(crate) ml_runtime: std::sync::OnceLock<crate::storage::ml::MlRuntime>,
+    /// Shared semantic cache used by `SEMANTIC_CACHE_*` scalars.
+    /// Separate from `MlRuntime` because cache config is runtime-only
+    /// and doesn't need the job queue — keep it a standalone `Arc`.
+    pub(crate) semantic_cache: std::sync::OnceLock<Arc<crate::storage::ml::SemanticCache>>,
 }
 
 /// A cached HNSW index together with the entity count at build time.

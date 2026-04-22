@@ -148,6 +148,19 @@ pub(super) fn evaluate_runtime_expr_with_db(
                         .unwrap_or(Value::Null),
                 );
             }
+            // ML and semantic-cache scalars live on the `RedDB` handle
+            // (model registry, shared cache). Route them before the
+            // db-less builtin dispatcher so the values land with full
+            // context.
+            if matches!(
+                upper.as_str(),
+                "ML_CLASSIFY" | "ML_PREDICT_PROBA" | "SEMANTIC_CACHE_GET" | "SEMANTIC_CACHE_PUT"
+            ) {
+                if let Some(db) = db {
+                    return dispatch_ml_function(db, &upper, &arg_values);
+                }
+                return None;
+            }
             // Uppercase the function name so CASE-insensitive lookups
             // match the legacy is_scalar_function table.
             dispatch_builtin_function(&upper, &arg_values)
@@ -480,6 +493,99 @@ fn runtime_cast(src: &Value, target: crate::storage::schema::types::DataType) ->
 /// functions that require row-level access stay on the legacy
 /// Projection::Function path for now. Week 4 folds them into a
 /// proper registry keyed on Expr.
+fn feature_vector_from_value(value: &Value) -> Option<Vec<f32>> {
+    match value {
+        Value::Vector(v) => Some(v.clone()),
+        Value::Array(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                let n = match item {
+                    Value::Integer(n) | Value::BigInt(n) => *n as f32,
+                    Value::UnsignedInteger(n) => *n as f32,
+                    Value::Float(f) => *f as f32,
+                    _ => return None,
+                };
+                out.push(n);
+            }
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
+fn model_kind_from_json(hyperparams_json: &str) -> String {
+    crate::serde_json::from_str::<crate::serde_json::Value>(hyperparams_json)
+        .ok()
+        .as_ref()
+        .and_then(|v| v.get("kind"))
+        .and_then(|k| k.as_str())
+        .unwrap_or("logreg")
+        .to_ascii_lowercase()
+}
+
+fn dispatch_ml_function(db: &RedDB, name: &str, args: &[Value]) -> Option<Value> {
+    match name {
+        "ML_CLASSIFY" | "ML_PREDICT_PROBA" => {
+            let model_name = match args.first()? {
+                Value::Text(s) => s.to_string(),
+                _ => return Some(Value::Null),
+            };
+            let features = feature_vector_from_value(args.get(1)?)?;
+
+            let version = db.ml_runtime().registry().get_active(&model_name).ok()??;
+            let kind = model_kind_from_json(&version.hyperparams_json);
+            let weights_json = std::str::from_utf8(&version.weights_blob).ok()?;
+
+            use crate::storage::ml::classifier::IncrementalClassifier;
+            let (class, probs) = match kind.as_str() {
+                "nb" | "naive_bayes" => {
+                    let m = crate::storage::ml::classifier::MultinomialNaiveBayes::from_json(
+                        weights_json,
+                    )?;
+                    (m.predict(&features), m.predict_proba(&features))
+                }
+                _ => {
+                    let m = crate::storage::ml::classifier::LogisticRegression::from_json(
+                        weights_json,
+                    )?;
+                    (m.predict(&features), m.predict_proba(&features))
+                }
+            };
+
+            if name == "ML_PREDICT_PROBA" {
+                Some(Value::Array(
+                    probs.into_iter().map(|p| Value::Float(p as f64)).collect(),
+                ))
+            } else {
+                Some(class.map(|c| Value::Integer(c as i64)).unwrap_or(Value::Null))
+            }
+        }
+        "SEMANTIC_CACHE_GET" => {
+            let _ns = args.first()?;
+            let embedding = feature_vector_from_value(args.get(1)?)?;
+            Some(match db.semantic_cache().lookup(&embedding) {
+                Some(resp) => Value::text(resp),
+                None => Value::Null,
+            })
+        }
+        "SEMANTIC_CACHE_PUT" => {
+            let _ns = args.first()?;
+            let prompt = match args.get(1)? {
+                Value::Text(s) => s.to_string(),
+                other => format!("{:?}", other),
+            };
+            let response = match args.get(2)? {
+                Value::Text(s) => s.to_string(),
+                other => format!("{:?}", other),
+            };
+            let embedding = feature_vector_from_value(args.get(3)?)?;
+            db.semantic_cache().insert(prompt, response, embedding, None);
+            Some(Value::Boolean(true))
+        }
+        _ => None,
+    }
+}
+
 fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
     match name {
         "UPPER" => match args.first()? {
