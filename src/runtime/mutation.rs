@@ -142,8 +142,23 @@ impl<'rt> MutationEngine<'rt> {
     ) -> RedDBResult<MutationResult> {
         let n = rows.len();
 
-        // Separate fields for index maintenance before moving into entities.
-        let mut field_snapshots: Vec<Vec<(String, Value)>> = Vec::with_capacity(n);
+        // If the collection has no registered secondary indexes the whole
+        // `field_snapshots.push(row.fields.clone())` work is pure waste:
+        // `index_entity_insert_batch` walks the registry and would find
+        // nothing to index. For a 15-column typed_insert that's 375K
+        // String clones per batch → a dominant CPU line. Skip entirely
+        // when we know the downstream indexer has nothing to do.
+        let has_secondary_indexes = !self
+            .runtime
+            .index_store_ref()
+            .list_indices(&collection)
+            .is_empty();
+
+        let mut field_snapshots: Vec<Vec<(String, Value)>> = if has_secondary_indexes {
+            Vec::with_capacity(n)
+        } else {
+            Vec::new()
+        };
         let mut metadata_batch: Vec<Vec<(String, MetadataValue)>> = Vec::with_capacity(n);
         let mut entities: Vec<UnifiedEntity> = Vec::with_capacity(n);
 
@@ -174,7 +189,9 @@ impl<'rt> MutationEngine<'rt> {
         let table_arc: Arc<str> = Arc::from(collection.as_str());
 
         for row in rows {
-            field_snapshots.push(row.fields.clone());
+            if has_secondary_indexes {
+                field_snapshots.push(row.fields.clone());
+            }
             metadata_batch.push(row.metadata);
             let mut entity = build_table_entity_shared(
                 self.store.as_ref(),
@@ -233,17 +250,20 @@ impl<'rt> MutationEngine<'rt> {
         }
 
         // Secondary indexes: fused pass — one registry-lock acquisition
-        // for the whole batch instead of N (see `index_entity_insert_batch`
-        // in `runtime::index_store`). This is the P4.T2 win.
-        let index_rows: Vec<(EntityId, Vec<(String, Value)>)> = ids
-            .iter()
-            .zip(field_snapshots.iter().cloned())
-            .map(|(id, fields)| (*id, fields))
-            .collect();
-        self.runtime
-            .index_store_ref()
-            .index_entity_insert_batch(&collection, &index_rows)
-            .map_err(RedDBError::Internal)?;
+        // for the whole batch. When the collection has no registered
+        // secondary indexes, we've already skipped the field_snapshots
+        // clone loop above, so there's nothing to hand over.
+        if has_secondary_indexes {
+            let index_rows: Vec<(EntityId, Vec<(String, Value)>)> = ids
+                .iter()
+                .zip(field_snapshots.into_iter())
+                .map(|(id, fields)| (*id, fields))
+                .collect();
+            self.runtime
+                .index_store_ref()
+                .index_entity_insert_batch(&collection, &index_rows)
+                .map_err(RedDBError::Internal)?;
+        }
 
         // CDC: emit once per entity but only ONE cache invalidation for the batch.
         // Previous code called cdc_emit() per row which triggered
