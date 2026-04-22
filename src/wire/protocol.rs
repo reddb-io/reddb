@@ -158,7 +158,13 @@ pub fn try_decode_value(data: &[u8], pos: &mut usize) -> Result<Value, &'static 
             let len =
                 u32::from_le_bytes(read_array::<4>(data, pos, "truncated text length")?) as usize;
             let bytes = read_bytes(data, pos, len, "truncated text value")?;
-            Ok(Value::text(String::from_utf8_lossy(bytes).to_string()))
+            // Avoid the double allocation the previous code paid:
+            //   bytes → String (via Cow::to_string) → Arc<str> (via Value::text).
+            // The common case (valid UTF-8 from a well-behaved client) borrows
+            // without allocating from the Cow, then `Arc::<str>::from(&str)`
+            // copies once into the shared ref-counted buffer.
+            let cow = std::string::String::from_utf8_lossy(bytes);
+            Ok(Value::text(std::sync::Arc::<str>::from(cow.as_ref())))
         }
         VAL_BOOL => {
             let bytes = read_bytes(data, pos, 1, "truncated bool value")?;
