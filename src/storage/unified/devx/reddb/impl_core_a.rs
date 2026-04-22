@@ -203,6 +203,7 @@ impl RedDB {
             ec_registry: std::sync::Arc::new(crate::ec::config::EcRegistry::new()),
             ml_runtime: std::sync::OnceLock::new(),
             semantic_cache: std::sync::OnceLock::new(),
+            hypertables: std::sync::OnceLock::new(),
         }
         .with_initialized_metadata()
     }

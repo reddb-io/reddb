@@ -106,6 +106,12 @@ pub struct RedDB {
     /// Separate from `MlRuntime` because cache config is runtime-only
     /// and doesn't need the job queue — keep it a standalone `Arc`.
     pub(crate) semantic_cache: std::sync::OnceLock<Arc<crate::storage::ml::SemanticCache>>,
+    /// Hypertable registry — populated by `CREATE HYPERTABLE` DDL,
+    /// consumed by chunk routing, retention sweeps, and `SHOW
+    /// HYPERTABLES`. Lazy so startup stays cheap when no hypertables
+    /// exist.
+    pub(crate) hypertables:
+        std::sync::OnceLock<Arc<crate::storage::timeseries::HypertableRegistry>>,
 }
 
 /// A cached HNSW index together with the entity count at build time.

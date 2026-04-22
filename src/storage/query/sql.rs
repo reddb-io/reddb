@@ -679,6 +679,20 @@ impl<'a> Parser<'a> {
                             self.position(),
                         )),
                     }
+                } else if matches!(self.peek(), Token::Ident(s) if s.eq_ignore_ascii_case("HYPERTABLE"))
+                {
+                    self.advance()?;
+                    match self.parse_create_hypertable_body()? {
+                        QueryExpr::CreateTimeSeries(query) => {
+                            Ok(SqlCommand::CreateTimeSeries(query))
+                        }
+                        other => Err(ParseError::new(
+                            format!(
+                                "internal: CREATE HYPERTABLE produced unexpected kind {other:?}"
+                            ),
+                            self.position(),
+                        )),
+                    }
                 } else if self.check(&Token::Queue) {
                     self.advance()?;
                     match self.parse_create_queue_body()? {

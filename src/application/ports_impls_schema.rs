@@ -97,6 +97,7 @@ impl RuntimeSchemaPort for RedDBRuntime {
             chunk_size,
             downsample_policies,
             if_not_exists,
+            hypertable: None,
         };
         RedDBRuntime::execute_create_timeseries(self, &raw_query, &query)
     }

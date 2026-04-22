@@ -1421,6 +1421,13 @@ impl RedDB {
         })
     }
 
+    /// Lazily-initialised hypertable registry. Populated by `CREATE
+    /// HYPERTABLE` DDL; consumed by chunk routing + retention.
+    pub fn hypertables(&self) -> &Arc<crate::storage::timeseries::HypertableRegistry> {
+        self.hypertables
+            .get_or_init(|| Arc::new(crate::storage::timeseries::HypertableRegistry::new()))
+    }
+
     pub(crate) fn is_binary_dump(path: &Path) -> Result<bool, std::io::Error> {
         let mut file = File::open(path)?;
         let mut magic = [0u8; 4];

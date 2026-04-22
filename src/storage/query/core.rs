@@ -1897,6 +1897,12 @@ pub enum SearchCommand {
 // ============================================================================
 
 /// CREATE TIMESERIES name [RETENTION duration] [CHUNK_SIZE n] [DOWNSAMPLE spec[, spec...]]
+///
+/// `CREATE HYPERTABLE` lands on the same AST with `hypertable` populated.
+/// The TimescaleDB-style syntax (time column + chunk_interval) gives the
+/// runtime enough to register a `HypertableSpec` alongside the
+/// underlying collection contract, so chunk routing and TTL sweeps can
+/// address the table without a separate DDL.
 #[derive(Debug, Clone)]
 pub struct CreateTimeSeriesQuery {
     pub name: String,
@@ -1904,6 +1910,21 @@ pub struct CreateTimeSeriesQuery {
     pub chunk_size: Option<usize>,
     pub downsample_policies: Vec<String>,
     pub if_not_exists: bool,
+    /// When `Some`, the DDL was spelled `CREATE HYPERTABLE` and the
+    /// runtime must register the spec with the hypertable registry.
+    pub hypertable: Option<HypertableDdl>,
+}
+
+/// Hypertable-specific DDL fields — set only when the caller used
+/// `CREATE HYPERTABLE`.
+#[derive(Debug, Clone)]
+pub struct HypertableDdl {
+    /// Column that carries the nanosecond timestamp axis.
+    pub time_column: String,
+    /// Chunk width in nanoseconds.
+    pub chunk_interval_ns: u64,
+    /// Per-chunk default TTL in nanoseconds (`None` = no TTL).
+    pub default_ttl_ns: Option<u64>,
 }
 
 /// DROP TIMESERIES [IF EXISTS] name

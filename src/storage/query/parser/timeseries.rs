@@ -1,6 +1,8 @@
 //! Parser for CREATE/DROP TIMESERIES
 
-use super::super::ast::{CreateTimeSeriesQuery, DropTimeSeriesQuery, QueryExpr};
+use super::super::ast::{
+    CreateTimeSeriesQuery, DropTimeSeriesQuery, HypertableDdl, QueryExpr,
+};
 use super::super::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
@@ -39,7 +41,93 @@ impl<'a> Parser<'a> {
             chunk_size,
             downsample_policies,
             if_not_exists,
+            hypertable: None,
         }))
+    }
+
+    /// Parse CREATE HYPERTABLE body — TimescaleDB-style.
+    ///
+    ///   CREATE HYPERTABLE metrics
+    ///     TIME_COLUMN ts
+    ///     CHUNK_INTERVAL '1d'
+    ///     [TTL '90d']
+    ///     [RETENTION 90 DAYS]          -- collection-level TTL (ms)
+    ///
+    /// Produces the same `CreateTimeSeriesQuery` AST as `CREATE
+    /// TIMESERIES`, with the `hypertable` field populated. The
+    /// runtime dispatcher registers the spec on the RedDB-wide
+    /// `HypertableRegistry` alongside creating the collection.
+    pub fn parse_create_hypertable_body(&mut self) -> Result<QueryExpr, ParseError> {
+        let if_not_exists = self.match_if_not_exists()?;
+        let name = self.expect_ident()?;
+
+        let mut time_column: Option<String> = None;
+        let mut chunk_interval_ns: Option<u64> = None;
+        let mut ttl_ns: Option<u64> = None;
+        let mut retention_ms = None;
+
+        loop {
+            if self.consume_ident_ci("TIME_COLUMN")? {
+                time_column = Some(self.expect_ident()?);
+            } else if self.consume_ident_ci("CHUNK_INTERVAL")? {
+                chunk_interval_ns = Some(self.parse_duration_ns_literal("CHUNK_INTERVAL")?);
+            } else if self.consume_ident_ci("TTL")? {
+                ttl_ns = Some(self.parse_duration_ns_literal("TTL")?);
+            } else if self.consume(&Token::Retention)? {
+                let value = self.parse_float()?;
+                let unit = self.parse_duration_unit()?;
+                retention_ms = Some((value * unit) as u64);
+            } else {
+                break;
+            }
+        }
+
+        let time_column = time_column.ok_or_else(|| {
+            ParseError::new(
+                "CREATE HYPERTABLE requires TIME_COLUMN <ident>".to_string(),
+                self.position(),
+            )
+        })?;
+        let chunk_interval_ns = chunk_interval_ns.ok_or_else(|| {
+            ParseError::new(
+                "CREATE HYPERTABLE requires CHUNK_INTERVAL '<duration>' (e.g. '1d')".to_string(),
+                self.position(),
+            )
+        })?;
+
+        Ok(QueryExpr::CreateTimeSeries(CreateTimeSeriesQuery {
+            name,
+            retention_ms,
+            chunk_size: None,
+            downsample_policies: Vec::new(),
+            if_not_exists,
+            hypertable: Some(HypertableDdl {
+                time_column,
+                chunk_interval_ns,
+                default_ttl_ns: ttl_ns,
+            }),
+        }))
+    }
+
+    /// Accept a string-literal duration (`'1d'`, `'5m'`, `'30s'`, …) and
+    /// resolve it to nanoseconds using the shared retention grammar.
+    fn parse_duration_ns_literal(&mut self, clause: &str) -> Result<u64, ParseError> {
+        let pos = self.position();
+        let value = self.parse_literal_value()?;
+        match value {
+            crate::storage::schema::Value::Text(s) => {
+                crate::storage::timeseries::retention::parse_duration_ns(&s).ok_or_else(|| {
+                    ParseError::new(
+                        format!("{clause} duration '{s}' is not a valid duration literal"),
+                        pos,
+                    )
+                })
+            }
+            other => Err(ParseError::new(
+                format!("{clause} expects a string duration literal, got {other:?}"),
+                pos,
+            )),
+        }
     }
 
     /// Parse DROP TIMESERIES body (after DROP TIMESERIES consumed)

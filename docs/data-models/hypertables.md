@@ -15,15 +15,33 @@ catalog.
 ## Declaration
 
 ```sql
+-- Shipped today — minimal hypertable with chunk routing + TTL.
+CREATE HYPERTABLE metrics
+  TIME_COLUMN ts
+  CHUNK_INTERVAL '1d'
+  TTL '90d';
+```
+
+`TIME_COLUMN` names the column carrying the nanosecond timestamp
+axis. `CHUNK_INTERVAL` accepts any duration the retention grammar
+understands (`30s`, `5m`, `1h`, `1d`, …). `TTL` is optional and
+installs a default retention per chunk — the sweep drops chunks once
+`max_ts + ttl < now`.
+
+### Extended column syntax (planned)
+
+```sql
 CREATE HYPERTABLE metrics (
   ts    BIGINT,
   host  TEXT,
   value DOUBLE
-) CHUNK_INTERVAL '1 day';
+) CHUNK_INTERVAL '1d';
 ```
 
-The `CHUNK_INTERVAL` clause accepts any duration understood by the
-time-series layer: `30s`, `5m`, `1h`, `1d`, etc.
+Column lists alongside the DDL land with the unified
+`CREATE TABLE ... PARTITION BY TIME` rewrite in a follow-on sprint.
+Until then declare schemas via `CREATE TABLE` + `CREATE HYPERTABLE`
+pointing at the same name, or rely on dynamic typing.
 
 ## API
 

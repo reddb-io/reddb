@@ -47,13 +47,35 @@ impl RedDBRuntime {
             .save_collection_contract(timeseries_collection_contract(query))
             .map_err(|err| RedDBError::Internal(err.to_string()))?;
         save_timeseries_metadata(store.as_ref(), query)?;
+
+        // `CREATE HYPERTABLE` additionally registers a HypertableSpec
+        // so chunk routing + retention sweeps can address this table.
+        // Plain `CREATE TIMESERIES` leaves `hypertable` = None and the
+        // runtime behaves as before.
+        if let Some(ht) = &query.hypertable {
+            let mut spec = crate::storage::timeseries::HypertableSpec::new(
+                query.name.clone(),
+                ht.time_column.clone(),
+                ht.chunk_interval_ns,
+            );
+            if let Some(ttl) = ht.default_ttl_ns {
+                spec = spec.with_ttl_ns(ttl);
+            }
+            self.inner.db.hypertables().register(spec);
+        }
+
         self.invalidate_result_cache();
         self.inner
             .db
             .persist_metadata()
             .map_err(|e| RedDBError::Internal(e.to_string()))?;
 
-        let mut msg = format!("timeseries '{}' created", query.name);
+        let noun = if query.hypertable.is_some() {
+            "hypertable"
+        } else {
+            "timeseries"
+        };
+        let mut msg = format!("{noun} '{}' created", query.name);
         if let Some(ret) = query.retention_ms {
             msg.push_str(&format!(" (retention={}ms)", ret));
         }
