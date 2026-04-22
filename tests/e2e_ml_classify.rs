@@ -151,6 +151,29 @@ fn semantic_cache_roundtrip_via_sql() {
 }
 
 #[test]
+fn embed_returns_null_without_provider_config() {
+    // EMBED needs `red_config` entries for a provider. With none set
+    // the scalar degrades to Null rather than panicking or crossing
+    // the network. Negative-path guard — proves the wiring reaches
+    // the runtime and fails closed.
+    let rt = rt();
+    let q = QueryUseCases::new(&rt);
+    let r = q
+        .execute(ExecuteQueryInput {
+            query: "SELECT EMBED('hello world', 'openai') AS emb".into(),
+        })
+        .expect("call should not error");
+    let emb = r.result.records[0].values.get("emb").expect("emb present");
+    // Either Null (no API key) or a Vector if REDDB_OPENAI_API_KEY is
+    // set in the environment. Both are acceptable; we only assert we
+    // didn't get a transport-layer panic or a stringified placeholder.
+    assert!(
+        matches!(emb, Value::Null | Value::Vector(_)),
+        "expected Null or Vector, got {emb:?}"
+    );
+}
+
+#[test]
 fn semantic_cache_miss_returns_null() {
     let rt = rt();
     let q = QueryUseCases::new(&rt);

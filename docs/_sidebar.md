@@ -129,6 +129,7 @@
   - [JavaScript and TypeScript Driver](/guides/javascript-typescript-driver.md)
   - [Running Benchmarks](/guides/benchmarks.md)
   - [Ask Your Database (AI Tutorial)](/guides/ask-your-database.md)
+  - [RAG in 20 lines](/guides/rag-in-20-lines.md)
   - [Multi-Model Queries](/guides/multi-model-queries.md)
   - [Local Dev with Docker](/guides/local-dev-docker.md)
   - [Read Replica Tutorial](/guides/read-replica-tutorial.md)

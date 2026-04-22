@@ -154,7 +154,11 @@ pub(super) fn evaluate_runtime_expr_with_db(
             // context.
             if matches!(
                 upper.as_str(),
-                "ML_CLASSIFY" | "ML_PREDICT_PROBA" | "SEMANTIC_CACHE_GET" | "SEMANTIC_CACHE_PUT"
+                "ML_CLASSIFY"
+                    | "ML_PREDICT_PROBA"
+                    | "SEMANTIC_CACHE_GET"
+                    | "SEMANTIC_CACHE_PUT"
+                    | "EMBED"
             ) {
                 if let Some(db) = db {
                     return dispatch_ml_function(db, &upper, &arg_values);
@@ -582,7 +586,71 @@ fn dispatch_ml_function(db: &RedDB, name: &str, args: &[Value]) -> Option<Value>
             db.semantic_cache().insert(prompt, response, embedding, None);
             Some(Value::Boolean(true))
         }
+        "EMBED" => {
+            let text = match args.first()? {
+                Value::Text(s) => s.to_string(),
+                other => other.display_string(),
+            };
+            let provider_hint = args.get(1).and_then(|v| match v {
+                Value::Text(s) => Some(s.to_string()),
+                _ => None,
+            });
+            embed_text(db, &text, provider_hint.as_deref())
+        }
         _ => None,
+    }
+}
+
+pub(super) fn embed_text_public(
+    db: &RedDB,
+    text: &str,
+    provider_hint: Option<&str>,
+) -> Option<Value> {
+    embed_text(db, text, provider_hint)
+}
+
+fn embed_text(db: &RedDB, text: &str, provider_hint: Option<&str>) -> Option<Value> {
+    // Resolve provider from explicit hint, then fall back to the
+    // runtime-wide default captured in `red_config`. Ollama and other
+    // OpenAI-compatible endpoints share the `openai_embeddings` call;
+    // only the api_base and model differ.
+    let kv_getter = |k: &str| -> Result<Option<String>, crate::RedDBError> {
+        Ok(lookup_latest_kv_value(db, "red_config", k).and_then(|v| match v {
+            Value::Text(s) => Some(s.to_string()),
+            _ => None,
+        }))
+    };
+    let provider = match provider_hint {
+        Some(name) => crate::ai::parse_provider(name).ok()?,
+        None => crate::ai::resolve_default_provider(&kv_getter),
+    };
+    if !provider.is_openai_compatible() {
+        // Anthropic / providers without embedding parity fall out —
+        // caller will see Null. A later sprint widens this.
+        return None;
+    }
+
+    let api_key = crate::ai::resolve_api_key(&provider, None, |kv_key| {
+        Ok(lookup_latest_kv_value(db, "red_config", kv_key).and_then(|v| match v {
+            Value::Text(s) => Some(s.to_string()),
+            _ => None,
+        }))
+    })
+    .ok()?;
+
+    let api_base = provider.resolve_api_base_with_kv("default", &kv_getter);
+    let model = provider.default_embedding_model().to_string();
+
+    let request = crate::ai::OpenAiEmbeddingRequest {
+        api_key,
+        model,
+        inputs: vec![text.to_string()],
+        dimensions: None,
+        api_base,
+    };
+    match crate::ai::openai_embeddings(request) {
+        Ok(resp) => resp.embeddings.into_iter().next().map(Value::Vector),
+        Err(_) => None,
     }
 }
 

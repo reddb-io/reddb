@@ -1785,7 +1785,11 @@ pub(super) fn evaluate_scalar_function_with_db(
     }
     if matches!(
         func_name.to_ascii_uppercase().as_str(),
-        "ML_CLASSIFY" | "ML_PREDICT_PROBA" | "SEMANTIC_CACHE_GET" | "SEMANTIC_CACHE_PUT"
+        "ML_CLASSIFY"
+            | "ML_PREDICT_PROBA"
+            | "SEMANTIC_CACHE_GET"
+            | "SEMANTIC_CACHE_PUT"
+            | "EMBED"
     ) {
         return evaluate_ml_scalar(db?, &func_name.to_ascii_uppercase(), args, source);
     }
@@ -2519,6 +2523,19 @@ fn evaluate_ml_scalar(
         "ML_PREDICT_PROBA" => ml_classify(db, args, source, /*probas=*/ true),
         "SEMANTIC_CACHE_GET" => semantic_cache_get(db, args, source),
         "SEMANTIC_CACHE_PUT" => semantic_cache_put(db, args, source),
+        "EMBED" => {
+            let text = match resolve_scalar_arg(args, 0, source)? {
+                Value::Text(s) => s.to_string(),
+                other => other.display_string(),
+            };
+            let provider_hint = args.get(1).and_then(|_| {
+                resolve_scalar_arg(args, 1, source).and_then(|v| match v {
+                    Value::Text(s) => Some(s.to_string()),
+                    _ => None,
+                })
+            });
+            super::expr_eval::embed_text_public(db, &text, provider_hint.as_deref())
+        }
         _ => None,
     }
 }
