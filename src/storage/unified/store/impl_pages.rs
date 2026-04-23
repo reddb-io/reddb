@@ -457,7 +457,11 @@ impl UnifiedStore {
 
     /// Serialize an entity to binary bytes
     pub(crate) fn serialize_entity(entity: &UnifiedEntity, format_version: u32) -> Vec<u8> {
-        let mut buf = Vec::new();
+        // Pre-allocate ~256 bytes to cover the typical 15-column
+        // typed row without any Vec growth. Bulk insert calls this
+        // millions of times per bench run; saving 2-3 reallocs per
+        // entity amortises.
+        let mut buf = Vec::with_capacity(256);
         Self::write_entity_binary(&mut buf, entity, format_version);
         buf
     }
@@ -467,14 +471,35 @@ impl UnifiedStore {
         metadata: Option<&Metadata>,
         format_version: u32,
     ) -> Vec<u8> {
-        let entity_bytes = Self::serialize_entity(entity, format_version);
-        let metadata_bytes = serialize_metadata(metadata);
-        let mut buf = Vec::with_capacity(12 + entity_bytes.len() + metadata_bytes.len());
+        // Build the record into a single buffer. Previously we allocated
+        // `entity_bytes`, then `metadata_bytes`, then `buf`, and copied
+        // bytes twice — three heap allocations per entity in bulk insert.
+        // Now we write the magic + placeholder length, fill the entity
+        // payload in place, back-patch the length, then append the
+        // metadata section. Two fewer allocations per entity.
+        let mut buf = Vec::with_capacity(256);
         buf.extend_from_slice(ENTITY_RECORD_MAGIC);
-        buf.extend_from_slice(&(entity_bytes.len() as u32).to_le_bytes());
-        buf.extend_from_slice(&entity_bytes);
-        buf.extend_from_slice(&(metadata_bytes.len() as u32).to_le_bytes());
-        buf.extend_from_slice(&metadata_bytes);
+
+        // Placeholder for entity_len (4 bytes, patched after we know it).
+        let entity_len_pos = buf.len();
+        buf.extend_from_slice(&[0u8; 4]);
+        let entity_start = buf.len();
+        Self::write_entity_binary(&mut buf, entity, format_version);
+        let entity_len = (buf.len() - entity_start) as u32;
+        buf[entity_len_pos..entity_len_pos + 4].copy_from_slice(&entity_len.to_le_bytes());
+
+        // Metadata section. Empty metadata → zero-length prefix only
+        // (no allocation). Non-empty → serialise inline.
+        match metadata {
+            Some(m) if !m.fields.is_empty() => {
+                let meta_bytes = serialize_metadata(Some(m));
+                buf.extend_from_slice(&(meta_bytes.len() as u32).to_le_bytes());
+                buf.extend_from_slice(&meta_bytes);
+            }
+            _ => {
+                buf.extend_from_slice(&0u32.to_le_bytes());
+            }
+        }
         buf
     }
 
