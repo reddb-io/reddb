@@ -286,8 +286,7 @@ red vcs commit "refactor: module B"
 
 # review what moved
 red vcs log --branch refactor --limit 10
-curl -X POST http://localhost:8080/vcs/diff \
-  -d '{"from":"main","to":"refactor"}' | jq
+curl "http://localhost:8080/repo/commits/main/diff/refactor" | jq
 
 # merge back
 red vcs checkout main

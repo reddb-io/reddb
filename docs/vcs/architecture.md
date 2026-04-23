@@ -109,7 +109,7 @@ red_vcs_settings
        │  set_versioned(name, false) ──▶ delete
        │
        ├── ALTER TABLE name SET VERSIONED = true  (SQL DDL)
-       ├── POST /vcs/versioned {"collection","enabled"}  (REST)
+       ├── PUT /collections/{name}/vcs {"versioned": …}  (REST)
        ├── red vcs versioned on name  (CLI)
        └── vcs.set_versioned(name, true)  (library)
 ```

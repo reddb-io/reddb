@@ -40,7 +40,7 @@ step "0. opt-in: mark demo_users as versioned"
 # Three equivalent ways to opt a collection into Git-for-Data:
 #   (a) SQL DDL:   ALTER TABLE demo_users SET VERSIONED = true
 #   (b) CLI:       red vcs versioned on demo_users
-#   (c) REST:      POST /vcs/versioned {"collection":..,"enabled":true}
+#   (c) REST:      PUT /collections/{name}/vcs {"versioned": true}
 # Working retroactively is supported — you may run this step any
 # time, even after commits already exist. See docs/vcs/overview.md.
 $RED vcs versioned on demo_users --path "$DB" | sed 's/^/  /'

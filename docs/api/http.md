@@ -783,6 +783,51 @@ See [Configuration -- Backup & Recovery](/getting-started/configuration.md#backu
 | `GET` | `/replication/status` | Replication status |
 | `POST` | `/replication/snapshot` | Replication snapshot |
 
+## Git for Data (VCS)
+
+Full reference: [/vcs/commands.md](/vcs/commands.md). Surface is
+RESTful and collection-centric — resources live under `/repo/*`
+(refs, commits, sessions, merges) and `/collections/{name}/vcs`
+(opt-in toggle).
+
+| Method | Path | Description |
+|:-------|:-----|:------------|
+| `GET`    | `/repo` | Repo summary (branches, tags, versioned collections) |
+| `GET`    | `/repo/refs[?prefix=refs/heads/]` | Unified ref listing |
+| `GET`    | `/repo/refs/heads` | List branches |
+| `POST`   | `/repo/refs/heads` | Create branch `{name, from?, connection_id?}` |
+| `GET`    | `/repo/refs/heads/{name}` | Show branch |
+| `PUT`    | `/repo/refs/heads/{name}` | Move branch `{commit}` |
+| `DELETE` | `/repo/refs/heads/{name}` | Delete branch |
+| `GET`    | `/repo/refs/tags` / `POST` / `GET {name}` / `DELETE {name}` | Tag CRUD |
+| `GET`    | `/repo/commits?branch=&limit=&skip=&from=&to=&no_merges=` | Commit log |
+| `POST`   | `/repo/commits` | Create commit from session workset |
+| `GET`    | `/repo/commits/{hash}` | Show commit |
+| `GET`    | `/repo/commits/{a}/diff/{b}[?collection=&summary=true]` | Diff |
+| `GET`    | `/repo/commits/{a}/lca/{b}` | Lowest common ancestor |
+| `GET`    | `/repo/sessions/{conn}` | Workset status |
+| `POST`   | `/repo/sessions/{conn}/checkout` | Switch HEAD |
+| `POST`   | `/repo/sessions/{conn}/merge` | Merge into HEAD |
+| `POST`   | `/repo/sessions/{conn}/reset` | Reset HEAD |
+| `POST`   | `/repo/sessions/{conn}/cherry-pick` | Apply one commit |
+| `POST`   | `/repo/sessions/{conn}/revert` | Reverse one commit |
+| `GET`    | `/repo/merges/{msid}` | Merge-state summary |
+| `GET`    | `/repo/merges/{msid}/conflicts` | List unresolved conflicts |
+| `POST`   | `/repo/merges/{msid}/conflicts/{cid}/resolve` | Resolve one |
+| `GET`    | `/collections/{name}/vcs` | Is this collection opted in? |
+| `PUT`    | `/collections/{name}/vcs` | Opt in / out `{versioned}` |
+
+Status codes: 201 Created (commit/branch/tag), 204 No Content
+(delete, resolve), 400 invalid body, 404 unknown ref / commit,
+409 protected branch / conflict, 405 method not allowed.
+
+Time-travel queries use the SQL `AS OF` clause (not a separate
+endpoint):
+
+```sql
+SELECT * FROM users AS OF COMMIT '7a1a...' WHERE age > 21;
+```
+
 ## DDL
 
 | Method | Path | Description |
