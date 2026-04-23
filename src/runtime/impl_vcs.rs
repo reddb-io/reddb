@@ -177,7 +177,7 @@ fn load_commit_entity(store: &UnifiedStore, hash: &str) -> Option<UnifiedEntity>
             entity
                 .data
                 .as_row()
-                .is_some_and(|row| row_text(row, "_id").as_deref() == Some(hash))
+                .is_some_and(|row| row_text(row, "id").as_deref() == Some(hash))
         })
         .into_iter()
         .next()
@@ -185,7 +185,7 @@ fn load_commit_entity(store: &UnifiedStore, hash: &str) -> Option<UnifiedEntity>
 
 fn commit_from_row(row: &RowData) -> Option<Commit> {
     Some(Commit {
-        hash: row_text(row, "_id")?,
+        hash: row_text(row, "id")?,
         root_xid: row_u64(row, "root_xid")?,
         parents: row_string_list(row, "parents"),
         height: row_u64(row, "height").unwrap_or(0),
@@ -211,7 +211,7 @@ fn load_commit(store: &UnifiedStore, hash: &str) -> Option<Commit> {
 
 fn save_commit(store: &UnifiedStore, commit: &Commit) -> RedDBResult<()> {
     let mut fields: HashMap<String, Value> = HashMap::new();
-    fields.insert("_id".to_string(), Value::text(commit.hash.as_str()));
+    fields.insert("id".to_string(), Value::text(commit.hash.as_str()));
     fields.insert(
         "root_xid".to_string(),
         Value::UnsignedInteger(commit.root_xid),
@@ -275,7 +275,7 @@ fn ref_kind_from_str(s: &str) -> RefKind {
 
 fn ref_from_row(row: &RowData) -> Option<Ref> {
     Some(Ref {
-        name: row_text(row, "_id")?,
+        name: row_text(row, "id")?,
         kind: ref_kind_from_str(&row_text(row, "type").unwrap_or_default()),
         target: row_text(row, "target").unwrap_or_default(),
         protected: row.get_field("protected")
@@ -294,7 +294,7 @@ fn load_ref_entity(store: &UnifiedStore, name: &str) -> Option<(EntityId, Unifie
             entity
                 .data
                 .as_row()
-                .is_some_and(|row| row_text(row, "_id").as_deref() == Some(name))
+                .is_some_and(|row| row_text(row, "id").as_deref() == Some(name))
         })
         .into_iter()
         .next()
@@ -313,7 +313,7 @@ fn save_ref(store: &UnifiedStore, r: &Ref) -> RedDBResult<()> {
         let _ = store.delete(vc::REFS, id);
     }
     let mut fields: HashMap<String, Value> = HashMap::new();
-    fields.insert("_id".to_string(), Value::text(r.name.as_str()));
+    fields.insert("id".to_string(), Value::text(r.name.as_str()));
     let kind_str = match r.kind {
         RefKind::Branch => "branch",
         RefKind::Tag => "tag",
@@ -359,7 +359,7 @@ fn is_versioned(store: &UnifiedStore, name: &str) -> bool {
             entity
                 .data
                 .as_row()
-                .is_some_and(|row| row_text(row, "_id").as_deref() == Some(&target))
+                .is_some_and(|row| row_text(row, "id").as_deref() == Some(&target))
         })
         .into_iter()
         .any(|entity| {
@@ -389,7 +389,7 @@ fn versioned_collections(store: &UnifiedStore) -> Vec<String> {
                 .unwrap_or(false)
         })
         .into_iter()
-        .filter_map(|entity| row_text(entity.data.as_row()?, "_id"))
+        .filter_map(|entity| row_text(entity.data.as_row()?, "id"))
         .collect()
 }
 
@@ -414,7 +414,7 @@ fn set_versioned_flag(
             entity
                 .data
                 .as_row()
-                .is_some_and(|row| row_text(row, "_id").as_deref() == Some(&target))
+                .is_some_and(|row| row_text(row, "id").as_deref() == Some(&target))
         });
         for row in rows {
             let _ = store.delete(vc::SETTINGS, row.id);
@@ -424,7 +424,7 @@ fn set_versioned_flag(
         return Ok(());
     }
     let mut fields: HashMap<String, Value> = HashMap::new();
-    fields.insert("_id".to_string(), Value::text(name));
+    fields.insert("id".to_string(), Value::text(name));
     fields.insert("versioned".to_string(), Value::Boolean(true));
     fields.insert("ts_ms".to_string(), Value::TimestampMs(now_ms()));
     insert_meta_row(store, vc::SETTINGS, fields)?;
@@ -439,7 +439,7 @@ fn list_refs_by_prefix(store: &UnifiedStore, prefix: Option<&str>) -> Vec<Ref> {
     manager
         .query_all(|entity| {
             entity.data.as_row().is_some_and(|row| {
-                let id = row_text(row, "_id").unwrap_or_default();
+                let id = row_text(row, "id").unwrap_or_default();
                 match &prefix_owned {
                     Some(p) => id.starts_with(p),
                     None => true,
@@ -560,13 +560,13 @@ fn resolve_short_commit(store: &UnifiedStore, prefix: &str) -> Option<CommitHash
     let matches: Vec<String> = manager
         .query_all(|entity| {
             entity.data.as_row().is_some_and(|row| {
-                row_text(row, "_id")
+                row_text(row, "id")
                     .map(|id| id.starts_with(prefix))
                     .unwrap_or(false)
             })
         })
         .into_iter()
-        .filter_map(|entity| row_text(entity.data.as_row()?, "_id"))
+        .filter_map(|entity| row_text(entity.data.as_row()?, "id"))
         .collect();
     if matches.len() == 1 {
         matches.into_iter().next()
@@ -593,14 +593,14 @@ fn upsert_workset(
             entity
                 .data
                 .as_row()
-                .is_some_and(|row| row_text(row, "_id").as_deref() == Some(&conn_id))
+                .is_some_and(|row| row_text(row, "id").as_deref() == Some(&conn_id))
         });
         for row in rows {
             let _ = store.delete(vc::WORKSETS, row.id);
         }
     }
     let mut fields: HashMap<String, Value> = HashMap::new();
-    fields.insert("_id".to_string(), Value::text(conn_id.as_str()));
+    fields.insert("id".to_string(), Value::text(conn_id.as_str()));
     fields.insert("branch".to_string(), Value::text(branch));
     if let Some(base) = base_commit {
         fields.insert("base_commit".to_string(), Value::text(base));
@@ -621,7 +621,7 @@ fn load_workset(store: &UnifiedStore, connection_id: u64) -> Option<(RefName, Op
             entity
                 .data
                 .as_row()
-                .is_some_and(|row| row_text(row, "_id").as_deref() == Some(&conn_id))
+                .is_some_and(|row| row_text(row, "id").as_deref() == Some(&conn_id))
         })
         .into_iter()
         .find_map(|entity| {
@@ -1048,7 +1048,7 @@ impl RedDBRuntime {
         };
 
         let mut ms_fields: HashMap<String, Value> = HashMap::new();
-        ms_fields.insert("_id".to_string(), Value::text(merge_state_id.as_str()));
+        ms_fields.insert("id".to_string(), Value::text(merge_state_id.as_str()));
         ms_fields.insert("kind".to_string(), Value::text("merge"));
         ms_fields.insert("branch".to_string(), Value::text(head_branch.as_str()));
         if let Some(base_hash) = &lca {
@@ -1183,7 +1183,7 @@ impl RedDBRuntime {
         )?;
 
         let mut ms_fields: HashMap<String, Value> = HashMap::new();
-        ms_fields.insert("_id".to_string(), Value::text(merge_state_id.as_str()));
+        ms_fields.insert("id".to_string(), Value::text(merge_state_id.as_str()));
         ms_fields.insert("kind".to_string(), Value::text("cherry_pick"));
         ms_fields.insert("branch".to_string(), Value::text(head_branch.as_str()));
         ms_fields.insert("base".to_string(), Value::text(parent_hash.as_str()));
@@ -1303,7 +1303,7 @@ impl RedDBRuntime {
         // materialisation here — revert conflicts are rare when the
         // reverted commit touches disjoint entities.
         let mut ms_fields: HashMap<String, Value> = HashMap::new();
-        ms_fields.insert("_id".to_string(), Value::text(merge_state_id.as_str()));
+        ms_fields.insert("id".to_string(), Value::text(merge_state_id.as_str()));
         ms_fields.insert("kind".to_string(), Value::text("revert"));
         ms_fields.insert("branch".to_string(), Value::text(head_branch.as_str()));
         ms_fields.insert("base".to_string(), Value::text(src_hash.as_str()));
@@ -1560,7 +1560,7 @@ impl RedDBRuntime {
             .filter_map(|entity| {
                 let row = entity.data.as_row()?;
                 Some(Conflict {
-                    id: row_text(row, "_id")?,
+                    id: row_text(row, "id")?,
                     collection: row_text(row, "collection")?,
                     entity_id: row_text(row, "entity_id").unwrap_or_default(),
                     base: row_json(row, "base_json"),
@@ -1592,7 +1592,7 @@ impl RedDBRuntime {
             entity
                 .data
                 .as_row()
-                .is_some_and(|row| row_text(row, "_id").as_deref() == Some(&cid))
+                .is_some_and(|row| row_text(row, "id").as_deref() == Some(&cid))
         });
         for entity in matches {
             store
@@ -1836,7 +1836,7 @@ fn materialize_merge_conflicts(
                 .collect();
 
             let mut fields: HashMap<String, Value> = HashMap::new();
-            fields.insert("_id".to_string(), Value::text(conflict_id.as_str()));
+            fields.insert("id".to_string(), Value::text(conflict_id.as_str()));
             fields.insert("collection".to_string(), Value::text(coll.as_str()));
             fields.insert("entity_id".to_string(), Value::text(eid.to_string().as_str()));
             fields.insert(

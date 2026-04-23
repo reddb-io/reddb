@@ -63,7 +63,7 @@ xid ──────▶ active ──────▶ committed ─────
    `prune_aborted` skips it. Until *all* references drop (branch
    delete, commit unreachable), the versions survive.
 4. `save_commit(...)` — write the canonical `red_commits` row with
-   `_id = sha256(...)`, `root_xid = xid`, `parents`, `height`,
+   `id = sha256(...)`, `root_xid = xid`, `parents`, `height`,
    `author`, `committer`, `message`, `timestamp_ms`.
 5. `save_ref(branch, hash)` — advance the current branch ref to
    the new commit hash (upsert semantics).
@@ -101,8 +101,8 @@ and short-circuit on the first common ancestor.
 ```
 red_vcs_settings
   ┌─────────────────────────────────────────────────┐
-  │ _id = "users",     versioned = true,  ts_ms = … │
-  │ _id = "products",  versioned = true,  ts_ms = … │
+  │ id = "users",     versioned = true,  ts_ms = … │
+  │ id = "products",  versioned = true,  ts_ms = … │
   └─────────────────────────────────────────────────┘
        ▲
        │  set_versioned(name, true)  ──▶ delete-then-insert

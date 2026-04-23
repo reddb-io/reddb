@@ -197,7 +197,7 @@ on first boot:
 | `red_conflicts` | unresolved merge conflicts — base/ours/theirs JSON + conflicting paths |
 | `red_merge_state` | in-progress merge/cherry_pick/revert/rebase metadata |
 | `red_remotes` | remote repository configuration (Phase 7) |
-| `red_vcs_settings` | per-collection opt-in flag (`_id = name`, `versioned = true`) |
+| `red_vcs_settings` | per-collection opt-in flag (`id = name`, `versioned = true`) |
 
 Config defaults live in `red_config` under `red.vcs.*` — inherits
 the same dot-notation patterns already used by `red.ai`,
