@@ -1062,6 +1062,11 @@ impl IndexStore {
         // compares short and amortised.
         for idx in &relevant {
             let col = idx.columns.first().map(|s| s.as_str()).unwrap_or("");
+            // Hoist the "{name}_hash" auxiliary index name out of
+            // the per-row inner loop for BTree indexes. Previously
+            // every row paid a fresh `format!()` allocation.
+            let btree_hash_name = matches!(idx.method, IndexMethodKind::BTree)
+                .then(|| format!("{}_hash", idx.name));
             for (entity_id, fields) in rows {
                 for (field_name, value) in fields {
                     if field_name != col {
@@ -1086,8 +1091,9 @@ impl IndexStore {
                                 ));
                             }
                             self.sorted.insert_one(collection, col, value, *entity_id);
+                            let hash_name = btree_hash_name.as_deref().unwrap_or("");
                             self.hash
-                                .insert(collection, &format!("{}_hash", idx.name), key, *entity_id)
+                                .insert(collection, hash_name, key, *entity_id)
                                 .map_err(|err| err.to_string())?;
                         }
                         IndexMethodKind::Spatial => {}
