@@ -25,7 +25,7 @@
 //!   implemented in Phase 2.3; resolver accepts the mode but downgrades
 //!   to SnapshotIsolation semantics with a logged warning.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::coordinator::IsolationLevel;
@@ -127,6 +127,12 @@ struct ManagerState {
     /// xids that rolled back. `is_visible` MUST treat these as invisible
     /// (the writer never committed). The set is pruned lazily by VACUUM.
     aborted: HashSet<Xid>,
+    /// xids that must NOT be reclaimed by VACUUM because some higher-level
+    /// object (a VCS commit, a long-lived replica snapshot) still points
+    /// at them. Reference-counted so multiple pins coexist; decrementing
+    /// to zero removes the entry. `prune_aborted` skips any xid present
+    /// here so its row versions stay readable.
+    pinned: HashMap<Xid, u32>,
 }
 
 impl SnapshotManager {
@@ -196,10 +202,54 @@ impl SnapshotManager {
 
     /// Prune the aborted-xid set. Safe to call once every aborted xid is
     /// below `oldest_active`, which guarantees no live snapshot depends
-    /// on the distinction between "aborted" and "never existed".
+    /// on the distinction between "aborted" and "never existed". Pinned
+    /// xids are always retained so higher-level references (VCS commits,
+    /// replica snapshots) stay readable.
     pub fn prune_aborted(&self, below: Xid) {
         let mut state = self.state.write();
-        state.aborted.retain(|&x| x >= below);
+        let ManagerState { aborted, pinned, .. } = &mut *state;
+        aborted.retain(|&x| x >= below || pinned.contains_key(&x));
+    }
+
+    /// Pin an xid so its row versions stay reclaim-safe across VACUUM.
+    /// Reference-counted — call `unpin` once per `pin` to release.
+    pub fn pin(&self, xid: Xid) {
+        if xid == XID_NONE {
+            return;
+        }
+        let mut state = self.state.write();
+        *state.pinned.entry(xid).or_insert(0) += 1;
+    }
+
+    /// Decrement an xid's pin count. At zero it is removed and becomes
+    /// VACUUM-eligible again. No-op if the xid was never pinned.
+    pub fn unpin(&self, xid: Xid) {
+        if xid == XID_NONE {
+            return;
+        }
+        let mut state = self.state.write();
+        if let Some(count) = state.pinned.get_mut(&xid) {
+            if *count <= 1 {
+                state.pinned.remove(&xid);
+            } else {
+                *count -= 1;
+            }
+        }
+    }
+
+    /// Is this xid currently pinned?
+    pub fn is_pinned(&self, xid: Xid) -> bool {
+        self.state.read().pinned.contains_key(&xid)
+    }
+
+    /// Current pin count for an xid (0 if not pinned). Diagnostic only.
+    pub fn pin_count(&self, xid: Xid) -> u32 {
+        self.state
+            .read()
+            .pinned
+            .get(&xid)
+            .copied()
+            .unwrap_or(0)
     }
 }
 
@@ -273,6 +323,47 @@ mod tests {
         let snap = m.snapshot(reader);
         // Reader opens *after* delete → row must be hidden.
         assert!(!snap.sees(creator, deleter));
+    }
+
+    #[test]
+    fn pin_blocks_prune_of_aborted_xid() {
+        let m = SnapshotManager::new();
+        let writer = m.begin();
+        m.rollback(writer);
+        assert!(m.is_aborted(writer));
+        m.pin(writer);
+        // Even with a high watermark, pinned xid survives prune.
+        m.prune_aborted(writer + 1);
+        assert!(m.is_aborted(writer));
+        m.unpin(writer);
+        m.prune_aborted(writer + 1);
+        assert!(!m.is_aborted(writer));
+    }
+
+    #[test]
+    fn pin_is_reference_counted() {
+        let m = SnapshotManager::new();
+        let x = m.begin();
+        m.pin(x);
+        m.pin(x);
+        assert_eq!(m.pin_count(x), 2);
+        m.unpin(x);
+        assert_eq!(m.pin_count(x), 1);
+        assert!(m.is_pinned(x));
+        m.unpin(x);
+        assert_eq!(m.pin_count(x), 0);
+        assert!(!m.is_pinned(x));
+        // Extra unpin is a no-op.
+        m.unpin(x);
+        assert_eq!(m.pin_count(x), 0);
+    }
+
+    #[test]
+    fn pin_xid_none_is_noop() {
+        let m = SnapshotManager::new();
+        m.pin(XID_NONE);
+        assert!(!m.is_pinned(XID_NONE));
+        assert_eq!(m.pin_count(XID_NONE), 0);
     }
 
     #[test]
