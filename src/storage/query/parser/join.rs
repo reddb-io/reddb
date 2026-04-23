@@ -66,6 +66,7 @@ impl<'a> Parser<'a> {
                 limit: None,
                 offset: None,
                 expand: None,
+                as_of: None,
             }
         };
 
@@ -231,6 +232,7 @@ impl<'a> Parser<'a> {
             limit: None,
             offset: None,
             expand: None,
+            as_of: None,
         };
 
         Ok(QueryExpr::Join(JoinQuery {

@@ -129,7 +129,11 @@ impl<'a> Parser<'a> {
         };
 
         // Parse optional alias (only when a FROM clause exists).
+        // `AS OF` is a clause — don't gobble the `AS` as an alias
+        // marker when the following token is `OF`.
         let alias = if !has_from {
+            None
+        } else if self.check(&Token::As) && matches!(self.peek_next()?, Token::Of) {
             None
         } else if self.consume(&Token::As)?
             || (self.check(&Token::Ident("".into())) && !self.is_clause_keyword())
@@ -155,6 +159,7 @@ impl<'a> Parser<'a> {
             limit: None,
             offset: None,
             expand: None,
+            as_of: None,
         };
 
         // Parse optional clauses
@@ -177,6 +182,7 @@ impl<'a> Parser<'a> {
                 | Token::Inner
                 | Token::Left
                 | Token::Right
+                | Token::As
         )
     }
 
@@ -299,8 +305,19 @@ fn attach_projection_alias(proj: Projection, alias: Option<String>) -> Projectio
 }
 
 impl<'a> Parser<'a> {
-    /// Parse table query clauses (WHERE, GROUP BY, HAVING, ORDER BY, LIMIT, OFFSET)
+    /// Parse table query clauses (AS OF, WHERE, GROUP BY, HAVING, ORDER BY, LIMIT, OFFSET)
     pub fn parse_table_clauses(&mut self, query: &mut TableQuery) -> Result<(), ParseError> {
+        // AS OF clause — time-travel anchor. Must come before WHERE
+        // so the executor can bind the snapshot before filter eval.
+        if self.check(&Token::As) {
+            let next_is_of = matches!(self.peek_next()?, Token::Of);
+            if next_is_of {
+                self.expect(Token::As)?;
+                self.expect(Token::Of)?;
+                query.as_of = Some(self.parse_as_of_spec()?);
+            }
+        }
+
         // WHERE clause
         if self.consume(&Token::Where)? {
             let filter = self.parse_filter()?;
@@ -345,6 +362,74 @@ impl<'a> Parser<'a> {
         }
 
         Ok(())
+    }
+
+    /// Parse an AS OF spec after `AS OF` has already been consumed.
+    /// Grammar:
+    ///   AS OF COMMIT   '<hex>'
+    ///   AS OF BRANCH   '<name>'
+    ///   AS OF TAG      '<name>'
+    ///   AS OF TIMESTAMP <integer-ms>
+    ///   AS OF SNAPSHOT  <xid>
+    fn parse_as_of_spec(
+        &mut self,
+    ) -> Result<crate::storage::query::ast::AsOfClause, ParseError> {
+        use crate::storage::query::ast::AsOfClause;
+
+        // Keyword — accept both tokenized forms (e.g. Token::Commit
+        // if present) and bare identifiers for flexibility.
+        let keyword = match self.peek() {
+            Token::Ident(s) => {
+                let s = s.to_ascii_uppercase();
+                self.advance()?;
+                s
+            }
+            Token::Commit => {
+                self.advance()?;
+                "COMMIT".to_string()
+            }
+            other => {
+                return Err(ParseError::expected(
+                    vec!["COMMIT", "BRANCH", "TAG", "TIMESTAMP", "SNAPSHOT"],
+                    other,
+                    self.position(),
+                ));
+            }
+        };
+
+        match keyword.as_str() {
+            "COMMIT" => {
+                let value = self.parse_string()?;
+                Ok(AsOfClause::Commit(value))
+            }
+            "BRANCH" => {
+                let value = self.parse_string()?;
+                Ok(AsOfClause::Branch(value))
+            }
+            "TAG" => {
+                let value = self.parse_string()?;
+                Ok(AsOfClause::Tag(value))
+            }
+            "TIMESTAMP" => {
+                let value = self.parse_integer()?;
+                Ok(AsOfClause::TimestampMs(value))
+            }
+            "SNAPSHOT" => {
+                let value = self.parse_integer()?;
+                if value < 0 {
+                    return Err(ParseError::new(
+                        "AS OF SNAPSHOT requires non-negative xid".to_string(),
+                        self.position(),
+                    ));
+                }
+                Ok(AsOfClause::Snapshot(value as u64))
+            }
+            other => Err(ParseError::expected(
+                vec!["COMMIT", "BRANCH", "TAG", "TIMESTAMP", "SNAPSHOT"],
+                &Token::Ident(other.into()),
+                self.position(),
+            )),
+        }
     }
 
     /// Parse EXPAND options: GRAPH [DEPTH n], CROSS_REFS, ALL

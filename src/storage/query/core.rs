@@ -593,6 +593,26 @@ pub struct TableQuery {
     pub offset: Option<u64>,
     /// WITH EXPAND options (graph traversal, cross-ref following)
     pub expand: Option<ExpandOptions>,
+    /// Time-travel anchor. When present the executor resolves this
+    /// to an MVCC xid and evaluates the query against that snapshot
+    /// instead of the current one. Mirrors git's `AS OF` semantics.
+    pub as_of: Option<AsOfClause>,
+}
+
+/// Source spec for `AS OF` — parsed form sits in `TableQuery`, then
+/// `vcs_resolve_as_of` turns it into an MVCC xid at execute time.
+#[derive(Debug, Clone)]
+pub enum AsOfClause {
+    /// Explicit commit hash literal: `AS OF COMMIT '<hex>'`.
+    Commit(String),
+    /// Branch or ref: `AS OF BRANCH 'main'` or `AS OF 'refs/heads/main'`.
+    Branch(String),
+    /// Tag: `AS OF TAG 'v1.0'`.
+    Tag(String),
+    /// Unix epoch milliseconds: `AS OF TIMESTAMP 1710000000000`.
+    TimestampMs(i64),
+    /// Raw MVCC snapshot xid: `AS OF SNAPSHOT 12345`.
+    Snapshot(u64),
 }
 
 /// Structured FROM source for a `TableQuery`. Additive alongside the
@@ -640,6 +660,7 @@ impl TableQuery {
             limit: None,
             offset: None,
             expand: None,
+            as_of: None,
         }
     }
 
@@ -669,6 +690,7 @@ impl TableQuery {
             limit: None,
             offset: None,
             expand: None,
+            as_of: None,
         }
     }
 }
