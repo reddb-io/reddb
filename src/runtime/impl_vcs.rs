@@ -70,6 +70,16 @@ fn row_i64(row: &RowData, field: &str) -> Option<i64> {
     }
 }
 
+fn row_json(row: &RowData, field: &str) -> JsonValue {
+    match row.get_field(field) {
+        Some(Value::Json(bytes)) => crate::json::from_slice::<JsonValue>(bytes)
+            .unwrap_or(JsonValue::Null),
+        Some(Value::Text(s)) => crate::json::from_str::<JsonValue>(s)
+            .unwrap_or_else(|_| JsonValue::String(s.to_string())),
+        _ => JsonValue::Null,
+    }
+}
+
 fn row_string_list(row: &RowData, field: &str) -> Vec<String> {
     match row.get_field(field) {
         Some(Value::Array(items)) => items
@@ -1455,9 +1465,9 @@ impl RedDBRuntime {
                     id: row_text(row, "_id")?,
                     collection: row_text(row, "collection")?,
                     entity_id: row_text(row, "entity_id").unwrap_or_default(),
-                    base: JsonValue::Null,
-                    ours: JsonValue::Null,
-                    theirs: JsonValue::Null,
+                    base: row_json(row, "base_json"),
+                    ours: row_json(row, "ours_json"),
+                    theirs: row_json(row, "theirs_json"),
                     conflicting_paths: row_string_list(row, "conflicting_paths"),
                     merge_state_id: row_text(row, "merge_state_id").unwrap_or_default(),
                 })
@@ -1620,6 +1630,7 @@ fn materialize_merge_conflicts(
     theirs_hash: &str,
     merge_state_id: &str,
 ) -> RedDBResult<Vec<Conflict>> {
+    use crate::application::merge_json::three_way_merge;
     use crate::application::vcs::AsOfSpec;
 
     let base_xid = rt.vcs_resolve_as_of(AsOfSpec::Commit(base_hash.to_string()))?;
@@ -1631,11 +1642,11 @@ fn materialize_merge_conflicts(
     let ours_snap = sm.snapshot(ours_xid);
     let theirs_snap = sm.snapshot(theirs_xid);
 
-    // Walk every user collection once, collecting per-entity
-    // visibility at the three snapshots. An entity is a candidate
-    // conflict when its visibility differs from base in *both*
-    // sides — i.e. both branches edited it (or one deleted and the
-    // other modified).
+    // Walk every user collection, materialising per-(entity_id)
+    // visible JSON bodies at each of the three snapshots. Phase 6:
+    // we keep the bodies, run a recursive 3-way merge, and persist
+    // the conflicting paths onto the red_conflicts row so
+    // vcs_conflict_resolve can present the full context to callers.
     let mut conflicts: Vec<Conflict> = Vec::new();
     for coll in store.list_collections() {
         if coll.starts_with("red_") {
@@ -1644,36 +1655,65 @@ fn materialize_merge_conflicts(
         let Some(manager) = store.get_collection(&coll) else {
             continue;
         };
-        // Group by entity id so multiple versions (xmin-distinct
-        // tuples sharing the user-facing id) collapse into a single
-        // visibility verdict per snapshot.
-        let mut per_id: HashMap<u64, (bool, bool, bool)> = HashMap::new();
+        let mut at_base: HashMap<u64, JsonValue> = HashMap::new();
+        let mut at_ours: HashMap<u64, JsonValue> = HashMap::new();
+        let mut at_theirs: HashMap<u64, JsonValue> = HashMap::new();
         for entity in manager.query_all(|_| true) {
             let xmin = entity.xmin;
             let xmax = entity.xmax;
-            let aborted = sm.is_aborted(xmin);
-            let in_base = base_snap.sees(xmin, xmax) && !aborted;
-            let in_ours = ours_snap.sees(xmin, xmax) && !aborted;
-            let in_theirs = theirs_snap.sees(xmin, xmax) && !aborted;
-            let entry = per_id.entry(entity.id.raw()).or_insert((false, false, false));
-            entry.0 |= in_base;
-            entry.1 |= in_ours;
-            entry.2 |= in_theirs;
+            if sm.is_aborted(xmin) {
+                continue;
+            }
+            let eid = entity.id.raw();
+            let body = crate::presentation::entity_json::compact_entity_json(&entity);
+            if base_snap.sees(xmin, xmax) {
+                at_base.insert(eid, body.clone());
+            }
+            if ours_snap.sees(xmin, xmax) {
+                at_ours.insert(eid, body.clone());
+            }
+            if theirs_snap.sees(xmin, xmax) {
+                at_theirs.insert(eid, body);
+            }
         }
-        for (eid, (b, o, t)) in per_id {
-            // Changed on both sides relative to base -> conflict.
+
+        let mut all_ids: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+        all_ids.extend(at_base.keys().copied());
+        all_ids.extend(at_ours.keys().copied());
+        all_ids.extend(at_theirs.keys().copied());
+
+        for eid in all_ids {
+            let b = at_base.get(&eid).cloned().unwrap_or(JsonValue::Null);
+            let o = at_ours.get(&eid).cloned().unwrap_or(JsonValue::Null);
+            let t = at_theirs.get(&eid).cloned().unwrap_or(JsonValue::Null);
             let ours_changed = b != o;
             let theirs_changed = b != t;
             if !(ours_changed && theirs_changed) {
                 continue;
             }
-            // Agreement (both deleted, both re-added identically) is
-            // not a conflict — Phase 5 treats any divergent-flip as
-            // one. Refined body comparison is Phase 6.
             if o == t {
                 continue;
             }
+            let merge = three_way_merge(&b, &o, &t);
+            if merge.is_clean() {
+                // Both sides touched different paths — no conflict
+                // to record; Phase 6.2 will stage the merged body
+                // into the workset for automatic apply.
+                continue;
+            }
             let conflict_id = format!("{}:{}/{}", merge_state_id, coll, eid);
+            let paths: Vec<String> = merge
+                .conflicts
+                .iter()
+                .map(|c| {
+                    if c.path.is_empty() {
+                        "*".to_string()
+                    } else {
+                        c.path.clone()
+                    }
+                })
+                .collect();
+
             let mut fields: HashMap<String, Value> = HashMap::new();
             fields.insert("_id".to_string(), Value::text(conflict_id.as_str()));
             fields.insert("collection".to_string(), Value::text(coll.as_str()));
@@ -1684,17 +1724,29 @@ fn materialize_merge_conflicts(
             );
             fields.insert(
                 "conflicting_paths".to_string(),
-                Value::Array(vec![Value::text("*")]),
+                Value::Array(paths.iter().map(|p| Value::text(p.as_str())).collect()),
             );
+            // Persist the three bodies as Value::Json blobs so
+            // vcs_conflicts_list can hydrate them back into the
+            // Conflict struct for presentation.
+            if let Ok(bytes) = crate::json::to_vec(&b) {
+                fields.insert("base_json".to_string(), Value::Json(bytes));
+            }
+            if let Ok(bytes) = crate::json::to_vec(&o) {
+                fields.insert("ours_json".to_string(), Value::Json(bytes));
+            }
+            if let Ok(bytes) = crate::json::to_vec(&t) {
+                fields.insert("theirs_json".to_string(), Value::Json(bytes));
+            }
             insert_meta_row(store, vc::CONFLICTS, fields)?;
             conflicts.push(Conflict {
                 id: conflict_id,
                 collection: coll.clone(),
                 entity_id: eid.to_string(),
-                base: JsonValue::Null,
-                ours: JsonValue::Null,
-                theirs: JsonValue::Null,
-                conflicting_paths: vec!["*".to_string()],
+                base: b,
+                ours: o,
+                theirs: t,
+                conflicting_paths: paths,
                 merge_state_id: merge_state_id.to_string(),
             });
         }
