@@ -1614,9 +1614,38 @@ fn run_vcs_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
                 })
                 .map_err(|e| e.to_string())
         }
+        "reset" => {
+            let Some(target) = args.first() else {
+                return emit_vcs_result(
+                    &rt,
+                    "reset",
+                    json_mode,
+                    Err("usage: red vcs reset <ref|hash> [--mode soft|mixed|hard]".to_string()),
+                );
+            };
+            let mode_str = flag_string(flags, "mode").unwrap_or_else(|| "mixed".to_string());
+            let mode = match mode_str.as_str() {
+                "soft" => reddb::application::ResetMode::Soft,
+                "hard" => reddb::application::ResetMode::Hard,
+                _ => reddb::application::ResetMode::Mixed,
+            };
+            vcs.reset(reddb::application::ResetInput {
+                connection_id,
+                target: target.to_string(),
+                mode,
+            })
+            .map(|()| {
+                if json_mode {
+                    "{\"ok\":true}".to_string()
+                } else {
+                    format!("reset ({mode_str}) to {target}\n")
+                }
+            })
+            .map_err(|e| e.to_string())
+        }
         _ => Err(format!(
             "Unknown vcs subcommand `{subcommand}`\n\n\
-             Usage: red vcs <commit|branch|branches|tag|tags|checkout|merge|log|status|lca|resolve> [args] [flags]\n"
+             Usage: red vcs <commit|branch|branches|tag|tags|checkout|merge|reset|log|status|lca|resolve> [args] [flags]\n"
         )),
     };
 
@@ -1781,6 +1810,42 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                     .with_short('p')
                     .with_description("Open a local .rdb file in embedded mode"),
             );
+        }
+        Some("vcs") => {
+            flags.extend(vec![
+                cli::types::FlagSchema::new("path")
+                    .with_short('d')
+                    .with_description("Persistent database file path (omit for in-memory)"),
+                cli::types::FlagSchema::new("connection")
+                    .with_short('c')
+                    .with_description("Connection id for workset scoping")
+                    .with_default("1"),
+                cli::types::FlagSchema::new("branch")
+                    .with_description("Branch name (log/checkout/merge)"),
+                cli::types::FlagSchema::new("from")
+                    .with_description("Source ref or commit (branch create / merge)"),
+                cli::types::FlagSchema::new("to")
+                    .with_description("Upper bound for log range"),
+                cli::types::FlagSchema::new("author")
+                    .with_description("Commit author name")
+                    .with_default("reddb"),
+                cli::types::FlagSchema::new("email")
+                    .with_description("Commit author email")
+                    .with_default("reddb@localhost"),
+                cli::types::FlagSchema::new("message")
+                    .with_short('m')
+                    .with_description("Commit message"),
+                cli::types::FlagSchema::new("limit")
+                    .with_description("Max log entries")
+                    .with_default("20"),
+                cli::types::FlagSchema::new("mode")
+                    .with_description("Reset mode: soft | mixed | hard")
+                    .with_default("mixed"),
+                cli::types::FlagSchema::boolean("ff-only")
+                    .with_description("Merge only if fast-forward"),
+                cli::types::FlagSchema::boolean("no-ff")
+                    .with_description("Always create a merge commit"),
+            ]);
         }
         Some("health") => {
             flags.extend(vec![

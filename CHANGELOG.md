@@ -2,6 +2,144 @@
 
 All notable changes to RedDB are documented here. Dates are ISO-8601 (UTC-3).
 
+## 2026-04-23 — Git for Data (VCS layer over MVCC)
+
+First-class version control on top of the MVCC engine. Every
+mutation already runs under MVCC snapshots; the VCS layer pins
+those snapshots, hashes them, and exposes git-style semantics
+(commit / branch / tag / checkout / merge / cherry-pick / revert
+/ reset / log / status / diff / LCA / AS OF time-travel) across
+the CLI, REST, and SQL surfaces.
+
+### New: seven internal `red_*` collections
+
+Created on first boot, seeded with defaults under `red.vcs.*`.
+
+- `red_commits` — commit entities (hash, root_xid, parents,
+  height, author, committer, message, timestamp_ms, signature?)
+- `red_refs` — branches (`refs/heads/*`), tags (`refs/tags/*`),
+  per-connection `HEAD:<conn>` pointers
+- `red_worksets` — per-connection working / staged state
+- `red_closure` — commit ancestry index for fast LCA
+- `red_conflicts` — shadow docs for unresolved merge conflicts
+  (base/ours/theirs JSON + conflicting paths)
+- `red_merge_state` — in-progress merge / cherry-pick / revert
+  metadata
+- `red_remotes` — remote repository configuration (Phase 7
+  placeholder)
+
+### MVCC extension: snapshot pin / unpin
+
+- `SnapshotManager::pin(xid)` / `unpin(xid)` / `is_pinned(xid)`
+  / `pin_count(xid)` — reference-counted so higher-level objects
+  (commits, replica snapshots) coexist with each other.
+- `prune_aborted` now skips pinned xids so historical row
+  versions survive VACUUM as long as a commit references them.
+
+### Runtime: full VCS surface
+
+`impl RuntimeVcsPort for RedDBRuntime` in
+`src/runtime/impl_vcs.rs` with real persistence for:
+
+- `vcs_commit` — allocates a monotonic xid, pins it, writes the
+  canonical `red_commits` row, advances the branch ref, updates
+  the workset. Commit hash is
+  `SHA-256("reddb-commit-v1" || root_xid || sorted_parents
+  || author || message || timestamp_ms)`.
+- `vcs_branch_create` / `_delete` / `_tag_create` / `_list_refs`
+  / `_checkout` — CRUD over `red_refs` with short-name
+  normalisation.
+- `vcs_merge` — fast-forward path + non-FF merge commit +
+  recursive 3-way JSON merge through
+  `application::merge_json`. Non-FF merges populate
+  `red_conflicts` with base/ours/theirs bodies so tooling can
+  render a full 3-way diff without extra fetches.
+- `vcs_cherry_pick` / `vcs_revert` — new commits on HEAD with
+  prefixed messages; refuses root/merge sources. Records a
+  `cp:<hex>` / `rv:<hex>` merge_state for Phase 6.2 data apply.
+- `vcs_reset` — soft / mixed (move ref + workset). Hard is
+  Phase 6.2.
+- `vcs_log` — reverse topological walk from HEAD honouring
+  `--from`, `--to`, `--limit`, `--skip`, `--no-merges`.
+- `vcs_diff` — per-entity visibility diff at two MVCC xids;
+  coalesces Add+Remove pairs sharing entity_id into `Modified`.
+- `vcs_lca` — BFS from both sides, highest-height match.
+- `vcs_resolve_commitish` / `vcs_resolve_as_of` — full hash,
+  full ref, short branch/tag, short hash prefix (≥ 4 chars).
+
+### SQL: `AS OF` time-travel clause
+
+Parser extension in `src/storage/query/parser/table.rs`; new
+`AsOfClause` on `core::TableQuery`. Runtime resolves to an MVCC
+xid and installs a `CurrentSnapshotGuard` for the statement:
+
+```sql
+SELECT * FROM users AS OF COMMIT '<hash>' WHERE age > 21;
+SELECT * FROM users AS OF BRANCH 'staging' LIMIT 5;
+SELECT * FROM orders AS OF TAG 'v1.0' WHERE total > 100;
+SELECT * FROM events AS OF TIMESTAMP 1710000000000;
+SELECT * FROM t AS OF SNAPSHOT 42;
+```
+
+### REST: `/vcs/*` surface
+
+14 endpoints wired into `src/server/routing.rs`:
+`/vcs/commit`, `/vcs/branch`, `/vcs/branches`, `/vcs/branches/<name>`,
+`/vcs/tag`, `/vcs/tags`, `/vcs/checkout`, `/vcs/merge`,
+`/vcs/reset`, `/vcs/log`, `/vcs/diff`, `/vcs/status`, `/vcs/lca`,
+`/vcs/conflicts/<merge_state_id>`.
+
+### CLI: `red vcs <subcommand>`
+
+Top-level `vcs` command with 11 subcommands —
+`commit | branch | branches | tag | tags | checkout | merge |
+reset | log | status | lca | resolve`. Honours `--json`,
+`--path`, `--connection`, `--author`, `--email`, `--limit`,
+`--branch`, `--from`, `-m/--message`, `--ff-only`, `--no-ff`.
+
+### Standalone 3-way JSON merge (`application::merge_json`)
+
+Pure library module with 15 unit tests covering disjoint edits,
+array elementwise merges, length changes, deletion vs
+modification, type mismatches, nested objects. No storage deps —
+feeds cherry-pick / revert / merge conflict materialisation and
+is reusable by other callers.
+
+### Tests
+
+- `tests/e2e_vcs.rs` — 13 cases: commit / branch / tag /
+  checkout / log / tags / resolve_commitish / resolve_as_of /
+  LCA / fast-forward / non-fast-forward / FF-only refusal /
+  reset soft / reset hard stub / diff / status.
+- `tests/e2e_vcs_phase5.rs` — 7 cases covering cherry-pick /
+  revert / conflict count.
+- `tests/e2e_vcs_as_of_parse.rs` — 8 cases covering every
+  AS OF variant and regression guards for `SELECT col AS alias`.
+- `tests/e2e_vcs_as_of_enforce.rs` — 6 cases covering runtime
+  resolver + executor snapshot install.
+- Unit tests: 15 `application::merge_json::tests` + 3 new
+  `snapshot::tests::pin_*`.
+
+Total: 2585 lib tests + 34 VCS e2e = 2619 green.
+
+### Docs
+
+- `docs/vcs/overview.md` — what + why + use cases
+- `docs/vcs/architecture.md` — layers, hashing, merge algorithm
+- `docs/vcs/commands.md` — exhaustive CLI / REST / SQL reference
+- `docs/vcs/walkthrough.md` — tour of every subcommand
+- `docs/guides/git-for-data.md` — end-to-end tutorial with real
+  user data + conflict resolution
+- `examples/vcs_showcase.sh` — runnable demo script
+
+### Not in scope (Phase 6.2+)
+
+- Worksets with real data staging (DML stamping during merge)
+- `vcs_conflict_resolve` applying resolved JSON to user rows
+- `reset --hard` selective MVCC rewind
+- gRPC `VcsService` in `proto/reddb.proto`
+- Remote push / pull (`red vcs push` / `pull`)
+
 ## 2026-04-22 — AI-first SQL surface + hypertable pipeline
 
 Multi-sprint push to make the "AI-first multi-model" pitch

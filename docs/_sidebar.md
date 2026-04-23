@@ -116,6 +116,12 @@
   - [WAL Archiving](/getting-started/configuration.md#backup--recovery-redbackup)
   - [Remote Backends](/deployment/backends.md)
 
+- **Git for Data (VCS)**
+  - [Overview](/vcs/overview.md)
+  - [Architecture](/vcs/architecture.md)
+  - [Command Reference](/vcs/commands.md)
+  - [Walkthrough](/vcs/walkthrough.md)
+
 - **Deployment**
   - [Embedded Mode](/deployment/embedded.md)
   - [Server Mode](/deployment/server.md)
@@ -138,6 +144,7 @@
   - [Graph Analytics](/guides/graph-analytics.md)
   - [Using with AI Agents (MCP)](/guides/mcp-agents.md)
   - [Foreign Data Wrappers](/guides/foreign-data-wrappers.md)
+  - [Git for Data (end-to-end)](/guides/git-for-data.md)
   - [Eventual Consistency](/guides/eventual-consistency.md)
   - [Geographic Operations](/guides/geo-operations.md)
   - [Vector Clustering](/guides/vector-clustering.md)
