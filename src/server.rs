@@ -63,6 +63,7 @@ mod handlers_log;
 mod handlers_ops;
 mod handlers_query;
 mod handlers_replication;
+mod handlers_vcs;
 mod handlers_vector;
 pub mod ingest_pipeline;
 mod patch_support;

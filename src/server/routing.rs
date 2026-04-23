@@ -594,6 +594,18 @@ impl RedDBServer {
             ("POST", "/graph/jobs/complete") => self.handle_analytics_job_complete(body),
             ("POST", "/graph/jobs/stale") => self.handle_analytics_job_stale(body),
             ("POST", "/graph/jobs/fail") => self.handle_analytics_job_fail(body),
+            ("POST", "/vcs/commit") => handlers_vcs::handle_commit(&self.runtime, body),
+            ("POST", "/vcs/branch") => handlers_vcs::handle_branch_create(&self.runtime, body),
+            ("GET", "/vcs/branches") => handlers_vcs::handle_branch_list(&self.runtime),
+            ("POST", "/vcs/tag") => handlers_vcs::handle_tag_create(&self.runtime, body),
+            ("GET", "/vcs/tags") => handlers_vcs::handle_tag_list(&self.runtime),
+            ("POST", "/vcs/checkout") => handlers_vcs::handle_checkout(&self.runtime, body),
+            ("POST", "/vcs/merge") => handlers_vcs::handle_merge(&self.runtime, body),
+            ("POST", "/vcs/reset") => handlers_vcs::handle_reset(&self.runtime, body),
+            ("POST", "/vcs/log") => handlers_vcs::handle_log(&self.runtime, body),
+            ("POST", "/vcs/diff") => handlers_vcs::handle_diff(&self.runtime, body),
+            ("POST", "/vcs/status") => handlers_vcs::handle_status(&self.runtime, body),
+            ("GET", "/vcs/lca") => handlers_vcs::handle_lca(&self.runtime, &query),
             _ => {
                 // Log dynamic routes: /logs/{name}/append, /logs/{name}/query, /logs/{name}/retention
                 if let Some(rest) = path.strip_prefix("/logs/") {
@@ -613,6 +625,18 @@ impl RedDBServer {
                             }
                             _ => json_error(405, "method not allowed for log endpoint"),
                         };
+                    }
+                }
+
+                // VCS dynamic routes: /vcs/branches/{name}, /vcs/conflicts/{merge_state_id}
+                if let Some(name) = path.strip_prefix("/vcs/branches/") {
+                    if method.as_str() == "DELETE" {
+                        return handlers_vcs::handle_branch_delete(&self.runtime, name);
+                    }
+                }
+                if let Some(msid) = path.strip_prefix("/vcs/conflicts/") {
+                    if method.as_str() == "GET" {
+                        return handlers_vcs::handle_conflicts_list(&self.runtime, msid);
                     }
                 }
 
