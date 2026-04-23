@@ -1483,6 +1483,37 @@ impl RedDBRuntime {
                 crate::runtime::config_overlay::apply_config_file(store.as_ref(), &overlay_path);
         }
 
+        // VCS ("Git for Data") — create the `red_*` metadata
+        // collections on first boot. Idempotent: `get_or_create_collection`
+        // is a no-op if the collection already exists.
+        {
+            let store = runtime.inner.db.store();
+            for name in crate::application::vcs_collections::ALL {
+                let _ = store.get_or_create_collection(*name);
+            }
+            // Seed VCS config namespace with sensible defaults on first
+            // boot, matching the pattern used by red.ai / red.storage.
+            store.set_config_tree(
+                crate::application::vcs_collections::CONFIG_NAMESPACE,
+                &crate::json!({
+                    "default_branch": "main",
+                    "author": crate::json!({
+                        "name": "reddb",
+                        "email": "reddb@localhost"
+                    }),
+                    "protected_branches": crate::json!(["main"]),
+                    "closure": crate::json!({
+                        "enabled": true,
+                        "lazy": true
+                    }),
+                    "merge": crate::json!({
+                        "default_strategy": "auto",
+                        "fast_forward": true
+                    })
+                }),
+            );
+        }
+
         // Start background maintenance thread (context index refresh +
         // session purge). Held by a WEAK reference to `RuntimeInner`
         // so dropping the last `RedDBRuntime` handle actually releases

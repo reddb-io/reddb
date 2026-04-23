@@ -763,6 +763,7 @@ mod impl_queue;
 mod impl_search;
 mod impl_timeseries;
 mod impl_tree;
+mod impl_vcs;
 mod index_store;
 mod join_filter;
 pub mod locking;

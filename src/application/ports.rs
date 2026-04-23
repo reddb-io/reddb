@@ -407,6 +407,98 @@ pub trait RuntimeGraphPort {
     ) -> RedDBResult<RuntimeGraphPropertiesResult>;
 }
 
+pub trait RuntimeVcsPort {
+    fn vcs_commit(
+        &self,
+        input: crate::application::vcs::CreateCommitInput,
+    ) -> RedDBResult<crate::application::vcs::Commit>;
+
+    fn vcs_branch_create(
+        &self,
+        input: crate::application::vcs::CreateBranchInput,
+    ) -> RedDBResult<crate::application::vcs::Ref>;
+
+    fn vcs_branch_delete(&self, name: &str) -> RedDBResult<()>;
+
+    fn vcs_tag_create(
+        &self,
+        input: crate::application::vcs::CreateTagInput,
+    ) -> RedDBResult<crate::application::vcs::Ref>;
+
+    fn vcs_list_refs(
+        &self,
+        prefix: Option<&str>,
+    ) -> RedDBResult<Vec<crate::application::vcs::Ref>>;
+
+    fn vcs_checkout(
+        &self,
+        input: crate::application::vcs::CheckoutInput,
+    ) -> RedDBResult<crate::application::vcs::Ref>;
+
+    fn vcs_merge(
+        &self,
+        input: crate::application::vcs::MergeInput,
+    ) -> RedDBResult<crate::application::vcs::MergeOutcome>;
+
+    fn vcs_cherry_pick(
+        &self,
+        connection_id: u64,
+        commit: &str,
+        author: crate::application::vcs::Author,
+    ) -> RedDBResult<crate::application::vcs::MergeOutcome>;
+
+    fn vcs_revert(
+        &self,
+        connection_id: u64,
+        commit: &str,
+        author: crate::application::vcs::Author,
+    ) -> RedDBResult<crate::application::vcs::Commit>;
+
+    fn vcs_reset(&self, input: crate::application::vcs::ResetInput) -> RedDBResult<()>;
+
+    fn vcs_log(
+        &self,
+        input: crate::application::vcs::LogInput,
+    ) -> RedDBResult<Vec<crate::application::vcs::Commit>>;
+
+    fn vcs_diff(
+        &self,
+        input: crate::application::vcs::DiffInput,
+    ) -> RedDBResult<crate::application::vcs::Diff>;
+
+    fn vcs_status(
+        &self,
+        input: crate::application::vcs::StatusInput,
+    ) -> RedDBResult<crate::application::vcs::Status>;
+
+    fn vcs_lca(
+        &self,
+        a: &str,
+        b: &str,
+    ) -> RedDBResult<Option<crate::application::vcs::CommitHash>>;
+
+    fn vcs_conflicts_list(
+        &self,
+        merge_state_id: &str,
+    ) -> RedDBResult<Vec<crate::application::vcs::Conflict>>;
+
+    fn vcs_conflict_resolve(
+        &self,
+        conflict_id: &str,
+        resolved: crate::json::Value,
+    ) -> RedDBResult<()>;
+
+    fn vcs_resolve_as_of(
+        &self,
+        spec: crate::application::vcs::AsOfSpec,
+    ) -> RedDBResult<crate::storage::transaction::snapshot::Xid>;
+
+    fn vcs_resolve_commitish(
+        &self,
+        spec: &str,
+    ) -> RedDBResult<crate::application::vcs::CommitHash>;
+}
+
 #[path = "ports_impls.rs"]
 mod ports_impls;
 pub(crate) use ports_impls::build_row_update_contract_plan;

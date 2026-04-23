@@ -6,6 +6,7 @@ pub(crate) mod entity_payload;
 pub mod graph;
 pub(crate) mod graph_payload;
 pub(crate) mod json_input;
+pub mod merge_json;
 pub mod native;
 pub mod ports;
 pub mod query;
@@ -14,6 +15,9 @@ pub mod schema;
 pub(crate) mod serverless_payload;
 pub mod tree;
 pub(crate) mod ttl_payload;
+pub mod vcs;
+pub mod vcs_collections;
+pub(crate) mod vcs_payload;
 
 pub use admin::{AdminUseCases, ServerlessAnalyticsWarmupTarget, ServerlessWarmupPlan};
 pub use catalog::CatalogUseCases;
@@ -33,7 +37,13 @@ pub use graph::{
 pub use native::{InspectNativeArtifactInput, NativeUseCases, RuntimeReadiness};
 pub use ports::{
     RuntimeAdminPort, RuntimeCatalogPort, RuntimeEntityPort, RuntimeGraphPort, RuntimeNativePort,
-    RuntimeQueryPort, RuntimeSchemaPort, RuntimeTreePort,
+    RuntimeQueryPort, RuntimeSchemaPort, RuntimeTreePort, RuntimeVcsPort,
+};
+pub use vcs::{
+    AsOfSpec, Author, CheckoutInput, CheckoutTarget, Commit, CommitHash, Conflict,
+    CreateBranchInput, CreateCommitInput, CreateTagInput, Diff, DiffChange, DiffEntry, DiffInput,
+    LogInput, LogRange, MergeInput, MergeOpts, MergeOutcome, MergeStrategy, Ref, RefKind, RefName,
+    ResetInput, ResetMode, Status, StatusInput, VcsUseCases,
 };
 pub use query::{
     ExecuteQueryInput, ExplainQueryInput, QueryUseCases, ScanCollectionInput, SearchContextInput,
