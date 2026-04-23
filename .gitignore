@@ -6,4 +6,9 @@ drivers/python/.venv/
 # Runtime WAL — binary, machine-local, should never be versioned.
 wal.log
 node_modules
+# Profiling artifacts (local machine paths, contain dev stack traces)
+flame-*.svg
+perf.data
+perf.data.old
+*.pprof
 
