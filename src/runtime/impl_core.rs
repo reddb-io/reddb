@@ -31,6 +31,13 @@ thread_local! {
     static CURRENT_SNAPSHOT: std::cell::RefCell<Option<SnapshotContext>> =
         const { std::cell::RefCell::new(None) };
 
+    /// Cheap presence flag for `CURRENT_SNAPSHOT`. Scan hot paths
+    /// poll this instead of `borrow()`-ing the RefCell on every
+    /// row — the common case (autocommit / no MVCC session) reads
+    /// one atomic `Cell<bool>` and short-circuits, saving ~10ns × N
+    /// rows on aggregate_group / select_range scans.
+    static HAS_SNAPSHOT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
     /// Session-scoped tenant id for the current connection (Phase 2.5.3
     /// multi-tenancy). Populated by `SET TENANT 'id'` or by transport
     /// middleware after resolving tenant from auth claims. Read by the
@@ -303,10 +310,12 @@ pub(crate) fn current_role_projected() -> Option<String> {
 /// still clean up.
 pub fn set_current_snapshot(ctx: SnapshotContext) {
     CURRENT_SNAPSHOT.with(|cell| *cell.borrow_mut() = Some(ctx));
+    HAS_SNAPSHOT.with(|c| c.set(true));
 }
 
 pub fn clear_current_snapshot() {
     CURRENT_SNAPSHOT.with(|cell| *cell.borrow_mut() = None);
+    HAS_SNAPSHOT.with(|c| c.set(false));
 }
 
 /// Drop-guard that restores the previous snapshot on scope exit. Safe to
@@ -328,7 +337,10 @@ impl CurrentSnapshotGuard {
 
 impl Drop for CurrentSnapshotGuard {
     fn drop(&mut self) {
-        CURRENT_SNAPSHOT.with(|cell| *cell.borrow_mut() = self.previous.take());
+        let prev = self.previous.take();
+        let has = prev.is_some();
+        CURRENT_SNAPSHOT.with(|cell| *cell.borrow_mut() = prev);
+        HAS_SNAPSHOT.with(|c| c.set(has));
     }
 }
 
@@ -346,6 +358,14 @@ impl Drop for CurrentSnapshotGuard {
 pub fn entity_visible_under_current_snapshot(
     entity: &crate::storage::unified::entity::UnifiedEntity,
 ) -> bool {
+    // Fast path — one `Cell<bool>` read, no RefCell borrow. Autocommit
+    // reads (no active MVCC transaction) see `HAS_SNAPSHOT == false`
+    // and return `true` without ever touching the snapshot context.
+    // This runs on every row of every scan; the slow path only fires
+    // inside an explicit transaction.
+    if !HAS_SNAPSHOT.with(|c| c.get()) {
+        return true;
+    }
     CURRENT_SNAPSHOT.with(|cell| {
         let guard = cell.borrow();
         let Some(ctx) = guard.as_ref() else {
@@ -361,6 +381,9 @@ pub fn entity_visible_under_current_snapshot(
 /// `entity_visible_under_current_snapshot`.
 #[inline]
 pub(crate) fn xids_visible_under_current_snapshot(xmin: u64, xmax: u64) -> bool {
+    if !HAS_SNAPSHOT.with(|c| c.get()) {
+        return true;
+    }
     CURRENT_SNAPSHOT.with(|cell| {
         let guard = cell.borrow();
         let Some(ctx) = guard.as_ref() else {
