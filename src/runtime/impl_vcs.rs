@@ -18,8 +18,9 @@ use sha2::{Digest, Sha256};
 
 use crate::application::vcs::{
     AsOfSpec, Author, CheckoutInput, CheckoutTarget, Commit, CommitHash, Conflict,
-    CreateBranchInput, CreateCommitInput, CreateTagInput, Diff, DiffInput, LogInput, LogRange,
-    MergeInput, MergeOutcome, Ref, RefKind, RefName, ResetInput, Status, StatusInput,
+    CreateBranchInput, CreateCommitInput, CreateTagInput, Diff, DiffChange, DiffEntry, DiffInput,
+    LogInput, LogRange, MergeInput, MergeOutcome, MergeStrategy, Ref, RefKind, RefName, ResetInput,
+    ResetMode, Status, StatusInput,
 };
 use crate::application::vcs_collections as vc;
 use crate::json::Value as JsonValue;
@@ -772,8 +773,168 @@ impl RedDBRuntime {
     }
 
     pub fn vcs_merge(&self, input: MergeInput) -> RedDBResult<MergeOutcome> {
-        let _ = input;
-        Err(unimplemented("merge"))
+        let store_arc = self.inner.db.store();
+        let store: &UnifiedStore = &store_arc;
+
+        // Resolve source commit (the one being merged in).
+        let from_hash = RedDBRuntime::vcs_resolve_commitish(self, &input.from)?;
+        let from_commit = load_commit(store, &from_hash).ok_or_else(|| {
+            RedDBError::NotFound(format!("source commit `{from_hash}` not found"))
+        })?;
+
+        // Resolve current HEAD for the connection.
+        let workset = load_workset(store, input.connection_id);
+        let (head_branch, head_hash) = match workset {
+            Some((branch, Some(head))) => (branch, head),
+            Some((branch, None)) => {
+                let head = load_ref(store, &branch).map(|r| r.target).unwrap_or_default();
+                (branch, head)
+            }
+            None => {
+                let head = load_ref(store, vc::DEFAULT_BRANCH_REF)
+                    .map(|r| r.target)
+                    .unwrap_or_default();
+                (vc::DEFAULT_BRANCH_REF.to_string(), head)
+            }
+        };
+        if head_hash.is_empty() {
+            return Err(RedDBError::InvalidConfig(
+                "cannot merge: HEAD has no commits".to_string(),
+            ));
+        }
+
+        // Fast-forward check: is HEAD an ancestor of `from`?
+        let from_ancestors = ancestor_set(store, &from_hash, 100_000);
+        let can_fast_forward = from_ancestors.contains(&head_hash);
+
+        match input.opts.strategy {
+            MergeStrategy::FastForwardOnly if !can_fast_forward => {
+                return Err(RedDBError::InvalidConfig(
+                    "not a fast-forward — use --strategy auto or no-ff".to_string(),
+                ));
+            }
+            _ => {}
+        }
+
+        if can_fast_forward && input.opts.strategy != MergeStrategy::NoFastForward {
+            if head_branch.is_empty() {
+                return Err(RedDBError::InvalidConfig(
+                    "cannot fast-forward a detached HEAD".to_string(),
+                ));
+            }
+            save_ref(
+                store,
+                &Ref {
+                    name: head_branch.clone(),
+                    kind: RefKind::Branch,
+                    target: from_hash.clone(),
+                    protected: false,
+                },
+            )?;
+            upsert_workset(
+                store,
+                input.connection_id,
+                &head_branch,
+                Some(&from_hash),
+                from_commit.root_xid,
+            )?;
+            return Ok(MergeOutcome {
+                merge_commit: Some(from_commit),
+                fast_forward: true,
+                conflicts: Vec::new(),
+                merge_state_id: None,
+            });
+        }
+
+        // Non-fast-forward: compute LCA, create a merge commit.
+        // Data-level 3-way merge (with conflict materialisation into
+        // red_conflicts) is deferred to Phase 4 — for now we produce
+        // the merge commit only when both sides have no content
+        // overlap to resolve, i.e. when LCA == head_hash (reverse FF)
+        // we already handled above. Otherwise surface a merge_state
+        // placeholder so callers know data reconciliation is required.
+        let lca = RedDBRuntime::vcs_lca(self, &head_hash, &from_hash)?;
+
+        let message = input.opts.message.unwrap_or_else(|| {
+            format!("Merge {} into {}", input.from, head_branch)
+        });
+        let author = input.author.clone();
+        let timestamp_ms = now_ms();
+        let parents = vec![head_hash.clone(), from_hash.clone()];
+        let parent_height = parents
+            .iter()
+            .filter_map(|p| load_commit(store, p).map(|c| c.height))
+            .max()
+            .unwrap_or(0);
+        let height = parent_height + 1;
+        let root_xid = self.inner.snapshot_manager.peek_next_xid();
+
+        let hash = compute_commit_hash(
+            root_xid,
+            &parents,
+            &author,
+            &message,
+            timestamp_ms,
+        );
+
+        let merge_commit = Commit {
+            hash: hash.clone(),
+            root_xid,
+            parents,
+            height,
+            author: author.clone(),
+            committer: author,
+            message,
+            timestamp_ms,
+            signature: None,
+        };
+
+        // Create a merge_state row so Phase 4 can pick up where we
+        // stopped and actually reconcile data. We still open the
+        // commit / ref so log() shows the history; worksets gets the
+        // merge_state_id so status() surfaces the in-progress state.
+        save_commit(store, &merge_commit)?;
+        if root_xid != XID_NONE {
+            self.inner.snapshot_manager.pin(root_xid);
+        }
+        if !head_branch.is_empty() {
+            save_ref(
+                store,
+                &Ref {
+                    name: head_branch.clone(),
+                    kind: RefKind::Branch,
+                    target: hash.clone(),
+                    protected: false,
+                },
+            )?;
+        }
+        upsert_workset(
+            store,
+            input.connection_id,
+            &head_branch,
+            Some(&hash),
+            root_xid,
+        )?;
+
+        let merge_state_id = format!("ms:{}", &hash[..16]);
+        let mut ms_fields: HashMap<String, Value> = HashMap::new();
+        ms_fields.insert("_id".to_string(), Value::text(merge_state_id.as_str()));
+        ms_fields.insert("kind".to_string(), Value::text("merge"));
+        ms_fields.insert("branch".to_string(), Value::text(head_branch.as_str()));
+        if let Some(base_hash) = &lca {
+            ms_fields.insert("base".to_string(), Value::text(base_hash.as_str()));
+        }
+        ms_fields.insert("ours".to_string(), Value::text(head_hash.as_str()));
+        ms_fields.insert("theirs".to_string(), Value::text(from_hash.as_str()));
+        ms_fields.insert("conflicts_count".to_string(), Value::UnsignedInteger(0));
+        insert_meta_row(store, vc::MERGE_STATE, ms_fields)?;
+
+        Ok(MergeOutcome {
+            merge_commit: Some(merge_commit),
+            fast_forward: false,
+            conflicts: Vec::new(),
+            merge_state_id: Some(merge_state_id),
+        })
     }
 
     pub fn vcs_cherry_pick(
@@ -797,8 +958,47 @@ impl RedDBRuntime {
     }
 
     pub fn vcs_reset(&self, input: ResetInput) -> RedDBResult<()> {
-        let _ = input;
-        Err(unimplemented("reset"))
+        let store_arc = self.inner.db.store();
+        let store: &UnifiedStore = &store_arc;
+        let target_hash = RedDBRuntime::vcs_resolve_commitish(self, &input.target)?;
+        let target_commit = load_commit(store, &target_hash).ok_or_else(|| {
+            RedDBError::NotFound(format!("target commit `{target_hash}` not found"))
+        })?;
+
+        // Find the current branch for this connection.
+        let workset = load_workset(store, input.connection_id);
+        let branch = workset
+            .as_ref()
+            .map(|(b, _)| b.clone())
+            .unwrap_or_else(|| vc::DEFAULT_BRANCH_REF.to_string());
+
+        // Soft and Mixed both move the branch ref + workset base.
+        // Hard would additionally revert entity data — deferred to
+        // Phase 4 because it requires selective MVCC rewind.
+        match input.mode {
+            ResetMode::Soft | ResetMode::Mixed => {
+                if !branch.is_empty() {
+                    save_ref(
+                        store,
+                        &Ref {
+                            name: branch.clone(),
+                            kind: RefKind::Branch,
+                            target: target_hash.clone(),
+                            protected: false,
+                        },
+                    )?;
+                }
+                upsert_workset(
+                    store,
+                    input.connection_id,
+                    &branch,
+                    Some(&target_hash),
+                    target_commit.root_xid,
+                )?;
+                Ok(())
+            }
+            ResetMode::Hard => Err(unimplemented("reset --hard (Phase 4)")),
+        }
     }
 
     pub fn vcs_log(&self, input: LogInput) -> RedDBResult<Vec<Commit>> {
@@ -823,8 +1023,95 @@ impl RedDBRuntime {
     }
 
     pub fn vcs_diff(&self, input: DiffInput) -> RedDBResult<Diff> {
-        let _ = input;
-        Err(unimplemented("diff"))
+        let store_arc = self.inner.db.store();
+        let store: &UnifiedStore = &store_arc;
+        let from_hash = RedDBRuntime::vcs_resolve_commitish(self, &input.from)?;
+        let to_hash = RedDBRuntime::vcs_resolve_commitish(self, &input.to)?;
+        let from_xid = RedDBRuntime::vcs_resolve_as_of(
+            self,
+            AsOfSpec::Commit(from_hash.clone()),
+        )?;
+        let to_xid = RedDBRuntime::vcs_resolve_as_of(
+            self,
+            AsOfSpec::Commit(to_hash.clone()),
+        )?;
+
+        let sm = &self.inner.snapshot_manager;
+        let from_snap = sm.snapshot(from_xid);
+        let to_snap = sm.snapshot(to_xid);
+
+        // Iterate every *user* collection (skip internal red_*).
+        let mut entries: Vec<DiffEntry> = Vec::new();
+        let mut added = 0usize;
+        let mut removed = 0usize;
+        let mut modified = 0usize;
+        let collections = store.list_collections();
+        for coll in collections {
+            if coll.starts_with("red_") {
+                continue;
+            }
+            if let Some(filter) = &input.collection {
+                if filter != &coll {
+                    continue;
+                }
+            }
+            let Some(manager) = store.get_collection(&coll) else {
+                continue;
+            };
+            let entities = manager.query_all(|_| true);
+            // Group by entity id so we can compare before/after state.
+            for entity in &entities {
+                let xmin = entity.xmin;
+                let xmax = entity.xmax;
+                let in_from = from_snap.sees(xmin, xmax)
+                    && !sm.is_aborted(xmin);
+                let in_to = to_snap.sees(xmin, xmax)
+                    && !sm.is_aborted(xmin);
+                if in_from == in_to {
+                    continue;
+                }
+                let entity_id = entity.id.raw().to_string();
+                let payload = if input.summary_only {
+                    JsonValue::Null
+                } else {
+                    JsonValue::String(format!(
+                        "entity#{} xmin={} xmax={}",
+                        entity_id, xmin, xmax
+                    ))
+                };
+                let change = match (in_from, in_to) {
+                    (false, true) => {
+                        added += 1;
+                        DiffChange::Added { after: payload }
+                    }
+                    (true, false) => {
+                        removed += 1;
+                        DiffChange::Removed { before: payload }
+                    }
+                    _ => unreachable!(),
+                };
+                entries.push(DiffEntry {
+                    collection: coll.clone(),
+                    entity_id,
+                    change,
+                });
+            }
+        }
+
+        // Modified rows in an append-only MVCC are expressed as a pair
+        // (remove old version + add new version sharing entity_id);
+        // collapse them into DiffChange::Modified so the wire format
+        // matches user intuition.
+        entries = coalesce_modifications(entries, &mut added, &mut removed, &mut modified);
+
+        Ok(Diff {
+            from: from_hash,
+            to: to_hash,
+            entries,
+            added,
+            removed,
+            modified,
+        })
     }
 
     pub fn vcs_status(&self, input: StatusInput) -> RedDBResult<Status> {
@@ -929,10 +1216,38 @@ impl RedDBRuntime {
     pub fn vcs_conflict_resolve(
         &self,
         conflict_id: &str,
-        resolved: JsonValue,
+        _resolved: JsonValue,
     ) -> RedDBResult<()> {
-        let _ = (conflict_id, resolved);
-        Err(unimplemented("conflict_resolve"))
+        let store_arc = self.inner.db.store();
+        let store: &UnifiedStore = &store_arc;
+        let Some(manager) = store.get_collection(vc::CONFLICTS) else {
+            return Err(RedDBError::NotFound(format!(
+                "conflict `{conflict_id}` not found"
+            )));
+        };
+        let cid = conflict_id.to_string();
+        let mut deleted = 0usize;
+        let matches = manager.query_all(|entity| {
+            entity
+                .data
+                .as_row()
+                .is_some_and(|row| row_text(row, "_id").as_deref() == Some(&cid))
+        });
+        for entity in matches {
+            store
+                .delete(vc::CONFLICTS, entity.id)
+                .map_err(|e| RedDBError::Internal(e.to_string()))?;
+            deleted += 1;
+        }
+        // NOTE: Phase 4 will also apply `_resolved` to the user
+        // collection under the current working set before deleting
+        // the conflict row. Here we only remove the marker.
+        if deleted == 0 {
+            return Err(RedDBError::NotFound(format!(
+                "conflict `{conflict_id}` not found"
+            )));
+        }
+        Ok(())
     }
 
     pub fn vcs_resolve_as_of(&self, spec: AsOfSpec) -> RedDBResult<Xid> {
@@ -1034,6 +1349,50 @@ impl RedDBRuntime {
             "commitish `{spec}` did not resolve to any ref or commit"
         )))
     }
+}
+
+// Collapse Add+Remove pairs sharing the same (collection, entity_id)
+// into a single `Modified` entry. Called by `vcs_diff` after the
+// naive pass so the caller sees one row per change, not two.
+fn coalesce_modifications(
+    entries: Vec<DiffEntry>,
+    added: &mut usize,
+    removed: &mut usize,
+    modified: &mut usize,
+) -> Vec<DiffEntry> {
+    let mut by_key: HashMap<(String, String), Vec<DiffEntry>> = HashMap::new();
+    for e in entries {
+        by_key
+            .entry((e.collection.clone(), e.entity_id.clone()))
+            .or_default()
+            .push(e);
+    }
+    let mut out: Vec<DiffEntry> = Vec::new();
+    for ((coll, eid), group) in by_key {
+        if group.len() >= 2 {
+            let mut before = JsonValue::Null;
+            let mut after = JsonValue::Null;
+            for item in group {
+                match item.change {
+                    DiffChange::Removed { before: b } => before = b,
+                    DiffChange::Added { after: a } => after = a,
+                    DiffChange::Modified { .. } => {}
+                }
+            }
+            *added = added.saturating_sub(1);
+            *removed = removed.saturating_sub(1);
+            *modified += 1;
+            out.push(DiffEntry {
+                collection: coll,
+                entity_id: eid,
+                change: DiffChange::Modified { before, after },
+            });
+        } else {
+            out.extend(group);
+        }
+    }
+    out.sort_by(|a, b| a.collection.cmp(&b.collection).then(a.entity_id.cmp(&b.entity_id)));
+    out
 }
 
 // Unused-import guards for stubs that reference types via `_`.
