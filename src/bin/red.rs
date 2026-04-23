@@ -1264,6 +1264,10 @@ fn main() {
             }
         }
 
+        "vcs" => {
+            run_vcs_command(&result.flags, &remaining);
+        }
+
         _ => {
             if wants_json(&result.flags) {
                 json_error("unknown", &format!("Unknown command: {}", cmd));
@@ -1271,6 +1275,374 @@ fn main() {
             eprintln!("Unknown command: {}", cmd);
             eprintln!();
             print!("{}", cli::commands::main_help_text());
+            std::process::exit(1);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// VCS command implementation
+// ---------------------------------------------------------------------------
+
+fn run_vcs_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
+    let json_mode = wants_json(flags);
+    let subcommand = remaining.first().map(|s| s.as_str()).unwrap_or("help");
+    let args: Vec<&str> = remaining.iter().skip(1).map(|s| s.as_str()).collect();
+
+    let rt = match open_local_runtime(flags) {
+        Ok(rt) => rt,
+        Err(err) => {
+            if json_mode {
+                json_error("vcs", &err);
+            }
+            eprintln!("vcs error: {err}");
+            std::process::exit(1);
+        }
+    };
+
+    let connection_id = flag_string(flags, "connection")
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(1);
+    let author = reddb::application::Author {
+        name: flag_string(flags, "author").unwrap_or_else(|| "reddb".to_string()),
+        email: flag_string(flags, "email").unwrap_or_else(|| "reddb@localhost".to_string()),
+    };
+
+    let vcs = reddb::application::VcsUseCases::new(&rt);
+
+    let outcome: Result<String, String> = match subcommand {
+        "commit" => {
+            let message = flag_string(flags, "message")
+                .or_else(|| args.first().map(|s| s.to_string()))
+                .unwrap_or_else(|| "no message".to_string());
+            vcs.commit(reddb::application::CreateCommitInput {
+                connection_id,
+                message,
+                author,
+                committer: None,
+                amend: false,
+                allow_empty: true,
+            })
+            .map(|c| {
+                if json_mode {
+                    format!(
+                        "{{\"hash\":\"{}\",\"height\":{},\"parents\":{}}}",
+                        json_escape(&c.hash),
+                        c.height,
+                        format_args!("[{}]", c.parents.iter().map(|p| format!("\"{}\"", json_escape(p))).collect::<Vec<_>>().join(","))
+                    )
+                } else {
+                    format!("commit {}\nHeight {}\nMessage: {}\n", c.hash, c.height, c.message)
+                }
+            })
+            .map_err(|e| e.to_string())
+        }
+        "branch" => match args.first() {
+            None => Err("usage: red vcs branch <name> [--from ref]".to_string()),
+            Some(name) => vcs
+                .branch_create(reddb::application::CreateBranchInput {
+                    name: name.to_string(),
+                    from: flag_string(flags, "from"),
+                    connection_id,
+                })
+            .map(|r| {
+                if json_mode {
+                    format!(
+                        "{{\"name\":\"{}\",\"target\":\"{}\"}}",
+                        json_escape(&r.name),
+                        json_escape(&r.target)
+                    )
+                } else {
+                    format!("branch {} -> {}\n", r.name, r.target)
+                }
+            })
+            .map_err(|e| e.to_string()),
+        },
+        "branches" => {
+            vcs.branch_list()
+                .map(|refs| {
+                    if json_mode {
+                        let items: Vec<String> = refs
+                            .iter()
+                            .map(|r| format!(
+                                "{{\"name\":\"{}\",\"target\":\"{}\"}}",
+                                json_escape(&r.name),
+                                json_escape(&r.target)
+                            ))
+                            .collect();
+                        format!("[{}]", items.join(","))
+                    } else {
+                        let mut out = String::new();
+                        for r in refs {
+                            out.push_str(&format!("{}\t{}\n", r.name, r.target));
+                        }
+                        out
+                    }
+                })
+                .map_err(|e| e.to_string())
+        }
+        "tag" => match args.first() {
+            None => Err("usage: red vcs tag <name> [target]".to_string()),
+            Some(name) => {
+                let target = args
+                    .get(1)
+                    .map(|s| s.to_string())
+                    .or_else(|| flag_string(flags, "from"))
+                    .unwrap_or_else(|| "main".to_string());
+                vcs.tag(reddb::application::CreateTagInput {
+                    name: name.to_string(),
+                    target,
+                    annotation: None,
+                })
+            .map(|r| {
+                if json_mode {
+                    format!(
+                        "{{\"name\":\"{}\",\"target\":\"{}\"}}",
+                        json_escape(&r.name),
+                        json_escape(&r.target)
+                    )
+                } else {
+                    format!("tag {} -> {}\n", r.name, r.target)
+                }
+            })
+            .map_err(|e| e.to_string())
+            }
+        },
+        "tags" => {
+            vcs.tag_list()
+                .map(|refs| {
+                    if json_mode {
+                        let items: Vec<String> = refs
+                            .iter()
+                            .map(|r| format!(
+                                "{{\"name\":\"{}\",\"target\":\"{}\"}}",
+                                json_escape(&r.name),
+                                json_escape(&r.target)
+                            ))
+                            .collect();
+                        format!("[{}]", items.join(","))
+                    } else {
+                        let mut out = String::new();
+                        for r in refs {
+                            out.push_str(&format!("{}\t{}\n", r.name, r.target));
+                        }
+                        out
+                    }
+                })
+                .map_err(|e| e.to_string())
+        }
+        "checkout" => match args.first() {
+            None => Err("usage: red vcs checkout <branch|tag|commit>".to_string()),
+            Some(target) => {
+                let target = target.to_string();
+                let kind = if target.len() == 64
+                    && target.chars().all(|c| c.is_ascii_hexdigit())
+                {
+                    reddb::application::CheckoutTarget::Commit(target.clone())
+                } else if target.starts_with("refs/tags/") {
+                    reddb::application::CheckoutTarget::Tag(target.clone())
+                } else {
+                    reddb::application::CheckoutTarget::Branch(target.clone())
+                };
+                vcs.checkout(reddb::application::CheckoutInput {
+                    connection_id,
+                    target: kind,
+                    force: false,
+                })
+            .map(|r| {
+                if json_mode {
+                    format!("{{\"ref\":\"{}\"}}", json_escape(&r.name))
+                } else {
+                    format!("switched to {}\n", r.name)
+                }
+            })
+            .map_err(|e| e.to_string())
+            }
+        },
+        "merge" => {
+            let from_opt = args
+                .first()
+                .map(|s| s.to_string())
+                .or_else(|| flag_string(flags, "from"));
+            let Some(from) = from_opt else {
+                return emit_vcs_result(
+                    &rt,
+                    "merge",
+                    json_mode,
+                    Err("usage: red vcs merge <branch>".to_string()),
+                );
+            };
+            let strategy = if flag_bool(flags, "ff-only") {
+                reddb::application::MergeStrategy::FastForwardOnly
+            } else if flag_bool(flags, "no-ff") {
+                reddb::application::MergeStrategy::NoFastForward
+            } else {
+                reddb::application::MergeStrategy::Auto
+            };
+            vcs.merge(reddb::application::MergeInput {
+                connection_id,
+                from,
+                opts: reddb::application::MergeOpts {
+                    strategy,
+                    message: flag_string(flags, "message"),
+                    abort_on_conflict: false,
+                },
+                author,
+            })
+            .map(|outcome| {
+                if json_mode {
+                    format!(
+                        "{{\"fast_forward\":{},\"conflicts\":{},\"commit\":{}}}",
+                        outcome.fast_forward,
+                        outcome.conflicts.len(),
+                        outcome
+                            .merge_commit
+                            .as_ref()
+                            .map(|c| format!("\"{}\"", json_escape(&c.hash)))
+                            .unwrap_or_else(|| "null".to_string())
+                    )
+                } else if outcome.fast_forward {
+                    "fast-forward\n".to_string()
+                } else {
+                    format!(
+                        "merged (non-ff)\ncommit {}\nmerge_state {}\n",
+                        outcome.merge_commit.as_ref().map(|c| c.hash.as_str()).unwrap_or("?"),
+                        outcome.merge_state_id.as_deref().unwrap_or("?")
+                    )
+                }
+            })
+            .map_err(|e| e.to_string())
+        }
+        "log" => {
+            let limit = flag_string(flags, "limit")
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(20);
+            vcs.log(reddb::application::LogInput {
+                connection_id,
+                range: reddb::application::LogRange {
+                    to: flag_string(flags, "to").or_else(|| flag_string(flags, "branch")),
+                    from: flag_string(flags, "from"),
+                    limit: Some(limit),
+                    skip: None,
+                    no_merges: false,
+                },
+            })
+            .map(|commits| {
+                if json_mode {
+                    let items: Vec<String> = commits
+                        .iter()
+                        .map(|c| format!(
+                            "{{\"hash\":\"{}\",\"height\":{},\"message\":\"{}\",\"author\":\"{}\"}}",
+                            json_escape(&c.hash),
+                            c.height,
+                            json_escape(&c.message),
+                            json_escape(&c.author.name)
+                        ))
+                        .collect();
+                    format!("[{}]", items.join(","))
+                } else {
+                    let mut out = String::new();
+                    for c in commits {
+                        out.push_str(&format!(
+                            "commit {}\nAuthor: {} <{}>\n\n    {}\n\n",
+                            c.hash, c.author.name, c.author.email, c.message
+                        ));
+                    }
+                    out
+                }
+            })
+            .map_err(|e| e.to_string())
+        }
+        "status" => {
+            vcs.status(reddb::application::StatusInput { connection_id })
+                .map(|s| {
+                    if json_mode {
+                        format!(
+                            "{{\"head_ref\":{},\"head_commit\":{},\"detached\":{}}}",
+                            s.head_ref.as_deref().map(|r| format!("\"{}\"", json_escape(r))).unwrap_or_else(|| "null".to_string()),
+                            s.head_commit.as_deref().map(|h| format!("\"{}\"", json_escape(h))).unwrap_or_else(|| "null".to_string()),
+                            s.detached
+                        )
+                    } else {
+                        format!(
+                            "On branch {}\nHead commit {}\n",
+                            s.head_ref.as_deref().unwrap_or("(detached)"),
+                            s.head_commit.as_deref().unwrap_or("(none)")
+                        )
+                    }
+                })
+                .map_err(|e| e.to_string())
+        }
+        "lca" => {
+            let (Some(a), Some(b)) = (args.first(), args.get(1)) else {
+                return emit_vcs_result(
+                    &rt,
+                    "lca",
+                    json_mode,
+                    Err("usage: red vcs lca <a> <b>".to_string()),
+                );
+            };
+            vcs.lca(a, b)
+                .map(|hash| {
+                    if json_mode {
+                        format!(
+                            "{{\"lca\":{}}}",
+                            hash.as_ref().map(|h| format!("\"{}\"", json_escape(h))).unwrap_or_else(|| "null".to_string())
+                        )
+                    } else {
+                        hash.map(|h| format!("{h}\n")).unwrap_or_else(|| "(no common ancestor)\n".to_string())
+                    }
+                })
+                .map_err(|e| e.to_string())
+        }
+        "resolve" => {
+            let Some(spec) = args.first() else {
+                return emit_vcs_result(
+                    &rt,
+                    "resolve",
+                    json_mode,
+                    Err("usage: red vcs resolve <ref|hash|prefix>".to_string()),
+                );
+            };
+            vcs.resolve_commitish(spec)
+                .map(|hash| {
+                    if json_mode {
+                        format!("{{\"hash\":\"{}\"}}", json_escape(&hash))
+                    } else {
+                        format!("{hash}\n")
+                    }
+                })
+                .map_err(|e| e.to_string())
+        }
+        _ => Err(format!(
+            "Unknown vcs subcommand `{subcommand}`\n\n\
+             Usage: red vcs <commit|branch|branches|tag|tags|checkout|merge|log|status|lca|resolve> [args] [flags]\n"
+        )),
+    };
+
+    emit_vcs_result(&rt, subcommand, json_mode, outcome);
+}
+
+fn emit_vcs_result(
+    rt: &reddb::RedDBRuntime,
+    subcommand: &str,
+    json_mode: bool,
+    outcome: Result<String, String>,
+) {
+    checkpoint_local_runtime(rt);
+    match outcome {
+        Ok(text) => {
+            if json_mode {
+                json_ok(&format!("vcs.{subcommand}"), &text);
+            } else {
+                print!("{text}");
+            }
+        }
+        Err(err) => {
+            if json_mode {
+                json_error(&format!("vcs.{subcommand}"), &err);
+            }
+            eprintln!("vcs {subcommand} error: {err}");
             std::process::exit(1);
         }
     }

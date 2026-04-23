@@ -176,6 +176,12 @@ pub fn all_commands() -> Vec<CommandDef> {
       usage: "red version",
       flags: vec![],
     },
+    CommandDef {
+      name: "vcs",
+      summary: "Version-control operations (Git for Data)",
+      usage: "red vcs <commit|branch|branches|tag|tags|checkout|merge|log|status|lca|resolve> [args] [flags]",
+      flags: vcs_flags(),
+    },
   ]
 }
 
@@ -364,6 +370,38 @@ fn replica_flags() -> Vec<FlagSchema> {
         FlagSchema::new("vault")
             .with_description("Enable encrypted auth vault (reserved pages in main .rdb file)")
             .with_default("false"),
+    ]
+}
+
+fn vcs_flags() -> Vec<FlagSchema> {
+    vec![
+        FlagSchema::new("path")
+            .with_short('d')
+            .with_description("Persistent database file path (omit for in-memory)"),
+        FlagSchema::new("connection")
+            .with_short('c')
+            .with_description("Connection id for workset scoping")
+            .with_default("1"),
+        FlagSchema::new("branch")
+            .with_description("Branch name (for log/checkout/merge)"),
+        FlagSchema::new("from")
+            .with_description("Source ref or commit (branch create / merge)"),
+        FlagSchema::new("to")
+            .with_description("Upper bound for log range"),
+        FlagSchema::new("author")
+            .with_description("Commit author name")
+            .with_default("reddb"),
+        FlagSchema::new("email")
+            .with_description("Commit author email")
+            .with_default("reddb@localhost"),
+        FlagSchema::new("message")
+            .with_short('m')
+            .with_description("Commit message"),
+        FlagSchema::new("limit")
+            .with_description("Max log entries")
+            .with_default("20"),
+        FlagSchema::boolean("ff-only").with_description("Merge only if fast-forward"),
+        FlagSchema::boolean("no-ff").with_description("Always create a merge commit"),
     ]
 }
 
