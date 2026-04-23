@@ -45,6 +45,19 @@ pub(super) fn scan_runtime_table_source_records(
     db: &RedDB,
     table: &str,
 ) -> RedDBResult<Vec<UnifiedRecord>> {
+    scan_runtime_table_source_records_limited(db, table, None)
+}
+
+/// Like `scan_runtime_table_source_records` but stops after `limit`
+/// visible rows when one is supplied. Pushes LIMIT down so that
+/// `SELECT * FROM t LIMIT N` does not materialise the full table
+/// before truncating — the hot case for dashboards and `\d`-style
+/// exploration queries.
+pub(super) fn scan_runtime_table_source_records_limited(
+    db: &RedDB,
+    table: &str,
+    limit: Option<usize>,
+) -> RedDBResult<Vec<UnifiedRecord>> {
     use crate::runtime::impl_core::{
         capture_current_snapshot, entity_visible_under_current_snapshot,
         entity_visible_with_context,
@@ -55,12 +68,17 @@ pub(super) fn scan_runtime_table_source_records(
         // the snapshot so worker threads see the same MVCC view instead
         // of defaulting to "no snapshot" (every row visible).
         let snap_ctx = capture_current_snapshot();
-        return Ok(db
+        let records: Vec<UnifiedRecord> = db
             .store()
             .query_all(move |e| entity_visible_with_context(snap_ctx.as_ref(), e))
             .into_iter()
             .filter_map(|(_, entity)| runtime_any_record_from_entity(entity))
-            .collect());
+            .collect();
+        let records = match limit {
+            Some(n) if records.len() > n => records.into_iter().take(n).collect(),
+            _ => records,
+        };
+        return Ok(records);
     }
 
     let manager = db
@@ -71,9 +89,13 @@ pub(super) fn scan_runtime_table_source_records(
     // A5 — parallel scan: for large unfiltered tables, collect entities once
     // then convert to records in parallel using the thread-pool coordinator.
     // The threshold guards against spawn overhead dominating on small tables.
+    // When a LIMIT is supplied and it's below the parallel threshold, prefer
+    // the sequential path so we can stop scanning as soon as we have enough.
     use crate::storage::query::executors::parallel_scan::MIN_PARALLEL_ROWS;
     let entity_count = manager.count();
-    if entity_count >= MIN_PARALLEL_ROWS {
+    let sequential_cap = limit.unwrap_or(usize::MAX);
+    let go_parallel = entity_count >= MIN_PARALLEL_ROWS && sequential_cap >= MIN_PARALLEL_ROWS;
+    if go_parallel {
         let mut entities: Vec<crate::storage::unified::entity::UnifiedEntity> =
             Vec::with_capacity(entity_count);
         manager.for_each_entity(|e| {
@@ -82,7 +104,7 @@ pub(super) fn scan_runtime_table_source_records(
             }
             true
         });
-        let records = crate::storage::query::executors::parallel_scan::parallel_scan_default(
+        let mut records = crate::storage::query::executors::parallel_scan::parallel_scan_default(
             &entities,
             |chunk| {
                 chunk
@@ -91,19 +113,32 @@ pub(super) fn scan_runtime_table_source_records(
                     .collect()
             },
         );
+        if let Some(n) = limit {
+            records.truncate(n);
+        }
         return Ok(records);
     }
 
-    // Sequential path for smaller tables — avoids thread overhead.
-    let mut records = Vec::new();
+    // Sequential path — short-circuits at `limit` rows so an unfiltered
+    // SELECT * LIMIT 100 on a 1M-row table doesn't build the whole set
+    // before truncating.
+    let mut records: Vec<UnifiedRecord> = match limit {
+        Some(n) => Vec::with_capacity(n),
+        None => Vec::new(),
+    };
     manager.for_each_entity(|entity| {
         if !entity_visible_under_current_snapshot(entity) {
             return true;
         }
         if let Some(record) = runtime_table_record_from_entity(entity.clone()) {
             records.push(record);
+            if let Some(n) = limit {
+                if records.len() >= n {
+                    return false; // stop scan early
+                }
+            }
         }
-        true // continue
+        true
     });
     Ok(records)
 }

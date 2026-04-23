@@ -95,6 +95,11 @@ def run_reddb():
         print(f"  {name:<18}{ops:>6} ops/sec{note}")
         return ops
 
+    # No-filter LIMIT (alpha blocker: used to hang at 0 qps — needs
+    # LIMIT pushdown into the table scan).
+    r["select_no_filter"] = run_select(
+        "select_no_filter:", ["SELECT * FROM users LIMIT 100"] * SELECT_ITERS, SELECT_ITERS)
+
     # Point lookups
     lids = [random.randint(1, N) for _ in range(POINT_ITERS)]
     r["select_point"] = run_select(
@@ -193,6 +198,9 @@ def run_pg():
         print(f"  {name:<18}{ops:>6} ops/sec{note}")
         return ops
 
+    r["select_no_filter"] = run_select(
+        "select_no_filter:", ["SELECT * FROM users LIMIT 100"] * SELECT_ITERS, SELECT_ITERS)
+
     lids = [random.randint(1, N) for _ in range(POINT_ITERS)]
     r["select_point"] = run_select(
         "select_point:", [f"SELECT * FROM users WHERE id = {i}" for i in lids], POINT_ITERS)
@@ -223,7 +231,7 @@ def print_table(rdb, pg):
     print("\n### Summary (100K rows)\n")
     print(f"{'KPI':<18} {'RedDB':>10} {'Postgres':>10} {'Ratio':>8}")
     print("-" * 50)
-    for key in ["insert", "select_point", "select_range", "select_filtered",
+    for key in ["insert", "select_no_filter", "select_point", "select_range", "select_filtered",
                 "agg_count", "agg_groupby", "update_single"]:
         rd = rdb.get(key, 0); pv = pg.get(key, 0)
         ratio = f"{rd/pv:.2f}x" if pv > 0 else "—"

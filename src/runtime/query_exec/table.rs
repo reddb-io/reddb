@@ -1079,7 +1079,18 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         && query.expand.is_none()
         && !has_scalar_function
     {
-        let mut records = scan_runtime_table_source_records(db, query.table.as_str())?;
+        // LIMIT + OFFSET pushdown: pre-scan cap is `offset + limit` so
+        // the scan loop stops once we have enough to skip + keep. An
+        // unbounded scan (no LIMIT) still reads the full table, same
+        // as before.
+        let scan_cap = match (query.offset, query.limit) {
+            (_, None) if !query.order_by.is_empty() => None, // ORDER BY needs full set
+            (Some(off), Some(lim)) => Some(off as usize + lim as usize),
+            (None, Some(lim)) if query.order_by.is_empty() => Some(lim as usize),
+            _ => None,
+        };
+        let mut records =
+            scan_runtime_table_source_records_limited(db, query.table.as_str(), scan_cap)?;
         let table_name = query.table.as_str();
         let table_alias = query.alias.as_deref().unwrap_or(table_name);
 
@@ -1267,8 +1278,18 @@ pub(crate) fn execute_runtime_canonical_table_node(
                 return Ok(records);
             }
 
-            // ── DEFAULT: Full scan ──
-            scan_runtime_table_source_records(db, context.query.table.as_str())
+            // ── DEFAULT: Full scan with LIMIT pushdown ──
+            let scan_cap = match (context.query.offset, context.query.limit) {
+                _ if !context.query.order_by.is_empty() => None,
+                (Some(off), Some(lim)) => Some(off as usize + lim as usize),
+                (None, Some(lim)) => Some(lim as usize),
+                _ => None,
+            };
+            scan_runtime_table_source_records_limited(
+                db,
+                context.query.table.as_str(),
+                scan_cap,
+            )
         }
         "filter" | "entity_filter" => {
             // ── FAST PATH: Direct entity_id lookup (O(1)) ──
