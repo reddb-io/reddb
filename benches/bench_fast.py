@@ -44,10 +44,15 @@ def run_reddb():
     os.makedirs("/tmp/br", exist_ok=True)
 
     t0 = time.perf_counter()
+    # Match PG's synchronous_commit=on + WAL writer batching rather
+    # than our historical default (fsync-per-commit). Single-row
+    # UPDATEs otherwise pay ~10 ms/commit for fsync on this hardware.
+    env = {**os.environ, "REDDB_DURABILITY": "sync"}
     proc = subprocess.Popen(
         [REDDB,"server","--path","/tmp/br/d.rdb",
          "--grpc-bind","127.0.0.1:19051","--wire-bind","127.0.0.1:19052"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        env=env,
     )
     import reddb_python
     for _ in range(100):
