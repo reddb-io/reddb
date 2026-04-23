@@ -924,6 +924,24 @@ impl RedDBRuntime {
         )?;
 
         let merge_state_id = format!("ms:{}", &hash[..16]);
+
+        // Materialise conflicts: any entity whose visibility changed
+        // in BOTH sides relative to the LCA snapshot is a candidate
+        // conflict. Phase 5 records identifiers + metadata; Phase 6
+        // will stage the merged body and apply it to the user data.
+        let conflicts = if let Some(lca_hash) = &lca {
+            materialize_merge_conflicts(
+                self,
+                store,
+                lca_hash,
+                &head_hash,
+                &from_hash,
+                &merge_state_id,
+            )?
+        } else {
+            Vec::new()
+        };
+
         let mut ms_fields: HashMap<String, Value> = HashMap::new();
         ms_fields.insert("_id".to_string(), Value::text(merge_state_id.as_str()));
         ms_fields.insert("kind".to_string(), Value::text("merge"));
@@ -933,13 +951,16 @@ impl RedDBRuntime {
         }
         ms_fields.insert("ours".to_string(), Value::text(head_hash.as_str()));
         ms_fields.insert("theirs".to_string(), Value::text(from_hash.as_str()));
-        ms_fields.insert("conflicts_count".to_string(), Value::UnsignedInteger(0));
+        ms_fields.insert(
+            "conflicts_count".to_string(),
+            Value::UnsignedInteger(conflicts.len() as u64),
+        );
         insert_meta_row(store, vc::MERGE_STATE, ms_fields)?;
 
         Ok(MergeOutcome {
             merge_commit: Some(merge_commit),
             fast_forward: false,
-            conflicts: Vec::new(),
+            conflicts,
             merge_state_id: Some(merge_state_id),
         })
     }
@@ -950,8 +971,131 @@ impl RedDBRuntime {
         commit: &str,
         author: Author,
     ) -> RedDBResult<MergeOutcome> {
-        let _ = (connection_id, commit, author);
-        Err(unimplemented("cherry_pick"))
+        let store_arc = self.inner.db.store();
+        let store: &UnifiedStore = &store_arc;
+
+        // Resolve the commit being cherry-picked and its parent.
+        let src_hash = RedDBRuntime::vcs_resolve_commitish(self, commit)?;
+        let src_commit = load_commit(store, &src_hash).ok_or_else(|| {
+            RedDBError::NotFound(format!("cherry-pick source `{src_hash}` not found"))
+        })?;
+        if src_commit.parents.is_empty() {
+            return Err(RedDBError::InvalidConfig(
+                "cannot cherry-pick a root commit".to_string(),
+            ));
+        }
+        if src_commit.parents.len() > 1 {
+            return Err(RedDBError::InvalidConfig(
+                "cannot cherry-pick a merge commit; resolve manually".to_string(),
+            ));
+        }
+        let parent_hash = src_commit.parents[0].clone();
+
+        // Resolve HEAD for this connection.
+        let workset = load_workset(store, connection_id);
+        let (head_branch, head_hash) = match workset {
+            Some((branch, Some(head))) => (branch, head),
+            Some((branch, None)) => {
+                let head = load_ref(store, &branch).map(|r| r.target).unwrap_or_default();
+                (branch, head)
+            }
+            None => {
+                let head = load_ref(store, vc::DEFAULT_BRANCH_REF)
+                    .map(|r| r.target)
+                    .unwrap_or_default();
+                (vc::DEFAULT_BRANCH_REF.to_string(), head)
+            }
+        };
+        if head_hash.is_empty() {
+            return Err(RedDBError::InvalidConfig(
+                "cannot cherry-pick onto empty HEAD".to_string(),
+            ));
+        }
+
+        // Cherry-pick = 3-way merge with base = parent(src), ours = HEAD,
+        // theirs = src. The new commit records the pick so log() sees
+        // it; data application is staged in merge_state.pending so
+        // Phase 6 can apply it transactionally.
+        let message = format!("cherry-pick: {}", src_commit.message);
+        let parents = vec![head_hash.clone()];
+        let parent_height = load_commit(store, &head_hash)
+            .map(|c| c.height)
+            .unwrap_or(0);
+        let height = parent_height + 1;
+        let root_xid = self.inner.snapshot_manager.begin();
+        self.inner.snapshot_manager.commit(root_xid);
+        let timestamp_ms = now_ms();
+
+        let hash = compute_commit_hash(
+            root_xid,
+            &parents,
+            &author,
+            &message,
+            timestamp_ms,
+        );
+        let pick_commit = Commit {
+            hash: hash.clone(),
+            root_xid,
+            parents,
+            height,
+            author: author.clone(),
+            committer: author,
+            message,
+            timestamp_ms,
+            signature: None,
+        };
+        save_commit(store, &pick_commit)?;
+        if root_xid != XID_NONE {
+            self.inner.snapshot_manager.pin(root_xid);
+        }
+        if !head_branch.is_empty() {
+            save_ref(
+                store,
+                &Ref {
+                    name: head_branch.clone(),
+                    kind: RefKind::Branch,
+                    target: hash.clone(),
+                    protected: false,
+                },
+            )?;
+        }
+        upsert_workset(
+            store,
+            connection_id,
+            &head_branch,
+            Some(&hash),
+            root_xid,
+        )?;
+
+        let merge_state_id = format!("cp:{}", &hash[..16]);
+        let conflicts = materialize_merge_conflicts(
+            self,
+            store,
+            &parent_hash,
+            &head_hash,
+            &src_hash,
+            &merge_state_id,
+        )?;
+
+        let mut ms_fields: HashMap<String, Value> = HashMap::new();
+        ms_fields.insert("_id".to_string(), Value::text(merge_state_id.as_str()));
+        ms_fields.insert("kind".to_string(), Value::text("cherry_pick"));
+        ms_fields.insert("branch".to_string(), Value::text(head_branch.as_str()));
+        ms_fields.insert("base".to_string(), Value::text(parent_hash.as_str()));
+        ms_fields.insert("ours".to_string(), Value::text(head_hash.as_str()));
+        ms_fields.insert("theirs".to_string(), Value::text(src_hash.as_str()));
+        ms_fields.insert(
+            "conflicts_count".to_string(),
+            Value::UnsignedInteger(conflicts.len() as u64),
+        );
+        insert_meta_row(store, vc::MERGE_STATE, ms_fields)?;
+
+        Ok(MergeOutcome {
+            merge_commit: Some(pick_commit),
+            fast_forward: false,
+            conflicts,
+            merge_state_id: Some(merge_state_id),
+        })
     }
 
     pub fn vcs_revert(
@@ -960,8 +1104,110 @@ impl RedDBRuntime {
         commit: &str,
         author: Author,
     ) -> RedDBResult<Commit> {
-        let _ = (connection_id, commit, author);
-        Err(unimplemented("revert"))
+        let store_arc = self.inner.db.store();
+        let store: &UnifiedStore = &store_arc;
+
+        let src_hash = RedDBRuntime::vcs_resolve_commitish(self, commit)?;
+        let src_commit = load_commit(store, &src_hash).ok_or_else(|| {
+            RedDBError::NotFound(format!("revert source `{src_hash}` not found"))
+        })?;
+        if src_commit.parents.is_empty() {
+            return Err(RedDBError::InvalidConfig(
+                "cannot revert a root commit".to_string(),
+            ));
+        }
+        let parent_hash = src_commit.parents[0].clone();
+
+        let workset = load_workset(store, connection_id);
+        let (head_branch, head_hash) = match workset {
+            Some((branch, Some(head))) => (branch, head),
+            Some((branch, None)) => {
+                let head = load_ref(store, &branch).map(|r| r.target).unwrap_or_default();
+                (branch, head)
+            }
+            None => {
+                let head = load_ref(store, vc::DEFAULT_BRANCH_REF)
+                    .map(|r| r.target)
+                    .unwrap_or_default();
+                (vc::DEFAULT_BRANCH_REF.to_string(), head)
+            }
+        };
+        if head_hash.is_empty() {
+            return Err(RedDBError::InvalidConfig(
+                "cannot revert onto empty HEAD".to_string(),
+            ));
+        }
+
+        // Revert = 3-way merge with base = src, ours = HEAD,
+        // theirs = parent(src). The asymmetry vs cherry-pick flips
+        // which side provides the "forward" delta so the effect is
+        // the inverse of the original commit.
+        let message = format!("Revert \"{}\"", src_commit.message);
+        let parents = vec![head_hash.clone()];
+        let parent_height = load_commit(store, &head_hash)
+            .map(|c| c.height)
+            .unwrap_or(0);
+        let height = parent_height + 1;
+        let root_xid = self.inner.snapshot_manager.begin();
+        self.inner.snapshot_manager.commit(root_xid);
+        let timestamp_ms = now_ms();
+
+        let hash = compute_commit_hash(
+            root_xid,
+            &parents,
+            &author,
+            &message,
+            timestamp_ms,
+        );
+        let rv_commit = Commit {
+            hash: hash.clone(),
+            root_xid,
+            parents,
+            height,
+            author: author.clone(),
+            committer: author,
+            message,
+            timestamp_ms,
+            signature: None,
+        };
+        save_commit(store, &rv_commit)?;
+        if root_xid != XID_NONE {
+            self.inner.snapshot_manager.pin(root_xid);
+        }
+        if !head_branch.is_empty() {
+            save_ref(
+                store,
+                &Ref {
+                    name: head_branch.clone(),
+                    kind: RefKind::Branch,
+                    target: hash.clone(),
+                    protected: false,
+                },
+            )?;
+        }
+        upsert_workset(
+            store,
+            connection_id,
+            &head_branch,
+            Some(&hash),
+            root_xid,
+        )?;
+
+        let merge_state_id = format!("rv:{}", &hash[..16]);
+        // Record merge_state for later data apply. No conflict
+        // materialisation here — revert conflicts are rare when the
+        // reverted commit touches disjoint entities.
+        let mut ms_fields: HashMap<String, Value> = HashMap::new();
+        ms_fields.insert("_id".to_string(), Value::text(merge_state_id.as_str()));
+        ms_fields.insert("kind".to_string(), Value::text("revert"));
+        ms_fields.insert("branch".to_string(), Value::text(head_branch.as_str()));
+        ms_fields.insert("base".to_string(), Value::text(src_hash.as_str()));
+        ms_fields.insert("ours".to_string(), Value::text(head_hash.as_str()));
+        ms_fields.insert("theirs".to_string(), Value::text(parent_hash.as_str()));
+        ms_fields.insert("conflicts_count".to_string(), Value::UnsignedInteger(0));
+        insert_meta_row(store, vc::MERGE_STATE, ms_fields)?;
+
+        Ok(rv_commit)
     }
 
     pub fn vcs_reset(&self, input: ResetInput) -> RedDBResult<()> {
@@ -1356,6 +1602,104 @@ impl RedDBRuntime {
             "commitish `{spec}` did not resolve to any ref or commit"
         )))
     }
+}
+
+/// Detect entities changed on both sides of a 3-way merge and write
+/// a `red_conflicts` row for each. Returns the in-memory `Conflict`
+/// list in the same shape `vcs_conflicts_list` would later read back.
+///
+/// Phase 5: metadata-level only — identifiers + which sides moved.
+/// Phase 6 will stage the merged body (base/ours/theirs payloads +
+/// JSON 3-way merge result) so `vcs_conflict_resolve` can apply the
+/// resolved value back to the user collection.
+fn materialize_merge_conflicts(
+    rt: &RedDBRuntime,
+    store: &UnifiedStore,
+    base_hash: &str,
+    ours_hash: &str,
+    theirs_hash: &str,
+    merge_state_id: &str,
+) -> RedDBResult<Vec<Conflict>> {
+    use crate::application::vcs::AsOfSpec;
+
+    let base_xid = rt.vcs_resolve_as_of(AsOfSpec::Commit(base_hash.to_string()))?;
+    let ours_xid = rt.vcs_resolve_as_of(AsOfSpec::Commit(ours_hash.to_string()))?;
+    let theirs_xid = rt.vcs_resolve_as_of(AsOfSpec::Commit(theirs_hash.to_string()))?;
+
+    let sm = &rt.inner.snapshot_manager;
+    let base_snap = sm.snapshot(base_xid);
+    let ours_snap = sm.snapshot(ours_xid);
+    let theirs_snap = sm.snapshot(theirs_xid);
+
+    // Walk every user collection once, collecting per-entity
+    // visibility at the three snapshots. An entity is a candidate
+    // conflict when its visibility differs from base in *both*
+    // sides — i.e. both branches edited it (or one deleted and the
+    // other modified).
+    let mut conflicts: Vec<Conflict> = Vec::new();
+    for coll in store.list_collections() {
+        if coll.starts_with("red_") {
+            continue;
+        }
+        let Some(manager) = store.get_collection(&coll) else {
+            continue;
+        };
+        // Group by entity id so multiple versions (xmin-distinct
+        // tuples sharing the user-facing id) collapse into a single
+        // visibility verdict per snapshot.
+        let mut per_id: HashMap<u64, (bool, bool, bool)> = HashMap::new();
+        for entity in manager.query_all(|_| true) {
+            let xmin = entity.xmin;
+            let xmax = entity.xmax;
+            let aborted = sm.is_aborted(xmin);
+            let in_base = base_snap.sees(xmin, xmax) && !aborted;
+            let in_ours = ours_snap.sees(xmin, xmax) && !aborted;
+            let in_theirs = theirs_snap.sees(xmin, xmax) && !aborted;
+            let entry = per_id.entry(entity.id.raw()).or_insert((false, false, false));
+            entry.0 |= in_base;
+            entry.1 |= in_ours;
+            entry.2 |= in_theirs;
+        }
+        for (eid, (b, o, t)) in per_id {
+            // Changed on both sides relative to base -> conflict.
+            let ours_changed = b != o;
+            let theirs_changed = b != t;
+            if !(ours_changed && theirs_changed) {
+                continue;
+            }
+            // Agreement (both deleted, both re-added identically) is
+            // not a conflict — Phase 5 treats any divergent-flip as
+            // one. Refined body comparison is Phase 6.
+            if o == t {
+                continue;
+            }
+            let conflict_id = format!("{}:{}/{}", merge_state_id, coll, eid);
+            let mut fields: HashMap<String, Value> = HashMap::new();
+            fields.insert("_id".to_string(), Value::text(conflict_id.as_str()));
+            fields.insert("collection".to_string(), Value::text(coll.as_str()));
+            fields.insert("entity_id".to_string(), Value::text(eid.to_string().as_str()));
+            fields.insert(
+                "merge_state_id".to_string(),
+                Value::text(merge_state_id),
+            );
+            fields.insert(
+                "conflicting_paths".to_string(),
+                Value::Array(vec![Value::text("*")]),
+            );
+            insert_meta_row(store, vc::CONFLICTS, fields)?;
+            conflicts.push(Conflict {
+                id: conflict_id,
+                collection: coll.clone(),
+                entity_id: eid.to_string(),
+                base: JsonValue::Null,
+                ours: JsonValue::Null,
+                theirs: JsonValue::Null,
+                conflicting_paths: vec!["*".to_string()],
+                merge_state_id: merge_state_id.to_string(),
+            });
+        }
+    }
+    Ok(conflicts)
 }
 
 // Collapse Add+Remove pairs sharing the same (collection, entity_id)
