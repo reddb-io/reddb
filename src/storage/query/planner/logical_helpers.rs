@@ -863,6 +863,7 @@ mod tests {
             limit: None,
             offset: None,
             expand: None,
+            as_of: None,
         })
     }
 

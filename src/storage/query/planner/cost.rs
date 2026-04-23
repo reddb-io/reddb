@@ -973,6 +973,7 @@ mod tests {
             limit: None,
             offset: None,
             expand: None,
+            as_of: None,
         }
     }
 
@@ -1123,6 +1124,7 @@ mod tests {
             limit: None,
             offset: None,
             expand: None,
+            as_of: None,
         });
 
         let cost = estimator.estimate(&query);
@@ -1190,6 +1192,7 @@ mod tests {
             limit: Some(10),
             offset: None,
             expand: None,
+            as_of: None,
         };
 
         let card = estimator.estimate_table_cardinality(&query);

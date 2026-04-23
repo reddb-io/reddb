@@ -519,6 +519,7 @@ mod tests {
             limit: None,
             offset: None,
             expand: None,
+            as_of: None,
         })
     }
 
@@ -552,6 +553,7 @@ mod tests {
             limit: Some(10), // Small table
             offset: None,
             expand: None,
+            as_of: None,
         });
 
         let large = QueryExpr::Table(TableQuery {
@@ -570,6 +572,7 @@ mod tests {
             limit: None, // Large table
             offset: None,
             expand: None,
+            as_of: None,
         });
 
         let join = QueryExpr::Join(JoinQuery {
