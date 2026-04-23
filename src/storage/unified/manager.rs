@@ -1090,6 +1090,85 @@ impl SegmentManager {
         }
     }
 
+    /// Parallel fold across all entities. Each sealed segment is
+    /// processed on its own rayon task; the growing segment stays on
+    /// the caller thread (its read lock is briefly held).
+    ///
+    /// - `init` builds a fresh accumulator per thread.
+    /// - `fold` mutates an accumulator with one entity at a time.
+    /// - `reduce` combines two accumulators into one.
+    ///
+    /// The returned value is the reduction of every per-thread
+    /// accumulator. Use this for aggregate-shape workloads (GROUP BY)
+    /// where per-thread partial state can be merged cheaply.
+    ///
+    /// NOTE: when there are 0 or 1 sealed segments, the parallel path
+    /// is skipped and the work runs sequentially to avoid rayon
+    /// overhead on tiny tables.
+    pub fn fold_entities_parallel<T, FInit, FFold, FReduce>(
+        &self,
+        init: FInit,
+        fold: FFold,
+        reduce: FReduce,
+    ) -> T
+    where
+        T: Send,
+        FInit: Fn() -> T + Send + Sync,
+        FFold: Fn(T, &UnifiedEntity) -> T + Send + Sync,
+        FReduce: Fn(T, T) -> T + Send + Sync,
+    {
+        use rayon::prelude::*;
+
+        // Growing segment — always sequential (single writer lock,
+        // usually small working set).
+        let mut acc = init();
+        if let Some(growing_arc) = self.growing.read().as_ref() {
+            let growing = if let Some(g) = growing_arc.try_read() {
+                g
+            } else {
+                growing_arc.read()
+            };
+            growing.for_each_fast(|entity| {
+                acc = fold(std::mem::replace(&mut acc, init()), entity);
+                true
+            });
+        }
+
+        // Sealed segments — snapshot the Arc list under the read lock,
+        // then drop the lock so rayon workers can fan out without
+        // blocking writers.
+        let segments: Vec<_> = {
+            let sealed = self.sealed.read();
+            sealed.iter().cloned().collect()
+        };
+
+        if segments.len() <= 1 {
+            for seg_arc in &segments {
+                let seg = seg_arc.read();
+                seg.for_each_fast(|entity| {
+                    acc = fold(std::mem::replace(&mut acc, init()), entity);
+                    true
+                });
+            }
+            return acc;
+        }
+
+        let sealed_acc = segments
+            .into_par_iter()
+            .map(|seg_arc| {
+                let mut local = init();
+                let seg = seg_arc.read();
+                seg.for_each_fast(|entity| {
+                    local = fold(std::mem::replace(&mut local, init()), entity);
+                    true
+                });
+                local
+            })
+            .reduce(&init, &reduce);
+
+        reduce(acc, sealed_acc)
+    }
+
     /// Zone-map-aware iteration across all segments.
     ///
     /// Like `for_each_entity`, but checks `zone_preds` against each segment's

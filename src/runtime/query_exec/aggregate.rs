@@ -75,6 +75,17 @@ pub(crate) fn execute_aggregate_query(
     query: &TableQuery,
 ) -> RedDBResult<UnifiedResult> {
     validate_aggregate_projection_shape(query)?;
+
+    // Fast path — SELECT <col>, COUNT(*) FROM t GROUP BY <col>
+    // parallelised across segments via rayon. Skips the full
+    // HashMap<Vec<GroupKeyPart>, AggregateGroup> materialisation that
+    // the generic aggregate loop needs; emits one count per distinct
+    // key value. Returns None for anything that doesn't match the
+    // narrow shape (other agg funcs, HAVING, OFFSET, WHERE, multi-col).
+    if let Some(result) = try_execute_parallel_single_col_count(db, query)? {
+        return Ok(result);
+    }
+
     let effective_projections = effective_table_projections(query);
     let effective_filter = effective_table_filter(query);
     let effective_group_by = effective_table_group_by_exprs(query);
@@ -2609,5 +2620,312 @@ mod agg_spill_codec {
                 }
             }
         }
+    }
+}
+
+// ── Fast path — parallel single-column COUNT(*) GROUP BY ──────────────────
+//
+// Serves queries shaped exactly as:
+//   SELECT <col>, COUNT(*) FROM <table> GROUP BY <col>
+// with no WHERE, HAVING, ORDER BY, LIMIT, OFFSET, or extra projections.
+//
+// Wins two ways versus the generic loop in `execute_aggregate_query`:
+//   1. No `Vec<Value>` / `Vec<GroupKeyPart>` allocation per row — the
+//      per-thread accumulator is `HashMap<SingleGroupKey, u64>`.
+//   2. Segments are folded in parallel via `SegmentManager::fold_entities_parallel`.
+//
+// Returns `Ok(None)` when the query doesn't fit — caller falls through
+// to the generic path. Returns `Ok(Some(result))` when served.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum SingleGroupKey {
+    Null,
+    Bool(bool),
+    Int(i64),
+    UInt(u64),
+    Text(std::sync::Arc<str>),
+}
+
+impl SingleGroupKey {
+    fn from_value(value: &Value) -> Option<Self> {
+        match value {
+            Value::Null => Some(Self::Null),
+            Value::Boolean(b) => Some(Self::Bool(*b)),
+            Value::Integer(n) => Some(Self::Int(*n)),
+            Value::UnsignedInteger(n) => Some(Self::UInt(*n)),
+            Value::Text(s) => Some(Self::Text(s.clone())),
+            _ => None,
+        }
+    }
+
+    fn into_value(self) -> Value {
+        match self {
+            Self::Null => Value::Null,
+            Self::Bool(b) => Value::Boolean(b),
+            Self::Int(n) => Value::Integer(n),
+            Self::UInt(n) => Value::UnsignedInteger(n),
+            Self::Text(s) => Value::text(s),
+        }
+    }
+}
+
+fn try_execute_parallel_single_col_count(
+    db: &RedDB,
+    query: &TableQuery,
+) -> RedDBResult<Option<UnifiedResult>> {
+    // Reject any shape we don't handle.
+    if !query.order_by.is_empty()
+        || query.limit.is_some()
+        || query.offset.is_some()
+        || query.filter.is_some()
+        || query.where_expr.is_some()
+        || query.having.is_some()
+        || query.having_expr.is_some()
+        || query.expand.is_some()
+    {
+        return Ok(None);
+    }
+    let group_exprs = effective_table_group_by_exprs(query);
+    if group_exprs.len() != 1 {
+        return Ok(None);
+    }
+    let projections = effective_table_projections(query);
+    if projections.len() != 2 {
+        return Ok(None);
+    }
+
+    // Extract the single GROUP BY column name.
+    let group_col = match &group_exprs[0] {
+        Expr::Column {
+            field: FieldRef::TableColumn { column, .. },
+            ..
+        } => column.clone(),
+        _ => return Ok(None),
+    };
+
+    // Projections must be exactly: [<group_col>, COUNT(*)].
+    let proj_is_group_col = |p: &Projection| -> bool {
+        match p {
+            Projection::Column(name) => name == &group_col,
+            Projection::Field(FieldRef::TableColumn { column, .. }, _) => column == &group_col,
+            _ => false,
+        }
+    };
+    let proj_is_count_star = |p: &Projection| -> bool {
+        let Projection::Function(name, args) = p else {
+            return false;
+        };
+        if !base_function_name(name).eq_ignore_ascii_case("COUNT") || args.len() != 1 {
+            return false;
+        }
+        match &args[0] {
+            Projection::All => true,
+            Projection::Column(c) => c == "*" || c == "LIT:*",
+            _ => false,
+        }
+    };
+    let (col_label, count_label) = match (&projections[0], &projections[1]) {
+        (a, b) if proj_is_group_col(a) && proj_is_count_star(b) => {
+            (projection_name(a), projection_name(b))
+        }
+        (a, b) if proj_is_count_star(a) && proj_is_group_col(b) => {
+            (projection_name(b), projection_name(a))
+        }
+        _ => return Ok(None),
+    };
+
+    let manager = db
+        .store()
+        .get_collection(query.table.as_str())
+        .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
+
+    let table_name = query.table.as_str();
+    let table_alias = query.alias.as_deref().unwrap_or(table_name);
+
+    // Pre-classify the group column for fast entity access. DocumentPath /
+    // Unknown fall back to the generic loop.
+    let field = FieldRef::TableColumn {
+        table: String::new(),
+        column: group_col.clone(),
+    };
+    let kind = super::filter_compiled::classify_field(&field, table_name, table_alias);
+    if matches!(
+        kind,
+        super::filter_compiled::EntityFieldKind::DocumentPath(_)
+            | super::filter_compiled::EntityFieldKind::Unknown
+    ) {
+        return Ok(None);
+    }
+    let resolver = super::filter_compiled::EntityColumnResolver { kinds: vec![kind] };
+
+    // Parallel fold — one HashMap per rayon worker, merged at the end.
+    let groups = manager.fold_entities_parallel(
+        std::collections::HashMap::<SingleGroupKey, u64>::new,
+        |mut local, entity| {
+            if !crate::runtime::impl_core::entity_visible_under_current_snapshot(entity) {
+                return local;
+            }
+            let Some(value_cow) = resolver.get_value(0, entity) else {
+                return local;
+            };
+            let value = value_cow.into_owned();
+            let Some(key) = SingleGroupKey::from_value(&value) else {
+                return local;
+            };
+            *local.entry(key).or_insert(0) += 1;
+            local
+        },
+        |mut a, b| {
+            for (k, v) in b {
+                *a.entry(k).or_insert(0) += v;
+            }
+            a
+        },
+    );
+
+    let mut records = Vec::with_capacity(groups.len().max(1));
+    for (key, count) in groups {
+        let mut record = UnifiedRecord::new();
+        record.set(&col_label, key.clone().into_value());
+        record.set(&group_col, key.into_value());
+        record.set(&count_label, Value::UnsignedInteger(count));
+        records.push(record);
+    }
+
+    Ok(Some(UnifiedResult {
+        columns: vec![col_label, count_label],
+        records,
+        stats: Default::default(),
+        pre_serialized_json: None,
+    }))
+}
+
+#[cfg(test)]
+mod parallel_group_by_tests {
+    use crate::{RedDBOptions, RedDBRuntime};
+
+    fn mk_runtime() -> RedDBRuntime {
+        RedDBRuntime::with_options(RedDBOptions::in_memory())
+            .expect("in-memory runtime should open")
+    }
+
+    fn seed_cities(rt: &RedDBRuntime, total: usize, cities: &[&str]) {
+        rt.execute_query("CREATE TABLE users (id INT, name TEXT, city TEXT, age INT)")
+            .unwrap();
+        for i in 0..total {
+            let city = cities[i % cities.len()];
+            rt.execute_query(&format!(
+                "INSERT INTO users (id, name, city, age) VALUES ({i}, 'u{i}', '{city}', {})",
+                20 + (i % 40)
+            ))
+            .unwrap();
+        }
+    }
+
+    fn count_by_city(rt: &RedDBRuntime) -> Vec<(String, u64)> {
+        let r = rt
+            .execute_query("SELECT city, COUNT(*) FROM users GROUP BY city")
+            .expect("group by ok");
+        let mut out: Vec<(String, u64)> = r
+            .result
+            .records
+            .iter()
+            .filter_map(|rec| {
+                let city = match rec.get("city")? {
+                    crate::storage::schema::Value::Text(s) => s.to_string(),
+                    _ => return None,
+                };
+                let count = match rec
+                    .get("COUNT")
+                    .or_else(|| rec.get("COUNT(*)"))
+                    .or_else(|| rec.get("count"))?
+                {
+                    crate::storage::schema::Value::UnsignedInteger(n) => *n,
+                    crate::storage::schema::Value::Integer(n) => *n as u64,
+                    _ => return None,
+                };
+                Some((city, count))
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    #[test]
+    fn single_col_count_returns_correct_counts() {
+        let rt = mk_runtime();
+        seed_cities(&rt, 300, &["NYC", "LA", "CHI"]);
+        let counts = count_by_city(&rt);
+        assert_eq!(counts.len(), 3);
+        for (_, n) in &counts {
+            assert_eq!(*n, 100, "each city should have 100 rows (got {n})");
+        }
+    }
+
+    #[test]
+    fn single_col_count_many_cities() {
+        let rt = mk_runtime();
+        seed_cities(&rt, 1000, &["A", "B", "C", "D", "E"]);
+        let counts = count_by_city(&rt);
+        assert_eq!(counts.len(), 5);
+        for (_, n) in &counts {
+            assert_eq!(*n, 200);
+        }
+    }
+
+    #[test]
+    fn single_col_count_single_group() {
+        let rt = mk_runtime();
+        seed_cities(&rt, 50, &["NYC"]);
+        let counts = count_by_city(&rt);
+        assert_eq!(counts, vec![("NYC".to_string(), 50)]);
+    }
+
+    #[test]
+    fn single_col_count_empty_table() {
+        let rt = mk_runtime();
+        rt.execute_query("CREATE TABLE users (id INT, city TEXT)")
+            .unwrap();
+        let r = rt
+            .execute_query("SELECT city, COUNT(*) FROM users GROUP BY city")
+            .unwrap();
+        assert_eq!(r.result.records.len(), 0);
+    }
+
+    #[test]
+    fn fallback_when_where_clause_present() {
+        // WHERE isn't supported by the fast path — it must defer to the
+        // generic aggregate loop. Correctness guard: the query still
+        // returns valid results (filtered groups).
+        let rt = mk_runtime();
+        seed_cities(&rt, 300, &["NYC", "LA", "CHI"]);
+        let r = rt
+            .execute_query("SELECT city, COUNT(*) FROM users WHERE age > 40 GROUP BY city")
+            .expect("with WHERE ok via generic path");
+        // Filter is age > 40; ages cycle 20..59; 19/40 values match; 300×19/40≈142.
+        // The generic path may label the count column differently; accept
+        // any numeric column that isn't the group key as the count.
+        let total: u64 = r
+            .result
+            .records
+            .iter()
+            .filter_map(|rec| {
+                for (k, v) in rec.values.iter() {
+                    if k.as_ref() == "city" {
+                        continue;
+                    }
+                    match v {
+                        crate::storage::schema::Value::UnsignedInteger(n) => return Some(*n),
+                        crate::storage::schema::Value::Integer(n) => return Some(*n as u64),
+                        _ => {}
+                    }
+                }
+                None
+            })
+            .sum();
+        assert!(
+            !r.result.records.is_empty(),
+            "expected at least one group record"
+        );
+        assert!(total > 0, "expected some rows past filter");
     }
 }
