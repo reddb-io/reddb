@@ -14,6 +14,38 @@ All commands below use an in-memory database (no `--path` flag).
 To persist state between commands, pass `--path /tmp/demo.rdb` on
 every invocation.
 
+## 0. Opt a user collection into VCS (required before AS OF)
+
+User collections are non-versioned by default — VCS only touches
+what you explicitly opt in. Three equivalent interfaces:
+
+```sql
+ALTER TABLE users SET VERSIONED = true;   -- SQL DDL
+```
+
+```bash
+red vcs versioned on users                -- CLI
+```
+
+```bash
+curl -X POST http://localhost:8080/vcs/versioned \
+  -d '{"collection":"users","enabled":true}'
+```
+
+Works *retroactively*: you can opt in after creating the table,
+inserting rows, and even after making some commits — earlier
+commits stay queryable via `AS OF COMMIT '<hash>'` as long as
+they still hold their `xid` pin. See
+[architecture → retroactive semantics](./architecture.md#retroactive-semantics).
+
+Without opt-in, `SELECT ... AS OF` on that table returns an
+explicit error:
+
+```
+AS OF requires a versioned collection — `users` has not opted in.
+Call vcs.set_versioned("users", true) first.
+```
+
 ## 1. First commit
 
 ```bash

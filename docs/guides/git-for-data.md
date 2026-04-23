@@ -19,7 +19,40 @@ and `alias reddb='curl -s http://127.0.0.1:8080'`.
 
 ---
 
-## 1. Seed the database
+## 1. Opt the `users` collection into VCS
+
+Every user collection is non-versioned by default. Flip `users`
+in before the first commit (or later — it works retroactively):
+
+```bash
+reddb -X POST /query \
+  -H 'content-type: application/json' \
+  -d '{"sql":"ALTER TABLE users SET VERSIONED = true"}'
+```
+
+Equivalent REST / CLI:
+
+```bash
+reddb -X POST /vcs/versioned \
+  -H 'content-type: application/json' \
+  -d '{"collection":"users","enabled":true}'
+
+red vcs versioned on users --path /tmp/git-for-data.rdb
+```
+
+Confirm:
+
+```bash
+reddb /vcs/versioned
+# -> {"ok":true,"result":["users"]}
+```
+
+If you skip this step, the `SELECT ... AS OF` queries in §11
+will fail with a clear opt-in error — intentional, so you
+don't accidentally rely on VCS semantics for a collection that
+isn't participating.
+
+## 2. Seed the database
 
 Two users go in first — on an implicit initial commit:
 
@@ -47,7 +80,7 @@ Grab that hash — we'll reference it as `$INIT`:
 INIT=$(red vcs resolve main --path /tmp/git-for-data.rdb --json | jq -r .data.hash)
 ```
 
-## 2. Open a feature branch
+## 3. Open a feature branch
 
 ```bash
 red vcs branch promote-admins --path /tmp/git-for-data.rdb
@@ -66,7 +99,7 @@ red vcs commit "promote alice to admin" \
   --path /tmp/git-for-data.rdb
 ```
 
-## 3. Diverge on main
+## 4. Diverge on main
 
 Back on main, an unrelated change:
 
@@ -82,7 +115,7 @@ red vcs commit "correct Bob's age" \
   --path /tmp/git-for-data.rdb
 ```
 
-## 4. Lowest common ancestor
+## 5. Lowest common ancestor
 
 ```bash
 red vcs lca main promote-admins --path /tmp/git-for-data.rdb
@@ -91,7 +124,7 @@ red vcs lca main promote-admins --path /tmp/git-for-data.rdb
 
 Both branches share the seed commit — exactly what you'd expect.
 
-## 5. Fast-forward path (when branches have not diverged)
+## 6. Fast-forward path (when branches have not diverged)
 
 Demonstrate FF separately. Create a no-op branch first:
 
@@ -107,7 +140,7 @@ red vcs merge trivial --path /tmp/git-for-data.rdb
 # -> fast-forward
 ```
 
-## 6. Non-fast-forward merge
+## 7. Non-fast-forward merge
 
 Now merge the divergent branch:
 
@@ -125,7 +158,7 @@ Because `main` and `promote-admins` touched *different* rows
 (Bob's age vs Alice's role), the recursive JSON merger finds no
 conflict. `red_conflicts` stays empty.
 
-## 7. Introduce a conflict, then merge again
+## 8. Introduce a conflict, then merge again
 
 Rewind and set up a real conflict:
 
@@ -163,7 +196,7 @@ echo "$OUTCOME" | jq
 `OUTCOME.data.conflicts` now has one entry, and
 `OUTCOME.data.merge_state_id` points at a `ms:<hex>` row.
 
-## 8. Inspect the conflict
+## 9. Inspect the conflict
 
 ```bash
 MSID=$(echo "$OUTCOME" | jq -r .data.merge_state_id)
@@ -191,7 +224,7 @@ snapshots the resolver pinned for the merge. `conflicting_paths`
 is emitted by `three_way_merge` in
 `src/application/merge_json.rs`.
 
-## 9. Resolve the conflict
+## 10. Resolve the conflict
 
 Decide the final value (say, `admin`), apply it as a normal PATCH,
 then clear the marker:
@@ -211,7 +244,7 @@ reddb -X POST /vcs/resolve-conflict \
 > so you won't need the extra PATCH. Today the runtime records
 > the decision; a tiny glue PR ships the apply step.
 
-## 10. Time-travel audit
+## 11. Time-travel audit
 
 Six months later, an auditor asks: *"what was Alice's role at
 the time of tag `v1.0`?"*
@@ -231,7 +264,7 @@ The scanner installs the MVCC snapshot pinned by the `v1.0` tag
 and resolves the row from that snapshot's perspective — even if
 Alice's role has changed ten times since.
 
-## 11. What you just exercised
+## 12. What you just exercised
 
 - **Commits as MVCC snapshots** — every `red vcs commit` allocates
   a fresh xid, pins it so VACUUM can't reclaim the row versions,

@@ -105,6 +105,17 @@ ALTER TABLE users DROP COLUMN phone
 
 -- Rename a column
 ALTER TABLE users RENAME COLUMN name TO full_name
+
+-- Toggle append-only mode
+ALTER TABLE events SET APPEND_ONLY = true
+ALTER TABLE events SET APPEND_ONLY = false
+
+-- Opt the table in to (or out of) Git-for-Data (VCS).
+-- Works retroactively — past commits become queryable via
+-- `SELECT ... AS OF COMMIT '<hash>'` as soon as the flag is on.
+-- See /vcs/overview.md for the full opt-in model.
+ALTER TABLE users SET VERSIONED = true
+ALTER TABLE sessions SET VERSIONED = false
 ```
 
 ## Via HTTP

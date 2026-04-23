@@ -36,7 +36,13 @@ dump_log() {
         '.data[] | "\(.hash[0:12])  h=\(.height)  \(.message)"'
 }
 
-step "0. opt-in: create a versioned collection for this demo"
+step "0. opt-in: mark demo_users as versioned"
+# Three equivalent ways to opt a collection into Git-for-Data:
+#   (a) SQL DDL:   ALTER TABLE demo_users SET VERSIONED = true
+#   (b) CLI:       red vcs versioned on demo_users
+#   (c) REST:      POST /vcs/versioned {"collection":..,"enabled":true}
+# Working retroactively is supported — you may run this step any
+# time, even after commits already exist. See docs/vcs/overview.md.
 $RED vcs versioned on demo_users --path "$DB" | sed 's/^/  /'
 $RED vcs versioned list --path "$DB" | sed 's/^/  /'
 

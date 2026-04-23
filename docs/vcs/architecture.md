@@ -96,6 +96,60 @@ a different protocol can't transplant it here.
 for fast LCA queries: iterate `red_closure` in ascending height
 and short-circuit on the first common ancestor.
 
+## Per-collection opt-in (Phase 7)
+
+```
+red_vcs_settings
+  ┌─────────────────────────────────────────────────┐
+  │ _id = "users",     versioned = true,  ts_ms = … │
+  │ _id = "products",  versioned = true,  ts_ms = … │
+  └─────────────────────────────────────────────────┘
+       ▲
+       │  set_versioned(name, true)  ──▶ delete-then-insert
+       │  set_versioned(name, false) ──▶ delete
+       │
+       ├── ALTER TABLE name SET VERSIONED = true  (SQL DDL)
+       ├── POST /vcs/versioned {"collection","enabled"}  (REST)
+       ├── red vcs versioned on name  (CLI)
+       └── vcs.set_versioned(name, true)  (library)
+```
+
+`is_versioned(store, name)` is a cheap query on
+`red_vcs_settings` (presence of a row with `versioned = true`).
+Gates three decisions:
+
+- `materialize_merge_conflicts` iterates only versioned
+  collections when scanning the base/ours/theirs snapshots.
+- `vcs_diff` filters collections by the flag before the full scan.
+- `execute_query` refuses `AS OF` against a non-versioned user
+  collection with a clear error message pointing the caller at
+  `vcs.set_versioned(...)`.
+
+Internal `red_*` collections bypass the gate — they are
+append-only VCS metadata and always accept `AS OF`. The
+`set_versioned_flag` writer refuses to opt one of them in.
+
+### Retroactive semantics
+
+Opting in flips the gate only. No data rewrite, no catalog
+migration, no index rebuild. A collection that already has
+commits pinning xids *before* the opt-in becomes queryable at
+those commits the moment the flag lands — the xids are still
+pinned, the MVCC row versions are still in storage, only the
+`is_versioned` check was saying "no". SQL:
+
+```sql
+-- commits exist, table has data, but the flag was off
+ALTER TABLE users SET VERSIONED = true;
+-- now this works:
+SELECT * FROM users AS OF COMMIT '<older-hash>';
+```
+
+This stays true until real VACUUM lands (Phase 7.5) and begins
+reclaiming non-pinned-collection versions. At that point, very
+late opt-ins may miss intermediate row versions the GC already
+removed; opt in early when you know a collection matters.
+
 ## AS OF resolution
 
 ```
