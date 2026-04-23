@@ -28,8 +28,9 @@ red vcs versioned on users                -- CLI
 ```
 
 ```bash
-curl -X POST http://localhost:8080/vcs/versioned \
-  -d '{"collection":"users","enabled":true}'
+curl -X PUT http://localhost:8080/collections/users/vcs \
+  -H 'content-type: application/json' \
+  -d '{"versioned": true}'
 ```
 
 Works *retroactively*: you can opt in after creating the table,
@@ -174,12 +175,12 @@ $ red vcs resolve pick-src              # show the head of pick-src
 # the REST surface or the library API.)
 ```
 
-HTTP equivalent:
+HTTP equivalent (session-scoped):
 
 ```bash
-curl -X POST http://localhost:8080/vcs/cherry-pick \
+curl -X POST http://localhost:8080/repo/sessions/1/cherry-pick \
   -H 'content-type: application/json' \
-  -d '{"connection_id":1,"commit":"<pick-src-head-hash>",
+  -d '{"commit":"<pick-src-head-hash>",
        "author":{"name":"alice","email":"alice@example.com"}}'
 ```
 
@@ -222,7 +223,7 @@ entities on both sides:
 $ red vcs log --limit 1 --json | jq '.data[0]'
 {"hash":"<merge-hash>", ...}
 
-$ curl -s http://localhost:8080/vcs/conflicts/ms:<id> | jq
+$ curl -s http://localhost:8080/repo/merges/ms:<id>/conflicts | jq
 [
   {
     "id": "ms:<id>:users/42",

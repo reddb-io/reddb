@@ -170,198 +170,101 @@ red vcs resolve refs/tags/v1.0
 
 ## REST API
 
-Every endpoint accepts and returns JSON with the `{ ok, result }`
-/ `{ ok, error }` envelope used by the rest of RedDB's HTTP
-surface.
+RESTful, collection-centric. Resources live under `/repo/*`
+(repository-global state: refs, commits, sessions, merges) and
+`/collections/{name}/*` (per-collection aspects). Every response
+uses the standard `{ ok, result }` / `{ ok, error }` envelope.
 
-### `POST /vcs/commit`
+### Cheat sheet
 
-```json
-{
-  "connection_id": 1,
-  "message": "initial",
-  "author": { "name": "alice", "email": "alice@example.com" },
-  "committer": null,
-  "amend": false,
-  "allow_empty": true
-}
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET    | `/repo` | Repo summary: branch count, tag count, versioned collections, default branch |
+| GET    | `/repo/refs[?prefix=...]` | List all refs (branches + tags) |
+| GET    | `/repo/refs/heads` | List branches |
+| POST   | `/repo/refs/heads` | Create branch (`{name, from?, connection_id?}`) |
+| GET    | `/repo/refs/heads/{name}` | Show one branch |
+| PUT    | `/repo/refs/heads/{name}` | Move branch to commit (`{commit}` — soft-reset semantics) |
+| DELETE | `/repo/refs/heads/{name}` | Delete branch |
+| GET    | `/repo/refs/tags` | List tags |
+| POST   | `/repo/refs/tags` | Create tag (`{name, target, annotation?}`) |
+| GET    | `/repo/refs/tags/{name}` | Show one tag |
+| DELETE | `/repo/refs/tags/{name}` | Delete tag |
+| GET    | `/repo/commits?branch=&limit=&skip=&from=&to=&no_merges=` | List commits (topo walk) |
+| POST   | `/repo/commits` | Create commit from session's workset (`{message, author, connection_id, committer?, allow_empty?}`) |
+| GET    | `/repo/commits/{hash}` | Show single commit |
+| GET    | `/repo/commits/{a}/diff/{b}[?collection=&summary=true]` | Diff between two commit-ish specs |
+| GET    | `/repo/commits/{a}/lca/{b}` | Lowest common ancestor |
+| GET    | `/repo/sessions/{conn}` | Working-set status for that connection |
+| POST   | `/repo/sessions/{conn}/checkout` | Switch HEAD (`{kind: branch\|tag\|commit, target, force?}`) |
+| POST   | `/repo/sessions/{conn}/merge` | Merge into current HEAD (`{from, author, strategy?, message?}`) |
+| POST   | `/repo/sessions/{conn}/reset` | Reset HEAD (`{target, mode: soft\|mixed\|hard}`) |
+| POST   | `/repo/sessions/{conn}/cherry-pick` | (`{commit, author}`) |
+| POST   | `/repo/sessions/{conn}/revert` | (`{commit, author}`) |
+| GET    | `/repo/merges/{msid}` | Merge-state summary |
+| GET    | `/repo/merges/{msid}/conflicts` | List unresolved conflicts for that merge |
+| POST   | `/repo/merges/{msid}/conflicts/{cid}/resolve` | Resolve one conflict (`{value}`) |
+| GET    | `/collections/{name}/vcs` | Is this collection versioned? |
+| PUT    | `/collections/{name}/vcs` | Opt in or out (`{versioned: true \| false}`) |
+
+### Example: fast-forward merge end-to-end
+
+```bash
+# 1. Opt the users collection into VCS (collection-centric)
+curl -X PUT http://localhost:8080/collections/users/vcs \
+  -H 'content-type: application/json' \
+  -d '{"versioned": true}'
+
+# 2. Create a commit from connection 1's workset
+curl -X POST http://localhost:8080/repo/commits \
+  -H 'content-type: application/json' \
+  -d '{
+    "connection_id": 1,
+    "message": "seed users",
+    "author": {"name":"alice","email":"alice@example.com"},
+    "allow_empty": true
+  }'
+# 201 { ok, result: { hash, parents, height, ... } }
+
+# 3. Branch, switch, make more commits
+curl -X POST http://localhost:8080/repo/refs/heads \
+  -d '{"name":"feature","connection_id":1}'
+curl -X POST http://localhost:8080/repo/sessions/1/checkout \
+  -d '{"kind":"branch","target":"feature"}'
+curl -X POST http://localhost:8080/repo/commits \
+  -d '{"connection_id":1,"message":"feat 1","author":{...},"allow_empty":true}'
+
+# 4. Merge back into main
+curl -X POST http://localhost:8080/repo/sessions/1/checkout \
+  -d '{"kind":"branch","target":"main"}'
+curl -X POST http://localhost:8080/repo/sessions/1/merge \
+  -d '{"from":"feature","author":{"name":"alice","email":"alice@example.com"}}'
+# 200 { ok, result: { fast_forward: true, conflicts: [], merge_commit: {...} } }
+
+# 5. Inspect history
+curl 'http://localhost:8080/repo/commits?branch=main&limit=5'
+curl http://localhost:8080/repo/commits/<hash>/diff/<other-hash>
+curl 'http://localhost:8080/repo/commits/<hash>/lca/<other-hash>'
 ```
 
-Returns `{ ok, result: Commit }` where `Commit` has `hash`,
-`root_xid`, `parents`, `height`, `author`, `committer`, `message`,
-`timestamp_ms`, `signature?`.
+### Status codes
 
-### `POST /vcs/branch`
+| Code | Meaning |
+|------|---------|
+| 200  | OK (existing resource or read) |
+| 201  | Created (commit, branch, tag) |
+| 204  | No content (successful DELETE, successful conflict resolve) |
+| 400  | Invalid body / bad request (malformed JSON, missing field, invalid config) |
+| 404  | Resource not found (commit hash, branch, tag, collection) |
+| 405  | Method not allowed on this path |
+| 409  | Conflict (e.g., delete of a protected branch) |
+| 500  | Internal (unexpected storage or engine error) |
 
-```json
-{ "name": "feature", "from": "main", "connection_id": 1 }
-```
-
-Returns `{ ok, result: Ref }` (`name`, `kind`, `target`, `protected`).
-
-### `GET /vcs/branches`
-
-Returns `{ ok, result: Ref[] }` filtered by prefix `refs/heads/`.
-
-### `DELETE /vcs/branches/<name>`
-
-Remove a branch. Refuses protected branches with a 500 error.
-
-### `POST /vcs/tag`
+Every error body:
 
 ```json
-{ "name": "v1.0", "target": "main", "annotation": null }
+{ "ok": false, "error": "branch `refs/heads/main` is protected" }
 ```
-
-### `GET /vcs/tags`
-
-Returns `{ ok, result: Ref[] }` filtered by prefix `refs/tags/`.
-
-### `POST /vcs/checkout`
-
-```json
-{
-  "connection_id": 1,
-  "kind": "branch",
-  "target": "feature",
-  "force": false
-}
-```
-
-`kind` is one of `branch` / `commit` / `tag`.
-
-### `POST /vcs/merge`
-
-```json
-{
-  "connection_id": 1,
-  "from": "feature",
-  "author": { "name": "alice", "email": "..." },
-  "strategy": "auto",
-  "message": null,
-  "abort_on_conflict": false
-}
-```
-
-`strategy` one of `auto` / `ff-only` / `no-ff`.
-
-Returns `MergeOutcome`:
-
-```json
-{
-  "fast_forward": true,
-  "conflicts": [],
-  "merge_commit": { "hash": "...", ... },
-  "merge_state_id": null
-}
-```
-
-### `POST /vcs/reset`
-
-```json
-{
-  "connection_id": 1,
-  "target": "7a1a...",
-  "mode": "soft"
-}
-```
-
-`mode` one of `soft` / `mixed` / `hard`.
-
-### `POST /vcs/log`
-
-```json
-{
-  "connection_id": 1,
-  "to": "main",
-  "from": null,
-  "limit": 20,
-  "skip": 0,
-  "no_merges": false
-}
-```
-
-Returns `Commit[]`.
-
-### `POST /vcs/diff`
-
-```json
-{
-  "from": "main",
-  "to": "feature",
-  "collection": null,
-  "summary_only": false
-}
-```
-
-Returns:
-
-```json
-{
-  "from": "<hash>",
-  "to": "<hash>",
-  "added": 2,
-  "removed": 1,
-  "modified": 0,
-  "entries": [
-    { "collection": "users", "entity_id": "42",
-      "change": "added", "after": ... },
-    ...
-  ]
-}
-```
-
-### `POST /vcs/status`
-
-```json
-{ "connection_id": 1 }
-```
-
-Returns `Status`:
-
-```json
-{
-  "connection_id": 1,
-  "head_ref": "refs/heads/main",
-  "head_commit": "<hash>",
-  "detached": false,
-  "staged_changes": 0,
-  "working_changes": 0,
-  "unresolved_conflicts": 0,
-  "merge_state_id": null
-}
-```
-
-### `GET /vcs/lca?a=<spec>&b=<spec>`
-
-Returns `{ ok, result: { lca: "<hash>" | null } }`.
-
-### `GET /vcs/versioned`
-
-Returns the list of user collections currently opted in:
-
-```json
-{ "ok": true, "result": ["users", "products"] }
-```
-
-### `POST /vcs/versioned`
-
-Opt a collection in or out:
-
-```json
-{ "collection": "users", "enabled": true }
-```
-
-Response:
-
-```json
-{ "ok": true, "result": { "collection": "users", "versioned": true } }
-```
-
-### `GET /vcs/conflicts/<merge_state_id>`
-
-Returns `Conflict[]` with `id`, `collection`, `entity_id`, `base`,
-`ours`, `theirs`, `conflicting_paths`, `merge_state_id`.
 
 ---
 

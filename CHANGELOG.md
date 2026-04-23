@@ -2,6 +2,80 @@
 
 All notable changes to RedDB are documented here. Dates are ISO-8601 (UTC-3).
 
+## 2026-04-23 — REST surface rewrite: RESTful + collection-centric
+
+Dropped the `/vcs/*` RPC-shaped endpoints and replaced them with a
+properly RESTful, collection-centric layout. **Breaking change for
+HTTP consumers** — there is no compatibility shim.
+
+### Design
+
+- **Nouns, not verbs**: `/repo/commits`, `/repo/refs/heads/{name}`,
+  no `/vcs/checkout` or `/vcs/merge` as top-level paths.
+- **HTTP semantics respected**: GET for reads, POST creates,
+  PUT moves refs, DELETE deletes. `201 Created`, `204 No Content`,
+  `404 Not Found`, `409 Conflict` mapped from RedDBError.
+- **Session-scoped state transitions**: checkout/merge/reset/
+  cherry-pick/revert live under `/repo/sessions/{conn}/*` instead
+  of taking `connection_id` as a body field on a global endpoint.
+- **Collection-centric opt-in**: `/collections/{name}/vcs` owns
+  the versioned toggle — that's how a dev thinks about it, the
+  collection is the resource and VCS is an aspect.
+- **Nested conflicts**: `/repo/merges/{msid}/conflicts/{cid}/resolve`.
+- **Consistent JSON envelope**: `{ ok, result }` / `{ ok, error }`
+  unchanged.
+
+### New surface (20 endpoints)
+
+```
+GET    /repo                                     repo summary
+GET    /repo/refs[?prefix=…]                     unified ref listing
+GET    /repo/refs/heads                          branch list
+POST   /repo/refs/heads                          create
+GET    /repo/refs/heads/{name}                   show
+PUT    /repo/refs/heads/{name}                   move ref
+DELETE /repo/refs/heads/{name}                   delete
+GET    /repo/refs/tags
+POST   /repo/refs/tags
+GET    /repo/refs/tags/{name}
+DELETE /repo/refs/tags/{name}
+GET    /repo/commits?branch=&limit=&…            log
+POST   /repo/commits                             create (session workset)
+GET    /repo/commits/{hash}                      show
+GET    /repo/commits/{a}/diff/{b}                diff
+GET    /repo/commits/{a}/lca/{b}                 LCA
+GET    /repo/sessions/{conn}                     status
+POST   /repo/sessions/{conn}/checkout
+POST   /repo/sessions/{conn}/merge
+POST   /repo/sessions/{conn}/reset
+POST   /repo/sessions/{conn}/cherry-pick
+POST   /repo/sessions/{conn}/revert
+GET    /repo/merges/{msid}                       merge-state summary
+GET    /repo/merges/{msid}/conflicts             list
+POST   /repo/merges/{msid}/conflicts/{cid}/resolve
+GET    /collections/{name}/vcs                   opt-in state
+PUT    /collections/{name}/vcs                   toggle { versioned }
+```
+
+### Removed
+
+Every `/vcs/*` endpoint from the previous layout. No migration
+shim — callers update to the new paths.
+
+### Bonus: cherry-pick + revert now have HTTP handlers
+
+Previously runtime-only. Exposed via
+`POST /repo/sessions/{conn}/{cherry-pick|revert}`.
+
+### Docs
+
+- `docs/vcs/overview.md` — operation matrix rewritten with new
+  paths
+- `docs/vcs/commands.md` — new REST section with cheat sheet,
+  end-to-end example, and status code mapping
+- `docs/vcs/walkthrough.md`, `docs/guides/git-for-data.md` — all
+  curl examples updated
+
 ## 2026-04-23 — Git for Data: ALTER TABLE SET VERSIONED (Phase 7.1)
 
 `ALTER TABLE <name> SET VERSIONED = true|false` now wires the VCS

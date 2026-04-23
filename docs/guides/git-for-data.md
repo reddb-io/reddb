@@ -33,9 +33,9 @@ reddb -X POST /query \
 Equivalent REST / CLI:
 
 ```bash
-reddb -X POST /vcs/versioned \
+reddb -X PUT /collections/users/vcs \
   -H 'content-type: application/json' \
-  -d '{"collection":"users","enabled":true}'
+  -d '{"versioned": true}'
 
 red vcs versioned on users --path /tmp/git-for-data.rdb
 ```
@@ -43,8 +43,8 @@ red vcs versioned on users --path /tmp/git-for-data.rdb
 Confirm:
 
 ```bash
-reddb /vcs/versioned
-# -> {"ok":true,"result":["users"]}
+reddb /collections/users/vcs
+# -> {"ok":true,"result":{"collection":"users","versioned":true}}
 ```
 
 If you skip this step, the `SELECT ... AS OF` queries in §11
@@ -201,7 +201,7 @@ echo "$OUTCOME" | jq
 ```bash
 MSID=$(echo "$OUTCOME" | jq -r .data.merge_state_id)
 
-reddb /vcs/conflicts/$MSID | jq
+reddb /repo/merges/$MSID/conflicts | jq
 ```
 
 ```json
@@ -235,9 +235,9 @@ reddb -X PATCH /entities/users/1 \
   -d '{"role":"admin"}'
 
 # delete the conflict row via the resolve endpoint
-reddb -X POST /vcs/resolve-conflict \
+reddb -X POST "/repo/merges/$MSID/conflicts/$MSID:users/1/resolve" \
   -H 'content-type: application/json' \
-  -d "{\"conflict_id\":\"$MSID:users/1\",\"resolved\":{\"role\":\"admin\"}}"
+  -d '{"value":{"role":"admin"}}'
 ```
 
 > Phase 6.2 will fold the resolve call into an automatic apply

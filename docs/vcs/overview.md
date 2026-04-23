@@ -11,20 +11,29 @@ built out-of-band, no custom file format.
 
 | Operation | CLI | REST | SQL |
 |-----------|-----|------|-----|
-| Commit | `red vcs commit` | `POST /vcs/commit` | — |
-| Branch | `red vcs branch` | `POST /vcs/branch` | — |
-| Tag | `red vcs tag` | `POST /vcs/tag` | — |
-| Checkout | `red vcs checkout` | `POST /vcs/checkout` | — |
-| Merge | `red vcs merge` | `POST /vcs/merge` | — |
-| Cherry-pick | *(runtime only)* | *(runtime only)* | — |
-| Revert | *(runtime only)* | *(runtime only)* | — |
-| Reset | *(soft/mixed)* | `POST /vcs/reset` | — |
-| Log | `red vcs log` | `POST /vcs/log` | — |
-| Status | `red vcs status` | `POST /vcs/status` | — |
-| Diff | — | `POST /vcs/diff` | — |
-| LCA | `red vcs lca` | `GET /vcs/lca` | — |
+| Repo summary | — | `GET /repo` | — |
+| Commit | `red vcs commit` | `POST /repo/commits` | — |
+| Log | `red vcs log` | `GET /repo/commits?branch=&limit=` | — |
+| Show commit | — | `GET /repo/commits/{hash}` | — |
+| Branch create | `red vcs branch` | `POST /repo/refs/heads` | — |
+| Branch list | `red vcs branches` | `GET /repo/refs/heads` | — |
+| Branch move | — | `PUT /repo/refs/heads/{name}` | — |
+| Branch delete | — | `DELETE /repo/refs/heads/{name}` | — |
+| Tag create/list/delete | `red vcs tag` / `tags` | `POST/GET/DELETE /repo/refs/tags[/{name}]` | — |
+| Checkout | `red vcs checkout` | `POST /repo/sessions/{conn}/checkout` | — |
+| Merge | `red vcs merge` | `POST /repo/sessions/{conn}/merge` | — |
+| Cherry-pick | — | `POST /repo/sessions/{conn}/cherry-pick` | — |
+| Revert | — | `POST /repo/sessions/{conn}/revert` | — |
+| Reset (soft/mixed) | `red vcs reset` | `POST /repo/sessions/{conn}/reset` | — |
+| Status | `red vcs status` | `GET /repo/sessions/{conn}` | — |
+| Diff | — | `GET /repo/commits/{a}/diff/{b}` | — |
+| LCA | `red vcs lca` | `GET /repo/commits/{a}/lca/{b}` | — |
+| Merge conflicts | — | `GET /repo/merges/{msid}/conflicts` | — |
+| Resolve conflict | — | `POST /repo/merges/{msid}/conflicts/{cid}/resolve` | — |
+| Opt-in collection | `red vcs versioned on X` | `PUT /collections/{name}/vcs` | `ALTER TABLE ... SET VERSIONED = true` |
+| Check opt-in | `red vcs versioned check X` | `GET /collections/{name}/vcs` | — |
 | Resolve ref/hash | `red vcs resolve` | — | — |
-| Time-travel | — | — | `SELECT ... AS OF ...` |
+| Time-travel | — | — | `SELECT ... AS OF COMMIT\|BRANCH\|TAG\|TIMESTAMP\|SNAPSHOT ...` |
 
 Direct SQL time-travel (`SELECT ... AS OF COMMIT '<hash>'`) is the
 killer feature: queries run against any historical point without
@@ -113,12 +122,14 @@ ALTER TABLE sessions SET VERSIONED = false;
 ```
 
 ```bash
-# REST
-curl -X POST http://localhost:8080/vcs/versioned \
+# REST — collection-centric PUT on the collection's /vcs aspect
+curl -X PUT http://localhost:8080/collections/users/vcs \
   -H 'content-type: application/json' \
-  -d '{"collection":"users","enabled":true}'
+  -d '{"versioned": true}'
 
-curl http://localhost:8080/vcs/versioned
+# Read current state
+curl http://localhost:8080/collections/users/vcs
+# → { "ok": true, "result": { "collection": "users", "versioned": true } }
 ```
 
 ### Retroactive opt-in

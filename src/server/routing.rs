@@ -594,21 +594,23 @@ impl RedDBServer {
             ("POST", "/graph/jobs/complete") => self.handle_analytics_job_complete(body),
             ("POST", "/graph/jobs/stale") => self.handle_analytics_job_stale(body),
             ("POST", "/graph/jobs/fail") => self.handle_analytics_job_fail(body),
-            ("POST", "/vcs/commit") => handlers_vcs::handle_commit(&self.runtime, body),
-            ("POST", "/vcs/branch") => handlers_vcs::handle_branch_create(&self.runtime, body),
-            ("GET", "/vcs/branches") => handlers_vcs::handle_branch_list(&self.runtime),
-            ("POST", "/vcs/tag") => handlers_vcs::handle_tag_create(&self.runtime, body),
-            ("GET", "/vcs/tags") => handlers_vcs::handle_tag_list(&self.runtime),
-            ("POST", "/vcs/checkout") => handlers_vcs::handle_checkout(&self.runtime, body),
-            ("POST", "/vcs/merge") => handlers_vcs::handle_merge(&self.runtime, body),
-            ("POST", "/vcs/reset") => handlers_vcs::handle_reset(&self.runtime, body),
-            ("POST", "/vcs/log") => handlers_vcs::handle_log(&self.runtime, body),
-            ("POST", "/vcs/diff") => handlers_vcs::handle_diff(&self.runtime, body),
-            ("POST", "/vcs/status") => handlers_vcs::handle_status(&self.runtime, body),
-            ("GET", "/vcs/lca") => handlers_vcs::handle_lca(&self.runtime, &query),
-            ("GET", "/vcs/versioned") => handlers_vcs::handle_versioned_list(&self.runtime),
-            ("POST", "/vcs/versioned") => {
-                handlers_vcs::handle_versioned_set(&self.runtime, body)
+
+            // ─── Git-for-Data / VCS — RESTful, collection-centric ───
+            ("GET", "/repo") => handlers_vcs::handle_repo_info(&self.runtime),
+            ("GET", "/repo/refs") => {
+                handlers_vcs::handle_refs_list(&self.runtime, &query)
+            }
+            ("GET", "/repo/refs/heads") => handlers_vcs::handle_branches_list(&self.runtime),
+            ("POST", "/repo/refs/heads") => {
+                handlers_vcs::handle_branch_create(&self.runtime, body)
+            }
+            ("GET", "/repo/refs/tags") => handlers_vcs::handle_tags_list(&self.runtime),
+            ("POST", "/repo/refs/tags") => handlers_vcs::handle_tag_create(&self.runtime, body),
+            ("GET", "/repo/commits") => {
+                handlers_vcs::handle_commits_list(&self.runtime, &query)
+            }
+            ("POST", "/repo/commits") => {
+                handlers_vcs::handle_commit_create(&self.runtime, body)
             }
             _ => {
                 // Log dynamic routes: /logs/{name}/append, /logs/{name}/query, /logs/{name}/retention
@@ -632,15 +634,150 @@ impl RedDBServer {
                     }
                 }
 
-                // VCS dynamic routes: /vcs/branches/{name}, /vcs/conflicts/{merge_state_id}
-                if let Some(name) = path.strip_prefix("/vcs/branches/") {
-                    if method.as_str() == "DELETE" {
-                        return handlers_vcs::handle_branch_delete(&self.runtime, name);
+                // ─── VCS dynamic routes ───
+                //
+                // /repo/refs/heads/{name}        GET | PUT | DELETE
+                // /repo/refs/tags/{name}         GET | DELETE
+                // /repo/commits/{hash}           GET
+                // /repo/commits/{a}/diff/{b}     GET
+                // /repo/commits/{a}/lca/{b}      GET
+                // /repo/sessions/{conn}          GET
+                // /repo/sessions/{conn}/*        POST (checkout/merge/reset/
+                //                                     cherry-pick/revert)
+                // /repo/merges/{msid}            GET
+                // /repo/merges/{msid}/conflicts  GET
+                // /repo/merges/{msid}/conflicts/{cid}/resolve  POST
+                // /collections/{name}/vcs        GET | PUT
+                if let Some(rest) = path.strip_prefix("/repo/refs/heads/") {
+                    return match method.as_str() {
+                        "GET" => handlers_vcs::handle_branch_show(&self.runtime, rest),
+                        "PUT" => handlers_vcs::handle_branch_move(&self.runtime, rest, body),
+                        "DELETE" => handlers_vcs::handle_branch_delete(&self.runtime, rest),
+                        _ => json_error(405, "method not allowed"),
+                    };
+                }
+                if let Some(rest) = path.strip_prefix("/repo/refs/tags/") {
+                    return match method.as_str() {
+                        "GET" => handlers_vcs::handle_tag_show(&self.runtime, rest),
+                        "DELETE" => handlers_vcs::handle_tag_delete(&self.runtime, rest),
+                        _ => json_error(405, "method not allowed"),
+                    };
+                }
+                if let Some(rest) = path.strip_prefix("/repo/commits/") {
+                    let parts: Vec<&str> = rest.split('/').collect();
+                    match parts.as_slice() {
+                        [hash] => {
+                            return match method.as_str() {
+                                "GET" => handlers_vcs::handle_commit_show(&self.runtime, hash),
+                                _ => json_error(405, "method not allowed"),
+                            };
+                        }
+                        [a, "diff", b] => {
+                            if method.as_str() == "GET" {
+                                return handlers_vcs::handle_commit_diff(
+                                    &self.runtime,
+                                    a,
+                                    b,
+                                    &query,
+                                );
+                            }
+                        }
+                        [a, "lca", b] => {
+                            if method.as_str() == "GET" {
+                                return handlers_vcs::handle_commit_lca(&self.runtime, a, b);
+                            }
+                        }
+                        _ => {}
                     }
                 }
-                if let Some(msid) = path.strip_prefix("/vcs/conflicts/") {
-                    if method.as_str() == "GET" {
-                        return handlers_vcs::handle_conflicts_list(&self.runtime, msid);
+                if let Some(rest) = path.strip_prefix("/repo/sessions/") {
+                    let parts: Vec<&str> = rest.split('/').collect();
+                    if let Some(conn_str) = parts.first() {
+                        if let Ok(conn) = conn_str.parse::<u64>() {
+                            match parts.as_slice() {
+                                [_] => {
+                                    if method.as_str() == "GET" {
+                                        return handlers_vcs::handle_session_status(
+                                            &self.runtime,
+                                            conn,
+                                        );
+                                    }
+                                }
+                                [_, "checkout"] if method.as_str() == "POST" => {
+                                    return handlers_vcs::handle_session_checkout(
+                                        &self.runtime,
+                                        conn,
+                                        body,
+                                    );
+                                }
+                                [_, "merge"] if method.as_str() == "POST" => {
+                                    return handlers_vcs::handle_session_merge(
+                                        &self.runtime,
+                                        conn,
+                                        body,
+                                    );
+                                }
+                                [_, "reset"] if method.as_str() == "POST" => {
+                                    return handlers_vcs::handle_session_reset(
+                                        &self.runtime,
+                                        conn,
+                                        body,
+                                    );
+                                }
+                                [_, "cherry-pick"] if method.as_str() == "POST" => {
+                                    return handlers_vcs::handle_session_cherry_pick(
+                                        &self.runtime,
+                                        conn,
+                                        body,
+                                    );
+                                }
+                                [_, "revert"] if method.as_str() == "POST" => {
+                                    return handlers_vcs::handle_session_revert(
+                                        &self.runtime,
+                                        conn,
+                                        body,
+                                    );
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                if let Some(rest) = path.strip_prefix("/repo/merges/") {
+                    let parts: Vec<&str> = rest.split('/').collect();
+                    match parts.as_slice() {
+                        [msid] if method.as_str() == "GET" => {
+                            return handlers_vcs::handle_merge_show(&self.runtime, msid);
+                        }
+                        [msid, "conflicts"] if method.as_str() == "GET" => {
+                            return handlers_vcs::handle_merge_conflicts(&self.runtime, msid);
+                        }
+                        [msid, "conflicts", cid, "resolve"] if method.as_str() == "POST" => {
+                            return handlers_vcs::handle_conflict_resolve(
+                                &self.runtime,
+                                msid,
+                                cid,
+                                body,
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(rest) = path.strip_prefix("/collections/") {
+                    let parts: Vec<&str> = rest.split('/').collect();
+                    if parts.len() == 2 && parts[1] == "vcs" {
+                        return match method.as_str() {
+                            "GET" => handlers_vcs::handle_collection_vcs_show(
+                                &self.runtime,
+                                parts[0],
+                            ),
+                            "PUT" => handlers_vcs::handle_collection_vcs_set(
+                                &self.runtime,
+                                parts[0],
+                                body,
+                            ),
+                            _ => json_error(405, "method not allowed"),
+                        };
                     }
                 }
 
