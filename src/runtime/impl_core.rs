@@ -2767,27 +2767,27 @@ impl RedDBRuntime {
         // DML statements (INSERT/UPDATE/DELETE) almost always have unique literal
         // values, so caching them burns CPU on eviction bookkeeping (Vec::remove(0)
         // shifts the entire LRU list) with zero hit rate. Skip the cache entirely
-        // for write operations — parse directly.
-        //
-        // Only SELECT/DDL statements benefit from plan caching.
-        // Detect by peeking at the first keyword of the trimmed query.
+        // Plan cache applies to statements whose shape can be
+        // normalised + rebound (`UPDATE t SET x=? WHERE _entity_id=?`
+        // reuses the same plan across thousands of varying literals).
+        // INSERT is still bypassed — its shape changes per column set
+        // and bulk paths don't go through here anyway.
         let first_word = query
             .trim()
             .split_ascii_whitespace()
             .next()
             .unwrap_or("")
             .to_ascii_uppercase();
-        let is_write_op =
-            first_word == "INSERT" || first_word == "UPDATE" || first_word == "DELETE";
+        let is_insert = first_word == "INSERT";
 
-        let cache_key = if is_write_op {
+        let cache_key = if is_insert {
             String::new() // unused
         } else {
             crate::storage::query::planner::cache_key::normalize_cache_key(query)
         };
 
-        let expr = if is_write_op {
-            // Bypass plan cache for write operations — no benefit, pure overhead
+        let expr = if is_insert {
+            // Bypass plan cache for INSERT — shape varies per query.
             parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?
         } else {
             // ── Hot path: read lock only (no writer serialization on cache hits) ──
