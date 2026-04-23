@@ -1614,6 +1614,84 @@ fn run_vcs_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
                 })
                 .map_err(|e| e.to_string())
         }
+        "versioned" => {
+            let action = args.first().copied().unwrap_or("list");
+            match action {
+                "list" => vcs
+                    .list_versioned()
+                    .map(|list| {
+                        if json_mode {
+                            let items: Vec<String> = list
+                                .iter()
+                                .map(|s| format!("\"{}\"", json_escape(s)))
+                                .collect();
+                            format!("[{}]", items.join(","))
+                        } else if list.is_empty() {
+                            "(no versioned collections)\n".to_string()
+                        } else {
+                            list.into_iter()
+                                .map(|s| format!("{s}\n"))
+                                .collect::<String>()
+                        }
+                    })
+                    .map_err(|e| e.to_string()),
+                "on" | "enable" | "add" => match args.get(1) {
+                    None => Err("usage: red vcs versioned on <collection>".to_string()),
+                    Some(coll) => vcs
+                        .set_versioned(coll, true)
+                        .map(|()| {
+                            if json_mode {
+                                format!(
+                                    "{{\"collection\":\"{}\",\"versioned\":true}}",
+                                    json_escape(coll)
+                                )
+                            } else {
+                                format!("opted in: {coll}\n")
+                            }
+                        })
+                        .map_err(|e| e.to_string()),
+                },
+                "off" | "disable" | "remove" => match args.get(1) {
+                    None => Err("usage: red vcs versioned off <collection>".to_string()),
+                    Some(coll) => vcs
+                        .set_versioned(coll, false)
+                        .map(|()| {
+                            if json_mode {
+                                format!(
+                                    "{{\"collection\":\"{}\",\"versioned\":false}}",
+                                    json_escape(coll)
+                                )
+                            } else {
+                                format!("opted out: {coll}\n")
+                            }
+                        })
+                        .map_err(|e| e.to_string()),
+                },
+                "check" => match args.get(1) {
+                    None => Err("usage: red vcs versioned check <collection>".to_string()),
+                    Some(coll) => vcs
+                        .is_versioned(coll)
+                        .map(|b| {
+                            if json_mode {
+                                format!(
+                                    "{{\"collection\":\"{}\",\"versioned\":{}}}",
+                                    json_escape(coll),
+                                    b
+                                )
+                            } else if b {
+                                format!("{coll}: versioned\n")
+                            } else {
+                                format!("{coll}: NOT versioned\n")
+                            }
+                        })
+                        .map_err(|e| e.to_string()),
+                },
+                _ => Err(format!(
+                    "usage: red vcs versioned [list|on|off|check] <collection>\n\
+                     got: {action}"
+                )),
+            }
+        }
         "reset" => {
             let Some(target) = args.first() else {
                 return emit_vcs_result(
@@ -1645,7 +1723,7 @@ fn run_vcs_command(flags: &HashMap<String, FlagValue>, remaining: &[String]) {
         }
         _ => Err(format!(
             "Unknown vcs subcommand `{subcommand}`\n\n\
-             Usage: red vcs <commit|branch|branches|tag|tags|checkout|merge|reset|log|status|lca|resolve> [args] [flags]\n"
+             Usage: red vcs <commit|branch|branches|tag|tags|checkout|merge|reset|log|status|lca|resolve|versioned> [args] [flags]\n"
         )),
     };
 

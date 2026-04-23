@@ -404,6 +404,22 @@ impl<'a, P: RuntimeVcsPort + ?Sized> VcsUseCases<'a, P> {
         self.runtime.vcs_resolve_as_of(spec)
     }
 
+    /// Opt a user collection into Git-for-Data. Once flagged, the
+    /// collection participates in merge / diff / AS OF semantics.
+    pub fn set_versioned(&self, collection: &str, enabled: bool) -> RedDBResult<()> {
+        self.runtime.vcs_set_versioned(collection, enabled)
+    }
+
+    /// List every user collection currently opted into VCS.
+    pub fn list_versioned(&self) -> RedDBResult<Vec<String>> {
+        self.runtime.vcs_list_versioned()
+    }
+
+    /// Is this user collection opted in?
+    pub fn is_versioned(&self, collection: &str) -> RedDBResult<bool> {
+        self.runtime.vcs_is_versioned(collection)
+    }
+
     /// Resolve a short ref / commit prefix / branch / tag to a full
     /// commit hash. Primary caller is the query parser's AS OF path.
     pub fn resolve_commitish(&self, spec: &str) -> RedDBResult<CommitHash> {

@@ -94,4 +94,16 @@ impl RuntimeVcsPort for RedDBRuntime {
     fn vcs_resolve_commitish(&self, spec: &str) -> RedDBResult<CommitHash> {
         RedDBRuntime::vcs_resolve_commitish(self, spec)
     }
+
+    fn vcs_set_versioned(&self, collection: &str, enabled: bool) -> RedDBResult<()> {
+        RedDBRuntime::vcs_set_versioned(self, collection, enabled)
+    }
+
+    fn vcs_list_versioned(&self) -> RedDBResult<Vec<String>> {
+        RedDBRuntime::vcs_list_versioned(self)
+    }
+
+    fn vcs_is_versioned(&self, collection: &str) -> RedDBResult<bool> {
+        RedDBRuntime::vcs_is_versioned(self, collection)
+    }
 }

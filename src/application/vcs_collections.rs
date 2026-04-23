@@ -33,6 +33,13 @@ pub const MERGE_STATE: &str = "red_merge_state";
 /// Remote repository configuration: url, fetch_specs, auth key ref.
 pub const REMOTES: &str = "red_remotes";
 
+/// Per-user-collection opt-in flag for Git-for-Data. Each row:
+/// `_id = <user_collection_name>`, `versioned = true`, `ts_ms`.
+/// A collection is treated as versioned iff a row exists here with
+/// `versioned = true`. Default (no row) is non-versioned — merge,
+/// diff, conflict materialisation, and AS OF queries skip it.
+pub const SETTINGS: &str = "red_vcs_settings";
+
 /// All VCS collections, in bootstrap order. Consumed by the runtime
 /// bootstrap to call `get_or_create_collection` once at startup.
 pub const ALL: &[&str] = &[
@@ -43,6 +50,7 @@ pub const ALL: &[&str] = &[
     CONFLICTS,
     MERGE_STATE,
     REMOTES,
+    SETTINGS,
 ];
 
 /// Ref name for the default branch.

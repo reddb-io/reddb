@@ -120,6 +120,22 @@ red vcs lca main feature-x
 red vcs lca 7a1a... e3f...
 ```
 
+### `red vcs versioned [list|on|off|check] [collection]`
+
+Manage per-collection opt-in. Collections are non-versioned by
+default; only opt-in collections participate in merge, diff, and
+AS OF.
+
+```bash
+red vcs versioned list                   # every opted-in name
+red vcs versioned on users               # opt users in
+red vcs versioned off sessions           # opt sessions out
+red vcs versioned check users            # versioned? true/false
+```
+
+Internal `red_*` collections cannot be opted in (refused with
+`cannot version internal collection`).
+
 ### `red vcs resolve <spec>`
 
 Resolve any of these to a 64-hex commit hash:
@@ -305,6 +321,28 @@ Returns `Status`:
 
 Returns `{ ok, result: { lca: "<hash>" | null } }`.
 
+### `GET /vcs/versioned`
+
+Returns the list of user collections currently opted in:
+
+```json
+{ "ok": true, "result": ["users", "products"] }
+```
+
+### `POST /vcs/versioned`
+
+Opt a collection in or out:
+
+```json
+{ "collection": "users", "enabled": true }
+```
+
+Response:
+
+```json
+{ "ok": true, "result": { "collection": "users", "versioned": true } }
+```
+
 ### `GET /vcs/conflicts/<merge_state_id>`
 
 Returns `Conflict[]` with `id`, `collection`, `entity_id`, `base`,
@@ -346,6 +384,11 @@ Grammar:
 
 ### Behaviour
 
+- **Opt-in gate** (Phase 7): `AS OF` on a user collection that
+  has not opted into VCS via `vcs.set_versioned(name, true)`
+  raises an error (`AS OF requires a versioned collection`).
+  Internal `red_*` collections are append-only and always accept
+  `AS OF` without opt-in.
 - The clause is resolved to an MVCC `xid` before execution and a
   `CurrentSnapshotGuard` is installed for the scope of the
   statement. Nested subqueries that don't declare their own

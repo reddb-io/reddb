@@ -2,6 +2,50 @@
 
 All notable changes to RedDB are documented here. Dates are ISO-8601 (UTC-3).
 
+## 2026-04-23 — Git for Data: opt-in per collection (Phase 7)
+
+Follow-up to the VCS ship. User collections now stay outside VCS
+by default; each one explicitly opts in via
+`vcs.set_versioned(name, true)` (library), `POST /vcs/versioned`
+(REST), or `red vcs versioned on <name>` (CLI). This keeps
+transactional churn (sessions, caches, queues) out of the commit
+graph so VACUUM stays free to prune aggressively.
+
+### Behaviour changes
+
+- **Default = non-versioned**: a freshly-created collection does
+  not participate in merge / diff / AS OF. No extra row versions
+  pinned by commits referencing it.
+- **`vcs_diff` / `vcs_merge` / cherry-pick / revert**: only scan
+  opted-in collections when computing deltas and conflicts.
+- **`AS OF` on unversioned table**: raises
+  `AS OF requires a versioned collection — \`X\` has not opted in.`
+  Internal `red_*` collections are an exception — they're
+  append-only and always accept `AS OF`.
+- **Idempotent + reversible**: `set_versioned(name, true)`
+  twice is a no-op; `false` removes the flag.
+- **`red_*` collections cannot be opted in**: the `red_vcs_settings`
+  writer refuses them explicitly.
+
+### New surface
+
+- `VcsUseCases::set_versioned / list_versioned / is_versioned`
+- `GET /vcs/versioned` → list; `POST /vcs/versioned` → set
+- `red vcs versioned [list|on|off|check]`
+
+### New collection
+
+- `red_vcs_settings` — one row per opted-in user collection
+  (`_id = name`, `versioned = true`, `ts_ms`). Added to
+  `vcs_collections::ALL` so bootstrap creates it.
+
+### Tests
+
+- `tests/e2e_vcs_opt_in.rs` — 6 cases covering default off, opt-in,
+  opt-out, idempotency, internal collection rejection, AS OF
+  enforcement, post-opt-in AS OF success.
+- All 34 existing e2e_vcs_* tests still green.
+
 ## 2026-04-23 — Git for Data (VCS layer over MVCC)
 
 First-class version control on top of the MVCC engine. Every

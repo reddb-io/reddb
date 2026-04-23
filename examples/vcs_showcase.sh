@@ -36,6 +36,10 @@ dump_log() {
         '.data[] | "\(.hash[0:12])  h=\(.height)  \(.message)"'
 }
 
+step "0. opt-in: create a versioned collection for this demo"
+$RED vcs versioned on demo_users --path "$DB" | sed 's/^/  /'
+$RED vcs versioned list --path "$DB" | sed 's/^/  /'
+
 step "1. seed — initial commit"
 $RED vcs commit "seed" $shared | sed 's/^/  /'
 

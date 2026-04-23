@@ -1011,6 +1011,16 @@ fn strip_explain_prefix(sql: &str) -> Option<&str> {
 fn peek_top_level_as_of(
     sql: &str,
 ) -> Option<crate::application::vcs::AsOfSpec> {
+    peek_top_level_as_of_with_table(sql).map(|(spec, _)| spec)
+}
+
+/// Same as `peek_top_level_as_of` but also returns the table name
+/// targeted by the AS OF clause (when the FROM clause names a
+/// concrete table). `None` for the table slot means scalar SELECT
+/// or a subquery source — callers treat those as "no enforcement".
+fn peek_top_level_as_of_with_table(
+    sql: &str,
+) -> Option<(crate::application::vcs::AsOfSpec, Option<String>)> {
     if !sql.as_bytes().windows(5).any(|w| w.eq_ignore_ascii_case(b"as of")) {
         return None;
     }
@@ -1019,7 +1029,12 @@ fn peek_top_level_as_of(
         return None;
     };
     let clause = table.as_of?;
-    Some(match clause {
+    let table_name = if table.table.is_empty() || table.table == "any" {
+        None
+    } else {
+        Some(table.table.clone())
+    };
+    let spec = match clause {
         crate::storage::query::ast::AsOfClause::Commit(h) => {
             crate::application::vcs::AsOfSpec::Commit(h)
         }
@@ -1035,7 +1050,8 @@ fn peek_top_level_as_of(
         crate::storage::query::ast::AsOfClause::Snapshot(x) => {
             crate::application::vcs::AsOfSpec::Snapshot(x)
         }
-    })
+    };
+    Some((spec, table_name))
 }
 
 fn query_has_volatile_builtin(sql: &str) -> bool {
@@ -2655,8 +2671,36 @@ impl RedDBRuntime {
         // point. Visibility for every scan then transparently honours
         // the time-travel target. Invalid AS OF (unknown commit/
         // branch/tag) short-circuits with the resolver's error.
-        let snapshot = match peek_top_level_as_of(query) {
-            Some(spec) => {
+        //
+        // Phase 7 (opt-in): AS OF only works against collections
+        // that opted in via `vcs_set_versioned`. Running AS OF on a
+        // non-versioned collection would silently return the current
+        // tip (xmin=0 rows are always visible) — a foot-gun we reject
+        // explicitly so users notice the missed opt-in.
+        let snapshot = match peek_top_level_as_of_with_table(query) {
+            Some((spec, Some(table))) => {
+                // Internal `red_*` collections are append-only and
+                // always safe to query AS OF — they store VCS
+                // metadata that grows monotonically. For user
+                // collections enforce the opt-in so accidental
+                // AS OF on a non-versioned table raises loudly.
+                if !table.starts_with("red_") && !self.vcs_is_versioned(&table)? {
+                    return Err(RedDBError::InvalidConfig(format!(
+                        "AS OF requires a versioned collection — \
+                         `{table}` has not opted in. \
+                         Call vcs.set_versioned(\"{table}\", true) first."
+                    )));
+                }
+                let xid = self.vcs_resolve_as_of(spec)?;
+                crate::storage::transaction::snapshot::Snapshot {
+                    xid,
+                    in_progress: std::collections::HashSet::new(),
+                }
+            }
+            Some((spec, None)) => {
+                // No table in FROM (scalar SELECT) — honour AS OF
+                // as a best-effort snapshot install; it won't filter
+                // anything since there's no scan.
                 let xid = self.vcs_resolve_as_of(spec)?;
                 crate::storage::transaction::snapshot::Snapshot {
                     xid,

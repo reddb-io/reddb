@@ -606,6 +606,10 @@ impl RedDBServer {
             ("POST", "/vcs/diff") => handlers_vcs::handle_diff(&self.runtime, body),
             ("POST", "/vcs/status") => handlers_vcs::handle_status(&self.runtime, body),
             ("GET", "/vcs/lca") => handlers_vcs::handle_lca(&self.runtime, &query),
+            ("GET", "/vcs/versioned") => handlers_vcs::handle_versioned_list(&self.runtime),
+            ("POST", "/vcs/versioned") => {
+                handlers_vcs::handle_versioned_set(&self.runtime, body)
+            }
             _ => {
                 // Log dynamic routes: /logs/{name}/append, /logs/{name}/query, /logs/{name}/retention
                 if let Some(rest) = path.strip_prefix("/logs/") {

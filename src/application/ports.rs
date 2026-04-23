@@ -497,6 +497,10 @@ pub trait RuntimeVcsPort {
         &self,
         spec: &str,
     ) -> RedDBResult<crate::application::vcs::CommitHash>;
+
+    fn vcs_set_versioned(&self, collection: &str, enabled: bool) -> RedDBResult<()>;
+    fn vcs_list_versioned(&self) -> RedDBResult<Vec<String>>;
+    fn vcs_is_versioned(&self, collection: &str) -> RedDBResult<bool>;
 }
 
 #[path = "ports_impls.rs"]

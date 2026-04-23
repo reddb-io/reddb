@@ -225,3 +225,41 @@ pub(crate) fn handle_conflicts_list(
         Err(e) => json_response(500, err(&e.to_string())),
     }
 }
+
+pub(crate) fn handle_versioned_list(runtime: &RedDBRuntime) -> HttpResponse {
+    match use_cases(runtime).list_versioned() {
+        Ok(list) => {
+            let arr = JsonValue::Array(list.into_iter().map(JsonValue::String).collect());
+            json_response(200, ok(arr))
+        }
+        Err(e) => json_response(500, err(&e.to_string())),
+    }
+}
+
+pub(crate) fn handle_versioned_set(runtime: &RedDBRuntime, body: Vec<u8>) -> HttpResponse {
+    let body = match parse_body(body) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    let collection = match body
+        .get("collection")
+        .and_then(JsonValue::as_str)
+        .map(String::from)
+    {
+        Some(s) => s,
+        None => return json_response(400, err("missing `collection`")),
+    };
+    let enabled = body
+        .get("enabled")
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(true);
+    match use_cases(runtime).set_versioned(&collection, enabled) {
+        Ok(()) => {
+            let mut map = Map::new();
+            map.insert("collection".to_string(), JsonValue::String(collection));
+            map.insert("versioned".to_string(), JsonValue::Bool(enabled));
+            json_response(200, ok(JsonValue::Object(map)))
+        }
+        Err(e) => json_response(500, err(&e.to_string())),
+    }
+}

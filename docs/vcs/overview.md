@@ -87,6 +87,67 @@ collections without extra work.
   the hash — tampering is immediately visible to anyone who saved
   the old hash.
 
+## Opt-in per collection
+
+**User collections are non-versioned by default.** Nothing you
+create participates in Git-for-Data until you explicitly mark it:
+
+```rust
+// Library API
+vcs.set_versioned("users", true)?;
+vcs.set_versioned("sessions", false)?;  // default, shown for clarity
+```
+
+```bash
+# CLI
+red vcs versioned on users
+red vcs versioned off users
+red vcs versioned list
+red vcs versioned check users
+```
+
+```bash
+# REST
+curl -X POST http://localhost:8080/vcs/versioned \
+  -H 'content-type: application/json' \
+  -d '{"collection":"users","enabled":true}'
+
+curl http://localhost:8080/vcs/versioned
+```
+
+### What opt-in changes
+
+- **`vcs_diff`** iterates only versioned collections.
+- **`vcs_merge` / cherry-pick / revert** materialise conflicts
+  only from versioned collections.
+- **`AS OF` queries** error with
+  `AS OF requires a versioned collection — \`X\` has not opted in`
+  when the target table hasn't been flagged.
+- **Internal `red_*` collections** are always treated as
+  append-only and always accept `AS OF` (they store VCS metadata
+  itself; their history is the history of the history).
+- **Storage**: versions of rows in non-versioned collections stay
+  reclaim-eligible by VACUUM; only versioned collections pin
+  row versions behind commit references. This is the main disk-
+  cost lever — keep ephemeral data (sessions, caches, queues)
+  out of VCS and let VACUUM prune aggressively.
+
+### Default-off rationale
+
+Most transactional data doesn't warrant history:
+
+- Sessions, tokens, and short-TTL caches churn dozens of times
+  per row per day — history would multiply their storage cost
+  without any audit value.
+- Queues and streams are semantically linear; commits don't map
+  to them.
+- Vector indices and derived aggregates can be rebuilt from
+  source data on demand.
+
+Conversely, users / products / audit_log / transactional ledgers
+are obvious opt-in candidates — every change should be reviewable
+and reproducible.
+
 ## Storage footprint
 
 All VCS state lives in these seven `red_*` collections, created
@@ -101,6 +162,7 @@ on first boot:
 | `red_conflicts` | unresolved merge conflicts — base/ours/theirs JSON + conflicting paths |
 | `red_merge_state` | in-progress merge/cherry_pick/revert/rebase metadata |
 | `red_remotes` | remote repository configuration (Phase 7) |
+| `red_vcs_settings` | per-collection opt-in flag (`_id = name`, `versioned = true`) |
 
 Config defaults live in `red_config` under `red.vcs.*` — inherits
 the same dot-notation patterns already used by `red.ai`,

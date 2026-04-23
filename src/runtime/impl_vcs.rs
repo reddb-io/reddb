@@ -336,6 +336,101 @@ fn delete_ref(store: &UnifiedStore, name: &str) -> RedDBResult<bool> {
     Ok(true)
 }
 
+// ---------------------------------------------------------------------------
+// Opt-in per-collection versioning (Phase 7 — disk-cost isolation)
+// ---------------------------------------------------------------------------
+
+/// Is this user collection opted in to Git-for-Data?
+///
+/// Default is `false`: a fresh collection stays outside the VCS so
+/// transactional churn (sessions, caches, queues) doesn't pin
+/// extra row versions. Internal `red_*` collections are never
+/// versioned — they store VCS metadata itself.
+fn is_versioned(store: &UnifiedStore, name: &str) -> bool {
+    if name.starts_with("red_") {
+        return false;
+    }
+    let Some(manager) = store.get_collection(vc::SETTINGS) else {
+        return false;
+    };
+    let target = name.to_string();
+    manager
+        .query_all(|entity| {
+            entity
+                .data
+                .as_row()
+                .is_some_and(|row| row_text(row, "_id").as_deref() == Some(&target))
+        })
+        .into_iter()
+        .any(|entity| {
+            entity
+                .data
+                .as_row()
+                .and_then(|row| row.get_field("versioned"))
+                .map(|v| matches!(v, Value::Boolean(true)))
+                .unwrap_or(false)
+        })
+}
+
+/// Enumerate every user collection currently opted in. Order
+/// undefined — callers that need a deterministic iteration should
+/// sort the returned list.
+fn versioned_collections(store: &UnifiedStore) -> Vec<String> {
+    let Some(manager) = store.get_collection(vc::SETTINGS) else {
+        return Vec::new();
+    };
+    manager
+        .query_all(|entity| {
+            entity
+                .data
+                .as_row()
+                .and_then(|row| row.get_field("versioned"))
+                .map(|v| matches!(v, Value::Boolean(true)))
+                .unwrap_or(false)
+        })
+        .into_iter()
+        .filter_map(|entity| row_text(entity.data.as_row()?, "_id"))
+        .collect()
+}
+
+/// Upsert / delete the `red_vcs_settings` row for `name`. `true`
+/// opts the collection into VCS; `false` opts it out (subsequent
+/// merges / diffs / AS OF queries stop seeing it). Does NOT touch
+/// existing row versions — you control whether history is retained
+/// by deciding *when* to opt out.
+fn set_versioned_flag(
+    store: &UnifiedStore,
+    name: &str,
+    enabled: bool,
+) -> RedDBResult<()> {
+    if name.starts_with("red_") {
+        return Err(RedDBError::InvalidConfig(format!(
+            "cannot version internal collection `{name}`"
+        )));
+    }
+    let target = name.to_string();
+    if let Some(manager) = store.get_collection(vc::SETTINGS) {
+        let rows = manager.query_all(|entity| {
+            entity
+                .data
+                .as_row()
+                .is_some_and(|row| row_text(row, "_id").as_deref() == Some(&target))
+        });
+        for row in rows {
+            let _ = store.delete(vc::SETTINGS, row.id);
+        }
+    }
+    if !enabled {
+        return Ok(());
+    }
+    let mut fields: HashMap<String, Value> = HashMap::new();
+    fields.insert("_id".to_string(), Value::text(name));
+    fields.insert("versioned".to_string(), Value::Boolean(true));
+    fields.insert("ts_ms".to_string(), Value::TimestampMs(now_ms()));
+    insert_meta_row(store, vc::SETTINGS, fields)?;
+    Ok(())
+}
+
 fn list_refs_by_prefix(store: &UnifiedStore, prefix: Option<&str>) -> Vec<Ref> {
     let Some(manager) = store.get_collection(vc::REFS) else {
         return Vec::new();
@@ -1313,6 +1408,9 @@ impl RedDBRuntime {
             if coll.starts_with("red_") {
                 continue;
             }
+            if !is_versioned(store, &coll) {
+                continue;
+            }
             if let Some(filter) = &input.collection {
                 if filter != &coll {
                     continue;
@@ -1570,6 +1668,26 @@ impl RedDBRuntime {
         }
     }
 
+    pub fn vcs_set_versioned(&self, collection: &str, enabled: bool) -> RedDBResult<()> {
+        let store_arc = self.inner.db.store();
+        let store: &UnifiedStore = &store_arc;
+        set_versioned_flag(store, collection, enabled)
+    }
+
+    pub fn vcs_list_versioned(&self) -> RedDBResult<Vec<String>> {
+        let store_arc = self.inner.db.store();
+        let store: &UnifiedStore = &store_arc;
+        let mut list = versioned_collections(store);
+        list.sort();
+        Ok(list)
+    }
+
+    pub fn vcs_is_versioned(&self, collection: &str) -> RedDBResult<bool> {
+        let store_arc = self.inner.db.store();
+        let store: &UnifiedStore = &store_arc;
+        Ok(is_versioned(store, collection))
+    }
+
     pub fn vcs_resolve_commitish(&self, spec: &str) -> RedDBResult<CommitHash> {
         let store_arc = self.inner.db.store();
         let store: &UnifiedStore = &store_arc;
@@ -1642,14 +1760,17 @@ fn materialize_merge_conflicts(
     let ours_snap = sm.snapshot(ours_xid);
     let theirs_snap = sm.snapshot(theirs_xid);
 
-    // Walk every user collection, materialising per-(entity_id)
-    // visible JSON bodies at each of the three snapshots. Phase 6:
-    // we keep the bodies, run a recursive 3-way merge, and persist
-    // the conflicting paths onto the red_conflicts row so
-    // vcs_conflict_resolve can present the full context to callers.
+    // Walk every VCS-opted-in user collection, materialising
+    // per-(entity_id) visible JSON bodies at each of the three
+    // snapshots. Collections that never opted in are skipped — by
+    // definition they have no history semantics worth conflicting
+    // over.
     let mut conflicts: Vec<Conflict> = Vec::new();
     for coll in store.list_collections() {
         if coll.starts_with("red_") {
+            continue;
+        }
+        if !is_versioned(store, &coll) {
             continue;
         }
         let Some(manager) = store.get_collection(&coll) else {
