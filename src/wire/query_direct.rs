@@ -120,93 +120,95 @@ fn execute_direct_scan(runtime: &RedDBRuntime, tq: &TableQuery) -> Option<Vec<u8
         return None;
     }
 
-    // Without a filter there's no index to use; full scan duplicates
-    // the runtime's canonical scan loop. Fall back.
-    let filter = effective_filter.as_ref()?;
-
-    let limit = tq.limit.map(|l| l as usize);
-    let idx_store = runtime.index_store_ref();
-
-    // LIMIT pushdown is safe only when the index filter matches the
-    // full WHERE predicate. For composite filters (`And(Eq(city), Gt(age))`
-    // where only `age` has an index) the index returns up to `limit`
-    // ids that pass `age > X` but still need to pass `city = Y` after —
-    // pushing the limit down would short-return fewer than `limit` rows.
-    // Fall back to no pushdown when the filter has branches the index
-    // can't resolve on its own.
-    let index_limit = if filter_is_single_indexable_leaf(filter) {
-        limit
-    } else {
-        None
-    };
-    let ids = try_sorted_index_lookup(filter, tq.table.as_str(), idx_store, index_limit)?;
-
     let db = runtime.db();
     let store = db.store();
     let manager = store.get_collection(&tq.table)?;
-
-    let table_name = tq.table.as_str();
-    let table_alias = tq.alias.as_deref().unwrap_or(table_name);
-    let compiled_filter = CompiledEntityFilter::compile(filter, table_name, table_alias);
-
+    let limit = tq.limit.map(|l| l as usize);
     let hard_limit = limit.unwrap_or(usize::MAX);
 
-    let mut body: Vec<u8> = Vec::with_capacity(256 + ids.len() * 64);
+    let mut body: Vec<u8> = Vec::with_capacity(2048);
     let mut header_nrows_pos: usize = 0;
     let mut cols: Option<Vec<Arc<str>>> = None;
     let mut row_count: u32 = 0;
 
-    manager.for_each_id(&ids, |_, entity| {
-        if (row_count as usize) >= hard_limit {
-            return;
-        }
-        if !entity.data.is_row() {
-            return;
-        }
-        if !entity_visible_under_current_snapshot(entity) {
-            return;
-        }
-        if !compiled_filter.evaluate(entity) {
-            return;
-        }
-
-        let row = match &entity.data {
-            EntityData::Row(r) => r,
-            _ => return,
-        };
-
-        // Lazy header emit on first visible row. The wire format
-        // requires ncols/names up front, and we only know the row
-        // shape after opening the first entity.
-        if cols.is_none() {
-            let resolved = derive_wire_columns(tq, row);
-            body.extend_from_slice(&(resolved.len() as u16).to_le_bytes());
-            for name in &resolved {
-                encode_column_name(&mut body, name);
-            }
-            header_nrows_pos = body.len();
-            body.extend_from_slice(&[0u8; 4]);
-            cols = Some(
-                resolved
-                    .into_iter()
-                    .map(|s| Arc::<str>::from(s.as_str()))
-                    .collect(),
-            );
-        }
-
-        if let Some(cols) = cols.as_ref() {
-            for c in cols {
-                match resolve_entity_value(entity, row, c.as_ref()) {
-                    ValueRef::Owned(v) => encode_value(&mut body, &v),
-                    ValueRef::Borrowed(v) => encode_value(&mut body, v),
+    // Inline row-emit macro — avoids a shared `FnMut` closure whose
+    // state captures force every call through an indirect dispatch,
+    // measurably slower on the select_filtered hot loop (AND filter
+    // with single-indexed leaf can iterate tens of thousands of ids).
+    macro_rules! emit_one {
+        ($entity:expr) => {{
+            let entity: &UnifiedEntity = $entity;
+            if !entity.data.is_row()
+                || !entity_visible_under_current_snapshot(entity)
+            {
+                // skip
+            } else if let EntityData::Row(ref row) = entity.data {
+                if cols.is_none() {
+                    let resolved = derive_wire_columns(tq, row);
+                    body.extend_from_slice(&(resolved.len() as u16).to_le_bytes());
+                    for name in &resolved {
+                        encode_column_name(&mut body, name);
+                    }
+                    header_nrows_pos = body.len();
+                    body.extend_from_slice(&[0u8; 4]);
+                    cols = Some(
+                        resolved
+                            .into_iter()
+                            .map(|s| Arc::<str>::from(s.as_str()))
+                            .collect(),
+                    );
+                }
+                if let Some(cols_ref) = cols.as_ref() {
+                    for c in cols_ref {
+                        match resolve_entity_value(entity, row, c.as_ref()) {
+                            ValueRef::Owned(v) => encode_value(&mut body, &v),
+                            ValueRef::Borrowed(v) => encode_value(&mut body, v),
+                        }
+                    }
+                    row_count += 1;
                 }
             }
-            row_count += 1;
-        }
-    });
+        }};
+    }
 
-    // Empty result — no schema decided. Fall back so the standard
-    // path emits the correct column list (from catalog) with 0 rows.
+    if let Some(filter) = effective_filter.as_ref() {
+        // ── Filtered / indexed path ───────────────────────────────
+        let idx_store = runtime.index_store_ref();
+        let index_limit = if filter_is_single_indexable_leaf(filter) {
+            limit
+        } else {
+            None
+        };
+        let ids = try_sorted_index_lookup(filter, tq.table.as_str(), idx_store, index_limit)?;
+        let table_name = tq.table.as_str();
+        let table_alias = tq.alias.as_deref().unwrap_or(table_name);
+        let compiled_filter = CompiledEntityFilter::compile(filter, table_name, table_alias);
+        manager.for_each_id(&ids, |_, entity| {
+            if (row_count as usize) >= hard_limit {
+                return;
+            }
+            if !compiled_filter.evaluate(entity) {
+                return;
+            }
+            emit_one!(entity);
+        });
+    } else {
+        // ── Unfiltered LIMIT path ─────────────────────────────────
+        // Require explicit LIMIT — we don't want to materialise an
+        // unbounded scan here (the runtime's canonical path has the
+        // parallel-scan branch for that).
+        if limit.is_none() {
+            return None;
+        }
+        manager.for_each_entity(|entity| {
+            if (row_count as usize) >= hard_limit {
+                return false;
+            }
+            emit_one!(entity);
+            (row_count as usize) < hard_limit
+        });
+    }
+
     if cols.is_none() {
         return None;
     }
@@ -216,6 +218,8 @@ fn execute_direct_scan(runtime: &RedDBRuntime, tq: &TableQuery) -> Option<Vec<u8
     let mut resp = Vec::with_capacity(5 + body.len());
     write_frame_header(&mut resp, MSG_RESULT, body.len() as u32);
     resp.extend_from_slice(&body);
+    let _ = db;
+    let _ = store;
     Some(resp)
 }
 
@@ -345,15 +349,39 @@ mod tests {
     }
 
     #[test]
-    fn shape_miss_without_filter() {
+    fn shape_miss_unbounded_unfiltered() {
+        // SELECT * FROM t with NO WHERE and NO LIMIT must fall back —
+        // we don't want the fast path to materialise an unbounded scan
+        // here, the runtime's canonical path has the parallel-scan
+        // branch for that.
         let rt = mk_runtime();
         seed_users(&rt);
         let sql = "SELECT * FROM users";
         let resp = try_handle_query_binary_direct(&rt, sql);
         assert!(
             resp.is_none(),
-            "full scan (no indexed filter) should miss fast path"
+            "full unbounded scan should defer to runtime path"
         );
+    }
+
+    #[test]
+    fn fast_path_hits_on_unfiltered_with_limit() {
+        // SELECT * FROM t LIMIT N — no WHERE but bounded: fast path
+        // scans entities with early-stop at LIMIT.
+        let rt = mk_runtime();
+        seed_users(&rt);
+        let sql = "SELECT * FROM users LIMIT 3";
+        let fast =
+            try_handle_query_binary_direct(&rt, sql).expect("fast path should hit LIMIT no-filter");
+        let body = &fast[5..];
+        let ncols = u16::from_le_bytes([body[0], body[1]]);
+        let mut pos = 2usize;
+        for _ in 0..ncols {
+            let name_len = u16::from_le_bytes([body[pos], body[pos + 1]]) as usize;
+            pos += 2 + name_len;
+        }
+        let nrows = u32::from_le_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]);
+        assert_eq!(nrows, 3, "fast path should emit exactly LIMIT rows");
     }
 
     #[test]
