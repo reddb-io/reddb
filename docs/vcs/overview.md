@@ -106,6 +106,12 @@ red vcs versioned list
 red vcs versioned check users
 ```
 
+```sql
+-- SQL DDL (works retroactively — see below)
+ALTER TABLE users SET VERSIONED = true;
+ALTER TABLE sessions SET VERSIONED = false;
+```
+
 ```bash
 # REST
 curl -X POST http://localhost:8080/vcs/versioned \
@@ -114,6 +120,35 @@ curl -X POST http://localhost:8080/vcs/versioned \
 
 curl http://localhost:8080/vcs/versioned
 ```
+
+### Retroactive opt-in
+
+`ALTER TABLE ... SET VERSIONED = true` works on a collection
+that already has data and commits. You can flip any existing
+collection into VCS after the fact and immediately query earlier
+commits via `AS OF COMMIT '<older-hash>'` — as long as those
+commits still hold their `xid` pin, the MVCC row versions are
+still present and reachable.
+
+```sql
+CREATE TABLE products (...);
+INSERT INTO products VALUES (...);
+-- no opt-in yet
+
+-- make some commits at the VCS layer
+-- ... (commits reference the products table even though it's
+-- not explicitly opted in — their root_xid is still pinned)
+
+ALTER TABLE products SET VERSIONED = true;
+
+-- now this works:
+SELECT * FROM products AS OF COMMIT '<older-hash>';
+```
+
+Caveat: once real VACUUM lands (Phase 7.5+), opting in *very*
+late may miss intermediate row versions that VACUUM reclaimed
+before the opt-in. If you know a collection will ever be
+versioned, opt in early.
 
 ### What opt-in changes
 

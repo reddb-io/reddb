@@ -120,6 +120,21 @@ red vcs lca main feature-x
 red vcs lca 7a1a... e3f...
 ```
 
+### SQL: `ALTER TABLE ... SET VERSIONED = <bool>`
+
+Runs the opt-in/out through the standard DDL path. Mirrors the
+existing `SET APPEND_ONLY = ...` syntax:
+
+```sql
+ALTER TABLE users SET VERSIONED = true;
+ALTER TABLE sessions SET VERSIONED = false;
+```
+
+Works retroactively: previously-inserted rows become visible via
+`AS OF COMMIT` as long as the referenced commit's `xid` is still
+pinned and the row versions are still in storage (they are by
+default — VACUUM doesn't reclaim them until Phase 7.5 lands).
+
 ### `red vcs versioned [list|on|off|check] [collection]`
 
 Manage per-collection opt-in. Collections are non-versioned by

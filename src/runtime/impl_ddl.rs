@@ -291,6 +291,20 @@ impl RedDBRuntime {
                         query.name
                     ));
                 }
+                AlterOperation::SetVersioned(on) => {
+                    // Opt the collection into (or out of) Git-for-Data.
+                    // Persists a row in red_vcs_settings; next AS OF /
+                    // merge / diff against this table honours the
+                    // flag. Retroactive: existing row versions whose
+                    // xmins are still pinned by commits become
+                    // reachable via AS OF COMMIT immediately.
+                    self.vcs_set_versioned(&query.name, *on)?;
+                    messages.push(format!(
+                        "versioned {} on '{}'",
+                        if *on { "enabled" } else { "disabled" },
+                        query.name
+                    ));
+                }
             }
         }
 
@@ -763,6 +777,9 @@ fn apply_alter_operations_to_contract(
             AlterOperation::SetAppendOnly(on) => {
                 contract.append_only = *on;
             }
+            // VCS opt-in is persisted to red_vcs_settings by the
+            // executor, not the contract — nothing to do here.
+            AlterOperation::SetVersioned(_) => {}
         }
     }
 }

@@ -96,6 +96,62 @@ fn as_of_errors_on_unversioned_table() {
 }
 
 #[test]
+fn alter_table_set_versioned_opts_in() {
+    let rt = rt();
+    rt.execute_query("CREATE TABLE products (id INT, name TEXT)")
+        .unwrap();
+    assert!(!vcs(&rt).is_versioned("products").unwrap());
+    rt.execute_query("ALTER TABLE products SET VERSIONED = true")
+        .expect("ALTER SET VERSIONED = true");
+    assert!(vcs(&rt).is_versioned("products").unwrap());
+}
+
+#[test]
+fn alter_table_set_versioned_false_opts_out() {
+    let rt = rt();
+    rt.execute_query("CREATE TABLE products (id INT, name TEXT)")
+        .unwrap();
+    vcs(&rt).set_versioned("products", true).unwrap();
+    rt.execute_query("ALTER TABLE products SET VERSIONED = false")
+        .expect("ALTER SET VERSIONED = false");
+    assert!(!vcs(&rt).is_versioned("products").unwrap());
+}
+
+#[test]
+fn as_of_works_after_opt_in_retroactively() {
+    // Classic retroactive flow: create, insert, commit, opt-in,
+    // then AS OF the earlier commit. Must work — the xid is
+    // pinned by the commit regardless of opt-in status at commit
+    // time.
+    let rt = rt();
+    rt.execute_query("CREATE TABLE products (id INT, name TEXT)")
+        .unwrap();
+    let before = vcs(&rt)
+        .commit(reddb::application::CreateCommitInput {
+            connection_id: 1,
+            message: "before opt-in".to_string(),
+            author: reddb::application::Author {
+                name: "t".to_string(),
+                email: "t@x".to_string(),
+            },
+            committer: None,
+            amend: false,
+            allow_empty: true,
+        })
+        .unwrap();
+    // Opt-in AFTER the commit — SQL path.
+    rt.execute_query("ALTER TABLE products SET VERSIONED = true")
+        .unwrap();
+
+    let sql = format!(
+        "SELECT * FROM products AS OF COMMIT '{}'",
+        before.hash
+    );
+    rt.execute_query(&sql)
+        .expect("retroactive AS OF on opted-in table succeeds");
+}
+
+#[test]
 fn as_of_works_after_opt_in() {
     let rt = rt();
     rt.execute_query("CREATE TABLE products (id INT, name TEXT)")

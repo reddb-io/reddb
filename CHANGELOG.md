@@ -2,6 +2,28 @@
 
 All notable changes to RedDB are documented here. Dates are ISO-8601 (UTC-3).
 
+## 2026-04-23 — Git for Data: ALTER TABLE SET VERSIONED (Phase 7.1)
+
+`ALTER TABLE <name> SET VERSIONED = true|false` now wires the VCS
+opt-in flag through the standard DDL parser and executor, mirroring
+`SET APPEND_ONLY = ...`. Parses identically, dispatches to
+`vcs_set_versioned` at execute time, returns a human-readable
+`versioned enabled on '<name>'` message.
+
+Works retroactively: a table that already has rows and existing
+commits in its history can be flipped in-place and the earlier
+commits become queryable via `AS OF COMMIT '<hash>'` immediately
+(as long as those commits' xids are still pinned, which is the
+default — VACUUM doesn't reclaim pinned versions).
+
+Tests (tests/e2e_vcs_opt_in.rs, 3 new):
+  - alter_table_set_versioned_opts_in
+  - alter_table_set_versioned_false_opts_out
+  - as_of_works_after_opt_in_retroactively  (demonstrates the
+    retroactive flow end-to-end)
+
+Total e2e_vcs_opt_in coverage: 9 cases.
+
 ## 2026-04-23 — Git for Data: opt-in per collection (Phase 7)
 
 Follow-up to the VCS ship. User collections now stay outside VCS

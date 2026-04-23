@@ -1573,6 +1573,12 @@ pub enum AlterOperation {
     /// guard; setting `false` re-enables them. Existing rows are
     /// untouched either way — this is a purely declarative switch.
     SetAppendOnly(bool),
+    /// `SET VERSIONED = true|false` — opt the table into (or out of)
+    /// Git-for-Data. Enables merge / diff / AS OF semantics against
+    /// this collection. Works retroactively: previously-created
+    /// rows become part of the history accessible via AS OF as long
+    /// as their xmin is still pinned by an existing commit.
+    SetVersioned(bool),
 }
 
 // ============================================================================

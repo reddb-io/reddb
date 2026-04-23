@@ -388,13 +388,16 @@ impl<'a> Parser<'a> {
                 Ok(AlterOperation::DisableRowLevelSecurity)
             }
         } else if self.consume(&Token::Set)? || self.consume_ident_ci("SET")? {
-            // SET APPEND_ONLY = true|false
+            // SET APPEND_ONLY = true|false | SET VERSIONED = true|false
             if self.consume_ident_ci("APPEND_ONLY")? {
                 let on = self.parse_bool_assign()?;
                 Ok(AlterOperation::SetAppendOnly(on))
+            } else if self.consume_ident_ci("VERSIONED")? {
+                let on = self.parse_bool_assign()?;
+                Ok(AlterOperation::SetVersioned(on))
             } else {
                 Err(ParseError::expected(
-                    vec!["APPEND_ONLY"],
+                    vec!["APPEND_ONLY", "VERSIONED"],
                     self.peek(),
                     self.position(),
                 ))
