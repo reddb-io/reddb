@@ -463,7 +463,24 @@ impl SegmentManager {
     where
         F: FnMut(usize, &UnifiedEntity),
     {
-        let mut remaining: Vec<usize> = (0..ids.len()).collect();
+        // Thread-local scratch buffer for the "pending" index list.
+        // Previous code allocated a fresh `Vec<usize>` of capacity
+        // N on every call — 4200 × 1000 queries / scenario on the
+        // select_range bench path. Take-and-restore pattern (vs
+        // RefCell::borrow_mut) so user closures that recurse into
+        // another `for_each_id` don't panic on a re-borrow; worst
+        // case they allocate a fresh buffer and we lose the caching
+        // win for that nested call.
+        thread_local! {
+            static REMAINING_SCRATCH: std::cell::Cell<Vec<usize>> =
+                const { std::cell::Cell::new(Vec::new()) };
+        }
+
+        let mut remaining: Vec<usize> =
+            REMAINING_SCRATCH.with(|cell| cell.take());
+        remaining.clear();
+        remaining.reserve(ids.len());
+        remaining.extend(0..ids.len());
 
         if let Some(growing_arc) = self.growing.read().as_ref() {
             let growing = if let Some(g) = growing_arc.try_read() {
@@ -481,25 +498,25 @@ impl SegmentManager {
             });
         }
 
-        if remaining.is_empty() {
-            return;
+        if !remaining.is_empty() {
+            let sealed = self.sealed.read();
+            for segment in sealed.iter() {
+                if remaining.is_empty() {
+                    break;
+                }
+                let seg = segment.read();
+                remaining.retain(|&i| {
+                    if let Some(entity) = seg.get(ids[i]) {
+                        f(i, entity);
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
         }
 
-        let sealed = self.sealed.read();
-        for segment in sealed.iter() {
-            if remaining.is_empty() {
-                break;
-            }
-            let seg = segment.read();
-            remaining.retain(|&i| {
-                if let Some(entity) = seg.get(ids[i]) {
-                    f(i, entity);
-                    false
-                } else {
-                    true
-                }
-            });
-        }
+        REMAINING_SCRATCH.with(|cell| cell.set(remaining));
     }
 
     /// Scan all segments for an entity
