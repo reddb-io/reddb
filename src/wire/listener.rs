@@ -243,6 +243,13 @@ fn handle_query(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
         Err(_) => return make_error(b"invalid UTF-8 in query"),
     };
 
+    // Zero-copy fast path for simple indexed SELECT. Returns None
+    // unchanged when the shape / filter / index don't qualify, so we
+    // fall through to the standard executor without semantic drift.
+    if let Some(resp) = super::query_direct::try_handle_query_binary_direct(runtime, sql) {
+        return resp;
+    }
+
     match runtime.execute_query(sql) {
         Ok(result) => {
             // Fast path: if pre_serialized_json available, send it as text

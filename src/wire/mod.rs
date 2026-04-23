@@ -1,6 +1,7 @@
 pub mod listener;
 pub mod postgres;
 pub mod protocol;
+pub(crate) mod query_direct;
 pub mod tls;
 
 #[cfg(unix)]
