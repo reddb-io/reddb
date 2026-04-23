@@ -1001,6 +1001,43 @@ fn strip_explain_prefix(sql: &str) -> Option<&str> {
     Some(rest)
 }
 
+/// If the query is a plain SELECT whose top-level `TableQuery`
+/// carries an `AS OF` clause, return a typed spec that the runtime
+/// can feed to `vcs_resolve_as_of`. Returns `None` for any other
+/// shape — joins, DML, EXPLAIN, or parse failures — so callers fall
+/// back to the connection's regular MVCC snapshot. A cheap textual
+/// prefilter skips the parse entirely when the source doesn't
+/// mention `AS OF` / `as of`, keeping the autocommit hot path free.
+fn peek_top_level_as_of(
+    sql: &str,
+) -> Option<crate::application::vcs::AsOfSpec> {
+    if !sql.as_bytes().windows(5).any(|w| w.eq_ignore_ascii_case(b"as of")) {
+        return None;
+    }
+    let parsed = crate::storage::query::parser::parse(sql).ok()?;
+    let crate::storage::query::ast::QueryExpr::Table(table) = parsed else {
+        return None;
+    };
+    let clause = table.as_of?;
+    Some(match clause {
+        crate::storage::query::ast::AsOfClause::Commit(h) => {
+            crate::application::vcs::AsOfSpec::Commit(h)
+        }
+        crate::storage::query::ast::AsOfClause::Branch(b) => {
+            crate::application::vcs::AsOfSpec::Branch(b)
+        }
+        crate::storage::query::ast::AsOfClause::Tag(t) => {
+            crate::application::vcs::AsOfSpec::Tag(t)
+        }
+        crate::storage::query::ast::AsOfClause::TimestampMs(ts) => {
+            crate::application::vcs::AsOfSpec::TimestampMs(ts)
+        }
+        crate::storage::query::ast::AsOfClause::Snapshot(x) => {
+            crate::application::vcs::AsOfSpec::Snapshot(x)
+        }
+    })
+}
+
 fn query_has_volatile_builtin(sql: &str) -> bool {
     // Lowercase the bytes up to the first null/newline into a small
     // stack buffer for cheap contains() checks. Most SQL fits in the
@@ -2613,8 +2650,23 @@ impl RedDBRuntime {
             }
             set
         };
+        // Phase 4c: if the query carries an `AS OF` clause, resolve
+        // it to an MVCC xid and install a snapshot pinned at that
+        // point. Visibility for every scan then transparently honours
+        // the time-travel target. Invalid AS OF (unknown commit/
+        // branch/tag) short-circuits with the resolver's error.
+        let snapshot = match peek_top_level_as_of(query) {
+            Some(spec) => {
+                let xid = self.vcs_resolve_as_of(spec)?;
+                crate::storage::transaction::snapshot::Snapshot {
+                    xid,
+                    in_progress: std::collections::HashSet::new(),
+                }
+            }
+            None => self.current_snapshot(),
+        };
         let _snapshot_guard = CurrentSnapshotGuard::install(SnapshotContext {
-            snapshot: self.current_snapshot(),
+            snapshot,
             manager: Arc::clone(&self.inner.snapshot_manager),
             own_xids,
         });

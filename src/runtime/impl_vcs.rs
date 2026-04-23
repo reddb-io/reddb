@@ -567,7 +567,13 @@ impl RedDBRuntime {
             parent_height + 1
         };
 
-        let root_xid = self.inner.snapshot_manager.peek_next_xid();
+        // Allocate a fresh xid for this commit and immediately mark
+        // it committed so all future snapshots see the commit record.
+        // Each commit therefore has a unique, monotonic root_xid — a
+        // prerequisite for `AS OF BRANCH` to map to distinct
+        // snapshots across divergent branches.
+        let root_xid = self.inner.snapshot_manager.begin();
+        self.inner.snapshot_manager.commit(root_xid);
         let timestamp_ms = now_ms();
         let committer = input.committer.unwrap_or_else(|| input.author.clone());
 
@@ -867,7 +873,8 @@ impl RedDBRuntime {
             .max()
             .unwrap_or(0);
         let height = parent_height + 1;
-        let root_xid = self.inner.snapshot_manager.peek_next_xid();
+        let root_xid = self.inner.snapshot_manager.begin();
+        self.inner.snapshot_manager.commit(root_xid);
 
         let hash = compute_commit_hash(
             root_xid,
