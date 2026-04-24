@@ -207,6 +207,166 @@ pub fn same_cache_key(a: &str, b: &str) -> bool {
     normalize_cache_key(a) == normalize_cache_key(b)
 }
 
+/// Fused single-pass of `normalize_cache_key` + `extract_literal_bindings`.
+///
+/// The normalize pass already identifies every literal token
+/// (byte-scan state machine — single quotes, numeric runs,
+/// TRUE/FALSE/NULL keywords). Extracting the bound `Value`
+/// alongside is strictly cheaper than running a separate `Lexer`
+/// pass, which is what `extract_literal_bindings` does today.
+///
+/// On the plan-cache HIT path (every UPDATE / repeat SELECT in a
+/// hot loop) this saves one full lex of the query text per hit.
+pub fn normalize_and_extract(sql: &str) -> (String, Vec<Value>) {
+    let mut out = String::with_capacity(sql.len());
+    let mut binds: Vec<Value> = Vec::new();
+    let bytes = sql.as_bytes();
+    let mut i = 0;
+    let mut last_was_space = true;
+    let mut preserve_numeric_literal = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+
+        if b.is_ascii_whitespace() {
+            if !last_was_space {
+                out.push(' ');
+                last_was_space = true;
+            }
+            i += 1;
+            continue;
+        }
+
+        if b == b'\'' {
+            // Walk the string body, honouring the SQL '' escape.
+            // Handle the escape-free fast path as a single span copy.
+            i += 1;
+            let body_start = i;
+            let mut literal: Option<String> = None;
+            while i < bytes.len() {
+                if bytes[i] == b'\'' {
+                    if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                        // Escaped single quote — switch to the
+                        // owned-accumulator mode if we haven't
+                        // already, copying what we've seen so far.
+                        let acc = literal.get_or_insert_with(|| sql[body_start..i].to_string());
+                        acc.push('\'');
+                        i += 2;
+                        continue;
+                    }
+                    break;
+                }
+                if let Some(ref mut acc) = literal {
+                    acc.push(bytes[i] as char);
+                }
+                i += 1;
+            }
+            let value = match literal {
+                Some(s) => s,
+                None => sql[body_start..i].to_string(),
+            };
+            if i < bytes.len() && bytes[i] == b'\'' {
+                i += 1;
+            }
+            binds.push(Value::text(value));
+            out.push('?');
+            last_was_space = false;
+            continue;
+        }
+
+        if b == b'"' {
+            let start = i;
+            i += 1;
+            while i < bytes.len() && bytes[i] != b'"' {
+                i += 1;
+            }
+            if i < bytes.len() {
+                i += 1;
+            }
+            out.push_str(&sql[start..i]);
+            last_was_space = false;
+            continue;
+        }
+
+        if b.is_ascii_digit() {
+            let start = i;
+            while i < bytes.len()
+                && (bytes[i].is_ascii_digit()
+                    || bytes[i] == b'.'
+                    || bytes[i] == b'e'
+                    || bytes[i] == b'E'
+                    || bytes[i] == b'+'
+                    || bytes[i] == b'-')
+            {
+                if bytes[i] == b'+' || bytes[i] == b'-' {
+                    let prev = if i > 0 { bytes[i - 1] } else { 0 };
+                    if prev != b'e' && prev != b'E' {
+                        break;
+                    }
+                }
+                i += 1;
+            }
+            let lit = &sql[start..i];
+            if preserve_numeric_literal {
+                out.push_str(lit);
+                preserve_numeric_literal = false;
+            } else {
+                out.push('?');
+                if lit.contains('.') || lit.contains('e') || lit.contains('E') {
+                    if let Ok(v) = lit.parse::<f64>() {
+                        binds.push(Value::Float(v));
+                    }
+                } else if let Ok(v) = lit.parse::<i64>() {
+                    binds.push(Value::Integer(v));
+                } else if let Ok(v) = lit.parse::<u64>() {
+                    binds.push(Value::UnsignedInteger(v));
+                }
+            }
+            last_was_space = false;
+            continue;
+        }
+
+        if b.is_ascii_alphabetic() || b == b'_' {
+            let start = i;
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+            let word = &sql[start..i];
+            if word.eq_ignore_ascii_case("true") {
+                out.push('?');
+                binds.push(Value::Boolean(true));
+                preserve_numeric_literal = false;
+            } else if word.eq_ignore_ascii_case("false") {
+                out.push('?');
+                binds.push(Value::Boolean(false));
+                preserve_numeric_literal = false;
+            } else if word.eq_ignore_ascii_case("null") {
+                out.push('?');
+                binds.push(Value::Null);
+                preserve_numeric_literal = false;
+            } else {
+                for c in word.chars() {
+                    out.push(c.to_ascii_uppercase());
+                }
+                preserve_numeric_literal =
+                    word.eq_ignore_ascii_case("limit") || word.eq_ignore_ascii_case("offset");
+            }
+            last_was_space = false;
+            continue;
+        }
+
+        out.push(b as char);
+        preserve_numeric_literal = false;
+        last_was_space = false;
+        i += 1;
+    }
+
+    if out.ends_with(' ') {
+        out.pop();
+    }
+
+    (out, binds)
+}
+
 pub fn extract_literal_bindings(sql: &str) -> Result<Vec<Value>, String> {
     let mut lexer = Lexer::new(sql);
     let mut binds = Vec::new();
@@ -336,6 +496,33 @@ mod tests {
             normalize_cache_key("SELECT * FROM t WHERE id = 1 OFFSET 10"),
             normalize_cache_key("SELECT * FROM t WHERE id = 2 OFFSET 20"),
         );
+    }
+
+    #[test]
+    fn normalize_and_extract_agrees_with_separate_paths() {
+        let queries = [
+            "SELECT * FROM users WHERE id = 42",
+            "UPDATE users SET score = 99.5 WHERE city = 'NYC' AND age > 30",
+            "DELETE FROM t WHERE name = 'al''ice' AND active = TRUE",
+            "SELECT 1, 'x', 2.5, NULL, FALSE FROM t",
+            "SELECT * FROM t LIMIT 10 OFFSET 5",
+        ];
+        for q in queries {
+            let (fk, fb) = normalize_and_extract(q);
+            assert_eq!(fk, normalize_cache_key(q), "cache_key mismatch for: {q}");
+            let sep = extract_literal_bindings(q).unwrap();
+            assert_eq!(
+                fb.len(),
+                sep.len(),
+                "bind count mismatch for {q}: fused={:?} sep={:?}",
+                fb,
+                sep
+            );
+            // Compare by string repr (Value doesn't derive PartialEq uniformly).
+            for (a, b) in fb.iter().zip(sep.iter()) {
+                assert_eq!(format!("{a:?}"), format!("{b:?}"), "bind mismatch for {q}");
+            }
+        }
     }
 
     #[test]

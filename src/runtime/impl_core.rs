@@ -2780,10 +2780,15 @@ impl RedDBRuntime {
             .to_ascii_uppercase();
         let is_insert = first_word == "INSERT";
 
-        let cache_key = if is_insert {
-            String::new() // unused
+        // Fused normalize+extract: one byte-scan produces both the
+        // cache_key AND the literal bindings. Saves a second Lexer
+        // pass over the query text on every cache hit — dominant
+        // cost on tight UPDATE loops that hit the same shape
+        // thousands of times with varying literals.
+        let (cache_key, prescan_binds) = if is_insert {
+            (String::new(), Vec::new())
         } else {
-            crate::storage::query::planner::cache_key::normalize_cache_key(query)
+            crate::storage::query::planner::cache_key::normalize_and_extract(query)
         };
 
         let expr = if is_insert {
@@ -2808,10 +2813,8 @@ impl RedDBRuntime {
 
             if let Some((parameter_count, optimized, exact_query)) = hit {
                 if parameter_count > 0 {
-                    // Shape hit: substitute the current literal values into the shape.
-                    let shape_binds =
-                        crate::storage::query::planner::cache_key::extract_literal_bindings(query)
-                            .unwrap_or_default();
+                    // Shape hit: use the binds extracted during normalise.
+                    let shape_binds = prescan_binds.clone();
                     if let Some(bound) =
                         crate::storage::query::planner::shape::bind_parameterized_query(
                             &optimized,
