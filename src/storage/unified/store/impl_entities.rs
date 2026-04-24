@@ -9,6 +9,78 @@ impl UnifiedStore {
         self.persist_entities_impl(collection, entities, /* skip_btree= */ false)
     }
 
+    /// Same as `persist_entities_to_pager` but takes `&[&UnifiedEntity]` so
+    /// callers that already hold references (SQL UPDATE fast path) don't
+    /// have to clone a `Vec<UnifiedEntity>` just to satisfy the signature.
+    pub(crate) fn persist_entity_refs_to_pager(
+        &self,
+        collection: &str,
+        entities: &[&UnifiedEntity],
+    ) -> Result<(), StoreError> {
+        self.persist_entity_refs_impl(collection, entities, /* skip_btree= */ false)
+    }
+
+    /// Reference-taking WAL-only variant — see
+    /// `persist_entities_to_pager_wal_only` for semantics.
+    pub(crate) fn persist_entity_refs_to_pager_wal_only(
+        &self,
+        collection: &str,
+        entities: &[&UnifiedEntity],
+    ) -> Result<(), StoreError> {
+        self.persist_entity_refs_impl(collection, entities, /* skip_btree= */ true)
+    }
+
+    fn persist_entity_refs_impl(
+        &self,
+        collection: &str,
+        entities: &[&UnifiedEntity],
+        skip_btree: bool,
+    ) -> Result<(), StoreError> {
+        if entities.is_empty() {
+            return Ok(());
+        }
+        let Some(pager) = &self.pager else {
+            return Ok(());
+        };
+        let fv = self.format_version();
+        let manager = self
+            .get_collection(collection)
+            .ok_or_else(|| StoreError::CollectionNotFound(collection.to_string()))?;
+        let mut serialized: Vec<(Vec<u8>, Vec<u8>)> = entities
+            .iter()
+            .map(|entity| {
+                let metadata = manager.get_metadata(entity.id);
+                (
+                    entity.id.raw().to_be_bytes().to_vec(),
+                    Self::serialize_entity_record(entity, metadata.as_ref(), fv),
+                )
+            })
+            .collect();
+        serialized.sort_by(|a, b| a.0.cmp(&b.0));
+
+        if !skip_btree {
+            let mut btree_indices = self.btree_indices.write();
+            let btree = btree_indices
+                .entry(collection.to_string())
+                .or_insert_with(|| Arc::new(BTree::new(Arc::clone(pager))));
+            let root_before = btree.root_page_id();
+            btree.upsert_batch_sorted(&serialized).map_err(|e| {
+                StoreError::Io(std::io::Error::other(format!("B-tree upsert error: {}", e)))
+            })?;
+            let root_after = btree.root_page_id();
+            drop(btree_indices);
+            if root_before != root_after {
+                self.mark_paged_registry_dirty();
+            }
+        }
+        let records: Vec<Vec<u8>> = serialized.into_iter().map(|(_id, record)| record).collect();
+        self.finish_paged_write([StoreWalAction::BulkUpsertEntityRecords {
+            collection: collection.to_string(),
+            records,
+        }])?;
+        Ok(())
+    }
+
     /// PG-HOT-like UPDATE persist: emit the WAL record so the update
     /// survives a crash, but skip the in-line B-tree upsert. Reads
     /// continue to see the new entity because `manager.get()` prefers

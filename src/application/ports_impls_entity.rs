@@ -1716,13 +1716,17 @@ impl RedDBRuntime {
             || indexed_cols.is_empty()
                 && applied.iter().all(|item| !item.persist_metadata);
 
-        let entities: Vec<_> = applied.iter().map(|item| item.entity.clone()).collect();
+        // Pass `&[&UnifiedEntity]` — no per-entity clone. The SQL UPDATE
+        // inner loop hands us `applied` which already owns the post-image
+        // entity; all we need for the persist path is a read borrow.
+        let entity_refs: Vec<&crate::storage::UnifiedEntity> =
+            applied.iter().map(|item| &item.entity).collect();
         let persist_fn = if all_hot {
-            crate::storage::unified::UnifiedStore::persist_entities_to_pager_wal_only
+            crate::storage::unified::UnifiedStore::persist_entity_refs_to_pager_wal_only
         } else {
-            crate::storage::unified::UnifiedStore::persist_entities_to_pager
+            crate::storage::unified::UnifiedStore::persist_entity_refs_to_pager
         };
-        persist_fn(store.as_ref(), collection, &entities)
+        persist_fn(store.as_ref(), collection, &entity_refs)
             .map_err(|err| crate::RedDBError::Internal(err.to_string()))
     }
 
