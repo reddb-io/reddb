@@ -74,14 +74,32 @@ impl RedDB {
     }
 
     pub fn collection_contracts(&self) -> Vec<crate::physical::CollectionContract> {
-        self.contract_cache_map().values().cloned().collect()
+        self.contract_cache_map()
+            .values()
+            .map(|arc| (**arc).clone())
+            .collect()
     }
 
     pub fn collection_contract(
         &self,
         collection: &str,
     ) -> Option<crate::physical::CollectionContract> {
-        self.contract_cache_map().get(collection).cloned()
+        self.contract_cache_map()
+            .get(collection)
+            .map(|arc| (**arc).clone())
+    }
+
+    /// Arc-bumping variant — callers that only need read access skip
+    /// the per-call full `CollectionContract` clone. Deep clones cost
+    /// ~200-400 ns each (vec of declared columns + string allocs);
+    /// the UPDATE fast path hits this 2-3× per mutation.
+    pub fn collection_contract_arc(
+        &self,
+        collection: &str,
+    ) -> Option<std::sync::Arc<crate::physical::CollectionContract>> {
+        self.contract_cache_map()
+            .get(collection)
+            .map(std::sync::Arc::clone)
     }
 
     /// Return (or lazily build) the in-memory contract map.
@@ -90,8 +108,9 @@ impl RedDB {
     /// so the cache is load-bearing for insert throughput.
     fn contract_cache_map(
         &self,
-    ) -> std::sync::Arc<std::collections::HashMap<String, crate::physical::CollectionContract>>
-    {
+    ) -> std::sync::Arc<
+        std::collections::HashMap<String, std::sync::Arc<crate::physical::CollectionContract>>,
+    > {
         if let Ok(guard) = self.collection_contract_cache.read() {
             if let Some(map) = guard.as_ref() {
                 return std::sync::Arc::clone(map);
@@ -103,7 +122,7 @@ impl RedDB {
             .unwrap_or_default();
         let map: std::collections::HashMap<_, _> = contracts
             .into_iter()
-            .map(|contract| (contract.name.clone(), contract))
+            .map(|contract| (contract.name.clone(), std::sync::Arc::new(contract)))
             .collect();
         let arc = std::sync::Arc::new(map);
         if let Ok(mut guard) = self.collection_contract_cache.write() {

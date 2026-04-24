@@ -331,7 +331,7 @@ impl RedDBRuntime {
         let _ = store.get_or_create_collection(&query.table);
         let declared_model = self
             .db()
-            .collection_contract(&query.table)
+            .collection_contract_arc(&query.table)
             .map(|contract| contract.declared_model);
 
         let mut returning_snapshots: Option<Vec<Vec<(String, Value)>>> =
@@ -725,7 +725,7 @@ impl RedDBRuntime {
         // operator's immutability declaration is honoured uniformly
         // and the error message points at the DDL rather than at a
         // downstream symptom.
-        if let Some(contract) = self.db().collection_contract(&query.table) {
+        if let Some(contract) = self.db().collection_contract_arc(&query.table) {
             if contract.append_only {
                 return Err(RedDBError::Query(format!(
                     "table '{}' is APPEND ONLY — UPDATE is rejected. \
@@ -1290,7 +1290,7 @@ impl RedDBRuntime {
         query: &DeleteQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         // APPEND ONLY guard — see execute_update for rationale.
-        if let Some(contract) = self.db().collection_contract(&query.table) {
+        if let Some(contract) = self.db().collection_contract_arc(&query.table) {
             if contract.append_only {
                 return Err(RedDBError::Query(format!(
                     "table '{}' is APPEND ONLY — DELETE is rejected. \
