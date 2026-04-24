@@ -74,6 +74,12 @@ fn filter_is_single_indexable_leaf(filter: &Filter) -> bool {
     )
 }
 
+/// Detects the `And(leaf_a, leaf_b)` shape where **both** leaves resolve to
+/// an exact index result (sorted range or hash-eq). When this holds,
+/// `try_sorted_index_lookup` intersects the two id sets, and the intersection
+/// is a complete answer to the full filter — so the outer LIMIT can be pushed
+/// through to the intersector without losing rows.
+
 fn is_shape_direct_eligible(tq: &TableQuery) -> bool {
     if let Some(source) = &tq.source {
         if !matches!(source, TableSource::Name(_)) {
@@ -174,6 +180,13 @@ fn execute_direct_scan(runtime: &RedDBRuntime, tq: &TableQuery) -> Option<Vec<u8
     if let Some(filter) = effective_filter.as_ref() {
         // ── Filtered / indexed path ───────────────────────────────
         let idx_store = runtime.index_store_ref();
+        // LIMIT pushdown is only safe when the filter is a single
+        // indexable leaf. For composite `And(_, _)` we can't push the
+        // outer LIMIT to `try_sorted_index_lookup`, because that
+        // propagates it to each leaf's index scan — truncating the
+        // candidate sets before the intersection and dropping matches.
+        // (See `fast_path_and_with_limit_returns_same_row_count_as_standard`
+        //  for the regression-guard.)
         let index_limit = if filter_is_single_indexable_leaf(filter) {
             limit
         } else {

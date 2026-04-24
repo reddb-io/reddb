@@ -136,8 +136,14 @@ pub(crate) fn try_sorted_index_lookup(
             // Phase 6: if BOTH sides have sorted indexes, intersect their ID sets.
             // Eliminates the gap-scanning problem for compound range queries like
             // `WHERE age > 30 AND score > 0.5` when both columns are indexed.
-            let ids_left = try_sorted_index_lookup_leaf(left, table, idx_store, limit);
-            let ids_right = try_sorted_index_lookup_leaf(right, table, idx_store, limit);
+            //
+            // Pass `None` to the leaf lookups instead of the caller's limit:
+            // each side must return its full candidate set so the intersection
+            // doesn't drop matches that happen to sort past the first `limit`
+            // ids on only one of the axes. The intersection itself still
+            // honours `limit` via its early-stop below.
+            let ids_left = try_sorted_index_lookup_leaf(left, table, idx_store, None);
+            let ids_right = try_sorted_index_lookup_leaf(right, table, idx_store, None);
             match (ids_left, ids_right) {
                 (Some(a), Some(b)) => {
                     // Intersect: build HashSet from smaller, filter larger.
@@ -160,6 +166,13 @@ pub(crate) fn try_sorted_index_lookup(
 
 /// Like `try_sorted_index_lookup` but only matches leaf predicates (not AND/OR wrappers).
 /// Used by Phase 6 AND-of-sorted to prevent double-counting nested ANDs.
+///
+/// Falls through to hash-eq for `Eq`/`In` leaves when the sorted path doesn't
+/// apply — gives the `And` intersector a small candidate set from the equality
+/// side (e.g. `city='NYC'`) that it can cheaply cross against the sorted
+/// range side (e.g. `age > 30`). Without this path, an `Eq` on a hash-only
+/// indexed column contributes nothing and the AND returns the full range
+/// side's result, which can be 50k+ rows for low-selectivity ranges.
 fn try_sorted_index_lookup_leaf(
     filter: &Filter,
     table: &str,
@@ -168,6 +181,11 @@ fn try_sorted_index_lookup_leaf(
 ) -> Option<Vec<EntityId>> {
     match filter {
         Filter::And(_, _) | Filter::Or(_, _) | Filter::Not(_) => None,
+        Filter::Compare {
+            op: CompareOp::Eq, ..
+        }
+        | Filter::In { .. } => try_sorted_index_lookup(filter, table, idx_store, limit)
+            .or_else(|| super::helpers::try_hash_eq_lookup(filter, table, idx_store)),
         other => try_sorted_index_lookup(other, table, idx_store, limit),
     }
 }
