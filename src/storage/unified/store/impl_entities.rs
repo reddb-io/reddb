@@ -6,6 +6,34 @@ impl UnifiedStore {
         collection: &str,
         entities: &[UnifiedEntity],
     ) -> Result<(), StoreError> {
+        self.persist_entities_impl(collection, entities, /* skip_btree= */ false)
+    }
+
+    /// PG-HOT-like UPDATE persist: emit the WAL record so the update
+    /// survives a crash, but skip the in-line B-tree upsert. Reads
+    /// continue to see the new entity because `manager.get()` prefers
+    /// the segment over the B-tree; WAL replay re-applies the upsert
+    /// to the B-tree on recovery so the two views converge before
+    /// any stale B-tree page can be surfaced.
+    ///
+    /// Safe to use only when the caller has already updated the
+    /// segment in-place (so live reads see the new value). Cuts out
+    /// the dominant cost of single-row UPDATEs: per-entity serialize
+    /// + leaf descent + page decompress / compress / write_page.
+    pub(crate) fn persist_entities_to_pager_wal_only(
+        &self,
+        collection: &str,
+        entities: &[UnifiedEntity],
+    ) -> Result<(), StoreError> {
+        self.persist_entities_impl(collection, entities, /* skip_btree= */ true)
+    }
+
+    fn persist_entities_impl(
+        &self,
+        collection: &str,
+        entities: &[UnifiedEntity],
+        skip_btree: bool,
+    ) -> Result<(), StoreError> {
         if entities.is_empty() {
             return Ok(());
         }
@@ -31,32 +59,34 @@ impl UnifiedStore {
         // u64 IDs encoded as big-endian — lex order = numeric order.
         serialized.sort_by(|a, b| a.0.cmp(&b.0));
 
-        let mut btree_indices = self.btree_indices.write();
-        let btree = btree_indices
-            .entry(collection.to_string())
-            .or_insert_with(|| Arc::new(BTree::new(Arc::clone(pager))));
-        let root_before = btree.root_page_id();
+        if !skip_btree {
+            let mut btree_indices = self.btree_indices.write();
+            let btree = btree_indices
+                .entry(collection.to_string())
+                .or_insert_with(|| Arc::new(BTree::new(Arc::clone(pager))));
+            let root_before = btree.root_page_id();
 
-        // Walks each distinct leaf once, applies all in-place overwrites
-        // that belong there under one read+write. Keys that miss or grow
-        // fall back to the per-key `upsert` path internally.
-        btree.upsert_batch_sorted(&serialized).map_err(|e| {
-            StoreError::Io(std::io::Error::other(format!("B-tree upsert error: {}", e)))
-        })?;
-        let root_after = btree.root_page_id();
-        drop(btree_indices);
-        if root_before != root_after {
-            self.mark_paged_registry_dirty();
+            // Walks each distinct leaf once, applies all in-place overwrites
+            // that belong there under one read+write. Keys that miss or grow
+            // fall back to the per-key `upsert` path internally.
+            btree.upsert_batch_sorted(&serialized).map_err(|e| {
+                StoreError::Io(std::io::Error::other(format!("B-tree upsert error: {}", e)))
+            })?;
+            let root_after = btree.root_page_id();
+            drop(btree_indices);
+            if root_before != root_after {
+                self.mark_paged_registry_dirty();
+            }
         }
         // One WAL action covering the whole bulk. Previously each entity
         // produced its own `UpsertEntityRecord` action, which then became
         // its own `WalRecord::PageWrite` triple inside
         // `StoreCommitCoordinator::append_actions` — N WAL records per
-        // bulk. The batched variant is one WAL record per bulk. The
-        // already-serialised records from the btree pass above are
-        // reused here so we don't re-run `serialize_entity_record` N
-        // times; replay applies upserts by id, so the sorted-by-id
-        // order is safe for WAL too.
+        // bulk. The batched variant is one WAL record per bulk.
+        //
+        // WAL is emitted even in the `skip_btree` variant — recovery
+        // replay reapplies the upsert to the B-tree, so durability
+        // is unchanged.
         let records: Vec<Vec<u8>> = serialized.into_iter().map(|(_id, record)| record).collect();
         self.finish_paged_write([StoreWalAction::BulkUpsertEntityRecords {
             collection: collection.to_string(),

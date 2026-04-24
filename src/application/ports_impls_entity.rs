@@ -1691,9 +1691,38 @@ impl RedDBRuntime {
             }))
             .map_err(|err| crate::RedDBError::Query(err.to_string()))?;
 
+        // PG-HOT-like fast path: segment in-place is done; when no
+        // mutation touches a secondary-indexed column AND no metadata
+        // payload needs to be folded into a B-tree record, skip the
+        // in-line B-tree upsert. The WAL still records the update
+        // (durability preserved; recovery replay rebuilds the B-tree),
+        // and `manager.get()` prefers the live segment over the
+        // B-tree for reads — so the short-circuit is invisible to
+        // callers. See `persist_entities_to_pager_wal_only`.
+        let indexed_cols: std::collections::HashSet<String> = self
+            .index_store_ref()
+            .list_indices(collection.as_str())
+            .into_iter()
+            .flat_map(|idx| idx.columns.into_iter())
+            .collect();
+        let all_hot = !indexed_cols.is_empty()
+            && applied.iter().all(|item| {
+                !item.persist_metadata
+                    && !item
+                        .modified_columns
+                        .iter()
+                        .any(|c| indexed_cols.contains(c))
+            })
+            || indexed_cols.is_empty()
+                && applied.iter().all(|item| !item.persist_metadata);
+
         let entities: Vec<_> = applied.iter().map(|item| item.entity.clone()).collect();
-        store
-            .persist_entities_to_pager(collection, &entities)
+        let persist_fn = if all_hot {
+            crate::storage::unified::UnifiedStore::persist_entities_to_pager_wal_only
+        } else {
+            crate::storage::unified::UnifiedStore::persist_entities_to_pager
+        };
+        persist_fn(store.as_ref(), collection, &entities)
             .map_err(|err| crate::RedDBError::Internal(err.to_string()))
     }
 
