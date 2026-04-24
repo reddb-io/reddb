@@ -1268,6 +1268,24 @@ impl IndexStore {
             .collect()
     }
 
+    /// Collect the column-name set covered by any index on `collection`
+    /// without cloning the full `RegisteredIndex` values — the
+    /// `persist_applied_entity_mutations` HOT gate only needs to
+    /// intersect `modified_columns` against this set, so cloning the
+    /// index name / method / unique-flag every UPDATE is wasted work.
+    pub fn indexed_columns_set(&self, collection: &str) -> std::collections::HashSet<String> {
+        let registry = read_unpoisoned(&self.registry);
+        let mut out = std::collections::HashSet::new();
+        for idx in registry.values() {
+            if idx.collection == collection {
+                for col in &idx.columns {
+                    out.insert(col.clone());
+                }
+            }
+        }
+        out
+    }
+
     /// Batched counterpart of `index_entity_insert`: takes a full
     /// slice of `(EntityId, Vec<(String, Value)>)` pairs and walks
     /// the index registry ONCE, then loops inside each registered

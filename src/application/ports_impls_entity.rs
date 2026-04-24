@@ -1699,12 +1699,7 @@ impl RedDBRuntime {
         // and `manager.get()` prefers the live segment over the
         // B-tree for reads — so the short-circuit is invisible to
         // callers. See `persist_entities_to_pager_wal_only`.
-        let indexed_cols: std::collections::HashSet<String> = self
-            .index_store_ref()
-            .list_indices(collection.as_str())
-            .into_iter()
-            .flat_map(|idx| idx.columns.into_iter())
-            .collect();
+        let indexed_cols = self.index_store_ref().indexed_columns_set(collection.as_str());
         let all_hot = !indexed_cols.is_empty()
             && applied.iter().all(|item| {
                 !item.persist_metadata
