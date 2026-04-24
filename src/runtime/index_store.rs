@@ -363,15 +363,248 @@ impl SortedColumnIndex {
     }
 }
 
+/// In-memory sorted index over a TUPLE of canonical keys — the composite
+/// index used to accelerate `WHERE col_a = X AND col_b > Y LIMIT N` style
+/// queries where a single-column index would force a post-filter scan.
+///
+/// Ordering is the lexicographic ordering of the underlying `Vec<CanonicalKey>`
+/// (Rust's derived `Ord` on `Vec` compares element-by-element), which
+/// matches how PostgreSQL's multi-column B-tree behaves for prefix-seek
+/// + trailing-range queries.
+pub struct SortedCompositeIndex {
+    entries: BTreeMap<Vec<CanonicalKey>, Vec<EntityId>>,
+}
+
+impl SortedCompositeIndex {
+    pub fn new() -> Self {
+        Self {
+            entries: BTreeMap::new(),
+        }
+    }
+
+    pub fn insert(&mut self, key: Vec<CanonicalKey>, entity_id: EntityId) {
+        self.entries.entry(key).or_default().push(entity_id);
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.values().map(|v| v.len()).sum()
+    }
+
+    /// Range scan with an exact prefix on the first `prefix.len()` columns
+    /// and a range on the column at index `prefix.len()`. Returns up to
+    /// `limit` entity IDs in key order.
+    ///
+    /// Preconditions — caller must ensure:
+    /// - `prefix.len()` is < composite arity (strictly a prefix)
+    /// - `low.family() == high.family()` so range semantics are well-defined
+    pub fn prefix_range(
+        &self,
+        prefix: &[CanonicalKey],
+        low: CanonicalKey,
+        high: CanonicalKey,
+        limit: usize,
+    ) -> Vec<EntityId> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let mut low_key = prefix.to_vec();
+        low_key.push(low);
+        let mut high_key = prefix.to_vec();
+        high_key.push(high);
+        let mut out = Vec::with_capacity(limit.min(128));
+        for (_, ids) in self.entries.range(low_key..=high_key) {
+            for id in ids {
+                out.push(*id);
+                if out.len() >= limit {
+                    return out;
+                }
+            }
+        }
+        out
+    }
+
+    /// Exact-prefix equality scan: returns entity IDs for every key
+    /// whose first `prefix.len()` components match `prefix` exactly.
+    /// Used by `WHERE col_a = X AND col_b = Y` on a `(col_a, col_b)`
+    /// composite — treated as a prefix-only seek with no trailing range.
+    pub fn prefix_eq(&self, prefix: &[CanonicalKey], limit: usize) -> Vec<EntityId> {
+        if limit == 0 || prefix.is_empty() {
+            return Vec::new();
+        }
+        // Low = prefix itself; high = prefix with one extra component that
+        // is guaranteed to be > than any "same-prefix" key. We use the
+        // half-open upper bound trick with BTreeMap::range(low..upper).
+        let low = prefix.to_vec();
+        let mut out = Vec::with_capacity(limit.min(128));
+        for (k, ids) in self.entries.range(low.clone()..) {
+            if k.len() < prefix.len() || &k[..prefix.len()] != prefix {
+                break;
+            }
+            for id in ids {
+                out.push(*id);
+                if out.len() >= limit {
+                    return out;
+                }
+            }
+        }
+        out
+    }
+}
+
 /// Manages sorted column indices per (collection, column).
 pub struct SortedIndexManager {
     indices: RwLock<HashMap<(String, String), SortedColumnIndex>>,
+    composite: RwLock<HashMap<(String, Vec<String>), SortedCompositeIndex>>,
 }
 
 impl SortedIndexManager {
     pub fn new() -> Self {
         Self {
             indices: RwLock::new(HashMap::new()),
+            composite: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Build a composite (multi-column) sorted index from existing entities.
+    /// Every entity must expose a value for every listed column; entities
+    /// missing any one column are skipped.
+    pub fn build_composite(
+        &self,
+        collection: &str,
+        columns: &[String],
+        entities: &[(EntityId, Vec<(String, Value)>)],
+    ) -> usize {
+        let mut index = SortedCompositeIndex::new();
+        let mut count = 0;
+        'entity: for (eid, fields) in entities {
+            let mut tuple: Vec<CanonicalKey> = Vec::with_capacity(columns.len());
+            for col in columns {
+                let found = fields.iter().find(|(name, _)| name == col);
+                let key = match found {
+                    Some((_, val)) => match classify_sorted_value(val) {
+                        CanonicalizedValue::Exact(k) => k,
+                        CanonicalizedValue::Unsupported => continue 'entity,
+                    },
+                    None => continue 'entity,
+                };
+                tuple.push(key);
+            }
+            index.insert(tuple, *eid);
+            count += 1;
+        }
+        write_unpoisoned(&self.composite)
+            .insert((collection.to_string(), columns.to_vec()), index);
+        count
+    }
+
+    pub fn has_composite_index(&self, collection: &str, columns: &[String]) -> bool {
+        let key = (collection.to_string(), columns.to_vec());
+        read_unpoisoned(&self.composite).contains_key(&key)
+    }
+
+    /// Composite prefix-eq + trailing range lookup.
+    /// `columns` must match a previously-built composite index exactly.
+    pub fn composite_prefix_range_lookup(
+        &self,
+        collection: &str,
+        columns: &[String],
+        prefix: &[CanonicalKey],
+        low: CanonicalKey,
+        high: CanonicalKey,
+        limit: usize,
+    ) -> Option<Vec<EntityId>> {
+        let guard = read_unpoisoned(&self.composite);
+        let idx = guard.get(&(collection.to_string(), columns.to_vec()))?;
+        Some(idx.prefix_range(prefix, low, high, limit))
+    }
+
+    /// Composite exact prefix lookup.
+    pub fn composite_prefix_eq_lookup(
+        &self,
+        collection: &str,
+        columns: &[String],
+        prefix: &[CanonicalKey],
+        limit: usize,
+    ) -> Option<Vec<EntityId>> {
+        let guard = read_unpoisoned(&self.composite);
+        let idx = guard.get(&(collection.to_string(), columns.to_vec()))?;
+        Some(idx.prefix_eq(prefix, limit))
+    }
+
+    /// Update a composite index when an entity's fields change. Drops the
+    /// old tuple and inserts the new one when any of the listed columns
+    /// differs between `old_fields` and `new_fields`.
+    pub fn composite_entity_update(
+        &self,
+        collection: &str,
+        columns: &[String],
+        entity_id: EntityId,
+        old_fields: &[(String, Value)],
+        new_fields: &[(String, Value)],
+    ) {
+        let build_tuple = |fields: &[(String, Value)]| -> Option<Vec<CanonicalKey>> {
+            let mut tuple = Vec::with_capacity(columns.len());
+            for col in columns {
+                let val = fields.iter().find(|(name, _)| name == col).map(|(_, v)| v)?;
+                match classify_sorted_value(val) {
+                    CanonicalizedValue::Exact(k) => tuple.push(k),
+                    CanonicalizedValue::Unsupported => return None,
+                }
+            }
+            Some(tuple)
+        };
+        let old_tuple = build_tuple(old_fields);
+        let new_tuple = build_tuple(new_fields);
+        if old_tuple == new_tuple {
+            return;
+        }
+        let mut guard = write_unpoisoned(&self.composite);
+        let idx = match guard.get_mut(&(collection.to_string(), columns.to_vec())) {
+            Some(i) => i,
+            None => return,
+        };
+        if let Some(old) = old_tuple {
+            if let Some(ids) = idx.entries.get_mut(&old) {
+                ids.retain(|id| *id != entity_id);
+                if ids.is_empty() {
+                    idx.entries.remove(&old);
+                }
+            }
+        }
+        if let Some(new) = new_tuple {
+            idx.insert(new, entity_id);
+        }
+    }
+
+    /// Insert a single entity into all composite indexes registered on
+    /// `collection`. Called from the entity-insert hot path alongside
+    /// the existing single-column index maintenance.
+    pub fn composite_entity_insert(
+        &self,
+        collection: &str,
+        entity_id: EntityId,
+        fields: &[(String, Value)],
+    ) {
+        let mut guard = write_unpoisoned(&self.composite);
+        for ((coll, cols), idx) in guard.iter_mut() {
+            if coll != collection {
+                continue;
+            }
+            let mut tuple = Vec::with_capacity(cols.len());
+            let mut complete = true;
+            for col in cols {
+                let val = fields.iter().find(|(name, _)| name == col).map(|(_, v)| v);
+                match val.map(classify_sorted_value) {
+                    Some(CanonicalizedValue::Exact(k)) => tuple.push(k),
+                    _ => {
+                        complete = false;
+                        break;
+                    }
+                }
+            }
+            if complete {
+                idx.insert(tuple, entity_id);
+            }
         }
     }
 
@@ -916,7 +1149,16 @@ impl IndexStore {
                 Ok(0)
             }
             IndexMethodKind::BTree => {
-                // Build sorted in-memory index for range scans
+                // Multi-column BTree → composite sorted index.
+                // `CREATE INDEX idx_cc ON users (city, age) USING BTREE`
+                // registers a `Vec<CanonicalKey>` → ids BTreeMap so
+                // `WHERE city='NYC' AND age>30` can seek prefix + range
+                // instead of intersecting two single-col results.
+                if columns.len() > 1 {
+                    let count = self.sorted.build_composite(collection, columns, entities);
+                    return Ok(count);
+                }
+                // Build sorted in-memory index for range scans (single col)
                 let count = self.sorted.build_index(collection, col, entities);
                 // Also build hash index for equality lookups on same column
                 self.hash
@@ -1123,6 +1365,14 @@ impl IndexStore {
             if idx.collection != collection {
                 continue;
             }
+
+            // Composite BTree (multi-column) — maintain the tuple index.
+            if matches!(idx.method, IndexMethodKind::BTree) && idx.columns.len() > 1 {
+                self.sorted
+                    .composite_entity_insert(collection, entity_id, fields);
+                continue;
+            }
+
             let col = idx.columns.first().map(|s| s.as_str()).unwrap_or("");
             for (field_name, value) in fields {
                 if field_name == col {
@@ -1172,6 +1422,16 @@ impl IndexStore {
             if idx.collection != collection {
                 continue;
             }
+
+            // Composite BTree — drop the entry under the old tuple, if
+            // present. Swap with None-fields on the update side flushes
+            // it out cleanly.
+            if matches!(idx.method, IndexMethodKind::BTree) && idx.columns.len() > 1 {
+                self.sorted
+                    .composite_entity_update(collection, &idx.columns, entity_id, fields, &[]);
+                continue;
+            }
+
             let col = idx.columns.first().map(|s| s.as_str()).unwrap_or("");
             for (field_name, value) in fields {
                 if field_name == col {

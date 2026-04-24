@@ -84,6 +84,9 @@ def run_reddb():
 
     conn.execute("CREATE INDEX idx_city ON users (city) USING HASH")
     conn.execute("CREATE INDEX idx_age ON users (age) USING BTREE")
+    # Composite index to match PG's `(city, age)` — lets
+    # `WHERE city=X AND age>Y` use a single prefix+range seek.
+    conn.execute("CREATE INDEX idx_city_age ON users (city, age) USING BTREE")
 
     def run_select(name, sqls, iters):
         def capped(timeout):

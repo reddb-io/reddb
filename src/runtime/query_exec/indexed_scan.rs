@@ -133,6 +133,19 @@ pub(crate) fn try_sorted_index_lookup(
                 .in_lookup_limited(table, col, &keys, effective_limit)
         }
         Filter::And(left, right) => {
+            // Composite sorted index path — when AND reduces to
+            // `Eq(col_a) AND Range(col_b)` and a composite index on
+            // `(col_a, col_b)` exists, do a single prefix+range seek.
+            // Matches PG's multi-column B-tree behaviour and is
+            // typically 2-5× faster than intersecting two single-col
+            // id sets because the scan touches exactly the matching
+            // range instead of unioning and post-filtering.
+            if let Some(ids) =
+                try_composite_and_lookup(left, right, table, idx_store, limit)
+            {
+                return Some(ids);
+            }
+
             // Phase 6: if BOTH sides have sorted indexes, intersect their ID sets.
             // Eliminates the gap-scanning problem for compound range queries like
             // `WHERE age > 30 AND score > 0.5` when both columns are indexed.
@@ -162,6 +175,119 @@ pub(crate) fn try_sorted_index_lookup(
         }
         _ => None,
     }
+}
+
+/// Detect `And(Eq(col_a), Range(col_b))` / `And(Range(col_b), Eq(col_a))`
+/// and resolve via a composite sorted index on `(col_a, col_b)` when one
+/// is registered. Returns `None` if the shape doesn't fit or no composite
+/// covers both columns in order.
+fn try_composite_and_lookup(
+    left: &Filter,
+    right: &Filter,
+    table: &str,
+    idx_store: &IndexStore,
+    limit: Option<usize>,
+) -> Option<Vec<EntityId>> {
+    use crate::storage::query::ast::FieldRef;
+    use crate::storage::schema::CanonicalKey;
+
+    // Extract equality side (col, value) and range side (col, low, high).
+    let extract_eq = |f: &Filter| -> Option<(String, CanonicalKey)> {
+        let Filter::Compare {
+            field,
+            op: CompareOp::Eq,
+            value,
+        } = f
+        else {
+            return None;
+        };
+        let col = match field {
+            FieldRef::TableColumn { column, .. } => column.clone(),
+            _ => return None,
+        };
+        let key = super::super::index_store::value_to_sorted_key(value)?;
+        Some((col, key))
+    };
+    let extract_range = |f: &Filter| -> Option<(String, CanonicalKey, CanonicalKey)> {
+        match f {
+            Filter::Between { field, low, high } => {
+                let col = match field {
+                    FieldRef::TableColumn { column, .. } => column.clone(),
+                    _ => return None,
+                };
+                let lo = super::super::index_store::value_to_sorted_key(low)?;
+                let hi = super::super::index_store::value_to_sorted_key(high)?;
+                Some((col, lo, hi))
+            }
+            Filter::Compare {
+                field,
+                op,
+                value,
+            } => {
+                let col = match field {
+                    FieldRef::TableColumn { column, .. } => column.clone(),
+                    _ => return None,
+                };
+                let pivot = super::super::index_store::value_to_sorted_key(value)?;
+                // Saturating bounds for the pivot's numeric family so we
+                // can express `age > N` as `range(N-exclusive ..= MAX)`
+                // against the composite BTreeMap.
+                use crate::storage::schema::{CanonicalKey, CanonicalKeyFamily};
+                let (family, is_signed) = match &pivot {
+                    CanonicalKey::Signed(f, _) => (*f, true),
+                    CanonicalKey::Unsigned(f, _) => (*f, false),
+                    _ => return None,
+                };
+                let (lo, hi) = match op {
+                    CompareOp::Gt | CompareOp::Ge => {
+                        // Low = pivot (prefix_range uses inclusive bounds
+                        // today; off-by-one on Gt's strict-gt is handled
+                        // by the outer filter re-check).
+                        let hi = if is_signed {
+                            CanonicalKey::Signed(family, i64::MAX)
+                        } else {
+                            CanonicalKey::Unsigned(family, u64::MAX)
+                        };
+                        (pivot, hi)
+                    }
+                    CompareOp::Lt | CompareOp::Le => {
+                        let lo = if is_signed {
+                            CanonicalKey::Signed(family, i64::MIN)
+                        } else {
+                            CanonicalKey::Unsigned(family, 0)
+                        };
+                        (lo, pivot)
+                    }
+                    _ => return None,
+                };
+                Some((col, lo, hi))
+            }
+            _ => None,
+        }
+    };
+
+    let (eq_col, eq_key, rng_col, rng_low, rng_high) = match (extract_eq(left), extract_range(right))
+    {
+        (Some((ec, ek)), Some((rc, rl, rh))) => (ec, ek, rc, rl, rh),
+        _ => match (extract_eq(right), extract_range(left)) {
+            (Some((ec, ek)), Some((rc, rl, rh))) => (ec, ek, rc, rl, rh),
+            _ => return None,
+        },
+    };
+
+    let cols = vec![eq_col, rng_col];
+    if !idx_store.sorted.has_composite_index(table, &cols) {
+        return None;
+    }
+    let limit_cap = limit.unwrap_or(200_000);
+    idx_store.sorted.composite_prefix_range_lookup(
+        table,
+        &cols,
+        &[eq_key],
+        rng_low,
+        rng_high,
+        limit_cap,
+    )
 }
 
 /// Like `try_sorted_index_lookup` but only matches leaf predicates (not AND/OR wrappers).
