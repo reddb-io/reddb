@@ -34,7 +34,7 @@ pub struct CachedPlan {
     /// Query shape key used for parameter-insensitive cache grouping.
     pub shape_key: Option<String>,
     /// Last exact query string stored in this slot.
-    pub exact_query: Option<String>,
+    pub exact_query: Option<std::sync::Arc<str>>,
     /// Runtime activation state inspired by Mongo's active/inactive plan cache.
     pub state: CacheEntryState,
     /// Moving expectation for storage reads (`rows_scanned`) on this shape.
@@ -72,7 +72,8 @@ impl CachedPlan {
     }
 
     pub fn with_exact_query(mut self, query: impl Into<String>) -> Self {
-        self.exact_query = Some(query.into());
+        let s: String = query.into();
+        self.exact_query = Some(std::sync::Arc::<str>::from(s));
         self
     }
 
