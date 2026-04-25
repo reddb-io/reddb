@@ -21,6 +21,8 @@
 //! ```
 
 pub mod cdc;
+pub mod commit_policy;
+pub mod commit_waiter;
 pub mod lease;
 pub mod logical;
 pub mod primary;
@@ -28,6 +30,8 @@ pub mod quorum;
 pub mod replica;
 pub mod scheduler;
 
+pub use commit_policy::CommitPolicy;
+pub use commit_waiter::{AwaitOutcome, CommitWaiter};
 pub use lease::{LeaseError, LeaseStore, WriterLease};
 pub use quorum::{QuorumConfig, QuorumCoordinator, QuorumError};
 
