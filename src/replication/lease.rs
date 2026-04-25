@@ -42,8 +42,10 @@
 //! authoritative version of the same protocol via `try_acquire_cas`
 //! once they grow the trait method.
 
+use fs2::FileExt;
+use std::fs::OpenOptions;
+use std::path::Path;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::serde_json::{self, Value as JsonValue};
 use crate::storage::backend::{BackendError, RemoteBackend};
@@ -229,6 +231,42 @@ impl LeaseStore {
         format!("{}{}.lease.json", self.prefix, database_key)
     }
 
+    fn with_local_lease_lock<T>(
+        &self,
+        database_key: &str,
+        op: impl FnOnce() -> Result<T, LeaseError>,
+    ) -> Result<T, LeaseError> {
+        if self.backend.name() != "local" {
+            return op();
+        }
+
+        let lock_key = format!("{}.lock", self.key_for(database_key));
+        let lock_path = Path::new(&lock_key);
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|err| LeaseError::Backend(BackendError::Transport(err.to_string())))?;
+        }
+        let lock_file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(lock_path)
+            .map_err(|err| LeaseError::Backend(BackendError::Transport(err.to_string())))?;
+        lock_file
+            .lock_exclusive()
+            .map_err(|err| LeaseError::Backend(BackendError::Transport(err.to_string())))?;
+
+        let result = op();
+        let unlock_result = lock_file
+            .unlock()
+            .map_err(|err| LeaseError::Backend(BackendError::Transport(err.to_string())));
+        match (result, unlock_result) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(err), _) => Err(err),
+            (Ok(_), Err(err)) => Err(err),
+        }
+    }
+
     /// Read whatever lease object is currently published. `None` means
     /// no lease has ever been written for this key.
     pub fn current(&self, database_key: &str) -> Result<Option<WriterLease>, LeaseError> {
@@ -236,10 +274,7 @@ impl LeaseStore {
         let temp = std::env::temp_dir().join(format!(
             "reddb-lease-read-{}-{}.json",
             std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
+            crate::utils::now_unix_nanos()
         ));
         let downloaded = self.backend.download(&key, &temp)?;
         if !downloaded {
@@ -266,10 +301,18 @@ impl LeaseStore {
         holder_id: &str,
         ttl_ms: u64,
     ) -> Result<WriterLease, LeaseError> {
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        self.with_local_lease_lock(database_key, || {
+            self.try_acquire_locked(database_key, holder_id, ttl_ms)
+        })
+    }
+
+    fn try_acquire_locked(
+        &self,
+        database_key: &str,
+        holder_id: &str,
+        ttl_ms: u64,
+    ) -> Result<WriterLease, LeaseError> {
+        let now_ms = crate::utils::now_unix_millis();
 
         let current = self.current(database_key)?;
         // If a healthy lease exists held by someone else, refuse
@@ -329,10 +372,15 @@ impl LeaseStore {
         lease: &WriterLease,
         ttl_ms: u64,
     ) -> Result<WriterLease, LeaseError> {
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        self.with_local_lease_lock(&lease.database_key, || self.refresh_locked(lease, ttl_ms))
+    }
+
+    fn refresh_locked(
+        &self,
+        lease: &WriterLease,
+        ttl_ms: u64,
+    ) -> Result<WriterLease, LeaseError> {
+        let now_ms = crate::utils::now_unix_millis();
         let observed = self.current(&lease.database_key)?;
         match observed {
             Some(o)
@@ -356,6 +404,10 @@ impl LeaseStore {
     /// matches `lease.holder_id + lease.generation`. A stolen or
     /// already-replaced lease returns `Stale`.
     pub fn release(&self, lease: &WriterLease) -> Result<(), LeaseError> {
+        self.with_local_lease_lock(&lease.database_key, || self.release_locked(lease))
+    }
+
+    fn release_locked(&self, lease: &WriterLease) -> Result<(), LeaseError> {
         let observed = self.current(&lease.database_key)?;
         match observed {
             Some(o)
@@ -385,10 +437,7 @@ impl LeaseStore {
         let temp = std::env::temp_dir().join(format!(
             "reddb-lease-write-{}-{}.json",
             std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
+            crate::utils::now_unix_nanos()
         ));
         std::fs::write(&temp, &bytes)
             .map_err(|err| LeaseError::Backend(BackendError::Transport(err.to_string())))?;

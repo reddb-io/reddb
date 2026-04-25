@@ -17,7 +17,6 @@
 //! backwards through them.
 
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::RwLock;
 
@@ -371,8 +370,5 @@ impl Lifecycle {
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    crate::utils::now_unix_millis()
 }

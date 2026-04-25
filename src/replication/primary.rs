@@ -565,10 +565,7 @@ impl PrimaryReplication {
     /// toward a `QuorumMode::Regions` commit.
     pub fn register_replica_with_region(&self, id: String, region: Option<String>) -> u64 {
         let lsn = self.wal_buffer.current_lsn();
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
+        let now_ms = crate::utils::now_unix_millis() as u128;
         let state = ReplicaState {
             id,
             last_acked_lsn: lsn,
@@ -584,10 +581,7 @@ impl PrimaryReplication {
     }
 
     pub fn ack_replica(&self, id: &str, lsn: u64) {
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
+        let now_ms = crate::utils::now_unix_millis() as u128;
         let mut replicas = self.replicas.write().unwrap_or_else(|e| e.into_inner());
         if let Some(r) = replicas.iter_mut().find(|r| r.id == id) {
             r.last_acked_lsn = r.last_acked_lsn.max(lsn);
@@ -601,10 +595,7 @@ impl PrimaryReplication {
     /// Also signals `commit_waiter` so any thread blocked on
     /// `ack_n` / `quorum` can wake and re-check its threshold.
     pub fn ack_replica_lsn(&self, id: &str, applied_lsn: u64, durable_lsn: u64) {
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
+        let now_ms = crate::utils::now_unix_millis() as u128;
         let mut replicas = self.replicas.write().unwrap_or_else(|e| e.into_inner());
         if let Some(r) = replicas.iter_mut().find(|r| r.id == id) {
             r.last_acked_lsn = r.last_acked_lsn.max(applied_lsn);
@@ -623,10 +614,7 @@ impl PrimaryReplication {
     /// last_sent_lsn - last_acked_lsn` to distinguish pull-side delay
     /// from apply-side delay.
     pub fn note_replica_pull(&self, id: &str, last_sent_lsn: u64) {
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
+        let now_ms = crate::utils::now_unix_millis() as u128;
         let mut replicas = self.replicas.write().unwrap_or_else(|e| e.into_inner());
         if let Some(r) = replicas.iter_mut().find(|r| r.id == id) {
             r.last_sent_lsn = r.last_sent_lsn.max(last_sent_lsn);

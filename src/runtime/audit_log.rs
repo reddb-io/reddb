@@ -29,7 +29,6 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::json::{Map, Value as JsonValue};
 
@@ -68,10 +67,7 @@ impl AuditLogger {
         result: &str,
         details: JsonValue,
     ) {
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        let now_ms = crate::utils::now_unix_millis();
 
         let mut object = Map::new();
         object.insert("ts_unix_ms".to_string(), JsonValue::Number(now_ms as f64));
@@ -168,10 +164,7 @@ mod tests {
             "reddb-audit-{}-{}-{}",
             tag,
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            crate::utils::now_unix_nanos()
         ));
         std::fs::create_dir_all(&p).unwrap();
         p.push("data.rdb");
