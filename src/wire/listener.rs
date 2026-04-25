@@ -282,6 +282,24 @@ fn handle_query(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
 
     match runtime.execute_query(sql) {
         Ok(result) => {
+            // PLAN.md Phase 11.4 — wire DML adoption. After a
+            // successful mutation, block until the configured
+            // commit policy is satisfied (no-op when policy is
+            // `local`, the default). On `RED_COMMIT_FAIL_ON_TIMEOUT
+            // = true` a missed ack window surfaces as an error
+            // frame so the client retries instead of silently
+            // accepting non-durable writes.
+            let is_mutation = matches!(
+                result.statement_type,
+                "insert" | "update" | "delete"
+            );
+            if is_mutation {
+                let post_lsn = runtime.cdc_current_lsn();
+                if let Err(err) = runtime.enforce_commit_policy(post_lsn) {
+                    return make_error(err.to_string().as_bytes());
+                }
+            }
+
             // Fast path: if pre_serialized_json available, send it as text
             // (avoids gRPC/protobuf overhead while reusing existing JSON turbo path)
             if let Some(ref json) = result.result.pre_serialized_json {
