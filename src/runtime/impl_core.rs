@@ -1294,10 +1294,25 @@ impl RedDBRuntime {
         options: RedDBOptions,
         pool_config: ConnectionPoolConfig,
     ) -> RedDBResult<Self> {
+        // PLAN.md Phase 9.1 — capture wall-clock before storage
+        // open so the cold-start phase markers can be backfilled
+        // once Lifecycle is constructed below. Storage open
+        // encapsulates auto-restore + WAL replay; we treat the
+        // whole window as one combined "restore" + "wal_replay"
+        // phase split at the same boundary because the storage
+        // layer doesn't yet emit a finer signal.
+        let boot_open_start_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
         let db = Arc::new(
             RedDB::open_with_options(&options)
                 .map_err(|err| RedDBError::Internal(err.to_string()))?,
         );
+        let storage_ready_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
 
         let runtime = Self {
             inner: Arc::new(RuntimeInner {
@@ -1387,6 +1402,30 @@ impl RedDBRuntime {
                 quota_bucket: crate::runtime::quota_bucket::QuotaBucket::from_env(),
             }),
         };
+
+        // PLAN.md Phase 9.1 — backfill cold-start phase markers
+        // from the wall-clock captured before storage open. The
+        // entire `RedDB::open_with_options` call covers both
+        // auto-restore (when configured) and WAL replay. We
+        // record both phases against the same boundary today;
+        // a follow-up will split them once the storage layer
+        // surfaces a finer-grained event.
+        runtime
+            .inner
+            .lifecycle
+            .set_restore_started_at_ms(boot_open_start_ms);
+        runtime
+            .inner
+            .lifecycle
+            .set_restore_ready_at_ms(storage_ready_ms);
+        runtime
+            .inner
+            .lifecycle
+            .set_wal_replay_started_at_ms(boot_open_start_ms);
+        runtime
+            .inner
+            .lifecycle
+            .set_wal_replay_ready_at_ms(storage_ready_ms);
 
         let restored_cdc_lsn = runtime
             .inner
