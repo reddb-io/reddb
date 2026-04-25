@@ -87,8 +87,13 @@ ENV REDDB_CONFIG_FILE=/etc/reddb/config.json
 
 USER 10001:10001
 
+# PLAN.md (cloud-agnostic) Phase 1 — universal liveness probe.
+# `/health/live` is the orchestrator-facing endpoint that every
+# runtime (K8s, Docker, Fly, ECS, Nomad, systemd) understands. It
+# returns 200 while the process is responsive, 503 only after
+# Stopped. Cheap — no I/O.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
-    CMD ["/usr/local/bin/red", "health", "--grpc", "--bind", "127.0.0.1:50051"]
+    CMD curl -fsS --max-time 2 http://127.0.0.1:8080/health/live || exit 1
 
 ENTRYPOINT ["/usr/local/bin/red"]
 CMD ["server"]

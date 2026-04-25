@@ -186,6 +186,9 @@ pub fn sqlstate_for_reddb_error(err: &crate::api::RedDBError) -> SqlState {
         E::Query(_) => SYNTAX_ERROR,
         E::Io(_) => IO_ERROR,
         E::VersionUnavailable => INTERNAL_ERROR,
+        // 53400 = configuration_limit_exceeded — closest PG class for
+        // operator-pinned RED_MAX_* enforcement (PLAN.md Phase 4.1).
+        E::QuotaExceeded(_) => SqlState::new("53400"),
         E::Internal(_) => INTERNAL_ERROR,
     }
 }

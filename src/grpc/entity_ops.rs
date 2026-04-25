@@ -235,6 +235,11 @@ pub(crate) fn entity_reply_from_output(output: CreateEntityOutput) -> EntityRepl
 pub(crate) fn entity_error_to_status(err: crate::api::RedDBError) -> Status {
     match err {
         crate::api::RedDBError::NotFound(msg) => Status::not_found(msg),
+        // PLAN.md Phase 4.1 — operator-pinned cap exceeded. gRPC
+        // doesn't have a 1:1 status for "storage full" or "rate
+        // limited"; `ResourceExhausted` is the canonical match and
+        // gives clients a clear retry-or-back-off signal.
+        crate::api::RedDBError::QuotaExceeded(msg) => Status::resource_exhausted(msg),
         crate::api::RedDBError::InvalidConfig(msg)
         | crate::api::RedDBError::FeatureNotEnabled(msg)
         | crate::api::RedDBError::ReadOnly(msg)

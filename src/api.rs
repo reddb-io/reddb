@@ -529,6 +529,12 @@ pub enum RedDBError {
     Query(String),
     Io(io::Error),
     VersionUnavailable,
+    /// Operator-pinned cap exceeded (PLAN.md Phase 4.1). The string
+    /// payload should follow the `quota_exceeded:<limit_name>:<current>:<max>`
+    /// shape so HTTP / wire surfaces can map to the right status
+    /// (507 for storage, 429 for rate, 504 for duration, 413 for
+    /// payload).
+    QuotaExceeded(String),
     Internal(String),
 }
 
@@ -550,6 +556,7 @@ impl fmt::Display for RedDBError {
             Self::Query(msg) => write!(f, "query error: {msg}"),
             Self::Io(err) => write!(f, "io error: {err}"),
             Self::VersionUnavailable => write!(f, "version information unavailable"),
+            Self::QuotaExceeded(msg) => write!(f, "quota exceeded: {msg}"),
             Self::Internal(msg) => write!(f, "internal error: {msg}"),
         }
     }

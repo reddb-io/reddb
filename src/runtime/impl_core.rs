@@ -2049,6 +2049,44 @@ impl RedDBRuntime {
         &self.inner.resource_limits
     }
 
+    /// Reject the call when the requested batch size exceeds
+    /// `RED_MAX_BATCH_SIZE`. Returns `RedDBError::QuotaExceeded`
+    /// shaped so the HTTP layer can map it to 413 Payload Too
+    /// Large (PLAN.md Phase 4.1).
+    pub fn check_batch_size(&self, requested: usize) -> RedDBResult<()> {
+        if self.inner.resource_limits.batch_size_exceeded(requested) {
+            let max = self.inner.resource_limits.max_batch_size.unwrap_or(0);
+            return Err(RedDBError::QuotaExceeded(format!(
+                "max_batch_size:{requested}:{max}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Reject the call when the local DB file exceeds
+    /// `RED_MAX_DB_SIZE_BYTES`. Reads file metadata once per call —
+    /// the cost is a single `stat()` syscall, negligible against the
+    /// I/O the caller is about to do. Returns `QuotaExceeded` shaped
+    /// for HTTP 507 Insufficient Storage.
+    pub fn check_db_size(&self) -> RedDBResult<()> {
+        let Some(limit) = self.inner.resource_limits.max_db_size_bytes else {
+            return Ok(());
+        };
+        if limit == 0 {
+            return Ok(());
+        }
+        let Some(path) = self.inner.db.path() else {
+            return Ok(());
+        };
+        let current = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        if current > limit {
+            return Err(RedDBError::QuotaExceeded(format!(
+                "max_db_size_bytes:{current}:{limit}"
+            )));
+        }
+        Ok(())
+    }
+
     /// Graceful shutdown coordinator (PLAN.md Phase 1.1).
     ///
     /// Steps, in order, all idempotent across re-entrant calls:

@@ -2036,6 +2036,8 @@ impl RuntimeEntityPort for RedDBRuntime {
         if input.rows.is_empty() {
             return Ok(Vec::new());
         }
+        self.check_batch_size(input.rows.len())?;
+        self.check_db_size()?;
 
         let db = self.db();
         let collection = input.collection;
@@ -2107,6 +2109,8 @@ impl RuntimeEntityPort for RedDBRuntime {
             return Ok(0);
         }
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        self.check_batch_size(rows.len())?;
+        self.check_db_size()?;
 
         let db = self.db();
         ensure_collection_model_contract(&db, &collection, crate::catalog::CollectionModel::Table)?;
@@ -2202,6 +2206,8 @@ impl RuntimeEntityPort for RedDBRuntime {
             return Ok(0);
         }
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        self.check_batch_size(input.rows.len())?;
+        self.check_db_size()?;
 
         let db = self.db();
         let collection = input.collection;

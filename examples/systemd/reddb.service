@@ -1,0 +1,113 @@
+# RedDB systemd unit (PLAN.md Phase 7.3 / Phase 10).
+#
+# Drop into /etc/systemd/system/reddb.service and:
+#
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now reddb
+#
+# Tunables:
+#   /etc/reddb/reddb.env  — KEY=VALUE pairs picked up by EnvironmentFile.
+#                           Operators put RED_BACKEND, RED_S3_*, RED_MAX_*,
+#                           RED_BACKUP_ON_SHUTDOWN, etc. here.
+#   /var/lib/reddb         — data directory (DynamicUser owns it).
+#   /run/reddb             — runtime PID/state.
+#
+# Lifecycle contract (mapped to the universal HTTP/SIGTERM contract
+# implemented in src/runtime/lifecycle.rs):
+#   ExecStart      → red server …
+#   ExecStop       → graceful via SIGTERM (signal handler runs
+#                    Engine::graceful_shutdown — flush WAL +
+#                    final checkpoint + optional backup + exit 0)
+#   TimeoutStopSec → bounded grace window; SIGKILL only after.
+#
+# Health: systemd watches the process. External monitoring should
+# scrape /health/ready, /metrics, and /admin/status from the
+# bound HTTP listener.
+
+[Unit]
+Description=RedDB unified database engine
+Documentation=https://github.com/forattini-dev/reddb
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Kernel-level isolation. DynamicUser= gives every restart a
+# fresh transient UID; combined with StateDirectory= the data is
+# owned by that UID and persists across restarts under
+# /var/lib/private/reddb (systemd handles the bind mount).
+DynamicUser=yes
+StateDirectory=reddb
+RuntimeDirectory=reddb
+ConfigurationDirectory=reddb
+
+# Pick up RED_* / REDDB_* env vars from a sibling file. Missing
+# file is non-fatal so a fresh install boots with defaults.
+EnvironmentFile=-/etc/reddb/reddb.env
+
+# Bind defaults match the existing Docker image so this unit can
+# replace it 1:1 on bare-metal. Operators that prefer the
+# PLAN.md spec ports (7777 / 7778 / 9090) override via the env
+# file or systemd drop-ins.
+Environment=RED_DATA_DIR=%S/reddb
+Environment=REDDB_HTTP_BIND_ADDR=127.0.0.1:8080
+Environment=REDDB_GRPC_BIND_ADDR=127.0.0.1:50051
+Environment=RUST_MIN_STACK=8388608
+
+ExecStart=/usr/local/bin/red server \
+    --path %S/reddb/data.rdb \
+    --http-bind 127.0.0.1:8080 \
+    --grpc-bind 127.0.0.1:50051
+
+# Graceful shutdown — SIGTERM hits our signal handler, which
+# runs Engine::graceful_shutdown then exits 0. Bound the grace
+# window so a hung shutdown doesn't block reboot forever.
+KillSignal=SIGTERM
+TimeoutStopSec=60s
+SendSIGKILL=yes
+
+# Reload secrets without restart (PLAN.md Phase 6). SIGHUP is
+# the standard convention; the binary's signal handler maps it
+# to the secret-reload path.
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Hardening — least-privilege defaults. Override via drop-in if
+# a deployment needs broader access (e.g. NFS mount under
+# /var/lib/reddb-shared).
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+# Resource accounting — exposed in `systemctl status reddb` and
+# fed into `/sys/fs/cgroup/...` so RED_MAX_MEMORY_MB inside the
+# binary stays consistent with the unit's hard cap.
+MemoryAccounting=yes
+TasksAccounting=yes
+IOAccounting=yes
+
+# Restart on crash with a bounded burst so a flap-loop can't
+# DoS the host.
+Restart=on-failure
+RestartSec=2s
+StartLimitBurst=5
+StartLimitIntervalSec=30s
+
+[Install]
+WantedBy=multi-user.target
