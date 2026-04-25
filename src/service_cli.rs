@@ -781,29 +781,84 @@ async fn spawn_lifecycle_signal_handler(runtime: RedDBRuntime) {
             return;
         }
     };
-
-    tokio::spawn(async move {
-        let signal_name = tokio::select! {
-            _ = sigterm.recv() => "SIGTERM",
-            _ = sigint.recv() => "SIGINT",
-        };
-        tracing::info!(signal = signal_name, "lifecycle signal received; shutting down");
-        match runtime.graceful_shutdown(backup_on_shutdown) {
-            Ok(report) => {
-                tracing::info!(
-                    duration_ms = report.duration_ms,
-                    flushed_wal = report.flushed_wal,
-                    final_checkpoint = report.final_checkpoint,
-                    backup_uploaded = report.backup_uploaded,
-                    "graceful shutdown complete"
-                );
-            }
-            Err(err) => {
-                tracing::error!(error = %err, "graceful shutdown failed");
-            }
+    // PLAN.md Phase 6.4 — SIGHUP triggers a reload of secrets from
+    // their `_FILE` companions without restarting the process.
+    // Useful for credential rotation pipelines (kubectl create
+    // secret + kubectl rollout restart, but for systemd / Nomad /
+    // bare-metal where rolling the process is heavier).
+    let mut sighup = match signal(SignalKind::hangup()) {
+        Ok(s) => Some(s),
+        Err(err) => {
+            tracing::warn!(error = %err, "could not install SIGHUP handler; secret reload via signal disabled");
+            None
         }
-        std::process::exit(0);
+    };
+
+    let reload_runtime = runtime.clone();
+    tokio::spawn(async move {
+        loop {
+            let signal_name = match &mut sighup {
+                Some(hup) => tokio::select! {
+                    _ = sigterm.recv() => "SIGTERM",
+                    _ = sigint.recv() => "SIGINT",
+                    _ = hup.recv() => "SIGHUP",
+                },
+                None => tokio::select! {
+                    _ = sigterm.recv() => "SIGTERM",
+                    _ = sigint.recv() => "SIGINT",
+                },
+            };
+
+            if signal_name == "SIGHUP" {
+                handle_sighup_reload(&reload_runtime);
+                continue; // stay alive; SIGHUP isn't a shutdown
+            }
+
+            tracing::info!(signal = signal_name, "lifecycle signal received; shutting down");
+            match runtime.graceful_shutdown(backup_on_shutdown) {
+                Ok(report) => {
+                    tracing::info!(
+                        duration_ms = report.duration_ms,
+                        flushed_wal = report.flushed_wal,
+                        final_checkpoint = report.final_checkpoint,
+                        backup_uploaded = report.backup_uploaded,
+                        "graceful shutdown complete"
+                    );
+                }
+                Err(err) => {
+                    tracing::error!(error = %err, "graceful shutdown failed");
+                }
+            }
+            std::process::exit(0);
+        }
     });
+}
+
+/// PLAN.md Phase 6.4 — re-read secrets from `*_FILE` companion env
+/// vars. Today this only refreshes the audit log + records the
+/// reload event; the runtime modules that hold cached secret
+/// material (S3 backend credentials, admin token, JWT keys) read
+/// the env on each request so the next call after SIGHUP picks up
+/// the new file contents automatically. A future extension can
+/// punch through to the LeaseStore / AuthStore for in-memory
+/// caches that don't re-read on each call.
+fn handle_sighup_reload(runtime: &RedDBRuntime) {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    tracing::info!(
+        target: "reddb::secrets",
+        ts_unix_ms = now_ms,
+        "SIGHUP received; secrets will be re-read from *_FILE on next access"
+    );
+    runtime.audit_log().record(
+        "config/sighup_reload",
+        "system",
+        "secrets",
+        "ok",
+        crate::json::Value::Null,
+    );
 }
 
 #[inline(never)]
