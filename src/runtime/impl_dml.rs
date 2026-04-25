@@ -305,6 +305,7 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &InsertQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         // Phase 2.5.4 table-scoped tenancy: if the target table is
         // tenant-scoped and the user didn't name the tenant column,
         // auto-inject it with the thread-local `CURRENT_TENANT()`
@@ -717,6 +718,7 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &UpdateQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         // APPEND ONLY guard: reject before RLS / RETURNING work so the
         // operator's immutability declaration is honoured uniformly
         // and the error message points at the DDL rather than at a
@@ -1306,6 +1308,7 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &DeleteQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         // APPEND ONLY guard — see execute_update for rationale.
         if let Some(contract) = self.db().collection_contract_arc(&query.table) {
             if contract.append_only {

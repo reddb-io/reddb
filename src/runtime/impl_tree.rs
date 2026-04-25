@@ -70,6 +70,7 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &CreateTreeQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
         if query.default_max_children == 0 {
             return Err(RedDBError::Query(
                 "tree default max children must be positive".to_string(),
@@ -158,6 +159,7 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &DropTreeQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
         let Some(definition) = self
             .inner
             .db
@@ -212,6 +214,7 @@ impl RedDBRuntime {
         raw_query: &str,
         command: &TreeCommand,
     ) -> RedDBResult<RuntimeQueryResult> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         match command {
             TreeCommand::Insert {
                 collection,

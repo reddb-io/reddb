@@ -13,6 +13,7 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &CreateTimeSeriesQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
         for spec in &query.downsample_policies {
             crate::storage::timeseries::retention::DownsamplePolicy::parse(spec).ok_or_else(
                 || RedDBError::Query(format!("invalid downsample policy '{}'", spec)),
@@ -110,6 +111,7 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &DropTimeSeriesQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
         let store = self.inner.db.store();
         if store.get_collection(&query.name).is_none() {
             if query.if_exists {

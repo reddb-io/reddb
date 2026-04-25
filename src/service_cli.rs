@@ -170,7 +170,12 @@ impl ServerCommandConfig {
                     .primary_addr
                     .clone()
                     .unwrap_or_else(|| "http://127.0.0.1:50051".to_string());
-                options.read_only = true;
+                // Public-mutation rejection on replicas is enforced by
+                // `WriteGate` at the runtime/RPC boundary (PLAN.md W1).
+                // Leaving `options.read_only = false` keeps the pager
+                // writable so the internal logical-WAL apply path can
+                // ingest records from the primary; WriteGate ensures no
+                // client request reaches storage.
                 ReplicationConfig::replica(primary_addr)
             }
             _ => ReplicationConfig::standalone(),

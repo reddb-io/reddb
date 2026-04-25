@@ -17,6 +17,27 @@ impl RedDBRuntime {
         raw_query: &str,
         cmd: &ProbabilisticCommand,
     ) -> RedDBResult<RuntimeQueryResult> {
+        // Mixed read/write surface: count/info/check are read-side and
+        // must remain available on read-only replicas; create/add/
+        // merge/delete/drop are mutations and must go through the gate.
+        let is_mutation = matches!(
+            cmd,
+            ProbabilisticCommand::CreateHll { .. }
+                | ProbabilisticCommand::HllAdd { .. }
+                | ProbabilisticCommand::HllMerge { .. }
+                | ProbabilisticCommand::DropHll { .. }
+                | ProbabilisticCommand::CreateSketch { .. }
+                | ProbabilisticCommand::SketchAdd { .. }
+                | ProbabilisticCommand::SketchMerge { .. }
+                | ProbabilisticCommand::DropSketch { .. }
+                | ProbabilisticCommand::CreateFilter { .. }
+                | ProbabilisticCommand::FilterAdd { .. }
+                | ProbabilisticCommand::FilterDelete { .. }
+                | ProbabilisticCommand::DropFilter { .. }
+        );
+        if is_mutation {
+            self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        }
         match cmd {
             // ── HyperLogLog ──────────────────────────────────────────
             ProbabilisticCommand::CreateHll {

@@ -59,6 +59,7 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &CreateQueueQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
         if query.dlq.as_deref() == Some(query.name.as_str()) {
             return Err(RedDBError::Query(
                 "dead-letter queue must be different from the source queue".to_string(),
@@ -156,6 +157,7 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &DropQueueQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
         let store = self.inner.db.store();
         if store.get_collection(&query.name).is_none() {
             if query.if_exists {
@@ -198,6 +200,7 @@ impl RedDBRuntime {
         raw_query: &str,
         cmd: &QueueCommand,
     ) -> RedDBResult<RuntimeQueryResult> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         match cmd {
             QueueCommand::Push {
                 queue,

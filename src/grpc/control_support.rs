@@ -39,7 +39,19 @@ impl GrpcRuntime {
 
     pub(crate) fn authorize(&self, metadata: &MetadataMap, is_write: bool) -> Result<(), Status> {
         let auth = self.resolve_auth(metadata);
-        check_permission(&auth, is_write, false).map_err(Status::unauthenticated)
+        check_permission(&auth, is_write, false).map_err(Status::unauthenticated)?;
+        // PLAN.md W1: every gRPC mutation RPC funnels through
+        // `authorize_write()`, so consulting the public-mutation gate
+        // here covers Insert/Update/Delete, BulkInsert, DDL helpers,
+        // and the serverless lifecycle endpoints in one place. Read
+        // RPCs (`is_write = false`) skip the gate so a replica can
+        // continue serving SELECTs.
+        if is_write {
+            self.runtime
+                .check_write(crate::runtime::write_gate::WriteKind::Dml)
+                .map_err(|err| Status::failed_precondition(err.to_string()))?;
+        }
+        Ok(())
     }
 
     pub(crate) fn authorize_admin(&self, metadata: &MetadataMap) -> Result<(), Status> {

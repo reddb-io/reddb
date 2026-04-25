@@ -333,6 +333,7 @@ impl RedDBRuntime {
         name: &str,
         enabled: bool,
     ) -> RedDBResult<crate::PhysicalIndexState> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Maintenance)?;
         self.inner
             .db
             .set_index_enabled(name, enabled)

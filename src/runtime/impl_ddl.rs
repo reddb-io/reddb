@@ -19,6 +19,7 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &CreateTableQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
         let store = self.inner.db.store();
         analyze_create_table(query).map_err(|err| RedDBError::Query(err.to_string()))?;
         // Check if the collection already exists.
@@ -128,6 +129,7 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &DropTableQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
         let store = self.inner.db.store();
 
         let exists = store.get_collection(&query.name).is_some();
@@ -189,6 +191,7 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &AlterTableQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
         let store = self.inner.db.store();
 
         // Verify the table exists.
@@ -403,6 +406,7 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &CreateIndexQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
         let store = self.inner.db.store();
 
         // Verify the table exists
@@ -513,6 +517,7 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &DropIndexQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Ddl)?;
         let store = self.inner.db.store();
 
         // Verify the table exists

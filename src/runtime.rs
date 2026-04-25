@@ -739,6 +739,17 @@ struct RuntimeInner {
     /// cached shape may reference dropped or renamed columns and the
     /// client must re-PREPARE.
     ddl_epoch: std::sync::atomic::AtomicU64,
+    /// Public-mutation gate (PLAN.md W1).
+    ///
+    /// Built once at construction from the immutable subset of
+    /// `RedDBOptions` (read_only flag + replication role). Every public
+    /// mutation surface — SQL DML/DDL, gRPC mutating RPCs, HTTP/native
+    /// wire mutations, admin maintenance endpoints, serverless
+    /// lifecycle — consults `write_gate.check(WriteKind::*)` before
+    /// dispatching to storage. The replica internal apply path
+    /// (`LogicalChangeApplier`) reaches into the store directly and
+    /// bypasses the gate by construction.
+    write_gate: crate::runtime::write_gate::WriteGate,
 }
 
 #[derive(Clone)]
@@ -780,6 +791,7 @@ mod record_search;
 pub mod schema_diff;
 pub mod snapshot_reuse;
 pub mod within_clause;
+pub mod write_gate;
 
 pub use self::graph_dsl::*;
 use self::join_filter::*;

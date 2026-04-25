@@ -68,6 +68,15 @@ impl<'rt> MutationEngine<'rt> {
         collection: String,
         mut rows: Vec<MutationRow>,
     ) -> RedDBResult<MutationResult> {
+        // Public-mutation gate (PLAN.md W1). Every public path that
+        // creates rows funnels through `apply`, so a single check here
+        // covers SQL `INSERT`, gRPC `Insert`/`BulkInsert`, HTTP
+        // `POST /collections/X`, and the native-wire equivalent. The
+        // replica internal apply path uses `LogicalChangeApplier`,
+        // which talks to the store directly and never enters this
+        // method, so legitimate replica catch-up is unaffected.
+        self.runtime
+            .check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         match rows.len() {
             0 => Ok(MutationResult::empty()),
             1 => self.append_one(collection, rows.remove(0)),

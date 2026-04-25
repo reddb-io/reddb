@@ -1369,6 +1369,7 @@ impl RedDBRuntime {
                 pending_tombstones: parking_lot::RwLock::new(HashMap::new()),
                 tenant_tables: parking_lot::RwLock::new(HashMap::new()),
                 ddl_epoch: std::sync::atomic::AtomicU64::new(0),
+                write_gate: crate::runtime::write_gate::WriteGate::from_options(&options),
             }),
         };
 
@@ -2007,6 +2008,27 @@ impl RedDBRuntime {
         crate::runtime::mutation::MutationEngine::new(self)
     }
 
+    /// Public-mutation gate snapshot (PLAN.md W1).
+    ///
+    /// Surfaces that accept untrusted client requests (SQL DML/DDL,
+    /// gRPC mutating RPCs, HTTP/native wire mutations, admin
+    /// maintenance, serverless lifecycle) call `check_write` before
+    /// dispatching to storage. Returns `RedDBError::ReadOnly` on any
+    /// instance running as a replica or with `options.read_only =
+    /// true`. The replica internal logical-WAL apply path reaches into
+    /// the store directly and never calls this method, so legitimate
+    /// replica catch-up still works.
+    pub fn check_write(&self, kind: crate::runtime::write_gate::WriteKind) -> RedDBResult<()> {
+        self.inner.write_gate.check(kind)
+    }
+
+    /// Read-only handle to the gate, useful for transports that want
+    /// to surface the policy in health/status output without taking on
+    /// a dependency on the concrete enum.
+    pub fn write_gate(&self) -> &crate::runtime::write_gate::WriteGate {
+        &self.inner.write_gate
+    }
+
     /// Emit a CDC record without invalidating the result cache.
     ///
     /// Used by `MutationEngine::append_batch` which calls
@@ -2408,6 +2430,7 @@ impl RedDBRuntime {
 
     /// Trigger an immediate backup.
     pub fn trigger_backup(&self) -> RedDBResult<crate::replication::scheduler::BackupResult> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Backup)?;
         let started = std::time::Instant::now();
         let snapshot = self.create_snapshot()?;
         let mut uploaded = false;

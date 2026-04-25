@@ -1989,6 +1989,7 @@ impl RedDBRuntime {
 
 impl RuntimeEntityPort for RedDBRuntime {
     fn create_row(&self, input: CreateRowInput) -> RedDBResult<CreateEntityOutput> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         let db = self.db();
         ensure_collection_model_contract(
             &db,
@@ -2105,6 +2106,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         if rows.is_empty() {
             return Ok(0);
         }
+        self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
 
         let db = self.db();
         ensure_collection_model_contract(&db, &collection, crate::catalog::CollectionModel::Table)?;
@@ -2199,6 +2201,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         if input.rows.is_empty() {
             return Ok(0);
         }
+        self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
 
         let db = self.db();
         let collection = input.collection;
@@ -2254,17 +2257,20 @@ impl RuntimeEntityPort for RedDBRuntime {
     }
 
     fn create_node(&self, input: CreateNodeInput) -> RedDBResult<CreateEntityOutput> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         ensure_non_tree_reserved_metadata_entries(&input.metadata)?;
         self.create_node_unchecked(input)
     }
 
     fn create_edge(&self, input: CreateEdgeInput) -> RedDBResult<CreateEntityOutput> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         ensure_non_tree_structural_edge_label(&input.label)?;
         ensure_non_tree_reserved_metadata_entries(&input.metadata)?;
         self.create_edge_unchecked(input)
     }
 
     fn create_vector(&self, input: CreateVectorInput) -> RedDBResult<CreateEntityOutput> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         let db = self.db();
         ensure_collection_model_contract(
             &db,
@@ -2309,6 +2315,7 @@ impl RuntimeEntityPort for RedDBRuntime {
     }
 
     fn create_document(&self, input: CreateDocumentInput) -> RedDBResult<CreateEntityOutput> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         let db = self.db();
         ensure_collection_model_contract(
             &db,
@@ -2391,6 +2398,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         &self,
         input: CreateTimeSeriesPointInput,
     ) -> RedDBResult<CreateEntityOutput> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         let db = self.db();
         ensure_collection_model_contract(
             &db,
@@ -2477,6 +2485,7 @@ impl RuntimeEntityPort for RedDBRuntime {
     }
 
     fn delete_kv(&self, collection: &str, key: &str) -> RedDBResult<bool> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         let found = self.get_kv(collection, key)?;
         if let Some((_, id)) = found {
             let db = self.db();
@@ -2494,6 +2503,7 @@ impl RuntimeEntityPort for RedDBRuntime {
     }
 
     fn patch_entity(&self, input: PatchEntityInput) -> RedDBResult<CreateEntityOutput> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         let PatchEntityInput {
             collection,
             id,
@@ -2517,6 +2527,7 @@ impl RuntimeEntityPort for RedDBRuntime {
     }
 
     fn delete_entity(&self, input: DeleteEntityInput) -> RedDBResult<DeleteEntityOutput> {
+        self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         let store = self.db().store();
         // Snapshot row fields before delete so we can mirror the removal
         // into every secondary index. The fetch is best-effort: if the
