@@ -7,7 +7,7 @@ use super::{
     load_archived_change_records, load_backup_head, load_snapshot_manifest,
     load_wal_segment_manifest,
 };
-use crate::replication::logical::{ApplyMode, LogicalChangeApplier};
+use crate::replication::logical::{ApplyMode, ApplyOutcome, LogicalChangeApplier};
 use crate::storage::backend::{BackendError, RemoteBackend};
 use crate::storage::RedDB;
 
@@ -189,7 +189,19 @@ impl PointInTimeRecovery {
         let mut recovered_to_lsn = plan.base_lsn;
         let mut recovered_to_time = plan.snapshot_time;
 
-        for segment_key in &plan.wal_segments {
+        // PLAN.md Phase 11.5 — stateful applier so restore enforces the
+        // same LSN monotonicity guarantees a replica fetcher does.
+        // Starting LSN is the snapshot's base_lsn; first applied record
+        // must be `base_lsn + 1` (or any positive LSN if base_lsn == 0).
+        let applier = LogicalChangeApplier::new(plan.base_lsn);
+
+        // PLAN.md Phase 11.3 — track the previous segment's sha256 so
+        // every iteration can verify `segment[i].prev_hash == segment[i-1].sha256`.
+        // The first segment is allowed `prev_hash = None`; subsequent
+        // segments must link explicitly. A break aborts restore.
+        let mut prev_segment_sha: Option<String> = None;
+
+        for (segment_idx, segment_key) in plan.wal_segments.iter().enumerate() {
             // PLAN.md Phase 2.4 — verify segment integrity via the
             // sidecar manifest's sha256 before applying its records.
             // Fail-closed parity with snapshot verification: a present-
@@ -225,6 +237,60 @@ impl PointInTimeRecovery {
                 }
             }
 
+            // PLAN.md Phase 11.3 — hash chain validation. The first
+            // segment in the restore plan may have `prev_hash = None`
+            // (fresh timeline). Every subsequent segment must point to
+            // the prior segment's sha256. A break detects:
+            //   * a segment removed from the middle (next segment's
+            //     prev_hash refers to the missing one)
+            //   * a tampered/replaced segment (prev_hash mismatches)
+            //   * reordering (prev_hash refers to a non-adjacent peer)
+            // Legacy segments (no manifest at all) skip the chain check
+            // with a warning, same as the sha256 case.
+            if let Some(m) = manifest.as_ref() {
+                match (&m.prev_hash, &prev_segment_sha) {
+                    (Some(declared), Some(actual)) => {
+                        if !declared.eq_ignore_ascii_case(actual) {
+                            return Err(BackendError::Internal(format!(
+                                "wal segment hash chain broken at '{segment_key}' (index {segment_idx}): \
+                                 declared prev_hash {declared} != prior segment sha256 {actual}; \
+                                 a segment was removed, reordered, or replaced",
+                            )));
+                        }
+                    }
+                    (Some(declared), None) => {
+                        return Err(BackendError::Internal(format!(
+                            "wal segment hash chain broken at '{segment_key}' (index {segment_idx}): \
+                             segment declares prev_hash {declared} but no prior segment was loaded; \
+                             the first segment of the chain is missing",
+                        )));
+                    }
+                    (None, Some(actual)) => {
+                        return Err(BackendError::Internal(format!(
+                            "wal segment hash chain broken at '{segment_key}' (index {segment_idx}): \
+                             segment claims to be the first in its timeline but a prior segment \
+                             (sha256 {actual}) was already replayed; reorder or merge of two timelines",
+                        )));
+                    }
+                    (None, None) => {
+                        // First segment of a fresh timeline — accepted.
+                    }
+                }
+                // Advance the chain head only when this segment carries
+                // a sha256. Without one we can't link the chain forward;
+                // keep the previous head so a later segment can still
+                // bridge over the gap (legacy archives mid-chain).
+                if let Some(sha) = m.sha256.clone() {
+                    prev_segment_sha = Some(sha);
+                }
+            } else {
+                // No manifest at all — already warned above. Reset
+                // chain tracking conservatively: the next segment
+                // can't reasonably claim a prev_hash if we don't know
+                // this one's sha256.
+                prev_segment_sha = None;
+            }
+
             let mut segment_applied = false;
             for record in records {
                 if record.lsn <= plan.base_lsn {
@@ -233,12 +299,21 @@ impl PointInTimeRecovery {
                 if plan.target_time != 0 && record.timestamp > plan.target_time {
                     continue;
                 }
-                LogicalChangeApplier::apply_record(&db, &record, ApplyMode::Restore)
-                    .map_err(|err| BackendError::Internal(err.to_string()))?;
-                recovered_to_lsn = recovered_to_lsn.max(record.lsn);
-                recovered_to_time = recovered_to_time.max(record.timestamp);
-                records_applied += 1;
-                segment_applied = true;
+                match applier.apply(&db, &record, ApplyMode::Restore) {
+                    Ok(ApplyOutcome::Applied) => {
+                        recovered_to_lsn = recovered_to_lsn.max(record.lsn);
+                        recovered_to_time = recovered_to_time.max(record.timestamp);
+                        records_applied += 1;
+                        segment_applied = true;
+                    }
+                    Ok(ApplyOutcome::Idempotent) | Ok(ApplyOutcome::Skipped) => {}
+                    Err(err) => {
+                        return Err(BackendError::Internal(format!(
+                            "restore apply failed at lsn {} in segment '{}': {}",
+                            record.lsn, segment_key, err
+                        )));
+                    }
+                }
             }
             if segment_applied {
                 wal_segments_replayed += 1;
@@ -431,5 +506,134 @@ mod tests {
         assert!(restore_path.exists());
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    /// Helper: build a snapshot+wal layout, archive `n` segments
+    /// linked by sha256 prev_hash, then run the restore loop and
+    /// return its result. Lets the chain tests share boilerplate.
+    fn run_chain_restore(
+        tag: &str,
+        mutate: impl FnOnce(&LocalBackend, &[crate::storage::wal::WalSegmentMeta]),
+    ) -> Result<RecoveryResult, BackendError> {
+        use crate::replication::cdc::ChangeRecord;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "reddb_chain_{}_{}_{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let snapshot_dir = temp_dir.join("snapshots");
+        let wal_dir = temp_dir.join("wal");
+        let restore_path = temp_dir.join("restore").join("data.rdb");
+        std::fs::create_dir_all(&snapshot_dir).unwrap();
+        std::fs::create_dir_all(&wal_dir).unwrap();
+
+        let snapshot_path = snapshot_dir.join("1-100.snapshot");
+        RedDB::open(&snapshot_path).unwrap().flush().unwrap();
+        publish_snapshot_manifest(
+            &LocalBackend,
+            &SnapshotManifest {
+                timeline_id: "main".to_string(),
+                snapshot_key: snapshot_path.to_string_lossy().to_string(),
+                snapshot_id: 1,
+                snapshot_time: 100,
+                base_lsn: 0,
+                schema_version: crate::api::REDDB_FORMAT_VERSION,
+                format_version: crate::api::REDDB_FORMAT_VERSION,
+                snapshot_sha256: None,
+            },
+        )
+        .unwrap();
+
+        let wal_prefix = format!("{}/", wal_dir.to_string_lossy());
+        let mk = |lsn: u64| ChangeRecord {
+            lsn,
+            timestamp: 100 + lsn,
+            operation: crate::replication::cdc::ChangeOperation::Insert,
+            collection: "users".to_string(),
+            entity_id: lsn,
+            entity_kind: "row".to_string(),
+            entity_bytes: Some(format!("payload-{lsn}").into_bytes()),
+            metadata: None,
+        };
+
+        let mut metas = Vec::new();
+        let mut prev: Option<String> = None;
+        for lsn in [1u64, 2, 3] {
+            let r = mk(lsn);
+            let m = crate::storage::wal::archive_change_records(
+                &LocalBackend,
+                &wal_prefix,
+                &[(r.lsn, r.encode())],
+                prev.clone(),
+            )
+            .unwrap()
+            .expect("archived");
+            prev = m.sha256.clone();
+            metas.push(m);
+        }
+
+        mutate(&LocalBackend, &metas);
+
+        let recovery = PointInTimeRecovery::new(
+            Arc::new(LocalBackend),
+            snapshot_dir.to_string_lossy().to_string(),
+            wal_prefix,
+        );
+        let result = recovery.restore_to(0, &restore_path);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        result
+    }
+
+    #[test]
+    fn restore_succeeds_with_intact_chain() {
+        let result = run_chain_restore("intact", |_, _| {});
+        let r = result.expect("intact chain restore must succeed");
+        assert_eq!(r.wal_segments_replayed, 3);
+    }
+
+    #[test]
+    fn restore_fails_closed_on_chain_break() {
+        // Corrupt segment 2's sidecar manifest by overwriting the
+        // declared prev_hash with a value that doesn't match segment 1.
+        let result = run_chain_restore("chainbreak", |backend, metas| {
+            let sidecar_key =
+                crate::storage::wal::wal_segment_manifest_key(&metas[1].key);
+            let mut bad = crate::storage::wal::load_wal_segment_manifest(backend, &metas[1].key)
+                .unwrap()
+                .unwrap();
+            bad.prev_hash = Some("00".repeat(32));
+            crate::storage::wal::publish_wal_segment_manifest(backend, &bad).unwrap();
+            let _ = sidecar_key; // ensure key reference unused warning suppressed
+        });
+        let err = result.expect_err("chain break must fail closed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("chain"),
+            "error must mention chain; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn restore_fails_closed_on_sha256_corruption() {
+        // Tamper segment 2's sidecar sha256 so the integrity check
+        // (Phase 2.4) fires before the chain check (Phase 11.3).
+        let result = run_chain_restore("shacorrupt", |backend, metas| {
+            let mut bad = crate::storage::wal::load_wal_segment_manifest(backend, &metas[1].key)
+                .unwrap()
+                .unwrap();
+            bad.sha256 = Some("ff".repeat(32));
+            crate::storage::wal::publish_wal_segment_manifest(backend, &bad).unwrap();
+        });
+        let err = result.expect_err("sha mismatch must fail closed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("integrity") || msg.contains("sha256"),
+            "error must mention integrity/sha256; got: {msg}"
+        );
     }
 }
