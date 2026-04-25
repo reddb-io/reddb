@@ -61,6 +61,39 @@ pub fn load_runtime_readonly(data_path: &Path) -> Option<bool> {
     parsed.get("read_only").and_then(|v| v.as_bool())
 }
 
+/// PLAN.md Phase 11.6 — default lease holder id when the operator
+/// doesn't pin one in the promotion request body. Mirrors the boot
+/// loop's resolution (`RED_LEASE_HOLDER_ID` → `<hostname>-<pid>`).
+fn default_holder_id() -> String {
+    if let Ok(explicit) = std::env::var("RED_LEASE_HOLDER_ID") {
+        if !explicit.trim().is_empty() {
+            return explicit;
+        }
+    }
+    let host = std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("HOST"))
+        .unwrap_or_else(|_| "unknown-host".to_string());
+    format!("{host}-{}", std::process::id())
+}
+
+/// Sanitize replica IDs for use as Prometheus label values.
+/// Replaces double quotes, backslashes, and newlines so the resulting
+/// metric line stays parseable. Operators picking aggressive replica
+/// IDs is rare but malicious input must not break /metrics.
+fn sanitize_label(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 impl RedDBServer {
     /// `POST /admin/shutdown` — graceful shutdown coordinator.
     /// Returns 200 with the shutdown report when complete; 200 with
@@ -506,6 +539,166 @@ impl RedDBServer {
         let _ = writeln!(body, "# TYPE reddb_wal_archive_lag_records gauge");
         let _ = writeln!(body, "reddb_wal_archive_lag_records {}", lag);
 
+        // PLAN.md Phase 11.4 — per-replica lag visibility. Emitted
+        // when this primary has registered replicas; replicas that
+        // haven't ack'd anything yet (`last_acked_lsn == 0`) still
+        // show up so dashboards can detect "registered but stuck".
+        let replicas = self.runtime.primary_replica_snapshots();
+        let _ = writeln!(
+            body,
+            "# HELP reddb_replica_count Currently registered replicas."
+        );
+        let _ = writeln!(body, "# TYPE reddb_replica_count gauge");
+        let _ = writeln!(body, "reddb_replica_count {}", replicas.len());
+        if !replicas.is_empty() {
+            let _ = writeln!(
+                body,
+                "# HELP reddb_replica_ack_lsn Most recent LSN acked by each replica."
+            );
+            let _ = writeln!(body, "# TYPE reddb_replica_ack_lsn gauge");
+            for r in &replicas {
+                let _ = writeln!(
+                    body,
+                    "reddb_replica_ack_lsn{{replica_id=\"{}\"}} {}",
+                    sanitize_label(&r.id),
+                    r.last_acked_lsn
+                );
+            }
+            let _ = writeln!(
+                body,
+                "# HELP reddb_replica_lag_records Distance from primary current LSN to replica acked LSN."
+            );
+            let _ = writeln!(body, "# TYPE reddb_replica_lag_records gauge");
+            for r in &replicas {
+                let _ = writeln!(
+                    body,
+                    "reddb_replica_lag_records{{replica_id=\"{}\"}} {}",
+                    sanitize_label(&r.id),
+                    current_lsn.saturating_sub(r.last_acked_lsn)
+                );
+            }
+            let _ = writeln!(
+                body,
+                "# HELP reddb_replica_lag_seconds Wall-clock seconds since the replica was last seen."
+            );
+            let _ = writeln!(body, "# TYPE reddb_replica_lag_seconds gauge");
+            for r in &replicas {
+                let lag_ms = (now_ms as u128).saturating_sub(r.last_seen_at_unix_ms);
+                let _ = writeln!(
+                    body,
+                    "reddb_replica_lag_seconds{{replica_id=\"{}\"}} {}",
+                    sanitize_label(&r.id),
+                    (lag_ms as f64) / 1000.0
+                );
+            }
+        }
+
+        // PLAN.md Phase 11.5 — replica apply error counters and
+        // current health label. Counters are global across the
+        // instance lifetime; the health label reflects whatever the
+        // replica loop last persisted (`ok`, `connecting`, `gap`,
+        // `divergence`, `apply_error`, `stalled_gap`).
+        let _ = writeln!(
+            body,
+            "# HELP reddb_replica_apply_errors_total Replica WAL apply errors since process start, by kind."
+        );
+        let _ = writeln!(body, "# TYPE reddb_replica_apply_errors_total counter");
+        for (kind, count) in self.runtime.replica_apply_error_counts() {
+            let _ = writeln!(
+                body,
+                "reddb_replica_apply_errors_total{{kind=\"{}\"}} {}",
+                kind.label(),
+                count
+            );
+        }
+        if let Some(health) = self.runtime.replica_apply_health() {
+            let _ = writeln!(
+                body,
+                "# HELP reddb_replica_apply_health Replica apply state (label, value=1)."
+            );
+            let _ = writeln!(body, "# TYPE reddb_replica_apply_health gauge");
+            let _ = writeln!(
+                body,
+                "reddb_replica_apply_health{{state=\"{}\"}} 1",
+                sanitize_label(&health)
+            );
+        }
+
+        // PLAN.md Phase 4.4 — per-caller quota rejections. Empty
+        // when the quota is unconfigured or no caller has been
+        // throttled yet. Opportunistic eviction here keeps the
+        // rejection map bounded on long-lived processes.
+        self.runtime.quota_bucket().evict_idle();
+        let rejections = self.runtime.quota_bucket().rejection_snapshot();
+        if !rejections.is_empty() {
+            let _ = writeln!(
+                body,
+                "# HELP reddb_quota_rejected_total Requests rejected by per-caller QPS quota."
+            );
+            let _ = writeln!(body, "# TYPE reddb_quota_rejected_total counter");
+            for (principal, count) in &rejections {
+                let _ = writeln!(
+                    body,
+                    "reddb_quota_rejected_total{{principal=\"{}\"}} {}",
+                    sanitize_label(principal),
+                    count
+                );
+            }
+        }
+
+        // PLAN.md Phase 11.4 — commit waiter outcome counters and
+        // last-wait gauge. Operators alert when `timed_out` rises
+        // (policy too tight or replicas stalled) and watch the
+        // last-wait gauge for p95 trends.
+        let (reached, timed_out, not_required, last_micros) =
+            self.runtime.commit_waiter_metrics_snapshot();
+        let _ = writeln!(
+            body,
+            "# HELP reddb_commit_wait_total Commit-wait outcomes by kind."
+        );
+        let _ = writeln!(body, "# TYPE reddb_commit_wait_total counter");
+        let _ = writeln!(
+            body,
+            "reddb_commit_wait_total{{outcome=\"reached\"}} {}",
+            reached
+        );
+        let _ = writeln!(
+            body,
+            "reddb_commit_wait_total{{outcome=\"timed_out\"}} {}",
+            timed_out
+        );
+        let _ = writeln!(
+            body,
+            "reddb_commit_wait_total{{outcome=\"not_required\"}} {}",
+            not_required
+        );
+        let _ = writeln!(
+            body,
+            "# HELP reddb_commit_wait_last_seconds Wall-clock seconds of the most recent commit wait."
+        );
+        let _ = writeln!(body, "# TYPE reddb_commit_wait_last_seconds gauge");
+        let _ = writeln!(
+            body,
+            "reddb_commit_wait_last_seconds {}",
+            (last_micros as f64) / 1_000_000.0
+        );
+
+        // PLAN.md Phase 11.4 — declared commit policy as a labeled
+        // gauge so dashboards can confirm what the operator pinned.
+        // The default `local` is emitted even when no replication is
+        // configured, so the metric is always present.
+        let policy = self.runtime.commit_policy();
+        let _ = writeln!(
+            body,
+            "# HELP reddb_primary_commit_policy Active commit policy on the primary."
+        );
+        let _ = writeln!(body, "# TYPE reddb_primary_commit_policy gauge");
+        let _ = writeln!(
+            body,
+            "reddb_primary_commit_policy{{policy=\"{}\"}} 1",
+            policy.label()
+        );
+
         let _ = writeln!(
             body,
             "# HELP reddb_db_size_bytes On-disk size of the primary database file."
@@ -626,6 +819,20 @@ impl RedDBServer {
             JsonValue::String(self.runtime.write_gate().lease_state().label().to_string()),
         );
 
+        // PLAN.md Phase 6.3 — surface encryption-at-rest configuration
+        // so dashboards / `red doctor` can flag a misconfigured key
+        // (Err on parse) before it silently leaves data plaintext.
+        let (enc_state, enc_error) = self.runtime.encryption_at_rest_status();
+        let mut enc_obj = Map::new();
+        enc_obj.insert("state".to_string(), JsonValue::String(enc_state.to_string()));
+        if let Some(err) = enc_error {
+            enc_obj.insert("error".to_string(), JsonValue::String(err));
+        }
+        object.insert(
+            "encryption_at_rest".to_string(),
+            JsonValue::Object(enc_obj),
+        );
+
         // Backup posture (PLAN.md Phase 5.1). `last_backup` carries
         // the same shape /metrics emits so dashboards and alert rules
         // share a single contract.
@@ -675,6 +882,81 @@ impl RedDBServer {
             JsonValue::Number(current_lsn.saturating_sub(last_archived_lsn) as f64),
         );
         object.insert("wal".to_string(), JsonValue::Object(wal_obj));
+
+        // PLAN.md Phase 11.5 — replica apply health + counters.
+        // Always emit so dashboards have a stable shape; missing
+        // health label means this isn't a replica or no apply has
+        // happened yet.
+        let mut replica_obj = Map::new();
+        if let Some(health) = self.runtime.replica_apply_health() {
+            replica_obj.insert("apply_health".to_string(), JsonValue::String(health));
+        }
+        let mut errors_obj = Map::new();
+        for (kind, count) in self.runtime.replica_apply_error_counts() {
+            errors_obj.insert(
+                kind.label().to_string(),
+                JsonValue::Number(count as f64),
+            );
+        }
+        replica_obj.insert("apply_errors".to_string(), JsonValue::Object(errors_obj));
+        // Per-replica array (primary view). Empty on replica/standalone.
+        let snaps = self.runtime.primary_replica_snapshots();
+        if !snaps.is_empty() {
+            let arr: Vec<JsonValue> = snaps
+                .iter()
+                .map(|r| {
+                    let mut o = Map::new();
+                    o.insert("id".to_string(), JsonValue::String(r.id.clone()));
+                    o.insert(
+                        "last_acked_lsn".to_string(),
+                        JsonValue::Number(r.last_acked_lsn as f64),
+                    );
+                    o.insert(
+                        "last_sent_lsn".to_string(),
+                        JsonValue::Number(r.last_sent_lsn as f64),
+                    );
+                    o.insert(
+                        "last_durable_lsn".to_string(),
+                        JsonValue::Number(r.last_durable_lsn as f64),
+                    );
+                    o.insert(
+                        "last_seen_at_unix_ms".to_string(),
+                        JsonValue::Number(r.last_seen_at_unix_ms as f64),
+                    );
+                    o.insert(
+                        "lag_records".to_string(),
+                        JsonValue::Number(
+                            current_lsn.saturating_sub(r.last_acked_lsn) as f64,
+                        ),
+                    );
+                    if let Some(region) = &r.region {
+                        o.insert("region".to_string(), JsonValue::String(region.clone()));
+                    }
+                    JsonValue::Object(o)
+                })
+                .collect();
+            replica_obj.insert("primary_view".to_string(), JsonValue::Array(arr));
+        }
+        replica_obj.insert(
+            "commit_policy".to_string(),
+            JsonValue::String(self.runtime.commit_policy().label().to_string()),
+        );
+        // PLAN.md Phase 11.4 — durable-LSN map per replica for
+        // ack_n debugging. Empty until at least one ack lands.
+        let durable = self.runtime.commit_waiter_snapshot();
+        if !durable.is_empty() {
+            let arr: Vec<JsonValue> = durable
+                .into_iter()
+                .map(|(id, lsn)| {
+                    let mut o = Map::new();
+                    o.insert("replica_id".to_string(), JsonValue::String(id));
+                    o.insert("durable_lsn".to_string(), JsonValue::Number(lsn as f64));
+                    JsonValue::Object(o)
+                })
+                .collect();
+            replica_obj.insert("durable_view".to_string(), JsonValue::Array(arr));
+        }
+        object.insert("replica".to_string(), JsonValue::Object(replica_obj));
         if let Some(backend) = backend_kind {
             object.insert("remote_backend".to_string(), JsonValue::String(backend));
         }
@@ -734,6 +1016,170 @@ impl RedDBServer {
     /// `WriteGate`-checked writes will be rejected until shutdown
     /// completes or another phase override re-enables Ready.
     /// Idempotent.
+    /// `POST /admin/failover/promote` — manual replica → primary
+    /// promotion (PLAN.md Phase 11.6).
+    ///
+    /// Hard checks before bumping the lease generation:
+    ///   * Caller is currently a replica (role guard) — primaries
+    ///     don't promote themselves.
+    ///   * Remote backend is configured (lease lives there).
+    ///   * Replica apply health is `ok` — no unresolved WAL gap or
+    ///     divergence. A replica that's behind cannot become the
+    ///     authoritative writer.
+    ///   * Lease can be acquired — `try_acquire` returns success.
+    ///     Failure surfaces the existing holder so the operator
+    ///     understands why.
+    ///
+    /// Body: `{"holder_id": "...", "ttl_ms": <u64>}`. `holder_id`
+    /// defaults to `RED_LEASE_HOLDER_ID` env / `<hostname>-<pid>`.
+    /// `ttl_ms` defaults to 60_000.
+    ///
+    /// On success the response includes the new lease's generation
+    /// and acquired_at. **Promotion does NOT flip the running role
+    /// to primary** — the operator's runbook is to restart the
+    /// process with `RED_REPLICATION_MODE=primary` after a
+    /// successful promotion. Auto-role-flip is a Phase 11.6 follow-
+    /// up that requires draining live read traffic safely.
+    pub(crate) fn handle_admin_failover_promote(&self, body: Vec<u8>) -> HttpResponse {
+        // Role guard.
+        if !matches!(
+            self.runtime.write_gate().role(),
+            crate::replication::ReplicationRole::Replica { .. }
+        ) {
+            return json_error(
+                409,
+                "promotion only allowed on a replica (current role is not Replica)",
+            );
+        }
+
+        // Backend guard.
+        let Some(backend) = self.runtime.db().options().remote_backend.clone() else {
+            return json_error(
+                412,
+                "promotion requires a remote backend (RED_BACKEND=none disables lease coordination)",
+            );
+        };
+
+        // Apply health guard. Anything other than `ok` / `healthy`
+        // / `connecting` indicates the replica isn't current.
+        let health = self.runtime.replica_apply_health().unwrap_or_default();
+        if matches!(
+            health.as_str(),
+            "stalled_gap" | "divergence" | "apply_error"
+        ) {
+            return json_error(
+                409,
+                format!(
+                    "promotion refused — replica apply state is `{health}`; resolve before promoting"
+                ),
+            );
+        }
+
+        // Body parsing.
+        let (holder_id, ttl_ms) = if body.is_empty() {
+            (default_holder_id(), 60_000u64)
+        } else {
+            match crate::serde_json::from_slice::<crate::serde_json::Value>(&body) {
+                Ok(v) => {
+                    let holder = v
+                        .get("holder_id")
+                        .and_then(|n| n.as_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(default_holder_id);
+                    let ttl = v
+                        .get("ttl_ms")
+                        .and_then(|n| n.as_u64())
+                        .filter(|t| *t > 0)
+                        .unwrap_or(60_000);
+                    (holder, ttl)
+                }
+                Err(err) => return json_error(400, format!("invalid JSON body: {err}")),
+            }
+        };
+
+        let database_key = self
+            .runtime
+            .db()
+            .options()
+            .remote_key
+            .clone()
+            .unwrap_or_else(|| "main".to_string());
+        let store = crate::replication::LeaseStore::new(backend);
+
+        match store.try_acquire(&database_key, &holder_id, ttl_ms) {
+            Ok(lease) => {
+                let mut details = Map::new();
+                details.insert(
+                    "holder_id".to_string(),
+                    JsonValue::String(lease.holder_id.clone()),
+                );
+                details.insert(
+                    "generation".to_string(),
+                    JsonValue::Number(lease.generation as f64),
+                );
+                details.insert(
+                    "ttl_ms".to_string(),
+                    JsonValue::Number(ttl_ms as f64),
+                );
+                self.runtime.audit_log().record(
+                    "admin/failover/promote",
+                    &lease.holder_id,
+                    &database_key,
+                    "ok",
+                    JsonValue::Object(details.clone()),
+                );
+
+                let mut object = Map::new();
+                object.insert("ok".to_string(), JsonValue::Bool(true));
+                object.insert("holder_id".to_string(), JsonValue::String(lease.holder_id));
+                object.insert(
+                    "generation".to_string(),
+                    JsonValue::Number(lease.generation as f64),
+                );
+                object.insert(
+                    "acquired_at_ms".to_string(),
+                    JsonValue::Number(lease.acquired_at_ms as f64),
+                );
+                object.insert(
+                    "expires_at_ms".to_string(),
+                    JsonValue::Number(lease.expires_at_ms as f64),
+                );
+                object.insert(
+                    "next_step".to_string(),
+                    JsonValue::String(
+                        "restart with RED_REPLICATION_MODE=primary to start accepting writes"
+                            .to_string(),
+                    ),
+                );
+                json_response(200, JsonValue::Object(object))
+            }
+            Err(err) => {
+                self.runtime.audit_log().record(
+                    "admin/failover/promote",
+                    &holder_id,
+                    &database_key,
+                    &format!("err: {err}"),
+                    JsonValue::Null,
+                );
+                json_error(409, format!("promotion refused: {err}"))
+            }
+        }
+    }
+
+    /// `GET /admin/openapi(.yaml)` — serve the public admin API
+    /// spec (PLAN.md Phase 10.3). The YAML file is embedded at
+    /// build time so the running binary always serves the spec
+    /// matching its own surface, even if the deploy target lacks
+    /// access to the source repo.
+    pub(crate) fn handle_admin_openapi(&self) -> HttpResponse {
+        const SPEC: &str = include_str!("../../docs/spec/admin-api.openapi.yaml");
+        HttpResponse {
+            status: 200,
+            content_type: "application/yaml",
+            body: SPEC.as_bytes().to_vec(),
+        }
+    }
+
     pub(crate) fn handle_admin_drain(&self) -> HttpResponse {
         self.runtime.lifecycle().mark_draining();
         self.runtime.audit_log().record(
