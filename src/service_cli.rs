@@ -225,48 +225,11 @@ impl ServerCommandConfig {
 }
 
 /// Read an env var, treating empty / whitespace-only as `None`.
-///
-/// PLAN.md Phase 6.4 — also honors the `<NAME>_FILE` convention used
-/// by Kubernetes Secrets, Docker Compose `secrets:`, and systemd
-/// `LoadCredential`. When `<NAME>` itself is unset/empty but
-/// `<NAME>_FILE` points to an existing file, returns the file's
-/// contents (trimmed of trailing whitespace, including the newline
-/// `kubectl create secret` and `echo > file` both produce). The
-/// inline value wins on collision so existing dev workflows stay
-/// untouched.
+/// Honors the `<NAME>_FILE` convention. Re-exports the shared
+/// `crate::utils::env_with_file_fallback` helper so call sites in
+/// this module can keep their short local name.
 fn env_nonempty(name: &str) -> Option<String> {
-    if let Ok(value) = std::env::var(name) {
-        let trimmed = value.trim();
-        if !trimmed.is_empty() {
-            return Some(value);
-        }
-    }
-    let file_var = format!("{name}_FILE");
-    let path = std::env::var(&file_var).ok()?;
-    let trimmed_path = path.trim();
-    if trimmed_path.is_empty() {
-        return None;
-    }
-    match std::fs::read_to_string(trimmed_path) {
-        Ok(contents) => {
-            let value = contents.trim_end_matches(|c: char| c == '\n' || c == '\r').to_string();
-            if value.is_empty() {
-                None
-            } else {
-                Some(value)
-            }
-        }
-        Err(err) => {
-            tracing::warn!(
-                target: "reddb::secrets",
-                env = %file_var,
-                path = %trimmed_path,
-                error = %err,
-                "secret file referenced by {file_var} could not be read; falling back to None"
-            );
-            None
-        }
-    }
+    crate::utils::env_with_file_fallback(name)
 }
 
 fn configure_remote_backend_from_env(options: &mut RedDBOptions) {

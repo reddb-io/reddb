@@ -215,22 +215,10 @@ fn decode_base64(s: &str) -> Result<Vec<u8>, String> {
 /// so a misconfigured key (typo, wrong length) fails boot loudly
 /// instead of silently leaving plaintext on disk.
 pub fn key_from_env() -> Result<Option<[u8; 32]>, String> {
-    if let Ok(value) = std::env::var("RED_ENCRYPTION_KEY") {
-        if !value.trim().is_empty() {
-            return parse_key(&value).map(Some);
-        }
+    match crate::utils::env_with_file_fallback("RED_ENCRYPTION_KEY") {
+        Some(raw) => parse_key(&raw).map(Some),
+        None => Ok(None),
     }
-    let path = match std::env::var("RED_ENCRYPTION_KEY_FILE") {
-        Ok(v) => v,
-        Err(_) => return Ok(None),
-    };
-    let trimmed = path.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    let raw = std::fs::read_to_string(trimmed)
-        .map_err(|err| format!("read {trimmed}: {err}"))?;
-    parse_key(&raw).map(Some)
 }
 
 #[cfg(test)]

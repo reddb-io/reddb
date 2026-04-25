@@ -130,9 +130,9 @@ pub fn verify(
     let body_hash_hex = body_hash_hex(body);
     let canonical = format!("{method}\n{path}\n{ts_str}\n{body_hash_hex}");
     let expected = crate::crypto::hmac_sha256(secret, canonical.as_bytes());
-    let expected_hex = hex_encode(&expected);
+    let expected_hex = crate::utils::to_hex(&expected);
 
-    if constant_time_eq(presented_sig.as_bytes(), expected_hex.as_bytes()) {
+    if crate::crypto::constant_time_eq(presented_sig.as_bytes(), expected_hex.as_bytes()) {
         HmacOutcome::Valid
     } else {
         HmacOutcome::Invalid
@@ -140,44 +140,29 @@ pub fn verify(
 }
 
 fn body_hash_hex(body: &[u8]) -> String {
-    let digest = crate::crypto::sha256(body);
-    hex_encode(&digest)
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push_str(&format!("{:02x}", b));
-    }
-    out
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    crate::utils::to_hex(&crate::crypto::sha256(body))
 }
 
 fn read_env_or_file(env: &str, env_file: &str) -> Option<String> {
-    if let Ok(value) = std::env::var(env) {
-        if !value.trim().is_empty() {
-            return Some(value);
+    // The env var name is the canonical form; the helper appends `_FILE`.
+    if env.ends_with("_FILE") || !env_file.starts_with(env) {
+        // Custom name pair — fall back to the explicit two-arg lookup.
+        if let Ok(value) = std::env::var(env) {
+            if !value.trim().is_empty() {
+                return Some(value);
+            }
         }
+        let path = std::env::var(env_file).ok()?;
+        let trimmed = path.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        return std::fs::read_to_string(trimmed)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
     }
-    let path = std::env::var(env_file).ok()?;
-    let trimmed = path.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    std::fs::read_to_string(trimmed)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    crate::utils::env_with_file_fallback(env)
 }
 
 #[cfg(test)]

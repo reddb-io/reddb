@@ -1220,7 +1220,7 @@ impl RedDBServer {
                     .get("authorization")
                     .and_then(|v| v.strip_prefix("Bearer "))
                     .unwrap_or("");
-                if !constant_time_eq(presented.as_bytes(), expected.as_bytes()) {
+                if !crate::crypto::constant_time_eq(presented.as_bytes(), expected.as_bytes()) {
                     return false;
                 }
                 // Admin token matches — bypass the rest of the auth
@@ -1467,12 +1467,7 @@ fn principal_for(headers: &BTreeMap<String, String>) -> String {
             let trimmed = token.trim();
             if !trimmed.is_empty() {
                 let digest = crate::crypto::sha256(trimmed.as_bytes());
-                let prefix: String = digest
-                    .iter()
-                    .take(8)
-                    .map(|b| format!("{:02x}", b))
-                    .collect();
-                return format!("bearer:{prefix}");
+                return format!("bearer:{}", crate::utils::to_hex_prefix(&digest, 8));
             }
         }
     }
@@ -1480,57 +1475,8 @@ fn principal_for(headers: &BTreeMap<String, String>) -> String {
 }
 
 /// PLAN.md Phase 6.1 — read the operator admin token. Honors
-/// `RED_ADMIN_TOKEN` and the `RED_ADMIN_TOKEN_FILE` companion
-/// (Kubernetes Secrets / Docker Compose `secrets:` /
-/// systemd LoadCredential). Returns `None` when both are unset or
-/// blank — in that case the admin gate is disabled and operators
-/// keep their dev workflow.
+/// `RED_ADMIN_TOKEN` and the `RED_ADMIN_TOKEN_FILE` companion via
+/// the shared `crate::utils::env_with_file_fallback` helper.
 fn read_admin_token() -> Option<String> {
-    if let Ok(value) = std::env::var("RED_ADMIN_TOKEN") {
-        let trimmed = value.trim();
-        if !trimmed.is_empty() {
-            return Some(value);
-        }
-    }
-    let path = std::env::var("RED_ADMIN_TOKEN_FILE").ok()?;
-    let trimmed_path = path.trim();
-    if trimmed_path.is_empty() {
-        return None;
-    }
-    match std::fs::read_to_string(trimmed_path) {
-        Ok(contents) => {
-            let value = contents
-                .trim_end_matches(|c: char| c == '\n' || c == '\r')
-                .to_string();
-            if value.is_empty() {
-                None
-            } else {
-                Some(value)
-            }
-        }
-        Err(err) => {
-            tracing::warn!(
-                target: "reddb::secrets",
-                env = "RED_ADMIN_TOKEN_FILE",
-                path = %trimmed_path,
-                error = %err,
-                "admin token file unreadable; admin gate disabled"
-            );
-            None
-        }
-    }
-}
-
-/// Constant-time byte-slice equality. Defends against timing oracles
-/// on the admin-token compare. Returns `false` when lengths differ
-/// without leaking *which* prefix matched.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    crate::utils::env_with_file_fallback("RED_ADMIN_TOKEN")
 }

@@ -65,10 +65,8 @@ pub fn load_runtime_readonly(data_path: &Path) -> Option<bool> {
 /// doesn't pin one in the promotion request body. Mirrors the boot
 /// loop's resolution (`RED_LEASE_HOLDER_ID` → `<hostname>-<pid>`).
 fn default_holder_id() -> String {
-    if let Ok(explicit) = std::env::var("RED_LEASE_HOLDER_ID") {
-        if !explicit.trim().is_empty() {
-            return explicit;
-        }
+    if let Some(explicit) = crate::utils::env_with_file_fallback("RED_LEASE_HOLDER_ID") {
+        return explicit;
     }
     let host = std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("HOST"))
