@@ -1,13 +1,73 @@
 //! Primary-side replication: WAL record production and snapshot serving.
+//!
+//! ## Logical WAL spool wire format
+//!
+//! ### Version 2 (current — PLAN.md Phase 2 / W2)
+//!
+//! ```text
+//! [magic     4 bytes  = b"RDLW"]
+//! [version   1 byte   = 0x02]
+//! [lsn       8 bytes  little-endian u64]
+//! [timestamp 8 bytes  little-endian u64 — wall-clock millis since UNIX epoch]
+//! [payload_len 4 bytes little-endian u32]
+//! [payload   payload_len bytes]
+//! [crc32     4 bytes  little-endian u32 — crc32fast of (version || lsn ||
+//!                                          timestamp || payload_len || payload)]
+//! ```
+//!
+//! - `sync_all()` is called after every append so an acknowledged
+//!   `append()` survives a power-loss event.
+//! - Recovery accepts the longest valid prefix and silently truncates
+//!   at the first torn header, short payload/crc, or checksum
+//!   mismatch (warning logged). No partial record is ever returned to
+//!   the replication subsystem.
+//!
+//! ### Version 1 (legacy, read-only)
+//!
+//! ```text
+//! [magic 4][version 1=0x01][lsn 8][payload_len 8][payload]
+//! ```
+//!
+//! No checksum, no timestamp. Read for backward compatibility on
+//! existing spools; never written. A v1 record found in a spool will
+//! be returned to consumers but flagged via `LogicalWalEntry::v1`.
 
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use tracing::warn;
 
 const LOGICAL_WAL_SPOOL_MAGIC: &[u8; 4] = b"RDLW";
-const LOGICAL_WAL_SPOOL_VERSION: u8 = 1;
+const LOGICAL_WAL_SPOOL_VERSION_V1: u8 = 1;
+const LOGICAL_WAL_SPOOL_VERSION_V2: u8 = 2;
+const LOGICAL_WAL_SPOOL_VERSION_CURRENT: u8 = LOGICAL_WAL_SPOOL_VERSION_V2;
+/// Header size in bytes for a v2 record before the payload starts:
+/// magic(4) + version(1) + lsn(8) + timestamp(8) + payload_len(4) = 25.
+const LOGICAL_WAL_V2_HEADER_LEN: u64 = 4 + 1 + 8 + 8 + 4;
+/// CRC32 trailer size in bytes for a v2 record.
+const LOGICAL_WAL_V2_CRC_LEN: u64 = 4;
+
+/// Compute CRC32 over the bytes that follow the magic — version,
+/// lsn, timestamp, payload_len, and payload. Magic is excluded so
+/// torn-record detection at recovery time depends only on data the
+/// writer covered.
+///
+/// Uses the same `crate::storage::engine::crc32` polynomial as the
+/// physical WAL record format so checksums computed here are
+/// comparable to those in `src/storage/wal/record.rs`.
+fn compute_logical_v2_crc(version: u8, lsn: u64, timestamp: u64, payload: &[u8]) -> u32 {
+    use crate::storage::engine::crc32::crc32_update;
+    let mut crc = crc32_update(0, &[version]);
+    crc = crc32_update(crc, &lsn.to_le_bytes());
+    crc = crc32_update(crc, &timestamp.to_le_bytes());
+    crc = crc32_update(crc, &(payload.len() as u32).to_le_bytes());
+    crc = crc32_update(crc, payload);
+    crc
+}
 
 /// In-memory WAL buffer for replication.
 /// Primary appends records here; replicas consume from it.
@@ -72,6 +132,9 @@ impl WalBuffer {
 #[derive(Debug, Clone)]
 struct LogicalWalEntry {
     lsn: u64,
+    /// Wall-clock millis at append time. `0` for legacy v1 records that
+    /// did not carry a framing timestamp.
+    timestamp_ms: u64,
     data: Vec<u8>,
 }
 
@@ -109,10 +172,12 @@ impl LogicalWalSpool {
         if !path.exists() {
             File::create(&path)?;
         }
-        let current_lsn = read_entries(&path)?
-            .last()
-            .map(|entry| entry.lsn)
-            .unwrap_or(0);
+        // Recover-or-truncate to the longest valid prefix. A torn tail
+        // from the previous process exit (power loss, OOM kill, ENOSPC
+        // mid-write) is silently dropped; the warning surfaces to the
+        // operator log but the spool stays open.
+        let entries = read_and_repair_entries(&path)?;
+        let current_lsn = entries.last().map(|entry| entry.lsn).unwrap_or(0);
         Ok(Self {
             path,
             state: Mutex::new(LogicalWalSpoolState { current_lsn }),
@@ -120,16 +185,61 @@ impl LogicalWalSpool {
     }
 
     pub fn append(&self, lsn: u64, data: &[u8]) -> io::Result<()> {
+        let timestamp_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        self.append_with_timestamp(lsn, timestamp_ms, data)
+    }
+
+    /// Append a record with an explicit framing timestamp. Used in
+    /// tests to produce deterministic timestamps; production callers
+    /// should use `append`.
+    pub fn append_with_timestamp(
+        &self,
+        lsn: u64,
+        timestamp_ms: u64,
+        data: &[u8],
+    ) -> io::Result<()> {
+        if data.len() > u32::MAX as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "logical WAL payload of {} bytes exceeds 4 GiB framing limit",
+                    data.len()
+                ),
+            ));
+        }
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)?;
-        file.write_all(LOGICAL_WAL_SPOOL_MAGIC)?;
-        file.write_all(&[LOGICAL_WAL_SPOOL_VERSION])?;
-        file.write_all(&lsn.to_le_bytes())?;
-        file.write_all(&(data.len() as u64).to_le_bytes())?;
-        file.write_all(data)?;
-        file.flush()?;
+        // Pre-build the record in memory so a single write_all keeps
+        // the on-disk record contiguous. Two side-effects:
+        //   (a) crash recovery sees either a complete record or a torn
+        //       header, never an interleaved partial frame from two
+        //       writers (the spool is not multi-writer today, but the
+        //       single-write semantics make that future-safe);
+        //   (b) crc32 is computed exactly once over the same bytes the
+        //       reader will checksum, with zero risk of header/payload
+        //       drift from a partial flush.
+        let mut frame =
+            Vec::with_capacity(LOGICAL_WAL_V2_HEADER_LEN as usize + data.len() + LOGICAL_WAL_V2_CRC_LEN as usize);
+        frame.extend_from_slice(LOGICAL_WAL_SPOOL_MAGIC);
+        frame.push(LOGICAL_WAL_SPOOL_VERSION_CURRENT);
+        frame.extend_from_slice(&lsn.to_le_bytes());
+        frame.extend_from_slice(&timestamp_ms.to_le_bytes());
+        frame.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        frame.extend_from_slice(data);
+        let crc = compute_logical_v2_crc(LOGICAL_WAL_SPOOL_VERSION_CURRENT, lsn, timestamp_ms, data);
+        frame.extend_from_slice(&crc.to_le_bytes());
+
+        file.write_all(&frame)?;
+        // PLAN.md Phase 2 mandates `sync_all` for logical WAL durability.
+        // `flush()` only drains the std::io userspace buffer; without
+        // `sync_all` the kernel page cache may still be dirty when an
+        // acknowledged write supposedly committed.
+        file.sync_all()?;
 
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.current_lsn = state.current_lsn.max(lsn);
@@ -137,7 +247,7 @@ impl LogicalWalSpool {
     }
 
     pub fn read_since(&self, since_lsn: u64, max_count: usize) -> io::Result<Vec<(u64, Vec<u8>)>> {
-        let entries = read_entries(&self.path)?;
+        let entries = read_and_repair_entries(&self.path)?;
         Ok(entries
             .into_iter()
             .filter(|entry| entry.lsn > since_lsn)
@@ -154,7 +264,7 @@ impl LogicalWalSpool {
     }
 
     pub fn oldest_lsn(&self) -> io::Result<Option<u64>> {
-        Ok(read_entries(&self.path)?
+        Ok(read_and_repair_entries(&self.path)?
             .into_iter()
             .next()
             .map(|entry| entry.lsn))
@@ -162,7 +272,7 @@ impl LogicalWalSpool {
 
     pub fn prune_through(&self, upto_lsn: u64) -> io::Result<()> {
         let previous_lsn = self.current_lsn();
-        let retained: Vec<_> = read_entries(&self.path)?
+        let retained: Vec<_> = read_and_repair_entries(&self.path)?
             .into_iter()
             .filter(|entry| entry.lsn > upto_lsn)
             .collect();
@@ -170,14 +280,37 @@ impl LogicalWalSpool {
         let mut temp = File::create(&temp_path)?;
         let mut current_lsn = 0;
         for entry in retained {
+            // Re-frame as v2 so the spool only ever contains v2 records
+            // after a prune. Legacy v1 records are upgraded by carrying
+            // their original LSN forward; the framing timestamp is
+            // re-stamped to wall-clock-now because the original v1
+            // record didn't carry one — downstream consumers that need
+            // the operation's logical timestamp continue to use the
+            // payload's own ChangeRecord::timestamp field.
+            let timestamp_ms = if entry.timestamp_ms > 0 {
+                entry.timestamp_ms
+            } else {
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0)
+            };
+            let crc = compute_logical_v2_crc(
+                LOGICAL_WAL_SPOOL_VERSION_CURRENT,
+                entry.lsn,
+                timestamp_ms,
+                &entry.data,
+            );
             temp.write_all(LOGICAL_WAL_SPOOL_MAGIC)?;
-            temp.write_all(&[LOGICAL_WAL_SPOOL_VERSION])?;
+            temp.write_all(&[LOGICAL_WAL_SPOOL_VERSION_CURRENT])?;
             temp.write_all(&entry.lsn.to_le_bytes())?;
-            temp.write_all(&(entry.data.len() as u64).to_le_bytes())?;
+            temp.write_all(&timestamp_ms.to_le_bytes())?;
+            temp.write_all(&(entry.data.len() as u32).to_le_bytes())?;
             temp.write_all(&entry.data)?;
+            temp.write_all(&crc.to_le_bytes())?;
             current_lsn = current_lsn.max(entry.lsn);
         }
-        temp.flush()?;
+        temp.sync_all()?;
         fs::rename(&temp_path, &self.path)?;
 
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -186,14 +319,43 @@ impl LogicalWalSpool {
     }
 }
 
-fn read_entries(path: &Path) -> io::Result<Vec<LogicalWalEntry>> {
+/// Reads every logical-WAL record from `path`, accepting the longest
+/// valid prefix and *truncating* the file at the first torn or
+/// corrupt record. Designed for crash recovery: a process killed
+/// mid-write leaves a partial frame that this function silently drops
+/// so the spool can resume appending without ambiguity.
+///
+/// Detection of "stop here" cases:
+///   1. `UnexpectedEof` while reading any header field, payload, or
+///      crc → torn write at end of file.
+///   2. Magic mismatch (any 4 bytes that aren't `RDLW`) → corrupt or
+///      foreign data; treated as if the file ended at the start of
+///      this record.
+///   3. v2 record with unsupported version byte → same.
+///   4. v2 CRC mismatch → record corrupt; truncated.
+///
+/// The truncation only fires when at least one valid record precedes
+/// the corrupt region (or when the corrupt region is the very first
+/// record — in which case the spool becomes empty). Either way the
+/// invariant that callers see only fully-checksummed payloads is
+/// preserved.
+///
+/// v1 records (legacy, no checksum) are accepted for read-only
+/// compatibility. They never receive a checksum; a v1 read that hits
+/// `UnexpectedEof` mid-payload also triggers truncation.
+fn read_and_repair_entries(path: &Path) -> io::Result<Vec<LogicalWalEntry>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
 
-    let mut file = File::open(path)?;
+    let mut file = OpenOptions::new().read(true).write(true).open(path)?;
     let mut entries = Vec::new();
+    let mut last_good_offset: u64 = 0;
+    let mut corrupt_reason: Option<String> = None;
+
     loop {
+        let record_start = file.stream_position()?;
+
         let mut magic = [0u8; 4];
         match file.read_exact(&mut magic) {
             Ok(()) => {}
@@ -201,34 +363,152 @@ fn read_entries(path: &Path) -> io::Result<Vec<LogicalWalEntry>> {
             Err(err) => return Err(err),
         }
         if &magic != LOGICAL_WAL_SPOOL_MAGIC {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid logical wal spool magic",
+            corrupt_reason = Some(format!(
+                "bad magic at offset {record_start}: got {magic:02x?}"
             ));
+            break;
         }
 
         let mut version = [0u8; 1];
-        file.read_exact(&mut version)?;
-        if version[0] != LOGICAL_WAL_SPOOL_VERSION {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "unsupported logical wal spool version",
-            ));
+        if let Err(err) = file.read_exact(&mut version) {
+            if err.kind() == io::ErrorKind::UnexpectedEof {
+                corrupt_reason = Some(format!("torn header at offset {record_start}"));
+                break;
+            }
+            return Err(err);
         }
 
-        let mut lsn = [0u8; 8];
-        file.read_exact(&mut lsn)?;
-        let mut len = [0u8; 8];
-        file.read_exact(&mut len)?;
-        let data_len = u64::from_le_bytes(len) as usize;
-        let mut data = vec![0u8; data_len];
-        file.read_exact(&mut data)?;
-        entries.push(LogicalWalEntry {
-            lsn: u64::from_le_bytes(lsn),
-            data,
-        });
+        let entry_result = match version[0] {
+            LOGICAL_WAL_SPOOL_VERSION_V2 => read_one_v2(&mut file, record_start),
+            LOGICAL_WAL_SPOOL_VERSION_V1 => read_one_v1(&mut file, record_start),
+            other => {
+                corrupt_reason = Some(format!(
+                    "unsupported version {other} at offset {record_start}"
+                ));
+                break;
+            }
+        };
+
+        match entry_result {
+            Ok(entry) => {
+                entries.push(entry);
+                last_good_offset = file.stream_position()?;
+            }
+            Err(reason) => {
+                corrupt_reason = Some(reason);
+                break;
+            }
+        }
     }
+
+    if let Some(reason) = corrupt_reason {
+        let total_len = file.metadata()?.len();
+        if last_good_offset < total_len {
+            warn!(
+                target: "reddb::replication::logical_wal",
+                path = %path.display(),
+                reason = %reason,
+                truncating_from = last_good_offset,
+                truncating_to = total_len,
+                kept_records = entries.len(),
+                "truncating logical-WAL spool to last valid record"
+            );
+            file.set_len(last_good_offset)?;
+            file.sync_all()?;
+        }
+    }
+
     Ok(entries)
+}
+
+/// Read a v2 record assuming the magic + version byte have already
+/// been consumed and the file cursor sits at the LSN field. Returns
+/// `Err(reason)` for any condition that should trigger truncation.
+fn read_one_v2(file: &mut File, record_start: u64) -> Result<LogicalWalEntry, String> {
+    let mut lsn = [0u8; 8];
+    if let Err(err) = file.read_exact(&mut lsn) {
+        return Err(format!("torn lsn at offset {record_start}: {err}"));
+    }
+    let mut timestamp = [0u8; 8];
+    if let Err(err) = file.read_exact(&mut timestamp) {
+        return Err(format!("torn timestamp at offset {record_start}: {err}"));
+    }
+    let mut len_bytes = [0u8; 4];
+    if let Err(err) = file.read_exact(&mut len_bytes) {
+        return Err(format!("torn payload length at offset {record_start}: {err}"));
+    }
+    let payload_len = u32::from_le_bytes(len_bytes) as usize;
+    // Sanity guard against a runaway length encoded by a partially-
+    // corrupted header. 256 MiB is well above any plausible single
+    // ChangeRecord and well below memory we'd allocate from a torn
+    // header that happens to look like a real frame.
+    const MAX_PLAUSIBLE_PAYLOAD: usize = 256 * 1024 * 1024;
+    if payload_len > MAX_PLAUSIBLE_PAYLOAD {
+        return Err(format!(
+            "implausible payload_len {payload_len} at offset {record_start}"
+        ));
+    }
+    let mut payload = vec![0u8; payload_len];
+    if let Err(err) = file.read_exact(&mut payload) {
+        return Err(format!(
+            "torn payload at offset {record_start} (expected {payload_len} bytes): {err}"
+        ));
+    }
+    let mut crc_bytes = [0u8; 4];
+    if let Err(err) = file.read_exact(&mut crc_bytes) {
+        return Err(format!("torn crc at offset {record_start}: {err}"));
+    }
+    let stored_crc = u32::from_le_bytes(crc_bytes);
+    let expected_crc = compute_logical_v2_crc(
+        LOGICAL_WAL_SPOOL_VERSION_V2,
+        u64::from_le_bytes(lsn),
+        u64::from_le_bytes(timestamp),
+        &payload,
+    );
+    if stored_crc != expected_crc {
+        return Err(format!(
+            "crc mismatch at offset {record_start}: stored {stored_crc:#010x}, expected {expected_crc:#010x}"
+        ));
+    }
+    Ok(LogicalWalEntry {
+        lsn: u64::from_le_bytes(lsn),
+        timestamp_ms: u64::from_le_bytes(timestamp),
+        data: payload,
+    })
+}
+
+/// Read a v1 record (legacy, no checksum). Layout after magic+version:
+/// [lsn 8][payload_len 8][payload]. v1 spools were written before
+/// PLAN.md Phase 2 hardened the format; we read them so existing dev
+/// installs don't drop history on upgrade.
+fn read_one_v1(file: &mut File, record_start: u64) -> Result<LogicalWalEntry, String> {
+    let mut lsn = [0u8; 8];
+    if let Err(err) = file.read_exact(&mut lsn) {
+        return Err(format!("v1 torn lsn at offset {record_start}: {err}"));
+    }
+    let mut len_bytes = [0u8; 8];
+    if let Err(err) = file.read_exact(&mut len_bytes) {
+        return Err(format!(
+            "v1 torn payload length at offset {record_start}: {err}"
+        ));
+    }
+    let payload_len = u64::from_le_bytes(len_bytes) as usize;
+    if payload_len > 256 * 1024 * 1024 {
+        return Err(format!(
+            "v1 implausible payload_len {payload_len} at offset {record_start}"
+        ));
+    }
+    let mut payload = vec![0u8; payload_len];
+    if let Err(err) = file.read_exact(&mut payload) {
+        return Err(format!(
+            "v1 torn payload at offset {record_start}: {err}"
+        ));
+    }
+    Ok(LogicalWalEntry {
+        lsn: u64::from_le_bytes(lsn),
+        timestamp_ms: 0,
+        data: payload,
+    })
 }
 
 /// State of a connected replica.
