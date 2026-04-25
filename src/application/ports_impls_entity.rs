@@ -2113,6 +2113,23 @@ impl RuntimeEntityPort for RedDBRuntime {
         let ncols = column_names.len();
         let table_arc: Arc<str> = Arc::from(collection.as_str());
 
+        // If the collection has any registered secondary index, snapshot
+        // each row's (column, value) pairs *before* the values move into
+        // entities. We need them for `index_entity_insert_batch` after
+        // `bulk_insert` returns the assigned IDs. When no indexes are
+        // registered the snapshot is pure waste — gate it. Mirrors the
+        // `has_secondary_indexes` short-circuit in MutationEngine.
+        let indexed_cols = self
+            .index_store_ref()
+            .indexed_columns_set(collection.as_str());
+        let has_secondary_indexes = !indexed_cols.is_empty();
+        let mut field_snapshots: Vec<Vec<(String, crate::storage::schema::Value)>> =
+            if has_secondary_indexes {
+                Vec::with_capacity(rows.len())
+            } else {
+                Vec::new()
+            };
+
         // Build `UnifiedEntity`s directly in columnar form — no
         // HashMap<String, Value> per row, no (String, Value) tuples,
         // no named→columnar conversion pass inside the manager. Every
@@ -2125,6 +2142,18 @@ impl RuntimeEntityPort for RedDBRuntime {
                     // Row width mismatch — shouldn't happen after wire
                     // decode, but guard against it. Fall back to zero
                     // so the caller sees the error.
+                }
+                if has_secondary_indexes {
+                    // Only snapshot indexed columns to keep alloc cost
+                    // proportional to index count, not row width.
+                    let mut snap: Vec<(String, crate::storage::schema::Value)> =
+                        Vec::with_capacity(indexed_cols.len());
+                    for (name, val) in column_names.iter().zip(values.iter()) {
+                        if indexed_cols.contains(name) {
+                            snap.push((name.clone(), val.clone()));
+                        }
+                    }
+                    field_snapshots.push(snap);
                 }
                 let mut row = RowData::new(values);
                 row.schema = Some(Arc::clone(&column_names));
@@ -2142,6 +2171,21 @@ impl RuntimeEntityPort for RedDBRuntime {
         let ids = store
             .bulk_insert(&collection, entities)
             .map_err(|e| crate::RedDBError::Internal(format!("{e:?}")))?;
+
+        // Secondary-index maintenance — required for post-CREATE-INDEX
+        // inserts to stay visible to indexed queries. Without this, the
+        // mini-duel `mixed_workload_indexed` scenario sees ~half its
+        // post-seed inserts disappear from `select_filtered`.
+        if has_secondary_indexes {
+            let index_rows: Vec<(EntityId, Vec<(String, crate::storage::schema::Value)>)> = ids
+                .iter()
+                .zip(field_snapshots.into_iter())
+                .map(|(id, fields)| (*id, fields))
+                .collect();
+            self.index_store_ref()
+                .index_entity_insert_batch(&collection, &index_rows)
+                .map_err(crate::RedDBError::Internal)?;
+        }
 
         // CDC + cache invalidation — one call, not N (same pattern
         // as MutationEngine::append_batch).

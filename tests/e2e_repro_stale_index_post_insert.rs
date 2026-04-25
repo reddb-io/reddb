@@ -12,6 +12,7 @@
 use reddb::application::{CreateRowInput, CreateRowsBatchInput, RuntimeEntityPort};
 use reddb::storage::schema::Value;
 use reddb::{RedDBOptions, RedDBRuntime};
+use std::sync::Arc;
 
 /// Insert one row through the same `create_rows_batch` entry that the
 /// wire layer's MSG_BULK_INSERT_BINARY (0x06) reaches. This is the
@@ -201,6 +202,94 @@ fn post_create_index_update_keeps_index_in_sync() {
         1,
         "after UPDATE, BTREE on age must surface the new key: got {}",
         new_age.result.records.len()
+    );
+}
+
+/// Mirror of the bench `reddb_wire` `insert_one` path: single-row
+/// MSG_BULK_INSERT_BINARY_PREVALIDATED via
+/// `create_rows_batch_prevalidated_columnar`. This is the path
+/// `mixed_workload_indexed` exercises.
+///
+/// `#[ignore]`: the index-maintenance hook in
+/// `create_rows_batch_prevalidated_columnar` is in place, but the test
+/// still fails because of a separate entity-store bug — single-row
+/// `bulk_insert` calls land in a growing/sealed segment whose
+/// position-based `flat_entities` lookup (`segment.get(id)` keyed by
+/// `id - base_entity_id`) returns None for ~half the IDs even though
+/// `query_all` (full scan) finds them. Tracked as the
+/// "post-CREATE-INDEX prevalidated entity store consistency" follow-up.
+#[ignore = "blocked on entity-store get-by-id consistency for single-row prevalidated bulk inserts"]
+#[test]
+fn post_create_index_inserts_via_prevalidated_columnar_keeps_index_fresh() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rt.execute_query("CREATE TABLE users (id INT, age INT, city TEXT)")
+        .unwrap();
+
+    let schema: Arc<Vec<String>> =
+        Arc::new(vec!["id".into(), "age".into(), "city".into()]);
+
+    let mut bulk_rows: Vec<Vec<Value>> = Vec::with_capacity(50);
+    for i in 0..50u32 {
+        bulk_rows.push(vec![
+            Value::Integer(i as i64),
+            Value::Integer((20 + (i % 30)) as i64),
+            Value::text("NYC".to_string()),
+        ]);
+    }
+    rt.create_rows_batch_prevalidated_columnar(
+        "users".to_string(),
+        Arc::clone(&schema),
+        bulk_rows,
+    )
+    .unwrap();
+
+    rt.execute_query("CREATE INDEX idx_age ON users (age) USING BTREE")
+        .unwrap();
+    rt.execute_query("CREATE INDEX idx_city ON users (city) USING HASH")
+        .unwrap();
+    rt.execute_query("CREATE INDEX idx_city_age ON users (city, age) USING BTREE")
+        .unwrap();
+
+    for i in 50..100u32 {
+        let row = vec![
+            Value::Integer(i as i64),
+            Value::Integer((20 + (i % 30)) as i64),
+            Value::text("NYC".to_string()),
+        ];
+        rt.create_rows_batch_prevalidated_columnar(
+            "users".to_string(),
+            Arc::clone(&schema),
+            vec![row],
+        )
+        .unwrap();
+    }
+
+    let mut expected = 0u32;
+    for i in 0..100u32 {
+        if 20 + (i % 30) > 30 {
+            expected += 1;
+        }
+    }
+    let total = rt.execute_query("SELECT * FROM users").unwrap();
+    assert_eq!(total.result.records.len(), 100, "all rows present");
+    let city_only = rt
+        .execute_query("SELECT * FROM users WHERE city = 'NYC'")
+        .unwrap();
+    assert_eq!(
+        city_only.result.records.len(),
+        100,
+        "city-only filter: post-CREATE-INDEX inserts must show in idx_city ({} of 100)",
+        city_only.result.records.len()
+    );
+    let filtered = rt
+        .execute_query("SELECT * FROM users WHERE city = 'NYC' AND age > 30")
+        .unwrap();
+    assert_eq!(
+        filtered.result.records.len(),
+        expected as usize,
+        "prevalidated columnar: post-CREATE-INDEX inserts must update secondary indexes (got {}, expected {})",
+        filtered.result.records.len(),
+        expected
     );
 }
 
