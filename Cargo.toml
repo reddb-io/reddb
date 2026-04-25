@@ -66,6 +66,12 @@ default = []
 backend-s3 = []
 backend-turso = []
 backend-d1 = []
+# PLAN.md Phase 5.3 — OpenTelemetry tracing. Opt-in (`--features otel`)
+# so the OTLP dependency tree doesn't bloat the default build. The
+# feature gate compiles the scaffolding in src/telemetry/otel.rs
+# but the OTLP client integration lands when the operator confirms
+# their collector and the dep tree review passes.
+otel = []
 
 [dev-dependencies]
 # `default-features = false` drops criterion's optional `rayon` dep
