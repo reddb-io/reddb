@@ -2636,6 +2636,13 @@ impl RedDBRuntime {
         self.inner.cdc.poll(since_lsn, max_count)
     }
 
+    /// PLAN.md Phase 11.4 — current CDC LSN. Public mutation
+    /// surfaces (HTTP query, gRPC entity ops) call this immediately
+    /// after a successful write to feed `enforce_commit_policy`.
+    pub fn cdc_current_lsn(&self) -> u64 {
+        self.inner.cdc.current_lsn()
+    }
+
     /// Get backup scheduler status.
     pub fn backup_status(&self) -> crate::replication::scheduler::BackupStatus {
         self.inner.backup_scheduler.status()
