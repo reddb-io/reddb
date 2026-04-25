@@ -224,10 +224,49 @@ impl ServerCommandConfig {
     }
 }
 
+/// Read an env var, treating empty / whitespace-only as `None`.
+///
+/// PLAN.md Phase 6.4 — also honors the `<NAME>_FILE` convention used
+/// by Kubernetes Secrets, Docker Compose `secrets:`, and systemd
+/// `LoadCredential`. When `<NAME>` itself is unset/empty but
+/// `<NAME>_FILE` points to an existing file, returns the file's
+/// contents (trimmed of trailing whitespace, including the newline
+/// `kubectl create secret` and `echo > file` both produce). The
+/// inline value wins on collision so existing dev workflows stay
+/// untouched.
 fn env_nonempty(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
+    if let Ok(value) = std::env::var(name) {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Some(value);
+        }
+    }
+    let file_var = format!("{name}_FILE");
+    let path = std::env::var(&file_var).ok()?;
+    let trimmed_path = path.trim();
+    if trimmed_path.is_empty() {
+        return None;
+    }
+    match std::fs::read_to_string(trimmed_path) {
+        Ok(contents) => {
+            let value = contents.trim_end_matches(|c: char| c == '\n' || c == '\r').to_string();
+            if value.is_empty() {
+                None
+            } else {
+                Some(value)
+            }
+        }
+        Err(err) => {
+            tracing::warn!(
+                target: "reddb::secrets",
+                env = %file_var,
+                path = %trimmed_path,
+                error = %err,
+                "secret file referenced by {file_var} could not be read; falling back to None"
+            );
+            None
+        }
+    }
 }
 
 fn configure_remote_backend_from_env(options: &mut RedDBOptions) {
@@ -777,6 +816,8 @@ fn run_routed_server(config: ServerCommandConfig, router_bind_addr: String) -> R
     let (runtime, auth_store, _telemetry_guard) =
         build_runtime_and_auth_store(db_options, cli_telemetry)?;
 
+    spawn_admin_metrics_listeners(&runtime, &auth_store);
+
     let http_listener = std::net::TcpListener::bind("127.0.0.1:0")
         .map_err(|err| format!("bind internal HTTP listener: {err}"))?;
     let http_backend = http_listener
@@ -1230,11 +1271,70 @@ fn build_http_server(
     .with_auth(auth_store)
 }
 
+/// PLAN.md Phase 6.2 — build a listener that only serves
+/// `/admin/*` + `/metrics` + `/health/*`. Defaults to `127.0.0.1`
+/// when the env var has no host (loopback-only by default per spec).
+#[inline(never)]
+fn build_admin_only_server(
+    runtime: RedDBRuntime,
+    auth_store: Arc<AuthStore>,
+    bind_addr: String,
+) -> RedDBServer {
+    RedDBServer::with_options(
+        runtime,
+        ServerOptions {
+            bind_addr,
+            surface: crate::server::ServerSurface::AdminOnly,
+            ..ServerOptions::default()
+        },
+    )
+    .with_auth(auth_store)
+}
+
+/// PLAN.md Phase 6.2 — build a listener that only serves `/metrics`
+/// + `/health/*`. Suitable for Prometheus scrape ports that may be
+/// exposed wider than the admin port.
+#[inline(never)]
+fn build_metrics_only_server(
+    runtime: RedDBRuntime,
+    auth_store: Arc<AuthStore>,
+    bind_addr: String,
+) -> RedDBServer {
+    RedDBServer::with_options(
+        runtime,
+        ServerOptions {
+            bind_addr,
+            surface: crate::server::ServerSurface::MetricsOnly,
+            ..ServerOptions::default()
+        },
+    )
+    .with_auth(auth_store)
+}
+
+/// Spawn dedicated admin / metrics listeners when the operator set
+/// `RED_ADMIN_BIND` / `RED_METRICS_BIND`. Both are optional; when
+/// unset the existing listener keeps serving everything (back-compat).
+fn spawn_admin_metrics_listeners(runtime: &RedDBRuntime, auth_store: &Arc<AuthStore>) {
+    if let Some(addr) = env_nonempty("RED_ADMIN_BIND") {
+        let server =
+            build_admin_only_server(runtime.clone(), auth_store.clone(), addr.clone());
+        let _ = server.serve_in_background();
+        tracing::info!(transport = "http", surface = "admin", bind = %addr, "listener online");
+    }
+    if let Some(addr) = env_nonempty("RED_METRICS_BIND") {
+        let server =
+            build_metrics_only_server(runtime.clone(), auth_store.clone(), addr.clone());
+        let _ = server.serve_in_background();
+        tracing::info!(transport = "http", surface = "metrics", bind = %addr, "listener online");
+    }
+}
+
 #[inline(never)]
 fn run_http_server(config: ServerCommandConfig, bind_addr: String) -> Result<(), String> {
     let cli_telemetry = config.telemetry.clone();
     let (runtime, auth_store, _telemetry_guard) =
         build_runtime_and_auth_store(config.to_db_options(), cli_telemetry)?;
+    spawn_admin_metrics_listeners(&runtime, &auth_store);
     let server = build_http_server(runtime, auth_store, bind_addr.clone());
     tracing::info!(transport = "http", bind = %bind_addr, "listener online");
     server.serve().map_err(|err| err.to_string())
@@ -1301,6 +1401,8 @@ fn run_dual_server(
     let worker_threads = workers.unwrap_or(rt_config.suggested_workers);
     let (runtime, auth_store, _telemetry_guard) =
         build_runtime_and_auth_store(db_options, cli_telemetry)?;
+
+    spawn_admin_metrics_listeners(&runtime, &auth_store);
 
     let http_server =
         build_http_server(runtime.clone(), auth_store.clone(), http_bind_addr.clone());
