@@ -715,6 +715,28 @@ impl RedDBServer {
             let _ = writeln!(body, "reddb_cold_start_duration_seconds {}", secs);
         }
 
+        // PLAN.md Phase 9.1 — per-phase cold-start breakdown.
+        // Operators use this to identify which phase dominates the
+        // cold-start budget (restore, WAL replay, index warmup).
+        // Phases that haven't fired yet are simply absent — no zero
+        // entries to confuse alert rules.
+        let phases = lifecycle.cold_start_phases().durations_ms();
+        if !phases.is_empty() {
+            let _ = writeln!(
+                body,
+                "# HELP reddb_cold_start_phase_seconds Per-phase cold-start duration."
+            );
+            let _ = writeln!(body, "# TYPE reddb_cold_start_phase_seconds gauge");
+            for (name, dur_ms) in phases {
+                let _ = writeln!(
+                    body,
+                    "reddb_cold_start_phase_seconds{{phase=\"{}\"}} {}",
+                    name,
+                    (dur_ms as f64) / 1000.0
+                );
+            }
+        }
+
         // Operator-imposed limits (PLAN.md Phase 4.1). Emitted as
         // gauges so external dashboards can graph headroom against
         // current usage. `0` means "no cap pinned at boot"; we
