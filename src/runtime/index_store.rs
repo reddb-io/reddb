@@ -1287,9 +1287,21 @@ impl IndexStore {
     /// Find which index (if any) covers a collection + column
     pub fn find_index_for_column(&self, collection: &str, column: &str) -> Option<RegisteredIndex> {
         let registry = read_unpoisoned(&self.registry);
+        // Callers (`try_hash_eq_lookup`, IN-list lookup) feed `idx.name`
+        // straight to `hash_lookup`, which only works for indexes that
+        // actually own a hash backing — Hash itself, or a single-col
+        // BTree whose `create_index` also registers an `{name}_hash`
+        // aux. Composite BTree indexes only live in `sorted`, so
+        // returning one here causes a `MissingIndex` error at lookup
+        // time. Restrict the search to single-column indexes so the
+        // ID list the caller gets back is always servable.
         registry
             .values()
-            .find(|idx| idx.collection == collection && idx.columns.contains(&column.to_string()))
+            .find(|idx| {
+                idx.collection == collection
+                    && idx.columns.len() == 1
+                    && idx.columns.first().is_some_and(|c| c == column)
+            })
             .cloned()
     }
 
