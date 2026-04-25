@@ -1,7 +1,7 @@
 //! Logical replication helpers shared by replica apply and point-in-time restore.
 
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use crate::api::{RedDBError, RedDBResult};
 use crate::application::entity::metadata_from_json;
@@ -50,9 +50,15 @@ impl ReplicaApplyMetrics {
         use std::sync::atomic::Ordering::Relaxed;
         [
             (ApplyErrorKind::Gap, self.gap_total.load(Relaxed)),
-            (ApplyErrorKind::Divergence, self.divergence_total.load(Relaxed)),
+            (
+                ApplyErrorKind::Divergence,
+                self.divergence_total.load(Relaxed),
+            ),
             (ApplyErrorKind::Apply, self.apply_error_total.load(Relaxed)),
-            (ApplyErrorKind::Decode, self.decode_error_total.load(Relaxed)),
+            (
+                ApplyErrorKind::Decode,
+                self.decode_error_total.load(Relaxed),
+            ),
         ]
     }
 }
@@ -122,11 +128,7 @@ impl std::fmt::Display for LogicalApplyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Gap { last, next } => write!(f, "LSN gap on apply: last={last} next={next}"),
-            Self::Divergence {
-                lsn,
-                expected,
-                got,
-            } => write!(
+            Self::Divergence { lsn, expected, got } => write!(
                 f,
                 "LSN divergence on apply at lsn={lsn}: expected payload hash {expected}, got {got}"
             ),
@@ -291,18 +293,16 @@ fn record_payload_hash(record: &ChangeRecord) -> [u8; 32] {
 }
 
 fn hex_digest(bytes: &[u8; 32]) -> String {
-    let mut s = String::with_capacity(64);
-    for b in bytes {
-        s.push_str(&format!("{:02x}", b));
-    }
-    s
+    crate::utils::to_hex(bytes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::replication::cdc::ChangeOperation;
-    use crate::storage::{EntityId, RedDB, UnifiedEntity, UnifiedStore};
+    use crate::storage::schema::Value;
+    use crate::storage::{EntityData, EntityId, EntityKind, RedDB, RowData, UnifiedEntity};
+    use std::sync::Arc;
 
     fn open_db() -> (RedDB, std::path::PathBuf) {
         let path = std::env::temp_dir().join(format!(
@@ -319,17 +319,31 @@ mod tests {
     }
 
     fn record(lsn: u64, payload: &[u8]) -> ChangeRecord {
-        let entity = UnifiedEntity::new(EntityId::new(lsn), payload.to_vec());
-        ChangeRecord {
+        let timestamp = 100 + lsn;
+        let mut entity = UnifiedEntity::new(
+            EntityId::new(lsn),
+            EntityKind::TableRow {
+                table: Arc::from("users"),
+                row_id: lsn,
+            },
+            EntityData::Row(RowData::with_names(
+                vec![Value::UnsignedInteger(lsn), Value::Blob(payload.to_vec())],
+                vec!["id".to_string(), "payload".to_string()],
+            )),
+        );
+        entity.created_at = timestamp;
+        entity.updated_at = timestamp;
+        entity.sequence_id = lsn;
+        ChangeRecord::from_entity(
             lsn,
-            timestamp: 100 + lsn,
-            operation: ChangeOperation::Insert,
-            collection: "users".to_string(),
-            entity_id: lsn,
-            entity_kind: "row".to_string(),
-            entity_bytes: Some(UnifiedStore::serialize_entity(&entity, crate::api::REDDB_FORMAT_VERSION)),
-            metadata: None,
-        }
+            timestamp,
+            ChangeOperation::Insert,
+            "users",
+            "row",
+            &entity,
+            crate::api::REDDB_FORMAT_VERSION,
+            None,
+        )
     }
 
     #[test]
@@ -337,12 +351,16 @@ mod tests {
         let (db, path) = open_db();
         let applier = LogicalChangeApplier::new(0);
         assert_eq!(
-            applier.apply(&db, &record(1, b"a"), ApplyMode::Replica).unwrap(),
+            applier
+                .apply(&db, &record(1, b"a"), ApplyMode::Replica)
+                .unwrap(),
             ApplyOutcome::Applied
         );
         assert_eq!(applier.last_applied_lsn(), 1);
         assert_eq!(
-            applier.apply(&db, &record(2, b"b"), ApplyMode::Replica).unwrap(),
+            applier
+                .apply(&db, &record(2, b"b"), ApplyMode::Replica)
+                .unwrap(),
             ApplyOutcome::Applied
         );
         assert_eq!(applier.last_applied_lsn(), 2);
@@ -367,7 +385,9 @@ mod tests {
     fn apply_fails_closed_on_lsn_collision_diff_payload() {
         let (db, path) = open_db();
         let applier = LogicalChangeApplier::new(0);
-        applier.apply(&db, &record(7, b"first"), ApplyMode::Replica).unwrap();
+        applier
+            .apply(&db, &record(7, b"first"), ApplyMode::Replica)
+            .unwrap();
         let err = applier
             .apply(&db, &record(7, b"different"), ApplyMode::Replica)
             .unwrap_err();
@@ -382,10 +402,16 @@ mod tests {
     fn apply_skips_older_lsn() {
         let (db, path) = open_db();
         let applier = LogicalChangeApplier::new(0);
-        applier.apply(&db, &record(1, b"a"), ApplyMode::Replica).unwrap();
-        applier.apply(&db, &record(2, b"b"), ApplyMode::Replica).unwrap();
+        applier
+            .apply(&db, &record(1, b"a"), ApplyMode::Replica)
+            .unwrap();
+        applier
+            .apply(&db, &record(2, b"b"), ApplyMode::Replica)
+            .unwrap();
         assert_eq!(
-            applier.apply(&db, &record(1, b"a"), ApplyMode::Replica).unwrap(),
+            applier
+                .apply(&db, &record(1, b"a"), ApplyMode::Replica)
+                .unwrap(),
             ApplyOutcome::Skipped
         );
         assert_eq!(applier.last_applied_lsn(), 2);
@@ -396,7 +422,9 @@ mod tests {
     fn apply_returns_gap_on_future_lsn() {
         let (db, path) = open_db();
         let applier = LogicalChangeApplier::new(0);
-        applier.apply(&db, &record(1, b"a"), ApplyMode::Replica).unwrap();
+        applier
+            .apply(&db, &record(1, b"a"), ApplyMode::Replica)
+            .unwrap();
         let err = applier
             .apply(&db, &record(5, b"e"), ApplyMode::Replica)
             .unwrap_err();

@@ -254,21 +254,14 @@ pub fn sha256_file_hex(path: &Path) -> Result<String, BackendError> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{:02x}", b))
-        .collect())
+    Ok(crate::utils::to_hex(&hasher.finalize()))
 }
 
 /// Compute SHA-256 over a byte slice and return the hex digest.
 /// Convenience for in-memory payloads (logical WAL segment buffer
 /// before upload).
 pub fn sha256_bytes_hex(bytes: &[u8]) -> String {
-    crate::crypto::sha256::sha256(bytes)
-        .iter()
-        .map(|b| format!("{:02x}", b))
-        .collect()
+    crate::utils::to_hex(&crate::crypto::sha256::sha256(bytes))
 }
 
 /// WAL Archiver — copies WAL segments to a remote backend.
