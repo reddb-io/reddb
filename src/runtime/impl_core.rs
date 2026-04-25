@@ -1382,6 +1382,9 @@ impl RedDBRuntime {
                         .unwrap_or_else(|| std::env::temp_dir().join("reddb"));
                     crate::runtime::audit_log::AuditLogger::for_data_path(&data_path)
                 },
+                replica_apply_metrics:
+                    crate::replication::logical::ReplicaApplyMetrics::default(),
+                quota_bucket: crate::runtime::quota_bucket::QuotaBucket::from_env(),
             }),
         };
 
@@ -2484,6 +2487,12 @@ impl RedDBRuntime {
                 }
             };
 
+            // PLAN.md Phase 11.5 — stateful applier guards LSN
+            // monotonicity across pulls. Seed with the persisted
+            // `last_applied_lsn` so reboots don't lose the chain
+            // pointer.
+            let applier = crate::replication::logical::LogicalChangeApplier::new(since_lsn);
+
             loop {
                 let payload = crate::json!({
                     "since_lsn": since_lsn,
@@ -2527,6 +2536,9 @@ impl RedDBRuntime {
                                     continue;
                                 };
                                 let Ok(data) = hex::decode(data_hex) else {
+                                    self.inner.replica_apply_metrics.record(
+                                        crate::replication::logical::ApplyErrorKind::Decode,
+                                    );
                                     self.persist_replication_health(
                                         "apply_error",
                                         "failed to decode WAL record hex payload",
@@ -2536,6 +2548,9 @@ impl RedDBRuntime {
                                     continue;
                                 };
                                 let Ok(change) = ChangeRecord::decode(&data) else {
+                                    self.inner.replica_apply_metrics.record(
+                                        crate::replication::logical::ApplyErrorKind::Decode,
+                                    );
                                     self.persist_replication_health(
                                         "apply_error",
                                         "failed to decode logical WAL record",
@@ -2544,23 +2559,44 @@ impl RedDBRuntime {
                                     );
                                     continue;
                                 };
-                                if LogicalChangeApplier::apply_record(
+                                match applier.apply(
                                     self.inner.db.as_ref(),
                                     &change,
                                     ApplyMode::Replica,
-                                )
-                                .is_err()
-                                {
-                                    self.persist_replication_health(
-                                        "apply_error",
-                                        "failed to apply logical WAL record on replica",
-                                        current_lsn,
-                                        oldest_available_lsn,
-                                    );
-                                    continue;
+                                ) {
+                                    Ok(crate::replication::logical::ApplyOutcome::Applied) => {
+                                        since_lsn = since_lsn.max(change.lsn);
+                                        self.persist_replica_lsn(since_lsn);
+                                    }
+                                    Ok(_) => {
+                                        // Idempotent / Skipped: no advance, no error.
+                                    }
+                                    Err(err) => {
+                                        self.inner.replica_apply_metrics.record(err.kind());
+                                        let kind = match &err {
+                                            crate::replication::logical::LogicalApplyError::Gap { .. } => "stalled_gap",
+                                            crate::replication::logical::LogicalApplyError::Divergence { .. } => "divergence",
+                                            _ => "apply_error",
+                                        };
+                                        self.persist_replication_health(
+                                            kind,
+                                            &format!("replica apply rejected: {err}"),
+                                            current_lsn,
+                                            oldest_available_lsn,
+                                        );
+                                        // Stop applying this batch. The
+                                        // outer loop will retry on next
+                                        // pull, which on a real Gap will
+                                        // not magically heal — operator
+                                        // must rebootstrap. For
+                                        // Divergence, we explicitly do
+                                        // not advance; this keeps the
+                                        // replica visibly unhealthy
+                                        // instead of silently swallowing
+                                        // corruption.
+                                        break;
+                                    }
                                 }
-                                since_lsn = since_lsn.max(change.lsn);
-                                self.persist_replica_lsn(since_lsn);
                             }
                         }
                         self.persist_replication_health(
@@ -2603,6 +2639,172 @@ impl RedDBRuntime {
     /// Get backup scheduler status.
     pub fn backup_status(&self) -> crate::replication::scheduler::BackupStatus {
         self.inner.backup_scheduler.status()
+    }
+
+    /// PLAN.md Phase 11.4 — owned snapshot of every registered
+    /// replica's state on this primary. Returns empty vec on
+    /// non-primary instances or when no replicas are registered yet.
+    pub fn primary_replica_snapshots(&self) -> Vec<crate::replication::primary::ReplicaState> {
+        self.inner
+            .db
+            .replication
+            .as_ref()
+            .map(|repl| repl.replica_snapshots())
+            .unwrap_or_default()
+    }
+
+    /// PLAN.md Phase 11.4 — active commit policy. Reads
+    /// `RED_PRIMARY_COMMIT_POLICY` once at runtime construction;
+    /// future env reloads will need a reload endpoint. Default is
+    /// `Local` — current behavior, no replica blocking.
+    pub fn commit_policy(&self) -> crate::replication::CommitPolicy {
+        crate::replication::CommitPolicy::from_env()
+    }
+
+    /// PLAN.md Phase 11.5 — accessor for replica-side apply error
+    /// counters (gap / divergence / apply / decode). Returned
+    /// snapshot is consistent across the four counters; the labels
+    /// match `reddb_replica_apply_errors_total{kind}`.
+    pub fn replica_apply_error_counts(
+        &self,
+    ) -> [(crate::replication::logical::ApplyErrorKind, u64); 4] {
+        self.inner.replica_apply_metrics.snapshot()
+    }
+
+    /// PLAN.md Phase 4.4 — per-caller quota bucket. Always
+    /// returned; `is_configured()` lets callers short-circuit.
+    pub fn quota_bucket(&self) -> &crate::runtime::quota_bucket::QuotaBucket {
+        &self.inner.quota_bucket
+    }
+
+    /// PLAN.md Phase 11.4 — observability snapshot of every
+    /// replica's durable LSN as known to the commit waiter. Empty
+    /// vec on non-primary instances or when no replica has acked.
+    pub fn commit_waiter_snapshot(&self) -> Vec<(String, u64)> {
+        self.inner
+            .db
+            .replication
+            .as_ref()
+            .map(|repl| repl.commit_waiter.snapshot())
+            .unwrap_or_default()
+    }
+
+    /// PLAN.md Phase 11.4 — `(reached, timed_out, not_required, last_micros)`
+    /// counters for /metrics. Always-zero on non-primary instances.
+    pub fn commit_waiter_metrics_snapshot(&self) -> (u64, u64, u64, u64) {
+        self.inner
+            .db
+            .replication
+            .as_ref()
+            .map(|repl| repl.commit_waiter.metrics_snapshot())
+            .unwrap_or((0, 0, 0, 0))
+    }
+
+    /// PLAN.md Phase 11.4 — block until at least `count` replicas
+    /// have durably applied through `target_lsn`, or `timeout`
+    /// elapses. Returns the `AwaitOutcome` so the caller can decide
+    /// whether to surface a timeout error to the client or continue
+    /// (the policy mapping lives in the commit dispatcher).
+    ///
+    /// Foundation only — the write commit path doesn't yet call
+    /// this. Wiring it is a per-surface task gated on the operator
+    /// flipping `RED_PRIMARY_COMMIT_POLICY` away from `local`.
+    pub fn await_replica_acks(
+        &self,
+        target_lsn: u64,
+        count: u32,
+        timeout: std::time::Duration,
+    ) -> crate::replication::AwaitOutcome {
+        match &self.inner.db.replication {
+            Some(repl) => repl.commit_waiter.await_acks(target_lsn, count, timeout),
+            None => {
+                // No replication configured: policy must be `Local`.
+                // Treat as immediate `NotRequired` so callers don't
+                // block on a degenerate setup.
+                crate::replication::AwaitOutcome::NotRequired
+            }
+        }
+    }
+
+    /// PLAN.md Phase 11.4 — enforce the configured commit policy
+    /// against `post_lsn` (the LSN of the just-completed write).
+    /// Returns `Ok(AwaitOutcome)` on every successful enforcement
+    /// (including `Reached` and `TimedOut` when fail-on-timeout is
+    /// off). Returns `Err(ReadOnly)` only when:
+    ///   * policy is `AckN(n)` with `n > 0`
+    ///   * the wait timed out
+    ///   * `RED_COMMIT_FAIL_ON_TIMEOUT=true` is set
+    ///
+    /// The HTTP / gRPC / wire surfaces map the error to 504 / wire
+    /// backoff. Default behaviour (env unset) logs warn and returns
+    /// success — matches PLAN.md "default v1 stays local" semantics
+    /// while still letting the operator opt into hard-blocking.
+    pub fn enforce_commit_policy(
+        &self,
+        post_lsn: u64,
+    ) -> RedDBResult<crate::replication::AwaitOutcome> {
+        let n = match self.commit_policy() {
+            crate::replication::CommitPolicy::AckN(n) if n > 0 => n,
+            _ => return Ok(crate::replication::AwaitOutcome::NotRequired),
+        };
+        let timeout_ms = std::env::var("RED_REPLICATION_ACK_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(5_000);
+        let outcome =
+            self.await_replica_acks(post_lsn, n, std::time::Duration::from_millis(timeout_ms));
+        if let crate::replication::AwaitOutcome::TimedOut { observed, required } = &outcome {
+            tracing::warn!(
+                target: "reddb::commit",
+                post_lsn,
+                observed = *observed,
+                required = *required,
+                timeout_ms,
+                "ack_n: timed out waiting for replicas"
+            );
+            let fail = std::env::var("RED_COMMIT_FAIL_ON_TIMEOUT")
+                .ok()
+                .map(|v| {
+                    let t = v.trim();
+                    t.eq_ignore_ascii_case("true") || t == "1" || t.eq_ignore_ascii_case("yes")
+                })
+                .unwrap_or(false);
+            if fail {
+                return Err(RedDBError::ReadOnly(format!(
+                    "commit policy timed out at lsn {post_lsn}: observed={observed} required={required} (RED_COMMIT_FAIL_ON_TIMEOUT=true)"
+                )));
+            }
+        }
+        Ok(outcome)
+    }
+
+    /// PLAN.md Phase 6.3 — whether at-rest encryption is configured.
+    /// Reads `RED_ENCRYPTION_KEY` / `RED_ENCRYPTION_KEY_FILE` lazily;
+    /// returns `("enabled", None)` when a key is loadable, `("error", Some(msg))`
+    /// when the operator set the env but it doesn't parse, and
+    /// `("disabled", None)` when no key is configured. The pager
+    /// hookup is deferred — this accessor surfaces the operator's
+    /// intent for /admin/status without yet using the key in writes.
+    pub fn encryption_at_rest_status(&self) -> (&'static str, Option<String>) {
+        match crate::crypto::page_encryption::key_from_env() {
+            Ok(Some(_)) => ("enabled", None),
+            Ok(None) => ("disabled", None),
+            Err(err) => ("error", Some(err)),
+        }
+    }
+
+    /// PLAN.md Phase 11.5 — current replica apply health label
+    /// (`ok`, `gap`, `divergence`, `apply_error`, `connecting`,
+    /// `stalled_gap`). Read from the persisted `red.replication.state`
+    /// config key updated by the replica loop. Returns `None` on
+    /// non-replica instances or when no apply has run yet.
+    pub fn replica_apply_health(&self) -> Option<String> {
+        let state = self.config_string("red.replication.state", "");
+        if state.is_empty() {
+            None
+        } else {
+            Some(state)
+        }
     }
 
     /// Current local LSN paired with the LSN of the most recently
@@ -2700,6 +2902,20 @@ impl RedDBRuntime {
             crate::storage::wal::publish_snapshot_manifest(backend.as_ref(), &manifest)
                 .map_err(|err| RedDBError::Internal(err.to_string()))?;
 
+            // PLAN.md Phase 11.3 — read the head of the WAL hash chain
+            // so the new segment can link back. `None` means we're
+            // starting a fresh timeline (after a clean restore or on
+            // first archive ever); the segment's `prev_hash` will be
+            // `None` and restore-side validation accepts that only for
+            // the first segment in `plan.wal_segments`.
+            let prev_segment_hash =
+                self.config_string("red.config.timeline.last_segment_hash", "");
+            let prev_hash_arg = if prev_segment_hash.is_empty() {
+                None
+            } else {
+                Some(prev_segment_hash)
+            };
+
             let archived_lsn = if let Some(primary) = &self.inner.db.replication {
                 let oldest = primary
                     .logical_wal_spool
@@ -2723,11 +2939,23 @@ impl RedDBRuntime {
                     backend.as_ref(),
                     &wal_prefix,
                     &records,
+                    prev_hash_arg,
                 )
                 .map_err(|err| RedDBError::Internal(err.to_string()))?
                 {
                     if let Some(spool) = &primary.logical_wal_spool {
                         let _ = spool.prune_through(meta.lsn_end);
+                    }
+                    // Advance the chain head so the next archive call
+                    // links to this segment's hash. If the segment has
+                    // no sha256 (legacy / hashing failed) we leave the
+                    // head as-is — the next segment then carries the
+                    // prior chain head, preserving continuity.
+                    if let Some(sha) = &meta.sha256 {
+                        self.inner.db.store().set_config_tree(
+                            "red.config.timeline",
+                            &crate::json!({ "last_segment_hash": sha }),
+                        );
                     }
                     meta.lsn_end
                 } else {
@@ -2773,6 +3001,54 @@ impl RedDBRuntime {
                     snapshot_prefix = %snapshot_prefix,
                     "unified MANIFEST.json refresh failed; per-artifact sidecars unaffected"
                 );
+            }
+
+            // PLAN.md Phase 11.4 — when the operator picked a
+            // commit policy that demands replica durability, block
+            // until the configured count of replicas has acked the
+            // archived LSN (or the timeout fires). For backup the
+            // policy decides the *DR posture* — `local` returns
+            // immediately, `ack_n` ensures at least N replicas saw
+            // the new tail before we report success to the
+            // operator. A `TimedOut` is logged but does NOT fail
+            // the backup: the local WAL + remote upload are durable
+            // regardless; the missing acks are reported via
+            // /metrics and /admin/status so the operator can decide.
+            match self.commit_policy() {
+                crate::replication::CommitPolicy::AckN(n) if n > 0 => {
+                    let timeout = std::env::var("RED_REPLICATION_ACK_TIMEOUT_MS")
+                        .ok()
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .unwrap_or(5_000);
+                    let outcome = self.await_replica_acks(
+                        archived_lsn,
+                        n,
+                        std::time::Duration::from_millis(timeout),
+                    );
+                    match outcome {
+                        crate::replication::AwaitOutcome::Reached(count) => {
+                            tracing::debug!(
+                                target: "reddb::backup",
+                                archived_lsn,
+                                n,
+                                count,
+                                "ack_n: replicas synced before backup return"
+                            );
+                        }
+                        crate::replication::AwaitOutcome::TimedOut { observed, required } => {
+                            tracing::warn!(
+                                target: "reddb::backup",
+                                archived_lsn,
+                                observed,
+                                required,
+                                timeout_ms = timeout,
+                                "ack_n: timed out waiting for replicas; backup uploaded but DR posture degraded"
+                            );
+                        }
+                        crate::replication::AwaitOutcome::NotRequired => {}
+                    }
+                }
+                _ => {} // Local / RemoteWal / Quorum: no blocking yet
             }
 
             uploaded = true;
