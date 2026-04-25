@@ -229,6 +229,32 @@ impl Lifecycle {
             .compare_exchange(0, now_ms(), Ordering::AcqRel, Ordering::Acquire);
     }
 
+    /// PLAN.md Phase 9.1 — backfill phase markers with an explicit
+    /// timestamp. Used when the runtime captures the wall-clock
+    /// before Lifecycle is constructible (e.g. before storage
+    /// open) and wants to replay it into the markers afterwards.
+    /// Idempotent (only sets when current value is 0).
+    pub fn set_restore_started_at_ms(&self, ms: u64) {
+        let _ = self
+            .restore_started_at_ms
+            .compare_exchange(0, ms, Ordering::AcqRel, Ordering::Acquire);
+    }
+    pub fn set_restore_ready_at_ms(&self, ms: u64) {
+        let _ = self
+            .restore_ready_at_ms
+            .compare_exchange(0, ms, Ordering::AcqRel, Ordering::Acquire);
+    }
+    pub fn set_wal_replay_started_at_ms(&self, ms: u64) {
+        let _ = self
+            .wal_replay_started_at_ms
+            .compare_exchange(0, ms, Ordering::AcqRel, Ordering::Acquire);
+    }
+    pub fn set_wal_replay_ready_at_ms(&self, ms: u64) {
+        let _ = self
+            .wal_replay_ready_at_ms
+            .compare_exchange(0, ms, Ordering::AcqRel, Ordering::Acquire);
+    }
+
     /// Snapshot every cold-start marker in one read. Callers compute
     /// per-phase deltas via `ColdStartPhases::durations_ms()`.
     pub fn cold_start_phases(&self) -> ColdStartPhases {
