@@ -256,6 +256,193 @@ impl RedDBServer {
         json_response(200, JsonValue::Object(object))
     }
 
+    /// `GET /metrics` — Prometheus / OpenMetrics exposition.
+    ///
+    /// Initial metric set (PLAN.md Phase 5.1) covers the
+    /// orchestrator-relevant signals: uptime, health phase, read-
+    /// only state, replication role, last-backup outcome, on-disk
+    /// size when known. Counters that need request-path
+    /// instrumentation (ops_total, query_duration_seconds_bucket)
+    /// land in a follow-up commit so this endpoint can ship today
+    /// against the existing data sources.
+    pub(crate) fn handle_metrics(&self) -> HttpResponse {
+        use std::fmt::Write;
+        let lifecycle = self.runtime.lifecycle();
+        let phase = lifecycle.phase();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let uptime_secs = (now_ms.saturating_sub(lifecycle.started_at_ms()) as f64) / 1000.0;
+        let cold_start_secs = lifecycle.ready_at_ms().map(|ready_ms| {
+            (ready_ms.saturating_sub(lifecycle.started_at_ms()) as f64) / 1000.0
+        });
+        let health_status: u8 = match phase {
+            Phase::Stopped => 0,
+            Phase::Starting | Phase::ShuttingDown => 0,
+            Phase::Draining => 1,
+            Phase::Ready => 2,
+        };
+        let read_only = self.runtime.write_gate().is_read_only();
+        let role = match self.runtime.write_gate().role() {
+            crate::replication::ReplicationRole::Standalone => "standalone",
+            crate::replication::ReplicationRole::Primary => "primary",
+            crate::replication::ReplicationRole::Replica { .. } => "replica",
+        };
+        let db_size_bytes = self
+            .runtime
+            .db()
+            .path()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .map(|m| m.len())
+            .unwrap_or(0);
+
+        let mut body = String::with_capacity(1024);
+        let _ = writeln!(
+            body,
+            "# HELP reddb_uptime_seconds Seconds since the runtime was constructed."
+        );
+        let _ = writeln!(body, "# TYPE reddb_uptime_seconds gauge");
+        let _ = writeln!(body, "reddb_uptime_seconds {}", uptime_secs);
+
+        let _ = writeln!(
+            body,
+            "# HELP reddb_health_status 0=down/starting, 1=degraded/draining, 2=ready."
+        );
+        let _ = writeln!(body, "# TYPE reddb_health_status gauge");
+        let _ = writeln!(body, "reddb_health_status {}", health_status);
+
+        let _ = writeln!(
+            body,
+            "# HELP reddb_phase Lifecycle phase as a labeled gauge (always 1; phase in label)."
+        );
+        let _ = writeln!(body, "# TYPE reddb_phase gauge");
+        let _ = writeln!(body, "reddb_phase{{phase=\"{}\"}} 1", phase.as_str());
+
+        let _ = writeln!(
+            body,
+            "# HELP reddb_read_only 1 when public mutations are gated, 0 otherwise."
+        );
+        let _ = writeln!(body, "# TYPE reddb_read_only gauge");
+        let _ = writeln!(body, "reddb_read_only {}", if read_only { 1 } else { 0 });
+
+        let _ = writeln!(
+            body,
+            "# HELP reddb_replication_role Replication role of this instance."
+        );
+        let _ = writeln!(body, "# TYPE reddb_replication_role gauge");
+        let _ = writeln!(body, "reddb_replication_role{{role=\"{}\"}} 1", role);
+
+        let _ = writeln!(
+            body,
+            "# HELP reddb_db_size_bytes On-disk size of the primary database file."
+        );
+        let _ = writeln!(body, "# TYPE reddb_db_size_bytes gauge");
+        let _ = writeln!(body, "reddb_db_size_bytes {}", db_size_bytes);
+
+        if let Some(secs) = cold_start_secs {
+            let _ = writeln!(
+                body,
+                "# HELP reddb_cold_start_duration_seconds Seconds from process start to /health/ready 200."
+            );
+            let _ = writeln!(body, "# TYPE reddb_cold_start_duration_seconds gauge");
+            let _ = writeln!(body, "reddb_cold_start_duration_seconds {}", secs);
+        }
+
+        HttpResponse {
+            status: 200,
+            content_type: "text/plain; version=0.0.4",
+            body: body.into_bytes(),
+        }
+    }
+
+    /// `GET /admin/status` — full structured snapshot of operator-
+    /// relevant state (PLAN.md Phase 5.4). One JSON object that
+    /// frontend dashboards / control-plane sidecars can poll
+    /// without scraping multiple endpoints.
+    pub(crate) fn handle_admin_status(&self) -> HttpResponse {
+        let lifecycle = self.runtime.lifecycle();
+        let phase = lifecycle.phase();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let uptime_secs = (now_ms.saturating_sub(lifecycle.started_at_ms()) as f64) / 1000.0;
+        let read_only = self.runtime.write_gate().is_read_only();
+        let role = match self.runtime.write_gate().role() {
+            crate::replication::ReplicationRole::Standalone => "standalone",
+            crate::replication::ReplicationRole::Primary => "primary",
+            crate::replication::ReplicationRole::Replica { .. } => "replica",
+        };
+        let db = self.runtime.db();
+        let db_size_bytes = db
+            .path()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let backend_kind = db
+            .options()
+            .remote_backend
+            .as_ref()
+            .map(|b| b.name().to_string());
+
+        let mut object = Map::new();
+        object.insert(
+            "version".to_string(),
+            JsonValue::String(env!("CARGO_PKG_VERSION").to_string()),
+        );
+        object.insert(
+            "phase".to_string(),
+            JsonValue::String(phase.as_str().to_string()),
+        );
+        object.insert(
+            "uptime_secs".to_string(),
+            JsonValue::Number((uptime_secs * 1000.0).round() / 1000.0),
+        );
+        object.insert(
+            "started_at_unix_ms".to_string(),
+            JsonValue::Number(lifecycle.started_at_ms() as f64),
+        );
+        if let Some(ready_at) = lifecycle.ready_at_ms() {
+            object.insert(
+                "ready_at_unix_ms".to_string(),
+                JsonValue::Number(ready_at as f64),
+            );
+        }
+        object.insert(
+            "db_size_bytes".to_string(),
+            JsonValue::Number(db_size_bytes as f64),
+        );
+        object.insert("read_only".to_string(), JsonValue::Bool(read_only));
+        object.insert(
+            "replication_role".to_string(),
+            JsonValue::String(role.to_string()),
+        );
+        if let Some(backend) = backend_kind {
+            object.insert("remote_backend".to_string(), JsonValue::String(backend));
+        }
+        if let Some(report) = lifecycle.shutdown_report() {
+            let mut shutdown_obj = Map::new();
+            shutdown_obj.insert(
+                "duration_ms".to_string(),
+                JsonValue::Number(report.duration_ms as f64),
+            );
+            shutdown_obj.insert(
+                "flushed_wal".to_string(),
+                JsonValue::Bool(report.flushed_wal),
+            );
+            shutdown_obj.insert(
+                "backup_uploaded".to_string(),
+                JsonValue::Bool(report.backup_uploaded),
+            );
+            object.insert(
+                "shutdown".to_string(),
+                JsonValue::Object(shutdown_obj),
+            );
+        }
+        json_response(200, JsonValue::Object(object))
+    }
+
     /// `POST /admin/drain` — flip to Draining phase. Subsequent
     /// `WriteGate`-checked writes will be rejected until shutdown
     /// completes or another phase override re-enables Ready.

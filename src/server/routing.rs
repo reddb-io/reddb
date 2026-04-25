@@ -68,6 +68,9 @@ impl RedDBServer {
             ("POST", "/admin/backup") => self.handle_admin_backup(&query),
             // PLAN.md Phase 4.3 — dynamic read-only toggle.
             ("POST", "/admin/readonly") => self.handle_admin_readonly(body),
+            // PLAN.md Phase 5.1 / 5.4 — observability endpoints.
+            ("GET", "/metrics") => self.handle_metrics(),
+            ("GET", "/admin/status") => self.handle_admin_status(),
 
             ("GET", "/health") => {
                 let report = self.native_use_cases().health();
