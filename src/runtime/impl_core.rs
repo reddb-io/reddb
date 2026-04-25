@@ -1371,6 +1371,7 @@ impl RedDBRuntime {
                 ddl_epoch: std::sync::atomic::AtomicU64::new(0),
                 write_gate: crate::runtime::write_gate::WriteGate::from_options(&options),
                 lifecycle: crate::runtime::lifecycle::Lifecycle::new(),
+                resource_limits: crate::runtime::resource_limits::ResourceLimits::from_env(),
             }),
         };
 
@@ -2041,6 +2042,11 @@ impl RedDBRuntime {
     /// state machine.
     pub fn lifecycle(&self) -> &crate::runtime::lifecycle::Lifecycle {
         &self.inner.lifecycle
+    }
+
+    /// Operator-imposed resource limits (PLAN.md Phase 4.1).
+    pub fn resource_limits(&self) -> &crate::runtime::resource_limits::ResourceLimits {
+        &self.inner.resource_limits
     }
 
     /// Graceful shutdown coordinator (PLAN.md Phase 1.1).

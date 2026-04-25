@@ -349,6 +349,36 @@ impl RedDBServer {
             let _ = writeln!(body, "reddb_cold_start_duration_seconds {}", secs);
         }
 
+        // Operator-imposed limits (PLAN.md Phase 4.1). Emitted as
+        // gauges so external dashboards can graph headroom against
+        // current usage. `0` means "no cap pinned at boot"; we
+        // still emit it so absence vs presence is unambiguous.
+        let limits = self.runtime.resource_limits();
+        if let Some(v) = limits.max_db_size_bytes {
+            let _ = writeln!(
+                body,
+                "# HELP reddb_limit_db_size_bytes Operator-pinned cap on the primary DB file size."
+            );
+            let _ = writeln!(body, "# TYPE reddb_limit_db_size_bytes gauge");
+            let _ = writeln!(body, "reddb_limit_db_size_bytes {}", v);
+        }
+        if let Some(v) = limits.max_connections {
+            let _ = writeln!(body, "# TYPE reddb_limit_connections gauge");
+            let _ = writeln!(body, "reddb_limit_connections {}", v);
+        }
+        if let Some(v) = limits.max_qps {
+            let _ = writeln!(body, "# TYPE reddb_limit_qps gauge");
+            let _ = writeln!(body, "reddb_limit_qps {}", v);
+        }
+        if let Some(v) = limits.max_batch_size {
+            let _ = writeln!(body, "# TYPE reddb_limit_batch_size gauge");
+            let _ = writeln!(body, "reddb_limit_batch_size {}", v);
+        }
+        if let Some(v) = limits.max_memory_bytes {
+            let _ = writeln!(body, "# TYPE reddb_limit_memory_bytes gauge");
+            let _ = writeln!(body, "reddb_limit_memory_bytes {}", v);
+        }
+
         HttpResponse {
             status: 200,
             content_type: "text/plain; version=0.0.4",
@@ -421,6 +451,36 @@ impl RedDBServer {
         if let Some(backend) = backend_kind {
             object.insert("remote_backend".to_string(), JsonValue::String(backend));
         }
+        // PLAN.md Phase 4.1 — operator-imposed limits surface so
+        // external dashboards can show headroom alongside usage.
+        let limits = self.runtime.resource_limits();
+        let mut limits_obj = Map::new();
+        if let Some(v) = limits.max_db_size_bytes {
+            limits_obj.insert("max_db_size_bytes".to_string(), JsonValue::Number(v as f64));
+        }
+        if let Some(v) = limits.max_connections {
+            limits_obj.insert("max_connections".to_string(), JsonValue::Number(v as f64));
+        }
+        if let Some(v) = limits.max_qps {
+            limits_obj.insert("max_qps".to_string(), JsonValue::Number(v as f64));
+        }
+        if let Some(v) = limits.max_batch_size {
+            limits_obj.insert("max_batch_size".to_string(), JsonValue::Number(v as f64));
+        }
+        if let Some(v) = limits.max_memory_bytes {
+            limits_obj.insert("max_memory_bytes".to_string(), JsonValue::Number(v as f64));
+        }
+        if let Some(d) = limits.max_query_duration {
+            limits_obj.insert(
+                "max_query_duration_ms".to_string(),
+                JsonValue::Number(d.as_millis() as f64),
+            );
+        }
+        if let Some(v) = limits.max_result_bytes {
+            limits_obj.insert("max_result_bytes".to_string(), JsonValue::Number(v as f64));
+        }
+        object.insert("limits".to_string(), JsonValue::Object(limits_obj));
+
         if let Some(report) = lifecycle.shutdown_report() {
             let mut shutdown_obj = Map::new();
             shutdown_obj.insert(

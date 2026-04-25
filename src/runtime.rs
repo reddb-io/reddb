@@ -756,6 +756,11 @@ struct RuntimeInner {
     /// orchestrator (K8s preStop, Fly autostop, ECS task drain,
     /// systemd) can coordinate without losing data.
     lifecycle: crate::runtime::lifecycle::Lifecycle,
+    /// Operator-imposed resource limits (PLAN.md Phase 4.1).
+    /// Read once at boot from `RED_MAX_*` env vars; consulted by
+    /// observability and (in follow-up commits) the per-write
+    /// enforcement points.
+    resource_limits: crate::runtime::resource_limits::ResourceLimits,
 }
 
 #[derive(Clone)]
@@ -771,6 +776,7 @@ pub struct RuntimeConnection {
 pub mod config_matrix;
 pub mod config_overlay;
 pub mod lifecycle;
+pub mod resource_limits;
 mod expr_eval;
 mod graph_dsl;
 mod health_connection;
