@@ -124,6 +124,12 @@ service RedDb {
   rpc ReplicationStatus(Empty) returns (PayloadReply);
   rpc PullWalRecords(JsonPayloadRequest) returns (PayloadReply);
   rpc ReplicationSnapshot(Empty) returns (PayloadReply);
+  // Replica-driven LSN ack (PLAN.md Phase 11.4). JSON payload:
+  // {"replica_id": "...", "applied_lsn": <u64>, "durable_lsn": <u64>}.
+  // Idempotent — older LSNs are ignored. Updates per-replica state
+  // (last_acked_lsn, last_durable_lsn, last_seen_at_unix_ms) for
+  // /metrics + /admin/status.
+  rpc AckReplicaLsn(JsonPayloadRequest) returns (PayloadReply);
 
   // DDL
   rpc CreateCollection(JsonPayloadRequest) returns (PayloadReply);
