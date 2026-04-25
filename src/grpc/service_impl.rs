@@ -2055,10 +2055,11 @@ async fn create_row(
     self.authorize_write(request.metadata())?;
     let request = request.into_inner();
     let rt = self.clone();
-    tokio::task::spawn_blocking(move || create_row_reply(&rt, request))
+    let reply = tokio::task::spawn_blocking(move || create_row_reply(&rt, request))
         .await
-        .map_err(|e| Status::internal(e.to_string()))?
-        .map(Response::new)
+        .map_err(|e| Status::internal(e.to_string()))??;
+    self.enforce_commit_policy_after_write()?;
+    Ok(Response::new(reply))
 }
 
 async fn create_node(
@@ -2068,10 +2069,11 @@ async fn create_node(
     self.authorize_write(request.metadata())?;
     let request = request.into_inner();
     let rt = self.clone();
-    tokio::task::spawn_blocking(move || create_node_reply(&rt, request))
+    let reply = tokio::task::spawn_blocking(move || create_node_reply(&rt, request))
         .await
-        .map_err(|e| Status::internal(e.to_string()))?
-        .map(Response::new)
+        .map_err(|e| Status::internal(e.to_string()))??;
+    self.enforce_commit_policy_after_write()?;
+    Ok(Response::new(reply))
 }
 
 async fn create_edge(
@@ -2081,10 +2083,11 @@ async fn create_edge(
     self.authorize_write(request.metadata())?;
     let request = request.into_inner();
     let rt = self.clone();
-    tokio::task::spawn_blocking(move || create_edge_reply(&rt, request))
+    let reply = tokio::task::spawn_blocking(move || create_edge_reply(&rt, request))
         .await
-        .map_err(|e| Status::internal(e.to_string()))?
-        .map(Response::new)
+        .map_err(|e| Status::internal(e.to_string()))??;
+    self.enforce_commit_policy_after_write()?;
+    Ok(Response::new(reply))
 }
 
 async fn create_vector(
@@ -2094,10 +2097,11 @@ async fn create_vector(
     self.authorize_write(request.metadata())?;
     let request = request.into_inner();
     let rt = self.clone();
-    tokio::task::spawn_blocking(move || create_vector_reply(&rt, request))
+    let reply = tokio::task::spawn_blocking(move || create_vector_reply(&rt, request))
         .await
-        .map_err(|e| Status::internal(e.to_string()))?
-        .map(Response::new)
+        .map_err(|e| Status::internal(e.to_string()))??;
+    self.enforce_commit_policy_after_write()?;
+    Ok(Response::new(reply))
 }
 
 async fn create_document(
@@ -2106,7 +2110,9 @@ async fn create_document(
 ) -> Result<Response<EntityReply>, Status> {
     self.authorize_write(request.metadata())?;
     let request = request.into_inner();
-    Ok(Response::new(create_document_reply(self, request)?))
+    let reply = create_document_reply(self, request)?;
+    self.enforce_commit_policy_after_write()?;
+    Ok(Response::new(reply))
 }
 
 async fn create_kv(
@@ -2115,7 +2121,9 @@ async fn create_kv(
 ) -> Result<Response<EntityReply>, Status> {
     self.authorize_write(request.metadata())?;
     let request = request.into_inner();
-    Ok(Response::new(create_kv_reply(self, request)?))
+    let reply = create_kv_reply(self, request)?;
+    self.enforce_commit_policy_after_write()?;
+    Ok(Response::new(reply))
 }
 
 async fn bulk_create_rows(
@@ -2348,6 +2356,7 @@ async fn delete_entity(
             request.id
         )));
     }
+    self.enforce_commit_policy_after_write()?;
     Ok(Response::new(OperationReply {
         ok: true,
         message: format!("entity {} deleted", request.id),
