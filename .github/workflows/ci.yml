@@ -110,6 +110,81 @@ jobs:
         if: always()
         run: docker compose down -v
 
+  chaos:
+    # PLAN.md Phase 8.4 — chaos & crash hardening matrix.
+    # Runs the 8 chaos tests + 3 backup/restore drills shipped in
+    # tests/chaos_*.rs and tests/drill_*.rs. Failure is a release blocker.
+    name: Chaos & Drill Suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: tests
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: '28.x'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: rui314/setup-mold@v1
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ubuntu-rust-1.91.0
+          cache-on-failure: "true"
+      - name: Run chaos tests
+        run: cargo test --locked --test 'chaos_*' --no-fail-fast
+      - name: Run drill tests
+        run: cargo test --locked --test 'drill_*' --no-fail-fast
+
+  chaos-minio:
+    # PLAN.md Phase 8.4 — chaos suite against an S3-compatible
+    # backend (MinIO) so the LocalBackend coverage doesn't mask
+    # backend-specific failure modes.
+    name: Chaos Suite (MinIO S3 backend)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: tests
+    services:
+      minio:
+        image: minio/minio:latest
+        ports: ['9000:9000']
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/ready || exit 1"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      RED_BACKEND: s3
+      RED_S3_ENDPOINT: http://localhost:9000
+      RED_S3_BUCKET: reddb-ci
+      RED_S3_REGION: us-east-1
+      RED_S3_PATH_STYLE: "true"
+      RED_S3_ACCESS_KEY: minioadmin
+      RED_S3_SECRET_KEY: minioadmin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: '28.x'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ubuntu-rust-1.91.0
+          cache-on-failure: "true"
+      - name: Wait for MinIO + create bucket
+        run: |
+          curl -fsS --retry 10 --retry-delay 2 http://localhost:9000/minio/health/ready
+          docker run --rm --network host minio/mc:latest \
+            sh -c "mc alias set ci http://localhost:9000 minioadmin minioadmin && mc mb -p ci/reddb-ci || true"
+      - run: cargo test --locked --test 'chaos_*' --no-fail-fast
+
   windows:
     # Phase 3.6 PG parity — verify RedDB compiles + passes the core unit
     # test suite on Windows. Excludes Linux-only integration tests
