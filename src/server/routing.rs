@@ -10,8 +10,41 @@ impl RedDBServer {
             body,
         } = request;
 
+        // PLAN.md Phase 6.2 — endpoint segregation. Listeners bound
+        // to the dedicated admin / metrics ports refuse paths
+        // outside their surface so accidentally exposing them does
+        // not leak the rest of the API.
+        if !self.surface_allows(&path) {
+            return json_error(404, "not found on this listener");
+        }
+
         if !self.is_authorized(&method, &path, &headers) {
             return json_error(401, "unauthorized");
+        }
+
+        // PLAN.md Phase 4.4 — per-caller QPS quota. Health probes
+        // skip the gate so probes never trip 429 on a hot instance.
+        let is_health_probe = matches!(
+            (method.as_str(), path.as_str()),
+            ("GET", "/health/live") | ("GET", "/health/ready") | ("GET", "/health/startup")
+        );
+        if !is_health_probe {
+            let principal = principal_for(&headers);
+            match self.runtime.quota_bucket().consume(&principal) {
+                crate::runtime::quota_bucket::QuotaOutcome::Throttled => {
+                    let retry = self.runtime.quota_bucket().retry_after_secs();
+                    return HttpResponse {
+                        status: 429,
+                        content_type: "application/json",
+                        body: format!(
+                            "{{\"error\":\"rate limited\",\"retry_after_secs\":{retry}}}"
+                        )
+                        .into_bytes(),
+                    };
+                }
+                crate::runtime::quota_bucket::QuotaOutcome::Granted
+                | crate::runtime::quota_bucket::QuotaOutcome::NotConfigured => {}
+            }
         }
 
         match (method.as_str(), path.as_str()) {
@@ -68,9 +101,15 @@ impl RedDBServer {
             ("POST", "/admin/backup") => self.handle_admin_backup(&query),
             // PLAN.md Phase 4.3 — dynamic read-only toggle.
             ("POST", "/admin/readonly") => self.handle_admin_readonly(body),
+            // PLAN.md Phase 11.6 — manual replica → primary promotion.
+            ("POST", "/admin/failover/promote") => self.handle_admin_failover_promote(body),
             // PLAN.md Phase 5.1 / 5.4 — observability endpoints.
             ("GET", "/metrics") => self.handle_metrics(),
             ("GET", "/admin/status") => self.handle_admin_status(),
+            // PLAN.md Phase 10.3 — public OpenAPI spec served inline
+            // so external tools can fetch it from a running server.
+            ("GET", "/admin/openapi") => self.handle_admin_openapi(),
+            ("GET", "/admin/openapi.yaml") => self.handle_admin_openapi(),
 
             ("GET", "/health") => {
                 let report = self.native_use_cases().health();
@@ -1131,7 +1170,66 @@ impl RedDBServer {
             .map_err(|err| json_error(400, err.to_string()))
     }
 
+    /// PLAN.md Phase 6.2 — return whether `path` is reachable on
+    /// this listener given its `ServerSurface` (Public / AdminOnly /
+    /// MetricsOnly). `/health/*` always passes so orchestrator
+    /// probes work on every bind.
+    fn surface_allows(&self, path: &str) -> bool {
+        match self.options.surface {
+            crate::server::ServerSurface::Public => true,
+            crate::server::ServerSurface::AdminOnly => {
+                path.starts_with("/admin/")
+                    || path == "/metrics"
+                    || path == "/admin"
+                    || path.starts_with("/health/")
+                    || path == "/health"
+            }
+            crate::server::ServerSurface::MetricsOnly => {
+                path == "/metrics"
+                    || path.starts_with("/health/")
+                    || path == "/health"
+            }
+        }
+    }
+
     fn is_authorized(&self, method: &str, path: &str, headers: &BTreeMap<String, String>) -> bool {
+        // PLAN.md Phase 1.2 — health probes are unauthenticated by
+        // contract: orchestrator probes can't carry tokens and a 401
+        // there would mark the pod unhealthy on the first scrape.
+        // Liveness, readiness, and startup all stay public.
+        if matches!(
+            (method, path),
+            ("GET", "/health/live")
+                | ("GET", "/health/ready")
+                | ("GET", "/health/startup")
+        ) {
+            return true;
+        }
+
+        // PLAN.md Phase 6.1 — operator endpoints (/admin/*, /metrics)
+        // are gated by a separate `RED_ADMIN_TOKEN` independent of
+        // the application auth store. When the env var (or its
+        // `_FILE` companion) is unset, the endpoints stay open so
+        // dev installs and dashboards keep working; once set, every
+        // hit needs `Authorization: Bearer <token>` with a
+        // constant-time match.
+        let is_admin_surface = path.starts_with("/admin/") || path == "/metrics";
+        if is_admin_surface {
+            if let Some(expected) = read_admin_token() {
+                let presented = headers
+                    .get("authorization")
+                    .and_then(|v| v.strip_prefix("Bearer "))
+                    .unwrap_or("");
+                if !constant_time_eq(presented.as_bytes(), expected.as_bytes()) {
+                    return false;
+                }
+                // Admin token matches — bypass the rest of the auth
+                // chain. Operators want /admin/* to keep working when
+                // the user-auth backend is down for maintenance.
+                return true;
+            }
+        }
+
         // Public endpoints that never require authentication.
         if matches!(
             (method, path),
@@ -1350,4 +1448,89 @@ fn collection_from_bare_path(path: &str) -> Option<&str> {
     } else {
         Some(name)
     }
+}
+
+/// PLAN.md Phase 4.4 — derive a stable principal label from a
+/// request's headers. Bearer tokens are hashed (sha256 prefix) so
+/// the metrics label never leaks the raw token. Unauthenticated
+/// requests share the `anon` bucket; replica RPCs that pass a
+/// `x-reddb-replica-id` header get their own `replica:<id>` bucket.
+fn principal_for(headers: &BTreeMap<String, String>) -> String {
+    if let Some(replica) = headers.get("x-reddb-replica-id") {
+        let trimmed = replica.trim();
+        if !trimmed.is_empty() {
+            return format!("replica:{trimmed}");
+        }
+    }
+    if let Some(auth) = headers.get("authorization") {
+        if let Some(token) = auth.strip_prefix("Bearer ") {
+            let trimmed = token.trim();
+            if !trimmed.is_empty() {
+                let digest = crate::crypto::sha256(trimmed.as_bytes());
+                let prefix: String = digest
+                    .iter()
+                    .take(8)
+                    .map(|b| format!("{:02x}", b))
+                    .collect();
+                return format!("bearer:{prefix}");
+            }
+        }
+    }
+    "anon".to_string()
+}
+
+/// PLAN.md Phase 6.1 — read the operator admin token. Honors
+/// `RED_ADMIN_TOKEN` and the `RED_ADMIN_TOKEN_FILE` companion
+/// (Kubernetes Secrets / Docker Compose `secrets:` /
+/// systemd LoadCredential). Returns `None` when both are unset or
+/// blank — in that case the admin gate is disabled and operators
+/// keep their dev workflow.
+fn read_admin_token() -> Option<String> {
+    if let Ok(value) = std::env::var("RED_ADMIN_TOKEN") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Some(value);
+        }
+    }
+    let path = std::env::var("RED_ADMIN_TOKEN_FILE").ok()?;
+    let trimmed_path = path.trim();
+    if trimmed_path.is_empty() {
+        return None;
+    }
+    match std::fs::read_to_string(trimmed_path) {
+        Ok(contents) => {
+            let value = contents
+                .trim_end_matches(|c: char| c == '\n' || c == '\r')
+                .to_string();
+            if value.is_empty() {
+                None
+            } else {
+                Some(value)
+            }
+        }
+        Err(err) => {
+            tracing::warn!(
+                target: "reddb::secrets",
+                env = "RED_ADMIN_TOKEN_FILE",
+                path = %trimmed_path,
+                error = %err,
+                "admin token file unreadable; admin gate disabled"
+            );
+            None
+        }
+    }
+}
+
+/// Constant-time byte-slice equality. Defends against timing oracles
+/// on the admin-token compare. Returns `false` when lengths differ
+/// without leaking *which* prefix matched.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
