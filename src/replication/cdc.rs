@@ -75,6 +75,35 @@ pub struct ChangeRecord {
 }
 
 impl ChangeRecord {
+    pub fn from_entity(
+        lsn: u64,
+        timestamp: u64,
+        operation: ChangeOperation,
+        collection: impl Into<String>,
+        entity_kind: impl Into<String>,
+        entity: &crate::storage::UnifiedEntity,
+        format_version: u32,
+        metadata: Option<JsonValue>,
+    ) -> Self {
+        let entity_bytes = match operation {
+            ChangeOperation::Delete => None,
+            ChangeOperation::Insert | ChangeOperation::Update => Some(
+                crate::storage::UnifiedStore::serialize_entity(entity, format_version),
+            ),
+        };
+
+        Self {
+            lsn,
+            timestamp,
+            operation,
+            collection: collection.into(),
+            entity_id: entity.id.raw(),
+            entity_kind: entity_kind.into(),
+            entity_bytes,
+            metadata,
+        }
+    }
+
     pub fn to_json_value(&self) -> JsonValue {
         let mut object = Map::new();
         object.insert("lsn".to_string(), JsonValue::Number(self.lsn as f64));

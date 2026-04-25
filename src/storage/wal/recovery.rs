@@ -377,17 +377,23 @@ impl PointInTimeRecovery {
                 continue;
             };
             let manifest = load_snapshot_manifest(self.backend.as_ref(), &key)?;
-            let snapshot_sha256 = manifest
-                .as_ref()
-                .and_then(|m| m.snapshot_sha256.clone());
-            let (timeline_id, base_lsn) = manifest
-                .map(|manifest| (manifest.timeline_id, manifest.base_lsn))
-                .or_else(|| {
-                    self.load_current_head()
+            let (snapshot_id, snapshot_time, timeline_id, base_lsn, snapshot_sha256) =
+                if let Some(manifest) = manifest {
+                    (
+                        manifest.snapshot_id,
+                        manifest.snapshot_time,
+                        manifest.timeline_id,
+                        manifest.base_lsn,
+                        manifest.snapshot_sha256,
+                    )
+                } else {
+                    let (timeline_id, base_lsn) = self
+                        .load_current_head()
                         .filter(|head| head.snapshot_id == snapshot_id)
                         .map(|head| (head.timeline_id, head.current_lsn))
-                })
-                .unwrap_or_else(|| ("main".to_string(), 0));
+                        .unwrap_or_else(|| ("main".to_string(), 0));
+                    (snapshot_id, snapshot_time, timeline_id, base_lsn, None)
+                };
 
             out.push(SnapshotDescriptor {
                 key,

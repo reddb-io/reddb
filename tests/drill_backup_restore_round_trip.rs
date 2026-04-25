@@ -15,15 +15,18 @@
 //! that catches integrity regressions in CI.
 
 use reddb::api::REDDB_FORMAT_VERSION;
-use reddb::replication::cdc::{ChangeOperation, ChangeRecord};
+use reddb::replication::cdc::ChangeRecord;
 use reddb::storage::backend::LocalBackend;
 use reddb::storage::wal::{
     archive_change_records, archive_snapshot, publish_snapshot_manifest,
     publish_unified_manifest_for_prefix, PointInTimeRecovery, SnapshotManifest,
 };
-use reddb::storage::{EntityId, RedDB, UnifiedEntity, UnifiedStore};
+use reddb::storage::RedDB;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+#[allow(dead_code)]
+mod support;
 
 fn temp_dir(tag: &str) -> PathBuf {
     let mut p = std::env::temp_dir();
@@ -40,17 +43,7 @@ fn temp_dir(tag: &str) -> PathBuf {
 }
 
 fn record(lsn: u64, payload: &[u8]) -> ChangeRecord {
-    let entity = UnifiedEntity::new(EntityId::new(lsn), payload.to_vec());
-    ChangeRecord {
-        lsn,
-        timestamp: 1000 + lsn,
-        operation: ChangeOperation::Insert,
-        collection: "drill".to_string(),
-        entity_id: lsn,
-        entity_kind: "row".to_string(),
-        entity_bytes: Some(UnifiedStore::serialize_entity(&entity, REDDB_FORMAT_VERSION)),
-        metadata: None,
-    }
+    support::logical_insert_record("drill", lsn, 1000 + lsn, payload)
 }
 
 #[test]
@@ -68,8 +61,13 @@ fn round_trip_restore_replays_full_wal_history() {
     let primary = RedDB::open(&primary_path).unwrap();
     primary.flush().unwrap();
     let snapshot_prefix = snapshot_dir.to_string_lossy().to_string();
-    let snapshot_key =
-        archive_snapshot(&LocalBackend, &primary_path, 1, &format!("{snapshot_prefix}/")).unwrap();
+    let snapshot_key = archive_snapshot(
+        &LocalBackend,
+        &primary_path,
+        1,
+        &format!("{snapshot_prefix}/"),
+    )
+    .unwrap();
     publish_snapshot_manifest(
         &LocalBackend,
         &SnapshotManifest {
@@ -118,11 +116,7 @@ fn round_trip_restore_replays_full_wal_history() {
     assert!(!primary_path.exists());
 
     // 4) Restore to "latest" into a fresh path.
-    let recovery = PointInTimeRecovery::new(
-        Arc::new(LocalBackend),
-        snapshot_prefix,
-        wal_prefix,
-    );
+    let recovery = PointInTimeRecovery::new(Arc::new(LocalBackend), snapshot_prefix, wal_prefix);
     let result = recovery
         .restore_to(0, &restore_path)
         .expect("restore must succeed against intact chain");

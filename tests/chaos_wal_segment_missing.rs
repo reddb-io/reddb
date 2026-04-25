@@ -14,6 +14,9 @@ use reddb::storage::RedDB;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+#[allow(dead_code)]
+mod support;
+
 fn temp_dir(prefix: &str) -> PathBuf {
     let mut p = std::env::temp_dir();
     p.push(format!(
@@ -29,22 +32,7 @@ fn temp_dir(prefix: &str) -> PathBuf {
 }
 
 fn record(lsn: u64, payload: &[u8]) -> reddb::replication::cdc::ChangeRecord {
-    use reddb::replication::cdc::{ChangeOperation, ChangeRecord};
-    use reddb::storage::{EntityId, UnifiedEntity, UnifiedStore};
-    let entity = UnifiedEntity::new(EntityId::new(lsn), payload.to_vec());
-    ChangeRecord {
-        lsn,
-        timestamp: 100 + lsn,
-        operation: ChangeOperation::Insert,
-        collection: "users".to_string(),
-        entity_id: lsn,
-        entity_kind: "row".to_string(),
-        entity_bytes: Some(UnifiedStore::serialize_entity(
-            &entity,
-            reddb::api::REDDB_FORMAT_VERSION,
-        )),
-        metadata: None,
-    }
+    support::logical_insert_record("users", lsn, 100 + lsn, payload)
 }
 
 #[test]
@@ -78,9 +66,14 @@ fn restore_fails_closed_on_missing_middle_segment() {
     let mut metas = Vec::new();
     for lsn in [1u64, 2, 3] {
         let r = record(lsn, format!("payload-{lsn}").as_bytes());
-        let m = archive_change_records(&LocalBackend, &wal_prefix, &[(r.lsn, r.encode())], prev.clone())
-            .unwrap()
-            .expect("archived");
+        let m = archive_change_records(
+            &LocalBackend,
+            &wal_prefix,
+            &[(r.lsn, r.encode())],
+            prev.clone(),
+        )
+        .unwrap()
+        .expect("archived");
         prev = m.sha256.clone();
         metas.push(m);
     }

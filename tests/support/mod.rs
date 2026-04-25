@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use reddb::api::REDDB_FORMAT_VERSION;
 use reddb::application::{
     CreateDocumentInput, CreateEdgeInput, CreateKvInput, CreateNodeInput, CreateRowInput,
     CreateTableColumnInput, CreateTableInput, CreateTimeSeriesInput, CreateTimeSeriesPointInput,
@@ -9,9 +11,10 @@ use reddb::application::{
     SchemaUseCases,
 };
 use reddb::json::{from_slice as json_from_slice, json, Value as JsonValue};
+use reddb::replication::cdc::{ChangeOperation, ChangeRecord};
 use reddb::storage::query::UnifiedRecord;
 use reddb::storage::schema::Value;
-use reddb::storage::{EntityData, EntityKind};
+use reddb::storage::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
 use reddb::{CatalogUseCases, HealthState, RedDBOptions, RedDBRuntime};
 
 const ACCOUNTS_TTL_MS: u64 = 86_400_000;
@@ -250,6 +253,38 @@ pub fn build_sql_fixture(rt: &RedDBRuntime) {
         &query,
         "INSERT INTO auth_accounts (username, pw) VALUES ('alice', PASSWORD('MyP@ss123'))",
     );
+}
+
+pub fn logical_insert_record(
+    collection: &str,
+    lsn: u64,
+    timestamp: u64,
+    payload: &[u8],
+) -> ChangeRecord {
+    let mut entity = UnifiedEntity::new(
+        EntityId::new(lsn),
+        EntityKind::TableRow {
+            table: Arc::from(collection),
+            row_id: lsn,
+        },
+        EntityData::Row(RowData::with_names(
+            vec![Value::UnsignedInteger(lsn), Value::Blob(payload.to_vec())],
+            vec!["id".to_string(), "payload".to_string()],
+        )),
+    );
+    entity.created_at = timestamp;
+    entity.updated_at = timestamp;
+    entity.sequence_id = lsn;
+    ChangeRecord::from_entity(
+        lsn,
+        timestamp,
+        ChangeOperation::Insert,
+        collection,
+        "row",
+        &entity,
+        REDDB_FORMAT_VERSION,
+        None,
+    )
 }
 
 pub fn build_api_fixture(rt: &RedDBRuntime) {

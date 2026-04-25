@@ -18,15 +18,18 @@
 //!     restore segments 1+2 and stop.
 
 use reddb::api::REDDB_FORMAT_VERSION;
-use reddb::replication::cdc::{ChangeOperation, ChangeRecord};
+use reddb::replication::cdc::ChangeRecord;
 use reddb::storage::backend::LocalBackend;
 use reddb::storage::wal::{
-    archive_change_records, archive_snapshot, load_wal_segment_manifest,
-    publish_snapshot_manifest, publish_wal_segment_manifest, PointInTimeRecovery, SnapshotManifest,
+    archive_change_records, archive_snapshot, load_wal_segment_manifest, publish_snapshot_manifest,
+    publish_wal_segment_manifest, PointInTimeRecovery, SnapshotManifest,
 };
-use reddb::storage::{EntityId, RedDB, UnifiedEntity, UnifiedStore};
+use reddb::storage::RedDB;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+#[allow(dead_code)]
+mod support;
 
 fn temp_dir(tag: &str) -> PathBuf {
     let mut p = std::env::temp_dir();
@@ -43,17 +46,7 @@ fn temp_dir(tag: &str) -> PathBuf {
 }
 
 fn record_at(lsn: u64, ts: u64, payload: &[u8]) -> ChangeRecord {
-    let entity = UnifiedEntity::new(EntityId::new(lsn), payload.to_vec());
-    ChangeRecord {
-        lsn,
-        timestamp: ts,
-        operation: ChangeOperation::Insert,
-        collection: "drill".to_string(),
-        entity_id: lsn,
-        entity_kind: "row".to_string(),
-        entity_bytes: Some(UnifiedStore::serialize_entity(&entity, REDDB_FORMAT_VERSION)),
-        metadata: None,
-    }
+    support::logical_insert_record("drill", lsn, ts, payload)
 }
 
 #[test]
@@ -71,8 +64,13 @@ fn pitr_within_window_fails_closed_on_chain_break_in_a_covered_segment() {
     let primary = RedDB::open(&primary_path).unwrap();
     primary.flush().unwrap();
     let snapshot_prefix = snapshot_dir.to_string_lossy().to_string();
-    let snapshot_key =
-        archive_snapshot(&LocalBackend, &primary_path, 1, &format!("{snapshot_prefix}/")).unwrap();
+    let snapshot_key = archive_snapshot(
+        &LocalBackend,
+        &primary_path,
+        1,
+        &format!("{snapshot_prefix}/"),
+    )
+    .unwrap();
     publish_snapshot_manifest(
         &LocalBackend,
         &SnapshotManifest {
@@ -118,11 +116,7 @@ fn pitr_within_window_fails_closed_on_chain_break_in_a_covered_segment() {
     bad.prev_hash = Some("00".repeat(32));
     publish_wal_segment_manifest(&LocalBackend, &bad).unwrap();
 
-    let recovery = PointInTimeRecovery::new(
-        Arc::new(LocalBackend),
-        snapshot_prefix,
-        wal_prefix,
-    );
+    let recovery = PointInTimeRecovery::new(Arc::new(LocalBackend), snapshot_prefix, wal_prefix);
     // target_time = 1100 covers segments 1..3 fully; segment 4..5
     // would be filtered by timestamp but we never get there because
     // the chain check on segment 3 fires first.

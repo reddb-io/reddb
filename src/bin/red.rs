@@ -2477,7 +2477,7 @@ fn parse_prom_metric(body: &str, metric_name: &str) -> Option<f64> {
 /// rollup, and exit 0/1/2. The check set covers the signals
 /// dashboards alert on (backup age, WAL archive lag, lease state,
 /// replica apply health).
-fn run_doctor(result: &reddb::cli::schema::ParseResult) -> i32 {
+fn run_doctor(result: &reddb::cli::schema::SchemaResult) -> i32 {
     let json_mode = wants_json(&result.flags);
     let bind = flag_string(&result.flags, "bind").unwrap_or_else(|| "127.0.0.1:8080".to_string());
     let token = flag_string(&result.flags, "token")

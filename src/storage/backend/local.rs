@@ -3,10 +3,13 @@
 use super::{BackendError, RemoteBackend};
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Local filesystem backend. Copies files between paths.
 /// This is the default backend -- operates entirely on local disk.
 pub struct LocalBackend;
+
+static LOCAL_UPLOAD_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 impl RemoteBackend for LocalBackend {
     fn name(&self) -> &str {
@@ -29,8 +32,32 @@ impl RemoteBackend for LocalBackend {
             fs::create_dir_all(parent)
                 .map_err(|e| BackendError::Transport(format!("mkdir failed: {e}")))?;
         }
-        fs::copy(local_path, dest)
-            .map_err(|e| BackendError::Transport(format!("copy failed: {e}")))?;
+        let file_name = dest
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("object");
+        let unique = LOCAL_UPLOAD_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let temp = dest.with_file_name(format!(
+            ".{file_name}.tmp-{}-{unique}",
+            std::process::id()
+        ));
+
+        let copy_result = fs::copy(local_path, &temp)
+            .map_err(|e| BackendError::Transport(format!("copy failed: {e}")));
+        if let Err(err) = copy_result {
+            let _ = fs::remove_file(&temp);
+            return Err(err);
+        }
+        fs::File::open(&temp)
+            .and_then(|file| file.sync_all())
+            .map_err(|e| BackendError::Transport(format!("sync failed: {e}")))?;
+        fs::rename(&temp, dest).map_err(|e| {
+            let _ = fs::remove_file(&temp);
+            BackendError::Transport(format!("rename failed: {e}"))
+        })?;
+        if let Some(parent) = dest.parent() {
+            let _ = fs::File::open(parent).and_then(|dir| dir.sync_all());
+        }
         Ok(())
     }
 

@@ -8,15 +8,18 @@
 //!   archive tip.
 
 use reddb::api::REDDB_FORMAT_VERSION;
-use reddb::replication::cdc::{ChangeOperation, ChangeRecord};
+use reddb::replication::cdc::ChangeRecord;
 use reddb::storage::backend::LocalBackend;
 use reddb::storage::wal::{
     archive_change_records, archive_snapshot, publish_snapshot_manifest, PointInTimeRecovery,
     SnapshotManifest,
 };
-use reddb::storage::{EntityId, RedDB, UnifiedEntity, UnifiedStore};
+use reddb::storage::RedDB;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+#[allow(dead_code)]
+mod support;
 
 fn temp_dir(tag: &str) -> PathBuf {
     let mut p = std::env::temp_dir();
@@ -33,21 +36,11 @@ fn temp_dir(tag: &str) -> PathBuf {
 }
 
 fn record_at(lsn: u64, ts: u64, payload: &[u8]) -> ChangeRecord {
-    let entity = UnifiedEntity::new(EntityId::new(lsn), payload.to_vec());
-    ChangeRecord {
-        lsn,
-        timestamp: ts,
-        operation: ChangeOperation::Insert,
-        collection: "drill".to_string(),
-        entity_id: lsn,
-        entity_kind: "row".to_string(),
-        entity_bytes: Some(UnifiedStore::serialize_entity(&entity, REDDB_FORMAT_VERSION)),
-        metadata: None,
-    }
+    support::logical_insert_record("drill", lsn, ts, payload)
 }
 
 #[test]
-fn restore_to_target_time_skips_records_after_T() {
+fn restore_to_target_time_skips_records_after_t() {
     let work = temp_dir("pitr-target");
     let snapshot_dir = work.join("snapshots");
     let wal_dir = work.join("wal");
@@ -61,8 +54,13 @@ fn restore_to_target_time_skips_records_after_T() {
     let primary = RedDB::open(&primary_path).unwrap();
     primary.flush().unwrap();
     let snapshot_prefix = snapshot_dir.to_string_lossy().to_string();
-    let snapshot_key =
-        archive_snapshot(&LocalBackend, &primary_path, 1, &format!("{snapshot_prefix}/")).unwrap();
+    let snapshot_key = archive_snapshot(
+        &LocalBackend,
+        &primary_path,
+        1,
+        &format!("{snapshot_prefix}/"),
+    )
+    .unwrap();
     publish_snapshot_manifest(
         &LocalBackend,
         &SnapshotManifest {
@@ -92,10 +90,9 @@ fn restore_to_target_time_skips_records_after_T() {
     }
     // Archive in two segments to also exercise the chain across the
     // PITR cutoff.
-    let m1 =
-        archive_change_records(&LocalBackend, &wal_prefix, &all_records[..5], prev.clone())
-            .unwrap()
-            .expect("seg1");
+    let m1 = archive_change_records(&LocalBackend, &wal_prefix, &all_records[..5], prev.clone())
+        .unwrap()
+        .expect("seg1");
     prev = m1.sha256;
     let _m2 = archive_change_records(&LocalBackend, &wal_prefix, &all_records[5..], prev)
         .unwrap()
@@ -103,12 +100,10 @@ fn restore_to_target_time_skips_records_after_T() {
 
     let target_time = 600u64; // up to and including lsn=5 (ts=600)
 
-    let recovery = PointInTimeRecovery::new(
-        Arc::new(LocalBackend),
-        snapshot_prefix,
-        wal_prefix,
-    );
-    let result = recovery.restore_to(target_time, &restore_path).expect("restore");
+    let recovery = PointInTimeRecovery::new(Arc::new(LocalBackend), snapshot_prefix, wal_prefix);
+    let result = recovery
+        .restore_to(target_time, &restore_path)
+        .expect("restore");
 
     // 5 records had ts <= 600, those must apply. The post-T records
     // are read but skipped by the timestamp filter inside

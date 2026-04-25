@@ -6,11 +6,15 @@
 //! the instance unhealthy instead of silently advancing past missing
 //! records.
 
-use reddb::api::REDDB_FORMAT_VERSION;
-use reddb::replication::cdc::{ChangeOperation, ChangeRecord};
-use reddb::replication::logical::{ApplyMode, ApplyOutcome, LogicalApplyError, LogicalChangeApplier};
-use reddb::storage::{EntityId, RedDB, UnifiedEntity, UnifiedStore};
+use reddb::replication::cdc::ChangeRecord;
+use reddb::replication::logical::{
+    ApplyMode, ApplyOutcome, LogicalApplyError, LogicalChangeApplier,
+};
+use reddb::storage::RedDB;
 use std::path::PathBuf;
+
+#[allow(dead_code)]
+mod support;
 
 fn temp_path(prefix: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
@@ -24,17 +28,7 @@ fn temp_path(prefix: &str) -> PathBuf {
 }
 
 fn record(lsn: u64, payload: &[u8]) -> ChangeRecord {
-    let entity = UnifiedEntity::new(EntityId::new(lsn), payload.to_vec());
-    ChangeRecord {
-        lsn,
-        timestamp: 1000 + lsn,
-        operation: ChangeOperation::Insert,
-        collection: "users".to_string(),
-        entity_id: lsn,
-        entity_kind: "row".to_string(),
-        entity_bytes: Some(UnifiedStore::serialize_entity(&entity, REDDB_FORMAT_VERSION)),
-        metadata: None,
-    }
+    support::logical_insert_record("users", lsn, 1000 + lsn, payload)
 }
 
 #[test]
@@ -46,7 +40,9 @@ fn replica_applier_returns_gap_when_record_skips_lsn() {
 
     // Anchor the chain at LSN 1.
     assert_eq!(
-        applier.apply(&db, &record(1, b"a"), ApplyMode::Replica).unwrap(),
+        applier
+            .apply(&db, &record(1, b"a"), ApplyMode::Replica)
+            .unwrap(),
         ApplyOutcome::Applied,
     );
     assert_eq!(applier.last_applied_lsn(), 1);
