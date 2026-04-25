@@ -1094,6 +1094,23 @@ pub struct RegisteredIndex {
     pub unique: bool,
 }
 
+impl RegisteredIndex {
+    /// Name under which this index is registered in the hash store.
+    /// Pure Hash indexes use their own name; single-col BTree indexes
+    /// store an auxiliary hash side-pocket as `{name}_hash` (see
+    /// `create_index` for BTree at lines 1199–1216) — callers must use
+    /// that suffix or `hash_lookup` returns `MissingIndex`.
+    pub fn hash_lookup_name(&self) -> std::borrow::Cow<'_, str> {
+        match self.method {
+            IndexMethodKind::Hash => std::borrow::Cow::Borrowed(self.name.as_str()),
+            IndexMethodKind::BTree => std::borrow::Cow::Owned(format!("{}_hash", self.name)),
+            IndexMethodKind::Bitmap | IndexMethodKind::Spatial => {
+                std::borrow::Cow::Borrowed(self.name.as_str())
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexMethodKind {
     Hash,

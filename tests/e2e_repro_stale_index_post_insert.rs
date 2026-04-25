@@ -139,3 +139,106 @@ fn post_create_index_inserts_visible_to_filtered_query() {
         expected
     );
 }
+
+#[test]
+fn post_create_index_update_keeps_index_in_sync() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rt.execute_query("CREATE TABLE users (id INT, age INT, city TEXT)")
+        .unwrap();
+    for i in 0..30u32 {
+        rt.execute_query(&format!(
+            "INSERT INTO users (id, age, city) VALUES ({i}, {}, 'NYC')",
+            20 + (i % 10)
+        ))
+        .unwrap();
+    }
+    rt.execute_query("CREATE INDEX idx_city ON users (city) USING HASH")
+        .unwrap();
+    rt.execute_query("CREATE INDEX idx_age ON users (age) USING BTREE")
+        .unwrap();
+
+    rt.execute_query("UPDATE users SET city = 'LA' WHERE id < 10")
+        .unwrap();
+
+    let nyc = rt
+        .execute_query("SELECT * FROM users WHERE city = 'NYC'")
+        .unwrap();
+    assert_eq!(
+        nyc.result.records.len(),
+        20,
+        "after UPDATE, idx_city must reflect new city values: NYC count {}",
+        nyc.result.records.len()
+    );
+    let la = rt
+        .execute_query("SELECT * FROM users WHERE city = 'LA'")
+        .unwrap();
+    assert_eq!(
+        la.result.records.len(),
+        10,
+        "after UPDATE, idx_city must include rows that moved to 'LA': got {}",
+        la.result.records.len()
+    );
+
+    rt.execute_query("UPDATE users SET age = 99 WHERE id = 0")
+        .unwrap();
+    let old_age = rt
+        .execute_query("SELECT * FROM users WHERE age = 20")
+        .unwrap();
+    assert!(
+        old_age.result.records.iter().all(|r| {
+            match r.get("id") {
+                Some(Value::Integer(n)) => *n != 0,
+                _ => true,
+            }
+        }),
+        "after UPDATE age=99 WHERE id=0, BTREE on age must drop id=0 from age=20"
+    );
+    let new_age = rt
+        .execute_query("SELECT * FROM users WHERE age = 99")
+        .unwrap();
+    assert_eq!(
+        new_age.result.records.len(),
+        1,
+        "after UPDATE, BTREE on age must surface the new key: got {}",
+        new_age.result.records.len()
+    );
+}
+
+#[test]
+fn post_create_index_delete_keeps_index_in_sync() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    rt.execute_query("CREATE TABLE users (id INT, age INT, city TEXT)")
+        .unwrap();
+    for i in 0..20u32 {
+        rt.execute_query(&format!(
+            "INSERT INTO users (id, age, city) VALUES ({i}, {}, 'NYC')",
+            20 + (i % 5)
+        ))
+        .unwrap();
+    }
+    rt.execute_query("CREATE INDEX idx_city ON users (city) USING HASH")
+        .unwrap();
+    rt.execute_query("CREATE INDEX idx_age ON users (age) USING BTREE")
+        .unwrap();
+
+    rt.execute_query("DELETE FROM users WHERE id < 5").unwrap();
+
+    let count_nyc = rt
+        .execute_query("SELECT * FROM users WHERE city = 'NYC'")
+        .unwrap();
+    assert_eq!(
+        count_nyc.result.records.len(),
+        15,
+        "after DELETE, idx_city must drop 5 rows: got {}",
+        count_nyc.result.records.len()
+    );
+    let count_age = rt
+        .execute_query("SELECT * FROM users WHERE age >= 20")
+        .unwrap();
+    assert_eq!(
+        count_age.result.records.len(),
+        15,
+        "after DELETE, BTREE on age must drop 5 rows: got {}",
+        count_age.result.records.len()
+    );
+}

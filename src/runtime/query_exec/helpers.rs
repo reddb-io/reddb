@@ -467,17 +467,18 @@ pub(crate) fn try_hash_eq_lookup(
             _ => return None,
         };
         let idx = idx_store.find_index_for_column(table, col)?;
+        let lookup_name = idx.hash_lookup_name();
         let mut ids = Vec::with_capacity(values.len());
         for value in values {
             let lookup = match value {
-                Value::Text(s) => idx_store.hash_lookup(table, &idx.name, s.as_bytes()),
+                Value::Text(s) => idx_store.hash_lookup(table, lookup_name.as_ref(), s.as_bytes()),
                 Value::Integer(n) => {
                     let bytes = n.to_le_bytes();
-                    idx_store.hash_lookup(table, &idx.name, &bytes)
+                    idx_store.hash_lookup(table, lookup_name.as_ref(), &bytes)
                 }
                 Value::UnsignedInteger(n) => {
                     let bytes = n.to_le_bytes();
-                    idx_store.hash_lookup(table, &idx.name, &bytes)
+                    idx_store.hash_lookup(table, lookup_name.as_ref(), &bytes)
                 }
                 _ => return None,
             }
@@ -489,7 +490,9 @@ pub(crate) fn try_hash_eq_lookup(
 
     let (col, val_bytes) = extract_index_candidate(filter)?;
     let idx = idx_store.find_index_for_column(table, &col)?;
-    idx_store.hash_lookup(table, &idx.name, &val_bytes).ok()
+    idx_store
+        .hash_lookup(table, idx.hash_lookup_name().as_ref(), &val_bytes)
+        .ok()
 }
 
 /// Evaluate a SQL Filter directly against a UnifiedEntity without creating a
