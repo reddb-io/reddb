@@ -780,6 +780,7 @@ pub struct RuntimeConnection {
 pub mod audit_log;
 pub mod config_matrix;
 pub mod config_overlay;
+pub mod lease_loop;
 pub mod lifecycle;
 pub mod resource_limits;
 mod expr_eval;

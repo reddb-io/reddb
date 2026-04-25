@@ -2143,16 +2143,31 @@ impl RedDBRuntime {
             ..Default::default()
         };
 
-        // Flush WAL + run any pending checkpoint. `db.flush()` is the
-        // store-level chokepoint that fsyncs WAL and the pager.
-        let flush_res = self.inner.db.flush();
+        // Flush WAL + run any pending checkpoint. Local fsync is
+        // unconditional — even a lease-lost replica needs its WAL on
+        // disk before exit so a future restore has the latest tail.
+        // The remote upload is gated separately so a lost-lease writer
+        // doesn't clobber the new holder's state on its way out.
+        let flush_res = self.inner.db.flush_local_only();
         report.flushed_wal = flush_res.is_ok();
         report.final_checkpoint = flush_res.is_ok();
         if let Err(err) = &flush_res {
             tracing::error!(
                 target: "reddb::lifecycle",
                 error = %err,
-                "graceful_shutdown: flush failed"
+                "graceful_shutdown: local flush failed"
+            );
+        } else if let Err(lease_err) = self.assert_remote_write_allowed("shutdown/checkpoint_upload") {
+            tracing::warn!(
+                target: "reddb::serverless::lease",
+                error = %lease_err,
+                "graceful_shutdown: remote upload skipped — lease not held"
+            );
+        } else if let Err(err) = self.inner.db.upload_to_remote_backend() {
+            tracing::error!(
+                target: "reddb::lifecycle",
+                error = %err,
+                "graceful_shutdown: remote upload failed"
             );
         }
 
@@ -2593,6 +2608,11 @@ impl RedDBRuntime {
     /// Trigger an immediate backup.
     pub fn trigger_backup(&self) -> RedDBResult<crate::replication::scheduler::BackupResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Backup)?;
+        // Defense in depth — check_write above already rejects when
+        // the lease is NotHeld, but log + audit the lease angle here
+        // explicitly so dashboards distinguish "lease lost" from a
+        // generic read-only refusal.
+        self.assert_remote_write_allowed("admin/backup")?;
         let started = std::time::Instant::now();
         let snapshot = self.create_snapshot()?;
         let mut uploaded = false;
@@ -2755,10 +2775,53 @@ impl RedDBRuntime {
     }
 
     pub fn checkpoint(&self) -> RedDBResult<()> {
+        // Local fsync always allowed — losing the lease shouldn't
+        // prevent us from durably persisting what's already in memory.
+        // The remote upload is the side-effect that risks clobbering a
+        // peer's state, so it's behind the lease gate.
         self.inner
             .db
-            .flush()
+            .flush_local_only()
+            .map_err(|err| RedDBError::Engine(err.to_string()))?;
+        if let Err(err) = self.assert_remote_write_allowed("checkpoint") {
+            tracing::warn!(
+                target: "reddb::serverless::lease",
+                error = %err,
+                "checkpoint: skipping remote upload — lease not held"
+            );
+            return Ok(());
+        }
+        self.inner
+            .db
+            .upload_to_remote_backend()
             .map_err(|err| RedDBError::Engine(err.to_string()))
+    }
+
+    /// Guard remote-mutating operations on the writer lease.
+    /// Returns `Ok(())` when no remote backend is configured (the
+    /// lease is irrelevant) or the lease state is `NotRequired` /
+    /// `Held`. Returns `RedDBError::ReadOnly` when the lease is
+    /// `NotHeld`, with an audit-friendly action label so the caller
+    /// can record the rejection.
+    pub(crate) fn assert_remote_write_allowed(&self, action: &str) -> RedDBResult<()> {
+        if self.inner.db.remote_backend.is_none() {
+            return Ok(());
+        }
+        match self.inner.write_gate.lease_state() {
+            crate::runtime::write_gate::LeaseGateState::NotHeld => {
+                self.inner.audit_log.record(
+                    action,
+                    "system",
+                    "remote_backend",
+                    "err: writer lease not held",
+                    crate::json::Value::Null,
+                );
+                Err(RedDBError::ReadOnly(format!(
+                    "writer lease not held — {action} blocked (serverless fence)"
+                )))
+            }
+            _ => Ok(()),
+        }
     }
 
     pub fn run_maintenance(&self) -> RedDBResult<()> {

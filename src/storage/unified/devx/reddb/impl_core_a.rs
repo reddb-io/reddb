@@ -305,10 +305,24 @@ impl RedDB {
 
     /// Flush changes to disk (if persistence is enabled).
     /// Consolidates all pending EC transactions before persisting.
+    ///
+    /// Two-phase: local fsync first, then optional remote upload. The
+    /// runtime gates the remote phase on serverless writer-lease state
+    /// (PLAN.md Phase 5 / W6) — losing the lease must not silently
+    /// blast over a peer's snapshot. Callers that need lease-fenced
+    /// behaviour use `flush_local_only()` + `upload_to_remote_backend()`
+    /// separately so the gate fits between the two halves.
     pub fn flush(&self) -> Result<(), Box<dyn std::error::Error>> {
-        // Consolidate all EC fields before persisting
-        let _ = self.ec_consolidate_all();
+        self.flush_local_only()?;
+        self.upload_to_remote_backend()?;
+        Ok(())
+    }
 
+    /// Local fsync without touching the remote backend. Used by
+    /// shutdown / checkpoint paths where the runtime decides whether
+    /// the remote upload is allowed (lease, dry-run, read-only).
+    pub fn flush_local_only(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let _ = self.ec_consolidate_all();
         if let Some(path) = &self.path {
             if self.paged_mode {
                 self.store.persist()?;
@@ -316,13 +330,21 @@ impl RedDB {
                 self.store.save_to_file(path)?;
             }
             self.persist_metadata()?;
+        }
+        Ok(())
+    }
 
-            // Upload to remote backend if configured
-            if let (Some(backend), Some(key)) = (&self.remote_backend, &self.remote_key) {
-                backend
-                    .upload(path, key)
-                    .map_err(|e| format!("remote backend upload failed: {e}"))?;
-            }
+    /// Push the on-disk database file to the configured remote
+    /// backend. Caller is responsible for any lease / role / read-only
+    /// check that gates the upload — this is a raw side-effect.
+    /// No-op when the runtime is in-memory or no remote backend is
+    /// configured.
+    pub fn upload_to_remote_backend(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(path) = &self.path else { return Ok(()) };
+        if let (Some(backend), Some(key)) = (&self.remote_backend, &self.remote_key) {
+            backend
+                .upload(path, key)
+                .map_err(|e| format!("remote backend upload failed: {e}"))?;
         }
         Ok(())
     }
