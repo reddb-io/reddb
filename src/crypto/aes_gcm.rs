@@ -40,10 +40,3 @@ pub fn aes256_gcm_decrypt(
         .map_err(|e| format!("AES-256-GCM decryption failed: {e}"))
 }
 
-pub fn aes256_encrypt_block(_plaintext: &[u8; 16], _key: &[u8; 32]) -> [u8; 16] {
-    [0u8; 16]
-}
-
-pub fn aes256_decrypt_block(_ciphertext: &[u8; 16], _key: &[u8; 32]) -> [u8; 16] {
-    [0u8; 16]
-}
