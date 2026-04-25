@@ -511,12 +511,19 @@ fn read_one_v1(file: &mut File, record_start: u64) -> Result<LogicalWalEntry, St
     })
 }
 
-/// State of a connected replica.
+/// State of a connected replica. PLAN.md Phase 11.4 fields:
+/// `last_seen_at_unix_ms` updates on every interaction (pull or ack);
+/// `last_sent_lsn` updates when the primary serves a `pull_wal_records`
+/// batch; `last_durable_lsn` updates when the replica reports its WAL
+/// is durably written via `ack_replica_lsn`.
 #[derive(Debug, Clone)]
 pub struct ReplicaState {
     pub id: String,
     pub last_acked_lsn: u64,
+    pub last_sent_lsn: u64,
+    pub last_durable_lsn: u64,
     pub connected_at_unix_ms: u128,
+    pub last_seen_at_unix_ms: u128,
     /// Region identifier declared by the replica at handshake time
     /// (Phase 2.6 multi-region PG parity). `None` until the replica
     /// handshake extension lands in 2.6.2; the quorum coordinator's
@@ -529,6 +536,10 @@ pub struct PrimaryReplication {
     pub wal_buffer: Arc<WalBuffer>,
     pub logical_wal_spool: Option<Arc<LogicalWalSpool>>,
     pub replicas: RwLock<Vec<ReplicaState>>,
+    /// PLAN.md Phase 11.4 — ack-driven commit synchronization. Always
+    /// allocated so the policy enum can flip from `Local` to
+    /// `AckN`/`Quorum` without touching this struct's shape.
+    pub commit_waiter: Arc<crate::replication::commit_waiter::CommitWaiter>,
 }
 
 impl PrimaryReplication {
@@ -539,6 +550,7 @@ impl PrimaryReplication {
                 .and_then(|path| LogicalWalSpool::open(path).ok())
                 .map(Arc::new),
             replicas: RwLock::new(Vec::new()),
+            commit_waiter: Arc::new(crate::replication::commit_waiter::CommitWaiter::new()),
         }
     }
 
@@ -553,13 +565,17 @@ impl PrimaryReplication {
     /// toward a `QuorumMode::Regions` commit.
     pub fn register_replica_with_region(&self, id: String, region: Option<String>) -> u64 {
         let lsn = self.wal_buffer.current_lsn();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
         let state = ReplicaState {
             id,
             last_acked_lsn: lsn,
-            connected_at_unix_ms: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis(),
+            last_sent_lsn: lsn,
+            last_durable_lsn: lsn,
+            connected_at_unix_ms: now_ms,
+            last_seen_at_unix_ms: now_ms,
             region,
         };
         let mut replicas = self.replicas.write().unwrap_or_else(|e| e.into_inner());
@@ -568,10 +584,64 @@ impl PrimaryReplication {
     }
 
     pub fn ack_replica(&self, id: &str, lsn: u64) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
         let mut replicas = self.replicas.write().unwrap_or_else(|e| e.into_inner());
         if let Some(r) = replicas.iter_mut().find(|r| r.id == id) {
-            r.last_acked_lsn = lsn;
+            r.last_acked_lsn = r.last_acked_lsn.max(lsn);
+            r.last_seen_at_unix_ms = now_ms;
         }
+    }
+
+    /// PLAN.md Phase 11.4 — replica reports applied + durable LSN
+    /// after persisting a batch. Idempotent: only advances LSNs
+    /// monotonically. `last_seen_at_unix_ms` always refreshes.
+    /// Also signals `commit_waiter` so any thread blocked on
+    /// `ack_n` / `quorum` can wake and re-check its threshold.
+    pub fn ack_replica_lsn(&self, id: &str, applied_lsn: u64, durable_lsn: u64) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let mut replicas = self.replicas.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(r) = replicas.iter_mut().find(|r| r.id == id) {
+            r.last_acked_lsn = r.last_acked_lsn.max(applied_lsn);
+            r.last_durable_lsn = r.last_durable_lsn.max(durable_lsn);
+            r.last_seen_at_unix_ms = now_ms;
+        }
+        // Drop the write lock before signaling so a waiter that
+        // wakes immediately can read replica state without
+        // contending against us.
+        drop(replicas);
+        self.commit_waiter.record_replica_ack(id, durable_lsn);
+    }
+
+    /// PLAN.md Phase 11.4 — primary records the LSN it last sent to a
+    /// replica via pull_wal_records. Helpful for `lag_records =
+    /// last_sent_lsn - last_acked_lsn` to distinguish pull-side delay
+    /// from apply-side delay.
+    pub fn note_replica_pull(&self, id: &str, last_sent_lsn: u64) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let mut replicas = self.replicas.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(r) = replicas.iter_mut().find(|r| r.id == id) {
+            r.last_sent_lsn = r.last_sent_lsn.max(last_sent_lsn);
+            r.last_seen_at_unix_ms = now_ms;
+        }
+    }
+
+    /// Snapshot of all currently registered replicas, for /metrics +
+    /// /admin/status. Returns owned clones so callers don't hold the
+    /// lock during serialization.
+    pub fn replica_snapshots(&self) -> Vec<ReplicaState> {
+        self.replicas
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn replica_count(&self) -> usize {
