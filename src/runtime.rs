@@ -765,6 +765,13 @@ struct RuntimeInner {
     /// 6.5). Lives next to the primary `.rdb` file so backup +
     /// restore flows ship it alongside the data.
     audit_log: crate::runtime::audit_log::AuditLogger,
+    /// PLAN.md Phase 11.5 — counters bumped by the replica apply
+    /// loop on `Gap` / `Divergence` / `Apply` errors so /metrics
+    /// surfaces them as `reddb_replica_apply_errors_total{kind}`.
+    replica_apply_metrics: crate::replication::logical::ReplicaApplyMetrics,
+    /// PLAN.md Phase 4.4 — per-caller QPS quotas. Disabled (no-op)
+    /// when `RED_MAX_QPS_PER_CALLER` is unset.
+    quota_bucket: crate::runtime::quota_bucket::QuotaBucket,
 }
 
 #[derive(Clone)]
@@ -782,6 +789,7 @@ pub mod config_matrix;
 pub mod config_overlay;
 pub mod lease_loop;
 pub mod lifecycle;
+pub mod quota_bucket;
 pub mod resource_limits;
 mod expr_eval;
 mod graph_dsl;
