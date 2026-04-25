@@ -36,6 +36,12 @@ pub struct RestorePlan {
     pub base_lsn: u64,
     pub target_time: u64,
     pub wal_segments: Vec<String>,
+    /// Hex-encoded SHA-256 of the snapshot bytes carried forward
+    /// from the manifest. `None` when the manifest predates the
+    /// checksum field (legacy backups). Restore-side verification
+    /// fails closed when the value is `Some` and the recomputed hash
+    /// doesn't match.
+    pub snapshot_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -45,6 +51,7 @@ struct SnapshotDescriptor {
     snapshot_time: u64,
     timeline_id: String,
     base_lsn: u64,
+    snapshot_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +108,7 @@ impl PointInTimeRecovery {
             base_lsn: selected.base_lsn,
             target_time,
             wal_segments,
+            snapshot_sha256: selected.snapshot_sha256.clone(),
         })
     }
 
@@ -132,6 +140,41 @@ impl PointInTimeRecovery {
                 "snapshot '{}' disappeared during restore",
                 plan.snapshot_key
             )));
+        }
+
+        // Snapshot integrity check (PLAN.md Phase 4 — restore validation).
+        //
+        // When the manifest carries a `snapshot_sha256`, recompute it
+        // against the downloaded file and refuse to open the database
+        // if they disagree. The downloaded file is left in place for
+        // operator forensics — they can re-run with `--ignore-checksum`
+        // (not yet implemented) once the corruption source is known.
+        //
+        // When the manifest predates the checksum field (`None`),
+        // proceed with a warning. Old backups stay restorable; new
+        // backups get fail-closed protection.
+        match &plan.snapshot_sha256 {
+            Some(expected) => {
+                let computed =
+                    crate::storage::wal::SnapshotManifest::compute_snapshot_sha256(dest_path)?;
+                if !computed.eq_ignore_ascii_case(expected) {
+                    return Err(BackendError::Internal(format!(
+                        "snapshot integrity check failed for '{}': manifest sha256 {} != computed sha256 {}; \
+                         downloaded file kept at {} for forensics",
+                        plan.snapshot_key,
+                        expected,
+                        computed,
+                        dest_path.display(),
+                    )));
+                }
+            }
+            None => {
+                tracing::warn!(
+                    target: "reddb::backup::restore",
+                    snapshot_key = %plan.snapshot_key,
+                    "manifest predates snapshot_sha256 field; restore proceeding without integrity check"
+                );
+            }
         }
 
         let db = RedDB::open(dest_path).map_err(|err| {
@@ -222,6 +265,9 @@ impl PointInTimeRecovery {
                 continue;
             };
             let manifest = load_snapshot_manifest(self.backend.as_ref(), &key)?;
+            let snapshot_sha256 = manifest
+                .as_ref()
+                .and_then(|m| m.snapshot_sha256.clone());
             let (timeline_id, base_lsn) = manifest
                 .map(|manifest| (manifest.timeline_id, manifest.base_lsn))
                 .or_else(|| {
@@ -237,6 +283,7 @@ impl PointInTimeRecovery {
                 snapshot_time,
                 timeline_id,
                 base_lsn,
+                snapshot_sha256,
             });
         }
         out.sort_by_key(|snapshot| snapshot.snapshot_time);
@@ -316,6 +363,7 @@ mod tests {
                 base_lsn: 0,
                 schema_version: crate::api::REDDB_FORMAT_VERSION,
                 format_version: crate::api::REDDB_FORMAT_VERSION,
+                snapshot_sha256: None,
             },
         )
         .unwrap();
@@ -329,6 +377,7 @@ mod tests {
                 base_lsn: 0,
                 schema_version: crate::api::REDDB_FORMAT_VERSION,
                 format_version: crate::api::REDDB_FORMAT_VERSION,
+                snapshot_sha256: None,
             },
         )
         .unwrap();

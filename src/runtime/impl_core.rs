@@ -2467,6 +2467,23 @@ impl RedDBRuntime {
                 })
                 .unwrap_or_else(|| self.inner.cdc.current_lsn());
             let last_archived_lsn = self.config_u64("red.config.timeline.last_archived_lsn", 0);
+            // Hash the local snapshot bytes so the manifest can carry
+            // the digest for restore-side verification (PLAN.md
+            // Phase 4). Failure to hash is non-fatal — we still
+            // publish the manifest, just without a checksum, so a
+            // future fix can backfill rather than losing the backup.
+            let snapshot_sha256 = crate::storage::wal::SnapshotManifest::compute_snapshot_sha256(
+                path,
+            )
+            .map_err(|err| {
+                tracing::warn!(
+                    target: "reddb::backup",
+                    error = %err,
+                    snapshot_id = snapshot.snapshot_id,
+                    "snapshot hash failed; manifest will lack checksum"
+                );
+            })
+            .ok();
             let manifest = crate::storage::wal::SnapshotManifest {
                 timeline_id: timeline_id.clone(),
                 snapshot_key: snapshot_key.clone(),
@@ -2475,6 +2492,7 @@ impl RedDBRuntime {
                 base_lsn: current_lsn,
                 schema_version: crate::api::REDDB_FORMAT_VERSION,
                 format_version: crate::api::REDDB_FORMAT_VERSION,
+                snapshot_sha256,
             };
             crate::storage::wal::publish_snapshot_manifest(backend.as_ref(), &manifest)
                 .map_err(|err| RedDBError::Internal(err.to_string()))?;

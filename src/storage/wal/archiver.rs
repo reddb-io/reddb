@@ -46,6 +46,13 @@ pub struct SnapshotManifest {
     pub base_lsn: u64,
     pub schema_version: u32,
     pub format_version: u32,
+    /// Hex-encoded SHA-256 of the snapshot bytes computed at upload
+    /// time. Restore reads this from the manifest, downloads the
+    /// snapshot, recomputes the hash, and refuses to proceed on a
+    /// mismatch. `None` for legacy manifests written before this
+    /// field was introduced — restore tolerates absence (with a
+    /// warning) but rejects a present-but-wrong value.
+    pub snapshot_sha256: Option<String>,
 }
 
 impl BackupHead {
@@ -156,6 +163,12 @@ impl SnapshotManifest {
             "format_version".to_string(),
             JsonValue::Number(self.format_version as f64),
         );
+        if let Some(ref sha) = self.snapshot_sha256 {
+            object.insert(
+                "snapshot_sha256".to_string(),
+                JsonValue::String(sha.clone()),
+            );
+        }
         JsonValue::Object(object)
     }
 
@@ -199,7 +212,35 @@ impl SnapshotManifest {
                 .and_then(JsonValue::as_u64)
                 .unwrap_or(crate::api::REDDB_FORMAT_VERSION as u64)
                 as u32,
+            snapshot_sha256: value
+                .get("snapshot_sha256")
+                .and_then(JsonValue::as_str)
+                .map(|s| s.to_string()),
         })
+    }
+
+    /// Compute SHA-256 over the local snapshot file. Used at archive
+    /// time so the manifest can carry the digest for restore-side
+    /// verification. Streamed (8 KiB chunks) so very large snapshots
+    /// don't peak memory.
+    pub fn compute_snapshot_sha256(snapshot_path: &Path) -> Result<String, BackendError> {
+        use std::fs::File;
+        use std::io::Read;
+        let mut hasher = crate::crypto::sha256::Sha256::new();
+        let mut file = File::open(snapshot_path)
+            .map_err(|err| BackendError::Internal(format!("open snapshot for hash: {err}")))?;
+        let mut buf = vec![0u8; 8 * 1024];
+        loop {
+            let n = file
+                .read(&mut buf)
+                .map_err(|err| BackendError::Internal(format!("read snapshot for hash: {err}")))?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        let digest = hasher.finalize();
+        Ok(digest.iter().map(|b| format!("{:02x}", b)).collect())
     }
 }
 
@@ -562,6 +603,7 @@ mod tests {
             base_lsn: 456,
             schema_version: crate::api::REDDB_FORMAT_VERSION,
             format_version: crate::api::REDDB_FORMAT_VERSION,
+            snapshot_sha256: None,
         };
 
         publish_snapshot_manifest(&backend, &manifest).unwrap();
