@@ -36,6 +36,37 @@ impl RedDB {
         options.default_backup_head_key()
     }
 
+    /// Parse `RED_RESTORE_TO_TIMESTAMP` into the millis-since-epoch
+    /// representation `PointInTimeRecovery::restore_to` expects.
+    /// Accepts:
+    ///   - bare integer (millis since UNIX epoch)
+    ///   - `unix:<secs>` or `unix_ms:<millis>` shorthand
+    ///   - bare integer in seconds when value is small enough to be
+    ///     unambiguous (< 1e12 = roughly year 33658 in millis, which
+    ///     is impossible — so anything < 1e12 is treated as seconds)
+    ///
+    /// Full RFC3339 parsing is deliberately not pulled in to keep
+    /// the engine cargo-free of a date/time crate; operators that
+    /// want a human-readable timestamp can use `date -d '...' +%s`
+    /// at the env-injection site.
+    fn parse_restore_timestamp(raw: &str) -> Option<u64> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let (prefix, body) = match trimmed.split_once(':') {
+            Some((p, b)) => (Some(p), b),
+            None => (None, trimmed),
+        };
+        let parsed: u64 = body.parse().ok()?;
+        Some(match prefix {
+            Some("unix") => parsed.saturating_mul(1000),
+            Some("unix_ms") | Some("ms") => parsed,
+            _ if parsed < 1_000_000_000_000 => parsed.saturating_mul(1000),
+            _ => parsed,
+        })
+    }
+
     fn resolve_remote_bootstrap_key(
         options: &RedDBOptions,
     ) -> Result<Option<String>, crate::storage::backend::BackendError> {
@@ -115,21 +146,84 @@ impl RedDB {
         if let Some(backend) = &options.remote_backend {
             let local_path = options.resolved_path("data.rdb");
             if !local_path.exists() {
-                let remote_key = Self::resolve_remote_bootstrap_key(options)
-                    .map_err(|e| format!("remote bootstrap key resolution failed: {e}"))?;
                 // Ensure parent directory exists for the download target
                 if let Some(parent) = local_path.parent() {
                     if !parent.exists() {
                         std::fs::create_dir_all(parent)?;
                     }
                 }
-                if let Some(key) = remote_key {
-                    // Download from remote to local cache
-                    match backend.download(&key, &local_path) {
-                        Ok(true) => { /* downloaded successfully */ }
-                        Ok(false) => { /* doesn't exist remotely, will create fresh */ }
-                        Err(e) => {
-                            return Err(format!("remote backend download failed: {e}").into());
+
+                // PLAN.md (cloud-agnostic) Phase 3.1 — auto-restore
+                // from remote when /data is empty AND a backend is
+                // configured AND `RED_AUTO_RESTORE=true` (default).
+                // Uses the PITR pipeline so the restored database
+                // includes WAL replay since the latest snapshot,
+                // honoring `RED_RESTORE_TO_TIMESTAMP` /
+                // `RED_RESTORE_TO_LSN` overrides.
+                //
+                // PITR requires a published snapshot manifest. When
+                // the operator hasn't published one yet (e.g. the
+                // remote was seeded with only a `data.rdb` blob),
+                // we fall through to the legacy single-key download
+                // path below.
+                let auto_restore_requested = std::env::var("RED_AUTO_RESTORE")
+                    .ok()
+                    .map(|v| {
+                        matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+                    })
+                    .unwrap_or(true);
+                let mut restored_via_pitr = false;
+                if auto_restore_requested {
+                    let target_time_ms = std::env::var("RED_RESTORE_TO_TIMESTAMP")
+                        .ok()
+                        .and_then(|raw| Self::parse_restore_timestamp(&raw))
+                        .unwrap_or(0);
+
+                    let snapshot_prefix = options.default_snapshot_prefix();
+                    let wal_prefix = options.default_wal_archive_prefix();
+                    let recovery = crate::storage::wal::PointInTimeRecovery::new(
+                        Arc::clone(backend),
+                        snapshot_prefix,
+                        wal_prefix,
+                    );
+                    match recovery.restore_to(target_time_ms, &local_path) {
+                        Ok(report) => {
+                            tracing::info!(
+                                target: "reddb::serverless::auto_restore",
+                                snapshot_used = report.snapshot_used,
+                                records_applied = report.records_applied,
+                                wal_segments_replayed = report.wal_segments_replayed,
+                                recovered_to_lsn = report.recovered_to_lsn,
+                                target_time_ms,
+                                "auto-restore from remote completed"
+                            );
+                            restored_via_pitr = true;
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                target: "reddb::serverless::auto_restore",
+                                error = %err,
+                                "PITR auto-restore unavailable; falling back to direct snapshot key"
+                            );
+                            // Wipe whatever partial bytes the failed
+                            // download left so the legacy fallback
+                            // doesn't open a corrupt file.
+                            let _ = std::fs::remove_file(&local_path);
+                        }
+                    }
+                }
+
+                if !restored_via_pitr {
+                    let remote_key = Self::resolve_remote_bootstrap_key(options)
+                        .map_err(|e| format!("remote bootstrap key resolution failed: {e}"))?;
+                    if let Some(key) = remote_key {
+                        // Download from remote to local cache
+                        match backend.download(&key, &local_path) {
+                            Ok(true) => { /* downloaded successfully */ }
+                            Ok(false) => { /* doesn't exist remotely, will create fresh */ }
+                            Err(e) => {
+                                return Err(format!("remote backend download failed: {e}").into());
+                            }
                         }
                     }
                 }
