@@ -1,0 +1,95 @@
+# Azure Container Apps reference deploy (PLAN.md Phase 10.1).
+#
+# Apply with:
+#   az containerapp create --resource-group RG --name reddb \
+#     --yaml containerapp.yaml
+#
+# Notes:
+# - For the writer, set minReplicas=1 maxReplicas=1 so the writer
+#   lease is held by exactly one revision.
+# - Replicas can scale-to-zero. Use a separate Container App for
+#   reads with RED_REPLICATION_MODE=replica + RED_PRIMARY_ADDR.
+# - Persistent storage via Azure Files: mounted volume at /data.
+
+properties:
+  managedEnvironmentId: /subscriptions/SUB/resourceGroups/RG/providers/Microsoft.App/managedEnvironments/reddb-env
+  configuration:
+    activeRevisionsMode: Single
+    ingress:
+      external: false
+      targetPort: 8080
+      transport: http
+      allowInsecure: false
+    secrets:
+      - name: s3-access
+        keyVaultUrl: https://VAULT.vault.azure.net/secrets/reddb-s3-access
+      - name: s3-secret
+        keyVaultUrl: https://VAULT.vault.azure.net/secrets/reddb-s3-secret
+      - name: admin-token
+        keyVaultUrl: https://VAULT.vault.azure.net/secrets/reddb-admin-token
+  template:
+    revisionSuffix: v1
+    containers:
+      - name: reddb
+        image: ACR.azurecr.io/reddb:latest
+        resources:
+          cpu: 1.0
+          memory: 2Gi
+        env:
+          - name: REDDB_HTTP_BIND_ADDR
+            value: "0.0.0.0:8080"
+          - name: RED_BACKEND
+            value: "s3"
+          - name: RED_S3_ENDPOINT
+            value: "https://STORAGE.blob.core.windows.net"
+          - name: RED_S3_BUCKET
+            value: "reddb-prod"
+          - name: RED_S3_REGION
+            value: "auto"
+          - name: RED_S3_PATH_STYLE
+            value: "true"
+          - name: RED_AUTO_RESTORE
+            value: "true"
+          - name: RED_BACKUP_ON_SHUTDOWN
+            value: "true"
+          - name: RED_BACKUP_INTERVAL_SECS
+            value: "300"
+          - name: RED_LOG_FORMAT
+            value: "json"
+          - name: RED_LOG_LEVEL
+            value: "info"
+          - name: RED_LEASE_REQUIRED
+            value: "true"
+          - name: RED_S3_ACCESS_KEY
+            secretRef: s3-access
+          - name: RED_S3_SECRET_KEY
+            secretRef: s3-secret
+          - name: RED_ADMIN_TOKEN
+            secretRef: admin-token
+        probes:
+          - type: Liveness
+            httpGet:
+              path: /health/live
+              port: 8080
+            periodSeconds: 10
+          - type: Readiness
+            httpGet:
+              path: /health/ready
+              port: 8080
+            periodSeconds: 10
+          - type: Startup
+            httpGet:
+              path: /health/startup
+              port: 8080
+            failureThreshold: 12
+            periodSeconds: 5
+        volumeMounts:
+          - mountPath: /data
+            volumeName: data
+    volumes:
+      - name: data
+        storageType: AzureFile
+        storageName: reddb-data
+    scale:
+      minReplicas: 1
+      maxReplicas: 1
