@@ -1,0 +1,51 @@
+# AWS App Runner reference deploy (PLAN.md Phase 10.1).
+# Hands-off serverless container — App Runner manages scaling +
+# health probes; RedDB just respects the universal contract.
+#
+# Apply via:
+#   aws apprunner create-service --cli-input-yaml file://apprunner.yaml
+
+ServiceName: reddb
+SourceConfiguration:
+  ImageRepository:
+    ImageIdentifier: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/reddb:latest
+    ImageRepositoryType: ECR
+    ImageConfiguration:
+      Port: "8080"
+      RuntimeEnvironmentVariables:
+        REDDB_HTTP_BIND_ADDR: "0.0.0.0:8080"
+        RED_BACKEND: "s3"
+        RED_S3_REGION: "us-east-1"
+        RED_S3_BUCKET: "reddb-prod"
+        RED_AUTO_RESTORE: "true"
+        RED_BACKUP_ON_SHUTDOWN: "true"
+        RED_BACKUP_INTERVAL_SECS: "300"
+        RED_LOG_FORMAT: "json"
+        RED_LOG_LEVEL: "info"
+      RuntimeEnvironmentSecrets:
+        RED_S3_ACCESS_KEY: arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:reddb/s3-access:::
+        RED_S3_SECRET_KEY: arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:reddb/s3-secret:::
+        RED_ADMIN_TOKEN: arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:reddb/admin-token:::
+  AuthenticationConfiguration:
+    AccessRoleArn: arn:aws:iam::ACCOUNT_ID:role/AppRunnerECRAccessRole
+
+InstanceConfiguration:
+  Cpu: 1 vCPU
+  Memory: 2 GB
+
+HealthCheckConfiguration:
+  Protocol: HTTP
+  Path: /health/ready
+  Interval: 10
+  Timeout: 5
+  HealthyThreshold: 1
+  UnhealthyThreshold: 5
+
+NetworkConfiguration:
+  EgressConfiguration:
+    EgressType: DEFAULT
+
+# Note: App Runner does not expose persistent volumes to user code.
+# Pair this deploy with `RED_AUTO_RESTORE=true` so each cold start
+# rebuilds /data from S3. Cold-start budget: ~5-10s for a 1 GB DB.
+# For lower cold-start, prefer ECS Fargate + EFS (see ../aws-ecs/).
