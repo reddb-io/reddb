@@ -3,7 +3,10 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use super::{load_archived_change_records, load_backup_head, load_snapshot_manifest};
+use super::{
+    load_archived_change_records, load_backup_head, load_snapshot_manifest,
+    load_wal_segment_manifest,
+};
 use crate::replication::logical::{ApplyMode, LogicalChangeApplier};
 use crate::storage::backend::{BackendError, RemoteBackend};
 use crate::storage::RedDB;
@@ -187,7 +190,41 @@ impl PointInTimeRecovery {
         let mut recovered_to_time = plan.snapshot_time;
 
         for segment_key in &plan.wal_segments {
-            let records = load_archived_change_records(self.backend.as_ref(), segment_key)?;
+            // PLAN.md Phase 2.4 — verify segment integrity via the
+            // sidecar manifest's sha256 before applying its records.
+            // Fail-closed parity with snapshot verification: a present-
+            // but-wrong digest aborts restore so we don't ingest a
+            // tampered tail; an absent manifest (legacy archive) logs
+            // a warning and proceeds.
+            let manifest =
+                super::load_wal_segment_manifest(self.backend.as_ref(), segment_key)?;
+            let (records, computed_sha) = super::archiver::
+                load_archived_change_records_with_sha256(self.backend.as_ref(), segment_key)?;
+            match manifest.as_ref().and_then(|m| m.sha256.as_deref()) {
+                Some(expected) => match computed_sha.as_deref() {
+                    Some(actual) if actual.eq_ignore_ascii_case(expected) => {}
+                    Some(actual) => {
+                        return Err(BackendError::Internal(format!(
+                            "wal segment integrity check failed for '{segment_key}': \
+                             manifest sha256 {expected} != computed sha256 {actual}",
+                        )));
+                    }
+                    None => {
+                        return Err(BackendError::Internal(format!(
+                            "wal segment integrity check failed for '{segment_key}': \
+                             expected sha256 {expected} but segment was empty / unreadable",
+                        )));
+                    }
+                },
+                None => {
+                    tracing::warn!(
+                        target: "reddb::backup::restore",
+                        segment_key = %segment_key,
+                        "wal segment manifest absent or sha256-less; restore proceeding without integrity check"
+                    );
+                }
+            }
+
             let mut segment_applied = false;
             for record in records {
                 if record.lsn <= plan.base_lsn {

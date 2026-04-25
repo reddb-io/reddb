@@ -2605,6 +2605,27 @@ impl RedDBRuntime {
         self.inner.backup_scheduler.status()
     }
 
+    /// Current local LSN paired with the LSN of the most recently
+    /// archived WAL segment. The difference is the replication /
+    /// archive lag operators alert on (PLAN.md Phase 5.1). Returns
+    /// `(0, 0)` when neither replication nor archiving is configured.
+    pub fn wal_archive_progress(&self) -> (u64, u64) {
+        let current_lsn = self
+            .inner
+            .db
+            .replication
+            .as_ref()
+            .map(|repl| {
+                repl.logical_wal_spool
+                    .as_ref()
+                    .map(|spool| spool.current_lsn())
+                    .unwrap_or_else(|| repl.wal_buffer.current_lsn())
+            })
+            .unwrap_or_else(|| self.inner.cdc.current_lsn());
+        let last_archived_lsn = self.config_u64("red.config.timeline.last_archived_lsn", 0);
+        (current_lsn, last_archived_lsn)
+    }
+
     /// Trigger an immediate backup.
     pub fn trigger_backup(&self) -> RedDBResult<crate::replication::scheduler::BackupResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Backup)?;
@@ -2734,6 +2755,26 @@ impl RedDBRuntime {
                     "id": head.timeline_id
                 }),
             );
+
+            // PLAN.md Phase 2.4 — refresh the unified `MANIFEST.json`
+            // at the prefix root so external tooling sees a single
+            // catalog of every snapshot + WAL segment with their
+            // checksums. Best-effort: a manifest publish failure
+            // doesn't fail the backup (the per-artifact sidecars
+            // already give restore-side integrity), but it does log
+            // so dashboards can flag stale catalogs.
+            if let Err(err) = crate::storage::wal::publish_unified_manifest_for_prefix(
+                backend.as_ref(),
+                &snapshot_prefix,
+            ) {
+                tracing::warn!(
+                    target: "reddb::backup",
+                    error = %err,
+                    snapshot_prefix = %snapshot_prefix,
+                    "unified MANIFEST.json refresh failed; per-artifact sidecars unaffected"
+                );
+            }
+
             uploaded = true;
         }
 

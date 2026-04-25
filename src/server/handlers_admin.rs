@@ -418,6 +418,94 @@ impl RedDBServer {
             lease_state.label()
         );
 
+        // PLAN.md Phase 5.1 — backup + WAL archive lag.
+        // These are the SRE signals an orchestrator alerts on when a
+        // serverless instance is healthy on the surface but its DR
+        // posture has degraded silently.
+        let backup_status = self.runtime.backup_status();
+        if let Some(last) = backup_status.last_backup.as_ref() {
+            let last_ts_secs = (last.timestamp as f64) / 1000.0;
+            let _ = writeln!(
+                body,
+                "# HELP reddb_backup_last_success_timestamp_seconds Unix ts (s) of the most recent successful backup."
+            );
+            let _ = writeln!(
+                body,
+                "# TYPE reddb_backup_last_success_timestamp_seconds gauge"
+            );
+            let _ = writeln!(
+                body,
+                "reddb_backup_last_success_timestamp_seconds {}",
+                last_ts_secs
+            );
+            let age_secs = ((now_ms.saturating_sub(last.timestamp)) as f64) / 1000.0;
+            let _ = writeln!(
+                body,
+                "# HELP reddb_backup_age_seconds Seconds since last successful backup."
+            );
+            let _ = writeln!(body, "# TYPE reddb_backup_age_seconds gauge");
+            let _ = writeln!(body, "reddb_backup_age_seconds {}", age_secs);
+            let _ = writeln!(
+                body,
+                "# HELP reddb_backup_last_duration_seconds Wall-clock duration of the most recent backup."
+            );
+            let _ = writeln!(body, "# TYPE reddb_backup_last_duration_seconds gauge");
+            let _ = writeln!(
+                body,
+                "reddb_backup_last_duration_seconds {}",
+                (last.duration_ms as f64) / 1000.0
+            );
+        }
+        let _ = writeln!(
+            body,
+            "# HELP reddb_backup_failures_total Total backup failures since process start."
+        );
+        let _ = writeln!(body, "# TYPE reddb_backup_failures_total counter");
+        let _ = writeln!(
+            body,
+            "reddb_backup_failures_total {}",
+            backup_status.total_failures
+        );
+        let _ = writeln!(
+            body,
+            "# HELP reddb_backup_total_total Total successful backups since process start."
+        );
+        let _ = writeln!(body, "# TYPE reddb_backup_total_total counter");
+        let _ = writeln!(
+            body,
+            "reddb_backup_total_total {}",
+            backup_status.total_backups
+        );
+
+        // WAL archive lag — distance between the engine's current LSN
+        // and the last archived LSN. Operators alert when this grows
+        // unbounded; it means archive uploads are failing or paused
+        // (e.g. backend unreachable, lease lost).
+        let (current_lsn, last_archived_lsn) = self.runtime.wal_archive_progress();
+        let lag = current_lsn.saturating_sub(last_archived_lsn);
+        let _ = writeln!(
+            body,
+            "# HELP reddb_wal_current_lsn Current local LSN (most recent record visible to writers)."
+        );
+        let _ = writeln!(body, "# TYPE reddb_wal_current_lsn gauge");
+        let _ = writeln!(body, "reddb_wal_current_lsn {}", current_lsn);
+        let _ = writeln!(
+            body,
+            "# HELP reddb_wal_last_archived_lsn LSN of the most recently archived WAL segment."
+        );
+        let _ = writeln!(body, "# TYPE reddb_wal_last_archived_lsn gauge");
+        let _ = writeln!(
+            body,
+            "reddb_wal_last_archived_lsn {}",
+            last_archived_lsn
+        );
+        let _ = writeln!(
+            body,
+            "# HELP reddb_wal_archive_lag_records Records between current LSN and last archived LSN."
+        );
+        let _ = writeln!(body, "# TYPE reddb_wal_archive_lag_records gauge");
+        let _ = writeln!(body, "reddb_wal_archive_lag_records {}", lag);
+
         let _ = writeln!(
             body,
             "# HELP reddb_db_size_bytes On-disk size of the primary database file."
@@ -537,6 +625,56 @@ impl RedDBServer {
             "writer_lease".to_string(),
             JsonValue::String(self.runtime.write_gate().lease_state().label().to_string()),
         );
+
+        // Backup posture (PLAN.md Phase 5.1). `last_backup` carries
+        // the same shape /metrics emits so dashboards and alert rules
+        // share a single contract.
+        let backup = self.runtime.backup_status();
+        let mut backup_obj = Map::new();
+        if let Some(last) = backup.last_backup.as_ref() {
+            backup_obj.insert(
+                "last_success_unix_ms".to_string(),
+                JsonValue::Number(last.timestamp as f64),
+            );
+            backup_obj.insert(
+                "last_duration_ms".to_string(),
+                JsonValue::Number(last.duration_ms as f64),
+            );
+            backup_obj.insert(
+                "age_seconds".to_string(),
+                JsonValue::Number(((now_ms.saturating_sub(last.timestamp)) as f64) / 1000.0),
+            );
+        }
+        backup_obj.insert(
+            "total_successes".to_string(),
+            JsonValue::Number(backup.total_backups as f64),
+        );
+        backup_obj.insert(
+            "total_failures".to_string(),
+            JsonValue::Number(backup.total_failures as f64),
+        );
+        backup_obj.insert(
+            "interval_secs".to_string(),
+            JsonValue::Number(backup.interval_secs as f64),
+        );
+        object.insert("backup".to_string(), JsonValue::Object(backup_obj));
+
+        // WAL archive lag.
+        let (current_lsn, last_archived_lsn) = self.runtime.wal_archive_progress();
+        let mut wal_obj = Map::new();
+        wal_obj.insert(
+            "current_lsn".to_string(),
+            JsonValue::Number(current_lsn as f64),
+        );
+        wal_obj.insert(
+            "last_archived_lsn".to_string(),
+            JsonValue::Number(last_archived_lsn as f64),
+        );
+        wal_obj.insert(
+            "archive_lag_records".to_string(),
+            JsonValue::Number(current_lsn.saturating_sub(last_archived_lsn) as f64),
+        );
+        object.insert("wal".to_string(), JsonValue::Object(wal_obj));
         if let Some(backend) = backend_kind {
             object.insert("remote_backend".to_string(), JsonValue::String(backend));
         }
