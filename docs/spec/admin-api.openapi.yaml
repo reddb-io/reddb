@@ -412,5 +412,26 @@ paths:
             text/plain:
               schema: { type: string }
 
+  /admin/openapi:
+    get:
+      summary: Serve this OpenAPI document inline.
+      description: |
+        Returns the YAML spec the engine ships with — operators can
+        codegen clients without needing GitHub access. The same
+        document is served at `/admin/openapi.yaml`.
+      responses:
+        "200":
+          content:
+            application/yaml:
+              schema: { type: string }
+  /admin/openapi.yaml:
+    get:
+      summary: Alias for `/admin/openapi`.
+      responses:
+        "200":
+          content:
+            application/yaml:
+              schema: { type: string }
+
 security:
   - AdminBearer: []
