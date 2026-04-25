@@ -14,6 +14,52 @@
 
 use super::*;
 use crate::runtime::lifecycle::Phase;
+use std::path::{Path, PathBuf};
+
+/// Path to the persistent runtime-toggle file kept beside the
+/// `.rdb` data file. Operators can prep a fresh deploy by writing
+/// `{"read_only": true}` before first boot to come up locked.
+pub(crate) fn runtime_state_path(data_path: &Path) -> PathBuf {
+    let parent = data_path.parent().unwrap_or_else(|| Path::new("."));
+    parent.join(".runtime-state.json")
+}
+
+/// Atomically persist the read_only toggle. Writes to a sibling
+/// `.tmp` file then renames to defeat torn writes — same pattern
+/// the snapshot publish path uses.
+pub(crate) fn persist_runtime_readonly(state_path: &Path, enabled: bool) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut object = crate::json::Map::new();
+    object.insert(
+        "read_only".to_string(),
+        crate::json::Value::Bool(enabled),
+    );
+    let body = crate::serde_json::to_string_pretty(&crate::json::Value::Object(object))
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err.to_string()))?;
+    if let Some(parent) = state_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let tmp = state_path.with_extension("json.tmp");
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(body.as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, state_path)?;
+    Ok(())
+}
+
+/// Read a previously-persisted read_only toggle. Returns `None`
+/// when the file doesn't exist or doesn't parse — boot continues
+/// from the env-var / RedDBOptions value in that case.
+pub fn load_runtime_readonly(data_path: &Path) -> Option<bool> {
+    let state_path = runtime_state_path(data_path);
+    let bytes = std::fs::read(&state_path).ok()?;
+    let parsed: crate::json::Value = crate::json::from_slice(&bytes).ok()?;
+    parsed.get("read_only").and_then(|v| v.as_bool())
+}
 
 impl RedDBServer {
     /// `POST /admin/shutdown` — graceful shutdown coordinator.
@@ -159,6 +205,55 @@ impl RedDBServer {
             }
             Err(err) => json_error(500, err.to_string()),
         }
+    }
+
+    /// `POST /admin/readonly` — flip the public-mutation gate
+    /// (PLAN.md Phase 4.3).
+    ///
+    /// Body: `{"enabled": true|false}`. Returns the new state. Useful
+    /// for orchestrators that need to suspend writes (maintenance,
+    /// billing suspension, hot key rotation) without killing the
+    /// process or detaching the volume. Replicas reject writes
+    /// regardless of this flag — the replication-role gate fires
+    /// first.
+    ///
+    /// Persistence: the new state is written to
+    /// `<data_dir>/.runtime-state.json` so a subsequent restart
+    /// re-applies it. Failure to persist returns 500 — the in-memory
+    /// flag is reverted so caller and disk stay consistent.
+    pub(crate) fn handle_admin_readonly(&self, body: Vec<u8>) -> HttpResponse {
+        let enabled = if body.is_empty() {
+            true
+        } else {
+            match crate::serde_json::from_slice::<crate::serde_json::Value>(&body) {
+                Ok(v) => v.get("enabled").and_then(|n| n.as_bool()).unwrap_or(true),
+                Err(err) => return json_error(400, format!("invalid JSON body: {err}")),
+            }
+        };
+
+        let previous = self.runtime.write_gate().set_read_only(enabled);
+
+        // Persist the toggle so a subsequent restart re-applies it
+        // before any client surface comes online. Best-effort: on
+        // failure we revert the in-memory flag so disk and runtime
+        // agree (operator can then re-issue once the storage issue
+        // is resolved).
+        if let Some(data_path) = self.runtime.db().path() {
+            let state_path = runtime_state_path(data_path);
+            if let Err(err) = persist_runtime_readonly(&state_path, enabled) {
+                self.runtime.write_gate().set_read_only(previous);
+                return json_error(
+                    500,
+                    format!("read_only persisted to {state_path:?} failed: {err}"),
+                );
+            }
+        }
+
+        let mut object = Map::new();
+        object.insert("ok".to_string(), JsonValue::Bool(true));
+        object.insert("read_only".to_string(), JsonValue::Bool(enabled));
+        object.insert("previous".to_string(), JsonValue::Bool(previous));
+        json_response(200, JsonValue::Object(object))
     }
 
     /// `POST /admin/drain` — flip to Draining phase. Subsequent

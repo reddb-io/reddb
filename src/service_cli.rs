@@ -161,7 +161,26 @@ impl ServerCommandConfig {
 
         options.mode = StorageMode::Persistent;
         options.create_if_missing = self.create_if_missing;
-        options.read_only = self.read_only;
+        // PLAN.md Phase 4.3 — read_only resolution priority:
+        //   1. CLI flag (`--readonly`) — explicit operator intent.
+        //   2. `RED_READONLY=true` env — orchestrator override.
+        //   3. Persisted `<data>/.runtime-state.json` from a prior
+        //      `POST /admin/readonly` — survives restart.
+        //   4. Default `false`.
+        options.read_only = if self.read_only {
+            true
+        } else if env_nonempty("RED_READONLY")
+            .or_else(|| env_nonempty("REDDB_READONLY"))
+            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false)
+        {
+            true
+        } else if let Some(data_path) = self.path.as_ref() {
+            crate::server::handlers_admin::load_runtime_readonly(std::path::Path::new(data_path))
+                .unwrap_or(false)
+        } else {
+            false
+        };
 
         options.replication = match self.role.as_str() {
             "primary" => ReplicationConfig::primary(),

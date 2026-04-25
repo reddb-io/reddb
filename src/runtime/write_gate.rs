@@ -52,19 +52,24 @@ impl WriteKind {
     }
 }
 
-/// Snapshot of the policy applied to public-mutation surfaces. Built once
-/// at runtime construction from the immutable subset of `RedDBOptions`
-/// and consulted on every public write attempt.
-#[derive(Debug, Clone)]
+/// Live policy for public-mutation surfaces.
+///
+/// `read_only` was originally a `bool` snapshot taken at runtime
+/// construction. PLAN.md Phase 4.3 promotes it to an `AtomicBool` so
+/// `POST /admin/readonly` can flip the policy without a restart. The
+/// `ReplicationRole` stays immutable — flipping a replica into a
+/// primary mid-process would need a full handshake (Phase 3 work in
+/// the data-safety plan), and shouldn't be a single-flag decision.
+#[derive(Debug)]
 pub struct WriteGate {
-    read_only: bool,
+    read_only: std::sync::atomic::AtomicBool,
     role: ReplicationRole,
 }
 
 impl WriteGate {
     pub fn from_options(options: &RedDBOptions) -> Self {
         Self {
-            read_only: options.read_only,
+            read_only: std::sync::atomic::AtomicBool::new(options.read_only),
             role: options.replication.role.clone(),
         }
     }
@@ -81,7 +86,7 @@ impl WriteGate {
                 kind.label()
             )));
         }
-        if self.read_only {
+        if self.read_only.load(std::sync::atomic::Ordering::Acquire) {
             return Err(RedDBError::ReadOnly(format!(
                 "instance is configured read_only — {} rejected",
                 kind.label()
@@ -91,11 +96,24 @@ impl WriteGate {
     }
 
     pub fn is_read_only(&self) -> bool {
-        self.read_only || matches!(self.role, ReplicationRole::Replica { .. })
+        self.read_only.load(std::sync::atomic::Ordering::Acquire)
+            || matches!(self.role, ReplicationRole::Replica { .. })
     }
 
     pub fn role(&self) -> &ReplicationRole {
         &self.role
+    }
+
+    /// PLAN.md Phase 4.3 — dynamic read-only toggle. Flipping a
+    /// replica back to writable here is a no-op for `check()` because
+    /// the role check fires first; the operator must change the
+    /// replication role through a separate, audited path.
+    ///
+    /// Returns the previous read_only value so callers can detect
+    /// idempotent calls (toggle to the same value = no work to do).
+    pub fn set_read_only(&self, enabled: bool) -> bool {
+        self.read_only
+            .swap(enabled, std::sync::atomic::Ordering::AcqRel)
     }
 }
 
@@ -104,7 +122,10 @@ mod tests {
     use super::*;
 
     fn gate(read_only: bool, role: ReplicationRole) -> WriteGate {
-        WriteGate { read_only, role }
+        WriteGate {
+            read_only: std::sync::atomic::AtomicBool::new(read_only),
+            role,
+        }
     }
 
     #[test]
