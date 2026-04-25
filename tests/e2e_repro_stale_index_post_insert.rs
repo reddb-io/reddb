@@ -205,6 +205,112 @@ fn post_create_index_update_keeps_index_in_sync() {
     );
 }
 
+/// Closer mirror of the bench `mixed_workload_indexed` shape: bulk-
+/// seed N/2 rows via the prevalidated columnar path, CREATE INDEX,
+/// then drip-feed N/2 single rows via `create_rows_batch` (the entry
+/// for MSG_BULK_INSERT_BINARY non-prevalidated, which is what the
+/// adapter's `insert_one` uses). Larger N exercises segment rotation
+/// boundaries where the position-based `flat_entities` access used
+/// to corrupt post-CREATE-INDEX entity lookups.
+#[test]
+fn post_create_index_inserts_at_scale_keeps_index_fresh() {
+    let mut p = std::env::temp_dir();
+    p.push(format!(
+        "reddb-scale-repro-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&p)).unwrap();
+    rt.execute_query("CREATE TABLE users (id INT, age INT, city TEXT)")
+        .unwrap();
+
+    let schema: Arc<Vec<String>> =
+        Arc::new(vec!["id".into(), "age".into(), "city".into()]);
+
+    const N: u32 = 1000;
+    const CITIES: &[&str] = &["NYC", "LA", "Chicago", "Houston", "Phoenix"];
+    let city_for = |i: u32| CITIES[(i as usize) % CITIES.len()];
+    let age_for = |i: u32| 20 + (i % 30);
+
+    // Bench seeds in 1000-row chunks via prevalidated.
+    const CHUNK: u32 = 1000;
+    let mut next_id = 0u32;
+    while next_id < N / 2 {
+        let end = (next_id + CHUNK).min(N / 2);
+        let mut bulk_rows: Vec<Vec<Value>> = Vec::with_capacity((end - next_id) as usize);
+        for i in next_id..end {
+            bulk_rows.push(vec![
+                Value::Integer(i as i64),
+                Value::Integer(age_for(i) as i64),
+                Value::text(city_for(i).to_string()),
+            ]);
+        }
+        rt.create_rows_batch_prevalidated_columnar(
+            "users".to_string(),
+            Arc::clone(&schema),
+            bulk_rows,
+        )
+        .unwrap();
+        next_id = end;
+    }
+
+    rt.execute_query("CREATE INDEX idx_age ON users (age) USING BTREE")
+        .unwrap();
+    rt.execute_query("CREATE INDEX idx_city ON users (city) USING HASH")
+        .unwrap();
+    rt.execute_query("CREATE INDEX idx_city_age ON users (city, age) USING BTREE")
+        .unwrap();
+
+    for i in (N / 2)..N {
+        create_one_via_port(&rt, i, age_for(i), city_for(i));
+    }
+
+    let total = rt.execute_query("SELECT * FROM users").unwrap();
+    assert_eq!(total.result.records.len(), N as usize, "all rows present");
+
+    // Per-city counts must match — the bench generates queries per
+    // city + min_age and validates against the full dataset.
+    for city in CITIES {
+        let mut expected_eq = 0u32;
+        let mut expected_filtered = 0u32;
+        for i in 0..N {
+            if city_for(i) == *city {
+                expected_eq += 1;
+                if age_for(i) > 30 {
+                    expected_filtered += 1;
+                }
+            }
+        }
+        let city_only = rt
+            .execute_query(&format!("SELECT * FROM users WHERE city = '{city}'"))
+            .unwrap();
+        assert_eq!(
+            city_only.result.records.len(),
+            expected_eq as usize,
+            "city='{city}': got {} expected {}",
+            city_only.result.records.len(),
+            expected_eq
+        );
+        let filtered = rt
+            .execute_query(&format!(
+                "SELECT * FROM users WHERE city = '{city}' AND age > 30"
+            ))
+            .unwrap();
+        assert_eq!(
+            filtered.result.records.len(),
+            expected_filtered as usize,
+            "city='{city}' AND age > 30: got {} expected {}",
+            filtered.result.records.len(),
+            expected_filtered
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&p);
+}
+
 /// Mirror of the bench `reddb_wire` `insert_one` path: single-row
 /// MSG_BULK_INSERT_BINARY_PREVALIDATED via
 /// `create_rows_batch_prevalidated_columnar`. This is the path
