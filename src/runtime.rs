@@ -750,6 +750,12 @@ struct RuntimeInner {
     /// (`LogicalChangeApplier`) reaches into the store directly and
     /// bypasses the gate by construction.
     write_gate: crate::runtime::write_gate::WriteGate,
+    /// Process lifecycle state machine (PLAN.md Phase 1 — Lifecycle
+    /// Contract). Drives `/health/live`, `/health/ready`,
+    /// `/health/startup`, and `POST /admin/shutdown` so any
+    /// orchestrator (K8s preStop, Fly autostop, ECS task drain,
+    /// systemd) can coordinate without losing data.
+    lifecycle: crate::runtime::lifecycle::Lifecycle,
 }
 
 #[derive(Clone)]
@@ -764,6 +770,7 @@ pub struct RuntimeConnection {
 
 pub mod config_matrix;
 pub mod config_overlay;
+pub mod lifecycle;
 mod expr_eval;
 mod graph_dsl;
 mod health_connection;

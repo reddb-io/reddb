@@ -52,6 +52,7 @@ fn graph_projection_json(projection: &crate::PhysicalGraphProjection) -> JsonVal
     crate::presentation::admin_json::graph_projection_json(projection)
 }
 
+mod handlers_admin;
 mod handlers_ai;
 mod handlers_auth;
 mod handlers_backup;

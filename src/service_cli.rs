@@ -561,6 +561,78 @@ fn run_configured_servers(config: ServerCommandConfig) -> Result<(), String> {
     }
 }
 
+/// Wire SIGTERM and SIGINT to `RedDBRuntime::graceful_shutdown`.
+///
+/// PLAN.md Phase 1.1 — orchestrators (K8s preStop, Fly autostop, ECS
+/// drain, systemd, plain `docker stop`) all rely on SIGTERM with a
+/// grace window. SIGKILL after that grace window is the OS's
+/// fallback; we are responsible for finishing in time.
+///
+/// Spawns a tokio task on the caller's runtime that:
+///   1. Awaits the first of SIGTERM / SIGINT.
+///   2. Calls `runtime.graceful_shutdown(backup_on_shutdown)`. The
+///      runtime moves to `Stopped` on its own; this just runs the
+///      flush + checkpoint pipeline and (optionally) a final backup.
+///   3. Calls `std::process::exit(0)` so the orchestrator sees a
+///      clean exit code.
+///
+/// `RED_BACKUP_ON_SHUTDOWN` (default `true` if a remote backend is
+/// configured) toggles step 3's backup branch. The flush + checkpoint
+/// always run.
+///
+/// Idempotent across signal storms — `graceful_shutdown` returns the
+/// cached report on second call, but we exit on the first one
+/// regardless, so the second SIGTERM never reaches the handler.
+async fn spawn_lifecycle_signal_handler(runtime: RedDBRuntime) {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let backup_on_shutdown = std::env::var("RED_BACKUP_ON_SHUTDOWN")
+        .ok()
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(true);
+
+    let mut sigterm = match signal(SignalKind::terminate()) {
+        Ok(s) => s,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "could not install SIGTERM handler; orchestrator graceful shutdown will fall back to SIGKILL"
+            );
+            return;
+        }
+    };
+    let mut sigint = match signal(SignalKind::interrupt()) {
+        Ok(s) => s,
+        Err(err) => {
+            tracing::warn!(error = %err, "could not install SIGINT handler");
+            return;
+        }
+    };
+
+    tokio::spawn(async move {
+        let signal_name = tokio::select! {
+            _ = sigterm.recv() => "SIGTERM",
+            _ = sigint.recv() => "SIGINT",
+        };
+        tracing::info!(signal = signal_name, "lifecycle signal received; shutting down");
+        match runtime.graceful_shutdown(backup_on_shutdown) {
+            Ok(report) => {
+                tracing::info!(
+                    duration_ms = report.duration_ms,
+                    flushed_wal = report.flushed_wal,
+                    final_checkpoint = report.final_checkpoint,
+                    backup_uploaded = report.backup_uploaded,
+                    "graceful shutdown complete"
+                );
+            }
+            Err(err) => {
+                tracing::error!(error = %err, "graceful shutdown failed");
+            }
+        }
+        std::process::exit(0);
+    });
+}
+
 #[inline(never)]
 fn run_routed_server(config: ServerCommandConfig, router_bind_addr: String) -> Result<(), String> {
     let workers = config.workers;
@@ -599,7 +671,9 @@ fn run_routed_server(config: ServerCommandConfig, router_bind_addr: String) -> R
         .build()
         .map_err(|err| format!("tokio runtime: {err}"))?;
 
+    let signal_runtime = runtime.clone();
     tokio_runtime.block_on(async move {
+        spawn_lifecycle_signal_handler(signal_runtime).await;
         let grpc_listener = std::net::TcpListener::bind("127.0.0.1:0")
             .map_err(|err| format!("bind internal gRPC listener: {err}"))?;
         let grpc_backend = grpc_listener
@@ -754,7 +828,9 @@ fn run_wire_only_server(config: ServerCommandConfig, wire_addr: String) -> Resul
     // flushes the file log writer.
     let (runtime, _auth_store, _telemetry_guard) =
         build_runtime_and_auth_store(db_options, cli_telemetry)?;
+    let signal_runtime = runtime.clone();
     tokio_runtime.block_on(async move {
+        spawn_lifecycle_signal_handler(signal_runtime).await;
         let wire_rt = Arc::new(runtime);
         crate::wire::start_wire_listener(&wire_addr, wire_rt)
             .await
@@ -1042,7 +1118,9 @@ fn run_grpc_server(config: ServerCommandConfig, bind_addr: String) -> Result<(),
     // Guard lives on the outer stack so it outlives the tokio runtime.
     let (runtime, auth_store, _telemetry_guard) =
         build_runtime_and_auth_store(db_options, cli_telemetry)?;
+    let signal_runtime = runtime.clone();
     tokio_runtime.block_on(async move {
+        spawn_lifecycle_signal_handler(signal_runtime).await;
         // Start wire protocol listeners (plaintext + TLS)
         spawn_wire_listeners(&config, &runtime);
 
@@ -1103,7 +1181,9 @@ fn run_dual_server(
         .build()
         .map_err(|err| format!("tokio runtime: {err}"))?;
 
+    let signal_runtime = runtime.clone();
     tokio_runtime.block_on(async move {
+        spawn_lifecycle_signal_handler(signal_runtime).await;
         // Start wire protocol listeners (plaintext + TLS)
         spawn_wire_listeners(&config, &runtime);
 

@@ -57,6 +57,13 @@ impl RedDBServer {
             ("GET", "/replication/status") => self.handle_replication_status(),
             ("POST", "/replication/snapshot") => self.handle_replication_snapshot(),
 
+            // PLAN.md Phase 1 — universal lifecycle/health contract.
+            ("GET", "/health/live") => self.handle_health_live(),
+            ("GET", "/health/ready") => self.handle_health_ready(),
+            ("GET", "/health/startup") => self.handle_health_startup(),
+            ("POST", "/admin/shutdown") => self.handle_admin_shutdown(),
+            ("POST", "/admin/drain") => self.handle_admin_drain(),
+
             ("GET", "/health") => {
                 let report = self.native_use_cases().health();
                 let status = if report.is_healthy() { 200 } else { 503 };

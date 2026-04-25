@@ -1370,6 +1370,7 @@ impl RedDBRuntime {
                 tenant_tables: parking_lot::RwLock::new(HashMap::new()),
                 ddl_epoch: std::sync::atomic::AtomicU64::new(0),
                 write_gate: crate::runtime::write_gate::WriteGate::from_options(&options),
+                lifecycle: crate::runtime::lifecycle::Lifecycle::new(),
             }),
         };
 
@@ -1744,6 +1745,12 @@ impl RedDBRuntime {
                 .ok();
         }
 
+        // PLAN.md Phase 1 — Lifecycle Contract. Mark Ready once every
+        // boot stage above has completed (WAL replay, restore-from-
+        // remote, replica-loop spawn). Health probes flip from 503 to
+        // 200 here; shutdown begins from this state.
+        runtime.inner.lifecycle.mark_ready();
+
         Ok(runtime)
     }
 
@@ -2027,6 +2034,102 @@ impl RedDBRuntime {
     /// a dependency on the concrete enum.
     pub fn write_gate(&self) -> &crate::runtime::write_gate::WriteGate {
         &self.inner.write_gate
+    }
+
+    /// Process lifecycle handle (PLAN.md Phase 1). Health probes,
+    /// admin/shutdown, and signal handlers consult this single
+    /// state machine.
+    pub fn lifecycle(&self) -> &crate::runtime::lifecycle::Lifecycle {
+        &self.inner.lifecycle
+    }
+
+    /// Graceful shutdown coordinator (PLAN.md Phase 1.1).
+    ///
+    /// Steps, in order, all idempotent across re-entrant calls:
+    ///   1. Move lifecycle into `ShuttingDown` (concurrent callers
+    ///      observe `Stopped` after first finishes).
+    ///   2. Flush WAL + run final checkpoint via `db.flush()` so
+    ///      every acked write is durable on disk.
+    ///   3. If `backup_on_shutdown == true` and a remote backend is
+    ///      configured, run a synchronous `trigger_backup()` so the
+    ///      remote head reflects the final state.
+    ///   4. Stamp the report and move to `Stopped`. Subsequent calls
+    ///      return the cached report without re-running anything.
+    ///
+    /// On any error, the runtime is still marked `Stopped` so the
+    /// process can exit; the caller logs the error context but does
+    /// not retry the same shutdown — the operator can inspect the
+    /// report fields to see which step failed.
+    pub fn graceful_shutdown(
+        &self,
+        backup_on_shutdown: bool,
+    ) -> RedDBResult<crate::runtime::lifecycle::ShutdownReport> {
+        if !self.inner.lifecycle.begin_shutdown() {
+            // Someone else already shut down (or is in flight). Return
+            // the cached report so the HTTP caller and SIGTERM handler
+            // get the same idempotent answer.
+            return Ok(self
+                .inner
+                .lifecycle
+                .shutdown_report()
+                .unwrap_or_default());
+        }
+
+        let started_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let mut report = crate::runtime::lifecycle::ShutdownReport {
+            started_at_ms: started_ms,
+            ..Default::default()
+        };
+
+        // Flush WAL + run any pending checkpoint. `db.flush()` is the
+        // store-level chokepoint that fsyncs WAL and the pager.
+        let flush_res = self.inner.db.flush();
+        report.flushed_wal = flush_res.is_ok();
+        report.final_checkpoint = flush_res.is_ok();
+        if let Err(err) = &flush_res {
+            tracing::error!(
+                target: "reddb::lifecycle",
+                error = %err,
+                "graceful_shutdown: flush failed"
+            );
+        }
+
+        // Optional final backup. Skipped silently when no remote
+        // backend is configured — `trigger_backup()` returns Err
+        // anyway in that case, but logging it as a shutdown failure
+        // would be misleading on a standalone (no-backend) runtime.
+        if backup_on_shutdown && self.inner.db.remote_backend.is_some() {
+            // The trigger_backup gate now reads `WriteKind::Backup`,
+            // which a replica/read_only instance refuses. That's
+            // intentional — replicas don't drive backups; only the
+            // primary does. We still want shutdown to flush its WAL
+            // even if the backup branch is gated off.
+            match self.trigger_backup() {
+                Ok(result) => {
+                    report.backup_uploaded = result.uploaded;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        target: "reddb::lifecycle",
+                        error = %err,
+                        "graceful_shutdown: final backup skipped"
+                    );
+                }
+            }
+        }
+
+        let completed_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(started_ms);
+        report.completed_at_ms = completed_ms;
+        report.duration_ms = completed_ms.saturating_sub(started_ms);
+
+        self.inner.lifecycle.finish_shutdown(report.clone());
+        Ok(report)
     }
 
     /// Emit a CDC record without invalidating the result cache.
