@@ -13,14 +13,39 @@ impl RedDBServer {
         } = request;
 
         match self.query_use_cases().execute(ExecuteQueryInput { query }) {
-            Ok(result) => json_response(
-                200,
-                crate::presentation::query_result_json::runtime_query_json(
-                    &result,
-                    &entity_types,
-                    &capabilities,
-                ),
-            ),
+            Ok(result) => {
+                // PLAN.md Phase 11.4 — when the operator picked a
+                // commit policy that requires replica acks (`ack_n`),
+                // block until the configured count of replicas have
+                // ack'd the write's LSN. Reads short-circuit
+                // (statement_type=="select"), so SELECT latency is
+                // unaffected. The helper itself is a no-op when
+                // policy is `Local` (the default) or when the
+                // statement isn't a mutation.
+                let is_mutation = matches!(
+                    result.statement_type,
+                    "insert" | "update" | "delete"
+                );
+                if is_mutation {
+                    let post_lsn = self.runtime.cdc_current_lsn();
+                    if let Err(err) = self.runtime.enforce_commit_policy(post_lsn) {
+                        // Only fired when RED_COMMIT_FAIL_ON_TIMEOUT=true
+                        // — operator opted into hard-blocking. 504
+                        // is the right code: the local write
+                        // succeeded, but the configured durability
+                        // contract didn't.
+                        return json_error(504, err.to_string());
+                    }
+                }
+                json_response(
+                    200,
+                    crate::presentation::query_result_json::runtime_query_json(
+                        &result,
+                        &entity_types,
+                        &capabilities,
+                    ),
+                )
+            }
             Err(err) => json_error(400, err.to_string()),
         }
     }
