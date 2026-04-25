@@ -274,13 +274,56 @@ fn configure_remote_backend_from_env(options: &mut RedDBOptions) {
                 options.remote_key = Some(key);
             }
         }
+        // Generic HTTP backend (PLAN.md Phase 2.3). Maximum
+        // portability: any service exposing PUT/GET/DELETE serves
+        // as a backup target. Optional auth via *_FILE secret
+        // path keeps the token out of the env.
+        "http" => {
+            let base_url = match env_nonempty("RED_HTTP_BACKEND_URL")
+                .or_else(|| env_nonempty("REDDB_HTTP_BACKEND_URL"))
+            {
+                Some(u) => u,
+                None => {
+                    tracing::warn!(
+                        "RED_BACKEND=http requires RED_HTTP_BACKEND_URL — backend disabled"
+                    );
+                    return;
+                }
+            };
+            let prefix = env_nonempty("RED_HTTP_BACKEND_PREFIX")
+                .or_else(|| env_nonempty("REDDB_HTTP_BACKEND_PREFIX"))
+                .unwrap_or_default();
+            let auth_header =
+                if let Some(path) = env_nonempty("RED_HTTP_BACKEND_AUTH_HEADER_FILE")
+                    .or_else(|| env_nonempty("REDDB_HTTP_BACKEND_AUTH_HEADER_FILE"))
+                {
+                    std::fs::read_to_string(&path)
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                } else {
+                    env_nonempty("RED_HTTP_BACKEND_AUTH_HEADER")
+                        .or_else(|| env_nonempty("REDDB_HTTP_BACKEND_AUTH_HEADER"))
+                };
+
+            let mut config =
+                crate::storage::backend::HttpBackendConfig::new(base_url).with_prefix(prefix);
+            if let Some(auth) = auth_header {
+                config = config.with_auth_header(auth);
+            }
+            options.remote_backend =
+                Some(Arc::new(crate::storage::backend::HttpBackend::new(config)));
+            options.remote_key = env_nonempty("RED_REMOTE_KEY")
+                .or_else(|| env_nonempty("REDDB_REMOTE_KEY"))
+                .or_else(|| Some("clusters/dev/data.rdb".to_string()));
+        }
         // `none` is the explicit standalone — no remote, no backup
         // pipeline. Boot never blocks on network reachability.
         "none" | "" => {}
         other => {
             tracing::warn!(
                 backend = %other,
-                "unknown RED_BACKEND value — supported: s3 | fs | none (http coming in Phase 2.3)"
+                "unknown RED_BACKEND value — supported: s3 | fs | http | none"
             );
         }
     }

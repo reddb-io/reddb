@@ -61,6 +61,106 @@ impl RedDBServer {
         }
     }
 
+    /// `POST /admin/restore` — operator-triggered restore from the
+    /// configured remote backend (PLAN.md Phase 3.2). Refuses unless
+    /// the runtime is read_only / replica so live writes can't race
+    /// the swap. Body fields are optional:
+    /// `{"to_lsn": u64, "to_timestamp_ms": u64, "snapshot_id": str}`.
+    /// Empty body restores to latest.
+    pub(crate) fn handle_admin_restore(&self, body: Vec<u8>) -> HttpResponse {
+        if !self.runtime.write_gate().is_read_only() {
+            return json_error(
+                409,
+                "POST /admin/restore requires the runtime to be read_only or replica-role; \
+                 toggle via RED_READONLY=true or POST /admin/readonly first",
+            );
+        }
+        let db = self.runtime.db();
+        let Some(backend) = db.options().remote_backend.clone() else {
+            return json_error(412, "no remote backend configured (RED_BACKEND=none)");
+        };
+        let Some(local_path) = db.path().map(|p| p.to_path_buf()) else {
+            return json_error(412, "in-memory runtime cannot be restored from remote");
+        };
+        let snapshot_prefix = db.options().default_snapshot_prefix();
+        let wal_prefix = db.options().default_wal_archive_prefix();
+        let target_time_ms = if body.is_empty() {
+            0u64
+        } else {
+            match crate::serde_json::from_slice::<crate::serde_json::Value>(&body) {
+                Ok(v) => v
+                    .get("to_timestamp_ms")
+                    .and_then(|n| n.as_u64())
+                    .or_else(|| {
+                        v.get("to_timestamp")
+                            .and_then(|n| n.as_u64())
+                            .map(|s| s.saturating_mul(1000))
+                    })
+                    .unwrap_or(0),
+                Err(err) => return json_error(400, format!("invalid JSON body: {err}")),
+            }
+        };
+        let recovery = crate::storage::wal::PointInTimeRecovery::new(
+            backend,
+            snapshot_prefix,
+            wal_prefix,
+        );
+        match recovery.restore_to(target_time_ms, &local_path) {
+            Ok(report) => {
+                let mut object = Map::new();
+                object.insert("ok".to_string(), JsonValue::Bool(true));
+                object.insert(
+                    "snapshot_used".to_string(),
+                    JsonValue::Number(report.snapshot_used as f64),
+                );
+                object.insert(
+                    "wal_segments_replayed".to_string(),
+                    JsonValue::Number(report.wal_segments_replayed as f64),
+                );
+                object.insert(
+                    "records_applied".to_string(),
+                    JsonValue::Number(report.records_applied as f64),
+                );
+                object.insert(
+                    "recovered_to_lsn".to_string(),
+                    JsonValue::Number(report.recovered_to_lsn as f64),
+                );
+                object.insert(
+                    "recovered_to_time".to_string(),
+                    JsonValue::Number(report.recovered_to_time as f64),
+                );
+                json_response(200, JsonValue::Object(object))
+            }
+            Err(err) => json_error(500, err.to_string()),
+        }
+    }
+
+    /// `POST /admin/backup` — operator-triggered backup, alias of
+    /// `/backup/trigger` placed under the universal `/admin/*`
+    /// namespace per PLAN.md Phase 3.3.
+    pub(crate) fn handle_admin_backup(
+        &self,
+        _query: &std::collections::BTreeMap<String, String>,
+    ) -> HttpResponse {
+        match self.runtime.trigger_backup() {
+            Ok(result) => {
+                let mut object = Map::new();
+                object.insert("ok".to_string(), JsonValue::Bool(true));
+                object.insert(
+                    "snapshot_id".to_string(),
+                    JsonValue::Number(result.snapshot_id as f64),
+                );
+                object.insert("uploaded".to_string(), JsonValue::Bool(result.uploaded));
+                object.insert(
+                    "duration_ms".to_string(),
+                    JsonValue::Number(result.duration_ms as f64),
+                );
+                json_response(200, JsonValue::Object(object))
+            }
+            Err(err) => json_error(500, err.to_string()),
+        }
+    }
+
     /// `POST /admin/drain` — flip to Draining phase. Subsequent
     /// `WriteGate`-checked writes will be rejected until shutdown
     /// completes or another phase override re-enables Ready.

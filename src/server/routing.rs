@@ -63,6 +63,9 @@ impl RedDBServer {
             ("GET", "/health/startup") => self.handle_health_startup(),
             ("POST", "/admin/shutdown") => self.handle_admin_shutdown(),
             ("POST", "/admin/drain") => self.handle_admin_drain(),
+            // PLAN.md Phase 3.2 / 3.3 — admin restore + backup.
+            ("POST", "/admin/restore") => self.handle_admin_restore(body),
+            ("POST", "/admin/backup") => self.handle_admin_backup(&query),
 
             ("GET", "/health") => {
                 let report = self.native_use_cases().health();

@@ -26,6 +26,7 @@
 
 #[cfg(feature = "backend-d1")]
 pub mod d1;
+pub mod http;
 pub mod local;
 #[cfg(feature = "backend-s3")]
 pub mod s3;
@@ -92,6 +93,7 @@ pub trait RemoteBackend: Send + Sync {
 
 #[cfg(feature = "backend-d1")]
 pub use d1::{D1Backend, D1Config};
+pub use http::{HttpBackend, HttpBackendConfig};
 pub use local::LocalBackend;
 #[cfg(feature = "backend-s3")]
 pub use s3::{S3Backend, S3Config};
