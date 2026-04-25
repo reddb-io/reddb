@@ -396,11 +396,7 @@ impl RedDBRuntime {
                     for row in &effective_rows {
                         if let Some(Value::Integer(n) | Value::BigInt(n)) = row.get(idx) {
                             if *n >= 0 {
-                                let _ = self
-                                    .inner
-                                    .db
-                                    .hypertables()
-                                    .route(&query.table, *n as u64);
+                                let _ = self.inner.db.hypertables().route(&query.table, *n as u64);
                             }
                         } else if let Some(Value::UnsignedInteger(n)) = row.get(idx) {
                             let _ = self.inner.db.hypertables().route(&query.table, *n);
@@ -828,13 +824,30 @@ impl RedDBRuntime {
         let effective_filter = effective_update_filter(query);
         let compiled_plan = self.compile_update_plan(query)?;
         let mut touched_ids: Vec<EntityId> = Vec::new();
+        let manager = store
+            .get_collection(&query.table)
+            .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
+        let table_name = query.table.as_str();
+        let compiled_effective_filter =
+            effective_filter
+                .as_ref()
+                .map(|filter| match manager.column_schema() {
+                    Some(schema) => query_exec::CompiledEntityFilter::compile_with_schema(
+                        filter, table_name, table_name, &schema,
+                    ),
+                    None => {
+                        query_exec::CompiledEntityFilter::compile(filter, table_name, table_name)
+                    }
+                });
+        // The compiled fallback path intentionally does not receive `db`; keep
+        // db-dependent filters on the legacy evaluator to preserve semantics.
+        let compiled_effective_filter = compiled_effective_filter
+            .as_ref()
+            .filter(|compiled| !compiled.has_fallback());
 
         // ── FAST PATH: UPDATE ... WHERE _entity_id = N ──
         // Direct entity lookup instead of full collection scan.
         if let Some(entity_id) = query_exec::extract_entity_id_from_filter(&effective_filter) {
-            let manager = store
-                .get_collection(&query.table)
-                .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
             if let Some(entity) = manager.get(EntityId::new(entity_id)) {
                 let assignments =
                     self.materialize_update_assignments_for_entity(query, &entity, &compiled_plan)?;
@@ -884,21 +897,23 @@ impl RedDBRuntime {
                         touched_ids,
                     ));
                 }
-                let manager = store
-                    .get_collection(&query.table)
-                    .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
                 let mut affected: u64 = 0;
-                let table_name = query.table.as_str();
                 for chunk in entity_ids.chunks(UPDATE_APPLY_CHUNK_SIZE) {
                     let mut applied_chunk = Vec::with_capacity(chunk.len());
                     for entity in manager.get_many(chunk).into_iter().flatten() {
-                        if !query_exec::evaluate_entity_filter_with_db(
-                            Some(db.as_ref()),
-                            &entity,
-                            filter,
-                            table_name,
-                            table_name,
-                        ) {
+                        let matches_filter =
+                            if let Some(compiled_filter) = compiled_effective_filter {
+                                compiled_filter.evaluate(&entity)
+                            } else {
+                                query_exec::evaluate_entity_filter_with_db(
+                                    Some(db.as_ref()),
+                                    &entity,
+                                    filter,
+                                    table_name,
+                                    table_name,
+                                )
+                            };
+                        if !matches_filter {
                             continue;
                         }
                         let assignments = self.materialize_update_assignments_for_entity(
@@ -954,21 +969,23 @@ impl RedDBRuntime {
                         touched_ids,
                     ));
                 }
-                let manager = store
-                    .get_collection(&query.table)
-                    .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
                 let mut affected: u64 = 0;
-                let table_name = query.table.as_str();
                 for chunk in entity_ids.chunks(UPDATE_APPLY_CHUNK_SIZE) {
                     let mut applied_chunk = Vec::with_capacity(chunk.len());
                     for entity in manager.get_many(chunk).into_iter().flatten() {
-                        if !query_exec::evaluate_entity_filter_with_db(
-                            Some(db.as_ref()),
-                            &entity,
-                            filter,
-                            table_name,
-                            table_name,
-                        ) {
+                        let matches_filter =
+                            if let Some(compiled_filter) = compiled_effective_filter {
+                                compiled_filter.evaluate(&entity)
+                            } else {
+                                query_exec::evaluate_entity_filter_with_db(
+                                    Some(db.as_ref()),
+                                    &entity,
+                                    filter,
+                                    table_name,
+                                    table_name,
+                                )
+                            };
+                        if !matches_filter {
                             continue;
                         }
                         let assignments = self.materialize_update_assignments_for_entity(
@@ -1004,15 +1021,10 @@ impl RedDBRuntime {
             }
         }
 
-        let manager = store
-            .get_collection(&query.table)
-            .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
-
         // Collect matching entity IDs first while holding only read locks, then
         // fetch/apply in bounded chunks so bulk UPDATEs don't clone the whole
         // matching set at once.
         let mut ids_to_update = Vec::new();
-        let table_name = query.table.as_str();
         if let Some(ref filter) = effective_filter {
             let mut owned_zone_preds = Vec::new();
             query_exec::extract_zone_predicates(filter, &mut owned_zone_preds);
@@ -1046,13 +1058,18 @@ impl RedDBRuntime {
                 if !crate::runtime::impl_core::entity_visible_under_current_snapshot(entity) {
                     return true;
                 }
-                if query_exec::evaluate_entity_filter_with_db(
-                    Some(db.as_ref()),
-                    entity,
-                    filter,
-                    table_name,
-                    table_name,
-                ) {
+                let matches_filter = if let Some(compiled_filter) = compiled_effective_filter {
+                    compiled_filter.evaluate(entity)
+                } else {
+                    query_exec::evaluate_entity_filter_with_db(
+                        Some(db.as_ref()),
+                        entity,
+                        filter,
+                        table_name,
+                        table_name,
+                    )
+                };
+                if matches_filter {
                     ids_to_update.push(entity.id);
                 }
                 true
@@ -2566,4 +2583,49 @@ fn merge_dotted_tenant(current: Value, tail: &str, tenant_id: &str) -> RedDBResu
         ))
     })?;
     Ok(Value::Json(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::storage::schema::Value;
+    use crate::{RedDBOptions, RedDBRuntime};
+
+    #[test]
+    fn update_where_id_in_with_hash_index_updates_expected_rows() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE TABLE users (id INT, score INT)")
+            .unwrap();
+        for id in 0..5 {
+            rt.execute_query(&format!("INSERT INTO users (id, score) VALUES ({id}, 0)"))
+                .unwrap();
+        }
+        rt.execute_query("CREATE INDEX idx_id ON users (id) USING HASH")
+            .unwrap();
+
+        let updated = rt
+            .execute_query("UPDATE users SET score = 42 WHERE id IN (1,3,4)")
+            .unwrap();
+        assert_eq!(updated.affected_rows, 3);
+
+        let selected = rt
+            .execute_query("SELECT id, score FROM users ORDER BY id")
+            .unwrap();
+        let scores: Vec<(i64, i64)> = selected
+            .result
+            .records
+            .iter()
+            .map(|record| {
+                let id = match record.get("id").unwrap() {
+                    Value::Integer(value) => *value,
+                    other => panic!("expected integer id, got {other:?}"),
+                };
+                let score = match record.get("score").unwrap() {
+                    Value::Integer(value) => *value,
+                    other => panic!("expected integer score, got {other:?}"),
+                };
+                (id, score)
+            })
+            .collect();
+        assert_eq!(scores, vec![(0, 0), (1, 42), (2, 0), (3, 42), (4, 42)]);
+    }
 }

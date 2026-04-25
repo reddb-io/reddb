@@ -476,11 +476,8 @@ impl SegmentManager {
                 const { std::cell::Cell::new(Vec::new()) };
         }
 
-        let mut remaining: Vec<usize> =
-            REMAINING_SCRATCH.with(|cell| cell.take());
+        let mut remaining: Vec<usize> = REMAINING_SCRATCH.with(|cell| cell.take());
         remaining.clear();
-        remaining.reserve(ids.len());
-        remaining.extend(0..ids.len());
 
         if let Some(growing_arc) = self.growing.read().as_ref() {
             let growing = if let Some(g) = growing_arc.try_read() {
@@ -488,14 +485,16 @@ impl SegmentManager {
             } else {
                 growing_arc.read()
             };
-            remaining.retain(|&i| {
-                if let Some(entity) = growing.get(ids[i]) {
+            for (i, id) in ids.iter().enumerate() {
+                if let Some(entity) = growing.get(*id) {
                     f(i, entity);
-                    false
                 } else {
-                    true
+                    remaining.push(i);
                 }
-            });
+            }
+        } else {
+            remaining.reserve(ids.len());
+            remaining.extend(0..ids.len());
         }
 
         if !remaining.is_empty() {

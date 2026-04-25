@@ -249,6 +249,61 @@ impl CdcBuffer {
         event_lsn
     }
 
+    /// Emit many same-collection events with one LSN reservation and one
+    /// ring-buffer lock. This is used by bulk insert paths that do not need
+    /// per-row logical-WAL records.
+    pub fn emit_batch_same_collection<I>(
+        &self,
+        operation: ChangeOperation,
+        collection: &str,
+        entity_kind: &str,
+        entity_ids: I,
+    ) where
+        I: IntoIterator<Item = u64>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        let iter = entity_ids.into_iter();
+        let count = iter.len();
+        if count == 0 {
+            return;
+        }
+
+        let first_lsn = self.next_lsn.fetch_add(count as u64, Ordering::AcqRel) + 1;
+        if self.max_size == 0 {
+            return;
+        }
+
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let collection = collection.to_string();
+        let entity_kind = entity_kind.to_string();
+
+        let skip = count.saturating_sub(self.max_size);
+        let kept = count - skip;
+        let mut events = self.events.lock();
+        let overflow = events
+            .len()
+            .saturating_add(kept)
+            .saturating_sub(self.max_size);
+        for _ in 0..overflow {
+            events.pop_front();
+        }
+
+        for (idx, entity_id) in iter.enumerate().skip(skip) {
+            events.push_back(ChangeEvent {
+                lsn: first_lsn + idx as u64,
+                timestamp,
+                operation,
+                collection: collection.clone(),
+                entity_id,
+                entity_kind: entity_kind.clone(),
+                changed_columns: None,
+            });
+        }
+    }
+
     /// Poll for events since a given LSN.
     pub fn poll(&self, since_lsn: u64, max_count: usize) -> Vec<ChangeEvent> {
         let events = self.events.lock();
@@ -361,6 +416,40 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].collection, "b");
         assert_eq!(events[1].collection, "c");
+    }
+
+    #[test]
+    fn test_emit_batch_same_collection_assigns_contiguous_lsns() {
+        let buf = CdcBuffer::new(100);
+        buf.emit(ChangeOperation::Insert, "users", 10, "table");
+        buf.emit_batch_same_collection(ChangeOperation::Insert, "users", "table", [11, 12, 13]);
+
+        let events = buf.poll(0, 10);
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[1].lsn, 2);
+        assert_eq!(events[2].lsn, 3);
+        assert_eq!(events[3].lsn, 4);
+        assert_eq!(events[3].entity_id, 13);
+        assert_eq!(buf.current_lsn(), 4);
+    }
+
+    #[test]
+    fn test_emit_batch_same_collection_respects_ring_size() {
+        let buf = CdcBuffer::new(3);
+        buf.emit_batch_same_collection(ChangeOperation::Insert, "users", "table", [1, 2, 3, 4, 5]);
+
+        let events = buf.poll(0, 10);
+        assert_eq!(events.len(), 3);
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.entity_id)
+                .collect::<Vec<_>>(),
+            vec![3, 4, 5]
+        );
+        assert_eq!(events[0].lsn, 3);
+        assert_eq!(events[2].lsn, 5);
+        assert_eq!(buf.current_lsn(), 5);
     }
 
     #[test]

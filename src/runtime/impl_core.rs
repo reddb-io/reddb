@@ -403,6 +403,79 @@ pub fn capture_current_snapshot() -> Option<SnapshotContext> {
     CURRENT_SNAPSHOT.with(|cell| cell.borrow().clone())
 }
 
+/// Frozen MVCC + identity context for callers that need to reinstall
+/// the same view across thread-local boundaries — long-lived cursors,
+/// background batchers, anything that detaches from the dispatch path
+/// and re-enters later.
+///
+/// The bundle bakes in the three thread-locals every read path
+/// consults: `SnapshotContext` (MVCC visibility), the auth identity
+/// (RLS policy gate), and the tenant id (RLS scope). A FETCH that
+/// reinstalls the bundle sees exactly the same rows as the DECLARE
+/// would have, regardless of writes that landed in between.
+///
+/// Cheap to clone — `SnapshotContext` is a clone of three
+/// `Arc`-backed fields, identity is a `(String, Role)`, tenant is a
+/// `String`. None of these contend with the read path.
+#[derive(Clone, Default)]
+pub struct SnapshotBundle {
+    pub snapshot: Option<SnapshotContext>,
+    pub auth: Option<(String, crate::auth::Role)>,
+    pub tenant: Option<String>,
+}
+
+/// Capture the three read-path thread-locals into a `SnapshotBundle`.
+/// Pairs with `with_snapshot_bundle` for re-entry.
+pub fn snapshot_bundle() -> SnapshotBundle {
+    SnapshotBundle {
+        snapshot: capture_current_snapshot(),
+        auth: current_auth_identity(),
+        tenant: CURRENT_TENANT_ID.with(|cell| cell.borrow().clone()),
+    }
+}
+
+/// Reinstall a captured `SnapshotBundle` for the duration of `f`.
+/// Restores the caller's previous thread-locals on exit (panic-safe via
+/// the explicit guard struct so a panic in `f` cannot leak the
+/// installed identity into the worker's next request).
+pub fn with_snapshot_bundle<R>(bundle: &SnapshotBundle, f: impl FnOnce() -> R) -> R {
+    struct Guard {
+        prev_snapshot: Option<SnapshotContext>,
+        prev_auth: Option<(String, crate::auth::Role)>,
+        prev_tenant: Option<String>,
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let snap = self.prev_snapshot.take();
+            let has = snap.is_some();
+            CURRENT_SNAPSHOT.with(|cell| *cell.borrow_mut() = snap);
+            HAS_SNAPSHOT.with(|c| c.set(has));
+            CURRENT_AUTH_IDENTITY.with(|cell| *cell.borrow_mut() = self.prev_auth.take());
+            CURRENT_TENANT_ID.with(|cell| *cell.borrow_mut() = self.prev_tenant.take());
+        }
+    }
+
+    let _guard = {
+        let prev_snapshot = CURRENT_SNAPSHOT.with(|cell| cell.borrow().clone());
+        let prev_auth = CURRENT_AUTH_IDENTITY.with(|cell| cell.borrow().clone());
+        let prev_tenant = CURRENT_TENANT_ID.with(|cell| cell.borrow().clone());
+
+        match bundle.snapshot.clone() {
+            Some(ctx) => set_current_snapshot(ctx),
+            None => clear_current_snapshot(),
+        }
+        CURRENT_AUTH_IDENTITY.with(|cell| *cell.borrow_mut() = bundle.auth.clone());
+        CURRENT_TENANT_ID.with(|cell| *cell.borrow_mut() = bundle.tenant.clone());
+
+        Guard {
+            prev_snapshot,
+            prev_auth,
+            prev_tenant,
+        }
+    };
+    f()
+}
+
 /// Apply the same visibility rules used by the thread-local helpers
 /// against a caller-provided context. Intended for parallel workers
 /// that captured the snapshot with `capture_current_snapshot()`.
@@ -1008,9 +1081,7 @@ fn strip_explain_prefix(sql: &str) -> Option<&str> {
 /// back to the connection's regular MVCC snapshot. A cheap textual
 /// prefilter skips the parse entirely when the source doesn't
 /// mention `AS OF` / `as of`, keeping the autocommit hot path free.
-fn peek_top_level_as_of(
-    sql: &str,
-) -> Option<crate::application::vcs::AsOfSpec> {
+fn peek_top_level_as_of(sql: &str) -> Option<crate::application::vcs::AsOfSpec> {
     peek_top_level_as_of_with_table(sql).map(|(spec, _)| spec)
 }
 
@@ -1021,7 +1092,11 @@ fn peek_top_level_as_of(
 fn peek_top_level_as_of_with_table(
     sql: &str,
 ) -> Option<(crate::application::vcs::AsOfSpec, Option<String>)> {
-    if !sql.as_bytes().windows(5).any(|w| w.eq_ignore_ascii_case(b"as of")) {
+    if !sql
+        .as_bytes()
+        .windows(5)
+        .any(|w| w.eq_ignore_ascii_case(b"as of"))
+    {
         return None;
     }
     let parsed = crate::storage::query::parser::parse(sql).ok()?;
@@ -1041,9 +1116,7 @@ fn peek_top_level_as_of_with_table(
         crate::storage::query::ast::AsOfClause::Branch(b) => {
             crate::application::vcs::AsOfSpec::Branch(b)
         }
-        crate::storage::query::ast::AsOfClause::Tag(t) => {
-            crate::application::vcs::AsOfSpec::Tag(t)
-        }
+        crate::storage::query::ast::AsOfClause::Tag(t) => crate::application::vcs::AsOfSpec::Tag(t),
         crate::storage::query::ast::AsOfClause::TimestampMs(ts) => {
             crate::application::vcs::AsOfSpec::TimestampMs(ts)
         }
@@ -1295,6 +1368,7 @@ impl RedDBRuntime {
                 foreign_tables: Arc::new(crate::storage::fdw::ForeignTableRegistry::with_builtins()),
                 pending_tombstones: parking_lot::RwLock::new(HashMap::new()),
                 tenant_tables: parking_lot::RwLock::new(HashMap::new()),
+                ddl_epoch: std::sync::atomic::AtomicU64::new(0),
             }),
         };
 
@@ -1978,6 +2052,41 @@ impl RedDBRuntime {
             if let Some(spool) = &primary.logical_wal_spool {
                 let _ = spool.append(record.lsn, &encoded);
             }
+        }
+    }
+
+    pub(crate) fn cdc_emit_insert_batch_no_cache_invalidate(
+        &self,
+        collection: &str,
+        ids: &[EntityId],
+        entity_kind: &str,
+    ) {
+        if ids.is_empty() {
+            return;
+        }
+
+        // Without logical replication, CDC only needs the in-memory event
+        // ring. Reserve all LSNs and push the batch under one mutex instead
+        // of taking the ring lock once per inserted row.
+        if self.inner.db.replication.is_none() {
+            self.inner.cdc.emit_batch_same_collection(
+                crate::replication::cdc::ChangeOperation::Insert,
+                collection,
+                entity_kind,
+                ids.iter().map(|id| id.raw()),
+            );
+            return;
+        }
+
+        // Replication needs one logical-WAL record per entity with the
+        // serialized entity bytes, so keep the existing per-row path.
+        for &id in ids {
+            self.cdc_emit_no_cache_invalidate(
+                crate::replication::cdc::ChangeOperation::Insert,
+                collection,
+                id.raw(),
+                entity_kind,
+            );
         }
     }
 
@@ -4256,6 +4365,18 @@ impl RedDBRuntime {
 
     pub(crate) fn invalidate_plan_cache(&self) {
         self.inner.query_cache.write().clear();
+        self.inner
+            .ddl_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Read the monotonic DDL epoch counter. Bumped by every
+    /// `invalidate_plan_cache` call so prepared-statement holders can
+    /// detect schema drift between PREPARE and EXECUTE.
+    pub fn ddl_epoch(&self) -> u64 {
+        self.inner
+            .ddl_epoch
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub(crate) fn clear_table_planner_stats(&self, table: &str) {

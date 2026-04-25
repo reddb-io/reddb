@@ -467,15 +467,21 @@ pub(crate) fn try_hash_eq_lookup(
             _ => return None,
         };
         let idx = idx_store.find_index_for_column(table, col)?;
-        let mut ids = Vec::new();
+        let mut ids = Vec::with_capacity(values.len());
         for value in values {
-            let bytes = match value {
-                Value::Text(s) => s.as_bytes().to_vec(),
-                Value::Integer(n) => n.to_le_bytes().to_vec(),
-                Value::UnsignedInteger(n) => n.to_le_bytes().to_vec(),
+            let lookup = match value {
+                Value::Text(s) => idx_store.hash_lookup(table, &idx.name, s.as_bytes()),
+                Value::Integer(n) => {
+                    let bytes = n.to_le_bytes();
+                    idx_store.hash_lookup(table, &idx.name, &bytes)
+                }
+                Value::UnsignedInteger(n) => {
+                    let bytes = n.to_le_bytes();
+                    idx_store.hash_lookup(table, &idx.name, &bytes)
+                }
                 _ => return None,
-            };
-            let lookup = idx_store.hash_lookup(table, &idx.name, &bytes).ok()?;
+            }
+            .ok()?;
             ids.extend(lookup);
         }
         return Some(ids);

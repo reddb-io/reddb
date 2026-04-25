@@ -69,6 +69,70 @@ pub const MSG_BULK_STREAM_COMMIT: u8 = 0x0B;
 /// MSG_BULK_OK at COMMIT time.
 pub const MSG_BULK_STREAM_ACK: u8 = 0x0C;
 
+// ── Prepared statements (PG-style Prepare/Execute) ────────────────
+//
+// The plan cache already parameterizes literals and caches by shape
+// key, but every MSG_QUERY_BINARY still pays: (a) the byte-scan
+// `normalize_and_extract` that builds the shape key from text, (b) a
+// `HashMap<String, CachedPlan>` lookup, and (c) Arc clones. On a tight
+// `select_point` loop that's ~50-100µs per call, dominated by the
+// parse/normalize work.
+//
+// Prepared statements skip all three by letting the client allocate a
+// per-connection `stmt_id: u32` at PREPARE time (parse + parameterize
+// once) and later reference the compiled shape by that integer at
+// EXECUTE time (bind + run, no text involved).
+//
+//   client → MSG_PREPARE          [stmt_id u32][sql_len u32][sql]
+//   server → MSG_PREPARED_OK      [stmt_id u32][param_count u16]
+//   client → MSG_EXECUTE_PREPARED [stmt_id u32][nparams u16](val_tag+data)*
+//   server → MSG_RESULT / MSG_ERROR  (same shape as MSG_QUERY_BINARY)
+//   client → MSG_DEALLOCATE       [stmt_id u32]
+//   server → (no response on success; MSG_ERROR on unknown id)
+//
+// State is per-connection. Disconnect drops all prepared statements
+// the connection owned. Clients that don't implement these messages
+// are unaffected — old servers reply `unknown message type` so the
+// client transparently falls back to MSG_QUERY_BINARY.
+pub const MSG_PREPARE: u8 = 0x0D;
+pub const MSG_PREPARED_OK: u8 = 0x0E;
+pub const MSG_EXECUTE_PREPARED: u8 = 0x0F;
+pub const MSG_DEALLOCATE: u8 = 0x10;
+
+// ── Cursors (server-side paginated SELECT) ────────────────────────
+//
+// Large SELECTs force one of two bad choices today: return every row
+// in a single MSG_RESULT frame (O(result) memory on both client and
+// server) or paginate via LIMIT/OFFSET (O(offset) re-scan per page).
+// Cursors cut both: DECLARE runs the query once and parks the result,
+// each FETCH slices the next N rows without re-executing.
+//
+// V1 materialises the full result set at DECLARE and serves FETCH
+// from the buffered Vec. Trades peak memory for scan-once semantics —
+// fine for bench scenarios and the typical range-pagination pattern.
+// Streaming variant with snapshot pinning lands in V2 alongside the
+// MVCC context capture work.
+//
+//   client → MSG_DECLARE_CURSOR [cursor_id u32][sql_len u32][sql]
+//   server → MSG_CURSOR_OK      [cursor_id u32][ncols u16]
+//                               ([col_len u16][col_name])*ncols
+//                               [total_rows u64]
+//   client → MSG_FETCH          [cursor_id u32][max_rows u32]
+//   server → MSG_CURSOR_BATCH   [cursor_id u32][nrows u32][has_more u8]
+//                               ([val_tag u8][val_data])* per row/col
+//   client → MSG_CLOSE_CURSOR   [cursor_id u32]
+//   server → (no response; MSG_ERROR on unknown id)
+//
+// State is per-connection. Disconnect drops every cursor the
+// connection owned. Max 16 open cursors per connection — DECLAREs
+// past the cap return MSG_ERROR so runaway clients can't OOM the
+// server.
+pub const MSG_DECLARE_CURSOR: u8 = 0x11;
+pub const MSG_CURSOR_OK: u8 = 0x12;
+pub const MSG_FETCH: u8 = 0x13;
+pub const MSG_CURSOR_BATCH: u8 = 0x14;
+pub const MSG_CLOSE_CURSOR: u8 = 0x15;
+
 // --- Value type tags ---
 pub const VAL_NULL: u8 = 0;
 pub const VAL_I64: u8 = 1;

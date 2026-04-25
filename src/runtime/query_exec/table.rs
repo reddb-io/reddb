@@ -89,10 +89,12 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                 // path. Expression-shaped sort keys run through
                 // expr_eval, bare columns through resolve_field.
                 if !query.order_by.is_empty() {
-                    super::super::join_filter::sort_records_by_order_by_with_db(
+                    super::super::join_filter::sort_or_top_k_records_with_db(
                         Some(db),
                         &mut records,
                         &query.order_by,
+                        query.offset,
+                        query.limit,
                         outer_alias,
                         outer_alias,
                     );
@@ -1095,10 +1097,12 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         let table_alias = query.alias.as_deref().unwrap_or(table_name);
 
         if !query.order_by.is_empty() {
-            super::super::join_filter::sort_records_by_order_by_with_db(
+            super::super::join_filter::sort_or_top_k_records_with_db(
                 Some(db),
                 &mut records,
                 &query.order_by,
+                query.offset,
+                query.limit,
                 Some(table_name),
                 Some(table_alias),
             );

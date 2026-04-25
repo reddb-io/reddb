@@ -1699,7 +1699,9 @@ impl RedDBRuntime {
         // and `manager.get()` prefers the live segment over the
         // B-tree for reads — so the short-circuit is invisible to
         // callers. See `persist_entities_to_pager_wal_only`.
-        let indexed_cols = self.index_store_ref().indexed_columns_set(collection.as_str());
+        let indexed_cols = self
+            .index_store_ref()
+            .indexed_columns_set(collection.as_str());
         let all_hot = !indexed_cols.is_empty()
             && applied.iter().all(|item| {
                 !item.persist_metadata
@@ -1708,8 +1710,7 @@ impl RedDBRuntime {
                         .iter()
                         .any(|c| indexed_cols.contains(c))
             })
-            || indexed_cols.is_empty()
-                && applied.iter().all(|item| !item.persist_metadata);
+            || indexed_cols.is_empty() && applied.iter().all(|item| !item.persist_metadata);
 
         // Pass `&[&UnifiedEntity]` — no per-entity clone. The SQL UPDATE
         // inner loop hands us `applied` which already owns the post-image
@@ -2145,14 +2146,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         // CDC + cache invalidation — one call, not N (same pattern
         // as MutationEngine::append_batch).
         self.invalidate_result_cache();
-        for &id in &ids {
-            self.cdc_emit_no_cache_invalidate(
-                crate::replication::cdc::ChangeOperation::Insert,
-                &collection,
-                id.raw(),
-                "table",
-            );
-        }
+        self.cdc_emit_insert_batch_no_cache_invalidate(&collection, &ids, "table");
 
         Ok(ids.len())
     }

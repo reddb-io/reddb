@@ -140,9 +140,7 @@ pub(crate) fn try_sorted_index_lookup(
             // typically 2-5× faster than intersecting two single-col
             // id sets because the scan touches exactly the matching
             // range instead of unioning and post-filtering.
-            if let Some(ids) =
-                try_composite_and_lookup(left, right, table, idx_store, limit)
-            {
+            if let Some(ids) = try_composite_and_lookup(left, right, table, idx_store, limit) {
                 return Some(ids);
             }
 
@@ -219,11 +217,7 @@ fn try_composite_and_lookup(
                 let hi = super::super::index_store::value_to_sorted_key(high)?;
                 Some((col, lo, hi))
             }
-            Filter::Compare {
-                field,
-                op,
-                value,
-            } => {
+            Filter::Compare { field, op, value } => {
                 let col = match field {
                     FieldRef::TableColumn { column, .. } => column.clone(),
                     _ => return None,
@@ -238,26 +232,31 @@ fn try_composite_and_lookup(
                     CanonicalKey::Unsigned(f, _) => (*f, false),
                     _ => return None,
                 };
-                let (lo, hi) = match op {
-                    CompareOp::Gt | CompareOp::Ge => {
-                        // Low = pivot (prefix_range uses inclusive bounds
-                        // today; off-by-one on Gt's strict-gt is handled
-                        // by the outer filter re-check).
-                        let hi = if is_signed {
-                            CanonicalKey::Signed(family, i64::MAX)
-                        } else {
-                            CanonicalKey::Unsigned(family, u64::MAX)
-                        };
-                        (pivot, hi)
+                let min = if is_signed {
+                    CanonicalKey::Signed(family, i64::MIN)
+                } else {
+                    CanonicalKey::Unsigned(family, 0)
+                };
+                let max = if is_signed {
+                    CanonicalKey::Signed(family, i64::MAX)
+                } else {
+                    CanonicalKey::Unsigned(family, u64::MAX)
+                };
+                let (lo, hi) = match (op, &pivot) {
+                    (CompareOp::Gt, CanonicalKey::Signed(_, v)) => {
+                        (CanonicalKey::Signed(family, v.checked_add(1)?), max)
                     }
-                    CompareOp::Lt | CompareOp::Le => {
-                        let lo = if is_signed {
-                            CanonicalKey::Signed(family, i64::MIN)
-                        } else {
-                            CanonicalKey::Unsigned(family, 0)
-                        };
-                        (lo, pivot)
+                    (CompareOp::Gt, CanonicalKey::Unsigned(_, v)) => {
+                        (CanonicalKey::Unsigned(family, v.checked_add(1)?), max)
                     }
+                    (CompareOp::Ge, _) => (pivot.clone(), max),
+                    (CompareOp::Lt, CanonicalKey::Signed(_, v)) => {
+                        (min, CanonicalKey::Signed(family, v.checked_sub(1)?))
+                    }
+                    (CompareOp::Lt, CanonicalKey::Unsigned(_, v)) => {
+                        (min, CanonicalKey::Unsigned(family, v.checked_sub(1)?))
+                    }
+                    (CompareOp::Le, _) => (min, pivot.clone()),
                     _ => return None,
                 };
                 Some((col, lo, hi))
@@ -266,14 +265,14 @@ fn try_composite_and_lookup(
         }
     };
 
-    let (eq_col, eq_key, rng_col, rng_low, rng_high) = match (extract_eq(left), extract_range(right))
-    {
-        (Some((ec, ek)), Some((rc, rl, rh))) => (ec, ek, rc, rl, rh),
-        _ => match (extract_eq(right), extract_range(left)) {
+    let (eq_col, eq_key, rng_col, rng_low, rng_high) =
+        match (extract_eq(left), extract_range(right)) {
             (Some((ec, ek)), Some((rc, rl, rh))) => (ec, ek, rc, rl, rh),
-            _ => return None,
-        },
-    };
+            _ => match (extract_eq(right), extract_range(left)) {
+                (Some((ec, ek)), Some((rc, rl, rh))) => (ec, ek, rc, rl, rh),
+                _ => return None,
+            },
+        };
 
     let cols = vec![eq_col, rng_col];
     if !idx_store.sorted.has_composite_index(table, &cols) {
@@ -921,6 +920,73 @@ mod tests {
         };
 
         assert!(try_sorted_index_lookup(&filter, "metrics", &idx_store, None).is_none());
+    }
+
+    #[test]
+    fn test_composite_city_age_lookup_matches_filtered_shape() {
+        let idx_store = IndexStore::new();
+        let columns = vec!["city".to_string(), "age".to_string()];
+        let entities = vec![
+            (
+                EntityId::new(1),
+                vec![
+                    ("city".to_string(), Value::text("NYC".to_string())),
+                    ("age".to_string(), Value::Integer(25)),
+                ],
+            ),
+            (
+                EntityId::new(2),
+                vec![
+                    ("city".to_string(), Value::text("LA".to_string())),
+                    ("age".to_string(), Value::Integer(40)),
+                ],
+            ),
+            (
+                EntityId::new(3),
+                vec![
+                    ("city".to_string(), Value::text("NYC".to_string())),
+                    ("age".to_string(), Value::Integer(35)),
+                ],
+            ),
+            (
+                EntityId::new(4),
+                vec![
+                    ("city".to_string(), Value::text("NYC".to_string())),
+                    ("age".to_string(), Value::Integer(45)),
+                ],
+            ),
+            (
+                EntityId::new(5),
+                vec![
+                    ("city".to_string(), Value::text("NYC".to_string())),
+                    ("age".to_string(), Value::Integer(30)),
+                ],
+            ),
+        ];
+        idx_store
+            .sorted
+            .build_composite("users", &columns, &entities);
+
+        let city_eq = Filter::Compare {
+            field: FieldRef::column("users", "city"),
+            op: CompareOp::Eq,
+            value: Value::text("NYC".to_string()),
+        };
+        let age_gt = Filter::Compare {
+            field: FieldRef::column("users", "age"),
+            op: CompareOp::Gt,
+            value: Value::Integer(30),
+        };
+
+        let filter = Filter::And(Box::new(city_eq.clone()), Box::new(age_gt.clone()));
+        let ids = try_sorted_index_lookup(&filter, "users", &idx_store, None)
+            .expect("composite index should resolve city equality + age range");
+        assert_eq!(sort_ids(ids), vec![3, 4]);
+
+        let reversed = Filter::And(Box::new(age_gt), Box::new(city_eq));
+        let ids = try_sorted_index_lookup(&reversed, "users", &idx_store, None)
+            .expect("composite lookup should accept either AND order");
+        assert_eq!(sort_ids(ids), vec![3, 4]);
     }
 
     #[test]

@@ -492,8 +492,7 @@ impl SortedIndexManager {
             index.insert(tuple, *eid);
             count += 1;
         }
-        write_unpoisoned(&self.composite)
-            .insert((collection.to_string(), columns.to_vec()), index);
+        write_unpoisoned(&self.composite).insert((collection.to_string(), columns.to_vec()), index);
         count
     }
 
@@ -545,7 +544,10 @@ impl SortedIndexManager {
         let build_tuple = |fields: &[(String, Value)]| -> Option<Vec<CanonicalKey>> {
             let mut tuple = Vec::with_capacity(columns.len());
             for col in columns {
-                let val = fields.iter().find(|(name, _)| name == col).map(|(_, v)| v)?;
+                let val = fields
+                    .iter()
+                    .find(|(name, _)| name == col)
+                    .map(|(_, v)| v)?;
                 match classify_sorted_value(val) {
                     CanonicalizedValue::Exact(k) => tuple.push(k),
                     CanonicalizedValue::Unsupported => return None,
@@ -604,6 +606,39 @@ impl SortedIndexManager {
             }
             if complete {
                 idx.insert(tuple, entity_id);
+            }
+        }
+    }
+
+    /// Batch insert rows into one composite index. Keeps the registry-level
+    /// batch path from falling through to the single-column BTree branch for
+    /// `(a, b, ...)` indexes.
+    pub fn composite_insert_batch(
+        &self,
+        collection: &str,
+        columns: &[String],
+        rows: &[(EntityId, Vec<(String, Value)>)],
+    ) {
+        let mut guard = write_unpoisoned(&self.composite);
+        let Some(idx) = guard.get_mut(&(collection.to_string(), columns.to_vec())) else {
+            return;
+        };
+
+        for (entity_id, fields) in rows {
+            let mut tuple = Vec::with_capacity(columns.len());
+            let mut complete = true;
+            for col in columns {
+                let val = fields.iter().find(|(name, _)| name == col).map(|(_, v)| v);
+                match val.map(classify_sorted_value) {
+                    Some(CanonicalizedValue::Exact(k)) => tuple.push(k),
+                    _ => {
+                        complete = false;
+                        break;
+                    }
+                }
+            }
+            if complete {
+                idx.insert(tuple, *entity_id);
             }
         }
     }
@@ -1321,12 +1356,18 @@ impl IndexStore {
         // OLTP schema), because the inner `break` keeps string
         // compares short and amortised.
         for idx in &relevant {
+            if matches!(idx.method, IndexMethodKind::BTree) && idx.columns.len() > 1 {
+                self.sorted
+                    .composite_insert_batch(collection, &idx.columns, rows);
+                continue;
+            }
+
             let col = idx.columns.first().map(|s| s.as_str()).unwrap_or("");
             // Hoist the "{name}_hash" auxiliary index name out of
             // the per-row inner loop for BTree indexes. Previously
             // every row paid a fresh `format!()` allocation.
-            let btree_hash_name = matches!(idx.method, IndexMethodKind::BTree)
-                .then(|| format!("{}_hash", idx.name));
+            let btree_hash_name =
+                matches!(idx.method, IndexMethodKind::BTree).then(|| format!("{}_hash", idx.name));
             for (entity_id, fields) in rows {
                 for (field_name, value) in fields {
                     if field_name != col {
@@ -1445,8 +1486,13 @@ impl IndexStore {
             // present. Swap with None-fields on the update side flushes
             // it out cleanly.
             if matches!(idx.method, IndexMethodKind::BTree) && idx.columns.len() > 1 {
-                self.sorted
-                    .composite_entity_update(collection, &idx.columns, entity_id, fields, &[]);
+                self.sorted.composite_entity_update(
+                    collection,
+                    &idx.columns,
+                    entity_id,
+                    fields,
+                    &[],
+                );
                 continue;
             }
 
@@ -1674,6 +1720,68 @@ mod tests {
 
         assert!(err.contains("idx_email"));
         assert!(err.contains("users"));
+    }
+
+    #[test]
+    fn test_index_entity_insert_batch_maintains_composite_btree() {
+        let store = IndexStore::new();
+        let columns = vec!["city".to_string(), "age".to_string()];
+        store
+            .create_index(
+                "idx_city_age",
+                "users",
+                &columns,
+                IndexMethodKind::BTree,
+                false,
+                &[],
+            )
+            .unwrap();
+        store.register(RegisteredIndex {
+            name: "idx_city_age".to_string(),
+            collection: "users".to_string(),
+            columns: columns.clone(),
+            method: IndexMethodKind::BTree,
+            unique: false,
+        });
+
+        let rows = vec![
+            (
+                EntityId::new(1),
+                vec![
+                    ("city".to_string(), Value::text("NYC".to_string())),
+                    ("age".to_string(), Value::Integer(30)),
+                ],
+            ),
+            (
+                EntityId::new(2),
+                vec![
+                    ("city".to_string(), Value::text("LA".to_string())),
+                    ("age".to_string(), Value::Integer(30)),
+                ],
+            ),
+            (
+                EntityId::new(3),
+                vec![
+                    ("city".to_string(), Value::text("NYC".to_string())),
+                    ("age".to_string(), Value::Integer(40)),
+                ],
+            ),
+        ];
+
+        store.index_entity_insert_batch("users", &rows).unwrap();
+
+        let found = store
+            .sorted
+            .composite_prefix_range_lookup(
+                "users",
+                &columns,
+                &[value_to_sorted_key(&Value::text("NYC".to_string())).unwrap()],
+                value_to_sorted_key(&Value::Integer(20)).unwrap(),
+                value_to_sorted_key(&Value::Integer(45)).unwrap(),
+                10,
+            )
+            .unwrap();
+        assert_eq!(ids(&found), vec![1, 3]);
     }
 
     /// Helper that fully provisions a hash index on `users.email` with

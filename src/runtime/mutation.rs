@@ -281,14 +281,8 @@ impl<'rt> MutationEngine<'rt> {
         // Previous code called cdc_emit() per row which triggered
         // invalidate_result_cache() N times — one write-lock acquisition per row.
         self.runtime.invalidate_result_cache();
-        for &id in &ids {
-            self.runtime.cdc_emit_no_cache_invalidate(
-                crate::replication::cdc::ChangeOperation::Insert,
-                &collection,
-                id.raw(),
-                "table",
-            );
-        }
+        self.runtime
+            .cdc_emit_insert_batch_no_cache_invalidate(&collection, &ids, "table");
 
         Ok(MutationResult { ids })
     }

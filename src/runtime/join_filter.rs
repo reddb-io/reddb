@@ -1032,47 +1032,44 @@ pub(super) fn sort_records_by_order_by_with_db(
     }
 
     // Extract sort keys once per record — O(n × k) where k = ORDER BY clauses.
-    // Text columns also get a u64 abbreviated key (first 8 bytes big-endian) so the
-    // comparator short-circuits without touching the heap string in the common case.
-    let mut keyed: Vec<(usize, Vec<SortKey>)> = records
-        .iter()
-        .enumerate()
-        .map(|(i, rec)| {
-            let keys: Vec<SortKey> = order_by
-                .iter()
-                .map(|clause| {
-                    let v = if let Some(ref expr) = clause.expr {
-                        super::expr_eval::evaluate_runtime_expr_with_db(
-                            db,
-                            expr,
-                            rec,
-                            table_name,
-                            table_alias,
-                        )
-                    } else {
-                        resolve_runtime_field(rec, &clause.field, table_name, table_alias)
-                    };
-                    SortKey::new(v)
-                })
-                .collect();
-            (i, keys)
-        })
-        .collect();
+    // Layout: a single flat `Vec<SortKey>` of length n*k where row i's
+    // keys live at `keys_flat[i*k .. (i+1)*k]`. One allocation total
+    // instead of one per row, and the index permutation in `idxs`
+    // stays a contiguous `Vec<usize>` — both vectors are sized exactly
+    // up front so the inner sort never reallocates.
+    let n = records.len();
+    let k = order_by.len();
+    let mut keys_flat: Vec<SortKey> = Vec::with_capacity(n * k);
+    for rec in records.iter() {
+        for clause in order_by.iter() {
+            let v = if let Some(ref expr) = clause.expr {
+                super::expr_eval::evaluate_runtime_expr_with_db(
+                    db, expr, rec, table_name, table_alias,
+                )
+            } else {
+                resolve_runtime_field(rec, &clause.field, table_name, table_alias)
+            };
+            keys_flat.push(SortKey::new(v));
+        }
+    }
+    let mut idxs: Vec<usize> = (0..n).collect();
 
     // Sort by extracted keys — O(n log n).
     // Text: compare abbreviated u64 key first; only fall through to full str::cmp on tie.
     // Non-text: delegate to the existing value comparator as before.
-    keyed.sort_by(|(_, lkeys), (_, rkeys)| {
-        for (clause, (lk, rk)) in order_by.iter().zip(lkeys.iter().zip(rkeys.iter())) {
+    let cmp_keys = |a: usize, b: usize| -> Ordering {
+        let la = a * k;
+        let lb = b * k;
+        for (j, clause) in order_by.iter().enumerate() {
+            let lk = &keys_flat[la + j];
+            let rk = &keys_flat[lb + j];
             let ord = match (&lk.abbrev, &rk.abbrev, &lk.value, &rk.value) {
-                // Both have abbreviated keys: fast u64 compare first
-                (Some(la), Some(ra), Some(Value::Text(ls)), Some(Value::Text(rs))) => {
-                    match la.cmp(ra) {
+                (Some(la_a), Some(ra), Some(Value::Text(ls)), Some(Value::Text(rs))) => {
+                    match la_a.cmp(ra) {
                         Ordering::Equal => ls.as_ref().cmp(rs.as_ref()),
                         other => other,
                     }
                 }
-                // Fallback: full value compare (handles Null, non-text, mixed)
                 _ => compare_runtime_optional_values(
                     lk.value.as_ref(),
                     rk.value.as_ref(),
@@ -1084,11 +1081,166 @@ pub(super) fn sort_records_by_order_by_with_db(
             }
         }
         Ordering::Equal
-    });
+    };
+    idxs.sort_by(|&a, &b| cmp_keys(a, b));
 
     // Reorder records in-place using the sorted index permutation
     let orig: Vec<_> = std::mem::take(records);
-    *records = keyed.into_iter().map(|(i, _)| orig[i].clone()).collect();
+    let mut out = Vec::with_capacity(n);
+    for i in idxs {
+        out.push(orig[i].clone());
+    }
+    *records = out;
+}
+
+/// Whether the `REDDB_DISABLE_TOPK` kill-switch is set. Cached so a
+/// `std::env::var` lookup doesn't land in the per-query hot path once
+/// the binary is warm.
+pub(super) fn topk_disabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var("REDDB_DISABLE_TOPK")
+            .ok()
+            .map(|v| matches!(v.as_str(), "1" | "true" | "on" | "yes"))
+            .unwrap_or(false)
+    })
+}
+
+/// Chooses between full sort and quickselect-based top-k based on
+/// `limit`, `offset`, and the kill-switch. When `limit` is unset or
+/// `records.len()` is already close to `offset + limit`, the heap
+/// overhead of top-k doesn't pay off and we fall through to the
+/// existing sort path. Output is identical in every branch.
+pub(super) fn sort_or_top_k_records_with_db(
+    db: Option<&RedDB>,
+    records: &mut Vec<UnifiedRecord>,
+    order_by: &[OrderByClause],
+    offset: Option<u64>,
+    limit: Option<u64>,
+    table_name: Option<&str>,
+    table_alias: Option<&str>,
+) {
+    if order_by.is_empty() {
+        return;
+    }
+    let effective_k = match (offset, limit) {
+        (_, None) => None,
+        (off, Some(lim)) => Some(off.unwrap_or(0).saturating_add(lim) as usize),
+    };
+    if !topk_disabled() {
+        if let Some(k) = effective_k {
+            // Only take the top-k path when it actually saves work:
+            // n > 2k means quickselect + sort-of-k beats full sort.
+            if k > 0 && records.len() > k.saturating_mul(2) {
+                top_k_records_by_order_by_with_db(
+                    db,
+                    records,
+                    order_by,
+                    k,
+                    table_name,
+                    table_alias,
+                );
+                return;
+            }
+        }
+    }
+    sort_records_by_order_by_with_db(db, records, order_by, table_name, table_alias);
+}
+
+/// Top-K variant of `sort_records_by_order_by_with_db`. For ORDER BY + LIMIT k
+/// with n > k, full O(n log n) sort is wasteful — quickselect picks the
+/// k smallest in O(n) average, then sort only those k. Mirrors the
+/// `select_nth_unstable_by` pattern used by `query_direct`'s
+/// `parse_simple_ordered_complex_select` fast path so semantics stay
+/// identical across code paths.
+///
+/// Output is bit-identical to `sort_records_by_order_by_with_db(...) +
+/// records.truncate(k)` because the comparator used here is a **strict
+/// total order** — ties are broken by original index, so no two records
+/// ever compare Equal and the unstable partition degenerates to stable
+/// semantics.
+pub(super) fn top_k_records_by_order_by_with_db(
+    db: Option<&RedDB>,
+    records: &mut Vec<UnifiedRecord>,
+    order_by: &[OrderByClause],
+    k: usize,
+    table_name: Option<&str>,
+    table_alias: Option<&str>,
+) {
+    if k == 0 {
+        records.clear();
+        return;
+    }
+    if order_by.is_empty() {
+        records.truncate(k);
+        return;
+    }
+    let n = records.len();
+    if n <= k {
+        sort_records_by_order_by_with_db(db, records, order_by, table_name, table_alias);
+        return;
+    }
+
+    // Flat key buffer — see `sort_records_by_order_by_with_db` for the
+    // layout rationale. One allocation of n*kc keys instead of n.
+    let kc = order_by.len();
+    let mut keys_flat: Vec<SortKey> = Vec::with_capacity(n * kc);
+    for rec in records.iter() {
+        for clause in order_by.iter() {
+            let v = if let Some(ref expr) = clause.expr {
+                super::expr_eval::evaluate_runtime_expr_with_db(
+                    db, expr, rec, table_name, table_alias,
+                )
+            } else {
+                resolve_runtime_field(rec, &clause.field, table_name, table_alias)
+            };
+            keys_flat.push(SortKey::new(v));
+        }
+    }
+
+    // Returns Ordering::Less when `lhs` should come before `rhs` in the
+    // final sorted output. Byte-for-byte identical to the loop inside
+    // `sort_records_by_order_by_with_db`.
+    let row_cmp = |a: usize, b: usize| -> Ordering {
+        let la = a * kc;
+        let lb = b * kc;
+        for (j, clause) in order_by.iter().enumerate() {
+            let lk = &keys_flat[la + j];
+            let rk = &keys_flat[lb + j];
+            let ord = match (&lk.abbrev, &rk.abbrev, &lk.value, &rk.value) {
+                (Some(la_a), Some(ra), Some(Value::Text(ls)), Some(Value::Text(rs))) => {
+                    match la_a.cmp(ra) {
+                        Ordering::Equal => ls.as_ref().cmp(rs.as_ref()),
+                        other => other,
+                    }
+                }
+                _ => compare_runtime_optional_values(
+                    lk.value.as_ref(),
+                    rk.value.as_ref(),
+                    clause.nulls_first,
+                ),
+            };
+            if ord != Ordering::Equal {
+                return if clause.ascending { ord } else { ord.reverse() };
+            }
+        }
+        Ordering::Equal
+    };
+
+    let mut idxs: Vec<usize> = (0..n).collect();
+    // Partition k smallest by (row_cmp, idx) — strict total order makes
+    // the unstable partition deterministic and equivalent to stable sort
+    // followed by truncate(k).
+    idxs.select_nth_unstable_by(k - 1, |&a, &b| row_cmp(a, b).then_with(|| a.cmp(&b)));
+    idxs.truncate(k);
+    idxs.sort_by(|&a, &b| row_cmp(a, b).then_with(|| a.cmp(&b)));
+
+    let orig: Vec<_> = std::mem::take(records);
+    let mut out = Vec::with_capacity(k);
+    for i in idxs {
+        out.push(orig[i].clone());
+    }
+    *records = out;
 }
 
 pub(super) fn compare_runtime_optional_values(
@@ -3089,5 +3241,279 @@ mod tests {
             &Value::Integer(-1),
             CompareOp::Gt
         ));
+    }
+
+    // ── Top-K parity tests ───────────────────────────────────────────
+    // Each test asserts `top_k_records_by_order_by_with_db(k)` returns
+    // a result byte-for-byte identical to `sort_records_by_order_by_with_db`
+    // followed by `records.truncate(k)`. Any divergence here is a bug.
+
+    fn rec_i(col: &str, v: i64) -> UnifiedRecord {
+        let mut r = UnifiedRecord::with_capacity(1);
+        r.set(col, Value::Integer(v));
+        r
+    }
+
+    fn rec_f(col: &str, v: f64) -> UnifiedRecord {
+        let mut r = UnifiedRecord::with_capacity(1);
+        r.set(col, Value::Float(v));
+        r
+    }
+
+    fn rec_t(col: &str, v: &str) -> UnifiedRecord {
+        let mut r = UnifiedRecord::with_capacity(1);
+        r.set(col, Value::text(v.to_string()));
+        r
+    }
+
+    fn rec_pair(c1: &str, v1: Value, c2: &str, v2: Value) -> UnifiedRecord {
+        let mut r = UnifiedRecord::with_capacity(2);
+        r.set(c1, v1);
+        r.set(c2, v2);
+        r
+    }
+
+    fn order_by_col(col: &str, asc: bool, nulls_first: bool) -> OrderByClause {
+        OrderByClause {
+            field: FieldRef::TableColumn {
+                table: String::new(),
+                column: col.to_string(),
+            },
+            expr: None,
+            ascending: asc,
+            nulls_first,
+        }
+    }
+
+    fn reference_sort_truncate(
+        mut records: Vec<UnifiedRecord>,
+        ob: &[OrderByClause],
+        k: usize,
+    ) -> Vec<UnifiedRecord> {
+        sort_records_by_order_by_with_db(None, &mut records, ob, None, None);
+        records.truncate(k);
+        records
+    }
+
+    fn topk_via(records: Vec<UnifiedRecord>, ob: &[OrderByClause], k: usize) -> Vec<UnifiedRecord> {
+        let mut v = records;
+        top_k_records_by_order_by_with_db(None, &mut v, ob, k, None, None);
+        v
+    }
+
+    fn extract_i(records: &[UnifiedRecord], col: &str) -> Vec<Option<i64>> {
+        records
+            .iter()
+            .map(|r| match r.values.get(col) {
+                Some(Value::Integer(n)) => Some(*n),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn extract_f(records: &[UnifiedRecord], col: &str) -> Vec<Option<f64>> {
+        records
+            .iter()
+            .map(|r| match r.values.get(col) {
+                Some(Value::Float(n)) => Some(*n),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn extract_t(records: &[UnifiedRecord], col: &str) -> Vec<Option<String>> {
+        records
+            .iter()
+            .map(|r| match r.values.get(col) {
+                Some(Value::Text(s)) => Some(s.as_ref().to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn topk_asc_smaller_k_matches_sort_truncate() {
+        let rows: Vec<_> = [5i64, 3, 8, 1, 9, 4, 7, 2, 6, 0]
+            .iter()
+            .map(|n| rec_i("a", *n))
+            .collect();
+        let ob = vec![order_by_col("a", true, false)];
+        for k in [1usize, 3, 5, 9] {
+            let expected = reference_sort_truncate(rows.clone(), &ob, k);
+            let actual = topk_via(rows.clone(), &ob, k);
+            assert_eq!(extract_i(&actual, "a"), extract_i(&expected, "a"), "k={k}");
+        }
+    }
+
+    #[test]
+    fn topk_desc_matches_sort_truncate() {
+        let rows: Vec<_> = [5i64, 3, 8, 1, 9, 4, 7, 2, 6, 0]
+            .iter()
+            .map(|n| rec_i("a", *n))
+            .collect();
+        let ob = vec![order_by_col("a", false, false)];
+        for k in [1usize, 3, 5, 9] {
+            let expected = reference_sort_truncate(rows.clone(), &ob, k);
+            let actual = topk_via(rows.clone(), &ob, k);
+            assert_eq!(extract_i(&actual, "a"), extract_i(&expected, "a"), "k={k}");
+        }
+    }
+
+    #[test]
+    fn topk_ties_preserve_stable_order() {
+        // Multiple records with the same sort key but distinct secondary
+        // column — stable sort keeps insertion order, top-k must match.
+        let rows = vec![
+            rec_pair("k", Value::Integer(1), "tag", Value::text("a")),
+            rec_pair("k", Value::Integer(2), "tag", Value::text("b")),
+            rec_pair("k", Value::Integer(1), "tag", Value::text("c")),
+            rec_pair("k", Value::Integer(2), "tag", Value::text("d")),
+            rec_pair("k", Value::Integer(1), "tag", Value::text("e")),
+        ];
+        let ob = vec![order_by_col("k", true, false)];
+        for k in [1usize, 2, 3, 4] {
+            let expected = reference_sort_truncate(rows.clone(), &ob, k);
+            let actual = topk_via(rows.clone(), &ob, k);
+            assert_eq!(extract_t(&actual, "tag"), extract_t(&expected, "tag"), "k={k}");
+        }
+    }
+
+    #[test]
+    fn topk_multi_key_mixed_asc_desc() {
+        let rows = vec![
+            rec_pair("a", Value::Integer(1), "b", Value::Integer(10)),
+            rec_pair("a", Value::Integer(2), "b", Value::Integer(5)),
+            rec_pair("a", Value::Integer(1), "b", Value::Integer(30)),
+            rec_pair("a", Value::Integer(2), "b", Value::Integer(25)),
+            rec_pair("a", Value::Integer(1), "b", Value::Integer(20)),
+        ];
+        let ob = vec![
+            order_by_col("a", true, false),
+            order_by_col("b", false, false),
+        ];
+        for k in [1usize, 2, 3, 4] {
+            let expected = reference_sort_truncate(rows.clone(), &ob, k);
+            let actual = topk_via(rows.clone(), &ob, k);
+            assert_eq!(extract_i(&actual, "a"), extract_i(&expected, "a"), "k={k} a");
+            assert_eq!(extract_i(&actual, "b"), extract_i(&expected, "b"), "k={k} b");
+        }
+    }
+
+    #[test]
+    fn topk_nulls_first_and_last() {
+        let rows = vec![
+            rec_i("a", 3),
+            {
+                let mut r = UnifiedRecord::with_capacity(1);
+                r.set("a", Value::Null);
+                r
+            },
+            rec_i("a", 1),
+            {
+                let mut r = UnifiedRecord::with_capacity(1);
+                r.set("a", Value::Null);
+                r
+            },
+            rec_i("a", 2),
+        ];
+        for nulls_first in [false, true] {
+            let ob = vec![order_by_col("a", true, nulls_first)];
+            for k in [1usize, 2, 3, 4] {
+                let expected = reference_sort_truncate(rows.clone(), &ob, k);
+                let actual = topk_via(rows.clone(), &ob, k);
+                let exp_i = extract_i(&expected, "a");
+                let act_i = extract_i(&actual, "a");
+                assert_eq!(act_i, exp_i, "nulls_first={nulls_first} k={k}");
+            }
+        }
+    }
+
+    #[test]
+    fn topk_nan_float_count_and_subset() {
+        // NaN breaks total ordering: both `sort_by` and our quickselect
+        // produce implementation-defined orderings when NaN participates.
+        // The real invariant is "doesn't panic" + "returns k elements
+        // drawn from the input" — verify that much.
+        let rows = vec![
+            rec_f("a", 1.5),
+            rec_f("a", f64::NAN),
+            rec_f("a", 0.5),
+            rec_f("a", f64::NAN),
+            rec_f("a", 2.5),
+        ];
+        let ob = vec![order_by_col("a", true, false)];
+        for k in [1usize, 2, 3, 4, 5] {
+            let actual = topk_via(rows.clone(), &ob, k);
+            assert_eq!(actual.len(), k.min(rows.len()), "k={k}");
+            for rec in &actual {
+                let v = extract_f(std::slice::from_ref(rec), "a").pop().flatten();
+                assert!(
+                    matches!(v, Some(f) if f.is_nan() || [0.5_f64, 1.5, 2.5].contains(&f)),
+                    "k={k} value not from input: {v:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn topk_k_zero_clears() {
+        let rows: Vec<_> = (0..5).map(|n| rec_i("a", n)).collect();
+        let ob = vec![order_by_col("a", true, false)];
+        let got = topk_via(rows, &ob, 0);
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn topk_k_ge_len_full_sorted() {
+        let rows: Vec<_> = [5i64, 3, 8, 1, 9, 4].iter().map(|n| rec_i("a", *n)).collect();
+        let ob = vec![order_by_col("a", true, false)];
+        let expected = reference_sort_truncate(rows.clone(), &ob, 100);
+        let actual = topk_via(rows, &ob, 100);
+        assert_eq!(extract_i(&actual, "a"), extract_i(&expected, "a"));
+    }
+
+    #[test]
+    fn topk_text_abbrev_path_matches_sort() {
+        // Text sort triggers the abbreviated u64 prefix fast path in
+        // both functions — ensures both traverse it identically.
+        let rows: Vec<_> = [
+            "delta", "alpha", "echo", "bravo", "charlie", "foxtrot", "golf",
+        ]
+        .iter()
+        .map(|s| rec_t("a", s))
+        .collect();
+        let ob = vec![order_by_col("a", true, false)];
+        for k in [1usize, 2, 3, 4, 5, 6] {
+            let expected = reference_sort_truncate(rows.clone(), &ob, k);
+            let actual = topk_via(rows.clone(), &ob, k);
+            assert_eq!(extract_t(&actual, "a"), extract_t(&expected, "a"), "k={k}");
+        }
+    }
+
+    #[test]
+    fn topk_property_random_matches_sort() {
+        // Pseudo-random but deterministic — same seed each run so a
+        // failure reproduces. 200 rows × 4 k-values × 2 directions.
+        let mut rows: Vec<UnifiedRecord> = Vec::with_capacity(200);
+        let mut state: u64 = 0x9E3779B97F4A7C15;
+        for _ in 0..200 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let v = (state % 50) as i64; // intentionally high collision rate
+            rows.push(rec_i("a", v));
+        }
+        for asc in [true, false] {
+            let ob = vec![order_by_col("a", asc, false)];
+            for k in [1usize, 10, 50, 100, 199] {
+                let expected = reference_sort_truncate(rows.clone(), &ob, k);
+                let actual = topk_via(rows.clone(), &ob, k);
+                assert_eq!(
+                    extract_i(&actual, "a"),
+                    extract_i(&expected, "a"),
+                    "asc={asc} k={k}"
+                );
+            }
+        }
     }
 }

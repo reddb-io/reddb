@@ -733,6 +733,12 @@ struct RuntimeInner {
     /// piggy-backs on the existing RLS infrastructure: every entry
     /// installs an implicit `col = CURRENT_TENANT()` policy.
     tenant_tables: parking_lot::RwLock<HashMap<String, String>>,
+    /// Monotonic epoch bumped on every DDL / schema-mutating operation
+    /// that calls `invalidate_plan_cache`. Prepared statements capture
+    /// this at PREPARE and re-check at EXECUTE — a mismatch means the
+    /// cached shape may reference dropped or renamed columns and the
+    /// client must re-PREPARE.
+    ddl_epoch: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Clone)]
@@ -791,7 +797,8 @@ pub mod mvcc {
         clear_current_snapshot, clear_current_tenant, current_connection_id, current_tenant,
         entity_visible_under_current_snapshot, entity_visible_with_context,
         set_current_auth_identity, set_current_connection_id, set_current_snapshot,
-        set_current_tenant, SnapshotContext,
+        set_current_tenant, snapshot_bundle, with_snapshot_bundle, SnapshotBundle,
+        SnapshotContext,
     };
 }
 

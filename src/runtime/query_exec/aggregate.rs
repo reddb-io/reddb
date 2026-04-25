@@ -76,13 +76,11 @@ pub(crate) fn execute_aggregate_query(
 ) -> RedDBResult<UnifiedResult> {
     validate_aggregate_projection_shape(query)?;
 
-    // Fast path — SELECT <col>, COUNT(*) FROM t GROUP BY <col>
-    // parallelised across segments via rayon. Skips the full
-    // HashMap<Vec<GroupKeyPart>, AggregateGroup> materialisation that
-    // the generic aggregate loop needs; emits one count per distinct
-    // key value. Returns None for anything that doesn't match the
-    // narrow shape (other agg funcs, HAVING, OFFSET, WHERE, multi-col).
-    if let Some(result) = try_execute_parallel_single_col_count(db, query)? {
+    // Fast path — SELECT <col>, COUNT/SUM/AVG(...) FROM t GROUP BY <col>
+    // parallelised across segments via rayon. This is the mini-duel
+    // aggregate_group shape and avoids the generic Vec<GroupKeyPart> +
+    // spill-capable accumulator for low-cardinality group scans.
+    if let Some(result) = try_execute_parallel_single_col_numeric_aggs(db, query)? {
         return Ok(result);
     }
 
@@ -2623,19 +2621,22 @@ mod agg_spill_codec {
     }
 }
 
-// ── Fast path — parallel single-column COUNT(*) GROUP BY ──────────────────
+// ── Fast path — parallel single-column numeric GROUP BY ───────────────────
 //
-// Serves queries shaped exactly as:
-//   SELECT <col>, COUNT(*) FROM <table> GROUP BY <col>
-// with no WHERE, HAVING, ORDER BY, LIMIT, OFFSET, or extra projections.
+// Serves queries shaped as:
+//   SELECT <col>, COUNT(*), AVG(<num_col>), SUM(<num_col>)
+//   FROM <table> GROUP BY <col> [ORDER BY <col>]
+// with no WHERE, HAVING, LIMIT, OFFSET, or extra projections.
 //
-// Wins two ways versus the generic loop in `execute_aggregate_query`:
-//   1. No `Vec<Value>` / `Vec<GroupKeyPart>` allocation per row — the
-//      per-thread accumulator is `HashMap<SingleGroupKey, u64>`.
-//   2. Segments are folded in parallel via `SegmentManager::fold_entities_parallel`.
+// Wins three ways versus the generic loop in `execute_aggregate_query`:
+//   1. No `Vec<Value>` / `Vec<GroupKeyPart>` allocation per row — each worker
+//      groups by `SingleGroupKey` directly.
+//   2. Numeric aggregate slots are plain Vec<f64>/Vec<u64>, not the full
+//      general-purpose slotted state with spill codecs.
+//   3. Segments are folded in parallel via `SegmentManager::fold_entities_parallel`.
 //
-// Returns `Ok(None)` when the query doesn't fit — caller falls through
-// to the generic path. Returns `Ok(Some(result))` when served.
+// Returns `Ok(None)` when the query doesn't fit or runtime values need the
+// generic key/value semantics.
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum SingleGroupKey {
     Null,
@@ -2668,13 +2669,107 @@ impl SingleGroupKey {
     }
 }
 
-fn try_execute_parallel_single_col_count(
+struct FastEntityAccessor {
+    name: String,
+    schema_idx: Option<u16>,
+    fallback: super::filter_compiled::EntityFieldKind,
+}
+
+impl FastEntityAccessor {
+    fn get_value<'a>(
+        &'a self,
+        entity: &'a crate::storage::unified::entity::UnifiedEntity,
+    ) -> Option<std::borrow::Cow<'a, Value>> {
+        if let Some(idx) = self.schema_idx {
+            if let Some(row) = entity.data.as_row() {
+                if row.named.is_none()
+                    && row
+                        .schema
+                        .as_ref()
+                        .and_then(|schema| schema.get(idx as usize))
+                        .is_some_and(|name| name == &self.name)
+                {
+                    if let Some(value) = row.columns.get(idx as usize) {
+                        return Some(std::borrow::Cow::Borrowed(value));
+                    }
+                }
+            }
+        }
+
+        super::filter_compiled::resolve_kind(&self.fallback, entity)
+    }
+}
+
+enum FastAggOutput {
+    Group {
+        output_name: String,
+    },
+    CountStar {
+        output_name: String,
+    },
+    Sum {
+        output_name: String,
+        slot: usize,
+        accessor: FastEntityAccessor,
+    },
+    Avg {
+        output_name: String,
+        slot: usize,
+        accessor: FastEntityAccessor,
+    },
+}
+
+impl FastAggOutput {
+    fn output_name(&self) -> &str {
+        match self {
+            Self::Group { output_name }
+            | Self::CountStar { output_name }
+            | Self::Sum { output_name, .. }
+            | Self::Avg { output_name, .. } => output_name,
+        }
+    }
+}
+
+struct FastNumericGroupState {
+    rows: u64,
+    sums: Vec<f64>,
+    counts: Vec<u64>,
+}
+
+impl FastNumericGroupState {
+    fn new(numeric_slots: usize) -> Self {
+        Self {
+            rows: 0,
+            sums: vec![0.0; numeric_slots],
+            counts: vec![0; numeric_slots],
+        }
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.rows += other.rows;
+        for (idx, value) in other.sums.into_iter().enumerate() {
+            if let Some(sum) = self.sums.get_mut(idx) {
+                *sum += value;
+            }
+        }
+        for (idx, value) in other.counts.into_iter().enumerate() {
+            if let Some(count) = self.counts.get_mut(idx) {
+                *count += value;
+            }
+        }
+    }
+}
+
+struct FastNumericGroupAccumulator {
+    groups: std::collections::HashMap<SingleGroupKey, FastNumericGroupState>,
+    unsupported_value: bool,
+}
+
+fn try_execute_parallel_single_col_numeric_aggs(
     db: &RedDB,
     query: &TableQuery,
 ) -> RedDBResult<Option<UnifiedResult>> {
-    // Reject any shape we don't handle.
-    if !query.order_by.is_empty()
-        || query.limit.is_some()
+    if query.limit.is_some()
         || query.offset.is_some()
         || query.filter.is_some()
         || query.where_expr.is_some()
@@ -2689,47 +2784,15 @@ fn try_execute_parallel_single_col_count(
         return Ok(None);
     }
     let projections = effective_table_projections(query);
-    if projections.len() != 2 {
+    if projections.len() < 2 {
         return Ok(None);
     }
 
-    // Extract the single GROUP BY column name.
     let group_col = match &group_exprs[0] {
         Expr::Column {
             field: FieldRef::TableColumn { column, .. },
             ..
         } => column.clone(),
-        _ => return Ok(None),
-    };
-
-    // Projections must be exactly: [<group_col>, COUNT(*)].
-    let proj_is_group_col = |p: &Projection| -> bool {
-        match p {
-            Projection::Column(name) => name == &group_col,
-            Projection::Field(FieldRef::TableColumn { column, .. }, _) => column == &group_col,
-            _ => false,
-        }
-    };
-    let proj_is_count_star = |p: &Projection| -> bool {
-        let Projection::Function(name, args) = p else {
-            return false;
-        };
-        if !base_function_name(name).eq_ignore_ascii_case("COUNT") || args.len() != 1 {
-            return false;
-        }
-        match &args[0] {
-            Projection::All => true,
-            Projection::Column(c) => c == "*" || c == "LIT:*",
-            _ => false,
-        }
-    };
-    let (col_label, count_label) = match (&projections[0], &projections[1]) {
-        (a, b) if proj_is_group_col(a) && proj_is_count_star(b) => {
-            (projection_name(a), projection_name(b))
-        }
-        (a, b) if proj_is_count_star(a) && proj_is_group_col(b) => {
-            (projection_name(b), projection_name(a))
-        }
         _ => return Ok(None),
     };
 
@@ -2740,67 +2803,372 @@ fn try_execute_parallel_single_col_count(
 
     let table_name = query.table.as_str();
     let table_alias = query.alias.as_deref().unwrap_or(table_name);
+    let schema_cols = manager.column_schema();
 
-    // Pre-classify the group column for fast entity access. DocumentPath /
-    // Unknown fall back to the generic loop.
+    let mut outputs = Vec::with_capacity(projections.len());
+    let mut saw_group_projection = false;
+    let mut saw_aggregate_projection = false;
+    let mut numeric_slots = 0usize;
+    for projection in &projections {
+        if projection_matches_group_col(projection, &group_col) {
+            saw_group_projection = true;
+            outputs.push(FastAggOutput::Group {
+                output_name: projection_name(projection),
+            });
+            continue;
+        }
+
+        let Some(output) = build_fast_numeric_agg_output(
+            projection,
+            table_name,
+            table_alias,
+            schema_cols.as_deref().map(|cols| cols.as_slice()),
+            &mut numeric_slots,
+        ) else {
+            return Ok(None);
+        };
+        saw_aggregate_projection = true;
+        outputs.push(output);
+    }
+    if !saw_group_projection || !saw_aggregate_projection {
+        return Ok(None);
+    }
+
+    let order_by = match fast_group_order_by(query, &group_col) {
+        Some(order_by) => order_by,
+        None => return Ok(None),
+    };
+
     let field = FieldRef::TableColumn {
         table: String::new(),
         column: group_col.clone(),
     };
-    let kind = super::filter_compiled::classify_field(&field, table_name, table_alias);
-    if matches!(
-        kind,
-        super::filter_compiled::EntityFieldKind::DocumentPath(_)
-            | super::filter_compiled::EntityFieldKind::Unknown
-    ) {
+    let Some(group_accessor) = build_fast_entity_accessor(
+        &field,
+        table_name,
+        table_alias,
+        schema_cols.as_deref().map(|cols| cols.as_slice()),
+    ) else {
         return Ok(None);
-    }
-    let resolver = super::filter_compiled::EntityColumnResolver { kinds: vec![kind] };
+    };
 
-    // Parallel fold — one HashMap per rayon worker, merged at the end.
-    let groups = manager.fold_entities_parallel(
-        std::collections::HashMap::<SingleGroupKey, u64>::new,
+    let acc = manager.fold_entities_parallel(
+        || FastNumericGroupAccumulator {
+            groups: std::collections::HashMap::new(),
+            unsupported_value: false,
+        },
         |mut local, entity| {
+            if local.unsupported_value {
+                return local;
+            }
             if !crate::runtime::impl_core::entity_visible_under_current_snapshot(entity) {
                 return local;
             }
-            let Some(value_cow) = resolver.get_value(0, entity) else {
+
+            let Some(value_cow) = group_accessor.get_value(entity) else {
+                local.unsupported_value = true;
                 return local;
             };
             let value = value_cow.into_owned();
             let Some(key) = SingleGroupKey::from_value(&value) else {
+                local.unsupported_value = true;
                 return local;
             };
-            *local.entry(key).or_insert(0) += 1;
+            let group = local
+                .groups
+                .entry(key)
+                .or_insert_with(|| FastNumericGroupState::new(numeric_slots));
+            group.rows += 1;
+
+            for output in &outputs {
+                match output {
+                    FastAggOutput::Sum { slot, accessor, .. }
+                    | FastAggOutput::Avg { slot, accessor, .. } => {
+                        let Some(value) = accessor.get_value(entity) else {
+                            continue;
+                        };
+                        let Some(num) = value_to_f64(value.as_ref()) else {
+                            continue;
+                        };
+                        if let Some(sum) = group.sums.get_mut(*slot) {
+                            *sum += num;
+                        }
+                        if let Some(count) = group.counts.get_mut(*slot) {
+                            *count += 1;
+                        }
+                    }
+                    FastAggOutput::Group { .. } | FastAggOutput::CountStar { .. } => {}
+                }
+            }
+
             local
         },
         |mut a, b| {
-            for (k, v) in b {
-                *a.entry(k).or_insert(0) += v;
+            a.unsupported_value |= b.unsupported_value;
+            for (key, state) in b.groups {
+                match a.groups.get_mut(&key) {
+                    Some(existing) => existing.merge(state),
+                    None => {
+                        a.groups.insert(key, state);
+                    }
+                }
             }
             a
         },
     );
 
+    if acc.unsupported_value {
+        return Ok(None);
+    }
+
+    let mut groups: Vec<_> = acc.groups.into_iter().collect();
+    if let Some((ascending, nulls_first)) = order_by {
+        groups.sort_by(|(left, _), (right, _)| {
+            let ord = compare_single_group_key(left, right, nulls_first);
+            if ascending {
+                ord
+            } else {
+                ord.reverse()
+            }
+        });
+    }
+
     let mut records = Vec::with_capacity(groups.len().max(1));
-    for (key, count) in groups {
+    for (key, state) in groups {
+        let group_value = key.clone().into_value();
         let mut record = UnifiedRecord::new();
-        record.set(&col_label, key.clone().into_value());
-        record.set(&group_col, key.into_value());
-        record.set(&count_label, Value::UnsignedInteger(count));
+        record.set(&group_col, group_value.clone());
+        for output in &outputs {
+            match output {
+                FastAggOutput::Group { output_name } => {
+                    record.set(output_name, group_value.clone());
+                }
+                FastAggOutput::CountStar { output_name } => {
+                    record.set(output_name, Value::Integer(state.rows as i64));
+                }
+                FastAggOutput::Sum {
+                    output_name, slot, ..
+                } => {
+                    let value = if state.counts.get(*slot).copied().unwrap_or(0) == 0 {
+                        Value::Null
+                    } else {
+                        Value::Float(state.sums.get(*slot).copied().unwrap_or_default())
+                    };
+                    record.set(output_name, value);
+                }
+                FastAggOutput::Avg {
+                    output_name, slot, ..
+                } => {
+                    let count = state.counts.get(*slot).copied().unwrap_or(0);
+                    let value = if count == 0 {
+                        Value::Null
+                    } else {
+                        Value::Float(
+                            state.sums.get(*slot).copied().unwrap_or_default() / count as f64,
+                        )
+                    };
+                    record.set(output_name, value);
+                }
+            }
+        }
         records.push(record);
     }
 
     Ok(Some(UnifiedResult {
-        columns: vec![col_label, count_label],
+        columns: outputs
+            .iter()
+            .map(|output| output.output_name().to_string())
+            .collect(),
         records,
         stats: Default::default(),
         pre_serialized_json: None,
     }))
 }
 
+fn projection_matches_group_col(projection: &Projection, group_col: &str) -> bool {
+    match projection {
+        Projection::Column(name) => name == group_col,
+        Projection::Alias(name, _) => name == group_col,
+        Projection::Field(FieldRef::TableColumn { column, .. }, _) => column == group_col,
+        _ => false,
+    }
+}
+
+fn build_fast_numeric_agg_output(
+    projection: &Projection,
+    table_name: &str,
+    table_alias: &str,
+    schema_cols: Option<&[String]>,
+    next_numeric_slot: &mut usize,
+) -> Option<FastAggOutput> {
+    let Projection::Function(name, args) = projection else {
+        return None;
+    };
+    let func_name = base_function_name(name).to_uppercase();
+    if func_name == "COUNT" && projection_is_count_star(args) {
+        return Some(FastAggOutput::CountStar {
+            output_name: projection_name(projection),
+        });
+    }
+    if func_name != "SUM" && func_name != "AVG" {
+        return None;
+    }
+
+    let (field, col_name) = projection_simple_field_arg(args)?;
+    let accessor = build_fast_entity_accessor(&field, table_name, table_alias, schema_cols)?;
+    let slot = *next_numeric_slot;
+    *next_numeric_slot += 1;
+    let output_name = aggregate_output_name(projection, &func_name, &col_name);
+    match func_name.as_str() {
+        "SUM" => Some(FastAggOutput::Sum {
+            output_name,
+            slot,
+            accessor,
+        }),
+        "AVG" => Some(FastAggOutput::Avg {
+            output_name,
+            slot,
+            accessor,
+        }),
+        _ => None,
+    }
+}
+
+fn projection_is_count_star(args: &[Projection]) -> bool {
+    if args.len() != 1 {
+        return false;
+    }
+    match &args[0] {
+        Projection::All => true,
+        Projection::Column(value) => value == "*" || value == "LIT:*",
+        _ => false,
+    }
+}
+
+fn projection_simple_field_arg(args: &[Projection]) -> Option<(FieldRef, String)> {
+    if args.len() != 1 {
+        return None;
+    }
+    match &args[0] {
+        Projection::Column(column) if !column.starts_with("LIT:") && column != "*" => Some((
+            FieldRef::TableColumn {
+                table: String::new(),
+                column: column.clone(),
+            },
+            column.clone(),
+        )),
+        Projection::Field(field @ FieldRef::TableColumn { column, .. }, _) => {
+            Some((field.clone(), column.clone()))
+        }
+        _ => None,
+    }
+}
+
+fn build_fast_entity_accessor(
+    field: &FieldRef,
+    table_name: &str,
+    table_alias: &str,
+    schema_cols: Option<&[String]>,
+) -> Option<FastEntityAccessor> {
+    let kind = super::filter_compiled::classify_field(field, table_name, table_alias);
+    if matches!(
+        kind,
+        super::filter_compiled::EntityFieldKind::DocumentPath(_)
+            | super::filter_compiled::EntityFieldKind::Unknown
+    ) {
+        return None;
+    }
+
+    let schema_idx = match (&kind, field) {
+        (
+            super::filter_compiled::EntityFieldKind::RowField(name),
+            FieldRef::TableColumn { table, column },
+        ) if column == name
+            && (table.is_empty() || table == table_name || table == table_alias) =>
+        {
+            schema_cols
+                .and_then(|cols| cols.iter().position(|candidate| candidate == name))
+                .and_then(|idx| u16::try_from(idx).ok())
+        }
+        _ => None,
+    };
+
+    let name = match &kind {
+        super::filter_compiled::EntityFieldKind::RowField(name)
+        | super::filter_compiled::EntityFieldKind::RowFieldFast { name, .. } => name.clone(),
+        _ => field_ref_name(field),
+    };
+
+    Some(FastEntityAccessor {
+        name,
+        schema_idx,
+        fallback: kind,
+    })
+}
+
+fn fast_group_order_by(query: &TableQuery, group_col: &str) -> Option<Option<(bool, bool)>> {
+    if query.order_by.is_empty() {
+        return Some(None);
+    }
+    if query.order_by.len() != 1 {
+        return None;
+    }
+    let clause = &query.order_by[0];
+    if let Some(expr) = &clause.expr {
+        match expr {
+            Expr::Column { field, .. } if field_ref_name(field) == group_col => {}
+            _ => return None,
+        }
+    }
+    if field_ref_name(&clause.field) != group_col {
+        return None;
+    }
+    Some(Some((clause.ascending, clause.nulls_first)))
+}
+
+fn compare_single_group_key(
+    left: &SingleGroupKey,
+    right: &SingleGroupKey,
+    nulls_first: bool,
+) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (left, right) {
+        (SingleGroupKey::Null, SingleGroupKey::Null) => Ordering::Equal,
+        (SingleGroupKey::Null, _) => {
+            if nulls_first {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            }
+        }
+        (_, SingleGroupKey::Null) => {
+            if nulls_first {
+                Ordering::Greater
+            } else {
+                Ordering::Less
+            }
+        }
+        (SingleGroupKey::Bool(a), SingleGroupKey::Bool(b)) => a.cmp(b),
+        (SingleGroupKey::Int(a), SingleGroupKey::Int(b)) => a.cmp(b),
+        (SingleGroupKey::UInt(a), SingleGroupKey::UInt(b)) => a.cmp(b),
+        (SingleGroupKey::Text(a), SingleGroupKey::Text(b)) => a.cmp(b),
+        (a, b) => single_group_key_rank(a).cmp(&single_group_key_rank(b)),
+    }
+}
+
+fn single_group_key_rank(key: &SingleGroupKey) -> u8 {
+    match key {
+        SingleGroupKey::Null => 0,
+        SingleGroupKey::Bool(_) => 1,
+        SingleGroupKey::Int(_) => 2,
+        SingleGroupKey::UInt(_) => 3,
+        SingleGroupKey::Text(_) => 4,
+    }
+}
+
 #[cfg(test)]
 mod parallel_group_by_tests {
+    use crate::storage::schema::Value;
     use crate::{RedDBOptions, RedDBRuntime};
 
     fn mk_runtime() -> RedDBRuntime {
@@ -2850,6 +3218,15 @@ mod parallel_group_by_tests {
         out
     }
 
+    fn number(value: &Value) -> f64 {
+        match value {
+            Value::Integer(n) => *n as f64,
+            Value::UnsignedInteger(n) => *n as f64,
+            Value::Float(n) => *n,
+            other => panic!("expected numeric value, got {other:?}"),
+        }
+    }
+
     #[test]
     fn single_col_count_returns_correct_counts() {
         let rt = mk_runtime();
@@ -2878,6 +3255,45 @@ mod parallel_group_by_tests {
         seed_cities(&rt, 50, &["NYC"]);
         let counts = count_by_city(&rt);
         assert_eq!(counts, vec![("NYC".to_string(), 50)]);
+    }
+
+    #[test]
+    fn single_col_count_avg_sum_ordered_by_group_col() {
+        let rt = mk_runtime();
+        rt.execute_query("CREATE TABLE users (id INT, city TEXT, age INT, score INT)")
+            .unwrap();
+        rt.execute_query("INSERT INTO users (id, city, age, score) VALUES (1, 'NYC', 20, 10)")
+            .unwrap();
+        rt.execute_query("INSERT INTO users (id, city, age, score) VALUES (2, 'LA', 40, 5)")
+            .unwrap();
+        rt.execute_query("INSERT INTO users (id, city, age, score) VALUES (3, 'NYC', 30, 30)")
+            .unwrap();
+        rt.execute_query("INSERT INTO users (id, city, age, score) VALUES (4, 'LA', 20, 15)")
+            .unwrap();
+
+        let r = rt
+            .execute_query(
+                "SELECT city, COUNT(*) AS cnt, AVG(age) AS avg_age, SUM(score) AS sum_score \
+                 FROM users GROUP BY city ORDER BY city",
+            )
+            .expect("aggregate group fast path should return results");
+        assert_eq!(
+            r.result.columns,
+            vec!["city", "cnt", "avg_age", "sum_score"]
+        );
+        assert_eq!(r.result.records.len(), 2);
+
+        let first = &r.result.records[0];
+        assert_eq!(first.get("city"), Some(&Value::text("LA")));
+        assert_eq!(number(first.get("cnt").unwrap()), 2.0);
+        assert_eq!(number(first.get("avg_age").unwrap()), 30.0);
+        assert_eq!(number(first.get("sum_score").unwrap()), 20.0);
+
+        let second = &r.result.records[1];
+        assert_eq!(second.get("city"), Some(&Value::text("NYC")));
+        assert_eq!(number(second.get("cnt").unwrap()), 2.0);
+        assert_eq!(number(second.get("avg_age").unwrap()), 25.0);
+        assert_eq!(number(second.get("sum_score").unwrap()), 40.0);
     }
 
     #[test]
