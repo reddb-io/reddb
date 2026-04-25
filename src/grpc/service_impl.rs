@@ -2450,6 +2450,12 @@ async fn pull_wal_records(
     let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
     let since_lsn = json_usize_field(&payload, "since_lsn").unwrap_or(0) as u64;
     let max_count = json_usize_field(&payload, "max_count").unwrap_or(1000);
+    // PLAN.md Phase 11.4 — caller may identify itself so primary can
+    // track per-replica `last_sent_lsn` and `last_seen_at_unix_ms`.
+    let replica_id = payload
+        .get("replica_id")
+        .and_then(JsonValue::as_str)
+        .map(|s| s.to_string());
 
     let records = if let Some(spool) = &repl.logical_wal_spool {
         spool
@@ -2459,11 +2465,19 @@ async fn pull_wal_records(
         repl.wal_buffer.read_since(since_lsn, max_count)
     };
     let mut entries = Vec::with_capacity(records.len());
+    let mut max_sent_lsn = since_lsn;
     for (lsn, data) in &records {
         let mut entry = crate::json::Map::new();
         entry.insert("lsn".into(), JsonValue::Number(*lsn as f64));
         entry.insert("data".into(), JsonValue::String(hex::encode(data)));
         entries.push(JsonValue::Object(entry));
+        if *lsn > max_sent_lsn {
+            max_sent_lsn = *lsn;
+        }
+    }
+
+    if let Some(id) = &replica_id {
+        repl.note_replica_pull(id, max_sent_lsn);
     }
 
     let mut map = crate::json::Map::new();
@@ -2487,6 +2501,45 @@ async fn pull_wal_records(
     }
 
     Ok(Response::new(json_payload_reply(JsonValue::Object(map))))
+}
+
+/// PLAN.md Phase 11.4 — replica reports applied + durable LSN to the
+/// primary after persisting a WAL batch. JSON payload:
+/// `{"replica_id": "...", "applied_lsn": <u64>, "durable_lsn": <u64>}`.
+/// Idempotent — older LSN values are clamped to the existing maximum.
+async fn ack_replica_lsn(
+    &self,
+    request: Request<JsonPayloadRequest>,
+) -> Result<Response<PayloadReply>, Status> {
+    self.authorize_read(request.metadata())?;
+    let db = self.runtime.db();
+    let repl = db.replication.as_ref().ok_or_else(|| {
+        Status::failed_precondition("this instance is not a replication primary")
+    })?;
+
+    let payload = parse_json_payload_allow_empty(&request.into_inner().payload_json)?;
+    let replica_id = payload
+        .get("replica_id")
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| Status::invalid_argument("missing replica_id"))?
+        .to_string();
+    let applied_lsn = payload
+        .get("applied_lsn")
+        .and_then(JsonValue::as_u64)
+        .ok_or_else(|| Status::invalid_argument("missing applied_lsn"))?;
+    let durable_lsn = payload
+        .get("durable_lsn")
+        .and_then(JsonValue::as_u64)
+        .unwrap_or(applied_lsn);
+
+    repl.ack_replica_lsn(&replica_id, applied_lsn, durable_lsn);
+
+    let mut reply = crate::json::Map::new();
+    reply.insert("ok".into(), JsonValue::Bool(true));
+    reply.insert("replica_id".into(), JsonValue::String(replica_id));
+    reply.insert("applied_lsn".into(), JsonValue::Number(applied_lsn as f64));
+    reply.insert("durable_lsn".into(), JsonValue::Number(durable_lsn as f64));
+    Ok(Response::new(json_payload_reply(JsonValue::Object(reply))))
 }
 
 async fn replication_snapshot(
