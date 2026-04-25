@@ -292,6 +292,10 @@ fn main() {
             }
         }
 
+        "doctor" => {
+            std::process::exit(run_doctor(&result));
+        }
+
         "server" => {
             let json_mode = wants_json(&result.flags);
             let config = build_server_config(&result.flags, None).unwrap_or_else(|err| {
@@ -2368,11 +2372,365 @@ fn post_json_to_http(bind_addr: &str, path: &str, payload: &str) -> Result<Strin
     }
 }
 
+/// PLAN.md Phase 5.5 — barebones GET against the server's HTTP port,
+/// returning the response body. Mirrors `post_json_to_http`'s
+/// hand-rolled approach so the CLI stays free of HTTP-client deps.
+/// Caller passes the `Authorization` header value when present
+/// (post Phase 6.1, /admin/* may require a bearer token).
+fn get_from_http(
+    bind_addr: &str,
+    path: &str,
+    token: Option<&str>,
+) -> Result<(u16, String), String> {
+    let bind_addr = bind_addr
+        .trim()
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
+    let mut stream = TcpStream::connect(bind_addr)
+        .map_err(|err| format!("failed to connect to {bind_addr}: {err}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|err| format!("failed to set read timeout: {err}"))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .map_err(|err| format!("failed to set write timeout: {err}"))?;
+
+    let auth_line = token
+        .map(|t| format!("Authorization: Bearer {t}\r\n"))
+        .unwrap_or_default();
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nHost: {bind_addr}\r\n{auth_line}Connection: close\r\n\r\n",
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|err| format!("failed to write request: {err}"))?;
+
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|err| format!("failed to read response: {err}"))?;
+
+    let status_line = response
+        .lines()
+        .next()
+        .ok_or_else(|| "empty response from server".to_string())?;
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|v| v.parse::<u16>().ok())
+        .ok_or_else(|| format!("invalid response status line: {status_line}"))?;
+    let body = response
+        .split_once("\r\n\r\n")
+        .map(|(_h, b)| b.to_string())
+        .unwrap_or_default();
+    Ok((status, body))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum DoctorSeverity {
+    Ok,
+    Warn,
+    Crit,
+}
+
+impl DoctorSeverity {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Warn => "warn",
+            Self::Crit => "crit",
+        }
+    }
+    fn exit_code(self) -> i32 {
+        match self {
+            Self::Ok => 0,
+            Self::Warn => 1,
+            Self::Crit => 2,
+        }
+    }
+}
+
+struct DoctorCheck {
+    name: &'static str,
+    severity: DoctorSeverity,
+    detail: String,
+}
+
+/// Pull a numeric metric line out of a Prometheus exposition body.
+/// Returns the first match for `metric_name<labels?> <value>`.
+fn parse_prom_metric(body: &str, metric_name: &str) -> Option<f64> {
+    for line in body.lines() {
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        let head = line.split_whitespace().next()?;
+        let name = head.split('{').next().unwrap_or(head);
+        if name == metric_name {
+            return line.split_whitespace().last().and_then(|v| v.parse().ok());
+        }
+    }
+    None
+}
+
+/// PLAN.md Phase 5.5 — `red doctor`: hit /admin/status + /metrics
+/// against a running server, evaluate operator thresholds, print a
+/// rollup, and exit 0/1/2. The check set covers the signals
+/// dashboards alert on (backup age, WAL archive lag, lease state,
+/// replica apply health).
+fn run_doctor(result: &reddb::cli::schema::ParseResult) -> i32 {
+    let json_mode = wants_json(&result.flags);
+    let bind = flag_string(&result.flags, "bind").unwrap_or_else(|| "127.0.0.1:8080".to_string());
+    let token = flag_string(&result.flags, "token")
+        .or_else(|| std::env::var("RED_ADMIN_TOKEN").ok())
+        .filter(|t| !t.trim().is_empty());
+
+    let backup_warn: f64 = flag_string(&result.flags, "backup-age-warn-secs")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(600.0);
+    let backup_crit: f64 = flag_string(&result.flags, "backup-age-crit-secs")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3600.0);
+    let wal_warn: f64 = flag_string(&result.flags, "wal-lag-warn")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1000.0);
+    let wal_crit: f64 = flag_string(&result.flags, "wal-lag-crit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10000.0);
+
+    let mut checks: Vec<DoctorCheck> = Vec::new();
+
+    // 1) Server reachability via /metrics (also catches admin-token
+    // misconfiguration since /metrics is gated when token is set).
+    let metrics = match get_from_http(&bind, "/metrics", token.as_deref()) {
+        Ok((status, body)) if status == 200 => Some(body),
+        Ok((status, _)) => {
+            checks.push(DoctorCheck {
+                name: "reachability",
+                severity: DoctorSeverity::Crit,
+                detail: format!(
+                    "GET /metrics returned HTTP {status} (token mismatch or service down)"
+                ),
+            });
+            None
+        }
+        Err(err) => {
+            checks.push(DoctorCheck {
+                name: "reachability",
+                severity: DoctorSeverity::Crit,
+                detail: format!("connect to {bind} failed: {err}"),
+            });
+            None
+        }
+    };
+
+    // 2) /admin/status JSON.
+    let status_body = get_from_http(&bind, "/admin/status", token.as_deref()).ok();
+    let status_json = status_body
+        .as_ref()
+        .filter(|(s, _)| *s == 200)
+        .and_then(|(_, body)| reddb::serde_json::from_str::<reddb::serde_json::Value>(body).ok());
+    if status_json.is_none() {
+        checks.push(DoctorCheck {
+            name: "admin_status",
+            severity: DoctorSeverity::Warn,
+            detail: "GET /admin/status not parseable; downstream checks rely on /metrics only"
+                .to_string(),
+        });
+    }
+
+    // 3) Backup age.
+    if let Some(body) = &metrics {
+        if let Some(age) = parse_prom_metric(body, "reddb_backup_age_seconds") {
+            let sev = if age >= backup_crit {
+                DoctorSeverity::Crit
+            } else if age >= backup_warn {
+                DoctorSeverity::Warn
+            } else {
+                DoctorSeverity::Ok
+            };
+            checks.push(DoctorCheck {
+                name: "backup_age",
+                severity: sev,
+                detail: format!(
+                    "{age:.0}s since last successful backup (warn={backup_warn}s crit={backup_crit}s)"
+                ),
+            });
+        } else {
+            checks.push(DoctorCheck {
+                name: "backup_age",
+                severity: DoctorSeverity::Warn,
+                detail: "no successful backup recorded yet (reddb_backup_age_seconds absent)"
+                    .to_string(),
+            });
+        }
+    }
+
+    // 4) WAL archive lag.
+    if let Some(body) = &metrics {
+        if let Some(lag) = parse_prom_metric(body, "reddb_wal_archive_lag_records") {
+            let sev = if lag >= wal_crit {
+                DoctorSeverity::Crit
+            } else if lag >= wal_warn {
+                DoctorSeverity::Warn
+            } else {
+                DoctorSeverity::Ok
+            };
+            checks.push(DoctorCheck {
+                name: "wal_archive_lag",
+                severity: sev,
+                detail: format!(
+                    "{lag:.0} records between current LSN and last archived (warn={wal_warn} crit={wal_crit})"
+                ),
+            });
+        }
+    }
+
+    // 5) Writer lease state — `not_held` is critical when the role is
+    // primary (silent split-brain risk). `not_required` is fine.
+    if let Some(json) = &status_json {
+        if let Some(lease) = json.get("writer_lease").and_then(|v| v.as_str()) {
+            let sev = match lease {
+                "not_held" => DoctorSeverity::Crit,
+                _ => DoctorSeverity::Ok,
+            };
+            checks.push(DoctorCheck {
+                name: "writer_lease",
+                severity: sev,
+                detail: format!("lease state: {lease}"),
+            });
+        }
+    }
+
+    // 6) Replica apply health (replica only).
+    if let Some(json) = &status_json {
+        if let Some(health) = json
+            .get("replica")
+            .and_then(|v| v.get("apply_health"))
+            .and_then(|v| v.as_str())
+        {
+            let sev = match health {
+                "ok" | "healthy" | "connecting" => DoctorSeverity::Ok,
+                "stalled_gap" | "divergence" => DoctorSeverity::Crit,
+                _ => DoctorSeverity::Warn,
+            };
+            checks.push(DoctorCheck {
+                name: "replica_apply_health",
+                severity: sev,
+                detail: format!("replica apply state: {health}"),
+            });
+        }
+    }
+
+    // 7) Read-only flag — informational. Surfaces as warn so an
+    // operator that didn't expect it sees it.
+    if let Some(json) = &status_json {
+        if let Some(true) = json.get("read_only").and_then(|v| v.as_bool()) {
+            checks.push(DoctorCheck {
+                name: "read_only",
+                severity: DoctorSeverity::Warn,
+                detail: "instance is read-only; writes will be rejected".to_string(),
+            });
+        }
+    }
+
+    let worst = checks
+        .iter()
+        .map(|c| c.severity)
+        .max()
+        .unwrap_or(DoctorSeverity::Ok);
+
+    if json_mode {
+        let mut buf = String::from("{\"checks\":[");
+        for (i, c) in checks.iter().enumerate() {
+            if i > 0 {
+                buf.push(',');
+            }
+            buf.push_str(&format!(
+                "{{\"name\":\"{}\",\"severity\":\"{}\",\"detail\":\"{}\"}}",
+                json_escape(c.name),
+                c.severity.label(),
+                json_escape(&c.detail)
+            ));
+        }
+        buf.push_str(&format!("],\"worst\":\"{}\"}}", worst.label()));
+        json_ok("doctor", &buf);
+    } else {
+        for c in &checks {
+            let icon = match c.severity {
+                DoctorSeverity::Ok => "[ok]  ",
+                DoctorSeverity::Warn => "[warn]",
+                DoctorSeverity::Crit => "[crit]",
+            };
+            println!("{icon} {} — {}", c.name, c.detail);
+        }
+        println!("\nworst: {}", worst.label());
+    }
+    worst.exit_code()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use std::sync::{Mutex, OnceLock};
+
+    #[test]
+    fn doctor_parses_simple_metric_line() {
+        let body = "\
+# HELP reddb_uptime_seconds Seconds since boot.\n\
+# TYPE reddb_uptime_seconds gauge\n\
+reddb_uptime_seconds 12345.6\n";
+        assert_eq!(
+            parse_prom_metric(body, "reddb_uptime_seconds"),
+            Some(12345.6)
+        );
+    }
+
+    #[test]
+    fn doctor_parses_metric_with_labels() {
+        let body = "\
+# HELP reddb_writer_lease_state ...\n\
+# TYPE reddb_writer_lease_state gauge\n\
+reddb_writer_lease_state{state=\"held\"} 1\n";
+        assert_eq!(
+            parse_prom_metric(body, "reddb_writer_lease_state"),
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    fn doctor_returns_first_match_when_multiple_label_sets() {
+        let body = "\
+reddb_replica_lag_records{replica_id=\"a\"} 100\n\
+reddb_replica_lag_records{replica_id=\"b\"} 250\n";
+        assert_eq!(
+            parse_prom_metric(body, "reddb_replica_lag_records"),
+            Some(100.0)
+        );
+    }
+
+    #[test]
+    fn doctor_misses_unknown_metric() {
+        let body = "reddb_uptime_seconds 1\n";
+        assert_eq!(parse_prom_metric(body, "reddb_does_not_exist"), None);
+    }
+
+    #[test]
+    fn doctor_skips_help_and_type_lines() {
+        let body = "\
+# HELP reddb_uptime_seconds Time since boot.\n\
+# TYPE reddb_uptime_seconds gauge\n";
+        assert_eq!(parse_prom_metric(body, "reddb_uptime_seconds"), None);
+    }
+
+    #[test]
+    fn doctor_severity_orders_ok_warn_crit() {
+        assert!(DoctorSeverity::Ok < DoctorSeverity::Warn);
+        assert!(DoctorSeverity::Warn < DoctorSeverity::Crit);
+        assert_eq!(DoctorSeverity::Ok.exit_code(), 0);
+        assert_eq!(DoctorSeverity::Warn.exit_code(), 1);
+        assert_eq!(DoctorSeverity::Crit.exit_code(), 2);
+    }
 
     fn bool_flag(value: bool) -> FlagValue {
         FlagValue::Bool(value)
