@@ -209,16 +209,6 @@ fn post_create_index_update_keeps_index_in_sync() {
 /// MSG_BULK_INSERT_BINARY_PREVALIDATED via
 /// `create_rows_batch_prevalidated_columnar`. This is the path
 /// `mixed_workload_indexed` exercises.
-///
-/// `#[ignore]`: the index-maintenance hook in
-/// `create_rows_batch_prevalidated_columnar` is in place, but the test
-/// still fails because of a separate entity-store bug — single-row
-/// `bulk_insert` calls land in a growing/sealed segment whose
-/// position-based `flat_entities` lookup (`segment.get(id)` keyed by
-/// `id - base_entity_id`) returns None for ~half the IDs even though
-/// `query_all` (full scan) finds them. Tracked as the
-/// "post-CREATE-INDEX prevalidated entity store consistency" follow-up.
-#[ignore = "blocked on entity-store get-by-id consistency for single-row prevalidated bulk inserts"]
 #[test]
 fn post_create_index_inserts_via_prevalidated_columnar_keeps_index_fresh() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();

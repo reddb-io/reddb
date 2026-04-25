@@ -1154,7 +1154,27 @@ impl GrowingSegment {
                         }
                     }
                 }
-                self.flat_entities.push(entity);
+                // Position-based `flat_entities` access in `get(id)`
+                // assumes IDs are contiguous starting at
+                // `base_entity_id`. When IDs ARE contiguous (the bulk
+                // ingest hot path) this saves a HashMap probe per
+                // lookup. But the global ID counter can jump between
+                // bulk calls — CREATE INDEX, catalog DDL, even other
+                // collections in the same store reserve IDs from the
+                // same allocator. If we blindly `push` a gap entity
+                // its actual position in the Vec no longer matches
+                // `id - base`, and `flat_entities[id - base].id == id`
+                // fails — the entity becomes invisible to `get(id)`.
+                //
+                // Route gap entities into the HashMap fallback
+                // (`self.entities`). `get(id)` already falls through
+                // there when the flat probe misses.
+                let expected = self.base_entity_id + self.flat_entities.len() as u64;
+                if id.raw() == expected {
+                    self.flat_entities.push(entity);
+                } else {
+                    self.entities.insert(id, entity);
+                }
             }
         } else {
             // Fallback to HashMap for non-sequential inserts
