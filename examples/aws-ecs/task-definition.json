@@ -1,0 +1,67 @@
+{
+  "family": "reddb",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "1024",
+  "memory": "2048",
+  "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::ACCOUNT_ID:role/reddb-task-role",
+  "containerDefinitions": [
+    {
+      "name": "reddb",
+      "image": "reddb-benchmark/reddb:latest",
+      "essential": true,
+      "portMappings": [
+        {"containerPort": 8080, "protocol": "tcp"},
+        {"containerPort": 50051, "protocol": "tcp"}
+      ],
+      "stopTimeout": 60,
+      "environment": [
+        {"name": "REDDB_HTTP_BIND_ADDR", "value": "0.0.0.0:8080"},
+        {"name": "REDDB_GRPC_BIND_ADDR", "value": "0.0.0.0:50051"},
+        {"name": "RED_BACKEND", "value": "s3"},
+        {"name": "RED_S3_BUCKET", "value": "reddb-prod"},
+        {"name": "RED_S3_REGION", "value": "us-east-1"},
+        {"name": "RED_AUTO_RESTORE", "value": "true"},
+        {"name": "RED_BACKUP_ON_SHUTDOWN", "value": "true"},
+        {"name": "RED_BACKUP_INTERVAL_SECS", "value": "300"},
+        {"name": "RED_LOG_FORMAT", "value": "json"},
+        {"name": "RED_LOG_LEVEL", "value": "info"},
+        {"name": "RED_SHUTDOWN_TIMEOUT_SECS", "value": "60"}
+      ],
+      "secrets": [
+        {"name": "RED_S3_ACCESS_KEY", "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:reddb/s3-access:::"},
+        {"name": "RED_S3_SECRET_KEY", "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:reddb/s3-secret:::"},
+        {"name": "RED_ADMIN_TOKEN", "valueFrom": "arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:reddb/admin-token:::"}
+      ],
+      "mountPoints": [
+        {"sourceVolume": "data", "containerPath": "/data"}
+      ],
+      "healthCheck": {
+        "command": ["CMD-SHELL", "curl -fsS --max-time 2 http://127.0.0.1:8080/health/live || exit 1"],
+        "interval": 10,
+        "timeout": 3,
+        "retries": 3,
+        "startPeriod": 5
+      },
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/reddb",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ],
+  "volumes": [
+    {
+      "name": "data",
+      "efsVolumeConfiguration": {
+        "fileSystemId": "fs-XXXXXXXX",
+        "rootDirectory": "/reddb",
+        "transitEncryption": "ENABLED"
+      }
+    }
+  ]
+}
