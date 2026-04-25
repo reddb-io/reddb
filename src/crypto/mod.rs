@@ -1,4 +1,5 @@
 pub mod aes_gcm;
+pub mod const_time;
 pub mod hmac;
 #[path = "os-random.rs"]
 pub mod os_random;
@@ -7,6 +8,7 @@ pub mod sha256;
 pub mod uuid;
 
 pub use aes_gcm::{aes256_gcm_decrypt, aes256_gcm_encrypt};
+pub use const_time::constant_time_eq;
 pub use hmac::hmac_sha256;
 pub use page_encryption::{
     decrypt_page, encrypt_page, is_encrypted_frame, key_from_env, parse_key as parse_encryption_key,
