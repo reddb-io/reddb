@@ -1,0 +1,98 @@
+# Google Cloud Run reference deploy (PLAN.md Phase 10.1).
+#
+# Apply with:
+#   gcloud run services replace service.yaml --region us-central1
+#
+# Notes:
+# - Cloud Run instances are stateless. Pair with RED_AUTO_RESTORE=true
+#   so each cold start rebuilds /data from a remote backend (GCS via
+#   the S3-compatible interop endpoint, or a custom RED_BACKEND=http
+#   shim).
+# - Set min-instances >= 1 for the writer; this preserves the
+#   writer-lease without thrashing the cold-start path.
+# - Replicas can run with min-instances=0 (scale-to-zero) when the
+#   workload tolerates eventual reads.
+
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: reddb
+  annotations:
+    run.googleapis.com/launch-stage: GA
+spec:
+  template:
+    metadata:
+      annotations:
+        run.googleapis.com/cpu-throttling: "false"
+        run.googleapis.com/execution-environment: gen2
+        autoscaling.knative.dev/minScale: "1"
+        autoscaling.knative.dev/maxScale: "1"  # exactly one writer
+    spec:
+      containerConcurrency: 80
+      timeoutSeconds: 60
+      containers:
+        - image: us-central1-docker.pkg.dev/PROJECT/reddb/reddb:latest
+          ports:
+            - containerPort: 8080
+              name: http1
+          resources:
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+          env:
+            - name: REDDB_HTTP_BIND_ADDR
+              value: "0.0.0.0:8080"
+            - name: RED_BACKEND
+              value: "s3"
+            - name: RED_S3_ENDPOINT
+              value: "https://storage.googleapis.com"
+            - name: RED_S3_REGION
+              value: "auto"
+            - name: RED_S3_BUCKET
+              value: "reddb-prod"
+            - name: RED_S3_PATH_STYLE
+              value: "true"
+            - name: RED_AUTO_RESTORE
+              value: "true"
+            - name: RED_BACKUP_ON_SHUTDOWN
+              value: "true"
+            - name: RED_BACKUP_INTERVAL_SECS
+              value: "300"
+            - name: RED_LOG_FORMAT
+              value: "json"
+            - name: RED_LOG_LEVEL
+              value: "info"
+            - name: RED_LEASE_REQUIRED
+              value: "true"
+            - name: RED_S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: reddb-s3-access
+                  key: latest
+            - name: RED_S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: reddb-s3-secret
+                  key: latest
+            - name: RED_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: reddb-admin-token
+                  key: latest
+          startupProbe:
+            httpGet:
+              path: /health/startup
+              port: 8080
+            initialDelaySeconds: 0
+            periodSeconds: 5
+            failureThreshold: 12  # 60s grace for restore-from-remote
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8080
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8080
+            periodSeconds: 10
