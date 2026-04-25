@@ -84,6 +84,25 @@ use self::routing::*;
 use self::serverless_support::*;
 use self::transport::*;
 
+/// PLAN.md Phase 6.2 — endpoint segregation. A given HTTP listener
+/// can serve either every public surface (`Public`, default) or a
+/// restricted slice (`AdminOnly`, `MetricsOnly`). The route filter at
+/// the top of `route()` consults this so a port bound only to
+/// loopback for admin work won't accidentally hand out DML.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerSurface {
+    /// Everything routed normally (default — matches v0 behaviour).
+    Public,
+    /// Only `/admin/*`, `/metrics`, and `/health/*`. Other paths
+    /// return 404. Intended for `RED_ADMIN_BIND` operator listeners
+    /// which default to `127.0.0.1`.
+    AdminOnly,
+    /// Only `/metrics` and `/health/*`. Intended for
+    /// `RED_METRICS_BIND` Prometheus scrape ports that may be
+    /// exposed to non-admin networks.
+    MetricsOnly,
+}
+
 #[derive(Debug, Clone)]
 pub struct ServerOptions {
     pub bind_addr: String,
@@ -91,6 +110,10 @@ pub struct ServerOptions {
     pub read_timeout_ms: u64,
     pub write_timeout_ms: u64,
     pub max_scan_limit: usize,
+    /// Which subset of paths this listener serves. Defaults to
+    /// `Public`. Set to `AdminOnly` / `MetricsOnly` for dedicated
+    /// admin / scrape ports (PLAN.md Phase 6.2).
+    pub surface: ServerSurface,
 }
 
 impl Default for ServerOptions {
@@ -101,6 +124,7 @@ impl Default for ServerOptions {
             read_timeout_ms: 5_000,
             write_timeout_ms: 5_000,
             max_scan_limit: 1_000,
+            surface: ServerSurface::Public,
         }
     }
 }
