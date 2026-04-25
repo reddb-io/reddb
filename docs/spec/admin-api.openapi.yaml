@@ -1,0 +1,416 @@
+openapi: 3.1.0
+info:
+  title: RedDB Admin API
+  version: "1.0.0"
+  summary: Operator + observability surface for a running RedDB instance.
+  description: |
+    Cloud-agnostic operator API exposed by every RedDB engine (PLAN.md
+    Phase 1 + Phase 5 + Phase 6 + Phase 11). Endpoints are stable
+    across patch releases of the engine; incompatible changes bump
+    the spec major.
+
+    ## Surfaces
+
+    - **Health** (`/health/live`, `/health/ready`, `/health/startup`):
+      orchestrator probes. Always public — never authenticated, even
+      when `RED_ADMIN_TOKEN` is set, so liveness probes don't carry
+      tokens.
+    - **Admin** (`/admin/*`): operator mutations (shutdown, drain,
+      backup, restore, readonly, promote) + status JSON. Gated by
+      `Authorization: Bearer <RED_ADMIN_TOKEN>` when the env var is
+      set.
+    - **Metrics** (`/metrics`): Prometheus / OpenMetrics exposition.
+      Gated by the same admin token when set.
+
+    ## Endpoint segregation
+
+    Operators can bind admin / metrics on dedicated listeners by
+    setting `RED_ADMIN_BIND` (default `127.0.0.1` loopback) and
+    `RED_METRICS_BIND`. Listeners restrict their accepted paths to
+    the surface declared at bind time.
+
+  contact:
+    name: RedDB project
+    url: https://github.com/forattini-dev/reddb
+  license:
+    name: Apache-2.0
+
+servers:
+  - url: http://127.0.0.1:8080
+    description: Default single-listener bind.
+  - url: http://127.0.0.1:7778
+    description: Dedicated admin-only listener (RED_ADMIN_BIND).
+  - url: http://0.0.0.0:9090
+    description: Dedicated metrics listener (RED_METRICS_BIND).
+
+components:
+  securitySchemes:
+    AdminBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: |
+        Operator bearer token. Loaded from `RED_ADMIN_TOKEN` or
+        `RED_ADMIN_TOKEN_FILE` (Kubernetes/Docker secrets pattern).
+        Compared with constant-time equality. When the env is unset
+        the gate is disabled and admin endpoints are public — useful
+        for dev installs.
+
+  schemas:
+    OkBool:
+      type: object
+      required: [ok]
+      properties:
+        ok: { type: boolean, const: true }
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+        details: { type: string }
+
+    ShutdownReport:
+      type: object
+      required: [ok, phase, flushed_wal, final_checkpoint, backup_uploaded, duration_ms]
+      properties:
+        ok: { type: boolean }
+        phase: { type: string, enum: [Stopped, ShuttingDown] }
+        flushed_wal: { type: boolean }
+        final_checkpoint: { type: boolean }
+        backup_uploaded: { type: boolean }
+        duration_ms: { type: integer, format: int64 }
+
+    DrainReport:
+      allOf:
+        - $ref: '#/components/schemas/OkBool'
+        - type: object
+          required: [phase]
+          properties:
+            phase: { type: string, enum: [Draining] }
+
+    BackupResult:
+      type: object
+      required: [ok, snapshot_id, uploaded, duration_ms]
+      properties:
+        ok: { type: boolean }
+        snapshot_id: { type: integer, format: int64 }
+        uploaded: { type: boolean }
+        duration_ms: { type: integer, format: int64 }
+
+    RestoreReport:
+      type: object
+      required: [ok, snapshot_used, wal_segments_replayed, records_applied, recovered_to_lsn, recovered_to_time]
+      properties:
+        ok: { type: boolean }
+        snapshot_used: { type: integer, format: int64 }
+        wal_segments_replayed: { type: integer, format: int64 }
+        records_applied: { type: integer, format: int64 }
+        recovered_to_lsn: { type: integer, format: int64 }
+        recovered_to_time: { type: integer, format: int64 }
+
+    RestoreRequest:
+      type: object
+      properties:
+        to_lsn: { type: integer, format: int64 }
+        to_timestamp_ms: { type: integer, format: int64, description: "Unix milliseconds; 0 = restore to latest" }
+        snapshot_id: { type: integer, format: int64 }
+
+    ReadonlyRequest:
+      type: object
+      properties:
+        enabled: { type: boolean, default: true }
+
+    ReadonlyResponse:
+      type: object
+      required: [ok, read_only, previous]
+      properties:
+        ok: { type: boolean }
+        read_only: { type: boolean }
+        previous: { type: boolean }
+
+    PromoteRequest:
+      type: object
+      properties:
+        holder_id:
+          type: string
+          description: |
+            Defaults to RED_LEASE_HOLDER_ID env or `<hostname>-<pid>`.
+        ttl_ms:
+          type: integer
+          format: int64
+          default: 60000
+
+    PromoteResponse:
+      type: object
+      required: [ok, holder_id, generation, acquired_at_ms, expires_at_ms, next_step]
+      properties:
+        ok: { type: boolean }
+        holder_id: { type: string }
+        generation: { type: integer, format: int64 }
+        acquired_at_ms: { type: integer, format: int64 }
+        expires_at_ms: { type: integer, format: int64 }
+        next_step:
+          type: string
+          description: |
+            Operator runbook hint. Promotion does NOT auto-flip the
+            running role; the operator restarts with
+            RED_REPLICATION_MODE=primary.
+
+    HealthReport:
+      type: object
+      required: [status, phase]
+      properties:
+        status: { type: string, enum: [alive, ready, starting, stopped] }
+        phase: { type: string, enum: [Starting, Ready, Draining, ShuttingDown, Stopped] }
+
+    AdminStatus:
+      type: object
+      required: [version, phase, uptime_secs, db_size_bytes, read_only, replication_role, writer_lease]
+      properties:
+        version: { type: string }
+        phase: { type: string }
+        uptime_secs: { type: number, format: double }
+        started_at_unix_ms: { type: integer, format: int64 }
+        ready_at_unix_ms: { type: integer, format: int64 }
+        db_size_bytes: { type: integer, format: int64 }
+        read_only: { type: boolean }
+        replication_role: { type: string, enum: [standalone, primary, replica] }
+        writer_lease: { type: string, enum: [not_required, held, not_held] }
+        encryption_at_rest:
+          type: object
+          required: [state]
+          properties:
+            state: { type: string, enum: [enabled, disabled, error] }
+            error: { type: string }
+        remote_backend: { type: string }
+        limits:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int64
+        backup:
+          type: object
+          properties:
+            last_success_unix_ms: { type: integer, format: int64 }
+            age_seconds: { type: number, format: double }
+            last_duration_ms: { type: integer, format: int64 }
+            total_successes: { type: integer, format: int64 }
+            total_failures: { type: integer, format: int64 }
+            interval_secs: { type: integer, format: int64 }
+        wal:
+          type: object
+          required: [current_lsn, last_archived_lsn, archive_lag_records]
+          properties:
+            current_lsn: { type: integer, format: int64 }
+            last_archived_lsn: { type: integer, format: int64 }
+            archive_lag_records: { type: integer, format: int64 }
+        replica:
+          type: object
+          properties:
+            apply_health:
+              type: string
+              enum: [ok, healthy, connecting, stalled_gap, divergence, apply_error]
+            apply_errors:
+              type: object
+              additionalProperties:
+                type: integer
+                format: int64
+            commit_policy: { type: string, enum: [local, remote_wal, ack_n, quorum] }
+            primary_view:
+              type: array
+              items:
+                type: object
+                required: [id, last_acked_lsn, last_sent_lsn, last_durable_lsn]
+                properties:
+                  id: { type: string }
+                  last_acked_lsn: { type: integer, format: int64 }
+                  last_sent_lsn: { type: integer, format: int64 }
+                  last_durable_lsn: { type: integer, format: int64 }
+                  last_seen_at_unix_ms: { type: integer, format: int64 }
+                  lag_records: { type: integer, format: int64 }
+                  region: { type: string }
+            durable_view:
+              type: array
+              items:
+                type: object
+                required: [replica_id, durable_lsn]
+                properties:
+                  replica_id: { type: string }
+                  durable_lsn: { type: integer, format: int64 }
+        shutdown:
+          type: object
+          properties:
+            duration_ms: { type: integer, format: int64 }
+            flushed_wal: { type: boolean }
+            backup_uploaded: { type: boolean }
+
+paths:
+  /health/live:
+    get:
+      summary: Liveness probe.
+      description: 200 once the runtime is constructed; 503 only after Stopped. Never touches I/O.
+      security: []
+      responses:
+        "200":
+          description: Process is alive.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthReport' }
+        "503":
+          description: Process is stopped or shutting down.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthReport' }
+
+  /health/ready:
+    get:
+      summary: Readiness probe.
+      description: 200 once WAL replay and restore-from-remote completed; 503 otherwise.
+      security: []
+      responses:
+        "200": { description: Ready, content: { application/json: { schema: { $ref: '#/components/schemas/HealthReport' } } } }
+        "503": { description: Not ready, content: { application/json: { schema: { $ref: '#/components/schemas/HealthReport' } } } }
+
+  /health/startup:
+    get:
+      summary: Startup probe.
+      description: 200 when the process passed the cold-start path. Used for `startupProbe` in Kubernetes to defer liveness/readiness until restore is done.
+      security: []
+      responses:
+        "200": { description: Startup complete, content: { application/json: { schema: { $ref: '#/components/schemas/HealthReport' } } } }
+        "503": { description: Still starting, content: { application/json: { schema: { $ref: '#/components/schemas/HealthReport' } } } }
+
+  /admin/shutdown:
+    post:
+      summary: Graceful shutdown coordinator.
+      description: |
+        Flushes WAL, runs final checkpoint, and uploads a final
+        backup if `RED_BACKUP_ON_SHUTDOWN=true`. Idempotent —
+        repeated calls return the cached report. The HTTP layer
+        does NOT own process exit; the signal handler does.
+      responses:
+        "200": { description: Shutdown completed, content: { application/json: { schema: { $ref: '#/components/schemas/ShutdownReport' } } } }
+        "500": { description: Flush failed; process should still exit, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
+  /admin/drain:
+    post:
+      summary: Begin draining new connections.
+      description: Flips lifecycle to `Draining`. Subsequent WriteGate-checked writes are rejected. Idempotent.
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DrainReport' }
+
+  /admin/backup:
+    post:
+      summary: Trigger an immediate backup.
+      description: |
+        Uploads a snapshot + archives any pending WAL segments + refreshes
+        the unified `MANIFEST.json`. When `RED_PRIMARY_COMMIT_POLICY=ack_n=N`,
+        the call blocks until N replicas ack the new tail or
+        `RED_REPLICATION_ACK_TIMEOUT_MS` elapses (default 5000).
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BackupResult' }
+        "500":
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /admin/restore:
+    post:
+      summary: Operator-triggered restore from remote backend.
+      description: |
+        Refuses unless the runtime is `read_only` or `replica` (toggle
+        via `RED_READONLY=true` or `POST /admin/readonly` first).
+        Runs PITR with chain validation; fails closed on any
+        sha256 / hash-chain break.
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RestoreRequest' }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RestoreReport' }
+        "409": { description: Runtime is not read_only / replica, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        "412": { description: No remote backend configured / in-memory runtime, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        "500": { description: Restore failed (integrity or transport), content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
+  /admin/readonly:
+    post:
+      summary: Toggle the dynamic read-only flag.
+      description: |
+        Persists to `<data>/.runtime-state.json` so the toggle
+        survives restart. Replicas reject writes regardless of this
+        flag — the replication-role gate fires first.
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReadonlyRequest' }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReadonlyResponse' }
+        "500":
+          description: Persistence failed; in-memory flag was reverted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /admin/failover/promote:
+    post:
+      summary: Manual replica → primary promotion.
+      description: |
+        Hard checks: caller must be a replica, remote backend
+        configured, replica apply health is `ok`/`healthy`/`connecting`,
+        and lease can be acquired. Bumps lease generation and audits.
+        Does NOT auto-flip the running role — operator restarts with
+        `RED_REPLICATION_MODE=primary`.
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PromoteRequest' }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PromoteResponse' }
+        "409": { description: Role / health / lease check failed, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        "412": { description: Remote backend not configured, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        "400": { description: Invalid JSON body, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
+  /admin/status:
+    get:
+      summary: Full operator state snapshot.
+      description: |
+        Aggregates lifecycle, role, lease, encryption, backup, WAL,
+        replica, and limits views. Stable shape — additive changes
+        only within v1.x of this spec.
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminStatus' }
+
+  /metrics:
+    get:
+      summary: Prometheus / OpenMetrics exposition.
+      description: |
+        Text format `text/plain; version=0.0.4`. Metric set documented
+        in `docs/spec/metrics.md` (see PLAN.md Phase 5.1).
+      responses:
+        "200":
+          description: Exposition body.
+          content:
+            text/plain:
+              schema: { type: string }
+
+security:
+  - AdminBearer: []
