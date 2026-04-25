@@ -16,8 +16,8 @@
 //! - `Projection::Expression` once the planner flips from Filter
 //!   to Expr for scalar projection bodies.
 
-use super::join_filter::{compare_runtime_values, evaluate_runtime_filter, resolve_runtime_field};
-use crate::storage::query::ast::{BinOp, Expr, FieldRef, Filter, UnaryOp};
+use super::join_filter::{compare_runtime_values, resolve_runtime_field};
+use crate::storage::query::ast::{BinOp, Expr, FieldRef, UnaryOp};
 use crate::storage::query::unified::UnifiedRecord;
 use crate::storage::schema::Value;
 use crate::storage::RedDB;
@@ -291,20 +291,6 @@ pub(super) fn evaluate_runtime_expr_with_db(
             Some(Value::Boolean(if *negated { !in_range } else { in_range }))
         }
     }
-}
-
-/// Evaluate a legacy `Filter` tree as an expression context. Used by
-/// nodes that still produce `Filter` (WHERE clause today) while the
-/// ORDER BY / projection paths flip to `Expr`. Bridges the two until
-/// Week 3 finishes the Filter migration.
-#[allow(dead_code)]
-pub(super) fn evaluate_filter_as_bool(
-    filter: &Filter,
-    record: &UnifiedRecord,
-    table_name: Option<&str>,
-    table_alias: Option<&str>,
-) -> bool {
-    evaluate_runtime_filter(record, filter, table_name, table_alias)
 }
 
 pub(super) fn lookup_latest_kv_value(db: &RedDB, collection: &str, key: &str) -> Option<Value> {
