@@ -150,3 +150,25 @@ debug = 0
 # default because incremental hurts runtime perf slightly; in
 # release-fast we already traded runtime for build time.
 incremental = true
+
+# PLAN.md Phase 7.2 — static-binary-friendly profile for the
+# distributed v1.0 release builds. Aggressive size optimisation
+# (`opt-level = "z"`), full LTO, single codegen unit, strip
+# everything. Build with:
+#
+#   cargo build --profile release-static --bin red \
+#     --target x86_64-unknown-linux-musl
+#
+# CI uses an Alpine container + musl toolchain so the resulting
+# binary has zero glibc dependency and runs on every Linux distro
+# (`scratch`-based containers, busybox, etc.). Target binary size
+# < 30 MB after strip, < 12 MB after `upx --best`.
+[profile.release-static]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+debug = false
+panic = "abort"
+incremental = false
