@@ -21,12 +21,14 @@
 //! ```
 
 pub mod cdc;
+pub mod lease;
 pub mod logical;
 pub mod primary;
 pub mod quorum;
 pub mod replica;
 pub mod scheduler;
 
+pub use lease::{LeaseError, LeaseStore, WriterLease};
 pub use quorum::{QuorumConfig, QuorumCoordinator, QuorumError};
 
 /// Role of this RedDB instance in a replication cluster.
