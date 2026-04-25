@@ -56,6 +56,15 @@ pub struct S3Config {
     pub secret_key: String,
     /// AWS region (e.g., `"us-east-1"`, `"auto"` for R2).
     pub region: String,
+    /// Use path-style addressing (`{endpoint}/{bucket}/{key}`) instead
+    /// of virtual-host-style (`{scheme}://{bucket}.{endpoint_host}/{key}`).
+    /// Required for MinIO, Ceph RGW, Garage, SeaweedFS, and any
+    /// self-hosted S3-compatible store. AWS S3 / R2 / DO Spaces /
+    /// GCS interop accept either style — true is the safe default
+    /// for cloud-agnostic deployments. Override via env
+    /// `RED_S3_PATH_STYLE=false` for providers that hard-require
+    /// virtual-host (rare).
+    pub path_style: bool,
 }
 
 impl S3Config {
@@ -68,6 +77,7 @@ impl S3Config {
             access_key: access_key.into(),
             secret_key: secret_key.into(),
             region: region.into(),
+            path_style: true,
         }
     }
 
@@ -80,6 +90,7 @@ impl S3Config {
             access_key: access_key.into(),
             secret_key: secret_key.into(),
             region: "auto".into(),
+            path_style: true,
         }
     }
 
@@ -92,6 +103,7 @@ impl S3Config {
             access_key: access_key.into(),
             secret_key: secret_key.into(),
             region: region.into(),
+            path_style: true,
         }
     }
 
@@ -104,12 +116,47 @@ impl S3Config {
             access_key: access_key.into(),
             secret_key: secret_key.into(),
             region: "us".into(),
+            path_style: true,
+        }
+    }
+
+    /// Create a config targeting a generic S3-compatible endpoint
+    /// (MinIO, Ceph, Garage, SeaweedFS, B2 S3-compat, IDrive,
+    /// Storj, Wasabi, etc.). The operator passes the full endpoint
+    /// URL; region defaults to `us-east-1` because most self-hosted
+    /// stores ignore it.
+    pub fn generic(
+        endpoint: &str,
+        bucket: &str,
+        access_key: &str,
+        secret_key: &str,
+    ) -> Self {
+        Self {
+            endpoint: endpoint.trim_end_matches('/').into(),
+            bucket: bucket.into(),
+            key_prefix: String::new(),
+            access_key: access_key.into(),
+            secret_key: secret_key.into(),
+            region: "us-east-1".into(),
+            path_style: true,
         }
     }
 
     /// Set a key prefix (e.g., `"databases/prod/"`).
     pub fn with_prefix(mut self, prefix: &str) -> Self {
         self.key_prefix = prefix.into();
+        self
+    }
+
+    /// Override the addressing style (path-style vs virtual-host).
+    pub fn with_path_style(mut self, path_style: bool) -> Self {
+        self.path_style = path_style;
+        self
+    }
+
+    /// Override the AWS region.
+    pub fn with_region(mut self, region: &str) -> Self {
+        self.region = region.into();
         self
     }
 }
@@ -199,12 +246,37 @@ impl S3Backend {
         Ok(headers)
     }
 
-    /// Build the full URL for the given object key.
+    /// Build the full URL for the given object key, honoring the
+    /// configured addressing style.
+    ///
+    /// Path-style: `https://endpoint/bucket/key` — what MinIO, Ceph,
+    /// Garage, SeaweedFS, and self-hosted S3-compatible stores
+    /// require.
+    ///
+    /// Virtual-host style: `https://bucket.endpoint-host/key` — the
+    /// modern AWS default. Switching is a one-line config change in
+    /// case a provider rejects path-style.
     fn object_url(&self, object_key: &str) -> String {
-        format!(
-            "{}/{}/{}",
-            self.config.endpoint, self.config.bucket, object_key
-        )
+        if self.config.path_style {
+            return format!(
+                "{}/{}/{}",
+                self.config.endpoint, self.config.bucket, object_key
+            );
+        }
+        // Virtual-host style: prepend bucket as a subdomain of the
+        // endpoint host. Splits scheme + host carefully so an
+        // endpoint with a non-default port (`https://host:9000`)
+        // still produces a valid URL.
+        let trimmed = self.config.endpoint.trim_end_matches('/');
+        if let Some(rest) = trimmed.strip_prefix("https://") {
+            return format!("https://{}.{}/{}", self.config.bucket, rest, object_key);
+        }
+        if let Some(rest) = trimmed.strip_prefix("http://") {
+            return format!("http://{}.{}/{}", self.config.bucket, rest, object_key);
+        }
+        // Endpoint missing a scheme — fall back to path-style; safer
+        // than producing a malformed URL the operator can't debug.
+        format!("{}/{}/{}", trimmed, self.config.bucket, object_key)
     }
 
     /// Build the full object key by prepending the configured prefix.
@@ -680,6 +752,7 @@ mod tests {
             access_key: "AKIAIOSFODNN7EXAMPLE".into(),
             secret_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".into(),
             region: "us-east-1".into(),
+            path_style: true,
         };
 
         let mut headers = BTreeMap::new();
@@ -782,6 +855,34 @@ mod tests {
         assert_eq!(
             backend.object_url("data/test.rdb"),
             "https://s3.us-east-1.amazonaws.com/mybucket/data/test.rdb"
+        );
+    }
+
+    #[test]
+    fn test_object_url_virtual_host_style() {
+        let backend = S3Backend::new(
+            S3Config::aws("mybucket", "us-east-1", "AK", "SK").with_path_style(false),
+        );
+        assert_eq!(
+            backend.object_url("data/test.rdb"),
+            "https://mybucket.s3.us-east-1.amazonaws.com/data/test.rdb"
+        );
+    }
+
+    #[test]
+    fn test_object_url_path_style_minio() {
+        // MinIO/Ceph self-hosted endpoint with port. Path-style is
+        // the only supported addressing — verify it works for an
+        // endpoint that includes a non-default port.
+        let backend = S3Backend::new(S3Config::generic(
+            "http://minio:9000",
+            "bench",
+            "minio",
+            "minio123",
+        ));
+        assert_eq!(
+            backend.object_url("snapshots/1.snap"),
+            "http://minio:9000/bench/snapshots/1.snap"
         );
     }
 }

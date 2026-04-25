@@ -212,16 +212,27 @@ fn env_nonempty(name: &str) -> Option<String> {
 }
 
 fn configure_remote_backend_from_env(options: &mut RedDBOptions) {
-    let backend = env_nonempty("REDDB_REMOTE_BACKEND")
+    // PLAN.md (cloud-agnostic) — prefer the new spelling
+    // `RED_BACKEND`; accept the legacy `REDDB_REMOTE_BACKEND` for
+    // existing dev installs. `none` (default) means standalone — no
+    // remote backend, valid for development and on-prem without
+    // remote.
+    let backend = env_nonempty("RED_BACKEND")
+        .or_else(|| env_nonempty("REDDB_REMOTE_BACKEND"))
         .unwrap_or_else(|| "none".to_string())
         .to_ascii_lowercase();
 
     match backend.as_str() {
+        // Universal S3-compatible — covers AWS, R2, MinIO, Ceph,
+        // GCS-interop, B2, DO Spaces, Wasabi, Garage, SeaweedFS,
+        // IDrive, Storj. The `path_style` toggle in S3Config picks
+        // the right addressing for self-hosted vs hosted.
         "s3" | "minio" | "r2" => {
             #[cfg(feature = "backend-s3")]
             {
                 if let Some(config) = s3_config_from_env() {
-                    let remote_key = env_nonempty("REDDB_REMOTE_KEY")
+                    let remote_key = env_nonempty("RED_REMOTE_KEY")
+                        .or_else(|| env_nonempty("REDDB_REMOTE_KEY"))
                         .unwrap_or_else(|| "clusters/dev/data.rdb".to_string());
                     options.remote_backend =
                         Some(Arc::new(crate::storage::backend::S3Backend::new(config)));
@@ -232,28 +243,88 @@ fn configure_remote_backend_from_env(options: &mut RedDBOptions) {
             {
                 tracing::warn!(
                     backend = %backend,
-                    "REDDB_REMOTE_BACKEND requested but binary was built without backend-s3"
+                    "RED_BACKEND={backend} requested but binary was built without `backend-s3` feature"
                 );
             }
         }
-        "local" => {
-            if let Some(remote_key) = env_nonempty("REDDB_REMOTE_KEY") {
+        // Filesystem backend (NFS/EFS/SMB/local-disk). PLAN.md spec
+        // calls it `fs`; legacy code shipped it as `local`. Both
+        // names map to LocalBackend, with the remote_key derived
+        // from `RED_FS_PATH` + a per-database suffix when provided.
+        "fs" | "local" => {
+            let base_path = env_nonempty("RED_FS_PATH").or_else(|| env_nonempty("REDDB_FS_PATH"));
+            let remote_key = match (
+                base_path,
+                env_nonempty("RED_REMOTE_KEY").or_else(|| env_nonempty("REDDB_REMOTE_KEY")),
+            ) {
+                (Some(base), Some(rel)) => Some(format!(
+                    "{}/{}",
+                    base.trim_end_matches('/'),
+                    rel.trim_start_matches('/')
+                )),
+                (Some(base), None) => Some(format!(
+                    "{}/clusters/dev/data.rdb",
+                    base.trim_end_matches('/')
+                )),
+                (None, Some(rel)) => Some(rel),
+                (None, None) => None,
+            };
+            if let Some(key) = remote_key {
                 options.remote_backend = Some(Arc::new(crate::storage::backend::LocalBackend));
-                options.remote_key = Some(remote_key);
+                options.remote_key = Some(key);
             }
         }
-        _ => {}
+        // `none` is the explicit standalone — no remote, no backup
+        // pipeline. Boot never blocks on network reachability.
+        "none" | "" => {}
+        other => {
+            tracing::warn!(
+                backend = %other,
+                "unknown RED_BACKEND value — supported: s3 | fs | none (http coming in Phase 2.3)"
+            );
+        }
     }
+}
+
+/// Resolve a value from env, accepting both the cloud-agnostic
+/// `RED_S3_*` family (PLAN.md spec) and the legacy `REDDB_S3_*` form
+/// kept for existing dev installs. The new spelling wins; the
+/// legacy spelling is read with a warning hint in callers' logs.
+#[cfg(feature = "backend-s3")]
+fn env_s3(suffix: &str) -> Option<String> {
+    env_nonempty(&format!("RED_S3_{suffix}"))
+        .or_else(|| env_nonempty(&format!("REDDB_S3_{suffix}")))
+}
+
+/// Read a secret value from either the literal env var or a file
+/// path supplied via `*_FILE` (PLAN.md spec — compatible with
+/// Kubernetes / Docker Secrets, HashiCorp Vault Agent, sealed-
+/// secrets). The `_FILE` variant wins so an operator can set it to
+/// override the inline value without touching the inline env.
+#[cfg(feature = "backend-s3")]
+fn env_s3_secret(suffix: &str) -> Option<String> {
+    let file_key_red = format!("RED_S3_{suffix}_FILE");
+    let file_key_legacy = format!("REDDB_S3_{suffix}_FILE");
+    if let Some(path) = env_nonempty(&file_key_red).or_else(|| env_nonempty(&file_key_legacy)) {
+        return std::fs::read_to_string(&path)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+    }
+    env_s3(suffix)
 }
 
 #[cfg(feature = "backend-s3")]
 fn s3_config_from_env() -> Option<crate::storage::backend::S3Config> {
-    let endpoint = env_nonempty("REDDB_S3_ENDPOINT")?;
-    let bucket = env_nonempty("REDDB_S3_BUCKET")?;
-    let access_key = env_nonempty("REDDB_S3_ACCESS_KEY")?;
-    let secret_key = env_nonempty("REDDB_S3_SECRET_KEY")?;
-    let region = env_nonempty("REDDB_S3_REGION").unwrap_or_else(|| "us-east-1".to_string());
-    let key_prefix = env_nonempty("REDDB_S3_KEY_PREFIX").unwrap_or_default();
+    let endpoint = env_s3("ENDPOINT")?;
+    let bucket = env_s3("BUCKET")?;
+    let access_key = env_s3_secret("ACCESS_KEY")?;
+    let secret_key = env_s3_secret("SECRET_KEY")?;
+    let region = env_s3("REGION").unwrap_or_else(|| "us-east-1".to_string());
+    let key_prefix = env_s3("KEY_PREFIX").or_else(|| env_s3("PREFIX")).unwrap_or_default();
+    let path_style = env_s3("PATH_STYLE")
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(true);
     Some(crate::storage::backend::S3Config {
         endpoint,
         bucket,
@@ -261,6 +332,7 @@ fn s3_config_from_env() -> Option<crate::storage::backend::S3Config> {
         access_key,
         secret_key,
         region,
+        path_style,
     })
 }
 
