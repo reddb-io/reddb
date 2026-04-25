@@ -288,11 +288,16 @@ impl WalArchiver {
 
     /// Archive a WAL file as a named segment.
     /// Call this BEFORE truncating the WAL.
+    /// `prev_hash` links this segment to the prior one in the
+    /// timeline (PLAN.md Phase 11.3) — pass the sha256 of the last
+    /// successfully archived segment, or `None` if this is the first
+    /// segment in a fresh timeline.
     pub fn archive_segment(
         &self,
         wal_path: &Path,
         lsn_start: u64,
         lsn_end: u64,
+        prev_hash: Option<String>,
     ) -> Result<WalSegmentMeta, BackendError> {
         let size_bytes = std::fs::metadata(wal_path).map(|m| m.len()).unwrap_or(0);
 
@@ -320,7 +325,7 @@ impl WalArchiver {
         };
         if let Err(err) = publish_wal_segment_manifest(
             self.backend.as_ref(),
-            &WalSegmentManifest::from_meta(&meta),
+            &WalSegmentManifest::from_meta(&meta, prev_hash),
         ) {
             tracing::warn!(
                 target: "reddb::backup",
@@ -398,10 +403,12 @@ pub fn snapshot_manifest_key(snapshot_key: &str) -> String {
 }
 
 /// Per-segment manifest written next to each archived WAL segment
-/// (PLAN.md Phase 2.4). Holds the digest the restore side needs to
-/// verify the segment bytes after download. Stored at
-/// `<segment_key>.manifest.json` so `cleanup_before` can drop the
-/// pair atomically.
+/// (PLAN.md Phase 2.4 + 11.3). Holds the digest the restore side
+/// needs to verify the segment bytes after download, plus a
+/// `prev_hash` linking it to the previous segment in the timeline so
+/// the restore can detect a missing/reordered/replaced middle
+/// segment. Stored at `<segment_key>.manifest.json` so
+/// `cleanup_before` drops the pair atomically.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WalSegmentManifest {
     pub key: String,
@@ -409,11 +416,18 @@ pub struct WalSegmentManifest {
     pub lsn_end: u64,
     pub size_bytes: u64,
     pub created_at: u64,
+    /// Hex SHA-256 of *this* segment's payload bytes.
     pub sha256: Option<String>,
+    /// Hex SHA-256 of the segment immediately preceding this one in
+    /// the timeline. `None` only for the very first segment after a
+    /// fresh snapshot / PITR restore. Restore validates that
+    /// segment[i].prev_hash == segment[i-1].sha256; any break is
+    /// fail-closed (PLAN.md Phase 11.3).
+    pub prev_hash: Option<String>,
 }
 
 impl WalSegmentManifest {
-    pub fn from_meta(meta: &WalSegmentMeta) -> Self {
+    pub fn from_meta(meta: &WalSegmentMeta, prev_hash: Option<String>) -> Self {
         Self {
             key: meta.key.clone(),
             lsn_start: meta.lsn_start,
@@ -421,6 +435,7 @@ impl WalSegmentManifest {
             size_bytes: meta.size_bytes,
             created_at: meta.created_at,
             sha256: meta.sha256.clone(),
+            prev_hash,
         }
     }
 
@@ -445,6 +460,9 @@ impl WalSegmentManifest {
         );
         if let Some(sha) = &self.sha256 {
             object.insert("sha256".to_string(), JsonValue::String(sha.clone()));
+        }
+        if let Some(prev) = &self.prev_hash {
+            object.insert("prev_hash".to_string(), JsonValue::String(prev.clone()));
         }
         JsonValue::Object(object)
     }
@@ -476,6 +494,10 @@ impl WalSegmentManifest {
                 .unwrap_or(0),
             sha256: value
                 .get("sha256")
+                .and_then(JsonValue::as_str)
+                .map(|s| s.to_string()),
+            prev_hash: value
+                .get("prev_hash")
                 .and_then(JsonValue::as_str)
                 .map(|s| s.to_string()),
         })
@@ -528,6 +550,11 @@ pub struct UnifiedWalEntry {
     pub key: String,
     pub bytes: u64,
     pub checksum: Option<String>,
+    /// PLAN.md Phase 11.3 — sha256 of the prior segment in the
+    /// timeline. Surfacing this in the unified manifest lets
+    /// external verifiers validate the chain end-to-end from the
+    /// catalog alone, without per-segment GETs.
+    pub prev_hash: Option<String>,
 }
 
 impl UnifiedManifest {
@@ -686,6 +713,12 @@ impl UnifiedWalEntry {
                 JsonValue::String(format!("sha256:{c}")),
             );
         }
+        if let Some(p) = &self.prev_hash {
+            obj.insert(
+                "prev_hash".to_string(),
+                JsonValue::String(format!("sha256:{p}")),
+            );
+        }
         JsonValue::Object(obj)
     }
 
@@ -715,6 +748,10 @@ impl UnifiedWalEntry {
                 .unwrap_or(0),
             checksum: obj
                 .get("checksum")
+                .and_then(JsonValue::as_str)
+                .map(|s| s.strip_prefix("sha256:").unwrap_or(s).to_string()),
+            prev_hash: obj
+                .get("prev_hash")
                 .and_then(JsonValue::as_str)
                 .map(|s| s.strip_prefix("sha256:").unwrap_or(s).to_string()),
         })
@@ -851,6 +888,7 @@ fn collect_unified_wal_segments(
             key: manifest.key.clone(),
             bytes: manifest.size_bytes,
             checksum: manifest.sha256.clone(),
+            prev_hash: manifest.prev_hash.clone(),
         });
     }
     out.sort_by_key(|w| w.lsn_start);
@@ -919,6 +957,7 @@ pub fn archive_change_records(
     backend: &dyn RemoteBackend,
     prefix: &str,
     records: &[(u64, Vec<u8>)],
+    prev_hash: Option<String>,
 ) -> Result<Option<WalSegmentMeta>, BackendError> {
     let Some((lsn_start, _)) = records.first() else {
         return Ok(None);
@@ -975,7 +1014,7 @@ pub fn archive_change_records(
     // tolerates with a warning, so this is non-fatal. We still log so
     // operators can flag that backup integrity coverage is degraded.
     if let Err(err) =
-        publish_wal_segment_manifest(backend, &WalSegmentManifest::from_meta(&meta))
+        publish_wal_segment_manifest(backend, &WalSegmentManifest::from_meta(&meta, prev_hash))
     {
         tracing::warn!(
             target: "reddb::backup",
@@ -1112,7 +1151,7 @@ mod tests {
         }
 
         // Archive it
-        let meta = archiver.archive_segment(&wal_path, 8, 500).unwrap();
+        let meta = archiver.archive_segment(&wal_path, 8, 500, None).unwrap();
         assert_eq!(meta.lsn_start, 8);
         assert_eq!(meta.lsn_end, 500);
         assert!(meta.key.starts_with("wal/"));
@@ -1201,9 +1240,10 @@ mod tests {
             metadata: None,
         };
 
-        let meta = archive_change_records(&backend, &prefix, &[(record.lsn, record.encode())])
-            .unwrap()
-            .expect("meta");
+        let meta =
+            archive_change_records(&backend, &prefix, &[(record.lsn, record.encode())], None)
+                .unwrap()
+                .expect("meta");
         let loaded = load_archived_change_records(&backend, &meta.key).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].lsn, 7);
@@ -1229,9 +1269,10 @@ mod tests {
             entity_bytes: Some(b"x".to_vec()),
             metadata: None,
         };
-        let meta = archive_change_records(&backend, &prefix, &[(record.lsn, record.encode())])
-            .unwrap()
-            .expect("meta");
+        let meta =
+            archive_change_records(&backend, &prefix, &[(record.lsn, record.encode())], None)
+                .unwrap()
+                .expect("meta");
         assert!(meta.sha256.is_some(), "WalSegmentMeta should carry sha256");
 
         let sidecar = load_wal_segment_manifest(&backend, &meta.key).unwrap().expect("sidecar");
@@ -1264,6 +1305,7 @@ mod tests {
                 key: "wal/000000000100-000000000250.wal".to_string(),
                 bytes: 1024,
                 checksum: Some("c1d2".to_string()),
+                prev_hash: Some("9f8b".to_string()),
             }],
         );
 
@@ -1271,6 +1313,16 @@ mod tests {
         let parsed = UnifiedManifest::from_json_value(&json).unwrap();
         assert_eq!(parsed, manifest);
         assert_eq!(parsed.latest_lsn, 250);
+
+        // prev_hash must round-trip with `sha256:` prefix on the wire
+        // (PLAN.md Phase 11.3) so external verifiers can validate
+        // the chain end-to-end without parsing the per-segment sidecar.
+        assert_eq!(parsed.wal_segments[0].prev_hash.as_deref(), Some("9f8b"));
+        let wal_wire = parsed.wal_segments[0].to_json_value().to_string_compact();
+        assert!(
+            wal_wire.contains("\"prev_hash\":\"sha256:9f8b\""),
+            "wire form must include sha256: prefix on prev_hash; got: {wal_wire}"
+        );
 
         // Checksum should round-trip with the `sha256:` prefix in the
         // wire form but parse back to the bare hex.
@@ -1295,6 +1347,74 @@ mod tests {
         assert_eq!(loaded.latest_lsn, 0);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn archive_change_records_chains_prev_hash() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("reddb_archive_chain_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let backend = LocalBackend;
+        let prefix = format!("{}/wal/", temp_dir.to_string_lossy());
+
+        let mk = |lsn: u64| ChangeRecord {
+            lsn,
+            timestamp: lsn * 1000,
+            operation: crate::replication::cdc::ChangeOperation::Insert,
+            collection: "users".to_string(),
+            entity_id: lsn,
+            entity_kind: "row".to_string(),
+            entity_bytes: Some(format!("payload-{lsn}").into_bytes()),
+            metadata: None,
+        };
+
+        let r1 = mk(10);
+        let m1 = archive_change_records(&backend, &prefix, &[(r1.lsn, r1.encode())], None)
+            .unwrap()
+            .expect("seg 1");
+        let r2 = mk(11);
+        let m2 = archive_change_records(
+            &backend,
+            &prefix,
+            &[(r2.lsn, r2.encode())],
+            m1.sha256.clone(),
+        )
+        .unwrap()
+        .expect("seg 2");
+        let r3 = mk(12);
+        let m3 = archive_change_records(
+            &backend,
+            &prefix,
+            &[(r3.lsn, r3.encode())],
+            m2.sha256.clone(),
+        )
+        .unwrap()
+        .expect("seg 3");
+
+        let s1 = load_wal_segment_manifest(&backend, &m1.key).unwrap().unwrap();
+        let s2 = load_wal_segment_manifest(&backend, &m2.key).unwrap().unwrap();
+        let s3 = load_wal_segment_manifest(&backend, &m3.key).unwrap().unwrap();
+        assert!(s1.prev_hash.is_none(), "first segment has no prev_hash");
+        assert_eq!(s2.prev_hash, m1.sha256, "seg 2 links to seg 1 sha256");
+        assert_eq!(s3.prev_hash, m2.sha256, "seg 3 links to seg 2 sha256");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn wal_segment_manifest_carries_prev_hash_through_json() {
+        let m = WalSegmentManifest {
+            key: "wal/000000000010-000000000010.wal".to_string(),
+            lsn_start: 10,
+            lsn_end: 10,
+            size_bytes: 128,
+            created_at: 1730000000000,
+            sha256: Some("abc".to_string()),
+            prev_hash: Some("def".to_string()),
+        };
+        let parsed = WalSegmentManifest::from_json_value(&m.to_json_value()).unwrap();
+        assert_eq!(parsed, m);
     }
 
     #[test]
