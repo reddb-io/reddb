@@ -1,0 +1,259 @@
+# Reference Kubernetes manifest for RedDB.
+# PLAN.md (cloud-agnostic) Phase 10 — operator can take this and run
+# RedDB on any conformant Kubernetes (vanilla, EKS, GKE, AKS, OKE,
+# DigitalOcean Kubernetes, Civo, Linode, Scaleway, k3s, OpenShift).
+# Zero vendor SDK dependencies — every primitive is core Kubernetes.
+#
+# Usage:
+#   kubectl create namespace reddb
+#   kubectl -n reddb apply -f examples/kubernetes/reddb.yaml
+#
+# Customise via the ConfigMap (engine env) and the Secret (auth +
+# remote-backend credentials). Override the image tag in the
+# StatefulSet spec.
+#
+# This deploys ONE writer + a ClusterIP Service. Read replicas, HPA,
+# NetworkPolicy, and HTTPScaledObject (KEDA) examples live alongside
+# in this directory and reference the same ConfigMap/Secret.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: reddb
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: reddb-config
+  namespace: reddb
+data:
+  # Cloud-agnostic backend selection. `none` for in-cluster only;
+  # set RED_BACKEND=s3 to push backups out. RED_S3_ENDPOINT works
+  # against any S3-compatible store (MinIO operator, Rook-Ceph
+  # RGW, AWS, R2, etc.).
+  RED_BACKEND: "none"
+  RED_AUTO_RESTORE: "true"
+  RED_BACKUP_ON_SHUTDOWN: "true"
+  RED_BACKUP_INTERVAL_SECS: "300"
+
+  # Operator-imposed limits. Adjust per workload.
+  RED_MAX_DB_SIZE_BYTES: "10737418240"   # 10 GiB
+  RED_MAX_BATCH_SIZE: "10000"
+  RED_MAX_QUERY_DURATION_MS: "30000"
+  RED_MAX_RESULT_BYTES: "10485760"       # 10 MiB
+
+  # Lifecycle tuning. preStop calls /admin/shutdown synchronously;
+  # combined with terminationGracePeriodSeconds=70 below this gives
+  # the engine plenty of headroom to flush + checkpoint + back up.
+  RED_SHUTDOWN_TIMEOUT_SECS: "60"
+  RED_DRAIN_TIMEOUT_SECS: "30"
+
+  # Logs are JSON-line-on-stdout by default — Loki / Vector /
+  # Fluent Bit ingest without transformation.
+  RED_LOG_FORMAT: "json"
+  RED_LOG_LEVEL: "info"
+---
+# Replace the placeholder values before applying. For S3 swap in
+# the issuing IAM credentials or use IRSA via projected service-
+# account tokens (out-of-band; this manifest stays cloud-agnostic).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: reddb-secrets
+  namespace: reddb
+type: Opaque
+stringData:
+  api_token: "replace-me"
+  admin_token: "replace-me"
+  # Uncomment when RED_BACKEND=s3:
+  # s3_access_key: "AKIA..."
+  # s3_secret_key: "..."
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: reddb
+  namespace: reddb
+  labels:
+    app.kubernetes.io/name: reddb
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: reddb
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+    - name: grpc
+      port: 50051
+      targetPort: 50051
+---
+# Headless service for stable DNS to each pod (required for
+# StatefulSet replica addressing).
+apiVersion: v1
+kind: Service
+metadata:
+  name: reddb-headless
+  namespace: reddb
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: reddb
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+    - name: grpc
+      port: 50051
+      targetPort: 50051
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: reddb
+  namespace: reddb
+  labels:
+    app.kubernetes.io/name: reddb
+spec:
+  serviceName: reddb-headless
+  replicas: 1
+  # `OnDelete` is the safe choice for a single-writer DB — the
+  # operator decides when to roll, no surprise restarts mid-write.
+  # Switch to RollingUpdate only after read-replica support is
+  # production-ready (PLAN.md Phase 3 of the data-safety plan).
+  updateStrategy:
+    type: OnDelete
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: reddb
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: reddb
+    spec:
+      # Wire SIGTERM-based graceful shutdown. Kubernetes sends
+      # SIGTERM, then SIGKILL after `terminationGracePeriodSeconds`.
+      # The engine's signal handler (Phase 1) catches SIGTERM, runs
+      # graceful_shutdown (flush + checkpoint + final backup), then
+      # exits 0. 70s = 60s shutdown timeout + 10s slack.
+      terminationGracePeriodSeconds: 70
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: reddb
+          image: reddb-benchmark/reddb:latest   # replace with your registry
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: grpc
+              containerPort: 50051
+          envFrom:
+            - configMapRef:
+                name: reddb-config
+          env:
+            - name: REDDB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: reddb-secrets
+                  key: api_token
+                  optional: true
+            # Secrets-via-file (PLAN.md Phase 6.4) — the binary reads
+            # *_FILE env paths, so you can mount Kubernetes Secrets
+            # as files instead of plain env values.
+            - name: RED_S3_ACCESS_KEY_FILE
+              value: /run/secrets/reddb/s3_access_key
+            - name: RED_S3_SECRET_KEY_FILE
+              value: /run/secrets/reddb/s3_secret_key
+          # PLAN.md Phase 1 health probe surface. /health/startup
+          # has a longer grace window for cold-start (WAL replay,
+          # restore-from-remote); /health/ready guards traffic.
+          startupProbe:
+            httpGet:
+              path: /health/startup
+              port: http
+            failureThreshold: 30
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 10
+            failureThreshold: 6
+          # Hand off to graceful shutdown ahead of SIGTERM. preStop
+          # is invoked when the pod transitions to Terminating.
+          # Calling /admin/shutdown explicitly lets the engine
+          # finish its flush + final-backup cycle before kubelet's
+          # SIGTERM arrives — defense in depth.
+          lifecycle:
+            preStop:
+              httpGet:
+                path: /admin/drain
+                port: http
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2000m"
+              memory: "2Gi"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: secrets
+              mountPath: /run/secrets/reddb
+              readOnly: true
+      volumes:
+        - name: secrets
+          projected:
+            sources:
+              - secret:
+                  name: reddb-secrets
+                  items:
+                    - key: s3_access_key
+                      path: s3_access_key
+                    - key: s3_secret_key
+                      path: s3_secret_key
+                  optional: true
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+        # Replace with your cluster's storage class. For
+        # cloud-agnostic deployment, leave it unset and let the
+        # default storage class win.
+        # storageClassName: gp3
+---
+# PrometheusRule + ServiceMonitor (Prometheus Operator) consume
+# /metrics directly. The exposition format is OpenMetrics (Phase
+# 5.1) so any compliant scraper works.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: reddb
+  namespace: reddb
+  labels:
+    app.kubernetes.io/name: reddb
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: reddb
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
