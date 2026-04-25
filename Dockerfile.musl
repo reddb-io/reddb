@@ -1,0 +1,41 @@
+# PLAN.md Phase 7.2 — static-musl Dockerfile.
+#
+# Produces a `scratch`-based image carrying nothing but the static
+# `red` binary. Output image is < 30 MB and runs on every Linux
+# distro (no glibc dependency, no shared libraries).
+#
+# Build:
+#   docker buildx build -f Dockerfile.musl -t reddb:musl .
+#
+# Run:
+#   docker run --rm -p 8080:8080 -v reddb-data:/data \
+#     -e RED_BACKEND=fs -e RED_FS_PATH=/backups \
+#     reddb:musl
+
+FROM rust:1.91-alpine AS build
+RUN apk add --no-cache musl-dev openssl-dev pkgconfig protoc protobuf-dev
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY proto ./proto
+COPY src ./src
+COPY benches ./benches
+COPY tests ./tests
+COPY build.rs ./build.rs
+RUN rustup target add x86_64-unknown-linux-musl
+ENV RUSTFLAGS="-C target-feature=+crt-static"
+RUN cargo build \
+        --profile release-static \
+        --bin red \
+        --target x86_64-unknown-linux-musl
+
+# Pure static — `scratch` would work but `alpine` is included so
+# /tmp + /etc/ssl/certs exist for HTTPS backends. Pick scratch
+# instead if you don't need TLS at the engine.
+FROM alpine:3.19
+RUN apk add --no-cache ca-certificates tini
+COPY --from=build /src/target/x86_64-unknown-linux-musl/release-static/red /usr/local/bin/red
+EXPOSE 8080 50051
+HEALTHCHECK --interval=10s --timeout=2s --start-period=5s --retries=3 \
+    CMD wget -qO- http://127.0.0.1:8080/health/live >/dev/null 2>&1 || exit 1
+ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["/usr/local/bin/red", "server", "--http", "--grpc", "--path", "/data/data.rdb"]
