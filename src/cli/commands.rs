@@ -171,6 +171,12 @@ pub fn all_commands() -> Vec<CommandDef> {
       flags: pitr_restore_flags(),
     },
     CommandDef {
+      name: "doctor",
+      summary: "Health-check a running server against operator thresholds (PLAN.md Phase 5.5)",
+      usage: "red doctor [--bind 127.0.0.1:8080] [--token <admin>] [--json] [--backup-age-warn-secs 600] [--backup-age-crit-secs 3600] [--wal-lag-warn 1000] [--wal-lag-crit 10000]",
+      flags: doctor_flags(),
+    },
+    CommandDef {
       name: "version",
       summary: "Show RedDB version information",
       usage: "red version",
@@ -468,6 +474,29 @@ fn health_flags() -> Vec<FlagSchema> {
             .with_description("Server address; defaults by transport"),
         FlagSchema::boolean("grpc").with_description("Probe a gRPC listener (default transport)"),
         FlagSchema::boolean("http").with_description("Probe an HTTP listener"),
+    ]
+}
+
+fn doctor_flags() -> Vec<FlagSchema> {
+    vec![
+        FlagSchema::new("bind")
+            .with_description("HTTP address of the server to probe")
+            .with_default("127.0.0.1:8080"),
+        FlagSchema::new("token")
+            .with_description("Admin bearer token; defaults to RED_ADMIN_TOKEN env"),
+        FlagSchema::boolean("json").with_description("Emit a single JSON object instead of human text"),
+        FlagSchema::new("backup-age-warn-secs")
+            .with_description("Warn when last successful backup is older than N seconds")
+            .with_default("600"),
+        FlagSchema::new("backup-age-crit-secs")
+            .with_description("Critical when last successful backup is older than N seconds")
+            .with_default("3600"),
+        FlagSchema::new("wal-lag-warn")
+            .with_description("Warn when WAL archive lag exceeds N records")
+            .with_default("1000"),
+        FlagSchema::new("wal-lag-crit")
+            .with_description("Critical when WAL archive lag exceeds N records")
+            .with_default("10000"),
     ]
 }
 
