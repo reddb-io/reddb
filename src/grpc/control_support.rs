@@ -59,6 +59,26 @@ impl GrpcRuntime {
         check_permission(&auth, false, true).map_err(Status::permission_denied)
     }
 
+    /// PLAN.md Phase 11.4 — call after a successful gRPC write to
+    /// enforce the configured commit policy. When policy is `Local`
+    /// (default) this returns immediately. When policy is
+    /// `AckN(n)` and `RED_COMMIT_FAIL_ON_TIMEOUT=true`, a missed
+    /// ack window is mapped to `Status::deadline_exceeded` so
+    /// clients map it to a retry.
+    ///
+    /// Each create_* / update / delete RPC calls this right before
+    /// building its `Response::new(reply)`. The post_lsn is the
+    /// CDC current LSN at call time — which is the LSN of the
+    /// just-completed write because the runtime advances it
+    /// synchronously inside the storage path.
+    pub(crate) fn enforce_commit_policy_after_write(&self) -> Result<(), Status> {
+        let post_lsn = self.runtime.cdc_current_lsn();
+        self.runtime
+            .enforce_commit_policy(post_lsn)
+            .map(|_| ())
+            .map_err(|err| Status::deadline_exceeded(err.to_string()))
+    }
+
     pub(crate) fn start_graph_analytics_job(
         &self,
         kind: impl Into<String>,
