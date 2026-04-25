@@ -14,8 +14,14 @@
 //! to storage. The replica internal apply path is the privileged surface
 //! and bypasses the gate by construction.
 //!
-//! Future inputs (planned but not yet wired):
-//! * Serverless writer-lease state (`PLAN.md` Phase 5 / W6).
+//! Serverless writer-lease state (`PLAN.md` Phase 5 / W6) is wired
+//! through `LeaseGateState` — runtime flips it to `Held` after a
+//! successful acquire/refresh and back to `NotHeld` when the lease is
+//! lost, released, or has expired. Standalone / replica / lease-not-
+//! configured deployments stay on `NotRequired` so the check is a
+//! single atomic load of zero.
+
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use crate::api::{RedDBError, RedDBOptions, RedDBResult};
 use crate::replication::ReplicationRole;
@@ -52,6 +58,39 @@ impl WriteKind {
     }
 }
 
+/// Serverless writer-lease state wired through the gate.
+///
+/// `NotRequired` is the default — standalone, replica, and
+/// lease-disabled serverless deployments all share it. `Held` /
+/// `NotHeld` only matter for instances that opted into lease-fenced
+/// writes; the lease loop flips the value as it acquires / refreshes /
+/// loses the slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum LeaseGateState {
+    NotRequired = 0,
+    Held = 1,
+    NotHeld = 2,
+}
+
+impl LeaseGateState {
+    fn from_u8(raw: u8) -> Self {
+        match raw {
+            1 => Self::Held,
+            2 => Self::NotHeld,
+            _ => Self::NotRequired,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NotRequired => "not_required",
+            Self::Held => "held",
+            Self::NotHeld => "not_held",
+        }
+    }
+}
+
 /// Live policy for public-mutation surfaces.
 ///
 /// `read_only` was originally a `bool` snapshot taken at runtime
@@ -62,23 +101,32 @@ impl WriteKind {
 /// the data-safety plan), and shouldn't be a single-flag decision.
 #[derive(Debug)]
 pub struct WriteGate {
-    read_only: std::sync::atomic::AtomicBool,
+    read_only: AtomicBool,
     role: ReplicationRole,
+    lease: AtomicU8,
 }
 
 impl WriteGate {
     pub fn from_options(options: &RedDBOptions) -> Self {
         Self {
-            read_only: std::sync::atomic::AtomicBool::new(options.read_only),
+            read_only: AtomicBool::new(options.read_only),
             role: options.replication.role.clone(),
+            lease: AtomicU8::new(LeaseGateState::NotRequired as u8),
         }
     }
 
     /// Returns `Ok(())` if the public surface is allowed to perform `kind`.
     /// Returns `RedDBError::ReadOnly` otherwise.
     ///
-    /// Reasoning order is intentional: replica role first so a replica
-    /// that was somehow booted with `read_only = false` still rejects.
+    /// Reasoning order is intentional:
+    /// 1. Replica role — a replica booted with `read_only = false`
+    ///    must still reject; this is a structural property.
+    /// 2. Lease lost — the strongest serverless correctness signal.
+    ///    A writer that lost its lease must stop *immediately*; running
+    ///    while another holder has been promoted causes split-brain.
+    /// 3. Operator read-only flag — explicit /admin/readonly toggle
+    ///    or boot-time pin; lower priority than lease loss because the
+    ///    operator can revoke it without external coordination.
     pub fn check(&self, kind: WriteKind) -> RedDBResult<()> {
         if matches!(self.role, ReplicationRole::Replica { .. }) {
             return Err(RedDBError::ReadOnly(format!(
@@ -86,7 +134,13 @@ impl WriteGate {
                 kind.label()
             )));
         }
-        if self.read_only.load(std::sync::atomic::Ordering::Acquire) {
+        if matches!(self.lease_state(), LeaseGateState::NotHeld) {
+            return Err(RedDBError::ReadOnly(format!(
+                "writer lease not held — {} rejected (serverless fence)",
+                kind.label()
+            )));
+        }
+        if self.read_only.load(Ordering::Acquire) {
             return Err(RedDBError::ReadOnly(format!(
                 "instance is configured read_only — {} rejected",
                 kind.label()
@@ -96,8 +150,9 @@ impl WriteGate {
     }
 
     pub fn is_read_only(&self) -> bool {
-        self.read_only.load(std::sync::atomic::Ordering::Acquire)
+        self.read_only.load(Ordering::Acquire)
             || matches!(self.role, ReplicationRole::Replica { .. })
+            || matches!(self.lease_state(), LeaseGateState::NotHeld)
     }
 
     pub fn role(&self) -> &ReplicationRole {
@@ -112,8 +167,27 @@ impl WriteGate {
     /// Returns the previous read_only value so callers can detect
     /// idempotent calls (toggle to the same value = no work to do).
     pub fn set_read_only(&self, enabled: bool) -> bool {
-        self.read_only
-            .swap(enabled, std::sync::atomic::Ordering::AcqRel)
+        self.read_only.swap(enabled, Ordering::AcqRel)
+    }
+
+    /// Current writer-lease gate state. `NotRequired` for standalone,
+    /// replica, and lease-disabled serverless instances.
+    pub fn lease_state(&self) -> LeaseGateState {
+        LeaseGateState::from_u8(self.lease.load(Ordering::Acquire))
+    }
+
+    /// Flip the lease gate state. Called by the lease lifecycle loop
+    /// (PLAN.md Phase 5 / W6) on acquire / refresh / lose / release.
+    /// Returns the previous state so the caller can detect idempotent
+    /// transitions and avoid spamming audit / metrics.
+    ///
+    /// `NotRequired` is set once at boot when the operator opted out
+    /// of lease fencing. Once set to `Held` / `NotHeld`, callers should
+    /// keep it in that subset; flipping back to `NotRequired` mid-flight
+    /// silently disables the fence and is reserved for shutdown
+    /// teardown only.
+    pub fn set_lease_state(&self, state: LeaseGateState) -> LeaseGateState {
+        LeaseGateState::from_u8(self.lease.swap(state as u8, Ordering::AcqRel))
     }
 }
 
@@ -123,8 +197,9 @@ mod tests {
 
     fn gate(read_only: bool, role: ReplicationRole) -> WriteGate {
         WriteGate {
-            read_only: std::sync::atomic::AtomicBool::new(read_only),
+            read_only: AtomicBool::new(read_only),
             role,
+            lease: AtomicU8::new(LeaseGateState::NotRequired as u8),
         }
     }
 
@@ -174,6 +249,52 @@ mod tests {
         let err = g.check(WriteKind::Dml).unwrap_err();
         match err {
             RedDBError::ReadOnly(msg) => assert!(msg.contains("read_only")),
+            other => panic!("expected ReadOnly, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lease_not_held_rejects_writes_on_primary() {
+        let g = gate(false, ReplicationRole::Primary);
+        g.set_lease_state(LeaseGateState::NotHeld);
+        let err = g.check(WriteKind::Dml).unwrap_err();
+        match err {
+            RedDBError::ReadOnly(msg) => assert!(msg.contains("lease")),
+            other => panic!("expected ReadOnly, got {other:?}"),
+        }
+        assert!(g.is_read_only());
+    }
+
+    #[test]
+    fn lease_held_allows_writes_on_primary() {
+        let g = gate(false, ReplicationRole::Primary);
+        g.set_lease_state(LeaseGateState::Held);
+        assert!(g.check(WriteKind::Dml).is_ok());
+        assert!(!g.is_read_only());
+    }
+
+    #[test]
+    fn lease_state_transitions_return_previous() {
+        let g = gate(false, ReplicationRole::Primary);
+        assert_eq!(
+            g.set_lease_state(LeaseGateState::Held),
+            LeaseGateState::NotRequired
+        );
+        assert_eq!(
+            g.set_lease_state(LeaseGateState::NotHeld),
+            LeaseGateState::Held
+        );
+        assert_eq!(g.lease_state(), LeaseGateState::NotHeld);
+    }
+
+    #[test]
+    fn lease_loss_overrides_writable_read_only_flag() {
+        // Even with read_only=false, losing the lease must reject.
+        let g = gate(false, ReplicationRole::Primary);
+        g.set_lease_state(LeaseGateState::NotHeld);
+        let err = g.check(WriteKind::Ddl).unwrap_err();
+        match err {
+            RedDBError::ReadOnly(msg) => assert!(msg.contains("lease")),
             other => panic!("expected ReadOnly, got {other:?}"),
         }
     }

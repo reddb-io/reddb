@@ -172,31 +172,51 @@ impl RedDBServer {
         );
         match recovery.restore_to(target_time_ms, &local_path) {
             Ok(report) => {
-                let mut object = Map::new();
-                object.insert("ok".to_string(), JsonValue::Bool(true));
-                object.insert(
+                let mut details = Map::new();
+                details.insert(
                     "snapshot_used".to_string(),
                     JsonValue::Number(report.snapshot_used as f64),
                 );
-                object.insert(
+                details.insert(
                     "wal_segments_replayed".to_string(),
                     JsonValue::Number(report.wal_segments_replayed as f64),
                 );
-                object.insert(
+                details.insert(
                     "records_applied".to_string(),
                     JsonValue::Number(report.records_applied as f64),
                 );
-                object.insert(
+                details.insert(
                     "recovered_to_lsn".to_string(),
                     JsonValue::Number(report.recovered_to_lsn as f64),
                 );
-                object.insert(
+                details.insert(
                     "recovered_to_time".to_string(),
                     JsonValue::Number(report.recovered_to_time as f64),
                 );
+                self.runtime.audit_log().record(
+                    "admin/restore",
+                    "operator",
+                    "instance",
+                    "ok",
+                    JsonValue::Object(details.clone()),
+                );
+                let mut object = Map::new();
+                object.insert("ok".to_string(), JsonValue::Bool(true));
+                for (k, v) in details {
+                    object.insert(k, v);
+                }
                 json_response(200, JsonValue::Object(object))
             }
-            Err(err) => json_error(500, err.to_string()),
+            Err(err) => {
+                self.runtime.audit_log().record(
+                    "admin/restore",
+                    "operator",
+                    "instance",
+                    &format!("err: {err}"),
+                    JsonValue::Null,
+                );
+                json_error(500, err.to_string())
+            }
         }
     }
 
@@ -209,20 +229,40 @@ impl RedDBServer {
     ) -> HttpResponse {
         match self.runtime.trigger_backup() {
             Ok(result) => {
-                let mut object = Map::new();
-                object.insert("ok".to_string(), JsonValue::Bool(true));
-                object.insert(
+                let mut details = Map::new();
+                details.insert(
                     "snapshot_id".to_string(),
                     JsonValue::Number(result.snapshot_id as f64),
                 );
-                object.insert("uploaded".to_string(), JsonValue::Bool(result.uploaded));
-                object.insert(
+                details.insert("uploaded".to_string(), JsonValue::Bool(result.uploaded));
+                details.insert(
                     "duration_ms".to_string(),
                     JsonValue::Number(result.duration_ms as f64),
                 );
+                self.runtime.audit_log().record(
+                    "admin/backup",
+                    "operator",
+                    "instance",
+                    "ok",
+                    JsonValue::Object(details.clone()),
+                );
+                let mut object = Map::new();
+                object.insert("ok".to_string(), JsonValue::Bool(true));
+                for (k, v) in details {
+                    object.insert(k, v);
+                }
                 json_response(200, JsonValue::Object(object))
             }
-            Err(err) => json_error(500, err.to_string()),
+            Err(err) => {
+                self.runtime.audit_log().record(
+                    "admin/backup",
+                    "operator",
+                    "instance",
+                    &format!("err: {err}"),
+                    JsonValue::Null,
+                );
+                json_error(500, err.to_string())
+            }
         }
     }
 
@@ -362,6 +402,22 @@ impl RedDBServer {
         let _ = writeln!(body, "# TYPE reddb_replication_role gauge");
         let _ = writeln!(body, "reddb_replication_role{{role=\"{}\"}} 1", role);
 
+        // PLAN.md Phase 5 / W6 — serverless writer lease state.
+        // `not_required` for instances that opted out of lease fencing;
+        // `held` / `not_held` for instances behind the fence so dashboards
+        // can alert on lease loss without scraping logs.
+        let lease_state = self.runtime.write_gate().lease_state();
+        let _ = writeln!(
+            body,
+            "# HELP reddb_writer_lease_state Serverless writer-lease gate state (label)."
+        );
+        let _ = writeln!(body, "# TYPE reddb_writer_lease_state gauge");
+        let _ = writeln!(
+            body,
+            "reddb_writer_lease_state{{state=\"{}\"}} 1",
+            lease_state.label()
+        );
+
         let _ = writeln!(
             body,
             "# HELP reddb_db_size_bytes On-disk size of the primary database file."
@@ -476,6 +532,10 @@ impl RedDBServer {
         object.insert(
             "replication_role".to_string(),
             JsonValue::String(role.to_string()),
+        );
+        object.insert(
+            "writer_lease".to_string(),
+            JsonValue::String(self.runtime.write_gate().lease_state().label().to_string()),
         );
         if let Some(backend) = backend_kind {
             object.insert("remote_backend".to_string(), JsonValue::String(backend));
