@@ -1,0 +1,58 @@
+# Reference docker-compose for the cloud-agnostic universal contract.
+# PLAN.md Phase 10. Exercises:
+#   * RED_BACKEND=fs with a host-mounted backup root
+#   * /health/live HEALTHCHECK
+#   * RED_MAX_* operator-imposed limits
+#   * Resource caps the engine sees via cgroup auto-detect
+#   * Graceful shutdown with a 70s grace window
+#
+# Bring up:
+#     docker compose -f examples/docker-compose.universal.yml up -d
+#
+# Tail audit log + metrics:
+#     docker exec -it reddb cat /data/.audit.log
+#     curl http://localhost:8080/metrics
+#     curl http://localhost:8080/admin/status | jq
+
+services:
+  reddb:
+    image: reddb-benchmark/reddb:latest   # replace with your registry
+    container_name: reddb
+    ports:
+      - "8080:8080"
+      - "50051:50051"
+    environment:
+      RED_BACKEND: "fs"
+      RED_FS_PATH: "/backups"
+      RED_AUTO_RESTORE: "true"
+      RED_BACKUP_ON_SHUTDOWN: "true"
+      RED_BACKUP_INTERVAL_SECS: "300"
+      RED_MAX_DB_SIZE_BYTES: "10737418240"
+      RED_MAX_BATCH_SIZE: "10000"
+      RED_MAX_QUERY_DURATION_MS: "30000"
+      RED_LOG_FORMAT: "json"
+      RED_LOG_LEVEL: "info"
+      RED_SHUTDOWN_TIMEOUT_SECS: "60"
+    volumes:
+      - reddb-data:/data
+      - reddb-backups:/backups
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--max-time", "2", "http://127.0.0.1:8080/health/live"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    stop_grace_period: 70s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2"
+        reservations:
+          memory: 512M
+          cpus: "0.5"
+    restart: unless-stopped
+
+volumes:
+  reddb-data:
+  reddb-backups:

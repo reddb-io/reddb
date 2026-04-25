@@ -67,7 +67,7 @@ impl ResourceLimits {
     /// unbounded" so operators can disable a deployment-default
     /// cap without unsetting the env.
     pub fn from_env() -> Self {
-        Self {
+        let mut out = Self {
             max_db_size_bytes: Self::read_u64("MAX_DB_SIZE_BYTES"),
             max_connections: Self::read_u64("MAX_CONNECTIONS"),
             max_memory_bytes: Self::read_u64("MAX_MEMORY_MB").map(|mb| mb.saturating_mul(1_048_576)),
@@ -75,7 +75,21 @@ impl ResourceLimits {
             max_query_duration: Self::read_u64("MAX_QUERY_DURATION_MS").map(Duration::from_millis),
             max_result_bytes: Self::read_u64("MAX_RESULT_BYTES"),
             max_batch_size: Self::read_u64("MAX_BATCH_SIZE"),
+        };
+
+        // PLAN.md Phase 4.2 — auto-detect container memory cap when
+        // the operator didn't pin one. Cgroup v2 first
+        // (`memory.max`), v1 fallback
+        // (`memory/memory.limit_in_bytes`). Cross-platform: missing
+        // files / non-Linux just leave the field `None`. The
+        // explicit env var still wins so an operator can override
+        // a too-tight cgroup detect without restructuring the
+        // container.
+        if out.max_memory_bytes.is_none() {
+            out.max_memory_bytes = read_cgroup_memory_max();
         }
+
+        out
     }
 
     fn read_u64(suffix: &str) -> Option<u64> {
@@ -101,6 +115,41 @@ impl ResourceLimits {
             _ => false,
         }
     }
+}
+
+/// Read the active cgroup memory cap, returning bytes when known.
+/// Cgroup v2 first (`/sys/fs/cgroup/memory.max`), v1 fallback
+/// (`/sys/fs/cgroup/memory/memory.limit_in_bytes`). The literal
+/// string `max` (cgroup v2 "no cap") returns `None` so the
+/// resource-limits struct stays at "no cap pinned".
+///
+/// Non-Linux / missing files / unparseable contents → `None`. Never
+/// panics; the caller treats absence as "fall through to whatever
+/// upstream layer decides".
+fn read_cgroup_memory_max() -> Option<u64> {
+    // cgroup v2
+    if let Ok(raw) = std::fs::read_to_string("/sys/fs/cgroup/memory.max") {
+        let trimmed = raw.trim();
+        if trimmed != "max" && !trimmed.is_empty() {
+            if let Ok(bytes) = trimmed.parse::<u64>() {
+                if bytes > 0 && bytes < u64::MAX / 2 {
+                    return Some(bytes);
+                }
+            }
+        }
+    }
+    // cgroup v1
+    if let Ok(raw) = std::fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes") {
+        if let Ok(bytes) = raw.trim().parse::<u64>() {
+            // Kernels report `9223372036854771712` as "unlimited" in
+            // cgroup v1; treat any value that's effectively
+            // unbounded as `None`.
+            if bytes > 0 && bytes < (u64::MAX / 2) {
+                return Some(bytes);
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]

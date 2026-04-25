@@ -761,6 +761,10 @@ struct RuntimeInner {
     /// observability and (in follow-up commits) the per-write
     /// enforcement points.
     resource_limits: crate::runtime::resource_limits::ResourceLimits,
+    /// Append-only audit log for admin mutations (PLAN.md Phase
+    /// 6.5). Lives next to the primary `.rdb` file so backup +
+    /// restore flows ship it alongside the data.
+    audit_log: crate::runtime::audit_log::AuditLogger,
 }
 
 #[derive(Clone)]
@@ -773,6 +777,7 @@ pub struct RuntimeConnection {
     inner: Arc<RuntimeInner>,
 }
 
+pub mod audit_log;
 pub mod config_matrix;
 pub mod config_overlay;
 pub mod lifecycle;

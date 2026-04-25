@@ -1,0 +1,103 @@
+# Reference Fly Machines deployment.
+# PLAN.md Phase 10. Targets the cloud-agnostic universal contract:
+#   * graceful_stop via SIGTERM (the engine's signal handler runs
+#     /admin/shutdown semantics in-process)
+#   * /health/live + /health/ready as Fly-side health probes
+#   * Persistent volume mounted at /data
+#   * Optional auto-stop / auto-start (set in [services]) so this
+#     can run as a wake-on-traffic serverless writer.
+#
+# Operator workflow:
+#     fly launch --copy-config --no-deploy
+#     fly volumes create reddb_data --region gru --size 10
+#     fly secrets set RED_S3_ACCESS_KEY=... RED_S3_SECRET_KEY=...
+#     fly deploy
+#
+# Replace `app =` and `primary_region =` with your own.
+
+app = "reddb-example"
+primary_region = "gru"
+kill_signal = "SIGTERM"
+kill_timeout = "60s"
+
+[build]
+  image = "reddb-benchmark/reddb:latest"
+
+[env]
+  REDDB_HTTP_BIND_ADDR = "0.0.0.0:8080"
+  REDDB_GRPC_BIND_ADDR = "0.0.0.0:50051"
+
+  RED_BACKEND = "s3"
+  RED_S3_ENDPOINT = "https://fly.storage.tigris.dev"
+  RED_S3_BUCKET = "reddb-example"
+  RED_S3_REGION = "auto"
+  RED_S3_PATH_STYLE = "true"
+
+  RED_AUTO_RESTORE = "true"
+  RED_BACKUP_ON_SHUTDOWN = "true"
+  RED_BACKUP_INTERVAL_SECS = "300"
+
+  RED_MAX_DB_SIZE_BYTES = "10737418240"
+  RED_MAX_BATCH_SIZE = "10000"
+  RED_LOG_FORMAT = "json"
+  RED_LOG_LEVEL = "info"
+  RED_SHUTDOWN_TIMEOUT_SECS = "60"
+
+[mounts]
+  source = "reddb_data"
+  destination = "/data"
+
+[[services]]
+  protocol = "tcp"
+  internal_port = 8080
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+    force_https = true
+
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+
+  [[services.tcp_checks]]
+    interval = "15s"
+    timeout = "2s"
+    grace_period = "30s"
+
+  [[services.http_checks]]
+    interval = "10s"
+    timeout = "2s"
+    grace_period = "30s"
+    method = "GET"
+    path = "/health/live"
+    protocol = "http"
+
+  [[services.http_checks]]
+    interval = "10s"
+    timeout = "2s"
+    grace_period = "60s"
+    method = "GET"
+    path = "/health/ready"
+    protocol = "http"
+
+[[services]]
+  protocol = "tcp"
+  internal_port = 50051
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+
+  [[services.ports]]
+    port = 50051
+
+[metrics]
+  port = 8080
+  path = "/metrics"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 2
+  memory_mb = 2048

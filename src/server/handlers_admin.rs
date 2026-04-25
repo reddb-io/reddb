@@ -79,6 +79,25 @@ impl RedDBServer {
 
         match self.runtime.graceful_shutdown(backup_on_shutdown) {
             Ok(report) => {
+                // PLAN.md Phase 6.5 — audit operator-triggered
+                // shutdown. Recorded as "ok" + duration so the log
+                // shipper can graph shutdown latency over time.
+                let mut details = Map::new();
+                details.insert(
+                    "backup_uploaded".to_string(),
+                    JsonValue::Bool(report.backup_uploaded),
+                );
+                details.insert(
+                    "duration_ms".to_string(),
+                    JsonValue::Number(report.duration_ms as f64),
+                );
+                self.runtime.audit_log().record(
+                    "admin/shutdown",
+                    "operator",
+                    "instance",
+                    "ok",
+                    JsonValue::Object(details),
+                );
                 let mut object = Map::new();
                 object.insert("ok".to_string(), JsonValue::Bool(true));
                 object.insert(
@@ -249,6 +268,16 @@ impl RedDBServer {
             }
         }
 
+        let mut details = Map::new();
+        details.insert("enabled".to_string(), JsonValue::Bool(enabled));
+        details.insert("previous".to_string(), JsonValue::Bool(previous));
+        self.runtime.audit_log().record(
+            "admin/readonly",
+            "operator",
+            "instance",
+            "ok",
+            JsonValue::Object(details),
+        );
         let mut object = Map::new();
         object.insert("ok".to_string(), JsonValue::Bool(true));
         object.insert("read_only".to_string(), JsonValue::Bool(enabled));
@@ -509,6 +538,13 @@ impl RedDBServer {
     /// Idempotent.
     pub(crate) fn handle_admin_drain(&self) -> HttpResponse {
         self.runtime.lifecycle().mark_draining();
+        self.runtime.audit_log().record(
+            "admin/drain",
+            "operator",
+            "instance",
+            "ok",
+            JsonValue::Null,
+        );
         let mut object = Map::new();
         object.insert("ok".to_string(), JsonValue::Bool(true));
         object.insert(

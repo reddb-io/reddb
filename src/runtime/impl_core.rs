@@ -1372,6 +1372,16 @@ impl RedDBRuntime {
                 write_gate: crate::runtime::write_gate::WriteGate::from_options(&options),
                 lifecycle: crate::runtime::lifecycle::Lifecycle::new(),
                 resource_limits: crate::runtime::resource_limits::ResourceLimits::from_env(),
+                audit_log: {
+                    // Default audit-log path for the in-memory case
+                    // sits in the system temp dir; persistent runs
+                    // place it next to data.rdb.
+                    let data_path = options
+                        .data_path
+                        .clone()
+                        .unwrap_or_else(|| std::env::temp_dir().join("reddb"));
+                    crate::runtime::audit_log::AuditLogger::for_data_path(&data_path)
+                },
             }),
         };
 
@@ -2047,6 +2057,11 @@ impl RedDBRuntime {
     /// Operator-imposed resource limits (PLAN.md Phase 4.1).
     pub fn resource_limits(&self) -> &crate::runtime::resource_limits::ResourceLimits {
         &self.inner.resource_limits
+    }
+
+    /// Append-only audit log for admin mutations (PLAN.md Phase 6.5).
+    pub fn audit_log(&self) -> &crate::runtime::audit_log::AuditLogger {
+        &self.inner.audit_log
     }
 
     /// Reject the call when the requested batch size exceeds
