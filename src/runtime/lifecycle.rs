@@ -100,11 +100,75 @@ pub struct Lifecycle {
     /// still starting. Read by `/health/ready` to expose the cold-
     /// start window.
     ready_at_ms: AtomicU64,
+    /// PLAN.md Phase 9.1 — cold-start phase markers. Each AtomicU64
+    /// is the wall-clock unix-ms when the runtime transitioned into
+    /// the named phase. `0` until the phase fires. Operators tune
+    /// the cold-start budget by reading the deltas through the
+    /// `cold_start_phases()` accessor.
+    restore_started_at_ms: AtomicU64,
+    restore_ready_at_ms: AtomicU64,
+    wal_replay_started_at_ms: AtomicU64,
+    wal_replay_ready_at_ms: AtomicU64,
+    index_warmup_started_at_ms: AtomicU64,
+    index_warmup_ready_at_ms: AtomicU64,
     /// Reason string when /health/ready returns 503. Empty when
     /// ready or stopped. Updated under `report` write lock so
     /// readers of the JSON status see a consistent pair of phase +
     /// reason.
     report: RwLock<LifecycleReport>,
+}
+
+/// PLAN.md Phase 9.1 — cold-start phase snapshot. All fields are
+/// wall-clock unix-ms; `0` means the phase hasn't fired yet.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ColdStartPhases {
+    pub started_at_ms: u64,
+    pub restore_started_at_ms: u64,
+    pub restore_ready_at_ms: u64,
+    pub wal_replay_started_at_ms: u64,
+    pub wal_replay_ready_at_ms: u64,
+    pub index_warmup_started_at_ms: u64,
+    pub index_warmup_ready_at_ms: u64,
+    pub ready_at_ms: u64,
+}
+
+impl ColdStartPhases {
+    /// `(phase_name, duration_ms)` pairs for /metrics. Skips phases
+    /// that haven't fired or haven't completed.
+    pub fn durations_ms(&self) -> Vec<(&'static str, u64)> {
+        let mut out = Vec::with_capacity(4);
+        if self.restore_ready_at_ms >= self.restore_started_at_ms
+            && self.restore_started_at_ms > 0
+            && self.restore_ready_at_ms > 0
+        {
+            out.push((
+                "restore",
+                self.restore_ready_at_ms - self.restore_started_at_ms,
+            ));
+        }
+        if self.wal_replay_ready_at_ms >= self.wal_replay_started_at_ms
+            && self.wal_replay_started_at_ms > 0
+            && self.wal_replay_ready_at_ms > 0
+        {
+            out.push((
+                "wal_replay",
+                self.wal_replay_ready_at_ms - self.wal_replay_started_at_ms,
+            ));
+        }
+        if self.index_warmup_ready_at_ms >= self.index_warmup_started_at_ms
+            && self.index_warmup_started_at_ms > 0
+            && self.index_warmup_ready_at_ms > 0
+        {
+            out.push((
+                "index_warmup",
+                self.index_warmup_ready_at_ms - self.index_warmup_started_at_ms,
+            ));
+        }
+        if self.ready_at_ms >= self.started_at_ms && self.ready_at_ms > 0 {
+            out.push(("total", self.ready_at_ms - self.started_at_ms));
+        }
+        out
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -119,7 +183,64 @@ impl Lifecycle {
             phase: AtomicU8::new(Phase::Starting as u8),
             started_at_ms: now_ms(),
             ready_at_ms: AtomicU64::new(0),
+            restore_started_at_ms: AtomicU64::new(0),
+            restore_ready_at_ms: AtomicU64::new(0),
+            wal_replay_started_at_ms: AtomicU64::new(0),
+            wal_replay_ready_at_ms: AtomicU64::new(0),
+            index_warmup_started_at_ms: AtomicU64::new(0),
+            index_warmup_ready_at_ms: AtomicU64::new(0),
             report: RwLock::new(LifecycleReport::default()),
+        }
+    }
+
+    /// PLAN.md Phase 9.1 — mark a cold-start phase boundary. Boot
+    /// code calls these as it transitions through restore-from-
+    /// remote, WAL replay, and index warmup. Idempotent: only the
+    /// first call sets the timestamp; subsequent calls are no-ops
+    /// so a retried boot doesn't reset the gauge.
+    pub fn mark_restore_started(&self) {
+        let _ = self
+            .restore_started_at_ms
+            .compare_exchange(0, now_ms(), Ordering::AcqRel, Ordering::Acquire);
+    }
+    pub fn mark_restore_ready(&self) {
+        let _ = self
+            .restore_ready_at_ms
+            .compare_exchange(0, now_ms(), Ordering::AcqRel, Ordering::Acquire);
+    }
+    pub fn mark_wal_replay_started(&self) {
+        let _ = self
+            .wal_replay_started_at_ms
+            .compare_exchange(0, now_ms(), Ordering::AcqRel, Ordering::Acquire);
+    }
+    pub fn mark_wal_replay_ready(&self) {
+        let _ = self
+            .wal_replay_ready_at_ms
+            .compare_exchange(0, now_ms(), Ordering::AcqRel, Ordering::Acquire);
+    }
+    pub fn mark_index_warmup_started(&self) {
+        let _ = self
+            .index_warmup_started_at_ms
+            .compare_exchange(0, now_ms(), Ordering::AcqRel, Ordering::Acquire);
+    }
+    pub fn mark_index_warmup_ready(&self) {
+        let _ = self
+            .index_warmup_ready_at_ms
+            .compare_exchange(0, now_ms(), Ordering::AcqRel, Ordering::Acquire);
+    }
+
+    /// Snapshot every cold-start marker in one read. Callers compute
+    /// per-phase deltas via `ColdStartPhases::durations_ms()`.
+    pub fn cold_start_phases(&self) -> ColdStartPhases {
+        ColdStartPhases {
+            started_at_ms: self.started_at_ms,
+            restore_started_at_ms: self.restore_started_at_ms.load(Ordering::Acquire),
+            restore_ready_at_ms: self.restore_ready_at_ms.load(Ordering::Acquire),
+            wal_replay_started_at_ms: self.wal_replay_started_at_ms.load(Ordering::Acquire),
+            wal_replay_ready_at_ms: self.wal_replay_ready_at_ms.load(Ordering::Acquire),
+            index_warmup_started_at_ms: self.index_warmup_started_at_ms.load(Ordering::Acquire),
+            index_warmup_ready_at_ms: self.index_warmup_ready_at_ms.load(Ordering::Acquire),
+            ready_at_ms: self.ready_at_ms.load(Ordering::Acquire),
         }
     }
 
