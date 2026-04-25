@@ -1520,7 +1520,6 @@ fn build_aggregate_group_key(values: &[Value]) -> AggregateGroupKey {
         .collect()
 }
 
-#[allow(dead_code)]
 fn group_value_key(value: &Value) -> String {
     use std::fmt::Write;
     let mut buf = String::with_capacity(32);
