@@ -41,7 +41,8 @@ Public, versioned spec for the backup catalog RedDB writes to a remote backend (
       "lsn_end": 12500,
       "key": "wal/000000012345-000000012500.wal",
       "bytes": 4096,
-      "checksum": "sha256:c1d2…"
+      "checksum": "sha256:c1d2…",
+      "prev_hash": "sha256:9f8b…"
     }
   ]
 }
@@ -66,6 +67,7 @@ Public, versioned spec for the backup catalog RedDB writes to a remote backend (
 | `wal_segments[].key` | string | yes | Backend key. |
 | `wal_segments[].bytes` | uint64 | no | Encoded payload size. |
 | `wal_segments[].checksum` | string | no | `"sha256:<hex>"`. Absent for legacy segments. |
+| `wal_segments[].prev_hash` | string | no | `"sha256:<hex>"` of the prior segment in the timeline. **Restore enforces the chain.** Absent only on the first segment of a fresh timeline. |
 
 ## Per-artifact sidecar schema
 
@@ -81,6 +83,30 @@ Public, versioned spec for the backup catalog RedDB writes to a remote backend (
   "sha256": "c1d2…"
 }
 ```
+
+WAL segment sidecar fields:
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `key` | string | yes | Backend key of the segment payload. |
+| `lsn_start` / `lsn_end` | uint64 | yes | Inclusive LSN range. |
+| `size_bytes` | uint64 | no | Encoded payload size. |
+| `created_at` | uint64 | no | Unix milliseconds when archived. |
+| `sha256` | string | no | Hex SHA-256 of the segment payload. |
+| `prev_hash` | string | no | Hex SHA-256 of the prior segment in this timeline. **Restore validates the chain** — `segment[i].prev_hash` must equal `segment[i-1].sha256`. `null`/absent only on the first segment of a timeline (fresh archive or post-PITR). |
+
+### Hash chain semantics (v1.0)
+
+The `prev_hash` field forms a forward-only chain across all WAL segments archived from a single timeline. Restore enforces it strictly:
+
+1. The first segment in `plan.wal_segments` (lowest `lsn_start`) may have `prev_hash = null`.
+2. Every subsequent segment's `prev_hash` **must** equal the prior segment's `sha256`. Any of the following is fail-closed:
+   - Missing middle segment — next segment's `prev_hash` refers to a sha that wasn't loaded.
+   - Tampered segment — `prev_hash` does not match what was loaded.
+   - Reordered segments — a segment claiming `prev_hash = null` appears after an earlier segment was already replayed.
+3. Legacy archives with no sidecar at all skip the chain check with `tracing::warn!`. Once the operator runs a backup with the new engine, the chain becomes mandatory from that point forward.
+
+The runtime persists the active chain head at `red.config.timeline.last_segment_hash` in the database's `red_config` store. Each successful `archive_change_records` call advances this value to the new segment's `sha256`.
 
 Snapshot sidecar (legacy name, used directly by restore):
 
