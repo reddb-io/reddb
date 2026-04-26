@@ -27,7 +27,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use super::{BackendError, RemoteBackend};
+use super::{BackendError, BackendObjectVersion, ConditionalDelete, ConditionalPut, RemoteBackend};
 
 /// Configuration for the generic HTTP backend.
 #[derive(Debug, Clone)]
@@ -39,6 +39,8 @@ pub struct HttpBackendConfig {
     pub prefix: String,
     /// Optional `Authorization: <value>` header. `None` means no auth.
     pub auth_header: Option<String>,
+    /// Whether the server supports ETag + If-Match / If-None-Match.
+    pub conditional_writes: bool,
 }
 
 impl HttpBackendConfig {
@@ -47,6 +49,7 @@ impl HttpBackendConfig {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             prefix: String::new(),
             auth_header: None,
+            conditional_writes: false,
         }
     }
 
@@ -61,6 +64,11 @@ impl HttpBackendConfig {
 
     pub fn with_auth_header(mut self, value: impl Into<String>) -> Self {
         self.auth_header = Some(value.into());
+        self
+    }
+
+    pub fn with_conditional_writes(mut self, enabled: bool) -> Self {
+        self.conditional_writes = enabled;
         self
     }
 }
@@ -88,14 +96,26 @@ impl HttpBackend {
     /// exit codes — for `download` a 404 is success-with-false, for
     /// `upload` any non-2xx is an error.
     fn curl(&self, args: &[&str]) -> Result<std::process::Output, BackendError> {
+        let args = args.iter().map(|arg| (*arg).to_string()).collect();
+        self.curl_owned(args, &[])
+    }
+
+    fn curl_owned(
+        &self,
+        args: Vec<String>,
+        extra_headers: &[(&str, &str)],
+    ) -> Result<std::process::Output, BackendError> {
         let mut cmd = Command::new("curl");
         cmd.arg("-sS"); // silent + show errors
         cmd.arg("-w").arg("HTTPSTATUS:%{http_code}");
-        for &a in args {
+        for a in args {
             cmd.arg(a);
         }
         if let Some(ref auth) = self.config.auth_header {
             cmd.arg("-H").arg(format!("Authorization: {}", auth));
+        }
+        for (name, value) in extra_headers {
+            cmd.arg("-H").arg(format!("{name}: {value}"));
         }
         cmd.output()
             .map_err(|e| BackendError::Transport(format!("curl not available: {e}")))
@@ -107,13 +127,37 @@ impl HttpBackend {
         let s = String::from_utf8_lossy(stdout);
         if let Some(idx) = s.rfind("HTTPSTATUS:") {
             let body = stdout[..idx].to_vec();
-            let code: u16 = s[idx + "HTTPSTATUS:".len()..]
-                .trim()
-                .parse()
-                .unwrap_or(0);
+            let code: u16 = s[idx + "HTTPSTATUS:".len()..].trim().parse().unwrap_or(0);
             (code, body)
         } else {
             (0, stdout.to_vec())
+        }
+    }
+
+    fn header_value(headers: &[u8], name: &str) -> Option<String> {
+        let needle = format!("{}:", name.to_ascii_lowercase());
+        String::from_utf8_lossy(headers)
+            .lines()
+            .filter_map(|line| {
+                let trimmed = line.trim();
+                let lower = trimmed.to_ascii_lowercase();
+                lower
+                    .starts_with(&needle)
+                    .then(|| trimmed[needle.len()..].trim().to_string())
+            })
+            .last()
+            .filter(|value| !value.is_empty())
+    }
+
+    #[inline]
+    fn null_device() -> &'static str {
+        #[cfg(windows)]
+        {
+            "NUL"
+        }
+        #[cfg(not(windows))]
+        {
+            "/dev/null"
         }
     }
 }
@@ -123,11 +167,7 @@ impl RemoteBackend for HttpBackend {
         "http"
     }
 
-    fn download(
-        &self,
-        remote_key: &str,
-        local_path: &Path,
-    ) -> Result<bool, BackendError> {
+    fn download(&self, remote_key: &str, local_path: &Path) -> Result<bool, BackendError> {
         let url = self.url_for(remote_key);
         // Stream body to a temp file via -o; we still want HTTPSTATUS
         // in stdout for the success/404 distinction.
@@ -247,6 +287,127 @@ impl RemoteBackend for HttpBackend {
             .filter(|line| !line.is_empty())
             .collect())
     }
+
+    fn supports_conditional_writes(&self) -> bool {
+        self.config.conditional_writes
+    }
+
+    fn object_version(
+        &self,
+        remote_key: &str,
+    ) -> Result<Option<BackendObjectVersion>, BackendError> {
+        let url = self.url_for(remote_key);
+        let output = self.curl(&["-D", "-", "-o", Self::null_device(), "-X", "HEAD", &url])?;
+        if !output.status.success() {
+            return Err(BackendError::Transport(format!(
+                "http HEAD {url}: curl failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        let (code, body) = Self::split_status(&output.stdout);
+        match code {
+            200..=299 => Self::header_value(&body, "etag")
+                .map(BackendObjectVersion::new)
+                .map(Some)
+                .ok_or_else(|| BackendError::Internal(format!("http HEAD {url} missing ETag"))),
+            404 => Ok(None),
+            401 | 403 => Err(BackendError::Auth(format!(
+                "http HEAD {url} returned status {code}"
+            ))),
+            other => Err(BackendError::Transport(format!(
+                "http HEAD {url} returned status {other}"
+            ))),
+        }
+    }
+
+    fn upload_conditional(
+        &self,
+        local_path: &Path,
+        remote_key: &str,
+        condition: ConditionalPut,
+    ) -> Result<BackendObjectVersion, BackendError> {
+        if !self.config.conditional_writes {
+            return Err(BackendError::Config(
+                "HTTP conditional writes require RED_HTTP_CONDITIONAL_WRITES=true".into(),
+            ));
+        }
+        let url = self.url_for(remote_key);
+        let local_path_str = local_path.to_string_lossy().to_string();
+        let condition_header = match &condition {
+            ConditionalPut::IfAbsent => ("If-None-Match", "*"),
+            ConditionalPut::IfVersion(version) => ("If-Match", version.token.as_str()),
+        };
+        let output = self.curl_owned(
+            vec![
+                "-X".into(),
+                "PUT".into(),
+                "--data-binary".into(),
+                format!("@{}", local_path_str),
+                url.clone(),
+            ],
+            &[condition_header],
+        )?;
+        if !output.status.success() {
+            return Err(BackendError::Transport(format!(
+                "http conditional PUT {url}: curl failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        let (code, body) = Self::split_status(&output.stdout);
+        match code {
+            200..=299 => self.object_version(remote_key)?.ok_or_else(|| {
+                BackendError::Internal(format!("http object '{}' missing after upload", remote_key))
+            }),
+            404 | 409 | 412 => Err(BackendError::PreconditionFailed(format!(
+                "http conditional PUT {url} returned status {code}: {}",
+                String::from_utf8_lossy(&body)
+            ))),
+            401 | 403 => Err(BackendError::Auth(format!(
+                "http conditional PUT {url} returned status {code}"
+            ))),
+            other => Err(BackendError::Transport(format!(
+                "http conditional PUT {url} returned status {other}: {}",
+                String::from_utf8_lossy(&body)
+            ))),
+        }
+    }
+
+    fn delete_conditional(
+        &self,
+        remote_key: &str,
+        condition: ConditionalDelete,
+    ) -> Result<(), BackendError> {
+        if !self.config.conditional_writes {
+            return Err(BackendError::Config(
+                "HTTP conditional deletes require RED_HTTP_CONDITIONAL_WRITES=true".into(),
+            ));
+        }
+        let url = self.url_for(remote_key);
+        let ConditionalDelete::IfVersion(version) = condition;
+        let output = self.curl_owned(
+            vec!["-X".into(), "DELETE".into(), url.clone()],
+            &[("If-Match", version.token.as_str())],
+        )?;
+        if !output.status.success() {
+            return Err(BackendError::Transport(format!(
+                "http conditional DELETE {url}: curl failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        let (code, _) = Self::split_status(&output.stdout);
+        match code {
+            200..=299 => Ok(()),
+            404 | 409 | 412 => Err(BackendError::PreconditionFailed(format!(
+                "http conditional DELETE {url} returned status {code}"
+            ))),
+            401 | 403 => Err(BackendError::Auth(format!(
+                "http conditional DELETE {url} returned status {code}"
+            ))),
+            other => Err(BackendError::Transport(format!(
+                "http conditional DELETE {url} returned status {other}"
+            ))),
+        }
+    }
 }
 
 /// Minimal RFC3986 percent-encoder for the query-string `list=` value.
@@ -256,10 +417,7 @@ fn urlencode_simple(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for byte in input.bytes() {
         match byte {
-            b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'-' | b'_' | b'.' | b'~' | b'/' => {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
                 out.push(byte as char);
             }
             other => {
@@ -277,7 +435,9 @@ mod tests {
 
     #[test]
     fn url_for_strips_leading_slash() {
-        let backend = HttpBackend::new(HttpBackendConfig::new("https://store.example/").with_prefix("dbs/prod"));
+        let backend = HttpBackend::new(
+            HttpBackendConfig::new("https://store.example/").with_prefix("dbs/prod"),
+        );
         assert_eq!(
             backend.url_for("/snapshots/1.snap"),
             "https://store.example/dbs/prod/snapshots/1.snap"
