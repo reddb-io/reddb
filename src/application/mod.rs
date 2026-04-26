@@ -38,8 +38,10 @@ pub use graph::{
 };
 pub use native::{InspectNativeArtifactInput, NativeUseCases, RuntimeReadiness};
 pub use ports::{
-    RuntimeAdminPort, RuntimeCatalogPort, RuntimeEntityPort, RuntimeGraphPort, RuntimeNativePort,
-    RuntimeQueryPort, RuntimeSchemaPort, RuntimeTreePort, RuntimeVcsPort,
+    RuntimeAdminPort, RuntimeCatalogPort, RuntimeEntityPort, RuntimeEntityPortCtx,
+    RuntimeGraphPort, RuntimeNativePort, RuntimeNativePortCtx, RuntimeQueryPort,
+    RuntimeQueryPortCtx, RuntimeSchemaPort, RuntimeSchemaPortCtx, RuntimeTreePort,
+    RuntimeTreePortCtx, RuntimeVcsPort, RuntimeVcsPortCtx,
 };
 pub use vcs::{
     AsOfSpec, Author, CheckoutInput, CheckoutTarget, Commit, CommitHash, Conflict,

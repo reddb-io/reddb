@@ -72,13 +72,6 @@ backend-d1 = []
 # but the OTLP client integration lands when the operator confirms
 # their collector and the dep tree review passes.
 otel = []
-# Migration flag for the OperationContext-through-ports refactor.
-# When enabled, every Runtime*Port trait method takes
-# `&OperationContext` as the first non-self argument; handler files
-# build the context once at request entry and pass it through. Off
-# by default until all 9 ports + 14 handlers are migrated; the
-# implicit() shim keeps unmigrated callers compiling.
-ctx-ports = []
 
 [dev-dependencies]
 # `default-features = false` drops criterion's optional `rayon` dep

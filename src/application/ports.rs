@@ -517,7 +517,6 @@ pub trait RuntimeVcsPort {
 /// window so the impl bloat doesn't burden default builds. Once
 /// every port is migrated, the flag goes away and these traits
 /// become the only surface.
-#[cfg(feature = "ctx-ports")]
 pub trait RuntimeEntityPortCtx: RuntimeEntityPort {
     fn create_row_ctx(
         &self,
@@ -613,7 +612,6 @@ pub trait RuntimeEntityPortCtx: RuntimeEntityPort {
 
 /// Blanket impl: every concrete `RuntimeEntityPort` automatically
 /// gains the context-aware surface via the default forwards above.
-#[cfg(feature = "ctx-ports")]
 impl<T: RuntimeEntityPort + ?Sized> RuntimeEntityPortCtx for T {}
 
 // ─── ctx extension traits for the remaining mutating ports ───
@@ -629,7 +627,6 @@ impl<T: RuntimeEntityPort + ?Sized> RuntimeEntityPortCtx for T {}
 // `OperationContext` adds no locality there until the snapshot-
 // xid migration also lands.
 
-#[cfg(feature = "ctx-ports")]
 pub trait RuntimeQueryPortCtx: RuntimeQueryPort {
     fn execute_query_ctx(
         &self,
@@ -658,10 +655,8 @@ pub trait RuntimeQueryPortCtx: RuntimeQueryPort {
         self.scan_collection(collection, cursor, limit)
     }
 }
-#[cfg(feature = "ctx-ports")]
 impl<T: RuntimeQueryPort + ?Sized> RuntimeQueryPortCtx for T {}
 
-#[cfg(feature = "ctx-ports")]
 pub trait RuntimeSchemaPortCtx: RuntimeSchemaPort {
     fn create_table_ctx(
         &self,
@@ -696,10 +691,8 @@ pub trait RuntimeSchemaPortCtx: RuntimeSchemaPort {
         self.drop_timeseries(input)
     }
 }
-#[cfg(feature = "ctx-ports")]
 impl<T: RuntimeSchemaPort + ?Sized> RuntimeSchemaPortCtx for T {}
 
-#[cfg(feature = "ctx-ports")]
 pub trait RuntimeTreePortCtx: RuntimeTreePort {
     fn create_tree_ctx(
         &self,
@@ -750,10 +743,8 @@ pub trait RuntimeTreePortCtx: RuntimeTreePort {
         self.rebalance_tree(input)
     }
 }
-#[cfg(feature = "ctx-ports")]
 impl<T: RuntimeTreePort + ?Sized> RuntimeTreePortCtx for T {}
 
-#[cfg(feature = "ctx-ports")]
 pub trait RuntimeNativePortCtx: RuntimeNativePort {
     fn create_snapshot_ctx(
         &self,
@@ -806,10 +797,8 @@ pub trait RuntimeNativePortCtx: RuntimeNativePort {
         self.rebuild_physical_metadata_from_native_state()
     }
 }
-#[cfg(feature = "ctx-ports")]
 impl<T: RuntimeNativePort + ?Sized> RuntimeNativePortCtx for T {}
 
-#[cfg(feature = "ctx-ports")]
 pub trait RuntimeVcsPortCtx: RuntimeVcsPort {
     fn vcs_branch_delete_ctx(
         &self,
@@ -846,7 +835,6 @@ pub trait RuntimeVcsPortCtx: RuntimeVcsPort {
         self.vcs_conflict_resolve(conflict_id, resolved)
     }
 }
-#[cfg(feature = "ctx-ports")]
 impl<T: RuntimeVcsPort + ?Sized> RuntimeVcsPortCtx for T {}
 
 #[path = "ports_impls.rs"]

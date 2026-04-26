@@ -1,6 +1,9 @@
 use super::*;
 use std::sync::Arc;
 
+use crate::application::{RuntimeEntityPortCtx, RuntimeQueryPortCtx};
+use crate::runtime::write_gate::WriteKind;
+
 impl RedDBServer {
     pub(crate) fn handle_scan(
         &self,
@@ -18,13 +21,21 @@ impl RedDBServer {
             .max(1)
             .min(self.options.max_scan_limit);
 
+        let ctx = self.build_read_context(None, None);
+        let collection = collection.to_string();
         crate::server::transport::run_use_case(
-            || {
-                self.query_use_cases()
-                    .scan(crate::application::ScanCollectionInput {
-                        collection: collection.to_string(),
-                        offset,
-                        limit,
+            move || {
+                self.runtime
+                    .scan_collection_ctx(&ctx, &collection, None, limit + offset)
+                    .map(|page| {
+                        // The legacy scan use-case applied offset client-side
+                        // before this migration; preserve that semantic by
+                        // slicing the cursor-based page.
+                        let mut page = page;
+                        if offset > 0 && offset < page.items.len() {
+                            page.items = page.items.split_off(offset);
+                        }
+                        page
                     })
             },
             |page| crate::presentation::entity_json::scan_page_json(page),
@@ -44,8 +55,12 @@ impl RedDBServer {
             Err(err) => return json_error(400, err.to_string()),
         };
 
+        let ctx = match self.build_write_context(WriteKind::Dml, None, None) {
+            Ok(ctx) => ctx,
+            Err(err) => return json_error(403, err.to_string()),
+        };
         crate::server::transport::run_use_case(
-            || self.entity_use_cases().create_row(input),
+            move || self.runtime.create_row_ctx(&ctx, input),
             |output| crate::presentation::entity_json::created_entity_output_json(output),
         )
     }
@@ -63,8 +78,12 @@ impl RedDBServer {
             Err(err) => return json_error(400, err.to_string()),
         };
 
+        let ctx = match self.build_write_context(WriteKind::Dml, None, None) {
+            Ok(ctx) => ctx,
+            Err(err) => return json_error(403, err.to_string()),
+        };
         crate::server::transport::run_use_case(
-            || self.entity_use_cases().create_node(input),
+            move || self.runtime.create_node_ctx(&ctx, input),
             |output| crate::presentation::entity_json::created_entity_output_json(output),
         )
     }
