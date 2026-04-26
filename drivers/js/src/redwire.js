@@ -71,6 +71,12 @@ const KIND_NAME = Object.fromEntries(
  * @param {number} opts.port
  * @param {{ kind: 'anonymous' } | { kind: 'bearer', token: string }} [opts.auth]
  * @param {string} [opts.clientName]
+ * @param {object} [opts.tls] When set, wraps the socket in TLS.
+ * @param {string|Buffer} [opts.tls.ca] Trusted CA bundle (PEM).
+ * @param {string|Buffer} [opts.tls.cert] Client cert for mTLS (PEM).
+ * @param {string|Buffer} [opts.tls.key] Client key for mTLS (PEM).
+ * @param {boolean} [opts.tls.rejectUnauthorized=true] Verify server cert.
+ * @param {string} [opts.tls.servername] SNI override.
  * @returns {Promise<RedWireClient>}
  */
 export async function connectRedwire(opts) {
@@ -83,7 +89,9 @@ export async function connectRedwire(opts) {
   }
   const auth = opts.auth ?? { kind: 'anonymous' }
 
-  const socket = await openSocket(host, port)
+  const socket = opts.tls
+    ? await openTlsSocket(host, port, opts.tls)
+    : await openSocket(host, port)
   const reader = new FrameReader(socket)
 
   // Discriminator + minor-version byte.
@@ -477,6 +485,43 @@ async function openSocket(host, port) {
     sock.once('error', onErr)
     sock.once('connect', onOk)
     sock.connect(port, host)
+  })
+}
+
+async function openTlsSocket(host, port, tlsOpts) {
+  const tls = await import('node:tls')
+  const fs = await import('node:fs/promises')
+  const resolveBytes = async (input) => {
+    if (input == null) return undefined
+    if (typeof input === 'string' && input.includes('-----BEGIN')) return input
+    if (typeof input === 'string') return await fs.readFile(input)
+    return input // Buffer / Uint8Array
+  }
+  const ca = await resolveBytes(tlsOpts.ca)
+  const cert = await resolveBytes(tlsOpts.cert)
+  const key = await resolveBytes(tlsOpts.key)
+  return await new Promise((resolve, reject) => {
+    const sock = tls.connect({
+      host,
+      port,
+      ca,
+      cert,
+      key,
+      servername: tlsOpts.servername ?? host,
+      rejectUnauthorized: tlsOpts.rejectUnauthorized !== false,
+      ALPNProtocols: ['redwire/1'],
+    })
+    const onErr = (err) => {
+      sock.removeListener('secureConnect', onOk)
+      reject(err)
+    }
+    const onOk = () => {
+      sock.removeListener('error', onErr)
+      sock.setNoDelay(true)
+      resolve(sock)
+    }
+    sock.once('error', onErr)
+    sock.once('secureConnect', onOk)
   })
 }
 

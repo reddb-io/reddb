@@ -19,11 +19,30 @@ export type AuthOptions =
   | { apiKey: string }
   | { username: string; password: string; loginUrl?: string }
 
+/**
+ * TLS / mTLS configuration for `redwire(s)://` connections.
+ * `ca` / `cert` / `key` accept a filesystem path or a PEM string
+ * starting with `-----BEGIN`.
+ */
+export interface TlsOptions {
+  ca?: string | Uint8Array
+  cert?: string | Uint8Array
+  key?: string | Uint8Array
+  servername?: string
+  rejectUnauthorized?: boolean
+}
+
 export interface ConnectOptions {
   /** Override the path to the `red` binary (defaults to bundled). */
   binary?: string
   /** Authentication credentials (grpc:// only). */
   auth?: AuthOptions
+  /**
+   * TLS for `redwire(s)://` connections. URL params (`tls=true`,
+   * `cert=`, `key=`, `ca=`) feed the same field; this option
+   * always wins.
+   */
+  tls?: TlsOptions
 }
 
 export interface QueryResult {
@@ -211,6 +230,8 @@ export interface RedWireConnectOptions {
   port: number
   auth?: RedWireAuth
   clientName?: string
+  /** When set, wraps the socket in TLS (mTLS via cert + key). */
+  tls?: TlsOptions
 }
 
 /**

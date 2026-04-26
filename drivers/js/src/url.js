@@ -147,18 +147,23 @@ export function parseLegacyUrl(uri) {
     }
     return { kind: 'embedded', path, originalUri: uri }
   }
-  if (uri.startsWith('grpc://') || uri.startsWith('grpcs://')) {
-    const proto = uri.startsWith('grpcs://') ? 'grpcs' : 'grpc'
-    const stripped = uri.slice(`${proto}://`.length)
+  if (
+    uri.startsWith('grpc://')
+    || uri.startsWith('grpcs://')
+    || uri.startsWith('reds://')
+  ) {
+    const isTls = uri.startsWith('grpcs://') || uri.startsWith('reds://')
+    const scheme = uri.split('://', 1)[0]
+    const stripped = uri.slice(`${scheme}://`.length)
     const [hostPort] = stripped.split(/[/?]/, 1)
     const [host, portStr] = hostPort.split(':')
     if (!host) {
-      throw new TypeError(`invalid ${proto}:// URI: missing host in '${uri}'`)
+      throw new TypeError(`invalid ${scheme}:// URI: missing host in '${uri}'`)
     }
     return {
-      kind: proto === 'grpcs' ? 'grpcs' : 'grpc',
+      kind: isTls ? 'grpcs' : 'grpc',
       host,
-      port: portStr ? Number(portStr) : defaultPortFor(proto),
+      port: portStr ? Number(portStr) : defaultPortFor(isTls ? 'grpcs' : 'grpc'),
       originalUri: uri,
     }
   }
@@ -192,8 +197,10 @@ function resolveKind(protoQueryParam) {
   switch (protoQueryParam) {
     case '':
     case 'grpc':
+    case 'red':
       return 'grpc'
     case 'grpcs':
+    case 'reds':
       return 'grpcs'
     case 'http':
       return 'http'
@@ -206,7 +213,7 @@ function resolveKind(protoQueryParam) {
     default:
       throw new RedDBError(
         'UNSUPPORTED_PROTO',
-        `unknown proto='${protoQueryParam}'. Supported: grpc | grpcs | http | https | pg`,
+        `unknown proto='${protoQueryParam}'. Supported: red | reds | grpc | grpcs | http | https | pg`,
       )
   }
 }

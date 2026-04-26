@@ -132,10 +132,12 @@ export async function connect(uri, options = {}) {
     }
 
     const auth = token ? { kind: 'bearer', token } : { kind: 'anonymous' }
+    const tls = buildTlsOpts(parsed, options.tls)
     const client = await connectRedwire({
       host: parsed.host,
       port: parsed.port,
       auth,
+      ...(tls ? { tls } : {}),
     })
     return new RedDB(client)
   }
@@ -176,6 +178,38 @@ function grpcArgs(parsed, token) {
  * shape) with credentials lifted from the URI itself. Explicit
  * `options.auth` always wins to keep behaviour predictable.
  */
+/**
+ * Resolve TLS options for a redwire(s) connection.
+ *
+ * Sources, in priority order:
+ *   - `options.tls` from the caller (object form), wins everything
+ *   - `parsed.kind === 'grpcs'` (i.e. `redwires://` or `?proto=grpcs`)
+ *   - `?tls=true` in the URL params
+ *   - `?ca=`, `?cert=`, `?key=`, `?servername=`,
+ *     `?rejectUnauthorized=false` URL params (paths or PEM strings)
+ *
+ * Returns `null` when TLS isn't requested.
+ */
+function buildTlsOpts(parsed, callerTls) {
+  if (callerTls && typeof callerTls === 'object') {
+    return callerTls
+  }
+  const params = parsed.params
+  const wantsTls =
+    parsed.kind === 'grpcs'
+    || params?.get?.('tls') === 'true'
+    || params?.get?.('tls') === '1'
+  if (!wantsTls) return null
+  return {
+    ca: params?.get?.('ca') ?? undefined,
+    cert: params?.get?.('cert') ?? undefined,
+    key: params?.get?.('key') ?? undefined,
+    servername: params?.get?.('servername') ?? undefined,
+    rejectUnauthorized:
+      params?.get?.('rejectUnauthorized') === 'false' ? false : true,
+  }
+}
+
 function mergeAuthFromUri(parsed, optionAuth) {
   const out = {
     token: parsed.token ?? parsed.apiKey ?? null,
