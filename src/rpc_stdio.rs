@@ -902,6 +902,25 @@ fn dispatch_method(
             Ok(Value::Null)
         }
 
+        // Auth surface — local stdio bridge has no auth backend
+        // (the spawned binary inherits the caller's privileges by
+        // construction). The remote bridge below maps these methods
+        // onto the gRPC server's auth endpoints.
+        "auth.login"
+        | "auth.whoami"
+        | "auth.change_password"
+        | "auth.create_api_key"
+        | "auth.revoke_api_key" => {
+            let _ = (session, params);
+            Err((
+                error_code::INVALID_REQUEST,
+                format!(
+                    "{method}: auth methods are only available on grpc:// connections; \
+                     embedded modes (memory://, file://) inherit caller privileges"
+                ),
+            ))
+        }
+
         other => Err((
             error_code::INVALID_REQUEST,
             format!("unknown method: {other}"),
