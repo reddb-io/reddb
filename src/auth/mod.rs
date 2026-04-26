@@ -15,6 +15,7 @@ pub mod cert;
 pub mod locks;
 pub mod middleware;
 pub mod oauth;
+pub mod scram;
 pub mod store;
 pub mod vault;
 
