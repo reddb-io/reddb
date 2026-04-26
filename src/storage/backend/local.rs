@@ -1,6 +1,9 @@
 //! Local filesystem backend (default).
 
-use super::{BackendError, BackendObjectVersion, ConditionalDelete, ConditionalPut, RemoteBackend};
+use super::{
+    AtomicRemoteBackend, BackendError, BackendObjectVersion, ConditionalDelete, ConditionalPut,
+    RemoteBackend,
+};
 use crate::crypto;
 use fs2::FileExt;
 use std::fs;
@@ -142,10 +145,9 @@ impl RemoteBackend for LocalBackend {
         Ok(results)
     }
 
-    fn supports_conditional_writes(&self) -> bool {
-        true
-    }
+}
 
+impl AtomicRemoteBackend for LocalBackend {
     fn object_version(
         &self,
         remote_key: &str,

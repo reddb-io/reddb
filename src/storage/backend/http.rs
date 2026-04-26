@@ -27,7 +27,10 @@
 use std::path::Path;
 use std::process::Command;
 
-use super::{BackendError, BackendObjectVersion, ConditionalDelete, ConditionalPut, RemoteBackend};
+use super::{
+    AtomicRemoteBackend, BackendError, BackendObjectVersion, ConditionalDelete, ConditionalPut,
+    RemoteBackend,
+};
 
 /// Configuration for the generic HTTP backend.
 #[derive(Debug, Clone)]
@@ -288,25 +291,89 @@ impl RemoteBackend for HttpBackend {
             .collect())
     }
 
-    fn supports_conditional_writes(&self) -> bool {
-        self.config.conditional_writes
+}
+
+/// HTTP backend that promises CAS — only constructible when the
+/// operator confirmed the upstream server honors RFC 7232
+/// preconditions (`If-Match` / `If-None-Match`).
+///
+/// Wrapping `HttpBackend` rather than mutating it keeps the snapshot-
+/// transport surface (download/upload/delete) callable on servers that
+/// don't support CAS, while still preventing `LeaseStore` from binding
+/// to a non-CAS HTTP server (the type system rejects it at compile).
+pub struct AtomicHttpBackend {
+    inner: HttpBackend,
+}
+
+impl AtomicHttpBackend {
+    /// Build a CAS-capable HTTP backend. Returns `BackendError::Config`
+    /// when `config.conditional_writes` is false — operators must
+    /// explicitly opt in via `RED_HTTP_CONDITIONAL_WRITES=true` after
+    /// confirming their server supports preconditions.
+    pub fn try_new(config: HttpBackendConfig) -> Result<Self, BackendError> {
+        if !config.conditional_writes {
+            return Err(BackendError::Config(
+                "AtomicHttpBackend requires HttpBackendConfig::conditional_writes=true \
+                 (set RED_HTTP_CONDITIONAL_WRITES=true once your server is verified to \
+                 honor If-Match / If-None-Match)"
+                    .into(),
+            ));
+        }
+        Ok(Self {
+            inner: HttpBackend::new(config),
+        })
     }
 
+    pub fn inner(&self) -> &HttpBackend {
+        &self.inner
+    }
+}
+
+impl RemoteBackend for AtomicHttpBackend {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+    fn download(&self, remote_key: &str, local_path: &Path) -> Result<bool, BackendError> {
+        self.inner.download(remote_key, local_path)
+    }
+    fn upload(&self, local_path: &Path, remote_key: &str) -> Result<(), BackendError> {
+        self.inner.upload(local_path, remote_key)
+    }
+    fn exists(&self, remote_key: &str) -> Result<bool, BackendError> {
+        self.inner.exists(remote_key)
+    }
+    fn delete(&self, remote_key: &str) -> Result<(), BackendError> {
+        self.inner.delete(remote_key)
+    }
+    fn list(&self, prefix: &str) -> Result<Vec<String>, BackendError> {
+        self.inner.list(prefix)
+    }
+}
+
+impl AtomicRemoteBackend for AtomicHttpBackend {
     fn object_version(
         &self,
         remote_key: &str,
     ) -> Result<Option<BackendObjectVersion>, BackendError> {
-        let url = self.url_for(remote_key);
-        let output = self.curl(&["-D", "-", "-o", Self::null_device(), "-X", "HEAD", &url])?;
+        let url = self.inner.url_for(remote_key);
+        let output = self.inner.curl(&[
+            "-D",
+            "-",
+            "-o",
+            HttpBackend::null_device(),
+            "-X",
+            "HEAD",
+            &url,
+        ])?;
         if !output.status.success() {
             return Err(BackendError::Transport(format!(
                 "http HEAD {url}: curl failed: {}",
                 String::from_utf8_lossy(&output.stderr)
             )));
         }
-        let (code, body) = Self::split_status(&output.stdout);
+        let (code, body) = HttpBackend::split_status(&output.stdout);
         match code {
-            200..=299 => Self::header_value(&body, "etag")
+            200..=299 => HttpBackend::header_value(&body, "etag")
                 .map(BackendObjectVersion::new)
                 .map(Some)
                 .ok_or_else(|| BackendError::Internal(format!("http HEAD {url} missing ETag"))),
@@ -326,18 +393,13 @@ impl RemoteBackend for HttpBackend {
         remote_key: &str,
         condition: ConditionalPut,
     ) -> Result<BackendObjectVersion, BackendError> {
-        if !self.config.conditional_writes {
-            return Err(BackendError::Config(
-                "HTTP conditional writes require RED_HTTP_CONDITIONAL_WRITES=true".into(),
-            ));
-        }
-        let url = self.url_for(remote_key);
+        let url = self.inner.url_for(remote_key);
         let local_path_str = local_path.to_string_lossy().to_string();
         let condition_header = match &condition {
             ConditionalPut::IfAbsent => ("If-None-Match", "*"),
             ConditionalPut::IfVersion(version) => ("If-Match", version.token.as_str()),
         };
-        let output = self.curl_owned(
+        let output = self.inner.curl_owned(
             vec![
                 "-X".into(),
                 "PUT".into(),
@@ -353,10 +415,13 @@ impl RemoteBackend for HttpBackend {
                 String::from_utf8_lossy(&output.stderr)
             )));
         }
-        let (code, body) = Self::split_status(&output.stdout);
+        let (code, body) = HttpBackend::split_status(&output.stdout);
         match code {
             200..=299 => self.object_version(remote_key)?.ok_or_else(|| {
-                BackendError::Internal(format!("http object '{}' missing after upload", remote_key))
+                BackendError::Internal(format!(
+                    "http object '{}' missing after upload",
+                    remote_key
+                ))
             }),
             404 | 409 | 412 => Err(BackendError::PreconditionFailed(format!(
                 "http conditional PUT {url} returned status {code}: {}",
@@ -377,14 +442,9 @@ impl RemoteBackend for HttpBackend {
         remote_key: &str,
         condition: ConditionalDelete,
     ) -> Result<(), BackendError> {
-        if !self.config.conditional_writes {
-            return Err(BackendError::Config(
-                "HTTP conditional deletes require RED_HTTP_CONDITIONAL_WRITES=true".into(),
-            ));
-        }
-        let url = self.url_for(remote_key);
+        let url = self.inner.url_for(remote_key);
         let ConditionalDelete::IfVersion(version) = condition;
-        let output = self.curl_owned(
+        let output = self.inner.curl_owned(
             vec!["-X".into(), "DELETE".into(), url.clone()],
             &[("If-Match", version.token.as_str())],
         )?;
@@ -394,7 +454,7 @@ impl RemoteBackend for HttpBackend {
                 String::from_utf8_lossy(&output.stderr)
             )));
         }
-        let (code, _) = Self::split_status(&output.stdout);
+        let (code, _) = HttpBackend::split_status(&output.stdout);
         match code {
             200..=299 => Ok(()),
             404 | 409 | 412 => Err(BackendError::PreconditionFailed(format!(

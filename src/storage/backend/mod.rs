@@ -126,56 +126,52 @@ pub trait RemoteBackend: Send + Sync {
 
     /// List remote objects matching a prefix.
     fn list(&self, prefix: &str) -> Result<Vec<String>, BackendError>;
+}
 
-    /// Whether this backend can enforce conditional writes atomically.
-    fn supports_conditional_writes(&self) -> bool {
-        false
-    }
-
+/// Backends that can enforce compare-and-swap atomically.
+///
+/// Where `RemoteBackend` is "snapshot transport," `AtomicRemoteBackend`
+/// is the contract callers need when they cannot tolerate lost updates
+/// (writer leases, distributed locks, ledger appenders). Implementing
+/// this trait is a *promise* the backend never silently overwrites a
+/// versioned object — preconditions translate to backend-native
+/// guarantees (S3 ETag + If-Match, FS lock + content-hash CAS, HTTP
+/// servers that honor RFC 7232 preconditions).
+///
+/// Backends that cannot meet that promise (Turso, D1, HTTP servers
+/// without ETag) deliberately do **not** implement this trait, so a
+/// caller that needs CAS will fail at compile time rather than at the
+/// first contended write.
+pub trait AtomicRemoteBackend: RemoteBackend {
     /// Return the current opaque version token for an object.
+    /// `Ok(None)` means the object does not exist.
     fn object_version(
         &self,
         remote_key: &str,
-    ) -> Result<Option<BackendObjectVersion>, BackendError> {
-        if self.exists(remote_key)? {
-            Err(BackendError::Config(format!(
-                "backend '{}' does not expose object version tokens",
-                self.name()
-            )))
-        } else {
-            Ok(None)
-        }
-    }
+    ) -> Result<Option<BackendObjectVersion>, BackendError>;
 
-    /// Upload a local file only if the backend-side condition still holds.
+    /// Upload a local file only if the backend-side condition still
+    /// holds. Returns the new version token on success;
+    /// `BackendError::PreconditionFailed` on contention.
     fn upload_conditional(
         &self,
-        _local_path: &Path,
-        _remote_key: &str,
-        _condition: ConditionalPut,
-    ) -> Result<BackendObjectVersion, BackendError> {
-        Err(BackendError::Config(format!(
-            "backend '{}' does not support conditional writes",
-            self.name()
-        )))
-    }
+        local_path: &Path,
+        remote_key: &str,
+        condition: ConditionalPut,
+    ) -> Result<BackendObjectVersion, BackendError>;
 
-    /// Delete a remote object only if the backend-side condition still holds.
+    /// Delete a remote object only if the backend-side condition
+    /// still holds. `BackendError::PreconditionFailed` on contention.
     fn delete_conditional(
         &self,
-        _remote_key: &str,
-        _condition: ConditionalDelete,
-    ) -> Result<(), BackendError> {
-        Err(BackendError::Config(format!(
-            "backend '{}' does not support conditional deletes",
-            self.name()
-        )))
-    }
+        remote_key: &str,
+        condition: ConditionalDelete,
+    ) -> Result<(), BackendError>;
 }
 
 #[cfg(feature = "backend-d1")]
 pub use d1::{D1Backend, D1Config};
-pub use http::{HttpBackend, HttpBackendConfig};
+pub use http::{AtomicHttpBackend, HttpBackend, HttpBackendConfig};
 pub use local::LocalBackend;
 #[cfg(feature = "backend-s3")]
 pub use s3::{S3Backend, S3Config};

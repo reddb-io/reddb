@@ -82,6 +82,11 @@ pub struct RedDB {
         RwLock<Option<Arc<HashMap<String, Arc<crate::physical::CollectionContract>>>>>,
     /// Optional remote storage backend for snapshot transport.
     pub(crate) remote_backend: Option<Arc<dyn crate::storage::backend::RemoteBackend>>,
+    /// Optional CAS-capable handle for backends that implement
+    /// `AtomicRemoteBackend`. Mirrors `RedDBOptions::remote_backend_atomic`
+    /// — see that field for semantics.
+    pub(crate) remote_backend_atomic:
+        Option<Arc<dyn crate::storage::backend::AtomicRemoteBackend>>,
     /// Remote object key used by the remote backend.
     pub(crate) remote_key: Option<String>,
     /// Primary replication state (only present when role is Primary).

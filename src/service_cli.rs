@@ -261,8 +261,9 @@ fn configure_remote_backend_from_env(options: &mut RedDBOptions) {
                     let remote_key = env_nonempty("RED_REMOTE_KEY")
                         .or_else(|| env_nonempty("REDDB_REMOTE_KEY"))
                         .unwrap_or_else(|| "clusters/dev/data.rdb".to_string());
-                    options.remote_backend =
-                        Some(Arc::new(crate::storage::backend::S3Backend::new(config)));
+                    let backend = Arc::new(crate::storage::backend::S3Backend::new(config));
+                    options.remote_backend = Some(backend.clone());
+                    options.remote_backend_atomic = Some(backend);
                     options.remote_key = Some(remote_key);
                 }
             }
@@ -297,7 +298,9 @@ fn configure_remote_backend_from_env(options: &mut RedDBOptions) {
                 (None, None) => None,
             };
             if let Some(key) = remote_key {
-                options.remote_backend = Some(Arc::new(crate::storage::backend::LocalBackend));
+                let backend = Arc::new(crate::storage::backend::LocalBackend);
+                options.remote_backend = Some(backend.clone());
+                options.remote_backend_atomic = Some(backend);
                 options.remote_key = Some(key);
             }
         }
@@ -341,8 +344,29 @@ fn configure_remote_backend_from_env(options: &mut RedDBOptions) {
                 || env_truthy("RED_HTTP_BACKEND_CONDITIONAL_WRITES")
                 || env_truthy("REDDB_HTTP_BACKEND_CONDITIONAL_WRITES");
             config = config.with_conditional_writes(conditional_writes);
-            options.remote_backend =
-                Some(Arc::new(crate::storage::backend::HttpBackend::new(config)));
+            // Always populate the snapshot-transport handle. When the
+            // operator confirmed CAS support, also populate the atomic
+            // handle via AtomicHttpBackend — without that flag,
+            // LeaseStore must remain unreachable on this backend.
+            if conditional_writes {
+                match crate::storage::backend::AtomicHttpBackend::try_new(config.clone()) {
+                    Ok(atomic) => {
+                        let atomic_arc = Arc::new(atomic);
+                        options.remote_backend = Some(atomic_arc.clone());
+                        options.remote_backend_atomic = Some(atomic_arc);
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "AtomicHttpBackend init failed; falling back to plain HTTP (no CAS)");
+                        options.remote_backend = Some(Arc::new(
+                            crate::storage::backend::HttpBackend::new(config),
+                        ));
+                    }
+                }
+            } else {
+                options.remote_backend = Some(Arc::new(
+                    crate::storage::backend::HttpBackend::new(config),
+                ));
+            }
             options.remote_key = env_nonempty("RED_REMOTE_KEY")
                 .or_else(|| env_nonempty("REDDB_REMOTE_KEY"))
                 .or_else(|| Some("clusters/dev/data.rdb".to_string()));

@@ -40,11 +40,12 @@ pub fn start_lease_loop_if_required(runtime: &RedDBRuntime) -> RedDBResult<()> {
     let backend = runtime
         .db()
         .options()
-        .remote_backend
+        .remote_backend_atomic
         .clone()
         .ok_or_else(|| {
             RedDBError::Internal(
-                "RED_LEASE_REQUIRED=true but no remote backend configured (RED_BACKEND=none)"
+                "RED_LEASE_REQUIRED=true but the configured backend does not support atomic \
+                 CAS — use s3, fs, or http with RED_HTTP_CONDITIONAL_WRITES=true"
                     .to_string(),
             )
         })?;

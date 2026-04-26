@@ -195,6 +195,14 @@ pub struct RedDBOptions {
     pub metadata: BTreeMap<String, String>,
     /// Optional remote storage backend for snapshot transport.
     pub remote_backend: Option<Arc<dyn crate::storage::backend::RemoteBackend>>,
+    /// Optional CAS-capable handle to the same backend, populated by
+    /// the factory when the configured backend implements
+    /// `AtomicRemoteBackend` (S3/local always; HTTP only when
+    /// `RED_HTTP_CONDITIONAL_WRITES=true`). `None` for backends that
+    /// do not provide compare-and-swap (Turso, D1, plain HTTP).
+    /// `LeaseStore` and any future CAS consumer pull from this field.
+    pub remote_backend_atomic:
+        Option<Arc<dyn crate::storage::backend::AtomicRemoteBackend>>,
     /// Remote object key used by the remote backend.
     pub remote_key: Option<String>,
     /// Replication configuration.
@@ -247,6 +255,7 @@ impl Clone for RedDBOptions {
             force_create: self.force_create,
             metadata: self.metadata.clone(),
             remote_backend: self.remote_backend.clone(),
+            remote_backend_atomic: self.remote_backend_atomic.clone(),
             remote_key: self.remote_key.clone(),
             replication: self.replication.clone(),
             auth: self.auth.clone(),
@@ -280,6 +289,7 @@ impl Default for RedDBOptions {
             force_create: true,
             metadata: BTreeMap::new(),
             remote_backend: None,
+            remote_backend_atomic: None,
             remote_key: None,
             replication: ReplicationConfig::standalone(),
             auth: AuthConfig::default(),
@@ -405,6 +415,19 @@ impl RedDBOptions {
     ) -> Self {
         self.remote_backend = Some(backend);
         self.remote_key = Some(key.into());
+        self
+    }
+
+    /// Attach a CAS-capable backend handle. Pass the same `Arc` as
+    /// `with_remote_backend` (factories should construct the backend
+    /// once and call both setters); this method exists so the type
+    /// system, not runtime config, decides whether `LeaseStore` is
+    /// reachable.
+    pub fn with_atomic_remote_backend(
+        mut self,
+        backend: Arc<dyn crate::storage::backend::AtomicRemoteBackend>,
+    ) -> Self {
+        self.remote_backend_atomic = Some(backend);
         self
     }
 

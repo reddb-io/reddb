@@ -29,7 +29,10 @@
 //! ));
 //! ```
 
-use super::{BackendError, BackendObjectVersion, ConditionalDelete, ConditionalPut, RemoteBackend};
+use super::{
+    AtomicRemoteBackend, BackendError, BackendObjectVersion, ConditionalDelete, ConditionalPut,
+    RemoteBackend,
+};
 use crate::crypto;
 use std::collections::BTreeMap;
 use std::fs;
@@ -519,10 +522,9 @@ impl RemoteBackend for S3Backend {
             .collect())
     }
 
-    fn supports_conditional_writes(&self) -> bool {
-        true
-    }
+}
 
+impl AtomicRemoteBackend for S3Backend {
     fn object_version(
         &self,
         remote_key: &str,

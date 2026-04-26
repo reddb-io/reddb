@@ -291,6 +291,7 @@ impl RedDB {
             collection_ttl_defaults_ms: RwLock::new(HashMap::new()),
             collection_contract_cache: RwLock::new(None),
             remote_backend: options.remote_backend.clone(),
+            remote_backend_atomic: options.remote_backend_atomic.clone(),
             remote_key,
             replication,
             quorum,

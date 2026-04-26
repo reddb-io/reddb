@@ -43,7 +43,7 @@ use std::sync::Arc;
 
 use crate::serde_json::{self, Value as JsonValue};
 use crate::storage::backend::{
-    BackendError, BackendObjectVersion, ConditionalDelete, ConditionalPut, RemoteBackend,
+    AtomicRemoteBackend, BackendError, BackendObjectVersion, ConditionalDelete, ConditionalPut,
 };
 use serde_json::Map;
 
@@ -198,20 +198,22 @@ struct VersionedLease {
     version: BackendObjectVersion,
 }
 
-/// Wraps a `RemoteBackend` with lease primitives. The lease object is
-/// stored under a deterministic key derived from `database_key`; the
-/// store reads/writes that one key.
+/// Wraps an `AtomicRemoteBackend` with lease primitives. The lease
+/// object is stored under a deterministic key derived from
+/// `database_key`; the store reads/writes that one key.
 ///
-/// Mutating operations use backend-native conditional writes. A
-/// backend that cannot expose object versions is rejected by
-/// `try_acquire`, `refresh`, and `release`.
+/// The trait bound `AtomicRemoteBackend` is the type-system version
+/// of "this backend can enforce CAS" — backends that cannot
+/// (Turso, D1, plain HTTP without ETag) deliberately do not
+/// implement the trait, so wiring them into a `LeaseStore` becomes
+/// a compile error rather than a runtime fail-closed.
 pub struct LeaseStore {
-    backend: Arc<dyn RemoteBackend>,
+    backend: Arc<dyn AtomicRemoteBackend>,
     prefix: String,
 }
 
 impl LeaseStore {
-    pub fn new(backend: Arc<dyn RemoteBackend>) -> Self {
+    pub fn new(backend: Arc<dyn AtomicRemoteBackend>) -> Self {
         Self {
             backend,
             prefix: "leases/".to_string(),
@@ -226,16 +228,6 @@ impl LeaseStore {
 
     fn key_for(&self, database_key: &str) -> String {
         format!("{}{}.lease.json", self.prefix, database_key)
-    }
-
-    fn ensure_conditional_backend(&self) -> Result<(), LeaseError> {
-        if self.backend.supports_conditional_writes() {
-            return Ok(());
-        }
-        Err(LeaseError::Backend(BackendError::Config(format!(
-            "writer lease requires a backend with conditional writes; '{}' is not eligible",
-            self.backend.name()
-        ))))
     }
 
     /// Read whatever lease object is currently published. `None` means
@@ -308,7 +300,6 @@ impl LeaseStore {
         holder_id: &str,
         ttl_ms: u64,
     ) -> Result<WriterLease, LeaseError> {
-        self.ensure_conditional_backend()?;
         let now_ms = crate::utils::now_unix_millis();
 
         let current = self.current_versioned(database_key)?;
@@ -407,7 +398,6 @@ impl LeaseStore {
     /// currently published. The returned lease is the new
     /// in-effect record.
     pub fn refresh(&self, lease: &WriterLease, ttl_ms: u64) -> Result<WriterLease, LeaseError> {
-        self.ensure_conditional_backend()?;
         let now_ms = crate::utils::now_unix_millis();
         let observed = self.current_versioned(&lease.database_key)?;
         match observed {
@@ -446,7 +436,6 @@ impl LeaseStore {
     /// matches `lease.holder_id + lease.generation`. A stolen or
     /// already-replaced lease returns `Stale`.
     pub fn release(&self, lease: &WriterLease) -> Result<(), LeaseError> {
-        self.ensure_conditional_backend()?;
         let observed = self.current_versioned(&lease.database_key)?;
         match observed {
             Some(o)
@@ -584,43 +573,9 @@ mod tests {
         assert!(matches!(err, LeaseError::Stale { .. }));
     }
 
-    struct UnsupportedBackend;
-
-    impl RemoteBackend for UnsupportedBackend {
-        fn name(&self) -> &str {
-            "unsupported"
-        }
-
-        fn download(&self, _remote_key: &str, _local_path: &Path) -> Result<bool, BackendError> {
-            Ok(false)
-        }
-
-        fn upload(&self, _local_path: &Path, _remote_key: &str) -> Result<(), BackendError> {
-            Ok(())
-        }
-
-        fn exists(&self, _remote_key: &str) -> Result<bool, BackendError> {
-            Ok(false)
-        }
-
-        fn delete(&self, _remote_key: &str) -> Result<(), BackendError> {
-            Ok(())
-        }
-
-        fn list(&self, _prefix: &str) -> Result<Vec<String>, BackendError> {
-            Ok(Vec::new())
-        }
-    }
-
-    #[test]
-    fn acquire_fails_closed_without_backend_conditional_writes() {
-        let s = LeaseStore::new(Arc::new(UnsupportedBackend));
-        let err = s.try_acquire("db", "writer-a", 60_000).unwrap_err();
-        match err {
-            LeaseError::Backend(BackendError::Config(msg)) => {
-                assert!(msg.contains("conditional writes"));
-            }
-            other => panic!("expected backend config error, got {other:?}"),
-        }
-    }
+    // The legacy `acquire_fails_closed_without_backend_conditional_writes`
+    // test was deleted with the trait split: `LeaseStore::new` now requires
+    // `Arc<dyn AtomicRemoteBackend>`, so a non-CAS backend cannot even be
+    // wired into the constructor — the test is enforced at compile time
+    // (see tests/lease_atomic_http_opt_in.rs for the runtime-config branch).
 }

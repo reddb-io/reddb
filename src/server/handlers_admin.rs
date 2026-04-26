@@ -1072,10 +1072,10 @@ impl RedDBServer {
         }
 
         // Backend guard.
-        let Some(backend) = self.runtime.db().options().remote_backend.clone() else {
+        let Some(backend) = self.runtime.db().options().remote_backend_atomic.clone() else {
             return json_error(
                 412,
-                "promotion requires a remote backend (RED_BACKEND=none disables lease coordination)",
+                "promotion requires a CAS-capable remote backend (use s3, fs, or http with RED_HTTP_CONDITIONAL_WRITES=true)",
             );
         };
 
