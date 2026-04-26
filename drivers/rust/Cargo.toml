@@ -1,6 +1,6 @@
 [package]
 name = "reddb-client"
-version = "0.1.5"
+version = "0.2.4"
 edition = "2021"
 authors = ["RedBlue Team"]
 description = "Official Rust client for RedDB — embedded engine and (eventually) gRPC remote, behind one connection-string API."
@@ -24,7 +24,7 @@ grpc = ["dep:reddb", "dep:tokio"]
 
 [dependencies]
 # Engine — only compiled in when the `embedded` or `grpc` feature is on.
-reddb = { version = "0.1", path = "../..", optional = true }
+reddb = { version = "0.2", path = "../..", optional = true }
 
 # Only needed by the grpc backend (block_on inside the sync methods).
 tokio = { version = "1", features = ["rt", "rt-multi-thread"], optional = true }

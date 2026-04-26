@@ -1,6 +1,6 @@
 [package]
 name = "reddb"
-version = "0.1.5"
+version = "0.2.4"
 edition = "2021"
 authors = ["RedBlue Team"]
 description = "Unified multi-model database: tables, documents, graphs, vectors, and key-value in one engine"
@@ -12,15 +12,16 @@ readme = "README.md"
 keywords = ["database", "vector-search", "graph", "document-store", "rust"]
 categories = ["database-implementations", "data-structures"]
 include = [
-    "src/**/*.rs",
-    "benches/**/*.rs",
-    "proto/**/*.proto",
-    "build.rs",
-    "README.md",
-    "Cargo.toml",
-    "LICENSE",
-    "CHANGELOG.md",
-    "RELEASE.md"
+    "/src/**/*.rs",
+    "/benches/**/*.rs",
+    "/proto/**/*.proto",
+    "/docs/spec/admin-api.openapi.yaml",
+    "/build.rs",
+    "/README.md",
+    "/Cargo.toml",
+    "/LICENSE",
+    "/CHANGELOG.md",
+    "/RELEASE.md",
 ]
 
 [[bin]]
