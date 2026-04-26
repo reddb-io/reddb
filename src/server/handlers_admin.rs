@@ -30,10 +30,7 @@ pub(crate) fn runtime_state_path(data_path: &Path) -> PathBuf {
 pub(crate) fn persist_runtime_readonly(state_path: &Path, enabled: bool) -> std::io::Result<()> {
     use std::io::Write;
     let mut object = crate::json::Map::new();
-    object.insert(
-        "read_only".to_string(),
-        crate::json::Value::Bool(enabled),
-    );
+    object.insert("read_only".to_string(), crate::json::Value::Bool(enabled));
     let body = crate::serde_json::to_string_pretty(&crate::json::Value::Object(object))
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err.to_string()))?;
     if let Some(parent) = state_path.parent() {
@@ -196,11 +193,8 @@ impl RedDBServer {
                 Err(err) => return json_error(400, format!("invalid JSON body: {err}")),
             }
         };
-        let recovery = crate::storage::wal::PointInTimeRecovery::new(
-            backend,
-            snapshot_prefix,
-            wal_prefix,
-        );
+        let recovery =
+            crate::storage::wal::PointInTimeRecovery::new(backend, snapshot_prefix, wal_prefix);
         match recovery.restore_to(target_time_ms, &local_path) {
             Ok(report) => {
                 let mut details = Map::new();
@@ -374,9 +368,9 @@ impl RedDBServer {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
         let uptime_secs = (now_ms.saturating_sub(lifecycle.started_at_ms()) as f64) / 1000.0;
-        let cold_start_secs = lifecycle.ready_at_ms().map(|ready_ms| {
-            (ready_ms.saturating_sub(lifecycle.started_at_ms()) as f64) / 1000.0
-        });
+        let cold_start_secs = lifecycle
+            .ready_at_ms()
+            .map(|ready_ms| (ready_ms.saturating_sub(lifecycle.started_at_ms()) as f64) / 1000.0);
         let health_status: u8 = match phase {
             Phase::Stopped => 0,
             Phase::Starting | Phase::ShuttingDown => 0,
@@ -525,11 +519,7 @@ impl RedDBServer {
             "# HELP reddb_wal_last_archived_lsn LSN of the most recently archived WAL segment."
         );
         let _ = writeln!(body, "# TYPE reddb_wal_last_archived_lsn gauge");
-        let _ = writeln!(
-            body,
-            "reddb_wal_last_archived_lsn {}",
-            last_archived_lsn
-        );
+        let _ = writeln!(body, "reddb_wal_last_archived_lsn {}", last_archived_lsn);
         let _ = writeln!(
             body,
             "# HELP reddb_wal_archive_lag_records Records between current LSN and last archived LSN."
@@ -549,6 +539,11 @@ impl RedDBServer {
         let _ = writeln!(body, "# TYPE reddb_replica_count gauge");
         let _ = writeln!(body, "reddb_replica_count {}", replicas.len());
         if !replicas.is_empty() {
+            let replica_lag_budget_secs = std::env::var("RED_SLO_REPLICA_LAG_BUDGET_SECONDS")
+                .ok()
+                .and_then(|value| value.parse::<f64>().ok())
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .unwrap_or(60.0);
             let _ = writeln!(
                 body,
                 "# HELP reddb_replica_ack_lsn Most recent LSN acked by each replica."
@@ -580,13 +575,25 @@ impl RedDBServer {
                 "# HELP reddb_replica_lag_seconds Wall-clock seconds since the replica was last seen."
             );
             let _ = writeln!(body, "# TYPE reddb_replica_lag_seconds gauge");
+            let _ = writeln!(
+                body,
+                "# HELP reddb_slo_lag_budget_remaining_seconds Remaining per-replica lag budget; negative means SLO breach."
+            );
+            let _ = writeln!(body, "# TYPE reddb_slo_lag_budget_remaining_seconds gauge");
             for r in &replicas {
                 let lag_ms = (now_ms as u128).saturating_sub(r.last_seen_at_unix_ms);
+                let lag_secs = (lag_ms as f64) / 1000.0;
                 let _ = writeln!(
                     body,
                     "reddb_replica_lag_seconds{{replica_id=\"{}\"}} {}",
                     sanitize_label(&r.id),
-                    (lag_ms as f64) / 1000.0
+                    lag_secs
+                );
+                let _ = writeln!(
+                    body,
+                    "reddb_slo_lag_budget_remaining_seconds{{replica_id=\"{}\"}} {}",
+                    sanitize_label(&r.id),
+                    replica_lag_budget_secs - lag_secs
                 );
             }
         }
@@ -844,14 +851,14 @@ impl RedDBServer {
         // (Err on parse) before it silently leaves data plaintext.
         let (enc_state, enc_error) = self.runtime.encryption_at_rest_status();
         let mut enc_obj = Map::new();
-        enc_obj.insert("state".to_string(), JsonValue::String(enc_state.to_string()));
+        enc_obj.insert(
+            "state".to_string(),
+            JsonValue::String(enc_state.to_string()),
+        );
         if let Some(err) = enc_error {
             enc_obj.insert("error".to_string(), JsonValue::String(err));
         }
-        object.insert(
-            "encryption_at_rest".to_string(),
-            JsonValue::Object(enc_obj),
-        );
+        object.insert("encryption_at_rest".to_string(), JsonValue::Object(enc_obj));
 
         // Backup posture (PLAN.md Phase 5.1). `last_backup` carries
         // the same shape /metrics emits so dashboards and alert rules
@@ -913,10 +920,7 @@ impl RedDBServer {
         }
         let mut errors_obj = Map::new();
         for (kind, count) in self.runtime.replica_apply_error_counts() {
-            errors_obj.insert(
-                kind.label().to_string(),
-                JsonValue::Number(count as f64),
-            );
+            errors_obj.insert(kind.label().to_string(), JsonValue::Number(count as f64));
         }
         replica_obj.insert("apply_errors".to_string(), JsonValue::Object(errors_obj));
         // Per-replica array (primary view). Empty on replica/standalone.
@@ -945,9 +949,7 @@ impl RedDBServer {
                     );
                     o.insert(
                         "lag_records".to_string(),
-                        JsonValue::Number(
-                            current_lsn.saturating_sub(r.last_acked_lsn) as f64,
-                        ),
+                        JsonValue::Number(current_lsn.saturating_sub(r.last_acked_lsn) as f64),
                     );
                     if let Some(region) = &r.region {
                         o.insert("region".to_string(), JsonValue::String(region.clone()));
@@ -1024,10 +1026,7 @@ impl RedDBServer {
                 "backup_uploaded".to_string(),
                 JsonValue::Bool(report.backup_uploaded),
             );
-            object.insert(
-                "shutdown".to_string(),
-                JsonValue::Object(shutdown_obj),
-            );
+            object.insert("shutdown".to_string(), JsonValue::Object(shutdown_obj));
         }
         json_response(200, JsonValue::Object(object))
     }
@@ -1137,10 +1136,7 @@ impl RedDBServer {
                     "generation".to_string(),
                     JsonValue::Number(lease.generation as f64),
                 );
-                details.insert(
-                    "ttl_ms".to_string(),
-                    JsonValue::Number(ttl_ms as f64),
-                );
+                details.insert("ttl_ms".to_string(), JsonValue::Number(ttl_ms as f64));
                 self.runtime.audit_log().record(
                     "admin/failover/promote",
                     &lease.holder_id,
