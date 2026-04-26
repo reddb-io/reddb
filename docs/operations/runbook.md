@@ -43,7 +43,25 @@ env:
     value: /run/secrets/admin-token
 ```
 
-Inline value wins over `_FILE` when both are set.
+The `_FILE` companion wins over the inline value when both are set.
+
+### Writer lease backend matrix
+
+Use `RED_LEASE_REQUIRED=true` only with a backend that supports conditional writes. S3-compatible stores use ETag + `If-Match`; filesystem uses a content-hash token plus an exclusive local lock. Generic HTTP is eligible only when the service implements ETag and precondition headers and the operator sets `RED_HTTP_CONDITIONAL_WRITES=true`.
+
+| Runtime | fs lease | s3 lease | Notes |
+|---------|----------|----------|-------|
+| K8s + PVC RWO | ✅ recommended | ✅ | PVC must be mounted by one writer at a time. |
+| Fly Machines + volume | ✅ recommended | ✅ | Volume follows the machine. |
+| ECS + EBS | ✅ recommended | ✅ | Avoid shared EFS for writer lease. |
+| Lambda + EFS (NFS) | ❌ flaky locks | ✅ required | Use S3-compatible CAS for fencing. |
+| Nomad + host volume | ✅ | ✅ | Host volume must be pinned to the allocation. |
+| Cloud Run | ❌ ephemeral | ✅ required | No durable fs lease. |
+| App Runner | ❌ ephemeral | ✅ required | No durable fs lease. |
+| Container Apps | ❌ ephemeral | ✅ required | No durable fs lease. |
+| Generic HTTP backend | ❌ unless local durable disk | ✅ via backend service | Requires `RED_HTTP_CONDITIONAL_WRITES=true`. |
+
+If the chosen backend cannot enforce conditional writes, RedDB refuses to acquire the lease and keeps the writer gate closed. That is intentional: a failed boot is safer than split-brain.
 
 ### Verify the deploy
 
@@ -186,6 +204,7 @@ Exit codes:
 | `reddb_replica_apply_errors_total{kind="divergence"}` | `> 0` | Corruption / split-brain — page operator now. |
 | `reddb_replica_apply_errors_total{kind="gap"}` | rising | Replica is unhealthy; consider rebootstrap. |
 | `reddb_replica_lag_records` | `> 100000` | Replica too far behind to be promoted safely. |
+| `reddb_slo_lag_budget_remaining_seconds` | `< 0` | Replica lag exhausted `RED_SLO_REPLICA_LAG_BUDGET_SECONDS`. |
 | `reddb_commit_wait_total{outcome="timed_out"}` | rising | `ack_n` policy is too tight or replicas can't keep up. |
 | `reddb_quota_rejected_total{principal=...}` | sustained | Caller exceeded `RED_MAX_QPS_PER_CALLER` budget. |
 
@@ -210,6 +229,12 @@ Read the release notes for any spec major bumps. The unified `MANIFEST.json` car
 1. Upgrade replicas first, one at a time. Wait for `replica.apply_health == ok` after each.
 2. Promote a known-good replica (Section 3).
 3. Upgrade the old primary; bring it back as a replica.
+
+### Panic policy
+
+Release binaries are built with `panic = "abort"`. RedDB treats unexpected panic as process-fatal because unwinding through write, recovery, or replication paths can leave in-memory state inconsistent with the WAL. The recovery contract is: crash fast, let the supervisor restart, replay WAL, and fail closed if WAL/hash-chain validation detects corruption.
+
+Do not wrap engine write paths in broad `catch_unwind` as an availability shortcut. RPC/server boundaries may convert isolated request panics into 500 responses only when the mutation did not enter the storage path.
 
 ---
 
