@@ -24,6 +24,9 @@ grpc = ["dep:reddb", "dep:tokio"]
 # RedWire v2 native TCP client. No engine dep — speaks the wire
 # protocol directly. See ADR 0001.
 redwire = ["dep:tokio", "dep:serde_json", "dep:zstd"]
+# HTTP / HTTPS transport using reqwest. Parity with the JS
+# driver's HttpRpcClient — talks REST endpoints directly.
+http = ["dep:tokio", "dep:serde_json", "dep:reqwest"]
 # RedWire v2 over TLS / mTLS. Reuses the redwire handshake; flips
 # the transport to tokio-rustls.
 redwire-tls = [
@@ -53,6 +56,10 @@ zstd = { version = "0.13", default-features = false, optional = true }
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12", "ring"], optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"], optional = true }
 rustls-pemfile = { version = "2", optional = true }
+
+# HTTP / HTTPS transport. Pulled in only by the `http` feature.
+# `default-features = false` skips OpenSSL; we use rustls.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"], optional = true }
 
 # Connection-string parsing.
 url = "2"

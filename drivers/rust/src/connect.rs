@@ -16,6 +16,8 @@ pub enum Target {
     File { path: PathBuf },
     /// `grpc://host:port` — remote tonic client (not yet implemented).
     Grpc { endpoint: String },
+    /// `http://host:port` / `https://host:port` — REST client.
+    Http { base_url: String },
 }
 
 /// Parse a connection URI. Pure function, no side effects.
@@ -57,6 +59,16 @@ pub fn parse(uri: &str) -> Result<Target> {
             let port = parsed.port().unwrap_or(50051);
             Ok(Target::Grpc {
                 endpoint: format!("http://{host}:{port}"),
+            })
+        }
+        "http" | "https" => {
+            let host = parsed.host_str().ok_or_else(|| {
+                ClientError::new(ErrorCode::InvalidUri, "http(s):// URI is missing a host")
+            })?;
+            let scheme = parsed.scheme();
+            let port = parsed.port().unwrap_or(if scheme == "https" { 443 } else { 80 });
+            Ok(Target::Http {
+                base_url: format!("{scheme}://{host}:{port}"),
             })
         }
         other => Err(ClientError::unsupported_scheme(other)),

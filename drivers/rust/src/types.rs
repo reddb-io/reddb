@@ -152,6 +152,7 @@ pub struct QueryResult {
     pub rows: Vec<Vec<(String, ValueOut)>>,
 }
 
+#[cfg(any(feature = "redwire", feature = "http"))]
 impl QueryResult {
     /// Build a `QueryResult` from the JSON envelope the v2 server
     /// emits in a `Result` frame. Today the envelope only carries

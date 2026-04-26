@@ -34,6 +34,8 @@ pub enum ErrorCode {
     AuthRefused,
     /// Engine returned an error string in response to a Query frame.
     Engine,
+    /// HTTP 404 / collection or resource missing.
+    NotFound,
 }
 
 impl ErrorCode {
@@ -50,6 +52,7 @@ impl ErrorCode {
             ErrorCode::Protocol => "PROTOCOL_ERROR",
             ErrorCode::AuthRefused => "AUTH_REFUSED",
             ErrorCode::Engine => "ENGINE_ERROR",
+            ErrorCode::NotFound => "NOT_FOUND",
         }
     }
 }

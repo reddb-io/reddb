@@ -45,6 +45,9 @@ pub mod grpc;
 #[cfg(feature = "redwire")]
 pub mod redwire;
 
+#[cfg(feature = "http")]
+pub mod http;
+
 pub use error::{ClientError, ErrorCode, Result};
 pub use types::{InsertResult, JsonValue, QueryResult, ValueOut};
 
@@ -57,6 +60,8 @@ pub enum Reddb {
     Embedded(embedded::EmbeddedClient),
     #[cfg(feature = "grpc")]
     Grpc(grpc::GrpcClient),
+    #[cfg(feature = "http")]
+    Http(http::HttpClient),
     /// Constructed when a feature gate would have produced a real
     /// variant but the feature is disabled. Every method on this
     /// variant returns a `FEATURE_DISABLED` error so build-time
@@ -102,6 +107,19 @@ impl Reddb {
                     return Err(ClientError::feature_disabled("grpc"));
                 }
             }
+            Target::Http { base_url } => {
+                #[cfg(feature = "http")]
+                {
+                    return http::HttpClient::connect(http::HttpOptions::new(base_url))
+                        .await
+                        .map(Reddb::Http);
+                }
+                #[cfg(not(feature = "http"))]
+                {
+                    let _ = base_url;
+                    return Err(ClientError::feature_disabled("http"));
+                }
+            }
         }
     }
 
@@ -111,6 +129,8 @@ impl Reddb {
             Reddb::Embedded(c) => c.query(sql),
             #[cfg(feature = "grpc")]
             Reddb::Grpc(c) => c.query(sql).await,
+            #[cfg(feature = "http")]
+            Reddb::Http(c) => c.query(sql).await,
             Reddb::Unavailable(name) => Err(ClientError::feature_disabled(name)),
         }
     }
@@ -121,6 +141,8 @@ impl Reddb {
             Reddb::Embedded(c) => c.insert(collection, payload),
             #[cfg(feature = "grpc")]
             Reddb::Grpc(c) => c.insert(collection, payload).await,
+            #[cfg(feature = "http")]
+            Reddb::Http(c) => c.insert(collection, payload).await,
             Reddb::Unavailable(name) => Err(ClientError::feature_disabled(name)),
         }
     }
@@ -131,6 +153,8 @@ impl Reddb {
             Reddb::Embedded(c) => c.bulk_insert(collection, payloads),
             #[cfg(feature = "grpc")]
             Reddb::Grpc(c) => c.bulk_insert(collection, payloads).await,
+            #[cfg(feature = "http")]
+            Reddb::Http(c) => c.bulk_insert(collection, payloads).await,
             Reddb::Unavailable(name) => Err(ClientError::feature_disabled(name)),
         }
     }
@@ -141,6 +165,8 @@ impl Reddb {
             Reddb::Embedded(c) => c.delete(collection, id),
             #[cfg(feature = "grpc")]
             Reddb::Grpc(c) => c.delete(collection, id).await,
+            #[cfg(feature = "http")]
+            Reddb::Http(c) => c.delete(collection, id).await,
             Reddb::Unavailable(name) => Err(ClientError::feature_disabled(name)),
         }
     }
@@ -151,6 +177,8 @@ impl Reddb {
             Reddb::Embedded(c) => c.close(),
             #[cfg(feature = "grpc")]
             Reddb::Grpc(c) => c.close().await,
+            #[cfg(feature = "http")]
+            Reddb::Http(c) => c.close().await,
             Reddb::Unavailable(_) => Ok(()),
         }
     }
