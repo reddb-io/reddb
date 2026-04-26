@@ -53,6 +53,7 @@ Per-replica metrics on the primary; absent on replicas / standalone. Replicas re
 | `reddb_replica_ack_lsn` | gauge | `replica_id` | Most recent LSN acked. |
 | `reddb_replica_lag_records` | gauge | `replica_id` | `current_lsn - last_acked_lsn`. |
 | `reddb_replica_lag_seconds` | gauge | `replica_id` | Wall-clock seconds since the replica was last seen. |
+| `reddb_slo_lag_budget_remaining_seconds` | gauge | `replica_id` | `RED_SLO_REPLICA_LAG_BUDGET_SECONDS` (default 60) minus `reddb_replica_lag_seconds`; negative means SLO breach. |
 | `reddb_replica_apply_errors_total` | counter | `kind` | `gap|divergence|apply|decode`. **`divergence > 0` = page operator immediately**. |
 | `reddb_replica_apply_health` | gauge (label-only) | `state` | Current apply state (`ok|healthy|connecting|stalled_gap|divergence|apply_error`). |
 | `reddb_primary_commit_policy` | gauge (label-only) | `policy` | `local|remote_wal|ack_n|quorum`. |
@@ -78,6 +79,7 @@ Tune to your SLA; these are starting points used by `red doctor` defaults:
 | `reddb_backup_age_seconds` | 600 | 3600 | DR posture degraded. |
 | `reddb_wal_archive_lag_records` | 1000 | 10000 | Archive stuck. |
 | `reddb_replica_lag_records` | 1000 | 100000 | Replica too far behind to be promoted. |
+| `reddb_slo_lag_budget_remaining_seconds < 0` | immediate | 5m | Replica lag exhausted the operator's SLO budget. |
 | `reddb_replica_apply_errors_total{kind="divergence"} > 0` | immediate | immediate | Corruption / split-brain. |
 | `reddb_commit_wait_total{outcome="timed_out"} rising` | 10/min | 100/min | `ack_n` policy too tight or replicas can't keep up. |
 | `reddb_quota_rejected_total{principal=...} sustained` | 10/min | 100/min | Caller exceeded budget. |
