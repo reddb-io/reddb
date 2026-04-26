@@ -41,6 +41,26 @@ pub trait ProtocolDetector: Send + Sync {
     fn detect(&self, peek: &[u8]) -> DetectOutcome;
 }
 
+/// RedWire v2 detector — keys off the `0xFE` magic byte the v2
+/// client sends as its first byte. v1 wire clients never set this
+/// byte (their first byte is the low byte of a u32 length field,
+/// which for any reasonable frame size is well below 0xFE), so
+/// this never aliases the legacy listener.
+pub struct RedWireDetector;
+
+impl ProtocolDetector for RedWireDetector {
+    fn detect(&self, peek: &[u8]) -> DetectOutcome {
+        if peek.is_empty() {
+            return DetectOutcome::Pending;
+        }
+        if peek[0] == 0xFE {
+            DetectOutcome::Match(Protocol::Wire)
+        } else {
+            DetectOutcome::NoMatch
+        }
+    }
+}
+
 pub struct H2Detector;
 
 impl ProtocolDetector for H2Detector {
