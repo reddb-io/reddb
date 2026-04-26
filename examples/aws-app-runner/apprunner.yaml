@@ -22,6 +22,7 @@ SourceConfiguration:
         RED_BACKUP_INTERVAL_SECS: "300"
         RED_LOG_FORMAT: "json"
         RED_LOG_LEVEL: "info"
+        RED_LEASE_REQUIRED: "true"
       RuntimeEnvironmentSecrets:
         RED_S3_ACCESS_KEY: arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:reddb/s3-access:::
         RED_S3_SECRET_KEY: arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:reddb/s3-secret:::
