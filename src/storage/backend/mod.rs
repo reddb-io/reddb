@@ -45,6 +45,8 @@ pub enum BackendError {
     Auth(String),
     /// The requested resource was not found.
     NotFound(String),
+    /// A compare-and-swap / conditional write precondition failed.
+    PreconditionFailed(String),
     /// Configuration error.
     Config(String),
     /// Backend-specific error.
@@ -57,6 +59,7 @@ impl fmt::Display for BackendError {
             Self::Transport(msg) => write!(f, "backend transport error: {msg}"),
             Self::Auth(msg) => write!(f, "backend auth error: {msg}"),
             Self::NotFound(msg) => write!(f, "backend not found: {msg}"),
+            Self::PreconditionFailed(msg) => write!(f, "backend precondition failed: {msg}"),
             Self::Config(msg) => write!(f, "backend config error: {msg}"),
             Self::Internal(msg) => write!(f, "backend internal error: {msg}"),
         }
@@ -64,6 +67,40 @@ impl fmt::Display for BackendError {
 }
 
 impl std::error::Error for BackendError {}
+
+/// Backend-specific version token for one remote object.
+///
+/// S3-compatible backends use ETag, generic HTTP backends use ETag, and
+/// LocalBackend derives a content hash token. Callers must treat the
+/// token as opaque and feed it back through conditional operations only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackendObjectVersion {
+    pub token: String,
+}
+
+impl BackendObjectVersion {
+    pub fn new(token: impl Into<String>) -> Self {
+        Self {
+            token: token.into(),
+        }
+    }
+}
+
+/// Conditional upload semantics for backends that support compare-and-swap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConditionalPut {
+    /// Succeed only when the target object is absent.
+    IfAbsent,
+    /// Succeed only when the target object still has this version token.
+    IfVersion(BackendObjectVersion),
+}
+
+/// Conditional delete semantics for backends that support compare-and-swap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConditionalDelete {
+    /// Succeed only when the target object still has this version token.
+    IfVersion(BackendObjectVersion),
+}
 
 /// Trait for remote storage backends.
 ///
@@ -89,6 +126,51 @@ pub trait RemoteBackend: Send + Sync {
 
     /// List remote objects matching a prefix.
     fn list(&self, prefix: &str) -> Result<Vec<String>, BackendError>;
+
+    /// Whether this backend can enforce conditional writes atomically.
+    fn supports_conditional_writes(&self) -> bool {
+        false
+    }
+
+    /// Return the current opaque version token for an object.
+    fn object_version(
+        &self,
+        remote_key: &str,
+    ) -> Result<Option<BackendObjectVersion>, BackendError> {
+        if self.exists(remote_key)? {
+            Err(BackendError::Config(format!(
+                "backend '{}' does not expose object version tokens",
+                self.name()
+            )))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Upload a local file only if the backend-side condition still holds.
+    fn upload_conditional(
+        &self,
+        _local_path: &Path,
+        _remote_key: &str,
+        _condition: ConditionalPut,
+    ) -> Result<BackendObjectVersion, BackendError> {
+        Err(BackendError::Config(format!(
+            "backend '{}' does not support conditional writes",
+            self.name()
+        )))
+    }
+
+    /// Delete a remote object only if the backend-side condition still holds.
+    fn delete_conditional(
+        &self,
+        _remote_key: &str,
+        _condition: ConditionalDelete,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Config(format!(
+            "backend '{}' does not support conditional deletes",
+            self.name()
+        )))
+    }
 }
 
 #[cfg(feature = "backend-d1")]
