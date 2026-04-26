@@ -72,7 +72,12 @@ export function parseRedUrl(uri) {
     normalised = 'red://embedded.local'
   } else if (uri.startsWith('red:///')) {
     normalised = `red://embedded.local${uri.slice('red://'.length)}`
-  } else if (uri === 'red://memory' || uri === 'red://memory/') {
+  } else if (
+    uri === 'red://memory'
+    || uri === 'red://memory/'
+    || uri === 'red://:memory'
+    || uri === 'red://:memory:'  // SQLite-style ":memory:" alias
+  ) {
     normalised = 'red://embedded.local'
   }
 
