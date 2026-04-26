@@ -69,6 +69,7 @@ mod handlers_vector;
 pub mod ingest_pipeline;
 mod patch_support;
 mod request_body;
+mod request_context;
 mod routing;
 mod serverless_support;
 mod transport;

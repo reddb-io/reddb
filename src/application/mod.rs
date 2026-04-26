@@ -1,5 +1,6 @@
 pub mod admin;
 pub(crate) mod admin_payload;
+pub mod operation_context;
 pub mod catalog;
 pub mod entity;
 pub(crate) mod entity_payload;
@@ -20,6 +21,7 @@ pub mod vcs_collections;
 pub(crate) mod vcs_payload;
 
 pub use admin::{AdminUseCases, ServerlessAnalyticsWarmupTarget, ServerlessWarmupPlan};
+pub use operation_context::{OperationContext, WriteConsent, WriteConsentSeal, Xid};
 pub use catalog::CatalogUseCases;
 pub use entity::{
     CreateDocumentInput, CreateEdgeInput, CreateEntityOutput, CreateKvInput,

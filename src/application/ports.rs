@@ -503,6 +503,119 @@ pub trait RuntimeVcsPort {
     fn vcs_is_versioned(&self, collection: &str) -> RedDBResult<bool>;
 }
 
+/// Context-aware extension trait that mirrors `RuntimeEntityPort`
+/// with `&OperationContext` threaded through every method.
+///
+/// This is the migration runway for the `OperationContext` deepening
+/// (PLAN cluster 6). Each default implementation forwards to the
+/// existing context-less method, so today the trait is a pure
+/// pass-through — but new callers can already adopt the
+/// context-passing surface, and a future PR will replace the
+/// defaults with real impls that read `ctx.xid` / `ctx.write_consent`.
+///
+/// Hidden behind the `ctx-ports` feature flag during the migration
+/// window so the impl bloat doesn't burden default builds. Once
+/// every port is migrated, the flag goes away and these traits
+/// become the only surface.
+#[cfg(feature = "ctx-ports")]
+pub trait RuntimeEntityPortCtx: RuntimeEntityPort {
+    fn create_row_ctx(
+        &self,
+        ctx: &crate::application::OperationContext,
+        input: CreateRowInput,
+    ) -> RedDBResult<CreateEntityOutput> {
+        let _ = ctx;
+        self.create_row(input)
+    }
+    fn create_node_ctx(
+        &self,
+        ctx: &crate::application::OperationContext,
+        input: CreateNodeInput,
+    ) -> RedDBResult<CreateEntityOutput> {
+        let _ = ctx;
+        self.create_node(input)
+    }
+    fn create_edge_ctx(
+        &self,
+        ctx: &crate::application::OperationContext,
+        input: CreateEdgeInput,
+    ) -> RedDBResult<CreateEntityOutput> {
+        let _ = ctx;
+        self.create_edge(input)
+    }
+    fn create_vector_ctx(
+        &self,
+        ctx: &crate::application::OperationContext,
+        input: CreateVectorInput,
+    ) -> RedDBResult<CreateEntityOutput> {
+        let _ = ctx;
+        self.create_vector(input)
+    }
+    fn create_document_ctx(
+        &self,
+        ctx: &crate::application::OperationContext,
+        input: CreateDocumentInput,
+    ) -> RedDBResult<CreateEntityOutput> {
+        let _ = ctx;
+        self.create_document(input)
+    }
+    fn create_kv_ctx(
+        &self,
+        ctx: &crate::application::OperationContext,
+        input: CreateKvInput,
+    ) -> RedDBResult<CreateEntityOutput> {
+        let _ = ctx;
+        self.create_kv(input)
+    }
+    fn create_timeseries_point_ctx(
+        &self,
+        ctx: &crate::application::OperationContext,
+        input: CreateTimeSeriesPointInput,
+    ) -> RedDBResult<CreateEntityOutput> {
+        let _ = ctx;
+        self.create_timeseries_point(input)
+    }
+    fn get_kv_ctx(
+        &self,
+        ctx: &crate::application::OperationContext,
+        collection: &str,
+        key: &str,
+    ) -> RedDBResult<Option<(crate::storage::schema::Value, crate::storage::EntityId)>> {
+        let _ = ctx;
+        self.get_kv(collection, key)
+    }
+    fn delete_kv_ctx(
+        &self,
+        ctx: &crate::application::OperationContext,
+        collection: &str,
+        key: &str,
+    ) -> RedDBResult<bool> {
+        let _ = ctx;
+        self.delete_kv(collection, key)
+    }
+    fn patch_entity_ctx(
+        &self,
+        ctx: &crate::application::OperationContext,
+        input: PatchEntityInput,
+    ) -> RedDBResult<CreateEntityOutput> {
+        let _ = ctx;
+        self.patch_entity(input)
+    }
+    fn delete_entity_ctx(
+        &self,
+        ctx: &crate::application::OperationContext,
+        input: DeleteEntityInput,
+    ) -> RedDBResult<DeleteEntityOutput> {
+        let _ = ctx;
+        self.delete_entity(input)
+    }
+}
+
+/// Blanket impl: every concrete `RuntimeEntityPort` automatically
+/// gains the context-aware surface via the default forwards above.
+#[cfg(feature = "ctx-ports")]
+impl<T: RuntimeEntityPort + ?Sized> RuntimeEntityPortCtx for T {}
+
 #[path = "ports_impls.rs"]
 mod ports_impls;
 pub(crate) use ports_impls::build_row_update_contract_plan;

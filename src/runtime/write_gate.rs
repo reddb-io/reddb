@@ -128,6 +128,19 @@ impl WriteGate {
     ///    or boot-time pin; lower priority than lease loss because the
     ///    operator can revoke it without external coordination.
     pub fn check(&self, kind: WriteKind) -> RedDBResult<()> {
+        self.check_consent(kind).map(|_| ())
+    }
+
+    /// Same as `check` but on success returns a sealed
+    /// `WriteConsent` token. Mutating port methods that take
+    /// `&OperationContext` demand `ctx.write_consent.is_some()`;
+    /// the only way to mint such a token is to call this method,
+    /// so forgetting to consult the gate becomes a structural
+    /// property — not a discipline question.
+    pub fn check_consent(
+        &self,
+        kind: WriteKind,
+    ) -> RedDBResult<crate::application::WriteConsent> {
         if matches!(self.role, ReplicationRole::Replica { .. }) {
             return Err(RedDBError::ReadOnly(format!(
                 "instance is a replica — {} rejected on public surface",
@@ -146,7 +159,10 @@ impl WriteGate {
                 kind.label()
             )));
         }
-        Ok(())
+        Ok(crate::application::WriteConsent {
+            kind,
+            _seal: crate::application::WriteConsentSeal::new(),
+        })
     }
 
     pub fn is_read_only(&self) -> bool {
