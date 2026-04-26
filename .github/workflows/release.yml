@@ -309,16 +309,25 @@ jobs:
         with:
           version: '28.x'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Sync Cargo.toml version
+      - name: Install cargo-edit
+        run: cargo install cargo-edit --locked --no-default-features --features set-version
+      - name: Sync Cargo.toml + Cargo.lock version
         run: |
           VERSION="${{ needs.plan.outputs.package_version }}"
-          sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml
-          cargo generate-lockfile
+          # `cargo set-version` updates Cargo.toml + Cargo.lock atomically;
+          # commit so the tree is clean for `--locked`.
+          cargo set-version "${VERSION}"
+          git config user.email "actions@github.com"
+          git config user.name "github-actions[bot]"
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore(release): bump to ${VERSION}" || true
           echo "Publishing reddb@${VERSION} to crates.io"
+      - name: Dry-run package
+        run: cargo publish --dry-run --locked
       - name: Publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --allow-dirty --token "${CARGO_REGISTRY_TOKEN}"
+        run: cargo publish --locked --token "${CARGO_REGISTRY_TOKEN}"
 
   publish-rust-client:
     name: Publish reddb-client to crates.io
@@ -346,6 +355,12 @@ jobs:
           # version field, but we rewrite to drop the path entirely to be explicit.
           sed -i "s|reddb = { version = \"[^\"]*\", path = \"\.\./\.\.\", optional = true }|reddb = { version = \"${VERSION}\", optional = true }|" drivers/rust/Cargo.toml
           cargo generate-lockfile --manifest-path drivers/rust/Cargo.toml
+          # Commit so the publish step can use `--locked` (cleaner than
+          # --allow-dirty, catches Cargo.lock drift).
+          git config user.email "actions@github.com"
+          git config user.name "github-actions[bot]"
+          git add Cargo.toml drivers/rust/Cargo.toml drivers/rust/Cargo.lock 2>/dev/null || true
+          git commit -m "chore(release): bump driver to ${VERSION}" || true
           echo "Publishing reddb-client@${VERSION} to crates.io"
       - name: Wait for reddb index propagation
         run: |
@@ -361,11 +376,14 @@ jobs:
             sleep 30
           done
           echo "warning: reddb not visible after 150s — attempting publish anyway"
+      - name: Dry-run package
+        working-directory: drivers/rust
+        run: cargo publish --dry-run --locked
       - name: Publish
         working-directory: drivers/rust
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --allow-dirty --token "${CARGO_REGISTRY_TOKEN}"
+        run: cargo publish --locked --token "${CARGO_REGISTRY_TOKEN}"
 
   publish-js-driver:
     name: Publish reddb (npm)
