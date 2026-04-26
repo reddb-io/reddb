@@ -218,6 +218,7 @@ impl Database {
             create: config.create,
             verify_checksums: config.verify_checksums,
             double_write: true,
+            encryption: None,
         };
 
         // Open pager

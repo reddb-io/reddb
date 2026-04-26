@@ -62,6 +62,12 @@ pub enum PagerError {
     Locked,
     /// A Mutex or RwLock was poisoned (another thread panicked while holding it)
     LockPoisoned,
+    /// Database is encrypted but no key was supplied.
+    EncryptionRequired,
+    /// Plain (unencrypted) database opened with an encryption key.
+    PlainDatabaseRefusesKey,
+    /// Encryption key validation failed for an encrypted database.
+    InvalidKey,
 }
 
 impl std::fmt::Display for PagerError {
@@ -74,6 +80,15 @@ impl std::fmt::Display for PagerError {
             Self::PageNotFound(id) => write!(f, "Page {} not found", id),
             Self::Locked => write!(f, "Database is locked"),
             Self::LockPoisoned => write!(f, "Internal lock poisoned (concurrent thread panicked)"),
+            Self::EncryptionRequired => write!(
+                f,
+                "Database is encrypted but no key was supplied (set PagerConfig::encryption)"
+            ),
+            Self::PlainDatabaseRefusesKey => write!(
+                f,
+                "Plain (unencrypted) database opened with an encryption key — refusing"
+            ),
+            Self::InvalidKey => write!(f, "Encryption key validation failed for this database"),
         }
     }
 }
@@ -113,6 +128,12 @@ pub struct PagerConfig {
     pub verify_checksums: bool,
     /// Enable double-write buffer for torn page protection
     pub double_write: bool,
+    /// Optional encryption key. When set, `Pager::open` writes/reads
+    /// pages through `PageEncryptor` and rejects any DB whose
+    /// encryption-marker disagrees with the supplied key (or its
+    /// absence). When `None`, the pager refuses to open a DB whose
+    /// header carries the `RDBE` encryption marker.
+    pub encryption: Option<crate::storage::encryption::SecureKey>,
 }
 
 impl Default for PagerConfig {
@@ -123,6 +144,7 @@ impl Default for PagerConfig {
             create: true,
             verify_checksums: true,
             double_write: true,
+            encryption: None,
         }
     }
 }
@@ -233,6 +255,15 @@ pub struct Pager {
     /// existing callers that build a Pager without a WAL keep working
     /// unchanged. See `PLAN.md` § Target 3.
     wal: RwLock<Option<Arc<Mutex<WalWriter>>>>,
+    /// Optional page encryptor + header. When set, `read_page` /
+    /// `write_page` route through AES-GCM transparently and page 0
+    /// bypasses encryption (it carries the encryption marker +
+    /// header itself). When `None`, all pages are stored plaintext
+    /// and any DB header carrying the `RDBE` marker is rejected at
+    /// open time.
+    pub(crate) encryption:
+        Option<(crate::storage::encryption::PageEncryptor,
+                crate::storage::encryption::EncryptionHeader)>,
 }
 
 #[path = "pager/impl.rs"]

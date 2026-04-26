@@ -50,7 +50,7 @@ impl Pager {
             None
         };
 
-        let pager = Self {
+        let mut pager = Self {
             path,
             file: Mutex::new(file),
             _lock_file: lock_file,
@@ -61,6 +61,7 @@ impl Pager {
             config,
             header_dirty: Mutex::new(false),
             wal: RwLock::new(None),
+            encryption: None,
         };
 
         if exists {
@@ -68,12 +69,89 @@ impl Pager {
             pager.recover_from_dwb()?;
             // Load existing database (with header shadow fallback)
             pager.load_header()?;
+            pager.bind_encryption_for_existing()?;
         } else {
             // Initialize new database
             pager.initialize()?;
+            pager.bind_encryption_for_new()?;
         }
 
         Ok(pager)
+    }
+
+    /// Inspect page 0 for the `RDBE` encryption marker, then resolve
+    /// the (key, marker) matrix:
+    ///
+    /// | Marker | Key supplied | Result                              |
+    /// |--------|--------------|-------------------------------------|
+    /// | yes    | yes          | Bind encryptor; validate key        |
+    /// | yes    | no           | `EncryptionRequired` (fail closed)  |
+    /// | no     | yes          | `PlainDatabaseRefusesKey`           |
+    /// | no     | no           | Plain pager — no binding needed     |
+    fn bind_encryption_for_existing(&mut self) -> Result<(), PagerError> {
+        const ENCRYPTION_MARKER_OFFSET: usize = HEADER_SIZE + 32;
+        const ENCRYPTION_MARKER: &[u8; 4] = b"RDBE";
+
+        if self.page_count().unwrap_or(0) == 0 {
+            return self.bind_encryption_for_new();
+        }
+        let header_page = self.read_page_no_checksum(0)?;
+        let data = header_page.as_bytes();
+        let has_marker = data.len() > ENCRYPTION_MARKER_OFFSET + 4
+            && &data[ENCRYPTION_MARKER_OFFSET..ENCRYPTION_MARKER_OFFSET + 4]
+                == ENCRYPTION_MARKER;
+
+        let key = self.config.encryption.clone();
+        match (has_marker, key) {
+            (true, Some(key)) => {
+                let header_start = ENCRYPTION_MARKER_OFFSET + 4;
+                let header =
+                    crate::storage::encryption::EncryptionHeader::from_bytes(&data[header_start..])
+                        .map_err(|e| {
+                            PagerError::InvalidDatabase(format!(
+                                "encryption header parse failed: {e}"
+                            ))
+                        })?;
+                if !header.validate(&key) {
+                    return Err(PagerError::InvalidKey);
+                }
+                let encryptor = crate::storage::encryption::PageEncryptor::new(key);
+                self.encryption = Some((encryptor, header));
+                Ok(())
+            }
+            (true, None) => Err(PagerError::EncryptionRequired),
+            (false, Some(_)) => Err(PagerError::PlainDatabaseRefusesKey),
+            (false, None) => Ok(()),
+        }
+    }
+
+    /// New DB: if a key is configured, write the marker + header to
+    /// page 0 so subsequent opens detect encryption.
+    fn bind_encryption_for_new(&mut self) -> Result<(), PagerError> {
+        const ENCRYPTION_MARKER_OFFSET: usize = HEADER_SIZE + 32;
+        const ENCRYPTION_MARKER: &[u8; 4] = b"RDBE";
+
+        let Some(key) = self.config.encryption.clone() else {
+            return Ok(());
+        };
+        let header = crate::storage::encryption::EncryptionHeader::new(&key);
+        let encryptor = crate::storage::encryption::PageEncryptor::new(key);
+
+        // Stamp the marker + header into page 0 if it's been
+        // initialised by `initialize()` already.
+        if self.page_count().unwrap_or(0) > 0 {
+            let mut page = self.read_page_no_checksum(0)?;
+            let data = page.as_bytes_mut();
+            data[ENCRYPTION_MARKER_OFFSET..ENCRYPTION_MARKER_OFFSET + 4]
+                .copy_from_slice(ENCRYPTION_MARKER);
+            let header_bytes = header.to_bytes();
+            let header_start = ENCRYPTION_MARKER_OFFSET + 4;
+            data[header_start..header_start + header_bytes.len()]
+                .copy_from_slice(&header_bytes);
+            self.write_page_no_checksum(0, page)?;
+        }
+        self.encryption = Some((encryptor, header));
+        Ok(())
     }
 
     /// Open with default configuration
@@ -708,6 +786,51 @@ impl Pager {
         self.cache.mark_dirty(page_id);
 
         Ok(())
+    }
+
+    /// Read a page through the configured encryptor if any. Page 0
+    /// is always returned plaintext (it carries the encryption marker
+    /// + header). Callers that want raw cipher bytes can use
+    /// `read_page_no_checksum` directly.
+    pub fn read_page_decrypted(&self, page_id: u32) -> Result<Page, PagerError> {
+        if page_id == 0 || self.encryption.is_none() {
+            return self.read_page(page_id);
+        }
+        let raw = self.read_page_no_checksum(page_id)?;
+        let (enc, _) = self
+            .encryption
+            .as_ref()
+            .expect("encryption presence checked above");
+        let plaintext = enc
+            .decrypt(page_id, raw.as_bytes())
+            .map_err(|e| PagerError::InvalidDatabase(format!("decrypt page {page_id}: {e}")))?;
+        let mut buf = [0u8; PAGE_SIZE];
+        let n = plaintext.len().min(PAGE_SIZE);
+        buf[..n].copy_from_slice(&plaintext[..n]);
+        Ok(Page::from_bytes(buf))
+    }
+
+    /// Write a page through the configured encryptor if any. Page 0
+    /// bypasses encryption and goes through the normal checksummed
+    /// path. Encrypted pages skip the checksum update because
+    /// AES-GCM's authentication tag is the integrity guarantee.
+    pub fn write_page_encrypted(&self, page_id: u32, page: Page) -> Result<(), PagerError> {
+        if page_id == 0 || self.encryption.is_none() {
+            return self.write_page(page_id, page);
+        }
+        const OVERHEAD: usize = 12 + 16; // nonce + GCM tag
+        let plaintext_len = PAGE_SIZE - OVERHEAD;
+        let plaintext = &page.as_bytes()[..plaintext_len];
+        let (enc, _) = self
+            .encryption
+            .as_ref()
+            .expect("encryption presence checked above");
+        let ciphertext = enc.encrypt(page_id, plaintext);
+        debug_assert_eq!(ciphertext.len(), PAGE_SIZE);
+        let mut buf = [0u8; PAGE_SIZE];
+        buf.copy_from_slice(&ciphertext);
+        let cipher_page = Page::from_bytes(buf);
+        self.write_page_no_checksum(page_id, cipher_page)
     }
 
     /// Write a page without updating checksum (for encrypted pages)

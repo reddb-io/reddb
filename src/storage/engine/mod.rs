@@ -63,6 +63,7 @@ pub mod encrypted_pager;
 pub use btree::{BTree, BTreeCursor, BTreeError};
 pub use crc32::crc32;
 pub use database::{Database, DatabaseConfig, DatabaseError};
+#[allow(deprecated)]
 pub use encrypted_pager::{EncryptedPager, EncryptedPagerConfig, EncryptedPagerError};
 pub use freelist::FreeList;
 pub use graph_store::{GraphEdgeType, GraphNodeType, GraphStore, StoredEdge, StoredNode, TableRef};
