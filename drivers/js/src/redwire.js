@@ -39,6 +39,9 @@ export const MessageKind = Object.freeze({
   Bye: 0x16,
   Ping: 0x17,
   Pong: 0x18,
+  Get: 0x19,
+  Delete: 0x1A,
+  DeleteOk: 0x1B,
 })
 
 const KIND_NAME = Object.fromEntries(
@@ -159,10 +162,27 @@ export class RedWireClient {
     if (method === 'query') return this.#query(params.sql ?? '')
     if (method === 'insert') return this.#insert({ collection: params.collection, payload: params.payload })
     if (method === 'bulk_insert') return this.#insert({ collection: params.collection, payloads: params.payloads })
+    if (method === 'get') return this.#getOrDelete(MessageKind.Get, MessageKind.Result, params)
+    if (method === 'delete') return this.#getOrDelete(MessageKind.Delete, MessageKind.DeleteOk, params)
     if (method === 'health' || method === 'version') return this.#ping()
     throw new RedDBError(
       'UNKNOWN_METHOD',
       `RedWire transport doesn't bridge '${method}' yet`,
+    )
+  }
+
+  async #getOrDelete(reqKind, okKind, params) {
+    const corr = this.#corr()
+    const payload = jsonBytes({ collection: params.collection, id: String(params.id) })
+    await writeFrame(this.socket, reqKind, corr, payload)
+    const resp = await this.reader.next()
+    if (resp.kind === okKind) return jsonOf(resp.payload) ?? {}
+    if (resp.kind === MessageKind.Error) {
+      throw new RedDBError('ENGINE', new TextDecoder().decode(resp.payload))
+    }
+    throw new RedDBError(
+      'PROTOCOL',
+      `expected ${KIND_NAME[okKind]}/Error, got ${KIND_NAME[resp.kind] ?? resp.kind}`,
     )
   }
 

@@ -48,6 +48,9 @@ pub enum MessageKind {
     Bye = 0x16,
     Ping = 0x17,
     Pong = 0x18,
+    Get = 0x19,
+    Delete = 0x1A,
+    DeleteOk = 0x1B,
 }
 
 impl MessageKind {
@@ -67,6 +70,9 @@ impl MessageKind {
             0x16 => Some(Self::Bye),
             0x17 => Some(Self::Ping),
             0x18 => Some(Self::Pong),
+            0x19 => Some(Self::Get),
+            0x1A => Some(Self::Delete),
+            0x1B => Some(Self::DeleteOk),
             _ => None,
         }
     }

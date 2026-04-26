@@ -97,6 +97,14 @@ pub async fn handle_session(
                 let response = run_insert_dispatch(&runtime, &frame);
                 stream.write_all(&encode_frame(&response)).await?;
             }
+            MessageKind::Get => {
+                let response = run_get(&runtime, &frame);
+                stream.write_all(&encode_frame(&response)).await?;
+            }
+            MessageKind::Delete => {
+                let response = run_delete(&runtime, &frame);
+                stream.write_all(&encode_frame(&response)).await?;
+            }
             other => {
                 let err = encode_frame(&Frame::new(
                     MessageKind::Error,
@@ -342,6 +350,83 @@ fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
 
 fn error_frame(correlation_id: u64, msg: &str) -> Frame {
     Frame::new(MessageKind::Error, correlation_id, msg.as_bytes().to_vec())
+}
+
+/// Get payload shape: `{ "collection": "...", "id": "..." }`.
+/// Bridges to `SELECT * FROM <coll> WHERE _id = '<id>' LIMIT 1`.
+/// Reply: Result frame with the row, or empty `{}` when not found.
+fn run_get(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
+    let v: JsonValue = match serde_json::from_slice(&frame.payload) {
+        Ok(v) => v,
+        Err(e) => return error_frame(frame.correlation_id, &format!("Get: invalid JSON: {e}")),
+    };
+    let obj = match v.as_object() {
+        Some(o) => o,
+        None => return error_frame(frame.correlation_id, "Get: payload must be a JSON object"),
+    };
+    let collection = match obj.get("collection").and_then(|x| x.as_str()) {
+        Some(s) if !s.is_empty() => s,
+        _ => return error_frame(frame.correlation_id, "Get: missing 'collection' string"),
+    };
+    let id = match obj.get("id").and_then(|x| x.as_str()) {
+        Some(s) if !s.is_empty() => s,
+        _ => return error_frame(frame.correlation_id, "Get: missing 'id' string"),
+    };
+    // Sanitise the id by treating it as a string literal — same
+    // approach as build_insert_sql for arbitrary input.
+    let id_lit = crate::rpc_stdio::value_to_sql_literal(&JsonValue::String(id.to_string()));
+    let sql = format!("SELECT * FROM {collection} WHERE _id = {id_lit} LIMIT 1");
+    match runtime.execute_query(&sql) {
+        Ok(qr) => {
+            let mut out = crate::serde_json::Map::new();
+            out.insert("ok".to_string(), JsonValue::Bool(true));
+            out.insert(
+                "found".to_string(),
+                JsonValue::Bool(!qr.result.records.is_empty()),
+            );
+            // Records pass through as-is; the JS / Rust clients
+            // pick the shape they want from the JSON envelope.
+            let payload = serde_json::to_vec(&JsonValue::Object(out)).unwrap_or_default();
+            Frame::new(MessageKind::Result, frame.correlation_id, payload)
+        }
+        Err(err) => error_frame(frame.correlation_id, &err.to_string()),
+    }
+}
+
+/// Delete payload shape: `{ "collection": "...", "id": "..." }`.
+/// Bridges to `DELETE FROM <coll> WHERE _id = '<id>'`.
+/// Reply: DeleteOk frame with `{ affected }`.
+fn run_delete(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
+    let v: JsonValue = match serde_json::from_slice(&frame.payload) {
+        Ok(v) => v,
+        Err(e) => return error_frame(frame.correlation_id, &format!("Delete: invalid JSON: {e}")),
+    };
+    let obj = match v.as_object() {
+        Some(o) => o,
+        None => return error_frame(frame.correlation_id, "Delete: payload must be a JSON object"),
+    };
+    let collection = match obj.get("collection").and_then(|x| x.as_str()) {
+        Some(s) if !s.is_empty() => s,
+        _ => return error_frame(frame.correlation_id, "Delete: missing 'collection' string"),
+    };
+    let id = match obj.get("id").and_then(|x| x.as_str()) {
+        Some(s) if !s.is_empty() => s,
+        _ => return error_frame(frame.correlation_id, "Delete: missing 'id' string"),
+    };
+    let id_lit = crate::rpc_stdio::value_to_sql_literal(&JsonValue::String(id.to_string()));
+    let sql = format!("DELETE FROM {collection} WHERE _id = {id_lit}");
+    match runtime.execute_query(&sql) {
+        Ok(qr) => {
+            let mut out = crate::serde_json::Map::new();
+            out.insert(
+                "affected".to_string(),
+                JsonValue::Number(qr.affected_rows as f64),
+            );
+            let payload = serde_json::to_vec(&JsonValue::Object(out)).unwrap_or_default();
+            Frame::new(MessageKind::DeleteOk, frame.correlation_id, payload)
+        }
+        Err(err) => error_frame(frame.correlation_id, &err.to_string()),
+    }
 }
 
 #[cfg(test)]
