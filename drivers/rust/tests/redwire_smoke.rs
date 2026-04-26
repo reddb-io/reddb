@@ -12,7 +12,7 @@ use std::sync::Arc;
 use reddb::api::RedDBOptions;
 use reddb::wire::redwire::{start_redwire_listener, RedWireConfig};
 use reddb::RedDBRuntime;
-use reddb_client::redwire::{Auth, ConnectOptions, RedWireClient};
+use reddb_client::redwire::{Auth, BinaryValue, ConnectOptions, RedWireClient};
 use tokio::net::TcpListener;
 
 async fn start_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
@@ -95,6 +95,38 @@ async fn insert_dispatch_round_trip() {
         .await
         .expect("bulk_insert");
     assert!(affected >= 3, "bulk insert affected at least 3 rows");
+
+    client.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn binary_bulk_insert_fast_path() {
+    let (addr, _server) = start_server().await;
+    let mut client = RedWireClient::connect(
+        ConnectOptions::new(addr.ip().to_string(), addr.port()).with_auth(Auth::Anonymous),
+    )
+    .await
+    .expect("connect");
+
+    client
+        .query("CREATE TABLE bin_users (name TEXT, age INTEGER)")
+        .await
+        .expect("create");
+
+    // Binary fast path: typed values, zero JSON encoding/decoding.
+    // Reuses the v1 MSG_BULK_INSERT_BINARY codec on the engine
+    // side — same hot-loop perf as examples/stress_wire_client.rs.
+    let columns = ["name", "age"];
+    let rows = vec![
+        vec![BinaryValue::Text("alice".into()), BinaryValue::I64(30)],
+        vec![BinaryValue::Text("bob".into()), BinaryValue::I64(25)],
+        vec![BinaryValue::Text("carol".into()), BinaryValue::I64(40)],
+    ];
+    let affected = client
+        .bulk_insert_binary("bin_users", &columns, &rows)
+        .await
+        .expect("binary bulk insert");
+    assert_eq!(affected, 3, "binary path inserted all rows");
 
     client.close().await.expect("close");
 }

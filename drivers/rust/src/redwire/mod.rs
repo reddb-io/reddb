@@ -45,6 +45,51 @@ pub enum Auth {
     Bearer(String),
 }
 
+/// Typed value for the binary bulk-insert fast path. Tag bytes
+/// match `src/wire/protocol.rs` so the wire shape is identical to
+/// what `examples/stress_wire_client.rs` already produces.
+#[derive(Debug, Clone)]
+pub enum BinaryValue {
+    I64(i64),
+    F64(f64),
+    Text(String),
+    Bool(bool),
+    Null,
+}
+
+impl BinaryValue {
+    /// Tag constants — keep in sync with the engine's
+    /// `wire::protocol::VAL_*` table.
+    const TAG_I64: u8 = 1;
+    const TAG_F64: u8 = 2;
+    const TAG_TEXT: u8 = 3;
+    const TAG_BOOL: u8 = 4;
+    const TAG_NULL: u8 = 0;
+
+    pub(crate) fn encode(&self, buf: &mut Vec<u8>) {
+        match self {
+            Self::I64(n) => {
+                buf.push(Self::TAG_I64);
+                buf.extend_from_slice(&n.to_le_bytes());
+            }
+            Self::F64(n) => {
+                buf.push(Self::TAG_F64);
+                buf.extend_from_slice(&n.to_le_bytes());
+            }
+            Self::Text(s) => {
+                buf.push(Self::TAG_TEXT);
+                buf.extend_from_slice(&(s.len() as u32).to_le_bytes());
+                buf.extend_from_slice(s.as_bytes());
+            }
+            Self::Bool(b) => {
+                buf.push(Self::TAG_BOOL);
+                buf.push(if *b { 1 } else { 0 });
+            }
+            Self::Null => buf.push(Self::TAG_NULL),
+        }
+    }
+}
+
 /// Configuration for `RedWireClient::connect`.
 #[derive(Debug, Clone)]
 pub struct ConnectOptions {
@@ -253,6 +298,85 @@ impl RedWireClient {
             other => Err(ClientError::new(
                 ErrorCode::Protocol,
                 format!("expected DeleteOk/Error, got {other:?}"),
+            )),
+        }
+    }
+
+    /// Bulk-insert via the v1 binary fast path. Same wire shape as
+    /// `MSG_BULK_INSERT_BINARY` (0x06): typed values, no JSON
+    /// encode/decode. Use this for hot inserts where the column
+    /// types are known up front.
+    ///
+    /// `columns`: column names in fixed order.
+    /// `rows`: each inner Vec must have one entry per column, in
+    /// column order. Mixed types are encoded by the value writer.
+    pub async fn bulk_insert_binary(
+        &mut self,
+        collection: &str,
+        columns: &[&str],
+        rows: &[Vec<BinaryValue>],
+    ) -> Result<u64> {
+        let mut payload = Vec::with_capacity(64 + rows.len() * columns.len() * 16);
+        // Collection name
+        payload.extend_from_slice(&(collection.len() as u16).to_le_bytes());
+        payload.extend_from_slice(collection.as_bytes());
+        // Column count + names
+        payload.extend_from_slice(&(columns.len() as u16).to_le_bytes());
+        for c in columns {
+            payload.extend_from_slice(&(c.len() as u16).to_le_bytes());
+            payload.extend_from_slice(c.as_bytes());
+        }
+        // Row count + rows
+        payload.extend_from_slice(&(rows.len() as u32).to_le_bytes());
+        for row in rows {
+            if row.len() != columns.len() {
+                return Err(ClientError::new(
+                    ErrorCode::Protocol,
+                    format!(
+                        "row had {} values for {} columns",
+                        row.len(),
+                        columns.len()
+                    ),
+                ));
+            }
+            for v in row {
+                v.encode(&mut payload);
+            }
+        }
+
+        let corr = self.next_corr();
+        let req = Frame::new(MessageKind::BulkInsertBinary, corr, payload);
+        self.stream
+            .write_all(&encode_frame(&req))
+            .await
+            .map_err(io_err)?;
+        let resp = self.read_frame().await?;
+        match resp.kind {
+            MessageKind::BulkOk => {
+                if resp.payload.len() < 8 {
+                    return Err(ClientError::new(
+                        ErrorCode::Protocol,
+                        "BulkOk truncated: expected 8-byte count",
+                    ));
+                }
+                Ok(u64::from_le_bytes([
+                    resp.payload[0],
+                    resp.payload[1],
+                    resp.payload[2],
+                    resp.payload[3],
+                    resp.payload[4],
+                    resp.payload[5],
+                    resp.payload[6],
+                    resp.payload[7],
+                ]))
+            }
+            MessageKind::Error => Err(ClientError::new(
+                ErrorCode::Engine,
+                String::from_utf8_lossy(&resp.payload).to_string(),
+            )),
+            other => Err(ClientError::new(
+                ErrorCode::Protocol,
+                format!("expected BulkOk/Error, got {other:?}"),
             )),
         }
     }

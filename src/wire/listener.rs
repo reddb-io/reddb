@@ -287,7 +287,7 @@ where
     }
 }
 
-fn handle_query(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
+pub(crate) fn handle_query(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
     let sql = match std::str::from_utf8(payload) {
         Ok(s) => s,
         Err(_) => return make_error(b"invalid UTF-8 in query"),
@@ -356,7 +356,7 @@ fn handle_query(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
 /// on the wire. The only observable difference between MSG_QUERY
 /// and MSG_QUERY_BINARY is the client-side intent marker — useful
 /// for routing/telemetry, but no longer a functional divergence.
-fn handle_query_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
+pub(crate) fn handle_query_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
     handle_query(runtime, payload)
 }
 
@@ -413,7 +413,7 @@ fn encode_empty_result() -> Vec<u8> {
     resp
 }
 
-fn handle_bulk_insert(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
+pub(crate) fn handle_bulk_insert(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
     let mut pos = 0;
 
     // Collection name
@@ -618,7 +618,7 @@ fn encode_result(result: &crate::runtime::RuntimeQueryResult) -> Vec<u8> {
 
 /// Binary bulk insert — zero JSON parsing. Values come as typed wire bytes.
 /// Format: [coll_len:u16][coll][ncols:u16][col_names...][nrows:u32][row_values...]
-fn handle_bulk_insert_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
+pub(crate) fn handle_bulk_insert_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
     let mut pos = 0;
 
     if payload.len() < 6 {
@@ -712,7 +712,7 @@ fn handle_bulk_insert_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> 
 /// pre-validated path which skips per-row contract + uniqueness
 /// checks. Used by typed-bench-style workloads where the client
 /// already validated types before sending.
-fn handle_bulk_insert_binary_prevalidated(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
+pub(crate) fn handle_bulk_insert_binary_prevalidated(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
     let mut pos = 0;
 
     if payload.len() < 6 {

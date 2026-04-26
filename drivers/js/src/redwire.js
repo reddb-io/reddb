@@ -42,6 +42,21 @@ export const MessageKind = Object.freeze({
   Get: 0x19,
   Delete: 0x1A,
   DeleteOk: 0x1B,
+  BulkInsertBinary: 0x06,
+  QueryBinary: 0x07,
+  BulkInsertPrevalidated: 0x08,
+})
+
+/**
+ * Typed value tags for the binary fast path. Identical to the
+ * engine-side `wire::protocol::VAL_*` table.
+ */
+export const BinaryTag = Object.freeze({
+  Null: 0,
+  I64: 1,
+  F64: 2,
+  Text: 3,
+  Bool: 4,
 })
 
 const KIND_NAME = Object.fromEntries(
@@ -162,12 +177,56 @@ export class RedWireClient {
     if (method === 'query') return this.#query(params.sql ?? '')
     if (method === 'insert') return this.#insert({ collection: params.collection, payload: params.payload })
     if (method === 'bulk_insert') return this.#insert({ collection: params.collection, payloads: params.payloads })
+    if (method === 'bulk_insert_binary') {
+      return this.bulkInsertBinary(params.collection, params.columns, params.rows)
+    }
     if (method === 'get') return this.#getOrDelete(MessageKind.Get, MessageKind.Result, params)
     if (method === 'delete') return this.#getOrDelete(MessageKind.Delete, MessageKind.DeleteOk, params)
     if (method === 'health' || method === 'version') return this.#ping()
     throw new RedDBError(
       'UNKNOWN_METHOD',
       `RedWire transport doesn't bridge '${method}' yet`,
+    )
+  }
+
+  /**
+   * Bulk-insert via the v1 binary fast path (frame kind 0x06).
+   * Same hot-loop perf as the engine's `MSG_BULK_INSERT_BINARY`
+   * stress tests. Each row is an array of `[tag, value]` pairs
+   * matching the column order; tag values come from `BinaryTag`.
+   *
+   * Example:
+   *   client.bulkInsertBinary('users', ['name', 'age'], [
+   *     [[BinaryTag.Text, 'alice'], [BinaryTag.I64, 30n]],
+   *     [[BinaryTag.Text, 'bob'],   [BinaryTag.I64, 25n]],
+   *   ])
+   */
+  async bulkInsertBinary(collection, columns, rows) {
+    if (!Array.isArray(columns) || !Array.isArray(rows)) {
+      throw new TypeError('bulkInsertBinary: columns and rows must be arrays')
+    }
+    const buf = encodeBinaryBulk(collection, columns, rows)
+    const corr = this.#corr()
+    await writeFrame(this.socket, MessageKind.BulkInsertBinary, corr, buf)
+    const resp = await this.reader.next()
+    if (resp.kind === MessageKind.BulkOk) {
+      // v1 BulkOk body is an 8-byte little-endian count.
+      if (resp.payload.length < 8) {
+        throw new RedDBError('PROTOCOL', 'BulkOk truncated: expected 8-byte count')
+      }
+      const view = new DataView(
+        resp.payload.buffer,
+        resp.payload.byteOffset,
+        resp.payload.byteLength,
+      )
+      return Number(view.getBigUint64(0, true))
+    }
+    if (resp.kind === MessageKind.Error) {
+      throw new RedDBError('ENGINE', new TextDecoder().decode(resp.payload))
+    }
+    throw new RedDBError(
+      'PROTOCOL',
+      `expected BulkOk/Error, got ${KIND_NAME[resp.kind] ?? resp.kind}`,
     )
   }
 
@@ -441,6 +500,100 @@ function jsonOf(bytes) {
     return JSON.parse(new TextDecoder().decode(bytes))
   } catch {
     return null
+  }
+}
+
+/**
+ * Encode the v1 binary bulk-insert payload (no v2 frame header).
+ * Layout: `[coll_len u16][coll_bytes][ncols u16]
+ *          [(name_len u16)(name_bytes)]*ncols
+ *          [nrows u32]
+ *          [(tag u8)(value)]*ncols * nrows`
+ */
+function encodeBinaryBulk(collection, columns, rows) {
+  const enc = new TextEncoder()
+  const collBytes = enc.encode(collection)
+  // Pre-encode column names + their length prefixes.
+  const colChunks = columns.map((c) => enc.encode(c))
+  let total = 2 + collBytes.length + 2
+  for (const cb of colChunks) total += 2 + cb.length
+  total += 4
+  // Estimate row size — we'll resize if needed.
+  for (const row of rows) {
+    if (!Array.isArray(row) || row.length !== columns.length) {
+      throw new TypeError(
+        `bulkInsertBinary: each row must be an array of length ${columns.length}`,
+      )
+    }
+    for (const cell of row) {
+      total += sizeOfBinaryCell(cell)
+    }
+  }
+  const buf = new Uint8Array(total)
+  const view = new DataView(buf.buffer)
+  let pos = 0
+  view.setUint16(pos, collBytes.length, true); pos += 2
+  buf.set(collBytes, pos); pos += collBytes.length
+  view.setUint16(pos, colChunks.length, true); pos += 2
+  for (const cb of colChunks) {
+    view.setUint16(pos, cb.length, true); pos += 2
+    buf.set(cb, pos); pos += cb.length
+  }
+  view.setUint32(pos, rows.length, true); pos += 4
+  for (const row of rows) {
+    for (const cell of row) {
+      pos = writeBinaryCell(buf, view, pos, cell, enc)
+    }
+  }
+  return buf
+}
+
+function sizeOfBinaryCell(cell) {
+  if (!Array.isArray(cell) || cell.length !== 2) {
+    throw new TypeError('bulkInsertBinary cell must be [tag, value]')
+  }
+  const [tag] = cell
+  switch (tag) {
+    case 0: return 1
+    case 1: return 1 + 8
+    case 2: return 1 + 8
+    case 3: {
+      const v = cell[1]
+      const bytes = typeof v === 'string' ? new TextEncoder().encode(v).length : 0
+      return 1 + 4 + bytes
+    }
+    case 4: return 1 + 1
+    default: throw new RedDBError('UNKNOWN_BINARY_TAG', `tag=${tag}`)
+  }
+}
+
+function writeBinaryCell(buf, view, pos, cell, enc) {
+  const [tag, value] = cell
+  buf[pos++] = tag
+  switch (tag) {
+    case 0: // Null
+      return pos
+    case 1: { // I64
+      const bi = typeof value === 'bigint' ? value : BigInt(value)
+      view.setBigInt64(pos, bi, true)
+      return pos + 8
+    }
+    case 2: { // F64
+      view.setFloat64(pos, Number(value), true)
+      return pos + 8
+    }
+    case 3: { // Text
+      const bytes = enc.encode(String(value))
+      view.setUint32(pos, bytes.length, true); pos += 4
+      buf.set(bytes, pos)
+      return pos + bytes.length
+    }
+    case 4: { // Bool
+      buf[pos] = value ? 1 : 0
+      return pos + 1
+    }
+    default:
+      throw new RedDBError('UNKNOWN_BINARY_TAG', `tag=${tag}`)
   }
 }
 

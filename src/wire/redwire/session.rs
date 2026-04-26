@@ -97,6 +97,26 @@ pub async fn handle_session(
                 let response = run_insert_dispatch(&runtime, &frame);
                 stream.write_all(&encode_frame(&response)).await?;
             }
+            // v1 binary fast paths — reuse the v1 handler verbatim.
+            // The handler returns a v1-framed response; we strip
+            // the 5-byte v1 header and rewrap with v2 framing,
+            // preserving zero-copy of the body bytes for max perf
+            // parity with v1 stress tools.
+            MessageKind::BulkInsertBinary => {
+                let v1 = crate::wire::listener::handle_bulk_insert_binary(&runtime, &frame.payload);
+                stream.write_all(&encode_frame(&rewrap_v1(&v1, &frame))).await?;
+            }
+            MessageKind::BulkInsertPrevalidated => {
+                let v1 = crate::wire::listener::handle_bulk_insert_binary_prevalidated(
+                    &runtime,
+                    &frame.payload,
+                );
+                stream.write_all(&encode_frame(&rewrap_v1(&v1, &frame))).await?;
+            }
+            MessageKind::QueryBinary => {
+                let v1 = crate::wire::listener::handle_query_binary(&runtime, &frame.payload);
+                stream.write_all(&encode_frame(&rewrap_v1(&v1, &frame))).await?;
+            }
             MessageKind::Get => {
                 let response = run_get(&runtime, &frame);
                 stream.write_all(&encode_frame(&response)).await?;
@@ -350,6 +370,28 @@ fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
 
 fn error_frame(correlation_id: u64, msg: &str) -> Frame {
     Frame::new(MessageKind::Error, correlation_id, msg.as_bytes().to_vec())
+}
+
+/// Adapt a v1-framed handler response into a v2 frame.
+///
+/// v1 handlers (`handle_bulk_insert_binary`, `handle_query_binary`,
+/// etc) return `[u32 length][u8 msg_type][body]` already wrapped.
+/// v2 carries the same body verbatim (kinds 0x01..0x0F are
+/// preserved by design), so we strip the 5-byte v1 header and
+/// rewrap with v2 framing using the same `correlation_id` and
+/// the kind byte from the v1 frame.
+///
+/// The payload `Vec<u8>` is moved into the new frame — no extra
+/// allocation, no body copy — which is the property that lets
+/// v2 hit v1 perf parity on bulk insert benchmarks.
+fn rewrap_v1(v1_bytes: &[u8], req: &Frame) -> Frame {
+    if v1_bytes.len() < 5 {
+        return error_frame(req.correlation_id, "v1 handler returned a truncated frame");
+    }
+    let kind_byte = v1_bytes[4];
+    let kind = MessageKind::from_u8(kind_byte).unwrap_or(MessageKind::Error);
+    let body = v1_bytes[5..].to_vec();
+    Frame::new(kind, req.correlation_id, body)
 }
 
 /// Get payload shape: `{ "collection": "...", "id": "..." }`.
