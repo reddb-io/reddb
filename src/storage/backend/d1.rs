@@ -353,6 +353,39 @@ impl D1Backend {
         }
         false
     }
+
+    fn extract_string_values(response: &str, field: &str) -> Vec<String> {
+        let field_key = format!("\"{}\"", field);
+        let mut values = Vec::new();
+        let mut rest = response;
+        while let Some(field_start) = rest.find(&field_key) {
+            let after_field = &rest[field_start + field_key.len()..];
+            let Some(colon) = after_field.find(':') else {
+                break;
+            };
+            let trimmed = after_field[colon + 1..].trim_start();
+            if !trimmed.starts_with('"') {
+                rest = trimmed;
+                continue;
+            }
+            let value_start = 1;
+            let value_rest = &trimmed[value_start..];
+            let mut end = 0;
+            let bytes = value_rest.as_bytes();
+            while end < bytes.len() {
+                if bytes[end] == b'"' && (end == 0 || bytes[end - 1] != b'\\') {
+                    break;
+                }
+                end += 1;
+            }
+            if end >= bytes.len() {
+                break;
+            }
+            values.push(value_rest[..end].to_string());
+            rest = &value_rest[end + 1..];
+        }
+        values
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -439,6 +472,18 @@ impl RemoteBackend for D1Backend {
 
         self.exec_query(&body)?;
         Ok(())
+    }
+
+    fn list(&self, prefix: &str) -> Result<Vec<String>, BackendError> {
+        self.ensure_table()?;
+
+        let sql = format!(
+            "SELECT key FROM {} WHERE key LIKE ?1 ORDER BY key",
+            self.config.table_name
+        );
+        let body = Self::build_query(&sql, &[&format!("\"{}%\"", prefix)]);
+        let response = self.exec_query(&body)?;
+        Ok(Self::extract_string_values(&response, "key"))
     }
 }
 
