@@ -153,6 +153,132 @@ pub(crate) fn json_response(status: u16, value: JsonValue) -> HttpResponse {
         content_type: "application/json",
     }
 }
+
+/// Map a `RedDBError` to an HTTP status + display string.
+///
+/// Single source of truth for the engine's error → HTTP-status table.
+/// Handlers that route through `run_use_case` get this mapping for
+/// free; handlers that hand-roll status codes should migrate to keep
+/// the wire surface uniform.
+///
+/// `QuotaExceeded` payloads are expected to follow the
+/// `quota_exceeded:<bucket>:<current>:<max>` shape — the bucket
+/// prefix decides which 4xx/5xx the operator sees:
+/// - `:storage:*` → 507
+/// - `:rate:*`    → 429
+/// - `:duration:*`→ 504
+/// - `:payload:*` → 413
+pub(crate) fn map_runtime_error(err: &crate::api::RedDBError) -> (u16, String) {
+    use crate::api::RedDBError::*;
+    let msg = err.to_string();
+    let status = match err {
+        NotFound(_) => 404,
+        ReadOnly(_) => 403,
+        InvalidConfig(_) | Query(_) => 400,
+        FeatureNotEnabled(_) => 501,
+        SchemaVersionMismatch { .. } => 409,
+        QuotaExceeded(payload) => {
+            let body = payload.strip_prefix("quota_exceeded:").unwrap_or(payload);
+            if body.starts_with("storage") {
+                507
+            } else if body.starts_with("rate") {
+                429
+            } else if body.starts_with("duration") {
+                504
+            } else if body.starts_with("payload") {
+                413
+            } else {
+                429
+            }
+        }
+        Engine(_) | Catalog(_) | Io(_) | VersionUnavailable | Internal(_) => 500,
+    };
+    (status, msg)
+}
+
+/// Run a use-case closure and format the result.
+///
+/// Collapses the `parse → run → match → present` boilerplate scattered
+/// across handler files into one Adapter. Cross-cutting concerns
+/// (status mapping, latency tracing, audit hooks) live here, not
+/// duplicated 14 ways.
+pub(crate) fn run_use_case<O, F, P>(run: F, present: P) -> HttpResponse
+where
+    F: FnOnce() -> crate::api::RedDBResult<O>,
+    P: FnOnce(&O) -> JsonValue,
+{
+    match run() {
+        Ok(output) => json_response(200, present(&output)),
+        Err(err) => {
+            let (status, msg) = map_runtime_error(&err);
+            json_error(status, msg)
+        }
+    }
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+    use crate::api::RedDBError;
+
+    #[test]
+    fn map_runtime_error_covers_each_variant() {
+        // Spot-check: status code is the contract, not the message.
+        assert_eq!(map_runtime_error(&RedDBError::NotFound("x".into())).0, 404);
+        assert_eq!(map_runtime_error(&RedDBError::ReadOnly("x".into())).0, 403);
+        assert_eq!(map_runtime_error(&RedDBError::InvalidConfig("x".into())).0, 400);
+        assert_eq!(map_runtime_error(&RedDBError::Query("x".into())).0, 400);
+        assert_eq!(map_runtime_error(&RedDBError::FeatureNotEnabled("x".into())).0, 501);
+        assert_eq!(
+            map_runtime_error(&RedDBError::SchemaVersionMismatch { expected: 1, found: 2 }).0,
+            409
+        );
+        assert_eq!(
+            map_runtime_error(&RedDBError::QuotaExceeded("storage:1:0".into())).0,
+            507
+        );
+        assert_eq!(
+            map_runtime_error(&RedDBError::QuotaExceeded("rate:1:0".into())).0,
+            429
+        );
+        assert_eq!(
+            map_runtime_error(&RedDBError::QuotaExceeded("duration:1:0".into())).0,
+            504
+        );
+        assert_eq!(
+            map_runtime_error(&RedDBError::QuotaExceeded("payload:1:0".into())).0,
+            413
+        );
+        assert_eq!(map_runtime_error(&RedDBError::Internal("x".into())).0, 500);
+        assert_eq!(map_runtime_error(&RedDBError::Engine("x".into())).0, 500);
+        assert_eq!(map_runtime_error(&RedDBError::Catalog("x".into())).0, 500);
+        assert_eq!(map_runtime_error(&RedDBError::VersionUnavailable).0, 500);
+    }
+
+    #[test]
+    fn run_use_case_returns_200_with_presented_body() {
+        let resp = run_use_case::<i32, _, _>(
+            || Ok(7),
+            |n| {
+                let mut m = Map::new();
+                m.insert("count".into(), JsonValue::Number(*n as f64));
+                JsonValue::Object(m)
+            },
+        );
+        assert_eq!(resp.status, 200);
+        assert!(String::from_utf8_lossy(&resp.body).contains("\"count\":7"));
+    }
+
+    #[test]
+    fn run_use_case_maps_err_through_helper() {
+        let resp = run_use_case::<i32, _, _>(
+            || Err(crate::api::RedDBError::NotFound("missing".into())),
+            |_| JsonValue::Null,
+        );
+        assert_eq!(resp.status, 404);
+        assert!(String::from_utf8_lossy(&resp.body).contains("not found"));
+    }
+}
 pub(crate) fn split_target(target: &str) -> (String, BTreeMap<String, String>) {
     match target.split_once('?') {
         Some((path, raw_query)) => (path.to_string(), parse_query_string(raw_query)),

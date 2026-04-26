@@ -15,6 +15,8 @@ impl RedDBServer {
             return json_error(400, "field 'name' cannot be empty");
         }
 
+        // TODO(cluster-5-sweep): explicit 400 disagrees with map_runtime_error
+        // (Engine/Io/Internal → 500). Migrate after auditing wire contract.
         match self.native_use_cases().create_export(name.to_string()) {
             Ok(export) => json_response(
                 200,
@@ -544,6 +546,8 @@ impl RedDBServer {
             .map(|value| value.to_string())
             .or(body_collection);
 
+        // TODO(cluster-5-sweep): explicit 400 disagrees with map_runtime_error
+        // (Engine/Io → 500). Migrate after auditing wire contract.
         match self
             .admin_use_cases()
             .rebuild_indexes(collection.as_deref())

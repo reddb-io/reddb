@@ -91,17 +91,17 @@ impl RedDBServer {
     ///
     /// Creates a snapshot suitable for bootstrapping a new replica.
     pub(crate) fn handle_replication_snapshot(&self) -> HttpResponse {
-        match self.native_use_cases().create_snapshot() {
-            Ok(snapshot) => {
+        crate::server::transport::run_use_case(
+            || self.native_use_cases().create_snapshot(),
+            |snapshot| {
                 let mut object = Map::new();
                 object.insert("ok".to_string(), JsonValue::Bool(true));
                 object.insert(
                     "snapshot".to_string(),
-                    crate::presentation::native_json::snapshot_descriptor_json(&snapshot),
+                    crate::presentation::native_json::snapshot_descriptor_json(snapshot),
                 );
-                json_response(200, JsonValue::Object(object))
-            }
-            Err(err) => json_error(500, err.to_string()),
-        }
+                JsonValue::Object(object)
+            },
+        )
     }
 }

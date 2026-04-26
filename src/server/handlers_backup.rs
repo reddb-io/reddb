@@ -95,8 +95,9 @@ impl RedDBServer {
 
     /// POST /backup/trigger — force an immediate backup.
     pub(crate) fn handle_backup_trigger(&self) -> HttpResponse {
-        match self.runtime.trigger_backup() {
-            Ok(result) => {
+        crate::server::transport::run_use_case(
+            || self.runtime.trigger_backup(),
+            |result| {
                 let mut object = Map::new();
                 object.insert("ok".to_string(), JsonValue::Bool(true));
                 object.insert(
@@ -108,10 +109,9 @@ impl RedDBServer {
                     "duration_ms".to_string(),
                     JsonValue::Number(result.duration_ms as f64),
                 );
-                json_response(200, JsonValue::Object(object))
-            }
-            Err(err) => json_error(500, err.to_string()),
-        }
+                JsonValue::Object(object)
+            },
+        )
     }
 
     /// GET /recovery/restore-points — list available restore points.

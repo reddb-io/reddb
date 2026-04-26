@@ -18,16 +18,17 @@ impl RedDBServer {
             .max(1)
             .min(self.options.max_scan_limit);
 
-        match self
-            .query_use_cases()
-            .scan(crate::application::ScanCollectionInput {
-                collection: collection.to_string(),
-                offset,
-                limit,
-            }) {
-            Ok(page) => json_response(200, crate::presentation::entity_json::scan_page_json(&page)),
-            Err(err) => json_error(404, err.to_string()),
-        }
+        crate::server::transport::run_use_case(
+            || {
+                self.query_use_cases()
+                    .scan(crate::application::ScanCollectionInput {
+                        collection: collection.to_string(),
+                        offset,
+                        limit,
+                    })
+            },
+            |page| crate::presentation::entity_json::scan_page_json(page),
+        )
     }
 
     pub(crate) fn handle_create_row(&self, collection: &str, body: Vec<u8>) -> HttpResponse {
@@ -43,13 +44,10 @@ impl RedDBServer {
             Err(err) => return json_error(400, err.to_string()),
         };
 
-        match self.entity_use_cases().create_row(input) {
-            Ok(output) => json_response(
-                200,
-                crate::presentation::entity_json::created_entity_output_json(&output),
-            ),
-            Err(err) => json_error(400, err.to_string()),
-        }
+        crate::server::transport::run_use_case(
+            || self.entity_use_cases().create_row(input),
+            |output| crate::presentation::entity_json::created_entity_output_json(output),
+        )
     }
 
     pub(crate) fn handle_create_node(&self, collection: &str, body: Vec<u8>) -> HttpResponse {
@@ -65,13 +63,10 @@ impl RedDBServer {
             Err(err) => return json_error(400, err.to_string()),
         };
 
-        match self.entity_use_cases().create_node(input) {
-            Ok(output) => json_response(
-                200,
-                crate::presentation::entity_json::created_entity_output_json(&output),
-            ),
-            Err(err) => json_error(400, err.to_string()),
-        }
+        crate::server::transport::run_use_case(
+            || self.entity_use_cases().create_node(input),
+            |output| crate::presentation::entity_json::created_entity_output_json(output),
+        )
     }
 
     pub(crate) fn handle_create_edge(&self, collection: &str, body: Vec<u8>) -> HttpResponse {

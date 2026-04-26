@@ -17,13 +17,10 @@ impl RedDBServer {
             Err(err) => return json_error(400, err.to_string()),
         };
 
-        match self.graph_use_cases().neighborhood(input) {
-            Ok(result) => json_response(
-                200,
-                crate::presentation::graph_json::graph_neighborhood_json(&result),
-            ),
-            Err(err) => json_error(400, err.to_string()),
-        }
+        crate::server::transport::run_use_case(
+            || self.graph_use_cases().neighborhood(input),
+            |result| crate::presentation::graph_json::graph_neighborhood_json(result),
+        )
     }
 
     pub(crate) fn handle_graph_traverse(&self, body: Vec<u8>) -> HttpResponse {
@@ -42,13 +39,10 @@ impl RedDBServer {
             Err(err) => return json_error(400, err.to_string()),
         };
 
-        match self.graph_use_cases().traverse(input) {
-            Ok(result) => json_response(
-                200,
-                crate::presentation::graph_json::graph_traversal_json(&result),
-            ),
-            Err(err) => json_error(400, err.to_string()),
-        }
+        crate::server::transport::run_use_case(
+            || self.graph_use_cases().traverse(input),
+            |result| crate::presentation::graph_json::graph_traversal_json(result),
+        )
     }
 
     pub(crate) fn handle_graph_shortest_path(&self, body: Vec<u8>) -> HttpResponse {
@@ -67,13 +61,10 @@ impl RedDBServer {
             Err(err) => return json_error(400, err.to_string()),
         };
 
-        match self.graph_use_cases().shortest_path(input) {
-            Ok(result) => json_response(
-                200,
-                crate::presentation::graph_json::graph_path_result_json(&result),
-            ),
-            Err(err) => json_error(400, err.to_string()),
-        }
+        crate::server::transport::run_use_case(
+            || self.graph_use_cases().shortest_path(input),
+            |result| crate::presentation::graph_json::graph_path_result_json(result),
+        )
     }
 
     pub(crate) fn handle_graph_components(&self, body: Vec<u8>) -> HttpResponse {
@@ -501,17 +492,16 @@ impl RedDBServer {
             Err(err) => return json_error(400, err.to_string()),
         };
 
-        match self.admin_use_cases().save_graph_projection(
-            input.name,
-            input.projection,
-            input.source,
-        ) {
-            Ok(projection) => json_response(
-                200,
-                crate::presentation::admin_json::graph_projection_json(&projection),
-            ),
-            Err(err) => json_error(400, err.to_string()),
-        }
+        crate::server::transport::run_use_case(
+            || {
+                self.admin_use_cases().save_graph_projection(
+                    input.name,
+                    input.projection,
+                    input.source,
+                )
+            },
+            |projection| crate::presentation::admin_json::graph_projection_json(projection),
+        )
     }
 
     pub(crate) fn materialize_graph_projection_transition(&self, name: &str) -> HttpResponse {
@@ -594,10 +584,10 @@ impl RedDBServer {
                 Err(err) => return json_error(400, err.to_string()),
             };
 
-        match apply(input.kind, input.projection, input.metadata) {
-            Ok(job) => json_response(200, analytics_job_json(&job)),
-            Err(err) => json_error(400, err.to_string()),
-        }
+        crate::server::transport::run_use_case(
+            || apply(input.kind, input.projection, input.metadata),
+            |job| analytics_job_json(job),
+        )
     }
 
     pub(crate) fn start_graph_analytics_job(

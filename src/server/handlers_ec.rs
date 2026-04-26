@@ -73,8 +73,9 @@ pub(crate) fn handle_ec_consolidate(
     collection: &str,
     field: &str,
 ) -> HttpResponse {
-    match runtime.ec_consolidate(collection, field, None) {
-        Ok(result) => {
+    crate::server::transport::run_use_case(
+        || runtime.ec_consolidate(collection, field, None),
+        |result| {
             let mut obj = Map::new();
             obj.insert("ok".to_string(), JsonValue::Bool(true));
             obj.insert(
@@ -89,15 +90,9 @@ pub(crate) fn handle_ec_consolidate(
                 "errors".to_string(),
                 JsonValue::Number(result.errors as f64),
             );
-            json_response(200, JsonValue::Object(obj))
-        }
-        Err(e) => {
-            let mut obj = Map::new();
-            obj.insert("ok".to_string(), JsonValue::Bool(false));
-            obj.insert("error".to_string(), JsonValue::String(e.to_string()));
-            json_response(500, JsonValue::Object(obj))
-        }
-    }
+            JsonValue::Object(obj)
+        },
+    )
 }
 
 pub(crate) fn handle_ec_status(
