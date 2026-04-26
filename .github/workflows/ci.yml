@@ -143,6 +143,13 @@ jobs:
           cache-on-failure: "true"
       - name: cargo package (engine)
         run: cargo package --allow-dirty
+      - name: cargo package (rust client driver, no verify)
+        # Verify mode would resolve `reddb = "0.2"` against crates.io,
+        # but the version we just packaged isn't published yet — so
+        # skip verify here and rely on `publish-rust-client` in
+        # release.yml to do the real verify against the freshly-
+        # published engine version.
+        run: cargo package --manifest-path drivers/rust/Cargo.toml --allow-dirty --no-verify
       - name: Show sccache stats
         if: always()
         run: sccache --show-stats

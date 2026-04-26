@@ -150,7 +150,7 @@ fn map_query_result(qr: &reddb::runtime::RuntimeQueryResult) -> QueryResult {
         .records
         .first()
         .map(|r| {
-            let mut keys: Vec<String> = r.values.keys().cloned().collect();
+            let mut keys: Vec<String> = r.values.keys().map(|k| k.to_string()).collect();
             keys.sort();
             keys
         })
@@ -172,11 +172,12 @@ fn map_query_result(qr: &reddb::runtime::RuntimeQueryResult) -> QueryResult {
 }
 
 fn record_to_pairs(record: &UnifiedRecord) -> Vec<(String, ValueOut)> {
-    let mut entries: Vec<(&String, &SchemaValue)> = record.values.iter().collect();
+    let mut entries: Vec<(&str, &SchemaValue)> =
+        record.values.iter().map(|(k, v)| (k.as_ref(), v)).collect();
     entries.sort_by(|a, b| a.0.cmp(b.0));
     entries
         .into_iter()
-        .map(|(k, v)| (k.clone(), schema_value_to_value_out(v)))
+        .map(|(k, v)| (k.to_string(), schema_value_to_value_out(v)))
         .collect()
 }
 
@@ -193,8 +194,8 @@ fn schema_value_to_value_out(v: &SchemaValue) -> ValueOut {
         | SchemaValue::Duration(n)
         | SchemaValue::Decimal(n) => ValueOut::Integer(*n),
         SchemaValue::Password(_) | SchemaValue::Secret(_) => ValueOut::String("***".to_string()),
-        SchemaValue::Text(s)
-        | SchemaValue::Email(s)
+        SchemaValue::Text(s) => ValueOut::String(s.to_string()),
+        SchemaValue::Email(s)
         | SchemaValue::Url(s)
         | SchemaValue::NodeRef(s)
         | SchemaValue::EdgeRef(s) => ValueOut::String(s.clone()),
