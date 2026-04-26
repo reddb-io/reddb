@@ -7,21 +7,30 @@
  *
  * Runs automatically via the npm "version" lifecycle hook:
  *   pnpm version patch
- *     → package.json bumped
- *     → this script
- *     → every manifest updated
- *     → git add
+ *     1. pnpm bumps package.json (e.g. 0.2.4 → 0.2.5)
+ *     2. pnpm runs this script
+ *     3. We update every manifest + lockfile to match
+ *     4. We stage the changed files so pnpm includes them in the
+ *        version commit
+ *     5. pnpm commits + creates the git tag
+ *
+ * After this, `git push --follow-tags` triggers the release workflow
+ * and the engine + driver versions stay locked in sync.
  *
  * Files updated:
  *   - Cargo.toml                      (engine crate)
+ *   - Cargo.lock                      (regenerated)
  *   - drivers/rust/Cargo.toml         (reddb-client)
+ *   - drivers/rust/Cargo.lock         (regenerated)
  *   - drivers/js/package.json         (reddb npm)
  *   - drivers/python/Cargo.toml       (reddb-python internal name)
+ *   - drivers/python/Cargo.lock       (regenerated)
  *   - drivers/python/pyproject.toml   (reddb PyPI)
  *
- * Reads version from package.json. Source of truth: the root npm manifest.
+ * Source of truth: the root npm manifest's `version` field.
  */
 
+const { execSync } = require('node:child_process')
 const fs = require('node:fs')
 const path = require('node:path')
 
@@ -86,6 +95,58 @@ for (const c of changes) {
 if (failed > 0) {
   process.exit(1)
 }
+
+// Regenerate every Cargo.lock so `cargo build --locked` (used by
+// CI + crates.io publish) doesn't bail on a version mismatch.
+// Best-effort — if cargo is missing or fails for unrelated
+// reasons, we still proceed and let the release workflow do
+// the authoritative verify.
+const lockManifests = [
+  path.join(root, 'Cargo.toml'),
+  path.join(root, 'drivers', 'rust', 'Cargo.toml'),
+  path.join(root, 'drivers', 'python', 'Cargo.toml'),
+]
+
+for (const manifest of lockManifests) {
+  if (!fs.existsSync(manifest)) continue
+  try {
+    execSync(`cargo generate-lockfile --manifest-path "${manifest}"`, {
+      stdio: 'pipe',
+      timeout: 120_000,
+    })
+  } catch (err) {
+    console.warn(`  WARN regenerate-lockfile ${manifest}: ${err.message.split('\n')[0]}`)
+  }
+}
+
+// Stage every file that the version bump touches so pnpm's
+// version commit picks them up in one atomic commit.
+const stageList = [
+  'package.json',
+  'Cargo.toml',
+  'Cargo.lock',
+  'drivers/rust/Cargo.toml',
+  'drivers/rust/Cargo.lock',
+  'drivers/js/package.json',
+  'drivers/python/Cargo.toml',
+  'drivers/python/Cargo.lock',
+  'drivers/python/pyproject.toml',
+]
+  .map((f) => path.join(root, f))
+  .filter((f) => fs.existsSync(f))
+
+if (stageList.length > 0) {
+  try {
+    execSync(`git add ${stageList.map((f) => `"${f}"`).join(' ')}`, {
+      cwd: root,
+      stdio: 'pipe',
+    })
+  } catch (err) {
+    console.warn(`  WARN git add: ${err.message.split('\n')[0]}`)
+  }
+}
+
+console.log(`  staged ${stageList.length} files for the version commit`)
 
 function apply(target) {
   if (!fs.existsSync(target.file)) {

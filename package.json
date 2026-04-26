@@ -1,6 +1,6 @@
 {
   "name": "reddb-cli",
-  "version": "0.1.5",
+  "version": "0.2.4",
   "description": "CLI launcher for RedDB. For JS/TS app code, use the `reddb` driver package.",
   "type": "commonjs",
   "bin": {
@@ -14,10 +14,11 @@
   "engines": {
     "node": ">=18"
   },
+  "packageManager": "pnpm@9.15.0",
   "scripts": {
     "postinstall": "node drivers/js/postinstall.js",
     "test": "node drivers/js/test/smoke.test.mjs",
-    "version": "node scripts/sync-version.js && cargo generate-lockfile && git add Cargo.toml Cargo.lock drivers/rust/Cargo.toml drivers/js/package.json drivers/python/Cargo.toml drivers/python/pyproject.toml"
+    "version": "node scripts/sync-version.js"
   },
   "keywords": [
     "database",
