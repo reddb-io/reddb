@@ -128,10 +128,7 @@ Optional feature flags:
 
 | Feature | Description |
 |:--------|:------------|
-| `query-vector` | Enable vector similarity queries |
-| `query-graph` | Enable graph traversal and analytics queries |
-| `query-fulltext` | Enable full-text search |
-| `encryption` | Enable encryption at rest |
+| `otel` | Enable OpenTelemetry scaffolding |
 | `backend-s3` | Enable S3-compatible remote storage |
 | `backend-turso` | Enable Turso/libSQL backend integration |
 | `backend-d1` | Enable Cloudflare D1 backend integration |
@@ -140,7 +137,7 @@ Example:
 
 ```toml
 [dependencies]
-reddb = { version = "0.1", features = ["query-vector", "query-graph", "encryption"] }
+reddb = { version = "0.1", features = ["backend-s3", "otel"] }
 ```
 
 ## Docker
