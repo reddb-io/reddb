@@ -314,6 +314,24 @@ impl TursoBackend {
             None => Ok(None),
         }
     }
+
+    fn extract_text_values(response: &str) -> Vec<String> {
+        let mut values = Vec::new();
+        let mut rest = response;
+        while let Some(value_key) = rest.find("\"value\"") {
+            let after_key = &rest[value_key + 7..];
+            let Some(quote_start) = after_key.find('"') else {
+                break;
+            };
+            let value_rest = &after_key[quote_start + 1..];
+            let Some(quote_end) = value_rest.find('"') else {
+                break;
+            };
+            values.push(value_rest[..quote_end].to_string());
+            rest = &value_rest[quote_end + 1..];
+        }
+        values
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -407,6 +425,22 @@ impl RemoteBackend for TursoBackend {
 
         self.exec_pipeline(&body)?;
         Ok(())
+    }
+
+    fn list(&self, prefix: &str) -> Result<Vec<String>, BackendError> {
+        self.ensure_table()?;
+
+        let sql = format!(
+            "SELECT key FROM {} WHERE key LIKE ? ORDER BY key",
+            self.config.table_name
+        );
+        let body = Self::build_stmt(
+            &sql,
+            &[&format!(r#"{{"type":"text","value":"{}%"}}"#, prefix)],
+        );
+
+        let response = self.exec_pipeline(&body)?;
+        Ok(Self::extract_text_values(&response))
     }
 }
 
