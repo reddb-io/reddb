@@ -28,6 +28,8 @@ export const MessageKind = Object.freeze({
   Query: 0x01,
   Result: 0x02,
   Error: 0x03,
+  BulkInsert: 0x04,
+  BulkOk: 0x05,
   Hello: 0x10,
   HelloAck: 0x11,
   AuthRequest: 0x12,
@@ -155,10 +157,29 @@ export class RedWireClient {
 
   async call(method, params = {}) {
     if (method === 'query') return this.#query(params.sql ?? '')
+    if (method === 'insert') return this.#insert({ collection: params.collection, payload: params.payload })
+    if (method === 'bulk_insert') return this.#insert({ collection: params.collection, payloads: params.payloads })
     if (method === 'health' || method === 'version') return this.#ping()
     throw new RedDBError(
       'UNKNOWN_METHOD',
       `RedWire transport doesn't bridge '${method}' yet`,
+    )
+  }
+
+  async #insert(body) {
+    const corr = this.#corr()
+    const payload = jsonBytes(body)
+    await writeFrame(this.socket, MessageKind.BulkInsert, corr, payload)
+    const resp = await this.reader.next()
+    if (resp.kind === MessageKind.BulkOk) {
+      return jsonOf(resp.payload) ?? { affected: 0 }
+    }
+    if (resp.kind === MessageKind.Error) {
+      throw new RedDBError('ENGINE', new TextDecoder().decode(resp.payload))
+    }
+    throw new RedDBError(
+      'PROTOCOL',
+      `expected BulkOk/Error, got ${KIND_NAME[resp.kind] ?? resp.kind}`,
     )
   }
 

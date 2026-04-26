@@ -141,6 +141,65 @@ impl RedWireClient {
         }
     }
 
+    /// Insert a single row. `payload` is a JSON object with column
+    /// → value pairs. Returns the engine's affected-rows count.
+    pub async fn insert(&mut self, collection: &str, payload: serde_json::Value) -> Result<u64> {
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "collection".into(),
+            serde_json::Value::String(collection.to_string()),
+        );
+        obj.insert("payload".into(), payload);
+        self.send_insert_frame(serde_json::Value::Object(obj)).await
+    }
+
+    /// Bulk insert. Each entry in `payloads` is a JSON object.
+    pub async fn bulk_insert(
+        &mut self,
+        collection: &str,
+        payloads: Vec<serde_json::Value>,
+    ) -> Result<u64> {
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "collection".into(),
+            serde_json::Value::String(collection.to_string()),
+        );
+        obj.insert("payloads".into(), serde_json::Value::Array(payloads));
+        self.send_insert_frame(serde_json::Value::Object(obj)).await
+    }
+
+    async fn send_insert_frame(&mut self, body: serde_json::Value) -> Result<u64> {
+        let bytes = serde_json::to_vec(&body)
+            .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("encode insert: {e}")))?;
+        let corr = self.next_corr();
+        let req = Frame::new(MessageKind::BulkInsert, corr, bytes);
+        self.stream
+            .write_all(&encode_frame(&req))
+            .await
+            .map_err(io_err)?;
+        let resp = self.read_frame().await?;
+        match resp.kind {
+            MessageKind::BulkOk => {
+                let v: serde_json::Value = serde_json::from_slice(&resp.payload)
+                    .map_err(|e| ClientError::new(ErrorCode::Protocol, format!("decode bulk_ok: {e}")))?;
+                let affected = v
+                    .as_object()
+                    .and_then(|o| o.get("affected"))
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0);
+                Ok(affected)
+            }
+            MessageKind::Error => {
+                let msg = String::from_utf8_lossy(&resp.payload).to_string();
+                Err(ClientError::new(ErrorCode::Engine, msg))
+            }
+            other => Err(ClientError::new(
+                ErrorCode::Protocol,
+                format!("expected BulkOk/Error, got {other:?}"),
+            )),
+        }
+    }
+
     pub async fn ping(&mut self) -> Result<()> {
         let corr = self.next_corr();
         let req = Frame::new(MessageKind::Ping, corr, vec![]);

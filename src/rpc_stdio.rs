@@ -978,7 +978,7 @@ fn pending_tx_response(tx_id: u64) -> Value {
     )
 }
 
-fn build_insert_sql<'a, I>(collection: &str, fields: I) -> String
+pub(crate) fn build_insert_sql<'a, I>(collection: &str, fields: I) -> String
 where
     I: Iterator<Item = (&'a String, &'a Value)>,
 {
@@ -995,7 +995,7 @@ where
     )
 }
 
-fn value_to_sql_literal(v: &Value) -> String {
+pub(crate) fn value_to_sql_literal(v: &Value) -> String {
     match v {
         Value::Null => "NULL".to_string(),
         Value::Bool(b) => b.to_string(),
@@ -1045,7 +1045,7 @@ fn query_result_to_json(qr: &RuntimeQueryResult) -> Value {
     Value::Object(envelope)
 }
 
-fn insert_result_to_json(qr: &RuntimeQueryResult) -> Value {
+pub(crate) fn insert_result_to_json(qr: &RuntimeQueryResult) -> Value {
     let mut envelope = json::Map::new();
     envelope.insert(
         "affected".to_string(),

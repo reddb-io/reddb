@@ -179,3 +179,56 @@ export function parseUri(uri: string): ParsedUri
 
 /** Derive the HTTP `/auth/login` URL from a parsed URI. */
 export function deriveLoginUrl(parsed: ParsedUri): string
+
+// ---------------------------------------------------------------
+// RedWire v2 native TCP transport (drivers/js/src/redwire.js)
+// ---------------------------------------------------------------
+
+/** RedWire frame kinds. Numeric values are the wire-stable spec. */
+export const MessageKind: Readonly<{
+  Query: 0x01
+  Result: 0x02
+  Error: 0x03
+  BulkInsert: 0x04
+  BulkOk: 0x05
+  Hello: 0x10
+  HelloAck: 0x11
+  AuthRequest: 0x12
+  AuthResponse: 0x13
+  AuthOk: 0x14
+  AuthFail: 0x15
+  Bye: 0x16
+  Ping: 0x17
+  Pong: 0x18
+}>
+
+export type RedWireAuth =
+  | { kind: 'anonymous' }
+  | { kind: 'bearer'; token: string }
+
+export interface RedWireConnectOptions {
+  host: string
+  port: number
+  auth?: RedWireAuth
+  clientName?: string
+}
+
+/**
+ * Open a v2 connection. Speaks the binary protocol directly via
+ * a TCP socket — no spawn, no fetch. Returned client matches the
+ * `RpcClient` / `HttpRpcClient` surface so it slots into the
+ * existing `RedDB` class.
+ */
+export function connectRedwire(opts: RedWireConnectOptions): Promise<RedWireClient>
+
+export class RedWireClient {
+  /**
+   * Generic RPC entry. Routes:
+   *  - 'query' → Query frame (SQL string)
+   *  - 'insert' → BulkInsert frame, single-row shape
+   *  - 'bulk_insert' → BulkInsert frame, array shape
+   *  - 'health' / 'version' → Ping frame
+   */
+  call(method: string, params?: Record<string, unknown>): Promise<unknown>
+  close(): Promise<void>
+}

@@ -88,8 +88,14 @@ pub async fn handle_session(
             }
             MessageKind::Query => {
                 let response = run_query(&runtime, &frame);
-                let bytes = encode_frame(&response);
-                stream.write_all(&bytes).await?;
+                stream.write_all(&encode_frame(&response)).await?;
+            }
+            // v1 inserted single rows via the BulkInsert code (with
+            // a one-element array). v2 keeps that code; the payload
+            // shape distinguishes single (`payload`) vs bulk (`payloads`).
+            MessageKind::BulkInsert => {
+                let response = run_insert_dispatch(&runtime, &frame);
+                stream.write_all(&encode_frame(&response)).await?;
             }
             other => {
                 let err = encode_frame(&Frame::new(
@@ -251,11 +257,7 @@ fn run_query(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
     let sql = match std::str::from_utf8(&frame.payload) {
         Ok(s) => s,
         Err(_) => {
-            return Frame::new(
-                MessageKind::Error,
-                frame.correlation_id,
-                b"Query payload must be UTF-8 SQL".to_vec(),
-            );
+            return error_frame(frame.correlation_id, "Query payload must be UTF-8 SQL");
         }
     };
     match runtime.execute_query(sql) {
@@ -273,12 +275,73 @@ fn run_query(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
             let payload = serde_json::to_vec(&JsonValue::Object(obj)).unwrap_or_default();
             Frame::new(MessageKind::Result, frame.correlation_id, payload)
         }
-        Err(err) => Frame::new(
-            MessageKind::Error,
-            frame.correlation_id,
-            err.to_string().into_bytes(),
-        ),
+        Err(err) => error_frame(frame.correlation_id, &err.to_string()),
     }
+}
+
+/// Insert dispatch — handles both single-row and bulk shapes off
+/// the same `BulkInsert` (0x04) frame:
+///   - `{ "collection": "...", "payload": {...} }` → single insert
+///   - `{ "collection": "...", "payloads": [...] }` → bulk insert
+///
+/// Mirrors the JSON-RPC `insert` / `bulk_insert` method shapes
+/// from `rpc_stdio.rs` so both transports agree on the payload.
+fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
+    let v: JsonValue = match serde_json::from_slice(&frame.payload) {
+        Ok(v) => v,
+        Err(e) => return error_frame(frame.correlation_id, &format!("Insert: invalid JSON: {e}")),
+    };
+    let obj = match v.as_object() {
+        Some(o) => o,
+        None => return error_frame(frame.correlation_id, "Insert: payload must be a JSON object"),
+    };
+    let collection = match obj.get("collection").and_then(|x| x.as_str()) {
+        Some(s) if !s.is_empty() => s,
+        _ => return error_frame(frame.correlation_id, "Insert: missing 'collection' string"),
+    };
+
+    if let Some(rows) = obj.get("payloads").and_then(|x| x.as_array()) {
+        let mut affected: u64 = 0;
+        for entry in rows {
+            let row = match entry.as_object() {
+                Some(o) => o,
+                None => return error_frame(
+                    frame.correlation_id,
+                    "Insert: each payload must be a JSON object",
+                ),
+            };
+            let sql = crate::rpc_stdio::build_insert_sql(collection, row.iter());
+            match runtime.execute_query(&sql) {
+                Ok(qr) => affected += qr.affected_rows,
+                Err(err) => return error_frame(frame.correlation_id, &err.to_string()),
+            }
+        }
+        let mut out = crate::serde_json::Map::new();
+        out.insert("affected".to_string(), JsonValue::Number(affected as f64));
+        let payload = serde_json::to_vec(&JsonValue::Object(out)).unwrap_or_default();
+        return Frame::new(MessageKind::BulkOk, frame.correlation_id, payload);
+    }
+
+    let row = match obj.get("payload").and_then(|x| x.as_object()) {
+        Some(o) => o,
+        None => return error_frame(
+            frame.correlation_id,
+            "Insert: missing 'payload' object or 'payloads' array",
+        ),
+    };
+    let sql = crate::rpc_stdio::build_insert_sql(collection, row.iter());
+    match runtime.execute_query(&sql) {
+        Ok(qr) => {
+            let body = crate::rpc_stdio::insert_result_to_json(&qr);
+            let payload = serde_json::to_vec(&body).unwrap_or_default();
+            Frame::new(MessageKind::BulkOk, frame.correlation_id, payload)
+        }
+        Err(err) => error_frame(frame.correlation_id, &err.to_string()),
+    }
+}
+
+fn error_frame(correlation_id: u64, msg: &str) -> Frame {
+    Frame::new(MessageKind::Error, correlation_id, msg.as_bytes().to_vec())
 }
 
 #[cfg(test)]

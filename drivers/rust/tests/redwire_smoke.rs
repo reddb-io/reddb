@@ -57,6 +57,49 @@ async fn handshake_query_close_round_trip() {
 }
 
 #[tokio::test]
+async fn insert_dispatch_round_trip() {
+    let (addr, _server) = start_server().await;
+    let mut client = RedWireClient::connect(
+        ConnectOptions::new(addr.ip().to_string(), addr.port()).with_auth(Auth::Anonymous),
+    )
+    .await
+    .expect("connect");
+
+    // Create a tiny table the inserts can target.
+    client
+        .query("CREATE TABLE smoke_users (name TEXT, age INTEGER)")
+        .await
+        .expect("create");
+
+    // Single insert via the BulkInsert (0x04) frame with a
+    // `payload` key (single-row shape).
+    let mut row = serde_json::Map::new();
+    row.insert("name".into(), serde_json::Value::String("alice".into()));
+    row.insert("age".into(), serde_json::Value::Number(30.into()));
+    let affected = client
+        .insert("smoke_users", serde_json::Value::Object(row))
+        .await
+        .expect("insert");
+    assert!(affected >= 1, "single insert affected at least one row");
+
+    // Bulk insert.
+    let mut rows = Vec::new();
+    for n in 0..3 {
+        let mut r = serde_json::Map::new();
+        r.insert("name".into(), serde_json::Value::String(format!("u{n}")));
+        r.insert("age".into(), serde_json::Value::Number((20 + n).into()));
+        rows.push(serde_json::Value::Object(r));
+    }
+    let affected = client
+        .bulk_insert("smoke_users", rows)
+        .await
+        .expect("bulk_insert");
+    assert!(affected >= 3, "bulk insert affected at least 3 rows");
+
+    client.close().await.expect("close");
+}
+
+#[tokio::test]
 async fn bearer_required_when_anonymous_unsupported() {
     // Spin up a listener with an auth store that has auth.enabled.
     // A v2 client offering only `anonymous` should be refused.
