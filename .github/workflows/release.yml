@@ -204,9 +204,34 @@ jobs:
         if: always()
         run: sccache --show-stats
 
+  artifact-sizes:
+    # PLAN.md B2 — gate release on measured static binary and image size.
+    name: Artifact Size Gate
+    needs: [plan]
+    runs-on: ubuntu-latest
+    if: needs.plan.outputs.should_skip != 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: '28.x'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-artifact-size-rust-1.91.0
+          cache-on-failure: "true"
+      - name: Measure binary and image size
+        run: make artifact-size
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: artifact-sizes
+          path: bench/artifact-sizes.md
+
   publish-github:
     name: GitHub Release
-    needs: [plan, build]
+    needs: [plan, build, artifact-sizes]
     runs-on: ubuntu-latest
     permissions:
       contents: write
