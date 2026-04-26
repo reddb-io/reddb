@@ -4,11 +4,37 @@ All notable changes to RedDB are documented here. Dates are ISO-8601 (UTC-3).
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-04-26
+
 ### Added
 
-- Backend conditional-write contract for writer leases: `RemoteBackend` now exposes object version tokens plus conditional upload/delete. Local FS uses content-hash tokens; S3-compatible stores use ETag + `If-Match`; HTTP can opt in with `RED_HTTP_CONDITIONAL_WRITES=true`.
+- **Architectural deepening (6 clusters):**
+  - `service_router::ProtocolDetector` trait + composable `Router` — replaces the centralised probe match; adding a new protocol becomes a new struct, not edits to a switch.
+  - `runtime::lease_lifecycle::LeaseLifecycle` — single owner of the writer-lease state machine. Eliminates drift between `WriteGate.set_lease_state` and `AuditLogger.record`. `WriteGate::set_lease_state` is now `pub(crate)`.
+  - `storage::backend::AtomicRemoteBackend` trait — splits CAS contract off `RemoteBackend`. `LeaseStore::new` requires `Arc<dyn AtomicRemoteBackend>`. Turso/D1 cannot be wired into a writer lease; the type system rejects them. `AtomicHttpBackend` wraps `HttpBackend` and refuses construction unless `RED_HTTP_CONDITIONAL_WRITES=true`.
+  - `Pager` owns page-level encryption directly: `PagerConfig::encryption: Option<SecureKey>`, transparent `read_page_decrypted` / `write_page_encrypted`, fail-closed marker matrix (encrypted-vs-plain × key-supplied-vs-absent). `EncryptedPager` collapses to a `#[deprecated]` thin wrapper.
+  - `server::transport::run_use_case` + `map_runtime_error` — single source of truth for `RedDBError → HTTP status`. Migrated 8 endpoints; rest stay on the manual pattern by design (audit lifecycle, multi-step orchestration).
+  - `application::OperationContext` + sealed `WriteConsent` token. `WriteGate::check_consent` is the only mint site outside the gate module. Six `Runtime*PortCtx` extension traits ship default-forward methods; pilot threads context through `handlers_entity::handle_scan/create_row/create_node`.
+- Backend conditional-write contract for writer leases: `RemoteBackend` exposes object version tokens plus conditional upload/delete. Local FS uses content-hash tokens; S3-compatible stores use ETag + `If-Match`; HTTP opts in with `RED_HTTP_CONDITIONAL_WRITES=true`.
 - Release gates for cold-start baselines, artifact size measurement, feature-matrix compilation, and nightly backup/restore drills.
 - `reddb_slo_lag_budget_remaining_seconds{replica_id}` metric, derived from `RED_SLO_REPLICA_LAG_BUDGET_SECONDS` and replica lag.
+- CI publish dry-run job: `cargo package` (engine) + `cargo package --no-verify` (rust client) on every PR. Catches packaging issues before release time.
+
+### Changed
+
+- Serverless writer fencing fails closed when the configured backend cannot enforce CAS — no more last-writer-wins on writer leases.
+- Production release binaries use `panic = "abort"`; WAL/recovery is the consistency boundary after process death.
+- `Cargo.toml` `include` patterns anchored with leading `/` so `README.md` / `LICENSE` no longer sweep up vendored `node_modules` / `dolt` trees. Package shrinks from 1026 → 638 files.
+- Engine version bumped 0.1.5 → 0.2.4 to align with crates.io's 0.2.x line. `drivers/rust` engine dep follows.
+
+### Fixed
+
+- `drivers/rust/src/embedded.rs` adapted to the engine's `Arc<str>` schema-key types — embedded mode compiles again.
+
+### Documentation
+
+- Added `docs/release/v1.0-migration.md`, `docs/reference/features.md`, `bench/artifact-sizes.md`, and `docs/release/drill-history.md`.
+- Updated the operator runbook with the lease backend/runtime matrix, panic policy, and SLO lag budget alert.
 
 ### Changed
 

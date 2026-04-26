@@ -1,4 +1,4 @@
-.PHONY: help build build-fast release warm test test-fast test-persistent drill-nightly clean run run-grpc install fmt lint check check-driver-rust check-driver-python timings cold-start-bench binary-size image-size artifact-size link unlink dev which patch minor major docs publish publish-dry-run env-up env-down env-logs test-env test-env-shell test-env-rust
+.PHONY: help build build-fast release warm test test-fast test-persistent drill-nightly clean run run-grpc install fmt lint check check-driver-rust check-driver-python timings cold-start-bench binary-size image-size artifact-size link unlink dev which patch minor major release-push package-check docs publish publish-dry-run env-up env-down env-logs test-env test-env-shell test-env-rust
 
 # Paths
 LOCAL_BIN := $(HOME)/.local/bin
@@ -163,7 +163,10 @@ test-env-shell:
 test-env-rust:
 	@./scripts/test-environment.sh $${PROFILE:-replica} rust
 
-# Release bump helpers
+# Release bump helpers — bump version in Cargo.toml + Cargo.lock,
+# commit, tag. Operator runs `make release-push` to fire the
+# release.yml workflow (binary builds + GitHub release +
+# cargo publish + npm publish).
 patch:
 	@./scripts/release.sh patch
 
@@ -173,8 +176,27 @@ minor:
 major:
 	@./scripts/release.sh major
 
+# Push the latest tag + commit so the release workflow fires.
+# Equivalent to `git push --follow-tags`. Run this immediately
+# after `make patch|minor|major` once the working tree is clean.
+release-push:
+	@git push --follow-tags
+
+# Manual cargo publish (engine only). Prefer the GitHub release
+# workflow (triggered by tag push) for the canonical path. Use
+# this only when the workflow is unavailable.
 publish:
 	@./scripts/publish.sh
 
 publish-dry-run:
 	@./scripts/publish.sh --dry-run
+
+# Local cargo package dry-run for engine + rust client. Mirrors
+# the publish-dry-run CI job — catches missing include paths,
+# stale path-only deps, and license mismatches without hitting
+# the registry.
+package-check:
+	@echo "==> cargo package (engine, with verify)"
+	@cargo package --allow-dirty
+	@echo "==> cargo package (rust client, no verify)"
+	@cargo package --manifest-path drivers/rust/Cargo.toml --allow-dirty --no-verify
