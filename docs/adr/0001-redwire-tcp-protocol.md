@@ -1,301 +1,365 @@
-# ADR 0001 — RedWire: native TCP protocol for RedDB clients
+# ADR 0001 — RedWire v2: evolving the existing TCP protocol
 
 **Status:** Proposed
 **Date:** 2026-04-26
-**Decision driver:** parity with PostgreSQL (libpq/F+B v3) and MongoDB
-(OP_MSG) — drivers should hold a single TCP socket, negotiate auth
-in the handshake, and stream typed responses, with no HTTP/gRPC
-overhead.
+**Decision driver:** the wire protocol that already powers RedDB's
+benchmark numbers (`examples/stress_wire_client.rs` against port
+5050) is missing four pieces that PostgreSQL F+B v3 and MongoDB
+OP_MSG have shipped for years: auth handshake, message
+multiplexing, per-frame compression, and protocol-version
+negotiation. v2 closes those gaps without breaking v1 clients.
 
 ## Context
 
-The JS driver currently multiplexes three transports under a unified
-`red://` connection string (Phase 1, 2026-04-26):
+### What we already have (v1)
 
-- **embedded** — spawn the `red` binary, JSON-RPC over stdio
-- **http(s)** — fetch() to REST endpoints, Bearer/Basic auth
-- **grpc(s)** — spawn the binary as a stdio→gRPC bridge
+`src/wire/protocol.rs` defines the canonical RedDB wire protocol.
+It's not a future thing — it's what bench clients have been
+talking to:
 
-This works but has structural ceilings:
-
-1. **Per-request HTTP overhead** (headers, content-length, URL parse,
-   TCP/TLS handshake amortised across far fewer queries than a
-   long-lived connection).
-2. **gRPC bridge requires the binary on every client host** — operators
-   cannot ship a thin native client without bundling the engine.
-3. **Auth model is split** — HTTP login mints tokens; gRPC accepts only
-   bearer; PG-wire negotiates SCRAM/MD5; embedded has no auth at all.
-   Drivers need three code paths.
-4. **Streaming results back to the caller** is awkward over REST and
-   tied to gRPC's message types when over gRPC.
-5. **Type fidelity** — REST loses type information through JSON;
-   gRPC needs proto regeneration per language.
-
-Postgres and MongoDB solved this the same way: define one binary
-TCP wire protocol, ship a thin reference client, let every language
-implement framing + auth + flow control directly on TCP. Drivers stay
-small (~1500 LOC each), run anywhere, and consistently outperform
-HTTP-based clients by an order of magnitude on small-message
-workloads.
-
-## Decision
-
-Define **RedWire**, a native TCP protocol that drivers in every
-language speak directly. `red://` URLs without an explicit `proto=`
-default to RedWire on port 5050.
-
-### Wire layout
-
-Length-prefixed binary frames over a single TCP (or TLS) socket.
-
-```
+```text
 ┌──────────────────────────────────────────────────────────┐
-│ MessageHeader                                            │
-│   u32   length    (little-endian; total frame, incl. hdr) │
-│   u8    kind      (see MessageKind table)                 │
-│   u8    flags     (bit 0: zstd-compressed payload)        │
-│   u16   stream_id (multiplexes parallel queries)          │
-│   u64   correlation_id (request↔response pairing)        │
+│ v1 Frame (5-byte header, little-endian)                  │
+│   u32   length        total frame, incl. header           │
+│   u8    msg_type      message kind                        │
 ├──────────────────────────────────────────────────────────┤
-│ Payload                                                   │
-│   variable-length, format determined by `kind`            │
+│ Payload (length - 5 bytes)                                │
 └──────────────────────────────────────────────────────────┘
 ```
 
-Total header: 16 bytes. Max frame: 16 MiB by default (configurable).
+Message types in production today:
+
+| Code | Name | Direction |
+|------|------|-----------|
+| 0x01 | `MSG_QUERY`                       | C→S |
+| 0x02 | `MSG_RESULT`                      | S→C |
+| 0x03 | `MSG_ERROR`                       | S→C |
+| 0x04 | `MSG_BULK_INSERT`                 | C→S |
+| 0x05 | `MSG_BULK_OK`                     | S→C |
+| 0x06 | `MSG_BULK_INSERT_BINARY`          | C→S |
+| 0x07 | `MSG_QUERY_BINARY`                | C→S |
+| 0x08 | `MSG_BULK_INSERT_PREVALIDATED`    | C→S |
+| 0x09 | `MSG_BULK_STREAM_START`           | C→S |
+| 0x0A | `MSG_BULK_STREAM_ROWS`            | C→S |
+| 0x0B | `MSG_BULK_STREAM_COMMIT`          | C→S |
+| 0x0C | `MSG_BULK_STREAM_ACK`             | S→C |
+| 0x0D+ | `MSG_PREPARE` / `EXECUTE_PREPARED` / `DEALLOCATE` | C→S |
+
+Listener: `src/wire/listener.rs` (`start_wire_listener`,
+`start_wire_tls_listener`, `start_wire_unix_listener`). Default
+port 5050.
+
+This is the protocol that gives the benchmark numbers — RedDB
+beats Postgres in 7 of 10 workloads precisely because the bench
+clients never speak HTTP. Don't break it.
+
+### What v1 is missing vs PG / Mongo
+
+| Concern | v1 today | PG F+B v3 | Mongo OP_MSG |
+|---------|----------|-----------|--------------|
+| Frame multiplex | one query per round-trip | extended query (yes) | `requestId`/`responseTo` (yes) |
+| Auth handshake | none — relies on server-level config | StartupMessage + AuthenticationRequest | hello + saslStart/saslContinue |
+| Compression | none | per-message in libpq | per-message snappy/zstd/zlib |
+| Version negotiation | none | hardcoded 0x0003_0000 in StartupMessage | hello.maxWireVersion |
+| Cancel in-flight | impossible without closing TCP | CancelRequest on side socket | killOp command |
+| Notice / async msgs | none | NoticeResponse | change streams |
+
+The four gaps that hurt the most in production:
+
+1. **No auth handshake** — clients have to be on a trusted network.
+   There is no "server proves identity / client presents creds /
+   role established" round-trip baked into the wire. Auth is bolted
+   on via HTTP (`/auth/login` mints tokens) and gRPC (Bearer
+   metadata); v1 wire connections inherit nothing.
+2. **No multiplexing** — a client that wants 4 concurrent queries
+   opens 4 TCP connections. Postgres does the same so this isn't
+   catastrophic, but Mongo has shown that single-connection
+   multiplex saves real connection-pool tax in serverless.
+3. **No compression** — large bulk inserts (which the protocol
+   already streams via `MSG_BULK_STREAM_*`) ship raw bytes. Mongo
+   ships zstd at the frame level for free.
+4. **No version negotiation** — bumping `MSG_BULK_INSERT_PREVALIDATED`
+   to 0x08 in 2025 was safe only because callers used
+   `MSG_ERROR "unknown message type"` as an oracle. There's no
+   structured way for a v2 client to ask "do you also speak
+   feature X?" before issuing it.
+
+## Decision
+
+Add a **v2 startup handshake** that transparently extends v1 frames
+on connections that opt in. v1 clients keep working unchanged on
+the same listener.
+
+### Protocol-version detection
+
+The first byte off the wire is the discriminator:
+
+- **`0x00..0x7F`** — first byte of a v1 length field. Length is
+  almost always small (most messages are < 128 bytes), so most v1
+  frames open with a low byte. Server reads the rest of the v1
+  header and proceeds as today.
+- **`0xFE`** — magic byte reserved for v2 startup. Followed by:
+  - `u8` minor version (currently 0x01 → "v2.1")
+  - `u32` features bitfield (caller capabilities, see § Features)
+  - rest of the `Hello` payload framed in v2 shape
+
+  v1 length fields can in principle reach 0xFE in their high byte,
+  but that requires a frame > 4.2 GB, which is rejected by the v1
+  ceiling (`MAX_INCOMING_FRAME` ≈ 256 MiB). So 0xFE as the very
+  first byte is safe to claim.
+
+This means **no changes to existing v1 clients** — they don't send
+0xFE, they keep working. v2 clients announce themselves immediately
+and negotiate auth / features before any data frame.
+
+### v2 frame layout
+
+After a successful `Hello` handshake, both sides switch to the v2
+frame format (16-byte header). The v1 ↔ v2 boundary is the
+`AuthOk` reply.
+
+```text
+┌──────────────────────────────────────────────────────────┐
+│ v2 Frame (16-byte header, little-endian)                 │
+│   u32   length         total frame, incl. header          │
+│   u8    kind           MessageKind (extended over v1)     │
+│   u8    flags          COMPRESSED | MORE_FRAMES | …       │
+│   u16   stream_id      multiplex key (0 = unsolicited)    │
+│   u64   correlation_id request↔response pairing          │
+├──────────────────────────────────────────────────────────┤
+│ Payload (length - 16 bytes)                               │
+└──────────────────────────────────────────────────────────┘
+```
+
+The `kind` numbering is **superset** of v1: 0x01–0x0F stay
+unchanged so server dispatch can share the v1 message-type table
+where logic is identical. v2 adds 0x10–0x3F for handshake / control
+/ explicit response framing.
+
+### Handshake state machine
+
+```
+                   ┌──────────────┐
+   Client opens TCP├──────────────┤
+                   │              ▼
+                   │      [first byte]
+                   │       /        \
+                   │   0xFE          0x00..0x7F
+                   │   (v2)          (v1 — proceed as today)
+                   │     │
+                   │     ▼
+                   │   Hello { versions, auth_methods, features }
+                   │     │
+                   │     ▼
+                   │   HelloAck { chosen_version, chosen_auth, server_features }
+                   │     │
+                   │     ▼
+                   │   AuthRequest { method, challenge }       (skipped for bearer)
+                   │     │
+                   │     ▼
+                   │   AuthResponse { method, response }
+                   │     │
+                   │     ▼
+                   │   AuthOk { session_id, role, server_caps_final }
+                   │     │
+                   │     ▼
+                   │   [v2 data plane — Query/Insert/etc with multiplex]
+                   ▼
+```
+
+`Bye` cleanly closes either path.
+
+### v2 message kinds (additions only — v1 codes unchanged)
+
+| Kind | Name | Purpose |
+|------|------|---------|
+| 0x10 | `Hello` | Client's first frame after the 0xFE discriminator. |
+| 0x11 | `HelloAck` | Server's reply with chosen version + features. |
+| 0x12 | `AuthRequest` | Server challenge (SCRAM salt, nonce, etc). |
+| 0x13 | `AuthResponse` | Client reply. |
+| 0x14 | `AuthOk` | Auth complete; session id; final caps. |
+| 0x15 | `AuthFail` | Auth refused; reason; retry hint. |
+| 0x16 | `Bye` | Clean close (either side). |
+| 0x17 | `Ping` / 0x18 `Pong` | Keepalive. |
+| 0x20 | `Cancel` | Abort the named `correlation_id`. |
+| 0x21 | `Compress` | Toggle zstd for this stream. |
+| 0x22 | `SetSession` | Session vars (timezone, schema, isolation). |
+| 0x23 | `Notice` | Non-fatal warning. |
+| 0x24 | `RowDescription` | Column types for an upcoming stream of `MSG_RESULT`-equivalent rows. |
+| 0x25 | `StreamEnd` | End-of-results marker for `correlation_id`. |
+| 0x26 | `VectorSearch` | RedDB-native dense kNN query. |
+| 0x27 | `GraphTraverse` | RedDB-native graph walk. |
+
+Existing v1 codes (0x01–0x0F) keep their semantics, just framed
+in 16-byte headers when the connection is v2.
+
+### Features bitfield (Hello.features)
+
+| Bit | Name | Meaning |
+|-----|------|---------|
+| 0   | `MULTIPLEX` | Client supports `correlation_id` routing |
+| 1   | `COMPRESS_ZSTD` | Client/server has zstd available |
+| 2   | `CANCEL` | Client may issue 0x20 Cancel frames |
+| 3   | `ROW_STREAMING` | Client wants RowDescription/DataRow streaming instead of one-shot Result |
+| 4   | `VECTOR_NATIVE` | Client speaks 0x26 VectorSearch frames |
+| 5   | `GRAPH_NATIVE` | Client speaks 0x27 GraphTraverse frames |
+
+Server intersects with its own capabilities and returns the
+agreed set in `HelloAck.features`. Only flagged features may be
+used for the rest of the session.
+
+### Auth methods
+
+Negotiated via `Hello.auth_methods` (CBOR list of strings) →
+`HelloAck.chosen_auth`:
+
+1. **`bearer`** — token in `AuthResponse`; server validates
+   against `AuthStore`. Maps cleanly onto today's HTTP/gRPC
+   bearer flow.
+2. **`scram-sha-256`** — RFC 5802. Server stores only the salted
+   verifier; never sees plaintext. Same as Postgres ≥ 10 and
+   MongoDB ≥ 4.0.
+3. **`mtls`** — auth derived from the TLS client certificate;
+   triggers when the listener has client-cert auth on. No extra
+   round-trip after the TLS handshake.
+4. **`oauth-jwt`** — JWT bearer validated against the configured
+   `auth.oauth.issuer`. Reuses the `OAuthConfig` block.
+5. **`anonymous`** — only when `auth.enabled = false`; server
+   advertises `anonymous` as the *only* method in `HelloAck`.
+
+Multi-method servers list every method they accept; client picks
+the strongest available (mtls > scram > oauth > bearer > anon).
 
 ### Encoding
 
-Payloads use **CBOR** (RFC 8949) — typed, self-describing, smaller
-than JSON, faster to encode/decode, and has direct mappings for
-RedDB's value types (int, float, bytes, string, list, map, tag) plus
-extension tags for `Vector`, `NodeRef`, `EdgeRef`, `Timestamp`,
-`Decimal`. CBOR is also what TLS-EXPORTER, COSE, and CWT use, so
-crypto integration (signing, attestation) gets a natural path.
+v2 payloads use **CBOR** (RFC 8949) — typed, self-describing,
+smaller than JSON, has tag space for `Vector`, `NodeRef`,
+`EdgeRef`, `Decimal`, `Timestamp`. v1 payloads stay in their
+hand-rolled binary format until the kind moves into v2-only
+territory.
 
-Alternatives considered:
-- **BSON** (Mongo) — wider language support, but larger, less
-  compact for the typed scalars RedDB cares about, and heavier
-  decode.
-- **Protobuf** — requires schema regen per language; opaque on
-  the wire (can't dump a frame to text without the .proto).
-- **MessagePack** — close second to CBOR; CBOR wins on standardised
-  tag space + RFC stability.
-- **Postgres binary types** — perfect for SQL but doesn't model
-  graphs, vectors, documents.
+The codec uses `ciborium` (already used by parts of the Rust
+ecosystem we depend on; small dep).
 
-### Message kinds
+### Compression
 
-Handshake / lifecycle:
-| Kind | Name | Direction | Purpose |
-|------|------|-----------|---------|
-| 0x01 | Hello | C→S | client greets, lists supported versions + auth methods |
-| 0x02 | HelloAck | S→C | server picks version, advertises auth requirement |
-| 0x03 | AuthRequest | S→C | challenge for chosen method (SCRAM salt, JWT scope, etc) |
-| 0x04 | AuthResponse | C→S | client reply |
-| 0x05 | AuthOk | S→C | session established, returns server caps |
-| 0x06 | AuthFail | S→C | reason + retry hint |
-| 0x07 | Bye | both | clean close |
-| 0x08 | Ping | both | heartbeat |
-| 0x09 | Pong | both | heartbeat reply |
+When both sides flag `COMPRESS_ZSTD`, frames may set
+`Flags::COMPRESSED` (bit 0). Compressor: zstd level 1 (we already
+depend on the `zstd` crate).
 
-Data plane:
-| Kind | Name | Direction | Purpose |
-|------|------|-----------|---------|
-| 0x10 | Query | C→S | SQL string + params |
-| 0x11 | Prepare | C→S | prepared-statement registration |
-| 0x12 | Execute | C→S | run a prepared statement |
-| 0x13 | Insert | C→S | typed insert (collection + payload(s)) |
-| 0x14 | Get | C→S | entity-by-id lookup |
-| 0x15 | Delete | C→S | entity-by-id delete |
-| 0x16 | VectorSearch | C→S | dense-vector kNN (RedDB-native, no PG analogue) |
-| 0x17 | GraphTraverse | C→S | graph walk (RedDB-native) |
-| 0x18 | TxBegin | C→S | open transaction |
-| 0x19 | TxCommit | C→S | commit |
-| 0x1A | TxRollback | C→S | rollback |
-| 0x20 | RowDescription | S→C | column types for the next stream |
-| 0x21 | DataRow | S→C | one row (streamed, repeats) |
-| 0x22 | Affected | S→C | count for DML |
-| 0x23 | Stream End | S→C | end-of-results marker for `correlation_id` |
-| 0x24 | Error | S→C | error code + message + structured details |
-| 0x25 | Notice | S→C | non-fatal warning (deprecated method, slow query) |
+### Multiplexing
 
-Control:
-| Kind | Name | Direction | Purpose |
-|------|------|-----------|---------|
-| 0x30 | Cancel | C→S | abort the in-flight `correlation_id` |
-| 0x31 | Compress | C→S | toggle zstd compression for this stream |
-| 0x32 | SetSession | C→S | session vars (timezone, schema, isolation) |
+When both sides flag `MULTIPLEX`, server dispatches each frame
+keyed by `correlation_id`. Per-stream backpressure is the v1
+TCP backpressure (no new flow-control credit system) — clients
+that issue 1000 concurrent queries on one socket are rate-limited
+by socket-buffer and server-side worker pool the same way as
+gRPC.
 
-### Auth methods (negotiated in Hello / HelloAck)
+### Service-router integration
 
-1. **`bearer`** — caller sends `Authorization: Bearer <token>`-shaped
-   payload as AuthResponse. Token may be an API key or a session
-   token from `POST /auth/login`. Simplest path for serverless.
-2. **`scram-sha-256`** — RFC 5802 challenge/response. Server stores
-   only the salted password verifier; never sees plaintext. Same as
-   Postgres ≥10.
-3. **`mtls`** — auth derived from the TLS client certificate (CN +
-   SAN → username). Triggered when `proto=redwires://` and listener
-   has `auth.cert.enabled=true`.
-4. **`oauth-jwt`** — OIDC/JWT bearer validated against configured
-   issuer. Reuses the existing `auth.oauth` config block.
-5. **`anonymous`** — only when `auth.enabled=false` (dev mode);
-   server announces `anonymous` as the *only* method in HelloAck.
+`src/service_router/detector.rs` gains a `RedWireDetector`:
 
-The handshake never echoes the password back — SCRAM is the canonical
-path when usernames+passwords are involved. Bearer + mTLS + OAuth
-are stateless and don't need additional round-trips.
+- `detect(peek)` returns `Match(RedWire)` if `peek[0] == 0xFE` and
+  `peek[1] <= MAX_KNOWN_MINOR_VERSION`.
+- Registered after `H2Detector` and `HttpDetector` so HTTP/2 and
+  HTTP/1 still win on their own bytes.
+- v1 clients keep working through the existing wire listener — they
+  never set 0xFE so the detector returns `NoMatch` and the router
+  falls back to Wire.
 
-### Connection URL
+This means a single port (5050) can serve v1, v2, HTTP, and gRPC —
+just like the existing service-router multiplex but with one more
+detector.
 
-```
-red://[user[:pass]@]host[:port][/path][?param=value]
-```
+### Driver story
 
-- Default proto = `redwire`, default port = 5050
-- `red://...?proto=https` keeps the HTTPS path (Phase 1 router still works)
-- `redwire://` and `red://` are aliases; `redwires://` for TLS
-- Auth: `user:pass` → SCRAM if server allows; otherwise drives the
-  HTTP login flow and converts to bearer (Phase 1 behaviour)
-- Query params: `token=`, `apiKey=`, `sni=`, `appName=`, `compress=`,
-  `timeout_ms=`
+Reference Rust client lives at `drivers/rust/src/redwire/`:
 
-### Server-side architecture
+- `transport.rs` — TCP socket + TLS (rustls)
+- `frame.rs` — encode / decode v2 frames
+- `handshake.rs` — Hello → HelloAck → Auth*
+- `session.rs` — multiplex + cancellation
+- `api.rs` — query / insert / get / delete / vector / graph / tx
 
-New listener `src/wire/redwire/`:
+JS / Python / Go / Java drivers port from this. ~1500 LOC each.
 
-- `listener.rs` — TCP / TLS accept, hand off to a session task per
-  connection
-- `frame.rs` — `Frame` codec (read/write the 16-byte header + payload)
-- `session.rs` — handshake state machine, auth negotiation, command
-  dispatch loop
-- `auth/` — pluggable challenge handlers (bearer, scram, mtls, oauth)
-- `dispatch.rs` — bridge to the runtime (`RuntimeQueryPort`,
-  `RuntimeEntityPort`, etc) — same surface the gRPC + HTTP servers
-  consume
+## Migration plan
 
-The listener registers via `service_router` (existing) so a single
-TCP port can multiplex RedWire / HTTP / gRPC / PG-wire by sniffing
-the first bytes:
+**Phase 0 (today, done):** v1 protocol exists and powers
+benchmarks.
 
-- HTTP/1.x → method prefix
-- HTTP/2 / gRPC → `PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n`
-- PG wire → 4-byte length + 4-byte protocol version (0x0003_0000) or `SSLRequest` / `GSSENCRequest`
-- **RedWire → magic prefix `\xRD\xDB\x01` followed by the Hello frame**
-
-The magic prefix is the dispatch signal; it's discarded after the
-detector matches.
-
-### Client-side architecture (per language)
-
-Each driver implements roughly:
-
-```
-RedWireClient
-├── transport: TCP socket (or TLS-wrapped)
-├── frameCodec: read/write framed messages
-├── handshake: Hello → HelloAck → Auth → AuthOk
-├── inflight: Map<correlation_id, response_handler>
-├── reader_task: pull frames, route by correlation_id
-└── api: query / insert / get / delete / vector / graph / tx
-```
-
-Reference impl in Rust at `drivers/rust/src/redwire/` — the JS, Python,
-Go, Java drivers port from there. Estimated ~1500 LOC per driver.
-
-### Compression + chunking
-
-- Per-frame `flags` bit 0: payload is zstd-compressed
-- Negotiated default at `Hello` (client lists `zstd` cap; server
-  agrees in `HelloAck`)
-- `Compress` control message can flip per-stream
-- Frames > 16 MiB split into chunks with `flags` bit 1 = "more frames
-  follow under this correlation_id"
-
-## Performance targets
-
-Numbers per driver client, single connection, localhost, 1k-byte
-rows:
-
-| Workload                | Postgres (libpq) | MongoDB (OP_MSG) | Target RedWire |
-|-------------------------|------------------|------------------|----------------|
-| `SELECT 1` round-trip   | ~30 µs           | ~35 µs           | ≤ 30 µs        |
-| Insert 10k rows         | ~250 ms          | ~280 ms          | ≤ 250 ms       |
-| Stream 1M rows          | ~1.2 s           | ~1.4 s           | ≤ 1.2 s        |
-| Vector kNN (k=10)       | n/a              | n/a              | ≤ 5 ms (HNSW)  |
-
-Methodology: end-to-end through the TCP wire, no caching, fresh
-connection per benchmark run.
-
-## Migration path
-
-**Phase 1 (done, 2026-04-26):** `red://` URL parser routes to existing
-HTTP / gRPC / embedded transports. Drivers gain a unified surface
-without server changes.
+**Phase 1 (today, done):** `red://` URL multiplexer in JS driver
+routes among HTTP / gRPC / embedded. v1 wire stays accessible via
+`red://host:5050` (default proto, but currently routed through
+the gRPC bridge — this is the asymmetry to fix).
 
 **Phase 2 (this ADR, ~3 weeks):**
-- Implement the RedWire listener server-side.
-- Reference Rust client at `drivers/rust/src/redwire/`.
-- JS driver gains a RedWire transport alongside HTTP / spawn-gRPC.
-- `red://` URLs default to RedWire when no `proto=` is given.
+1. Codec for v2 frames (`src/wire/redwire/frame.rs` +
+   `codec.rs`). Reuses v1 codes for kinds 0x01–0x0F.
+2. Handshake state machine (`src/wire/redwire/handshake.rs`).
+3. Auth methods plugged into the existing `AuthStore`.
+4. Service-router detector for the `0xFE` magic.
+5. Reference Rust client at `drivers/rust/src/redwire/`.
+6. JS driver gains a v2 transport (replaces the gRPC bridge for
+   `red://host:5050`).
 
-**Phase 3 (~2 weeks):** Ship Python, Go, Java drivers using the same
-wire spec. Each driver is ~1500 LOC. Add fuzz harness + protocol
-test vectors in `tests/redwire/`.
+**Phase 3 (~2 weeks):** Python, Go, Java drivers. Conformance test
+suite.
 
-**Phase 4 (~1 week):** Deprecate `--connect grpc://...` from the `red`
-binary. Remove the stdio→gRPC bridge in JS driver. gRPC stays
-available for service-mesh integrations but stops being the canonical
-remote transport.
+**Phase 4 (~1 week):** Deprecate the spawn-binary gRPC bridge in
+the JS driver. v2 wire becomes the canonical remote transport.
+gRPC stays available for service-mesh integrations and v1 wire
+stays accessible on the same port for legacy benchmark tooling.
 
-## Out of scope
+## Out of scope (intentional)
 
+- **Replacing the v1 protocol** — v1 stays. Bench tools that talk
+  to it directly are not retired. v2 is additive.
+- **PG-wire compatibility** — keeps existing role for psql / JDBC.
+  The pgwire emulator continues. v2 RedWire is for RedDB-native
+  clients that want graph/vector/document features.
 - **HTTP REST** — keeps existing role for dashboards, webhooks,
-  ad-hoc curl debugging. Not deprecated.
-- **PG wire compatibility** — keeps existing role for psql / JDBC /
-  node-pg / asyncpg. Pgwire emulation continues. RedWire is for
-  RedDB-native clients that want graph/vector/document features.
-- **Web browser support** — RedWire requires raw TCP; browsers can't
-  open arbitrary sockets. Browser SDKs continue using HTTP. A future
-  WebSocket-tunneled RedWire might happen but isn't in this ADR.
-- **GSSAPI / Kerberos auth** — not in v1; `mtls` and `oauth-jwt`
-  cover most enterprise needs.
+  ad-hoc curl debugging.
+- **GSSAPI / Kerberos auth** — not in v2; mtls + oauth-jwt cover
+  most enterprise needs.
 
 ## Risks
 
-1. **Spec churn during implementation** — mitigated by writing
-   protocol test vectors first, and keeping Phase 1 transports
-   working through the migration window.
-2. **TLS handshake CPU on serverless** — TLS adds ~3 ms per cold
-   connection. Mitigated by connection pooling + ALPN + session
-   resumption (RFC 5077).
-3. **Breaking change pressure** — once shipped, the protocol freezes.
-   Reserve the `flags` byte (8 unused bits) and a `version` field
-   in `Hello` for non-breaking extensions.
-4. **Driver fragmentation** — every language reimplementing framing
-   risks divergence. Mitigated by shipping a shared `redwire-conformance`
-   test suite that every driver runs in its CI.
+1. **Mid-handshake server crash** — partial state. Mitigated by
+   only spawning per-session resources after `AuthOk`.
+2. **TLS handshake CPU on serverless cold start** — ~3 ms per
+   connection. Mitigated by ALPN + session resumption (RFC 5077).
+3. **0xFE collision** — only matters if v1 ever needs > 4 GiB
+   frames. Today's v1 ceiling is 256 MiB. Reserve 0xFE explicitly
+   in v1 config so a future v1 bump won't cross it.
+4. **Spec churn during implementation** — mitigated by writing
+   protocol test vectors first (`tests/redwire/conformance/*.bin`).
+5. **Driver fragmentation** — mitigated by a shared
+   `redwire-conformance` test suite every driver runs in CI.
 
-## Open questions
+## Performance targets
 
-1. Should `Hello` carry a `tenant_id` field for multi-tenant servers,
-   or rely on the auth principal? Lean toward auth principal.
-2. Encrypted-at-rest interaction: does the RedWire layer carry the
-   page-encryption key, or does the operator inject via env? Lean
-   toward env (status quo for embedded).
-3. Should we support pipelining out of the box (send N requests
-   without waiting for response)? Yes — the `correlation_id` field
-   exists precisely for that.
-4. Cancellation: `Cancel` frame matches PG's `CancelRequest` shape
-   semantically — ack is best-effort. Document this in the spec.
+Numbers per driver client, single connection, localhost,
+1k-byte rows:
+
+| Workload                | libpq (PG) | mongodb-driver | RedWire v2 target |
+|-------------------------|------------|----------------|-------------------|
+| `SELECT 1` round-trip   | ~30 µs     | ~35 µs         | ≤ 30 µs           |
+| Insert 10k rows         | ~250 ms    | ~280 ms        | ≤ 250 ms          |
+| Stream 1M rows          | ~1.2 s     | ~1.4 s         | ≤ 1.2 s           |
+| Vector kNN (k=10)       | n/a        | n/a            | ≤ 5 ms (HNSW)     |
+
+These targets match v1's existing numbers for everything except
+the auth-handshake amortisation. Connection setup is one-time;
+steady-state perf doesn't regress.
 
 ## Decision rationale
 
-PostgreSQL and MongoDB both invested in custom wire protocols and
-both dominated their categories in part *because* of that — the
-protocol is the contract that lets a hundred drivers exist without
-merge conflicts in a single repo. RedDB needs the same property to
-ship in every language we care about, with consistent perf and a
-consistent auth story. Phase 1's URL unification was the easy half;
-this is the load-bearing half.
+v1 already gives us the binary-protocol numbers. What it doesn't
+give is the rest of what production clusters need: structured
+auth, multiplex, compression, version negotiation. v2 ships those
+without touching the data-plane format, on the same port, behind
+a single first-byte discriminator. Drivers in every language get
+a clean handshake to target, and the bench tools we already
+trust keep talking the v1 protocol they were written against.
