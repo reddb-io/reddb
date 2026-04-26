@@ -40,6 +40,7 @@ import { spawnRed } from './spawn.js'
 import { resolveBinaryPath } from './binary.js'
 import { RpcClient, RedDBError } from './protocol.js'
 import { HttpRpcClient } from './http.js'
+import { connectRedwire } from './redwire.js'
 import { parseUri, deriveLoginUrl } from './url.js'
 
 export { RedDBError }
@@ -97,9 +98,15 @@ export async function connect(uri, options = {}) {
     return new RedDB(client)
   }
 
-  // gRPC / gRPCs: spawn the binary as a stdio bridge to the gRPC
-  // server. Auth flows: explicit token wins; username/password
-  // round-trips through HTTP /auth/login first to mint a token.
+  // gRPC / gRPCs / RedWire (default for grpc-shaped URIs):
+  // speak the v2 binary protocol natively via TCP. No spawn, no
+  // gRPC bridge. Resolves bearer auth from username/password via
+  // HTTP /auth/login first when needed.
+  //
+  // The binary's gRPC server already accepts v2 wire on port 5050
+  // through the v1 listener's 0xFE dispatch (src/wire/listener.rs).
+  // For pure grpc:// callers we still default to the same RedWire
+  // path because it wins on perf and parity.
   if (parsed.kind === 'grpc' || parsed.kind === 'grpcs') {
     let token = merged.token
     if (!token && merged.username && merged.password) {
@@ -110,11 +117,26 @@ export async function connect(uri, options = {}) {
       })
       token = session.token
     }
-    const args = grpcArgs(parsed, token)
-    const binary = options.binary ?? resolveBinaryPath()
-    const child = await spawnRed(binary, args)
-    const client = new RpcClient(child)
-    await client.call('version', {})
+
+    // Honour `proto=spawn-grpc` as an escape hatch for callers that
+    // explicitly want the legacy stdio→gRPC bridge. Default is the
+    // RedWire transport.
+    const protoOverride = parsed.params?.get?.('proto') ?? ''
+    if (protoOverride === 'spawn-grpc') {
+      const args = grpcArgs(parsed, token)
+      const binary = options.binary ?? resolveBinaryPath()
+      const child = await spawnRed(binary, args)
+      const legacy = new RpcClient(child)
+      await legacy.call('version', {})
+      return new RedDB(legacy)
+    }
+
+    const auth = token ? { kind: 'bearer', token } : { kind: 'anonymous' }
+    const client = await connectRedwire({
+      host: parsed.host,
+      port: parsed.port,
+      auth,
+    })
     return new RedDB(client)
   }
 
