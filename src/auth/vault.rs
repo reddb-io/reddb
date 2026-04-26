@@ -214,15 +214,36 @@ impl VaultState {
         out.push_str(&format!("SEALED:{}\n", self.bootstrapped));
 
         // Users.
+        //
+        // Format v1 had 6 tab-separated fields. v2 appends an
+        // optional 7th field carrying the SCRAM-SHA-256 verifier
+        // so the v2 wire handshake works against vault-loaded
+        // users without needing a password rotation. v1 readers
+        // still parse correctly because they ignore any trailing
+        // fields they don't understand (the parser checks for
+        // either 6 or 7 fields explicitly).
+        //
+        // Verifier encoding: `<salt_hex>:<iter>:<stored_hex>:<server_hex>`.
         for user in &self.users {
+            let scram_field = match &user.scram_verifier {
+                Some(v) => format!(
+                    "{}:{}:{}:{}",
+                    hex::encode(&v.salt),
+                    v.iter,
+                    hex::encode(v.stored_key),
+                    hex::encode(v.server_key),
+                ),
+                None => String::new(),
+            };
             out.push_str(&format!(
-                "USER:{}\t{}\t{}\t{}\t{}\t{}\n",
+                "USER:{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                 user.username,
                 user.password_hash,
                 user.role.as_str(),
                 user.enabled,
                 user.created_at,
                 user.updated_at,
+                scram_field,
             ));
         }
 
@@ -271,9 +292,11 @@ impl VaultState {
                 bootstrapped = rest == "true";
             } else if let Some(rest) = line.strip_prefix("USER:") {
                 let parts: Vec<&str> = rest.split('\t').collect();
-                if parts.len() != 6 {
+                // 6 fields = legacy v1; 7 fields = v2 with the
+                // SCRAM verifier appended. Anything else is corrupt.
+                if parts.len() != 6 && parts.len() != 7 {
                     return Err(VaultError::Corrupt(format!(
-                        "USER line has {} fields, expected 6",
+                        "USER line has {} fields, expected 6 or 7",
                         parts.len()
                     )));
                 }
@@ -286,17 +309,17 @@ impl VaultState {
                 let updated_at: u128 = parts[5]
                     .parse()
                     .map_err(|_| VaultError::Corrupt("invalid updated_at".into()))?;
+                let scram_verifier = parts
+                    .get(6)
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(parse_scram_field)
+                    .transpose()?;
 
                 users.push(User {
                     username: parts[0].to_string(),
                     password_hash: parts[1].to_string(),
-                    // Vault format v1 doesn't carry the SCRAM
-                    // verifier — it landed after the format
-                    // froze. Users that pre-date Phase 3a get
-                    // their verifier rebuilt on next password
-                    // change; SCRAM auth fails closed for them
-                    // until then.
-                    scram_verifier: None,
+                    scram_verifier,
                     role,
                     api_keys: Vec::new(), // API keys are attached separately below
                     created_at,
@@ -656,6 +679,46 @@ impl Vault {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Decode a SCRAM verifier field of the form
+/// `<salt_hex>:<iter>:<stored_hex>:<server_hex>` into a `ScramVerifier`.
+fn parse_scram_field(field: &str) -> Result<crate::auth::scram::ScramVerifier, VaultError> {
+    let parts: Vec<&str> = field.split(':').collect();
+    if parts.len() != 4 {
+        return Err(VaultError::Corrupt(format!(
+            "SCRAM verifier has {} segments, expected 4",
+            parts.len()
+        )));
+    }
+    let salt = hex::decode(parts[0])
+        .map_err(|_| VaultError::Corrupt("invalid SCRAM salt hex".into()))?;
+    let iter: u32 = parts[1]
+        .parse()
+        .map_err(|_| VaultError::Corrupt("invalid SCRAM iter".into()))?;
+    if iter < crate::auth::scram::MIN_ITER {
+        return Err(VaultError::Corrupt(format!(
+            "SCRAM iter {} below minimum {}",
+            iter,
+            crate::auth::scram::MIN_ITER
+        )));
+    }
+    let stored_vec = hex::decode(parts[2])
+        .map_err(|_| VaultError::Corrupt("invalid SCRAM stored_key hex".into()))?;
+    let server_vec = hex::decode(parts[3])
+        .map_err(|_| VaultError::Corrupt("invalid SCRAM server_key hex".into()))?;
+    let stored_key: [u8; 32] = stored_vec
+        .try_into()
+        .map_err(|_| VaultError::Corrupt("SCRAM stored_key must be 32 bytes".into()))?;
+    let server_key: [u8; 32] = server_vec
+        .try_into()
+        .map_err(|_| VaultError::Corrupt("SCRAM server_key must be 32 bytes".into()))?;
+    Ok(crate::auth::scram::ScramVerifier {
+        salt,
+        iter,
+        stored_key,
+        server_key,
+    })
+}
 
 /// Read the 16-byte salt from an existing vault page in the pager.
 fn read_vault_salt_from_pager(pager: &Pager) -> Result<[u8; 16], VaultError> {
@@ -1066,6 +1129,84 @@ mod tests {
         let restored = VaultState::deserialize(data).unwrap();
         assert!(restored.master_secret.is_none());
         assert!(restored.bootstrapped);
+    }
+
+    #[test]
+    fn test_vault_state_scram_verifier_roundtrip() {
+        use crate::auth::scram::ScramVerifier;
+
+        let verifier = ScramVerifier::from_password(
+            "hunter2",
+            b"reddb-vault-test-salt".to_vec(),
+            crate::auth::scram::DEFAULT_ITER,
+        );
+
+        let now = now_ms();
+        let state = VaultState {
+            users: vec![User {
+                username: "carol".into(),
+                password_hash: "argon2id$abc$def".into(),
+                scram_verifier: Some(verifier.clone()),
+                role: Role::Admin,
+                api_keys: vec![],
+                created_at: now,
+                updated_at: now,
+                enabled: true,
+            }],
+            api_keys: vec![],
+            bootstrapped: true,
+            master_secret: None,
+            kv: std::collections::HashMap::new(),
+        };
+
+        let bytes = state.serialize();
+        let restored = VaultState::deserialize(&bytes).unwrap();
+        let carol = restored
+            .users
+            .iter()
+            .find(|u| u.username == "carol")
+            .unwrap();
+        let v = carol.scram_verifier.as_ref().expect("verifier round-trips");
+        assert_eq!(v.salt, verifier.salt);
+        assert_eq!(v.iter, verifier.iter);
+        assert_eq!(v.stored_key, verifier.stored_key);
+        assert_eq!(v.server_key, verifier.server_key);
+    }
+
+    #[test]
+    fn test_vault_state_legacy_user_line_still_parses() {
+        // Six-field v1 USER line with no trailing verifier. Must keep working.
+        let now = now_ms();
+        let line = format!(
+            "USER:dave\targon2id$x$y\tread\ttrue\t{}\t{}\nSEALED:false\n",
+            now, now
+        );
+        let restored = VaultState::deserialize(line.as_bytes()).unwrap();
+        let dave = restored
+            .users
+            .iter()
+            .find(|u| u.username == "dave")
+            .unwrap();
+        assert!(dave.scram_verifier.is_none());
+    }
+
+    #[test]
+    fn test_vault_state_scram_iter_below_min_rejected() {
+        let now = now_ms();
+        // 33 hex pairs = 33 bytes, but the parse_scram_field iter check
+        // fires before length validation. Stored/server are 32 hex bytes
+        // (64 chars) here so we exercise the iter floor specifically.
+        let stored_hex = "00".repeat(32);
+        let server_hex = "11".repeat(32);
+        let line = format!(
+            "USER:eve\targon2id$x$y\tread\ttrue\t{}\t{}\tdeadbeef:1024:{}:{}\n",
+            now, now, stored_hex, server_hex
+        );
+        match VaultState::deserialize(line.as_bytes()) {
+            Err(VaultError::Corrupt(msg)) => assert!(msg.contains("below minimum")),
+            Err(other) => panic!("expected Corrupt iter-floor error, got {other:?}"),
+            Ok(_) => panic!("expected Corrupt iter-floor error, got Ok"),
+        }
     }
 
     #[test]
