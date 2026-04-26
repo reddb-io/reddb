@@ -94,8 +94,8 @@ Per-row authorization on top of authentication:
 - **OAuth / OIDC**: JWT bearer-token validation with pluggable verifier
 - **Row-Level Security**: Per-row predicates via CREATE POLICY
 - **Multi-Tenancy**: Declarative `TENANT BY` + session tenant handle
-- **Encrypted Vault**: Auth data and arbitrary `red.secret.*` KV pairs stored in encrypted pages
-- **Encryption at Rest**: AES-256-GCM page-level encryption
+- **Encrypted Vault / Secret values**: Auth secrets and `Secret` values use the vault/secret encryption pipeline when configured
+- **At-rest posture**: v1.0 relies on infrastructure encryption for full database files; pager-level encryption is foundation-only
 - **Password Hashing**: Secure password storage
 - **`Secret` column type**: Transparent AES-256-GCM field-level encryption, keyed by the vault
 - **`Password` column type**: argon2id hashing with `VERIFY_PASSWORD()` comparator
