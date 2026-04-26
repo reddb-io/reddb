@@ -1,15 +1,18 @@
 # Wire-Protocol Comparison: Postgres vs Mongo vs RedWire
 
-How RedDB's wire protocol — the existing v1 (`src/wire/protocol.rs`,
-already powering bench numbers) and the planned v2 evolution
-(ADR 0001) — lines up with the two databases everyone benchmarks
-against.
+How RedDB's wire protocol — v1 (`src/wire/protocol.rs`, the bench
+fast path) and v2 (ADR 0001 + 0002) — lines up with the two databases
+everyone benchmarks against.
 
-> **Heads-up:** v1 is what the benchmark tools already speak.
-> v2 is what extends v1 with auth handshake, multiplex,
-> compression, and version negotiation. Both share port 5050;
+> **Status (2026-04-26):** v2 is wired end-to-end. Phases landed are
+> framing/handshake/auth (Phase 2), per-frame zstd compression
+> (Phase 1 of ADR 0002), TLS+mTLS dispatch (Phase 2 of ADR 0002),
+> SCRAM-SHA-256 over the v2 handshake (Phase 3), and OAuth/JWT
+> over the v2 handshake (Phase 4). Both v1 and v2 share port 5050;
 > the first byte off the wire (`0xFE` = v2, anything else = v1)
-> is the discriminator.
+> is the discriminator. v1 stays the bench fast path — v2 falls
+> through to the v1 binary handlers after auth, so steady-state
+> perf is identical.
 
 | Dimension              | PostgreSQL F+B v3 | MongoDB OP_MSG | RedWire v1 (today) | RedWire v2 (ADR) |
 |------------------------|-------------------|----------------|--------------------|--------------------|
@@ -21,15 +24,15 @@ against.
 | **Multiplexing**       | extended query    | `requestId`    | none               | `correlation_id`   |
 | **Pipelining**         | yes               | yes            | one-at-a-time      | yes                |
 | **Cancellation**       | side-socket       | killOp         | reconnect          | in-band Cancel     |
-| **Auth in handshake**  | SCRAM/MD5/cert    | SASL           | none               | SCRAM/Bearer/mTLS/OAuth |
-| **TLS upgrade**        | StartTLS          | StartTLS       | direct TLS         | direct TLS / ALPN  |
+| **Auth in handshake**  | SCRAM/MD5/cert    | SASL           | none               | SCRAM/Bearer/mTLS/OAuth ✅ |
+| **TLS upgrade**        | StartTLS          | StartTLS       | direct TLS         | direct TLS / ALPN ✅ |
 | **Streaming results**  | RowDescription + DataRow* | bulk reply | one MSG_RESULT     | RowDescription + DataRow* |
 | **Server push**        | LISTEN/NOTIFY     | change streams | none               | Notice frame       |
 | **Schema-typed values**| binary modes      | BSON tags      | per-msg tag bytes  | CBOR + tags        |
-| **Compression**        | libpq-only        | snappy/zlib/zstd | none             | per-frame zstd     |
-| **Version negotiation**| hardcoded         | `hello.maxWireVersion` | none       | `Hello.versions[]` |
-| **Driver count**       | 80+               | 50+            | 1 (Rust example)   | starts at 1; JS/Py/Go/Java target |
-| **Spec stability**     | frozen 2003       | OP_MSG since 4.0 | benchmark-tooling stable | freeze after Phase 4 |
+| **Compression**        | libpq-only        | snappy/zlib/zstd | none             | per-frame zstd ✅    |
+| **Version negotiation**| hardcoded         | `hello.maxWireVersion` | none       | `Hello.versions[]` ✅ |
+| **Driver count**       | 80+               | 50+            | 1 (Rust example)   | 2 (Rust + JS); Python+Go+Java target |
+| **Spec stability**     | frozen 2003       | OP_MSG since 4.0 | benchmark-tooling stable | freeze after Phase 4 (current) |
 
 ## Auth story side by side
 
@@ -55,19 +58,23 @@ C → S  saslContinue { conversationId, payload: client-final }
 S → C  saslFinal
 ```
 
-**RedWire SCRAM-SHA-256 handshake (planned):**
+**RedWire SCRAM-SHA-256 handshake (landed, Phase 3 of ADR 0002):**
 ```
-C → S  Hello { versions: [1], auth_methods: ["scram-sha-256", "bearer"] }
-S → C  HelloAck { version: 1, chosen_auth: "scram-sha-256", server_caps }
-S → C  AuthRequest { sasl_first: client-first-message echoed back }
-C → S  AuthResponse { client-final-message }
+C → S  Hello { versions: [2], auth_methods: ["scram-sha-256", "bearer", "oauth-jwt", "mtls"] }
+S → C  HelloAck { version: 2, server_caps, advertised_methods }
+C → S  AuthStart { mechanism: "scram-sha-256", client-first }
+S → C  AuthChallenge { server-first }
+C → S  AuthResponse { client-final }
 S → C  AuthOk { session_id, server_caps_final }
 ```
 
-3 round-trips for SCRAM in all three. Bearer/mTLS skip the
+3 round-trips for SCRAM in all three. Bearer/mTLS/JWT skip the
 challenge-response (1 RTT). RedWire's `Hello` carries the auth
 methods inline so caller doesn't need a probe round-trip like
-Mongo's `hello`.
+Mongo's `hello`. SCRAM primitives live in `src/auth/scram.rs`
+(server) and `drivers/rust/src/redwire/scram.rs` (client); the
+JWT validator path is shared with the HTTP and gRPC surfaces
+through `AuthConfig.oauth`.
 
 ## What v1 already gives us
 

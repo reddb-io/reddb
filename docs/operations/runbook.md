@@ -154,12 +154,13 @@ The endpoint **does not auto-flip the role** — it acquires the lease + audits.
 
 ## 4. Secret Rotation
 
-All sensitive env vars accept a `_FILE` companion. The runtime reads the file once at boot. To rotate without restart, today's path is:
+All sensitive env vars accept a `_FILE` companion. The runtime reads
+each file at boot **and** re-reads on `SIGHUP`, so secret rotation
+does not require a pod roll.
 
-1. Update the secret in your KMS / Kubernetes Secret / Docker secret.
-2. Roll the pod / restart the systemd unit. RedDB takes a graceful-shutdown backup if `RED_BACKUP_ON_SHUTDOWN=true`.
-
-In-flight SIGHUP reload of secrets is a Phase 6.4 follow-up.
+1. Update the secret in your KMS / Kubernetes Secret / Docker secret. The path bound to `*_FILE` should now point at the new value.
+2. Send `SIGHUP` to the RedDB process (`kubectl exec ... -- kill -HUP 1`, `systemctl kill --signal=SIGHUP reddb`, `docker kill --signal=SIGHUP <container>`). RedDB reloads the file in place; the previous value is invalidated immediately.
+3. If you prefer a roll, set `RED_BACKUP_ON_SHUTDOWN=true` so the graceful-shutdown path takes a final backup before exit.
 
 ### Admin token rotation
 

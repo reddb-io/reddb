@@ -112,18 +112,41 @@ const db = await connect('grpc://reddb.example.com:5051?proto=spawn-grpc')
 
 ## Auth methods supported
 
-| Method         | HTTP | gRPC (Bearer) | RedWire | PG wire |
-|----------------|------|---------------|---------|---------|
+| Method         | HTTP | gRPC (Bearer) | RedWire v2 | PG wire |
+|----------------|------|---------------|------------|---------|
 | Username + password (login → token) | ✅ | ✅ via `/auth/login` then bearer | ✅ same path | ❌ |
-| Bearer token / API key             | ✅ | ✅            | ✅      | ❌ |
-| mTLS client cert                   | ✅ via TLS | n/a    | ✅      | ✅ |
-| OAuth / OIDC JWT                   | ✅ | ✅            | planned | ❌ |
-| SCRAM-SHA-256                      | ❌ | ❌            | planned | ✅ |
-| SQL-cleartext                      | ❌ | ❌            | ❌      | ✅ |
-| Anonymous (auth disabled)          | ✅ | ✅            | ✅      | ✅ |
+| Bearer token / API key             | ✅ | ✅            | ✅         | ❌ |
+| mTLS client cert                   | ✅ via TLS | n/a    | ✅         | ✅ |
+| OAuth / OIDC JWT                   | ✅ | ✅            | ✅ (Phase 4 of ADR 0002) | ❌ |
+| SCRAM-SHA-256                      | ❌ | ❌            | ✅ (Phase 3 of ADR 0002) | ✅ |
+| HMAC-signed request                | ✅ | ✅            | ✅         | ❌ |
+| SQL-cleartext                      | ❌ | ❌            | ❌         | ✅ |
+| Anonymous (auth disabled)          | ✅ | ✅            | ✅         | ✅ |
+
+The RedWire v2 handshake advertises supported methods inline in the
+server `Hello` frame, so the driver picks the strongest method
+without an extra probe round-trip. SCRAM-SHA-256 follows RFC 5802
+(client-first → server-first → client-final → server-final);
+OAuth/JWT validates via the server's pluggable `JwtVerifier`.
+
+## Reference drivers
+
+| Driver | Transports landed | Auth methods |
+|--------|--------------------|--------------|
+| `reddb` (JS / TS) — `drivers/js` | embedded, HTTP, HTTPS, RedWire v2 (TCP / TLS / mTLS), PG wire | bearer, login, mTLS, OAuth/JWT, SCRAM (via RedWire) |
+| `reddb` (Rust) — `drivers/rust` | embedded, HTTP, HTTPS, RedWire v2 (TCP / TLS / mTLS), PG wire | bearer, login, mTLS, OAuth/JWT, SCRAM (via RedWire) |
+| `reddb` (Python) — `drivers/python` | embedded (PyO3), HTTP | bearer, login |
+
+The JS and Rust drivers share the **6-transport matrix** (embedded,
+HTTP, HTTPS, RedWire-TCP, RedWire-TLS, RedWire-mTLS) plus a PG-wire
+fallback. The Python driver exposes the embedded engine and HTTP
+adapter only — RedWire bindings live behind the `redwire` extra.
 
 ## See also
 
 - `docs/adr/0001-redwire-tcp-protocol.md` — wire protocol spec
+- `docs/adr/0002-redwire-v2-rollout.md` — phased rollout (compression → TLS → SCRAM → OAuth/JWT)
 - `docs/clients/wire-protocol-comparison.md` — vs Postgres / Mongo
+- `docs/clients/sdk-compatibility.md` — driver feature matrix
 - `docs/security/overview.md` — server-side auth config
+- `docs/security/tokens.md` — bearer / SCRAM / OAuth / HMAC token reference

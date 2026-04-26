@@ -86,6 +86,10 @@
   - [Competitive Positioning](/architecture/competitive-positioning.md)
   - [Distributed Roadmap](/architecture/distributed-roadmap.md)
 
+- **ADRs**
+  - [0001 — RedWire TCP Protocol](/adr/0001-redwire-tcp-protocol.md)
+  - [0002 — RedWire v2 Rollout](/adr/0002-redwire-v2-rollout.md)
+
 - **Vector Engine**
   - [HNSW Index](/vectors/hnsw.md)
   - [IVF Index](/vectors/ivf.md)
@@ -156,4 +160,12 @@
   - [Schema Definition](/reference/schema.md)
   - [Artifact Lifecycle](/reference/artifacts.md)
   - [Health & Observability](/reference/health.md)
+  - [Feature Matrix](/reference/features.md)
   - [Limitations](/reference/limitations.md)
+
+- **Release Notes**
+  - [2026-04-26 (RedWire v2 + Auth)](/release-notes-2026-04-26.md)
+  - [2026-04-17 (Multi-tenancy + Perf)](/release-notes-2026-04-17.md)
+  - [v1.0 Migration Guide](/release/v1.0-migration.md)
+  - [v1.0 Gate Status](/release/v1.0-gate.md)
+  - [DR Drill History](/release/drill-history.md)

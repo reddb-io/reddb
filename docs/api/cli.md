@@ -18,6 +18,7 @@ red <command> [args] [flags]
 | `get` | Get command (currently placeholder; execution not wired) |
 | `delete` | Delete command (currently placeholder; execution not wired) |
 | `health` | Run a health check against a server |
+| `doctor` | Probe `/metrics` + `/admin/status` against operator-tunable thresholds |
 | `replica` | Start as a read replica connected to a primary |
 | `status` | Replication status command (currently placeholder) |
 | `tick` | Run maintenance/reclaim tick operations |
@@ -194,6 +195,53 @@ red health [--bind host:port] [--grpc|--http]
 | `--bind` | `-b` | Server address. Defaults to `127.0.0.1:5050` when no transport is selected |
 | `--grpc` | | Probe gRPC listener |
 | `--http` | | Probe HTTP listener |
+
+## red doctor
+
+Probe the running server's `/metrics` and `/admin/status` against
+operator-tunable thresholds. Designed for CI gates, on-call runbooks,
+and Kubernetes liveness wrappers.
+
+```bash
+red doctor --bind <host>:<port> [--token <admin-token>] [--json] \
+  [--backup-age-warn-secs 600] [--backup-age-crit-secs 3600] \
+  [--wal-lag-warn 1000] [--wal-lag-crit 10000] \
+  [--replica-lag-warn 1000] [--replica-lag-crit 100000]
+```
+
+| Flag | Default | Description |
+|:-----|:--------|:------------|
+| `--bind` | `127.0.0.1:8080` | Server address (HTTP). |
+| `--token` | `$RED_ADMIN_TOKEN` | Admin bearer token. |
+| `--json` | off | Emit a structured report instead of human-readable text. |
+| `--backup-age-warn-secs` | `600` | Warn when `reddb_backup_age_seconds` exceeds this. |
+| `--backup-age-crit-secs` | `3600` | Critical when `reddb_backup_age_seconds` exceeds this. |
+| `--wal-lag-warn` | `1000` | Warn on `reddb_wal_archive_lag_records`. |
+| `--wal-lag-crit` | `10000` | Critical on `reddb_wal_archive_lag_records`. |
+| `--replica-lag-warn` | `1000` | Warn on max `reddb_replica_lag_records`. |
+| `--replica-lag-crit` | `100000` | Critical on max `reddb_replica_lag_records`. |
+
+Exit codes are stable for automation:
+
+| Code | Meaning |
+|------|---------|
+| `0` | Healthy. No checks fired. |
+| `1` | At least one warn (backup older than warn threshold, read-only flag set, etc.). |
+| `2` | At least one critical (lease lost, divergence, server unreachable, sha256 mismatch). |
+
+Examples:
+
+```bash
+# Quick local probe
+red doctor --bind 127.0.0.1:8080
+
+# Kubernetes liveness probe
+red doctor --bind 127.0.0.1:8080 --json | jq -e '.status == "ok"'
+
+# Tighter backup SLA
+red doctor --bind 127.0.0.1:8080 \
+  --backup-age-warn-secs 120 --backup-age-crit-secs 600
+```
 
 ## red tick
 

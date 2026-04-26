@@ -54,6 +54,8 @@ This returns the admin user and an initial API key.
 | Session Token | `Authorization: Bearer <token>` | Expires after session |
 | Client Certificate (mTLS) | TLS handshake | Per-connection |
 | OAuth / OIDC JWT | `Authorization: Bearer <jwt>` | Token lifetime |
+| SCRAM-SHA-256 | RedWire v2 handshake / PG SASL | Per-connection |
+| HMAC-signed request | `X-RedDB-Key-Id` + `-Timestamp` + `-Nonce` + `-Signature` | Per-request, ±5 min window, single-use nonce |
 
 ### mTLS client certificates
 
@@ -74,7 +76,26 @@ Enable the OAuth validator via `AuthConfig.oauth`. The validator
 accepts a pluggable `JwtVerifier` closure so you pick the signing
 algorithm and key source (JWKS, shared secret, HSM). Validates the
 standard `iss`, `aud`, `exp`, and `nbf` claims and maps a claim
-(default `preferred_username`) onto a RedDB identity.
+(default `preferred_username`) onto a RedDB identity. The same
+validator path is used by HTTP, gRPC, and the RedWire v2 handshake.
+
+### SCRAM-SHA-256
+
+Stored credentials live in the user vault as
+`SCRAM-SHA-256$<iter>:<salt>:<stored-key>:<server-key>`. The same
+state machine drives the PG-wire SASL flow and the
+`AuthStart`/`AuthChallenge`/`AuthResponse` frames in RedWire v2.
+Provision with `red auth set-scram <user>`. Spec: RFC 5802. Details:
+[`tokens.md`](tokens.md#scram-sha-256).
+
+### HMAC-signed requests
+
+Tamper-evident, replay-protected request signing for cross-org
+webhooks and high-trust automation. Canonical string is
+`{method}\n{path}\n{timestamp}\n{nonce}\n{sha256(body)}`, signed
+with the shared secret minted at API-key creation. Nonces are
+remembered server-side for the validity window (±5 min default).
+Details: [`tokens.md`](tokens.md#hmac-signed-requests).
 
 ### Row-level security & tenancy
 
@@ -92,6 +113,8 @@ Per-row authorization on top of authentication:
 - **Session Tokens**: Time-limited tokens from login
 - **mTLS**: Client certificate authentication (CN / SAN / OID roles)
 - **OAuth / OIDC**: JWT bearer-token validation with pluggable verifier
+- **SCRAM-SHA-256**: RFC 5802 challenge/response in RedWire v2 + PG wire
+- **HMAC-signed requests**: timestamped + nonce-protected request signatures
 - **Row-Level Security**: Per-row predicates via CREATE POLICY
 - **Multi-Tenancy**: Declarative `TENANT BY` + session tenant handle
 - **Encrypted Vault / Secret values**: Auth secrets and `Secret` values use the vault/secret encryption pipeline when configured
@@ -99,3 +122,5 @@ Per-row authorization on top of authentication:
 - **Password Hashing**: Secure password storage
 - **`Secret` column type**: Transparent AES-256-GCM field-level encryption, keyed by the vault
 - **`Password` column type**: argon2id hashing with `VERIFY_PASSWORD()` comparator
+- **`_FILE` secrets convention**: every sensitive env var (`RED_ADMIN_TOKEN`, `RED_S3_SECRET_KEY`, `RED_BACKEND_HTTP_AUTH`, …) honours an `*_FILE` companion that wins over the inline value. Pairs with Kubernetes Secrets, Docker secrets, and systemd `LoadCredential`.
+- **Live secret rotation via SIGHUP**: sending `SIGHUP` to the process reloads every `*_FILE` companion in place, so token rotation no longer requires a pod roll.

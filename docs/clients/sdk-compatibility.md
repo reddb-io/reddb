@@ -6,10 +6,12 @@ PLAN.md Phase 10.4. RedDB exposes four transports — PostgreSQL wire (v3), gRPC
 
 | Transport | Default port | Bind env | Auth |
 |-----------|--------------|----------|------|
-| PostgreSQL wire | none (off by default) | `--pg-bind` flag | password / token |
+| PostgreSQL wire | none (off by default) | `--pg-bind` flag | password / token / SCRAM |
 | gRPC | `:50051` | `RED_GRPC_BIND_ADDR` / `--grpc-bind` | bearer (per RPC) |
-| HTTP | `:8080` | `RED_HTTP_BIND_ADDR` / `--http-bind` | bearer (`Authorization: Bearer`) |
-| Native wire | `:5050` | `--wire-bind` | length-framed binary; bearer optional |
+| HTTP / HTTPS | `:8080` | `RED_HTTP_BIND_ADDR` / `--http-bind` | bearer / login / mTLS / OAuth-JWT / HMAC |
+| RedWire v1 (legacy bench fast-path) | `:5050` | `--wire-bind` | length-framed binary; optional bearer |
+| RedWire v2 (TCP) | `:5050` | shares `--wire-bind` (auto-dispatched on `0xFE` byte) | bearer / SCRAM-SHA-256 / OAuth-JWT / HMAC |
+| RedWire v2 (TLS / mTLS) | `:5050` | `--wire-tls-bind` + `--wire-tls-cert` / `--wire-tls-key` | mTLS + bearer / SCRAM / OAuth |
 
 `/admin/*` and `/metrics` always live on the HTTP transport. Operators can split them onto dedicated listeners via `RED_ADMIN_BIND` and `RED_METRICS_BIND` (see [scaling.md](../operations/scaling.md)).
 
@@ -82,15 +84,28 @@ curl http://<host>:<port>/admin/openapi.yaml > admin.openapi.yaml
 openapi-generator-cli generate -i admin.openapi.yaml -g go -o ./reddb-admin-go
 ```
 
-## Native binary wire
+## Native binary wire (RedWire)
 
-Length-framed binary protocol used for the highest-throughput path (point lookups, bulk insert). Schema documented in [`docs/wire-protocol.md`](../wire-protocol.md). Use only when:
+Length-framed binary protocol used for the highest-throughput path (point lookups, bulk insert). Two protocol generations share port 5050:
+
+- **v1** — `[u32 length][u8 kind][payload]`, the bench fast-path. Documented in [`docs/adr/0001-redwire-tcp-protocol.md`](../adr/0001-redwire-tcp-protocol.md). No auth handshake — auth is bolted on via HTTP/`auth/login` on the same server.
+- **v2** — `[u32 length][u8 kind][u8 flags][u16 stream][u64 corr_id][payload]`, dispatched by the `0xFE` magic byte. Adds Hello/Auth handshake (SCRAM-SHA-256, bearer, OAuth-JWT, mTLS), per-frame zstd compression, multiplex via `correlation_id`, version negotiation. After auth, v2 falls through to v1's binary handlers, so steady-state perf matches.
+
+Use the binary wire when:
 
 - You're embedding RedDB and want zero-copy point reads.
-- You wrote a client in Rust / C / a language with strong byte-buffer ergonomics.
-- You're OK with manual upgrades on schema bumps.
+- You're writing a high-throughput client in Rust / Go / C++ / Node and want sub-50µs round-trips.
+- You're OK with manual upgrades on schema bumps until the v2 spec is frozen (after Phase 4 of ADR 0002, currently complete).
 
-Most workloads should pick HTTP or PG wire instead.
+For dashboard / dev workloads pick HTTP or PG wire instead.
+
+### Reference drivers
+
+| Driver | Status | RedWire | HTTP / HTTPS | PG wire | mTLS | OAuth-JWT | SCRAM |
+|--------|--------|---------|--------------|---------|------|-----------|-------|
+| `reddb` (JS / TS) | ✅ | v2 (TCP/TLS/mTLS) | ✅ | via `pg` | ✅ | ✅ | ✅ |
+| `reddb` (Rust) | ✅ | v2 (TCP/TLS/mTLS) | ✅ | via `tokio-postgres` | ✅ | ✅ | ✅ |
+| `reddb` (Python / PyO3) | ✅ embedded + HTTP | planned | ✅ | via `psycopg` | planned | planned | planned |
 
 ## Versioning Promise
 
