@@ -133,13 +133,14 @@ pub fn build_hello_ack(
 /// versions prepend scram-sha-256, mtls, oauth-jwt to the
 /// priority list.
 pub fn pick_auth_method(client_methods: &[String], server_anon_ok: bool) -> Option<&'static str> {
-    // SCRAM > bearer > anonymous when the server has auth on.
+    // SCRAM (no-plaintext-on-the-wire) > OAuth-JWT (federated)
+    // > bearer (session token / API key) > anonymous.
     // No-auth servers prefer anonymous so the handshake succeeds
     // without an AuthStore lookup.
     let priority: &[&'static str] = if server_anon_ok {
-        &["anonymous", "scram-sha-256", "bearer"]
+        &["anonymous", "scram-sha-256", "oauth-jwt", "bearer"]
     } else {
-        &["scram-sha-256", "bearer", "anonymous"]
+        &["scram-sha-256", "oauth-jwt", "bearer", "anonymous"]
     };
     for method in priority {
         if !client_methods.iter().any(|m| m == *method) {
@@ -197,12 +198,18 @@ pub fn validate_auth_response(
              the 1-RTT validate_auth_response path doesn't apply"
                 .to_string(),
         ),
-        "oauth-jwt" => AuthOutcome::Refused(
-            "oauth-jwt validation requires OAuthAuthenticator plumbing into the \
-             handshake (Phase 4 of ADR 0002). Use bearer with a session token \
-             from POST /auth/login for now."
-                .to_string(),
-        ),
+        "oauth-jwt" => {
+            // The OAuthValidator handle is expected via the
+            // RedWireConfig.oauth slot — plumbing happens in
+            // session::handle_session. When called here without
+            // it (e.g. test paths that don't set the handle),
+            // the v2 handshake refuses cleanly.
+            AuthOutcome::Refused(
+                "oauth-jwt requires RedWireConfig.oauth to be set. Pass an \
+                 OAuthValidator with the issuer + JWKS configured."
+                    .to_string(),
+            )
+        }
         other => AuthOutcome::Refused(format!("auth method '{other}' is not supported in v2.1")),
     }
 }
@@ -408,6 +415,138 @@ pub fn base64_std_decode(input: &str) -> Option<Vec<u8>> {
         }
     }
     Some(out)
+}
+
+/// Parse a compact-serialized JWT into a `DecodedJwt`. RFC 7519
+/// shape: `<base64url(header)>.<base64url(payload)>.<base64url(signature)>`.
+/// The validator does the heavy lifting (signature, claims,
+/// expiry); this function just splits + decodes.
+pub fn parse_jwt(token: &str) -> Result<crate::auth::oauth::DecodedJwt, String> {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return Err(format!("expected 3 dot-separated parts, got {}", parts.len()));
+    }
+    let header_bytes = base64_url_decode(parts[0])
+        .ok_or_else(|| "header is not valid base64url".to_string())?;
+    let payload_bytes = base64_url_decode(parts[1])
+        .ok_or_else(|| "payload is not valid base64url".to_string())?;
+    let signature = base64_url_decode(parts[2])
+        .ok_or_else(|| "signature is not valid base64url".to_string())?;
+
+    let header_json: JsonValue = serde_json::from_slice(&header_bytes)
+        .map_err(|e| format!("header JSON: {e}"))?;
+    let payload_json: JsonValue = serde_json::from_slice(&payload_bytes)
+        .map_err(|e| format!("payload JSON: {e}"))?;
+
+    let header = jwt_header_from(&header_json)?;
+    let claims = jwt_claims_from(&payload_json);
+
+    let signing_input = format!("{}.{}", parts[0], parts[1]).into_bytes();
+
+    Ok(crate::auth::oauth::DecodedJwt {
+        header,
+        claims,
+        signing_input,
+        signature,
+    })
+}
+
+fn jwt_header_from(v: &JsonValue) -> Result<crate::auth::oauth::JwtHeader, String> {
+    let obj = v
+        .as_object()
+        .ok_or_else(|| "JWT header must be a JSON object".to_string())?;
+    let alg = obj
+        .get("alg")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| "JWT header missing 'alg'".to_string())?
+        .to_string();
+    let kid = obj.get("kid").and_then(|x| x.as_str()).map(String::from);
+    Ok(crate::auth::oauth::JwtHeader { alg, kid })
+}
+
+fn jwt_claims_from(v: &JsonValue) -> crate::auth::oauth::JwtClaims {
+    let obj = v.as_object().cloned().unwrap_or_default();
+    let mut claims = crate::auth::oauth::JwtClaims::default();
+    if let Some(s) = obj.get("iss").and_then(|x| x.as_str()) {
+        claims.iss = Some(s.to_string());
+    }
+    if let Some(s) = obj.get("sub").and_then(|x| x.as_str()) {
+        claims.sub = Some(s.to_string());
+    }
+    if let Some(s) = obj.get("aud").and_then(|x| x.as_str()) {
+        claims.aud = vec![s.to_string()];
+    } else if let Some(arr) = obj.get("aud").and_then(|x| x.as_array()) {
+        claims.aud = arr.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+    }
+    if let Some(n) = obj.get("exp").and_then(|x| x.as_f64()) {
+        claims.exp = Some(n as i64);
+    }
+    if let Some(n) = obj.get("nbf").and_then(|x| x.as_f64()) {
+        claims.nbf = Some(n as i64);
+    }
+    if let Some(n) = obj.get("iat").and_then(|x| x.as_f64()) {
+        claims.iat = Some(n as i64);
+    }
+    for (k, v) in obj.iter() {
+        if matches!(k.as_str(), "iss" | "sub" | "aud" | "exp" | "nbf" | "iat") {
+            continue;
+        }
+        if let Some(s) = v.as_str() {
+            claims.extra.insert(k.clone(), s.to_string());
+        }
+    }
+    claims
+}
+
+/// Validate a JWT through the supplied `OAuthValidator`. Returns
+/// `(username, role)` on success, or a refusal reason.
+pub fn validate_oauth_jwt(
+    validator: &crate::auth::oauth::OAuthValidator,
+    raw_token: &str,
+) -> Result<(String, Role), String> {
+    let token = parse_jwt(raw_token).map_err(|e| format!("decode JWT: {e}"))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    // sub-claim mode: the JWT subject IS the RedDB username.
+    // Roles map from a `role` custom claim; default to Read.
+    let identity = validator
+        .validate(&token, now, |sub| {
+            Some(crate::auth::User {
+                username: sub.to_string(),
+                password_hash: String::new(),
+                scram_verifier: None,
+                role: token
+                    .claims
+                    .extra
+                    .get("role")
+                    .and_then(|s| Role::from_str(s))
+                    .unwrap_or(Role::Read),
+                api_keys: Vec::new(),
+                created_at: 0,
+                updated_at: 0,
+                enabled: true,
+            })
+        })
+        .map_err(|e| format!("{e}"))?;
+    Ok((identity.username, identity.role))
+}
+
+fn base64_url_decode(input: &str) -> Option<Vec<u8>> {
+    // base64url = '+' → '-', '/' → '_', stripped padding.
+    let mut s = String::with_capacity(input.len() + 4);
+    for ch in input.chars() {
+        match ch {
+            '-' => s.push('+'),
+            '_' => s.push('/'),
+            _ => s.push(ch),
+        }
+    }
+    while s.len() % 4 != 0 {
+        s.push('=');
+    }
+    base64_std_decode(&s)
 }
 
 /// Generate a session id. Format: `rwsess-<unix_micros>-<rand>`.

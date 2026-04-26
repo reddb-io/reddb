@@ -22,6 +22,11 @@ use super::REDWIRE_V2_MAGIC;
 pub struct RedWireConfig {
     pub bind_addr: String,
     pub auth_store: Option<Arc<AuthStore>>,
+    /// Optional OAuth/OIDC validator. When set, v2 clients can
+    /// negotiate `oauth-jwt` in their `Hello.auth_methods` and
+    /// the handshake will validate the JWT against this issuer
+    /// + JWKS.
+    pub oauth: Option<Arc<crate::auth::oauth::OAuthValidator>>,
 }
 
 impl std::fmt::Debug for RedWireConfig {
@@ -29,6 +34,7 @@ impl std::fmt::Debug for RedWireConfig {
         f.debug_struct("RedWireConfig")
             .field("bind_addr", &self.bind_addr)
             .field("auth_store_present", &self.auth_store.is_some())
+            .field("oauth_present", &self.oauth.is_some())
             .finish()
     }
 }
@@ -47,9 +53,10 @@ pub async fn start_redwire_listener(
         let (stream, peer) = listener.accept().await?;
         let rt = runtime.clone();
         let auth = config.auth_store.clone();
+        let oauth = config.oauth.clone();
         let peer_str = peer.to_string();
         tokio::spawn(async move {
-            if let Err(err) = handle_standalone(stream, rt, auth).await {
+            if let Err(err) = handle_standalone(stream, rt, auth, oauth).await {
                 tracing::warn!(
                     transport = "redwire-v2",
                     peer = %peer_str,
@@ -68,6 +75,7 @@ async fn handle_standalone(
     mut stream: TcpStream,
     runtime: Arc<RedDBRuntime>,
     auth_store: Option<Arc<AuthStore>>,
+    oauth: Option<Arc<crate::auth::oauth::OAuthValidator>>,
 ) -> io::Result<()> {
     let mut magic = [0u8; 1];
     stream.read_exact(&mut magic).await?;
@@ -77,5 +85,5 @@ async fn handle_standalone(
             magic[0]
         )));
     }
-    handle_session(stream, runtime, auth_store).await
+    handle_session(stream, runtime, auth_store, oauth).await
 }

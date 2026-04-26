@@ -26,6 +26,7 @@ async fn start_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let cfg = RedWireConfig {
         bind_addr: addr.to_string(),
         auth_store: None,
+        oauth: None,
     };
     let handle = tokio::spawn(async move {
         let _ = start_redwire_listener(cfg, runtime).await;
@@ -164,6 +165,7 @@ async fn scram_sha_256_end_to_end() {
     let cfg = reddb::wire::redwire::RedWireConfig {
         bind_addr: addr.to_string(),
         auth_store: Some(store),
+        oauth: None,
     };
     tokio::spawn(async move {
         let _ = reddb::wire::redwire::start_redwire_listener(cfg, runtime).await;
@@ -353,6 +355,7 @@ async fn bearer_required_when_anonymous_unsupported() {
     let cfg = RedWireConfig {
         bind_addr: addr.to_string(),
         auth_store: Some(store),
+        oauth: None,
     };
     tokio::spawn(async move {
         let _ = start_redwire_listener(cfg, runtime).await;

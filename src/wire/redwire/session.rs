@@ -40,6 +40,7 @@ pub async fn handle_session<S>(
     mut stream: S,
     runtime: Arc<RedDBRuntime>,
     auth_store: Option<Arc<AuthStore>>,
+    oauth: Option<Arc<crate::auth::oauth::OAuthValidator>>,
 ) -> io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
@@ -47,7 +48,12 @@ where
     // Discriminator byte was already consumed by the service-router
     // detector when it dispatched here. If callers wire this from
     // a non-router path they must consume it themselves first.
-    let session = perform_handshake(&mut stream, auth_store.as_deref()).await?;
+    let session = perform_handshake(
+        &mut stream,
+        auth_store.as_deref(),
+        oauth.as_deref(),
+    )
+    .await?;
     if session.is_none() {
         return Ok(());
     }
@@ -207,6 +213,7 @@ where
 async fn perform_handshake<S>(
     stream: &mut S,
     auth_store: Option<&AuthStore>,
+    oauth: Option<&crate::auth::oauth::OAuthValidator>,
 ) -> io::Result<Option<AuthedSession>>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
@@ -310,6 +317,66 @@ where
         ));
         let _ = stream.write_all(&fail).await;
         return Ok(None);
+    }
+
+    // OAuth-JWT branch — needs the validator that the 1-RTT
+    // shape doesn't get. Done inline so the rest of the path
+    // (anonymous / bearer) keeps the same bookkeeping.
+    if chosen == "oauth-jwt" {
+        let validator = match oauth {
+            Some(v) => v,
+            None => {
+                let fail = encode_frame(&Frame::new(
+                    MessageKind::AuthFail,
+                    resp.correlation_id,
+                    build_auth_fail("oauth-jwt requires RedWireConfig.oauth"),
+                ));
+                let _ = stream.write_all(&fail).await;
+                return Ok(None);
+            }
+        };
+        let raw = match crate::serde_json::from_slice::<JsonValue>(&resp.payload)
+            .ok()
+            .and_then(|v| {
+                v.as_object()
+                    .and_then(|o| o.get("jwt").cloned())
+                    .and_then(|x| x.as_str().map(String::from))
+            }) {
+            Some(s) if !s.is_empty() => s,
+            _ => {
+                let fail = encode_frame(&Frame::new(
+                    MessageKind::AuthFail,
+                    resp.correlation_id,
+                    build_auth_fail("oauth-jwt: AuthResponse missing 'jwt' string"),
+                ));
+                let _ = stream.write_all(&fail).await;
+                return Ok(None);
+            }
+        };
+        match super::auth::validate_oauth_jwt(validator, &raw) {
+            Ok((username, role)) => {
+                let session_id = super::auth::new_session_id_for_scram();
+                let ok = encode_frame(&Frame::new(
+                    MessageKind::AuthOk,
+                    resp.correlation_id,
+                    build_auth_ok(&session_id, &username, role, server_features),
+                ));
+                stream.write_all(&ok).await?;
+                return Ok(Some(AuthedSession {
+                    username,
+                    session_id,
+                }));
+            }
+            Err(reason) => {
+                let fail = encode_frame(&Frame::new(
+                    MessageKind::AuthFail,
+                    resp.correlation_id,
+                    build_auth_fail(&format!("oauth-jwt: {reason}")),
+                ));
+                let _ = stream.write_all(&fail).await;
+                return Ok(None);
+            }
+        }
     }
 
     match validate_auth_response(chosen, &resp.payload, auth_store) {

@@ -61,7 +61,7 @@ async fn dispatch_connection(
         let mut stream = stream;
         let mut consume = [0u8; 1];
         tokio::io::AsyncReadExt::read_exact(&mut stream, &mut consume).await?;
-        return crate::wire::redwire::session::handle_session(stream, runtime, None)
+        return crate::wire::redwire::session::handle_session(stream, runtime, None, None)
             .await
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>);
     }
@@ -156,7 +156,7 @@ where
     let mut first = [0u8; 1];
     tokio::io::AsyncReadExt::read_exact(&mut stream, &mut first).await?;
     if first[0] == crate::wire::redwire::REDWIRE_V2_MAGIC {
-        return crate::wire::redwire::session::handle_session(stream, runtime, None)
+        return crate::wire::redwire::session::handle_session(stream, runtime, None, None)
             .await
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>);
     }
