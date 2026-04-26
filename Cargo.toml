@@ -124,7 +124,11 @@ codegen-units = 256
 incremental = true
 codegen-units = 256
 
-# [profile.release] — use default
+# Production binaries abort on panic. RedDB relies on WAL/recovery for
+# consistency after process death; unwinding through worker/write paths
+# risks leaving application-layer state half-mutated.
+[profile.release]
+panic = "abort"
 
 # Fast-build variant of release. Trades ~5-10% runtime perf for
 # ~3× faster cold build of the `red` binary. Use for local smoke
