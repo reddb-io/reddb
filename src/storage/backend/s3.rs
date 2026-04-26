@@ -29,7 +29,7 @@
 //! ));
 //! ```
 
-use super::{BackendError, RemoteBackend};
+use super::{BackendError, BackendObjectVersion, ConditionalDelete, ConditionalPut, RemoteBackend};
 use crate::crypto;
 use std::collections::BTreeMap;
 use std::fs;
@@ -125,12 +125,7 @@ impl S3Config {
     /// Storj, Wasabi, etc.). The operator passes the full endpoint
     /// URL; region defaults to `us-east-1` because most self-hosted
     /// stores ignore it.
-    pub fn generic(
-        endpoint: &str,
-        bucket: &str,
-        access_key: &str,
-        secret_key: &str,
-    ) -> Self {
+    pub fn generic(endpoint: &str, bucket: &str, access_key: &str, secret_key: &str) -> Self {
         Self {
             endpoint: endpoint.trim_end_matches('/').into(),
             bucket: bucket.into(),
@@ -204,6 +199,23 @@ impl S3Backend {
         canonical_querystring: &str,
         body: &[u8],
     ) -> Result<BTreeMap<String, String>, BackendError> {
+        self.build_signed_request_with_query_and_headers(
+            method,
+            object_key,
+            canonical_querystring,
+            body,
+            &[],
+        )
+    }
+
+    fn build_signed_request_with_query_and_headers(
+        &self,
+        method: &str,
+        object_key: &str,
+        canonical_querystring: &str,
+        body: &[u8],
+        extra_headers: &[(&str, &str)],
+    ) -> Result<BTreeMap<String, String>, BackendError> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| BackendError::Internal(format!("clock error: {e}")))?;
@@ -229,6 +241,9 @@ impl S3Backend {
         if method == "PUT" {
             headers.insert("content-type".into(), "application/octet-stream".into());
         }
+        for (name, value) in extra_headers {
+            headers.insert(name.to_ascii_lowercase(), value.trim().to_string());
+        }
 
         let auth = sign_s3v4(
             method,
@@ -244,6 +259,32 @@ impl S3Backend {
         headers.insert("Authorization".into(), auth);
 
         Ok(headers)
+    }
+
+    fn split_status(stdout: &[u8]) -> (u16, Vec<u8>) {
+        let s = String::from_utf8_lossy(stdout);
+        if let Some(idx) = s.rfind("HTTPSTATUS:") {
+            let body = stdout[..idx].to_vec();
+            let code = s[idx + "HTTPSTATUS:".len()..].trim().parse().unwrap_or(0);
+            (code, body)
+        } else {
+            (0, stdout.to_vec())
+        }
+    }
+
+    fn header_value(headers: &[u8], name: &str) -> Option<String> {
+        let needle = format!("{}:", name.to_ascii_lowercase());
+        String::from_utf8_lossy(headers)
+            .lines()
+            .filter_map(|line| {
+                let trimmed = line.trim();
+                let lower = trimmed.to_ascii_lowercase();
+                lower
+                    .starts_with(&needle)
+                    .then(|| trimmed[needle.len()..].trim().to_string())
+            })
+            .last()
+            .filter(|value| !value.is_empty())
     }
 
     /// Build the full URL for the given object key, honoring the
@@ -476,6 +517,168 @@ impl RemoteBackend for S3Backend {
                     .map(|k| k.to_string())
             })
             .collect())
+    }
+
+    fn supports_conditional_writes(&self) -> bool {
+        true
+    }
+
+    fn object_version(
+        &self,
+        remote_key: &str,
+    ) -> Result<Option<BackendObjectVersion>, BackendError> {
+        let object_key = self.full_key(remote_key);
+        let url = self.object_url(&object_key);
+        let headers = self.build_signed_request("HEAD", &object_key, &[])?;
+
+        let mut cmd = std::process::Command::new("curl");
+        cmd.arg("-sS")
+            .arg("-D")
+            .arg("-")
+            .arg("-o")
+            .arg(Self::null_device())
+            .arg("-w")
+            .arg("HTTPSTATUS:%{http_code}")
+            .arg("-X")
+            .arg("HEAD");
+        for (k, v) in &headers {
+            cmd.arg("-H").arg(format!("{k}: {v}"));
+        }
+        cmd.arg(&url);
+
+        let output = Self::exec_curl(&mut cmd)?;
+        if !output.status.success() {
+            return Err(BackendError::Transport(format!(
+                "s3 HEAD {url}: curl failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        let (code, body) = Self::split_status(&output.stdout);
+        match code {
+            200..=299 => Self::header_value(&body, "etag")
+                .map(BackendObjectVersion::new)
+                .map(Some)
+                .ok_or_else(|| BackendError::Internal(format!("s3 HEAD {url} missing ETag"))),
+            404 => Ok(None),
+            401 | 403 => Err(BackendError::Auth(format!(
+                "s3 HEAD {url} returned status {code}"
+            ))),
+            other => Err(BackendError::Transport(format!(
+                "s3 HEAD {url} returned status {other}"
+            ))),
+        }
+    }
+
+    fn upload_conditional(
+        &self,
+        local_path: &Path,
+        remote_key: &str,
+        condition: ConditionalPut,
+    ) -> Result<BackendObjectVersion, BackendError> {
+        let data = fs::read(local_path)
+            .map_err(|e| BackendError::Transport(format!("read local file: {e}")))?;
+        let object_key = self.full_key(remote_key);
+        let url = self.object_url(&object_key);
+        let condition_header = match &condition {
+            ConditionalPut::IfAbsent => ("if-none-match", "*"),
+            ConditionalPut::IfVersion(version) => ("if-match", version.token.as_str()),
+        };
+        let headers = self.build_signed_request_with_query_and_headers(
+            "PUT",
+            &object_key,
+            "",
+            &data,
+            &[condition_header],
+        )?;
+
+        let mut cmd = std::process::Command::new("curl");
+        cmd.arg("-sS")
+            .arg("-o")
+            .arg(Self::null_device())
+            .arg("-w")
+            .arg("HTTPSTATUS:%{http_code}")
+            .arg("-X")
+            .arg("PUT")
+            .arg("--data-binary")
+            .arg(format!("@{}", local_path.display()));
+        for (k, v) in &headers {
+            cmd.arg("-H").arg(format!("{k}: {v}"));
+        }
+        cmd.arg(&url);
+
+        let output = Self::exec_curl(&mut cmd)?;
+        if !output.status.success() {
+            return Err(BackendError::Transport(format!(
+                "s3 conditional PUT {url}: curl failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        let (code, _) = Self::split_status(&output.stdout);
+        match code {
+            200..=299 => self.object_version(remote_key)?.ok_or_else(|| {
+                BackendError::Internal(format!("s3 object '{}' missing after upload", remote_key))
+            }),
+            404 | 409 | 412 => Err(BackendError::PreconditionFailed(format!(
+                "s3 conditional PUT {url} returned status {code}"
+            ))),
+            401 | 403 => Err(BackendError::Auth(format!(
+                "s3 conditional PUT {url} returned status {code}"
+            ))),
+            other => Err(BackendError::Transport(format!(
+                "s3 conditional PUT {url} returned status {other}"
+            ))),
+        }
+    }
+
+    fn delete_conditional(
+        &self,
+        remote_key: &str,
+        condition: ConditionalDelete,
+    ) -> Result<(), BackendError> {
+        let object_key = self.full_key(remote_key);
+        let url = self.object_url(&object_key);
+        let ConditionalDelete::IfVersion(version) = condition;
+        let headers = self.build_signed_request_with_query_and_headers(
+            "DELETE",
+            &object_key,
+            "",
+            &[],
+            &[("if-match", version.token.as_str())],
+        )?;
+
+        let mut cmd = std::process::Command::new("curl");
+        cmd.arg("-sS")
+            .arg("-o")
+            .arg(Self::null_device())
+            .arg("-w")
+            .arg("HTTPSTATUS:%{http_code}")
+            .arg("-X")
+            .arg("DELETE");
+        for (k, v) in &headers {
+            cmd.arg("-H").arg(format!("{k}: {v}"));
+        }
+        cmd.arg(&url);
+
+        let output = Self::exec_curl(&mut cmd)?;
+        if !output.status.success() {
+            return Err(BackendError::Transport(format!(
+                "s3 conditional DELETE {url}: curl failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        let (code, _) = Self::split_status(&output.stdout);
+        match code {
+            200..=299 => Ok(()),
+            404 | 409 | 412 => Err(BackendError::PreconditionFailed(format!(
+                "s3 conditional DELETE {url} returned status {code}"
+            ))),
+            401 | 403 => Err(BackendError::Auth(format!(
+                "s3 conditional DELETE {url} returned status {code}"
+            ))),
+            other => Err(BackendError::Transport(format!(
+                "s3 conditional DELETE {url} returned status {other}"
+            ))),
+        }
     }
 }
 
@@ -766,6 +969,7 @@ mod tests {
         let auth = sign_s3v4(
             "GET",
             "test.txt",
+            "",
             &headers,
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             &config,
