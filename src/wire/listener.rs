@@ -33,11 +33,39 @@ pub async fn start_wire_listener_on(
         let rt = runtime.clone();
         let peer_str = peer.to_string();
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, rt).await {
+            if let Err(e) = dispatch_connection(stream, rt).await {
                 tracing::warn!(transport = "wire", peer = %peer_str, err = %e, "connection failed");
             }
         });
     }
+}
+
+/// Peek the first byte off a fresh TCP connection and dispatch
+/// either to the v2 RedWire session (when the byte is `0xFE`) or
+/// to the v1 handler (everything else). The byte is consumed off
+/// the wire either way — v1 paths won't see it because they
+/// receive the unaltered stream.
+///
+/// We deliberately use a tiny buffer + `peek` instead of a full
+/// 5-byte read because v1 frames may be only 5 bytes total
+/// (`MSG_BULK_STREAM_COMMIT` with empty body), so peeking to
+/// classify keeps the v1 codepath byte-exact.
+async fn dispatch_connection(
+    stream: tokio::net::TcpStream,
+    runtime: Arc<RedDBRuntime>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut peek = [0u8; 1];
+    let n = stream.peek(&mut peek).await?;
+    if n == 1 && peek[0] == crate::wire::redwire::REDWIRE_V2_MAGIC {
+        // v2 — consume the magic byte, then hand off.
+        let mut stream = stream;
+        let mut consume = [0u8; 1];
+        tokio::io::AsyncReadExt::read_exact(&mut stream, &mut consume).await?;
+        return crate::wire::redwire::session::handle_session(stream, runtime, None)
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>);
+    }
+    handle_connection(stream, runtime).await
 }
 
 /// Start the wire protocol listener on a Unix domain socket (Phase 1.7 PG parity).

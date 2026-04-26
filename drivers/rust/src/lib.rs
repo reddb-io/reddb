@@ -42,6 +42,9 @@ pub mod embedded;
 #[cfg(feature = "grpc")]
 pub mod grpc;
 
+#[cfg(feature = "redwire")]
+pub mod redwire;
+
 pub use error::{ClientError, ErrorCode, Result};
 pub use types::{InsertResult, JsonValue, QueryResult, ValueOut};
 

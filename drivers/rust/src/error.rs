@@ -26,6 +26,14 @@ pub enum ErrorCode {
     ClientClosed,
     /// Catch-all for unexpected engine failures.
     Internal,
+    /// TCP / TLS / DNS layer reported a failure (RedWire client).
+    Network,
+    /// Wire-level decode failure or unexpected message kind.
+    Protocol,
+    /// Server refused the credentials the client supplied.
+    AuthRefused,
+    /// Engine returned an error string in response to a Query frame.
+    Engine,
 }
 
 impl ErrorCode {
@@ -38,6 +46,10 @@ impl ErrorCode {
             ErrorCode::FeatureDisabled => "FEATURE_DISABLED",
             ErrorCode::ClientClosed => "CLIENT_CLOSED",
             ErrorCode::Internal => "INTERNAL_ERROR",
+            ErrorCode::Network => "NETWORK_ERROR",
+            ErrorCode::Protocol => "PROTOCOL_ERROR",
+            ErrorCode::AuthRefused => "AUTH_REFUSED",
+            ErrorCode::Engine => "ENGINE_ERROR",
         }
     }
 }

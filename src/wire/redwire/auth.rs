@@ -118,19 +118,31 @@ pub fn build_hello_ack(
 }
 
 /// Server's policy for picking an auth method given the client's
-/// preferences. Strongest-first ordering. v2.1 supports bearer
-/// and anonymous; future versions will append scram-sha-256, mtls,
-/// oauth-jwt to the front.
+/// preferences. Strongest-first ordering — but when the server
+/// has no auth backend configured (`server_anon_ok = true`),
+/// `anonymous` wins over `bearer` because bearer validation
+/// would fail anyway. v2.1 supports bearer + anonymous; future
+/// versions prepend scram-sha-256, mtls, oauth-jwt to the
+/// priority list.
 pub fn pick_auth_method(client_methods: &[String], server_anon_ok: bool) -> Option<&'static str> {
-    let priority = ["bearer", "anonymous"];
+    let priority: &[&'static str] = if server_anon_ok {
+        // No auth store — bearer would fail validation. Prefer
+        // anonymous so the handshake succeeds when the client
+        // offers it.
+        &["anonymous", "bearer"]
+    } else {
+        // Auth store enabled — bearer is the only path that
+        // succeeds. anonymous is filtered out below.
+        &["bearer", "anonymous"]
+    };
     for method in priority {
-        if !client_methods.iter().any(|m| m == method) {
+        if !client_methods.iter().any(|m| m == *method) {
             continue;
         }
-        if method == "anonymous" && !server_anon_ok {
+        if *method == "anonymous" && !server_anon_ok {
             continue;
         }
-        return Some(method);
+        return Some(*method);
     }
     None
 }
@@ -243,9 +255,18 @@ mod tests {
     }
 
     #[test]
-    fn pick_auth_picks_strongest_first() {
+    fn pick_auth_prefers_anonymous_when_server_has_no_auth_store() {
+        // Without an auth store, bearer validation can't succeed.
+        // Picker should prefer anonymous so the handshake works.
         let pref = vec!["anonymous".to_string(), "bearer".to_string()];
-        assert_eq!(pick_auth_method(&pref, true), Some("bearer"));
+        assert_eq!(pick_auth_method(&pref, true), Some("anonymous"));
+    }
+
+    #[test]
+    fn pick_auth_picks_bearer_when_anonymous_blocked() {
+        // Server has auth enabled (no anonymous) — bearer wins.
+        let pref = vec!["anonymous".to_string(), "bearer".to_string()];
+        assert_eq!(pick_auth_method(&pref, false), Some("bearer"));
     }
 
     #[test]

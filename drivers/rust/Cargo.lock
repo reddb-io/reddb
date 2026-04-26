@@ -1403,6 +1403,7 @@ name = "reddb-client"
 version = "0.2.4"
 dependencies = [
  "reddb",
+ "serde_json",
  "tokio",
  "url",
 ]

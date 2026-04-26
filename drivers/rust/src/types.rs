@@ -152,6 +152,32 @@ pub struct QueryResult {
     pub rows: Vec<Vec<(String, ValueOut)>>,
 }
 
+impl QueryResult {
+    /// Build a `QueryResult` from the JSON envelope the v2 server
+    /// emits in a `Result` frame. Today the envelope only carries
+    /// `{ statement, affected }` — column / row streaming is the
+    /// follow-up that introduces `RowDescription` + `DataRow`
+    /// frames.
+    pub fn from_envelope(value: serde_json::Value) -> Self {
+        let obj = value.as_object().cloned().unwrap_or_default();
+        let statement = obj
+            .get("statement")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let affected = obj
+            .get("affected")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        Self {
+            statement,
+            affected,
+            columns: Vec::new(),
+            rows: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct InsertResult {
     pub affected: u64,

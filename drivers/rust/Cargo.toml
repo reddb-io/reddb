@@ -21,13 +21,20 @@ default = ["embedded"]
 
 embedded = ["dep:reddb"]
 grpc = ["dep:reddb", "dep:tokio"]
+# RedWire v2 native TCP client. No engine dep — speaks the wire
+# protocol directly. See ADR 0001.
+redwire = ["dep:tokio", "dep:serde_json"]
 
 [dependencies]
 # Engine — only compiled in when the `embedded` or `grpc` feature is on.
 reddb = { version = "0.2", path = "../..", optional = true }
 
 # Only needed by the grpc backend (block_on inside the sync methods).
-tokio = { version = "1", features = ["rt", "rt-multi-thread"], optional = true }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util"], optional = true }
+
+# RedWire v2 handshake payloads are JSON-encoded today. Pulled in
+# only by the `redwire` feature.
+serde_json = { version = "1", optional = true }
 
 # Connection-string parsing.
 url = "2"
