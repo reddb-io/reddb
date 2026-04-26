@@ -72,6 +72,13 @@ backend-d1 = []
 # but the OTLP client integration lands when the operator confirms
 # their collector and the dep tree review passes.
 otel = []
+# Migration flag for the OperationContext-through-ports refactor.
+# When enabled, every Runtime*Port trait method takes
+# `&OperationContext` as the first non-self argument; handler files
+# build the context once at request entry and pass it through. Off
+# by default until all 9 ports + 14 handlers are migrated; the
+# implicit() shim keeps unmigrated callers compiling.
+ctx-ports = []
 
 [dev-dependencies]
 # `default-features = false` drops criterion's optional `rayon` dep
@@ -79,6 +86,9 @@ otel = []
 # the `cast` crate. We keep `html_reports` for local plots.
 criterion = { version = "0.8", default-features = false, features = ["html_reports", "plotters", "cargo_bench_support"] }
 pprof = { version = "0.15", features = ["flamegraph"] }
+# Used by `tests/compile_fail.rs` to assert that misuse of
+# `LeaseStore::new` (passing a non-CAS backend) fails to compile.
+trybuild = "1"
 
 [build-dependencies]
 tonic-build = "0.14"
