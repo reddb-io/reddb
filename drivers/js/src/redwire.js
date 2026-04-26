@@ -63,6 +63,41 @@ const KIND_NAME = Object.fromEntries(
   Object.entries(MessageKind).map(([k, v]) => [v, k]),
 )
 
+export const Flags = Object.freeze({
+  COMPRESSED: 0b00000001,
+  MORE_FRAMES: 0b00000010,
+})
+
+/** zstd level for outbound compressed frames. Override via env. */
+const ZSTD_LEVEL = (() => {
+  const env = typeof process !== 'undefined' ? process.env?.RED_REDWIRE_ZSTD_LEVEL : null
+  const n = env ? Number(env) : NaN
+  return Number.isFinite(n) && n >= 1 && n <= 22 ? n : 1
+})()
+
+/**
+ * Compress / decompress shim. Tries Node 22+'s native zstd
+ * bindings first; if unavailable returns null and the codec
+ * falls back to plaintext (operators still see the
+ * COMPRESSED flag bit when peers offer it, but encode is a
+ * no-op until the runtime ships native zstd).
+ */
+let _zstdMod = undefined
+async function zstdMod() {
+  if (_zstdMod !== undefined) return _zstdMod
+  try {
+    const zlib = await import('node:zlib')
+    if (typeof zlib.zstdCompressSync === 'function') {
+      _zstdMod = zlib
+      return _zstdMod
+    }
+  } catch {
+    // node:zlib missing — Deno (no-zstd) or restricted runtime.
+  }
+  _zstdMod = null
+  return null
+}
+
 /**
  * Open a v2 connection.
  *
@@ -88,6 +123,9 @@ export async function connectRedwire(opts) {
     throw new TypeError('connectRedwire: port required (1-65535)')
   }
   const auth = opts.auth ?? { kind: 'anonymous' }
+  // Resolve the zstd shim once per process — this populates the
+  // shared `_zstdMod` cache so encode/decode hot paths are sync.
+  await zstdMod()
 
   const socket = opts.tls
     ? await openTlsSocket(host, port, opts.tls)
@@ -330,7 +368,25 @@ function encodeFrame(kind, correlationId, payload, flags = 0, streamId = 0) {
   if (!(payload instanceof Uint8Array)) {
     payload = new Uint8Array(payload)
   }
-  const length = FRAME_HEADER_SIZE + payload.length
+  let onWire = payload
+  let outFlags = flags & KNOWN_FLAGS
+  // We compress synchronously when the flag is set AND the
+  // runtime ships native zstd. Async flag-flip happens at
+  // session level (see RedWireClient construction); per-frame
+  // call here is a fast Buffer roundtrip.
+  if (outFlags & Flags.COMPRESSED && _zstdMod && typeof _zstdMod.zstdCompressSync === 'function') {
+    try {
+      const compressed = _zstdMod.zstdCompressSync(payload, {
+        params: { [_zstdMod.constants?.ZSTD_c_compressionLevel ?? 100]: ZSTD_LEVEL },
+      })
+      onWire = compressed instanceof Uint8Array ? compressed : new Uint8Array(compressed)
+    } catch {
+      // Fallback: ship plaintext, drop the flag so the peer
+      // doesn't try to decompress.
+      outFlags &= ~Flags.COMPRESSED
+    }
+  }
+  const length = FRAME_HEADER_SIZE + onWire.length
   if (length > MAX_FRAME_SIZE) {
     throw new RedDBError('FRAME_TOO_LARGE', `frame ${length} > ${MAX_FRAME_SIZE}`)
   }
@@ -338,10 +394,10 @@ function encodeFrame(kind, correlationId, payload, flags = 0, streamId = 0) {
   const view = new DataView(buf.buffer)
   view.setUint32(0, length, true)
   buf[4] = kind
-  buf[5] = flags & KNOWN_FLAGS
+  buf[5] = outFlags
   view.setUint16(6, streamId, true)
   view.setBigUint64(8, BigInt(correlationId), true)
-  buf.set(payload, FRAME_HEADER_SIZE)
+  buf.set(onWire, FRAME_HEADER_SIZE)
   return buf
 }
 
@@ -365,7 +421,21 @@ function decodeFrame(buf) {
   }
   const streamId = view.getUint16(6, true)
   const correlationId = view.getBigUint64(8, true)
-  const payload = buf.slice(FRAME_HEADER_SIZE, length)
+  let payload = buf.slice(FRAME_HEADER_SIZE, length)
+  if (flags & Flags.COMPRESSED) {
+    if (!_zstdMod || typeof _zstdMod.zstdDecompressSync !== 'function') {
+      throw new RedDBError(
+        'COMPRESSED_BUT_NO_ZSTD',
+        'incoming frame has COMPRESSED flag but runtime has no zstd support — upgrade Node >= 22',
+      )
+    }
+    try {
+      const plain = _zstdMod.zstdDecompressSync(payload)
+      payload = plain instanceof Uint8Array ? plain : new Uint8Array(plain)
+    } catch (err) {
+      throw new RedDBError('FRAME_DECOMPRESS_FAILED', err.message)
+    }
+  }
   return { kind, flags, streamId, correlationId, payload, consumed: length }
 }
 

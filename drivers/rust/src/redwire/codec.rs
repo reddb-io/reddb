@@ -29,6 +29,24 @@ impl std::fmt::Display for FrameError {
 impl std::error::Error for FrameError {}
 
 pub fn encode_frame(frame: &Frame) -> Vec<u8> {
+    if frame.flags.contains(Flags::COMPRESSED) {
+        let level: i32 = std::env::var("RED_REDWIRE_ZSTD_LEVEL")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1);
+        if let Ok(compressed) = zstd::stream::encode_all(frame.payload.as_slice(), level) {
+            let total = (FRAME_HEADER_SIZE + compressed.len()) as u32;
+            let mut buf = Vec::with_capacity(total as usize);
+            buf.extend_from_slice(&total.to_le_bytes());
+            buf.push(frame.kind as u8);
+            buf.push(frame.flags.bits());
+            buf.extend_from_slice(&frame.stream_id.to_le_bytes());
+            buf.extend_from_slice(&frame.correlation_id.to_le_bytes());
+            buf.extend_from_slice(&compressed);
+            return buf;
+        }
+        // Compress failed (extremely rare at level 1); ship plain.
+    }
     let total = frame.encoded_len() as usize;
     let mut buf = Vec::with_capacity(total);
     buf.extend_from_slice(&frame.encoded_len().to_le_bytes());
@@ -66,7 +84,20 @@ pub fn decode_frame(bytes: &[u8]) -> Result<(Frame, usize), FrameError> {
         bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
     ]);
     let payload_len = (length as usize) - FRAME_HEADER_SIZE;
-    let payload = bytes[FRAME_HEADER_SIZE..FRAME_HEADER_SIZE + payload_len].to_vec();
+    let on_wire = &bytes[FRAME_HEADER_SIZE..FRAME_HEADER_SIZE + payload_len];
+    let payload = if flags.contains(Flags::COMPRESSED) {
+        match zstd::stream::decode_all(on_wire) {
+            Ok(plain) => plain,
+            Err(_) => {
+                return Err(FrameError::PayloadTruncated {
+                    expected: payload_len as u32,
+                    available: 0,
+                });
+            }
+        }
+    } else {
+        on_wire.to_vec()
+    };
     Ok((
         Frame {
             kind,

@@ -31,6 +31,13 @@ impl std::fmt::Display for FrameError {
 impl std::error::Error for FrameError {}
 
 pub fn encode_frame(frame: &Frame) -> Vec<u8> {
+    // The frame's `payload` is always the plaintext form. If the
+    // COMPRESSED flag is set we compress on the wire and rewrite
+    // the length header to match the compressed size — the
+    // receiver inflates before delivering to the dispatch loop.
+    if frame.flags.contains(Flags::COMPRESSED) {
+        return encode_compressed(frame);
+    }
     let total = frame.encoded_len() as usize;
     let mut buf = Vec::with_capacity(total);
     buf.extend_from_slice(&frame.encoded_len().to_le_bytes());
@@ -39,6 +46,37 @@ pub fn encode_frame(frame: &Frame) -> Vec<u8> {
     buf.extend_from_slice(&frame.stream_id.to_le_bytes());
     buf.extend_from_slice(&frame.correlation_id.to_le_bytes());
     buf.extend_from_slice(&frame.payload);
+    buf
+}
+
+fn encode_compressed(frame: &Frame) -> Vec<u8> {
+    // zstd level 1 — keeps CPU low while still cutting JSON +
+    // BulkInsertBinary by 60-80%. Operators that want max ratio
+    // can flip to level 3+ via `RED_REDWIRE_ZSTD_LEVEL` env.
+    let level = std::env::var("RED_REDWIRE_ZSTD_LEVEL")
+        .ok()
+        .and_then(|s| s.parse::<i32>().ok())
+        .unwrap_or(1);
+    let compressed = match zstd::stream::encode_all(frame.payload.as_slice(), level) {
+        Ok(buf) => buf,
+        Err(_) => {
+            // Fallback: drop the COMPRESSED flag and ship plaintext.
+            // Compression failures are rare (level 1 effectively
+            // never fails on bytes), but the fallback is safer
+            // than panicking inside the framing layer.
+            let mut clone = frame.clone();
+            clone.flags = Flags::from_bits(clone.flags.bits() & !Flags::COMPRESSED.bits());
+            return encode_frame(&clone);
+        }
+    };
+    let total = (FRAME_HEADER_SIZE + compressed.len()) as u32;
+    let mut buf = Vec::with_capacity(total as usize);
+    buf.extend_from_slice(&total.to_le_bytes());
+    buf.push(frame.kind as u8);
+    buf.push(frame.flags.bits());
+    buf.extend_from_slice(&frame.stream_id.to_le_bytes());
+    buf.extend_from_slice(&frame.correlation_id.to_le_bytes());
+    buf.extend_from_slice(&compressed);
     buf
 }
 
@@ -68,10 +106,31 @@ pub fn decode_frame(bytes: &[u8]) -> Result<(Frame, usize), FrameError> {
         bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
     ]);
     let payload_len = (length as usize) - FRAME_HEADER_SIZE;
-    let payload = bytes[FRAME_HEADER_SIZE..FRAME_HEADER_SIZE + payload_len].to_vec();
+    let on_wire = &bytes[FRAME_HEADER_SIZE..FRAME_HEADER_SIZE + payload_len];
+    let payload = if flags.contains(Flags::COMPRESSED) {
+        // Decompress on read so the rest of the dispatch loop
+        // sees plaintext bytes regardless of how they arrived.
+        match zstd::stream::decode_all(on_wire) {
+            Ok(plain) => plain,
+            Err(e) => {
+                return Err(FrameError::PayloadTruncated {
+                    // Reuse PayloadTruncated for "decompression
+                    // failed" rather than introduce a new variant
+                    // — the wire-layer outcome is the same: the
+                    // body is unparseable, drop the connection.
+                    expected: payload_len as u32,
+                    available: e.to_string().len() as u32,
+                });
+            }
+        }
+    } else {
+        on_wire.to_vec()
+    };
     Ok((
         Frame {
             kind,
+            // The flag stays on the decoded frame so dispatch can
+            // see it was compressed if it cares (audit, metrics).
             flags,
             stream_id,
             correlation_id,
@@ -156,5 +215,34 @@ mod tests {
         let (got2, _n2) = decode_frame(&buf[n1..]).unwrap();
         assert_eq!(got1, f1);
         assert_eq!(got2, f2);
+    }
+
+    #[test]
+    fn compressed_round_trip_recovers_plaintext() {
+        // A compressible payload — a kilobyte of repeating text.
+        let payload = b"abcabcabcabc".repeat(100);
+        let frame = Frame::new(MessageKind::Result, 7, payload.clone())
+            .with_flags(Flags::COMPRESSED);
+        let bytes = encode_frame(&frame);
+        // Wire form should be smaller than the plaintext frame.
+        assert!(
+            bytes.len() < FRAME_HEADER_SIZE + payload.len(),
+            "compressed frame ({}) must be smaller than plaintext payload ({})",
+            bytes.len(),
+            payload.len(),
+        );
+        let (decoded, _) = decode_frame(&bytes).expect("decode compressed");
+        assert_eq!(decoded.payload, payload);
+        assert!(decoded.flags.contains(Flags::COMPRESSED));
+    }
+
+    #[test]
+    fn uncompressed_frame_decodes_unchanged_when_flag_unset() {
+        let payload = b"hello world".to_vec();
+        let frame = Frame::new(MessageKind::Result, 1, payload.clone());
+        let bytes = encode_frame(&frame);
+        let (decoded, _) = decode_frame(&bytes).unwrap();
+        assert_eq!(decoded.payload, payload);
+        assert!(!decoded.flags.contains(Flags::COMPRESSED));
     }
 }

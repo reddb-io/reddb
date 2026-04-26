@@ -23,7 +23,7 @@ embedded = ["dep:reddb"]
 grpc = ["dep:reddb", "dep:tokio"]
 # RedWire v2 native TCP client. No engine dep — speaks the wire
 # protocol directly. See ADR 0001.
-redwire = ["dep:tokio", "dep:serde_json"]
+redwire = ["dep:tokio", "dep:serde_json", "dep:zstd"]
 # RedWire v2 over TLS / mTLS. Reuses the redwire handshake; flips
 # the transport to tokio-rustls.
 redwire-tls = [
@@ -43,6 +43,10 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util"],
 # RedWire v2 handshake payloads are JSON-encoded today. Pulled in
 # only by the `redwire` feature.
 serde_json = { version = "1", optional = true }
+
+# Per-frame compression (Flags::COMPRESSED). Pulled in only by
+# the `redwire` feature so embedded-only callers don't pay it.
+zstd = { version = "0.13", default-features = false, optional = true }
 
 # TLS / mTLS for the RedWire client. Pulled in only by the
 # `redwire-tls` feature.

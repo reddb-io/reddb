@@ -11,7 +11,7 @@
 //!   - [`RedWireClient::ping`]: keepalive
 //!   - [`RedWireClient::close`]: clean shutdown via Bye
 
-mod codec;
+pub mod codec;
 mod frame;
 mod handshake;
 #[cfg(feature = "redwire-tls")]

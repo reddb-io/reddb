@@ -12,7 +12,7 @@ use std::sync::Arc;
 use reddb::api::RedDBOptions;
 use reddb::wire::redwire::{start_redwire_listener, RedWireConfig};
 use reddb::RedDBRuntime;
-use reddb_client::redwire::{Auth, BinaryValue, ConnectOptions, RedWireClient};
+use reddb_client::redwire::{Auth, BinaryValue, ConnectOptions, Flags, Frame, MessageKind, RedWireClient};
 use tokio::net::TcpListener;
 
 async fn start_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
@@ -129,6 +129,20 @@ async fn binary_bulk_insert_fast_path() {
     assert_eq!(affected, 3, "binary path inserted all rows");
 
     client.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn frame_round_trip_with_zstd_compression() {
+    use reddb_client::redwire::codec::{decode_frame, encode_frame};
+    // Highly compressible payload — zstd level 1 should cut this
+    // by ~80% even on a tiny dataset.
+    let payload = b"abcabc".repeat(500);
+    let frame = Frame::new(MessageKind::Result, 1, payload.clone()).with_flags(Flags::COMPRESSED);
+    let bytes = encode_frame(&frame);
+    assert!(bytes.len() < 16 + payload.len());
+    let (decoded, _) = decode_frame(&bytes).unwrap();
+    assert_eq!(decoded.payload, payload);
+    assert!(decoded.flags.contains(Flags::COMPRESSED));
 }
 
 #[tokio::test]

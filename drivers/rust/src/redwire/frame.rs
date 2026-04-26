@@ -29,6 +29,16 @@ impl Frame {
     pub fn encoded_len(&self) -> u32 {
         (FRAME_HEADER_SIZE + self.payload.len()) as u32
     }
+
+    pub fn with_flags(mut self, flags: Flags) -> Self {
+        self.flags = flags;
+        self
+    }
+
+    pub fn with_stream(mut self, stream_id: u16) -> Self {
+        self.stream_id = stream_id;
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,5 +111,20 @@ impl Flags {
 
     pub const fn from_bits(bits: u8) -> Self {
         Self(bits)
+    }
+
+    pub const fn contains(self, other: Self) -> bool {
+        (self.0 & other.0) == other.0
+    }
+
+    pub const fn insert(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+
+impl std::ops::BitOr for Flags {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        self.insert(rhs)
     }
 }

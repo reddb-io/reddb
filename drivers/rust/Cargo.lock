@@ -1409,6 +1409,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "url",
+ "zstd",
 ]
 
 [[package]]
