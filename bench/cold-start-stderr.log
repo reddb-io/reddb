@@ -1,0 +1,20 @@
+[cold-start-bench] scenario=warm size_mb=100 data_dir=/tmp/reddb-cold-start-data-1280653-1777167400151949933 remote_dir=/tmp/reddb-cold-start-remote-1280653-1777167400151964960
+[cold-start-bench] populating /tmp/reddb-cold-start-data-1280653-1777167400151949933 to ~100 MB
+[cold-start-bench] data_dir = 184 MB; remote_dir = 0 MB
+[cold-start-bench] warmup 0 open=21124ms total=28ms
+[cold-start-bench] warmup 1 open=20510ms total=30ms
+[cold-start-bench] iter 0 open=20623ms restore=20592ms wal_replay=20592ms index_warmup=0ms total=31ms
+[cold-start-bench] iter 1 open=20897ms restore=20872ms wal_replay=20872ms index_warmup=0ms total=26ms
+[cold-start-bench] iter 2 open=20380ms restore=20346ms wal_replay=20346ms index_warmup=0ms total=34ms
+[cold-start-bench] iter 3 open=20380ms restore=20348ms wal_replay=20348ms index_warmup=0ms total=32ms
+[cold-start-bench] iter 4 open=20620ms restore=20590ms wal_replay=20590ms index_warmup=0ms total=30ms
+[cold-start-bench] iter 5 open=20809ms restore=20779ms wal_replay=20779ms index_warmup=0ms total=30ms
+[cold-start-bench] iter 6 open=21149ms restore=21080ms wal_replay=21080ms index_warmup=0ms total=68ms
+[cold-start-bench] iter 7 open=20556ms restore=20522ms wal_replay=20522ms index_warmup=0ms total=34ms
+[cold-start-bench] iter 8 open=20317ms restore=20251ms wal_replay=20251ms index_warmup=0ms total=67ms
+[cold-start-bench] iter 9 open=20645ms restore=20617ms wal_replay=20617ms index_warmup=0ms total=27ms
+[cold-start-bench] scenario=warm size_mb=1024 data_dir=/tmp/reddb-cold-start-data-1281173-1777167694798142248 remote_dir=/tmp/reddb-cold-start-remote-1281173-1777167694798158741
+[cold-start-bench] populating /tmp/reddb-cold-start-data-1281173-1777167694798142248 to ~1024 MB
+[cold-start-bench] data_dir = 1884 MB; remote_dir = 0 MB
+[cold-start-bench] scenario=warm size_mb=1024 data_dir=/tmp/reddb-cold-start-data-1284169-1777168066880574673 remote_dir=/tmp/reddb-cold-start-remote-1284169-1777168066880591546
+[cold-start-bench] populating /tmp/reddb-cold-start-data-1284169-1777168066880574673 to ~1024 MB
