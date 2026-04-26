@@ -1,0 +1,1 @@
+{"scenario":"warm","size_mb":100,"iters":10,"data_bytes":193180838,"remote_bytes":0,"open_ms_p50":20623,"open_ms_p95":21149,"open_ms_p99":21149,"total_ms_p50":32,"total_ms_p95":68,"total_ms_p99":68,"restore_ms_p50":20592,"restore_ms_p95":21080}
