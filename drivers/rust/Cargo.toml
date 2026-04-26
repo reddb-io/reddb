@@ -24,6 +24,14 @@ grpc = ["dep:reddb", "dep:tokio"]
 # RedWire v2 native TCP client. No engine dep — speaks the wire
 # protocol directly. See ADR 0001.
 redwire = ["dep:tokio", "dep:serde_json"]
+# RedWire v2 over TLS / mTLS. Reuses the redwire handshake; flips
+# the transport to tokio-rustls.
+redwire-tls = [
+    "redwire",
+    "dep:tokio-rustls",
+    "dep:rustls",
+    "dep:rustls-pemfile",
+]
 
 [dependencies]
 # Engine — only compiled in when the `embedded` or `grpc` feature is on.
@@ -35,6 +43,12 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util"],
 # RedWire v2 handshake payloads are JSON-encoded today. Pulled in
 # only by the `redwire` feature.
 serde_json = { version = "1", optional = true }
+
+# TLS / mTLS for the RedWire client. Pulled in only by the
+# `redwire-tls` feature.
+tokio-rustls = { version = "0.26", default-features = false, features = ["tls12", "ring"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"], optional = true }
+rustls-pemfile = { version = "2", optional = true }
 
 # Connection-string parsing.
 url = "2"

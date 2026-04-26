@@ -1,7 +1,6 @@
 //! Client-side handshake — Hello → HelloAck → AuthResponse → AuthOk.
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::error::{ClientError, ErrorCode, Result};
 
@@ -18,7 +17,10 @@ pub(super) enum HandshakeOutcome {
     Refused(String),
 }
 
-pub(super) async fn run(stream: &mut TcpStream, opts: &ConnectOptions) -> Result<HandshakeOutcome> {
+pub(super) async fn run<S>(stream: &mut S, opts: &ConnectOptions) -> Result<HandshakeOutcome>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
     // 1. Send Hello.
     let methods: Vec<&str> = match &opts.auth {
         Auth::Bearer(_) => vec!["bearer"],
@@ -138,7 +140,10 @@ pub(super) async fn run(stream: &mut TcpStream, opts: &ConnectOptions) -> Result
     }
 }
 
-async fn read_frame(stream: &mut TcpStream) -> Result<Frame> {
+async fn read_frame<S>(stream: &mut S) -> Result<Frame>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
     let mut header = [0u8; FRAME_HEADER_SIZE];
     stream.read_exact(&mut header).await.map_err(io_err)?;
     let length = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;

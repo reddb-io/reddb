@@ -14,14 +14,27 @@
 mod codec;
 mod frame;
 mod handshake;
+#[cfg(feature = "redwire-tls")]
+mod tls;
 
 pub use codec::FrameError;
 pub use frame::{Flags, Frame, MessageKind};
+#[cfg(feature = "redwire-tls")]
+pub use tls::TlsConfig;
 
 use std::io;
+use std::pin::Pin;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
+
+/// Boxed read+write trait object. Lets `RedWireClient` carry
+/// either a plain `TcpStream` or a `tokio_rustls::TlsStream`
+/// without leaking the type up.
+pub(crate) type Stream = Pin<Box<dyn AsyncReadWrite + Send + Unpin>>;
+
+pub(crate) trait AsyncReadWrite: AsyncRead + AsyncWrite {}
+impl<T: AsyncRead + AsyncWrite + ?Sized> AsyncReadWrite for T {}
 
 use crate::error::{ClientError, ErrorCode, Result};
 use crate::types::QueryResult;
@@ -91,12 +104,39 @@ impl BinaryValue {
 }
 
 /// Configuration for `RedWireClient::connect`.
-#[derive(Debug, Clone)]
 pub struct ConnectOptions {
     pub host: String,
     pub port: u16,
     pub auth: Auth,
     pub client_name: Option<String>,
+    #[cfg(feature = "redwire-tls")]
+    pub tls: Option<TlsConfig>,
+}
+
+impl std::fmt::Debug for ConnectOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut s = f.debug_struct("ConnectOptions");
+        s.field("host", &self.host)
+            .field("port", &self.port)
+            .field("auth", &self.auth)
+            .field("client_name", &self.client_name);
+        #[cfg(feature = "redwire-tls")]
+        s.field("tls", &self.tls.is_some());
+        s.finish()
+    }
+}
+
+impl Clone for ConnectOptions {
+    fn clone(&self) -> Self {
+        Self {
+            host: self.host.clone(),
+            port: self.port,
+            auth: self.auth.clone(),
+            client_name: self.client_name.clone(),
+            #[cfg(feature = "redwire-tls")]
+            tls: self.tls.clone(),
+        }
+    }
 }
 
 impl ConnectOptions {
@@ -106,6 +146,8 @@ impl ConnectOptions {
             port,
             auth: Auth::Anonymous,
             client_name: Some(format!("reddb-rs/{}", env!("CARGO_PKG_VERSION"))),
+            #[cfg(feature = "redwire-tls")]
+            tls: None,
         }
     }
 
@@ -118,11 +160,17 @@ impl ConnectOptions {
         self.client_name = Some(name.into());
         self
     }
+
+    /// Wrap the TCP socket in TLS using the supplied config.
+    #[cfg(feature = "redwire-tls")]
+    pub fn with_tls(mut self, tls: TlsConfig) -> Self {
+        self.tls = Some(tls);
+        self
+    }
 }
 
-#[derive(Debug)]
 pub struct RedWireClient {
-    stream: TcpStream,
+    stream: Stream,
     next_correlation_id: u64,
     #[allow(dead_code)]
     session_id: String,
@@ -130,12 +178,31 @@ pub struct RedWireClient {
     server_features: u32,
 }
 
+impl std::fmt::Debug for RedWireClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RedWireClient")
+            .field("session_id", &self.session_id)
+            .field("server_features", &self.server_features)
+            .finish()
+    }
+}
+
 impl RedWireClient {
     pub async fn connect(opts: ConnectOptions) -> Result<Self> {
         let addr = format!("{}:{}", opts.host, opts.port);
-        let mut stream = TcpStream::connect(&addr)
+        let tcp = TcpStream::connect(&addr)
             .await
             .map_err(|e| ClientError::new(ErrorCode::Network, format!("{addr}: {e}")))?;
+
+        let mut stream: Stream = match () {
+            #[cfg(feature = "redwire-tls")]
+            _ if opts.tls.is_some() => {
+                let tls_cfg = opts.tls.as_ref().unwrap();
+                let tls_stream = tls::wrap_client(tcp, &opts.host, tls_cfg).await?;
+                Box::pin(tls_stream)
+            }
+            _ => Box::pin(tcp),
+        };
 
         // Discriminator + minor-version byte.
         stream

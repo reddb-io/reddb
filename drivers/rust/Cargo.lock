@@ -1403,8 +1403,11 @@ name = "reddb-client"
 version = "0.2.4"
 dependencies = [
  "reddb",
+ "rustls",
+ "rustls-pemfile",
  "serde_json",
  "tokio",
+ "tokio-rustls",
  "url",
 ]
 
