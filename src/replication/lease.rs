@@ -30,25 +30,21 @@
 //!   refreshes it periodically; a contender treats anything past it as
 //!   poachable.
 //!
-//! ## Atomicity caveat
+//! ## Atomicity contract
 //!
-//! Without backend-side compare-and-swap (S3 conditional PUT, R2
-//! `If-Match`, Turso row-level transactions), two contenders racing
-//! to acquire an expired lease can both upload a new lease object;
-//! last-writer-wins. After upload, the acquirer re-downloads and
-//! verifies that the lease object matches what it wrote — if not, it
-//! lost the race and reports `LeaseError::LostRace`. That is
-//! best-effort cooperative; backends with native CAS get an
-//! authoritative version of the same protocol via `try_acquire_cas`
-//! once they grow the trait method.
+//! Lease mutation requires backend-side compare-and-swap. Backends
+//! advertise this through `RemoteBackend::supports_conditional_writes`
+//! and implement object version tokens + conditional writes/deletes.
+//! A backend that cannot enforce `IfAbsent` / `IfVersion` fails
+//! closed before the instance is allowed to write. This keeps
+//! serverless fencing out of "last writer wins" territory.
 
-use fs2::FileExt;
-use std::fs::OpenOptions;
-use std::path::Path;
 use std::sync::Arc;
 
 use crate::serde_json::{self, Value as JsonValue};
-use crate::storage::backend::{BackendError, RemoteBackend};
+use crate::storage::backend::{
+    BackendError, BackendObjectVersion, ConditionalDelete, ConditionalPut, RemoteBackend,
+};
 use serde_json::Map;
 
 /// One snapshot of who owns the writer lease for a database key.
@@ -166,10 +162,7 @@ impl std::fmt::Display for LeaseError {
             } => write!(
                 f,
                 "lost lease acquire race: '{}' tried to take '{}' but '{}' (gen {}) won",
-                attempted_holder,
-                observed.database_key,
-                observed.holder_id,
-                observed.generation
+                attempted_holder, observed.database_key, observed.holder_id, observed.generation
             ),
             Self::InvalidFormat(msg) => write!(f, "invalid lease format: {msg}"),
             Self::Stale {
@@ -200,14 +193,18 @@ impl From<BackendError> for LeaseError {
     }
 }
 
+struct VersionedLease {
+    lease: WriterLease,
+    version: BackendObjectVersion,
+}
+
 /// Wraps a `RemoteBackend` with lease primitives. The lease object is
 /// stored under a deterministic key derived from `database_key`; the
 /// store reads/writes that one key.
 ///
-/// Implementation deliberately stays at the application layer (read →
-/// upload → re-read verify) so it works against every existing
-/// backend impl. Backends that grow native CAS can override
-/// `try_acquire` later by adding a new RemoteBackend trait method.
+/// Mutating operations use backend-native conditional writes. A
+/// backend that cannot expose object versions is rejected by
+/// `try_acquire`, `refresh`, and `release`.
 pub struct LeaseStore {
     backend: Arc<dyn RemoteBackend>,
     prefix: String,
@@ -231,45 +228,23 @@ impl LeaseStore {
         format!("{}{}.lease.json", self.prefix, database_key)
     }
 
-    fn with_local_lease_lock<T>(
-        &self,
-        database_key: &str,
-        op: impl FnOnce() -> Result<T, LeaseError>,
-    ) -> Result<T, LeaseError> {
-        if self.backend.name() != "local" {
-            return op();
+    fn ensure_conditional_backend(&self) -> Result<(), LeaseError> {
+        if self.backend.supports_conditional_writes() {
+            return Ok(());
         }
-
-        let lock_key = format!("{}.lock", self.key_for(database_key));
-        let lock_path = Path::new(&lock_key);
-        if let Some(parent) = lock_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|err| LeaseError::Backend(BackendError::Transport(err.to_string())))?;
-        }
-        let lock_file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .open(lock_path)
-            .map_err(|err| LeaseError::Backend(BackendError::Transport(err.to_string())))?;
-        lock_file
-            .lock_exclusive()
-            .map_err(|err| LeaseError::Backend(BackendError::Transport(err.to_string())))?;
-
-        let result = op();
-        let unlock_result = lock_file
-            .unlock()
-            .map_err(|err| LeaseError::Backend(BackendError::Transport(err.to_string())));
-        match (result, unlock_result) {
-            (Ok(value), Ok(())) => Ok(value),
-            (Err(err), _) => Err(err),
-            (Ok(_), Err(err)) => Err(err),
-        }
+        Err(LeaseError::Backend(BackendError::Config(format!(
+            "writer lease requires a backend with conditional writes; '{}' is not eligible",
+            self.backend.name()
+        ))))
     }
 
     /// Read whatever lease object is currently published. `None` means
     /// no lease has ever been written for this key.
     pub fn current(&self, database_key: &str) -> Result<Option<WriterLease>, LeaseError> {
+        self.read_lease(database_key)
+    }
+
+    fn read_lease(&self, database_key: &str) -> Result<Option<WriterLease>, LeaseError> {
         let key = self.key_for(database_key);
         let temp = std::env::temp_dir().join(format!(
             "reddb-lease-read-{}-{}.json",
@@ -283,10 +258,42 @@ impl LeaseStore {
         let bytes = std::fs::read(&temp)
             .map_err(|err| LeaseError::Backend(BackendError::Transport(err.to_string())))?;
         let _ = std::fs::remove_file(&temp);
-        let json: JsonValue = serde_json::from_slice(&bytes).map_err(|err| {
-            LeaseError::InvalidFormat(format!("lease json parse: {err}"))
-        })?;
+        let json: JsonValue = serde_json::from_slice(&bytes)
+            .map_err(|err| LeaseError::InvalidFormat(format!("lease json parse: {err}")))?;
         WriterLease::from_json(&json).map(Some)
+    }
+
+    fn current_versioned(&self, database_key: &str) -> Result<Option<VersionedLease>, LeaseError> {
+        let key = self.key_for(database_key);
+        let before = match self.backend.object_version(&key)? {
+            Some(version) => version,
+            None => return Ok(None),
+        };
+        let temp = std::env::temp_dir().join(format!(
+            "reddb-lease-read-{}-{}.json",
+            std::process::id(),
+            crate::utils::now_unix_nanos()
+        ));
+        let downloaded = self.backend.download(&key, &temp)?;
+        if !downloaded {
+            return Ok(None);
+        }
+        let after = self.backend.object_version(&key)?;
+        if after.as_ref() != Some(&before) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(LeaseError::Backend(BackendError::PreconditionFailed(
+                "lease object changed while being read".to_string(),
+            )));
+        }
+        let bytes = std::fs::read(&temp)
+            .map_err(|err| LeaseError::Backend(BackendError::Transport(err.to_string())))?;
+        let _ = std::fs::remove_file(&temp);
+        let json: JsonValue = serde_json::from_slice(&bytes)
+            .map_err(|err| LeaseError::InvalidFormat(format!("lease json parse: {err}")))?;
+        Ok(Some(VersionedLease {
+            lease: WriterLease::from_json(&json)?,
+            version: before,
+        }))
     }
 
     /// Try to acquire the lease for `database_key` on behalf of
@@ -301,31 +308,21 @@ impl LeaseStore {
         holder_id: &str,
         ttl_ms: u64,
     ) -> Result<WriterLease, LeaseError> {
-        self.with_local_lease_lock(database_key, || {
-            self.try_acquire_locked(database_key, holder_id, ttl_ms)
-        })
-    }
-
-    fn try_acquire_locked(
-        &self,
-        database_key: &str,
-        holder_id: &str,
-        ttl_ms: u64,
-    ) -> Result<WriterLease, LeaseError> {
+        self.ensure_conditional_backend()?;
         let now_ms = crate::utils::now_unix_millis();
 
-        let current = self.current(database_key)?;
+        let current = self.current_versioned(database_key)?;
         // If a healthy lease exists held by someone else, refuse
         // immediately. Two cases collapse: either the current holder
         // is us (refresh) or it's somebody else with time left.
         let next_generation = match &current {
-            Some(c) if !c.is_expired(now_ms) && c.holder_id != holder_id => {
+            Some(c) if !c.lease.is_expired(now_ms) && c.lease.holder_id != holder_id => {
                 return Err(LeaseError::Held {
-                    current: c.clone(),
+                    current: c.lease.clone(),
                     now_ms,
                 });
             }
-            Some(c) => c.generation.saturating_add(1),
+            Some(c) => c.lease.generation.saturating_add(1),
             None => 1,
         };
 
@@ -336,7 +333,19 @@ impl LeaseStore {
             acquired_at_ms: now_ms,
             expires_at_ms: now_ms.saturating_add(ttl_ms),
         };
-        self.publish(&new_lease)?;
+        let condition = match current {
+            Some(c) => ConditionalPut::IfVersion(c.version),
+            None => ConditionalPut::IfAbsent,
+        };
+        if let Err(err) = self.publish_conditional(&new_lease, condition) {
+            if matches!(
+                err,
+                LeaseError::Backend(BackendError::PreconditionFailed(_))
+            ) {
+                return self.acquire_race_error(database_key, holder_id, now_ms);
+            }
+            return Err(err);
+        }
 
         // Re-read and verify nobody else won the same gap.
         match self.current(database_key)? {
@@ -363,39 +372,72 @@ impl LeaseStore {
         }
     }
 
+    fn acquire_race_error(
+        &self,
+        database_key: &str,
+        holder_id: &str,
+        now_ms: u64,
+    ) -> Result<WriterLease, LeaseError> {
+        match self.current(database_key)? {
+            Some(observed) if !observed.is_expired(now_ms) && observed.holder_id != holder_id => {
+                Err(LeaseError::Held {
+                    current: observed,
+                    now_ms,
+                })
+            }
+            Some(observed) => Err(LeaseError::LostRace {
+                attempted_holder: holder_id.to_string(),
+                observed,
+            }),
+            None => Err(LeaseError::LostRace {
+                attempted_holder: holder_id.to_string(),
+                observed: WriterLease {
+                    database_key: database_key.to_string(),
+                    holder_id: "<missing>".to_string(),
+                    generation: 0,
+                    acquired_at_ms: 0,
+                    expires_at_ms: 0,
+                },
+            }),
+        }
+    }
+
     /// Refresh `lease.expires_at_ms` to `now + ttl_ms`. Fails with
     /// `Stale` if the holder/generation no longer matches what's
     /// currently published. The returned lease is the new
     /// in-effect record.
-    pub fn refresh(
-        &self,
-        lease: &WriterLease,
-        ttl_ms: u64,
-    ) -> Result<WriterLease, LeaseError> {
-        self.with_local_lease_lock(&lease.database_key, || self.refresh_locked(lease, ttl_ms))
-    }
-
-    fn refresh_locked(
-        &self,
-        lease: &WriterLease,
-        ttl_ms: u64,
-    ) -> Result<WriterLease, LeaseError> {
+    pub fn refresh(&self, lease: &WriterLease, ttl_ms: u64) -> Result<WriterLease, LeaseError> {
+        self.ensure_conditional_backend()?;
         let now_ms = crate::utils::now_unix_millis();
-        let observed = self.current(&lease.database_key)?;
+        let observed = self.current_versioned(&lease.database_key)?;
         match observed {
             Some(o)
-                if o.holder_id == lease.holder_id
-                    && o.generation == lease.generation =>
+                if o.lease.holder_id == lease.holder_id
+                    && o.lease.generation == lease.generation =>
             {
                 let mut next = lease.clone();
                 next.expires_at_ms = now_ms.saturating_add(ttl_ms);
-                self.publish(&next)?;
+                if let Err(err) =
+                    self.publish_conditional(&next, ConditionalPut::IfVersion(o.version))
+                {
+                    if matches!(
+                        err,
+                        LeaseError::Backend(BackendError::PreconditionFailed(_))
+                    ) {
+                        return Err(LeaseError::Stale {
+                            attempted_holder: lease.holder_id.clone(),
+                            attempted_generation: lease.generation,
+                            observed: self.current(&lease.database_key)?,
+                        });
+                    }
+                    return Err(err);
+                }
                 Ok(next)
             }
             other => Err(LeaseError::Stale {
                 attempted_holder: lease.holder_id.clone(),
                 attempted_generation: lease.generation,
-                observed: other,
+                observed: other.map(|v| v.lease),
             }),
         }
     }
@@ -404,35 +446,46 @@ impl LeaseStore {
     /// matches `lease.holder_id + lease.generation`. A stolen or
     /// already-replaced lease returns `Stale`.
     pub fn release(&self, lease: &WriterLease) -> Result<(), LeaseError> {
-        self.with_local_lease_lock(&lease.database_key, || self.release_locked(lease))
-    }
-
-    fn release_locked(&self, lease: &WriterLease) -> Result<(), LeaseError> {
-        let observed = self.current(&lease.database_key)?;
+        self.ensure_conditional_backend()?;
+        let observed = self.current_versioned(&lease.database_key)?;
         match observed {
             Some(o)
-                if o.holder_id == lease.holder_id
-                    && o.generation == lease.generation =>
+                if o.lease.holder_id == lease.holder_id
+                    && o.lease.generation == lease.generation =>
             {
                 let key = self.key_for(&lease.database_key);
-                self.backend.delete(&key)?;
+                if let Err(err) = self
+                    .backend
+                    .delete_conditional(&key, ConditionalDelete::IfVersion(o.version))
+                {
+                    if matches!(err, BackendError::PreconditionFailed(_)) {
+                        return Err(LeaseError::Stale {
+                            attempted_holder: lease.holder_id.clone(),
+                            attempted_generation: lease.generation,
+                            observed: self.current(&lease.database_key)?,
+                        });
+                    }
+                    return Err(err.into());
+                }
                 Ok(())
             }
             other => Err(LeaseError::Stale {
                 attempted_holder: lease.holder_id.clone(),
                 attempted_generation: lease.generation,
-                observed: other,
+                observed: other.map(|v| v.lease),
             }),
         }
     }
 
-    fn publish(&self, lease: &WriterLease) -> Result<(), LeaseError> {
+    fn publish_conditional(
+        &self,
+        lease: &WriterLease,
+        condition: ConditionalPut,
+    ) -> Result<BackendObjectVersion, LeaseError> {
         let key = self.key_for(&lease.database_key);
         let json = lease.to_json();
         let bytes = serde_json::to_vec(&json).map_err(|err| {
-            LeaseError::Backend(BackendError::Internal(format!(
-                "serialize lease: {err}"
-            )))
+            LeaseError::Backend(BackendError::Internal(format!("serialize lease: {err}")))
         })?;
         let temp = std::env::temp_dir().join(format!(
             "reddb-lease-write-{}-{}.json",
@@ -441,10 +494,9 @@ impl LeaseStore {
         ));
         std::fs::write(&temp, &bytes)
             .map_err(|err| LeaseError::Backend(BackendError::Transport(err.to_string())))?;
-        let res = self.backend.upload(&temp, &key);
+        let res = self.backend.upload_conditional(&temp, &key, condition);
         let _ = std::fs::remove_file(&temp);
-        res?;
-        Ok(())
+        Ok(res?)
     }
 }
 
@@ -452,17 +504,17 @@ impl LeaseStore {
 mod tests {
     use super::*;
     use crate::storage::backend::LocalBackend;
+    use std::path::Path;
 
     fn store() -> LeaseStore {
-        LeaseStore::new(Arc::new(LocalBackend))
-            .with_prefix(format!(
-                "{}/leases-test-{}",
-                std::env::temp_dir().to_string_lossy(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ))
+        LeaseStore::new(Arc::new(LocalBackend)).with_prefix(format!(
+            "{}/leases-test-{}",
+            std::env::temp_dir().to_string_lossy(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
     }
 
     #[test]
@@ -530,5 +582,45 @@ mod tests {
         let _ = s.try_acquire("db", "writer-b", 60_000).unwrap();
         let err = s.refresh(&lease, 60_000).unwrap_err();
         assert!(matches!(err, LeaseError::Stale { .. }));
+    }
+
+    struct UnsupportedBackend;
+
+    impl RemoteBackend for UnsupportedBackend {
+        fn name(&self) -> &str {
+            "unsupported"
+        }
+
+        fn download(&self, _remote_key: &str, _local_path: &Path) -> Result<bool, BackendError> {
+            Ok(false)
+        }
+
+        fn upload(&self, _local_path: &Path, _remote_key: &str) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn exists(&self, _remote_key: &str) -> Result<bool, BackendError> {
+            Ok(false)
+        }
+
+        fn delete(&self, _remote_key: &str) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn list(&self, _prefix: &str) -> Result<Vec<String>, BackendError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn acquire_fails_closed_without_backend_conditional_writes() {
+        let s = LeaseStore::new(Arc::new(UnsupportedBackend));
+        let err = s.try_acquire("db", "writer-a", 60_000).unwrap_err();
+        match err {
+            LeaseError::Backend(BackendError::Config(msg)) => {
+                assert!(msg.contains("conditional writes"));
+            }
+            other => panic!("expected backend config error, got {other:?}"),
+        }
     }
 }
