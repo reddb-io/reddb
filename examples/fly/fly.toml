@@ -41,6 +41,7 @@ kill_timeout = "60s"
   RED_MAX_BATCH_SIZE = "10000"
   RED_LOG_FORMAT = "json"
   RED_LOG_LEVEL = "info"
+  RED_LEASE_REQUIRED = "true"
   RED_SHUTDOWN_TIMEOUT_SECS = "60"
 
 [mounts]
