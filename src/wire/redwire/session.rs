@@ -15,8 +15,7 @@
 use std::io;
 use std::sync::Arc;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::auth::store::AuthStore;
 use crate::runtime::RedDBRuntime;
@@ -37,11 +36,14 @@ struct AuthedSession {
     session_id: String,
 }
 
-pub async fn handle_session(
-    mut stream: TcpStream,
+pub async fn handle_session<S>(
+    mut stream: S,
     runtime: Arc<RedDBRuntime>,
     auth_store: Option<Arc<AuthStore>>,
-) -> io::Result<()> {
+) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
     // Discriminator byte was already consumed by the service-router
     // detector when it dispatched here. If callers wire this from
     // a non-router path they must consume it themselves first.
@@ -50,6 +52,13 @@ pub async fn handle_session(
         return Ok(());
     }
     let _session = session.unwrap();
+
+    // Per-connection state for v1 prepared statements + streaming
+    // bulk inserts. Same shape the v1 listener uses; v2 just owns
+    // the lifetime.
+    let mut stream_session: Option<crate::wire::listener::BulkStreamSession> = None;
+    let mut prepared_stmts: std::collections::HashMap<u32, crate::wire::listener::PreparedStmt> =
+        std::collections::HashMap::new();
 
     let mut buf = vec![0u8; FRAME_HEADER_SIZE];
     loop {
@@ -117,6 +126,62 @@ pub async fn handle_session(
                 let v1 = crate::wire::listener::handle_query_binary(&runtime, &frame.payload);
                 stream.write_all(&encode_frame(&rewrap_v1(&v1, &frame))).await?;
             }
+            // Streaming bulk insert (PG COPY equivalent). Same
+            // start/rows/commit dance as v1, with v2 framing on
+            // the wire. State persists across frames on the same
+            // session.
+            MessageKind::BulkStreamStart => {
+                let v1 = crate::wire::listener::handle_stream_start(
+                    &frame.payload,
+                    &mut stream_session,
+                );
+                stream.write_all(&encode_frame(&rewrap_v1(&v1, &frame))).await?;
+            }
+            MessageKind::BulkStreamRows => {
+                let v1 = crate::wire::listener::handle_stream_rows(
+                    &runtime,
+                    &frame.payload,
+                    &mut stream_session,
+                );
+                stream.write_all(&encode_frame(&rewrap_v1(&v1, &frame))).await?;
+            }
+            MessageKind::BulkStreamCommit => {
+                let v1 = crate::wire::listener::handle_stream_commit(
+                    &runtime,
+                    &mut stream_session,
+                );
+                stream.write_all(&encode_frame(&rewrap_v1(&v1, &frame))).await?;
+            }
+            // Prepared statements — parse SQL once via Prepare,
+            // bind + execute many times via ExecutePrepared.
+            // Per-session HashMap holds compiled shapes.
+            MessageKind::Prepare => {
+                let v1 = crate::wire::listener::handle_prepare(
+                    &runtime,
+                    &frame.payload,
+                    &mut prepared_stmts,
+                );
+                stream.write_all(&encode_frame(&rewrap_v1(&v1, &frame))).await?;
+            }
+            MessageKind::ExecutePrepared => {
+                let v1 = crate::wire::listener::handle_execute_prepared(
+                    &runtime,
+                    &frame.payload,
+                    &prepared_stmts,
+                );
+                stream.write_all(&encode_frame(&rewrap_v1(&v1, &frame))).await?;
+            }
+            MessageKind::PreparedOk => {
+                // Server-emitted in response to Prepare; clients
+                // shouldn't send it. Ignore-with-error to flag
+                // misbehaving callers.
+                let err = encode_frame(&Frame::new(
+                    MessageKind::Error,
+                    frame.correlation_id,
+                    b"PreparedOk is server-only".to_vec(),
+                ));
+                stream.write_all(&err).await?;
+            }
             MessageKind::Get => {
                 let response = run_get(&runtime, &frame);
                 stream.write_all(&encode_frame(&response)).await?;
@@ -139,10 +204,13 @@ pub async fn handle_session(
 
 /// Run the handshake. Returns `Ok(None)` when the client disconnected
 /// or the auth was refused (the failure frame is already on the wire).
-async fn perform_handshake(
-    stream: &mut TcpStream,
+async fn perform_handshake<S>(
+    stream: &mut S,
     auth_store: Option<&AuthStore>,
-) -> io::Result<Option<AuthedSession>> {
+) -> io::Result<Option<AuthedSession>>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
     // Step 1: read minor version byte.
     let mut minor_buf = [0u8; 1];
     stream.read_exact(&mut minor_buf).await?;
@@ -260,7 +328,10 @@ async fn perform_handshake(
     }
 }
 
-async fn read_frame(stream: &mut TcpStream) -> io::Result<Frame> {
+async fn read_frame<S>(stream: &mut S) -> io::Result<Frame>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
     let mut header = [0u8; FRAME_HEADER_SIZE];
     stream.read_exact(&mut header).await?;
     let length = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;

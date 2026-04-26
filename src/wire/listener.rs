@@ -124,7 +124,7 @@ async fn start_wire_tls_listener_on(
         tokio::spawn(async move {
             match acceptor.accept(tcp_stream).await {
                 Ok(tls_stream) => {
-                    if let Err(e) = handle_connection(tls_stream, rt).await {
+                    if let Err(e) = dispatch_tls_connection(tls_stream, rt).await {
                         tracing::warn!(transport = "wire+tls", peer = %peer_str, err = %e, "connection failed");
                     }
                 }
@@ -136,6 +136,98 @@ async fn start_wire_tls_listener_on(
                 ),
             }
         });
+    }
+}
+
+/// Same v1↔v2 dispatch as `dispatch_connection` but for already-
+/// negotiated TLS streams. We can't `peek` over TLS records, so we
+/// read 1 byte explicitly. If it's the v2 magic, hand off to the
+/// v2 session (which is generic over `AsyncRead+Write`); otherwise
+/// the byte we just consumed is the first byte of a v1 frame —
+/// prepend it back via a `Chain` reader so the v1 handler sees an
+/// unaltered stream.
+async fn dispatch_tls_connection<S>(
+    mut stream: tokio_rustls::server::TlsStream<S>,
+    runtime: Arc<RedDBRuntime>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let mut first = [0u8; 1];
+    tokio::io::AsyncReadExt::read_exact(&mut stream, &mut first).await?;
+    if first[0] == crate::wire::redwire::REDWIRE_V2_MAGIC {
+        return crate::wire::redwire::session::handle_session(stream, runtime, None)
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>);
+    }
+    // v1 path: feed the byte we consumed back via a PrefixedStream
+    // so handle_connection sees the same bytes the client sent.
+    let prefixed = PrefixedStream::new(stream, first[0]);
+    handle_connection(prefixed, runtime).await
+}
+
+/// Wraps an `AsyncRead + AsyncWrite` and prepends a single byte of
+/// "already-consumed" data to the read side. Reads pull from the
+/// stash first, then transparently delegate to the inner stream.
+/// Writes always delegate. Used by `dispatch_tls_connection` to
+/// hand the byte we peeked at back to the v1 handler.
+struct PrefixedStream<S> {
+    inner: S,
+    prefix: Option<u8>,
+}
+
+impl<S> PrefixedStream<S> {
+    fn new(inner: S, byte: u8) -> Self {
+        Self {
+            inner,
+            prefix: Some(byte),
+        }
+    }
+}
+
+impl<S> tokio::io::AsyncRead for PrefixedStream<S>
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        if let Some(byte) = self.prefix.take() {
+            if buf.remaining() == 0 {
+                self.prefix = Some(byte);
+                return std::task::Poll::Pending;
+            }
+            buf.put_slice(&[byte]);
+            return std::task::Poll::Ready(Ok(()));
+        }
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S> tokio::io::AsyncWrite for PrefixedStream<S>
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
 
@@ -810,7 +902,7 @@ pub(crate) fn handle_bulk_insert_binary_prevalidated(runtime: &RedDBRuntime, pay
 ///
 /// `flush_row_threshold == 0` disables auto-flushing (legacy unbounded
 /// mode) — set via `REDDB_BULK_STREAM_FLUSH_ROWS=0`.
-struct BulkStreamSession {
+pub(crate) struct BulkStreamSession {
     collection: String,
     schema: std::sync::Arc<Vec<String>>,
     pending: Vec<Vec<crate::storage::schema::Value>>,
@@ -892,7 +984,7 @@ fn flush_pending_rows(
 /// collection + schema for subsequent ROWS frames. Any in-flight
 /// session is aborted. Responds `MSG_BULK_STREAM_ACK` (empty body)
 /// on success, `MSG_ERROR` otherwise.
-fn handle_stream_start(payload: &[u8], session: &mut Option<BulkStreamSession>) -> Vec<u8> {
+pub(crate) fn handle_stream_start(payload: &[u8], session: &mut Option<BulkStreamSession>) -> Vec<u8> {
     let mut pos = 0;
     let coll_len = match read_u16(payload, &mut pos, "stream start: missing collection length") {
         Ok(len) => len as usize,
@@ -955,7 +1047,7 @@ fn handle_stream_start(payload: &[u8], session: &mut Option<BulkStreamSession>) 
 /// val_data]*ncols)*nrows`. Columns are implicit from the session
 /// schema so the frame carries only values. Responds
 /// `MSG_BULK_STREAM_ACK` on success.
-fn handle_stream_rows(
+pub(crate) fn handle_stream_rows(
     runtime: &RedDBRuntime,
     payload: &[u8],
     session: &mut Option<BulkStreamSession>,
@@ -1009,7 +1101,7 @@ fn handle_stream_rows(
 /// one-shot MSG_BULK_INSERT_PREVALIDATED uses) and responds with
 /// `MSG_BULK_OK { count u64 }`. Session state is cleared whether
 /// the flush succeeds or fails.
-fn handle_stream_commit(
+pub(crate) fn handle_stream_commit(
     runtime: &RedDBRuntime,
     session: &mut Option<BulkStreamSession>,
 ) -> Vec<u8> {
@@ -1083,7 +1175,7 @@ fn read_bytes<'a>(
 // post-parameterize) and the number of binds it expects. One lookup
 // from the connection's `prepared_stmts` map yields everything
 // EXECUTE needs — no SQL text, no byte-scan, no plan-cache probe.
-struct PreparedStmt {
+pub(crate) struct PreparedStmt {
     shape: crate::storage::query::ast::QueryExpr,
     parameter_count: usize,
     /// DDL epoch at the moment the shape was compiled. EXECUTE checks
@@ -1110,7 +1202,7 @@ fn prepared_disabled() -> bool {
     })
 }
 
-fn handle_prepare(
+pub(crate) fn handle_prepare(
     runtime: &RedDBRuntime,
     payload: &[u8],
     stmts: &mut std::collections::HashMap<u32, PreparedStmt>,
@@ -1174,7 +1266,7 @@ fn handle_prepare(
     resp
 }
 
-fn handle_execute_prepared(
+pub(crate) fn handle_execute_prepared(
     runtime: &RedDBRuntime,
     payload: &[u8],
     stmts: &std::collections::HashMap<u32, PreparedStmt>,
@@ -1263,7 +1355,7 @@ fn handle_execute_prepared(
     }
 }
 
-fn handle_deallocate(
+pub(crate) fn handle_deallocate(
     payload: &[u8],
     stmts: &mut std::collections::HashMap<u32, PreparedStmt>,
 ) -> Vec<u8> {
