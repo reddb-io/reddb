@@ -176,17 +176,14 @@ impl WriteGate {
         LeaseGateState::from_u8(self.lease.load(Ordering::Acquire))
     }
 
-    /// Flip the lease gate state. Called by the lease lifecycle loop
-    /// (PLAN.md Phase 5 / W6) on acquire / refresh / lose / release.
+    /// Flip the lease gate state. Only `LeaseLifecycle` should call
+    /// this — other callers must go through the lifecycle so the
+    /// gate flip and the corresponding `lease/*` audit record
+    /// stay paired.
+    ///
     /// Returns the previous state so the caller can detect idempotent
     /// transitions and avoid spamming audit / metrics.
-    ///
-    /// `NotRequired` is set once at boot when the operator opted out
-    /// of lease fencing. Once set to `Held` / `NotHeld`, callers should
-    /// keep it in that subset; flipping back to `NotRequired` mid-flight
-    /// silently disables the fence and is reserved for shutdown
-    /// teardown only.
-    pub fn set_lease_state(&self, state: LeaseGateState) -> LeaseGateState {
+    pub(crate) fn set_lease_state(&self, state: LeaseGateState) -> LeaseGateState {
         LeaseGateState::from_u8(self.lease.swap(state as u8, Ordering::AcqRel))
     }
 }

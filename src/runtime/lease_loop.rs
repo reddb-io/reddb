@@ -1,47 +1,29 @@
-//! Serverless writer-lease lifecycle (PLAN.md Phase 5 / W6).
+//! Serverless writer-lease boot path (PLAN.md Phase 5 / W6).
 //!
 //! Boot-time entrypoint that opts the runtime into lease-fenced
 //! writes when:
 //!   * `RED_LEASE_REQUIRED=true` (or `1`) is set, and
 //!   * a remote backend is configured (S3, FS, HTTP, …).
 //!
-//! Behaviour:
-//!   1. Build a `LeaseStore` against the runtime's remote backend.
-//!   2. `try_acquire` for the configured holder id + TTL. Failure to
-//!      acquire returns `Err` so the bootstrap aborts fast — the
-//!      operator opted into fencing, so a missing lease is fatal.
-//!   3. Flip `WriteGate::set_lease_state(Held)` so public mutations
-//!      and remote uploads start passing the gate.
-//!   4. Spawn a daemon thread that calls `refresh` every `ttl/3`. On
-//!      `LostRace` / `Stale` / backend error: flip to `NotHeld`,
-//!      audit, mark the lifecycle as draining, and exit. The refresh
-//!      thread does *not* attempt to re-acquire — losing the lease
-//!      means a new writer was promoted and we must not race it.
+//! All transitions (acquire / refresh / lost / release) are
+//! delegated to `LeaseLifecycle`; this module only owns env-var
+//! parsing, lifecycle construction, and the refresh thread.
 //!
 //! Env knobs:
 //!   * `RED_LEASE_REQUIRED` — `true` / `1` to enable. Default off.
 //!   * `RED_LEASE_TTL_SECS` — lease TTL in seconds. Default 60.
 //!   * `RED_LEASE_HOLDER_ID` — explicit holder id. Default
-//!     `<hostname>-<pid>`. The `holder_id` is what shows up in audit
-//!     and in the published lease object on the backend.
+//!     `<hostname>-<pid>`.
 //!   * `RED_LEASE_PREFIX` — backend prefix for the lease object key.
 //!     Default `leases/`.
-//!
-//! Caveat: without backend-native CAS, two contenders racing on an
-//! expired lease can both win the in-process check; `LeaseStore`
-//! re-reads after publish to detect that case and reports
-//! `LostRace`. Backends with native CAS (S3 conditional PUT, R2
-//! `If-Match`) get the same protocol with stronger guarantees once
-//! the trait grows a `try_acquire_cas` method.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use crate::api::{RedDBError, RedDBResult};
-use crate::json::Value as JsonValue;
-use crate::replication::lease::{LeaseStore, WriterLease};
-use crate::runtime::write_gate::LeaseGateState;
+use crate::replication::lease::LeaseStore;
+use crate::runtime::lease_lifecycle::{LeaseLifecycle, MarkDraining};
 use crate::runtime::RedDBRuntime;
 
 /// Try to start the writer-lease lifecycle if the operator opted in.
@@ -80,45 +62,34 @@ pub fn start_lease_loop_if_required(runtime: &RedDBRuntime) -> RedDBResult<()> {
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| "leases/".to_string());
 
-    let store = LeaseStore::new(backend).with_prefix(prefix);
-    let lease = store
-        .try_acquire(&database_key, &holder_id, ttl_ms)
-        .map_err(|err| RedDBError::Internal(format!("acquire writer lease: {err}")))?;
+    let store = Arc::new(LeaseStore::new(backend).with_prefix(prefix));
+    let runtime_for_drain = runtime.clone();
+    let mark_draining: MarkDraining = Arc::new(move || {
+        runtime_for_drain.lifecycle().mark_draining();
+    });
+    let lifecycle = Arc::new(LeaseLifecycle::new(
+        store,
+        runtime.write_gate_arc(),
+        runtime.audit_log_arc(),
+        mark_draining,
+        holder_id,
+        database_key,
+        ttl_ms,
+    ));
+    lifecycle.try_acquire()?;
 
-    runtime
-        .write_gate()
-        .set_lease_state(LeaseGateState::Held);
+    // Stash the lifecycle on the runtime so admin handlers and the
+    // refresh thread share one instance. The OnceLock guarantees
+    // idempotency — re-entering the boot path (tests, double-init)
+    // returns Err and we drop the duplicate.
+    let lifecycle_for_runtime = Arc::clone(&lifecycle);
+    let _ = runtime.set_lease_lifecycle(lifecycle_for_runtime);
 
-    let mut details = crate::json::Map::new();
-    details.insert(
-        "generation".to_string(),
-        JsonValue::Number(lease.generation as f64),
-    );
-    details.insert(
-        "ttl_ms".to_string(),
-        JsonValue::Number(ttl_ms as f64),
-    );
-    runtime.audit_log().record(
-        "lease/acquire",
-        &holder_id,
-        &database_key,
-        "ok",
-        JsonValue::Object(details),
-    );
-
-    spawn_refresh_thread(runtime.clone(), Arc::new(store), lease, holder_id, database_key, ttl_ms);
+    spawn_refresh_thread(runtime.clone(), lifecycle, ttl_ms);
     Ok(())
 }
 
-fn spawn_refresh_thread(
-    runtime: RedDBRuntime,
-    store: Arc<LeaseStore>,
-    lease: WriterLease,
-    holder_id: String,
-    database_key: String,
-    ttl_ms: u64,
-) {
-    let lease = Arc::new(Mutex::new(lease));
+fn spawn_refresh_thread(runtime: RedDBRuntime, lifecycle: Arc<LeaseLifecycle>, ttl_ms: u64) {
     let interval = Duration::from_millis(ttl_ms.saturating_div(3).max(1_000));
     let _ = thread::Builder::new()
         .name("reddb-lease-refresh".into())
@@ -136,53 +107,12 @@ fn spawn_refresh_thread(
                         | crate::runtime::lifecycle::Phase::ShuttingDown
                         | crate::runtime::lifecycle::Phase::Stopped
                 ) {
-                    let current = lease.lock().expect("poisoned lease mutex").clone();
-                    if let Err(err) = store.release(&current) {
-                        tracing::warn!(
-                            target: "reddb::serverless::lease",
-                            error = %err,
-                            "lease release on shutdown failed"
-                        );
-                    }
-                    runtime
-                        .write_gate()
-                        .set_lease_state(LeaseGateState::NotHeld);
-                    runtime.audit_log().record(
-                        "lease/release",
-                        &holder_id,
-                        &database_key,
-                        "ok",
-                        JsonValue::Null,
-                    );
+                    let _ = lifecycle.release();
                     return;
                 }
 
-                let current = lease.lock().expect("poisoned lease mutex").clone();
-                match store.refresh(&current, ttl_ms) {
-                    Ok(updated) => {
-                        *lease.lock().expect("poisoned lease mutex") = updated;
-                    }
-                    Err(err) => {
-                        tracing::error!(
-                            target: "reddb::serverless::lease",
-                            error = %err,
-                            holder = %holder_id,
-                            database_key = %database_key,
-                            "lease refresh failed; flipping to NotHeld + drain"
-                        );
-                        runtime
-                            .write_gate()
-                            .set_lease_state(LeaseGateState::NotHeld);
-                        runtime.audit_log().record(
-                            "lease/lost",
-                            &holder_id,
-                            &database_key,
-                            &format!("err: {err}"),
-                            JsonValue::Null,
-                        );
-                        runtime.lifecycle().mark_draining();
-                        return;
-                    }
+                if lifecycle.refresh().is_err() {
+                    return;
                 }
             }
         });

@@ -749,7 +749,7 @@ struct RuntimeInner {
     /// dispatching to storage. The replica internal apply path
     /// (`LogicalChangeApplier`) reaches into the store directly and
     /// bypasses the gate by construction.
-    write_gate: crate::runtime::write_gate::WriteGate,
+    write_gate: Arc<crate::runtime::write_gate::WriteGate>,
     /// Process lifecycle state machine (PLAN.md Phase 1 — Lifecycle
     /// Contract). Drives `/health/live`, `/health/ready`,
     /// `/health/startup`, and `POST /admin/shutdown` so any
@@ -764,7 +764,15 @@ struct RuntimeInner {
     /// Append-only audit log for admin mutations (PLAN.md Phase
     /// 6.5). Lives next to the primary `.rdb` file so backup +
     /// restore flows ship it alongside the data.
-    audit_log: crate::runtime::audit_log::AuditLogger,
+    audit_log: Arc<crate::runtime::audit_log::AuditLogger>,
+    /// Serverless writer-lease state machine. `None` when the operator
+    /// did not opt into lease fencing (`RED_LEASE_REQUIRED` unset/false).
+    /// When set, owns the {acquire/refresh/release/lost} transitions and
+    /// is the single place that mutates `write_gate.set_lease_state` and
+    /// records lease/* audit entries — keeping those two side-effects
+    /// from drifting.
+    lease_lifecycle:
+        std::sync::OnceLock<Arc<crate::runtime::lease_lifecycle::LeaseLifecycle>>,
     /// PLAN.md Phase 11.5 — counters bumped by the replica apply
     /// loop on `Gap` / `Divergence` / `Apply` errors so /metrics
     /// surfaces them as `reddb_replica_apply_errors_total{kind}`.
@@ -785,6 +793,7 @@ pub struct RuntimeConnection {
 }
 
 pub mod audit_log;
+pub mod lease_lifecycle;
 pub mod config_matrix;
 pub mod config_overlay;
 pub mod lease_loop;

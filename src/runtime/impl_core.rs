@@ -1384,7 +1384,9 @@ impl RedDBRuntime {
                 pending_tombstones: parking_lot::RwLock::new(HashMap::new()),
                 tenant_tables: parking_lot::RwLock::new(HashMap::new()),
                 ddl_epoch: std::sync::atomic::AtomicU64::new(0),
-                write_gate: crate::runtime::write_gate::WriteGate::from_options(&options),
+                write_gate: Arc::new(
+                    crate::runtime::write_gate::WriteGate::from_options(&options),
+                ),
                 lifecycle: crate::runtime::lifecycle::Lifecycle::new(),
                 resource_limits: crate::runtime::resource_limits::ResourceLimits::from_env(),
                 audit_log: {
@@ -1395,8 +1397,11 @@ impl RedDBRuntime {
                         .data_path
                         .clone()
                         .unwrap_or_else(|| std::env::temp_dir().join("reddb"));
-                    crate::runtime::audit_log::AuditLogger::for_data_path(&data_path)
+                    Arc::new(crate::runtime::audit_log::AuditLogger::for_data_path(
+                        &data_path,
+                    ))
                 },
+                lease_lifecycle: std::sync::OnceLock::new(),
                 replica_apply_metrics:
                     crate::replication::logical::ReplicaApplyMetrics::default(),
                 quota_bucket: crate::runtime::quota_bucket::QuotaBucket::from_env(),
@@ -2104,6 +2109,38 @@ impl RedDBRuntime {
     /// Append-only audit log for admin mutations (PLAN.md Phase 6.5).
     pub fn audit_log(&self) -> &crate::runtime::audit_log::AuditLogger {
         &self.inner.audit_log
+    }
+
+    /// Shared `Arc` to the audit logger — used by collaborators (the
+    /// lease lifecycle, future request-context plumbing) that need to
+    /// keep the logger alive past the runtime's stack frame.
+    pub fn audit_log_arc(&self) -> Arc<crate::runtime::audit_log::AuditLogger> {
+        Arc::clone(&self.inner.audit_log)
+    }
+
+    /// Shared `Arc` to the write gate. Same rationale as
+    /// `audit_log_arc`: collaborators (lease lifecycle, refresh
+    /// thread) need a clone-cheap handle they can move into a
+    /// background thread.
+    pub fn write_gate_arc(&self) -> Arc<crate::runtime::write_gate::WriteGate> {
+        Arc::clone(&self.inner.write_gate)
+    }
+
+    /// Serverless writer-lease state machine. `None` when the operator
+    /// did not opt into lease fencing (`RED_LEASE_REQUIRED` unset).
+    pub fn lease_lifecycle(
+        &self,
+    ) -> Option<&Arc<crate::runtime::lease_lifecycle::LeaseLifecycle>> {
+        self.inner.lease_lifecycle.get()
+    }
+
+    /// Install the lease lifecycle. Idempotent; subsequent calls
+    /// return the previously stored value untouched.
+    pub fn set_lease_lifecycle(
+        &self,
+        lifecycle: Arc<crate::runtime::lease_lifecycle::LeaseLifecycle>,
+    ) -> Result<(), Arc<crate::runtime::lease_lifecycle::LeaseLifecycle>> {
+        self.inner.lease_lifecycle.set(lifecycle)
     }
 
     /// Reject the call when the requested batch size exceeds

@@ -1125,26 +1125,14 @@ impl RedDBServer {
             .unwrap_or_else(|| "main".to_string());
         let store = crate::replication::LeaseStore::new(backend);
 
-        match store.try_acquire(&database_key, &holder_id, ttl_ms) {
+        match crate::runtime::lease_lifecycle::admin_promote_lease(
+            &store,
+            self.runtime.audit_log(),
+            &database_key,
+            &holder_id,
+            ttl_ms,
+        ) {
             Ok(lease) => {
-                let mut details = Map::new();
-                details.insert(
-                    "holder_id".to_string(),
-                    JsonValue::String(lease.holder_id.clone()),
-                );
-                details.insert(
-                    "generation".to_string(),
-                    JsonValue::Number(lease.generation as f64),
-                );
-                details.insert("ttl_ms".to_string(), JsonValue::Number(ttl_ms as f64));
-                self.runtime.audit_log().record(
-                    "admin/failover/promote",
-                    &lease.holder_id,
-                    &database_key,
-                    "ok",
-                    JsonValue::Object(details.clone()),
-                );
-
                 let mut object = Map::new();
                 object.insert("ok".to_string(), JsonValue::Bool(true));
                 object.insert("holder_id".to_string(), JsonValue::String(lease.holder_id));
@@ -1169,16 +1157,7 @@ impl RedDBServer {
                 );
                 json_response(200, JsonValue::Object(object))
             }
-            Err(err) => {
-                self.runtime.audit_log().record(
-                    "admin/failover/promote",
-                    &holder_id,
-                    &database_key,
-                    &format!("err: {err}"),
-                    JsonValue::Null,
-                );
-                json_error(409, format!("promotion refused: {err}"))
-            }
+            Err(err) => json_error(409, format!("promotion refused: {err}")),
         }
     }
 
