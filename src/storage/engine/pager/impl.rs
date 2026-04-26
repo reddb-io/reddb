@@ -165,6 +165,11 @@ impl Pager {
                 page_size
             )));
         }
+        if version > DB_VERSION {
+            return Err(PagerError::InvalidDatabase(format!(
+                "Unsupported database version: file version {version} is newer than supported {DB_VERSION}"
+            )));
+        }
 
         let page_count = u32::from_le_bytes([
             data[HEADER_SIZE + 12],
@@ -1306,5 +1311,52 @@ impl Pager {
         *self.header_dirty_lock()? = true;
         drop(header);
         self.write_header_and_sync()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_db_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "reddb-pager-{}-{}-{}.rdb",
+            name,
+            std::process::id(),
+            crate::utils::now_unix_nanos()
+        ))
+    }
+
+    #[test]
+    fn open_refuses_future_database_version() {
+        let path = temp_db_path("future-version");
+        let pager = Pager::open_default(&path).unwrap();
+        drop(pager);
+
+        let mut future_header = Page::new_header_page(1);
+        future_header.as_bytes_mut()[HEADER_SIZE + 4..HEADER_SIZE + 8]
+            .copy_from_slice(&(DB_VERSION + 1).to_le_bytes());
+        future_header.update_checksum();
+
+        let mut file = OpenOptions::new().write(true).open(&path).unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(future_header.as_bytes()).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        let err = match Pager::open_default(&path) {
+            Ok(_) => panic!("future database version should be rejected"),
+            Err(err) => err,
+        };
+        match err {
+            PagerError::InvalidDatabase(msg) => {
+                assert!(msg.contains("newer than supported"));
+            }
+            other => panic!("expected InvalidDatabase, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(Pager::shadow_path(&path));
+        let _ = std::fs::remove_file(Pager::dwb_path(&path));
     }
 }
