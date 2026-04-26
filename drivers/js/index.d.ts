@@ -17,6 +17,7 @@
 export type AuthOptions =
   | { token: string }
   | { apiKey: string }
+  | { username: string; password: string; loginUrl?: string }
 
 export interface ConnectOptions {
   /** Override the path to the `red` binary (defaults to bundled). */
@@ -148,10 +149,33 @@ export function login(
 
 /**
  * Translate a connection URI + (optional) auth into argv for
- * `red rpc --stdio`. Exported for tests; the second parameter is
- * the normalised auth shape from `connect`'s internal helper.
+ * `red rpc --stdio`. Exported for tests / debug. New code should
+ * use `parseUri` directly and let `connect` handle dispatch.
  */
 export function uriToArgs(
   uri: string,
   auth?: { kind: 'token'; token: string } | null,
 ): string[]
+
+/**
+ * Parsed `red://` (or legacy) URI. Returned by `parseUri`.
+ */
+export interface ParsedUri {
+  kind: 'embedded' | 'http' | 'https' | 'grpc' | 'grpcs' | 'pg'
+  host?: string
+  port?: number
+  path?: string
+  username?: string
+  password?: string
+  token?: string
+  apiKey?: string
+  loginUrl?: string
+  params?: URLSearchParams
+  originalUri: string
+}
+
+/** Parse any URI (red://, memory://, file://, grpc://, http(s)://) into a normalised shape. */
+export function parseUri(uri: string): ParsedUri
+
+/** Derive the HTTP `/auth/login` URL from a parsed URI. */
+export function deriveLoginUrl(parsed: ParsedUri): string

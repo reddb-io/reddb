@@ -39,8 +39,11 @@
 import { spawnRed } from './spawn.js'
 import { resolveBinaryPath } from './binary.js'
 import { RpcClient, RedDBError } from './protocol.js'
+import { HttpRpcClient } from './http.js'
+import { parseUri, deriveLoginUrl } from './url.js'
 
 export { RedDBError }
+export { parseUri, deriveLoginUrl } from './url.js'
 
 /**
  * Connect to a RedDB instance.
@@ -56,16 +59,140 @@ export { RedDBError }
  * @returns {Promise<RedDB>}
  */
 export async function connect(uri, options = {}) {
-  const auth = normalizeAuth(uri, options.auth)
-  const args = uriToArgs(uri, auth)
-  const binary = options.binary ?? resolveBinaryPath()
-  const child = await spawnRed(binary, args)
-  const client = new RpcClient(child)
-  // Sanity check: bounce a `version` call so connection errors surface
-  // here instead of on the user's first real query.
-  await client.call('version', {})
+  const parsed = parseUri(uri)
+  const merged = mergeAuthFromUri(parsed, options.auth)
 
-  return new RedDB(client)
+  // Embedded modes: spawn the binary with stdio JSON-RPC. Auth is
+  // not applicable (caller already has filesystem privileges).
+  if (parsed.kind === 'embedded') {
+    if (merged.token || merged.username) {
+      throw new RedDBError(
+        'AUTH_NOT_APPLICABLE',
+        'auth is only meaningful for remote connections; embedded modes inherit caller privileges.',
+      )
+    }
+    const args = embeddedArgs(parsed)
+    const binary = options.binary ?? resolveBinaryPath()
+    const child = await spawnRed(binary, args)
+    const client = new RpcClient(child)
+    await client.call('version', {})
+    return new RedDB(client)
+  }
+
+  // HTTP / HTTPS: speak directly to the server via fetch().
+  if (parsed.kind === 'http' || parsed.kind === 'https') {
+    const baseUrl = `${parsed.kind}://${parsed.host}:${parsed.port}`
+    let token = merged.token
+    if (!token && merged.username && merged.password) {
+      const loginUrl = merged.loginUrl ?? `${baseUrl}/auth/login`
+      const session = await login(loginUrl, {
+        username: merged.username,
+        password: merged.password,
+      })
+      token = session.token
+    }
+    const client = new HttpRpcClient({ baseUrl, token })
+    // Sanity check before returning the handle.
+    await client.call('health', {})
+    return new RedDB(client)
+  }
+
+  // gRPC / gRPCs: spawn the binary as a stdio bridge to the gRPC
+  // server. Auth flows: explicit token wins; username/password
+  // round-trips through HTTP /auth/login first to mint a token.
+  if (parsed.kind === 'grpc' || parsed.kind === 'grpcs') {
+    let token = merged.token
+    if (!token && merged.username && merged.password) {
+      const loginUrl = merged.loginUrl ?? deriveLoginUrl(parsed)
+      const session = await login(loginUrl, {
+        username: merged.username,
+        password: merged.password,
+      })
+      token = session.token
+    }
+    const args = grpcArgs(parsed, token)
+    const binary = options.binary ?? resolveBinaryPath()
+    const child = await spawnRed(binary, args)
+    const client = new RpcClient(child)
+    await client.call('version', {})
+    return new RedDB(client)
+  }
+
+  // Postgres wire: not yet wired in the driver. Document the gap
+  // so users get a clear actionable error instead of a silent
+  // unsupported transport.
+  if (parsed.kind === 'pg') {
+    throw new RedDBError(
+      'PG_TRANSPORT_NOT_WIRED',
+      "PostgreSQL wire (proto=pg) requires a node-pg-style client; "
+        + "the JS driver doesn't bundle one yet. Use a separate `pg` package "
+        + 'against the same host:port for now, or open an issue if you want it built in.',
+    )
+  }
+
+  throw new RedDBError(
+    'UNSUPPORTED_KIND',
+    `internal: parsed kind '${parsed.kind}' has no transport`,
+  )
+}
+
+function embeddedArgs(parsed) {
+  if (parsed.path) return ['rpc', '--stdio', '--path', parsed.path]
+  return ['rpc', '--stdio']
+}
+
+function grpcArgs(parsed, token) {
+  const scheme = parsed.kind === 'grpcs' ? 'grpcs' : 'grpc'
+  const url = `${scheme}://${parsed.host}:${parsed.port}${parsed.path ?? ''}`
+  const args = ['rpc', '--stdio', '--connect', url]
+  if (token) args.push('--token', token)
+  return args
+}
+
+/**
+ * Merge `options.auth` (legacy `{ token, apiKey, username, password }`
+ * shape) with credentials lifted from the URI itself. Explicit
+ * `options.auth` always wins to keep behaviour predictable.
+ */
+function mergeAuthFromUri(parsed, optionAuth) {
+  const out = {
+    token: parsed.token ?? parsed.apiKey ?? null,
+    username: parsed.username ?? null,
+    password: parsed.password ?? null,
+    loginUrl: parsed.loginUrl ?? null,
+  }
+  if (optionAuth == null) return out
+  if (typeof optionAuth !== 'object') {
+    throw new TypeError('options.auth must be an object')
+  }
+  if (optionAuth.token != null) {
+    if (typeof optionAuth.token !== 'string' || optionAuth.token.length === 0) {
+      throw new TypeError('options.auth.token must be a non-empty string')
+    }
+    out.token = optionAuth.token
+  }
+  if (optionAuth.apiKey != null) {
+    if (typeof optionAuth.apiKey !== 'string' || optionAuth.apiKey.length === 0) {
+      throw new TypeError('options.auth.apiKey must be a non-empty string')
+    }
+    out.token = optionAuth.apiKey
+  }
+  if (optionAuth.username != null) {
+    if (typeof optionAuth.username !== 'string' || optionAuth.username.length === 0) {
+      throw new TypeError('options.auth.username must be a non-empty string')
+    }
+    out.username = optionAuth.username
+  }
+  if (optionAuth.password != null) {
+    if (typeof optionAuth.password !== 'string' || optionAuth.password.length === 0) {
+      throw new TypeError('options.auth.password must be a non-empty string')
+    }
+    out.password = optionAuth.password
+  }
+  if (optionAuth.loginUrl != null) {
+    out.loginUrl = optionAuth.loginUrl
+  }
+  return out
 }
 
 /**
@@ -116,93 +243,24 @@ export async function login(loginUrl, { username, password }) {
 }
 
 /**
- * Translate a connection URI + (optional) auth into the argv passed
- * to `red rpc --stdio`.
- *
- * @param {string} uri
- * @param {object|null} [auth] Output of `normalizeAuth`. Only token-shaped
- *                              auth surfaces here; login flow is handled
- *                              one layer up in `connect`.
+ * Backwards-compatible shim: translate a URI into argv for
+ * `red rpc --stdio`. New code should call `parseUri` directly and
+ * route via `connect`. Kept exported for tests that pre-date the
+ * `red://` parser.
  */
 export function uriToArgs(uri, auth = null) {
-  if (typeof uri !== 'string' || uri.length === 0) {
-    throw new TypeError("connect() requires a URI string (e.g. 'file:///data.rdb' or 'memory://')")
-  }
-  if (uri === 'memory://' || uri === 'memory:') {
-    return ['rpc', '--stdio']
-  }
-  if (uri.startsWith('file://')) {
-    const path = uri.slice('file://'.length)
-    if (!path) {
-      throw new TypeError(`invalid file:// URI: missing path in '${uri}'`)
-    }
-    return ['rpc', '--stdio', '--path', path]
-  }
-  if (uri.startsWith('grpc://')) {
-    // The driver hands the full URI back to the binary, which will
-    // open a tonic client and proxy every JSON-RPC call. The binary
-    // attaches the bearer token to gRPC metadata for every call.
-    const args = ['rpc', '--stdio', '--connect', uri]
-    if (auth?.kind === 'token') {
-      args.push('--token', auth.token)
-    }
-    return args
+  const parsed = parseUri(uri)
+  if (parsed.kind === 'embedded') return embeddedArgs(parsed)
+  if (parsed.kind === 'grpc' || parsed.kind === 'grpcs') {
+    const token = auth?.kind === 'token' ? auth.token : (parsed.token ?? parsed.apiKey ?? null)
+    return grpcArgs(parsed, token)
   }
   throw new RedDBError(
     'UNSUPPORTED_SCHEME',
-    `unsupported URI scheme: '${uri}'. Expected 'file://', 'memory://' or 'grpc://'.`,
+    `uriToArgs() supports embedded + grpc kinds; for '${parsed.kind}' use connect() directly.`,
   )
 }
 
-/**
- * Normalise `options.auth` into:
- *   - `null` (no auth supplied)
- *   - `{ kind: 'token', token: '...' }`
- *
- * Validates that auth is only specified for grpc:// URIs and that
- * the token is non-empty.
- *
- * Username/password is intentionally NOT a valid `auth` shape on
- * `connect()` — gRPC doesn't expose an `auth.login` RPC today.
- * Use the standalone `login(httpUrl, { username, password })`
- * helper to exchange credentials for a token first, then pass
- * the token here.
- */
-function normalizeAuth(uri, auth) {
-  if (auth == null) return null
-  if (typeof auth !== 'object') {
-    throw new TypeError('options.auth must be an object')
-  }
-
-  const isRemote = typeof uri === 'string' && uri.startsWith('grpc://')
-  if (!isRemote) {
-    throw new RedDBError(
-      'AUTH_NOT_APPLICABLE',
-      'options.auth is only meaningful for grpc:// connections; '
-        + 'embedded modes (memory://, file://) inherit the caller\'s privileges.',
-    )
-  }
-
-  // Username/password requires a separate HTTP round-trip; reject
-  // the combined shape so users don't expect transparent login here.
-  if (auth.username != null || auth.password != null) {
-    throw new RedDBError(
-      'AUTH_LOGIN_NEEDS_HTTP',
-      'username/password login is not yet bridged through gRPC. '
-        + "Use `await login(httpUrl, { username, password })` to mint a token, "
-        + 'then pass `{ token }` here.',
-    )
-  }
-
-  const tokenLike = auth.token ?? auth.apiKey ?? null
-  if (tokenLike == null) {
-    throw new TypeError('options.auth must contain { token } or { apiKey }')
-  }
-  if (typeof tokenLike !== 'string' || tokenLike.length === 0) {
-    throw new TypeError('options.auth.token / options.auth.apiKey must be a non-empty string')
-  }
-  return { kind: 'token', token: tokenLike }
-}
 
 /**
  * Connection handle. Methods map 1:1 to JSON-RPC methods on the binary.
