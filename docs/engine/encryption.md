@@ -1,57 +1,24 @@
-# Encryption at Rest
+# Storage Engine Encryption
 
-RedDB supports AES-256-GCM encryption at the page level for data at rest.
+The storage engine has cryptographic building blocks for an encrypted pager, but the v1.0 file format still writes normal pager pages.
 
-## Enabling Encryption
+## Current v1.0 Contract
 
-Compile with the `encryption` feature:
+- WAL integrity uses SHA-256 and hash chaining.
+- HMAC and AES-GCM primitives are available to the engine.
+- Page-encryption framing exists as foundation code.
+- The main pager does not yet encrypt every page before writing.
+- Archived WAL segments and snapshots rely on backend-side encryption if the operator needs at-rest protection.
 
-```toml
-[dependencies]
-reddb = { version = "0.1", features = ["encryption"] }
-```
+## Why Pager Encryption Is Post-v1.0
 
-## How It Works
+Wiring encryption into the pager is a format change, not a toggle. It needs:
 
-Encryption is applied at the page level:
+1. A file-format version bump.
+2. Read support for plaintext v1 files.
+3. Write support for encrypted v2 files.
+4. Clear wrong-key refusal.
+5. Downgrade refusal when an older binary sees a newer encrypted format.
+6. Backup/restore drills over encrypted files.
 
-1. Each page is encrypted with AES-256-GCM before writing to disk
-2. A unique nonce is generated per page write
-3. Pages are decrypted on read
-4. The encryption key is derived from a user-provided passphrase
-
-```mermaid
-flowchart LR
-    A[Page Data] --> B[AES-256-GCM Encrypt]
-    B --> C[Encrypted Page + Nonce + Tag]
-    C --> D[Write to Disk]
-
-    E[Read from Disk] --> F[Encrypted Page]
-    F --> G[AES-256-GCM Decrypt]
-    G --> H[Page Data]
-```
-
-## Cryptographic Primitives
-
-RedDB uses the following cryptographic primitives:
-
-| Primitive | Algorithm | Use |
-|:----------|:----------|:----|
-| Encryption | AES-256-GCM | Page-level encryption |
-| Hashing | SHA-256 | Integrity verification |
-| MAC | HMAC-SHA256 | Authentication |
-| Random | OS entropy | Nonce and key generation |
-| UUID | v4 (random) | Entity identifiers |
-
-## Auth Vault
-
-When `--vault` is enabled, authentication data (users, roles, API keys) is stored in encrypted reserved pages within the main database file:
-
-```bash
-red server --http --path ./data/reddb.rdb --vault --bind 0.0.0.0:8080
-```
-
-The vault uses a certificate-seal model where the encryption key is sealed to the database file.
-
-> [!WARNING]
-> Encryption adds overhead to every page read and write. Enable it only when data at rest protection is required.
+Until that ships, do not describe RedDB v1.0 as encrypted-at-rest by default. Use cloud disk encryption, bucket-side encryption, dm-crypt/LUKS, or equivalent infrastructure controls.
