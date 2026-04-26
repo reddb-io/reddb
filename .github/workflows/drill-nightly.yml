@@ -1,0 +1,68 @@
+name: Nightly DR Drill
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  drill:
+    name: Backup/Restore Drills
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: '28.x'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: rui314/setup-mold@v1
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ubuntu-drill-rust-1.91.0
+          cache-on-failure: "true"
+      - name: Run nightly drill
+        id: drill
+        run: make drill-nightly
+      - name: Upload drill history
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: drill-history
+          path: docs/release/drill-history.md
+      - name: Open issue on drill failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `Nightly DR drill failed: ${new Date().toISOString().slice(0, 10)}`;
+            const body = [
+              'The scheduled backup/restore drill failed.',
+              '',
+              `Workflow run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              '',
+              'Triage checklist:',
+              '- Inspect drill test failure output.',
+              '- Confirm WAL chain validation and restore target behavior.',
+              '- Re-run `make drill-nightly` locally before closing.'
+            ].join('\n');
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+              labels: ['release-blocker', 'drill']
+            });
