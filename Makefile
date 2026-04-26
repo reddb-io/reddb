@@ -1,4 +1,4 @@
-.PHONY: help build build-fast release warm test test-fast test-persistent clean run run-grpc install fmt lint check check-driver-rust check-driver-python timings link unlink dev which patch minor major docs publish publish-dry-run env-up env-down env-logs test-env test-env-shell test-env-rust
+.PHONY: help build build-fast release warm test test-fast test-persistent drill-nightly clean run run-grpc install fmt lint check check-driver-rust check-driver-python timings cold-start-bench binary-size image-size artifact-size link unlink dev which patch minor major docs publish publish-dry-run env-up env-down env-logs test-env test-env-shell test-env-rust
 
 # Paths
 LOCAL_BIN := $(HOME)/.local/bin
@@ -17,6 +17,7 @@ help:
 	@echo "  make test          - Run the default local test layer"
 	@echo "  make test-fast     - Run the default local test layer"
 	@echo "  make test-persistent - Run the persistent multimodel integration layer"
+	@echo "  make drill-nightly - Run backup/restore drill tests and append drill history"
 	@echo "  make test-env PROFILE=replica - Bring up a dedicated test environment and run shell + Rust external-env tests"
 	@echo "  make test-env-shell PROFILE=replica - Bring up a dedicated test environment and run shell checks only"
 	@echo "  make test-env-rust PROFILE=replica - Run Rust external-env tests against an already running environment"
@@ -31,6 +32,9 @@ help:
 	@echo "  make check-driver-rust - Compile-check the Rust SDK with gRPC enabled"
 	@echo "  make check-driver-python - Compile-check the Python SDK"
 	@echo "  make timings       - Generate cargo build timings for the `red` binary"
+	@echo "  make cold-start-bench - Measure cold-start P50/P95/P99 baselines"
+	@echo "  make binary-size   - Measure release-static binary size"
+	@echo "  make image-size    - Measure Docker image size"
 	@echo ""
 	@echo "Release:"
 	@echo "  make patch         - Release bump + commit/tag (patch)"
@@ -66,6 +70,9 @@ test-fast:
 test-persistent:
 	CARGO_TARGET_DIR=$${CARGO_TARGET_DIR:-target/persistent-tests} cargo test --locked --test integration_persistent_multimodel -- --ignored
 
+drill-nightly:
+	@./scripts/drill-nightly.sh
+
 # Clean artifacts
 clean:
 	cargo clean
@@ -98,6 +105,18 @@ check-driver-python:
 
 timings:
 	REDB_USE_SCCACHE=1 ./scripts/cargo-fast.sh build --profile release-fast --bin red --timings
+
+cold-start-bench:
+	@./scripts/cold-start-bench.sh
+
+binary-size:
+	@./scripts/artifact-size.sh binary
+
+image-size:
+	@./scripts/artifact-size.sh image
+
+artifact-size:
+	@./scripts/artifact-size.sh all
 
 # Install from source
 install:
