@@ -394,18 +394,15 @@ When using RedDB as a Rust crate, you control features at compile time:
 
 ```toml
 [dependencies]
-reddb = { version = "0.1", features = ["query-vector", "query-graph", "encryption"] }
+reddb = { version = "0.1", features = ["backend-s3", "otel"] }
 ```
 
 | Feature | What It Enables |
 |:--------|:----------------|
-| `query-vector` | Vector similarity search in the query engine |
-| `query-graph` | Graph traversal and analytics in the query engine |
-| `query-fulltext` | Full-text search indexing and queries |
-| `encryption` | AES-256-GCM encryption at rest |
+| `otel` | OpenTelemetry scaffolding |
 | `backend-s3` | S3-compatible remote storage backend |
 | `backend-turso` | Turso (libSQL) remote backend |
 | `backend-d1` | Cloudflare D1 remote backend |
 
 > [!NOTE]
-> By default, no optional features are enabled. The base crate provides table and document storage with the core query engine.
+> By default, no optional features are enabled. Crypto primitives and replication/fencing are part of the base crate; pager-level encryption-at-rest is not a v1.0 feature flag.
