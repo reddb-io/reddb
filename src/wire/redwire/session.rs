@@ -286,6 +286,19 @@ where
     ));
     stream.write_all(&ack).await?;
 
+    // SCRAM is a 3-RTT challenge/response exchange. Branch off to
+    // its own state machine before the 1-RTT bearer/anonymous
+    // path runs.
+    if chosen == "scram-sha-256" {
+        return perform_scram_handshake(
+            stream,
+            auth_store,
+            hello.correlation_id,
+            server_features,
+        )
+        .await;
+    }
+
     // Step 4: AuthResponse (no challenge in v2.1 since bearer/anonymous
     // are zero-round-trip).
     let resp = read_frame(stream).await?;
@@ -326,6 +339,181 @@ where
             Ok(None)
         }
     }
+}
+
+/// 3-RTT SCRAM-SHA-256 server handshake (RFC 5802 + RFC 7677).
+///
+///     C → S  AuthResponse(client-first-message)         (already received as client-first)
+///     S → C  AuthRequest(server-first-message)
+///     C → S  AuthResponse(client-final-message)
+///     S → C  AuthOk(v=server-signature)
+async fn perform_scram_handshake<S>(
+    stream: &mut S,
+    auth_store: Option<&AuthStore>,
+    initial_correlation: u64,
+    server_features: u32,
+) -> io::Result<Option<AuthedSession>>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    let store = match auth_store {
+        Some(s) => s,
+        None => {
+            let fail = encode_frame(&Frame::new(
+                MessageKind::AuthFail,
+                initial_correlation,
+                build_auth_fail("scram-sha-256 requires an AuthStore"),
+            ));
+            let _ = stream.write_all(&fail).await;
+            return Ok(None);
+        }
+    };
+
+    // 1. Client-first.
+    let cf = read_frame(stream).await?;
+    if cf.kind != MessageKind::AuthResponse {
+        let fail = encode_frame(&Frame::new(
+            MessageKind::AuthFail,
+            cf.correlation_id,
+            build_auth_fail("expected AuthResponse(client-first-message)"),
+        ));
+        let _ = stream.write_all(&fail).await;
+        return Ok(None);
+    }
+    let (username, client_nonce, client_first_bare) =
+        match super::auth::parse_scram_client_first(&cf.payload) {
+            Ok(t) => t,
+            Err(e) => {
+                let fail = encode_frame(&Frame::new(
+                    MessageKind::AuthFail,
+                    cf.correlation_id,
+                    build_auth_fail(&format!("scram client-first: {e}")),
+                ));
+                let _ = stream.write_all(&fail).await;
+                return Ok(None);
+            }
+        };
+
+    // 2. Look up the verifier. If the user doesn't exist or has
+    // no SCRAM verifier, run a dummy iteration count to keep the
+    // timing flat (no user-enumeration leak).
+    let verifier = store.lookup_scram_verifier(&username);
+    let (salt, iter, stored_key, server_key, user_known) = match &verifier {
+        Some(v) => (
+            v.salt.clone(),
+            v.iter,
+            v.stored_key,
+            v.server_key,
+            true,
+        ),
+        None => (
+            crate::auth::store::random_bytes(16),
+            crate::auth::scram::DEFAULT_ITER,
+            [0u8; 32],
+            [0u8; 32],
+            false,
+        ),
+    };
+
+    // 3. Server-first.
+    let server_nonce = super::auth::new_server_nonce();
+    let server_first =
+        super::auth::build_scram_server_first(&client_nonce, &server_nonce, &salt, iter);
+    let req = encode_frame(&Frame::new(
+        MessageKind::AuthRequest,
+        cf.correlation_id,
+        server_first.as_bytes().to_vec(),
+    ));
+    stream.write_all(&req).await?;
+
+    // 4. Client-final.
+    let cfinal = read_frame(stream).await?;
+    if cfinal.kind != MessageKind::AuthResponse {
+        let fail = encode_frame(&Frame::new(
+            MessageKind::AuthFail,
+            cfinal.correlation_id,
+            build_auth_fail("expected AuthResponse(client-final-message)"),
+        ));
+        let _ = stream.write_all(&fail).await;
+        return Ok(None);
+    }
+    let (combined_nonce, presented_proof, client_final_no_proof) =
+        match super::auth::parse_scram_client_final(&cfinal.payload) {
+            Ok(t) => t,
+            Err(e) => {
+                let fail = encode_frame(&Frame::new(
+                    MessageKind::AuthFail,
+                    cfinal.correlation_id,
+                    build_auth_fail(&format!("scram client-final: {e}")),
+                ));
+                let _ = stream.write_all(&fail).await;
+                return Ok(None);
+            }
+        };
+    let expected_combined = format!("{client_nonce}{server_nonce}");
+    if combined_nonce != expected_combined {
+        let fail = encode_frame(&Frame::new(
+            MessageKind::AuthFail,
+            cfinal.correlation_id,
+            build_auth_fail("scram nonce mismatch — replay protection failed"),
+        ));
+        let _ = stream.write_all(&fail).await;
+        return Ok(None);
+    }
+
+    // 5. Verify proof.
+    let auth_message = crate::auth::scram::auth_message(
+        &client_first_bare,
+        &server_first,
+        &client_final_no_proof,
+    );
+    let proof_ok = if user_known {
+        let v = crate::auth::scram::ScramVerifier {
+            salt: salt.clone(),
+            iter,
+            stored_key,
+            server_key,
+        };
+        crate::auth::scram::verify_client_proof(&v, &auth_message, &presented_proof)
+    } else {
+        false
+    };
+    if !proof_ok {
+        let fail = encode_frame(&Frame::new(
+            MessageKind::AuthFail,
+            cfinal.correlation_id,
+            build_auth_fail("invalid SCRAM proof"),
+        ));
+        let _ = stream.write_all(&fail).await;
+        return Ok(None);
+    }
+
+    // 6. AuthOk with server signature.
+    let role = store
+        .list_users()
+        .into_iter()
+        .find(|u| u.username == username)
+        .map(|u| u.role)
+        .unwrap_or(crate::auth::Role::Read);
+    let server_sig = crate::auth::scram::server_signature(&server_key, &auth_message);
+    let session_id = super::auth::new_session_id_for_scram();
+    let ok_payload = super::auth::build_scram_auth_ok(
+        &session_id,
+        &username,
+        role,
+        server_features,
+        &server_sig,
+    );
+    let ok = encode_frame(&Frame::new(
+        MessageKind::AuthOk,
+        cfinal.correlation_id,
+        ok_payload,
+    ));
+    stream.write_all(&ok).await?;
+    Ok(Some(AuthedSession {
+        username,
+        session_id,
+    }))
 }
 
 async fn read_frame<S>(stream: &mut S) -> io::Result<Frame>

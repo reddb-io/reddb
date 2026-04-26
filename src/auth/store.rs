@@ -412,6 +412,7 @@ impl AuthStore {
         let user = User {
             username: username.to_string(),
             password_hash: hash_password(password),
+            scram_verifier: Some(make_scram_verifier(password)),
             role,
             api_keys: Vec::new(),
             created_at: now,
@@ -422,6 +423,14 @@ impl AuthStore {
         drop(users); // release lock before vault I/O
         self.persist_to_vault();
         Ok(user)
+    }
+
+    /// Look up a user's SCRAM verifier. Returned by reference-clone
+    /// so the v2 handshake can compute proofs without holding the
+    /// users lock for the whole challenge/response exchange.
+    pub fn lookup_scram_verifier(&self, username: &str) -> Option<crate::auth::scram::ScramVerifier> {
+        let users = self.users.read().ok()?;
+        users.get(username).and_then(|u| u.scram_verifier.clone())
     }
 
     /// Return all users (password hashes redacted).
@@ -479,6 +488,7 @@ impl AuthStore {
         }
 
         user.password_hash = hash_password(new_password);
+        user.scram_verifier = Some(make_scram_verifier(new_password));
         user.updated_at = now_ms();
         drop(users); // release lock before vault I/O
         self.persist_to_vault();
@@ -695,6 +705,20 @@ impl AuthStore {
 // ===========================================================================
 // Password hashing
 // ===========================================================================
+
+/// Derive a SCRAM-SHA-256 verifier for a fresh user / password
+/// rotation. Salt is 16 random bytes; iter is the engine default
+/// (`scram::DEFAULT_ITER`). Stored alongside the Argon2 password
+/// hash so HTTP login + v2 SCRAM can both authenticate the same
+/// user.
+fn make_scram_verifier(password: &str) -> crate::auth::scram::ScramVerifier {
+    let salt = random_bytes(16);
+    crate::auth::scram::ScramVerifier::from_password(
+        password,
+        salt,
+        crate::auth::scram::DEFAULT_ITER,
+    )
+}
 
 /// Hash a password using Argon2id.
 ///

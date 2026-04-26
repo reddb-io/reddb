@@ -133,15 +133,13 @@ pub fn build_hello_ack(
 /// versions prepend scram-sha-256, mtls, oauth-jwt to the
 /// priority list.
 pub fn pick_auth_method(client_methods: &[String], server_anon_ok: bool) -> Option<&'static str> {
-    // Phase 3a/4 wires up the negotiation surface but the
-    // server validators for scram-sha-256 / oauth-jwt return
-    // AuthFail until Phase 3b/4. Keep them out of the picker
-    // priority so the handshake doesn't fail every login —
-    // clients that offer them will fall through to bearer.
+    // SCRAM > bearer > anonymous when the server has auth on.
+    // No-auth servers prefer anonymous so the handshake succeeds
+    // without an AuthStore lookup.
     let priority: &[&'static str] = if server_anon_ok {
-        &["anonymous", "bearer"]
+        &["anonymous", "scram-sha-256", "bearer"]
     } else {
-        &["bearer", "anonymous"]
+        &["scram-sha-256", "bearer", "anonymous"]
     };
     for method in priority {
         if !client_methods.iter().any(|m| m == *method) {
@@ -195,9 +193,8 @@ pub fn validate_auth_response(
             }
         }
         "scram-sha-256" => AuthOutcome::Refused(
-            "scram-sha-256 negotiation is wire-ready but server-side AuthStore \
-             migration is pending (Phase 3b of ADR 0002). Use bearer or anonymous \
-             for now."
+            "scram-sha-256 must be driven through perform_scram_handshake — \
+             the 1-RTT validate_auth_response path doesn't apply"
                 .to_string(),
         ),
         "oauth-jwt" => AuthOutcome::Refused(
@@ -240,6 +237,177 @@ pub fn build_auth_fail(reason: &str) -> Vec<u8> {
     let mut obj = crate::serde_json::Map::new();
     obj.insert("reason".to_string(), JsonValue::String(reason.to_string()));
     JsonValue::Object(obj).to_string_compact().into_bytes()
+}
+
+/// Parse a SCRAM client-first-message.
+/// Format: `n,,n=<user>,r=<client_nonce>` (no channel binding,
+/// no authzid). Returns `(username, client_nonce, bare_message)`.
+pub fn parse_scram_client_first(payload: &[u8]) -> Result<(String, String, String), String> {
+    let s = std::str::from_utf8(payload)
+        .map_err(|_| "client-first not UTF-8".to_string())?;
+    // Strip the GS2 header `n,,` (or `y,,` / `p=...,`). v2.1 only
+    // accepts `n,,` — explicit no-channel-binding.
+    let bare = s
+        .strip_prefix("n,,")
+        .ok_or_else(|| "client-first must start with 'n,,' (no channel binding)".to_string())?;
+    let mut user = None;
+    let mut nonce = None;
+    for part in bare.split(',') {
+        if let Some(v) = part.strip_prefix("n=") {
+            user = Some(v.to_string());
+        } else if let Some(v) = part.strip_prefix("r=") {
+            nonce = Some(v.to_string());
+        }
+    }
+    let user = user.ok_or_else(|| "missing n=<user>".to_string())?;
+    let nonce = nonce.ok_or_else(|| "missing r=<nonce>".to_string())?;
+    Ok((user, nonce, bare.to_string()))
+}
+
+/// Build the SCRAM server-first-message. Sent in `AuthRequest`.
+/// Format: `r=<client_nonce><server_nonce>,s=<salt_b64>,i=<iter>`.
+pub fn build_scram_server_first(
+    client_nonce: &str,
+    server_nonce: &str,
+    salt: &[u8],
+    iter: u32,
+) -> String {
+    format!(
+        "r={client_nonce}{server_nonce},s={},i={iter}",
+        base64_std(salt)
+    )
+}
+
+/// Parse SCRAM client-final-message.
+/// Format: `c=<channel_binding_b64>,r=<combined_nonce>,p=<proof_b64>`.
+pub fn parse_scram_client_final(
+    payload: &[u8],
+) -> Result<(String, Vec<u8>, String), String> {
+    let s = std::str::from_utf8(payload)
+        .map_err(|_| "client-final not UTF-8".to_string())?;
+    let mut channel_binding = None;
+    let mut nonce = None;
+    let mut proof_b64 = None;
+    for part in s.split(',') {
+        if let Some(v) = part.strip_prefix("c=") {
+            channel_binding = Some(v.to_string());
+        } else if let Some(v) = part.strip_prefix("r=") {
+            nonce = Some(v.to_string());
+        } else if let Some(v) = part.strip_prefix("p=") {
+            proof_b64 = Some(v.to_string());
+        }
+    }
+    let channel_binding =
+        channel_binding.ok_or_else(|| "missing c=<channel-binding>".to_string())?;
+    let nonce = nonce.ok_or_else(|| "missing r=<nonce>".to_string())?;
+    let proof_b64 = proof_b64.ok_or_else(|| "missing p=<proof>".to_string())?;
+    let proof = base64_std_decode(&proof_b64)
+        .ok_or_else(|| "client proof is not valid base64".to_string())?;
+    // c=biws is base64("n,,") — the canonical no-channel-binding GS2 header.
+    if channel_binding != "biws" {
+        return Err(format!(
+            "channel binding must be 'biws' (n,,), got '{channel_binding}'"
+        ));
+    }
+    let no_proof = format!("c={channel_binding},r={nonce}");
+    Ok((nonce, proof, no_proof))
+}
+
+/// Build the AuthOk payload for a successful SCRAM completion.
+/// Carries the server signature so the client can verify the
+/// server also knew the verifier.
+pub fn build_scram_auth_ok(
+    session_id: &str,
+    username: &str,
+    role: Role,
+    server_features: u32,
+    server_signature: &[u8],
+) -> Vec<u8> {
+    let mut obj = crate::serde_json::Map::new();
+    obj.insert("session_id".to_string(), JsonValue::String(session_id.to_string()));
+    obj.insert("username".to_string(), JsonValue::String(username.to_string()));
+    obj.insert("role".to_string(), JsonValue::String(role.to_string()));
+    obj.insert("features".to_string(), JsonValue::Number(server_features as f64));
+    obj.insert(
+        "v".to_string(),
+        JsonValue::String(base64_std(server_signature)),
+    );
+    JsonValue::Object(obj).to_string_compact().into_bytes()
+}
+
+/// Generate a 24-byte server nonce, base64-encoded. Cryptographic
+/// randomness sourced from the engine's existing `random_bytes`
+/// helper so SCRAM doesn't introduce a new RNG path.
+pub fn new_server_nonce() -> String {
+    base64_std(&crate::auth::store::random_bytes(18))
+}
+
+pub(crate) fn new_session_id_for_scram() -> String {
+    new_session_id()
+}
+
+// ---------------------------------------------------------------
+// Tiny base64 — RFC 4648 standard alphabet. Only used for SCRAM
+// payloads + AuthOk signature, low-frequency so a hand-rolled
+// codec is fine and avoids pulling another crate.
+// ---------------------------------------------------------------
+
+const B64_ALPHA: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+pub fn base64_std(input: &[u8]) -> String {
+    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+    let chunks = input.chunks_exact(3);
+    let rem = chunks.remainder();
+    for c in chunks {
+        let n = ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | (c[2] as u32);
+        out.push(B64_ALPHA[((n >> 18) & 0x3F) as usize] as char);
+        out.push(B64_ALPHA[((n >> 12) & 0x3F) as usize] as char);
+        out.push(B64_ALPHA[((n >> 6) & 0x3F) as usize] as char);
+        out.push(B64_ALPHA[(n & 0x3F) as usize] as char);
+    }
+    match rem {
+        [a] => {
+            let n = (*a as u32) << 16;
+            out.push(B64_ALPHA[((n >> 18) & 0x3F) as usize] as char);
+            out.push(B64_ALPHA[((n >> 12) & 0x3F) as usize] as char);
+            out.push('=');
+            out.push('=');
+        }
+        [a, b] => {
+            let n = ((*a as u32) << 16) | ((*b as u32) << 8);
+            out.push(B64_ALPHA[((n >> 18) & 0x3F) as usize] as char);
+            out.push(B64_ALPHA[((n >> 12) & 0x3F) as usize] as char);
+            out.push(B64_ALPHA[((n >> 6) & 0x3F) as usize] as char);
+            out.push('=');
+        }
+        _ => {}
+    }
+    out
+}
+
+pub fn base64_std_decode(input: &str) -> Option<Vec<u8>> {
+    let trimmed = input.trim_end_matches('=');
+    let mut out = Vec::with_capacity(trimmed.len() * 3 / 4);
+    let mut buf = 0u32;
+    let mut bits = 0u8;
+    for ch in trimmed.bytes() {
+        let v: u32 = match ch {
+            b'A'..=b'Z' => (ch - b'A') as u32,
+            b'a'..=b'z' => (ch - b'a' + 26) as u32,
+            b'0'..=b'9' => (ch - b'0' + 52) as u32,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        };
+        buf = (buf << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((buf >> bits) & 0xFF) as u8);
+        }
+    }
+    Some(out)
 }
 
 /// Generate a session id. Format: `rwsess-<unix_micros>-<rand>`.

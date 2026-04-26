@@ -290,6 +290,13 @@ impl VaultState {
                 users.push(User {
                     username: parts[0].to_string(),
                     password_hash: parts[1].to_string(),
+                    // Vault format v1 doesn't carry the SCRAM
+                    // verifier — it landed after the format
+                    // froze. Users that pre-date Phase 3a get
+                    // their verifier rebuilt on next password
+                    // change; SCRAM auth fails closed for them
+                    // until then.
+                    scram_verifier: None,
                     role,
                     api_keys: Vec::new(), // API keys are attached separately below
                     created_at,
@@ -686,6 +693,7 @@ mod tests {
                 User {
                     username: "alice".into(),
                     password_hash: "argon2id$aabbccdd$eeff0011".into(),
+                    scram_verifier: None,
                     role: Role::Admin,
                     api_keys: vec![ApiKey {
                         key: "rk_abc123".into(),
@@ -700,6 +708,7 @@ mod tests {
                 User {
                     username: "bob".into(),
                     password_hash: "argon2id$11223344$55667788".into(),
+                    scram_verifier: None,
                     role: Role::Read,
                     api_keys: vec![],
                     created_at: now,

@@ -86,10 +86,19 @@ impl fmt::Display for Role {
 // ---------------------------------------------------------------------------
 
 /// A registered user in the RedDB auth system.
+///
+/// Stores both the legacy bcrypt-style `password_hash` (used by
+/// HTTP `/auth/login` for token minting) and the SCRAM-SHA-256
+/// verifier (used by the v2 wire handshake). Both derive from the
+/// same plaintext at user creation; the SCRAM path never sees
+/// plaintext or the salted password again.
 #[derive(Debug, Clone)]
 pub struct User {
     pub username: String,
     pub password_hash: String,
+    /// SCRAM-SHA-256 verifier — `{ salt, iter, stored_key, server_key }`.
+    /// Populated alongside `password_hash` on user creation.
+    pub scram_verifier: Option<scram::ScramVerifier>,
     pub role: Role,
     pub api_keys: Vec<ApiKey>,
     pub created_at: u128,
