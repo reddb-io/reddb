@@ -2,6 +2,36 @@
 
 All notable changes to RedDB are documented here. Dates are ISO-8601 (UTC-3).
 
+## [Unreleased]
+
+### Added
+
+- Backend conditional-write contract for writer leases: `RemoteBackend` now exposes object version tokens plus conditional upload/delete. Local FS uses content-hash tokens; S3-compatible stores use ETag + `If-Match`; HTTP can opt in with `RED_HTTP_CONDITIONAL_WRITES=true`.
+- Release gates for cold-start baselines, artifact size measurement, feature-matrix compilation, and nightly backup/restore drills.
+- `reddb_slo_lag_budget_remaining_seconds{replica_id}` metric, derived from `RED_SLO_REPLICA_LAG_BUDGET_SECONDS` and replica lag.
+
+### Changed
+
+- Serverless writer fencing now fails closed when the configured backend cannot enforce compare-and-swap. A failed lease acquire is preferred over split-brain.
+- Production release binaries use `panic = "abort"`; WAL/recovery is the consistency boundary after process death.
+
+### Documentation
+
+- Added `docs/release/v1.0-migration.md`, `docs/reference/features.md`, `bench/artifact-sizes.md`, and `docs/release/drill-history.md`.
+- Updated the operator runbook with the lease backend/runtime matrix, panic policy, and SLO lag budget alert.
+
+## [v1.0-rc1] - planned
+
+### Breaking Changes
+
+- Public cloud/runtime configuration uses the `RED_*` namespace. Legacy `REDDB_*` aliases remain accepted where already shipped, but new deployment manifests should use `RED_*`.
+- Writer lease deployments must use a CAS-capable backend. Filesystem leases are not supported on ephemeral runtimes or NFS-style shared filesystems for v1 production fencing.
+- Encryption-at-rest is **foundation-only** in v1.0 unless a later release note explicitly says the pager format was bumped and wired. Do not market v1.0 as encrypted-at-rest by default.
+
+### Migration Guide
+
+- See `docs/release/v1.0-migration.md`.
+
 ## 2026-04-23 — REST surface rewrite: RESTful + collection-centric
 
 Dropped the `/vcs/*` RPC-shaped endpoints and replaced them with a
