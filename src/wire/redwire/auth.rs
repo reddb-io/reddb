@@ -13,9 +13,17 @@ use crate::auth::store::AuthStore;
 use crate::auth::Role;
 use crate::serde_json::{self, Value as JsonValue};
 
-/// Methods we know how to handle today. SCRAM/mTLS/OAuth land
-/// in follow-up PRs (each is its own state machine).
-pub const SUPPORTED_METHODS: &[&str] = &["bearer", "anonymous"];
+/// Methods we know how to handle today.
+///
+/// `bearer` + `anonymous` are 1-RTT and fully wired.
+/// `scram-sha-256` and `oauth-jwt` are advertised but the
+/// validate_auth_response side returns AuthFail until the
+/// AuthStore migration (Phase 3b/4) lands the verifier
+/// storage + OAuth authenticator handle. Listing them keeps
+/// Hello/HelloAck stable while the server-side wiring catches
+/// up — clients can probe for the method without churning the
+/// negotiation surface later.
+pub const SUPPORTED_METHODS: &[&str] = &["bearer", "anonymous", "scram-sha-256", "oauth-jwt"];
 
 /// Outcome of `validate_auth_response`.
 #[derive(Debug, Clone)]
@@ -125,14 +133,14 @@ pub fn build_hello_ack(
 /// versions prepend scram-sha-256, mtls, oauth-jwt to the
 /// priority list.
 pub fn pick_auth_method(client_methods: &[String], server_anon_ok: bool) -> Option<&'static str> {
+    // Phase 3a/4 wires up the negotiation surface but the
+    // server validators for scram-sha-256 / oauth-jwt return
+    // AuthFail until Phase 3b/4. Keep them out of the picker
+    // priority so the handshake doesn't fail every login —
+    // clients that offer them will fall through to bearer.
     let priority: &[&'static str] = if server_anon_ok {
-        // No auth store — bearer would fail validation. Prefer
-        // anonymous so the handshake succeeds when the client
-        // offers it.
         &["anonymous", "bearer"]
     } else {
-        // Auth store enabled — bearer is the only path that
-        // succeeds. anonymous is filtered out below.
         &["bearer", "anonymous"]
     };
     for method in priority {
@@ -186,6 +194,18 @@ pub fn validate_auth_response(
                 None => AuthOutcome::Refused("bearer token invalid".into()),
             }
         }
+        "scram-sha-256" => AuthOutcome::Refused(
+            "scram-sha-256 negotiation is wire-ready but server-side AuthStore \
+             migration is pending (Phase 3b of ADR 0002). Use bearer or anonymous \
+             for now."
+                .to_string(),
+        ),
+        "oauth-jwt" => AuthOutcome::Refused(
+            "oauth-jwt validation requires OAuthAuthenticator plumbing into the \
+             handshake (Phase 4 of ADR 0002). Use bearer with a session token \
+             from POST /auth/login for now."
+                .to_string(),
+        ),
         other => AuthOutcome::Refused(format!("auth method '{other}' is not supported in v2.1")),
     }
 }

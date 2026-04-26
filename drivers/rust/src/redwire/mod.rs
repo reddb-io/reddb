@@ -14,6 +14,7 @@
 pub mod codec;
 mod frame;
 mod handshake;
+pub mod scram;
 #[cfg(feature = "redwire-tls")]
 mod tls;
 

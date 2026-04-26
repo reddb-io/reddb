@@ -23,7 +23,7 @@ embedded = ["dep:reddb"]
 grpc = ["dep:reddb", "dep:tokio"]
 # RedWire v2 native TCP client. No engine dep — speaks the wire
 # protocol directly. See ADR 0001.
-redwire = ["dep:tokio", "dep:serde_json", "dep:zstd"]
+redwire = ["dep:tokio", "dep:serde_json", "dep:zstd", "dep:sha2"]
 # HTTP / HTTPS transport using reqwest. Parity with the JS
 # driver's HttpRpcClient — talks REST endpoints directly.
 http = ["dep:tokio", "dep:serde_json", "dep:reqwest"]
@@ -50,6 +50,10 @@ serde_json = { version = "1", optional = true }
 # Per-frame compression (Flags::COMPRESSED). Pulled in only by
 # the `redwire` feature so embedded-only callers don't pay it.
 zstd = { version = "0.13", default-features = false, optional = true }
+
+# SHA-256 for SCRAM client primitives (Phase 3a/3c). Pulled in
+# only by the `redwire` feature.
+sha2 = { version = "0.11", optional = true }
 
 # TLS / mTLS for the RedWire client. Pulled in only by the
 # `redwire-tls` feature.
