@@ -232,6 +232,12 @@ fn env_nonempty(name: &str) -> Option<String> {
     crate::utils::env_with_file_fallback(name)
 }
 
+fn env_truthy(name: &str) -> bool {
+    env_nonempty(name)
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
 fn configure_remote_backend_from_env(options: &mut RedDBOptions) {
     // PLAN.md (cloud-agnostic) — prefer the new spelling
     // `RED_BACKEND`; accept the legacy `REDDB_REMOTE_BACKEND` for
@@ -314,24 +320,27 @@ fn configure_remote_backend_from_env(options: &mut RedDBOptions) {
             let prefix = env_nonempty("RED_HTTP_BACKEND_PREFIX")
                 .or_else(|| env_nonempty("REDDB_HTTP_BACKEND_PREFIX"))
                 .unwrap_or_default();
-            let auth_header =
-                if let Some(path) = env_nonempty("RED_HTTP_BACKEND_AUTH_HEADER_FILE")
-                    .or_else(|| env_nonempty("REDDB_HTTP_BACKEND_AUTH_HEADER_FILE"))
-                {
-                    std::fs::read_to_string(&path)
-                        .ok()
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                } else {
-                    env_nonempty("RED_HTTP_BACKEND_AUTH_HEADER")
-                        .or_else(|| env_nonempty("REDDB_HTTP_BACKEND_AUTH_HEADER"))
-                };
+            let auth_header = if let Some(path) = env_nonempty("RED_HTTP_BACKEND_AUTH_HEADER_FILE")
+                .or_else(|| env_nonempty("REDDB_HTTP_BACKEND_AUTH_HEADER_FILE"))
+            {
+                std::fs::read_to_string(&path)
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            } else {
+                env_nonempty("RED_HTTP_BACKEND_AUTH_HEADER")
+                    .or_else(|| env_nonempty("REDDB_HTTP_BACKEND_AUTH_HEADER"))
+            };
 
             let mut config =
                 crate::storage::backend::HttpBackendConfig::new(base_url).with_prefix(prefix);
             if let Some(auth) = auth_header {
                 config = config.with_auth_header(auth);
             }
+            let conditional_writes = env_truthy("RED_HTTP_CONDITIONAL_WRITES")
+                || env_truthy("RED_HTTP_BACKEND_CONDITIONAL_WRITES")
+                || env_truthy("REDDB_HTTP_BACKEND_CONDITIONAL_WRITES");
+            config = config.with_conditional_writes(conditional_writes);
             options.remote_backend =
                 Some(Arc::new(crate::storage::backend::HttpBackend::new(config)));
             options.remote_key = env_nonempty("RED_REMOTE_KEY")
@@ -385,7 +394,9 @@ fn s3_config_from_env() -> Option<crate::storage::backend::S3Config> {
     let access_key = env_s3_secret("ACCESS_KEY")?;
     let secret_key = env_s3_secret("SECRET_KEY")?;
     let region = env_s3("REGION").unwrap_or_else(|| "us-east-1".to_string());
-    let key_prefix = env_s3("KEY_PREFIX").or_else(|| env_s3("PREFIX")).unwrap_or_default();
+    let key_prefix = env_s3("KEY_PREFIX")
+        .or_else(|| env_s3("PREFIX"))
+        .unwrap_or_default();
     let path_style = env_s3("PATH_STYLE")
         .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(true);
@@ -777,7 +788,10 @@ async fn spawn_lifecycle_signal_handler(runtime: RedDBRuntime) {
                 continue; // stay alive; SIGHUP isn't a shutdown
             }
 
-            tracing::info!(signal = signal_name, "lifecycle signal received; shutting down");
+            tracing::info!(
+                signal = signal_name,
+                "lifecycle signal received; shutting down"
+            );
             match runtime.graceful_shutdown(backup_on_shutdown) {
                 Ok(report) => {
                     tracing::info!(
@@ -1334,14 +1348,12 @@ fn build_metrics_only_server(
 /// unset the existing listener keeps serving everything (back-compat).
 fn spawn_admin_metrics_listeners(runtime: &RedDBRuntime, auth_store: &Arc<AuthStore>) {
     if let Some(addr) = env_nonempty("RED_ADMIN_BIND") {
-        let server =
-            build_admin_only_server(runtime.clone(), auth_store.clone(), addr.clone());
+        let server = build_admin_only_server(runtime.clone(), auth_store.clone(), addr.clone());
         let _ = server.serve_in_background();
         tracing::info!(transport = "http", surface = "admin", bind = %addr, "listener online");
     }
     if let Some(addr) = env_nonempty("RED_METRICS_BIND") {
-        let server =
-            build_metrics_only_server(runtime.clone(), auth_store.clone(), addr.clone());
+        let server = build_metrics_only_server(runtime.clone(), auth_store.clone(), addr.clone());
         let _ = server.serve_in_background();
         tracing::info!(transport = "http", surface = "metrics", bind = %addr, "listener online");
     }
