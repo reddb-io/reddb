@@ -616,6 +616,239 @@ pub trait RuntimeEntityPortCtx: RuntimeEntityPort {
 #[cfg(feature = "ctx-ports")]
 impl<T: RuntimeEntityPort + ?Sized> RuntimeEntityPortCtx for T {}
 
+// ─── ctx extension traits for the remaining mutating ports ───
+//
+// Same pattern as RuntimeEntityPortCtx: methods take
+// `&OperationContext` first, default-forward to the existing
+// context-less call. Blanket impls give every concrete port
+// the new surface for free. Future PRs replace the forwards
+// with real `ctx.write_consent` / `ctx.xid` handling.
+//
+// Read-only ports (RuntimeCatalogPort, RuntimeGraphPort) and the
+// read-only methods of mutating ports are intentionally absent —
+// `OperationContext` adds no locality there until the snapshot-
+// xid migration also lands.
+
+#[cfg(feature = "ctx-ports")]
+pub trait RuntimeQueryPortCtx: RuntimeQueryPort {
+    fn execute_query_ctx(
+        &self,
+        ctx: &crate::application::OperationContext,
+        query: &str,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let _ = ctx;
+        self.execute_query(query)
+    }
+    fn explain_query_ctx(
+        &self,
+        ctx: &crate::application::OperationContext,
+        query: &str,
+    ) -> RedDBResult<RuntimeQueryExplain> {
+        let _ = ctx;
+        self.explain_query(query)
+    }
+    fn scan_collection_ctx(
+        &self,
+        ctx: &crate::application::OperationContext,
+        collection: &str,
+        cursor: Option<ScanCursor>,
+        limit: usize,
+    ) -> RedDBResult<ScanPage> {
+        let _ = ctx;
+        self.scan_collection(collection, cursor, limit)
+    }
+}
+#[cfg(feature = "ctx-ports")]
+impl<T: RuntimeQueryPort + ?Sized> RuntimeQueryPortCtx for T {}
+
+#[cfg(feature = "ctx-ports")]
+pub trait RuntimeSchemaPortCtx: RuntimeSchemaPort {
+    fn create_table_ctx(
+        &self,
+        ctx: &crate::application::OperationContext,
+        input: CreateTableInput,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let _ = ctx;
+        self.create_table(input)
+    }
+    fn drop_table_ctx(
+        &self,
+        ctx: &crate::application::OperationContext,
+        input: DropTableInput,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let _ = ctx;
+        self.drop_table(input)
+    }
+    fn create_timeseries_ctx(
+        &self,
+        ctx: &crate::application::OperationContext,
+        input: CreateTimeSeriesInput,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let _ = ctx;
+        self.create_timeseries(input)
+    }
+    fn drop_timeseries_ctx(
+        &self,
+        ctx: &crate::application::OperationContext,
+        input: DropTimeSeriesInput,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let _ = ctx;
+        self.drop_timeseries(input)
+    }
+}
+#[cfg(feature = "ctx-ports")]
+impl<T: RuntimeSchemaPort + ?Sized> RuntimeSchemaPortCtx for T {}
+
+#[cfg(feature = "ctx-ports")]
+pub trait RuntimeTreePortCtx: RuntimeTreePort {
+    fn create_tree_ctx(
+        &self,
+        ctx: &crate::application::OperationContext,
+        input: CreateTreeInput,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let _ = ctx;
+        self.create_tree(input)
+    }
+    fn drop_tree_ctx(
+        &self,
+        ctx: &crate::application::OperationContext,
+        input: DropTreeInput,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let _ = ctx;
+        self.drop_tree(input)
+    }
+    fn insert_tree_node_ctx(
+        &self,
+        ctx: &crate::application::OperationContext,
+        input: InsertTreeNodeInput,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let _ = ctx;
+        self.insert_tree_node(input)
+    }
+    fn move_tree_node_ctx(
+        &self,
+        ctx: &crate::application::OperationContext,
+        input: MoveTreeNodeInput,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let _ = ctx;
+        self.move_tree_node(input)
+    }
+    fn delete_tree_node_ctx(
+        &self,
+        ctx: &crate::application::OperationContext,
+        input: DeleteTreeNodeInput,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let _ = ctx;
+        self.delete_tree_node(input)
+    }
+    fn rebalance_tree_ctx(
+        &self,
+        ctx: &crate::application::OperationContext,
+        input: RebalanceTreeInput,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        let _ = ctx;
+        self.rebalance_tree(input)
+    }
+}
+#[cfg(feature = "ctx-ports")]
+impl<T: RuntimeTreePort + ?Sized> RuntimeTreePortCtx for T {}
+
+#[cfg(feature = "ctx-ports")]
+pub trait RuntimeNativePortCtx: RuntimeNativePort {
+    fn create_snapshot_ctx(
+        &self,
+        ctx: &crate::application::OperationContext,
+    ) -> RedDBResult<SnapshotDescriptor> {
+        let _ = ctx;
+        self.create_snapshot()
+    }
+    fn create_export_ctx(
+        &self,
+        ctx: &crate::application::OperationContext,
+        name: String,
+    ) -> RedDBResult<ExportDescriptor> {
+        let _ = ctx;
+        self.create_export(name)
+    }
+    fn checkpoint_ctx(
+        &self,
+        ctx: &crate::application::OperationContext,
+    ) -> RedDBResult<()> {
+        let _ = ctx;
+        self.checkpoint()
+    }
+    fn apply_retention_policy_ctx(
+        &self,
+        ctx: &crate::application::OperationContext,
+    ) -> RedDBResult<()> {
+        let _ = ctx;
+        self.apply_retention_policy()
+    }
+    fn run_maintenance_ctx(
+        &self,
+        ctx: &crate::application::OperationContext,
+    ) -> RedDBResult<()> {
+        let _ = ctx;
+        self.run_maintenance()
+    }
+    fn repair_native_header_from_metadata_ctx(
+        &self,
+        ctx: &crate::application::OperationContext,
+    ) -> RedDBResult<String> {
+        let _ = ctx;
+        self.repair_native_header_from_metadata()
+    }
+    fn rebuild_physical_metadata_from_native_state_ctx(
+        &self,
+        ctx: &crate::application::OperationContext,
+    ) -> RedDBResult<bool> {
+        let _ = ctx;
+        self.rebuild_physical_metadata_from_native_state()
+    }
+}
+#[cfg(feature = "ctx-ports")]
+impl<T: RuntimeNativePort + ?Sized> RuntimeNativePortCtx for T {}
+
+#[cfg(feature = "ctx-ports")]
+pub trait RuntimeVcsPortCtx: RuntimeVcsPort {
+    fn vcs_branch_delete_ctx(
+        &self,
+        ctx: &crate::application::OperationContext,
+        name: &str,
+    ) -> RedDBResult<()> {
+        let _ = ctx;
+        self.vcs_branch_delete(name)
+    }
+    fn vcs_reset_ctx(
+        &self,
+        ctx: &crate::application::OperationContext,
+        input: crate::application::vcs::ResetInput,
+    ) -> RedDBResult<()> {
+        let _ = ctx;
+        self.vcs_reset(input)
+    }
+    fn vcs_set_versioned_ctx(
+        &self,
+        ctx: &crate::application::OperationContext,
+        collection: &str,
+        enabled: bool,
+    ) -> RedDBResult<()> {
+        let _ = ctx;
+        self.vcs_set_versioned(collection, enabled)
+    }
+    fn vcs_conflict_resolve_ctx(
+        &self,
+        ctx: &crate::application::OperationContext,
+        conflict_id: &str,
+        resolved: crate::json::Value,
+    ) -> RedDBResult<()> {
+        let _ = ctx;
+        self.vcs_conflict_resolve(conflict_id, resolved)
+    }
+}
+#[cfg(feature = "ctx-ports")]
+impl<T: RuntimeVcsPort + ?Sized> RuntimeVcsPortCtx for T {}
+
 #[path = "ports_impls.rs"]
 mod ports_impls;
 pub(crate) use ports_impls::build_row_update_contract_plan;
