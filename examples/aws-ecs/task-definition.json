@@ -27,6 +27,7 @@
         {"name": "RED_BACKUP_INTERVAL_SECS", "value": "300"},
         {"name": "RED_LOG_FORMAT", "value": "json"},
         {"name": "RED_LOG_LEVEL", "value": "info"},
+        {"name": "RED_LEASE_REQUIRED", "value": "true"},
         {"name": "RED_SHUTDOWN_TIMEOUT_SECS", "value": "60"}
       ],
       "secrets": [
