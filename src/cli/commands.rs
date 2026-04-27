@@ -177,6 +177,12 @@ pub fn all_commands() -> Vec<CommandDef> {
       flags: doctor_flags(),
     },
     CommandDef {
+      name: "bootstrap",
+      summary: "One-shot first-admin bootstrap for headless containers / K8s Jobs",
+      usage: "red bootstrap --path PATH --vault [--username USER] [--password-stdin] [--print-certificate] [--json]",
+      flags: bootstrap_flags(),
+    },
+    CommandDef {
       name: "version",
       summary: "Show RedDB version information",
       usage: "red version",
@@ -388,12 +394,9 @@ fn vcs_flags() -> Vec<FlagSchema> {
             .with_short('c')
             .with_description("Connection id for workset scoping")
             .with_default("1"),
-        FlagSchema::new("branch")
-            .with_description("Branch name (for log/checkout/merge)"),
-        FlagSchema::new("from")
-            .with_description("Source ref or commit (branch create / merge)"),
-        FlagSchema::new("to")
-            .with_description("Upper bound for log range"),
+        FlagSchema::new("branch").with_description("Branch name (for log/checkout/merge)"),
+        FlagSchema::new("from").with_description("Source ref or commit (branch create / merge)"),
+        FlagSchema::new("to").with_description("Upper bound for log range"),
         FlagSchema::new("author")
             .with_description("Commit author name")
             .with_default("reddb"),
@@ -477,6 +480,25 @@ fn health_flags() -> Vec<FlagSchema> {
     ]
 }
 
+fn bootstrap_flags() -> Vec<FlagSchema> {
+    vec![
+        FlagSchema::new("path")
+            .with_short('d')
+            .with_description("Persistent database file path"),
+        FlagSchema::boolean("vault")
+            .with_description("Required: seal credentials in the encrypted vault"),
+        FlagSchema::new("username")
+            .with_short('u')
+            .with_description("Admin username (defaults to REDDB_USERNAME)"),
+        FlagSchema::new("password")
+            .with_description("Admin password (DEV ONLY; prefer --password-stdin)"),
+        FlagSchema::boolean("password-stdin")
+            .with_description("Read the admin password from stdin (one line)"),
+        FlagSchema::boolean("print-certificate")
+            .with_description("Print only the certificate to stdout"),
+    ]
+}
+
 fn doctor_flags() -> Vec<FlagSchema> {
     vec![
         FlagSchema::new("bind")
@@ -484,7 +506,8 @@ fn doctor_flags() -> Vec<FlagSchema> {
             .with_default("127.0.0.1:8080"),
         FlagSchema::new("token")
             .with_description("Admin bearer token; defaults to RED_ADMIN_TOKEN env"),
-        FlagSchema::boolean("json").with_description("Emit a single JSON object instead of human text"),
+        FlagSchema::boolean("json")
+            .with_description("Emit a single JSON object instead of human text"),
         FlagSchema::new("backup-age-warn-secs")
             .with_description("Warn when last successful backup is older than N seconds")
             .with_default("600"),

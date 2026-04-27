@@ -359,12 +359,7 @@ impl<'a, P: RuntimeVcsPort + ?Sized> VcsUseCases<'a, P> {
         self.runtime.vcs_cherry_pick(connection_id, commit, author)
     }
 
-    pub fn revert(
-        &self,
-        connection_id: u64,
-        commit: &str,
-        author: Author,
-    ) -> RedDBResult<Commit> {
+    pub fn revert(&self, connection_id: u64, commit: &str, author: Author) -> RedDBResult<Commit> {
         self.runtime.vcs_revert(connection_id, commit, author)
     }
 
@@ -392,11 +387,7 @@ impl<'a, P: RuntimeVcsPort + ?Sized> VcsUseCases<'a, P> {
         self.runtime.vcs_conflicts_list(merge_state_id)
     }
 
-    pub fn conflict_resolve(
-        &self,
-        conflict_id: &str,
-        resolved: JsonValue,
-    ) -> RedDBResult<()> {
+    pub fn conflict_resolve(&self, conflict_id: &str, resolved: JsonValue) -> RedDBResult<()> {
         self.runtime.vcs_conflict_resolve(conflict_id, resolved)
     }
 

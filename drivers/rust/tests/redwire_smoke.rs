@@ -1,4 +1,4 @@
-//! End-to-end smoke for RedWire v2: spin up the engine listener
+//! End-to-end smoke for RedWire: spin up the engine listener
 //! on an ephemeral port, drive it from the reference client.
 //!
 //! Validates handshake (anonymous), `version` query round-trip,
@@ -46,7 +46,7 @@ async fn handshake_query_close_round_trip() {
     .await
     .expect("connect");
 
-    // Bounce a trivial query through the v2 wire.
+    // Bounce a trivial query through the wire.
     let result = client.query("SELECT 1").await.expect("query");
     assert!(!result.statement.is_empty(), "server populated statement");
 
@@ -343,7 +343,7 @@ async fn scram_sha_256_end_to_end() {
 #[tokio::test]
 async fn bearer_required_when_anonymous_unsupported() {
     // Spin up a listener with an auth store that has auth.enabled.
-    // A v2 client offering only `anonymous` should be refused.
+    // A client offering only `anonymous` should be refused.
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     drop(listener);

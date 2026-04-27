@@ -8,10 +8,7 @@ use reddb::application::VcsUseCases;
 use reddb::{RedDBOptions, RedDBRuntime};
 
 fn rt() -> Arc<RedDBRuntime> {
-    Arc::new(
-        RedDBRuntime::with_options(RedDBOptions::in_memory())
-            .expect("in-memory runtime"),
-    )
+    Arc::new(RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("in-memory runtime"))
 }
 
 fn vcs(rt: &RedDBRuntime) -> VcsUseCases<'_, RedDBRuntime> {
@@ -36,7 +33,10 @@ fn set_versioned_on_and_off() {
         .unwrap();
     vcs(&rt).set_versioned("users", true).unwrap();
     assert!(vcs(&rt).is_versioned("users").unwrap());
-    assert_eq!(vcs(&rt).list_versioned().unwrap(), vec!["users".to_string()]);
+    assert_eq!(
+        vcs(&rt).list_versioned().unwrap(),
+        vec!["users".to_string()]
+    );
 
     // Toggle off — row deleted, list empty.
     vcs(&rt).set_versioned("users", false).unwrap();
@@ -143,10 +143,7 @@ fn as_of_works_after_opt_in_retroactively() {
     rt.execute_query("ALTER TABLE products SET VERSIONED = true")
         .unwrap();
 
-    let sql = format!(
-        "SELECT * FROM products AS OF COMMIT '{}'",
-        before.hash
-    );
+    let sql = format!("SELECT * FROM products AS OF COMMIT '{}'", before.hash);
     rt.execute_query(&sql)
         .expect("retroactive AS OF on opted-in table succeeds");
 }

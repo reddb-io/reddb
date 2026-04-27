@@ -16,6 +16,13 @@ Replicas (readers, {{ .Values.replica.replicaCount }} pod(s)):
   gRPC: {{ include "reddb.replica.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.replica.service.grpcPort }}
   HTTP: http://{{ include "reddb.replica.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.replica.service.httpPort }}
 {{- end }}
+{{- if .Values.ingress.enabled }}
+
+Ingress hosts:
+{{- range .Values.ingress.hosts }}
+  - {{ .host }}
+{{- end }}
+{{- end }}
 
 ────────────────────────────────────────────────────────────────────────────
 Quick checks
@@ -29,7 +36,57 @@ Quick checks
 Auth bootstrap is ENABLED. Initial admin credentials live in secret:
   {{ include "reddb.authSecretName" . }}
 {{- end }}
+
+{{- if .Values.auth.vault.enabled }}
+
+────────────────────────────────────────────────────────────────────────────
+ENCRYPTED VAULT — ACTION REQUIRED
+────────────────────────────────────────────────────────────────────────────
+config.vault is ON. RedDB stores the auth state in encrypted reserved
+pages of {{ .Values.primary.service.httpPort | toString | replace "8080" "/data/data.rdb" }}.
+
+  {{- if .Values.auth.vault.bootstrapJob.enabled }}
+A one-off bootstrap Job ran (or is running) and wrote the freshly-minted
+certificate to:
+    secret/{{ .Values.auth.vault.bootstrapJob.certificateSecretName }}
+in namespace {{ .Release.Namespace }}.
+
+To inspect (the cert is the only key — DO NOT log it):
+    kubectl -n {{ .Release.Namespace }} get secret {{ .Values.auth.vault.bootstrapJob.certificateSecretName }} \
+        -o jsonpath='{.data.{{ default "certificate" .Values.auth.vault.certificate.existingSecretKey }}}' | base64 -d
+  {{- else if .Values.auth.vault.certificate.existingSecret }}
+The chart references the pre-existing Secret:
+    secret/{{ .Values.auth.vault.certificate.existingSecret }} (key: {{ default "certificate" .Values.auth.vault.certificate.existingSecretKey }})
+  {{- else if .Values.auth.vault.certificate.value }}
+The chart materialised the certificate into:
+    secret/{{ include "reddb.authSecretName" . }} (key: {{ default "certificate" .Values.auth.vault.certificate.existingSecretKey }})
+  {{- else }}
+WARNING: config.vault is ON but no certificate source is configured.
+The pod will fail to start until you set ONE of:
+    auth.vault.certificate.value
+    auth.vault.certificate.existingSecret
+    auth.vault.bootstrapJob.enabled=true
+  {{- end }}
+
+  {{- if .Values.auth.vault.certificate.fileMount.enabled }}
+Cert is mounted at: {{ .Values.auth.vault.certificate.fileMount.path }}
+  REDDB_CERTIFICATE_FILE points at the same path.
+  {{- end }}
+
+────────────────────────────────────────────────────────────────────────────
+BACK UP THE CERTIFICATE
+────────────────────────────────────────────────────────────────────────────
+Without this 64-char hex string the encrypted vault is unreadable. There
+is NO recovery path. Export it now and store it offline (password manager,
+HSM, KMS-wrapped object). Rotate via the documented vault-rekey runbook.
+
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "reddb.vaultCertSecretName" . }} \
+      -o jsonpath='{.data.{{ default "certificate" .Values.auth.vault.certificate.existingSecretKey }}}' | base64 -d > vault-cert.txt
+  shred -u vault-cert.txt   # after you've copied it to your offline store
+
+{{- end }}
+
 {{- if not .Values.primary.persistence.enabled }}
 
-⚠  Persistence is DISABLED on the primary — data lives in an emptyDir and is lost on pod restart.
+WARNING: Persistence is DISABLED on the primary — data lives in an emptyDir and is lost on pod restart.
 {{- end }}

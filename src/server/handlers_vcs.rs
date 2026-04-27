@@ -17,8 +17,8 @@ use crate::application::vcs_payload::{
 };
 use crate::application::{
     AsOfSpec, Author, CheckoutInput, CheckoutTarget, CreateBranchInput, CreateCommitInput,
-    CreateTagInput, DiffInput, LogInput, LogRange, MergeInput, MergeOpts, MergeStrategy, ResetInput,
-    ResetMode, StatusInput, VcsUseCases,
+    CreateTagInput, DiffInput, LogInput, LogRange, MergeInput, MergeOpts, MergeStrategy,
+    ResetInput, ResetMode, StatusInput, VcsUseCases,
 };
 use crate::json::{from_slice as json_from_slice, Map, Value as JsonValue};
 use crate::runtime::RedDBRuntime;
@@ -188,12 +188,10 @@ pub(crate) fn handle_branch_show(runtime: &RedDBRuntime, name: &str) -> HttpResp
         format!("refs/heads/{name}")
     };
     match runtime.vcs_list_refs(Some(&full)) {
-        Ok(refs) => {
-            match refs.into_iter().find(|r| r.name == full) {
-                Some(r) => json_response(200, ok(ref_to_json(&r))),
-                None => json_response(404, err(&format!("branch `{name}` not found"))),
-            }
-        }
+        Ok(refs) => match refs.into_iter().find(|r| r.name == full) {
+            Some(r) => json_response(200, ok(ref_to_json(&r))),
+            None => json_response(404, err(&format!("branch `{name}` not found"))),
+        },
         Err(e) => map_err_response(e),
     }
 }
@@ -295,12 +293,10 @@ pub(crate) fn handle_tag_delete(runtime: &RedDBRuntime, name: &str) -> HttpRespo
         format!("refs/tags/{name}")
     };
     match runtime.vcs_list_refs(Some(&full)) {
-        Ok(refs) if refs.iter().any(|r| r.name == full) => {
-            match runtime.vcs_branch_delete(&full) {
-                Ok(()) => json_response(204, JsonValue::Null),
-                Err(e) => map_err_response(e),
-            }
-        }
+        Ok(refs) if refs.iter().any(|r| r.name == full) => match runtime.vcs_branch_delete(&full) {
+            Ok(()) => json_response(204, JsonValue::Null),
+            Err(e) => map_err_response(e),
+        },
         Ok(_) => json_response(404, err(&format!("tag `{name}` not found"))),
         Err(e) => map_err_response(e),
     }
@@ -351,9 +347,7 @@ pub(crate) fn handle_commit_show(runtime: &RedDBRuntime, hash: &str) -> HttpResp
             no_merges: false,
         },
     }) {
-        Ok(commits) if !commits.is_empty() => {
-            json_response(200, ok(commit_to_json(&commits[0])))
-        }
+        Ok(commits) if !commits.is_empty() => json_response(200, ok(commit_to_json(&commits[0]))),
         Ok(_) => json_response(404, err(&format!("commit `{hash}` not found"))),
         Err(e) => map_err_response(e),
     }
@@ -431,11 +425,7 @@ pub(crate) fn handle_commit_diff(
     }
 }
 
-pub(crate) fn handle_commit_lca(
-    runtime: &RedDBRuntime,
-    a: &str,
-    b: &str,
-) -> HttpResponse {
+pub(crate) fn handle_commit_lca(runtime: &RedDBRuntime, a: &str, b: &str) -> HttpResponse {
     match vcs(runtime).lca(a, b) {
         Ok(hash) => {
             let mut map = Map::new();
@@ -483,7 +473,9 @@ pub(crate) fn handle_session_checkout(
         other => {
             return json_response(
                 400,
-                err(&format!("unknown kind `{other}` (expected branch|commit|tag)")),
+                err(&format!(
+                    "unknown kind `{other}` (expected branch|commit|tag)"
+                )),
             );
         }
     };
@@ -665,14 +657,14 @@ pub(crate) fn handle_conflict_resolve(
 // /collections/{name}/vcs — collection-centric opt-in toggle
 // ---------------------------------------------------------------------------
 
-pub(crate) fn handle_collection_vcs_show(
-    runtime: &RedDBRuntime,
-    name: &str,
-) -> HttpResponse {
+pub(crate) fn handle_collection_vcs_show(runtime: &RedDBRuntime, name: &str) -> HttpResponse {
     match vcs(runtime).is_versioned(name) {
         Ok(versioned) => {
             let mut map = Map::new();
-            map.insert("collection".to_string(), JsonValue::String(name.to_string()));
+            map.insert(
+                "collection".to_string(),
+                JsonValue::String(name.to_string()),
+            );
             map.insert("versioned".to_string(), JsonValue::Bool(versioned));
             json_response(200, ok(JsonValue::Object(map)))
         }

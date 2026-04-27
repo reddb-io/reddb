@@ -4,8 +4,7 @@
 # RedDB - Multi-stage Docker build
 # ============================================================================
 # Stage 1: Build release binaries with protobuf support
-# Stage 2: Prepare owned runtime directories
-# Stage 3: Distroless non-root runtime image
+# Stage 2: Debian-slim runtime with tini, non-root user, secret-file shim
 # ============================================================================
 
 FROM rust:1.91-slim-bookworm AS builder
@@ -41,15 +40,23 @@ FROM debian:bookworm-slim AS runtime
 
 ARG DEBIAN_FRONTEND=noninteractive
 
+# tini = init that reaps zombies and forwards SIGTERM to the engine
+# (the engine's signal handler runs graceful shutdown — see docs/engine).
+# curl is only here for HEALTHCHECK; it is not on the audited runtime path.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && apt-get install -y --no-install-recommends ca-certificates curl tini \
     && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 10001 reddb \
+    && useradd --system --uid 10001 --gid 10001 \
+        --home-dir /var/lib/reddb --no-create-home --shell /sbin/nologin reddb \
     && install -d -o 10001 -g 10001 -m 0750 /data \
-    && install -o 10001 -g 10001 -m 0640 /dev/null /data/.keep
+    && install -o 10001 -g 10001 -m 0640 /dev/null /data/.keep \
+    && install -d -o 10001 -g 10001 -m 0750 /run/secrets \
+    && install -d -o 10001 -g 10001 -m 0755 /etc/reddb
 
 COPY --from=builder --chown=10001:10001 /app/target/release/red /usr/local/bin/red
-
-RUN install -d -o 10001 -g 10001 -m 0755 /etc/reddb
+COPY --chown=10001:10001 docker/entrypoint.sh /entrypoint.sh
+RUN chmod 0755 /entrypoint.sh
 
 WORKDIR /data
 VOLUME /data
@@ -81,9 +88,18 @@ ENV RUST_MIN_STACK=8388608
 # non-standard location.
 ENV REDDB_CONFIG_FILE=/etc/reddb/config.json
 
-# Set these to auto-create the first admin user on startup:
-# ENV REDDB_USERNAME=admin
-# ENV REDDB_PASSWORD=changeme
+# === Secrets via file mounts ====================================================
+# DO NOT bake REDDB_CERTIFICATE / REDDB_VAULT_KEY / REDDB_PASSWORD into this image.
+# Mount them at runtime via Docker/Swarm secrets, K8s Secret volumes, or any
+# orchestrator-native secret store. The entrypoint (/entrypoint.sh) and the
+# binary both honour the *_FILE convention:
+#
+#   docker run -v ./cert.txt:/run/secrets/reddb_certificate:ro reddb \
+#     # OR explicitly:
+#     -e REDDB_CERTIFICATE_FILE=/run/secrets/reddb_certificate
+#
+# See examples/docker-compose.vault.yml for the canonical secure deploy.
+# ===============================================================================
 
 USER 10001:10001
 
@@ -95,5 +111,5 @@ USER 10001:10001
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -fsS --max-time 2 http://127.0.0.1:8080/health/live || exit 1
 
-ENTRYPOINT ["/usr/local/bin/red"]
-CMD ["server"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]
+CMD ["server", "--http", "--vault", "--path", "/data/data.rdb", "--http-bind", "0.0.0.0:8080", "--grpc-bind", "0.0.0.0:50051"]

@@ -227,8 +227,7 @@ fn post_create_index_inserts_at_scale_keeps_index_fresh() {
     rt.execute_query("CREATE TABLE users (id INT, age INT, city TEXT)")
         .unwrap();
 
-    let schema: Arc<Vec<String>> =
-        Arc::new(vec!["id".into(), "age".into(), "city".into()]);
+    let schema: Arc<Vec<String>> = Arc::new(vec!["id".into(), "age".into(), "city".into()]);
 
     const N: u32 = 1000;
     const CITIES: &[&str] = &["NYC", "LA", "Chicago", "Houston", "Phoenix"];
@@ -321,8 +320,7 @@ fn post_create_index_inserts_via_prevalidated_columnar_keeps_index_fresh() {
     rt.execute_query("CREATE TABLE users (id INT, age INT, city TEXT)")
         .unwrap();
 
-    let schema: Arc<Vec<String>> =
-        Arc::new(vec!["id".into(), "age".into(), "city".into()]);
+    let schema: Arc<Vec<String>> = Arc::new(vec!["id".into(), "age".into(), "city".into()]);
 
     let mut bulk_rows: Vec<Vec<Value>> = Vec::with_capacity(50);
     for i in 0..50u32 {
@@ -332,12 +330,8 @@ fn post_create_index_inserts_via_prevalidated_columnar_keeps_index_fresh() {
             Value::text("NYC".to_string()),
         ]);
     }
-    rt.create_rows_batch_prevalidated_columnar(
-        "users".to_string(),
-        Arc::clone(&schema),
-        bulk_rows,
-    )
-    .unwrap();
+    rt.create_rows_batch_prevalidated_columnar("users".to_string(), Arc::clone(&schema), bulk_rows)
+        .unwrap();
 
     rt.execute_query("CREATE INDEX idx_age ON users (age) USING BTREE")
         .unwrap();

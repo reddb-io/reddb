@@ -157,6 +157,171 @@ pub enum QueryExpr {
     CreateForeignTable(CreateForeignTableQuery),
     /// `DROP FOREIGN TABLE [IF EXISTS] name`
     DropForeignTable(DropForeignTableQuery),
+    /// `GRANT { actions | ALL [PRIVILEGES] }
+    ///   ON { TABLE | SCHEMA | DATABASE | FUNCTION } object_list
+    ///   TO grant_principal_list
+    ///   [WITH GRANT OPTION]`
+    ///
+    /// Granular RBAC primitive layered on top of the legacy 3-role model.
+    /// See `crate::auth::privileges` for the resolution algorithm.
+    Grant(GrantStmt),
+    /// `REVOKE [GRANT OPTION FOR] { actions | ALL } ON … FROM …`
+    Revoke(RevokeStmt),
+    /// `ALTER USER name [VALID UNTIL 'ts'] [CONNECTION LIMIT n]
+    ///   [ENABLE | DISABLE] [SET search_path = ...]`
+    AlterUser(AlterUserStmt),
+    // ----- IAM policy DDL (Agent #28 / IAM kernel integration) -----
+    /// `CREATE POLICY '<id>' AS '<json>'` — installs an IAM policy
+    /// document in the AuthStore. Distinct from the RLS-flavoured
+    /// `CreatePolicy(CreatePolicyQuery)` above (which uses
+    /// `CREATE POLICY name ON table ...`); the parser disambiguates
+    /// at parse time by inspecting the token after the policy name.
+    CreateIamPolicy { id: String, json: String },
+    /// `DROP POLICY '<id>'` — removes an IAM policy and its
+    /// attachments.
+    DropIamPolicy { id: String },
+    /// `ATTACH POLICY '<id>' TO USER <name>` /
+    /// `ATTACH POLICY '<id>' TO GROUP <name>`.
+    AttachPolicy {
+        policy_id: String,
+        principal: PolicyPrincipalRef,
+    },
+    /// `DETACH POLICY '<id>' FROM USER <name>` /
+    /// `DETACH POLICY '<id>' FROM GROUP <name>`.
+    DetachPolicy {
+        policy_id: String,
+        principal: PolicyPrincipalRef,
+    },
+    /// `SHOW POLICIES [FOR USER <name> | FOR GROUP <name>]`.
+    ShowPolicies { filter: Option<PolicyPrincipalRef> },
+    /// `SHOW EFFECTIVE PERMISSIONS FOR <name> [ON <kind>:<name>]`.
+    ShowEffectivePermissions {
+        user: PolicyUserRef,
+        resource: Option<PolicyResourceRef>,
+    },
+    /// `SIMULATE <name> ACTION <verb> ON <kind>:<name>`.
+    SimulatePolicy {
+        user: PolicyUserRef,
+        action: String,
+        resource: PolicyResourceRef,
+    },
+}
+
+/// Tenant-qualified user reference for IAM policy SQL DDL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyUserRef {
+    pub tenant: Option<String>,
+    pub username: String,
+}
+
+/// Resource reference (`<kind>:<name>`) used in `SIMULATE` /
+/// `SHOW EFFECTIVE PERMISSIONS`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyResourceRef {
+    pub kind: String,
+    pub name: String,
+}
+
+/// Principal target for ATTACH / DETACH / SHOW POLICIES filter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyPrincipalRef {
+    User(PolicyUserRef),
+    Group(String),
+}
+
+// ---------------------------------------------------------------------------
+// GRANT / REVOKE / ALTER USER AST
+// ---------------------------------------------------------------------------
+
+/// Object class targeted by a GRANT/REVOKE.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GrantObjectKind {
+    Table,
+    Schema,
+    Database,
+    Function,
+}
+
+/// One target object in a `GRANT ... ON ... <object_list>` clause.
+///
+/// `name` follows the parser's standard `[schema.]object` shape; the
+/// optional `schema` is only populated for `Table` / `Function` and
+/// stays `None` when the user wrote a bare identifier.
+#[derive(Debug, Clone)]
+pub struct GrantObject {
+    pub schema: Option<String>,
+    pub name: String,
+}
+
+/// Principal target of a GRANT (i.e. the recipient).
+#[derive(Debug, Clone)]
+pub enum GrantPrincipalRef {
+    /// `TO username` — username may include an `@tenant` suffix.
+    User {
+        tenant: Option<String>,
+        name: String,
+    },
+    /// `TO PUBLIC`.
+    Public,
+    /// `TO GROUP groupname` (parsed today, enforcement deferred).
+    Group(String),
+}
+
+/// `GRANT` statement AST.
+#[derive(Debug, Clone)]
+pub struct GrantStmt {
+    /// Privilege keywords as the user typed them, normalised to upper
+    /// case. Matches the `Action` set in `crate::auth::privileges`. An
+    /// empty list together with `all = true` represents `ALL [PRIVILEGES]`.
+    pub actions: Vec<String>,
+    /// Optional column list — populates the AST for column-level
+    /// grants but enforcement is deferred (stretch goal).
+    pub columns: Option<Vec<String>>,
+    pub object_kind: GrantObjectKind,
+    pub objects: Vec<GrantObject>,
+    pub principals: Vec<GrantPrincipalRef>,
+    pub with_grant_option: bool,
+    /// `true` when the privilege list was `ALL [PRIVILEGES]`.
+    pub all: bool,
+}
+
+/// `REVOKE` statement AST.
+#[derive(Debug, Clone)]
+pub struct RevokeStmt {
+    pub actions: Vec<String>,
+    pub columns: Option<Vec<String>>,
+    pub object_kind: GrantObjectKind,
+    pub objects: Vec<GrantObject>,
+    pub principals: Vec<GrantPrincipalRef>,
+    /// `REVOKE GRANT OPTION FOR ...` — strips just the grant option,
+    /// keeping the underlying privilege.
+    pub grant_option_for: bool,
+    pub all: bool,
+}
+
+/// One attribute setting under `ALTER USER`.
+#[derive(Debug, Clone)]
+pub enum AlterUserAttribute {
+    ValidUntil(String),
+    ConnectionLimit(i64),
+    Enable,
+    Disable,
+    SetSearchPath(String),
+    AddGroup(String),
+    DropGroup(String),
+    /// Reset password (carry the new plaintext until the runtime
+    /// hands it to AuthStore::change_password). Out of scope for the
+    /// initial milestone — present so the parser can accept the
+    /// keyword without a follow-up grammar change.
+    Password(String),
+}
+
+/// `ALTER USER` statement AST.
+#[derive(Debug, Clone)]
+pub struct AlterUserStmt {
+    pub tenant: Option<String>,
+    pub username: String,
+    pub attributes: Vec<AlterUserAttribute>,
 }
 
 #[derive(Debug, Clone)]

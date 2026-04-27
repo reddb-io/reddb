@@ -6,30 +6,27 @@ user visibility.
 
 ## RedWire wire protocol
 
-ADR 0001 (RedWire as evolution of v1) and ADR 0002 (phased rollout)
-are now mostly executed. All four phases of ADR 0002 landed:
+The full RedWire surface (ADR 0001) is wired end-to-end:
 
-- **Phase 1 — per-frame zstd compression.** Optional, advertised in
-  the v2 `Hello` capabilities, applied per-frame. Cuts bulk insert
-  egress on slow links without changing v1 behaviour.
-- **Phase 2 — TLS / mTLS dispatch + prepared statements + streaming
-  bulk.** TLS-wrapped wire shares port 5050 with plaintext via the
-  `0xFE` magic byte. Prepared statements and `BULK_STREAM_*` frames
-  now flow through v2.
-- **Phase 3 — SCRAM-SHA-256 over the v2 handshake.** Server primitives
-  in `src/auth/scram.rs`; client primitives in
+- **Per-frame zstd compression.** Optional, advertised in the
+  `Hello` capabilities, applied per-frame. Cuts bulk insert egress on
+  slow links.
+- **TLS / mTLS dispatch + prepared statements + streaming bulk.**
+  TLS-wrapped wire shares port 5050 with plaintext via the `0xFE`
+  magic byte. Prepared statements and `BULK_STREAM_*` frames flow
+  through RedWire.
+- **SCRAM-SHA-256 over the RedWire handshake.** Server primitives in
+  `src/auth/scram.rs`; client primitives in
   `drivers/rust/src/redwire/scram.rs`. Stored credential format:
   `SCRAM-SHA-256$<iter>:<salt>:<stored-key>:<server-key>`. RFC 5802
   state machine identical to PG-wire SASL.
-- **Phase 4 — OAuth / OIDC JWT over the v2 handshake.** Same
+- **OAuth / OIDC JWT over the RedWire handshake.** Same
   `JwtVerifier` validator already used by HTTP and gRPC; `iss`,
   `aud`, `exp`, `nbf` enforced, `preferred_username` claim mapped
   to RedDB identity by default.
 
-Steady-state perf is unchanged: v2 hands off to the v1 binary
-handlers after the handshake, so per-query overhead is the
-extra 11 bytes in the frame header. Spec freezes after this
-phase block; subsequent feature work bumps `Hello.versions[]`.
+Per-query overhead is the 16-byte frame header. Subsequent
+feature work bumps `Hello.versions[]`.
 
 ## Drivers
 
@@ -38,10 +35,9 @@ phase block; subsequent feature work bumps `Hello.versions[]`.
 - Unified `red://` connection-string parser landed. The driver
   picks the right transport from one URL.
 - HTTP / HTTPS adapter (`drivers/js/src/http.js`).
-- Native RedWire v2 TCP transport (`drivers/js/src/redwire.js`)
-  with bridge to v1 binary fast path (`MSG_BULK_INSERT_BINARY`,
-  `MSG_QUERY_BINARY`, `MSG_PREPARE`/`EXECUTE_PREPARED`,
-  `BULK_STREAM_*`).
+- Native RedWire TCP transport (`drivers/js/src/redwire.js`) covering
+  `MSG_BULK_INSERT_BINARY`, `MSG_QUERY_BINARY`,
+  `MSG_PREPARE`/`EXECUTE_PREPARED`, and `BULK_STREAM_*`.
 - mTLS through `reds://` scheme + `tls: { ca, cert, key }` options.
 - 6-transport matrix: embedded, HTTP, HTTPS, RedWire-TCP,
   RedWire-TLS, RedWire-mTLS. Plus PG-wire fallback via the
@@ -75,10 +71,10 @@ root `package.json` together.
 
 ## Authentication
 
-- **SCRAM-SHA-256 end-to-end** — RedWire v2 + PG wire + user vault
+- **SCRAM-SHA-256 end-to-end** — RedWire + PG wire + user vault
   storage format documented in [`security/tokens.md`](security/tokens.md#scram-sha-256).
 - **OAuth / OIDC JWT** — `AuthConfig.oauth` validator now serves
-  HTTP, gRPC, and RedWire v2 from the same code path.
+  HTTP, gRPC, and RedWire from the same code path.
 - **HMAC-signed requests** — new scheme with timestamp + nonce
   replay protection; canonical string is
   `{method}\n{path}\n{timestamp}\n{nonce}\n{sha256(body)}`.
@@ -211,7 +207,7 @@ root `package.json` together.
 - **Cluster 6 — `OperationContext` + `WriteConsent`.** Five
   mutating ports now carry an explicit context object that carries
   caller identity, write consent, and trace metadata. Gates the
-  writer surface from HTTP, gRPC, RedWire v2, and PG wire alike.
+  writer surface from HTTP, gRPC, RedWire, and PG wire alike.
 - **`service_router` split** into `ProtocolDetector` + `Router`.
 - **Lease state machine** centralised in `LeaseLifecycle`.
 
@@ -253,7 +249,6 @@ the same release cycle:
 ## See also
 
 - [ADR 0001 — RedWire TCP Protocol](adr/0001-redwire-tcp-protocol.md)
-- [ADR 0002 — RedWire v2 rollout](adr/0002-redwire-v2-rollout.md)
 - [Auth & Security Overview](security/overview.md)
 - [Auth Methods, Tokens & Keys](security/tokens.md)
 - [Connection Strings](clients/connection-strings.md)

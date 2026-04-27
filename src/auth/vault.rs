@@ -1,22 +1,67 @@
 //! Encrypted vault for auth state persistence.
 //!
-//! Stores users and API keys in **reserved pages** inside the main `.rdb`
-//! database file instead of a separate `_vault.rdb` file.  The vault
-//! occupies pages 2-3 (header + data) using `PageType::Vault` and is
-//! encrypted with a SEPARATE key derived from `REDDB_VAULT_KEY`.
+//! Stores users and API keys in **a chained set of reserved pages** inside
+//! the main `.rdb` database file instead of a separate `_vault.rdb` file.
+//! The vault header lives at a fixed page id (`VAULT_HEADER_PAGE = 2`)
+//! using `PageType::Vault` and points to a chain of overflow pages
+//! allocated dynamically as the payload grows. The contents are
+//! encrypted with a SEPARATE key derived from `REDDB_VAULT_KEY`
+//! (or, preferably, a certificate via `REDDB_CERTIFICATE`).
 //!
-//! Page content layout (inside the 4KB page, after the 32-byte page header):
-//!   [4 bytes: magic "RDVT"]
-//!   [1 byte: version]
-//!   [16 bytes: salt (for key derivation)]
-//!   [4 bytes: payload length (little-endian u32)]
-//!   [12 bytes: nonce]
-//!   [N bytes: encrypted payload (AES-256-GCM ciphertext + tag)]
+//! # On-disk format (v2)
 //!
-//! The plaintext payload is a simple text format:
-//!   USER:<username>\t<password_hash>\t<role>\t<enabled>\t<created_at>\t<updated_at>\n
-//!   KEY:<username>\t<key_string>\t<name>\t<role>\t<created_at>\n
+//! Header page content (inside the 4 KiB page, after the 32-byte
+//! page header — i.e. the bytes returned by `page.content()`):
+//!
+//! ```text
+//!   [ 4 bytes: magic "RDVT"             ]
+//!   [ 1 byte : version = 2              ]
+//!   [16 bytes: salt (key derivation)    ]
+//!   [ 4 bytes: total_payload_len u32 LE ]   // == NONCE_SIZE + ciphertext_len
+//!   [12 bytes: nonce                    ]
+//!   [ 4 bytes: chain_count u32 LE       ]   // number of data pages
+//!   [ 4 bytes: first_data_page_id u32 LE]   // 0 if no chain (single page)
+//!   [ N bytes: ciphertext fragment      ]   // first slice of the GCM ciphertext+tag
+//! ```
+//!
+//! Each data page (also `PageType::Vault`, allocated by the pager):
+//!
+//! ```text
+//!   [ 4 bytes: magic "RDVD"          ]
+//!   [ 4 bytes: next_page_id u32 LE   ]   // 0 if this is the last
+//!   [ N bytes: ciphertext fragment   ]
+//! ```
+//!
+//! The total ciphertext (with the 16-byte AES-GCM authentication tag at
+//! the end) is the concatenation of every fragment in chain order. We
+//! only call `aes256_gcm_decrypt` after the whole chain is reassembled,
+//! so a partial / corrupted chain produces a clean `Decryption` error
+//! instead of leaking unauthenticated bytes.
+//!
+//! # Plaintext payload format
+//!
+//! Newline-separated records:
+//!
+//! ```text
+//!   MASTER_SECRET:<hex>\n
 //!   SEALED:<true|false>\n
+//!   USER:<username>\t<password_hash>\t<role>\t<enabled>\t<created_at>\t<updated_at>\t<scram_verifier?>\n
+//!   KEY:<username>\t<key_string>\t<name>\t<role>\t<created_at>\n
+//!   KV:<key>\t<hex_value>\n
+//! ```
+//!
+//! # Crash safety
+//!
+//! Save order: encrypt → write all data pages first → finally rewrite
+//! the header page in place. The header page is the commit point: its
+//! `chain_count` + `first_data_page_id` describe whichever chain is
+//! actually usable on the next open. Crashing mid-save leaves the
+//! previous header (and its chain) untouched, so the old vault remains
+//! readable.
+//!
+//! When the new payload is *smaller* than the existing one, the surplus
+//! pages from the old chain are returned to the freelist via
+//! `Pager::free_page` so the file does not grow unbounded.
 
 use crate::crypto::aes_gcm::{aes256_gcm_decrypt, aes256_gcm_encrypt};
 use crate::crypto::hmac::hmac_sha256;
@@ -26,28 +71,59 @@ use crate::storage::encryption::key::SecureKey;
 use crate::storage::engine::page::{Page, PageType, CONTENT_SIZE, HEADER_SIZE};
 use crate::storage::engine::pager::Pager;
 
-use super::{ApiKey, AuthError, Role, User};
+use super::{ApiKey, AuthError, Role, User, UserId};
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
 const VAULT_MAGIC: &[u8; 4] = b"RDVT";
-const VAULT_VERSION: u8 = 1;
+const VAULT_DATA_MAGIC: &[u8; 4] = b"RDVD";
+
+/// Current on-disk vault format. v1 was the legacy fixed two-page
+/// format (pages 2 + 3); v2 introduces the dynamic chain.
+const VAULT_VERSION: u8 = 2;
+
+/// Last legacy version. Pre-1.0 we refuse to migrate it — operators
+/// re-bootstrap with `red bootstrap` to upgrade.
+const VAULT_LEGACY_VERSION: u8 = 1;
+
 const VAULT_AAD: &[u8] = b"reddb-vault";
 
-/// Vault header within page content: magic(4) + version(1) + salt(16) + payload_len(4) = 25 bytes.
-const VAULT_CONTENT_HEADER_SIZE: usize = 4 + 1 + 16 + 4;
+/// Header content layout sizes (after the page's own 32-byte header).
+const VAULT_MAGIC_SIZE: usize = 4;
+const VAULT_VERSION_SIZE: usize = 1;
+const VAULT_SALT_SIZE: usize = 16;
+const VAULT_PAYLOAD_LEN_SIZE: usize = 4;
+const VAULT_CHAIN_COUNT_SIZE: usize = 4;
+const VAULT_FIRST_PAGE_ID_SIZE: usize = 4;
 
 /// AES-256-GCM nonce size.
 const NONCE_SIZE: usize = 12;
 
-/// Reserved page IDs for the auth vault within the main .rdb file.
-const VAULT_HEADER_PAGE: u32 = 2;
-const VAULT_DATA_PAGE: u32 = 3;
+/// Header preamble (everything up to and including `total_payload_len`).
+const VAULT_HEADER_PREAMBLE_SIZE: usize =
+    VAULT_MAGIC_SIZE + VAULT_VERSION_SIZE + VAULT_SALT_SIZE + VAULT_PAYLOAD_LEN_SIZE; // 25
 
-/// Usable content per vault page (page size minus the 32-byte page header).
-const VAULT_PAGE_CAPACITY: usize = CONTENT_SIZE;
+/// Total fixed metadata at the start of the header page's content area:
+/// preamble + nonce + chain_count + first_data_page_id.
+const VAULT_HEADER_META_SIZE: usize =
+    VAULT_HEADER_PREAMBLE_SIZE + NONCE_SIZE + VAULT_CHAIN_COUNT_SIZE + VAULT_FIRST_PAGE_ID_SIZE; // 25 + 12 + 4 + 4 = 45
+
+/// Fixed prefix on every data page (magic + next_page_id).
+const VAULT_DATA_PREFIX_SIZE: usize = VAULT_MAGIC_SIZE + 4; // 8 bytes
+
+/// Reserved page id for the vault header (entry point of the chain).
+/// Data pages are allocated dynamically and may live anywhere in the file.
+const VAULT_HEADER_PAGE: u32 = 2;
+
+/// Bytes of ciphertext that fit alongside the metadata in the header page.
+/// CONTENT_SIZE (4064) − VAULT_HEADER_META_SIZE (45) = 4019.
+const VAULT_HEADER_CIPHER_CAPACITY: usize = CONTENT_SIZE - VAULT_HEADER_META_SIZE;
+
+/// Bytes of ciphertext that fit in a single overflow page.
+/// CONTENT_SIZE (4064) − VAULT_DATA_PREFIX_SIZE (8) = 4056.
+const VAULT_DATA_CIPHER_CAPACITY: usize = CONTENT_SIZE - VAULT_DATA_PREFIX_SIZE;
 
 // ---------------------------------------------------------------------------
 // KeyPair -- certificate-based vault seal
@@ -184,11 +260,13 @@ impl From<VaultError> for AuthError {
 /// Serializable snapshot of all auth state (users, api keys, bootstrap seal,
 /// the master secret for the certificate-based seal, and a key-value store
 /// for arbitrary encrypted secrets).
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct VaultState {
     pub users: Vec<User>,
-    /// `(owner_username, api_key)` pairs.
-    pub api_keys: Vec<(String, ApiKey)>,
+    /// `(owner UserId, api_key)` pairs. The owner carries tenant scope
+    /// so an API key under `(acme, alice)` reattaches to the correct
+    /// user when a same-named user exists in another tenant.
+    pub api_keys: Vec<(UserId, ApiKey)>,
     pub bootstrapped: bool,
     /// The 32-byte master secret stored inside the encrypted vault.
     /// Present after bootstrap; `None` for legacy vaults that pre-date
@@ -215,13 +293,14 @@ impl VaultState {
 
         // Users.
         //
-        // Format v1 had 6 tab-separated fields. v2 appends an
-        // optional 7th field carrying the SCRAM-SHA-256 verifier
-        // so the v2 wire handshake works against vault-loaded
-        // users without needing a password rotation. v1 readers
-        // still parse correctly because they ignore any trailing
-        // fields they don't understand (the parser checks for
-        // either 6 or 7 fields explicitly).
+        // USER line tabs: <username> <pw_hash> <role> <enabled>
+        // <created_at> <updated_at> <scram_verifier?> <tenant_id?>
+        //
+        // Field counts accepted on read:
+        //   * 7 fields — pre-tenant USER line (any prior v2 vault
+        //     written before tenant scoping landed).
+        //   * 8 fields — current USER line. The 8th field is the
+        //     tenant id; empty string = platform tenant (`None`).
         //
         // Verifier encoding: `<salt_hex>:<iter>:<stored_hex>:<server_hex>`.
         for user in &self.users {
@@ -235,8 +314,9 @@ impl VaultState {
                 ),
                 None => String::new(),
             };
+            let tenant_field = user.tenant_id.clone().unwrap_or_default();
             out.push_str(&format!(
-                "USER:{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                "USER:{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                 user.username,
                 user.password_hash,
                 user.role.as_str(),
@@ -244,18 +324,23 @@ impl VaultState {
                 user.created_at,
                 user.updated_at,
                 scram_field,
+                tenant_field,
             ));
         }
 
-        // API keys (with owner username).
-        for (username, key) in &self.api_keys {
+        // API keys: `KEY:<username>\t<key>\t<name>\t<role>\t<created_at>\t<tenant_id?>`.
+        // The 6th tenant field is empty for platform users and disambiguates
+        // owners when the same username appears under multiple tenants.
+        for (owner, key) in &self.api_keys {
+            let tenant_field = owner.tenant.clone().unwrap_or_default();
             out.push_str(&format!(
-                "KEY:{}\t{}\t{}\t{}\t{}\n",
-                username,
+                "KEY:{}\t{}\t{}\t{}\t{}\t{}\n",
+                owner.username,
                 key.key,
                 key.name,
                 key.role.as_str(),
                 key.created_at,
+                tenant_field,
             ));
         }
 
@@ -273,7 +358,7 @@ impl VaultState {
             .map_err(|_| VaultError::Corrupt("payload is not valid UTF-8".into()))?;
 
         let mut users = Vec::new();
-        let mut api_keys: Vec<(String, ApiKey)> = Vec::new();
+        let mut api_keys: Vec<(UserId, ApiKey)> = Vec::new();
         let mut bootstrapped = false;
         let mut master_secret: Option<Vec<u8>> = None;
         let mut kv: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -292,11 +377,11 @@ impl VaultState {
                 bootstrapped = rest == "true";
             } else if let Some(rest) = line.strip_prefix("USER:") {
                 let parts: Vec<&str> = rest.split('\t').collect();
-                // 6 fields = legacy v1; 7 fields = v2 with the
-                // SCRAM verifier appended. Anything else is corrupt.
-                if parts.len() != 6 && parts.len() != 7 {
+                // 7 fields = pre-tenant v2 USER line; 8 fields = with
+                // tenant id appended. Anything else is corrupt.
+                if parts.len() != 7 && parts.len() != 8 {
                     return Err(VaultError::Corrupt(format!(
-                        "USER line has {} fields, expected 6 or 7",
+                        "USER line has {} fields, expected 7 or 8",
                         parts.len()
                     )));
                 }
@@ -315,9 +400,15 @@ impl VaultState {
                     .filter(|s| !s.is_empty())
                     .map(parse_scram_field)
                     .transpose()?;
+                let tenant_id = parts
+                    .get(7)
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string());
 
                 users.push(User {
                     username: parts[0].to_string(),
+                    tenant_id,
                     password_hash: parts[1].to_string(),
                     scram_verifier,
                     role,
@@ -328,9 +419,10 @@ impl VaultState {
                 });
             } else if let Some(rest) = line.strip_prefix("KEY:") {
                 let parts: Vec<&str> = rest.split('\t').collect();
-                if parts.len() != 5 {
+                // 5 fields = pre-tenant; 6 fields = with tenant id.
+                if parts.len() != 5 && parts.len() != 6 {
                     return Err(VaultError::Corrupt(format!(
-                        "KEY line has {} fields, expected 5",
+                        "KEY line has {} fields, expected 5 or 6",
                         parts.len()
                     )));
                 }
@@ -339,9 +431,17 @@ impl VaultState {
                 let created_at: u128 = parts[4]
                     .parse()
                     .map_err(|_| VaultError::Corrupt("invalid key created_at".into()))?;
+                let tenant_id = parts
+                    .get(5)
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string());
 
                 api_keys.push((
-                    parts[0].to_string(),
+                    UserId {
+                        tenant: tenant_id,
+                        username: parts[0].to_string(),
+                    },
                     ApiKey {
                         key: parts[1].to_string(),
                         name: parts[2].to_string(),
@@ -363,9 +463,14 @@ impl VaultState {
             }
         }
 
-        // Re-attach API keys to their owning users.
+        // Re-attach API keys to their owning users. Match on the full
+        // `(tenant, username)` so a key for `(acme, alice)` doesn't
+        // accidentally attach to `(globex, alice)`.
         for (owner, key) in &api_keys {
-            if let Some(user) = users.iter_mut().find(|u| u.username == *owner) {
+            if let Some(user) = users
+                .iter_mut()
+                .find(|u| u.username == owner.username && u.tenant_id == owner.tenant)
+            {
                 user.api_keys.push(key.clone());
             }
         }
@@ -523,155 +628,435 @@ impl Vault {
     }
 
     /// Save the given auth state to the encrypted vault pages.
+    ///
+    /// Order of operations is the only thing keeping this crash-safe:
+    ///   1. Encrypt the serialized state under a fresh nonce.
+    ///   2. Allocate (or reuse) the data-page chain and write every
+    ///      data page to disk.
+    ///   3. Free any surplus pages that the previous chain owned.
+    ///   4. Rewrite the header page in place — this is the commit
+    ///      point. After it lands, `load()` will follow the new chain.
+    /// A crash anywhere before step 4 leaves the existing header (and
+    /// its chain) intact, so the previous vault snapshot is still
+    /// readable on the next open.
     pub fn save(&self, pager: &Pager, state: &VaultState) -> Result<(), VaultError> {
         let plaintext = state.serialize();
 
-        // Generate a fresh nonce for every write.
+        // Fresh nonce per write — required for AES-GCM.
         let mut nonce = [0u8; NONCE_SIZE];
         os_random::fill_bytes(&mut nonce)
             .map_err(|e| VaultError::Corrupt(format!("CSPRNG failed: {e}")))?;
 
-        // Encrypt.
         let key_bytes: &[u8] = self.key.as_bytes();
         let key_arr: &[u8; 32] = key_bytes.try_into().map_err(|_| VaultError::Encryption)?;
         let ciphertext = aes256_gcm_encrypt(key_arr, &nonce, VAULT_AAD, &plaintext);
+        // The 16-byte GCM tag is appended to `ciphertext` already; we
+        // treat the whole vector as one opaque blob.
 
-        // Assemble vault content: magic + version + salt + payload_len + nonce + ciphertext
-        let payload_len = (NONCE_SIZE + ciphertext.len()) as u32;
-        let total_content_len = VAULT_CONTENT_HEADER_SIZE + NONCE_SIZE + ciphertext.len();
+        let cipher_total = ciphertext.len();
+        let payload_len = (NONCE_SIZE + cipher_total) as u32; // for legacy field
 
-        let mut content = Vec::with_capacity(total_content_len);
-        content.extend_from_slice(VAULT_MAGIC);
-        content.push(VAULT_VERSION);
-        content.extend_from_slice(&self.salt);
-        content.extend_from_slice(&payload_len.to_le_bytes());
-        content.extend_from_slice(&nonce);
-        content.extend_from_slice(&ciphertext);
+        // ---- 1. Plan the chain --------------------------------------
+        //
+        // The header page absorbs the first `VAULT_HEADER_CIPHER_CAPACITY`
+        // bytes of ciphertext; everything after spills into a chain of
+        // data pages with `VAULT_DATA_CIPHER_CAPACITY` bytes each.
+        let header_chunk_len = cipher_total.min(VAULT_HEADER_CIPHER_CAPACITY);
+        let overflow = cipher_total.saturating_sub(header_chunk_len);
+        let chain_count = overflow.div_ceil(VAULT_DATA_CIPHER_CAPACITY);
 
-        // Split content across reserved vault pages (VAULT_HEADER_PAGE and
-        // optionally VAULT_DATA_PAGE if it overflows one page).
-        let first_chunk_len = content.len().min(VAULT_PAGE_CAPACITY);
-        self.write_vault_page(pager, VAULT_HEADER_PAGE, &content[..first_chunk_len])?;
-
-        if content.len() > VAULT_PAGE_CAPACITY {
-            self.write_vault_page(pager, VAULT_DATA_PAGE, &content[VAULT_PAGE_CAPACITY..])?;
+        // ---- 2. Reserve VAULT_HEADER_PAGE on a fresh DB -------------
+        //
+        // The pager hands out ids from `page_count` upward. On a brand
+        // new file `page_count == 1` (only the database header at id
+        // 0), so without this dance the next call to `allocate_page`
+        // would happily return id 1 and then id 2 — colliding with our
+        // fixed VAULT_HEADER_PAGE. Burn allocations until `page_count`
+        // is past the header so future `allocate_page(Vault)` calls
+        // for the data chain return ids >= VAULT_HEADER_PAGE + 1.
+        //
+        // We pass `PageType::Vault` so anyone scanning page types sees
+        // the right tag for these reserved slots; the header-page
+        // contents get overwritten below in any case.
+        while pager
+            .page_count()
+            .map_err(|e| VaultError::Pager(e.to_string()))?
+            <= VAULT_HEADER_PAGE
+        {
+            pager
+                .allocate_page(PageType::Vault)
+                .map_err(|e| VaultError::Pager(format!("reserve vault slot: {e}")))?;
         }
 
-        // Flush vault pages to disk immediately so auth state survives crashes.
+        // ---- 3. Snapshot the previous chain (if any) for later cleanup.
+        //
+        // We do NOT reuse these ids — overwriting an old data page
+        // before the header is rewritten would corrupt the live vault
+        // mid-save (the still-valid header would point at a page that
+        // now has the *new* ciphertext but the *old* nonce). Allocating
+        // fresh pages means the old chain stays byte-identical until
+        // the header commit, so `load()` keeps working through any
+        // crash before step 7.
+        let old_chain = match self.read_existing_chain_ids(pager) {
+            Ok(ids) => ids,
+            Err(_) => Vec::new(), // No prior vault — fine.
+        };
+
+        // ---- 4. Allocate fresh data-page ids for the new chain.
+        //
+        // The pager pulls from the freelist first, so successive
+        // saves recycle ids without growing the file — the old chain
+        // is freed at step 6 below and becomes available the *next*
+        // time we save.
+        let mut new_chain: Vec<u32> = Vec::with_capacity(chain_count);
+        for _ in 0..chain_count {
+            let page = pager
+                .allocate_page(PageType::Vault)
+                .map_err(|e| VaultError::Pager(format!("allocate vault data page: {e}")))?;
+            new_chain.push(page.page_id());
+        }
+
+        // ---- 5. Write data pages. We already know every page id up
+        // front (allocated in step 4), so each page can record its
+        // successor's id directly — no second pass needed. The header
+        // is *not* updated yet, so a crash here leaves `load()`
+        // looking at the previous chain (which is still on disk and
+        // valid because we did not touch its pages).
+        let mut cursor = header_chunk_len;
+        for i in 0..chain_count {
+            let next_id = if i + 1 < chain_count {
+                new_chain[i + 1]
+            } else {
+                0
+            };
+            let take = (cipher_total - cursor).min(VAULT_DATA_CIPHER_CAPACITY);
+            let frag = &ciphertext[cursor..cursor + take];
+            self.write_data_page(pager, new_chain[i], next_id, frag)?;
+            cursor += take;
+        }
+        debug_assert_eq!(cursor, cipher_total, "ciphertext spill accounting mismatch");
+
+        // ---- 6. (Deferred) The old chain pages are freed *after* the
+        // header commit so the freelist doesn't hand them back out
+        // before we've finished swapping over.
+
+        // ---- 7. Rewrite the header page. This is the commit point —
+        // after this write the new chain is authoritative and any
+        // future load() will follow it.
+        let first_data_page = new_chain.first().copied().unwrap_or(0);
+        self.write_header_page(
+            pager,
+            &nonce,
+            payload_len,
+            chain_count as u32,
+            first_data_page,
+            &ciphertext[..header_chunk_len],
+        )?;
+
+        // ---- 8. Flush so a process crash after return doesn't lose
+        // the write. We flush *before* freeing old pages so the new
+        // header is durable on disk before we tell the pager those
+        // old ids are reusable.
         pager
             .flush()
             .map_err(|e| VaultError::Pager(e.to_string()))?;
+
+        // ---- 9. Now safe to free the old chain. The freelist update
+        // makes those page ids reclaimable on the *next* allocation,
+        // which is exactly what we want — the old data is no longer
+        // referenced by the (just-flushed) header.
+        for &id in old_chain.iter() {
+            pager
+                .free_page(id)
+                .map_err(|e| VaultError::Pager(format!("free old vault page {id}: {e}")))?;
+        }
 
         Ok(())
     }
 
     /// Load auth state from the encrypted vault pages.
     ///
-    /// Returns `Ok(None)` if the vault pages do not exist yet.
+    /// Returns `Ok(None)` if the vault pages do not exist yet (fresh DB).
     pub fn load(&self, pager: &Pager) -> Result<Option<VaultState>, VaultError> {
-        // Read the first vault page.
+        // Header page is the entry point.
         let page = match pager.read_page_no_checksum(VAULT_HEADER_PAGE) {
             Ok(p) => p,
-            Err(_) => return Ok(None), // No vault pages yet.
+            Err(_) => return Ok(None),
         };
 
         let page_content = page.content();
 
-        // Check magic to determine if this page is actually a vault page.
-        if page_content.len() < VAULT_CONTENT_HEADER_SIZE {
+        if page_content.len() < VAULT_HEADER_META_SIZE {
             return Ok(None);
         }
-        if &page_content[0..4] != VAULT_MAGIC {
-            return Ok(None); // Not a vault page (page exists but was never written).
+        if &page_content[0..VAULT_MAGIC_SIZE] != VAULT_MAGIC {
+            return Ok(None); // Slot is reserved but never written.
         }
 
-        // Validate version.
-        if page_content[4] != VAULT_VERSION {
+        let version = page_content[4];
+        if version == VAULT_LEGACY_VERSION {
+            // Pre-1.0: no migration shim. Fail loudly with operator
+            // guidance so this gets surfaced during upgrade and not
+            // hidden behind a generic decryption error.
+            return Err(VaultError::Corrupt(
+                "vault was bootstrapped with the legacy 2-page format \
+                 (pre-RedDB v0.3); re-bootstrap with `red bootstrap` to upgrade"
+                    .to_string(),
+            ));
+        }
+        if version != VAULT_VERSION {
             return Err(VaultError::Corrupt(format!(
-                "unsupported vault version: {}",
-                page_content[4]
+                "unsupported vault version: {} (expected {})",
+                version, VAULT_VERSION
             )));
         }
 
-        // Salt is at bytes 5..21 (already read during open).
-
-        // Payload length.
+        // Decode header preamble.
         let payload_len = u32::from_le_bytes(
             page_content[21..25]
                 .try_into()
                 .map_err(|_| VaultError::Corrupt("bad payload length bytes".into()))?,
         ) as usize;
 
-        let expected_total = VAULT_CONTENT_HEADER_SIZE + payload_len;
+        let nonce_start = VAULT_HEADER_PREAMBLE_SIZE;
+        let nonce: [u8; NONCE_SIZE] = page_content[nonce_start..nonce_start + NONCE_SIZE]
+            .try_into()
+            .map_err(|_| VaultError::Corrupt("bad nonce".into()))?;
 
-        // Reassemble content from one or two pages.
-        let mut content = Vec::with_capacity(expected_total);
-        // First page contributes up to VAULT_PAGE_CAPACITY bytes of vault content.
-        let first_avail = page_content.len().min(VAULT_PAGE_CAPACITY);
-        content.extend_from_slice(&page_content[..first_avail]);
-
-        if expected_total > VAULT_PAGE_CAPACITY {
-            // Need the continuation page.
-            let data_page = pager
-                .read_page_no_checksum(VAULT_DATA_PAGE)
-                .map_err(|e| VaultError::Pager(format!("vault data page read: {e}")))?;
-            let data_content = data_page.content();
-            let needed = expected_total - VAULT_PAGE_CAPACITY;
-            let avail = data_content.len().min(needed);
-            content.extend_from_slice(&data_content[..avail]);
-        }
-
-        if content.len() < expected_total {
-            return Err(VaultError::Corrupt(format!(
-                "vault truncated: expected {} bytes, got {}",
-                expected_total,
-                content.len()
-            )));
-        }
+        let chain_count_off = nonce_start + NONCE_SIZE;
+        let chain_count = u32::from_le_bytes(
+            page_content[chain_count_off..chain_count_off + 4]
+                .try_into()
+                .map_err(|_| VaultError::Corrupt("bad chain_count bytes".into()))?,
+        ) as usize;
+        let first_id_off = chain_count_off + 4;
+        let mut next_id = u32::from_le_bytes(
+            page_content[first_id_off..first_id_off + 4]
+                .try_into()
+                .map_err(|_| VaultError::Corrupt("bad first_data_page_id bytes".into()))?,
+        );
 
         if payload_len < NONCE_SIZE {
             return Err(VaultError::Corrupt("payload too short for nonce".into()));
         }
+        let cipher_total = payload_len - NONCE_SIZE;
 
-        // Extract nonce and ciphertext from the reassembled content.
-        let nonce_start = VAULT_CONTENT_HEADER_SIZE;
-        let nonce: [u8; NONCE_SIZE] = content[nonce_start..nonce_start + NONCE_SIZE]
-            .try_into()
-            .map_err(|_| VaultError::Corrupt("bad nonce".into()))?;
+        // ---- Reassemble ciphertext fragments. ----------------------
+        let mut cipher = Vec::with_capacity(cipher_total);
+        let header_chunk_len = cipher_total.min(VAULT_HEADER_CIPHER_CAPACITY);
+        let header_cipher_start = VAULT_HEADER_META_SIZE;
+        cipher.extend_from_slice(
+            &page_content[header_cipher_start..header_cipher_start + header_chunk_len],
+        );
 
-        let ciphertext =
-            &content[nonce_start + NONCE_SIZE..VAULT_CONTENT_HEADER_SIZE + payload_len];
+        // Walk the data-page chain.
+        let mut hops = 0usize;
+        // Bound the walk: chain_count from the header is the source of
+        // truth. We tolerate next_id pointers but trust chain_count to
+        // avoid getting trapped in a corrupt loop.
+        while cipher.len() < cipher_total {
+            if hops >= chain_count {
+                return Err(VaultError::Corrupt(format!(
+                    "vault chain shorter than declared: {} hops, expected {}",
+                    hops, chain_count
+                )));
+            }
+            if next_id == 0 {
+                return Err(VaultError::Corrupt(
+                    "vault chain ends prematurely (next_id == 0)".to_string(),
+                ));
+            }
 
-        // Decrypt.
+            let dp = pager
+                .read_page_no_checksum(next_id)
+                .map_err(|e| VaultError::Pager(format!("vault data page {next_id}: {e}")))?;
+            let dp_content = dp.content();
+            if dp_content.len() < VAULT_DATA_PREFIX_SIZE {
+                return Err(VaultError::Corrupt(format!(
+                    "vault data page {next_id} truncated"
+                )));
+            }
+            if &dp_content[0..VAULT_MAGIC_SIZE] != VAULT_DATA_MAGIC {
+                return Err(VaultError::Corrupt(format!(
+                    "vault data page {next_id} has bad magic"
+                )));
+            }
+            let np = u32::from_le_bytes(
+                dp_content[VAULT_MAGIC_SIZE..VAULT_MAGIC_SIZE + 4]
+                    .try_into()
+                    .map_err(|_| VaultError::Corrupt("bad next_page_id bytes".into()))?,
+            );
+            let take = (cipher_total - cipher.len()).min(VAULT_DATA_CIPHER_CAPACITY);
+            let frag_start = VAULT_DATA_PREFIX_SIZE;
+            cipher.extend_from_slice(&dp_content[frag_start..frag_start + take]);
+
+            next_id = np;
+            hops += 1;
+        }
+
+        if cipher.len() != cipher_total {
+            return Err(VaultError::Corrupt(format!(
+                "vault truncated: expected {} cipher bytes, got {}",
+                cipher_total,
+                cipher.len()
+            )));
+        }
+        if hops != chain_count {
+            return Err(VaultError::Corrupt(format!(
+                "vault chain length mismatch: walked {} pages, header says {}",
+                hops, chain_count
+            )));
+        }
+
+        // ---- Decrypt the reassembled blob in one shot. -------------
         let key_bytes: &[u8] = self.key.as_bytes();
         let key_arr: &[u8; 32] = key_bytes.try_into().map_err(|_| VaultError::Decryption)?;
-        let plaintext = aes256_gcm_decrypt(key_arr, &nonce, VAULT_AAD, ciphertext)
+        let plaintext = aes256_gcm_decrypt(key_arr, &nonce, VAULT_AAD, &cipher)
             .map_err(|_| VaultError::Decryption)?;
 
         let state = VaultState::deserialize(&plaintext)?;
         Ok(Some(state))
     }
 
-    /// Write vault content into a reserved page via the pager.
-    fn write_vault_page(
+    /// Walk the existing chain (if any) and collect the data-page ids,
+    /// so `save()` can reuse / free them. Returns an error or empty
+    /// vector if the chain isn't intact — callers must treat that as
+    /// "no reusable chain" rather than failing the save outright,
+    /// because a partially-corrupt chain is exactly the case where we
+    /// most want a fresh write to land cleanly.
+    fn read_existing_chain_ids(&self, pager: &Pager) -> Result<Vec<u32>, VaultError> {
+        let header = pager
+            .read_page_no_checksum(VAULT_HEADER_PAGE)
+            .map_err(|e| VaultError::Pager(e.to_string()))?;
+        let content = header.content();
+        if content.len() < VAULT_HEADER_META_SIZE {
+            return Ok(Vec::new());
+        }
+        if &content[0..VAULT_MAGIC_SIZE] != VAULT_MAGIC {
+            return Ok(Vec::new());
+        }
+        let version = content[4];
+        if version != VAULT_VERSION {
+            // v1 (legacy) had its overflow at fixed page 3; we don't
+            // know if that page is "ours" to free. Safer to leak it
+            // — the operator is re-bootstrapping anyway.
+            return Ok(Vec::new());
+        }
+        let nonce_start = VAULT_HEADER_PREAMBLE_SIZE;
+        let chain_count_off = nonce_start + NONCE_SIZE;
+        let chain_count = u32::from_le_bytes(
+            content[chain_count_off..chain_count_off + 4]
+                .try_into()
+                .map_err(|_| VaultError::Corrupt("bad chain_count bytes".into()))?,
+        ) as usize;
+        let first_id_off = chain_count_off + 4;
+        let mut id = u32::from_le_bytes(
+            content[first_id_off..first_id_off + 4]
+                .try_into()
+                .map_err(|_| VaultError::Corrupt("bad first_data_page_id bytes".into()))?,
+        );
+
+        let mut out = Vec::with_capacity(chain_count);
+        let mut hops = 0usize;
+        while id != 0 && hops < chain_count {
+            out.push(id);
+            // Peek next_id off the data page. Soft-fail on read errors
+            // — we'd rather leak a page than refuse to save.
+            match pager.read_page_no_checksum(id) {
+                Ok(dp) => {
+                    let dc = dp.content();
+                    if dc.len() < VAULT_DATA_PREFIX_SIZE
+                        || &dc[0..VAULT_MAGIC_SIZE] != VAULT_DATA_MAGIC
+                    {
+                        break;
+                    }
+                    id = u32::from_le_bytes(
+                        dc[VAULT_MAGIC_SIZE..VAULT_MAGIC_SIZE + 4]
+                            .try_into()
+                            .map_err(|_| VaultError::Corrupt("bad next_id".into()))?,
+                    );
+                }
+                Err(_) => break,
+            }
+            hops += 1;
+        }
+        Ok(out)
+    }
+
+    /// Write the vault header page (magic + version + chain metadata +
+    /// nonce + first ciphertext fragment). This is the commit point —
+    /// callers must have flushed every data page first.
+    fn write_header_page(
+        &self,
+        pager: &Pager,
+        nonce: &[u8; NONCE_SIZE],
+        payload_len: u32,
+        chain_count: u32,
+        first_data_page_id: u32,
+        cipher_fragment: &[u8],
+    ) -> Result<(), VaultError> {
+        debug_assert!(cipher_fragment.len() <= VAULT_HEADER_CIPHER_CAPACITY);
+
+        let mut page = Page::new(PageType::Vault, VAULT_HEADER_PAGE);
+        let bytes = page.as_bytes_mut();
+        let mut off = HEADER_SIZE;
+
+        bytes[off..off + VAULT_MAGIC_SIZE].copy_from_slice(VAULT_MAGIC);
+        off += VAULT_MAGIC_SIZE;
+
+        bytes[off] = VAULT_VERSION;
+        off += VAULT_VERSION_SIZE;
+
+        bytes[off..off + VAULT_SALT_SIZE].copy_from_slice(&self.salt);
+        off += VAULT_SALT_SIZE;
+
+        bytes[off..off + 4].copy_from_slice(&payload_len.to_le_bytes());
+        off += VAULT_PAYLOAD_LEN_SIZE;
+
+        bytes[off..off + NONCE_SIZE].copy_from_slice(nonce);
+        off += NONCE_SIZE;
+
+        bytes[off..off + 4].copy_from_slice(&chain_count.to_le_bytes());
+        off += VAULT_CHAIN_COUNT_SIZE;
+
+        bytes[off..off + 4].copy_from_slice(&first_data_page_id.to_le_bytes());
+        off += VAULT_FIRST_PAGE_ID_SIZE;
+
+        debug_assert_eq!(off, HEADER_SIZE + VAULT_HEADER_META_SIZE);
+
+        bytes[off..off + cipher_fragment.len()].copy_from_slice(cipher_fragment);
+
+        pager
+            .write_page_no_checksum(VAULT_HEADER_PAGE, page)
+            .map_err(|e| VaultError::Pager(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Write a data page (magic + next_page_id + ciphertext fragment).
+    fn write_data_page(
         &self,
         pager: &Pager,
         page_id: u32,
-        content: &[u8],
+        next_page_id: u32,
+        cipher_fragment: &[u8],
     ) -> Result<(), VaultError> {
+        debug_assert!(cipher_fragment.len() <= VAULT_DATA_CIPHER_CAPACITY);
+
         let mut page = Page::new(PageType::Vault, page_id);
+        let bytes = page.as_bytes_mut();
+        let mut off = HEADER_SIZE;
 
-        // Write content into the page's content area (after the 32-byte header).
-        let page_bytes = page.as_bytes_mut();
-        let copy_len = content.len().min(VAULT_PAGE_CAPACITY);
-        page_bytes[HEADER_SIZE..HEADER_SIZE + copy_len].copy_from_slice(&content[..copy_len]);
+        bytes[off..off + VAULT_MAGIC_SIZE].copy_from_slice(VAULT_DATA_MAGIC);
+        off += VAULT_MAGIC_SIZE;
 
-        // Use write_page_no_checksum because vault pages have their own
-        // integrity protection (AES-GCM authentication tag).
+        bytes[off..off + 4].copy_from_slice(&next_page_id.to_le_bytes());
+        off += 4;
+
+        bytes[off..off + cipher_fragment.len()].copy_from_slice(cipher_fragment);
+
         pager
             .write_page_no_checksum(page_id, page)
             .map_err(|e| VaultError::Pager(e.to_string()))?;
-
         Ok(())
     }
 }
@@ -690,8 +1075,8 @@ fn parse_scram_field(field: &str) -> Result<crate::auth::scram::ScramVerifier, V
             parts.len()
         )));
     }
-    let salt = hex::decode(parts[0])
-        .map_err(|_| VaultError::Corrupt("invalid SCRAM salt hex".into()))?;
+    let salt =
+        hex::decode(parts[0]).map_err(|_| VaultError::Corrupt("invalid SCRAM salt hex".into()))?;
     let iter: u32 = parts[1]
         .parse()
         .map_err(|_| VaultError::Corrupt("invalid SCRAM iter".into()))?;
@@ -721,20 +1106,25 @@ fn parse_scram_field(field: &str) -> Result<crate::auth::scram::ScramVerifier, V
 }
 
 /// Read the 16-byte salt from an existing vault page in the pager.
+///
+/// Works against both v1 (legacy) and v2 layouts because the salt sits at
+/// the same offset (5..21) in both — we only need the salt to re-derive
+/// the key, not to interpret the rest of the page. Callers that intend
+/// to actually load() will hit the version check there if it's legacy.
 fn read_vault_salt_from_pager(pager: &Pager) -> Result<[u8; 16], VaultError> {
     let page = pager
         .read_page_no_checksum(VAULT_HEADER_PAGE)
         .map_err(|e| VaultError::Pager(format!("vault page read: {e}")))?;
 
     let content = page.content();
-    if content.len() < VAULT_CONTENT_HEADER_SIZE {
+    if content.len() < VAULT_HEADER_PREAMBLE_SIZE {
         return Err(VaultError::Corrupt("vault page too short".into()));
     }
-    if &content[0..4] != VAULT_MAGIC {
+    if &content[0..VAULT_MAGIC_SIZE] != VAULT_MAGIC {
         return Err(VaultError::Corrupt("bad magic bytes".into()));
     }
 
-    let mut salt = [0u8; 16];
+    let mut salt = [0u8; VAULT_SALT_SIZE];
     salt.copy_from_slice(&content[5..21]);
     Ok(salt)
 }
@@ -755,6 +1145,7 @@ mod tests {
             users: vec![
                 User {
                     username: "alice".into(),
+                    tenant_id: None,
                     password_hash: "argon2id$aabbccdd$eeff0011".into(),
                     scram_verifier: None,
                     role: Role::Admin,
@@ -770,6 +1161,7 @@ mod tests {
                 },
                 User {
                     username: "bob".into(),
+                    tenant_id: None,
                     password_hash: "argon2id$11223344$55667788".into(),
                     scram_verifier: None,
                     role: Role::Read,
@@ -780,7 +1172,7 @@ mod tests {
                 },
             ],
             api_keys: vec![(
-                "alice".into(),
+                UserId::platform("alice"),
                 ApiKey {
                     key: "rk_abc123".into(),
                     name: "ci-token".into(),
@@ -843,7 +1235,8 @@ mod tests {
         assert!(bob.api_keys.is_empty());
 
         assert_eq!(restored.api_keys.len(), 1);
-        assert_eq!(restored.api_keys[0].0, "alice");
+        assert_eq!(restored.api_keys[0].0.username, "alice");
+        assert!(restored.api_keys[0].0.tenant.is_none());
     }
 
     #[test]
@@ -1145,6 +1538,7 @@ mod tests {
         let state = VaultState {
             users: vec![User {
                 username: "carol".into(),
+                tenant_id: None,
                 password_hash: "argon2id$abc$def".into(),
                 scram_verifier: Some(verifier.clone()),
                 role: Role::Admin,
@@ -1174,11 +1568,13 @@ mod tests {
     }
 
     #[test]
-    fn test_vault_state_legacy_user_line_still_parses() {
-        // Six-field v1 USER line with no trailing verifier. Must keep working.
+    fn test_vault_state_pre_tenant_user_line_still_parses() {
+        // 7-field pre-tenant USER line (no trailing tenant id). Must
+        // keep working since vaults written before tenant scoping
+        // landed have this shape.
         let now = now_ms();
         let line = format!(
-            "USER:dave\targon2id$x$y\tread\ttrue\t{}\t{}\nSEALED:false\n",
+            "USER:dave\targon2id$x$y\tread\ttrue\t{}\t{}\t\nSEALED:false\n",
             now, now
         );
         let restored = VaultState::deserialize(line.as_bytes()).unwrap();
@@ -1188,6 +1584,114 @@ mod tests {
             .find(|u| u.username == "dave")
             .unwrap();
         assert!(dave.scram_verifier.is_none());
+        assert!(dave.tenant_id.is_none());
+    }
+
+    #[test]
+    fn test_vault_state_user_line_with_tenant_roundtrip() {
+        let now = now_ms();
+        let state = VaultState {
+            users: vec![User {
+                username: "alice".into(),
+                tenant_id: Some("acme".into()),
+                password_hash: "argon2id$x$y".into(),
+                scram_verifier: None,
+                role: Role::Write,
+                api_keys: vec![],
+                created_at: now,
+                updated_at: now,
+                enabled: true,
+            }],
+            api_keys: vec![],
+            bootstrapped: true,
+            master_secret: None,
+            kv: std::collections::HashMap::new(),
+        };
+        let bytes = state.serialize();
+        let text = std::str::from_utf8(&bytes).unwrap();
+        // 8 fields: trailing `\tacme` after the empty SCRAM field.
+        assert!(text.contains("\tacme\n"));
+
+        let restored = VaultState::deserialize(&bytes).unwrap();
+        let alice = restored
+            .users
+            .iter()
+            .find(|u| u.username == "alice")
+            .unwrap();
+        assert_eq!(alice.tenant_id.as_deref(), Some("acme"));
+    }
+
+    #[test]
+    fn test_vault_state_key_line_with_tenant_reattaches_correctly() {
+        // Two same-named users in different tenants. Each owns one
+        // API key. Reattachment must respect tenant scope.
+        let now = now_ms();
+        let state = VaultState {
+            users: vec![
+                User {
+                    username: "alice".into(),
+                    tenant_id: Some("acme".into()),
+                    password_hash: "argon2id$x$y".into(),
+                    scram_verifier: None,
+                    role: Role::Write,
+                    api_keys: vec![],
+                    created_at: now,
+                    updated_at: now,
+                    enabled: true,
+                },
+                User {
+                    username: "alice".into(),
+                    tenant_id: Some("globex".into()),
+                    password_hash: "argon2id$a$b".into(),
+                    scram_verifier: None,
+                    role: Role::Read,
+                    api_keys: vec![],
+                    created_at: now,
+                    updated_at: now,
+                    enabled: true,
+                },
+            ],
+            api_keys: vec![
+                (
+                    UserId::scoped("acme", "alice"),
+                    ApiKey {
+                        key: "rk_acme_key".into(),
+                        name: "deploy".into(),
+                        role: Role::Write,
+                        created_at: now,
+                    },
+                ),
+                (
+                    UserId::scoped("globex", "alice"),
+                    ApiKey {
+                        key: "rk_globex_key".into(),
+                        name: "ci".into(),
+                        role: Role::Read,
+                        created_at: now,
+                    },
+                ),
+            ],
+            bootstrapped: true,
+            master_secret: None,
+            kv: std::collections::HashMap::new(),
+        };
+        let bytes = state.serialize();
+        let restored = VaultState::deserialize(&bytes).unwrap();
+        // The api_keys vector retains both entries with the right
+        // owners.
+        assert_eq!(restored.api_keys.len(), 2);
+        let acme_key = restored
+            .api_keys
+            .iter()
+            .find(|(o, _)| o.tenant.as_deref() == Some("acme"))
+            .unwrap();
+        assert_eq!(acme_key.1.key, "rk_acme_key");
+        let globex_key = restored
+            .api_keys
+            .iter()
+            .find(|(o, _)| o.tenant.as_deref() == Some("globex"))
+            .unwrap();
+        assert_eq!(globex_key.1.key, "rk_globex_key");
     }
 
     #[test]

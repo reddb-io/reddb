@@ -71,6 +71,11 @@ pub fn detect_mode(input: &str) -> QueryMode {
             | "copy"
             | "refresh"
             | "explain"
+            | "grant"
+            | "revoke"
+            | "attach"
+            | "detach"
+            | "simulate"
     ) {
         return QueryMode::Sql;
     }
@@ -93,6 +98,8 @@ pub fn detect_mode(input: &str) -> QueryMode {
         || lower.starts_with("set tenant")
         || lower.starts_with("show config")
         || lower.starts_with("show tenant")
+        || lower.starts_with("show policies")
+        || lower.starts_with("show effective ")
     {
         // But check if it's SPARQL-style SELECT with ?variable
         if lower.starts_with("select ") && lower.contains(" ?") {

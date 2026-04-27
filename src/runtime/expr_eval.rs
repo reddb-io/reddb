@@ -592,7 +592,11 @@ fn dispatch_ml_function(db: &RedDB, name: &str, args: &[Value]) -> Option<Value>
                     probs.into_iter().map(|p| Value::Float(p as f64)).collect(),
                 ))
             } else {
-                Some(class.map(|c| Value::Integer(c as i64)).unwrap_or(Value::Null))
+                Some(
+                    class
+                        .map(|c| Value::Integer(c as i64))
+                        .unwrap_or(Value::Null),
+                )
             }
         }
         "SEMANTIC_CACHE_GET" => {
@@ -614,7 +618,8 @@ fn dispatch_ml_function(db: &RedDB, name: &str, args: &[Value]) -> Option<Value>
                 other => format!("{:?}", other),
             };
             let embedding = feature_vector_from_value(args.get(3)?)?;
-            db.semantic_cache().insert(prompt, response, embedding, None);
+            db.semantic_cache()
+                .insert(prompt, response, embedding, None);
             Some(Value::Boolean(true))
         }
         "EMBED" => {
@@ -646,10 +651,12 @@ fn embed_text(db: &RedDB, text: &str, provider_hint: Option<&str>) -> Option<Val
     // OpenAI-compatible endpoints share the `openai_embeddings` call;
     // only the api_base and model differ.
     let kv_getter = |k: &str| -> Result<Option<String>, crate::RedDBError> {
-        Ok(lookup_latest_kv_value(db, "red_config", k).and_then(|v| match v {
-            Value::Text(s) => Some(s.to_string()),
-            _ => None,
-        }))
+        Ok(
+            lookup_latest_kv_value(db, "red_config", k).and_then(|v| match v {
+                Value::Text(s) => Some(s.to_string()),
+                _ => None,
+            }),
+        )
     };
     let provider = match provider_hint {
         Some(name) => crate::ai::parse_provider(name).ok()?,
@@ -662,10 +669,12 @@ fn embed_text(db: &RedDB, text: &str, provider_hint: Option<&str>) -> Option<Val
     }
 
     let api_key = crate::ai::resolve_api_key(&provider, None, |kv_key| {
-        Ok(lookup_latest_kv_value(db, "red_config", kv_key).and_then(|v| match v {
-            Value::Text(s) => Some(s.to_string()),
-            _ => None,
-        }))
+        Ok(
+            lookup_latest_kv_value(db, "red_config", kv_key).and_then(|v| match v {
+                Value::Text(s) => Some(s.to_string()),
+                _ => None,
+            }),
+        )
     })
     .ok()?;
 
@@ -782,10 +791,7 @@ pub(super) fn dispatch_introspection_function_public(db: &RedDB, name: &str) -> 
 /// hypertable. Exposes the partition-pruning primitive over real
 /// allocated chunks. Uses RANGE semantics (the only kind hypertables
 /// have today).
-pub(super) fn dispatch_hypertable_prune_public(
-    db: &RedDB,
-    args: &[Value],
-) -> Option<Value> {
+pub(super) fn dispatch_hypertable_prune_public(db: &RedDB, args: &[Value]) -> Option<Value> {
     dispatch_hypertable_prune(db, args)
 }
 
@@ -871,14 +877,16 @@ fn dispatch_hypertable_retention(db: &RedDB, name: &str, args: &[Value]) -> Opti
             // HYPERTABLE_SET_TTL(name, duration | null)
             let ttl_ns = match args.get(1)? {
                 Value::Null => None,
-                Value::Text(s) => Some(
-                    crate::storage::timeseries::retention::parse_duration_ns(s)?,
-                ),
+                Value::Text(s) => {
+                    Some(crate::storage::timeseries::retention::parse_duration_ns(s)?)
+                }
                 Value::Integer(n) | Value::BigInt(n) if *n >= 0 => Some(*n as u64),
                 Value::UnsignedInteger(n) => Some(*n),
                 _ => return Some(Value::Null),
             };
-            Some(Value::Boolean(registry.set_default_ttl_ns(&ht_name, ttl_ns)))
+            Some(Value::Boolean(
+                registry.set_default_ttl_ns(&ht_name, ttl_ns),
+            ))
         }
         "HYPERTABLE_GET_TTL" => {
             let spec = registry.get(&ht_name)?;
@@ -913,8 +921,7 @@ fn dispatch_hypertable_retention(db: &RedDB, name: &str, args: &[Value]) -> Opti
 
 fn dispatch_hypertable_prune(db: &RedDB, args: &[Value]) -> Option<Value> {
     use crate::storage::query::planner::partition_pruning::{
-        prune_range, PruneKind, PrunePartitioning, PrunePredicate, PruneOp, PruneValue,
-        RangeChild,
+        prune_range, PruneKind, PruneOp, PrunePartitioning, PrunePredicate, PruneValue, RangeChild,
     };
 
     let ht_name = match args.first()? {
@@ -989,11 +996,7 @@ fn dispatch_introspection_function(db: &RedDB, name: &str) -> Option<Value> {
     }
 }
 
-pub(super) fn dispatch_ca_function_public(
-    db: &RedDB,
-    name: &str,
-    args: &[Value],
-) -> Option<Value> {
+pub(super) fn dispatch_ca_function_public(db: &RedDB, name: &str, args: &[Value]) -> Option<Value> {
     dispatch_ca_function(db, name, args)
 }
 

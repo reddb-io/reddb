@@ -1,0 +1,54 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "reddb-asyncio"
+version = "0.1.0"
+description = "Pure-asyncio Python driver for RedDB (RedWire + HTTP)"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [
+  { name = "Filipe Forattini", email = "filipeforattini1@gmail.com" },
+]
+keywords = ["reddb", "database", "asyncio", "client", "redwire", "scram"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Framework :: AsyncIO",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX",
+  "Operating System :: MacOS",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Database",
+]
+dependencies = [
+  "httpx>=0.27,<1",
+]
+
+[project.optional-dependencies]
+zstd = ["zstandard>=0.22"]
+test = [
+  "pytest>=8",
+  "pytest-asyncio>=0.23",
+  "zstandard>=0.22",
+]
+
+[project.urls]
+Homepage = "https://github.com/forattini-dev/reddb"
+Repository = "https://github.com/forattini-dev/reddb"
+Issues = "https://github.com/forattini-dev/reddb/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/reddb_asyncio"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/reddb_asyncio", "README.md", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

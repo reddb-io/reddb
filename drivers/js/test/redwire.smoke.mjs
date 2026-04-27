@@ -1,5 +1,5 @@
 /**
- * End-to-end smoke for the JS driver's RedWire v2 transport.
+ * End-to-end smoke for the JS driver's RedWire transport.
  *
  * Skipped automatically when the engine binary isn't running on
  * REDWIRE_TEST_HOST:REDWIRE_TEST_PORT (default 127.0.0.1:5050).
@@ -8,8 +8,8 @@
  *   cargo run --release --bin red --
  *     server --bind 127.0.0.1:5050
  *
- * The 0xFE dispatch in src/wire/listener.rs routes this driver's
- * connection to the v2 session.
+ * The 0xFE magic byte routes this driver's connection through the
+ * RedWire session via the service-router detector.
  */
 
 import assert from 'node:assert/strict'

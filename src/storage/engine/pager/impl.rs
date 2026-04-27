@@ -98,8 +98,7 @@ impl Pager {
         let header_page = self.read_page_no_checksum(0)?;
         let data = header_page.as_bytes();
         let has_marker = data.len() > ENCRYPTION_MARKER_OFFSET + 4
-            && &data[ENCRYPTION_MARKER_OFFSET..ENCRYPTION_MARKER_OFFSET + 4]
-                == ENCRYPTION_MARKER;
+            && &data[ENCRYPTION_MARKER_OFFSET..ENCRYPTION_MARKER_OFFSET + 4] == ENCRYPTION_MARKER;
 
         let key = self.config.encryption.clone();
         match (has_marker, key) {
@@ -146,8 +145,7 @@ impl Pager {
                 .copy_from_slice(ENCRYPTION_MARKER);
             let header_bytes = header.to_bytes();
             let header_start = ENCRYPTION_MARKER_OFFSET + 4;
-            data[header_start..header_start + header_bytes.len()]
-                .copy_from_slice(&header_bytes);
+            data[header_start..header_start + header_bytes.len()].copy_from_slice(&header_bytes);
             self.write_page_no_checksum(0, page)?;
         }
         self.encryption = Some((encryptor, header));

@@ -1,3 +1,7 @@
+# Minimal single-node demo. Auth vault is OFF here for simplicity.
+# For the canonical secure deploy (vault on, cert via Docker secrets),
+# see examples/docker-compose.vault.yml.
+
 services:
   server:
     build:
@@ -19,12 +23,24 @@ services:
       - "0.0.0.0:8080"
     environment:
       RUST_LOG: info
+      # Uncomment when promoting to vault mode + add `--vault` to command:
+      # REDDB_CERTIFICATE_FILE: /run/secrets/reddb_certificate
+    # secrets:
+    #   - source: reddb_certificate
+    #     target: reddb_certificate
+    #     uid: "10001"
+    #     gid: "10001"
+    #     mode: 0400
     healthcheck:
       test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:8080"]
       interval: 5s
       timeout: 3s
       retries: 5
       start_period: 5s
+
+# secrets:
+#   reddb_certificate:
+#     external: true
 
 volumes:
   server-data:

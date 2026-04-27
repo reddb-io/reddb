@@ -1,25 +1,50 @@
-# Reference Kubernetes manifest for RedDB.
+# Reference Kubernetes manifest for RedDB — secure-by-default.
 # PLAN.md (cloud-agnostic) Phase 10 — operator can take this and run
 # RedDB on any conformant Kubernetes (vanilla, EKS, GKE, AKS, OKE,
 # DigitalOcean Kubernetes, Civo, Linode, Scaleway, k3s, OpenShift).
 # Zero vendor SDK dependencies — every primitive is core Kubernetes.
 #
-# Usage:
-#   kubectl create namespace reddb
-#   kubectl -n reddb apply -f examples/kubernetes/reddb.yaml
+# -----------------------------------------------------------------------------
+# Bootstrap flow (one-time, per cluster)
+# -----------------------------------------------------------------------------
+#   1. Generate the vault certificate on a trusted machine:
+#         red bootstrap \
+#             --path ./scratch/data.rdb \
+#             --vault \
+#             --username admin \
+#             --password-stdin \
+#             --print-certificate \
+#             --json > bootstrap.json
+#         CERT=$(jq -r .certificate bootstrap.json)
+#         # BACK THIS UP OFFLINE — there is no recovery if you lose it.
 #
-# Customise via the ConfigMap (engine env) and the Secret (auth +
-# remote-backend credentials). Override the image tag in the
-# StatefulSet spec.
+#   2. Create the K8s Secret holding the certificate:
+#         kubectl create namespace reddb
+#         kubectl -n reddb create secret generic reddb-vault \
+#             --from-literal=certificate=$CERT
+#         unset CERT
 #
-# This deploys ONE writer + a ClusterIP Service. Read replicas, HPA,
-# NetworkPolicy, and HTTPScaledObject (KEDA) examples live alongside
-# in this directory and reference the same ConfigMap/Secret.
+#   3. Apply this manifest:
+#         kubectl -n reddb apply -f examples/kubernetes/reddb.yaml
+# -----------------------------------------------------------------------------
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
   name: reddb
+---
+# Secret stub — DO NOT apply this section as-is. Create the Secret
+# imperatively (see step 2 above) so the certificate never lands in
+# a YAML file checked into version control.
+#
+# apiVersion: v1
+# kind: Secret
+# metadata:
+#   name: reddb-vault
+#   namespace: reddb
+# type: Opaque
+# stringData:
+#   certificate: "<64-char hex from `red bootstrap --print-certificate`>"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -27,47 +52,25 @@ metadata:
   name: reddb-config
   namespace: reddb
 data:
-  # Cloud-agnostic backend selection. `none` for in-cluster only;
-  # set RED_BACKEND=s3 to push backups out. RED_S3_ENDPOINT works
-  # against any S3-compatible store (MinIO operator, Rook-Ceph
-  # RGW, AWS, R2, etc.).
   RED_BACKEND: "none"
   RED_AUTO_RESTORE: "true"
   RED_BACKUP_ON_SHUTDOWN: "true"
   RED_BACKUP_INTERVAL_SECS: "300"
-
-  # Operator-imposed limits. Adjust per workload.
-  RED_MAX_DB_SIZE_BYTES: "10737418240"   # 10 GiB
+  RED_MAX_DB_SIZE_BYTES: "10737418240"
   RED_MAX_BATCH_SIZE: "10000"
   RED_MAX_QUERY_DURATION_MS: "30000"
-  RED_MAX_RESULT_BYTES: "10485760"       # 10 MiB
-
-  # Lifecycle tuning. preStop calls /admin/shutdown synchronously;
-  # combined with terminationGracePeriodSeconds=70 below this gives
-  # the engine plenty of headroom to flush + checkpoint + back up.
+  RED_MAX_RESULT_BYTES: "10485760"
   RED_SHUTDOWN_TIMEOUT_SECS: "60"
   RED_DRAIN_TIMEOUT_SECS: "30"
-
-  # Logs are JSON-line-on-stdout by default — Loki / Vector /
-  # Fluent Bit ingest without transformation.
   RED_LOG_FORMAT: "json"
   RED_LOG_LEVEL: "info"
 ---
-# Replace the placeholder values before applying. For S3 swap in
-# the issuing IAM credentials or use IRSA via projected service-
-# account tokens (out-of-band; this manifest stays cloud-agnostic).
 apiVersion: v1
-kind: Secret
+kind: ServiceAccount
 metadata:
-  name: reddb-secrets
+  name: reddb
   namespace: reddb
-type: Opaque
-stringData:
-  api_token: "replace-me"
-  admin_token: "replace-me"
-  # Uncomment when RED_BACKEND=s3:
-  # s3_access_key: "AKIA..."
-  # s3_secret_key: "..."
+automountServiceAccountToken: false
 ---
 apiVersion: v1
 kind: Service
@@ -83,13 +86,11 @@ spec:
   ports:
     - name: http
       port: 8080
-      targetPort: 8080
+      targetPort: http
     - name: grpc
       port: 50051
-      targetPort: 50051
+      targetPort: grpc
 ---
-# Headless service for stable DNS to each pod (required for
-# StatefulSet replica addressing).
 apiVersion: v1
 kind: Service
 metadata:
@@ -102,10 +103,10 @@ spec:
   ports:
     - name: http
       port: 8080
-      targetPort: 8080
+      targetPort: http
     - name: grpc
       port: 50051
-      targetPort: 50051
+      targetPort: grpc
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -117,10 +118,6 @@ metadata:
 spec:
   serviceName: reddb-headless
   replicas: 1
-  # `OnDelete` is the safe choice for a single-writer DB — the
-  # operator decides when to roll, no surprise restarts mid-write.
-  # Switch to RollingUpdate only after read-replica support is
-  # production-ready (PLAN.md Phase 3 of the data-safety plan).
   updateStrategy:
     type: OnDelete
   selector:
@@ -131,23 +128,38 @@ spec:
       labels:
         app.kubernetes.io/name: reddb
     spec:
-      # Wire SIGTERM-based graceful shutdown. Kubernetes sends
-      # SIGTERM, then SIGKILL after `terminationGracePeriodSeconds`.
-      # The engine's signal handler (Phase 1) catches SIGTERM, runs
-      # graceful_shutdown (flush + checkpoint + final backup), then
-      # exits 0. 70s = 60s shutdown timeout + 10s slack.
+      serviceAccountName: reddb
+      automountServiceAccountToken: false
       terminationGracePeriodSeconds: 70
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
         runAsGroup: 10001
         fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: RuntimeDefault
       containers:
         - name: reddb
           image: reddb-benchmark/reddb:latest   # replace with your registry
           imagePullPolicy: IfNotPresent
+          args:
+            - server
+            - --vault
+            - --path
+            - /data/data.rdb
+            - --grpc-bind
+            - 0.0.0.0:50051
+            - --http-bind
+            - 0.0.0.0:8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            capabilities:
+              drop: ["ALL"]
           ports:
             - name: http
               containerPort: 8080
@@ -157,22 +169,14 @@ spec:
             - configMapRef:
                 name: reddb-config
           env:
-            - name: REDDB_USERNAME
+            # Encrypted-vault key. The Secret is created out-of-band via
+            # `kubectl create secret generic reddb-vault --from-literal=...`
+            # so that the cert never appears in a checked-in YAML file.
+            - name: REDDB_CERTIFICATE
               valueFrom:
                 secretKeyRef:
-                  name: reddb-secrets
-                  key: api_token
-                  optional: true
-            # Secrets-via-file (PLAN.md Phase 6.4) — the binary reads
-            # *_FILE env paths, so you can mount Kubernetes Secrets
-            # as files instead of plain env values.
-            - name: RED_S3_ACCESS_KEY_FILE
-              value: /run/secrets/reddb/s3_access_key
-            - name: RED_S3_SECRET_KEY_FILE
-              value: /run/secrets/reddb/s3_secret_key
-          # PLAN.md Phase 1 health probe surface. /health/startup
-          # has a longer grace window for cold-start (WAL replay,
-          # restore-from-remote); /health/ready guards traffic.
+                  name: reddb-vault
+                  key: certificate
           startupProbe:
             httpGet:
               path: /health/startup
@@ -191,11 +195,6 @@ spec:
               port: http
             periodSeconds: 10
             failureThreshold: 6
-          # Hand off to graceful shutdown ahead of SIGTERM. preStop
-          # is invoked when the pod transitions to Terminating.
-          # Calling /admin/shutdown explicitly lets the engine
-          # finish its flush + final-backup cycle before kubelet's
-          # SIGTERM arrives — defense in depth.
           lifecycle:
             preStop:
               httpGet:
@@ -211,21 +210,13 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
-            - name: secrets
-              mountPath: /run/secrets/reddb
-              readOnly: true
+            - name: tmp
+              mountPath: /tmp
       volumes:
-        - name: secrets
-          projected:
-            sources:
-              - secret:
-                  name: reddb-secrets
-                  items:
-                    - key: s3_access_key
-                      path: s3_access_key
-                    - key: s3_secret_key
-                      path: s3_secret_key
-                  optional: true
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
   volumeClaimTemplates:
     - metadata:
         name: data
@@ -234,14 +225,8 @@ spec:
         resources:
           requests:
             storage: 10Gi
-        # Replace with your cluster's storage class. For
-        # cloud-agnostic deployment, leave it unset and let the
-        # default storage class win.
         # storageClassName: gp3
 ---
-# PrometheusRule + ServiceMonitor (Prometheus Operator) consume
-# /metrics directly. The exposition format is OpenMetrics (Phase
-# 5.1) so any compliant scraper works.
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:

@@ -27,7 +27,53 @@
         "enabled": { "type": "boolean" },
         "username": { "type": "string" },
         "password": { "type": "string" },
-        "existingSecret": { "type": "string" }
+        "existingSecret": { "type": "string" },
+        "vault": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "certificate": {
+              "type": "object",
+              "properties": {
+                "value": { "type": "string" },
+                "existingSecret": { "type": "string" },
+                "existingSecretKey": { "type": "string" },
+                "fileMount": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": { "type": "boolean" },
+                    "path": { "type": "string" }
+                  }
+                }
+              }
+            },
+            "bootstrapJob": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "username": { "type": "string" },
+                "passwordSecret": { "type": "string" },
+                "certificateSecretName": { "type": "string" },
+                "backoffLimit": { "type": "integer", "minimum": 0 },
+                "image": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "extraSecretMounts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "secretName", "mountPath"],
+        "properties": {
+          "name": { "type": "string" },
+          "secretName": { "type": "string" },
+          "mountPath": { "type": "string" },
+          "readOnly": { "type": "boolean" },
+          "items": { "type": "array" }
+        }
       }
     },
     "config": {

@@ -1175,6 +1175,105 @@ impl RedDBServer {
         }
     }
 
+    /// `GET /admin/audit` — structured audit log query for compliance
+    /// (SOC 2 / HIPAA / ISO 27001). Reads the active `.audit.log`
+    /// plus rotated `.audit.log.<ms>.zst` archives, applies the
+    /// query filters, and returns the matching events as a JSON
+    /// object: `{"count": n, "events": [...]}`.
+    ///
+    /// Supported query params:
+    ///   * `since` / `until` — RFC 3339 (`...Z`) or ms epoch.
+    ///   * `principal` — exact match (e.g. `alice@acme`).
+    ///   * `tenant` — exact match.
+    ///   * `action` — prefix match (e.g. `auth/`, `admin/`).
+    ///   * `outcome` — `success` / `denied` / `error`.
+    ///   * `limit` — default 100, max 1000.
+    ///   * `format` — `json` (default) or `jsonl`.
+    ///
+    /// Auth: relies on the `RED_ADMIN_TOKEN` gate already enforced
+    /// for every `/admin/*` path in `is_authorized`. When that env
+    /// var is unset the endpoint is open — same posture as every
+    /// other admin endpoint.
+    pub(crate) fn handle_admin_audit_query(
+        &self,
+        query: &std::collections::BTreeMap<String, String>,
+    ) -> HttpResponse {
+        use crate::runtime::audit_log::Outcome;
+        use crate::runtime::audit_query::{
+            events_to_json_array, parse_time_arg, run_query, AuditQuery,
+        };
+
+        let mut q = AuditQuery::new();
+        if let Some(s) = query.get("since") {
+            q.since_ms = parse_time_arg(s);
+            if q.since_ms.is_none() {
+                return json_error(400, format!("invalid 'since' value: {s}"));
+            }
+        }
+        if let Some(u) = query.get("until") {
+            q.until_ms = parse_time_arg(u);
+            if q.until_ms.is_none() {
+                return json_error(400, format!("invalid 'until' value: {u}"));
+            }
+        }
+        if let Some(p) = query.get("principal") {
+            if !p.is_empty() {
+                q.principal = Some(p.clone());
+            }
+        }
+        if let Some(t) = query.get("tenant") {
+            if !t.is_empty() {
+                q.tenant = Some(t.clone());
+            }
+        }
+        if let Some(a) = query.get("action") {
+            if !a.is_empty() {
+                q.action_prefix = Some(a.clone());
+            }
+        }
+        if let Some(o) = query.get("outcome") {
+            if let Some(parsed) = Outcome::parse(o) {
+                q.outcome = Some(parsed);
+            } else {
+                return json_error(
+                    400,
+                    format!("invalid 'outcome' value: {o} (expected success|denied|error)"),
+                );
+            }
+        }
+        if let Some(l) = query.get("limit") {
+            match l.parse::<usize>() {
+                Ok(n) if n > 0 => q.limit = n.min(1000),
+                _ => return json_error(400, format!("invalid 'limit' value: {l}")),
+            }
+        } else {
+            q.limit = 100;
+        }
+
+        let format = query
+            .get("format")
+            .map(|s| s.to_ascii_lowercase())
+            .unwrap_or_default();
+
+        let path = self.runtime.audit_log().path().to_path_buf();
+        let events = run_query(&path, &q);
+
+        if format == "jsonl" || format == "ndjson" {
+            let mut body = String::new();
+            for ev in &events {
+                body.push_str(&ev.to_json_line(None));
+                body.push('\n');
+            }
+            return HttpResponse {
+                status: 200,
+                content_type: "application/x-ndjson",
+                body: body.into_bytes(),
+            };
+        }
+
+        json_response(200, events_to_json_array(&events))
+    }
+
     pub(crate) fn handle_admin_drain(&self) -> HttpResponse {
         self.runtime.lifecycle().mark_draining();
         self.runtime.audit_log().record(
@@ -1276,4 +1375,430 @@ impl RedDBServer {
             json_response(503, JsonValue::Object(object))
         }
     }
+
+    // -----------------------------------------------------------------
+    // IAM policy admin endpoints
+    // -----------------------------------------------------------------
+
+    fn iam_audit(&self, action: &str, target: &str, outcome: &str) {
+        self.runtime
+            .audit_log()
+            .record(action, "operator", target, outcome, JsonValue::Null);
+    }
+
+    /// `PUT /admin/policies/:id` — install or replace an IAM policy.
+    pub(crate) fn handle_iam_policy_put(&self, id: &str, body: Vec<u8>) -> HttpResponse {
+        let Some(store) = self.auth_store.as_ref() else {
+            return json_error(503, "auth store not configured");
+        };
+        let Ok(text) = std::str::from_utf8(&body) else {
+            return json_error(400, "body must be utf-8 JSON");
+        };
+        let mut policy = match crate::auth::policies::Policy::from_json_str(text) {
+            Ok(p) => p,
+            Err(e) => return json_error(400, format!("policy parse: {e}")),
+        };
+        if policy.id != id {
+            policy.id = id.to_string();
+        }
+        if let Err(e) = store.put_policy(policy) {
+            return json_error(400, e.to_string());
+        }
+        self.runtime.invalidate_result_cache();
+        self.iam_audit("iam/policy.put", id, "ok");
+        let mut obj = Map::new();
+        obj.insert("ok".to_string(), JsonValue::Bool(true));
+        obj.insert("id".to_string(), JsonValue::String(id.to_string()));
+        json_response(200, JsonValue::Object(obj))
+    }
+
+    /// `GET /admin/policies/:id` — fetch a single policy as JSON.
+    pub(crate) fn handle_iam_policy_get(&self, id: &str) -> HttpResponse {
+        let Some(store) = self.auth_store.as_ref() else {
+            return json_error(503, "auth store not configured");
+        };
+        let Some(p) = store.get_policy(id) else {
+            return json_error(404, format!("policy `{id}` not found"));
+        };
+        let body = p.to_json_string();
+        HttpResponse {
+            status: 200,
+            content_type: "application/json",
+            body: body.into_bytes(),
+        }
+    }
+
+    /// `GET /admin/policies` — list policies (id-sorted summary).
+    pub(crate) fn handle_iam_policy_list(&self) -> HttpResponse {
+        let Some(store) = self.auth_store.as_ref() else {
+            return json_error(503, "auth store not configured");
+        };
+        let pols = store.list_policies();
+        let items: Vec<JsonValue> = pols
+            .iter()
+            .map(|p| {
+                let mut obj = Map::new();
+                obj.insert("id".to_string(), JsonValue::String(p.id.clone()));
+                obj.insert("version".to_string(), JsonValue::Number(p.version as f64));
+                obj.insert(
+                    "statements".to_string(),
+                    JsonValue::Number(p.statements.len() as f64),
+                );
+                obj.insert(
+                    "tenant".to_string(),
+                    p.tenant
+                        .as_deref()
+                        .map(|t| JsonValue::String(t.to_string()))
+                        .unwrap_or(JsonValue::Null),
+                );
+                JsonValue::Object(obj)
+            })
+            .collect();
+        let mut envelope = Map::new();
+        envelope.insert("count".to_string(), JsonValue::Number(items.len() as f64));
+        envelope.insert("items".to_string(), JsonValue::Array(items));
+        json_response(200, JsonValue::Object(envelope))
+    }
+
+    /// `DELETE /admin/policies/:id` — drop a policy.
+    pub(crate) fn handle_iam_policy_delete(&self, id: &str) -> HttpResponse {
+        let Some(store) = self.auth_store.as_ref() else {
+            return json_error(503, "auth store not configured");
+        };
+        match store.delete_policy(id) {
+            Ok(()) => {
+                self.runtime.invalidate_result_cache();
+                self.iam_audit("iam/policy.drop", id, "ok");
+                HttpResponse {
+                    status: 204,
+                    content_type: "application/json",
+                    body: Vec::new(),
+                }
+            }
+            Err(e) => json_error(404, e.to_string()),
+        }
+    }
+
+    /// `PUT /admin/users/:user/policies/:policy_id`. `:user` may
+    /// optionally be tenant-qualified as `tenant.username`.
+    pub(crate) fn handle_iam_attach_user(&self, user: &str, policy_id: &str) -> HttpResponse {
+        let Some(store) = self.auth_store.as_ref() else {
+            return json_error(503, "auth store not configured");
+        };
+        let uid = decode_user_arg(user);
+        match store.attach_policy(
+            crate::auth::store::PrincipalRef::User(uid.clone()),
+            policy_id,
+        ) {
+            Ok(()) => {
+                self.runtime.invalidate_result_cache();
+                self.iam_audit(
+                    "iam/policy.attach",
+                    &format!("user:{uid}::{policy_id}"),
+                    "ok",
+                );
+                let mut obj = Map::new();
+                obj.insert("ok".to_string(), JsonValue::Bool(true));
+                json_response(200, JsonValue::Object(obj))
+            }
+            Err(e) => json_error(400, e.to_string()),
+        }
+    }
+
+    /// `DELETE /admin/users/:user/policies/:policy_id`.
+    pub(crate) fn handle_iam_detach_user(&self, user: &str, policy_id: &str) -> HttpResponse {
+        let Some(store) = self.auth_store.as_ref() else {
+            return json_error(503, "auth store not configured");
+        };
+        let uid = decode_user_arg(user);
+        match store.detach_policy(
+            crate::auth::store::PrincipalRef::User(uid.clone()),
+            policy_id,
+        ) {
+            Ok(()) => {
+                self.runtime.invalidate_result_cache();
+                self.iam_audit(
+                    "iam/policy.detach",
+                    &format!("user:{uid}::{policy_id}"),
+                    "ok",
+                );
+                HttpResponse {
+                    status: 204,
+                    content_type: "application/json",
+                    body: Vec::new(),
+                }
+            }
+            Err(e) => json_error(400, e.to_string()),
+        }
+    }
+
+    /// `PUT /admin/users/:user/groups/:group`.
+    pub(crate) fn handle_iam_add_user_group(&self, user: &str, group: &str) -> HttpResponse {
+        let Some(store) = self.auth_store.as_ref() else {
+            return json_error(503, "auth store not configured");
+        };
+        let uid = decode_user_arg(user);
+        match store.add_user_to_group(&uid, group) {
+            Ok(()) => {
+                self.runtime.invalidate_result_cache();
+                self.iam_audit("iam/group.add", &format!("user:{uid}::group:{group}"), "ok");
+                let mut obj = Map::new();
+                obj.insert("ok".to_string(), JsonValue::Bool(true));
+                json_response(200, JsonValue::Object(obj))
+            }
+            Err(e) => json_error(400, e.to_string()),
+        }
+    }
+
+    /// `DELETE /admin/users/:user/groups/:group`.
+    pub(crate) fn handle_iam_remove_user_group(&self, user: &str, group: &str) -> HttpResponse {
+        let Some(store) = self.auth_store.as_ref() else {
+            return json_error(503, "auth store not configured");
+        };
+        let uid = decode_user_arg(user);
+        match store.remove_user_from_group(&uid, group) {
+            Ok(()) => {
+                self.runtime.invalidate_result_cache();
+                self.iam_audit(
+                    "iam/group.remove",
+                    &format!("user:{uid}::group:{group}"),
+                    "ok",
+                );
+                HttpResponse {
+                    status: 204,
+                    content_type: "application/json",
+                    body: Vec::new(),
+                }
+            }
+            Err(e) => json_error(400, e.to_string()),
+        }
+    }
+
+    /// `PUT /admin/groups/:group/policies/:policy_id`.
+    pub(crate) fn handle_iam_attach_group(&self, group: &str, policy_id: &str) -> HttpResponse {
+        let Some(store) = self.auth_store.as_ref() else {
+            return json_error(503, "auth store not configured");
+        };
+        match store.attach_policy(
+            crate::auth::store::PrincipalRef::Group(group.to_string()),
+            policy_id,
+        ) {
+            Ok(()) => {
+                self.runtime.invalidate_result_cache();
+                self.iam_audit(
+                    "iam/policy.attach",
+                    &format!("group:{group}::{policy_id}"),
+                    "ok",
+                );
+                let mut obj = Map::new();
+                obj.insert("ok".to_string(), JsonValue::Bool(true));
+                json_response(200, JsonValue::Object(obj))
+            }
+            Err(e) => json_error(400, e.to_string()),
+        }
+    }
+
+    /// `DELETE /admin/groups/:group/policies/:policy_id`.
+    pub(crate) fn handle_iam_detach_group(&self, group: &str, policy_id: &str) -> HttpResponse {
+        let Some(store) = self.auth_store.as_ref() else {
+            return json_error(503, "auth store not configured");
+        };
+        match store.detach_policy(
+            crate::auth::store::PrincipalRef::Group(group.to_string()),
+            policy_id,
+        ) {
+            Ok(()) => {
+                self.runtime.invalidate_result_cache();
+                self.iam_audit(
+                    "iam/policy.detach",
+                    &format!("group:{group}::{policy_id}"),
+                    "ok",
+                );
+                HttpResponse {
+                    status: 204,
+                    content_type: "application/json",
+                    body: Vec::new(),
+                }
+            }
+            Err(e) => json_error(400, e.to_string()),
+        }
+    }
+
+    /// `GET /admin/users/:user/effective-permissions[?resource=kind:name]`.
+    pub(crate) fn handle_iam_effective_permissions(
+        &self,
+        user: &str,
+        query: &std::collections::BTreeMap<String, String>,
+    ) -> HttpResponse {
+        let Some(store) = self.auth_store.as_ref() else {
+            return json_error(503, "auth store not configured");
+        };
+        let uid = decode_user_arg(user);
+        let pols = store.effective_policies(&uid);
+
+        // Build a JSON array of policy summaries scoped to the user.
+        // The optional `resource` query string parameter is parsed but
+        // currently only echoed back — fine-grained matching falls
+        // through to `simulate`.
+        let resource_echo = query.get("resource").cloned();
+        let items: Vec<JsonValue> = pols
+            .iter()
+            .map(|p| {
+                let mut obj = Map::new();
+                obj.insert("id".to_string(), JsonValue::String(p.id.clone()));
+                obj.insert(
+                    "statements".to_string(),
+                    JsonValue::Number(p.statements.len() as f64),
+                );
+                JsonValue::Object(obj)
+            })
+            .collect();
+        let mut envelope = Map::new();
+        envelope.insert("user".to_string(), JsonValue::String(uid.to_string()));
+        if let Some(r) = resource_echo {
+            envelope.insert("resource".to_string(), JsonValue::String(r));
+        }
+        envelope.insert("count".to_string(), JsonValue::Number(items.len() as f64));
+        envelope.insert("policies".to_string(), JsonValue::Array(items));
+        json_response(200, JsonValue::Object(envelope))
+    }
+
+    /// `POST /admin/policies/simulate` —
+    /// body: `{principal, action, resource: {kind, name, tenant?}, ctx?}`.
+    pub(crate) fn handle_iam_simulate(&self, body: Vec<u8>) -> HttpResponse {
+        let Some(store) = self.auth_store.as_ref() else {
+            return json_error(503, "auth store not configured");
+        };
+        let parsed = match crate::serde_json::from_str::<crate::serde_json::Value>(
+            std::str::from_utf8(&body).unwrap_or(""),
+        ) {
+            Ok(v) => v,
+            Err(e) => return json_error(400, format!("invalid JSON body: {e}")),
+        };
+        let obj = match parsed.as_object() {
+            Some(o) => o,
+            None => return json_error(400, "body must be a JSON object"),
+        };
+        let principal = match obj.get("principal").and_then(|v| v.as_str()) {
+            Some(s) => decode_user_arg(s),
+            None => return json_error(400, "missing `principal`"),
+        };
+        let action = match obj.get("action").and_then(|v| v.as_str()) {
+            Some(s) => s.to_string(),
+            None => return json_error(400, "missing `action`"),
+        };
+        let resource = match obj.get("resource") {
+            Some(JsonValue::Object(r)) => {
+                let kind = r
+                    .get("kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let name = r
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if kind.is_empty() || name.is_empty() {
+                    return json_error(400, "resource needs kind+name");
+                }
+                let mut rr = crate::auth::policies::ResourceRef::new(kind, name);
+                if let Some(t) = r.get("tenant").and_then(|v| v.as_str()) {
+                    rr = rr.with_tenant(t.to_string());
+                }
+                rr
+            }
+            Some(JsonValue::String(s)) => match s.split_once(':') {
+                Some((k, n)) => crate::auth::policies::ResourceRef::new(k, n),
+                None => return json_error(400, "resource string must be `kind:name`"),
+            },
+            _ => return json_error(400, "missing `resource`"),
+        };
+        let mut sim_ctx = crate::auth::store::SimCtx::default();
+        if let Some(c) = obj.get("ctx").and_then(|v| v.as_object()) {
+            if let Some(t) = c.get("current_tenant").and_then(|v| v.as_str()) {
+                sim_ctx.current_tenant = Some(t.to_string());
+            }
+            if let Some(true) = c.get("mfa").and_then(|v| v.as_bool()) {
+                sim_ctx.mfa_present = true;
+            }
+            if let Some(ip) = c
+                .get("source_ip")
+                .or_else(|| c.get("peer_ip"))
+                .and_then(|v| v.as_str())
+            {
+                if let Ok(addr) = ip.parse() {
+                    sim_ctx.peer_ip = Some(addr);
+                }
+            }
+            if let Some(ms) = c.get("now_ms").and_then(|v| v.as_u64()) {
+                sim_ctx.now_ms = Some(ms as u128);
+            }
+        }
+        let outcome = store.simulate(&principal, &action, &resource, sim_ctx);
+        let (decision_str, matched_pid, matched_sid) =
+            crate::runtime::impl_core::decision_to_strings(&outcome.decision);
+
+        self.iam_audit("iam/policy.simulate", &principal.to_string(), &decision_str);
+
+        let mut envelope = Map::new();
+        envelope.insert("decision".to_string(), JsonValue::String(decision_str));
+        envelope.insert(
+            "matched_policy_id".to_string(),
+            matched_pid
+                .map(JsonValue::String)
+                .unwrap_or(JsonValue::Null),
+        );
+        envelope.insert(
+            "matched_sid".to_string(),
+            matched_sid
+                .map(JsonValue::String)
+                .unwrap_or(JsonValue::Null),
+        );
+        envelope.insert("reason".to_string(), JsonValue::String(outcome.reason));
+        let trail: Vec<JsonValue> = outcome
+            .trail
+            .into_iter()
+            .map(|t| {
+                let mut obj = Map::new();
+                obj.insert("policy_id".to_string(), JsonValue::String(t.policy_id));
+                obj.insert(
+                    "sid".to_string(),
+                    t.sid.map(JsonValue::String).unwrap_or(JsonValue::Null),
+                );
+                obj.insert("matched".to_string(), JsonValue::Bool(t.matched));
+                obj.insert(
+                    "effect".to_string(),
+                    JsonValue::String(
+                        match t.effect {
+                            crate::auth::policies::Effect::Allow => "allow",
+                            crate::auth::policies::Effect::Deny => "deny",
+                        }
+                        .to_string(),
+                    ),
+                );
+                obj.insert(
+                    "why_skipped".to_string(),
+                    t.why_skipped
+                        .map(|s| JsonValue::String(s.to_string()))
+                        .unwrap_or(JsonValue::Null),
+                );
+                JsonValue::Object(obj)
+            })
+            .collect();
+        envelope.insert("trail".to_string(), JsonValue::Array(trail));
+        json_response(200, JsonValue::Object(envelope))
+    }
+}
+
+fn decode_user_arg(raw: &str) -> crate::auth::UserId {
+    // Accepts `username` (platform tenant), `tenant.username` or
+    // `tenant/username` to align with the SQL path / display form.
+    if let Some((tenant, name)) = raw.split_once('/') {
+        return crate::auth::UserId::scoped(tenant.to_string(), name.to_string());
+    }
+    if let Some((tenant, name)) = raw.split_once('.') {
+        return crate::auth::UserId::scoped(tenant.to_string(), name.to_string());
+    }
+    crate::auth::UserId::platform(raw.to_string())
 }

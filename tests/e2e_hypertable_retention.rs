@@ -198,7 +198,9 @@ fn chunks_expiring_within_horizon_previews_without_drop() {
     let horizon: i64 = 3_600_000_000_000;
     let r = q
         .execute(ExecuteQueryInput {
-            query: format!("SELECT HYPERTABLE_CHUNKS_EXPIRING_WITHIN('metrics', {now_ns}, {horizon}) AS c"),
+            query: format!(
+                "SELECT HYPERTABLE_CHUNKS_EXPIRING_WITHIN('metrics', {now_ns}, {horizon}) AS c"
+            ),
         })
         .expect("ok");
     let c = r.result.records[0].values.get("c").expect("c");

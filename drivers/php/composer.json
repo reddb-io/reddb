@@ -1,0 +1,35 @@
+{
+    "name": "forattini-dev/reddb",
+    "description": "Official PHP driver for RedDB — supports the redwire binary protocol and HTTP transport.",
+    "type": "library",
+    "license": "Apache-2.0",
+    "keywords": ["reddb", "database", "client", "driver", "redwire"],
+    "require": {
+        "php": ">=8.2",
+        "ext-curl": "*",
+        "ext-hash": "*",
+        "ext-json": "*",
+        "ext-openssl": "*"
+    },
+    "suggest": {
+        "ext-zstd": "Required to decode redwire frames carrying the COMPRESSED flag (and to send compressed frames)."
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^11.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Reddb\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Reddb\\Tests\\": "tests/"
+        }
+    },
+    "config": {
+        "sort-packages": true
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}

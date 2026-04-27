@@ -21,13 +21,13 @@ default = ["embedded"]
 
 embedded = ["dep:reddb"]
 grpc = ["dep:reddb", "dep:tokio"]
-# RedWire v2 native TCP client. No engine dep — speaks the wire
+# RedWire native TCP client. No engine dep — speaks the wire
 # protocol directly. See ADR 0001.
 redwire = ["dep:tokio", "dep:serde_json", "dep:zstd", "dep:sha2"]
 # HTTP / HTTPS transport using reqwest. Parity with the JS
 # driver's HttpRpcClient — talks REST endpoints directly.
 http = ["dep:tokio", "dep:serde_json", "dep:reqwest"]
-# RedWire v2 over TLS / mTLS. Reuses the redwire handshake; flips
+# RedWire over TLS / mTLS. Reuses the redwire handshake; flips
 # the transport to tokio-rustls.
 redwire-tls = [
     "redwire",
@@ -43,7 +43,7 @@ reddb = { version = "0.2", path = "../..", optional = true }
 # Only needed by the grpc backend (block_on inside the sync methods).
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util"], optional = true }
 
-# RedWire v2 handshake payloads are JSON-encoded today. Pulled in
+# RedWire handshake payloads are JSON-encoded today. Pulled in
 # only by the `redwire` feature.
 serde_json = { version = "1", optional = true }
 
@@ -73,3 +73,8 @@ url = "2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# OAuth-JWT smoke (`tests/redwire_oauth_smoke.rs`). Mints + decodes
+# RS256 tokens against an in-process JWKS server. Pulled only when
+# building tests.
+jsonwebtoken = "9"
+serde_json = "1"

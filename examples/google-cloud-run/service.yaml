@@ -3,6 +3,20 @@
 # Apply with:
 #   gcloud run services replace service.yaml --region us-central1
 #
+# Bootstrap the vault certificate first (one-time, per project):
+#   CERT=$(red bootstrap --vault --path ./scratch/data.rdb \
+#                        --username admin --password-stdin \
+#                        --print-certificate --json | jq -r .certificate)
+#   printf '%s' "$CERT" | gcloud secrets create reddb-vault-cert \
+#       --data-file=- --replication-policy=automatic
+#   unset CERT
+#   # BACK UP offline — no recovery if lost.
+#
+# Then either reference the secret in YAML (as below) or use:
+#   gcloud run deploy reddb \
+#     --image=us-central1-docker.pkg.dev/PROJECT/reddb/reddb:latest \
+#     --set-secrets=REDDB_CERTIFICATE=reddb-vault-cert:latest
+#
 # Notes:
 # - Cloud Run instances are stateless. Pair with RED_AUTO_RESTORE=true
 #   so each cold start rebuilds /data from a remote backend (GCS via
@@ -64,6 +78,14 @@ spec:
               value: "info"
             - name: RED_LEASE_REQUIRED
               value: "true"
+            # Encrypted-vault key. Out-of-band create:
+            #   gcloud secrets create reddb-vault-cert --replication-policy=automatic
+            #   printf '%s' "$CERT" | gcloud secrets versions add reddb-vault-cert --data-file=-
+            - name: REDDB_CERTIFICATE
+              valueFrom:
+                secretKeyRef:
+                  name: reddb-vault-cert
+                  key: latest
             - name: RED_S3_ACCESS_KEY
               valueFrom:
                 secretKeyRef:

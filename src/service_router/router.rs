@@ -13,7 +13,7 @@ use tokio::net::TcpStream;
 use tokio::time::sleep;
 
 use super::detector::{
-    DetectOutcome, HTTP_2_PREFACE, HttpDetector, H2Detector, Protocol, ProtocolDetector,
+    DetectOutcome, H2Detector, HttpDetector, Protocol, ProtocolDetector, HTTP_2_PREFACE,
 };
 
 const PROTOCOL_PROBE_TIMEOUT: Duration = Duration::from_millis(200);
@@ -35,10 +35,7 @@ pub(crate) struct Router {
 }
 
 impl Router {
-    pub(crate) fn new(
-        detectors: Vec<Box<dyn ProtocolDetector>>,
-        fallback: Protocol,
-    ) -> Self {
+    pub(crate) fn new(detectors: Vec<Box<dyn ProtocolDetector>>, fallback: Protocol) -> Self {
         Self {
             detectors,
             fallback,
@@ -86,9 +83,7 @@ impl Router {
                 ProbeStep::Match(p) => return Ok(p),
                 ProbeStep::NoMatch => return Ok(self.fallback),
                 ProbeStep::Pending => {
-                    if read == peek_buf.len()
-                        || started_at.elapsed() >= self.probe_timeout
-                    {
+                    if read == peek_buf.len() || started_at.elapsed() >= self.probe_timeout {
                         return Ok(self.fallback);
                     }
                     sleep(self.probe_retry).await;

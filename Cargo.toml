@@ -38,7 +38,7 @@ sha2 = "0.11"
 hex = "0.4"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 tokio-stream = { version = "0.1", features = ["net"] }
-tonic = { version = "0.14", features = ["transport", "gzip", "zstd"] }
+tonic = { version = "0.14", features = ["transport", "gzip", "zstd", "tls-ring"] }
 tonic-prost = "0.14"
 prost = "0.14"
 ureq = { version = "3.3", default-features = false, features = ["rustls"] }
@@ -83,6 +83,10 @@ pprof = { version = "0.15", features = ["flamegraph"] }
 # Used by `tests/compile_fail.rs` to assert that misuse of
 # `LeaseStore::new` (passing a non-CAS backend) fails to compile.
 trybuild = "1"
+# OAuth-JWT end-to-end smoke. `jsonwebtoken` mints + decodes RS256
+# tokens; `serde_json` shapes the JWKS responses. Both are dev-only.
+jsonwebtoken = "9"
+serde_json = "1"
 
 [build-dependencies]
 tonic-build = "0.14"

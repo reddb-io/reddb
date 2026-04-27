@@ -19,8 +19,7 @@ use reddb::{RedDBOptions, RedDBRuntime};
 
 fn rt() -> Arc<RedDBRuntime> {
     Arc::new(
-        RedDBRuntime::with_options(RedDBOptions::in_memory())
-            .expect("in-memory runtime boots"),
+        RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("in-memory runtime boots"),
     )
 }
 
@@ -165,15 +164,21 @@ fn resolve_as_of_by_snapshot_and_commit_and_branch() {
     let c2 = vcs(&rt).commit(commit_input(1, "c2")).unwrap();
 
     assert_eq!(
-        vcs(&rt).resolve_as_of(AsOfSpec::Commit(c1.hash.clone())).unwrap(),
+        vcs(&rt)
+            .resolve_as_of(AsOfSpec::Commit(c1.hash.clone()))
+            .unwrap(),
         c1.root_xid
     );
     assert_eq!(
-        vcs(&rt).resolve_as_of(AsOfSpec::Commit(c2.hash.clone())).unwrap(),
+        vcs(&rt)
+            .resolve_as_of(AsOfSpec::Commit(c2.hash.clone()))
+            .unwrap(),
         c2.root_xid
     );
     assert_eq!(
-        vcs(&rt).resolve_as_of(AsOfSpec::Branch("main".to_string())).unwrap(),
+        vcs(&rt)
+            .resolve_as_of(AsOfSpec::Branch("main".to_string()))
+            .unwrap(),
         c2.root_xid
     );
     assert_eq!(
@@ -382,7 +387,10 @@ fn reset_soft_moves_branch_back() {
         .expect("status");
     assert_eq!(status.head_commit.as_deref(), Some(c1.hash.as_str()));
     let branches = vcs(&rt).branch_list().unwrap();
-    let main = branches.iter().find(|r| r.name == "refs/heads/main").unwrap();
+    let main = branches
+        .iter()
+        .find(|r| r.name == "refs/heads/main")
+        .unwrap();
     assert_eq!(main.target, c1.hash);
 }
 

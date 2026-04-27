@@ -64,10 +64,14 @@ pub enum PageEncryptionError {
 impl std::fmt::Display for PageEncryptionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::InvalidMagic => f.write_str("encrypted page: bad magic — page not produced by encrypt_page"),
+            Self::InvalidMagic => {
+                f.write_str("encrypted page: bad magic — page not produced by encrypt_page")
+            }
             Self::UnsupportedVersion(v) => write!(f, "encrypted page: unsupported version {v}"),
             Self::Truncated => f.write_str("encrypted page: truncated frame"),
-            Self::KeyMismatch(detail) => write!(f, "encrypted page: key mismatch or tampering ({detail})"),
+            Self::KeyMismatch(detail) => {
+                write!(f, "encrypted page: key mismatch or tampering ({detail})")
+            }
             Self::RandomFailure(detail) => {
                 write!(f, "encrypted page: nonce generation failed ({detail})")
             }
@@ -120,8 +124,7 @@ pub fn decrypt_page(
     let mut nonce = [0u8; 12];
     nonce.copy_from_slice(&frame[5..17]);
     let aad = page_id.to_le_bytes();
-    aes256_gcm_decrypt(key, &nonce, &aad, &frame[17..])
-        .map_err(PageEncryptionError::KeyMismatch)
+    aes256_gcm_decrypt(key, &nonce, &aad, &frame[17..]).map_err(PageEncryptionError::KeyMismatch)
 }
 
 /// Cheap sniff: does this byte slice *look* like an encrypted page?
@@ -261,7 +264,10 @@ mod tests {
         // Decrypting the same bytes against page_id=2 must fail
         // (AAD mismatch) — proves the frame is bound to its slot.
         let err = decrypt_page(&key(), 2, &frame).unwrap_err();
-        assert!(matches!(err, PageEncryptionError::KeyMismatch(_)), "got {err:?}");
+        assert!(
+            matches!(err, PageEncryptionError::KeyMismatch(_)),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -326,8 +332,7 @@ mod tests {
         let mut out = String::new();
         let mut i = 0;
         while i + 3 <= raw.len() {
-            let n =
-                ((raw[i] as u32) << 16) | ((raw[i + 1] as u32) << 8) | (raw[i + 2] as u32);
+            let n = ((raw[i] as u32) << 16) | ((raw[i + 1] as u32) << 8) | (raw[i + 2] as u32);
             out.push(alphabet[((n >> 18) & 0x3F) as usize] as char);
             out.push(alphabet[((n >> 12) & 0x3F) as usize] as char);
             out.push(alphabet[((n >> 6) & 0x3F) as usize] as char);

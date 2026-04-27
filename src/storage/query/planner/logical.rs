@@ -645,7 +645,17 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
         | QueryExpr::CreateServer(_)
         | QueryExpr::DropServer(_)
         | QueryExpr::CreateForeignTable(_)
-        | QueryExpr::DropForeignTable(_) => {
+        | QueryExpr::DropForeignTable(_)
+        | QueryExpr::Grant(_)
+        | QueryExpr::Revoke(_)
+        | QueryExpr::AlterUser(_)
+        | QueryExpr::CreateIamPolicy { .. }
+        | QueryExpr::DropIamPolicy { .. }
+        | QueryExpr::AttachPolicy { .. }
+        | QueryExpr::DetachPolicy { .. }
+        | QueryExpr::ShowPolicies { .. }
+        | QueryExpr::ShowEffectivePermissions { .. }
+        | QueryExpr::SimulatePolicy { .. } => {
             let mut details = BTreeMap::new();
             details.insert("type".to_string(), "dml_ddl".to_string());
             CanonicalLogicalNode {

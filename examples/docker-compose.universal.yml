@@ -1,4 +1,7 @@
 # Reference docker-compose for the cloud-agnostic universal contract.
+# For the canonical secure deploy (vault on, cert via Docker secrets),
+# see examples/docker-compose.vault.yml.
+#
 # PLAN.md Phase 10. Exercises:
 #   * RED_BACKEND=fs with a host-mounted backup root
 #   * /health/live HEALTHCHECK
@@ -33,6 +36,13 @@ services:
       RED_LOG_FORMAT: "json"
       RED_LOG_LEVEL: "info"
       RED_SHUTDOWN_TIMEOUT_SECS: "60"
+      REDDB_CERTIFICATE_FILE: /run/secrets/reddb_certificate
+    secrets:
+      - source: reddb_certificate
+        target: reddb_certificate
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
     volumes:
       - reddb-data:/data
       - reddb-backups:/backups
@@ -52,6 +62,10 @@ services:
           memory: 512M
           cpus: "0.5"
     restart: unless-stopped
+
+secrets:
+  reddb_certificate:
+    external: true
 
 volumes:
   reddb-data:

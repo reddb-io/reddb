@@ -173,6 +173,17 @@ fn json_error(command: &str, error: &str) -> ! {
 }
 
 fn main() {
+    // PLAN.md Phase 6.4 — expand `*_FILE` env companions before any
+    // other env reads. Containerised deployments mount tmpfs secrets
+    // at /run/secrets/x and point e.g. `REDDB_PASSWORD_FILE` at the
+    // mount; we read the file, place the contents in `REDDB_PASSWORD`,
+    // and strip the `_FILE` var so it can't leak into `env` dumps.
+    // No threads are alive yet, so the unsafe `set_var` is sound.
+    for (name, err) in reddb::utils::expand_all_reddb_secrets() {
+        eprintln!("error: failed to expand {name}_FILE: {err}");
+        std::process::exit(2);
+    }
+
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     // Handle empty args early.
@@ -294,6 +305,10 @@ fn main() {
 
         "doctor" => {
             std::process::exit(run_doctor(&result));
+        }
+
+        "bootstrap" => {
+            std::process::exit(run_bootstrap_command(&result.flags));
         }
 
         "server" => {
@@ -1792,6 +1807,14 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                     .with_description("Explicit gRPC bind address (host:port)"),
                 cli::types::FlagSchema::new("http-bind")
                     .with_description("Explicit HTTP bind address (host:port)"),
+                cli::types::FlagSchema::new("http-tls-bind")
+                    .with_description("HTTPS bind address (host:port). Runs alongside --http-bind"),
+                cli::types::FlagSchema::new("http-tls-cert")
+                    .with_description("Path to HTTPS server certificate PEM"),
+                cli::types::FlagSchema::new("http-tls-key")
+                    .with_description("Path to HTTPS server private key PEM"),
+                cli::types::FlagSchema::new("http-tls-client-ca")
+                    .with_description("Path to PEM CA bundle for client cert verification (mTLS)"),
                 cli::types::FlagSchema::new("wire-bind")
                     .with_description("Wire protocol TCP bind address (host:port)"),
                 cli::types::FlagSchema::new("wire-tls-bind")
@@ -1906,8 +1929,7 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                     .with_description("Branch name (log/checkout/merge)"),
                 cli::types::FlagSchema::new("from")
                     .with_description("Source ref or commit (branch create / merge)"),
-                cli::types::FlagSchema::new("to")
-                    .with_description("Upper bound for log range"),
+                cli::types::FlagSchema::new("to").with_description("Upper bound for log range"),
                 cli::types::FlagSchema::new("author")
                     .with_description("Commit author name")
                     .with_default("reddb"),
@@ -1981,6 +2003,25 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                 cli::types::FlagSchema::new("password")
                     .with_short('p')
                     .with_description("Password for login"),
+            ]);
+        }
+        Some("bootstrap") => {
+            flags.extend(vec![
+                cli::types::FlagSchema::new("path")
+                    .with_short('d')
+                    .with_description("Persistent database file path"),
+                cli::types::FlagSchema::boolean("vault")
+                    .with_description("Required: seal credentials in the encrypted vault"),
+                cli::types::FlagSchema::new("username")
+                    .with_short('u')
+                    .with_description("Admin username (defaults to REDDB_USERNAME)"),
+                cli::types::FlagSchema::new("password").with_description(
+                    "Admin password (DEV ONLY — leaks to ps; prefer --password-stdin)",
+                ),
+                cli::types::FlagSchema::boolean("password-stdin")
+                    .with_description("Read the admin password from stdin (one line)"),
+                cli::types::FlagSchema::boolean("print-certificate")
+                    .with_description("Print only the issued certificate to stdout"),
             ]);
         }
         _ => {}
@@ -2073,11 +2114,75 @@ fn build_server_config(
     // falling back to a path-derived default when flags are absent.
     let telemetry = build_telemetry_config(flags, path.as_deref());
 
+    // gRPC TLS knobs come exclusively via env (REDDB_GRPC_TLS_BIND /
+    // REDDB_GRPC_TLS_CERT / REDDB_GRPC_TLS_KEY / REDDB_GRPC_TLS_CLIENT_CA,
+    // each with the standard `_FILE` companion). The CLI surface stays
+    // unchanged for now; flags can be added later without breaking the
+    // env-driven path.
+    let grpc_tls_bind_addr = std::env::var("REDDB_GRPC_TLS_BIND")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let grpc_tls_cert = std::env::var("REDDB_GRPC_TLS_CERT")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(PathBuf::from);
+    let grpc_tls_key = std::env::var("REDDB_GRPC_TLS_KEY")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(PathBuf::from);
+    let grpc_tls_client_ca = std::env::var("REDDB_GRPC_TLS_CLIENT_CA")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(PathBuf::from);
+
+    // HTTP TLS knobs. CLI flags win; otherwise read REDDB_HTTP_TLS_*
+    // (each with the standard `_FILE` companion expanded earlier in
+    // boot via `expand_file_env`).
+    let http_tls_bind_addr = flag_string(flags, "http-tls-bind")
+        .filter(|v| !v.is_empty())
+        .or_else(|| {
+            std::env::var("REDDB_HTTP_TLS_BIND")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        });
+    let http_tls_cert = flag_string(flags, "http-tls-cert")
+        .filter(|v| !v.is_empty())
+        .or_else(|| {
+            std::env::var("REDDB_HTTP_TLS_CERT")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        })
+        .map(PathBuf::from);
+    let http_tls_key = flag_string(flags, "http-tls-key")
+        .filter(|v| !v.is_empty())
+        .or_else(|| {
+            std::env::var("REDDB_HTTP_TLS_KEY")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        })
+        .map(PathBuf::from);
+    let http_tls_client_ca = flag_string(flags, "http-tls-client-ca")
+        .filter(|v| !v.is_empty())
+        .or_else(|| {
+            std::env::var("REDDB_HTTP_TLS_CLIENT_CA")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        })
+        .map(PathBuf::from);
+
     Ok(ServerCommandConfig {
         path,
         router_bind_addr,
         grpc_bind_addr,
+        grpc_tls_bind_addr,
+        grpc_tls_cert,
+        grpc_tls_key,
+        grpc_tls_client_ca,
         http_bind_addr,
+        http_tls_bind_addr,
+        http_tls_cert,
+        http_tls_key,
+        http_tls_client_ca,
         wire_bind_addr,
         wire_tls_bind_addr,
         wire_tls_cert,
@@ -2477,6 +2582,66 @@ fn parse_prom_metric(body: &str, metric_name: &str) -> Option<f64> {
 /// rollup, and exit 0/1/2. The check set covers the signals
 /// dashboards alert on (backup age, WAL archive lag, lease state,
 /// replica apply health).
+/// Dispatcher for `red bootstrap`. Returns the process exit code.
+fn run_bootstrap_command(flags: &HashMap<String, FlagValue>) -> i32 {
+    use reddb::cli::bootstrap::{render_success, run, BootstrapArgs};
+
+    let json_mode = wants_json(flags);
+
+    let path = match flag_string(flags, "path").filter(|s| !s.is_empty()) {
+        Some(p) => PathBuf::from(p),
+        None => {
+            let msg = "bootstrap requires --path <FILE>";
+            if json_mode {
+                json_error("bootstrap", msg);
+            }
+            eprintln!("error: {msg}");
+            return 2;
+        }
+    };
+
+    let username = flag_string(flags, "username")
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("REDDB_USERNAME").ok())
+        .unwrap_or_default();
+
+    let args = BootstrapArgs {
+        path,
+        vault: flag_bool(flags, "vault"),
+        username,
+        password: flag_string(flags, "password").filter(|s| !s.is_empty()),
+        password_stdin: flag_bool(flags, "password-stdin"),
+        print_certificate: flag_bool(flags, "print-certificate"),
+        json: json_mode,
+    };
+
+    match run(args) {
+        Ok(outcome) => {
+            // BootstrapArgs is moved into run(); rebuild a thin view
+            // for render_success. Keeping this local avoids cloning
+            // the password into the outcome.
+            let render_args = reddb::cli::bootstrap::BootstrapArgs {
+                path: PathBuf::new(),
+                vault: true,
+                username: outcome.username.clone(),
+                password: None,
+                password_stdin: false,
+                print_certificate: flag_bool(flags, "print-certificate"),
+                json: json_mode,
+            };
+            render_success(&outcome, &render_args);
+            0
+        }
+        Err(err) => {
+            if json_mode {
+                json_error("bootstrap", &err);
+            }
+            eprintln!("bootstrap error: {err}");
+            1
+        }
+    }
+}
+
 fn run_doctor(result: &reddb::cli::schema::SchemaResult) -> i32 {
     let json_mode = wants_json(&result.flags);
     let bind = flag_string(&result.flags, "bind").unwrap_or_else(|| "127.0.0.1:8080".to_string());

@@ -371,9 +371,7 @@ impl<'a> Parser<'a> {
     ///   AS OF TAG      '<name>'
     ///   AS OF TIMESTAMP <integer-ms>
     ///   AS OF SNAPSHOT  <xid>
-    fn parse_as_of_spec(
-        &mut self,
-    ) -> Result<crate::storage::query::ast::AsOfClause, ParseError> {
+    fn parse_as_of_spec(&mut self) -> Result<crate::storage::query::ast::AsOfClause, ParseError> {
         use crate::storage::query::ast::AsOfClause;
 
         // Keyword — accept both tokenized forms (e.g. Token::Commit

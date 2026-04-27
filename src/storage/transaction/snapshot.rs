@@ -207,7 +207,9 @@ impl SnapshotManager {
     /// replica snapshots) stay readable.
     pub fn prune_aborted(&self, below: Xid) {
         let mut state = self.state.write();
-        let ManagerState { aborted, pinned, .. } = &mut *state;
+        let ManagerState {
+            aborted, pinned, ..
+        } = &mut *state;
         aborted.retain(|&x| x >= below || pinned.contains_key(&x));
     }
 
@@ -244,12 +246,7 @@ impl SnapshotManager {
 
     /// Current pin count for an xid (0 if not pinned). Diagnostic only.
     pub fn pin_count(&self, xid: Xid) -> u32 {
-        self.state
-            .read()
-            .pinned
-            .get(&xid)
-            .copied()
-            .unwrap_or(0)
+        self.state.read().pinned.get(&xid).copied().unwrap_or(0)
     }
 }
 

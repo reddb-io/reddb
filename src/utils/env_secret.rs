@@ -81,7 +81,8 @@ mod tests {
     #[test]
     fn falls_back_to_file_when_inline_empty() {
         let _g = env_lock().lock();
-        let dir = std::env::temp_dir().join(format!("reddb-env-secret-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("reddb-env-secret-test-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("token");
         std::fs::write(&path, "value-from-file\n").unwrap();

@@ -48,8 +48,8 @@ fn try_new_rejects_explicit_false_opt_out() {
 #[test]
 fn try_new_succeeds_when_conditional_writes_enabled() {
     let cfg = base_config().with_conditional_writes(true);
-    let backend = AtomicHttpBackend::try_new(cfg)
-        .expect("try_new must succeed once the operator opts in");
+    let backend =
+        AtomicHttpBackend::try_new(cfg).expect("try_new must succeed once the operator opts in");
     // Sanity: the wrapper exposes the inner HttpBackend so the
     // snapshot-transport surface remains reachable.
     let _ = backend.inner();

@@ -178,3 +178,22 @@ Same test runs in Bun and Deno:
 bun test/smoke.test.mjs
 deno run -A test/smoke.test.mjs
 ```
+
+## Production deploy
+
+When you're ready to point this driver at a production RedDB cluster:
+
+- **Run RedDB with the encrypted vault** so auth state and
+  `red.secret.*` values are protected at rest. See
+  [`docs/security/vault.md`](../../docs/security/vault.md).
+- **Use Docker secrets or your cloud secret manager** to inject the
+  certificate — never bake it into an image. See
+  [`docs/getting-started/docker.md`](../../docs/getting-started/docker.md).
+- **Track every secret** the driver consumes (bearer tokens, mTLS
+  cert + key, OAuth JWTs) in
+  [`docs/operations/secrets.md`](../../docs/operations/secrets.md).
+- **Use `reds://` (TLS)** or `red://...?tls=true` for any traffic
+  crossing the network — never plain `red://` outside localhost.
+- **TLS posture, mTLS, OAuth/JWT and reverse-proxy patterns** are
+  covered in [`docs/security/transport-tls.md`](../../docs/security/transport-tls.md).
+- See [Policies](../../docs/security/policies.md) for IAM-style authorization.

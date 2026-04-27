@@ -23,15 +23,14 @@ use crate::{RedDBError, RedDBResult};
 // ---------------------------------------------------------------------------
 
 fn required_string(payload: &JsonValue, key: &str) -> RedDBResult<String> {
-    json_string_field(payload, key).ok_or_else(|| {
-        RedDBError::InvalidConfig(format!("missing required field `{key}`"))
-    })
+    json_string_field(payload, key)
+        .ok_or_else(|| RedDBError::InvalidConfig(format!("missing required field `{key}`")))
 }
 
 fn parse_author(payload: &JsonValue, key: &str) -> RedDBResult<Author> {
-    let obj = payload.get(key).ok_or_else(|| {
-        RedDBError::InvalidConfig(format!("missing required field `{key}`"))
-    })?;
+    let obj = payload
+        .get(key)
+        .ok_or_else(|| RedDBError::InvalidConfig(format!("missing required field `{key}`")))?;
     Ok(Author {
         name: json_string_field(obj, "name").unwrap_or_default(),
         email: json_string_field(obj, "email").unwrap_or_default(),
@@ -116,11 +115,7 @@ pub fn parse_merge_strategy(value: Option<&str>) -> MergeStrategy {
 
 pub fn parse_merge_input(payload: &JsonValue) -> RedDBResult<MergeInput> {
     let opts = MergeOpts {
-        strategy: parse_merge_strategy(
-            payload
-                .get("strategy")
-                .and_then(JsonValue::as_str),
-        ),
+        strategy: parse_merge_strategy(payload.get("strategy").and_then(JsonValue::as_str)),
         message: json_string_field(payload, "message"),
         abort_on_conflict: json_bool_field(payload, "abort_on_conflict").unwrap_or(false),
     };
@@ -224,10 +219,7 @@ pub fn author_to_json(a: &Author) -> JsonValue {
 pub fn commit_to_json(c: &Commit) -> JsonValue {
     let mut map = Map::new();
     map.insert("hash".to_string(), JsonValue::String(c.hash.clone()));
-    map.insert(
-        "root_xid".to_string(),
-        JsonValue::Number(c.root_xid as f64),
-    );
+    map.insert("root_xid".to_string(), JsonValue::Number(c.root_xid as f64));
     map.insert(
         "parents".to_string(),
         JsonValue::Array(

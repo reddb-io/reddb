@@ -74,7 +74,10 @@ fn main() {
     let mut samples = Vec::with_capacity(UPDATES);
     let t = Instant::now();
     for (iter, id) in ids.iter().enumerate() {
-        let sql = format!("UPDATE users SET score = {} WHERE _entity_id = {id}", iter as f64);
+        let sql = format!(
+            "UPDATE users SET score = {} WHERE _entity_id = {id}",
+            iter as f64
+        );
         let t0 = Instant::now();
         uc_q.execute(ExecuteQueryInput { query: sql }).expect("q");
         samples.push(t0.elapsed().as_nanos() as u64);

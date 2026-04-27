@@ -99,14 +99,13 @@ export async function connect(uri, options = {}) {
   }
 
   // gRPC / gRPCs / RedWire (default for grpc-shaped URIs):
-  // speak the v2 binary protocol natively via TCP. No spawn, no
+  // speak the RedWire binary protocol natively via TCP. No spawn, no
   // gRPC bridge. Resolves bearer auth from username/password via
   // HTTP /auth/login first when needed.
   //
-  // The binary's gRPC server already accepts v2 wire on port 5050
-  // through the v1 listener's 0xFE dispatch (src/wire/listener.rs).
-  // For pure grpc:// callers we still default to the same RedWire
-  // path because it wins on perf and parity.
+  // The server multiplexes RedWire on the same port as gRPC and HTTP
+  // via the service router's 0xFE detector, so pure grpc:// URLs
+  // still flow through RedWire because it wins on perf and parity.
   if (parsed.kind === 'grpc' || parsed.kind === 'grpcs') {
     let token = merged.token
     if (!token && merged.username && merged.password) {

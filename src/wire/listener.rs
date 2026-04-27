@@ -1,11 +1,17 @@
-/// RedDB Wire Protocol TCP Listener (plaintext + TLS)
-///
-/// Accepts TCP connections and processes binary wire protocol messages.
-/// Each connection is handled in its own tokio task.
-/// Supports both plaintext TCP and TLS-encrypted connections.
+//! RedWire frame handlers — pure request/response transformations
+//! shared by the RedWire session loop. Each handler takes a parsed
+//! payload and returns a length-prefixed response envelope; the
+//! session adapts the envelope into a RedWire frame via
+//! `rewrap_handler_response`.
+//!
+//! These functions used to back a standalone TCP listener. The
+//! listener has been removed — RedWire is the only wire protocol —
+//! but the handler bodies are kept here because they're well-tested
+//! and the binary fast paths (`handle_bulk_insert_binary`,
+//! `handle_query_binary`, streaming bulk, prepared statements) are
+//! exposed as native RedWire frame kinds.
+
 use std::sync::Arc;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::TcpListener;
 
 use super::protocol::*;
 use crate::application::ports::RuntimeEntityPort;
@@ -13,371 +19,6 @@ use crate::runtime::RedDBRuntime;
 use crate::storage::query::sql_lowering::effective_table_filter;
 use crate::storage::schema::Value;
 use crate::storage::unified::{EntityData, EntityId};
-
-/// Start the wire protocol TCP listener (plaintext).
-pub async fn start_wire_listener(
-    bind_addr: &str,
-    runtime: Arc<RedDBRuntime>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let listener = TcpListener::bind(bind_addr).await?;
-    tracing::info!(transport = "wire", bind = %bind_addr, "listener online");
-    start_wire_listener_on(listener, runtime).await
-}
-
-pub async fn start_wire_listener_on(
-    listener: TcpListener,
-    runtime: Arc<RedDBRuntime>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    loop {
-        let (stream, peer) = listener.accept().await?;
-        let rt = runtime.clone();
-        let peer_str = peer.to_string();
-        tokio::spawn(async move {
-            if let Err(e) = dispatch_connection(stream, rt).await {
-                tracing::warn!(transport = "wire", peer = %peer_str, err = %e, "connection failed");
-            }
-        });
-    }
-}
-
-/// Peek the first byte off a fresh TCP connection and dispatch
-/// either to the v2 RedWire session (when the byte is `0xFE`) or
-/// to the v1 handler (everything else). The byte is consumed off
-/// the wire either way — v1 paths won't see it because they
-/// receive the unaltered stream.
-///
-/// We deliberately use a tiny buffer + `peek` instead of a full
-/// 5-byte read because v1 frames may be only 5 bytes total
-/// (`MSG_BULK_STREAM_COMMIT` with empty body), so peeking to
-/// classify keeps the v1 codepath byte-exact.
-async fn dispatch_connection(
-    stream: tokio::net::TcpStream,
-    runtime: Arc<RedDBRuntime>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut peek = [0u8; 1];
-    let n = stream.peek(&mut peek).await?;
-    if n == 1 && peek[0] == crate::wire::redwire::REDWIRE_V2_MAGIC {
-        // v2 — consume the magic byte, then hand off.
-        let mut stream = stream;
-        let mut consume = [0u8; 1];
-        tokio::io::AsyncReadExt::read_exact(&mut stream, &mut consume).await?;
-        return crate::wire::redwire::session::handle_session(stream, runtime, None, None)
-            .await
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>);
-    }
-    handle_connection(stream, runtime).await
-}
-
-/// Start the wire protocol listener on a Unix domain socket (Phase 1.7 PG parity).
-///
-/// Accepts connections from `unix://path` URLs or plain filesystem paths.
-/// Existing socket files are removed before bind (parallel to PG's behaviour).
-/// Connection handling reuses `handle_connection`, which is generic over any
-/// `AsyncRead + AsyncWrite` stream.
-#[cfg(unix)]
-pub async fn start_wire_unix_listener(
-    socket_path: &str,
-    runtime: Arc<RedDBRuntime>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use tokio::net::UnixListener;
-
-    // Normalise: strip `unix://` prefix if caller passed a URL.
-    let path: &str = socket_path.strip_prefix("unix://").unwrap_or(socket_path);
-
-    // Remove stale socket file so bind() doesn't fail with EADDRINUSE.
-    let _ = std::fs::remove_file(path);
-    let listener = UnixListener::bind(path)?;
-    tracing::info!(transport = "wire-unix", bind = %path, "listener online");
-    loop {
-        let (stream, _addr) = listener.accept().await?;
-        let rt = runtime.clone();
-        tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, rt).await {
-                tracing::warn!(transport = "wire-unix", err = %e, "connection failed");
-            }
-        });
-    }
-}
-
-/// Start the wire protocol TCP listener with TLS encryption.
-pub async fn start_wire_tls_listener(
-    bind_addr: &str,
-    runtime: Arc<RedDBRuntime>,
-    tls_config: &super::tls::WireTlsConfig,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let acceptor = super::tls::build_tls_acceptor(tls_config)?;
-    let listener = TcpListener::bind(bind_addr).await?;
-    tracing::info!(transport = "wire+tls", bind = %bind_addr, "listener online");
-    start_wire_tls_listener_on(listener, runtime, acceptor).await
-}
-
-async fn start_wire_tls_listener_on(
-    listener: TcpListener,
-    runtime: Arc<RedDBRuntime>,
-    acceptor: tokio_rustls::TlsAcceptor,
-) -> Result<(), Box<dyn std::error::Error>> {
-    loop {
-        let (tcp_stream, peer) = listener.accept().await?;
-        let acceptor = acceptor.clone();
-        let rt = runtime.clone();
-        let peer_str = peer.to_string();
-        tokio::spawn(async move {
-            match acceptor.accept(tcp_stream).await {
-                Ok(tls_stream) => {
-                    if let Err(e) = dispatch_tls_connection(tls_stream, rt).await {
-                        tracing::warn!(transport = "wire+tls", peer = %peer_str, err = %e, "connection failed");
-                    }
-                }
-                Err(e) => tracing::warn!(
-                    transport = "wire+tls",
-                    peer = %peer_str,
-                    err = %e,
-                    "TLS handshake failed"
-                ),
-            }
-        });
-    }
-}
-
-/// Same v1↔v2 dispatch as `dispatch_connection` but for already-
-/// negotiated TLS streams. We can't `peek` over TLS records, so we
-/// read 1 byte explicitly. If it's the v2 magic, hand off to the
-/// v2 session (which is generic over `AsyncRead+Write`); otherwise
-/// the byte we just consumed is the first byte of a v1 frame —
-/// prepend it back via a `Chain` reader so the v1 handler sees an
-/// unaltered stream.
-async fn dispatch_tls_connection<S>(
-    mut stream: tokio_rustls::server::TlsStream<S>,
-    runtime: Arc<RedDBRuntime>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
-where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
-{
-    let mut first = [0u8; 1];
-    tokio::io::AsyncReadExt::read_exact(&mut stream, &mut first).await?;
-    if first[0] == crate::wire::redwire::REDWIRE_V2_MAGIC {
-        return crate::wire::redwire::session::handle_session(stream, runtime, None, None)
-            .await
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>);
-    }
-    // v1 path: feed the byte we consumed back via a PrefixedStream
-    // so handle_connection sees the same bytes the client sent.
-    let prefixed = PrefixedStream::new(stream, first[0]);
-    handle_connection(prefixed, runtime).await
-}
-
-/// Wraps an `AsyncRead + AsyncWrite` and prepends a single byte of
-/// "already-consumed" data to the read side. Reads pull from the
-/// stash first, then transparently delegate to the inner stream.
-/// Writes always delegate. Used by `dispatch_tls_connection` to
-/// hand the byte we peeked at back to the v1 handler.
-struct PrefixedStream<S> {
-    inner: S,
-    prefix: Option<u8>,
-}
-
-impl<S> PrefixedStream<S> {
-    fn new(inner: S, byte: u8) -> Self {
-        Self {
-            inner,
-            prefix: Some(byte),
-        }
-    }
-}
-
-impl<S> tokio::io::AsyncRead for PrefixedStream<S>
-where
-    S: tokio::io::AsyncRead + Unpin,
-{
-    fn poll_read(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        if let Some(byte) = self.prefix.take() {
-            if buf.remaining() == 0 {
-                self.prefix = Some(byte);
-                return std::task::Poll::Pending;
-            }
-            buf.put_slice(&[byte]);
-            return std::task::Poll::Ready(Ok(()));
-        }
-        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
-    }
-}
-
-impl<S> tokio::io::AsyncWrite for PrefixedStream<S>
-where
-    S: tokio::io::AsyncWrite + Unpin,
-{
-    fn poll_write(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> std::task::Poll<std::io::Result<usize>> {
-        std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
-    }
-    fn poll_flush(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
-    }
-    fn poll_shutdown(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
-    }
-}
-
-/// Handle a connection (works for both plain TCP and TLS streams).
-async fn handle_connection<S>(
-    mut stream: S,
-    runtime: Arc<RedDBRuntime>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
-where
-    S: AsyncRead + AsyncWrite + Unpin + Send,
-{
-    let mut header_buf = [0u8; 5]; // 4 bytes len + 1 byte msg_type
-
-    // Streaming-bulk session state. Populated by MSG_BULK_STREAM_START,
-    // appended to by each MSG_BULK_STREAM_ROWS, flushed and cleared
-    // by MSG_BULK_STREAM_COMMIT. One session per connection at a
-    // time — a second START before COMMIT returns an error.
-    let mut stream_session: Option<BulkStreamSession> = None;
-
-    // Prepared statement registry (per-connection). MSG_PREPARE parses
-    // SQL + parameterizes once; MSG_EXECUTE_PREPARED looks up the
-    // compiled shape by stmt_id and binds values. Dropped on
-    // disconnect alongside the rest of the connection's state.
-    let mut prepared_stmts: std::collections::HashMap<u32, PreparedStmt> =
-        std::collections::HashMap::new();
-
-    // Cursor registry (per-connection). DECLARE materialises the
-    // SELECT result once; FETCH slices the next batch without
-    // re-executing the query. Capped at MAX_CURSORS_PER_CONN to
-    // prevent a runaway client from pinning result sets.
-    let mut cursors: std::collections::HashMap<u32, CursorState> =
-        std::collections::HashMap::new();
-
-    // Per-connection timing aggregation. Flushed every 500 requests
-    // when REDDB_WIRE_TIMING=1 is set (bench mode only). Zero overhead
-    // when the env flag is absent — we don't even sample.
-    let trace = matches!(
-        std::env::var("REDDB_WIRE_TIMING").ok().as_deref(),
-        Some("1") | Some("true") | Some("on")
-    );
-    let mut trace_count: u64 = 0;
-    let mut trace_read_ns: u64 = 0;
-    let mut trace_process_ns: u64 = 0;
-    let mut trace_write_ns: u64 = 0;
-
-    loop {
-        let t_read = if trace {
-            Some(std::time::Instant::now())
-        } else {
-            None
-        };
-
-        // Read frame header
-        match stream.read_exact(&mut header_buf).await {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
-            Err(e) => return Err(e.into()),
-        }
-
-        let total_len =
-            u32::from_le_bytes([header_buf[0], header_buf[1], header_buf[2], header_buf[3]])
-                as usize;
-        let msg_type = header_buf[4];
-        let payload_len = total_len.saturating_sub(1);
-
-        // Read payload
-        let mut payload = vec![0u8; payload_len];
-        if payload_len > 0 {
-            stream.read_exact(&mut payload).await?;
-        }
-
-        if let Some(t) = t_read {
-            trace_read_ns += t.elapsed().as_nanos() as u64;
-        }
-
-        let t_proc = if trace {
-            Some(std::time::Instant::now())
-        } else {
-            None
-        };
-
-        // Process message
-        let response = match msg_type {
-            MSG_QUERY => handle_query(&runtime, &payload),
-            MSG_QUERY_BINARY => handle_query_binary(&runtime, &payload),
-            MSG_BULK_INSERT => handle_bulk_insert(&runtime, &payload),
-            MSG_BULK_INSERT_BINARY => handle_bulk_insert_binary(&runtime, &payload),
-            MSG_BULK_INSERT_PREVALIDATED => {
-                handle_bulk_insert_binary_prevalidated(&runtime, &payload)
-            }
-            MSG_BULK_STREAM_START => handle_stream_start(&payload, &mut stream_session),
-            MSG_BULK_STREAM_ROWS => {
-                // STREAM_ROWS is the hot path — if the append succeeds we
-                // send NO response and the client pipelines the next
-                // frame. Only on error does the server reply (MSG_ERROR).
-                // Handler returns an empty Vec to signal "no response".
-                handle_stream_rows(&runtime, &payload, &mut stream_session)
-            }
-            MSG_BULK_STREAM_COMMIT => handle_stream_commit(&runtime, &mut stream_session),
-            MSG_PREPARE => handle_prepare(&runtime, &payload, &mut prepared_stmts),
-            MSG_EXECUTE_PREPARED => {
-                handle_execute_prepared(&runtime, &payload, &prepared_stmts)
-            }
-            MSG_DEALLOCATE => handle_deallocate(&payload, &mut prepared_stmts),
-            MSG_DECLARE_CURSOR => handle_declare_cursor(&runtime, &payload, &mut cursors),
-            MSG_FETCH => handle_fetch(&payload, &mut cursors),
-            MSG_CLOSE_CURSOR => handle_close_cursor(&payload, &mut cursors),
-            _ => {
-                let mut resp = Vec::new();
-                let err = b"unknown message type";
-                write_frame_header(&mut resp, MSG_ERROR, err.len() as u32);
-                resp.extend_from_slice(err);
-                resp
-            }
-        };
-
-        if let Some(t) = t_proc {
-            trace_process_ns += t.elapsed().as_nanos() as u64;
-        }
-
-        let t_write = if trace {
-            Some(std::time::Instant::now())
-        } else {
-            None
-        };
-
-        // Send response — empty vec means "no response" (used by the
-        // streaming-bulk hot path so clients pipeline next frame).
-        if !response.is_empty() {
-            stream.write_all(&response).await?;
-        }
-
-        if let Some(t) = t_write {
-            trace_write_ns += t.elapsed().as_nanos() as u64;
-        }
-
-        if trace {
-            trace_count += 1;
-            if trace_count % 500 == 0 {
-                eprintln!(
-                    "[wire-timing] requests={} avg_read_us={} avg_process_us={} avg_write_us={}",
-                    trace_count,
-                    trace_read_ns / trace_count / 1000,
-                    trace_process_ns / trace_count / 1000,
-                    trace_write_ns / trace_count / 1000,
-                );
-            }
-        }
-    }
-}
 
 pub(crate) fn handle_query(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
     let sql = match std::str::from_utf8(payload) {
@@ -409,10 +50,7 @@ pub(crate) fn handle_query(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
             // = true` a missed ack window surfaces as an error
             // frame so the client retries instead of silently
             // accepting non-durable writes.
-            let is_mutation = matches!(
-                result.statement_type,
-                "insert" | "update" | "delete"
-            );
+            let is_mutation = matches!(result.statement_type, "insert" | "update" | "delete");
             if is_mutation {
                 let post_lsn = runtime.cdc_current_lsn();
                 if let Err(err) = runtime.enforce_commit_policy(post_lsn) {
@@ -451,7 +89,6 @@ pub(crate) fn handle_query(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
 pub(crate) fn handle_query_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
     handle_query(runtime, payload)
 }
-
 
 fn encode_entity_binary(entity: &crate::storage::unified::UnifiedEntity) -> Vec<u8> {
     let mut cols: Vec<String> = vec![
@@ -804,7 +441,10 @@ pub(crate) fn handle_bulk_insert_binary(runtime: &RedDBRuntime, payload: &[u8]) 
 /// pre-validated path which skips per-row contract + uniqueness
 /// checks. Used by typed-bench-style workloads where the client
 /// already validated types before sending.
-pub(crate) fn handle_bulk_insert_binary_prevalidated(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
+pub(crate) fn handle_bulk_insert_binary_prevalidated(
+    runtime: &RedDBRuntime,
+    payload: &[u8],
+) -> Vec<u8> {
     let mut pos = 0;
 
     if payload.len() < 6 {
@@ -939,10 +579,7 @@ fn value_bytes_estimate(v: &crate::storage::schema::Value) -> usize {
     match v {
         Value::Null => 1,
         Value::Boolean(_) => 2,
-        Value::Integer(_)
-        | Value::UnsignedInteger(_)
-        | Value::Float(_)
-        | Value::Timestamp(_) => 9,
+        Value::Integer(_) | Value::UnsignedInteger(_) | Value::Float(_) | Value::Timestamp(_) => 9,
         Value::Text(s) => 5 + s.len(),
         _ => 16,
     }
@@ -984,7 +621,10 @@ fn flush_pending_rows(
 /// collection + schema for subsequent ROWS frames. Any in-flight
 /// session is aborted. Responds `MSG_BULK_STREAM_ACK` (empty body)
 /// on success, `MSG_ERROR` otherwise.
-pub(crate) fn handle_stream_start(payload: &[u8], session: &mut Option<BulkStreamSession>) -> Vec<u8> {
+pub(crate) fn handle_stream_start(
+    payload: &[u8],
+    session: &mut Option<BulkStreamSession>,
+) -> Vec<u8> {
     let mut pos = 0;
     let coll_len = match read_u16(payload, &mut pos, "stream start: missing collection length") {
         Ok(len) => len as usize,
@@ -1078,10 +718,10 @@ pub(crate) fn handle_stream_rows(
         state.pending.push(values);
         state.pending_bytes = state.pending_bytes.saturating_add(row_bytes);
 
-        let rows_hit = state.flush_row_threshold > 0
-            && state.pending.len() >= state.flush_row_threshold;
-        let bytes_hit = state.flush_byte_threshold > 0
-            && state.pending_bytes >= state.flush_byte_threshold;
+        let rows_hit =
+            state.flush_row_threshold > 0 && state.pending.len() >= state.flush_row_threshold;
+        let bytes_hit =
+            state.flush_byte_threshold > 0 && state.pending_bytes >= state.flush_byte_threshold;
         if rows_hit || bytes_hit {
             if let Err(msg) = flush_pending_rows(runtime, state) {
                 return make_error(format!("stream rows: {msg}").as_bytes());
@@ -1647,10 +1287,8 @@ mod tests {
     }
 
     fn seed_users_table(rt: &RedDBRuntime) {
-        rt.execute_query(
-            "CREATE TABLE users (id INT, name TEXT, age INT, city TEXT)",
-        )
-        .unwrap();
+        rt.execute_query("CREATE TABLE users (id INT, name TEXT, age INT, city TEXT)")
+            .unwrap();
         for i in 0..20u32 {
             rt.execute_query(&format!(
                 "INSERT INTO users (id, name, age, city) VALUES ({i}, 'u{i}', {}, 'NYC')",
@@ -2062,10 +1700,7 @@ mod tests {
         p
     }
 
-    fn with_test_session(
-        flush_rows: usize,
-        flush_bytes: usize,
-    ) -> Option<BulkStreamSession> {
+    fn with_test_session(flush_rows: usize, flush_bytes: usize) -> Option<BulkStreamSession> {
         Some(BulkStreamSession {
             collection: "target".to_string(),
             schema: std::sync::Arc::new(vec!["id".to_string(), "name".to_string()]),
@@ -2161,8 +1796,7 @@ mod tests {
         use crate::storage::schema::Value;
         assert!(value_bytes_estimate(&Value::Null) < value_bytes_estimate(&Value::Boolean(true)));
         assert!(
-            value_bytes_estimate(&Value::Boolean(true))
-                < value_bytes_estimate(&Value::Integer(1))
+            value_bytes_estimate(&Value::Boolean(true)) < value_bytes_estimate(&Value::Integer(1))
         );
         assert!(
             value_bytes_estimate(&Value::text("hello".to_string()))

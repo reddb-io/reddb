@@ -72,8 +72,9 @@ fn row_i64(row: &RowData, field: &str) -> Option<i64> {
 
 fn row_json(row: &RowData, field: &str) -> JsonValue {
     match row.get_field(field) {
-        Some(Value::Json(bytes)) => crate::json::from_slice::<JsonValue>(bytes)
-            .unwrap_or(JsonValue::Null),
+        Some(Value::Json(bytes)) => {
+            crate::json::from_slice::<JsonValue>(bytes).unwrap_or(JsonValue::Null)
+        }
         Some(Value::Text(s)) => crate::json::from_str::<JsonValue>(s)
             .unwrap_or_else(|_| JsonValue::String(s.to_string())),
         _ => JsonValue::Null,
@@ -226,10 +227,7 @@ fn save_commit(store: &UnifiedStore, commit: &Commit) -> RedDBResult<()> {
                 .collect(),
         ),
     );
-    fields.insert(
-        "height".to_string(),
-        Value::UnsignedInteger(commit.height),
-    );
+    fields.insert("height".to_string(), Value::UnsignedInteger(commit.height));
     fields.insert(
         "author_name".to_string(),
         Value::text(commit.author.name.as_str()),
@@ -246,10 +244,7 @@ fn save_commit(store: &UnifiedStore, commit: &Commit) -> RedDBResult<()> {
         "committer_email".to_string(),
         Value::text(commit.committer.email.as_str()),
     );
-    fields.insert(
-        "message".to_string(),
-        Value::text(commit.message.as_str()),
-    );
+    fields.insert("message".to_string(), Value::text(commit.message.as_str()));
     fields.insert(
         "timestamp_ms".to_string(),
         Value::TimestampMs(commit.timestamp_ms),
@@ -278,7 +273,8 @@ fn ref_from_row(row: &RowData) -> Option<Ref> {
         name: row_text(row, "id")?,
         kind: ref_kind_from_str(&row_text(row, "type").unwrap_or_default()),
         target: row_text(row, "target").unwrap_or_default(),
-        protected: row.get_field("protected")
+        protected: row
+            .get_field("protected")
             .and_then(|v| match v {
                 Value::Boolean(b) => Some(*b),
                 _ => None,
@@ -398,11 +394,7 @@ fn versioned_collections(store: &UnifiedStore) -> Vec<String> {
 /// merges / diffs / AS OF queries stop seeing it). Does NOT touch
 /// existing row versions — you control whether history is retained
 /// by deciding *when* to opt out.
-fn set_versioned_flag(
-    store: &UnifiedStore,
-    name: &str,
-    enabled: bool,
-) -> RedDBResult<()> {
+fn set_versioned_flag(store: &UnifiedStore, name: &str, enabled: bool) -> RedDBResult<()> {
     if name.starts_with("red_") {
         return Err(RedDBError::InvalidConfig(format!(
             "cannot version internal collection `{name}`"
@@ -759,9 +751,7 @@ impl RedDBRuntime {
                 let workset = load_workset(store, input.connection_id);
                 let base = workset
                     .and_then(|(_, base)| base)
-                    .or_else(|| {
-                        load_ref(store, vc::DEFAULT_BRANCH_REF).map(|r| r.target)
-                    })
+                    .or_else(|| load_ref(store, vc::DEFAULT_BRANCH_REF).map(|r| r.target))
                     .unwrap_or_default();
                 base
             }
@@ -780,9 +770,8 @@ impl RedDBRuntime {
         let store_arc = self.inner.db.store();
         let store: &UnifiedStore = &store_arc;
         let full = normalize_branch_name(name);
-        let existing = load_ref(store, &full).ok_or_else(|| {
-            RedDBError::NotFound(format!("branch `{full}` does not exist"))
-        })?;
+        let existing = load_ref(store, &full)
+            .ok_or_else(|| RedDBError::NotFound(format!("branch `{full}` does not exist")))?;
         if existing.protected {
             return Err(RedDBError::ReadOnly(format!(
                 "branch `{full}` is protected"
@@ -831,9 +820,8 @@ impl RedDBRuntime {
             }
             CheckoutTarget::Tag(name) => {
                 let full = normalize_tag_name(name);
-                let r = load_ref(store, &full).ok_or_else(|| {
-                    RedDBError::NotFound(format!("tag `{full}` does not exist"))
-                })?;
+                let r = load_ref(store, &full)
+                    .ok_or_else(|| RedDBError::NotFound(format!("tag `{full}` does not exist")))?;
                 (full, r.target)
             }
             CheckoutTarget::Commit(hash) => {
@@ -898,7 +886,9 @@ impl RedDBRuntime {
         let (head_branch, head_hash) = match workset {
             Some((branch, Some(head))) => (branch, head),
             Some((branch, None)) => {
-                let head = load_ref(store, &branch).map(|r| r.target).unwrap_or_default();
+                let head = load_ref(store, &branch)
+                    .map(|r| r.target)
+                    .unwrap_or_default();
                 (branch, head)
             }
             None => {
@@ -966,9 +956,10 @@ impl RedDBRuntime {
         // placeholder so callers know data reconciliation is required.
         let lca = RedDBRuntime::vcs_lca(self, &head_hash, &from_hash)?;
 
-        let message = input.opts.message.unwrap_or_else(|| {
-            format!("Merge {} into {}", input.from, head_branch)
-        });
+        let message = input
+            .opts
+            .message
+            .unwrap_or_else(|| format!("Merge {} into {}", input.from, head_branch));
         let author = input.author.clone();
         let timestamp_ms = now_ms();
         let parents = vec![head_hash.clone(), from_hash.clone()];
@@ -981,13 +972,7 @@ impl RedDBRuntime {
         let root_xid = self.inner.snapshot_manager.begin();
         self.inner.snapshot_manager.commit(root_xid);
 
-        let hash = compute_commit_hash(
-            root_xid,
-            &parents,
-            &author,
-            &message,
-            timestamp_ms,
-        );
+        let hash = compute_commit_hash(root_xid, &parents, &author, &message, timestamp_ms);
 
         let merge_commit = Commit {
             hash: hash.clone(),
@@ -1101,7 +1086,9 @@ impl RedDBRuntime {
         let (head_branch, head_hash) = match workset {
             Some((branch, Some(head))) => (branch, head),
             Some((branch, None)) => {
-                let head = load_ref(store, &branch).map(|r| r.target).unwrap_or_default();
+                let head = load_ref(store, &branch)
+                    .map(|r| r.target)
+                    .unwrap_or_default();
                 (branch, head)
             }
             None => {
@@ -1131,13 +1118,7 @@ impl RedDBRuntime {
         self.inner.snapshot_manager.commit(root_xid);
         let timestamp_ms = now_ms();
 
-        let hash = compute_commit_hash(
-            root_xid,
-            &parents,
-            &author,
-            &message,
-            timestamp_ms,
-        );
+        let hash = compute_commit_hash(root_xid, &parents, &author, &message, timestamp_ms);
         let pick_commit = Commit {
             hash: hash.clone(),
             root_xid,
@@ -1164,13 +1145,7 @@ impl RedDBRuntime {
                 },
             )?;
         }
-        upsert_workset(
-            store,
-            connection_id,
-            &head_branch,
-            Some(&hash),
-            root_xid,
-        )?;
+        upsert_workset(store, connection_id, &head_branch, Some(&hash), root_xid)?;
 
         let merge_state_id = format!("cp:{}", &hash[..16]);
         let conflicts = materialize_merge_conflicts(
@@ -1213,9 +1188,8 @@ impl RedDBRuntime {
         let store: &UnifiedStore = &store_arc;
 
         let src_hash = RedDBRuntime::vcs_resolve_commitish(self, commit)?;
-        let src_commit = load_commit(store, &src_hash).ok_or_else(|| {
-            RedDBError::NotFound(format!("revert source `{src_hash}` not found"))
-        })?;
+        let src_commit = load_commit(store, &src_hash)
+            .ok_or_else(|| RedDBError::NotFound(format!("revert source `{src_hash}` not found")))?;
         if src_commit.parents.is_empty() {
             return Err(RedDBError::InvalidConfig(
                 "cannot revert a root commit".to_string(),
@@ -1227,7 +1201,9 @@ impl RedDBRuntime {
         let (head_branch, head_hash) = match workset {
             Some((branch, Some(head))) => (branch, head),
             Some((branch, None)) => {
-                let head = load_ref(store, &branch).map(|r| r.target).unwrap_or_default();
+                let head = load_ref(store, &branch)
+                    .map(|r| r.target)
+                    .unwrap_or_default();
                 (branch, head)
             }
             None => {
@@ -1257,13 +1233,7 @@ impl RedDBRuntime {
         self.inner.snapshot_manager.commit(root_xid);
         let timestamp_ms = now_ms();
 
-        let hash = compute_commit_hash(
-            root_xid,
-            &parents,
-            &author,
-            &message,
-            timestamp_ms,
-        );
+        let hash = compute_commit_hash(root_xid, &parents, &author, &message, timestamp_ms);
         let rv_commit = Commit {
             hash: hash.clone(),
             root_xid,
@@ -1290,13 +1260,7 @@ impl RedDBRuntime {
                 },
             )?;
         }
-        upsert_workset(
-            store,
-            connection_id,
-            &head_branch,
-            Some(&hash),
-            root_xid,
-        )?;
+        upsert_workset(store, connection_id, &head_branch, Some(&hash), root_xid)?;
 
         let merge_state_id = format!("rv:{}", &hash[..16]);
         // Record merge_state for later data apply. No conflict
@@ -1368,9 +1332,7 @@ impl RedDBRuntime {
                 let workset = load_workset(store, input.connection_id);
                 workset
                     .and_then(|(_, base)| base)
-                    .or_else(|| {
-                        load_ref(store, vc::DEFAULT_BRANCH_REF).map(|r| r.target)
-                    })
+                    .or_else(|| load_ref(store, vc::DEFAULT_BRANCH_REF).map(|r| r.target))
                     .unwrap_or_default()
             }
         };
@@ -1385,14 +1347,8 @@ impl RedDBRuntime {
         let store: &UnifiedStore = &store_arc;
         let from_hash = RedDBRuntime::vcs_resolve_commitish(self, &input.from)?;
         let to_hash = RedDBRuntime::vcs_resolve_commitish(self, &input.to)?;
-        let from_xid = RedDBRuntime::vcs_resolve_as_of(
-            self,
-            AsOfSpec::Commit(from_hash.clone()),
-        )?;
-        let to_xid = RedDBRuntime::vcs_resolve_as_of(
-            self,
-            AsOfSpec::Commit(to_hash.clone()),
-        )?;
+        let from_xid = RedDBRuntime::vcs_resolve_as_of(self, AsOfSpec::Commit(from_hash.clone()))?;
+        let to_xid = RedDBRuntime::vcs_resolve_as_of(self, AsOfSpec::Commit(to_hash.clone()))?;
 
         let sm = &self.inner.snapshot_manager;
         let from_snap = sm.snapshot(from_xid);
@@ -1424,10 +1380,8 @@ impl RedDBRuntime {
             for entity in &entities {
                 let xmin = entity.xmin;
                 let xmax = entity.xmax;
-                let in_from = from_snap.sees(xmin, xmax)
-                    && !sm.is_aborted(xmin);
-                let in_to = to_snap.sees(xmin, xmax)
-                    && !sm.is_aborted(xmin);
+                let in_from = from_snap.sees(xmin, xmax) && !sm.is_aborted(xmin);
+                let in_to = to_snap.sees(xmin, xmax) && !sm.is_aborted(xmin);
                 if in_from == in_to {
                     continue;
                 }
@@ -1435,10 +1389,7 @@ impl RedDBRuntime {
                 let payload = if input.summary_only {
                     JsonValue::Null
                 } else {
-                    JsonValue::String(format!(
-                        "entity#{} xmin={} xmax={}",
-                        entity_id, xmin, xmax
-                    ))
+                    JsonValue::String(format!("entity#{} xmin={} xmax={}", entity_id, xmin, xmax))
                 };
                 let change = match (in_from, in_to) {
                     (false, true) => {
@@ -1539,10 +1490,7 @@ impl RedDBRuntime {
         Ok(best.map(|(_, h)| h))
     }
 
-    pub fn vcs_conflicts_list(
-        &self,
-        merge_state_id: &str,
-    ) -> RedDBResult<Vec<Conflict>> {
+    pub fn vcs_conflicts_list(&self, merge_state_id: &str) -> RedDBResult<Vec<Conflict>> {
         let store_arc = self.inner.db.store();
         let store: &UnifiedStore = &store_arc;
         let Some(manager) = store.get_collection(vc::CONFLICTS) else {
@@ -1574,11 +1522,7 @@ impl RedDBRuntime {
         Ok(out)
     }
 
-    pub fn vcs_conflict_resolve(
-        &self,
-        conflict_id: &str,
-        _resolved: JsonValue,
-    ) -> RedDBResult<()> {
+    pub fn vcs_conflict_resolve(&self, conflict_id: &str, _resolved: JsonValue) -> RedDBResult<()> {
         let store_arc = self.inner.db.store();
         let store: &UnifiedStore = &store_arc;
         let Some(manager) = store.get_collection(vc::CONFLICTS) else {
@@ -1617,9 +1561,8 @@ impl RedDBRuntime {
         match spec {
             AsOfSpec::Snapshot(x) => Ok(x),
             AsOfSpec::Commit(h) => {
-                let c = load_commit(store, &h).ok_or_else(|| {
-                    RedDBError::NotFound(format!("commit `{h}` not found"))
-                })?;
+                let c = load_commit(store, &h)
+                    .ok_or_else(|| RedDBError::NotFound(format!("commit `{h}` not found")))?;
                 Ok(c.root_xid)
             }
             AsOfSpec::Branch(name) => {
@@ -1634,18 +1577,17 @@ impl RedDBRuntime {
             }
             AsOfSpec::Tag(name) => {
                 let full = normalize_tag_name(&name);
-                let r = load_ref(store, &full).ok_or_else(|| {
-                    RedDBError::NotFound(format!("tag `{full}` does not exist"))
-                })?;
+                let r = load_ref(store, &full)
+                    .ok_or_else(|| RedDBError::NotFound(format!("tag `{full}` does not exist")))?;
                 let c = load_commit(store, &r.target).ok_or_else(|| {
                     RedDBError::NotFound(format!("tag `{full}` points to missing commit"))
                 })?;
                 Ok(c.root_xid)
             }
             AsOfSpec::TimestampMs(ts) => {
-                let manager = store.get_collection(vc::COMMITS).ok_or_else(|| {
-                    RedDBError::NotFound("no commits exist yet".to_string())
-                })?;
+                let manager = store
+                    .get_collection(vc::COMMITS)
+                    .ok_or_else(|| RedDBError::NotFound("no commits exist yet".to_string()))?;
                 // Find the commit with the greatest timestamp_ms <= ts.
                 let mut best: Option<(i64, Xid)> = None;
                 let entities = manager.query_all(|_| true);
@@ -1661,9 +1603,8 @@ impl RedDBRuntime {
                         }
                     }
                 }
-                best.map(|(_, x)| x).ok_or_else(|| {
-                    RedDBError::NotFound(format!("no commit at or before ts={ts}"))
-                })
+                best.map(|(_, x)| x)
+                    .ok_or_else(|| RedDBError::NotFound(format!("no commit at or before ts={ts}")))
             }
         }
     }
@@ -1692,9 +1633,7 @@ impl RedDBRuntime {
         let store_arc = self.inner.db.store();
         let store: &UnifiedStore = &store_arc;
         if spec.is_empty() {
-            return Err(RedDBError::InvalidConfig(
-                "empty commitish".to_string(),
-            ));
+            return Err(RedDBError::InvalidConfig("empty commitish".to_string()));
         }
 
         // 1. Exact commit hash.
@@ -1838,11 +1777,11 @@ fn materialize_merge_conflicts(
             let mut fields: HashMap<String, Value> = HashMap::new();
             fields.insert("id".to_string(), Value::text(conflict_id.as_str()));
             fields.insert("collection".to_string(), Value::text(coll.as_str()));
-            fields.insert("entity_id".to_string(), Value::text(eid.to_string().as_str()));
             fields.insert(
-                "merge_state_id".to_string(),
-                Value::text(merge_state_id),
+                "entity_id".to_string(),
+                Value::text(eid.to_string().as_str()),
             );
+            fields.insert("merge_state_id".to_string(), Value::text(merge_state_id));
             fields.insert(
                 "conflicting_paths".to_string(),
                 Value::Array(paths.iter().map(|p| Value::text(p.as_str())).collect()),
@@ -1915,7 +1854,11 @@ fn coalesce_modifications(
             out.extend(group);
         }
     }
-    out.sort_by(|a, b| a.collection.cmp(&b.collection).then(a.entity_id.cmp(&b.entity_id)));
+    out.sort_by(|a, b| {
+        a.collection
+            .cmp(&b.collection)
+            .then(a.entity_id.cmp(&b.entity_id))
+    });
     out
 }
 

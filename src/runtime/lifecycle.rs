@@ -16,7 +16,7 @@
 //! report. Phase transitions are monotonic — the runtime cannot move
 //! backwards through them.
 
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 use parking_lot::RwLock;
 
@@ -198,34 +198,52 @@ impl Lifecycle {
     /// first call sets the timestamp; subsequent calls are no-ops
     /// so a retried boot doesn't reset the gauge.
     pub fn mark_restore_started(&self) {
-        let _ = self
-            .restore_started_at_ms
-            .compare_exchange(0, now_ms(), Ordering::AcqRel, Ordering::Acquire);
+        let _ = self.restore_started_at_ms.compare_exchange(
+            0,
+            now_ms(),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
     }
     pub fn mark_restore_ready(&self) {
-        let _ = self
-            .restore_ready_at_ms
-            .compare_exchange(0, now_ms(), Ordering::AcqRel, Ordering::Acquire);
+        let _ = self.restore_ready_at_ms.compare_exchange(
+            0,
+            now_ms(),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
     }
     pub fn mark_wal_replay_started(&self) {
-        let _ = self
-            .wal_replay_started_at_ms
-            .compare_exchange(0, now_ms(), Ordering::AcqRel, Ordering::Acquire);
+        let _ = self.wal_replay_started_at_ms.compare_exchange(
+            0,
+            now_ms(),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
     }
     pub fn mark_wal_replay_ready(&self) {
-        let _ = self
-            .wal_replay_ready_at_ms
-            .compare_exchange(0, now_ms(), Ordering::AcqRel, Ordering::Acquire);
+        let _ = self.wal_replay_ready_at_ms.compare_exchange(
+            0,
+            now_ms(),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
     }
     pub fn mark_index_warmup_started(&self) {
-        let _ = self
-            .index_warmup_started_at_ms
-            .compare_exchange(0, now_ms(), Ordering::AcqRel, Ordering::Acquire);
+        let _ = self.index_warmup_started_at_ms.compare_exchange(
+            0,
+            now_ms(),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
     }
     pub fn mark_index_warmup_ready(&self) {
-        let _ = self
-            .index_warmup_ready_at_ms
-            .compare_exchange(0, now_ms(), Ordering::AcqRel, Ordering::Acquire);
+        let _ = self.index_warmup_ready_at_ms.compare_exchange(
+            0,
+            now_ms(),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
     }
 
     /// PLAN.md Phase 9.1 — backfill phase markers with an explicit
@@ -234,24 +252,30 @@ impl Lifecycle {
     /// open) and wants to replay it into the markers afterwards.
     /// Idempotent (only sets when current value is 0).
     pub fn set_restore_started_at_ms(&self, ms: u64) {
-        let _ = self
-            .restore_started_at_ms
-            .compare_exchange(0, ms, Ordering::AcqRel, Ordering::Acquire);
+        let _ =
+            self.restore_started_at_ms
+                .compare_exchange(0, ms, Ordering::AcqRel, Ordering::Acquire);
     }
     pub fn set_restore_ready_at_ms(&self, ms: u64) {
-        let _ = self
-            .restore_ready_at_ms
-            .compare_exchange(0, ms, Ordering::AcqRel, Ordering::Acquire);
+        let _ =
+            self.restore_ready_at_ms
+                .compare_exchange(0, ms, Ordering::AcqRel, Ordering::Acquire);
     }
     pub fn set_wal_replay_started_at_ms(&self, ms: u64) {
-        let _ = self
-            .wal_replay_started_at_ms
-            .compare_exchange(0, ms, Ordering::AcqRel, Ordering::Acquire);
+        let _ = self.wal_replay_started_at_ms.compare_exchange(
+            0,
+            ms,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
     }
     pub fn set_wal_replay_ready_at_ms(&self, ms: u64) {
-        let _ = self
-            .wal_replay_ready_at_ms
-            .compare_exchange(0, ms, Ordering::AcqRel, Ordering::Acquire);
+        let _ = self.wal_replay_ready_at_ms.compare_exchange(
+            0,
+            ms,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
     }
 
     /// Snapshot every cold-start marker in one read. Callers compute

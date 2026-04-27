@@ -9,9 +9,8 @@ PLAN.md Phase 10.4. RedDB exposes four transports — PostgreSQL wire (v3), gRPC
 | PostgreSQL wire | none (off by default) | `--pg-bind` flag | password / token / SCRAM |
 | gRPC | `:50051` | `RED_GRPC_BIND_ADDR` / `--grpc-bind` | bearer (per RPC) |
 | HTTP / HTTPS | `:8080` | `RED_HTTP_BIND_ADDR` / `--http-bind` | bearer / login / mTLS / OAuth-JWT / HMAC |
-| RedWire v1 (legacy bench fast-path) | `:5050` | `--wire-bind` | length-framed binary; optional bearer |
-| RedWire v2 (TCP) | `:5050` | shares `--wire-bind` (auto-dispatched on `0xFE` byte) | bearer / SCRAM-SHA-256 / OAuth-JWT / HMAC |
-| RedWire v2 (TLS / mTLS) | `:5050` | `--wire-tls-bind` + `--wire-tls-cert` / `--wire-tls-key` | mTLS + bearer / SCRAM / OAuth |
+| RedWire (TCP) | `:5050` | `--wire-bind` | bearer / SCRAM-SHA-256 / OAuth-JWT / HMAC |
+| RedWire (TLS / mTLS) | `:5050` | `--wire-tls-bind` + `--wire-tls-cert` / `--wire-tls-key` | mTLS + bearer / SCRAM / OAuth |
 
 `/admin/*` and `/metrics` always live on the HTTP transport. Operators can split them onto dedicated listeners via `RED_ADMIN_BIND` and `RED_METRICS_BIND` (see [scaling.md](../operations/scaling.md)).
 
@@ -86,16 +85,12 @@ openapi-generator-cli generate -i admin.openapi.yaml -g go -o ./reddb-admin-go
 
 ## Native binary wire (RedWire)
 
-Length-framed binary protocol used for the highest-throughput path (point lookups, bulk insert). Two protocol generations share port 5050:
-
-- **v1** — `[u32 length][u8 kind][payload]`, the bench fast-path. Documented in [`docs/adr/0001-redwire-tcp-protocol.md`](../adr/0001-redwire-tcp-protocol.md). No auth handshake — auth is bolted on via HTTP/`auth/login` on the same server.
-- **v2** — `[u32 length][u8 kind][u8 flags][u16 stream][u64 corr_id][payload]`, dispatched by the `0xFE` magic byte. Adds Hello/Auth handshake (SCRAM-SHA-256, bearer, OAuth-JWT, mTLS), per-frame zstd compression, multiplex via `correlation_id`, version negotiation. After auth, v2 falls through to v1's binary handlers, so steady-state perf matches.
+Length-framed binary protocol used for the highest-throughput path (point lookups, bulk insert) on port 5050. Frame layout: `[u32 length][u8 kind][u8 flags][u16 stream][u64 corr_id][payload]`. Adds a Hello/Auth handshake (SCRAM-SHA-256, bearer, OAuth-JWT, mTLS), per-frame zstd compression, multiplexing via `correlation_id`, and version negotiation. Documented in [`docs/adr/0001-redwire-tcp-protocol.md`](../adr/0001-redwire-tcp-protocol.md).
 
 Use the binary wire when:
 
 - You're embedding RedDB and want zero-copy point reads.
 - You're writing a high-throughput client in Rust / Go / C++ / Node and want sub-50µs round-trips.
-- You're OK with manual upgrades on schema bumps until the v2 spec is frozen (after Phase 4 of ADR 0002, currently complete).
 
 For dashboard / dev workloads pick HTTP or PG wire instead.
 
@@ -103,8 +98,8 @@ For dashboard / dev workloads pick HTTP or PG wire instead.
 
 | Driver | Status | RedWire | HTTP / HTTPS | PG wire | mTLS | OAuth-JWT | SCRAM |
 |--------|--------|---------|--------------|---------|------|-----------|-------|
-| `reddb` (JS / TS) | ✅ | v2 (TCP/TLS/mTLS) | ✅ | via `pg` | ✅ | ✅ | ✅ |
-| `reddb` (Rust) | ✅ | v2 (TCP/TLS/mTLS) | ✅ | via `tokio-postgres` | ✅ | ✅ | ✅ |
+| `reddb` (JS / TS) | ✅ | TCP/TLS/mTLS | ✅ | via `pg` | ✅ | ✅ | ✅ |
+| `reddb` (Rust) | ✅ | TCP/TLS/mTLS | ✅ | via `tokio-postgres` | ✅ | ✅ | ✅ |
 | `reddb` (Python / PyO3) | ✅ embedded + HTTP | planned | ✅ | via `psycopg` | planned | planned | planned |
 
 ## Versioning Promise
@@ -115,7 +110,7 @@ For dashboard / dev workloads pick HTTP or PG wire instead.
 | HTTP `/metrics` exposition | Additive only within v1. Removed metrics get one release of overlap. |
 | gRPC proto | Field numbers + message names stable; new fields are additive. |
 | PG wire protocol | Tracks PostgreSQL v3. New SQL features land additively. |
-| Native wire | More volatile pre-v1.0; embedded users should pin engine version. |
+| RedWire native wire | More volatile pre-1.0; embedded users should pin engine version. |
 
 ## Reporting Compatibility Bugs
 

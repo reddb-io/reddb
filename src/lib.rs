@@ -64,7 +64,7 @@ pub mod prelude {
         snapshot_store, CatalogModelSnapshot, CollectionDescriptor, CollectionModel, SchemaMode,
     };
     pub use crate::engine::{EngineInfo, EngineStats, RedDBEngine};
-    pub use crate::grpc::{GrpcServerOptions, RedDBGrpcServer};
+    pub use crate::grpc::{GrpcServerOptions, GrpcTlsOptions, RedDBGrpcServer};
     pub use crate::health::{HealthIssue, HealthProvider, HealthReport, HealthState};
     pub use crate::index::{
         IndexCatalog, IndexCatalogSnapshot, IndexConfig, IndexKind, IndexMetric, IndexRuntime,
@@ -108,7 +108,7 @@ pub use crate::catalog::{
     snapshot_store, CatalogModelSnapshot, CollectionDescriptor, CollectionModel, SchemaMode,
 };
 pub use crate::engine::{EngineInfo, EngineStats, RedDBEngine};
-pub use crate::grpc::{GrpcServerOptions, RedDBGrpcServer};
+pub use crate::grpc::{GrpcServerOptions, GrpcTlsOptions, RedDBGrpcServer};
 pub use crate::health::{HealthIssue, HealthProvider, HealthReport, HealthState};
 pub use crate::index::{
     IndexCatalog, IndexCatalogSnapshot, IndexConfig, IndexKind, IndexMetric, IndexRuntime,

@@ -1297,11 +1297,7 @@ pub(crate) fn execute_runtime_canonical_table_node(
                 (None, Some(lim)) => Some(lim as usize),
                 _ => None,
             };
-            scan_runtime_table_source_records_limited(
-                db,
-                context.query.table.as_str(),
-                scan_cap,
-            )
+            scan_runtime_table_source_records_limited(db, context.query.table.as_str(), scan_cap)
         }
         "filter" | "entity_filter" => {
             // ── FAST PATH: Direct entity_id lookup (O(1)) ──

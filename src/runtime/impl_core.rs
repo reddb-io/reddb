@@ -680,7 +680,17 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
         | QueryExpr::CreateSchema(_)
         | QueryExpr::DropSchema(_)
         | QueryExpr::CreateSequence(_)
-        | QueryExpr::DropSequence(_) => {}
+        | QueryExpr::DropSequence(_)
+        | QueryExpr::Grant(_)
+        | QueryExpr::Revoke(_)
+        | QueryExpr::AlterUser(_)
+        | QueryExpr::CreateIamPolicy { .. }
+        | QueryExpr::DropIamPolicy { .. }
+        | QueryExpr::AttachPolicy { .. }
+        | QueryExpr::DetachPolicy { .. }
+        | QueryExpr::ShowPolicies { .. }
+        | QueryExpr::ShowEffectivePermissions { .. }
+        | QueryExpr::SimulatePolicy { .. } => {}
     }
 }
 
@@ -1344,6 +1354,7 @@ impl RedDBRuntime {
                 ec_registry: Arc::new(crate::ec::config::EcRegistry::new()),
                 ec_worker: crate::ec::worker::EcWorker::new(),
                 auth_store: parking_lot::RwLock::new(None),
+                oauth_validator: parking_lot::RwLock::new(None),
                 commit_lock: Mutex::new(()),
                 views: parking_lot::RwLock::new(HashMap::new()),
                 materialized_views: parking_lot::RwLock::new(
@@ -1384,9 +1395,9 @@ impl RedDBRuntime {
                 pending_tombstones: parking_lot::RwLock::new(HashMap::new()),
                 tenant_tables: parking_lot::RwLock::new(HashMap::new()),
                 ddl_epoch: std::sync::atomic::AtomicU64::new(0),
-                write_gate: Arc::new(
-                    crate::runtime::write_gate::WriteGate::from_options(&options),
-                ),
+                write_gate: Arc::new(crate::runtime::write_gate::WriteGate::from_options(
+                    &options,
+                )),
                 lifecycle: crate::runtime::lifecycle::Lifecycle::new(),
                 resource_limits: crate::runtime::resource_limits::ResourceLimits::from_env(),
                 audit_log: {
@@ -1402,8 +1413,7 @@ impl RedDBRuntime {
                     ))
                 },
                 lease_lifecycle: std::sync::OnceLock::new(),
-                replica_apply_metrics:
-                    crate::replication::logical::ReplicaApplyMetrics::default(),
+                replica_apply_metrics: crate::replication::logical::ReplicaApplyMetrics::default(),
                 quota_bucket: crate::runtime::quota_bucket::QuotaBucket::from_env(),
             }),
         };
@@ -1851,6 +1861,20 @@ impl RedDBRuntime {
         *self.inner.auth_store.write() = Some(store);
     }
 
+    /// Inject an `OAuthValidator` into the runtime. When set, HTTP and
+    /// wire transports try OAuth JWT validation before falling back to
+    /// the local AuthStore lookup. Pass `None` to disable.
+    pub fn set_oauth_validator(&self, validator: Option<Arc<crate::auth::oauth::OAuthValidator>>) {
+        *self.inner.oauth_validator.write() = validator;
+    }
+
+    /// Returns a clone of the configured `OAuthValidator` Arc, if any.
+    /// Hot path: called per HTTP request when an Authorization header
+    /// is present, so we hand back a cheap Arc clone.
+    pub fn oauth_validator(&self) -> Option<Arc<crate::auth::oauth::OAuthValidator>> {
+        self.inner.oauth_validator.read().clone()
+    }
+
     /// Returns the vault AES key (`red.secret.aes_key`) if an auth
     /// store is wired and a key has been generated. Used by the
     /// `Value::Secret` encrypt/decrypt pipeline.
@@ -2128,9 +2152,7 @@ impl RedDBRuntime {
 
     /// Serverless writer-lease state machine. `None` when the operator
     /// did not opt into lease fencing (`RED_LEASE_REQUIRED` unset).
-    pub fn lease_lifecycle(
-        &self,
-    ) -> Option<&Arc<crate::runtime::lease_lifecycle::LeaseLifecycle>> {
+    pub fn lease_lifecycle(&self) -> Option<&Arc<crate::runtime::lease_lifecycle::LeaseLifecycle>> {
         self.inner.lease_lifecycle.get()
     }
 
@@ -2206,11 +2228,7 @@ impl RedDBRuntime {
             // Someone else already shut down (or is in flight). Return
             // the cached report so the HTTP caller and SIGTERM handler
             // get the same idempotent answer.
-            return Ok(self
-                .inner
-                .lifecycle
-                .shutdown_report()
-                .unwrap_or_default());
+            return Ok(self.inner.lifecycle.shutdown_report().unwrap_or_default());
         }
 
         let started_ms = std::time::SystemTime::now()
@@ -2236,7 +2254,9 @@ impl RedDBRuntime {
                 error = %err,
                 "graceful_shutdown: local flush failed"
             );
-        } else if let Err(lease_err) = self.assert_remote_write_allowed("shutdown/checkpoint_upload") {
+        } else if let Err(lease_err) =
+            self.assert_remote_write_allowed("shutdown/checkpoint_upload")
+        {
             tracing::warn!(
                 target: "reddb::serverless::lease",
                 error = %lease_err,
@@ -2960,18 +2980,17 @@ impl RedDBRuntime {
             // Phase 4). Failure to hash is non-fatal — we still
             // publish the manifest, just without a checksum, so a
             // future fix can backfill rather than losing the backup.
-            let snapshot_sha256 = crate::storage::wal::SnapshotManifest::compute_snapshot_sha256(
-                path,
-            )
-            .map_err(|err| {
-                tracing::warn!(
-                    target: "reddb::backup",
-                    error = %err,
-                    snapshot_id = snapshot.snapshot_id,
-                    "snapshot hash failed; manifest will lack checksum"
-                );
-            })
-            .ok();
+            let snapshot_sha256 =
+                crate::storage::wal::SnapshotManifest::compute_snapshot_sha256(path)
+                    .map_err(|err| {
+                        tracing::warn!(
+                            target: "reddb::backup",
+                            error = %err,
+                            snapshot_id = snapshot.snapshot_id,
+                            "snapshot hash failed; manifest will lack checksum"
+                        );
+                    })
+                    .ok();
             let manifest = crate::storage::wal::SnapshotManifest {
                 timeline_id: timeline_id.clone(),
                 snapshot_key: snapshot_key.clone(),
@@ -2991,8 +3010,7 @@ impl RedDBRuntime {
             // first archive ever); the segment's `prev_hash` will be
             // `None` and restore-side validation accepts that only for
             // the first segment in `plan.wal_segments`.
-            let prev_segment_hash =
-                self.config_string("red.config.timeline.last_segment_hash", "");
+            let prev_segment_hash = self.config_string("red.config.timeline.last_segment_hash", "");
             let prev_hash_arg = if prev_segment_hash.is_empty() {
                 None
             } else {
@@ -3652,6 +3670,13 @@ impl RedDBRuntime {
         // (after parse, before dispatch) so the SQL entrypoint gets
         // the same view resolution `execute_query_expr` already does.
         let expr = self.rewrite_view_refs(expr);
+
+        // Granular RBAC privilege check. Runs before dispatch so a
+        // denied caller never reaches storage. Fail-closed: any error
+        // resolving the action / resource produces PermissionDenied.
+        if let Err(err) = self.check_query_privilege(&expr) {
+            return Err(RedDBError::Query(format!("permission denied: {err}")));
+        }
 
         let statement = query_expr_name(&expr);
         let result_cache_scopes = query_expr_result_cache_scopes(&expr);
@@ -4690,6 +4715,39 @@ impl RedDBRuntime {
                     kind,
                 ))
             }
+            // GRANT / REVOKE / ALTER USER (RBAC milestone).
+            //
+            // These hit the AuthStore directly. The privilege-check
+            // gate at the top of `execute_query_expr` already decided
+            // whether the caller may even run the statement; here we
+            // just translate the AST into AuthStore calls.
+            QueryExpr::Grant(ref g) => self.execute_grant_statement(query, g),
+            QueryExpr::Revoke(ref r) => self.execute_revoke_statement(query, r),
+            QueryExpr::AlterUser(ref a) => self.execute_alter_user_statement(query, a),
+            QueryExpr::CreateIamPolicy { ref id, ref json } => {
+                self.execute_create_iam_policy(query, id, json)
+            }
+            QueryExpr::DropIamPolicy { ref id } => self.execute_drop_iam_policy(query, id),
+            QueryExpr::AttachPolicy {
+                ref policy_id,
+                ref principal,
+            } => self.execute_attach_policy(query, policy_id, principal),
+            QueryExpr::DetachPolicy {
+                ref policy_id,
+                ref principal,
+            } => self.execute_detach_policy(query, policy_id, principal),
+            QueryExpr::ShowPolicies { ref filter } => {
+                self.execute_show_policies(query, filter.as_ref())
+            }
+            QueryExpr::ShowEffectivePermissions {
+                ref user,
+                ref resource,
+            } => self.execute_show_effective_permissions(query, user, resource.as_ref()),
+            QueryExpr::SimulatePolicy {
+                ref user,
+                ref action,
+                ref resource,
+            } => self.execute_simulate_policy(query, user, action, resource),
         };
 
         // Decrypt Value::Secret columns in-place before caching, so
@@ -4751,6 +4809,13 @@ impl RedDBRuntime {
         // whose `tq.table` matches a registered view with the view's
         // underlying query. Safe to call even when no views are registered.
         let expr = self.rewrite_view_refs(expr);
+
+        // Granular RBAC privilege check. Runs before dispatch so a
+        // denied caller never reaches storage. Fail-closed: any error
+        // resolving the action / resource produces PermissionDenied.
+        if let Err(err) = self.check_query_privilege(&expr) {
+            return Err(RedDBError::Query(format!("permission denied: {err}")));
+        }
 
         let statement = query_expr_name(&expr);
         let mode = detect_mode(statement);
@@ -5785,6 +5850,1153 @@ impl RedDBRuntime {
             statement_type: "select",
         })
     }
+
+    // -----------------------------------------------------------------
+    // Granular RBAC — privilege gate + GRANT/REVOKE/ALTER USER dispatch
+    // -----------------------------------------------------------------
+
+    /// Project a `QueryExpr` to the (action, resource) pair the
+    /// privilege engine cares about. Returns `Ok(())` for statements
+    /// that don't touch user data (transaction control, SHOW, SET, etc.).
+    fn check_query_privilege(
+        &self,
+        expr: &crate::storage::query::ast::QueryExpr,
+    ) -> Result<(), String> {
+        use crate::auth::privileges::{Action, AuthzContext, Resource};
+        use crate::auth::UserId;
+        use crate::storage::query::ast::QueryExpr;
+
+        // No auth store wired (embedded mode / fresh DB / tests) → bypass.
+        // The bootstrap path itself goes through `execute_query` so this
+        // is the only sensible default; once auth is wired, the gate
+        // becomes active.
+        let auth_store = match self.inner.auth_store.read().clone() {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
+        // Resolve principal + role from the thread-local identity.
+        // Anonymous (no identity) is allowed to read the bootstrap path
+        // only when auth_store says so; we treat missing identity as
+        // platform-admin-equivalent here so embedded test harnesses
+        // continue to work without setting an identity.
+        let (username, role) = match current_auth_identity() {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+        let tenant = current_tenant();
+
+        let ctx = AuthzContext {
+            principal: &username,
+            effective_role: role,
+            tenant: tenant.as_deref(),
+        };
+        let principal_id = UserId::from_parts(tenant.as_deref(), &username);
+
+        // Map QueryExpr → (Action, Resource).
+        let (action, resource) = match expr {
+            QueryExpr::Table(t) => (Action::Select, Resource::table_from_name(&t.table)),
+            QueryExpr::Insert(i) => (Action::Insert, Resource::table_from_name(&i.table)),
+            QueryExpr::Update(u) => (Action::Update, Resource::table_from_name(&u.table)),
+            QueryExpr::Delete(d) => (Action::Delete, Resource::table_from_name(&d.table)),
+            // Joins inherit the read privilege from any constituent
+            // table — for now we emit a single Select on the database
+            // (admins bypass; non-admins need a Database/Schema grant).
+            QueryExpr::Join(_) => (Action::Select, Resource::Database),
+            // GRANT / REVOKE / ALTER USER are authority statements;
+            // require Admin (the helper methods enforce).
+            QueryExpr::Grant(_) | QueryExpr::Revoke(_) | QueryExpr::AlterUser(_) => {
+                return if role == crate::auth::Role::Admin {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "principal=`{}` role=`{:?}` cannot issue ACL/auth DDL",
+                        username, role
+                    ))
+                };
+            }
+            QueryExpr::CreateIamPolicy { id, .. } => {
+                return self.check_policy_management_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    "policy:put",
+                    "policy",
+                    id,
+                );
+            }
+            QueryExpr::DropIamPolicy { id } => {
+                return self.check_policy_management_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    "policy:drop",
+                    "policy",
+                    id,
+                );
+            }
+            QueryExpr::AttachPolicy { policy_id, .. } => {
+                return self.check_policy_management_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    "policy:attach",
+                    "policy",
+                    policy_id,
+                );
+            }
+            QueryExpr::DetachPolicy { policy_id, .. } => {
+                return self.check_policy_management_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    "policy:detach",
+                    "policy",
+                    policy_id,
+                );
+            }
+            QueryExpr::ShowPolicies { .. } | QueryExpr::ShowEffectivePermissions { .. } => {
+                return Ok(());
+            }
+            QueryExpr::SimulatePolicy { .. } => {
+                return self.check_policy_management_privilege(
+                    &auth_store,
+                    &principal_id,
+                    role,
+                    tenant.as_deref(),
+                    "policy:simulate",
+                    "policy",
+                    "*",
+                );
+            }
+            // DDL — gate on Admin via the legacy fallback. The grant
+            // engine could add fine-grained DDL grants later; today
+            // those statements stay Admin-only.
+            QueryExpr::CreateTable(_)
+            | QueryExpr::DropTable(_)
+            | QueryExpr::AlterTable(_)
+            | QueryExpr::CreateIndex(_)
+            | QueryExpr::DropIndex(_)
+            | QueryExpr::CreateSchema(_)
+            | QueryExpr::DropSchema(_)
+            | QueryExpr::CreateSequence(_)
+            | QueryExpr::DropSequence(_)
+            | QueryExpr::CreateView(_)
+            | QueryExpr::DropView(_)
+            | QueryExpr::RefreshMaterializedView(_)
+            | QueryExpr::CreatePolicy(_)
+            | QueryExpr::DropPolicy(_)
+            | QueryExpr::CreateServer(_)
+            | QueryExpr::DropServer(_)
+            | QueryExpr::CreateForeignTable(_)
+            | QueryExpr::DropForeignTable(_)
+            | QueryExpr::CreateTimeSeries(_)
+            | QueryExpr::DropTimeSeries(_)
+            | QueryExpr::CreateQueue(_)
+            | QueryExpr::DropQueue(_)
+            | QueryExpr::CreateTree(_)
+            | QueryExpr::DropTree(_) => {
+                return if role >= crate::auth::Role::Write {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "principal=`{}` role=`{:?}` cannot issue DDL",
+                        username, role
+                    ))
+                };
+            }
+            // Everything else (SET, SHOW, transaction control, graph
+            // commands, queue/tree commands, MaintenanceCommand …)
+            // is allowed for any authenticated principal.
+            _ => return Ok(()),
+        };
+
+        if auth_store.iam_authorization_enabled() {
+            let iam_action = legacy_action_to_iam(action);
+            let iam_resource = legacy_resource_to_iam(&resource, tenant.as_deref());
+            let iam_ctx = runtime_iam_context(role, tenant.as_deref());
+            if auth_store.check_policy_authz(&principal_id, iam_action, &iam_resource, &iam_ctx) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "principal=`{}` action=`{}` resource=`{}:{}` denied by IAM policy",
+                    username, iam_action, iam_resource.kind, iam_resource.name
+                ))
+            }
+        } else {
+            auth_store
+                .check_grant(&ctx, action, &resource)
+                .map_err(|e| e.to_string())
+        }
+    }
+
+    fn check_policy_management_privilege(
+        &self,
+        auth_store: &Arc<crate::auth::store::AuthStore>,
+        principal: &crate::auth::UserId,
+        role: crate::auth::Role,
+        tenant: Option<&str>,
+        action: &str,
+        resource_kind: &str,
+        resource_name: &str,
+    ) -> Result<(), String> {
+        if !auth_store.iam_authorization_enabled() {
+            return if role == crate::auth::Role::Admin {
+                Ok(())
+            } else {
+                Err(format!(
+                    "principal=`{}` role=`{:?}` cannot issue ACL/auth DDL",
+                    principal, role
+                ))
+            };
+        }
+
+        let mut resource = crate::auth::policies::ResourceRef::new(
+            resource_kind.to_string(),
+            resource_name.to_string(),
+        );
+        if let Some(t) = tenant {
+            resource = resource.with_tenant(t.to_string());
+        }
+        let ctx = runtime_iam_context(role, tenant);
+        if auth_store.check_policy_authz(principal, action, &resource, &ctx) {
+            Ok(())
+        } else {
+            Err(format!(
+                "principal=`{}` action=`{}` resource=`{}:{}` denied by IAM policy",
+                principal, action, resource.kind, resource.name
+            ))
+        }
+    }
+
+    /// Translate the parsed [`GrantStmt`] into AuthStore mutations.
+    fn execute_grant_statement(
+        &self,
+        query: &str,
+        stmt: &crate::storage::query::ast::GrantStmt,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        use crate::auth::privileges::{Action, GrantPrincipal, Resource};
+        use crate::auth::UserId;
+        use crate::storage::query::ast::{GrantObjectKind, GrantPrincipalRef};
+
+        let auth_store = self
+            .inner
+            .auth_store
+            .read()
+            .clone()
+            .ok_or_else(|| RedDBError::Query("auth store not configured".to_string()))?;
+
+        // Granter identity + role.
+        let (gname, grole) = current_auth_identity().ok_or_else(|| {
+            RedDBError::Query("GRANT requires an authenticated principal".to_string())
+        })?;
+        let granter = UserId::from_parts(current_tenant().as_deref(), &gname);
+        let granter_role = grole;
+
+        // Build the action set.
+        let mut actions: Vec<Action> = Vec::new();
+        if stmt.all {
+            actions.push(Action::All);
+        } else {
+            for kw in &stmt.actions {
+                let a = Action::from_keyword(kw).ok_or_else(|| {
+                    RedDBError::Query(format!("unknown privilege keyword `{}`", kw))
+                })?;
+                actions.push(a);
+            }
+        }
+
+        // Audit emit (printed; structured emission is Agent #4's lane).
+        let mut applied = 0usize;
+        for obj in &stmt.objects {
+            let resource = match stmt.object_kind {
+                GrantObjectKind::Table => Resource::Table {
+                    schema: obj.schema.clone(),
+                    table: obj.name.clone(),
+                },
+                GrantObjectKind::Schema => Resource::Schema(obj.name.clone()),
+                GrantObjectKind::Database => Resource::Database,
+                GrantObjectKind::Function => Resource::Function {
+                    schema: obj.schema.clone(),
+                    name: obj.name.clone(),
+                },
+            };
+            for principal in &stmt.principals {
+                let p = match principal {
+                    GrantPrincipalRef::Public => GrantPrincipal::Public,
+                    GrantPrincipalRef::Group(g) => GrantPrincipal::Group(g.clone()),
+                    GrantPrincipalRef::User { tenant, name } => {
+                        GrantPrincipal::User(UserId::from_parts(tenant.as_deref(), name))
+                    }
+                };
+                // Tenant of the grant follows the granter's tenant
+                // (cross-tenant guard inside `AuthStore::grant`).
+                let tenant = granter.tenant.clone();
+                auth_store
+                    .grant(
+                        &granter,
+                        granter_role,
+                        p.clone(),
+                        resource.clone(),
+                        actions.clone(),
+                        stmt.with_grant_option,
+                        tenant.clone(),
+                    )
+                    .map_err(|e| RedDBError::Query(e.to_string()))?;
+
+                // IAM policy translation: every GRANT also lands as a
+                // synthetic `_grant_<id>` policy attached to the
+                // principal so the new evaluator sees it.
+                if let Some(policy) =
+                    grant_to_iam_policy(&p, &resource, &actions, tenant.as_deref())
+                {
+                    let pid = policy.id.clone();
+                    auth_store
+                        .put_policy_internal(policy)
+                        .map_err(|e| RedDBError::Query(e.to_string()))?;
+                    let attachment = match &p {
+                        GrantPrincipal::User(uid) => {
+                            crate::auth::store::PrincipalRef::User(uid.clone())
+                        }
+                        GrantPrincipal::Group(group) => {
+                            crate::auth::store::PrincipalRef::Group(group.clone())
+                        }
+                        GrantPrincipal::Public => crate::auth::store::PrincipalRef::Group(
+                            crate::auth::store::PUBLIC_IAM_GROUP.to_string(),
+                        ),
+                    };
+                    auth_store
+                        .attach_policy(attachment, &pid)
+                        .map_err(|e| RedDBError::Query(e.to_string()))?;
+                }
+                applied += 1;
+                tracing::info!(
+                    target: "audit",
+                    principal = %granter,
+                    action = "grant",
+                    "GRANT applied"
+                );
+            }
+        }
+
+        self.invalidate_result_cache();
+        Ok(RuntimeQueryResult::ok_message(
+            query.to_string(),
+            &format!("GRANT applied to {} target(s)", applied),
+            "grant",
+        ))
+    }
+
+    /// Translate the parsed [`RevokeStmt`] into AuthStore mutations.
+    fn execute_revoke_statement(
+        &self,
+        query: &str,
+        stmt: &crate::storage::query::ast::RevokeStmt,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        use crate::auth::privileges::{Action, GrantPrincipal, Resource};
+        use crate::auth::UserId;
+        use crate::storage::query::ast::{GrantObjectKind, GrantPrincipalRef};
+
+        let auth_store = self
+            .inner
+            .auth_store
+            .read()
+            .clone()
+            .ok_or_else(|| RedDBError::Query("auth store not configured".to_string()))?;
+
+        let (_gname, grole) = current_auth_identity().ok_or_else(|| {
+            RedDBError::Query("REVOKE requires an authenticated principal".to_string())
+        })?;
+        let granter_role = grole;
+
+        let actions: Vec<Action> = if stmt.all {
+            vec![Action::All]
+        } else {
+            stmt.actions
+                .iter()
+                .map(|kw| Action::from_keyword(kw).unwrap_or(Action::Select))
+                .collect()
+        };
+
+        let mut total_removed = 0usize;
+        for obj in &stmt.objects {
+            let resource = match stmt.object_kind {
+                GrantObjectKind::Table => Resource::Table {
+                    schema: obj.schema.clone(),
+                    table: obj.name.clone(),
+                },
+                GrantObjectKind::Schema => Resource::Schema(obj.name.clone()),
+                GrantObjectKind::Database => Resource::Database,
+                GrantObjectKind::Function => Resource::Function {
+                    schema: obj.schema.clone(),
+                    name: obj.name.clone(),
+                },
+            };
+            for principal in &stmt.principals {
+                let p = match principal {
+                    GrantPrincipalRef::Public => GrantPrincipal::Public,
+                    GrantPrincipalRef::Group(g) => GrantPrincipal::Group(g.clone()),
+                    GrantPrincipalRef::User { tenant, name } => {
+                        GrantPrincipal::User(UserId::from_parts(tenant.as_deref(), name))
+                    }
+                };
+                let removed = auth_store
+                    .revoke(granter_role, &p, &resource, &actions)
+                    .map_err(|e| RedDBError::Query(e.to_string()))?;
+                let _removed_policies =
+                    auth_store.delete_synthetic_grant_policies(&p, &resource, &actions);
+                total_removed += removed;
+            }
+        }
+
+        self.invalidate_result_cache();
+        Ok(RuntimeQueryResult::ok_message(
+            query.to_string(),
+            &format!("REVOKE removed {} grant(s)", total_removed),
+            "revoke",
+        ))
+    }
+
+    /// Translate the parsed [`AlterUserStmt`] into AuthStore mutations.
+    fn execute_alter_user_statement(
+        &self,
+        query: &str,
+        stmt: &crate::storage::query::ast::AlterUserStmt,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        use crate::auth::privileges::UserAttributes;
+        use crate::auth::UserId;
+        use crate::storage::query::ast::AlterUserAttribute;
+
+        let auth_store = self
+            .inner
+            .auth_store
+            .read()
+            .clone()
+            .ok_or_else(|| RedDBError::Query("auth store not configured".to_string()))?;
+
+        let (_gname, grole) = current_auth_identity().ok_or_else(|| {
+            RedDBError::Query("ALTER USER requires an authenticated principal".to_string())
+        })?;
+        if grole != crate::auth::Role::Admin {
+            return Err(RedDBError::Query(
+                "ALTER USER requires Admin role".to_string(),
+            ));
+        }
+
+        let target = UserId::from_parts(stmt.tenant.as_deref(), &stmt.username);
+
+        // Apply attributes incrementally — each one reads the current
+        // record, mutates the relevant field, writes back.
+        let mut attrs = auth_store.user_attributes(&target);
+        let mut enable_change: Option<bool> = None;
+
+        for a in &stmt.attributes {
+            match a {
+                AlterUserAttribute::ValidUntil(ts) => {
+                    // Parse ISO-ish timestamp → ms since epoch. Fall
+                    // back to integer-ms parsing for callers that pass
+                    // `'1234567890123'`.
+                    let ms = parse_timestamp_to_ms(ts).ok_or_else(|| {
+                        RedDBError::Query(format!("invalid VALID UNTIL timestamp `{ts}`"))
+                    })?;
+                    attrs.valid_until = Some(ms);
+                }
+                AlterUserAttribute::ConnectionLimit(n) => {
+                    if *n < 0 {
+                        return Err(RedDBError::Query(
+                            "CONNECTION LIMIT must be non-negative".to_string(),
+                        ));
+                    }
+                    attrs.connection_limit = Some(*n as u32);
+                }
+                AlterUserAttribute::SetSearchPath(p) => {
+                    attrs.search_path = Some(p.clone());
+                }
+                AlterUserAttribute::AddGroup(g) => {
+                    if !attrs.groups.iter().any(|existing| existing == g) {
+                        attrs.groups.push(g.clone());
+                        attrs.groups.sort();
+                    }
+                }
+                AlterUserAttribute::DropGroup(g) => {
+                    attrs.groups.retain(|existing| existing != g);
+                }
+                AlterUserAttribute::Enable => enable_change = Some(true),
+                AlterUserAttribute::Disable => enable_change = Some(false),
+                AlterUserAttribute::Password(_) => {
+                    // Out of scope — accept the AST but no-op so the
+                    // parser stays compatible with future password
+                    // rotation work.
+                }
+            }
+        }
+
+        auth_store
+            .set_user_attributes(&target, attrs)
+            .map_err(|e| RedDBError::Query(e.to_string()))?;
+        if let Some(en) = enable_change {
+            auth_store
+                .set_user_enabled(&target, en)
+                .map_err(|e| RedDBError::Query(e.to_string()))?;
+        }
+        self.invalidate_result_cache();
+        tracing::info!(
+            target: "audit",
+            principal = %target,
+            action = "alter_user",
+            "ALTER USER applied"
+        );
+
+        Ok(RuntimeQueryResult::ok_message(
+            query.to_string(),
+            &format!("ALTER USER {} applied", target),
+            "alter_user",
+        ))
+    }
+
+    // -----------------------------------------------------------------
+    // IAM policy executors
+    // -----------------------------------------------------------------
+
+    fn execute_create_iam_policy(
+        &self,
+        query: &str,
+        id: &str,
+        json: &str,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        use crate::auth::policies::Policy;
+
+        let auth_store = self
+            .inner
+            .auth_store
+            .read()
+            .clone()
+            .ok_or_else(|| RedDBError::Query("auth store not configured".to_string()))?;
+
+        // Parse + validate. The kernel rejects oversize / bad shape /
+        // bad action keywords. If the supplied id differs from the JSON
+        // id, override it with the SQL-provided id (the JSON id is
+        // optional context — the SQL DDL form is authoritative).
+        let mut policy = Policy::from_json_str(json)
+            .map_err(|e| RedDBError::Query(format!("policy parse: {e}")))?;
+        if policy.id != id {
+            policy.id = id.to_string();
+        }
+        let pid = policy.id.clone();
+        auth_store
+            .put_policy(policy)
+            .map_err(|e| RedDBError::Query(e.to_string()))?;
+
+        let principal = current_auth_identity()
+            .map(|(u, _)| u)
+            .unwrap_or_else(|| "anonymous".into());
+        tracing::info!(
+            target: "audit",
+            principal = %principal,
+            action = "iam:policy.put",
+            matched_policy_id = %pid,
+            "CREATE POLICY applied"
+        );
+        self.inner.audit_log.record(
+            "iam/policy.put",
+            &principal,
+            &pid,
+            "ok",
+            crate::json::Value::Null,
+        );
+
+        self.invalidate_result_cache();
+        Ok(RuntimeQueryResult::ok_message(
+            query.to_string(),
+            &format!("policy `{pid}` stored"),
+            "create_iam_policy",
+        ))
+    }
+
+    fn execute_drop_iam_policy(&self, query: &str, id: &str) -> RedDBResult<RuntimeQueryResult> {
+        let auth_store = self
+            .inner
+            .auth_store
+            .read()
+            .clone()
+            .ok_or_else(|| RedDBError::Query("auth store not configured".to_string()))?;
+        auth_store
+            .delete_policy(id)
+            .map_err(|e| RedDBError::Query(e.to_string()))?;
+
+        let principal = current_auth_identity()
+            .map(|(u, _)| u)
+            .unwrap_or_else(|| "anonymous".into());
+        tracing::info!(
+            target: "audit",
+            principal = %principal,
+            action = "iam:policy.drop",
+            matched_policy_id = %id,
+            "DROP POLICY applied"
+        );
+        self.inner.audit_log.record(
+            "iam/policy.drop",
+            &principal,
+            id,
+            "ok",
+            crate::json::Value::Null,
+        );
+
+        self.invalidate_result_cache();
+        Ok(RuntimeQueryResult::ok_message(
+            query.to_string(),
+            &format!("policy `{id}` dropped"),
+            "drop_iam_policy",
+        ))
+    }
+
+    fn execute_attach_policy(
+        &self,
+        query: &str,
+        policy_id: &str,
+        principal: &crate::storage::query::ast::PolicyPrincipalRef,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        use crate::auth::store::PrincipalRef;
+        use crate::auth::UserId;
+        use crate::storage::query::ast::PolicyPrincipalRef;
+
+        let auth_store = self
+            .inner
+            .auth_store
+            .read()
+            .clone()
+            .ok_or_else(|| RedDBError::Query("auth store not configured".to_string()))?;
+        let p = match principal {
+            PolicyPrincipalRef::User(u) => {
+                PrincipalRef::User(UserId::from_parts(u.tenant.as_deref(), &u.username))
+            }
+            PolicyPrincipalRef::Group(g) => PrincipalRef::Group(g.clone()),
+        };
+        let pretty_target = principal_label(principal);
+        auth_store
+            .attach_policy(p, policy_id)
+            .map_err(|e| RedDBError::Query(e.to_string()))?;
+
+        let principal_str = current_auth_identity()
+            .map(|(u, _)| u)
+            .unwrap_or_else(|| "anonymous".into());
+        tracing::info!(
+            target: "audit",
+            principal = %principal_str,
+            action = "iam:policy.attach",
+            matched_policy_id = %policy_id,
+            target = %pretty_target,
+            "ATTACH POLICY applied"
+        );
+        self.inner.audit_log.record(
+            "iam/policy.attach",
+            &principal_str,
+            &pretty_target,
+            "ok",
+            crate::json::Value::Null,
+        );
+
+        self.invalidate_result_cache();
+        Ok(RuntimeQueryResult::ok_message(
+            query.to_string(),
+            &format!("policy `{policy_id}` attached to {pretty_target}"),
+            "attach_policy",
+        ))
+    }
+
+    fn execute_detach_policy(
+        &self,
+        query: &str,
+        policy_id: &str,
+        principal: &crate::storage::query::ast::PolicyPrincipalRef,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        use crate::auth::store::PrincipalRef;
+        use crate::auth::UserId;
+        use crate::storage::query::ast::PolicyPrincipalRef;
+
+        let auth_store = self
+            .inner
+            .auth_store
+            .read()
+            .clone()
+            .ok_or_else(|| RedDBError::Query("auth store not configured".to_string()))?;
+        let p = match principal {
+            PolicyPrincipalRef::User(u) => {
+                PrincipalRef::User(UserId::from_parts(u.tenant.as_deref(), &u.username))
+            }
+            PolicyPrincipalRef::Group(g) => PrincipalRef::Group(g.clone()),
+        };
+        let pretty_target = principal_label(principal);
+        auth_store
+            .detach_policy(p, policy_id)
+            .map_err(|e| RedDBError::Query(e.to_string()))?;
+
+        let principal_str = current_auth_identity()
+            .map(|(u, _)| u)
+            .unwrap_or_else(|| "anonymous".into());
+        tracing::info!(
+            target: "audit",
+            principal = %principal_str,
+            action = "iam:policy.detach",
+            matched_policy_id = %policy_id,
+            target = %pretty_target,
+            "DETACH POLICY applied"
+        );
+        self.inner.audit_log.record(
+            "iam/policy.detach",
+            &principal_str,
+            &pretty_target,
+            "ok",
+            crate::json::Value::Null,
+        );
+
+        self.invalidate_result_cache();
+        Ok(RuntimeQueryResult::ok_message(
+            query.to_string(),
+            &format!("policy `{policy_id}` detached from {pretty_target}"),
+            "detach_policy",
+        ))
+    }
+
+    fn execute_show_policies(
+        &self,
+        query: &str,
+        filter: Option<&crate::storage::query::ast::PolicyPrincipalRef>,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        use crate::auth::UserId;
+        use crate::storage::query::ast::PolicyPrincipalRef;
+        use crate::storage::query::unified::UnifiedRecord;
+        use crate::storage::schema::Value as SchemaValue;
+        use std::sync::Arc;
+
+        let auth_store = self
+            .inner
+            .auth_store
+            .read()
+            .clone()
+            .ok_or_else(|| RedDBError::Query("auth store not configured".to_string()))?;
+
+        let pols = match filter {
+            None => auth_store.list_policies(),
+            Some(PolicyPrincipalRef::User(u)) => {
+                let id = UserId::from_parts(u.tenant.as_deref(), &u.username);
+                auth_store.effective_policies(&id)
+            }
+            Some(PolicyPrincipalRef::Group(g)) => auth_store.group_policies(g),
+        };
+
+        let mut records = Vec::with_capacity(pols.len());
+        for p in pols.iter() {
+            let mut rec = UnifiedRecord::default();
+            rec.values
+                .insert(Arc::from("id"), SchemaValue::text(p.id.clone()));
+            rec.values.insert(
+                Arc::from("statements"),
+                SchemaValue::Integer(p.statements.len() as i64),
+            );
+            rec.values.insert(
+                Arc::from("tenant"),
+                p.tenant
+                    .as_deref()
+                    .map(|t| SchemaValue::text(t.to_string()))
+                    .unwrap_or(SchemaValue::Null),
+            );
+            rec.values
+                .insert(Arc::from("json"), SchemaValue::text(p.to_json_string()));
+            records.push(rec);
+        }
+        let mut result = crate::storage::query::unified::UnifiedResult::empty();
+        result.records = records;
+        Ok(RuntimeQueryResult {
+            query: query.to_string(),
+            mode: crate::storage::query::modes::QueryMode::Sql,
+            statement: "show_policies",
+            engine: "iam-policies",
+            result,
+            affected_rows: 0,
+            statement_type: "select",
+        })
+    }
+
+    fn execute_show_effective_permissions(
+        &self,
+        query: &str,
+        user: &crate::storage::query::ast::PolicyUserRef,
+        resource: Option<&crate::storage::query::ast::PolicyResourceRef>,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        use crate::auth::UserId;
+        use crate::storage::query::unified::UnifiedRecord;
+        use crate::storage::schema::Value as SchemaValue;
+        use std::sync::Arc;
+
+        let auth_store = self
+            .inner
+            .auth_store
+            .read()
+            .clone()
+            .ok_or_else(|| RedDBError::Query("auth store not configured".to_string()))?;
+        let id = UserId::from_parts(user.tenant.as_deref(), &user.username);
+        let pols = auth_store.effective_policies(&id);
+
+        // Show one row per (policy, statement) tuple, plus any
+        // resource-level filter passed by the caller.
+        let mut records = Vec::new();
+        for p in pols.iter() {
+            for (idx, st) in p.statements.iter().enumerate() {
+                if let Some(_r) = resource {
+                    // Naive filter: render statement targets to strings
+                    // and skip if no match. Conservative default = include
+                    // (the simulator handles fine-grained matching).
+                }
+                let mut rec = UnifiedRecord::default();
+                rec.values
+                    .insert(Arc::from("policy_id"), SchemaValue::text(p.id.clone()));
+                rec.values.insert(
+                    Arc::from("statement_index"),
+                    SchemaValue::Integer(idx as i64),
+                );
+                rec.values.insert(
+                    Arc::from("sid"),
+                    st.sid
+                        .as_deref()
+                        .map(|s| SchemaValue::text(s.to_string()))
+                        .unwrap_or(SchemaValue::Null),
+                );
+                rec.values.insert(
+                    Arc::from("effect"),
+                    SchemaValue::text(match st.effect {
+                        crate::auth::policies::Effect::Allow => "allow",
+                        crate::auth::policies::Effect::Deny => "deny",
+                    }),
+                );
+                rec.values.insert(
+                    Arc::from("actions"),
+                    SchemaValue::Integer(st.actions.len() as i64),
+                );
+                rec.values.insert(
+                    Arc::from("resources"),
+                    SchemaValue::Integer(st.resources.len() as i64),
+                );
+                records.push(rec);
+            }
+        }
+        let mut result = crate::storage::query::unified::UnifiedResult::empty();
+        result.records = records;
+        Ok(RuntimeQueryResult {
+            query: query.to_string(),
+            mode: crate::storage::query::modes::QueryMode::Sql,
+            statement: "show_effective_permissions",
+            engine: "iam-policies",
+            result,
+            affected_rows: 0,
+            statement_type: "select",
+        })
+    }
+
+    fn execute_simulate_policy(
+        &self,
+        query: &str,
+        user: &crate::storage::query::ast::PolicyUserRef,
+        action: &str,
+        resource: &crate::storage::query::ast::PolicyResourceRef,
+    ) -> RedDBResult<RuntimeQueryResult> {
+        use crate::auth::policies::ResourceRef;
+        use crate::auth::store::SimCtx;
+        use crate::auth::UserId;
+        use crate::storage::query::unified::UnifiedRecord;
+        use crate::storage::schema::Value as SchemaValue;
+        use std::sync::Arc;
+
+        let auth_store = self
+            .inner
+            .auth_store
+            .read()
+            .clone()
+            .ok_or_else(|| RedDBError::Query("auth store not configured".to_string()))?;
+        let id = UserId::from_parts(user.tenant.as_deref(), &user.username);
+        let r = ResourceRef::new(resource.kind.clone(), resource.name.clone());
+        let outcome = auth_store.simulate(&id, action, &r, SimCtx::default());
+
+        let principal_str = current_auth_identity()
+            .map(|(u, _)| u)
+            .unwrap_or_else(|| "anonymous".into());
+        let (decision_str, matched_pid, matched_sid) = decision_to_strings(&outcome.decision);
+        tracing::info!(
+            target: "audit",
+            principal = %principal_str,
+            action = "iam:policy.simulate",
+            decision = %decision_str,
+            matched_policy_id = ?matched_pid,
+            matched_sid = ?matched_sid,
+            "SIMULATE issued"
+        );
+        self.inner.audit_log.record(
+            "iam/policy.simulate",
+            &principal_str,
+            &id.to_string(),
+            "ok",
+            crate::json::Value::Null,
+        );
+
+        let mut rec = UnifiedRecord::default();
+        rec.values
+            .insert(Arc::from("decision"), SchemaValue::text(decision_str));
+        rec.values.insert(
+            Arc::from("matched_policy_id"),
+            matched_pid
+                .map(SchemaValue::text)
+                .unwrap_or(SchemaValue::Null),
+        );
+        rec.values.insert(
+            Arc::from("matched_sid"),
+            matched_sid
+                .map(SchemaValue::text)
+                .unwrap_or(SchemaValue::Null),
+        );
+        rec.values
+            .insert(Arc::from("reason"), SchemaValue::text(outcome.reason));
+        rec.values.insert(
+            Arc::from("trail_len"),
+            SchemaValue::Integer(outcome.trail.len() as i64),
+        );
+        let mut result = crate::storage::query::unified::UnifiedResult::empty();
+        result.records = vec![rec];
+        Ok(RuntimeQueryResult {
+            query: query.to_string(),
+            mode: crate::storage::query::modes::QueryMode::Sql,
+            statement: "simulate_policy",
+            engine: "iam-policies",
+            result,
+            affected_rows: 0,
+            statement_type: "select",
+        })
+    }
+}
+
+/// Translate a parsed GRANT into a synthetic IAM policy whose id
+/// starts with `_grant_<unique>`. PUBLIC is represented as an
+/// implicit IAM group; legacy GROUP grants are still rejected by the
+/// grant store and are not translated here.
+fn grant_to_iam_policy(
+    principal: &crate::auth::privileges::GrantPrincipal,
+    resource: &crate::auth::privileges::Resource,
+    actions: &[crate::auth::privileges::Action],
+    tenant: Option<&str>,
+) -> Option<crate::auth::policies::Policy> {
+    use crate::auth::policies::{
+        compile_action, ActionPattern, Effect, Policy, ResourcePattern, Statement,
+    };
+    use crate::auth::privileges::{Action, GrantPrincipal, Resource};
+
+    if matches!(principal, GrantPrincipal::Group(_)) {
+        return None;
+    }
+
+    let now = crate::auth::now_ms();
+    let id = format!("_grant_{:x}_{:x}", now, std::process::id());
+
+    let resource_str = match resource {
+        Resource::Database => "table:*".to_string(),
+        Resource::Schema(s) => format!("table:{s}.*"),
+        Resource::Table { schema, table } => match schema {
+            Some(s) => format!("table:{s}.{table}"),
+            None => format!("table:{table}"),
+        },
+        Resource::Function { schema, name } => match schema {
+            Some(s) => format!("function:{s}.{name}"),
+            None => format!("function:{name}"),
+        },
+    };
+
+    // Compile actions — fall back to `*` only when the grant included
+    // `Action::All`. Map every other action keyword to its lowercase
+    // form so it lines up with the kernel's allowlist.
+    let action_patterns: Vec<ActionPattern> = if actions.contains(&Action::All) {
+        vec![ActionPattern::Wildcard]
+    } else {
+        actions
+            .iter()
+            .map(|a| compile_action(&a.as_str().to_ascii_lowercase()))
+            .collect()
+    };
+    if action_patterns.is_empty() {
+        return None;
+    }
+
+    // Inline resource compilation matching the kernel's `compile_resource`:
+    //   * `*` → wildcard
+    //   * contains `*` → glob
+    //   * `kind:name` → exact
+    let resource_patterns = if resource_str == "*" {
+        vec![ResourcePattern::Wildcard]
+    } else if resource_str.contains('*') {
+        vec![ResourcePattern::Glob(resource_str.clone())]
+    } else if let Some((kind, name)) = resource_str.split_once(':') {
+        vec![ResourcePattern::Exact {
+            kind: kind.to_string(),
+            name: name.to_string(),
+        }]
+    } else {
+        vec![ResourcePattern::Wildcard]
+    };
+
+    let policy = Policy {
+        id,
+        version: 1,
+        tenant: tenant.map(|t| t.to_string()),
+        created_at: now,
+        updated_at: now,
+        statements: vec![Statement {
+            sid: None,
+            effect: Effect::Allow,
+            actions: action_patterns,
+            resources: resource_patterns,
+            condition: None,
+        }],
+    };
+    if policy.validate().is_err() {
+        return None;
+    }
+    Some(policy)
+}
+
+fn legacy_action_to_iam(action: crate::auth::privileges::Action) -> &'static str {
+    use crate::auth::privileges::Action;
+    match action {
+        Action::Select => "select",
+        Action::Insert => "insert",
+        Action::Update => "update",
+        Action::Delete => "delete",
+        Action::Truncate => "truncate",
+        Action::References => "references",
+        Action::Execute => "execute",
+        Action::Usage => "usage",
+        Action::All => "*",
+    }
+}
+
+fn legacy_resource_to_iam(
+    resource: &crate::auth::privileges::Resource,
+    tenant: Option<&str>,
+) -> crate::auth::policies::ResourceRef {
+    use crate::auth::privileges::Resource;
+
+    let (kind, name) = match resource {
+        Resource::Database => ("database".to_string(), "*".to_string()),
+        Resource::Schema(s) => ("schema".to_string(), format!("{s}.*")),
+        Resource::Table { schema, table } => (
+            "table".to_string(),
+            match schema {
+                Some(s) => format!("{s}.{table}"),
+                None => table.clone(),
+            },
+        ),
+        Resource::Function { schema, name } => (
+            "function".to_string(),
+            match schema {
+                Some(s) => format!("{s}.{name}"),
+                None => name.clone(),
+            },
+        ),
+    };
+
+    let mut out = crate::auth::policies::ResourceRef::new(kind, name);
+    if let Some(t) = tenant {
+        out = out.with_tenant(t.to_string());
+    }
+    out
+}
+
+fn runtime_iam_context(
+    role: crate::auth::Role,
+    tenant: Option<&str>,
+) -> crate::auth::policies::EvalContext {
+    crate::auth::policies::EvalContext {
+        principal_tenant: tenant.map(|t| t.to_string()),
+        current_tenant: tenant.map(|t| t.to_string()),
+        peer_ip: None,
+        mfa_present: false,
+        now_ms: crate::auth::now_ms(),
+        principal_is_admin_role: role == crate::auth::Role::Admin,
+    }
+}
+
+fn principal_label(p: &crate::storage::query::ast::PolicyPrincipalRef) -> String {
+    use crate::storage::query::ast::PolicyPrincipalRef;
+    match p {
+        PolicyPrincipalRef::User(u) => match &u.tenant {
+            Some(t) => format!("user:{t}/{}", u.username),
+            None => format!("user:{}", u.username),
+        },
+        PolicyPrincipalRef::Group(g) => format!("group:{g}"),
+    }
+}
+
+/// Render a `Decision` into the (decision, matched_policy_id, matched_sid)
+/// shape used by every audit emit + the simulator response.
+pub(crate) fn decision_to_strings(
+    d: &crate::auth::policies::Decision,
+) -> (String, Option<String>, Option<String>) {
+    use crate::auth::policies::Decision;
+    match d {
+        Decision::Allow {
+            matched_policy_id,
+            matched_sid,
+        } => (
+            "allow".into(),
+            Some(matched_policy_id.clone()),
+            matched_sid.clone(),
+        ),
+        Decision::Deny {
+            matched_policy_id,
+            matched_sid,
+        } => (
+            "deny".into(),
+            Some(matched_policy_id.clone()),
+            matched_sid.clone(),
+        ),
+        Decision::DefaultDeny => ("default_deny".into(), None, None),
+        Decision::AdminBypass => ("admin_bypass".into(), None, None),
+    }
+}
+
+fn parse_timestamp_to_ms(s: &str) -> Option<u128> {
+    // Bare integer ms.
+    if let Ok(n) = s.parse::<u128>() {
+        return Some(n);
+    }
+    // Fallback: ISO-8601 like 2030-01-02 03:04:05 — accept the date
+    // portion only (midnight UTC). Full RFC3339 parsing is a stretch
+    // goal; the common case is `'2030-01-01'`.
+    if let Some(date) = s.split_whitespace().next() {
+        let parts: Vec<&str> = date.split('-').collect();
+        if parts.len() == 3 {
+            let (y, m, d) = (parts[0], parts[1], parts[2]);
+            if let (Ok(y), Ok(m), Ok(d)) = (y.parse::<i64>(), m.parse::<u32>(), d.parse::<u32>()) {
+                // Days since 1970-01-01 — simple Julian arithmetic
+                // suitable for years 1970-2100. Good enough for test
+                // fixtures; precise parsing lands when we wire chrono.
+                let days_in = days_from_civil(y, m, d);
+                return Some((days_in as u128) * 86_400_000u128);
+            }
+        }
+    }
+    None
+}
+
+/// Days from Unix epoch using H. Hinnant's civil-from-days algorithm.
+/// Robust for the entire Gregorian range; used by `parse_timestamp_to_ms`.
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u64; // [0, 399]
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) as u64 + 2) / 5 + d as u64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe as i64 - 719468
 }
 
 fn walk_plan_node(

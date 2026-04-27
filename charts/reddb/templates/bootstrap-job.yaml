@@ -1,0 +1,188 @@
+{{- if and .Values.auth.vault.enabled .Values.auth.vault.bootstrapJob.enabled -}}
+{{/*
+One-off Job that mints the first admin user + the encrypted-vault
+certificate via `red bootstrap`. The Job:
+
+  1. initContainer `bootstrap`: runs `red bootstrap --print-certificate
+     --json` against an emptyDir DB file, capturing the cert into
+     /tmp/bootstrap.json.
+  2. main container `publish`: invokes kubectl to create a Secret
+     containing the cert (key = .Values.auth.vault.certificate.existingSecretKey
+     or "certificate"), idempotently. The StatefulSet's REDDB_CERTIFICATE
+     env then resolves against this Secret.
+
+Caveats / known limitations:
+  * The publish container runs `kubectl` from the bitnami/kubectl
+    image. Operators who pin image registries should override the
+    image via an out-of-band kustomize patch — there's no values
+    knob for it because it's intentionally a one-shot path.
+  * The Job's ServiceAccount needs `secrets create/patch/get` in the
+    chart namespace. We create a Role + RoleBinding scoped to the
+    Job's ServiceAccount only (deleted when the Job is deleted).
+  * If you cannot grant the cluster permission, set
+    bootstrapJob.enabled=false and bootstrap manually:
+        kubectl create secret generic reddb-vault \
+          --from-literal=certificate=$(red bootstrap ... --print-certificate)
+*/}}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "reddb.fullname" . }}-bootstrap
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "reddb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: bootstrap
+  annotations:
+    "helm.sh/hook": pre-install
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "reddb.fullname" . }}-bootstrap
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "reddb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: bootstrap
+  annotations:
+    "helm.sh/hook": pre-install
+    "helm.sh/hook-weight": "-9"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "reddb.fullname" . }}-bootstrap
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "reddb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: bootstrap
+  annotations:
+    "helm.sh/hook": pre-install
+    "helm.sh/hook-weight": "-8"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "reddb.fullname" . }}-bootstrap
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "reddb.fullname" . }}-bootstrap
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "reddb.fullname" . }}-bootstrap
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "reddb.labels" . | nindent 4 }}
+    app.kubernetes.io/component: bootstrap
+  annotations:
+    "helm.sh/hook": pre-install
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.auth.vault.bootstrapJob.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "reddb.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: bootstrap
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "reddb.fullname" . }}-bootstrap
+      automountServiceAccountToken: true
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      initContainers:
+        - name: bootstrap
+          image: {{ default (include "reddb.image" .) .Values.auth.vault.bootstrapJob.image | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              # Read password from mounted secret (avoids passing it via env).
+              PASSWORD=$(cat /run/secrets/bootstrap/password)
+              printf '%s' "$PASSWORD" | /usr/local/bin/red bootstrap \
+                  --path /tmp/bootstrap.rdb \
+                  --vault \
+                  --username {{ .Values.auth.vault.bootstrapJob.username | quote }} \
+                  --password-stdin \
+                  --print-certificate \
+                  --json > /shared/bootstrap.json
+              unset PASSWORD
+              chmod 0400 /shared/bootstrap.json
+          volumeMounts:
+            - name: shared
+              mountPath: /shared
+            - name: scratch
+              mountPath: /tmp
+            - name: bootstrap-password
+              mountPath: /run/secrets/bootstrap
+              readOnly: true
+      containers:
+        - name: publish
+          image: bitnami/kubectl:1.30
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            capabilities:
+              drop: ["ALL"]
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              CERT=$(awk -F'"' '/"certificate"/{print $4; exit}' /shared/bootstrap.json)
+              if [ -z "$CERT" ]; then
+                  echo "publish: failed to extract certificate from bootstrap.json" >&2
+                  exit 1
+              fi
+              kubectl create secret generic {{ .Values.auth.vault.bootstrapJob.certificateSecretName | quote }} \
+                  --namespace {{ .Release.Namespace | quote }} \
+                  --from-literal={{ default "certificate" .Values.auth.vault.certificate.existingSecretKey }}="$CERT" \
+                  --dry-run=client -o yaml | kubectl apply -f -
+              # Print a one-line audit marker but NEVER the cert itself.
+              echo "publish: vault certificate stored in secret/{{ .Values.auth.vault.bootstrapJob.certificateSecretName }}"
+              unset CERT
+          volumeMounts:
+            - name: shared
+              mountPath: /shared
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: shared
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        - name: scratch
+          emptyDir:
+            sizeLimit: 16Mi
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Mi
+        - name: bootstrap-password
+          secret:
+            secretName: {{ required "auth.vault.bootstrapJob.passwordSecret is required when bootstrapJob.enabled=true" .Values.auth.vault.bootstrapJob.passwordSecret | quote }}
+            defaultMode: 0400
+            items:
+              - key: password
+                path: password
+{{- end }}

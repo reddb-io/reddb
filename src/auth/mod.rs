@@ -15,6 +15,8 @@ pub mod cert;
 pub mod locks;
 pub mod middleware;
 pub mod oauth;
+pub mod policies;
+pub mod privileges;
 pub mod scram;
 pub mod store;
 pub mod vault;
@@ -27,6 +29,11 @@ pub use oauth::{
     DecodedJwt, Jwk, JwtClaims, JwtHeader, OAuthConfig, OAuthError, OAuthIdentity,
     OAuthIdentityMode, OAuthValidator,
 };
+pub use privileges::{
+    check_grant, Action, AuthzContext, AuthzError, Grant, GrantPrincipal, GrantsView,
+    PermissionCache, Resource, UserAttributes,
+};
+pub use store::AuthStore;
 
 use std::fmt;
 
@@ -95,6 +102,10 @@ impl fmt::Display for Role {
 #[derive(Debug, Clone)]
 pub struct User {
     pub username: String,
+    /// Tenant scope. `None` = platform-wide (the bootstrap admin and any
+    /// platform-level operators); `Some("acme")` = scoped to a SaaS
+    /// tenant. `(tenant_id, username)` is the unique identity key.
+    pub tenant_id: Option<String>,
     pub password_hash: String,
     /// SCRAM-SHA-256 verifier — `{ salt, iter, stored_key, server_key }`.
     /// Populated alongside `password_hash` on user creation.
@@ -104,6 +115,62 @@ pub struct User {
     pub created_at: u128,
     pub updated_at: u128,
     pub enabled: bool,
+}
+
+// ---------------------------------------------------------------------------
+// UserId
+// ---------------------------------------------------------------------------
+
+/// Composite identity key: `(tenant_id, username)`.
+///
+/// `tenant_id == None` means the platform/system tenant (the bootstrap
+/// admin lives there). `tenant_id == Some("acme")` scopes the user to
+/// the `acme` tenant: `alice@acme` and `alice@globex` are two distinct
+/// identities with their own credentials and roles.
+///
+/// Display format is `tenant/username` for scoped users and just
+/// `username` for platform users so audit logs can be parsed back into
+/// the same shape.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UserId {
+    pub tenant: Option<String>,
+    pub username: String,
+}
+
+impl UserId {
+    /// Platform / system-tenant user (no tenant scoping).
+    pub fn platform(name: impl Into<String>) -> Self {
+        Self {
+            tenant: None,
+            username: name.into(),
+        }
+    }
+
+    /// Tenant-scoped user.
+    pub fn scoped(tenant: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            tenant: Some(tenant.into()),
+            username: name.into(),
+        }
+    }
+
+    /// Build a `UserId` from an optional tenant + username pair (the
+    /// shape most call-sites already have).
+    pub fn from_parts(tenant: Option<&str>, username: &str) -> Self {
+        Self {
+            tenant: tenant.map(|t| t.to_string()),
+            username: username.to_string(),
+        }
+    }
+}
+
+impl fmt::Display for UserId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.tenant {
+            Some(t) => write!(f, "{}/{}", t, self.username),
+            None => f.write_str(&self.username),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -132,6 +199,9 @@ pub struct Session {
     /// Token value: `"rs_<hex32>"`
     pub token: String,
     pub username: String,
+    /// Tenant the session is scoped to. Mirrors the `User.tenant_id`
+    /// at login time and is what `CURRENT_TENANT()` should default to.
+    pub tenant_id: Option<String>,
     pub role: Role,
     pub created_at: u128,
     /// Absolute expiry (ms since epoch).

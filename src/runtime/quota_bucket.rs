@@ -99,7 +99,9 @@ impl QuotaBucket {
             last_refill: now,
             rejected: 0,
         });
-        let elapsed = now.saturating_duration_since(bucket.last_refill).as_secs_f64();
+        let elapsed = now
+            .saturating_duration_since(bucket.last_refill)
+            .as_secs_f64();
         bucket.tokens = (bucket.tokens + elapsed * self.rate_per_sec).min(self.burst);
         bucket.last_refill = now;
 

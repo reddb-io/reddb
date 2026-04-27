@@ -26,7 +26,7 @@ pub(crate) struct HttpRequest {
 }
 
 impl HttpRequest {
-    pub(crate) fn read_from(stream: &mut TcpStream, max_body_bytes: usize) -> io::Result<Self> {
+    pub(crate) fn read_from<S: Read>(stream: &mut S, max_body_bytes: usize) -> io::Result<Self> {
         let mut buffer = Vec::with_capacity(4096);
         let mut chunk = [0_u8; 2048];
         let header_end = loop {
@@ -226,11 +226,21 @@ mod transport_tests {
         // Spot-check: status code is the contract, not the message.
         assert_eq!(map_runtime_error(&RedDBError::NotFound("x".into())).0, 404);
         assert_eq!(map_runtime_error(&RedDBError::ReadOnly("x".into())).0, 403);
-        assert_eq!(map_runtime_error(&RedDBError::InvalidConfig("x".into())).0, 400);
-        assert_eq!(map_runtime_error(&RedDBError::Query("x".into())).0, 400);
-        assert_eq!(map_runtime_error(&RedDBError::FeatureNotEnabled("x".into())).0, 501);
         assert_eq!(
-            map_runtime_error(&RedDBError::SchemaVersionMismatch { expected: 1, found: 2 }).0,
+            map_runtime_error(&RedDBError::InvalidConfig("x".into())).0,
+            400
+        );
+        assert_eq!(map_runtime_error(&RedDBError::Query("x".into())).0, 400);
+        assert_eq!(
+            map_runtime_error(&RedDBError::FeatureNotEnabled("x".into())).0,
+            501
+        );
+        assert_eq!(
+            map_runtime_error(&RedDBError::SchemaVersionMismatch {
+                expected: 1,
+                found: 2
+            })
+            .0,
             409
         );
         assert_eq!(

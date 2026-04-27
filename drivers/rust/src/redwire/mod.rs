@@ -1,4 +1,4 @@
-//! RedWire v2 client.
+//! RedWire client.
 //!
 //! Mirrors the server-side codec (`reddb::wire::redwire`) but
 //! lives in the driver crate so the client doesn't drag the
@@ -44,13 +44,13 @@ use codec::{decode_frame, encode_frame};
 use frame::FRAME_HEADER_SIZE;
 use handshake::HandshakeOutcome;
 
-/// Magic byte that identifies a v2 connection on the shared port.
+/// Magic byte that identifies a RedWire connection on the shared port.
 pub const MAGIC: u8 = 0xFE;
 
 /// Highest minor protocol version this client implements.
 pub const SUPPORTED_VERSION: u8 = 0x01;
 
-/// Authentication credentials for the v2 handshake.
+/// Authentication credentials for the RedWire handshake.
 #[derive(Debug, Clone)]
 pub enum Auth {
     /// Server is configured with `auth.enabled = false`.
@@ -370,7 +370,7 @@ impl RedWireClient {
         }
     }
 
-    /// Bulk-insert via the v1 binary fast path. Same wire shape as
+    /// Bulk-insert via the binary fast path. Same wire shape as
     /// `MSG_BULK_INSERT_BINARY` (0x06): typed values, no JSON
     /// encode/decode. Use this for hot inserts where the column
     /// types are known up front.

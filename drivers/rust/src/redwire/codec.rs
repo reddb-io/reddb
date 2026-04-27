@@ -1,4 +1,4 @@
-//! Encode / decode for v2 frames. Same byte layout as the
+//! Encode / decode for RedWire frames. Same byte layout as the
 //! engine-side codec.
 
 use super::frame::{Flags, Frame, MessageKind, FRAME_HEADER_SIZE, MAX_FRAME_SIZE};

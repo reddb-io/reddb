@@ -91,7 +91,7 @@ The payload is a JSON array of records:
 - `lsn` (uint64) — must match the LSN of the embedded change record.
 - `data` (hex string) — hex-encoded bytes of the [Logical Change Record payload](#11-logical-change-record-payload). NOT the full spool frame — the magic/version/crc are spool-only.
 
-The JSON envelope is intentionally simple so external tools (audit scripts, replicator services) can parse without proto schemas. A future v2 binary segment format may land alongside; readers MUST sniff the sidecar's `version` field (when present) before parsing.
+The JSON envelope is intentionally simple so external tools (audit scripts, replicator services) can parse without proto schemas. A future binary segment format may land alongside; readers MUST sniff the sidecar's `version` field (when present) before parsing.
 
 ### Range encoding
 

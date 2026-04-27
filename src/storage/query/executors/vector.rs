@@ -618,6 +618,16 @@ fn query_expr_name(expr: &QueryExpr) -> &'static str {
         QueryExpr::DropServer(_) => "drop_server",
         QueryExpr::CreateForeignTable(_) => "create_foreign_table",
         QueryExpr::DropForeignTable(_) => "drop_foreign_table",
+        QueryExpr::Grant(_) => "grant",
+        QueryExpr::Revoke(_) => "revoke",
+        QueryExpr::AlterUser(_) => "alter_user",
+        QueryExpr::CreateIamPolicy { .. } => "create_iam_policy",
+        QueryExpr::DropIamPolicy { .. } => "drop_iam_policy",
+        QueryExpr::AttachPolicy { .. } => "attach_policy",
+        QueryExpr::DetachPolicy { .. } => "detach_policy",
+        QueryExpr::ShowPolicies { .. } => "show_policies",
+        QueryExpr::ShowEffectivePermissions { .. } => "show_effective_permissions",
+        QueryExpr::SimulatePolicy { .. } => "simulate_policy",
     }
 }
 

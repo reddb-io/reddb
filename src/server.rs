@@ -72,6 +72,7 @@ mod request_body;
 mod request_context;
 mod routing;
 mod serverless_support;
+pub mod tls;
 mod transport;
 
 use self::handlers_ai::*;
@@ -287,6 +288,51 @@ impl RedDBServer {
         thread::spawn(move || server.serve_on(listener))
     }
 
+    /// Serve TLS-wrapped HTTPS on the configured `bind_addr`. The
+    /// `tls_config` is shared across all connections (rustls
+    /// `ServerConfig` is `Send + Sync`).
+    pub fn serve_tls(&self, tls_config: std::sync::Arc<rustls::ServerConfig>) -> io::Result<()> {
+        let listener = TcpListener::bind(&self.options.bind_addr)?;
+        self.serve_tls_on(listener, tls_config)
+    }
+
+    pub fn serve_tls_on(
+        &self,
+        listener: TcpListener,
+        tls_config: std::sync::Arc<rustls::ServerConfig>,
+    ) -> io::Result<()> {
+        for stream in listener.incoming() {
+            match stream {
+                Ok(stream) => {
+                    let server = self.clone();
+                    let cfg = tls_config.clone();
+                    thread::spawn(move || {
+                        let _ = server.handle_tls_connection(stream, cfg);
+                    });
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(())
+    }
+
+    pub fn serve_tls_in_background(
+        &self,
+        tls_config: std::sync::Arc<rustls::ServerConfig>,
+    ) -> thread::JoinHandle<io::Result<()>> {
+        let server = self.clone();
+        thread::spawn(move || server.serve_tls(tls_config))
+    }
+
+    pub fn serve_tls_in_background_on(
+        &self,
+        listener: TcpListener,
+        tls_config: std::sync::Arc<rustls::ServerConfig>,
+    ) -> thread::JoinHandle<io::Result<()>> {
+        let server = self.clone();
+        thread::spawn(move || server.serve_tls_on(listener, tls_config))
+    }
+
     fn handle_connection(&self, mut stream: TcpStream) -> io::Result<()> {
         stream.set_read_timeout(Some(Duration::from_millis(self.options.read_timeout_ms)))?;
         stream.set_write_timeout(Some(Duration::from_millis(self.options.write_timeout_ms)))?;
@@ -295,6 +341,41 @@ impl RedDBServer {
         let response = self.route(request);
         stream.write_all(&response.to_http_bytes())?;
         stream.flush()?;
+        Ok(())
+    }
+
+    fn handle_tls_connection(
+        &self,
+        tcp: TcpStream,
+        tls_config: std::sync::Arc<rustls::ServerConfig>,
+    ) -> io::Result<()> {
+        tcp.set_read_timeout(Some(Duration::from_millis(self.options.read_timeout_ms)))?;
+        tcp.set_write_timeout(Some(Duration::from_millis(self.options.write_timeout_ms)))?;
+        let mut tls_stream = match self::tls::accept_tls(tls_config, tcp) {
+            Ok(s) => s,
+            Err(err) => {
+                tracing::warn!(
+                    target: "reddb::http_tls",
+                    err = %err,
+                    "TLS handshake failed"
+                );
+                return Err(err);
+            }
+        };
+        let request = match HttpRequest::read_from(&mut tls_stream, self.options.max_body_bytes) {
+            Ok(req) => req,
+            Err(err) => {
+                tracing::warn!(
+                    target: "reddb::http_tls",
+                    err = %err,
+                    "TLS request parse failed"
+                );
+                return Err(err);
+            }
+        };
+        let response = self.route(request);
+        tls_stream.write_all(&response.to_http_bytes())?;
+        tls_stream.flush()?;
         Ok(())
     }
 }

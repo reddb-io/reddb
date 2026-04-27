@@ -35,6 +35,7 @@
 //! HYBRID (structured query) VECTOR SEARCH ... FUSION strategy LIMIT n
 //! ```
 
+mod auth_ddl;
 mod cte;
 mod ddl;
 mod dml;

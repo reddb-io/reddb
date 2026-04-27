@@ -323,7 +323,17 @@ impl JoinReorderingPass {
             | QueryExpr::CreateServer(_)
             | QueryExpr::DropServer(_)
             | QueryExpr::CreateForeignTable(_)
-            | QueryExpr::DropForeignTable(_) => 1.0,
+            | QueryExpr::DropForeignTable(_)
+            | QueryExpr::Grant(_)
+            | QueryExpr::Revoke(_)
+            | QueryExpr::AlterUser(_)
+            | QueryExpr::CreateIamPolicy { .. }
+            | QueryExpr::DropIamPolicy { .. }
+            | QueryExpr::AttachPolicy { .. }
+            | QueryExpr::DetachPolicy { .. }
+            | QueryExpr::ShowPolicies { .. }
+            | QueryExpr::ShowEffectivePermissions { .. }
+            | QueryExpr::SimulatePolicy { .. } => 1.0,
         }
     }
 }

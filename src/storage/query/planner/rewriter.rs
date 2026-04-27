@@ -224,7 +224,17 @@ impl RewriteRule for NormalizeRule {
             | QueryExpr::CreateServer(_)
             | QueryExpr::DropServer(_)
             | QueryExpr::CreateForeignTable(_)
-            | QueryExpr::DropForeignTable(_)) => other,
+            | QueryExpr::DropForeignTable(_)
+            | QueryExpr::Grant(_)
+            | QueryExpr::Revoke(_)
+            | QueryExpr::AlterUser(_)
+            | QueryExpr::CreateIamPolicy { .. }
+            | QueryExpr::DropIamPolicy { .. }
+            | QueryExpr::AttachPolicy { .. }
+            | QueryExpr::DetachPolicy { .. }
+            | QueryExpr::ShowPolicies { .. }
+            | QueryExpr::ShowEffectivePermissions { .. }
+            | QueryExpr::SimulatePolicy { .. }) => other,
         }
     }
 
@@ -318,7 +328,17 @@ impl RewriteRule for SimplifyFiltersRule {
             | QueryExpr::CreateServer(_)
             | QueryExpr::DropServer(_)
             | QueryExpr::CreateForeignTable(_)
-            | QueryExpr::DropForeignTable(_)) => other,
+            | QueryExpr::DropForeignTable(_)
+            | QueryExpr::Grant(_)
+            | QueryExpr::Revoke(_)
+            | QueryExpr::AlterUser(_)
+            | QueryExpr::CreateIamPolicy { .. }
+            | QueryExpr::DropIamPolicy { .. }
+            | QueryExpr::AttachPolicy { .. }
+            | QueryExpr::DetachPolicy { .. }
+            | QueryExpr::ShowPolicies { .. }
+            | QueryExpr::ShowEffectivePermissions { .. }
+            | QueryExpr::SimulatePolicy { .. }) => other,
         }
     }
 
@@ -371,7 +391,17 @@ impl RewriteRule for SimplifyFiltersRule {
             | QueryExpr::CreateServer(_)
             | QueryExpr::DropServer(_)
             | QueryExpr::CreateForeignTable(_)
-            | QueryExpr::DropForeignTable(_) => false,
+            | QueryExpr::DropForeignTable(_)
+            | QueryExpr::Grant(_)
+            | QueryExpr::Revoke(_)
+            | QueryExpr::AlterUser(_)
+            | QueryExpr::CreateIamPolicy { .. }
+            | QueryExpr::DropIamPolicy { .. }
+            | QueryExpr::AttachPolicy { .. }
+            | QueryExpr::DetachPolicy { .. }
+            | QueryExpr::ShowPolicies { .. }
+            | QueryExpr::ShowEffectivePermissions { .. }
+            | QueryExpr::SimulatePolicy { .. } => false,
         }
     }
 }

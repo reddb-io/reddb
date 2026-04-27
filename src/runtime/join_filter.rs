@@ -1044,7 +1044,11 @@ pub(super) fn sort_records_by_order_by_with_db(
         for clause in order_by.iter() {
             let v = if let Some(ref expr) = clause.expr {
                 super::expr_eval::evaluate_runtime_expr_with_db(
-                    db, expr, rec, table_name, table_alias,
+                    db,
+                    expr,
+                    rec,
+                    table_name,
+                    table_alias,
                 )
             } else {
                 resolve_runtime_field(rec, &clause.field, table_name, table_alias)
@@ -1189,7 +1193,11 @@ pub(super) fn top_k_records_by_order_by_with_db(
         for clause in order_by.iter() {
             let v = if let Some(ref expr) = clause.expr {
                 super::expr_eval::evaluate_runtime_expr_with_db(
-                    db, expr, rec, table_name, table_alias,
+                    db,
+                    expr,
+                    rec,
+                    table_name,
+                    table_alias,
                 )
             } else {
                 resolve_runtime_field(rec, &clause.field, table_name, table_alias)
@@ -1910,6 +1918,16 @@ pub(super) fn query_expr_name(expr: &QueryExpr) -> &'static str {
         QueryExpr::DropServer(_) => "drop_server",
         QueryExpr::CreateForeignTable(_) => "create_foreign_table",
         QueryExpr::DropForeignTable(_) => "drop_foreign_table",
+        QueryExpr::Grant(_) => "grant",
+        QueryExpr::Revoke(_) => "revoke",
+        QueryExpr::AlterUser(_) => "alter_user",
+        QueryExpr::CreateIamPolicy { .. } => "create_iam_policy",
+        QueryExpr::DropIamPolicy { .. } => "drop_iam_policy",
+        QueryExpr::AttachPolicy { .. } => "attach_policy",
+        QueryExpr::DetachPolicy { .. } => "detach_policy",
+        QueryExpr::ShowPolicies { .. } => "show_policies",
+        QueryExpr::ShowEffectivePermissions { .. } => "show_effective_permissions",
+        QueryExpr::SimulatePolicy { .. } => "simulate_policy",
     }
 }
 
@@ -1937,11 +1955,7 @@ pub(super) fn evaluate_scalar_function_with_db(
     }
     if matches!(
         func_name.to_ascii_uppercase().as_str(),
-        "ML_CLASSIFY"
-            | "ML_PREDICT_PROBA"
-            | "SEMANTIC_CACHE_GET"
-            | "SEMANTIC_CACHE_PUT"
-            | "EMBED"
+        "ML_CLASSIFY" | "ML_PREDICT_PROBA" | "SEMANTIC_CACHE_GET" | "SEMANTIC_CACHE_PUT" | "EMBED"
     ) {
         return evaluate_ml_scalar(db?, &func_name.to_ascii_uppercase(), args, source);
     }
@@ -2616,7 +2630,9 @@ fn parse_rl_atom(s: &str) -> Option<Value> {
         return Some(Value::Boolean(false));
     }
     if let Some(inner) = s.strip_prefix('"').and_then(|x| x.strip_suffix('"')) {
-        return Some(Value::text(inner.replace("\\\"", "\"").replace("\\\\", "\\")));
+        return Some(Value::text(
+            inner.replace("\\\"", "\"").replace("\\\\", "\\"),
+        ));
     }
     if s.starts_with('[') || s.starts_with("V[") {
         return parse_rl_literal(s);
@@ -2755,7 +2771,11 @@ fn evaluate_ml_scalar(
     }
 }
 
-fn resolve_feature_vector(args: &[Projection], idx: usize, source: &UnifiedRecord) -> Option<Vec<f32>> {
+fn resolve_feature_vector(
+    args: &[Projection],
+    idx: usize,
+    source: &UnifiedRecord,
+) -> Option<Vec<f32>> {
     let val = resolve_scalar_arg(args, idx, source)?;
     match val {
         Value::Vector(v) => Some(v),
@@ -2821,11 +2841,7 @@ fn parse_model_kind(hyperparams_json: &str) -> String {
         .to_ascii_lowercase()
 }
 
-fn semantic_cache_get(
-    db: &RedDB,
-    args: &[Projection],
-    source: &UnifiedRecord,
-) -> Option<Value> {
+fn semantic_cache_get(db: &RedDB, args: &[Projection], source: &UnifiedRecord) -> Option<Value> {
     // args[0] = namespace (reserved, currently ignored)
     let _ns = resolve_scalar_arg(args, 0, source)?;
     let embedding = resolve_feature_vector(args, 1, source)?;
@@ -2835,11 +2851,7 @@ fn semantic_cache_get(
     }
 }
 
-fn semantic_cache_put(
-    db: &RedDB,
-    args: &[Projection],
-    source: &UnifiedRecord,
-) -> Option<Value> {
+fn semantic_cache_put(db: &RedDB, args: &[Projection], source: &UnifiedRecord) -> Option<Value> {
     let _ns = resolve_scalar_arg(args, 0, source)?;
     let prompt = match resolve_scalar_arg(args, 1, source)? {
         Value::Text(s) => s.to_string(),
@@ -2850,7 +2862,8 @@ fn semantic_cache_put(
         other => other.display_string(),
     };
     let embedding = resolve_feature_vector(args, 3, source)?;
-    db.semantic_cache().insert(prompt, response, embedding, None);
+    db.semantic_cache()
+        .insert(prompt, response, embedding, None);
     Some(Value::Boolean(true))
 }
 
@@ -3374,7 +3387,11 @@ mod tests {
         for k in [1usize, 2, 3, 4] {
             let expected = reference_sort_truncate(rows.clone(), &ob, k);
             let actual = topk_via(rows.clone(), &ob, k);
-            assert_eq!(extract_t(&actual, "tag"), extract_t(&expected, "tag"), "k={k}");
+            assert_eq!(
+                extract_t(&actual, "tag"),
+                extract_t(&expected, "tag"),
+                "k={k}"
+            );
         }
     }
 
@@ -3394,8 +3411,16 @@ mod tests {
         for k in [1usize, 2, 3, 4] {
             let expected = reference_sort_truncate(rows.clone(), &ob, k);
             let actual = topk_via(rows.clone(), &ob, k);
-            assert_eq!(extract_i(&actual, "a"), extract_i(&expected, "a"), "k={k} a");
-            assert_eq!(extract_i(&actual, "b"), extract_i(&expected, "b"), "k={k} b");
+            assert_eq!(
+                extract_i(&actual, "a"),
+                extract_i(&expected, "a"),
+                "k={k} a"
+            );
+            assert_eq!(
+                extract_i(&actual, "b"),
+                extract_i(&expected, "b"),
+                "k={k} b"
+            );
         }
     }
 
@@ -3465,7 +3490,10 @@ mod tests {
 
     #[test]
     fn topk_k_ge_len_full_sorted() {
-        let rows: Vec<_> = [5i64, 3, 8, 1, 9, 4].iter().map(|n| rec_i("a", *n)).collect();
+        let rows: Vec<_> = [5i64, 3, 8, 1, 9, 4]
+            .iter()
+            .map(|n| rec_i("a", *n))
+            .collect();
         let ob = vec![order_by_col("a", true, false)];
         let expected = reference_sort_truncate(rows.clone(), &ob, 100);
         let actual = topk_via(rows, &ob, 100);

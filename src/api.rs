@@ -201,8 +201,7 @@ pub struct RedDBOptions {
     /// `RED_HTTP_CONDITIONAL_WRITES=true`). `None` for backends that
     /// do not provide compare-and-swap (Turso, D1, plain HTTP).
     /// `LeaseStore` and any future CAS consumer pull from this field.
-    pub remote_backend_atomic:
-        Option<Arc<dyn crate::storage::backend::AtomicRemoteBackend>>,
+    pub remote_backend_atomic: Option<Arc<dyn crate::storage::backend::AtomicRemoteBackend>>,
     /// Remote object key used by the remote backend.
     pub remote_key: Option<String>,
     /// Replication configuration.
@@ -543,7 +542,10 @@ impl SchemaManifest {
 #[derive(Debug)]
 pub enum RedDBError {
     InvalidConfig(String),
-    SchemaVersionMismatch { expected: u32, found: u32 },
+    SchemaVersionMismatch {
+        expected: u32,
+        found: u32,
+    },
     FeatureNotEnabled(String),
     NotFound(String),
     ReadOnly(String),

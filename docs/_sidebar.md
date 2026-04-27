@@ -5,6 +5,7 @@
   - [Connect](/getting-started/connect.md)
   - [Modes and Transports](/getting-started/modes-and-transports.md)
   - [Configuration](/getting-started/configuration.md)
+  - [Docker (Quickstart + Production)](/getting-started/docker.md)
 
 - **AI & LLM**
   - [ASK Command](/query/search-commands.md#ask)
@@ -88,7 +89,6 @@
 
 - **ADRs**
   - [0001 — RedWire TCP Protocol](/adr/0001-redwire-tcp-protocol.md)
-  - [0002 — RedWire v2 Rollout](/adr/0002-redwire-v2-rollout.md)
 
 - **Vector Engine**
   - [HNSW Index](/vectors/hnsw.md)
@@ -107,11 +107,16 @@
 
 - **Auth & Security**
   - [Overview](/security/overview.md)
-  - [Users & Roles (RBAC)](/security/rbac.md)
+  - [Users, Groups, and Legacy Roles](/security/rbac.md)
+  - [Permissioning Handbook](/security/permissions.md)
+  - [Permission Recipes](/guides/permissions-cookbook.md)
   - [Row Level Security](/security/rls.md)
   - [Multi-Tenancy](/security/multi-tenancy.md)
   - [API Keys & Tokens](/security/tokens.md)
   - [Vault (Certificate Seal)](/security/vault.md)
+  - [Policies](/security/policies.md)
+  - [Transport TLS](/security/transport-tls.md)
+  - [Secret Inventory & Operations](/operations/secrets.md)
   - [Encryption at Rest](/security/encryption.md)
 
 - **Backup & Recovery**
@@ -135,6 +140,7 @@
   - [Remote Backends (S3, R2, Turso, D1)](/deployment/backends.md)
 
 - **Guides**
+  - [Permission Recipes](/guides/permissions-cookbook.md)
   - [Builds, Targets, and CI Speed](/guides/builds-and-ci-speed.md)
   - [JavaScript and TypeScript Driver](/guides/javascript-typescript-driver.md)
   - [Running Benchmarks](/guides/benchmarks.md)
@@ -164,7 +170,7 @@
   - [Limitations](/reference/limitations.md)
 
 - **Release Notes**
-  - [2026-04-26 (RedWire v2 + Auth)](/release-notes-2026-04-26.md)
+  - [2026-04-26 (RedWire + Auth)](/release-notes-2026-04-26.md)
   - [2026-04-17 (Multi-tenancy + Perf)](/release-notes-2026-04-17.md)
   - [v1.0 Migration Guide](/release/v1.0-migration.md)
   - [v1.0 Gate Status](/release/v1.0-gate.md)

@@ -261,9 +261,10 @@ pub struct Pager {
     /// header itself). When `None`, all pages are stored plaintext
     /// and any DB header carrying the `RDBE` marker is rejected at
     /// open time.
-    pub(crate) encryption:
-        Option<(crate::storage::encryption::PageEncryptor,
-                crate::storage::encryption::EncryptionHeader)>,
+    pub(crate) encryption: Option<(
+        crate::storage::encryption::PageEncryptor,
+        crate::storage::encryption::EncryptionHeader,
+    )>,
 }
 
 #[path = "pager/impl.rs"]

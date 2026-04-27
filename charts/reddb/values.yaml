@@ -37,6 +37,108 @@ auth:
   # Reference an existing Secret. Must contain keys: username, password
   existingSecret: ""
 
+  # ---------------------------------------------------------------------------
+  # Encrypted vault key (REDDB_CERTIFICATE / REDDB_VAULT_KEY).
+  # ---------------------------------------------------------------------------
+  # Required when config.vault=true. Three mutually-exclusive ways to provide
+  # the cert. existingSecret > value (plaintext, dev-only). fileMount is
+  # orthogonal — set it true to mount the secret as a file and pass
+  # REDDB_CERTIFICATE_FILE instead of REDDB_CERTIFICATE.
+  vault:
+    enabled: false
+    certificate:
+      # Plaintext 64-char hex. DEV ONLY — leaks into rendered manifests.
+      value: ""
+      # Pre-existing Secret name (recommended for production).
+      existingSecret: ""
+      # Key inside the existing/managed secret holding the cert.
+      existingSecretKey: certificate
+      # Mount the secret as a file at fileMount.path and pass
+      # REDDB_CERTIFICATE_FILE instead of REDDB_CERTIFICATE. Recommended
+      # for FIPS / strict envs that audit env-var leakage.
+      fileMount:
+        enabled: false
+        path: /run/secrets/reddb_certificate
+    # Optional one-off Job that runs `red bootstrap` to mint the first
+    # admin user + certificate, then writes the cert into a Secret.
+    # See templates/bootstrap-job.yaml for caveats.
+    bootstrapJob:
+      enabled: false
+      username: admin
+      # Secret name carrying a `password` key (and optionally `username`).
+      passwordSecret: ""
+      # Output Secret name written by the Job for the StatefulSet to consume.
+      certificateSecretName: reddb-vault-cert
+      backoffLimit: 0
+      # Override the image used for the Job (defaults to the chart image).
+      image: ""
+
+# Arbitrary extra Secret/file mounts shared by all reddb pods.
+# Each item: {name, secretName, mountPath, readOnly?}.
+extraSecretMounts: []
+
+# -----------------------------------------------------------------------------
+# gRPC transport security (mutual TLS optional)
+#
+# When grpc.tls.enabled is true, the reddb pod also serves a TLS-terminated
+# gRPC listener on the address `grpc.tls.bindAddr`. The plaintext gRPC
+# listener can still be advertised on a separate port — operators commonly
+# pin 50051 plaintext + 50052 TLS during a rollout.
+#
+# Optional mTLS: when grpc.tls.clientCa.secretName is set, the gRPC server
+# requires every client to present a certificate that chains to a CA
+# bundle in that secret. Without `clientCa`, only one-way TLS is enforced.
+# -----------------------------------------------------------------------------
+grpc:
+  tls:
+    enabled: false
+    # In-pod bind address for the TLS gRPC listener. Plaintext gRPC
+    # continues to listen on `service.grpcPort` unless disabled.
+    bindAddr: "0.0.0.0:50052"
+    # Source of the server cert + key. Both keys are read from this secret.
+    secretName: ""
+    certKey: "tls.crt"
+    keyKey: "tls.key"
+    # Mount path inside the pod (must be under /etc/reddb to satisfy the
+    # readOnlyRootFilesystem securityContext).
+    mountPath: "/etc/reddb/grpc-tls"
+    # Optional client CA for mTLS. Pod boots without mTLS unless secretName
+    # is non-empty.
+    clientCa:
+      secretName: ""
+      key: "ca.crt"
+      mountPath: "/etc/reddb/grpc-tls-client-ca"
+
+# -----------------------------------------------------------------------------
+# HTTP transport security (HTTPS termination)
+#
+# When http.tls.enabled is true, the reddb pod also serves a TLS-terminated
+# HTTP listener on the address `http.tls.bindAddr`. The cert + key are
+# mounted from a Kubernetes Secret in PEM form (one cert chain per secret).
+#
+# Optional mTLS: when http.tls.clientCa.secretName is set, every client
+# request must present a certificate that chains to a CA bundle in that
+# secret.
+# -----------------------------------------------------------------------------
+http:
+  tls:
+    enabled: false
+    # In-pod bind address for the HTTPS listener.
+    bindAddr: "0.0.0.0:8443"
+    # Source of the server cert + key. Both keys are read from this secret.
+    secretName: ""
+    certKey: "tls.crt"
+    keyKey: "tls.key"
+    # Mount path inside the pod (must be under /etc/reddb to satisfy the
+    # readOnlyRootFilesystem securityContext).
+    mountPath: "/etc/reddb/http-tls"
+    # Optional client CA for mTLS. Pod boots without mTLS unless secretName
+    # is non-empty.
+    clientCa:
+      secretName: ""
+      key: "ca.crt"
+      mountPath: "/etc/reddb/http-tls-client-ca"
+
 # -----------------------------------------------------------------------------
 # Common server config
 # -----------------------------------------------------------------------------
@@ -112,10 +214,16 @@ primary:
     type: ClusterIP
     annotations: {}
     grpcPort: 50051
+    # gRPC TLS port — only exposed when grpc.tls.enabled is true.
+    grpcTlsPort: 50052
     httpPort: 8080
+    # HTTP TLS (HTTPS) port — only exposed when http.tls.enabled is true.
+    httpTlsPort: 8443
     # Optional fixed nodePort values (only when type=NodePort)
     grpcNodePort: ""
+    grpcTlsNodePort: ""
     httpNodePort: ""
+    httpTlsNodePort: ""
 
   nodeSelector: {}
   tolerations: []
@@ -153,6 +261,7 @@ replica:
     annotations: {}
     grpcPort: 50051
     httpPort: 8080
+    httpTlsPort: 8443
 
   nodeSelector: {}
   tolerations: []

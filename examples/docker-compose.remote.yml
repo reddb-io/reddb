@@ -1,3 +1,6 @@
+# Remote backend (S3 via MinIO) demo. For the canonical secure deploy
+# (vault on, cert via Docker secrets), see examples/docker-compose.vault.yml.
+
 services:
   minio:
     image: minio/minio:latest
@@ -64,6 +67,13 @@ services:
       REDDB_S3_ACCESS_KEY: minioadmin
       REDDB_S3_SECRET_KEY: minioadmin
       REDDB_S3_KEY_PREFIX: reddb/
+      REDDB_CERTIFICATE_FILE: /run/secrets/reddb_certificate
+    secrets:
+      - source: reddb_certificate
+        target: reddb_certificate
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
     healthcheck:
       test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:8080"]
       interval: 5s
@@ -107,12 +117,23 @@ services:
       REDDB_S3_SECRET_KEY: minioadmin
       REDDB_S3_KEY_PREFIX: reddb/
       REDDB_PRIMARY_ADDR: http://primary:50051
+      REDDB_CERTIFICATE_FILE: /run/secrets/reddb_certificate
+    secrets:
+      - source: reddb_certificate
+        target: reddb_certificate
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
     healthcheck:
       test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:8080"]
       interval: 5s
       timeout: 3s
       retries: 10
       start_period: 10s
+
+secrets:
+  reddb_certificate:
+    external: true
 
 volumes:
   minio-data:

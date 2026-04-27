@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use crate::api::{RedDBError, RedDBResult};
 use crate::json::Value as JsonValue;
 use crate::replication::lease::{LeaseError, LeaseStore, WriterLease};
-use crate::runtime::audit_log::AuditLogger;
+use crate::runtime::audit_log::{AuditAuthSource, AuditEvent, AuditLogger, Outcome};
 use crate::runtime::write_gate::{LeaseGateState, WriteGate};
 
 /// Callback the lifecycle uses to ask the surrounding runtime to
@@ -101,26 +101,29 @@ impl LeaseLifecycle {
                     "generation".to_string(),
                     JsonValue::Number(lease.generation as f64),
                 );
-                details.insert(
-                    "ttl_ms".to_string(),
-                    JsonValue::Number(self.ttl_ms as f64),
-                );
-                self.audit_log.record(
-                    "lease/acquire",
-                    &self.holder_id,
-                    &self.database_key,
-                    "ok",
-                    JsonValue::Object(details),
+                details.insert("ttl_ms".to_string(), JsonValue::Number(self.ttl_ms as f64));
+                self.audit_log.record_event(
+                    AuditEvent::builder("lease/acquire")
+                        .principal(self.holder_id.clone())
+                        .source(AuditAuthSource::System)
+                        .resource(self.database_key.clone())
+                        .outcome(Outcome::Success)
+                        .detail(JsonValue::Object(details))
+                        .build(),
                 );
                 Ok(())
             }
             Err(err) => {
-                self.audit_log.record(
-                    "lease/acquire",
-                    &self.holder_id,
-                    &self.database_key,
-                    &format!("err: {err}"),
-                    JsonValue::Null,
+                let mut detail = crate::json::Map::new();
+                detail.insert("error".to_string(), JsonValue::String(format!("{err}")));
+                self.audit_log.record_event(
+                    AuditEvent::builder("lease/acquire")
+                        .principal(self.holder_id.clone())
+                        .source(AuditAuthSource::System)
+                        .resource(self.database_key.clone())
+                        .outcome(Outcome::Error)
+                        .detail(JsonValue::Object(detail))
+                        .build(),
                 );
                 Err(RedDBError::Internal(format!("acquire writer lease: {err}")))
             }
@@ -173,22 +176,27 @@ impl LeaseLifecycle {
         self.write_gate.set_lease_state(LeaseGateState::NotHeld);
         match result {
             Ok(()) => {
-                self.audit_log.record(
-                    "lease/release",
-                    &self.holder_id,
-                    &self.database_key,
-                    "ok",
-                    JsonValue::Null,
+                self.audit_log.record_event(
+                    AuditEvent::builder("lease/release")
+                        .principal(self.holder_id.clone())
+                        .source(AuditAuthSource::System)
+                        .resource(self.database_key.clone())
+                        .outcome(Outcome::Success)
+                        .build(),
                 );
                 Ok(())
             }
             Err(err) => {
-                self.audit_log.record(
-                    "lease/release",
-                    &self.holder_id,
-                    &self.database_key,
-                    &format!("err: {err}"),
-                    JsonValue::Null,
+                let mut detail = crate::json::Map::new();
+                detail.insert("error".to_string(), JsonValue::String(format!("{err}")));
+                self.audit_log.record_event(
+                    AuditEvent::builder("lease/release")
+                        .principal(self.holder_id.clone())
+                        .source(AuditAuthSource::System)
+                        .resource(self.database_key.clone())
+                        .outcome(Outcome::Error)
+                        .detail(JsonValue::Object(detail))
+                        .build(),
                 );
                 tracing::warn!(
                     target: "reddb::serverless::lease",
@@ -210,12 +218,16 @@ impl LeaseLifecycle {
         );
         *self.current.lock().expect("poisoned lease mutex") = None;
         self.write_gate.set_lease_state(LeaseGateState::NotHeld);
-        self.audit_log.record(
-            "lease/lost",
-            &self.holder_id,
-            &self.database_key,
-            &format!("err: {err}"),
-            JsonValue::Null,
+        let mut detail = crate::json::Map::new();
+        detail.insert("error".to_string(), JsonValue::String(format!("{err}")));
+        self.audit_log.record_event(
+            AuditEvent::builder("lease/lost")
+                .principal(self.holder_id.clone())
+                .source(AuditAuthSource::System)
+                .resource(self.database_key.clone())
+                .outcome(Outcome::Error)
+                .detail(JsonValue::Object(detail))
+                .build(),
         );
         (self.mark_draining)();
     }
@@ -247,22 +259,28 @@ pub fn admin_promote_lease(
                 JsonValue::Number(lease.generation as f64),
             );
             details.insert("ttl_ms".to_string(), JsonValue::Number(ttl_ms as f64));
-            audit_log.record(
-                "admin/failover/promote",
-                &lease.holder_id,
-                database_key,
-                "ok",
-                JsonValue::Object(details),
+            audit_log.record_event(
+                AuditEvent::builder("admin/failover/promote")
+                    .principal(lease.holder_id.clone())
+                    .source(AuditAuthSource::System)
+                    .resource(database_key.to_string())
+                    .outcome(Outcome::Success)
+                    .detail(JsonValue::Object(details))
+                    .build(),
             );
             Ok(lease)
         }
         Err(err) => {
-            audit_log.record(
-                "admin/failover/promote",
-                holder_id,
-                database_key,
-                &format!("err: {err}"),
-                JsonValue::Null,
+            let mut detail = crate::json::Map::new();
+            detail.insert("error".to_string(), JsonValue::String(format!("{err}")));
+            audit_log.record_event(
+                AuditEvent::builder("admin/failover/promote")
+                    .principal(holder_id.to_string())
+                    .source(AuditAuthSource::System)
+                    .resource(database_key.to_string())
+                    .outcome(Outcome::Error)
+                    .detail(JsonValue::Object(detail))
+                    .build(),
             );
             Err(err)
         }
@@ -330,10 +348,11 @@ mod tests {
         assert_eq!(gate.lease_state(), LeaseGateState::Held);
         assert!(lifecycle.current_lease().is_some());
         assert_eq!(drain.load(Ordering::SeqCst), 0);
-        // Audit log file should contain one acquire ok line.
+        // Audit log file should contain one acquire success line.
+        assert!(audit.wait_idle(std::time::Duration::from_secs(2)));
         let body = std::fs::read_to_string(audit.path()).unwrap();
         assert!(body.contains("lease/acquire"));
-        assert!(body.contains("\"result\":\"ok\""));
+        assert!(body.contains("\"outcome\":\"success\""));
         let _ = std::fs::remove_dir_all(&prefix);
     }
 
@@ -344,6 +363,7 @@ mod tests {
         assert!(lifecycle.release().is_ok());
         assert_eq!(gate.lease_state(), LeaseGateState::NotHeld);
         assert!(lifecycle.current_lease().is_none());
+        assert!(audit.wait_idle(std::time::Duration::from_secs(2)));
         let body = std::fs::read_to_string(audit.path()).unwrap();
         assert!(body.contains("lease/release"));
         let _ = std::fs::remove_dir_all(&prefix);
@@ -379,9 +399,10 @@ mod tests {
         let audit = AuditLogger::for_data_path(&prefix.join("data.rdb"));
         let lease = admin_promote_lease(&store, &audit, "main", "promoter-1", 30_000).unwrap();
         assert_eq!(lease.holder_id, "promoter-1");
+        assert!(audit.wait_idle(std::time::Duration::from_secs(2)));
         let body = std::fs::read_to_string(audit.path()).unwrap();
         assert!(body.contains("admin/failover/promote"));
-        assert!(body.contains("\"result\":\"ok\""));
+        assert!(body.contains("\"outcome\":\"success\""));
         let _ = std::fs::remove_dir_all(&prefix);
     }
 

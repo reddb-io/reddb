@@ -1,4 +1,4 @@
-//! v2 frame layout — 16-byte header + payload, little-endian.
+//! RedWire frame layout — 16-byte header + payload, little-endian.
 //!
 //! ```text
 //! ┌──────────────────────────────────────────────────────────┐
@@ -13,9 +13,8 @@
 //! └──────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! v1 message types (0x01..0x0F) keep their semantics so dispatch
-//! can share code with the legacy listener. v2-specific kinds live
-//! at 0x10..0x3F.
+//! Data-plane kinds live at 0x01..0x0F; handshake / lifecycle at
+//! 0x10..0x1F; control plane at 0x20..0x3F.
 
 pub const FRAME_HEADER_SIZE: usize = 16;
 pub const MAX_FRAME_SIZE: u32 = 16 * 1024 * 1024;
@@ -60,7 +59,7 @@ impl Frame {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum MessageKind {
-    // v1 codes (preserved semantics; v2 just reframes them).
+    // Data-plane codes.
     Query = 0x01,
     Result = 0x02,
     Error = 0x03,
@@ -77,7 +76,7 @@ pub enum MessageKind {
     PreparedOk = 0x0E,
     ExecutePrepared = 0x0F,
 
-    // v2 handshake / lifecycle.
+    // Handshake / lifecycle.
     Hello = 0x10,
     HelloAck = 0x11,
     AuthRequest = 0x12,
@@ -91,17 +90,17 @@ pub enum MessageKind {
     Delete = 0x1A,
     DeleteOk = 0x1B,
 
-    // v2 control plane.
+    // Control plane.
     Cancel = 0x20,
     Compress = 0x21,
     SetSession = 0x22,
     Notice = 0x23,
 
-    // v2 streamed responses.
+    // Streamed responses.
     RowDescription = 0x24,
     StreamEnd = 0x25,
 
-    // v2 RedDB-native data plane.
+    // RedDB-native data plane.
     VectorSearch = 0x26,
     GraphTraverse = 0x27,
 }

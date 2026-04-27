@@ -39,4 +39,3 @@ pub fn aes256_gcm_decrypt(
         )
         .map_err(|e| format!("AES-256-GCM decryption failed: {e}"))
 }
-

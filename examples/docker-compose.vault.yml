@@ -1,0 +1,127 @@
+# =============================================================================
+# RedDB - secure single-node deploy with the encrypted auth vault enabled.
+# =============================================================================
+# This is the canonical "do it right" example. RedDB persists auth state in
+# encrypted reserved pages of the main `.rdb` file; the encryption key is
+# derived from REDDB_CERTIFICATE (64-char hex) or REDDB_VAULT_KEY (passphrase
+# fallback). Neither value is ever baked into the image — they are mounted
+# at runtime via Docker secrets and consumed via the *_FILE convention.
+#
+# -----------------------------------------------------------------------------
+# Bootstrap flow (one-time, per cluster):
+# -----------------------------------------------------------------------------
+#   1. Generate the certificate on a trusted machine:
+#         red bootstrap \
+#             --path ./scratch/data.rdb \
+#             --vault \
+#             --username admin \
+#             --password-stdin \
+#             --print-certificate \
+#             --json > bootstrap.json
+#         jq -r .certificate bootstrap.json > cert.txt
+#         chmod 0400 cert.txt
+#         # BACK THIS UP OFFLINE — there is no recovery if you lose it.
+#
+#   2. Register the cert as a Docker secret (swarm mode):
+#         docker swarm init               # if not already in swarm mode
+#         docker secret create reddb_certificate ./cert.txt
+#         shred -u cert.txt
+#
+#   3. Bring the stack up:
+#         docker compose -f examples/docker-compose.vault.yml up -d
+#
+# For non-swarm dev usage, comment out the `external: true` line and use the
+# `file:` alternative shown below — this writes the cert to a bind mount that
+# only the reddb user can read.
+# -----------------------------------------------------------------------------
+
+services:
+  reddb:
+    image: reddb-benchmark/reddb:latest
+    container_name: reddb-vault
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "8080:8080"
+      - "50051:50051"
+    volumes:
+      - reddb-data:/data
+    environment:
+      RUST_LOG: info
+      # The entrypoint shim AND the binary both honour these *_FILE vars.
+      # The cert never appears as a process env variable — only the path does.
+      REDDB_CERTIFICATE_FILE: /run/secrets/reddb_certificate
+      # Optional: bootstrap an admin on first start. Mount these as secrets
+      # too if you uncomment them.
+      # REDDB_USERNAME_FILE: /run/secrets/reddb_username
+      # REDDB_PASSWORD_FILE: /run/secrets/reddb_password
+    secrets:
+      - source: reddb_certificate
+        target: reddb_certificate    # ends up at /run/secrets/reddb_certificate
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
+      # - source: reddb_username
+      #   target: reddb_username
+      #   uid: "10001"
+      #   gid: "10001"
+      #   mode: 0400
+      # - source: reddb_password
+      #   target: reddb_password
+      #   uid: "10001"
+      #   gid: "10001"
+      #   mode: 0400
+    command:
+      - "server"
+      - "--vault"
+      - "--path"
+      - "/data/data.rdb"
+      - "--grpc-bind"
+      - "0.0.0.0:50051"
+      - "--http-bind"
+      - "0.0.0.0:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--max-time", "2", "http://127.0.0.1:8080/health/live"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    stop_grace_period: 70s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2"
+        reservations:
+          memory: 512M
+          cpus: "0.5"
+
+# -----------------------------------------------------------------------------
+# Top-level secrets stanza.
+#
+# Default: external secret managed by `docker secret create`. This is the
+# right choice for production — the secret never touches the compose file or
+# any committed artefact.
+#
+# Dev/local-only alternative (uncomment + comment the `external: true` line):
+#     reddb_certificate:
+#       file: ./.secrets/reddb_certificate
+# Make sure `.secrets/` is in .gitignore.
+# -----------------------------------------------------------------------------
+secrets:
+  reddb_certificate:
+    external: true
+  # reddb_username:
+  #   external: true
+  # reddb_password:
+  #   external: true
+
+volumes:
+  reddb-data:

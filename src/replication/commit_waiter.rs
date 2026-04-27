@@ -134,12 +134,7 @@ impl CommitWaiter {
     /// (whether from an ack or a spurious wakeup), we recompute the
     /// count and either return or wait again with the remaining
     /// budget.
-    pub fn await_acks(
-        &self,
-        target_lsn: u64,
-        required: u32,
-        timeout: Duration,
-    ) -> AwaitOutcome {
+    pub fn await_acks(&self, target_lsn: u64, required: u32, timeout: Duration) -> AwaitOutcome {
         if required == 0 {
             self.metrics
                 .not_required_total
@@ -158,10 +153,7 @@ impl CommitWaiter {
             let now = Instant::now();
             if now >= deadline {
                 self.record_outcome_metrics(false, started);
-                return AwaitOutcome::TimedOut {
-                    observed,
-                    required,
-                };
+                return AwaitOutcome::TimedOut { observed, required };
             }
             let remaining = deadline - now;
             let (next_state, _wait_result) = self
@@ -239,9 +231,7 @@ mod tests {
     fn ack_arriving_during_wait_unblocks_caller() {
         let w = Arc::new(CommitWaiter::new());
         let waiter = Arc::clone(&w);
-        let handle = thread::spawn(move || {
-            waiter.await_acks(1000, 1, Duration::from_secs(2))
-        });
+        let handle = thread::spawn(move || waiter.await_acks(1000, 1, Duration::from_secs(2)));
         // Give the waiter a moment to enter the condvar wait.
         thread::sleep(Duration::from_millis(50));
         w.record_replica_ack("late", 1000);
@@ -259,7 +249,13 @@ mod tests {
         assert_eq!(r, AwaitOutcome::Reached(1));
         // Threshold of 2 still fails — only one replica is registered.
         let r2 = w.await_acks(50, 2, Duration::from_millis(20));
-        assert!(matches!(r2, AwaitOutcome::TimedOut { observed: 1, required: 2 }));
+        assert!(matches!(
+            r2,
+            AwaitOutcome::TimedOut {
+                observed: 1,
+                required: 2
+            }
+        ));
     }
 
     #[test]
@@ -279,7 +275,13 @@ mod tests {
         w.record_replica_ack("b", 100);
         w.drop_replica("a");
         let r = w.await_acks(100, 2, Duration::from_millis(20));
-        assert!(matches!(r, AwaitOutcome::TimedOut { observed: 1, required: 2 }));
+        assert!(matches!(
+            r,
+            AwaitOutcome::TimedOut {
+                observed: 1,
+                required: 2
+            }
+        ));
     }
 
     #[test]

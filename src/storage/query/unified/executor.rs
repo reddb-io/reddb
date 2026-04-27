@@ -170,7 +170,17 @@ impl UnifiedExecutor {
             | QueryExpr::CreateServer(_)
             | QueryExpr::DropServer(_)
             | QueryExpr::CreateForeignTable(_)
-            | QueryExpr::DropForeignTable(_) => Err(ExecutionError::new(
+            | QueryExpr::DropForeignTable(_)
+            | QueryExpr::Grant(_)
+            | QueryExpr::Revoke(_)
+            | QueryExpr::AlterUser(_)
+            | QueryExpr::CreateIamPolicy { .. }
+            | QueryExpr::DropIamPolicy { .. }
+            | QueryExpr::AttachPolicy { .. }
+            | QueryExpr::DetachPolicy { .. }
+            | QueryExpr::ShowPolicies { .. }
+            | QueryExpr::ShowEffectivePermissions { .. }
+            | QueryExpr::SimulatePolicy { .. } => Err(ExecutionError::new(
                 "DML/DDL/Command statements are not supported in UnifiedExecutor",
             )),
         }
@@ -378,7 +388,17 @@ impl UnifiedExecutor {
             | QueryExpr::CreateServer(_)
             | QueryExpr::DropServer(_)
             | QueryExpr::CreateForeignTable(_)
-            | QueryExpr::DropForeignTable(_) => Err(ExecutionError::new(
+            | QueryExpr::DropForeignTable(_)
+            | QueryExpr::Grant(_)
+            | QueryExpr::Revoke(_)
+            | QueryExpr::AlterUser(_)
+            | QueryExpr::CreateIamPolicy { .. }
+            | QueryExpr::DropIamPolicy { .. }
+            | QueryExpr::AttachPolicy { .. }
+            | QueryExpr::DetachPolicy { .. }
+            | QueryExpr::ShowPolicies { .. }
+            | QueryExpr::ShowEffectivePermissions { .. }
+            | QueryExpr::SimulatePolicy { .. } => Err(ExecutionError::new(
                 "DML/DDL/Command statements are not supported in UnifiedExecutor",
             )),
         }

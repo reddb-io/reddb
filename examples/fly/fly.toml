@@ -10,7 +10,18 @@
 # Operator workflow:
 #     fly launch --copy-config --no-deploy
 #     fly volumes create reddb_data --region gru --size 10
-#     fly secrets set RED_S3_ACCESS_KEY=... RED_S3_SECRET_KEY=...
+#
+#     # Generate the vault certificate on a trusted host and push it
+#     # into Fly's secret store BEFORE the first deploy. The cert
+#     # never appears in this fly.toml.
+#     CERT=$(red bootstrap --vault --path ./scratch/data.rdb \
+#                          --username admin --password-stdin \
+#                          --print-certificate --json | jq -r .certificate)
+#     fly secrets set REDDB_CERTIFICATE="$CERT" \
+#                     RED_S3_ACCESS_KEY=... RED_S3_SECRET_KEY=...
+#     unset CERT
+#     # BACK UP the certificate offline — there is no recovery if you lose it.
+#
 #     fly deploy
 #
 # Replace `app =` and `primary_region =` with your own.

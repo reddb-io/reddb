@@ -56,7 +56,13 @@ fn late_ack_does_not_retroactively_unblock_prior_waiter() {
     // does not retroactively change that.
     let outcome1 = r1.join().expect("waiter thread");
     assert!(
-        matches!(outcome1, AwaitOutcome::TimedOut { observed: 0, required: 1 }),
+        matches!(
+            outcome1,
+            AwaitOutcome::TimedOut {
+                observed: 0,
+                required: 1
+            }
+        ),
         "first waiter must have timed out before the late ack arrived; got {outcome1:?}"
     );
 

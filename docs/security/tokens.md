@@ -5,14 +5,14 @@ deployment shape:
 
 | Method | Best fit | Wire transports | RTT cost |
 |--------|----------|-----------------|----------|
-| API key (`rdb_k_*`) | service accounts, CI | HTTP, gRPC, RedWire v2 | 0 (header) |
-| Session token (`rdb_s_*`) | interactive logins | HTTP, gRPC, RedWire v2 | 1 RTT to mint |
-| SCRAM-SHA-256 | drivers wanting RFC 5802 challenge/response without TLS | RedWire v2, PG wire | 3 RTTs |
-| OAuth / OIDC JWT | external IdP federation | HTTP, gRPC, RedWire v2 | 0 (header) |
-| HMAC-signed request | tamper-evident replay-protected calls | HTTP, gRPC, RedWire v2 | 0 (header) |
-| Client certificate (mTLS) | zero-trust mesh | HTTPS, RedWire v2 + TLS | 0 (TLS handshake) |
+| API key (`rdb_k_*`) | service accounts, CI | HTTP, gRPC, RedWire | 0 (header) |
+| Session token (`rdb_s_*`) | interactive logins | HTTP, gRPC, RedWire | 1 RTT to mint |
+| SCRAM-SHA-256 | drivers wanting RFC 5802 challenge/response without TLS | RedWire, PG wire | 3 RTTs |
+| OAuth / OIDC JWT | external IdP federation | HTTP, gRPC, RedWire | 0 (header) |
+| HMAC-signed request | tamper-evident replay-protected calls | HTTP, gRPC, RedWire | 0 (header) |
+| Client certificate (mTLS) | zero-trust mesh | HTTPS, RedWire + TLS | 0 (TLS handshake) |
 
-The RedWire v2 handshake (`Hello` → `HelloAck`) advertises the
+The RedWire handshake (`Hello` → `HelloAck`) advertises the
 methods the server has enabled, so drivers pick the strongest one
 without an extra probe round-trip.
 
@@ -110,7 +110,7 @@ curl -X POST http://127.0.0.1:8080/query \
 ## SCRAM-SHA-256
 
 RFC 5802 SCRAM is wired both at the PG-wire listener and inside the
-RedWire v2 handshake. Useful when a driver wants a challenge/response
+RedWire handshake. Useful when a driver wants a challenge/response
 flow without forcing TLS — the password never crosses the wire and a
 replay can't steal future sessions.
 
@@ -130,7 +130,7 @@ use reddb::redwire::scram::{ScramClient, ScramConfig};
 let mut client = ScramClient::new("alice", "changeme")?;
 let client_first = client.client_first_message();
 // ... server-first → client-final → server-final exchange happens
-//     transparently inside the v2 Hello/AuthStart/AuthChallenge frames.
+//     transparently inside the RedWire Hello/AuthStart/AuthChallenge frames.
 ```
 
 ## OAuth / OIDC JWT
@@ -153,7 +153,7 @@ jwks_url = "https://auth.example.com/.well-known/jwks.json"
 
 The validator enforces `iss`, `aud`, `exp`, and `nbf`. Every
 transport that already understands `Authorization: Bearer …`
-(HTTP, gRPC, RedWire v2) accepts JWTs without further config.
+(HTTP, gRPC, RedWire) accepts JWTs without further config.
 
 ```bash
 curl http://reddb:8080/collections/users/scan \
@@ -209,7 +209,7 @@ identity. Two server-side identity-mapping modes:
 
 Optional X.509 OID-to-role mapping lets the cert carry the RedDB
 role inline, skipping the vault lookup. Configure via
-`AuthConfig.cert`. Drivers connecting to RedWire v2 + TLS pass
+`AuthConfig.cert`. Drivers connecting to RedWire + TLS pass
 `cert`, `key`, and `ca` either through the URL or via the
 `tls: { ca, cert, key }` options object documented in
 [`/clients/connection-strings`](../clients/connection-strings.md).
@@ -222,7 +222,7 @@ role inline, skipping the vault lookup. Configure via
 | HTTP `/collections/*`, `/query` | ✅ | ✅ | ❌ | ✅ | ✅ | via TLS |
 | HTTP `/admin/*` (audit logged) | ✅ | ✅ | ❌ | ✅ | ✅ | via TLS |
 | gRPC | ✅ | ✅ | ❌ | ✅ | ✅ | n/a |
-| RedWire v2 handshake | ✅ | mints | ✅ | ✅ | ✅ | ✅ |
+| RedWire handshake | ✅ | mints | ✅ | ✅ | ✅ | ✅ |
 | PG wire | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ |
 
 ## See also
@@ -230,4 +230,4 @@ role inline, skipping the vault lookup. Configure via
 - [Auth & Security Overview](overview.md) — RBAC, vault, RLS
 - [Connection Strings](/clients/connection-strings.md) — driver-side wiring
 - [Wire Protocol Comparison](/clients/wire-protocol-comparison.md) — handshake diagrams
-- ADR 0002 — phased rollout of SCRAM + OAuth in RedWire v2
+- ADR 0001 — RedWire wire protocol spec

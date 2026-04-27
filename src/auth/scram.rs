@@ -165,8 +165,7 @@ mod tests {
         let verifier = ScramVerifier::from_password("correct horse", salt.clone(), iter);
 
         let client_first_bare = "n=alice,r=cnonce";
-        let server_first =
-            "r=cnonce+snonce,s=cmVkZGItcnQtc2FsdA==,i=4096";
+        let server_first = "r=cnonce+snonce,s=cmVkZGItcnQtc2FsdA==,i=4096";
         let client_final_no_proof = "c=biws,r=cnonce+snonce";
         let am = auth_message(client_first_bare, server_first, client_final_no_proof);
 
@@ -200,6 +199,9 @@ mod tests {
 
     #[test]
     fn xor_basic() {
-        assert_eq!(xor(&[0xff, 0x00, 0xaa], &[0x0f, 0xff, 0x55]), vec![0xf0, 0xff, 0xff]);
+        assert_eq!(
+            xor(&[0xff, 0x00, 0xaa], &[0x0f, 0xff, 0x55]),
+            vec![0xf0, 0xff, 0xff]
+        );
     }
 }

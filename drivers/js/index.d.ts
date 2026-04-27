@@ -200,7 +200,7 @@ export function parseUri(uri: string): ParsedUri
 export function deriveLoginUrl(parsed: ParsedUri): string
 
 // ---------------------------------------------------------------
-// RedWire v2 native TCP transport (drivers/js/src/redwire.js)
+// RedWire native TCP transport (drivers/js/src/redwire.js)
 // ---------------------------------------------------------------
 
 /** RedWire frame kinds. Numeric values are the wire-stable spec. */
@@ -235,7 +235,7 @@ export interface RedWireConnectOptions {
 }
 
 /**
- * Open a v2 connection. Speaks the binary protocol directly via
+ * Open a RedWire connection. Speaks the binary protocol directly via
  * a TCP socket — no spawn, no fetch. Returned client matches the
  * `RpcClient` / `HttpRpcClient` surface so it slots into the
  * existing `RedDB` class.

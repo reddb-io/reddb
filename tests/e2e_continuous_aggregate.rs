@@ -142,10 +142,7 @@ fn refresh_absorbs_rows_and_query_returns_aggregate() {
         .expect("query ok");
     let v = r.result.records[0].values.get("v").expect("v");
     match v {
-        Value::Float(f) => assert!(
-            (*f - 15.0).abs() < 0.01,
-            "expected ~15.0, got {f}"
-        ),
+        Value::Float(f) => assert!((*f - 15.0).abs() < 0.01, "expected ~15.0, got {f}"),
         other => panic!("expected Float, got {other:?}"),
     }
 }

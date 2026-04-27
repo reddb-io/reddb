@@ -32,9 +32,7 @@ fn temp_prefix(tag: &str) -> String {
 #[test]
 fn n_threads_racing_for_one_lease_yield_exactly_one_winner() {
     let prefix = temp_prefix("race");
-    let store = Arc::new(
-        LeaseStore::new(Arc::new(LocalBackend)).with_prefix(prefix.clone()),
-    );
+    let store = Arc::new(LeaseStore::new(Arc::new(LocalBackend)).with_prefix(prefix.clone()));
 
     const CONTENDERS: usize = 8;
     let barrier = Arc::new(Barrier::new(CONTENDERS));

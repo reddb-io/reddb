@@ -1,0 +1,18 @@
+include: package:lints/recommended.yaml
+
+analyzer:
+  language:
+    strict-casts: true
+    strict-inference: true
+    strict-raw-types: true
+  errors:
+    todo: ignore
+    constant_identifier_names: ignore
+  exclude:
+    - .dart_tool/**
+    - build/**
+
+linter:
+  rules:
+    - prefer_final_locals
+    - unawaited_futures

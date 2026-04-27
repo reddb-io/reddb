@@ -3,6 +3,14 @@ target/
 PLAN.md
 .cargo/config.toml
 drivers/python/.venv/
+# Local tool artifacts
+.claude/
+CLAUDE.md
+claude.md
+.agents/
+skills-lock.json
+# AI tool metadata (local/runtime)
+wal/
 # Runtime WAL — binary, machine-local, should never be versioned.
 wal.log
 node_modules
@@ -11,4 +19,3 @@ flame-*.svg
 perf.data
 perf.data.old
 *.pprof
-

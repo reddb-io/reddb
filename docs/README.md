@@ -99,6 +99,24 @@ For the distinction between user-facing models, native persisted entity kinds, a
 structures such as indexes and probabilistic sketches, see
 [Data Model Overview](/data-models/overview.md).
 
+## Permissions that fit the data model
+
+RedDB authorization is policy-driven: users and groups attach JSON policies,
+explicit deny wins, conditions gate access by time/IP/MFA/tenant, and RLS
+handles entity-level filtering. The same vocabulary covers tables, documents,
+KV, graphs, vectors, time-series, and queues.
+
+```sql
+ATTACH POLICY 'tenant-reader' TO GROUP tenant_readers;
+ALTER USER alice ADD GROUP tenant_readers;
+SIMULATE alice ACTION select ON table:orders;
+```
+
+Start with [Auth & Security Overview](/security/overview.md), then use the
+[Permissioning Handbook](/security/permissions.md) for the full model and
+[Permission Recipes](/guides/permissions-cookbook.md) for copyable production
+patterns.
+
 ## Six query languages
 
 Write queries in the style you already know. RedDB parses RQL, SQL, Gremlin, SPARQL, Cypher, and natural language.

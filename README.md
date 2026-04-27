@@ -525,6 +525,16 @@ Or via npm CLI launcher:
 npx reddb-cli@latest server --http --bind 127.0.0.1:8080
 ```
 
+Or via Docker:
+
+```bash
+docker run --rm -p 8080:8080 ghcr.io/forattini-dev/reddb:latest
+```
+
+For production-secure Docker (vault + secrets) and Kubernetes, see
+[`docs/getting-started/docker.md`](./docs/getting-started/docker.md)
+and [`docs/security/vault.md`](./docs/security/vault.md).
+
 ---
 
 ## Links

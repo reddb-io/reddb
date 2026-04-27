@@ -276,10 +276,7 @@ mod tests {
         let theirs = json!({"user": json!({"name": "a", "age": 31})});
         let r = three_way_merge(&base, &ours, &theirs);
         assert!(r.is_clean());
-        assert_eq!(
-            r.merged,
-            json!({"user": json!({"name": "b", "age": 31})})
-        );
+        assert_eq!(r.merged, json!({"user": json!({"name": "b", "age": 31})}));
     }
 
     #[test]

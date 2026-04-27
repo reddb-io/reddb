@@ -144,7 +144,6 @@ impl RemoteBackend for LocalBackend {
         results.sort();
         Ok(results)
     }
-
 }
 
 impl AtomicRemoteBackend for LocalBackend {

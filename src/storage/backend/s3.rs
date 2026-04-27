@@ -521,7 +521,6 @@ impl RemoteBackend for S3Backend {
             })
             .collect())
     }
-
 }
 
 impl AtomicRemoteBackend for S3Backend {

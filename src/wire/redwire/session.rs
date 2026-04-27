@@ -1,16 +1,13 @@
-//! Per-connection v2 session: handshake → frame loop → bye.
+//! Per-connection RedWire session: handshake → frame loop → bye.
 //!
-//! The dispatch loop is intentionally narrow in this initial cut.
-//! It accepts:
+//! Dispatches the full RedWire frame set:
 //!   - Hello / AuthResponse (handshake only — once)
-//!   - Query  → runs SQL, replies with one Result frame (JSON payload)
-//!   - Ping   → Pong
-//!   - Bye    → break loop
-//!
-//! Bulk inserts, prepared statements, multiplexed streams,
-//! VectorSearch, GraphTraverse, Cancel — all land in subsequent
-//! PRs. The framing + auth pieces are the load-bearing parts of
-//! this PR; data-plane completeness is a follow-up.
+//!   - Query / BulkInsert / Get / Delete (data plane)
+//!   - QueryBinary / BulkInsertBinary / BulkInsertPrevalidated
+//!     (binary fast paths)
+//!   - BulkStreamStart/Rows/Commit (streaming bulk)
+//!   - Prepare / ExecutePrepared (prepared statements)
+//!   - Ping / Pong / Bye (lifecycle)
 
 use std::io;
 use std::sync::Arc;
@@ -27,7 +24,7 @@ use super::auth::{
 };
 use super::codec::{decode_frame, encode_frame};
 use super::frame::{Frame, MessageKind, FRAME_HEADER_SIZE};
-use super::{MAX_KNOWN_MINOR_VERSION, REDWIRE_V2_MAGIC};
+use super::{MAX_KNOWN_MINOR_VERSION, REDWIRE_MAGIC};
 
 #[derive(Debug)]
 struct AuthedSession {
@@ -48,20 +45,14 @@ where
     // Discriminator byte was already consumed by the service-router
     // detector when it dispatched here. If callers wire this from
     // a non-router path they must consume it themselves first.
-    let session = perform_handshake(
-        &mut stream,
-        auth_store.as_deref(),
-        oauth.as_deref(),
-    )
-    .await?;
+    let session = perform_handshake(&mut stream, auth_store.as_deref(), oauth.as_deref()).await?;
     if session.is_none() {
         return Ok(());
     }
     let _session = session.unwrap();
 
-    // Per-connection state for v1 prepared statements + streaming
-    // bulk inserts. Same shape the v1 listener uses; v2 just owns
-    // the lifetime.
+    // Per-connection state for prepared statements + streaming
+    // bulk inserts. Owned by the session; dropped on disconnect.
     let mut stream_session: Option<crate::wire::listener::BulkStreamSession> = None;
     let mut prepared_stmts: std::collections::HashMap<u32, crate::wire::listener::PreparedStmt> =
         std::collections::HashMap::new();
@@ -98,84 +89,94 @@ where
                 return Ok(());
             }
             MessageKind::Ping => {
-                let pong = encode_frame(&Frame::new(MessageKind::Pong, frame.correlation_id, vec![]));
+                let pong =
+                    encode_frame(&Frame::new(MessageKind::Pong, frame.correlation_id, vec![]));
                 stream.write_all(&pong).await?;
             }
             MessageKind::Query => {
                 let response = run_query(&runtime, &frame);
                 stream.write_all(&encode_frame(&response)).await?;
             }
-            // v1 inserted single rows via the BulkInsert code (with
-            // a one-element array). v2 keeps that code; the payload
-            // shape distinguishes single (`payload`) vs bulk (`payloads`).
+            // BulkInsert handles both single-row and bulk shapes off
+            // the same frame kind: payload `payload` = single,
+            // payload `payloads` = array.
             MessageKind::BulkInsert => {
                 let response = run_insert_dispatch(&runtime, &frame);
                 stream.write_all(&encode_frame(&response)).await?;
             }
-            // v1 binary fast paths — reuse the v1 handler verbatim.
-            // The handler returns a v1-framed response; we strip
-            // the 5-byte v1 header and rewrap with v2 framing,
-            // preserving zero-copy of the body bytes for max perf
-            // parity with v1 stress tools.
+            // Binary fast paths — handlers produce a length-prefixed
+            // body which we extract and rewrap as a RedWire frame,
+            // moving the body Vec without a copy.
             MessageKind::BulkInsertBinary => {
-                let v1 = crate::wire::listener::handle_bulk_insert_binary(&runtime, &frame.payload);
-                stream.write_all(&encode_frame(&rewrap_v1(&v1, &frame))).await?;
+                let raw =
+                    crate::wire::listener::handle_bulk_insert_binary(&runtime, &frame.payload);
+                stream
+                    .write_all(&encode_frame(&rewrap_handler_response(&raw, &frame)))
+                    .await?;
             }
             MessageKind::BulkInsertPrevalidated => {
-                let v1 = crate::wire::listener::handle_bulk_insert_binary_prevalidated(
+                let raw = crate::wire::listener::handle_bulk_insert_binary_prevalidated(
                     &runtime,
                     &frame.payload,
                 );
-                stream.write_all(&encode_frame(&rewrap_v1(&v1, &frame))).await?;
+                stream
+                    .write_all(&encode_frame(&rewrap_handler_response(&raw, &frame)))
+                    .await?;
             }
             MessageKind::QueryBinary => {
-                let v1 = crate::wire::listener::handle_query_binary(&runtime, &frame.payload);
-                stream.write_all(&encode_frame(&rewrap_v1(&v1, &frame))).await?;
+                let raw = crate::wire::listener::handle_query_binary(&runtime, &frame.payload);
+                stream
+                    .write_all(&encode_frame(&rewrap_handler_response(&raw, &frame)))
+                    .await?;
             }
-            // Streaming bulk insert (PG COPY equivalent). Same
-            // start/rows/commit dance as v1, with v2 framing on
-            // the wire. State persists across frames on the same
-            // session.
+            // Streaming bulk insert (PG COPY equivalent).
+            // start/rows/commit; per-session state persists across frames.
             MessageKind::BulkStreamStart => {
-                let v1 = crate::wire::listener::handle_stream_start(
-                    &frame.payload,
-                    &mut stream_session,
-                );
-                stream.write_all(&encode_frame(&rewrap_v1(&v1, &frame))).await?;
+                let raw =
+                    crate::wire::listener::handle_stream_start(&frame.payload, &mut stream_session);
+                stream
+                    .write_all(&encode_frame(&rewrap_handler_response(&raw, &frame)))
+                    .await?;
             }
             MessageKind::BulkStreamRows => {
-                let v1 = crate::wire::listener::handle_stream_rows(
+                let raw = crate::wire::listener::handle_stream_rows(
                     &runtime,
                     &frame.payload,
                     &mut stream_session,
                 );
-                stream.write_all(&encode_frame(&rewrap_v1(&v1, &frame))).await?;
+                stream
+                    .write_all(&encode_frame(&rewrap_handler_response(&raw, &frame)))
+                    .await?;
             }
             MessageKind::BulkStreamCommit => {
-                let v1 = crate::wire::listener::handle_stream_commit(
-                    &runtime,
-                    &mut stream_session,
-                );
-                stream.write_all(&encode_frame(&rewrap_v1(&v1, &frame))).await?;
+                let raw =
+                    crate::wire::listener::handle_stream_commit(&runtime, &mut stream_session);
+                stream
+                    .write_all(&encode_frame(&rewrap_handler_response(&raw, &frame)))
+                    .await?;
             }
             // Prepared statements — parse SQL once via Prepare,
             // bind + execute many times via ExecutePrepared.
             // Per-session HashMap holds compiled shapes.
             MessageKind::Prepare => {
-                let v1 = crate::wire::listener::handle_prepare(
+                let raw = crate::wire::listener::handle_prepare(
                     &runtime,
                     &frame.payload,
                     &mut prepared_stmts,
                 );
-                stream.write_all(&encode_frame(&rewrap_v1(&v1, &frame))).await?;
+                stream
+                    .write_all(&encode_frame(&rewrap_handler_response(&raw, &frame)))
+                    .await?;
             }
             MessageKind::ExecutePrepared => {
-                let v1 = crate::wire::listener::handle_execute_prepared(
+                let raw = crate::wire::listener::handle_execute_prepared(
                     &runtime,
                     &frame.payload,
                     &prepared_stmts,
                 );
-                stream.write_all(&encode_frame(&rewrap_v1(&v1, &frame))).await?;
+                stream
+                    .write_all(&encode_frame(&rewrap_handler_response(&raw, &frame)))
+                    .await?;
             }
             MessageKind::PreparedOk => {
                 // Server-emitted in response to Prepare; clients
@@ -200,7 +201,7 @@ where
                 let err = encode_frame(&Frame::new(
                     MessageKind::Error,
                     frame.correlation_id,
-                    format!("v2 server cannot dispatch {other:?} yet").into_bytes(),
+                    format!("redwire: cannot dispatch {other:?} yet").into_bytes(),
                 ));
                 stream.write_all(&err).await?;
             }
@@ -297,17 +298,12 @@ where
     // its own state machine before the 1-RTT bearer/anonymous
     // path runs.
     if chosen == "scram-sha-256" {
-        return perform_scram_handshake(
-            stream,
-            auth_store,
-            hello.correlation_id,
-            server_features,
-        )
-        .await;
+        return perform_scram_handshake(stream, auth_store, hello.correlation_id, server_features)
+            .await;
     }
 
-    // Step 4: AuthResponse (no challenge in v2.1 since bearer/anonymous
-    // are zero-round-trip).
+    // Step 4: AuthResponse (no challenge for the 1-RTT methods —
+    // bearer/anonymous send their proof in the first AuthResponse).
     let resp = read_frame(stream).await?;
     if resp.kind != MessageKind::AuthResponse {
         let fail = encode_frame(&Frame::new(
@@ -461,18 +457,17 @@ where
             }
         };
 
-    // 2. Look up the verifier. If the user doesn't exist or has
-    // no SCRAM verifier, run a dummy iteration count to keep the
-    // timing flat (no user-enumeration leak).
-    let verifier = store.lookup_scram_verifier(&username);
+    // 2. Look up the verifier. The wire handshake doesn't yet learn
+    // a tenant before the SCRAM exchange completes, so we resolve
+    // against the platform tenant. Tenant-scoped users authenticate
+    // through the JWT path (which carries the tenant claim) or a
+    // future explicit `tenant` extension to the AuthRequest payload.
+    // If the user doesn't exist or has no SCRAM verifier, run a
+    // dummy iteration count to keep the timing flat
+    // (no user-enumeration leak).
+    let verifier = store.lookup_scram_verifier_global(&username);
     let (salt, iter, stored_key, server_key, user_known) = match &verifier {
-        Some(v) => (
-            v.salt.clone(),
-            v.iter,
-            v.stored_key,
-            v.server_key,
-            true,
-        ),
+        Some(v) => (v.salt.clone(), v.iter, v.stored_key, v.server_key, true),
         None => (
             crate::auth::store::random_bytes(16),
             crate::auth::scram::DEFAULT_ITER,
@@ -529,11 +524,8 @@ where
     }
 
     // 5. Verify proof.
-    let auth_message = crate::auth::scram::auth_message(
-        &client_first_bare,
-        &server_first,
-        &client_final_no_proof,
-    );
+    let auth_message =
+        crate::auth::scram::auth_message(&client_first_bare, &server_first, &client_final_no_proof);
     let proof_ok = if user_known {
         let v = crate::auth::scram::ScramVerifier {
             salt: salt.clone(),
@@ -602,8 +594,8 @@ where
             .read_exact(&mut buf[FRAME_HEADER_SIZE..length])
             .await?;
     }
-    let (frame, _) = decode_frame(&buf)
-        .map_err(|e| io::Error::other(format!("decode frame: {e}")))?;
+    let (frame, _) =
+        decode_frame(&buf).map_err(|e| io::Error::other(format!("decode frame: {e}")))?;
     Ok(frame)
 }
 
@@ -647,7 +639,12 @@ fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
     };
     let obj = match v.as_object() {
         Some(o) => o,
-        None => return error_frame(frame.correlation_id, "Insert: payload must be a JSON object"),
+        None => {
+            return error_frame(
+                frame.correlation_id,
+                "Insert: payload must be a JSON object",
+            )
+        }
     };
     let collection = match obj.get("collection").and_then(|x| x.as_str()) {
         Some(s) if !s.is_empty() => s,
@@ -659,10 +656,12 @@ fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
         for entry in rows {
             let row = match entry.as_object() {
                 Some(o) => o,
-                None => return error_frame(
-                    frame.correlation_id,
-                    "Insert: each payload must be a JSON object",
-                ),
+                None => {
+                    return error_frame(
+                        frame.correlation_id,
+                        "Insert: each payload must be a JSON object",
+                    )
+                }
             };
             let sql = crate::rpc_stdio::build_insert_sql(collection, row.iter());
             match runtime.execute_query(&sql) {
@@ -678,10 +677,12 @@ fn run_insert_dispatch(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
 
     let row = match obj.get("payload").and_then(|x| x.as_object()) {
         Some(o) => o,
-        None => return error_frame(
-            frame.correlation_id,
-            "Insert: missing 'payload' object or 'payloads' array",
-        ),
+        None => {
+            return error_frame(
+                frame.correlation_id,
+                "Insert: missing 'payload' object or 'payloads' array",
+            )
+        }
     };
     let sql = crate::rpc_stdio::build_insert_sql(collection, row.iter());
     match runtime.execute_query(&sql) {
@@ -698,25 +699,27 @@ fn error_frame(correlation_id: u64, msg: &str) -> Frame {
     Frame::new(MessageKind::Error, correlation_id, msg.as_bytes().to_vec())
 }
 
-/// Adapt a v1-framed handler response into a v2 frame.
+/// Adapt a binary-fast-path handler response into a RedWire frame.
 ///
-/// v1 handlers (`handle_bulk_insert_binary`, `handle_query_binary`,
-/// etc) return `[u32 length][u8 msg_type][body]` already wrapped.
-/// v2 carries the same body verbatim (kinds 0x01..0x0F are
-/// preserved by design), so we strip the 5-byte v1 header and
-/// rewrap with v2 framing using the same `correlation_id` and
-/// the kind byte from the v1 frame.
+/// The fast-path handlers (`handle_bulk_insert_binary`,
+/// `handle_query_binary`, etc) return their result already wrapped
+/// in a 5-byte length-prefixed envelope (`[u32 length][u8 kind][body]`).
+/// RedWire carries the same body verbatim — kinds 0x01..0x0F are
+/// the same numeric values — so we strip the 5-byte envelope and
+/// rewrap with a RedWire header using the response correlation id.
 ///
 /// The payload `Vec<u8>` is moved into the new frame — no extra
-/// allocation, no body copy — which is the property that lets
-/// v2 hit v1 perf parity on bulk insert benchmarks.
-fn rewrap_v1(v1_bytes: &[u8], req: &Frame) -> Frame {
-    if v1_bytes.len() < 5 {
-        return error_frame(req.correlation_id, "v1 handler returned a truncated frame");
+/// allocation, no body copy — preserving max bulk-insert perf.
+fn rewrap_handler_response(raw_bytes: &[u8], req: &Frame) -> Frame {
+    if raw_bytes.len() < 5 {
+        return error_frame(
+            req.correlation_id,
+            "fast-path handler returned a truncated frame",
+        );
     }
-    let kind_byte = v1_bytes[4];
+    let kind_byte = raw_bytes[4];
     let kind = MessageKind::from_u8(kind_byte).unwrap_or(MessageKind::Error);
-    let body = v1_bytes[5..].to_vec();
+    let body = raw_bytes[5..].to_vec();
     Frame::new(kind, req.correlation_id, body)
 }
 
@@ -771,7 +774,12 @@ fn run_delete(runtime: &RedDBRuntime, frame: &Frame) -> Frame {
     };
     let obj = match v.as_object() {
         Some(o) => o,
-        None => return error_frame(frame.correlation_id, "Delete: payload must be a JSON object"),
+        None => {
+            return error_frame(
+                frame.correlation_id,
+                "Delete: payload must be a JSON object",
+            )
+        }
     };
     let collection = match obj.get("collection").and_then(|x| x.as_str()) {
         Some(s) if !s.is_empty() => s,
@@ -803,6 +811,6 @@ mod tests {
 
     #[test]
     fn magic_byte_is_0xfe() {
-        assert_eq!(REDWIRE_V2_MAGIC, 0xFE);
+        assert_eq!(REDWIRE_MAGIC, 0xFE);
     }
 }

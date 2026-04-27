@@ -1,38 +1,27 @@
 # Wire-Protocol Comparison: Postgres vs Mongo vs RedWire
 
-How RedDB's wire protocol — v1 (`src/wire/protocol.rs`, the bench
-fast path) and v2 (ADR 0001 + 0002) — lines up with the two databases
-everyone benchmarks against.
+How RedDB's wire protocol (RedWire — `src/wire/`, ADR 0001) lines up
+with the two databases everyone benchmarks against.
 
-> **Status (2026-04-26):** v2 is wired end-to-end. Phases landed are
-> framing/handshake/auth (Phase 2), per-frame zstd compression
-> (Phase 1 of ADR 0002), TLS+mTLS dispatch (Phase 2 of ADR 0002),
-> SCRAM-SHA-256 over the v2 handshake (Phase 3), and OAuth/JWT
-> over the v2 handshake (Phase 4). Both v1 and v2 share port 5050;
-> the first byte off the wire (`0xFE` = v2, anything else = v1)
-> is the discriminator. v1 stays the bench fast path — v2 falls
-> through to the v1 binary handlers after auth, so steady-state
-> perf is identical.
-
-| Dimension              | PostgreSQL F+B v3 | MongoDB OP_MSG | RedWire v1 (today) | RedWire v2 (ADR) |
-|------------------------|-------------------|----------------|--------------------|--------------------|
-| **Transport**          | TCP / TLS         | TCP / TLS      | TCP / TLS          | TCP / TLS          |
-| **Default port**       | 5432              | 27017          | 5050               | 5050               |
-| **Frame layout**       | `[u8 type][u32 len][body]` | `[u32 len][u32 reqId][u32 respTo][u32 opCode][body]` | `[u32 len][u8 kind][body]` | `[u32 len][u8 kind][u8 flags][u16 stream][u64 corr_id][body]` |
-| **Header overhead**    | 5 bytes           | 16 bytes       | 5 bytes            | 16 bytes           |
-| **Body encoding**      | text + binary mix | BSON           | hand-rolled binary | CBOR + RedDB tags  |
-| **Multiplexing**       | extended query    | `requestId`    | none               | `correlation_id`   |
-| **Pipelining**         | yes               | yes            | one-at-a-time      | yes                |
-| **Cancellation**       | side-socket       | killOp         | reconnect          | in-band Cancel     |
-| **Auth in handshake**  | SCRAM/MD5/cert    | SASL           | none               | SCRAM/Bearer/mTLS/OAuth ✅ |
-| **TLS upgrade**        | StartTLS          | StartTLS       | direct TLS         | direct TLS / ALPN ✅ |
-| **Streaming results**  | RowDescription + DataRow* | bulk reply | one MSG_RESULT     | RowDescription + DataRow* |
-| **Server push**        | LISTEN/NOTIFY     | change streams | none               | Notice frame       |
-| **Schema-typed values**| binary modes      | BSON tags      | per-msg tag bytes  | CBOR + tags        |
-| **Compression**        | libpq-only        | snappy/zlib/zstd | none             | per-frame zstd ✅    |
-| **Version negotiation**| hardcoded         | `hello.maxWireVersion` | none       | `Hello.versions[]` ✅ |
-| **Driver count**       | 80+               | 50+            | 1 (Rust example)   | 2 (Rust + JS); Python+Go+Java target |
-| **Spec stability**     | frozen 2003       | OP_MSG since 4.0 | benchmark-tooling stable | freeze after Phase 4 (current) |
+| Dimension              | PostgreSQL F+B v3 | MongoDB OP_MSG | RedWire           |
+|------------------------|-------------------|----------------|--------------------|
+| **Transport**          | TCP / TLS         | TCP / TLS      | TCP / TLS          |
+| **Default port**       | 5432              | 27017          | 5050               |
+| **Frame layout**       | `[u8 type][u32 len][body]` | `[u32 len][u32 reqId][u32 respTo][u32 opCode][body]` | `[u32 len][u8 kind][u8 flags][u16 stream][u64 corr_id][body]` |
+| **Header overhead**    | 5 bytes           | 16 bytes       | 16 bytes           |
+| **Body encoding**      | text + binary mix | BSON           | CBOR + RedDB tags  |
+| **Multiplexing**       | extended query    | `requestId`    | `correlation_id`   |
+| **Pipelining**         | yes               | yes            | yes                |
+| **Cancellation**       | side-socket       | killOp         | in-band Cancel     |
+| **Auth in handshake**  | SCRAM/MD5/cert    | SASL           | SCRAM/Bearer/mTLS/OAuth |
+| **TLS upgrade**        | StartTLS          | StartTLS       | direct TLS / ALPN  |
+| **Streaming results**  | RowDescription + DataRow* | bulk reply | RowDescription + DataRow* |
+| **Server push**        | LISTEN/NOTIFY     | change streams | Notice frame       |
+| **Schema-typed values**| binary modes      | BSON tags      | CBOR + tags        |
+| **Compression**        | libpq-only        | snappy/zlib/zstd | per-frame zstd   |
+| **Version negotiation**| hardcoded         | `hello.maxWireVersion` | `Hello.versions[]` |
+| **Driver count**       | 80+               | 50+            | 2 first-party (Rust + JS) + community drivers in Go / Java / Python / .NET / C++ / Dart / Kotlin / PHP / Zig |
+| **Spec stability**     | frozen 2003       | OP_MSG since 4.0 | pre-1.0 — additive bumps via `Hello.versions[]` |
 
 ## Auth story side by side
 
@@ -58,7 +47,7 @@ C → S  saslContinue { conversationId, payload: client-final }
 S → C  saslFinal
 ```
 
-**RedWire SCRAM-SHA-256 handshake (landed, Phase 3 of ADR 0002):**
+**RedWire SCRAM-SHA-256 handshake:**
 ```
 C → S  Hello { versions: [2], auth_methods: ["scram-sha-256", "bearer", "oauth-jwt", "mtls"] }
 S → C  HelloAck { version: 2, server_caps, advertised_methods }
@@ -76,11 +65,11 @@ Mongo's `hello`. SCRAM primitives live in `src/auth/scram.rs`
 JWT validator path is shared with the HTTP and gRPC surfaces
 through `AuthConfig.oauth`.
 
-## What v1 already gives us
+## What RedWire gives us
 
-Don't lose sight of this when reading v2: v1 is what makes RedDB
-beat Postgres in 7/10 benchmarks. The bench tools (`stress_wire_client`,
-`profile_concurrent_wire`) talk this protocol directly:
+RedWire is what makes RedDB beat Postgres in 7/10 benchmarks. The
+bench tools (`stress_wire_client`, `profile_concurrent_wire`) talk
+this protocol directly:
 
 - **Framed binary on TCP** — no HTTP parse, no gRPC trip
 - **Typed value tags** — `VAL_I64`, `VAL_TEXT`, `VAL_F64`, etc
@@ -90,12 +79,10 @@ beat Postgres in 7/10 benchmarks. The bench tools (`stress_wire_client`,
   DEALLOCATE`
 - **TLS-wrapped variant** — `start_wire_tls_listener`
 - **Unix-socket variant** — `start_wire_unix_listener`
+- **Operational layer** — Hello/Auth handshake, multiplexed streams,
+  per-frame zstd compression, version negotiation.
 
-What v1 doesn't have is the "operational" layer of PG/Mongo:
-auth, multiplex, compression, version negotiation. v2 adds those
-as a strict superset, gated on a single 0xFE startup byte.
-
-## What v2 takes from each
+## What RedWire takes from each
 
 **From Postgres:**
 - Streaming `RowDescription` + `DataRow*` + `Stream End` — the simplest
@@ -122,27 +109,24 @@ as a strict superset, gated on a single 0xFE startup byte.
   hack; MongoDB has it via `MONGODB-OIDC` since 7.0). RedWire treats
   it as a first-class auth method.
 
-## Performance equivalence claim
+## Performance
 
-v1 already produces the bench numbers. v2 doesn't move the
-data-plane shape — it adds a one-time handshake (Hello + Auth
-round-trip, ~3 ms with TLS resumption) and zero per-query
-overhead beyond the extra 11 bytes in the frame header.
+A one-time handshake (Hello + Auth round-trip, ~3 ms with TLS
+resumption) is followed by zero per-query overhead beyond the
+16-byte frame header.
 
-Steady-state targets unchanged from v1:
+Steady-state targets:
 
-| Workload                | libpq (PG) | mongodb-driver | RedWire v1/v2 target |
-|-------------------------|------------|----------------|----------------------|
-| `SELECT 1` round-trip   | ~30 µs     | ~35 µs         | ≤ 30 µs              |
-| Insert 10k rows         | ~250 ms    | ~280 ms        | ≤ 250 ms             |
-| Stream 1M rows          | ~1.2 s     | ~1.4 s         | ≤ 1.2 s              |
-| Vector kNN (k=10)       | n/a        | n/a            | ≤ 5 ms (HNSW)        |
+| Workload                | libpq (PG) | mongodb-driver | RedWire target |
+|-------------------------|------------|----------------|-----------------|
+| `SELECT 1` round-trip   | ~30 µs     | ~35 µs         | ≤ 30 µs         |
+| Insert 10k rows         | ~250 ms    | ~280 ms        | ≤ 250 ms        |
+| Stream 1M rows          | ~1.2 s     | ~1.4 s         | ≤ 1.2 s         |
+| Vector kNN (k=10)       | n/a        | n/a            | ≤ 5 ms (HNSW)   |
 
-The Phase 1 connection-string multiplexer (HTTP + gRPC bridge in
-the JS driver) is **not** competitive on tight benchmarks —
-every HTTP request pays ~250 µs in headers + TLS resumption +
-URL parse. v2 brings the JS driver onto v1's perf profile by
-default.
+The HTTP REST surface is **not** competitive on tight benchmarks —
+every HTTP request pays ~250 µs in headers + TLS resumption + URL
+parse. Use RedWire when the workload is latency-sensitive.
 
 ## Why a binary protocol matters even for slow queries
 

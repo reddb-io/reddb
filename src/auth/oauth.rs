@@ -59,6 +59,10 @@ pub struct OAuthConfig {
     pub identity_mode: OAuthIdentityMode,
     /// Optional claim whose string value maps to `Role::from_str`.
     pub role_claim: Option<String>,
+    /// Claim name carrying the tenant id. Optional — when `None` no
+    /// tenant is extracted (the resulting identity is platform-scoped).
+    /// Convention: `"tenant"`. Override with `RED_OAUTH_TENANT_CLAIM`.
+    pub tenant_claim: Option<String>,
     pub default_role: Role,
     pub map_to_existing_users: bool,
     /// Accept `Bearer`-prefixed Authorization headers. Always true in
@@ -76,6 +80,7 @@ impl Default for OAuthConfig {
             jwks_url: String::new(),
             identity_mode: OAuthIdentityMode::SubClaim,
             role_claim: None,
+            tenant_claim: None,
             default_role: Role::Read,
             map_to_existing_users: true,
             accept_bearer: true,
@@ -140,6 +145,9 @@ impl JwtClaims {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OAuthIdentity {
     pub username: String,
+    /// Tenant scope extracted from the configured `tenant_claim`, or
+    /// `None` when no claim is configured / the token doesn't carry it.
+    pub tenant: Option<String>,
     pub role: Role,
     pub issuer: String,
     pub subject: Option<String>,
@@ -370,8 +378,19 @@ impl OAuthValidator {
             self.derive_role_from_claims(&token.claims)?
         };
 
+        // Tenant extraction (Phase: User tenant scoping). Reads the
+        // configured tenant_claim if present; otherwise leaves the
+        // identity unscoped (platform-tenant).
+        let tenant = self
+            .config
+            .tenant_claim
+            .as_deref()
+            .and_then(|name| token.claims.claim(name).map(|s| s.to_string()))
+            .filter(|s| !s.is_empty());
+
         Ok(OAuthIdentity {
             username,
+            tenant,
             role,
             issuer: self.config.issuer.clone(),
             subject: token.claims.sub.clone(),
@@ -406,6 +425,7 @@ mod tests {
             jwks_url: String::new(),
             identity_mode: OAuthIdentityMode::SubClaim,
             role_claim: None,
+            tenant_claim: None,
             default_role: Role::Read,
             map_to_existing_users: false,
             accept_bearer: true,
@@ -553,5 +573,47 @@ mod tests {
             .insert("preferred_username".into(), "alice.smith".into());
         let id = v.validate(&token, 1_700_000_000, |_| None).unwrap();
         assert_eq!(id.username, "alice.smith");
+    }
+
+    #[test]
+    fn tenant_claim_extracted_when_configured() {
+        let mut config = base_config();
+        config.tenant_claim = Some("tenant".into());
+        let v = OAuthValidator::with_verifier(config, noop_verifier());
+        v.set_jwks(vec![Jwk {
+            kid: "k1".to_string(),
+            alg: "RS256".to_string(),
+            key_bytes: Vec::new(),
+        }]);
+        let mut token = base_token(1_700_000_000);
+        token.claims.extra.insert("tenant".into(), "acme".into());
+        let id = v.validate(&token, 1_700_000_000, |_| None).unwrap();
+        assert_eq!(id.tenant.as_deref(), Some("acme"));
+    }
+
+    #[test]
+    fn tenant_absent_when_claim_unconfigured() {
+        let v = seeded_validator();
+        let mut token = base_token(1_700_000_000);
+        token.claims.extra.insert("tenant".into(), "acme".into());
+        let id = v.validate(&token, 1_700_000_000, |_| None).unwrap();
+        // tenant_claim is None on base_config -> identity has no tenant.
+        assert!(id.tenant.is_none());
+    }
+
+    #[test]
+    fn tenant_claim_custom_name() {
+        let mut config = base_config();
+        config.tenant_claim = Some("org_id".into());
+        let v = OAuthValidator::with_verifier(config, noop_verifier());
+        v.set_jwks(vec![Jwk {
+            kid: "k1".to_string(),
+            alg: "RS256".to_string(),
+            key_bytes: Vec::new(),
+        }]);
+        let mut token = base_token(1_700_000_000);
+        token.claims.extra.insert("org_id".into(), "globex".into());
+        let id = v.validate(&token, 1_700_000_000, |_| None).unwrap();
+        assert_eq!(id.tenant.as_deref(), Some("globex"));
     }
 }

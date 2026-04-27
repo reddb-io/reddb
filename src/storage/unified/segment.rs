@@ -1135,8 +1135,7 @@ impl GrowingSegment {
                 if let EntityData::Row(row) = &entity.data {
                     if row.schema.is_some() && !row.columns.is_empty() {
                         if columnar_zone_updates.is_empty() {
-                            columnar_zone_updates =
-                                vec![Vec::with_capacity(n); row.columns.len()];
+                            columnar_zone_updates = vec![Vec::with_capacity(n); row.columns.len()];
                             columnar_schema = row.schema.clone();
                         }
                         for (ci, val) in row.columns.iter().enumerate() {

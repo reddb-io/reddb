@@ -79,11 +79,7 @@ impl RuntimeVcsPort for RedDBRuntime {
         RedDBRuntime::vcs_conflicts_list(self, merge_state_id)
     }
 
-    fn vcs_conflict_resolve(
-        &self,
-        conflict_id: &str,
-        resolved: JsonValue,
-    ) -> RedDBResult<()> {
+    fn vcs_conflict_resolve(&self, conflict_id: &str, resolved: JsonValue) -> RedDBResult<()> {
         RedDBRuntime::vcs_conflict_resolve(self, conflict_id, resolved)
     }
 

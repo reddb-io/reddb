@@ -425,10 +425,8 @@ pub trait RuntimeVcsPort {
         input: crate::application::vcs::CreateTagInput,
     ) -> RedDBResult<crate::application::vcs::Ref>;
 
-    fn vcs_list_refs(
-        &self,
-        prefix: Option<&str>,
-    ) -> RedDBResult<Vec<crate::application::vcs::Ref>>;
+    fn vcs_list_refs(&self, prefix: Option<&str>)
+        -> RedDBResult<Vec<crate::application::vcs::Ref>>;
 
     fn vcs_checkout(
         &self,
@@ -471,11 +469,8 @@ pub trait RuntimeVcsPort {
         input: crate::application::vcs::StatusInput,
     ) -> RedDBResult<crate::application::vcs::Status>;
 
-    fn vcs_lca(
-        &self,
-        a: &str,
-        b: &str,
-    ) -> RedDBResult<Option<crate::application::vcs::CommitHash>>;
+    fn vcs_lca(&self, a: &str, b: &str)
+        -> RedDBResult<Option<crate::application::vcs::CommitHash>>;
 
     fn vcs_conflicts_list(
         &self,
@@ -493,10 +488,8 @@ pub trait RuntimeVcsPort {
         spec: crate::application::vcs::AsOfSpec,
     ) -> RedDBResult<crate::storage::transaction::snapshot::Xid>;
 
-    fn vcs_resolve_commitish(
-        &self,
-        spec: &str,
-    ) -> RedDBResult<crate::application::vcs::CommitHash>;
+    fn vcs_resolve_commitish(&self, spec: &str)
+        -> RedDBResult<crate::application::vcs::CommitHash>;
 
     fn vcs_set_versioned(&self, collection: &str, enabled: bool) -> RedDBResult<()>;
     fn vcs_list_versioned(&self) -> RedDBResult<Vec<String>>;
@@ -761,10 +754,7 @@ pub trait RuntimeNativePortCtx: RuntimeNativePort {
         let _ = ctx;
         self.create_export(name)
     }
-    fn checkpoint_ctx(
-        &self,
-        ctx: &crate::application::OperationContext,
-    ) -> RedDBResult<()> {
+    fn checkpoint_ctx(&self, ctx: &crate::application::OperationContext) -> RedDBResult<()> {
         let _ = ctx;
         self.checkpoint()
     }
@@ -775,10 +765,7 @@ pub trait RuntimeNativePortCtx: RuntimeNativePort {
         let _ = ctx;
         self.apply_retention_policy()
     }
-    fn run_maintenance_ctx(
-        &self,
-        ctx: &crate::application::OperationContext,
-    ) -> RedDBResult<()> {
+    fn run_maintenance_ctx(&self, ctx: &crate::application::OperationContext) -> RedDBResult<()> {
         let _ = ctx;
         self.run_maintenance()
     }

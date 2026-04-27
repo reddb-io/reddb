@@ -70,7 +70,8 @@ impl ResourceLimits {
         let mut out = Self {
             max_db_size_bytes: Self::read_u64("MAX_DB_SIZE_BYTES"),
             max_connections: Self::read_u64("MAX_CONNECTIONS"),
-            max_memory_bytes: Self::read_u64("MAX_MEMORY_MB").map(|mb| mb.saturating_mul(1_048_576)),
+            max_memory_bytes: Self::read_u64("MAX_MEMORY_MB")
+                .map(|mb| mb.saturating_mul(1_048_576)),
             max_qps: Self::read_u64("MAX_QPS"),
             max_query_duration: Self::read_u64("MAX_QUERY_DURATION_MS").map(Duration::from_millis),
             max_result_bytes: Self::read_u64("MAX_RESULT_BYTES"),

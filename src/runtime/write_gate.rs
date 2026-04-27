@@ -137,10 +137,7 @@ impl WriteGate {
     /// the only way to mint such a token is to call this method,
     /// so forgetting to consult the gate becomes a structural
     /// property — not a discipline question.
-    pub fn check_consent(
-        &self,
-        kind: WriteKind,
-    ) -> RedDBResult<crate::application::WriteConsent> {
+    pub fn check_consent(&self, kind: WriteKind) -> RedDBResult<crate::application::WriteConsent> {
         if matches!(self.role, ReplicationRole::Replica { .. }) {
             return Err(RedDBError::ReadOnly(format!(
                 "instance is a replica — {} rejected on public surface",

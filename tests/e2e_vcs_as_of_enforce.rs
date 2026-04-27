@@ -14,10 +14,7 @@ use reddb::application::{
 use reddb::{RedDBOptions, RedDBRuntime};
 
 fn rt() -> Arc<RedDBRuntime> {
-    Arc::new(
-        RedDBRuntime::with_options(RedDBOptions::in_memory())
-            .expect("in-memory runtime"),
-    )
+    Arc::new(RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("in-memory runtime"))
 }
 
 fn author() -> Author {
@@ -152,12 +149,8 @@ fn as_of_branch_after_checkout_divergent_history() {
         .unwrap();
     assert_ne!(side_xid, main_xid);
 
-    let by_hash_side = vcs(&rt)
-        .resolve_as_of(AsOfSpec::Commit(side_head))
-        .unwrap();
-    let by_hash_main = vcs(&rt)
-        .resolve_as_of(AsOfSpec::Commit(main_head))
-        .unwrap();
+    let by_hash_side = vcs(&rt).resolve_as_of(AsOfSpec::Commit(side_head)).unwrap();
+    let by_hash_main = vcs(&rt).resolve_as_of(AsOfSpec::Commit(main_head)).unwrap();
     assert_eq!(by_hash_side, side_xid);
     assert_eq!(by_hash_main, main_xid);
 }

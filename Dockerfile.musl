@@ -1,14 +1,19 @@
 # PLAN.md Phase 7.2 — static-musl Dockerfile.
 #
 # Produces a `scratch`-based image carrying nothing but the static
-# `red` binary. Output image is < 30 MB and runs on every Linux
-# distro (no glibc dependency, no shared libraries).
+# `red` binary plus tini and CA bundle. Output image is < 30 MB and
+# runs on every Linux distro (no glibc dependency, no shared libs).
 #
 # Build:
 #   docker buildx build -f Dockerfile.musl -t reddb:musl .
 #
-# Run:
+# Run with secret-file mounts (no shell available — the binary itself
+# resolves *_FILE env vars; see src/auth/vault.rs and Agent #2's
+# REDDB_CERTIFICATE_FILE wiring):
+#
 #   docker run --rm -p 8080:8080 -v reddb-data:/data \
+#     -v ./cert.txt:/run/secrets/reddb_certificate:ro \
+#     -e REDDB_CERTIFICATE_FILE=/run/secrets/reddb_certificate \
 #     -e RED_BACKEND=fs -e RED_FS_PATH=/backups \
 #     reddb:musl
 
@@ -28,14 +33,39 @@ RUN cargo build \
         --bin red \
         --target x86_64-unknown-linux-musl
 
-# Pure static — `scratch` would work but `alpine` is included so
-# /tmp + /etc/ssl/certs exist for HTTPS backends. Pick scratch
-# instead if you don't need TLS at the engine.
+# Pure static — alpine carries CA certs + tini for orchestrator-friendly
+# signal forwarding. Switch the FROM to `scratch` and drop the apk line
+# if you don't need TLS at the engine and rely on the orchestrator's
+# init/PID-1 (k8s, Nomad, ECS all forward SIGTERM correctly without tini).
 FROM alpine:3.19
-RUN apk add --no-cache ca-certificates tini
-COPY --from=build /src/target/x86_64-unknown-linux-musl/release-static/red /usr/local/bin/red
+
+# Match the non-root reddb user used by the debian-slim image so chart
+# and example manifests work uniformly across both image variants.
+RUN apk add --no-cache ca-certificates tini \
+    && addgroup -S -g 10001 reddb \
+    && adduser -S -u 10001 -G reddb -H -s /sbin/nologin reddb \
+    && install -d -o 10001 -g 10001 -m 0750 /data \
+    && install -d -o 10001 -g 10001 -m 0750 /run/secrets
+
+COPY --from=build --chown=10001:10001 /src/target/x86_64-unknown-linux-musl/release-static/red /usr/local/bin/red
+
+USER 10001:10001
+WORKDIR /data
+VOLUME /data
 EXPOSE 8080 50051
+
+# === Secrets via file mounts ====================================================
+# This image has NO shell. Agent #2's binary-side *_FILE env-var expansion
+# (REDDB_CERTIFICATE_FILE, REDDB_VAULT_KEY_FILE, REDDB_PASSWORD_FILE,
+# REDDB_ROOT_TOKEN_FILE) is the only path. Mount the secret as a file
+# and pass *_FILE pointing at it. NEVER bake the cert into the image.
+# See examples/docker-compose.vault.yml.
+# ===============================================================================
+
 HEALTHCHECK --interval=10s --timeout=2s --start-period=5s --retries=3 \
     CMD wget -qO- http://127.0.0.1:8080/health/live >/dev/null 2>&1 || exit 1
-ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["/usr/local/bin/red", "server", "--http", "--grpc", "--path", "/data/data.rdb"]
+
+# tini reaps zombies and forwards SIGTERM cleanly to the engine. The binary's
+# own signal handler runs graceful shutdown (flush + checkpoint + final backup).
+ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/red"]
+CMD ["server", "--http", "--grpc", "--vault", "--path", "/data/data.rdb"]

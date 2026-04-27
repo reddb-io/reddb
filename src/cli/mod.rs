@@ -3,6 +3,7 @@
 /// Schema-driven CLI with tokenizer, router, help generation, and shell
 /// completion. Self-contained -- no external dependencies on config or
 /// storage layers.
+pub mod bootstrap;
 pub mod commands;
 pub mod complete;
 pub mod error;

@@ -24,6 +24,10 @@ SourceConfiguration:
         RED_LOG_LEVEL: "info"
         RED_LEASE_REQUIRED: "true"
       RuntimeEnvironmentSecrets:
+        # Encrypted-vault key — generated via `red bootstrap --print-certificate`
+        # and stored in AWS Secrets Manager as a SecureString. The TaskRole must
+        # have `secretsmanager:GetSecretValue` on this ARN.
+        REDDB_CERTIFICATE: arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:reddb/vault-certificate:::
         RED_S3_ACCESS_KEY: arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:reddb/s3-access:::
         RED_S3_SECRET_KEY: arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:reddb/s3-secret:::
         RED_ADMIN_TOKEN: arn:aws:secretsmanager:us-east-1:ACCOUNT_ID:secret:reddb/admin-token:::

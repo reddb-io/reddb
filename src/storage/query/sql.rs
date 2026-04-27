@@ -1,13 +1,13 @@
 use crate::storage::query::ast::{
-    AlterTableQuery, AskQuery, CopyFormat, CopyFromQuery, CreateForeignTableQuery,
+    AlterTableQuery, AlterUserStmt, AskQuery, CopyFormat, CopyFromQuery, CreateForeignTableQuery,
     CreateIndexQuery, CreatePolicyQuery, CreateQueueQuery, CreateSchemaQuery, CreateSequenceQuery,
     CreateServerQuery, CreateTableQuery, CreateTimeSeriesQuery, CreateTreeQuery, CreateViewQuery,
     DeleteQuery, DropForeignTableQuery, DropIndexQuery, DropPolicyQuery, DropQueueQuery,
     DropSchemaQuery, DropSequenceQuery, DropServerQuery, DropTableQuery, DropTimeSeriesQuery,
-    DropTreeQuery, DropViewQuery, ExplainAlterQuery, ForeignColumnDef, GraphCommand, GraphQuery,
-    HybridQuery, InsertQuery, JoinQuery, MaintenanceCommand, PathQuery, PolicyAction,
-    ProbabilisticCommand, QueryExpr, QueueCommand, RefreshMaterializedViewQuery, SearchCommand,
-    TableQuery, TreeCommand, TxnControl, UpdateQuery, VectorQuery,
+    DropTreeQuery, DropViewQuery, ExplainAlterQuery, ForeignColumnDef, GrantStmt, GraphCommand,
+    GraphQuery, HybridQuery, InsertQuery, JoinQuery, MaintenanceCommand, PathQuery, PolicyAction,
+    ProbabilisticCommand, QueryExpr, QueueCommand, RefreshMaterializedViewQuery, RevokeStmt,
+    SearchCommand, TableQuery, TreeCommand, TxnControl, UpdateQuery, VectorQuery,
 };
 use crate::storage::query::parser::{ParseError, Parser};
 use crate::storage::query::Token;
@@ -60,8 +60,13 @@ pub enum SqlCommand {
     CreateTree(CreateTreeQuery),
     DropTree(DropTreeQuery),
     Probabilistic(ProbabilisticCommand),
-    SetConfig { key: String, value: Value },
-    ShowConfig { prefix: Option<String> },
+    SetConfig {
+        key: String,
+        value: Value,
+    },
+    ShowConfig {
+        prefix: Option<String>,
+    },
     SetTenant(Option<String>),
     ShowTenant,
     TransactionControl(TxnControl),
@@ -80,6 +85,17 @@ pub enum SqlCommand {
     DropServer(DropServerQuery),
     CreateForeignTable(CreateForeignTableQuery),
     DropForeignTable(DropForeignTableQuery),
+    /// `GRANT … ON … TO …`
+    Grant(GrantStmt),
+    /// `REVOKE … ON … FROM …`
+    Revoke(RevokeStmt),
+    /// `ALTER USER name <attrs>`
+    AlterUser(AlterUserStmt),
+    /// IAM policy DDL (CREATE POLICY '...' AS '...', DROP POLICY '...',
+    /// ATTACH/DETACH POLICY, SHOW POLICIES, SIMULATE, SHOW EFFECTIVE
+    /// PERMISSIONS). Stored as a pre-built QueryExpr so the dispatcher
+    /// can route the multitude of shapes through a single arm.
+    IamPolicy(QueryExpr),
 }
 
 #[derive(Debug, Clone)]
@@ -134,6 +150,10 @@ pub enum SqlAdminCommand {
     ShowTenant,
     TransactionControl(TxnControl),
     Maintenance(MaintenanceCommand),
+    Grant(GrantStmt),
+    Revoke(RevokeStmt),
+    AlterUser(AlterUserStmt),
+    IamPolicy(QueryExpr),
 }
 
 impl SqlStatement {
@@ -215,6 +235,10 @@ impl SqlStatement {
             SqlStatement::Schema(SqlSchemaCommand::DropForeignTable(q)) => {
                 SqlCommand::DropForeignTable(q)
             }
+            SqlStatement::Admin(SqlAdminCommand::Grant(s)) => SqlCommand::Grant(s),
+            SqlStatement::Admin(SqlAdminCommand::Revoke(s)) => SqlCommand::Revoke(s),
+            SqlStatement::Admin(SqlAdminCommand::AlterUser(s)) => SqlCommand::AlterUser(s),
+            SqlStatement::Admin(SqlAdminCommand::IamPolicy(e)) => SqlCommand::IamPolicy(e),
         }
     }
 
@@ -296,6 +320,10 @@ impl SqlCommand {
             SqlCommand::DropServer(q) => QueryExpr::DropServer(q),
             SqlCommand::CreateForeignTable(q) => QueryExpr::CreateForeignTable(q),
             SqlCommand::DropForeignTable(q) => QueryExpr::DropForeignTable(q),
+            SqlCommand::Grant(s) => QueryExpr::Grant(s),
+            SqlCommand::Revoke(s) => QueryExpr::Revoke(s),
+            SqlCommand::AlterUser(s) => QueryExpr::AlterUser(s),
+            SqlCommand::IamPolicy(e) => e,
         }
     }
 
@@ -377,6 +405,10 @@ impl SqlCommand {
             SqlCommand::DropForeignTable(q) => {
                 SqlStatement::Schema(SqlSchemaCommand::DropForeignTable(q))
             }
+            SqlCommand::Grant(s) => SqlStatement::Admin(SqlAdminCommand::Grant(s)),
+            SqlCommand::Revoke(s) => SqlStatement::Admin(SqlAdminCommand::Revoke(s)),
+            SqlCommand::AlterUser(s) => SqlStatement::Admin(SqlAdminCommand::AlterUser(s)),
+            SqlCommand::IamPolicy(e) => SqlStatement::Admin(SqlAdminCommand::IamPolicy(e)),
         }
     }
 }
@@ -441,6 +473,14 @@ impl<'a> Parser<'a> {
             Token::Ident(name) if name.eq_ignore_ascii_case("SHOW") => {
                 self.parse_sql_statement().map(FrontendStatement::Sql)
             }
+            Token::Ident(name)
+                if name.eq_ignore_ascii_case("GRANT")
+                    || name.eq_ignore_ascii_case("REVOKE")
+                    || name.eq_ignore_ascii_case("SIMULATE") =>
+            {
+                self.parse_sql_statement().map(FrontendStatement::Sql)
+            }
+            Token::Attach | Token::Detach => self.parse_sql_statement().map(FrontendStatement::Sql),
             Token::Match => match self.parse_match_query()? {
                 QueryExpr::Graph(query) => Ok(FrontendStatement::Graph(query)),
                 other => Err(ParseError::new(
@@ -737,16 +777,21 @@ impl<'a> Parser<'a> {
                         if_not_exists,
                     }))
                 } else if self.check(&Token::Policy) {
-                    // CREATE POLICY name ON <target> [FOR action] [TO role] USING (filter)
-                    //
-                    // <target> = table                       (Phase 2.5.2 default)
-                    //          | NODES    OF <collection>    (Phase 2.5.5 graph)
-                    //          | EDGES    OF <collection>
-                    //          | VECTORS  OF <collection>
-                    //          | MESSAGES OF <collection>
-                    //          | POINTS   OF <collection>    (timeseries)
-                    //          | DOCUMENTS OF <collection>
+                    // Two forms share the leading `CREATE POLICY` tokens:
+                    //   * IAM:   CREATE POLICY '<id>' AS '<json>'          (string literal id)
+                    //   * RLS:   CREATE POLICY <name> ON <target> ...      (bare ident name)
+                    // Disambiguate by peeking the token after POLICY.
                     self.advance()?;
+                    if matches!(self.peek(), Token::String(_)) {
+                        // IAM form — short-circuit out of the SQL command stack.
+                        let expr = self.parse_create_iam_policy_after_keywords()?;
+                        // Inline command-wrapping: produce a synthetic SqlCommand by
+                        // routing through a generic IAM admin holder. We don't
+                        // have a dedicated SqlCommand variant for IAM yet, so we
+                        // bounce through the existing Grant-shaped Admin slot
+                        // which expects no further tokens.
+                        return Ok(SqlCommand::IamPolicy(expr));
+                    }
                     let name = self.expect_ident()?;
                     self.expect(Token::On)?;
 
@@ -1043,8 +1088,14 @@ impl<'a> Parser<'a> {
                         cascade,
                     }))
                 } else if self.check(&Token::Policy) {
-                    // DROP POLICY [IF EXISTS] name ON table
+                    // Two forms:
+                    //   * IAM:   DROP POLICY '<id>'
+                    //   * RLS:   DROP POLICY [IF EXISTS] name ON table
                     self.advance()?;
+                    if matches!(self.peek(), Token::String(_)) {
+                        let expr = self.parse_drop_iam_policy_after_keywords()?;
+                        return Ok(SqlCommand::IamPolicy(expr));
+                    }
                     let if_exists = self.match_if_exists()?;
                     let name = self.expect_ident()?;
                     self.expect(Token::On)?;
@@ -1103,13 +1154,46 @@ impl<'a> Parser<'a> {
                     ))
                 }
             }
-            Token::Alter => match self.parse_alter_table_query()? {
-                QueryExpr::AlterTable(query) => Ok(SqlCommand::AlterTable(query)),
-                other => Err(ParseError::new(
-                    format!("internal: ALTER produced unexpected query kind {other:?}"),
-                    self.position(),
-                )),
-            },
+            Token::Alter => {
+                // Disambiguate ALTER USER vs ALTER TABLE without
+                // committing to a path until we've seen the target.
+                // We peek the *next* token (without consuming) and
+                // dispatch accordingly.
+                let next = self.peek_next()?.clone();
+                if matches!(next, Token::Ident(ref s) if s.eq_ignore_ascii_case("USER")) {
+                    self.advance()?; // consume ALTER
+                    let stmt = self.parse_alter_user_statement()?;
+                    Ok(SqlCommand::AlterUser(stmt))
+                } else {
+                    match self.parse_alter_table_query()? {
+                        QueryExpr::AlterTable(query) => Ok(SqlCommand::AlterTable(query)),
+                        other => Err(ParseError::new(
+                            format!("internal: ALTER produced unexpected query kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
+                }
+            }
+            Token::Ident(name) if name.eq_ignore_ascii_case("GRANT") => {
+                let stmt = self.parse_grant_statement()?;
+                Ok(SqlCommand::Grant(stmt))
+            }
+            Token::Ident(name) if name.eq_ignore_ascii_case("REVOKE") => {
+                let stmt = self.parse_revoke_statement()?;
+                Ok(SqlCommand::Revoke(stmt))
+            }
+            Token::Attach => {
+                let expr = self.parse_attach_policy()?;
+                Ok(SqlCommand::IamPolicy(expr))
+            }
+            Token::Detach => {
+                let expr = self.parse_detach_policy()?;
+                Ok(SqlCommand::IamPolicy(expr))
+            }
+            Token::Ident(name) if name.eq_ignore_ascii_case("SIMULATE") => {
+                let expr = self.parse_simulate_policy()?;
+                Ok(SqlCommand::IamPolicy(expr))
+            }
             Token::Set => {
                 self.advance()?;
                 if self.consume_ident_ci("CONFIG")? {
@@ -1190,9 +1274,11 @@ impl<'a> Parser<'a> {
                     Ok(SqlCommand::ShowConfig { prefix })
                 } else if self.consume_ident_ci("TENANT")? {
                     Ok(SqlCommand::ShowTenant)
+                } else if let Some(expr) = self.parse_show_iam_after_show()? {
+                    Ok(SqlCommand::IamPolicy(expr))
                 } else {
                     Err(ParseError::expected(
-                        vec!["CONFIG", "TENANT"],
+                        vec!["CONFIG", "TENANT", "POLICIES", "EFFECTIVE"],
                         self.peek(),
                         self.position(),
                     ))

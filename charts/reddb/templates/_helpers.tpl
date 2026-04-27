@@ -101,6 +101,32 @@ Auth secret name.
 {{- end -}}
 
 {{/*
+Vault certificate secret name. When existingSecret is set we use that.
+Otherwise we route through the chart-managed secret (created when value is set).
+*/}}
+{{- define "reddb.vaultCertSecretName" -}}
+{{- if .Values.auth.vault.certificate.existingSecret -}}
+{{- .Values.auth.vault.certificate.existingSecret -}}
+{{- else -}}
+{{- include "reddb.authSecretName" . -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "reddb.vaultCertSecretKey" -}}
+{{- default "certificate" .Values.auth.vault.certificate.existingSecretKey -}}
+{{- end -}}
+
+{{/*
+Whether the chart should emit the REDDB_CERTIFICATE / REDDB_CERTIFICATE_FILE
+plumbing at all. Returns "true" or empty.
+*/}}
+{{- define "reddb.vaultCertConfigured" -}}
+{{- if and .Values.auth.vault.enabled (or .Values.auth.vault.certificate.value .Values.auth.vault.certificate.existingSecret) -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{/*
 Validate the deployment mode.
 */}}
 {{- define "reddb.validateMode" -}}
@@ -137,8 +163,66 @@ Common environment variables for both primary and replica pods.
       name: {{ include "reddb.authSecretName" . }}
       key: password
 {{- end }}
+{{- if include "reddb.vaultCertConfigured" . }}
+{{- if .Values.auth.vault.certificate.fileMount.enabled }}
+- name: REDDB_CERTIFICATE_FILE
+  value: {{ .Values.auth.vault.certificate.fileMount.path | quote }}
+{{- else }}
+- name: REDDB_CERTIFICATE
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "reddb.vaultCertSecretName" . }}
+      key: {{ include "reddb.vaultCertSecretKey" . }}
+{{- end }}
+{{- end }}
 {{- with .Values.config.extraEnv }}
 {{ toYaml . }}
+{{- end }}
+{{- end -}}
+
+{{/*
+Vault certificate volume + volumeMount snippets. Only emitted when
+fileMount is enabled. Pair the two helpers in the StatefulSet template.
+*/}}
+{{- define "reddb.vaultVolume" -}}
+{{- if and (include "reddb.vaultCertConfigured" .) .Values.auth.vault.certificate.fileMount.enabled }}
+- name: reddb-vault-cert
+  secret:
+    secretName: {{ include "reddb.vaultCertSecretName" . }}
+    defaultMode: 0400
+{{- end }}
+{{- end -}}
+
+{{- define "reddb.vaultVolumeMount" -}}
+{{- if and (include "reddb.vaultCertConfigured" .) .Values.auth.vault.certificate.fileMount.enabled }}
+- name: reddb-vault-cert
+  mountPath: {{ .Values.auth.vault.certificate.fileMount.path | quote }}
+  subPath: {{ include "reddb.vaultCertSecretKey" . | quote }}
+  readOnly: true
+{{- end }}
+{{- end -}}
+
+{{/*
+Extra arbitrary secret mounts (operator-supplied list).
+*/}}
+{{- define "reddb.extraSecretVolumes" -}}
+{{- range .Values.extraSecretMounts }}
+- name: {{ .name }}
+  secret:
+    secretName: {{ .secretName }}
+    defaultMode: 0400
+    {{- with .items }}
+    items:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+{{- end }}
+{{- end -}}
+
+{{- define "reddb.extraSecretVolumeMounts" -}}
+{{- range .Values.extraSecretMounts }}
+- name: {{ .name }}
+  mountPath: {{ .mountPath | quote }}
+  readOnly: {{ default true .readOnly }}
 {{- end }}
 {{- end -}}
 

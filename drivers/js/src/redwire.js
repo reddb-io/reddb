@@ -1,5 +1,5 @@
 /**
- * RedWire v2 client for Node / Bun / Deno.
+ * RedWire client for Node / Bun / Deno.
  *
  * Speaks the binary TCP protocol from
  * `docs/adr/0001-redwire-tcp-protocol.md` directly — no spawn, no
@@ -99,7 +99,7 @@ async function zstdMod() {
 }
 
 /**
- * Open a v2 connection.
+ * Open a RedWire connection.
  *
  * @param {object} opts
  * @param {string} opts.host
@@ -236,7 +236,7 @@ export class RedWireClient {
   }
 
   /**
-   * Bulk-insert via the v1 binary fast path (frame kind 0x06).
+   * Bulk-insert via the binary fast path (frame kind 0x06).
    * Same hot-loop perf as the engine's `MSG_BULK_INSERT_BINARY`
    * stress tests. Each row is an array of `[tag, value]` pairs
    * matching the column order; tag values come from `BinaryTag`.
@@ -619,7 +619,9 @@ function jsonOf(bytes) {
 }
 
 /**
- * Encode the v1 binary bulk-insert payload (no v2 frame header).
+ * Encode the binary bulk-insert payload body (raw, no RedWire frame
+ * header — the body is wrapped by the caller as a `BulkInsertBinary`
+ * frame).
  * Layout: `[coll_len u16][coll_bytes][ncols u16]
  *          [(name_len u16)(name_bytes)]*ncols
  *          [nrows u32]

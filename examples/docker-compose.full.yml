@@ -1,3 +1,8 @@
+# Primary + 2 replicas. For the canonical secure deploy (vault on,
+# cert via Docker secrets), see examples/docker-compose.vault.yml.
+# All three reddb services share the same vault certificate so they
+# can decrypt each other's auth pages.
+
 services:
   primary:
     build:
@@ -15,6 +20,14 @@ services:
       - "0.0.0.0:50051"
       - "--http-bind"
       - "0.0.0.0:8080"
+    environment:
+      REDDB_CERTIFICATE_FILE: /run/secrets/reddb_certificate
+    secrets:
+      - source: reddb_certificate
+        target: reddb_certificate
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
 
   replica-1:
     build:
@@ -32,6 +45,14 @@ services:
       - "0.0.0.0:50051"
       - "--http-bind"
       - "0.0.0.0:8080"
+    environment:
+      REDDB_CERTIFICATE_FILE: /run/secrets/reddb_certificate
+    secrets:
+      - source: reddb_certificate
+        target: reddb_certificate
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
     depends_on:
       - primary
 
@@ -51,5 +72,17 @@ services:
       - "0.0.0.0:50051"
       - "--http-bind"
       - "0.0.0.0:8080"
+    environment:
+      REDDB_CERTIFICATE_FILE: /run/secrets/reddb_certificate
+    secrets:
+      - source: reddb_certificate
+        target: reddb_certificate
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
     depends_on:
       - primary
+
+secrets:
+  reddb_certificate:
+    external: true

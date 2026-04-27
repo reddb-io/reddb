@@ -1,5 +1,7 @@
 # ==========================================================================
-# RedDB - Primary + Read-Replica test environment
+# RedDB - Primary + Read-Replica test environment.
+# For the canonical secure deploy (vault on, cert via Docker secrets),
+# see examples/docker-compose.vault.yml.
 # ==========================================================================
 
 services:
@@ -29,6 +31,13 @@ services:
       - ALL
     environment:
       - RUST_LOG=info
+      - REDDB_CERTIFICATE_FILE=/run/secrets/reddb_certificate
+    secrets:
+      - source: reddb_certificate
+        target: reddb_certificate
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
     healthcheck:
       test: ["CMD", "/usr/local/bin/red", "health", "--http", "--bind", "127.0.0.1:8080"]
       interval: 5s
@@ -63,6 +72,13 @@ services:
     environment:
       - RUST_LOG=info
       - REDDB_PRIMARY_ADDR=http://primary:50051
+      - REDDB_CERTIFICATE_FILE=/run/secrets/reddb_certificate
+    secrets:
+      - source: reddb_certificate
+        target: reddb_certificate
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
     depends_on:
       primary:
         condition: service_healthy
@@ -72,6 +88,10 @@ services:
       timeout: 3s
       retries: 5
       start_period: 5s
+
+secrets:
+  reddb_certificate:
+    external: true
 
 volumes:
   primary-data:

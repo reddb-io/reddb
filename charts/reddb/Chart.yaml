@@ -4,7 +4,7 @@ description: |
   RedDB — unified multi-model database (tables, documents, graphs, vectors, key-value).
   Supports standalone single-node deployments and primary/read-replica topologies.
 type: application
-version: 0.1.0
+version: 0.2.0
 appVersion: "0.1.2"
 kubeVersion: ">=1.23.0-0"
 home: https://github.com/forattini-dev/reddb

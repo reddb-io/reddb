@@ -17,9 +17,7 @@
 //! entity port below, so the shared chokepoints here demonstrate the
 //! gate fires at the right layer.
 
-use reddb::application::{
-    CreateRowInput, DeleteEntityInput, EntityUseCases,
-};
+use reddb::application::{CreateRowInput, DeleteEntityInput, EntityUseCases};
 use reddb::replication::ReplicationConfig;
 use reddb::storage::EntityId;
 use reddb::{RedDBError, RedDBOptions, RedDBRuntime};
@@ -115,10 +113,7 @@ fn replica_rejects_sql_ddl_and_dml_on_every_surface() {
     assert_read_only_err(
         entity.create_row(CreateRowInput {
             collection: "accounts".into(),
-            fields: vec![(
-                "id".into(),
-                reddb::storage::schema::Value::Integer(99),
-            )],
+            fields: vec![("id".into(), reddb::storage::schema::Value::Integer(99))],
             metadata: Vec::new(),
             node_links: Vec::new(),
             vector_links: Vec::new(),
@@ -144,8 +139,7 @@ fn explicit_read_only_flag_rejects_writes_on_standalone() {
     // Seed a table on a writable instance so the read-only re-open has
     // something to read.
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path))
-            .expect("seed open");
+        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("seed open");
         rt.execute_query("CREATE TABLE flag_test (id INT)")
             .expect("seed CREATE");
         rt.execute_query("INSERT INTO flag_test (id) VALUES (1)")
@@ -171,8 +165,7 @@ fn explicit_read_only_flag_rejects_writes_on_standalone() {
 fn standalone_primary_default_is_writable() {
     let path = unique_data_dir("primary-writable");
 
-    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path))
-        .expect("primary open");
+    let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("primary open");
     rt.execute_query("CREATE TABLE writable (id INT)")
         .expect("CREATE TABLE on standalone");
     rt.execute_query("INSERT INTO writable (id) VALUES (1)")
@@ -197,8 +190,7 @@ fn replica_internal_apply_path_remains_privileged() {
 
     let path = unique_data_dir("replica-privileged");
     {
-        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path))
-            .expect("primary open");
+        let rt = RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("primary open");
         rt.execute_query("CREATE TABLE shipped (id INT, payload TEXT)")
             .expect("primary CREATE TABLE");
     }
@@ -224,10 +216,7 @@ fn replica_internal_apply_path_remains_privileged() {
     let mut row = RowData::new(Vec::new());
     row.named = Some(
         vec![
-            (
-                "id".to_string(),
-                reddb::storage::schema::Value::Integer(7),
-            ),
+            ("id".to_string(), reddb::storage::schema::Value::Integer(7)),
             (
                 "payload".to_string(),
                 reddb::storage::schema::Value::text("from-primary"),

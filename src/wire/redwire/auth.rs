@@ -49,8 +49,8 @@ pub struct Hello {
 
 impl Hello {
     pub fn from_payload(bytes: &[u8]) -> Result<Self, String> {
-        let v: JsonValue = serde_json::from_slice(bytes)
-            .map_err(|e| format!("Hello: invalid JSON: {e}"))?;
+        let v: JsonValue =
+            serde_json::from_slice(bytes).map_err(|e| format!("Hello: invalid JSON: {e}"))?;
         let obj = match v {
             JsonValue::Object(o) => o,
             _ => return Err("Hello: payload must be a JSON object".into()),
@@ -100,11 +100,7 @@ impl Hello {
 /// Build the HelloAck the server sends back. `chosen_auth` is the
 /// strongest method both sides support; `chosen_version` is
 /// `min(client_max, server_max)`.
-pub fn build_hello_ack(
-    chosen_version: u8,
-    chosen_auth: &str,
-    server_features: u32,
-) -> Vec<u8> {
+pub fn build_hello_ack(chosen_version: u8, chosen_auth: &str, server_features: u32) -> Vec<u8> {
     let mut obj = crate::serde_json::Map::new();
     obj.insert(
         "version".to_string(),
@@ -222,7 +218,12 @@ fn parse_bearer_response(payload: &[u8]) -> Option<String> {
 
 /// Build the AuthOk payload the server sends after a successful
 /// auth.
-pub fn build_auth_ok(session_id: &str, username: &str, role: Role, server_features: u32) -> Vec<u8> {
+pub fn build_auth_ok(
+    session_id: &str,
+    username: &str,
+    role: Role,
+    server_features: u32,
+) -> Vec<u8> {
     let mut obj = crate::serde_json::Map::new();
     obj.insert(
         "session_id".to_string(),
@@ -250,8 +251,7 @@ pub fn build_auth_fail(reason: &str) -> Vec<u8> {
 /// Format: `n,,n=<user>,r=<client_nonce>` (no channel binding,
 /// no authzid). Returns `(username, client_nonce, bare_message)`.
 pub fn parse_scram_client_first(payload: &[u8]) -> Result<(String, String, String), String> {
-    let s = std::str::from_utf8(payload)
-        .map_err(|_| "client-first not UTF-8".to_string())?;
+    let s = std::str::from_utf8(payload).map_err(|_| "client-first not UTF-8".to_string())?;
     // Strip the GS2 header `n,,` (or `y,,` / `p=...,`). v2.1 only
     // accepts `n,,` — explicit no-channel-binding.
     let bare = s
@@ -287,11 +287,8 @@ pub fn build_scram_server_first(
 
 /// Parse SCRAM client-final-message.
 /// Format: `c=<channel_binding_b64>,r=<combined_nonce>,p=<proof_b64>`.
-pub fn parse_scram_client_final(
-    payload: &[u8],
-) -> Result<(String, Vec<u8>, String), String> {
-    let s = std::str::from_utf8(payload)
-        .map_err(|_| "client-final not UTF-8".to_string())?;
+pub fn parse_scram_client_final(payload: &[u8]) -> Result<(String, Vec<u8>, String), String> {
+    let s = std::str::from_utf8(payload).map_err(|_| "client-final not UTF-8".to_string())?;
     let mut channel_binding = None;
     let mut nonce = None;
     let mut proof_b64 = None;
@@ -331,10 +328,19 @@ pub fn build_scram_auth_ok(
     server_signature: &[u8],
 ) -> Vec<u8> {
     let mut obj = crate::serde_json::Map::new();
-    obj.insert("session_id".to_string(), JsonValue::String(session_id.to_string()));
-    obj.insert("username".to_string(), JsonValue::String(username.to_string()));
+    obj.insert(
+        "session_id".to_string(),
+        JsonValue::String(session_id.to_string()),
+    );
+    obj.insert(
+        "username".to_string(),
+        JsonValue::String(username.to_string()),
+    );
     obj.insert("role".to_string(), JsonValue::String(role.to_string()));
-    obj.insert("features".to_string(), JsonValue::Number(server_features as f64));
+    obj.insert(
+        "features".to_string(),
+        JsonValue::Number(server_features as f64),
+    );
     obj.insert(
         "v".to_string(),
         JsonValue::String(base64_std(server_signature)),
@@ -359,8 +365,7 @@ pub(crate) fn new_session_id_for_scram() -> String {
 // codec is fine and avoids pulling another crate.
 // ---------------------------------------------------------------
 
-const B64_ALPHA: &[u8; 64] =
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const B64_ALPHA: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 pub fn base64_std(input: &[u8]) -> String {
     let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
@@ -424,19 +429,22 @@ pub fn base64_std_decode(input: &str) -> Option<Vec<u8>> {
 pub fn parse_jwt(token: &str) -> Result<crate::auth::oauth::DecodedJwt, String> {
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 3 {
-        return Err(format!("expected 3 dot-separated parts, got {}", parts.len()));
+        return Err(format!(
+            "expected 3 dot-separated parts, got {}",
+            parts.len()
+        ));
     }
-    let header_bytes = base64_url_decode(parts[0])
-        .ok_or_else(|| "header is not valid base64url".to_string())?;
-    let payload_bytes = base64_url_decode(parts[1])
-        .ok_or_else(|| "payload is not valid base64url".to_string())?;
+    let header_bytes =
+        base64_url_decode(parts[0]).ok_or_else(|| "header is not valid base64url".to_string())?;
+    let payload_bytes =
+        base64_url_decode(parts[1]).ok_or_else(|| "payload is not valid base64url".to_string())?;
     let signature = base64_url_decode(parts[2])
         .ok_or_else(|| "signature is not valid base64url".to_string())?;
 
-    let header_json: JsonValue = serde_json::from_slice(&header_bytes)
-        .map_err(|e| format!("header JSON: {e}"))?;
-    let payload_json: JsonValue = serde_json::from_slice(&payload_bytes)
-        .map_err(|e| format!("payload JSON: {e}"))?;
+    let header_json: JsonValue =
+        serde_json::from_slice(&header_bytes).map_err(|e| format!("header JSON: {e}"))?;
+    let payload_json: JsonValue =
+        serde_json::from_slice(&payload_bytes).map_err(|e| format!("payload JSON: {e}"))?;
 
     let header = jwt_header_from(&header_json)?;
     let claims = jwt_claims_from(&payload_json);
@@ -476,7 +484,10 @@ fn jwt_claims_from(v: &JsonValue) -> crate::auth::oauth::JwtClaims {
     if let Some(s) = obj.get("aud").and_then(|x| x.as_str()) {
         claims.aud = vec![s.to_string()];
     } else if let Some(arr) = obj.get("aud").and_then(|x| x.as_array()) {
-        claims.aud = arr.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+        claims.aud = arr
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
     }
     if let Some(n) = obj.get("exp").and_then(|x| x.as_f64()) {
         claims.exp = Some(n as i64);
@@ -504,17 +515,31 @@ pub fn validate_oauth_jwt(
     validator: &crate::auth::oauth::OAuthValidator,
     raw_token: &str,
 ) -> Result<(String, Role), String> {
+    validate_oauth_jwt_full(validator, raw_token).map(|(_tenant, username, role)| (username, role))
+}
+
+/// Tenant-aware variant of [`validate_oauth_jwt`]. Returns
+/// `(tenant, username, role)` so the caller can mint a session pinned
+/// to the tenant carried by the configured `tenant_claim`.
+pub fn validate_oauth_jwt_full(
+    validator: &crate::auth::oauth::OAuthValidator,
+    raw_token: &str,
+) -> Result<(Option<String>, String, Role), String> {
     let token = parse_jwt(raw_token).map_err(|e| format!("decode JWT: {e}"))?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    // sub-claim mode: the JWT subject IS the RedDB username.
-    // Roles map from a `role` custom claim; default to Read.
+    // sub-claim mode: the JWT subject IS the RedDB username. Roles map
+    // from a `role` custom claim; tenant from the configured tenant
+    // claim (default "tenant"). The lookup closure mirrors the same
+    // claims so `map_to_existing_users=false` deployments still get a
+    // tenant-tagged identity.
     let identity = validator
         .validate(&token, now, |sub| {
             Some(crate::auth::User {
                 username: sub.to_string(),
+                tenant_id: token.claims.extra.get("tenant").cloned(),
                 password_hash: String::new(),
                 scram_verifier: None,
                 role: token
@@ -530,7 +555,7 @@ pub fn validate_oauth_jwt(
             })
         })
         .map_err(|e| format!("{e}"))?;
-    Ok((identity.username, identity.role))
+    Ok((identity.tenant, identity.username, identity.role))
 }
 
 fn base64_url_decode(input: &str) -> Option<Vec<u8>> {
@@ -604,7 +629,7 @@ mod tests {
 
     #[test]
     fn pick_auth_returns_none_when_nothing_overlaps() {
-        let pref = vec!["scram-sha-256".to_string()];
+        let pref = vec!["kerberos".to_string(), "future-method".to_string()];
         assert_eq!(pick_auth_method(&pref, true), None);
     }
 

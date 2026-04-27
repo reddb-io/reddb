@@ -208,10 +208,12 @@ impl PointInTimeRecovery {
             // but-wrong digest aborts restore so we don't ingest a
             // tampered tail; an absent manifest (legacy archive) logs
             // a warning and proceeds.
-            let manifest =
-                super::load_wal_segment_manifest(self.backend.as_ref(), segment_key)?;
-            let (records, computed_sha) = super::archiver::
-                load_archived_change_records_with_sha256(self.backend.as_ref(), segment_key)?;
+            let manifest = super::load_wal_segment_manifest(self.backend.as_ref(), segment_key)?;
+            let (records, computed_sha) =
+                super::archiver::load_archived_change_records_with_sha256(
+                    self.backend.as_ref(),
+                    segment_key,
+                )?;
             match manifest.as_ref().and_then(|m| m.sha256.as_deref()) {
                 Some(expected) => match computed_sha.as_deref() {
                     Some(actual) if actual.eq_ignore_ascii_case(expected) => {}
@@ -607,8 +609,7 @@ mod tests {
         // Corrupt segment 2's sidecar manifest by overwriting the
         // declared prev_hash with a value that doesn't match segment 1.
         let result = run_chain_restore("chainbreak", |backend, metas| {
-            let sidecar_key =
-                crate::storage::wal::wal_segment_manifest_key(&metas[1].key);
+            let sidecar_key = crate::storage::wal::wal_segment_manifest_key(&metas[1].key);
             let mut bad = crate::storage::wal::load_wal_segment_manifest(backend, &metas[1].key)
                 .unwrap()
                 .unwrap();

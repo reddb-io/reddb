@@ -288,7 +288,17 @@ impl JoinQueryBuilder {
             | QueryExpr::CreateServer(_)
             | QueryExpr::DropServer(_)
             | QueryExpr::CreateForeignTable(_)
-            | QueryExpr::DropForeignTable(_) => {}
+            | QueryExpr::DropForeignTable(_)
+            | QueryExpr::Grant(_)
+            | QueryExpr::Revoke(_)
+            | QueryExpr::AlterUser(_)
+            | QueryExpr::CreateIamPolicy { .. }
+            | QueryExpr::DropIamPolicy { .. }
+            | QueryExpr::AttachPolicy { .. }
+            | QueryExpr::DetachPolicy { .. }
+            | QueryExpr::ShowPolicies { .. }
+            | QueryExpr::ShowEffectivePermissions { .. }
+            | QueryExpr::SimulatePolicy { .. } => {}
         }
         self
     }

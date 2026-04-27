@@ -631,6 +631,13 @@ struct RuntimeInner {
     /// because the AES key lives in the vault KV under the
     /// `red.secret.aes_key` entry.
     auth_store: parking_lot::RwLock<Option<Arc<crate::auth::store::AuthStore>>>,
+    /// Optional OAuth/OIDC JWT validator. Wired by server boot when
+    /// the operator configures issuer + JWKS via env / CLI. HTTP and
+    /// wire transports read this on every bearer-token request and,
+    /// when the token decodes as a JWT, validate it against the
+    /// configured issuer + audience + signature before falling back to
+    /// the local AuthStore lookup.
+    oauth_validator: parking_lot::RwLock<Option<Arc<crate::auth::oauth::OAuthValidator>>>,
     /// Global serialization point for transactional commits initiated via
     /// the stdio JSON-RPC `tx.commit` path. Held only for the duration of
     /// the write-set replay so concurrent auto-committed writes can still
@@ -771,8 +778,7 @@ struct RuntimeInner {
     /// is the single place that mutates `write_gate.set_lease_state` and
     /// records lease/* audit entries — keeping those two side-effects
     /// from drifting.
-    lease_lifecycle:
-        std::sync::OnceLock<Arc<crate::runtime::lease_lifecycle::LeaseLifecycle>>,
+    lease_lifecycle: std::sync::OnceLock<Arc<crate::runtime::lease_lifecycle::LeaseLifecycle>>,
     /// PLAN.md Phase 11.5 — counters bumped by the replica apply
     /// loop on `Gap` / `Divergence` / `Apply` errors so /metrics
     /// surfaces them as `reddb_replica_apply_errors_total{kind}`.
@@ -793,17 +799,13 @@ pub struct RuntimeConnection {
 }
 
 pub mod audit_log;
-pub mod lease_lifecycle;
+pub mod audit_query;
 pub mod config_matrix;
 pub mod config_overlay;
-pub mod lease_loop;
-pub mod lifecycle;
-pub mod quota_bucket;
-pub mod resource_limits;
 mod expr_eval;
 mod graph_dsl;
 mod health_connection;
-mod impl_core;
+pub(crate) mod impl_core;
 mod impl_ddl;
 mod impl_dml;
 mod impl_ec;
@@ -819,11 +821,16 @@ mod impl_tree;
 mod impl_vcs;
 mod index_store;
 mod join_filter;
+pub mod lease_lifecycle;
+pub mod lease_loop;
+pub mod lifecycle;
 pub mod locking;
 pub(crate) mod mutation;
 mod probabilistic_store;
 pub(crate) mod query_exec;
+pub mod quota_bucket;
 mod record_search;
+pub mod resource_limits;
 pub mod schema_diff;
 pub mod snapshot_reuse;
 pub mod within_clause;
@@ -845,8 +852,7 @@ pub mod mvcc {
         clear_current_snapshot, clear_current_tenant, current_connection_id, current_tenant,
         entity_visible_under_current_snapshot, entity_visible_with_context,
         set_current_auth_identity, set_current_connection_id, set_current_snapshot,
-        set_current_tenant, snapshot_bundle, with_snapshot_bundle, SnapshotBundle,
-        SnapshotContext,
+        set_current_tenant, snapshot_bundle, with_snapshot_bundle, SnapshotBundle, SnapshotContext,
     };
 }
 

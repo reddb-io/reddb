@@ -68,7 +68,39 @@ pub struct ServerCommandConfig {
     pub path: Option<PathBuf>,
     pub router_bind_addr: Option<String>,
     pub grpc_bind_addr: Option<String>,
+    /// TLS-encrypted gRPC bind address. Can run side-by-side with
+    /// `grpc_bind_addr` (e.g. `:50051` plain + `:50052` TLS) or
+    /// stand alone for TLS-only deploys. Defaults to `None`.
+    pub grpc_tls_bind_addr: Option<String>,
+    /// Path to PEM-encoded gRPC server certificate. Resolved through
+    /// `REDDB_GRPC_TLS_CERT` (with `_FILE` companion for k8s secret
+    /// mounts). When `None` and dev-mode is enabled
+    /// (`RED_GRPC_TLS_DEV=1`) the server auto-generates a self-signed
+    /// cert and prints its SHA-256 fingerprint to stderr.
+    pub grpc_tls_cert: Option<PathBuf>,
+    /// Path to PEM-encoded gRPC server private key. Same env-var
+    /// pattern as `grpc_tls_cert`.
+    pub grpc_tls_key: Option<PathBuf>,
+    /// Optional path to a PEM bundle of trust anchors used to verify
+    /// client certificates. When set, the gRPC listener requires
+    /// every client to present a cert that chains to this CA — i.e.
+    /// mutual TLS. When unset, one-way TLS only.
+    pub grpc_tls_client_ca: Option<PathBuf>,
     pub http_bind_addr: Option<String>,
+    /// HTTPS bind address. When set, the HTTP server also serves a
+    /// TLS-terminated listener on this addr. Plain HTTP and HTTPS can
+    /// run side by side (e.g. 8080 plain + 8443 TLS).
+    pub http_tls_bind_addr: Option<String>,
+    /// PEM cert for HTTPS. Reads `REDDB_HTTP_TLS_CERT` / its `_FILE`
+    /// companion when not set explicitly.
+    pub http_tls_cert: Option<PathBuf>,
+    /// PEM key for HTTPS. Reads `REDDB_HTTP_TLS_KEY` / its `_FILE`
+    /// companion when not set explicitly.
+    pub http_tls_key: Option<PathBuf>,
+    /// Optional PEM CA bundle. When set, the HTTPS listener requires
+    /// every client to present a cert that chains to a CA in this
+    /// bundle (mTLS). When unset, plain server-side TLS only.
+    pub http_tls_client_ca: Option<PathBuf>,
     pub wire_bind_addr: Option<String>,
     /// TLS-encrypted wire protocol bind address
     pub wire_tls_bind_addr: Option<String>,
@@ -357,15 +389,13 @@ fn configure_remote_backend_from_env(options: &mut RedDBOptions) {
                     }
                     Err(err) => {
                         tracing::warn!(error = %err, "AtomicHttpBackend init failed; falling back to plain HTTP (no CAS)");
-                        options.remote_backend = Some(Arc::new(
-                            crate::storage::backend::HttpBackend::new(config),
-                        ));
+                        options.remote_backend =
+                            Some(Arc::new(crate::storage::backend::HttpBackend::new(config)));
                     }
                 }
             } else {
-                options.remote_backend = Some(Arc::new(
-                    crate::storage::backend::HttpBackend::new(config),
-                ));
+                options.remote_backend =
+                    Some(Arc::new(crate::storage::backend::HttpBackend::new(config)));
             }
             options.remote_key = env_nonempty("RED_REMOTE_KEY")
                 .or_else(|| env_nonempty("REDDB_REMOTE_KEY"))
@@ -914,6 +944,7 @@ fn run_routed_server(config: ServerCommandConfig, router_bind_addr: String) -> R
             runtime.clone(),
             GrpcServerOptions {
                 bind_addr: grpc_backend.to_string(),
+                tls: None,
             },
             auth_store,
         );
@@ -931,8 +962,11 @@ fn run_routed_server(config: ServerCommandConfig, router_bind_addr: String) -> R
             .map_err(|err| format!("inspect internal wire listener: {err}"))?;
         let wire_rt = Arc::new(runtime);
         tokio::spawn(async move {
-            if let Err(err) = crate::wire::start_wire_listener_on(wire_listener, wire_rt).await {
-                tracing::error!(err = %err, "wire backend error");
+            if let Err(err) =
+                crate::wire::redwire::listener::start_redwire_listener_on(wire_listener, wire_rt)
+                    .await
+            {
+                tracing::error!(err = %err, "redwire backend error");
             }
         });
 
@@ -953,31 +987,39 @@ fn run_routed_server(config: ServerCommandConfig, router_bind_addr: String) -> R
     })
 }
 
-/// Spawn wire protocol listeners (plaintext + TLS) as background tokio tasks.
+/// Spawn RedWire listeners (plaintext + TLS) as background tokio tasks.
 fn spawn_wire_listeners(config: &ServerCommandConfig, runtime: &RedDBRuntime) {
-    // Plaintext wire — TCP or Unix socket
+    // Plaintext RedWire — TCP or Unix socket
     if let Some(wire_addr) = config.wire_bind_addr.clone() {
         let wire_rt = Arc::new(runtime.clone());
         tokio::spawn(async move {
             // Address starting with `unix://` or an absolute filesystem path
-            // switches to Unix domain sockets (Phase 1.7 PG parity).
+            // switches to Unix domain sockets.
             #[cfg(unix)]
             {
                 if wire_addr.starts_with("unix://") || wire_addr.starts_with('/') {
-                    if let Err(e) = crate::wire::start_wire_unix_listener(&wire_addr, wire_rt).await
+                    if let Err(e) = crate::wire::redwire::listener::start_redwire_unix_listener(
+                        &wire_addr, wire_rt,
+                    )
+                    .await
                     {
-                        tracing::error!(err = %e, "wire unix listener error");
+                        tracing::error!(err = %e, "redwire unix listener error");
                     }
                     return;
                 }
             }
-            if let Err(e) = crate::wire::start_wire_listener(&wire_addr, wire_rt).await {
-                tracing::error!(err = %e, "wire listener error");
+            let cfg = crate::wire::RedWireConfig {
+                bind_addr: wire_addr,
+                auth_store: None,
+                oauth: None,
+            };
+            if let Err(e) = crate::wire::start_redwire_listener(cfg, wire_rt).await {
+                tracing::error!(err = %e, "redwire listener error");
             }
         });
     }
 
-    // TLS wire
+    // RedWire over TLS
     if let Some(wire_tls_addr) = config.wire_tls_bind_addr.clone() {
         let tls_config = resolve_wire_tls_config(config);
         match tls_config {
@@ -985,14 +1027,14 @@ fn spawn_wire_listeners(config: &ServerCommandConfig, runtime: &RedDBRuntime) {
                 let wire_rt = Arc::new(runtime.clone());
                 tokio::spawn(async move {
                     if let Err(e) =
-                        crate::wire::start_wire_tls_listener(&wire_tls_addr, wire_rt, &tls_cfg)
+                        crate::wire::start_redwire_tls_listener(&wire_tls_addr, wire_rt, &tls_cfg)
                             .await
                     {
-                        tracing::error!(err = %e, "wire+tls listener error");
+                        tracing::error!(err = %e, "redwire+tls listener error");
                     }
                 });
             }
-            Err(e) => tracing::error!(err = %e, "wire TLS config error"),
+            Err(e) => tracing::error!(err = %e, "redwire TLS config error"),
         }
     }
 }
@@ -1016,6 +1058,170 @@ fn spawn_pg_listener(config: &ServerCommandConfig, runtime: &RedDBRuntime) {
             }
         });
     }
+}
+
+/// Resolve gRPC TLS material into PEM bytes.
+///
+/// Lookup order, in priority:
+///   1. Explicit `config.grpc_tls_cert` / `config.grpc_tls_key` (paths
+///      passed via CLI/env). Both must be present together.
+///   2. `RED_GRPC_TLS_DEV=1` — auto-generate a self-signed cert next
+///      to the data dir. Refuses to run without the env flag so an
+///      operator can't accidentally ship a dev cert in prod.
+///
+/// `client_ca` is loaded when `config.grpc_tls_client_ca` is set,
+/// turning the listener into a mutual-TLS endpoint that requires
+/// every client to present a chain that anchors at one of the CAs
+/// in the bundle.
+fn resolve_grpc_tls_options(config: &ServerCommandConfig) -> Result<crate::GrpcTlsOptions, String> {
+    use crate::utils::secret_file::expand_file_env;
+
+    // Best-effort *_FILE expansion for every TLS env knob. Errors here
+    // surface as warnings; the fallback path (explicit cert paths) will
+    // cover the common case.
+    for var in [
+        "REDDB_GRPC_TLS_CERT",
+        "REDDB_GRPC_TLS_KEY",
+        "REDDB_GRPC_TLS_CLIENT_CA",
+    ] {
+        if let Err(err) = expand_file_env(var) {
+            tracing::warn!(
+                target: "reddb::secrets",
+                env = %var,
+                err = %err,
+                "could not expand *_FILE companion for gRPC TLS"
+            );
+        }
+    }
+
+    let (cert_pem, key_pem) = match (&config.grpc_tls_cert, &config.grpc_tls_key) {
+        (Some(cert), Some(key)) => {
+            let cert_pem = std::fs::read(cert)
+                .map_err(|e| format!("read grpc cert {}: {e}", cert.display()))?;
+            let key_pem =
+                std::fs::read(key).map_err(|e| format!("read grpc key {}: {e}", key.display()))?;
+            (cert_pem, key_pem)
+        }
+        _ => {
+            // No explicit material → only proceed when dev-mode is on.
+            let dev = std::env::var("RED_GRPC_TLS_DEV")
+                .ok()
+                .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+                .unwrap_or(false);
+            if !dev {
+                return Err("gRPC TLS configured but no cert/key supplied — set \
+                     REDDB_GRPC_TLS_CERT / REDDB_GRPC_TLS_KEY (or \
+                     RED_GRPC_TLS_DEV=1 to auto-generate a self-signed cert)"
+                    .to_string());
+            }
+            let dir = config
+                .path
+                .as_ref()
+                .and_then(|p| p.parent())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
+            let (cert_pem_str, key_pem_str) =
+                crate::wire::tls::generate_self_signed_cert("localhost")
+                    .map_err(|e| format!("auto-generate dev grpc cert: {e}"))?;
+
+            // Constant-time-friendly fingerprint to stderr so the
+            // operator can pin a client trust store. We log via
+            // `tracing::warn!` so it stands out next to ordinary
+            // listener-online events.
+            let fp = sha256_pem_fingerprint(cert_pem_str.as_bytes());
+            tracing::warn!(
+                target: "reddb::security",
+                transport = "grpc",
+                cert_sha256 = %fp,
+                "RED_GRPC_TLS_DEV=1: using auto-generated self-signed cert; \
+                 DO NOT use in production"
+            );
+            // Persist so that restarts reuse the same identity.
+            let cert_path = dir.join("grpc-tls-cert.pem");
+            let key_path = dir.join("grpc-tls-key.pem");
+            if !cert_path.exists() || !key_path.exists() {
+                let _ = std::fs::create_dir_all(&dir);
+                std::fs::write(&cert_path, cert_pem_str.as_bytes())
+                    .map_err(|e| format!("write grpc dev cert: {e}"))?;
+                std::fs::write(&key_path, key_pem_str.as_bytes())
+                    .map_err(|e| format!("write grpc dev key: {e}"))?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ =
+                        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
+                }
+            }
+            (cert_pem_str.into_bytes(), key_pem_str.into_bytes())
+        }
+    };
+
+    let client_ca_pem = match &config.grpc_tls_client_ca {
+        Some(path) => Some(
+            std::fs::read(path)
+                .map_err(|e| format!("read grpc client CA {}: {e}", path.display()))?,
+        ),
+        None => None,
+    };
+
+    Ok(crate::GrpcTlsOptions {
+        cert_pem,
+        key_pem,
+        client_ca_pem,
+    })
+}
+
+/// Spawn a TLS-terminated gRPC listener when `grpc_tls_bind_addr` is
+/// configured. Logs and continues on TLS-config errors so the plain
+/// listener stays up; this matches the wire-listener pattern.
+fn spawn_grpc_tls_listener_if_configured(
+    config: &ServerCommandConfig,
+    runtime: RedDBRuntime,
+    auth_store: Arc<AuthStore>,
+) {
+    let Some(tls_bind) = config.grpc_tls_bind_addr.clone() else {
+        return;
+    };
+    let tls_opts = match resolve_grpc_tls_options(config) {
+        Ok(opts) => opts,
+        Err(err) => {
+            tracing::error!(
+                target: "reddb::security",
+                transport = "grpc",
+                err = %err,
+                "gRPC TLS config error; TLS listener will not start"
+            );
+            return;
+        }
+    };
+    tokio::spawn(async move {
+        let server = RedDBGrpcServer::with_options(
+            runtime,
+            GrpcServerOptions {
+                bind_addr: tls_bind.clone(),
+                tls: Some(tls_opts),
+            },
+            auth_store,
+        );
+        tracing::info!(transport = "grpc+tls", bind = %tls_bind, "listener online");
+        if let Err(err) = server.serve().await {
+            tracing::error!(transport = "grpc+tls", err = %err, "gRPC TLS listener error");
+        }
+    });
+}
+
+/// Hex-encoded SHA-256 of a PEM blob, used for cert-pin operator log
+/// lines. Constant-time hash; no token contents leave this fn.
+fn sha256_pem_fingerprint(pem: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(pem);
+    let d = h.finalize();
+    let mut buf = String::with_capacity(64);
+    for b in d.iter() {
+        buf.push_str(&format!("{b:02x}"));
+    }
+    buf
 }
 
 /// Resolve TLS config: use provided cert/key or auto-generate.
@@ -1063,7 +1269,12 @@ fn run_wire_only_server(config: ServerCommandConfig, wire_addr: String) -> Resul
     tokio_runtime.block_on(async move {
         spawn_lifecycle_signal_handler(signal_runtime).await;
         let wire_rt = Arc::new(runtime);
-        crate::wire::start_wire_listener(&wire_addr, wire_rt)
+        let cfg = crate::wire::RedWireConfig {
+            bind_addr: wire_addr,
+            auth_store: None,
+            oauth: None,
+        };
+        crate::wire::start_redwire_listener(cfg, wire_rt)
             .await
             .map_err(|e| e.to_string())
     })
@@ -1389,9 +1600,68 @@ fn run_http_server(config: ServerCommandConfig, bind_addr: String) -> Result<(),
     let (runtime, auth_store, _telemetry_guard) =
         build_runtime_and_auth_store(config.to_db_options(), cli_telemetry)?;
     spawn_admin_metrics_listeners(&runtime, &auth_store);
+    spawn_http_tls_listener(&config, &runtime, &auth_store)?;
     let server = build_http_server(runtime, auth_store, bind_addr.clone());
     tracing::info!(transport = "http", bind = %bind_addr, "listener online");
     server.serve().map_err(|err| err.to_string())
+}
+
+/// PLAN.md HTTP TLS — when `http_tls_bind_addr` is set, spawn a
+/// rustls-terminated listener alongside the plain HTTP server. Cert
+/// + key paths come from CLI flags or `REDDB_HTTP_TLS_*` env vars; if
+/// both are absent and `RED_HTTP_TLS_DEV=1` is set, a self-signed cert
+/// is auto-generated next to the data directory (refused otherwise).
+fn spawn_http_tls_listener(
+    config: &ServerCommandConfig,
+    runtime: &RedDBRuntime,
+    auth_store: &Arc<AuthStore>,
+) -> Result<(), String> {
+    let Some(addr) = config.http_tls_bind_addr.clone() else {
+        return Ok(());
+    };
+
+    let tls_config = resolve_http_tls_config(config)?;
+    let server_config = crate::server::tls::build_server_config(&tls_config)
+        .map_err(|err| format!("HTTP TLS: {err}"))?;
+
+    let server = build_http_server(runtime.clone(), auth_store.clone(), addr.clone());
+    let _handle = server.serve_tls_in_background(server_config);
+    tracing::info!(
+        transport = "https",
+        bind = %addr,
+        mtls = %tls_config.client_ca_path.is_some(),
+        "TLS listener online"
+    );
+    Ok(())
+}
+
+/// Resolve the HTTP TLS config from CLI / env / dev defaults.
+fn resolve_http_tls_config(
+    config: &ServerCommandConfig,
+) -> Result<crate::server::tls::HttpTlsConfig, String> {
+    match (&config.http_tls_cert, &config.http_tls_key) {
+        (Some(cert), Some(key)) => Ok(crate::server::tls::HttpTlsConfig {
+            cert_path: cert.clone(),
+            key_path: key.clone(),
+            client_ca_path: config.http_tls_client_ca.clone(),
+        }),
+        (None, None) => {
+            // Dev-mode auto-generate next to the data directory.
+            let dir = config
+                .path
+                .as_ref()
+                .and_then(|p| p.parent().map(std::path::PathBuf::from))
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            let auto = crate::server::tls::auto_generate_dev_cert(&dir)
+                .map_err(|err| format!("HTTP TLS dev: {err}"))?;
+            Ok(crate::server::tls::HttpTlsConfig {
+                cert_path: auto.cert_path,
+                key_path: auto.key_path,
+                client_ca_path: config.http_tls_client_ca.clone(),
+            })
+        }
+        _ => Err("HTTP TLS requires both --http-tls-cert and --http-tls-key (or neither, with RED_HTTP_TLS_DEV=1)".to_string()),
+    }
 }
 
 #[inline(never)]
@@ -1422,10 +1692,16 @@ fn run_grpc_server(config: ServerCommandConfig, bind_addr: String) -> Result<(),
         // Start PostgreSQL wire listener when --pg-bind is configured.
         spawn_pg_listener(&config, &runtime);
 
+        // Optional TLS gRPC listener. When `grpc_tls_bind_addr` is set
+        // it spawns a separate listener so plaintext + TLS can run
+        // side-by-side (50051 plain + 50052 TLS, etc.).
+        spawn_grpc_tls_listener_if_configured(&config, runtime.clone(), auth_store.clone());
+
         let server = RedDBGrpcServer::with_options(
             runtime,
             GrpcServerOptions {
                 bind_addr: bind_addr.clone(),
+                tls: None,
             },
             auth_store,
         );
@@ -1457,6 +1733,7 @@ fn run_dual_server(
         build_runtime_and_auth_store(db_options, cli_telemetry)?;
 
     spawn_admin_metrics_listeners(&runtime, &auth_store);
+    spawn_http_tls_listener(&config, &runtime, &auth_store)?;
 
     let http_server =
         build_http_server(runtime.clone(), auth_store.clone(), http_bind_addr.clone());
@@ -1487,10 +1764,14 @@ fn run_dual_server(
         // Start PostgreSQL wire listener when --pg-bind is configured.
         spawn_pg_listener(&config, &runtime);
 
+        // Optional TLS gRPC listener — runs alongside the plaintext one.
+        spawn_grpc_tls_listener_if_configured(&config, runtime.clone(), auth_store.clone());
+
         let server = RedDBGrpcServer::with_options(
             runtime,
             GrpcServerOptions {
                 bind_addr: grpc_bind_addr.clone(),
+                tls: None,
             },
             auth_store,
         );

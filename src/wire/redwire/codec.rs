@@ -18,7 +18,10 @@ impl std::fmt::Display for FrameError {
         match self {
             Self::Truncated => write!(f, "frame header truncated (< 16 bytes)"),
             Self::InvalidLength(n) => write!(f, "frame length field invalid: {n}"),
-            Self::PayloadTruncated { expected, available } => write!(
+            Self::PayloadTruncated {
+                expected,
+                available,
+            } => write!(
                 f,
                 "frame payload truncated: expected {expected} bytes, got {available}"
             ),
@@ -221,8 +224,8 @@ mod tests {
     fn compressed_round_trip_recovers_plaintext() {
         // A compressible payload — a kilobyte of repeating text.
         let payload = b"abcabcabcabc".repeat(100);
-        let frame = Frame::new(MessageKind::Result, 7, payload.clone())
-            .with_flags(Flags::COMPRESSED);
+        let frame =
+            Frame::new(MessageKind::Result, 7, payload.clone()).with_flags(Flags::COMPRESSED);
         let bytes = encode_frame(&frame);
         // Wire form should be smaller than the plaintext frame.
         assert!(

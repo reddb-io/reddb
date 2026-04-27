@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <AssemblyName>Reddb</AssemblyName>
+    <RootNamespace>Reddb</RootNamespace>
+
+    <!-- NuGet -->
+    <PackageId>Reddb</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>RedDB Authors</Authors>
+    <Description>Official .NET driver for RedDB. Speaks the RedWire binary protocol and the JSON HTTP API.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/reddb/reddb</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/reddb/reddb</PackageProjectUrl>
+    <PackageTags>reddb;database;sql;driver;redwire</PackageTags>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ZstdSharp.Port" Version="0.8.6" />
+  </ItemGroup>
+
+</Project>

@@ -4,13 +4,70 @@ impl GrpcRuntime {
     /// Resolve the auth result for an incoming request.
     ///
     /// Checks (in order):
-    /// 1. Session/API-key tokens via the `AuthStore`.
-    /// 2. Anonymous (when auth is not required).
-    /// 3. Denied.
+    /// 1. OAuth/OIDC JWT validation (when the bearer is JWT-shaped and an
+    ///    `OAuthValidator` is configured). Hard-rejects malformed-or-bad-JWTs
+    ///    when both OAuth + AuthStore.require_auth are on so attackers
+    ///    can't downgrade to AuthStore.
+    /// 2. Session/API-key tokens via the `AuthStore`.
+    /// 3. Anonymous (when auth is not required).
+    /// 4. Denied.
     pub(crate) fn resolve_auth(&self, metadata: &MetadataMap) -> AuthResult {
         let token = grpc_token(metadata);
 
-        // 1. Try AuthStore (session tokens / API keys) when auth is enabled.
+        // 1. OAuth/OIDC: only attempt when (a) a validator is wired up,
+        //    (b) a token is present, and (c) the token has 3-part JWT
+        //    shape. Non-JWT-shaped bearers fall straight through to the
+        //    AuthStore session/api-key path.
+        if let Some(token_str) = token {
+            let log_prefix = bearer_token_fingerprint_prefix(token_str);
+            if is_jwt_shape(token_str) {
+                if let Some(validator) = self.oauth_validator() {
+                    match crate::wire::redwire::auth::validate_oauth_jwt(&validator, token_str) {
+                        Ok((username, role)) => {
+                            tracing::info!(
+                                target: "reddb::security",
+                                transport = "grpc",
+                                token_sha256_prefix = %log_prefix,
+                                username = %username,
+                                role = %role.as_str(),
+                                "gRPC OAuth JWT accepted"
+                            );
+                            // Use AuthSource::Oauth so audit/who-am-i emits the
+                            // right tag (service_impl.rs:2886).
+                            let identity = crate::auth::OAuthIdentity {
+                                username,
+                                tenant: None,
+                                role,
+                                issuer: validator.config().issuer.clone(),
+                                subject: None,
+                                expires_at_unix_secs: None,
+                            };
+                            return AuthResult::from_oauth(identity);
+                        }
+                        Err(reason) => {
+                            // JWT-shaped + validator configured + failed
+                            // validation = hard reject. Falling back to
+                            // AuthStore would let an attacker forge a JWT
+                            // and ride a session-id collision.
+                            tracing::warn!(
+                                target: "reddb::security",
+                                transport = "grpc",
+                                token_sha256_prefix = %log_prefix,
+                                reason = %reason,
+                                "gRPC OAuth JWT rejected"
+                            );
+                            return AuthResult::Denied(format!("oauth jwt: {reason}"));
+                        }
+                    }
+                }
+                // No validator configured but token IS JWT-shaped — fall
+                // through to AuthStore. A deployment may carry both
+                // session tokens that happen to be 3-segment AND no JWT
+                // validator; we don't ban that combination.
+            }
+        }
+
+        // 2. Try AuthStore (session tokens / API keys) when auth is enabled.
         if self.auth_store.is_enabled() {
             if let Some(token) = token {
                 if let Some((username, role)) = self.auth_store.validate_token(token) {
@@ -25,8 +82,15 @@ impl GrpcRuntime {
             }
         }
 
-        // 2. No token or auth not enabled -> anonymous.
+        // 3. No token or auth not enabled -> anonymous.
         AuthResult::Anonymous
+    }
+
+    /// Return the lazily-constructed gRPC OAuth validator, when one is
+    /// configured on the embedded `AuthStore`. The validator is built
+    /// once per `GrpcRuntime` (cloned across requests) and re-used.
+    pub(crate) fn oauth_validator(&self) -> Option<std::sync::Arc<crate::auth::OAuthValidator>> {
+        self.oauth_validator.clone()
     }
 
     pub(crate) fn authorize_read(&self, metadata: &MetadataMap) -> Result<(), Status> {
@@ -127,12 +191,54 @@ pub(crate) fn to_status(err: crate::api::RedDBError) -> Status {
 pub(crate) fn grpc_token(metadata: &MetadataMap) -> Option<&str> {
     if let Some(value) = metadata.get("authorization") {
         let value = value.to_str().ok()?;
-        if let Some(token) = value.strip_prefix("Bearer ") {
-            return Some(token);
+        // Case-insensitive "Bearer " prefix per RFC 6750 §2.1.
+        let prefix = "Bearer ";
+        if value.len() > prefix.len() && value[..prefix.len()].eq_ignore_ascii_case(prefix) {
+            return Some(value[prefix.len()..].trim());
         }
     }
 
     metadata.get("x-reddb-token")?.to_str().ok()
+}
+
+/// Return true when `token` looks like a compact-serialized JWT
+/// (header.payload.signature). The gRPC interceptor uses this as a
+/// cheap classifier so non-JWT bearers (RedDB session tokens like
+/// `rs_<hex32>`, API keys like `rk_<hex32>`) skip the JWT path.
+pub(crate) fn is_jwt_shape(token: &str) -> bool {
+    let mut segments = 0usize;
+    for seg in token.split('.') {
+        if seg.is_empty() {
+            return false;
+        }
+        // base64url alphabet: a-z A-Z 0-9 - _ ; padding '=' optional.
+        if !seg
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'=')
+        {
+            return false;
+        }
+        segments += 1;
+        if segments > 3 {
+            return false;
+        }
+    }
+    segments == 3
+}
+
+/// Compute the first 8 hex chars of `sha256(token)` so audit logs
+/// can correlate failed/successful auth events without leaking the
+/// token itself.
+pub(crate) fn bearer_token_fingerprint_prefix(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(token.as_bytes());
+    let digest = h.finalize();
+    // 4 bytes = 8 hex chars; cheap to eyeball, useless for replay.
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}",
+        digest[0], digest[1], digest[2], digest[3]
+    )
 }
 
 pub(crate) fn none_if_empty(value: &str) -> Option<&str> {

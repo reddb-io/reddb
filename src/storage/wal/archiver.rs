@@ -246,9 +246,9 @@ pub fn sha256_file_hex(path: &Path) -> Result<String, BackendError> {
         .map_err(|err| BackendError::Internal(format!("open file for hash {path:?}: {err}")))?;
     let mut buf = vec![0u8; 8 * 1024];
     loop {
-        let n = file.read(&mut buf).map_err(|err| {
-            BackendError::Internal(format!("read file for hash {path:?}: {err}"))
-        })?;
+        let n = file
+            .read(&mut buf)
+            .map_err(|err| BackendError::Internal(format!("read file for hash {path:?}: {err}")))?;
         if n == 0 {
             break;
         }
@@ -553,10 +553,7 @@ pub struct UnifiedWalEntry {
 impl UnifiedManifest {
     pub const VERSION: &'static str = "1.0";
 
-    pub fn new(
-        snapshots: Vec<UnifiedSnapshotEntry>,
-        wal_segments: Vec<UnifiedWalEntry>,
-    ) -> Self {
+    pub fn new(snapshots: Vec<UnifiedSnapshotEntry>, wal_segments: Vec<UnifiedWalEntry>) -> Self {
         let latest_lsn = wal_segments
             .iter()
             .map(|w| w.lsn_end)
@@ -574,7 +571,10 @@ impl UnifiedManifest {
 
     pub fn to_json_value(&self) -> JsonValue {
         let mut obj = Map::new();
-        obj.insert("version".to_string(), JsonValue::String(self.version.clone()));
+        obj.insert(
+            "version".to_string(),
+            JsonValue::String(self.version.clone()),
+        );
         obj.insert(
             "engine_version".to_string(),
             JsonValue::String(self.engine_version.clone()),
@@ -670,10 +670,7 @@ impl UnifiedSnapshotEntry {
             id: obj.get("id").and_then(JsonValue::as_u64).unwrap_or(0),
             lsn: obj.get("lsn").and_then(JsonValue::as_u64).unwrap_or(0),
             ts: obj.get("ts").and_then(JsonValue::as_u64).unwrap_or(0),
-            bytes: obj
-                .get("bytes")
-                .and_then(JsonValue::as_u64)
-                .unwrap_or(0),
+            bytes: obj.get("bytes").and_then(JsonValue::as_u64).unwrap_or(0),
             key: obj
                 .get("key")
                 .and_then(JsonValue::as_str)
@@ -724,21 +721,13 @@ impl UnifiedWalEntry {
                 .get("lsn_start")
                 .and_then(JsonValue::as_u64)
                 .unwrap_or(0),
-            lsn_end: obj
-                .get("lsn_end")
-                .and_then(JsonValue::as_u64)
-                .unwrap_or(0),
+            lsn_end: obj.get("lsn_end").and_then(JsonValue::as_u64).unwrap_or(0),
             key: obj
                 .get("key")
                 .and_then(JsonValue::as_str)
-                .ok_or_else(|| {
-                    BackendError::Internal("wal segment entry missing key".to_string())
-                })?
+                .ok_or_else(|| BackendError::Internal("wal segment entry missing key".to_string()))?
                 .to_string(),
-            bytes: obj
-                .get("bytes")
-                .and_then(JsonValue::as_u64)
-                .unwrap_or(0),
+            bytes: obj.get("bytes").and_then(JsonValue::as_u64).unwrap_or(0),
             checksum: obj
                 .get("checksum")
                 .and_then(JsonValue::as_str)
@@ -1268,7 +1257,9 @@ mod tests {
                 .expect("meta");
         assert!(meta.sha256.is_some(), "WalSegmentMeta should carry sha256");
 
-        let sidecar = load_wal_segment_manifest(&backend, &meta.key).unwrap().expect("sidecar");
+        let sidecar = load_wal_segment_manifest(&backend, &meta.key)
+            .unwrap()
+            .expect("sidecar");
         assert_eq!(sidecar.key, meta.key);
         assert_eq!(sidecar.lsn_start, meta.lsn_start);
         assert_eq!(sidecar.lsn_end, meta.lsn_end);
@@ -1320,7 +1311,10 @@ mod tests {
         // Checksum should round-trip with the `sha256:` prefix in the
         // wire form but parse back to the bare hex.
         let body = json.to_string_compact();
-        assert!(body.contains("\"sha256:9f8b\""), "wire form must include sha256: prefix");
+        assert!(
+            body.contains("\"sha256:9f8b\""),
+            "wire form must include sha256: prefix"
+        );
         assert_eq!(parsed.snapshots[0].checksum.as_deref(), Some("9f8b"));
     }
 
@@ -1335,7 +1329,9 @@ mod tests {
         let backend = LocalBackend;
         let manifest = UnifiedManifest::new(vec![], vec![]);
         publish_unified_manifest(&backend, &prefix, &manifest).unwrap();
-        let loaded = load_unified_manifest(&backend, &prefix).unwrap().expect("manifest");
+        let loaded = load_unified_manifest(&backend, &prefix)
+            .unwrap()
+            .expect("manifest");
         assert_eq!(loaded.version, "1.0");
         assert_eq!(loaded.latest_lsn, 0);
 
@@ -1385,9 +1381,15 @@ mod tests {
         .unwrap()
         .expect("seg 3");
 
-        let s1 = load_wal_segment_manifest(&backend, &m1.key).unwrap().unwrap();
-        let s2 = load_wal_segment_manifest(&backend, &m2.key).unwrap().unwrap();
-        let s3 = load_wal_segment_manifest(&backend, &m3.key).unwrap().unwrap();
+        let s1 = load_wal_segment_manifest(&backend, &m1.key)
+            .unwrap()
+            .unwrap();
+        let s2 = load_wal_segment_manifest(&backend, &m2.key)
+            .unwrap()
+            .unwrap();
+        let s3 = load_wal_segment_manifest(&backend, &m3.key)
+            .unwrap()
+            .unwrap();
         assert!(s1.prev_hash.is_none(), "first segment has no prev_hash");
         assert_eq!(s2.prev_hash, m1.sha256, "seg 2 links to seg 1 sha256");
         assert_eq!(s3.prev_hash, m2.sha256, "seg 3 links to seg 2 sha256");
@@ -1415,8 +1417,14 @@ mod tests {
         assert_eq!(derive_backup_root(""), "");
         assert_eq!(derive_backup_root("snapshots/"), "");
         assert_eq!(derive_backup_root("snapshots"), "");
-        assert_eq!(derive_backup_root("clusters/dev/snapshots/"), "clusters/dev/");
-        assert_eq!(derive_backup_root("clusters/dev/snapshots"), "clusters/dev/");
+        assert_eq!(
+            derive_backup_root("clusters/dev/snapshots/"),
+            "clusters/dev/"
+        );
+        assert_eq!(
+            derive_backup_root("clusters/dev/snapshots"),
+            "clusters/dev/"
+        );
         assert_eq!(derive_backup_root("clusters/dev/"), "clusters/dev/");
     }
 }

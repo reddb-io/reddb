@@ -1432,8 +1432,7 @@ impl RedDB {
     /// `CA_REGISTER` and read by `CA_REFRESH` / `CA_STATE` scalars.
     pub fn continuous_aggregates(
         &self,
-    ) -> &Arc<crate::storage::timeseries::continuous_aggregate::ContinuousAggregateEngine>
-    {
+    ) -> &Arc<crate::storage::timeseries::continuous_aggregate::ContinuousAggregateEngine> {
         self.continuous_aggregates.get_or_init(|| {
             Arc::new(
                 crate::storage::timeseries::continuous_aggregate::ContinuousAggregateEngine::new(),

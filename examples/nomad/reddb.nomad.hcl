@@ -71,10 +71,29 @@ job "reddb" {
         RED_SHUTDOWN_TIMEOUT_SECS = "60"
       }
 
+      vault {
+        policies = ["reddb-read"]
+        change_mode = "restart"
+      }
+
+      # Encrypted-vault key — fetched from Vault KV and written into the
+      # task's runtime secrets dir. The binary reads REDDB_CERTIFICATE_FILE
+      # and the path never appears in the audited env. Bootstrap once via
+      # `red bootstrap --print-certificate` and `vault kv put reddb/vault
+      # certificate=$CERT`. BACK IT UP — there is no recovery.
+      template {
+        destination = "secrets/vault-cert"
+        perms       = "0400"
+        data        = <<EOH
+{{ with secret "reddb/data/vault" }}{{ .Data.data.certificate }}{{ end }}
+EOH
+      }
+
       template {
         destination = "secrets/s3.env"
         env         = true
         data        = <<EOH
+REDDB_CERTIFICATE_FILE=/secrets/vault-cert
 {{ with secret "reddb/data/s3" }}
 RED_S3_ACCESS_KEY={{ .Data.data.access_key }}
 RED_S3_SECRET_KEY={{ .Data.data.secret_key }}

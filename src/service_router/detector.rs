@@ -41,11 +41,11 @@ pub trait ProtocolDetector: Send + Sync {
     fn detect(&self, peek: &[u8]) -> DetectOutcome;
 }
 
-/// RedWire v2 detector — keys off the `0xFE` magic byte the v2
-/// client sends as its first byte. v1 wire clients never set this
-/// byte (their first byte is the low byte of a u32 length field,
-/// which for any reasonable frame size is well below 0xFE), so
-/// this never aliases the legacy listener.
+/// RedWire detector — keys off the `0xFE` magic byte every
+/// RedWire client sends as its first byte. The router uses Wire as
+/// the fallback protocol; this detector is provided for callers that
+/// want to compose a custom router with explicit RedWire matching
+/// (e.g. when they need `Pending` semantics).
 pub struct RedWireDetector;
 
 impl ProtocolDetector for RedWireDetector {
@@ -81,9 +81,7 @@ impl ProtocolDetector for HttpDetector {
     fn detect(&self, peek: &[u8]) -> DetectOutcome {
         if HTTP_METHOD_PREFIXES.iter().any(|p| peek.starts_with(p)) {
             DetectOutcome::Match(Protocol::Http)
-        } else if !peek.is_empty()
-            && HTTP_METHOD_PREFIXES.iter().any(|p| p.starts_with(peek))
-        {
+        } else if !peek.is_empty() && HTTP_METHOD_PREFIXES.iter().any(|p| p.starts_with(peek)) {
             DetectOutcome::Pending
         } else {
             DetectOutcome::NoMatch
@@ -105,7 +103,10 @@ mod tests {
 
     #[test]
     fn h2_detector_pending_on_partial_preface() {
-        assert_eq!(H2Detector.detect(b"PRI * HTTP/2.0\r\n"), DetectOutcome::Pending);
+        assert_eq!(
+            H2Detector.detect(b"PRI * HTTP/2.0\r\n"),
+            DetectOutcome::Pending
+        );
     }
 
     #[test]

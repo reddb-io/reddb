@@ -5,6 +5,10 @@ a declarative `TENANT BY (col)` clause on `CREATE TABLE`, and
 auto-wired row-level security that keeps every read and write scoped
 to the current tenant.
 
+Tenant scoping is enforced by every policy via the `tenant_match: true`
+condition or the implicit `current_tenant` prefix on resources — see
+[Policies](policies.md) for the authorization vocabulary.
+
 ## Three isolation patterns
 
 | Pattern | Mechanism | Storage | Use when |
@@ -387,6 +391,7 @@ cause and the deny-default explains the silent empty result.
 
 ## See also
 
+- [Policies](policies.md) — IAM-style authorization, `tenant_match` condition
 - [Row Level Security](rls.md)
 - [Transactions & MVCC](../query/transactions.md)
 - [CREATE TABLE](../query/create-table.md)

@@ -168,9 +168,7 @@ impl RedDB {
                 // path below.
                 let auto_restore_requested = std::env::var("RED_AUTO_RESTORE")
                     .ok()
-                    .map(|v| {
-                        matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
-                    })
+                    .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
                     .unwrap_or(true);
                 let mut restored_via_pitr = false;
                 if auto_restore_requested {
@@ -341,7 +339,9 @@ impl RedDB {
     /// No-op when the runtime is in-memory or no remote backend is
     /// configured.
     pub fn upload_to_remote_backend(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let Some(path) = &self.path else { return Ok(()) };
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
         if let (Some(backend), Some(key)) = (&self.remote_backend, &self.remote_key) {
             backend
                 .upload(path, key)

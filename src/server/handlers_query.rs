@@ -22,10 +22,7 @@ impl RedDBServer {
                 // unaffected. The helper itself is a no-op when
                 // policy is `Local` (the default) or when the
                 // statement isn't a mutation.
-                let is_mutation = matches!(
-                    result.statement_type,
-                    "insert" | "update" | "delete"
-                );
+                let is_mutation = matches!(result.statement_type, "insert" | "update" | "delete");
                 if is_mutation {
                     let post_lsn = self.runtime.cdc_current_lsn();
                     if let Err(err) = self.runtime.enforce_commit_policy(post_lsn) {

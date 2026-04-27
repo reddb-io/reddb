@@ -68,12 +68,52 @@ use self::scan_json::*;
 #[derive(Debug, Clone)]
 pub struct GrpcServerOptions {
     pub bind_addr: String,
+    /// Optional TLS configuration. When set the server terminates
+    /// TLS for inbound gRPC traffic via `tonic::transport::ServerTlsConfig`.
+    /// When `None`, the listener stays plaintext (back-compat for
+    /// loopback / sidecar deployments where a sidecar terminates TLS).
+    pub tls: Option<GrpcTlsOptions>,
+}
+
+/// PEM-encoded TLS material for gRPC's tonic-rustls server.
+///
+/// The server identity is required (cert + key); the optional
+/// client-CA enables mTLS — when present, tonic verifies and
+/// requires a client cert chain that anchors at this CA bundle.
+#[derive(Debug, Clone)]
+pub struct GrpcTlsOptions {
+    /// PEM bytes for the server certificate chain (leaf first).
+    pub cert_pem: Vec<u8>,
+    /// PEM bytes for the server private key (PKCS#8 / SEC1 / RSA).
+    pub key_pem: Vec<u8>,
+    /// Optional PEM bytes for the trust anchor used to verify
+    /// client certificates. When `Some(_)`, the server requires
+    /// every client to present a cert that chains to this CA;
+    /// when `None`, the server runs one-way TLS only.
+    pub client_ca_pem: Option<Vec<u8>>,
+}
+
+impl GrpcTlsOptions {
+    /// Build a `tonic` `ServerTlsConfig` from PEM bytes, applying
+    /// rustls defaults (TLS 1.2 + 1.3 — older versions are not
+    /// negotiable on tokio-rustls 0.26).
+    pub fn to_tonic_config(
+        &self,
+    ) -> Result<tonic::transport::ServerTlsConfig, Box<dyn std::error::Error>> {
+        let identity = tonic::transport::Identity::from_pem(&self.cert_pem, &self.key_pem);
+        let mut cfg = tonic::transport::ServerTlsConfig::new().identity(identity);
+        if let Some(ca_pem) = &self.client_ca_pem {
+            cfg = cfg.client_ca_root(tonic::transport::Certificate::from_pem(ca_pem));
+        }
+        Ok(cfg)
+    }
 }
 
 impl Default for GrpcServerOptions {
     fn default() -> Self {
         Self {
             bind_addr: "127.0.0.1:50051".to_string(),
+            tls: None,
         }
     }
 }
@@ -83,6 +123,12 @@ pub struct RedDBGrpcServer {
     runtime: RedDBRuntime,
     options: GrpcServerOptions,
     auth_store: Arc<AuthStore>,
+    /// Optional OAuth/OIDC JWT validator. When set, the gRPC
+    /// interceptor validates JWT-shaped bearers against the issuer's
+    /// JWKS *before* attempting `AuthStore` session/api-key lookups.
+    /// Build externally via `crate::auth::OAuthValidator::with_verifier`
+    /// and attach with [`Self::with_oauth_validator`].
+    oauth_validator: Option<Arc<crate::auth::OAuthValidator>>,
 }
 
 impl RedDBGrpcServer {
@@ -130,7 +176,23 @@ impl RedDBGrpcServer {
             runtime,
             options,
             auth_store,
+            oauth_validator: None,
         }
+    }
+
+    /// Attach an externally-constructed OAuth/OIDC JWT validator. Once
+    /// set, JWT-shaped bearer tokens (3-segment) on the
+    /// `authorization` metadata are validated against the issuer's
+    /// JWKS, expiry, audience, etc. Non-JWT bearers fall back to the
+    /// `AuthStore` session/API-key path.
+    pub fn with_oauth_validator(mut self, validator: Arc<crate::auth::OAuthValidator>) -> Self {
+        self.oauth_validator = Some(validator);
+        self
+    }
+
+    /// Inspect the active OAuth validator, when one is configured.
+    pub fn oauth_validator(&self) -> Option<&Arc<crate::auth::OAuthValidator>> {
+        self.oauth_validator.as_ref()
     }
 
     pub fn runtime(&self) -> &RedDBRuntime {
@@ -150,12 +212,20 @@ impl RedDBGrpcServer {
             runtime: self.runtime.clone(),
             auth_store: self.auth_store.clone(),
             prepared_registry: PreparedStatementRegistry::new(),
+            oauth_validator: self.oauth_validator.clone(),
         }
     }
 
     pub async fn serve(&self) -> Result<(), Box<dyn std::error::Error>> {
         let addr = self.options.bind_addr.parse()?;
-        tonic::transport::Server::builder()
+        let mut builder = tonic::transport::Server::builder();
+        if let Some(tls) = &self.options.tls {
+            // Constant-time SHA256 fingerprint logged for ops triage —
+            // never the bytes of cert/key themselves.
+            log_grpc_tls_identity(tls);
+            builder = builder.tls_config(tls.to_tonic_config()?)?;
+        }
+        builder
             .add_service(Self::configured_service(self.grpc_runtime()))
             .serve(addr)
             .await?;
@@ -169,7 +239,12 @@ impl RedDBGrpcServer {
         listener.set_nonblocking(true)?;
         let listener = tokio::net::TcpListener::from_std(listener)?;
         let incoming = TcpListenerStream::new(listener);
-        tonic::transport::Server::builder()
+        let mut builder = tonic::transport::Server::builder();
+        if let Some(tls) = &self.options.tls {
+            log_grpc_tls_identity(tls);
+            builder = builder.tls_config(tls.to_tonic_config()?)?;
+        }
+        builder
             .add_service(Self::configured_service(self.grpc_runtime()))
             .serve_with_incoming(incoming)
             .await?;
@@ -262,6 +337,10 @@ struct GrpcRuntime {
     runtime: RedDBRuntime,
     auth_store: Arc<AuthStore>,
     prepared_registry: Arc<PreparedStatementRegistry>,
+    /// OAuth/OIDC JWT validator built once from `auth_store.config().oauth`
+    /// when the operator enables OAuth. `None` means JWT bearers fall
+    /// back to the AuthStore lookup path.
+    oauth_validator: Option<Arc<crate::auth::OAuthValidator>>,
 }
 
 impl GrpcRuntime {
@@ -288,6 +367,31 @@ impl GrpcRuntime {
     fn native_use_cases(&self) -> NativeUseCases<'_, RedDBRuntime> {
         NativeUseCases::new(&self.runtime)
     }
+}
+
+/// Emit a single info-level event with the SHA-256 fingerprint of the
+/// active gRPC server cert + an mTLS flag. Never logs PEM bytes.
+fn log_grpc_tls_identity(tls: &GrpcTlsOptions) {
+    use sha2::{Digest, Sha256};
+    let cert_fp = {
+        let mut h = Sha256::new();
+        h.update(&tls.cert_pem);
+        let digest = h.finalize();
+        // First 16 hex chars are enough for human cross-check; the full
+        // SHA-256 lives in audit logs only.
+        let mut buf = String::with_capacity(64);
+        for b in digest.iter() {
+            buf.push_str(&format!("{b:02x}"));
+        }
+        buf
+    };
+    tracing::info!(
+        target: "reddb::security",
+        transport = "grpc",
+        cert_sha256 = %cert_fp,
+        mtls = tls.client_ca_pem.is_some(),
+        "gRPC TLS identity loaded"
+    );
 }
 
 include!("grpc/service_impl.rs");

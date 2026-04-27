@@ -335,7 +335,7 @@ mod tests {
                 limit: None,
                 offset: None,
                 expand: None,
-            as_of: None,
+                as_of: None,
             }),
             QueryExpr::Table(TableQuery {
                 table: "test".to_string(),
@@ -353,7 +353,7 @@ mod tests {
                 limit: None,
                 offset: None,
                 expand: None,
-            as_of: None,
+                as_of: None,
             }),
             PlanCost::default(),
         )

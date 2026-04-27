@@ -51,8 +51,8 @@ impl RedDBServer {
             // Auth endpoints
             ("POST", "/auth/bootstrap") => self.handle_auth_bootstrap(body),
             ("POST", "/auth/login") => self.handle_auth_login(body),
-            ("POST", "/auth/users") => self.handle_auth_create_user(body),
-            ("GET", "/auth/users") => self.handle_auth_list_users(),
+            ("POST", "/auth/users") => self.handle_auth_create_user(&headers, body, None),
+            ("GET", "/auth/users") => self.handle_auth_list_users(&headers, &query),
             ("POST", "/auth/api-keys") => self.handle_auth_create_api_key(body),
             ("POST", "/auth/change-password") => self.handle_auth_change_password(body),
             ("GET", "/auth/whoami") => self.handle_auth_whoami(&headers),
@@ -106,6 +106,9 @@ impl RedDBServer {
             // PLAN.md Phase 5.1 / 5.4 — observability endpoints.
             ("GET", "/metrics") => self.handle_metrics(),
             ("GET", "/admin/status") => self.handle_admin_status(),
+            // SOC 2 / HIPAA structured audit query — JSONL/JSON over
+            // the active `.audit.log` plus rotated archives.
+            ("GET", "/admin/audit") => self.handle_admin_audit_query(&query),
             // PLAN.md Phase 10.3 — public OpenAPI spec served inline
             // so external tools can fetch it from a running server.
             ("GET", "/admin/openapi") => self.handle_admin_openapi(),
@@ -651,22 +654,80 @@ impl RedDBServer {
 
             // ─── Git-for-Data / VCS — RESTful, collection-centric ───
             ("GET", "/repo") => handlers_vcs::handle_repo_info(&self.runtime),
-            ("GET", "/repo/refs") => {
-                handlers_vcs::handle_refs_list(&self.runtime, &query)
-            }
+            ("GET", "/repo/refs") => handlers_vcs::handle_refs_list(&self.runtime, &query),
             ("GET", "/repo/refs/heads") => handlers_vcs::handle_branches_list(&self.runtime),
-            ("POST", "/repo/refs/heads") => {
-                handlers_vcs::handle_branch_create(&self.runtime, body)
-            }
+            ("POST", "/repo/refs/heads") => handlers_vcs::handle_branch_create(&self.runtime, body),
             ("GET", "/repo/refs/tags") => handlers_vcs::handle_tags_list(&self.runtime),
             ("POST", "/repo/refs/tags") => handlers_vcs::handle_tag_create(&self.runtime, body),
-            ("GET", "/repo/commits") => {
-                handlers_vcs::handle_commits_list(&self.runtime, &query)
-            }
-            ("POST", "/repo/commits") => {
-                handlers_vcs::handle_commit_create(&self.runtime, body)
-            }
+            ("GET", "/repo/commits") => handlers_vcs::handle_commits_list(&self.runtime, &query),
+            ("POST", "/repo/commits") => handlers_vcs::handle_commit_create(&self.runtime, body),
             _ => {
+                // IAM policy admin endpoints (Agent #28 lane).
+                if path == "/admin/policies" {
+                    return match method.as_str() {
+                        "GET" => self.handle_iam_policy_list(),
+                        _ => json_error(405, "method not allowed"),
+                    };
+                }
+                if path == "/admin/policies/simulate" && method == "POST" {
+                    return self.handle_iam_simulate(body);
+                }
+                if let Some(rest) = path.strip_prefix("/admin/policies/") {
+                    let id = rest.trim_matches('/');
+                    if !id.is_empty() && !id.contains('/') {
+                        return match method.as_str() {
+                            "PUT" => self.handle_iam_policy_put(id, body),
+                            "GET" => self.handle_iam_policy_get(id),
+                            "DELETE" => self.handle_iam_policy_delete(id),
+                            _ => json_error(405, "method not allowed"),
+                        };
+                    }
+                }
+                if let Some(rest) = path.strip_prefix("/admin/users/") {
+                    // /admin/users/:user/policies/:policy_id  PUT|DELETE
+                    // /admin/users/:user/groups/:group       PUT|DELETE
+                    // /admin/users/:user/effective-permissions GET
+                    if let Some((user, tail)) = rest.split_once('/') {
+                        if tail == "effective-permissions" && method == "GET" {
+                            return self.handle_iam_effective_permissions(user, &query);
+                        }
+                        if let Some(group) = tail.strip_prefix("groups/") {
+                            let group = group.trim_matches('/');
+                            if !group.is_empty() && !group.contains('/') {
+                                return match method.as_str() {
+                                    "PUT" => self.handle_iam_add_user_group(user, group),
+                                    "DELETE" => self.handle_iam_remove_user_group(user, group),
+                                    _ => json_error(405, "method not allowed"),
+                                };
+                            }
+                        }
+                        if let Some(pid) = tail.strip_prefix("policies/") {
+                            let pid = pid.trim_matches('/');
+                            if !pid.is_empty() && !pid.contains('/') {
+                                return match method.as_str() {
+                                    "PUT" => self.handle_iam_attach_user(user, pid),
+                                    "DELETE" => self.handle_iam_detach_user(user, pid),
+                                    _ => json_error(405, "method not allowed"),
+                                };
+                            }
+                        }
+                    }
+                }
+                if let Some(rest) = path.strip_prefix("/admin/groups/") {
+                    if let Some((group, tail)) = rest.split_once('/') {
+                        if let Some(pid) = tail.strip_prefix("policies/") {
+                            let pid = pid.trim_matches('/');
+                            if !pid.is_empty() && !pid.contains('/') {
+                                return match method.as_str() {
+                                    "PUT" => self.handle_iam_attach_group(group, pid),
+                                    "DELETE" => self.handle_iam_detach_group(group, pid),
+                                    _ => json_error(405, "method not allowed"),
+                                };
+                            }
+                        }
+                    }
+                }
+
                 // Log dynamic routes: /logs/{name}/append, /logs/{name}/query, /logs/{name}/retention
                 if let Some(rest) = path.strip_prefix("/logs/") {
                     let parts: Vec<&str> = rest.split('/').collect();
@@ -821,10 +882,9 @@ impl RedDBServer {
                     let parts: Vec<&str> = rest.split('/').collect();
                     if parts.len() == 2 && parts[1] == "vcs" {
                         return match method.as_str() {
-                            "GET" => handlers_vcs::handle_collection_vcs_show(
-                                &self.runtime,
-                                parts[0],
-                            ),
+                            "GET" => {
+                                handlers_vcs::handle_collection_vcs_show(&self.runtime, parts[0])
+                            }
                             "PUT" => handlers_vcs::handle_collection_vcs_set(
                                 &self.runtime,
                                 parts[0],
@@ -881,6 +941,22 @@ impl RedDBServer {
                 }
 
                 if method == "GET" {
+                    // Auth: GET /auth/tenants/:tenant/users — list
+                    // users scoped to that tenant. Platform admins can
+                    // hit any tenant; tenant-scoped admins only their
+                    // own (the handler enforces this).
+                    if let Some(rest) = path.strip_prefix("/auth/tenants/") {
+                        if let Some((tenant, tail)) = rest.split_once('/') {
+                            if tail == "users" {
+                                let tenant = tenant.trim_matches('/');
+                                if !tenant.is_empty() {
+                                    let mut q = query.clone();
+                                    q.insert("tenant".to_string(), tenant.to_string());
+                                    return self.handle_auth_list_users(&headers, &q);
+                                }
+                            }
+                        }
+                    }
                     if let Some(collection) = collection_from_schema_path(&path) {
                         return self.handle_describe_collection(collection);
                     }
@@ -935,6 +1011,23 @@ impl RedDBServer {
                     };
                 }
                 if method == "POST" {
+                    // Auth: POST /auth/tenants/:tenant/users — explicit
+                    // tenant-scoped user creation. Equivalent to the
+                    // body-`tenant_id` field on /auth/users.
+                    if let Some(rest) = path.strip_prefix("/auth/tenants/") {
+                        if let Some((tenant, tail)) = rest.split_once('/') {
+                            if tail == "users" {
+                                let tenant = tenant.trim_matches('/');
+                                if !tenant.is_empty() {
+                                    return self.handle_auth_create_user(
+                                        &headers,
+                                        body,
+                                        Some(tenant),
+                                    );
+                                }
+                            }
+                        }
+                    }
                     if let Some(collection) = collection_from_action_path(&path, "trees") {
                         return self.handle_create_tree(collection, body);
                     }
@@ -1135,11 +1228,28 @@ impl RedDBServer {
                     if let Some(name) = collection_from_bare_path(&path) {
                         return self.handle_drop_collection(name);
                     }
+                    // Auth: DELETE /auth/tenants/:tenant/users/:username
+                    if let Some(rest) = path.strip_prefix("/auth/tenants/") {
+                        if let Some((tenant, tail)) = rest.split_once('/') {
+                            if let Some(username) = tail.strip_prefix("users/") {
+                                let username = username.trim_matches('/');
+                                let tenant = tenant.trim_matches('/');
+                                if !username.is_empty() && !tenant.is_empty() {
+                                    return self.handle_auth_delete_user(
+                                        &headers,
+                                        &query,
+                                        Some(tenant),
+                                        username,
+                                    );
+                                }
+                            }
+                        }
+                    }
                     // Auth: DELETE /auth/users/:username
                     if let Some(username) = path.strip_prefix("/auth/users/") {
                         let username = username.trim_matches('/');
                         if !username.is_empty() {
-                            return self.handle_auth_delete_user(username);
+                            return self.handle_auth_delete_user(&headers, &query, None, username);
                         }
                     }
                     // Auth: DELETE /auth/api-keys/:key
@@ -1185,9 +1295,7 @@ impl RedDBServer {
                     || path == "/health"
             }
             crate::server::ServerSurface::MetricsOnly => {
-                path == "/metrics"
-                    || path.starts_with("/health/")
-                    || path == "/health"
+                path == "/metrics" || path.starts_with("/health/") || path == "/health"
             }
         }
     }
@@ -1199,9 +1307,7 @@ impl RedDBServer {
         // Liveness, readiness, and startup all stay public.
         if matches!(
             (method, path),
-            ("GET", "/health/live")
-                | ("GET", "/health/ready")
-                | ("GET", "/health/startup")
+            ("GET", "/health/live") | ("GET", "/health/ready") | ("GET", "/health/startup")
         ) {
             return true;
         }
@@ -1259,22 +1365,26 @@ impl RedDBServer {
             return true;
         }
 
-        // Extract bearer token from Authorization header.
+        // Extract bearer token from Authorization header. JWT-shaped
+        // tokens are routed through the configured OAuthValidator
+        // first; fallback to AuthStore lookup for opaque API keys /
+        // session tokens.
         let token = headers
             .get("authorization")
             .and_then(|v| v.strip_prefix("Bearer "));
 
         match token {
             Some(tok) => {
-                if let Some((_username, role)) = auth_store.validate_token(tok) {
-                    let is_write = !matches!(method, "GET" | "HEAD" | "OPTIONS");
-                    if is_write {
-                        role.can_write()
-                    } else {
-                        role.can_read()
-                    }
+                let role = match resolve_bearer_role(tok, &self.runtime, auth_store.as_ref()) {
+                    BearerOutcome::Valid(role) => role,
+                    BearerOutcome::Invalid => return false,
+                    BearerOutcome::NoMatch => return false,
+                };
+                let is_write = !matches!(method, "GET" | "HEAD" | "OPTIONS");
+                if is_write {
+                    role.can_write()
                 } else {
-                    false
+                    role.can_read()
                 }
             }
             None => {
@@ -1283,6 +1393,102 @@ impl RedDBServer {
             }
         }
     }
+}
+
+/// Outcome of resolving a bearer token. Distinguishes a hard reject
+/// (signature/issuer/expiry failure) from "no match in any store"
+/// because the audit log treats them differently.
+pub(crate) enum BearerOutcome {
+    Valid(crate::auth::Role),
+    /// JWT-shaped + OAuth validator rejected (issuer mismatch, expired,
+    /// bad signature, audience mismatch). Keep distinct so callers can
+    /// surface `WWW-Authenticate: Bearer error="invalid_token"`.
+    Invalid,
+    /// Neither the OAuth validator nor the AuthStore recognized the
+    /// token. 401 with a generic error.
+    NoMatch,
+}
+
+/// Returns true when `token` is shaped like a compact JWT
+/// (`header.payload.signature` with three base64url segments).
+/// Cheap structural check — does NOT validate the signature.
+pub(crate) fn looks_like_jwt(token: &str) -> bool {
+    let mut parts = token.split('.');
+    let (Some(h), Some(p), Some(s)) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    if parts.next().is_some() {
+        return false;
+    }
+    if h.is_empty() || p.is_empty() || s.is_empty() {
+        return false;
+    }
+    let valid_b64url = |chunk: &str| {
+        chunk
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    };
+    valid_b64url(h) && valid_b64url(p) && valid_b64url(s)
+}
+
+/// Bearer-token resolution shared by `is_authorized` and the
+/// `/auth/whoami` handler. Tries OAuth JWT validation first when the
+/// token has JWT shape AND the runtime has an `OAuthValidator`
+/// configured; falls back to `AuthStore::validate_token` for opaque
+/// tokens (API keys, session tokens) and JWT-shaped tokens when no
+/// validator is wired.
+pub(crate) fn resolve_bearer_role(
+    token: &str,
+    runtime: &crate::runtime::RedDBRuntime,
+    auth_store: &crate::auth::store::AuthStore,
+) -> BearerOutcome {
+    let token_fp = token_fingerprint(token);
+    if looks_like_jwt(token) {
+        if let Some(validator) = runtime.oauth_validator() {
+            match crate::wire::redwire::auth::validate_oauth_jwt(&validator, token) {
+                Ok((username, role)) => {
+                    tracing::info!(
+                        target: "reddb::http_auth",
+                        method = "oauth_jwt",
+                        user = %username,
+                        token_sha256 = %token_fp,
+                        "JWT accepted"
+                    );
+                    return BearerOutcome::Valid(role);
+                }
+                Err(reason) => {
+                    tracing::warn!(
+                        target: "reddb::http_auth",
+                        method = "oauth_jwt",
+                        token_sha256 = %token_fp,
+                        reason = %reason,
+                        "JWT rejected"
+                    );
+                    return BearerOutcome::Invalid;
+                }
+            }
+        }
+        // JWT-shaped but no validator: fall through to AuthStore. This
+        // matches the behaviour where an operator hands out long-lived
+        // base64-segmented API keys that happen to look like JWTs.
+    }
+    match auth_store.validate_token(token) {
+        Some((_username, role)) => BearerOutcome::Valid(role),
+        None => {
+            tracing::debug!(
+                target: "reddb::http_auth",
+                method = "bearer",
+                token_sha256 = %token_fp,
+                "bearer token unknown"
+            );
+            BearerOutcome::NoMatch
+        }
+    }
+}
+
+fn token_fingerprint(token: &str) -> String {
+    let digest = crate::crypto::sha256(token.as_bytes());
+    crate::utils::to_hex_prefix(&digest, 8)
 }
 fn collection_from_scan_path(path: &str) -> Option<&str> {
     let prefix = "/collections/";

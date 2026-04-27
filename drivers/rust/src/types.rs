@@ -154,7 +154,7 @@ pub struct QueryResult {
 
 #[cfg(any(feature = "redwire", feature = "http"))]
 impl QueryResult {
-    /// Build a `QueryResult` from the JSON envelope the v2 server
+    /// Build a `QueryResult` from the JSON envelope the server
     /// emits in a `Result` frame. Today the envelope only carries
     /// `{ statement, affected }` — column / row streaming is the
     /// follow-up that introduces `RowDescription` + `DataRow`

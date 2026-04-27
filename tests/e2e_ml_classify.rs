@@ -5,7 +5,9 @@
 //! user session.
 
 use reddb::application::ExecuteQueryInput;
-use reddb::storage::ml::classifier::{IncrementalClassifier, LogisticRegression, LogisticRegressionConfig, TrainingExample};
+use reddb::storage::ml::classifier::{
+    IncrementalClassifier, LogisticRegression, LogisticRegressionConfig, TrainingExample,
+};
 use reddb::storage::ml::ModelVersion;
 use reddb::storage::schema::Value;
 use reddb::{QueryUseCases, RedDBRuntime};
@@ -29,8 +31,14 @@ fn train_and_register(rt: &RedDBRuntime, model_name: &str) {
     let mut examples = Vec::new();
     for i in 0..40 {
         let a = (i as f32) * 0.1;
-        examples.push(TrainingExample { features: vec![a, 0.0], label: 0 });
-        examples.push(TrainingExample { features: vec![0.0, a], label: 1 });
+        examples.push(TrainingExample {
+            features: vec![a, 0.0],
+            label: 0,
+        });
+        examples.push(TrainingExample {
+            features: vec![0.0, a],
+            label: 1,
+        });
     }
     model.fit(&examples);
 
@@ -68,7 +76,10 @@ fn ml_classify_returns_predicted_class_from_sql() {
         })
         .expect("ML_CLASSIFY should run");
     let cls = r.result.records[0].values.get("cls").expect("cls present");
-    assert!(matches!(cls, Value::Integer(0)), "expected class 0, got {cls:?}");
+    assert!(
+        matches!(cls, Value::Integer(0)),
+        "expected class 0, got {cls:?}"
+    );
 
     // Class 1: second feature bigger.
     let r = q
@@ -77,7 +88,10 @@ fn ml_classify_returns_predicted_class_from_sql() {
         })
         .expect("ML_CLASSIFY should run");
     let cls = r.result.records[0].values.get("cls").expect("cls present");
-    assert!(matches!(cls, Value::Integer(1)), "expected class 1, got {cls:?}");
+    assert!(
+        matches!(cls, Value::Integer(1)),
+        "expected class 1, got {cls:?}"
+    );
 }
 
 #[test]
@@ -91,7 +105,10 @@ fn ml_predict_proba_returns_normalised_probabilities() {
             query: "SELECT ML_PREDICT_PROBA('xor_toy2', [3.0, 0.1]) AS probs".into(),
         })
         .expect("ML_PREDICT_PROBA should run");
-    let probs = r.result.records[0].values.get("probs").expect("probs present");
+    let probs = r.result.records[0]
+        .values
+        .get("probs")
+        .expect("probs present");
     let arr = match probs {
         Value::Array(v) => v,
         other => panic!("expected Array, got {other:?}"),
@@ -101,7 +118,10 @@ fn ml_predict_proba_returns_normalised_probabilities() {
         .iter()
         .map(|v| if let Value::Float(f) = v { *f } else { 0.0 })
         .sum();
-    assert!((sum - 1.0).abs() < 0.01, "probs should sum to ~1.0, got {sum}");
+    assert!(
+        (sum - 1.0).abs() < 0.01,
+        "probs should sum to ~1.0, got {sum}"
+    );
     // First class should dominate.
     let p0 = match &arr[0] {
         Value::Float(f) => *f,
@@ -139,11 +159,13 @@ fn semantic_cache_roundtrip_via_sql() {
 
     let r = q
         .execute(ExecuteQueryInput {
-            query:
-                "SELECT SEMANTIC_CACHE_GET('qa', [0.1, 0.2, 0.3, 0.4]) AS cached".into(),
+            query: "SELECT SEMANTIC_CACHE_GET('qa', [0.1, 0.2, 0.3, 0.4]) AS cached".into(),
         })
         .expect("cache get ok");
-    let cached = r.result.records[0].values.get("cached").expect("cached present");
+    let cached = r.result.records[0]
+        .values
+        .get("cached")
+        .expect("cached present");
     assert!(
         matches!(cached, Value::Text(s) if s.as_ref() == "AI-first multi-model db"),
         "expected cached hit, got {cached:?}"
@@ -257,6 +279,12 @@ fn semantic_cache_miss_returns_null() {
             query: "SELECT SEMANTIC_CACHE_GET('qa', [0.99, 0.0, 0.0, 0.0]) AS cached".into(),
         })
         .expect("cache get ok");
-    let cached = r.result.records[0].values.get("cached").expect("cached present");
-    assert!(matches!(cached, Value::Null), "expected Null, got {cached:?}");
+    let cached = r.result.records[0]
+        .values
+        .get("cached")
+        .expect("cached present");
+    assert!(
+        matches!(cached, Value::Null),
+        "expected Null, got {cached:?}"
+    );
 }

@@ -290,7 +290,6 @@ impl RemoteBackend for HttpBackend {
             .filter(|line| !line.is_empty())
             .collect())
     }
-
 }
 
 /// HTTP backend that promises CAS — only constructible when the
@@ -418,10 +417,7 @@ impl AtomicRemoteBackend for AtomicHttpBackend {
         let (code, body) = HttpBackend::split_status(&output.stdout);
         match code {
             200..=299 => self.object_version(remote_key)?.ok_or_else(|| {
-                BackendError::Internal(format!(
-                    "http object '{}' missing after upload",
-                    remote_key
-                ))
+                BackendError::Internal(format!("http object '{}' missing after upload", remote_key))
             }),
             404 | 409 | 412 => Err(BackendError::PreconditionFailed(format!(
                 "http conditional PUT {url} returned status {code}: {}",

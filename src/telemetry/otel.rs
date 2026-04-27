@@ -138,7 +138,10 @@ mod tests {
             OtelProtocol::parse("http/protobuf"),
             Some(OtelProtocol::HttpProtobuf)
         );
-        assert_eq!(OtelProtocol::parse("http"), Some(OtelProtocol::HttpProtobuf));
+        assert_eq!(
+            OtelProtocol::parse("http"),
+            Some(OtelProtocol::HttpProtobuf)
+        );
         assert_eq!(OtelProtocol::parse("nope"), None);
     }
 

@@ -76,7 +76,10 @@ fn pitr_restore_succeeds_from_clean_snapshot() {
     // copied verbatim into the destination, so we can pre-stage one
     // by opening + flushing.
     let snapshot = snapshot_dir.join("000001-100.snapshot");
-    reddb::storage::RedDB::open(&snapshot).unwrap().flush().unwrap();
+    reddb::storage::RedDB::open(&snapshot)
+        .unwrap()
+        .flush()
+        .unwrap();
 
     let computed = SnapshotManifest::compute_snapshot_sha256(&snapshot).unwrap();
     publish_snapshot_manifest(
@@ -114,7 +117,10 @@ fn pitr_restore_fails_closed_when_snapshot_bytes_corrupted() {
     let restore_path = work.join("restore").join("data.rdb");
 
     let snapshot = snapshot_dir.join("000001-100.snapshot");
-    reddb::storage::RedDB::open(&snapshot).unwrap().flush().unwrap();
+    reddb::storage::RedDB::open(&snapshot)
+        .unwrap()
+        .flush()
+        .unwrap();
 
     // Hash the *original* bytes for the manifest, then corrupt the
     // file on disk. The manifest now references a hash that no longer
@@ -182,7 +188,10 @@ fn pitr_restore_proceeds_when_manifest_predates_checksum_field() {
     let restore_path = work.join("restore").join("data.rdb");
 
     let snapshot = snapshot_dir.join("000001-100.snapshot");
-    reddb::storage::RedDB::open(&snapshot).unwrap().flush().unwrap();
+    reddb::storage::RedDB::open(&snapshot)
+        .unwrap()
+        .flush()
+        .unwrap();
 
     publish_snapshot_manifest(
         &LocalBackend,

@@ -223,15 +223,17 @@ impl LogicalWalSpool {
         //   (b) crc32 is computed exactly once over the same bytes the
         //       reader will checksum, with zero risk of header/payload
         //       drift from a partial flush.
-        let mut frame =
-            Vec::with_capacity(LOGICAL_WAL_V2_HEADER_LEN as usize + data.len() + LOGICAL_WAL_V2_CRC_LEN as usize);
+        let mut frame = Vec::with_capacity(
+            LOGICAL_WAL_V2_HEADER_LEN as usize + data.len() + LOGICAL_WAL_V2_CRC_LEN as usize,
+        );
         frame.extend_from_slice(LOGICAL_WAL_SPOOL_MAGIC);
         frame.push(LOGICAL_WAL_SPOOL_VERSION_CURRENT);
         frame.extend_from_slice(&lsn.to_le_bytes());
         frame.extend_from_slice(&timestamp_ms.to_le_bytes());
         frame.extend_from_slice(&(data.len() as u32).to_le_bytes());
         frame.extend_from_slice(data);
-        let crc = compute_logical_v2_crc(LOGICAL_WAL_SPOOL_VERSION_CURRENT, lsn, timestamp_ms, data);
+        let crc =
+            compute_logical_v2_crc(LOGICAL_WAL_SPOOL_VERSION_CURRENT, lsn, timestamp_ms, data);
         frame.extend_from_slice(&crc.to_le_bytes());
 
         file.write_all(&frame)?;
@@ -435,7 +437,9 @@ fn read_one_v2(file: &mut File, record_start: u64) -> Result<LogicalWalEntry, St
     }
     let mut len_bytes = [0u8; 4];
     if let Err(err) = file.read_exact(&mut len_bytes) {
-        return Err(format!("torn payload length at offset {record_start}: {err}"));
+        return Err(format!(
+            "torn payload length at offset {record_start}: {err}"
+        ));
     }
     let payload_len = u32::from_le_bytes(len_bytes) as usize;
     // Sanity guard against a runaway length encoded by a partially-
@@ -500,9 +504,7 @@ fn read_one_v1(file: &mut File, record_start: u64) -> Result<LogicalWalEntry, St
     }
     let mut payload = vec![0u8; payload_len];
     if let Err(err) = file.read_exact(&mut payload) {
-        return Err(format!(
-            "v1 torn payload at offset {record_start}: {err}"
-        ));
+        return Err(format!("v1 torn payload at offset {record_start}: {err}"));
     }
     Ok(LogicalWalEntry {
         lsn: u64::from_le_bytes(lsn),

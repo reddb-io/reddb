@@ -1,8 +1,6 @@
 //! Parser for CREATE/DROP TIMESERIES
 
-use super::super::ast::{
-    CreateTimeSeriesQuery, DropTimeSeriesQuery, HypertableDdl, QueryExpr,
-};
+use super::super::ast::{CreateTimeSeriesQuery, DropTimeSeriesQuery, HypertableDdl, QueryExpr};
 use super::super::lexer::Token;
 use super::error::ParseError;
 use super::Parser;

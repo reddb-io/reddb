@@ -15,10 +15,7 @@ use reddb::application::{
 use reddb::{RedDBOptions, RedDBRuntime};
 
 fn rt() -> Arc<RedDBRuntime> {
-    Arc::new(
-        RedDBRuntime::with_options(RedDBOptions::in_memory())
-            .expect("in-memory runtime"),
-    )
+    Arc::new(RedDBRuntime::with_options(RedDBOptions::in_memory()).expect("in-memory runtime"))
 }
 
 fn author() -> Author {
@@ -217,9 +214,7 @@ fn log_includes_merge_and_cherry_pick_commits() {
     let c3 = commit(&rt, 1, "c3");
     // cherry-pick c3 back onto itself — HEAD advances with a new
     // commit whose message has the cherry-pick prefix.
-    vcs(&rt)
-        .cherry_pick(1, &c3, author())
-        .expect("cherry-pick");
+    vcs(&rt).cherry_pick(1, &c3, author()).expect("cherry-pick");
 
     let log = vcs(&rt)
         .log(reddb::application::LogInput {
