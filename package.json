@@ -1,11 +1,10 @@
 {
-  "name": "reddb",
+  "name": "reddb-cli",
   "version": "0.2.5",
-  "description": "CLI launcher for RedDB. The JS/TS app driver lives in `drivers/js` as package `reddb`.",
+  "description": "CLI launcher for RedDB. The JS/TS app driver is published as package `reddb`.",
   "type": "commonjs",
   "bin": {
-    "reddb-cli": "./drivers/js/src/cli.js",
-    "reddb": "./drivers/js/src/cli.js"
+    "reddb-cli": "./drivers/js/src/cli.js"
   },
   "files": [
     "drivers/js/src/",
