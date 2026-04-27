@@ -8,6 +8,22 @@ drivers/python/.venv/
 CLAUDE.md
 claude.md
 .agents/
+drivers/cpp/build/
+drivers/dart/.dart_tool/
+drivers/dotnet/src/Reddb/bin/
+drivers/dotnet/src/Reddb/obj/
+drivers/dotnet/tests/Reddb.Tests/bin/
+drivers/dotnet/tests/Reddb.Tests/obj/
+drivers/java/.gradle/
+drivers/java/build/
+drivers/kotlin/.gradle/
+drivers/kotlin/build/
+drivers/php/.phpunit.cache/
+drivers/php/vendor/
+drivers/python-asyncio/.venv/
+drivers/python-asyncio/src/reddb_asyncio/__pycache__/
+drivers/python-asyncio/tests/__pycache__/
+drivers/zig/.zig-cache/
 skills-lock.json
 # AI tool metadata (local/runtime)
 wal/
