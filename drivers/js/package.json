@@ -1,6 +1,6 @@
 {
   "name": "reddb",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "Official RedDB driver — talks the native RedWire TCP protocol (mTLS), HTTP, gRPC bridge, or embedded stdio JSON-RPC. Works in Node 18+, Bun and Deno.",
   "type": "module",
   "main": "src/index.js",

@@ -1,6 +1,6 @@
 [package]
 name = "reddb-client"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2021"
 authors = ["RedBlue Team"]
 description = "Official Rust client for RedDB — embedded engine and (eventually) gRPC remote, behind one connection-string API."
