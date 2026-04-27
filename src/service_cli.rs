@@ -199,20 +199,17 @@ impl ServerCommandConfig {
         //   3. Persisted `<data>/.runtime-state.json` from a prior
         //      `POST /admin/readonly` — survives restart.
         //   4. Default `false`.
-        options.read_only = if self.read_only {
-            true
-        } else if env_nonempty("RED_READONLY")
-            .or_else(|| env_nonempty("REDDB_READONLY"))
-            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-            .unwrap_or(false)
-        {
-            true
-        } else if let Some(data_path) = self.path.as_ref() {
-            crate::server::handlers_admin::load_runtime_readonly(std::path::Path::new(data_path))
+        options.read_only = self.read_only
+            || env_nonempty("RED_READONLY")
+                .or_else(|| env_nonempty("REDDB_READONLY"))
+                .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
                 .unwrap_or(false)
-        } else {
-            false
-        };
+            || self.path.as_ref().is_some_and(|data_path| {
+                crate::server::handlers_admin::load_runtime_readonly(std::path::Path::new(
+                    data_path,
+                ))
+                .unwrap_or(false)
+            });
 
         options.replication = match self.role.as_str() {
             "primary" => ReplicationConfig::primary(),
@@ -785,65 +782,99 @@ fn run_configured_servers(config: ServerCommandConfig) -> Result<(), String> {
 /// cached report on second call, but we exit on the first one
 /// regardless, so the second SIGTERM never reaches the handler.
 async fn spawn_lifecycle_signal_handler(runtime: RedDBRuntime) {
-    use tokio::signal::unix::{signal, SignalKind};
-
     let backup_on_shutdown = std::env::var("RED_BACKUP_ON_SHUTDOWN")
         .ok()
         .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(true);
 
-    let mut sigterm = match signal(SignalKind::terminate()) {
-        Ok(s) => s,
-        Err(err) => {
-            tracing::warn!(
-                error = %err,
-                "could not install SIGTERM handler; orchestrator graceful shutdown will fall back to SIGKILL"
-            );
-            return;
-        }
-    };
-    let mut sigint = match signal(SignalKind::interrupt()) {
-        Ok(s) => s,
-        Err(err) => {
-            tracing::warn!(error = %err, "could not install SIGINT handler");
-            return;
-        }
-    };
-    // PLAN.md Phase 6.4 — SIGHUP triggers a reload of secrets from
-    // their `_FILE` companions without restarting the process.
-    // Useful for credential rotation pipelines (kubectl create
-    // secret + kubectl rollout restart, but for systemd / Nomad /
-    // bare-metal where rolling the process is heavier).
-    let mut sighup = match signal(SignalKind::hangup()) {
-        Ok(s) => Some(s),
-        Err(err) => {
-            tracing::warn!(error = %err, "could not install SIGHUP handler; secret reload via signal disabled");
-            None
-        }
-    };
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
 
-    let reload_runtime = runtime.clone();
-    tokio::spawn(async move {
-        loop {
-            let signal_name = match &mut sighup {
-                Some(hup) => tokio::select! {
-                    _ = sigterm.recv() => "SIGTERM",
-                    _ = sigint.recv() => "SIGINT",
-                    _ = hup.recv() => "SIGHUP",
-                },
-                None => tokio::select! {
-                    _ = sigterm.recv() => "SIGTERM",
-                    _ = sigint.recv() => "SIGINT",
-                },
-            };
+        let mut sigterm = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "could not install SIGTERM handler; orchestrator graceful shutdown will fall back to SIGKILL"
+                );
+                return;
+            }
+        };
+        let mut sigint = match signal(SignalKind::interrupt()) {
+            Ok(s) => s,
+            Err(err) => {
+                tracing::warn!(error = %err, "could not install SIGINT handler");
+                return;
+            }
+        };
+        // PLAN.md Phase 6.4 — SIGHUP triggers a reload of secrets from
+        // their `_FILE` companions without restarting the process.
+        // Useful for credential rotation pipelines (kubectl create
+        // secret + kubectl rollout restart, but for systemd / Nomad /
+        // bare-metal where rolling the process is heavier).
+        let mut sighup = match signal(SignalKind::hangup()) {
+            Ok(s) => Some(s),
+            Err(err) => {
+                tracing::warn!(error = %err, "could not install SIGHUP handler; secret reload via signal disabled");
+                None
+            }
+        };
 
-            if signal_name == "SIGHUP" {
-                handle_sighup_reload(&reload_runtime);
-                continue; // stay alive; SIGHUP isn't a shutdown
+        let reload_runtime = runtime.clone();
+        tokio::spawn(async move {
+            loop {
+                let signal_name = match &mut sighup {
+                    Some(hup) => tokio::select! {
+                        _ = sigterm.recv() => "SIGTERM",
+                        _ = sigint.recv() => "SIGINT",
+                        _ = hup.recv() => "SIGHUP",
+                    },
+                    None => tokio::select! {
+                        _ = sigterm.recv() => "SIGTERM",
+                        _ = sigint.recv() => "SIGINT",
+                    },
+                };
+
+                if signal_name == "SIGHUP" {
+                    handle_sighup_reload(&reload_runtime);
+                    continue; // stay alive; SIGHUP isn't a shutdown
+                }
+
+                tracing::info!(
+                    signal = signal_name,
+                    "lifecycle signal received; shutting down"
+                );
+                match runtime.graceful_shutdown(backup_on_shutdown) {
+                    Ok(report) => {
+                        tracing::info!(
+                            duration_ms = report.duration_ms,
+                            flushed_wal = report.flushed_wal,
+                            final_checkpoint = report.final_checkpoint,
+                            backup_uploaded = report.backup_uploaded,
+                            "graceful shutdown complete"
+                        );
+                    }
+                    Err(err) => {
+                        tracing::error!(error = %err, "graceful shutdown failed");
+                    }
+                }
+                std::process::exit(0);
+            }
+        });
+    }
+
+    #[cfg(not(unix))]
+    {
+        tokio::spawn(async move {
+            let interrupted = tokio::signal::ctrl_c().await;
+            if let Err(err) = interrupted {
+                tracing::warn!(error = %err, "could not install Ctrl+C handler");
+                return;
             }
 
             tracing::info!(
-                signal = signal_name,
+                signal = "Ctrl+C",
                 "lifecycle signal received; shutting down"
             );
             match runtime.graceful_shutdown(backup_on_shutdown) {
@@ -861,8 +892,8 @@ async fn spawn_lifecycle_signal_handler(runtime: RedDBRuntime) {
                 }
             }
             std::process::exit(0);
-        }
-    });
+        });
+    }
 }
 
 /// PLAN.md Phase 6.4 — re-read secrets from `*_FILE` companion env
@@ -1560,7 +1591,7 @@ fn build_admin_only_server(
 
 /// PLAN.md Phase 6.2 — build a listener that only serves `/metrics`
 /// + `/health/*`. Suitable for Prometheus scrape ports that may be
-/// exposed wider than the admin port.
+///   exposed wider than the admin port.
 #[inline(never)]
 fn build_metrics_only_server(
     runtime: RedDBRuntime,
@@ -1609,8 +1640,8 @@ fn run_http_server(config: ServerCommandConfig, bind_addr: String) -> Result<(),
 /// PLAN.md HTTP TLS — when `http_tls_bind_addr` is set, spawn a
 /// rustls-terminated listener alongside the plain HTTP server. Cert
 /// + key paths come from CLI flags or `REDDB_HTTP_TLS_*` env vars; if
-/// both are absent and `RED_HTTP_TLS_DEV=1` is set, a self-signed cert
-/// is auto-generated next to the data directory (refused otherwise).
+///   both are absent and `RED_HTTP_TLS_DEV=1` is set, a self-signed cert
+///   is auto-generated next to the data directory (refused otherwise).
 fn spawn_http_tls_listener(
     config: &ServerCommandConfig,
     runtime: &RedDBRuntime,
