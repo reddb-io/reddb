@@ -260,7 +260,8 @@ jobs:
 
             **npm / pnpm:**
             ```bash
-            pnpm add reddb
+            pnpm add reddb-cli    # CLI launcher (`red` binary wrapper)
+            pnpm add reddb        # Node/TS driver package (native protocol + spawn)
             ```
 
             **Binary (Linux x86_64):**
@@ -277,7 +278,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
   publish-npm:
-    name: Publish to npm
+    name: Publish CLI npm package
     needs: [plan, publish-github]
     runs-on: ubuntu-latest
     if: needs.plan.outputs.should_skip != 'true'
@@ -392,7 +393,7 @@ jobs:
         run: cargo publish --locked --token "${CARGO_REGISTRY_TOKEN}"
 
   publish-js-driver:
-    name: Publish reddb (npm)
+    name: Publish reddb JS driver (npm)
     needs: [plan, publish-github]
     runs-on: ubuntu-latest
     if: needs.plan.outputs.should_skip != 'true'
