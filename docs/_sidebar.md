@@ -125,6 +125,16 @@
   - [WAL Archiving](/getting-started/configuration.md#backup--recovery-redbackup)
   - [Remote Backends](/deployment/backends.md)
 
+- **Native Migrations**
+  - [Overview](/migrations/overview.md)
+  - [Command Reference](/migrations/commands.md)
+  - [Walkthrough](/migrations/walkthrough.md)
+  - [Data Migrations](/migrations/data-migrations.md)
+  - [Dependency Graph](/migrations/dependency-graph.md)
+  - [VCS Integration](/migrations/vcs-integration.md)
+  - [Multi-Tenancy](/migrations/multi-tenancy.md)
+  - [Cookbook](/migrations/cookbook.md)
+
 - **Git for Data (VCS)**
   - [Overview](/vcs/overview.md)
   - [Architecture](/vcs/architecture.md)

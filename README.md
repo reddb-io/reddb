@@ -230,6 +230,39 @@ All six hit the same engine, same data, same indexes.
 
 ---
 
+## Native Migrations — No External Tools
+
+Stop reaching for Flyway, Liquibase, Drizzle Migrate, or Sequelize migrations. RedDB handles schema and data migrations as first-class SQL commands.
+
+```sql
+-- Register a migration
+CREATE MIGRATION add_users_table AS
+  CREATE TABLE users (id BIGINT, email TEXT, created_at TIMESTAMP);
+
+-- Register a dependent migration (RedDB also auto-infers deps from SQL body)
+CREATE MIGRATION add_users_index DEPENDS ON add_users_table AS
+  CREATE INDEX idx_email ON users (email);
+
+-- Apply everything in dependency order
+APPLY MIGRATION *
+
+-- Large data backfill in safe 5,000-row batches — resumes on crash
+CREATE MIGRATION backfill_display_names BATCH 5000 ROWS AS
+  UPDATE users SET display_name = email WHERE display_name IS NULL;
+
+-- Undo an applied migration (VCS revert under the hood)
+ROLLBACK MIGRATION add_users_index
+
+-- Inspect what a migration will do
+EXPLAIN MIGRATION backfill_display_names
+```
+
+Every applied migration creates a **VCS commit** (RedDB's "Git for Data"). Rollback reverts that commit automatically — no rollback scripts to maintain. Dependency ordering is a DAG; RedDB detects cycles at `CREATE` time and auto-infers edges from your SQL body so you rarely need explicit `DEPENDS ON`.
+
+→ [Native Migrations docs](./docs/migrations/overview.md)
+
+---
+
 ## 48 Built-in Types
 
 Not just `TEXT` and `INTEGER`. RedDB understands your domain.
