@@ -243,7 +243,7 @@ impl DegreeCentralityResult {
             .iter()
             .map(|(k, v)| (k.clone(), *v))
             .collect();
-        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
         sorted.truncate(n);
         sorted
     }
@@ -255,7 +255,7 @@ impl DegreeCentralityResult {
             .iter()
             .map(|(k, v)| (k.clone(), *v))
             .collect();
-        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
         sorted.truncate(n);
         sorted
     }
@@ -267,7 +267,7 @@ impl DegreeCentralityResult {
             .iter()
             .map(|(k, v)| (k.clone(), *v))
             .collect();
-        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
         sorted.truncate(n);
         sorted
     }

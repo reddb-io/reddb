@@ -195,7 +195,7 @@ impl LogCollection {
             .into_iter()
             .map(|Reverse(pair)| pair)
             .collect();
-        top_ids.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
+        top_ids.sort_by_key(|b| std::cmp::Reverse(b.0)); // newest first
 
         top_ids
             .into_iter()
@@ -252,7 +252,7 @@ impl LogCollection {
             true
         });
 
-        entries.sort_by(|a, b| a.id.cmp(&b.id));
+        entries.sort_by_key(|a| a.id);
         entries.truncate(limit);
         entries
     }

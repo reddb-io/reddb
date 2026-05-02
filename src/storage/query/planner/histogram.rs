@@ -77,7 +77,7 @@ impl std::hash::Hash for ColumnValue {
 
 impl PartialOrd for ColumnValue {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp_inner(other))
+        Some(std::cmp::Ord::cmp(self, other))
     }
 }
 

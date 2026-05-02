@@ -1425,11 +1425,10 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
         "TIME_BUCKET" => {
             let bucket_ns = time_bucket_duration(args.first()?)?;
             let timestamp_ns = args.get(1).and_then(value_to_bucket_timestamp_ns)?;
-            let bucket_start = if bucket_ns == 0 {
-                timestamp_ns
-            } else {
-                (timestamp_ns / bucket_ns) * bucket_ns
-            };
+            let bucket_start = timestamp_ns
+                .checked_div(bucket_ns)
+                .map(|bucket| bucket * bucket_ns)
+                .unwrap_or(timestamp_ns);
             Some(Value::UnsignedInteger(bucket_start))
         }
         "GEO_DISTANCE" | "HAVERSINE" => {
@@ -1529,7 +1528,7 @@ fn dispatch_builtin_function(name: &str, args: &[Value]) -> Option<Value> {
         }
         "JSON_OBJECT" => {
             // Args come as interleaved (key, value, key, value, ...).
-            if args.len() % 2 != 0 {
+            if !args.len().is_multiple_of(2) {
                 return Some(Value::Null);
             }
             let mut map = crate::serde_json::Map::new();

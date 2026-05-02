@@ -44,7 +44,7 @@
 //!
 //! - `bitmap_a_eq_1 OR bitmap_a_eq_2 OR bitmap_a_eq_3 OR
 //!    bitmap_b_gt_5` — four index lookups, three OR operations,
-//!    one final heap walk.
+//!   one final heap walk.
 
 use roaring::RoaringBitmap;
 
@@ -124,7 +124,7 @@ impl TidBitmap {
             count += 1;
             // Amortise the cap check: only verify every 4096
             // insertions to avoid O(n) on the size estimate.
-            if count % 4096 == 0 {
+            if count.is_multiple_of(4096) {
                 self.check_cap()?;
             }
         }

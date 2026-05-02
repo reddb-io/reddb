@@ -211,11 +211,10 @@ impl CacheEntry {
 
         // Score: frequency * priority / recency
         // Higher = keep longer
-        if recency == 0 {
-            frequency * priority * 1000
-        } else {
-            frequency * priority / recency
-        }
+        frequency
+            .saturating_mul(priority)
+            .checked_div(recency)
+            .unwrap_or_else(|| frequency.saturating_mul(priority).saturating_mul(1000))
     }
 }
 
@@ -571,10 +570,10 @@ impl MaterializedViewCache {
                         RefreshPolicy::OnChange => {
                             view.stale = true;
                         }
-                        RefreshPolicy::AfterWrites(threshold) => {
-                            if view.writes_since_refresh >= *threshold {
-                                view.stale = true;
-                            }
+                        RefreshPolicy::AfterWrites(threshold)
+                            if view.writes_since_refresh >= *threshold =>
+                        {
+                            view.stale = true;
                         }
                         _ => {}
                     }

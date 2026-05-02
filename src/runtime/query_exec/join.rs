@@ -309,7 +309,11 @@ pub(crate) fn runtime_join_table_context(
         | QueryExpr::DetachPolicy { .. }
         | QueryExpr::ShowPolicies { .. }
         | QueryExpr::ShowEffectivePermissions { .. }
-        | QueryExpr::SimulatePolicy { .. } => (None, None),
+        | QueryExpr::SimulatePolicy { .. }
+        | QueryExpr::CreateMigration(_)
+        | QueryExpr::ApplyMigration(_)
+        | QueryExpr::RollbackMigration(_)
+        | QueryExpr::ExplainMigration(_) => (None, None),
     };
 
     (

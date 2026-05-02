@@ -1617,7 +1617,7 @@ impl RedDBRuntime {
         for (key, value) in static_metadata_assignments
             .iter()
             .cloned()
-            .chain(dynamic_metadata_assignments.into_iter())
+            .chain(dynamic_metadata_assignments)
         {
             ensure_non_tree_reserved_metadata_key(&key)?;
             patch_metadata
@@ -2185,7 +2185,7 @@ impl RuntimeEntityPort for RedDBRuntime {
         if has_secondary_indexes {
             let index_rows: Vec<(EntityId, Vec<(String, crate::storage::schema::Value)>)> = ids
                 .iter()
-                .zip(field_snapshots.into_iter())
+                .zip(field_snapshots)
                 .map(|(id, fields)| (*id, fields))
                 .collect();
             self.index_store_ref()

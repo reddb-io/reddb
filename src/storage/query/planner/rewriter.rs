@@ -234,7 +234,11 @@ impl RewriteRule for NormalizeRule {
             | QueryExpr::DetachPolicy { .. }
             | QueryExpr::ShowPolicies { .. }
             | QueryExpr::ShowEffectivePermissions { .. }
-            | QueryExpr::SimulatePolicy { .. }) => other,
+            | QueryExpr::SimulatePolicy { .. }
+            | QueryExpr::CreateMigration(_)
+            | QueryExpr::ApplyMigration(_)
+            | QueryExpr::RollbackMigration(_)
+            | QueryExpr::ExplainMigration(_)) => other,
         }
     }
 
@@ -338,7 +342,11 @@ impl RewriteRule for SimplifyFiltersRule {
             | QueryExpr::DetachPolicy { .. }
             | QueryExpr::ShowPolicies { .. }
             | QueryExpr::ShowEffectivePermissions { .. }
-            | QueryExpr::SimulatePolicy { .. }) => other,
+            | QueryExpr::SimulatePolicy { .. }
+            | QueryExpr::CreateMigration(_)
+            | QueryExpr::ApplyMigration(_)
+            | QueryExpr::RollbackMigration(_)
+            | QueryExpr::ExplainMigration(_)) => other,
         }
     }
 
@@ -401,7 +409,11 @@ impl RewriteRule for SimplifyFiltersRule {
             | QueryExpr::DetachPolicy { .. }
             | QueryExpr::ShowPolicies { .. }
             | QueryExpr::ShowEffectivePermissions { .. }
-            | QueryExpr::SimulatePolicy { .. } => false,
+            | QueryExpr::SimulatePolicy { .. }
+            | QueryExpr::CreateMigration(_)
+            | QueryExpr::ApplyMigration(_)
+            | QueryExpr::RollbackMigration(_)
+            | QueryExpr::ExplainMigration(_) => false,
         }
     }
 }

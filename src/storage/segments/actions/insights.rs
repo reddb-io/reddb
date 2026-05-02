@@ -316,7 +316,7 @@ impl TraceSegment {
         }
 
         let mut patterns: Vec<_> = pattern_counts.into_iter().collect();
-        patterns.sort_by(|a, b| b.1.cmp(&a.1));
+        patterns.sort_by_key(|b| std::cmp::Reverse(b.1));
         patterns
     }
 
@@ -348,7 +348,7 @@ impl TraceSegment {
                 (op.clone(), avg)
             })
             .collect();
-        avg_times.sort_by(|a, b| b.1.cmp(&a.1));
+        avg_times.sort_by_key(|b| std::cmp::Reverse(b.1));
         let bottlenecks: Vec<_> = avg_times.into_iter().take(3).collect();
 
         // Find always succeeds / always fails

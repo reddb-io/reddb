@@ -589,10 +589,8 @@ impl UnifiedStore {
         }
 
         // Update graph label index for bulk-inserted GraphNode entities
-        for label_entry in &graph_labels {
-            if let Some((label, entity_id)) = label_entry {
-                self.update_graph_label_index(collection, label, *entity_id);
-            }
+        for (label, entity_id) in graph_labels.iter().flatten() {
+            self.update_graph_label_index(collection, label, *entity_id);
         }
 
         // REDDB_BULK_SKIP_PERSIST_UNSAFE=1 skips the persistent B-tree index
@@ -650,7 +648,7 @@ impl UnifiedStore {
                 t_btree_lock = t0.elapsed();
 
                 let t0 = std::time::Instant::now();
-                let _ = btree.bulk_insert_sorted(&batch);
+                let _ = btree.bulk_insert_sorted(batch);
                 t_btree_insert = t0.elapsed();
                 let registry_dirty = root_before != btree.root_page_id();
 

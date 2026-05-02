@@ -423,25 +423,21 @@ impl MapStep for ValueMapStep {
         let mut result = HashMap::new();
 
         match traverser.value() {
-            TraverserValue::Vertex(id) => {
-                if self.with_tokens {
-                    result.insert("@id".to_string(), json!(id));
-                    result.insert("@type".to_string(), json!("vertex"));
-                }
+            TraverserValue::Vertex(id) if self.with_tokens => {
+                result.insert("@id".to_string(), json!(id));
+                result.insert("@type".to_string(), json!("vertex"));
             }
             TraverserValue::Edge {
                 id,
                 source,
                 target,
                 label,
-            } => {
-                if self.with_tokens {
-                    result.insert("@id".to_string(), json!(id));
-                    result.insert("@type".to_string(), json!("edge"));
-                    result.insert("@label".to_string(), json!(label));
-                    result.insert("@source".to_string(), json!(source));
-                    result.insert("@target".to_string(), json!(target));
-                }
+            } if self.with_tokens => {
+                result.insert("@id".to_string(), json!(id));
+                result.insert("@type".to_string(), json!("edge"));
+                result.insert("@label".to_string(), json!(label));
+                result.insert("@source".to_string(), json!(source));
+                result.insert("@target".to_string(), json!(target));
             }
             TraverserValue::Map(map) => {
                 for (key, value) in map {

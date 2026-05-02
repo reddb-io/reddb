@@ -81,7 +81,7 @@ impl VisibilityMap {
     /// caller knows the table size up-front (e.g. ANALYZE
     /// freshly imported data).
     pub fn with_capacity(pages: u32) -> Self {
-        let words = (pages as usize + 63) / 64;
+        let words = (pages as usize).div_ceil(64);
         Self {
             bits: RwLock::new(vec![0u64; words]),
         }

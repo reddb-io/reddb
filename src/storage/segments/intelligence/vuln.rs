@@ -273,7 +273,7 @@ impl<'a> VulnIntelligence<'a> {
             }
         }
 
-        vulns.sort_by(|a, b| b.severity.cmp(&a.severity));
+        vulns.sort_by_key(|b| std::cmp::Reverse(b.severity));
         vulns
     }
 

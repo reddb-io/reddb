@@ -29,7 +29,7 @@ const SALTS: [u32; 8] = [
 
 /// One 32-byte cache-line-aligned block: 8 × u32 words.
 #[repr(align(32))]
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Block {
     words: [u32; 8],
 }
@@ -37,12 +37,6 @@ pub struct Block {
 impl std::fmt::Debug for Block {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Block({:08x?})", &self.words)
-    }
-}
-
-impl Default for Block {
-    fn default() -> Self {
-        Self { words: [0u32; 8] }
     }
 }
 

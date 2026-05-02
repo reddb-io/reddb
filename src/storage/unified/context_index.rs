@@ -146,12 +146,13 @@ impl ContextIndex {
             .map(|entity| {
                 let entity_tokens = extract_entity_tokens(entity);
                 let field_pairs = extract_field_lookup_pairs(entity);
-                let mut keys = EntityKeys::default();
-                keys.token_keys = entity_tokens
-                    .iter()
-                    .map(|(token, _)| token.clone())
-                    .collect();
-                keys.field_value_keys = field_pairs.clone();
+                let keys = EntityKeys {
+                    token_keys: entity_tokens
+                        .iter()
+                        .map(|(token, _)| token.clone())
+                        .collect(),
+                    field_value_keys: field_pairs.clone(),
+                };
                 (entity.id.raw(), keys, entity_tokens, field_pairs)
             })
             .collect();

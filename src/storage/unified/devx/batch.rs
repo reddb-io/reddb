@@ -202,7 +202,7 @@ impl BatchBuilder {
                 .bulk_insert(&collection, entities)
                 .map_err(|err| DevXError::Storage(format!("{err:?}")))?;
 
-            for (id, metadata) in ids.iter().zip(metadata_items.into_iter()) {
+            for (id, metadata) in ids.iter().zip(metadata_items) {
                 if !metadata.is_empty() {
                     let _ =
                         self.store

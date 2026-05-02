@@ -5,10 +5,10 @@
  *
  *   red://                                          embedded in-memory
  *   red:///abs/path/data.rdb                        embedded persistent
- *   red://user:pass@host:5051                       remote, default proto=grpc
+ *   red://user:pass@host:5050                       remote, default proto=red (wire)
  *   red://host:8080?proto=https                     remote HTTPS
  *   red://host:5432?proto=pg                        PostgreSQL wire
- *   red://host:5051?proto=grpc&token=sk-abc         remote gRPC w/ bearer
+ *   red://host:5055?proto=grpc&token=sk-abc         remote gRPC w/ bearer
  *   red://host:8080?proto=https&apiKey=ak-xyz       remote HTTPS w/ api key
  *
  * Backwards-compat: legacy `memory://`, `file://`, `grpc://` URLs
@@ -20,7 +20,7 @@ import { RedDBError } from './protocol.js'
 
 /**
  * @typedef {object} ParsedUri
- * @property {'embedded' | 'http' | 'https' | 'grpc' | 'grpcs' | 'pg'} kind
+ * @property {'embedded' | 'http' | 'https' | 'red' | 'reds' | 'grpc' | 'grpcs' | 'pg'} kind
  * @property {string} [host]
  * @property {number} [port]
  * @property {string} [path]            // for embedded `file://`-equivalent
@@ -44,7 +44,7 @@ import { RedDBError } from './protocol.js'
 export function parseUri(uri) {
   if (typeof uri !== 'string' || uri.length === 0) {
     throw new TypeError(
-      "connect() requires a URI string (e.g. 'red://localhost:5051' or 'red:///data.rdb')",
+      "connect() requires a URI string (e.g. 'red://localhost:5050' or 'red:///data.rdb')",
     )
   }
   if (uri.startsWith('red://') || uri === 'red:' || uri === 'red:/') {
@@ -110,7 +110,7 @@ export function parseRedUrl(uri) {
     }
   }
 
-  // Remote — default proto is grpc.
+  // Remote — default proto is red (wire).
   const kind = resolveKind(proto)
   const port = parsed.port ? Number(parsed.port) : defaultPortFor(kind)
   const username = parsed.username ? decodeURIComponent(parsed.username) : undefined
@@ -152,7 +152,6 @@ export function parseLegacyUrl(uri) {
     || uri.startsWith('grpcs://')
     || uri.startsWith('reds://')
   ) {
-    const isTls = uri.startsWith('grpcs://') || uri.startsWith('reds://')
     const scheme = uri.split('://', 1)[0]
     const stripped = uri.slice(`${scheme}://`.length)
     const [hostPort] = stripped.split(/[/?]/, 1)
@@ -160,10 +159,11 @@ export function parseLegacyUrl(uri) {
     if (!host) {
       throw new TypeError(`invalid ${scheme}:// URI: missing host in '${uri}'`)
     }
+    const legacyKind = scheme === 'reds' ? 'reds' : scheme === 'grpcs' ? 'grpcs' : scheme === 'grpc' ? 'grpc' : 'red'
     return {
-      kind: isTls ? 'grpcs' : 'grpc',
+      kind: legacyKind,
       host,
-      port: portStr ? Number(portStr) : defaultPortFor(isTls ? 'grpcs' : 'grpc'),
+      port: portStr ? Number(portStr) : defaultPortFor(legacyKind),
       originalUri: uri,
     }
   }
@@ -196,11 +196,13 @@ export function parseLegacyUrl(uri) {
 function resolveKind(protoQueryParam) {
   switch (protoQueryParam) {
     case '':
-    case 'grpc':
     case 'red':
+      return 'red'
+    case 'reds':
+      return 'reds'
+    case 'grpc':
       return 'grpc'
     case 'grpcs':
-    case 'reds':
       return 'grpcs'
     case 'http':
       return 'http'
@@ -224,10 +226,14 @@ function defaultPortFor(kind) {
       return 8080
     case 'https':
       return 8443
+    case 'red':
+    case 'reds':
+    case 'redwire':
+      return 5050
     case 'grpc':
-      return 5051
+      return 5055
     case 'grpcs':
-      return 5052
+      return 5056
     case 'pg':
     case 'postgres':
     case 'postgresql':

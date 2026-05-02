@@ -764,7 +764,7 @@ fn serialize_metadata(metadata: Option<&Metadata>) -> Vec<u8> {
     }
 
     let mut entries: Vec<_> = metadata.iter().collect();
-    entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+    entries.sort_by_key(|(a, _)| *a);
 
     let mut buf = Vec::new();
     buf.extend_from_slice(&(entries.len() as u32).to_le_bytes());
@@ -874,7 +874,7 @@ fn write_metadata_value(buf: &mut Vec<u8>, value: &MetadataValue) {
         MetadataValue::Object(values) => {
             buf.push(7);
             let mut entries: Vec<_> = values.iter().collect();
-            entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+            entries.sort_by_key(|(a, _)| *a);
             buf.extend_from_slice(&(entries.len() as u32).to_le_bytes());
             for (key, value) in entries {
                 write_string(buf, key);

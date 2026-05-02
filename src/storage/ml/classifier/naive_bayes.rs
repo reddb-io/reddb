@@ -238,7 +238,7 @@ impl IncrementalClassifier for MultinomialNaiveBayes {
         }
         let alpha = self.config.alpha as f64;
         let mut log_scores = vec![0f64; self.num_classes];
-        for c in 0..self.num_classes {
+        for (c, log_score) in log_scores.iter_mut().enumerate().take(self.num_classes) {
             let prior = (self.class_counts[c] as f64).max(f64::MIN_POSITIVE) / total_samples as f64;
             let mut lp = prior.ln();
             let denom = self.feature_totals[c] + alpha * self.num_features as f64;
@@ -249,7 +249,7 @@ impl IncrementalClassifier for MultinomialNaiveBayes {
                 let numer = self.feature_counts[c][i] + alpha;
                 lp += (x as f64) * (numer / denom).ln();
             }
-            log_scores[c] = lp;
+            *log_score = lp;
         }
         // Softmax over log-scores → normalised probabilities.
         let max = log_scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);

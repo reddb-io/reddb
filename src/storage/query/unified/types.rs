@@ -211,7 +211,7 @@ impl UnifiedRecord {
             if self.values.is_empty() {
                 self.values.reserve(col.schema.len());
             }
-            for (k, v) in col.schema.iter().zip(col.values.into_iter()) {
+            for (k, v) in col.schema.iter().zip(col.values) {
                 self.values.insert(Arc::clone(k), v);
             }
         }

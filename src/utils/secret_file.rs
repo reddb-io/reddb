@@ -71,9 +71,7 @@ pub fn expand_file_env(name: &str) -> std::io::Result<()> {
     }
 
     let contents = std::fs::read_to_string(&path)?;
-    let value = contents
-        .trim_end_matches(|c: char| c == '\n' || c == '\r')
-        .to_string();
+    let value = contents.trim_end_matches(['\n', '\r']).to_string();
 
     // SAFETY: set_var/remove_var are unsafe in Rust 2024 because they
     // are not thread-safe relative to getenv. We invoke this only

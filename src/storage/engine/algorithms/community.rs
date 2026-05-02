@@ -156,7 +156,7 @@ impl LabelPropagation {
             .collect();
 
         // Sort by size descending
-        communities.sort_by(|a, b| b.size.cmp(&a.size));
+        communities.sort_by_key(|b| std::cmp::Reverse(b.size));
 
         CommunitiesResult {
             communities,

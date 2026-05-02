@@ -268,7 +268,7 @@ await db.close()
 Start the server:
 
 ```bash
-red server --path ./data/reddb.rdb --grpc-bind 127.0.0.1:50051 --http-bind 127.0.0.1:8080
+red server --path ./data/reddb.rdb --grpc-bind 127.0.0.1:5055 --http-bind 127.0.0.1:8080
 ```
 
 Check health:
@@ -296,7 +296,7 @@ curl -X POST http://127.0.0.1:8080/ai/ask \
 Connect via gRPC REPL:
 
 ```bash
-red connect 127.0.0.1:50051
+red connect 127.0.0.1:5055
 ```
 
 ## Start here

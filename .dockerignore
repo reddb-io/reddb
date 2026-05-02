@@ -12,3 +12,8 @@
 !src/**
 !benches/
 !benches/**
+!docker/
+!docker/**
+!docs/
+!docs/spec/
+!docs/spec/**

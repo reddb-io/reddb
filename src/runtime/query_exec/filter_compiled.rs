@@ -92,11 +92,11 @@ pub(crate) fn classify_field(
     classify_field_inner(field, table_name, table_alias, None)
 }
 
-pub(crate) fn classify_field_with_schema<'s>(
+pub(crate) fn classify_field_with_schema(
     field: &FieldRef,
     table_name: &str,
     table_alias: &str,
-    schema_cols: &'s [String],
+    schema_cols: &[String],
 ) -> EntityFieldKind {
     classify_field_inner(field, table_name, table_alias, Some(schema_cols))
 }

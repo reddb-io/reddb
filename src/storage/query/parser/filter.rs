@@ -258,17 +258,16 @@ impl<'a> Parser<'a> {
         if matches!(
             self.peek(),
             Token::And | Token::Or | Token::RParen | Token::Eof
-        ) {
-            if expr_is_booleanish(&lhs) {
-                return Ok(Filter::CompareExpr {
-                    lhs,
-                    op: CompareOp::Eq,
-                    rhs: Expr::Literal {
-                        value: Value::Boolean(true),
-                        span: Span::synthetic(),
-                    },
-                });
-            }
+        ) && expr_is_booleanish(&lhs)
+        {
+            return Ok(Filter::CompareExpr {
+                lhs,
+                op: CompareOp::Eq,
+                rhs: Expr::Literal {
+                    value: Value::Boolean(true),
+                    span: Span::synthetic(),
+                },
+            });
         }
 
         // Comparison operator — now accepts an `Expr` RHS so users

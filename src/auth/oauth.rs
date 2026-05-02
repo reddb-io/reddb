@@ -354,11 +354,15 @@ impl OAuthValidator {
 
         // 3. Identity extraction.
         let username = match &self.config.identity_mode {
-            OAuthIdentityMode::SubClaim => token
-                .claims
-                .sub
-                .clone()
-                .ok_or_else(|| OAuthError::MissingIdentityClaim(OAuthIdentityMode::SubClaim))?,
+            OAuthIdentityMode::SubClaim => {
+                token
+                    .claims
+                    .sub
+                    .clone()
+                    .ok_or(OAuthError::MissingIdentityClaim(
+                        OAuthIdentityMode::SubClaim,
+                    ))?
+            }
             OAuthIdentityMode::ClaimField(name) => token
                 .claims
                 .claim(name)

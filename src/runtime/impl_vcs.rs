@@ -749,11 +749,11 @@ impl RedDBRuntime {
             None => {
                 // Fall back to the connection's current HEAD branch, then default.
                 let workset = load_workset(store, input.connection_id);
-                let base = workset
+
+                workset
                     .and_then(|(_, base)| base)
                     .or_else(|| load_ref(store, vc::DEFAULT_BRANCH_REF).map(|r| r.target))
-                    .unwrap_or_default();
-                base
+                    .unwrap_or_default()
             }
         };
         let r = Ref {
@@ -1637,10 +1637,11 @@ impl RedDBRuntime {
         }
 
         // 1. Exact commit hash.
-        if spec.len() == 64 && spec.chars().all(|c| c.is_ascii_hexdigit()) {
-            if load_commit(store, spec).is_some() {
-                return Ok(spec.to_string());
-            }
+        if spec.len() == 64
+            && spec.chars().all(|c| c.is_ascii_hexdigit())
+            && load_commit(store, spec).is_some()
+        {
+            return Ok(spec.to_string());
         }
 
         // 2. Full ref name (refs/heads/..., refs/tags/...).

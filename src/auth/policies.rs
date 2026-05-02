@@ -204,7 +204,7 @@ impl ResourceRef {
 }
 
 /// Per-request evaluation context.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct EvalContext {
     /// Tenant of the authenticated principal.
     pub principal_tenant: Option<String>,
@@ -218,19 +218,6 @@ pub struct EvalContext {
     /// Legacy 3-role bypass — set when the principal has the classic
     /// `Role::Admin`. Short-circuits the entire evaluator.
     pub principal_is_admin_role: bool,
-}
-
-impl Default for EvalContext {
-    fn default() -> Self {
-        Self {
-            principal_tenant: None,
-            current_tenant: None,
-            peer_ip: None,
-            mfa_present: false,
-            now_ms: 0,
-            principal_is_admin_role: false,
-        }
-    }
 }
 
 /// Outcome of `evaluate` / `simulate`.
@@ -335,7 +322,7 @@ impl Policy {
         let mut seen_sids: Vec<&str> = Vec::new();
         for st in &self.statements {
             if let Some(sid) = st.sid.as_deref() {
-                if seen_sids.iter().any(|s| *s == sid) {
+                if seen_sids.contains(&sid) {
                     return Err(PolicyError::DuplicateSid(sid.to_string()));
                 }
                 seen_sids.push(sid);
@@ -864,7 +851,7 @@ fn parse_rfc3339_ms(s: &str) -> Result<u128, PolicyError> {
 fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = (y - era * 400) as i64; // [0, 399]
+    let yoe = y - era * 400; // [0, 399]
     let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1; // [0, 365]
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
     era * 146_097 + doe - 719_468

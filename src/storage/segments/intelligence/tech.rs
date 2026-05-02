@@ -142,7 +142,7 @@ impl<'a> TechIntelligence<'a> {
             })
             .collect();
 
-        versions.sort_by(|a, b| b.count.cmp(&a.count));
+        versions.sort_by_key(|b| std::cmp::Reverse(b.count));
         versions
     }
 
@@ -179,7 +179,7 @@ impl<'a> TechIntelligence<'a> {
         }
 
         let mut sorted: Vec<_> = related.into_iter().collect();
-        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
         sorted.truncate(10);
         sorted
     }

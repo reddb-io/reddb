@@ -95,7 +95,7 @@ impl HeavyHitters {
             .filter(|(_, k)| k != key)
             .collect();
         kept.push((estimate, key.to_vec()));
-        kept.sort_by(|a, b| b.0.cmp(&a.0));
+        kept.sort_by_key(|b| std::cmp::Reverse(b.0));
         kept.truncate(self.k);
         self.top = kept.into_iter().map(Reverse).collect();
     }
@@ -107,7 +107,7 @@ impl HeavyHitters {
             .iter()
             .map(|Reverse((c, k))| (*c, k.clone()))
             .collect();
-        out.sort_by(|a, b| b.0.cmp(&a.0));
+        out.sort_by_key(|b| std::cmp::Reverse(b.0));
         out.into_iter().map(|(c, k)| (k, c)).collect()
     }
 

@@ -789,7 +789,7 @@ impl Pager {
     /// Read a page through the configured encryptor if any. Page 0
     /// is always returned plaintext (it carries the encryption marker
     /// + header). Callers that want raw cipher bytes can use
-    /// `read_page_no_checksum` directly.
+    ///   `read_page_no_checksum` directly.
     pub fn read_page_decrypted(&self, page_id: u32) -> Result<Page, PagerError> {
         if page_id == 0 || self.encryption.is_none() {
             return self.read_page(page_id);
@@ -1133,7 +1133,7 @@ impl Pager {
     pub fn prefetch_hint(&self, page_id: u32) {
         if let Ok(file) = self.file_lock() {
             let _ = crate::storage::btree::prefetch::prefetch_page(
-                &*file,
+                &file,
                 page_id as u64,
                 PAGE_SIZE as u32,
             );

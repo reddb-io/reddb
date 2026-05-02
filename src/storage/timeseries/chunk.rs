@@ -210,8 +210,8 @@ impl TimeSeriesChunk {
     /// Sealed chunks have sorted timestamps (sort happens in `seal()`), so
     /// `partition_point` binary-searches to the first relevant point — O(log n)
     /// + `take_while` early-exits at end_ns. Open chunks may be unsorted
-    /// (out-of-order appends are legal pre-seal), so we fall back to a
-    /// linear filter to preserve correctness.
+    ///   (out-of-order appends are legal pre-seal), so we fall back to a
+    ///   linear filter to preserve correctness.
     pub fn query_range(&self, start_ns: u64, end_ns: u64) -> Vec<TimeSeriesPoint> {
         // Zone-map fast-reject (BRIN MINMAX equivalent).
         if self.timestamp_range_skip(start_ns, end_ns) {

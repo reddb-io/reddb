@@ -277,7 +277,7 @@ impl<'rt> MutationEngine<'rt> {
         if has_secondary_indexes {
             let index_rows: Vec<(EntityId, Vec<(String, Value)>)> = ids
                 .iter()
-                .zip(field_snapshots.into_iter())
+                .zip(field_snapshots)
                 .map(|(id, fields)| (*id, fields))
                 .collect();
             self.runtime

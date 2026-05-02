@@ -338,7 +338,11 @@ impl CostEstimator {
             | QueryExpr::DetachPolicy { .. }
             | QueryExpr::ShowPolicies { .. }
             | QueryExpr::ShowEffectivePermissions { .. }
-            | QueryExpr::SimulatePolicy { .. } => PlanCost::new(1.0, 1.0, 0.0),
+            | QueryExpr::SimulatePolicy { .. }
+            | QueryExpr::CreateMigration(_)
+            | QueryExpr::ApplyMigration(_)
+            | QueryExpr::RollbackMigration(_)
+            | QueryExpr::ExplainMigration(_) => PlanCost::new(1.0, 1.0, 0.0),
         }
     }
 
@@ -402,7 +406,11 @@ impl CostEstimator {
             | QueryExpr::DetachPolicy { .. }
             | QueryExpr::ShowPolicies { .. }
             | QueryExpr::ShowEffectivePermissions { .. }
-            | QueryExpr::SimulatePolicy { .. } => CardinalityEstimate::new(1.0, 1.0),
+            | QueryExpr::SimulatePolicy { .. }
+            | QueryExpr::CreateMigration(_)
+            | QueryExpr::ApplyMigration(_)
+            | QueryExpr::RollbackMigration(_)
+            | QueryExpr::ExplainMigration(_) => CardinalityEstimate::new(1.0, 1.0),
         }
     }
 

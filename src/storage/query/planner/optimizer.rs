@@ -333,7 +333,11 @@ impl JoinReorderingPass {
             | QueryExpr::DetachPolicy { .. }
             | QueryExpr::ShowPolicies { .. }
             | QueryExpr::ShowEffectivePermissions { .. }
-            | QueryExpr::SimulatePolicy { .. } => 1.0,
+            | QueryExpr::SimulatePolicy { .. }
+            | QueryExpr::CreateMigration(_)
+            | QueryExpr::ApplyMigration(_)
+            | QueryExpr::RollbackMigration(_)
+            | QueryExpr::ExplainMigration(_) => 1.0,
         }
     }
 }

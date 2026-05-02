@@ -168,6 +168,7 @@ impl AtomicRemoteBackend for LocalBackend {
         let lock_path = lock_path_for(dest);
         let lock_file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&lock_path)
@@ -223,6 +224,7 @@ impl AtomicRemoteBackend for LocalBackend {
         let lock_path = lock_path_for(dest);
         let lock_file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&lock_path)

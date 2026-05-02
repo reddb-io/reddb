@@ -1,13 +1,15 @@
 use crate::storage::query::ast::{
-    AlterTableQuery, AlterUserStmt, AskQuery, CopyFormat, CopyFromQuery, CreateForeignTableQuery,
-    CreateIndexQuery, CreatePolicyQuery, CreateQueueQuery, CreateSchemaQuery, CreateSequenceQuery,
-    CreateServerQuery, CreateTableQuery, CreateTimeSeriesQuery, CreateTreeQuery, CreateViewQuery,
-    DeleteQuery, DropForeignTableQuery, DropIndexQuery, DropPolicyQuery, DropQueueQuery,
-    DropSchemaQuery, DropSequenceQuery, DropServerQuery, DropTableQuery, DropTimeSeriesQuery,
-    DropTreeQuery, DropViewQuery, ExplainAlterQuery, ForeignColumnDef, GrantStmt, GraphCommand,
+    AlterTableQuery, AlterUserStmt, ApplyMigrationQuery, AskQuery, CopyFormat, CopyFromQuery,
+    CreateForeignTableQuery, CreateIndexQuery, CreateMigrationQuery, CreatePolicyQuery,
+    CreateQueueQuery, CreateSchemaQuery, CreateSequenceQuery, CreateServerQuery, CreateTableQuery,
+    CreateTimeSeriesQuery, CreateTreeQuery, CreateViewQuery, DeleteQuery, DropForeignTableQuery,
+    DropIndexQuery, DropPolicyQuery, DropQueueQuery, DropSchemaQuery, DropSequenceQuery,
+    DropServerQuery, DropTableQuery, DropTimeSeriesQuery, DropTreeQuery, DropViewQuery,
+    ExplainAlterQuery, ExplainMigrationQuery, ForeignColumnDef, GrantStmt, GraphCommand,
     GraphQuery, HybridQuery, InsertQuery, JoinQuery, MaintenanceCommand, PathQuery, PolicyAction,
     ProbabilisticCommand, QueryExpr, QueueCommand, RefreshMaterializedViewQuery, RevokeStmt,
-    SearchCommand, TableQuery, TreeCommand, TxnControl, UpdateQuery, VectorQuery,
+    RollbackMigrationQuery, SearchCommand, TableQuery, TreeCommand, TxnControl, UpdateQuery,
+    VectorQuery,
 };
 use crate::storage::query::parser::{ParseError, Parser};
 use crate::storage::query::Token;
@@ -26,6 +28,7 @@ pub enum SqlStatement {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum FrontendStatement {
     Sql(SqlStatement),
     Graph(GraphQuery),
@@ -96,9 +99,14 @@ pub enum SqlCommand {
     /// PERMISSIONS). Stored as a pre-built QueryExpr so the dispatcher
     /// can route the multitude of shapes through a single arm.
     IamPolicy(QueryExpr),
+    CreateMigration(CreateMigrationQuery),
+    ApplyMigration(ApplyMigrationQuery),
+    RollbackMigration(RollbackMigrationQuery),
+    ExplainMigration(ExplainMigrationQuery),
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum SqlQuery {
     Select(TableQuery),
     Join(JoinQuery),
@@ -140,9 +148,14 @@ pub enum SqlSchemaCommand {
     DropServer(DropServerQuery),
     CreateForeignTable(CreateForeignTableQuery),
     DropForeignTable(DropForeignTableQuery),
+    CreateMigration(CreateMigrationQuery),
+    ApplyMigration(ApplyMigrationQuery),
+    RollbackMigration(RollbackMigrationQuery),
+    ExplainMigration(ExplainMigrationQuery),
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum SqlAdminCommand {
     SetConfig { key: String, value: Value },
     ShowConfig { prefix: Option<String> },
@@ -239,6 +252,18 @@ impl SqlStatement {
             SqlStatement::Admin(SqlAdminCommand::Revoke(s)) => SqlCommand::Revoke(s),
             SqlStatement::Admin(SqlAdminCommand::AlterUser(s)) => SqlCommand::AlterUser(s),
             SqlStatement::Admin(SqlAdminCommand::IamPolicy(e)) => SqlCommand::IamPolicy(e),
+            SqlStatement::Schema(SqlSchemaCommand::CreateMigration(q)) => {
+                SqlCommand::CreateMigration(q)
+            }
+            SqlStatement::Schema(SqlSchemaCommand::ApplyMigration(q)) => {
+                SqlCommand::ApplyMigration(q)
+            }
+            SqlStatement::Schema(SqlSchemaCommand::RollbackMigration(q)) => {
+                SqlCommand::RollbackMigration(q)
+            }
+            SqlStatement::Schema(SqlSchemaCommand::ExplainMigration(q)) => {
+                SqlCommand::ExplainMigration(q)
+            }
         }
     }
 
@@ -324,6 +349,10 @@ impl SqlCommand {
             SqlCommand::Revoke(s) => QueryExpr::Revoke(s),
             SqlCommand::AlterUser(s) => QueryExpr::AlterUser(s),
             SqlCommand::IamPolicy(e) => e,
+            SqlCommand::CreateMigration(q) => QueryExpr::CreateMigration(q),
+            SqlCommand::ApplyMigration(q) => QueryExpr::ApplyMigration(q),
+            SqlCommand::RollbackMigration(q) => QueryExpr::RollbackMigration(q),
+            SqlCommand::ExplainMigration(q) => QueryExpr::ExplainMigration(q),
         }
     }
 
@@ -409,6 +438,18 @@ impl SqlCommand {
             SqlCommand::Revoke(s) => SqlStatement::Admin(SqlAdminCommand::Revoke(s)),
             SqlCommand::AlterUser(s) => SqlStatement::Admin(SqlAdminCommand::AlterUser(s)),
             SqlCommand::IamPolicy(e) => SqlStatement::Admin(SqlAdminCommand::IamPolicy(e)),
+            SqlCommand::CreateMigration(q) => {
+                SqlStatement::Schema(SqlSchemaCommand::CreateMigration(q))
+            }
+            SqlCommand::ApplyMigration(q) => {
+                SqlStatement::Schema(SqlSchemaCommand::ApplyMigration(q))
+            }
+            SqlCommand::RollbackMigration(q) => {
+                SqlStatement::Schema(SqlSchemaCommand::RollbackMigration(q))
+            }
+            SqlCommand::ExplainMigration(q) => {
+                SqlStatement::Schema(SqlSchemaCommand::ExplainMigration(q))
+            }
         }
     }
 }
@@ -476,7 +517,8 @@ impl<'a> Parser<'a> {
             Token::Ident(name)
                 if name.eq_ignore_ascii_case("GRANT")
                     || name.eq_ignore_ascii_case("REVOKE")
-                    || name.eq_ignore_ascii_case("SIMULATE") =>
+                    || name.eq_ignore_ascii_case("SIMULATE")
+                    || name.eq_ignore_ascii_case("APPLY") =>
             {
                 self.parse_sql_statement().map(FrontendStatement::Sql)
             }
@@ -635,13 +677,28 @@ impl<'a> Parser<'a> {
                     self.position(),
                 )),
             },
-            Token::Explain => match self.parse_explain_alter_query()? {
-                QueryExpr::ExplainAlter(query) => Ok(SqlCommand::ExplainAlter(query)),
-                other => Err(ParseError::new(
-                    format!("internal: EXPLAIN produced unexpected query kind {other:?}"),
-                    self.position(),
-                )),
-            },
+            Token::Explain => {
+                // Peek ahead: EXPLAIN MIGRATION name → ExplainMigration
+                // EXPLAIN ALTER FOR ... → ExplainAlter (existing path)
+                if matches!(self.peek_next()?, Token::Ident(n) if n.eq_ignore_ascii_case("MIGRATION")) {
+                    self.advance()?; // consume EXPLAIN
+                    match self.parse_explain_migration_after_keyword()? {
+                        QueryExpr::ExplainMigration(q) => Ok(SqlCommand::ExplainMigration(q)),
+                        other => Err(ParseError::new(
+                            format!("internal: EXPLAIN MIGRATION produced unexpected kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
+                } else {
+                    match self.parse_explain_alter_query()? {
+                        QueryExpr::ExplainAlter(query) => Ok(SqlCommand::ExplainAlter(query)),
+                        other => Err(ParseError::new(
+                            format!("internal: EXPLAIN produced unexpected query kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
+                }
+            }
             Token::Create => {
                 let pos = self.position();
                 self.advance()?;
@@ -861,14 +918,14 @@ impl<'a> Parser<'a> {
                     let filter = self.parse_filter()?;
                     self.expect(Token::RParen)?;
 
-                    return Ok(SqlCommand::CreatePolicy(CreatePolicyQuery {
+                    Ok(SqlCommand::CreatePolicy(CreatePolicyQuery {
                         name,
                         table,
                         action,
                         role,
                         using: Box::new(filter),
                         target_kind,
-                    }));
+                    }))
                 } else if self.check(&Token::Server) {
                     // CREATE SERVER [IF NOT EXISTS] name
                     //   FOREIGN DATA WRAPPER kind
@@ -881,12 +938,12 @@ impl<'a> Parser<'a> {
                     self.expect(Token::Wrapper)?;
                     let wrapper = self.expect_ident()?;
                     let options = self.parse_fdw_options_clause()?;
-                    return Ok(SqlCommand::CreateServer(CreateServerQuery {
+                    Ok(SqlCommand::CreateServer(CreateServerQuery {
                         name,
                         wrapper,
                         options,
                         if_not_exists,
-                    }));
+                    }))
                 } else if self.check(&Token::Foreign) {
                     // CREATE FOREIGN TABLE [IF NOT EXISTS] name (cols)
                     //   SERVER server_name
@@ -924,13 +981,13 @@ impl<'a> Parser<'a> {
                     self.expect(Token::Server)?;
                     let server = self.expect_ident()?;
                     let options = self.parse_fdw_options_clause()?;
-                    return Ok(SqlCommand::CreateForeignTable(CreateForeignTableQuery {
+                    Ok(SqlCommand::CreateForeignTable(CreateForeignTableQuery {
                         name,
                         server,
                         columns,
                         options,
                         if_not_exists,
-                    }));
+                    }))
                 } else if self.check(&Token::Sequence) {
                     // CREATE SEQUENCE [IF NOT EXISTS] name
                     //   [START [WITH] n] [INCREMENT [BY] n]
@@ -959,6 +1016,15 @@ impl<'a> Parser<'a> {
                         start,
                         increment,
                     }))
+                } else if matches!(self.peek(), Token::Ident(n) if n.eq_ignore_ascii_case("MIGRATION")) {
+                    self.advance()?; // consume MIGRATION
+                    match self.parse_create_migration_body()? {
+                        QueryExpr::CreateMigration(q) => Ok(SqlCommand::CreateMigration(q)),
+                        other => Err(ParseError::new(
+                            format!("internal: CREATE MIGRATION produced unexpected kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
                 } else {
                     Err(ParseError::expected(
                         vec![
@@ -973,6 +1039,7 @@ impl<'a> Parser<'a> {
                             "FILTER",
                             "SCHEMA",
                             "SEQUENCE",
+                            "MIGRATION",
                         ],
                         self.peek(),
                         pos,
@@ -1239,6 +1306,16 @@ impl<'a> Parser<'a> {
                     ))
                 }
             }
+            Token::Ident(name) if name.eq_ignore_ascii_case("APPLY") => {
+                self.advance()?;
+                match self.parse_apply_migration()? {
+                    QueryExpr::ApplyMigration(q) => Ok(SqlCommand::ApplyMigration(q)),
+                    other => Err(ParseError::new(
+                        format!("internal: APPLY MIGRATION produced unexpected kind {other:?}"),
+                        self.position(),
+                    )),
+                }
+            }
             Token::Ident(name) if name.eq_ignore_ascii_case("RESET") => {
                 // RESET TENANT — session-local clear
                 self.advance()?;
@@ -1358,17 +1435,28 @@ impl<'a> Parser<'a> {
                 Ok(SqlCommand::TransactionControl(TxnControl::Commit))
             }
             // ROLLBACK [WORK | TRANSACTION] [TO [SAVEPOINT] name]
+            // ROLLBACK MIGRATION name
             Token::Rollback => {
                 self.advance()?;
-                let _ = self.consume(&Token::Work)? || self.consume(&Token::Transaction)?;
-                if self.consume(&Token::To)? {
-                    let _ = self.consume(&Token::Savepoint)?;
-                    let name = self.expect_ident()?;
-                    Ok(SqlCommand::TransactionControl(
-                        TxnControl::RollbackToSavepoint(name),
-                    ))
+                if matches!(self.peek(), Token::Ident(n) if n.eq_ignore_ascii_case("MIGRATION")) {
+                    match self.parse_rollback_migration_after_keyword()? {
+                        QueryExpr::RollbackMigration(q) => Ok(SqlCommand::RollbackMigration(q)),
+                        other => Err(ParseError::new(
+                            format!("internal: ROLLBACK MIGRATION produced unexpected kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
                 } else {
-                    Ok(SqlCommand::TransactionControl(TxnControl::Rollback))
+                    let _ = self.consume(&Token::Work)? || self.consume(&Token::Transaction)?;
+                    if self.consume(&Token::To)? {
+                        let _ = self.consume(&Token::Savepoint)?;
+                        let name = self.expect_ident()?;
+                        Ok(SqlCommand::TransactionControl(
+                            TxnControl::RollbackToSavepoint(name),
+                        ))
+                    } else {
+                        Ok(SqlCommand::TransactionControl(TxnControl::Rollback))
+                    }
                 }
             }
             // SAVEPOINT name

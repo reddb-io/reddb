@@ -410,7 +410,7 @@ impl WeaklyConnectedComponents {
 
         // Sort by size descending
         let mut indexed: Vec<(usize, Vec<String>)> = components.into_iter().enumerate().collect();
-        indexed.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+        indexed.sort_by_key(|b| std::cmp::Reverse(b.1.len()));
 
         // Rebuild with new indices
         let mut new_node_to_component: HashMap<String, usize> = HashMap::new();

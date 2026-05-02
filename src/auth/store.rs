@@ -1927,7 +1927,7 @@ fn grant_actions_overlap(
     patterns: &[crate::auth::policies::ActionPattern],
     actions: &[Action],
 ) -> bool {
-    if actions.iter().any(|a| *a == Action::All) {
+    if actions.contains(&Action::All) {
         return true;
     }
     patterns.iter().any(|pat| match pat {

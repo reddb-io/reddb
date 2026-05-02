@@ -150,7 +150,7 @@ impl ConnectedComponents {
             .collect();
 
         // Sort by size descending
-        components.sort_by(|a, b| b.size.cmp(&a.size));
+        components.sort_by_key(|b| std::cmp::Reverse(b.size));
 
         let count = components.len();
         ComponentsResult { components, count }

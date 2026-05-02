@@ -76,10 +76,10 @@ pub fn tf_idf_vectorize(vocab: &Vocabulary, tokens: &[&str]) -> Vec<f32> {
         }
     }
     let total_docs = (vocab.total_documents.max(1)) as f32;
-    for i in 0..vocab.dimensions() {
+    for (i, value) in tf.iter_mut().enumerate().take(vocab.dimensions()) {
         let df = vocab.document_frequency[i].max(1) as f32;
         let idf = ((total_docs + 1.0) / (df + 1.0)).ln() + 1.0;
-        tf[i] *= idf;
+        *value *= idf;
     }
     tf
 }

@@ -524,6 +524,8 @@ mod tests {
         mutate: impl FnOnce(&LocalBackend, &[crate::storage::wal::WalSegmentMeta]),
     ) -> Result<RecoveryResult, BackendError> {
         use crate::replication::cdc::ChangeRecord;
+        use crate::storage::schema::Value;
+        use crate::storage::{EntityData, EntityId, EntityKind, RowData, UnifiedEntity};
         let temp_dir = std::env::temp_dir().join(format!(
             "reddb_chain_{}_{}_{}",
             tag,
@@ -558,15 +560,35 @@ mod tests {
         .unwrap();
 
         let wal_prefix = format!("{}/", wal_dir.to_string_lossy());
-        let mk = |lsn: u64| ChangeRecord {
-            lsn,
-            timestamp: 100 + lsn,
-            operation: crate::replication::cdc::ChangeOperation::Insert,
-            collection: "users".to_string(),
-            entity_id: lsn,
-            entity_kind: "row".to_string(),
-            entity_bytes: Some(format!("payload-{lsn}").into_bytes()),
-            metadata: None,
+        let mk = |lsn: u64| {
+            let timestamp = 100 + lsn;
+            let mut entity = UnifiedEntity::new(
+                EntityId::new(lsn),
+                EntityKind::TableRow {
+                    table: Arc::from("users"),
+                    row_id: lsn,
+                },
+                EntityData::Row(RowData::with_names(
+                    vec![
+                        Value::UnsignedInteger(lsn),
+                        Value::Text(format!("payload-{lsn}").into()),
+                    ],
+                    vec!["id".to_string(), "payload".to_string()],
+                )),
+            );
+            entity.created_at = timestamp;
+            entity.updated_at = timestamp;
+            entity.sequence_id = lsn;
+            ChangeRecord::from_entity(
+                lsn,
+                timestamp,
+                crate::replication::cdc::ChangeOperation::Insert,
+                "users",
+                "row",
+                &entity,
+                crate::api::REDDB_FORMAT_VERSION,
+                None,
+            )
         };
 
         let mut metas = Vec::new();

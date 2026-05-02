@@ -38,7 +38,7 @@ impl RedDBServer {
                         page
                     })
             },
-            |page| crate::presentation::entity_json::scan_page_json(page),
+            crate::presentation::entity_json::scan_page_json,
         )
     }
 
@@ -61,7 +61,7 @@ impl RedDBServer {
         };
         crate::server::transport::run_use_case(
             move || self.runtime.create_row_ctx(&ctx, input),
-            |output| crate::presentation::entity_json::created_entity_output_json(output),
+            crate::presentation::entity_json::created_entity_output_json,
         )
     }
 
@@ -84,7 +84,7 @@ impl RedDBServer {
         };
         crate::server::transport::run_use_case(
             move || self.runtime.create_node_ctx(&ctx, input),
-            |output| crate::presentation::entity_json::created_entity_output_json(output),
+            crate::presentation::entity_json::created_entity_output_json,
         )
     }
 

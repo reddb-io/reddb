@@ -165,7 +165,7 @@ impl CommitWaiter {
     }
 
     fn record_outcome_metrics(&self, reached: bool, started: Instant) {
-        let elapsed = started.elapsed().as_micros() as u64;
+        let elapsed = (started.elapsed().as_micros() as u64).max(1);
         self.metrics
             .last_wait_micros
             .store(elapsed, Ordering::Relaxed);

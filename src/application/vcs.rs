@@ -174,7 +174,7 @@ pub struct ResetInput {
     pub mode: ResetMode,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct LogRange {
     /// Upper bound ref / commit hash. Defaults to HEAD.
     pub to: Option<String>,
@@ -184,18 +184,6 @@ pub struct LogRange {
     pub skip: Option<usize>,
     /// When true, exclude merge commits.
     pub no_merges: bool,
-}
-
-impl Default for LogRange {
-    fn default() -> Self {
-        Self {
-            to: None,
-            from: None,
-            limit: None,
-            skip: None,
-            no_merges: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]

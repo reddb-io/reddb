@@ -1928,6 +1928,10 @@ pub(super) fn query_expr_name(expr: &QueryExpr) -> &'static str {
         QueryExpr::ShowPolicies { .. } => "show_policies",
         QueryExpr::ShowEffectivePermissions { .. } => "show_effective_permissions",
         QueryExpr::SimulatePolicy { .. } => "simulate_policy",
+        QueryExpr::CreateMigration(_) => "create_migration",
+        QueryExpr::ApplyMigration(_) => "apply_migration",
+        QueryExpr::RollbackMigration(_) => "rollback_migration",
+        QueryExpr::ExplainMigration(_) => "explain_migration",
     }
 }
 
@@ -2104,11 +2108,10 @@ fn evaluate_scalar_function_legacy(
         "TIME_BUCKET" => {
             let bucket_ns = resolve_time_bucket_duration(args, 0)?;
             let timestamp_ns = resolve_time_bucket_timestamp(args, source)?;
-            let bucket_start = if bucket_ns == 0 {
-                timestamp_ns
-            } else {
-                (timestamp_ns / bucket_ns) * bucket_ns
-            };
+            let bucket_start = timestamp_ns
+                .checked_div(bucket_ns)
+                .map(|bucket| bucket * bucket_ns)
+                .unwrap_or(timestamp_ns);
             Some(Value::UnsignedInteger(bucket_start))
         }
         "GEO_DISTANCE_VINCENTY" | "VINCENTY" => {
@@ -2528,7 +2531,7 @@ fn value_as_number(v: &Value) -> Option<NumOperand> {
             is_float: true,
         }),
         Value::Decimal(d) => Some(NumOperand {
-            int_val: (*d / 10_000) as i64,
+            int_val: (*d / 10_000),
             float_val: *d as f64 / 10_000.0,
             is_float: true,
         }),

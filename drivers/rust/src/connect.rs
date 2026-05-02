@@ -52,11 +52,20 @@ pub fn parse(uri: &str) -> Result<Target> {
         .map_err(|e| ClientError::new(ErrorCode::InvalidUri, format!("{e}: {uri}")))?;
 
     match parsed.scheme() {
+        "red" | "reds" => {
+            let host = parsed.host_str().ok_or_else(|| {
+                ClientError::new(ErrorCode::InvalidUri, "red:// URI is missing a host")
+            })?;
+            let port = parsed.port().unwrap_or(5050);
+            Ok(Target::Grpc {
+                endpoint: format!("http://{host}:{port}"),
+            })
+        }
         "grpc" => {
             let host = parsed.host_str().ok_or_else(|| {
                 ClientError::new(ErrorCode::InvalidUri, "grpc:// URI is missing a host")
             })?;
-            let port = parsed.port().unwrap_or(50051);
+            let port = parsed.port().unwrap_or(5055);
             Ok(Target::Grpc {
                 endpoint: format!("http://{host}:{port}"),
             })
@@ -99,7 +108,18 @@ mod tests {
         let target = parse("grpc://primary.svc.cluster.local").unwrap();
         match target {
             Target::Grpc { endpoint } => {
-                assert_eq!(endpoint, "http://primary.svc.cluster.local:50051")
+                assert_eq!(endpoint, "http://primary.svc.cluster.local:5055")
+            }
+            _ => panic!("expected Grpc"),
+        }
+    }
+
+    #[test]
+    fn parses_red_with_default_port() {
+        let target = parse("red://primary.svc.cluster.local").unwrap();
+        match target {
+            Target::Grpc { endpoint } => {
+                assert_eq!(endpoint, "http://primary.svc.cluster.local:5050")
             }
             _ => panic!("expected Grpc"),
         }

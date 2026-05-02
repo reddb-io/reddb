@@ -131,17 +131,16 @@ impl<'a> Parser<'a> {
         // Parse optional alias (only when a FROM clause exists).
         // `AS OF` is a clause — don't gobble the `AS` as an alias
         // marker when the following token is `OF`.
-        let alias = if !has_from {
-            None
-        } else if self.check(&Token::As) && matches!(self.peek_next()?, Token::Of) {
-            None
-        } else if self.consume(&Token::As)?
-            || (self.check(&Token::Ident("".into())) && !self.is_clause_keyword())
-        {
-            Some(self.expect_ident()?)
-        } else {
-            None
-        };
+        let alias =
+            if !has_from || (self.check(&Token::As) && matches!(self.peek_next()?, Token::Of)) {
+                None
+            } else if self.consume(&Token::As)?
+                || (self.check(&Token::Ident("".into())) && !self.is_clause_keyword())
+            {
+                Some(self.expect_ident()?)
+            } else {
+                None
+            };
 
         let mut query = TableQuery {
             table,

@@ -36,7 +36,7 @@
 //! 2. For each subset `S` of size 2..n, ordered by ascending
 //!    size:
 //!    a. For every way to split `S = L ∪ R` with L and R
-//!       non-empty and `dp[L]` and `dp[R]` already computed:
+//!    non-empty and `dp[L]` and `dp[R]` already computed:
 //!       - Verify the split has at least one join predicate
 //!         (the join graph). Cartesian products without a
 //!         predicate are filtered out unless every other
@@ -292,7 +292,7 @@ fn cost_join(
     // discards the entry by passing None when min_selectivity is
     // missing AND the split contains more than one relation on
     // each side. Single-relation legs are always allowed.
-    if min_selectivity.is_none() && left_positions.len() > 0 && right_positions.len() > 0 {
+    if min_selectivity.is_none() && !left_positions.is_empty() && !right_positions.is_empty() {
         // If both sides are singletons, allow the Cartesian
         // (the user's join graph might genuinely be empty).
         // Otherwise reject — the DP will pick a different split.

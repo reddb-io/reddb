@@ -149,7 +149,7 @@ uint16_t default_port_for(UrlKind kind) {
         case UrlKind::Http: return 8080;
         case UrlKind::Https: return 8443;
         case UrlKind::Red: return 5050;
-        case UrlKind::Reds: return 5051;
+        case UrlKind::Reds: return 5050;
         case UrlKind::Embedded: return 0;
     }
     return 0;

@@ -824,6 +824,40 @@ pub trait RuntimeVcsPortCtx: RuntimeVcsPort {
 }
 impl<T: RuntimeVcsPort + ?Sized> RuntimeVcsPortCtx for T {}
 
+/// Port for native migration operations.
+///
+/// Stub methods — full implementations land in subsequent slices.
+pub trait RuntimeMigrationPort {
+    /// Register a new migration definition (status = pending).
+    fn migration_create(&self, input: MigrationCreateInput) -> RedDBResult<RuntimeQueryResult>;
+    /// Apply a named migration (or `*` for all pending).
+    fn migration_apply(&self, name: &str) -> RedDBResult<RuntimeQueryResult>;
+    /// Roll back an applied migration.
+    fn migration_rollback(&self, name: &str) -> RedDBResult<RuntimeQueryResult>;
+    /// Explain a migration without executing it.
+    fn migration_explain(&self, name: &str) -> RedDBResult<RuntimeQueryResult>;
+    /// List migrations, optionally filtered by status.
+    fn migration_list(&self, status: Option<&str>) -> RedDBResult<RuntimeQueryResult>;
+}
+
+/// Minimal input type for `migration_create`. Expanded in later slices.
+#[derive(Debug, Clone)]
+pub struct MigrationCreateInput {
+    pub name: String,
+    pub kind: MigrationKind,
+    pub body: String,
+    pub author: String,
+    pub depends_on: Vec<String>,
+    pub batch_size: Option<u64>,
+    pub no_rollback: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MigrationKind {
+    Ddl,
+    Data,
+}
+
 #[path = "ports_impls.rs"]
 mod ports_impls;
 pub(crate) use ports_impls::build_row_update_contract_plan;

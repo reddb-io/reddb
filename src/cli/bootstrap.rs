@@ -150,9 +150,7 @@ fn resolve_password(args: &BootstrapArgs) -> Result<String, String> {
             .map_err(|err| format!("read password from stdin: {err}"))?;
         // Strip the line-ending; preserve any internal whitespace
         // (passwords like `   ` are unusual but legal).
-        let trimmed = buf
-            .trim_end_matches(|c: char| c == '\n' || c == '\r')
-            .to_string();
+        let trimmed = buf.trim_end_matches(['\n', '\r']).to_string();
         return Ok(trimmed);
     }
     if let Some(p) = args.password.as_ref() {

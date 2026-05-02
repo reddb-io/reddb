@@ -148,7 +148,7 @@ impl HttpBackend {
                     .starts_with(&needle)
                     .then(|| trimmed[needle.len()..].trim().to_string())
             })
-            .last()
+            .next_back()
             .filter(|value| !value.is_empty())
     }
 

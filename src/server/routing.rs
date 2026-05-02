@@ -787,20 +787,11 @@ impl RedDBServer {
                                 _ => json_error(405, "method not allowed"),
                             };
                         }
-                        [a, "diff", b] => {
-                            if method.as_str() == "GET" {
-                                return handlers_vcs::handle_commit_diff(
-                                    &self.runtime,
-                                    a,
-                                    b,
-                                    &query,
-                                );
-                            }
+                        [a, "diff", b] if method.as_str() == "GET" => {
+                            return handlers_vcs::handle_commit_diff(&self.runtime, a, b, &query);
                         }
-                        [a, "lca", b] => {
-                            if method.as_str() == "GET" {
-                                return handlers_vcs::handle_commit_lca(&self.runtime, a, b);
-                            }
+                        [a, "lca", b] if method.as_str() == "GET" => {
+                            return handlers_vcs::handle_commit_lca(&self.runtime, a, b);
                         }
                         _ => {}
                     }
@@ -810,13 +801,11 @@ impl RedDBServer {
                     if let Some(conn_str) = parts.first() {
                         if let Ok(conn) = conn_str.parse::<u64>() {
                             match parts.as_slice() {
-                                [_] => {
-                                    if method.as_str() == "GET" {
-                                        return handlers_vcs::handle_session_status(
-                                            &self.runtime,
-                                            conn,
-                                        );
-                                    }
+                                [_] if method.as_str() == "GET" => {
+                                    return handlers_vcs::handle_session_status(
+                                        &self.runtime,
+                                        conn,
+                                    );
                                 }
                                 [_, "checkout"] if method.as_str() == "POST" => {
                                     return handlers_vcs::handle_session_checkout(

@@ -115,6 +115,7 @@ pub trait CheckpointDriver: Send + Sync {
     /// 1. Walk every dirty page, flush via pager.
     /// 2. Write a Checkpoint WAL record.
     /// 3. Truncate WAL up to the previous checkpoint's redo.
+    ///
     /// Returns (pages_flushed, new_redo_lsn, truncated_bytes).
     fn run_checkpoint(&self) -> CheckpointResult;
 }

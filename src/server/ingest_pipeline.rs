@@ -301,10 +301,7 @@ impl IngestSession {
         self.buffer.extend_from_slice(chunk);
         let mut report = IngestReport::default();
         // Drain complete lines (terminated by `\n`).
-        loop {
-            let Some(newline) = self.buffer.iter().position(|b| *b == b'\n') else {
-                break;
-            };
+        while let Some(newline) = self.buffer.iter().position(|b| *b == b'\n') {
             let line_bytes: Vec<u8> = self.buffer.drain(..=newline).collect();
             // `line_bytes` includes the trailing `\n` (and maybe `\r`).
             let line_str = std::str::from_utf8(&line_bytes)

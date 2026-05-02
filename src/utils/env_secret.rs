@@ -27,9 +27,7 @@ pub fn env_with_file_fallback(name: &str) -> Option<String> {
     }
     match std::fs::read_to_string(trimmed_path) {
         Ok(contents) => {
-            let value = contents
-                .trim_end_matches(|c: char| c == '\n' || c == '\r')
-                .to_string();
+            let value = contents.trim_end_matches(['\n', '\r']).to_string();
             if value.is_empty() {
                 None
             } else {

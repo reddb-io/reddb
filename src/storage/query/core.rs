@@ -8,6 +8,7 @@ use crate::storage::schema::{SqlTypeName, Value};
 
 /// Root query expression
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum QueryExpr {
     /// Pure table query: SELECT ... FROM ...
     Table(TableQuery),
@@ -87,6 +88,14 @@ pub enum QueryExpr {
     /// framework's migration generator and any other client that
     /// wants reddb to own the schema-diff rules.
     ExplainAlter(ExplainAlterQuery),
+    /// CREATE MIGRATION name [DEPENDS ON dep1, dep2] [BATCH n ROWS] [NO ROLLBACK] body
+    CreateMigration(CreateMigrationQuery),
+    /// APPLY MIGRATION name | APPLY MIGRATION *  [FOR TENANT id]
+    ApplyMigration(ApplyMigrationQuery),
+    /// ROLLBACK MIGRATION name
+    RollbackMigration(RollbackMigrationQuery),
+    /// EXPLAIN MIGRATION name
+    ExplainMigration(ExplainMigrationQuery),
     /// Transaction control: BEGIN, COMMIT, ROLLBACK, SAVEPOINT, RELEASE, ROLLBACK TO.
     ///
     /// Phase 1.1 (PG parity): parser + dispatch are wired so clients (psql, JDBC, etc.)
@@ -542,10 +551,11 @@ pub struct ExplainAlterQuery {
 }
 
 /// Output format requested for an `EXPLAIN ALTER` command.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ExplainFormat {
     /// Plain SQL text — `ALTER TABLE …;` lines plus header
     /// comments and rename hints. Default; copy-paste friendly.
+    #[default]
     Sql,
     /// Structured JSON object with `operations`,
     /// `rename_candidates`, `summary`. Machine-friendly for
@@ -554,10 +564,35 @@ pub enum ExplainFormat {
     Json,
 }
 
-impl Default for ExplainFormat {
-    fn default() -> Self {
-        Self::Sql
-    }
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateMigrationQuery {
+    pub name: String,
+    pub body: String,
+    pub depends_on: Vec<String>,
+    pub batch_size: Option<u64>,
+    pub no_rollback: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ApplyMigrationQuery {
+    pub target: ApplyMigrationTarget,
+    pub for_tenant: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ApplyMigrationTarget {
+    Named(String),
+    All,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RollbackMigrationQuery {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExplainMigrationQuery {
+    pub name: String,
 }
 
 /// Probabilistic data structure commands

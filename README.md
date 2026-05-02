@@ -494,7 +494,7 @@ Use `reddb-cli` only when you want to launch the real `red` binary from npm:
 
 ```bash
 npx reddb-cli@latest version
-npx reddb-cli@latest server --http-bind 127.0.0.1:8080 --path ./data.rdb
+npx reddb-cli@latest server --wire-bind 127.0.0.1:5050 --http-bind 127.0.0.1:8080 --path ./data.rdb
 ```
 
 ---
@@ -505,8 +505,8 @@ npx reddb-cli@latest server --http-bind 127.0.0.1:8080 --path ./data.rdb
 # Install
 curl -fsSL https://raw.githubusercontent.com/forattini-dev/reddb/main/install.sh | bash
 
-# Start the server
-red server --http-bind 127.0.0.1:8080 --path ./data.rdb
+# Start the server (wire: 5050, gRPC: 5055, HTTP: 8080)
+red server --wire-bind 127.0.0.1:5050 --grpc-bind 127.0.0.1:5055 --http-bind 127.0.0.1:8080 --path ./data.rdb
 
 # Insert data
 curl -X POST http://127.0.0.1:8080/query \
@@ -522,13 +522,13 @@ curl -X POST http://127.0.0.1:8080/query \
 Or via npm CLI launcher:
 
 ```bash
-npx reddb-cli@latest server --http --bind 127.0.0.1:8080
+npx reddb-cli@latest server --wire-bind 127.0.0.1:5050 --http-bind 127.0.0.1:8080
 ```
 
 Or via Docker:
 
 ```bash
-docker run --rm -p 8080:8080 ghcr.io/forattini-dev/reddb:latest
+docker run --rm -p 5050:5050 -p 5055:5055 -p 8080:8080 ghcr.io/forattini-dev/reddb:latest
 ```
 
 For production-secure Docker (vault + secrets) and Kubernetes, see

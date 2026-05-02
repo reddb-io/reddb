@@ -212,7 +212,7 @@ pub fn accept_tls(
     tcp: TcpStream,
 ) -> io::Result<StreamOwned<ServerConnection, TcpStream>> {
     let conn = ServerConnection::new(config)
-        .map_err(|err| io::Error::new(io::ErrorKind::Other, format!("rustls server: {err}")))?;
+        .map_err(|err| io::Error::other(format!("rustls server: {err}")))?;
     let mut stream = StreamOwned::new(conn, tcp);
     // Force the handshake now so any failure surfaces here (and not on
     // the first read inside the request parser).

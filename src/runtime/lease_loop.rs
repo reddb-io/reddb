@@ -30,6 +30,7 @@ use crate::runtime::RedDBRuntime;
 /// Returns `Ok(())` when:
 ///   * `RED_LEASE_REQUIRED` is unset / false, or
 ///   * the lease was acquired and the refresh thread is running.
+///
 /// Returns `Err` when the operator asked for a lease and we couldn't
 /// get one — the caller should refuse to serve in that case.
 pub fn start_lease_loop_if_required(runtime: &RedDBRuntime) -> RedDBResult<()> {

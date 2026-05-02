@@ -143,7 +143,7 @@ impl<'a> ServiceIntelligence<'a> {
             })
             .collect();
 
-        versions.sort_by(|a, b| b.count.cmp(&a.count));
+        versions.sort_by_key(|b| std::cmp::Reverse(b.count));
         versions
     }
 

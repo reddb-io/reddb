@@ -1607,7 +1607,7 @@ fn build_patch_operations_from_materialized_assignments(
         operations.push(PatchEntityOperation {
             op: PatchEntityOperationType::Set,
             path: vec!["fields".to_string(), column.clone()],
-            value: Some(storage_value_to_json(&value)),
+            value: Some(storage_value_to_json(value)),
         });
     }
 
@@ -1623,7 +1623,7 @@ fn build_patch_operations_from_materialized_assignments(
         operations.push(PatchEntityOperation {
             op: PatchEntityOperationType::Set,
             path: vec!["metadata".to_string(), key.clone()],
-            value: Some(metadata_value_to_json(&value)),
+            value: Some(metadata_value_to_json(value)),
         });
     }
 

@@ -71,13 +71,13 @@ pub fn all_commands() -> Vec<CommandDef> {
     CommandDef {
       name: "server",
       summary: "Start the database server (router/HTTP/gRPC/wire)",
-      usage: "red server [--grpc] [--http] [--grpc-bind 127.0.0.1:50051] [--http-bind 127.0.0.1:8080] [--wire-bind 127.0.0.1:5051] [--path ./data/reddb.rdb]",
+      usage: "red server [--grpc] [--http] [--grpc-bind 127.0.0.1:5055] [--http-bind 127.0.0.1:8080] [--wire-bind 127.0.0.1:5050] [--path ./data/reddb.rdb]",
       flags: server_flags(),
     },
     CommandDef {
       name: "service",
       summary: "Install or inspect a systemd service",
-      usage: "red service <install|print-unit> [--binary /usr/local/bin/red] [--grpc-bind 0.0.0.0:50051] [--http-bind 0.0.0.0:8080] [--path /var/lib/reddb/data.rdb]",
+      usage: "red service <install|print-unit> [--binary /usr/local/bin/red] [--grpc-bind 0.0.0.0:5055] [--http-bind 0.0.0.0:8080] [--path /var/lib/reddb/data.rdb]",
       flags: service_flags(),
     },
     CommandDef {
@@ -119,7 +119,7 @@ pub fn all_commands() -> Vec<CommandDef> {
     CommandDef {
       name: "replica",
       summary: "Start as a read replica connected to a primary",
-      usage: "red replica --primary-addr http://primary:50051 [--grpc] [--http] [--grpc-bind 127.0.0.1:50051] [--http-bind 127.0.0.1:8080] [--path ./data/reddb.rdb]",
+      usage: "red replica --primary-addr http://primary:5055 [--grpc] [--http] [--grpc-bind 127.0.0.1:5055] [--http-bind 127.0.0.1:8080] [--path ./data/reddb.rdb]",
       flags: replica_flags(),
     },
     CommandDef {
@@ -230,10 +230,10 @@ pub fn main_help_text() -> String {
 
     out.push_str("Examples:\n");
     out.push_str("  red server --path ./data/reddb.rdb\n");
-    out.push_str("  red server --grpc-bind 127.0.0.1:50051 --http-bind 127.0.0.1:8080 --path ./data/reddb.rdb\n");
-    out.push_str("  red server --wire-bind 127.0.0.1:5051 --path ./data/reddb.rdb\n");
-    out.push_str("  sudo red service install --binary /usr/local/bin/red --grpc-bind 0.0.0.0:50051 --http-bind 0.0.0.0:8080 --path /var/lib/reddb/data.rdb\n");
-    out.push_str("  red replica --primary-addr http://primary:50051 --path ./data/replica.rdb\n");
+    out.push_str("  red server --grpc-bind 127.0.0.1:5055 --http-bind 127.0.0.1:8080 --path ./data/reddb.rdb\n");
+    out.push_str("  red server --wire-bind 127.0.0.1:5050 --path ./data/reddb.rdb\n");
+    out.push_str("  sudo red service install --binary /usr/local/bin/red --grpc-bind 0.0.0.0:5055 --http-bind 0.0.0.0:8080 --path /var/lib/reddb/data.rdb\n");
+    out.push_str("  red replica --primary-addr http://primary:5055 --path ./data/replica.rdb\n");
     out.push_str("  red query \"SELECT * FROM users\"\n");
     out.push_str("  red insert users '{\"name\": \"Alice\"}'\n");
     out.push_str("  red get users abc123\n");

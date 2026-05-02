@@ -32,7 +32,7 @@ pub(crate) fn persist_runtime_readonly(state_path: &Path, enabled: bool) -> std:
     let mut object = crate::json::Map::new();
     object.insert("read_only".to_string(), crate::json::Value::Bool(enabled));
     let body = crate::serde_json::to_string_pretty(&crate::json::Value::Object(object))
-        .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err.to_string()))?;
+        .map_err(|err| std::io::Error::other(err.to_string()))?;
     if let Some(parent) = state_path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;

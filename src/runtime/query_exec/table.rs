@@ -397,18 +397,23 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                                         // Find the eq_col value in the original filter
                                         let mut v = None;
                                         let f = filter;
-                                        loop {
-                                            match f {
-                                                Filter::Compare {
-                                                    field: crate::storage::query::ast::FieldRef::TableColumn { column, .. },
-                                                    op: crate::storage::query::ast::CompareOp::Eq,
-                                                    value,
-                                                } if column == &eq_col => { v = Some(value.clone()); break; }
-                                                Filter::And(l, r) => {
-                                                    // Walk left first, then right
-                                                    let mut stk = vec![l.as_ref(), r.as_ref()];
-                                                    while let Some(node) = stk.pop() {
-                                                        match node {
+                                        match f {
+                                            Filter::Compare {
+                                                field:
+                                                    crate::storage::query::ast::FieldRef::TableColumn {
+                                                        column,
+                                                        ..
+                                                    },
+                                                op: crate::storage::query::ast::CompareOp::Eq,
+                                                value,
+                                            } if column == &eq_col => {
+                                                v = Some(value.clone());
+                                            }
+                                            Filter::And(l, r) => {
+                                                // Walk left first, then right
+                                                let mut stk = vec![l.as_ref(), r.as_ref()];
+                                                while let Some(node) = stk.pop() {
+                                                    match node {
                                                             Filter::Compare {
                                                                 field: crate::storage::query::ast::FieldRef::TableColumn { column, .. },
                                                                 op: crate::storage::query::ast::CompareOp::Eq,
@@ -417,11 +422,9 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                                                             Filter::And(a, b) => { stk.push(a); stk.push(b); }
                                                             _ => {}
                                                         }
-                                                    }
-                                                    break;
                                                 }
-                                                _ => break,
                                             }
+                                            _ => {}
                                         }
                                         v
                                     }
@@ -456,7 +459,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                                 }
                                 if compiled_filter
                                     .as_ref()
-                                    .map_or(true, |cf| cf.evaluate(&entity_opt))
+                                    .is_none_or(|cf| cf.evaluate(&entity_opt))
                                 {
                                     let record_opt = if lean {
                                         super::super::record_search::runtime_table_record_lean(
@@ -787,7 +790,7 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
                             }
                             if compiled_filter
                                 .as_ref()
-                                .map_or(true, |cf| cf.evaluate(&entity_opt))
+                                .is_none_or(|cf| cf.evaluate(&entity_opt))
                             {
                                 let record_opt = if lean {
                                     super::super::record_search::runtime_table_record_lean(

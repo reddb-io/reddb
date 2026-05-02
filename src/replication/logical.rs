@@ -188,11 +188,7 @@ impl LogicalChangeApplier {
         }
 
         if record.lsn == last {
-            let prior = self
-                .last_payload_hash
-                .lock()
-                .expect("payload hash mutex")
-                .clone();
+            let prior = *self.last_payload_hash.lock().expect("payload hash mutex");
             return match prior {
                 Some(p) if p == payload_hash => Ok(ApplyOutcome::Idempotent),
                 Some(p) => Err(LogicalApplyError::Divergence {

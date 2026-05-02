@@ -392,12 +392,11 @@ impl<'a> Parser<'a> {
 
     /// Parse comma-separated literal values for DML statements
     fn parse_dml_value_list(&mut self) -> Result<Vec<Value>, ParseError> {
-        Ok(self
-            .parse_dml_expr_list()?
+        self.parse_dml_expr_list()?
             .into_iter()
             .map(fold_expr_to_value)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|msg| ParseError::new(msg, self.position()))?)
+            .map_err(|msg| ParseError::new(msg, self.position()))
     }
 
     fn parse_dml_expr_list(&mut self) -> Result<Vec<Expr>, ParseError> {

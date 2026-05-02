@@ -168,7 +168,7 @@ fn apply_encode(codec: &ColumnCodec, data: &[u8]) -> CodecResult<Vec<u8>> {
         ColumnCodec::Zstd { level } => Ok(zstd_compress_at_inner(data, *level)),
         ColumnCodec::Delta | ColumnCodec::DoubleDelta => {
             // i64 stream required.
-            if data.len() % 8 != 0 {
+            if !data.len().is_multiple_of(8) {
                 return Err(CodecError::InvalidPayload("delta expects i64 stream"));
             }
             let values: Vec<u64> = data

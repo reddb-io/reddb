@@ -310,10 +310,8 @@ impl OrderBy {
 
         for row in rows {
             if let Some(first) = group.first() {
-                if !prefix_eq(first, &row) {
-                    if flush(&mut group, &mut out, get_value_dyn) {
-                        return out;
-                    }
+                if !prefix_eq(first, &row) && flush(&mut group, &mut out, get_value_dyn) {
+                    return out;
                 }
             }
             group.push(row);

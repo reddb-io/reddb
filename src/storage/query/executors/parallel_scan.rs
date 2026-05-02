@@ -81,7 +81,7 @@ where
     // Divide the input into roughly-equal slices. Slice
     // boundaries may not fall on clean chunk_size multiples
     // so the last chunk absorbs the remainder.
-    let chunk_size = (input.len() + chunk_count - 1) / chunk_count;
+    let chunk_size = input.len().div_ceil(chunk_count);
     let mut chunks: Vec<Vec<T>> = Vec::with_capacity(chunk_count);
     let mut idx = 0;
     while idx < input.len() {
@@ -147,7 +147,7 @@ where
     if chunk_count <= 1 || input.len() < MIN_PARALLEL_ROWS {
         return counter(input);
     }
-    let chunk_size = (input.len() + chunk_count - 1) / chunk_count;
+    let chunk_size = input.len().div_ceil(chunk_count);
     let mut chunks: Vec<Vec<T>> = Vec::with_capacity(chunk_count);
     let mut idx = 0;
     while idx < input.len() {

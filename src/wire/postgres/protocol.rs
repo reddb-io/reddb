@@ -22,7 +22,7 @@ use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Protocol version constant: 3.0 → 196608 (major<<16 | minor).
-pub const PG_PROTOCOL_V3: u32 = (3 << 16) | 0;
+pub const PG_PROTOCOL_V3: u32 = 3 << 16;
 
 /// Special startup-phase requests that share the StartupMessage length
 /// header. The PG reference calls out three: SSLRequest (80877103),
@@ -244,7 +244,7 @@ pub async fn read_frame<R: AsyncRead + Unpin>(
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf).await?;
     let len = u32::from_be_bytes(len_buf);
-    if len < 4 || len > 1_048_576 {
+    if !(4..=1_048_576).contains(&len) {
         return Err(PgWireError::Protocol(format!(
             "frame length {len} out of bounds"
         )));

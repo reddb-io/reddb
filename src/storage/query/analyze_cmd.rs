@@ -223,7 +223,7 @@ pub fn compute_column_stats(
         // MCV: top-k by frequency, sorted descending.
         let sample_len = sampled_rows.len() as f64;
         let mut mcv_pairs: Vec<(String, u64)> = freq.into_iter().collect();
-        mcv_pairs.sort_by(|a, b| b.1.cmp(&a.1));
+        mcv_pairs.sort_by_key(|b| std::cmp::Reverse(b.1));
         mcv_pairs.truncate(opts.mcv_size);
         let mcv: Vec<(String, f64)> = mcv_pairs
             .into_iter()

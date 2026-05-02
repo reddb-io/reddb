@@ -383,8 +383,8 @@ pub fn check_grant(
 
 /// Compact (resource, action) lookup pre-built from a user's grants
 /// + PUBLIC grants. The privilege check first probes this cache before
-/// falling back to the linear scan above. Invalidated on every
-/// GRANT / REVOKE / ALTER USER.
+///   falling back to the linear scan above. Invalidated on every
+///   GRANT / REVOKE / ALTER USER.
 #[derive(Debug, Default, Clone)]
 pub struct PermissionCache {
     /// Set of (resource, action) tuples authorised. `Action::All` is

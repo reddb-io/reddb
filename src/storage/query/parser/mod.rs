@@ -47,6 +47,7 @@ mod graph_commands;
 mod hybrid;
 mod index_ddl;
 mod join;
+mod migration;
 mod path;
 mod probabilistic_commands;
 mod queue;

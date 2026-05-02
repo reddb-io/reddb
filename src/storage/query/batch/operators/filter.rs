@@ -54,8 +54,8 @@ fn evaluate(batch: &ColumnBatch, predicate: &Predicate) -> Vec<bool> {
             let mut acc = vec![true; n];
             for child in children {
                 let m = evaluate(batch, child);
-                for i in 0..n {
-                    acc[i] = acc[i] && m.get(i).copied().unwrap_or(false);
+                for (i, value) in acc.iter_mut().enumerate().take(n) {
+                    *value = *value && m.get(i).copied().unwrap_or(false);
                 }
             }
             acc
@@ -64,8 +64,8 @@ fn evaluate(batch: &ColumnBatch, predicate: &Predicate) -> Vec<bool> {
             let mut acc = vec![false; n];
             for child in children {
                 let m = evaluate(batch, child);
-                for i in 0..n {
-                    acc[i] = acc[i] || m.get(i).copied().unwrap_or(false);
+                for (i, value) in acc.iter_mut().enumerate().take(n) {
+                    *value = *value || m.get(i).copied().unwrap_or(false);
                 }
             }
             acc

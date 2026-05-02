@@ -690,7 +690,11 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
         | QueryExpr::DetachPolicy { .. }
         | QueryExpr::ShowPolicies { .. }
         | QueryExpr::ShowEffectivePermissions { .. }
-        | QueryExpr::SimulatePolicy { .. } => {}
+        | QueryExpr::SimulatePolicy { .. }
+        | QueryExpr::CreateMigration(_)
+        | QueryExpr::ApplyMigration(_)
+        | QueryExpr::RollbackMigration(_)
+        | QueryExpr::ExplainMigration(_) => {}
     }
 }
 
@@ -1709,6 +1713,15 @@ impl RedDBRuntime {
                     })
                 }),
             );
+        }
+
+        // Migrations — create the `red_migrations` / `red_migration_deps`
+        // system collections on first boot. Idempotent.
+        {
+            let store = runtime.inner.db.store();
+            for name in crate::application::migration_collections::ALL {
+                let _ = store.get_or_create_collection(*name);
+            }
         }
 
         // Start background maintenance thread (context index refresh +
@@ -4748,6 +4761,18 @@ impl RedDBRuntime {
                 ref action,
                 ref resource,
             } => self.execute_simulate_policy(query, user, action, resource),
+            QueryExpr::CreateMigration(ref q) => {
+                self.execute_create_migration(query, q)
+            }
+            QueryExpr::ApplyMigration(ref q) => {
+                self.execute_apply_migration(query, q)
+            }
+            QueryExpr::RollbackMigration(ref q) => {
+                self.execute_rollback_migration(query, q)
+            }
+            QueryExpr::ExplainMigration(ref q) => {
+                self.execute_explain_migration(query, q)
+            }
         };
 
         // Decrypt Value::Secret columns in-place before caching, so
@@ -4931,9 +4956,9 @@ impl RedDBRuntime {
         match expr {
             QueryExpr::Graph(_) | QueryExpr::Path(_) => {
                 // Graph queries are not cacheable as prepared statements.
-                return Err(RedDBError::Query(
+                Err(RedDBError::Query(
                     "graph queries cannot be used as prepared statements".to_string(),
-                ));
+                ))
             }
             QueryExpr::Table(table) => Ok(RuntimeQueryResult {
                 query: query_str.to_string(),
@@ -6009,6 +6034,30 @@ impl RedDBRuntime {
                     ))
                 };
             }
+            // Migration DDL — CREATE MIGRATION requires Write role (schema author).
+            QueryExpr::CreateMigration(_) => {
+                return if role >= crate::auth::Role::Write {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "principal=`{}` role=`{:?}` cannot issue CREATE MIGRATION",
+                        username, role
+                    ))
+                };
+            }
+            // APPLY / ROLLBACK change data and schema — require Admin.
+            QueryExpr::ApplyMigration(_) | QueryExpr::RollbackMigration(_) => {
+                return if role == crate::auth::Role::Admin {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "principal=`{}` role=`{:?}` cannot issue APPLY/ROLLBACK MIGRATION",
+                        username, role
+                    ))
+                };
+            }
+            // EXPLAIN MIGRATION is read-only — any authenticated principal.
+            QueryExpr::ExplainMigration(_) => return Ok(()),
             // Everything else (SET, SHOW, transaction control, graph
             // commands, queue/tree commands, MaintenanceCommand …)
             // is allowed for any authenticated principal.

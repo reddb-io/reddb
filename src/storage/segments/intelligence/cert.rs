@@ -353,7 +353,7 @@ impl<'a> CertIntelligence<'a> {
         }
 
         // Sort by severity
-        issues.sort_by(|a, b| b.severity.cmp(&a.severity));
+        issues.sort_by_key(|b| std::cmp::Reverse(b.severity));
         issues
     }
 

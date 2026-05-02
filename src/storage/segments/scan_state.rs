@@ -495,7 +495,7 @@ impl ScanStateSegment {
     /// List recent scans
     pub fn list_recent(&self, limit: usize) -> Vec<ScanStateSummary> {
         let mut summaries: Vec<_> = self.states.values().map(ScanStateSummary::from).collect();
-        summaries.sort_by(|a, b| b.checkpoint_at.cmp(&a.checkpoint_at));
+        summaries.sort_by_key(|b| std::cmp::Reverse(b.checkpoint_at));
         summaries.truncate(limit);
         summaries
     }

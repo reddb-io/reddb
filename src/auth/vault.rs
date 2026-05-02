@@ -636,6 +636,7 @@ impl Vault {
     ///   3. Free any surplus pages that the previous chain owned.
     ///   4. Rewrite the header page in place — this is the commit
     ///      point. After it lands, `load()` will follow the new chain.
+    ///
     /// A crash anywhere before step 4 leaves the existing header (and
     /// its chain) intact, so the previous vault snapshot is still
     /// readable on the next open.
@@ -697,10 +698,7 @@ impl Vault {
         // fresh pages means the old chain stays byte-identical until
         // the header commit, so `load()` keeps working through any
         // crash before step 7.
-        let old_chain = match self.read_existing_chain_ids(pager) {
-            Ok(ids) => ids,
-            Err(_) => Vec::new(), // No prior vault — fine.
-        };
+        let old_chain = self.read_existing_chain_ids(pager).unwrap_or_default();
 
         // ---- 4. Allocate fresh data-page ids for the new chain.
         //

@@ -29,7 +29,7 @@
 //!   - `High`   → `sql_type` + every constraint + `default` match
 //!   - `Medium` → `sql_type` + every constraint match
 //!   - `Low`    → only `sql_type` matches (constraints differ)
-//!   Lower than `Low` produces no candidate.
+//!     Lower than `Low` produces no candidate.
 //!
 //! ## Out of scope (v1)
 //!

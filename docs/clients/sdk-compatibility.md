@@ -7,7 +7,7 @@ PLAN.md Phase 10.4. RedDB exposes four transports — PostgreSQL wire (v3), gRPC
 | Transport | Default port | Bind env | Auth |
 |-----------|--------------|----------|------|
 | PostgreSQL wire | none (off by default) | `--pg-bind` flag | password / token / SCRAM |
-| gRPC | `:50051` | `RED_GRPC_BIND_ADDR` / `--grpc-bind` | bearer (per RPC) |
+| gRPC | `:5055` | `RED_GRPC_BIND_ADDR` / `--grpc-bind` | bearer (per RPC) |
 | HTTP / HTTPS | `:8080` | `RED_HTTP_BIND_ADDR` / `--http-bind` | bearer / login / mTLS / OAuth-JWT / HMAC |
 | RedWire (TCP) | `:5050` | `--wire-bind` | bearer / SCRAM-SHA-256 / OAuth-JWT / HMAC |
 | RedWire (TLS / mTLS) | `:5050` | `--wire-tls-bind` + `--wire-tls-cert` / `--wire-tls-key` | mTLS + bearer / SCRAM / OAuth |

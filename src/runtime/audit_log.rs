@@ -436,6 +436,7 @@ impl FsyncMode {
 // Channel message
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::large_enum_variant)]
 enum WriterMsg {
     Event(AuditEvent),
     Flush(mpsc::Sender<()>),

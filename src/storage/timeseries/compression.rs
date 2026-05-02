@@ -286,7 +286,7 @@ pub fn select_int_codec(values: &[i64]) -> TsIntCodec {
     let bits = if range == 0 {
         0
     } else {
-        128 - range.leading_zeros() as u32
+        128 - range.leading_zeros()
     };
     if bits <= 20 {
         return TsIntCodec::T64;

@@ -1034,7 +1034,7 @@ impl SegmentManager {
         for seg_arc in sealed.iter() {
             let seg = seg_arc.read();
             let entity_count = seg.stats().entity_count as u64;
-            let pages = (entity_count + ROWS_PER_PAGE as u64 - 1) / ROWS_PER_PAGE as u64;
+            let pages = entity_count.div_ceil(ROWS_PER_PAGE as u64);
             total_pages += pages;
         }
         if total_pages == 0 {
@@ -1051,7 +1051,7 @@ impl SegmentManager {
         let existing_visible = self.visibility_map.all_visible_count();
         // Append pages starting after the last known visible page
         let start_page = existing_visible as u32;
-        let new_pages = (seg_entity_count + ROWS_PER_PAGE as u64 - 1) / ROWS_PER_PAGE as u64;
+        let new_pages = seg_entity_count.div_ceil(ROWS_PER_PAGE as u64);
         let end_page = start_page + new_pages as u32;
         self.visibility_map.mark_range_visible(start_page, end_page);
     }

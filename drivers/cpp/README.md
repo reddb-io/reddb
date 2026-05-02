@@ -44,7 +44,7 @@ o.username = "alice"; o.password = "hunter2";  // SCRAM-SHA-256 over RedWire
 // — or —
 o.jwt = "<oauth-jwt>";
 
-auto conn = reddb::connect("reds://db.example.com:5051", o);
+auto conn = reddb::connect("reds://db.example.com:5050", o);
 ```
 
 ### Transport selection

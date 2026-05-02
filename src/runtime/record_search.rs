@@ -260,7 +260,7 @@ pub(super) fn runtime_table_record_lean(entity: UnifiedEntity) -> Option<Unified
         );
         record.set_arc(sys_key_created_at(), Value::UnsignedInteger(created_at));
         record.set_arc(sys_key_updated_at(), Value::UnsignedInteger(updated_at));
-        for (name, value) in schema.iter().zip(row.columns.into_iter()) {
+        for (name, value) in schema.iter().zip(row.columns) {
             record.set(name, value);
         }
         Some(record)
@@ -338,7 +338,7 @@ pub(super) fn runtime_table_record_from_entity(entity: UnifiedEntity) -> Option<
                 }
             } else if let Some(ref schema) = row.schema {
                 // Columnar storage: use shared schema for field names
-                for (name, value) in schema.iter().zip(row.columns.into_iter()) {
+                for (name, value) in schema.iter().zip(row.columns) {
                     record.set(name, value);
                 }
             } else {

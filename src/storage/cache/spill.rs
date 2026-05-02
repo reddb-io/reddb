@@ -467,7 +467,7 @@ impl SpillManager {
         }
 
         // Sort by coldness (descending - higher = colder)
-        candidates.sort_by(|a, b| b.1.cmp(&a.1));
+        candidates.sort_by_key(|b| std::cmp::Reverse(b.1));
 
         // Select segments until we've freed enough
         let mut freed = 0usize;

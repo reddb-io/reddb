@@ -503,10 +503,7 @@ impl StoreCommitCoordinator {
             }
             let action = StoreWalAction::decode(&payload)?;
             store.apply_replayed_action(&action).map_err(|err| {
-                io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("failed to replay store wal action: {err}"),
-                )
+                io::Error::other(format!("failed to replay store wal action: {err}"))
             })?;
         }
 

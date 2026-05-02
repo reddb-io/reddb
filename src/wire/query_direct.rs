@@ -104,7 +104,6 @@ fn filter_is_single_indexable_leaf(filter: &Filter) -> bool {
 /// `try_sorted_index_lookup` intersects the two id sets, and the intersection
 /// is a complete answer to the full filter — so the outer LIMIT can be pushed
 /// through to the intersector without losing rows.
-
 pub(super) fn is_shape_direct_eligible(tq: &TableQuery) -> bool {
     if let Some(source) = &tq.source {
         if !matches!(source, TableSource::Name(_)) {
@@ -249,9 +248,7 @@ pub(super) fn execute_direct_scan(runtime: &RedDBRuntime, tq: &TableQuery) -> Op
         // Require explicit LIMIT — we don't want to materialise an
         // unbounded scan here (the runtime's canonical path has the
         // parallel-scan branch for that).
-        if limit.is_none() {
-            return None;
-        }
+        limit?;
         manager.for_each_entity(|entity| {
             if (row_count as usize) >= hard_limit {
                 return false;
@@ -261,9 +258,7 @@ pub(super) fn execute_direct_scan(runtime: &RedDBRuntime, tq: &TableQuery) -> Op
         });
     }
 
-    if cols.is_none() {
-        return None;
-    }
+    cols.as_ref()?;
 
     body[header_nrows_pos..header_nrows_pos + 4].copy_from_slice(&row_count.to_le_bytes());
 
@@ -855,11 +850,9 @@ fn execute_simple_ordered_complex_select(
         }
         encoded_rows[candidate_idx] = Some(row_bytes);
     });
-    for row in encoded_rows {
-        if let Some(row_bytes) = row {
-            body.extend_from_slice(&row_bytes);
-            row_count += 1;
-        }
+    for row_bytes in encoded_rows.into_iter().flatten() {
+        body.extend_from_slice(&row_bytes);
+        row_count += 1;
     }
     body[header_nrows_pos..header_nrows_pos + 4].copy_from_slice(&row_count.to_le_bytes());
 
@@ -894,7 +887,7 @@ where
     let mut cols: Option<Vec<WireColumn>> = None;
     let mut row_count: u32 = 0;
 
-    manager.for_each_id(&ids, |_, entity| {
+    manager.for_each_id(ids, |_, entity| {
         if !entity.data.is_row() || !entity_visible_under_current_snapshot(entity) {
             return;
         }
@@ -926,9 +919,7 @@ where
         }
     });
 
-    if cols.is_none() {
-        return None;
-    }
+    cols.as_ref()?;
 
     body[header_nrows_pos..header_nrows_pos + 4].copy_from_slice(&row_count.to_le_bytes());
     let mut resp = Vec::with_capacity(5 + body.len());
@@ -1270,15 +1261,17 @@ fn resolve_wire_columns(tq: &TableQuery, row: &RowData) -> Vec<WireColumn> {
 
     let mut out = Vec::with_capacity(tq.select_items.len());
     for item in &tq.select_items {
-        if let SelectItem::Expr { expr, alias } = item {
-            if let Expr::Column {
-                field: FieldRef::TableColumn { column, .. },
-                ..
-            } = expr
-            {
-                let name = alias.as_deref().unwrap_or(column.as_str());
-                out.push(resolve_named_wire_column(name, column, row));
-            }
+        if let SelectItem::Expr {
+            expr:
+                Expr::Column {
+                    field: FieldRef::TableColumn { column, .. },
+                    ..
+                },
+            alias,
+        } = item
+        {
+            let name = alias.as_deref().unwrap_or(column.as_str());
+            out.push(resolve_named_wire_column(name, column, row));
         }
     }
     out
@@ -1313,15 +1306,17 @@ fn resolve_wire_columns_from_query_schema(tq: &TableQuery, schema: &[String]) ->
 
     let mut out = Vec::with_capacity(tq.select_items.len());
     for item in &tq.select_items {
-        if let SelectItem::Expr { expr, alias } = item {
-            if let Expr::Column {
-                field: FieldRef::TableColumn { column, .. },
-                ..
-            } = expr
-            {
-                let name = alias.as_deref().unwrap_or(column.as_str());
-                out.push(resolve_named_wire_column_from_schema(name, column, schema));
-            }
+        if let SelectItem::Expr {
+            expr:
+                Expr::Column {
+                    field: FieldRef::TableColumn { column, .. },
+                    ..
+                },
+            alias,
+        } = item
+        {
+            let name = alias.as_deref().unwrap_or(column.as_str());
+            out.push(resolve_named_wire_column_from_schema(name, column, schema));
         }
     }
     out

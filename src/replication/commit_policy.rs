@@ -24,18 +24,13 @@
 //! regardless of the configured policy. See PLAN.md 11.4 "default v1
 //! behavior remains `local`".
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CommitPolicy {
+    #[default]
     Local,
     RemoteWal,
     AckN(u32),
     Quorum,
-}
-
-impl Default for CommitPolicy {
-    fn default() -> Self {
-        Self::Local
-    }
 }
 
 impl CommitPolicy {

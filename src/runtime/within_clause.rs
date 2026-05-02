@@ -21,17 +21,12 @@ use crate::storage::query::lexer::{Lexer, Token};
 /// `Clear` means the clause explicitly set the field to NULL — this
 /// must hide the inherited value, not fall through. `Set(v)` carries
 /// the literal value.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum FieldOverride {
+    #[default]
     Inherit,
     Clear,
     Set(String),
-}
-
-impl Default for FieldOverride {
-    fn default() -> Self {
-        Self::Inherit
-    }
 }
 
 impl FieldOverride {

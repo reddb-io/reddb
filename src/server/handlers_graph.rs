@@ -19,7 +19,7 @@ impl RedDBServer {
 
         crate::server::transport::run_use_case(
             || self.graph_use_cases().neighborhood(input),
-            |result| crate::presentation::graph_json::graph_neighborhood_json(result),
+            crate::presentation::graph_json::graph_neighborhood_json,
         )
     }
 
@@ -41,7 +41,7 @@ impl RedDBServer {
 
         crate::server::transport::run_use_case(
             || self.graph_use_cases().traverse(input),
-            |result| crate::presentation::graph_json::graph_traversal_json(result),
+            crate::presentation::graph_json::graph_traversal_json,
         )
     }
 
@@ -63,7 +63,7 @@ impl RedDBServer {
 
         crate::server::transport::run_use_case(
             || self.graph_use_cases().shortest_path(input),
-            |result| crate::presentation::graph_json::graph_path_result_json(result),
+            crate::presentation::graph_json::graph_path_result_json,
         )
     }
 
@@ -500,7 +500,7 @@ impl RedDBServer {
                     input.source,
                 )
             },
-            |projection| crate::presentation::admin_json::graph_projection_json(projection),
+            crate::presentation::admin_json::graph_projection_json,
         )
     }
 
@@ -586,7 +586,7 @@ impl RedDBServer {
 
         crate::server::transport::run_use_case(
             || apply(input.kind, input.projection, input.metadata),
-            |job| analytics_job_json(job),
+            analytics_job_json,
         )
     }
 

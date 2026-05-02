@@ -655,7 +655,11 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
         | QueryExpr::DetachPolicy { .. }
         | QueryExpr::ShowPolicies { .. }
         | QueryExpr::ShowEffectivePermissions { .. }
-        | QueryExpr::SimulatePolicy { .. } => {
+        | QueryExpr::SimulatePolicy { .. }
+        | QueryExpr::CreateMigration(_)
+        | QueryExpr::ApplyMigration(_)
+        | QueryExpr::RollbackMigration(_)
+        | QueryExpr::ExplainMigration(_) => {
             let mut details = BTreeMap::new();
             details.insert("type".to_string(), "dml_ddl".to_string());
             CanonicalLogicalNode {

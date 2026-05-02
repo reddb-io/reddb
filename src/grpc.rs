@@ -112,7 +112,7 @@ impl GrpcTlsOptions {
 impl Default for GrpcServerOptions {
     fn default() -> Self {
         Self {
-            bind_addr: "127.0.0.1:50051".to_string(),
+            bind_addr: "127.0.0.1:5055".to_string(),
             tls: None,
         }
     }
@@ -317,7 +317,7 @@ impl PreparedStatementRegistry {
             .get_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
-        if get_count % 256 == 0 {
+        if get_count.is_multiple_of(256) {
             let mut map = self.map.write();
             self.evict_old_locked(&mut map);
         }

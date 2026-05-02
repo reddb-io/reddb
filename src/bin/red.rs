@@ -179,7 +179,7 @@ fn main() {
     // mount; we read the file, place the contents in `REDDB_PASSWORD`,
     // and strip the `_FILE` var so it can't leak into `env` dumps.
     // No threads are alive yet, so the unsafe `set_var` is sound.
-    for (name, err) in reddb::utils::expand_all_reddb_secrets() {
+    if let Some((name, err)) = reddb::utils::expand_all_reddb_secrets().into_iter().next() {
         eprintln!("error: failed to expand {name}_FILE: {err}");
         std::process::exit(2);
     }
@@ -1284,7 +1284,7 @@ fn main() {
         }
 
         "vcs" => {
-            run_vcs_command(&result.flags, &remaining);
+            run_vcs_command(&result.flags, remaining);
         }
 
         _ => {
@@ -1983,7 +1983,7 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                     .with_description("Persistent database file path (omit for in-memory)"),
                 cli::types::FlagSchema::new("connect")
                     .with_short('c')
-                    .with_description("Proxy to a remote gRPC server (e.g. grpc://host:50051)"),
+                    .with_description("Proxy to a remote gRPC server (e.g. grpc://host:5055)"),
                 cli::types::FlagSchema::new("token")
                     .with_short('t')
                     .with_description("Auth token forwarded to the remote server"),
@@ -2667,7 +2667,7 @@ fn run_doctor(result: &reddb::cli::schema::SchemaResult) -> i32 {
     // 1) Server reachability via /metrics (also catches admin-token
     // misconfiguration since /metrics is gated when token is set).
     let metrics = match get_from_http(&bind, "/metrics", token.as_deref()) {
-        Ok((status, body)) if status == 200 => Some(body),
+        Ok((200, body)) => Some(body),
         Ok((status, _)) => {
             checks.push(DoctorCheck {
                 name: "reachability",
@@ -2971,7 +2971,7 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
         ]);
         let flags = HashMap::new();
         let (grpc_bind, http_bind) = resolve_server_binds(&flags).unwrap();
-        assert_eq!(grpc_bind.as_deref(), Some("127.0.0.1:50051"));
+        assert_eq!(grpc_bind.as_deref(), Some("127.0.0.1:5055"));
         assert_eq!(http_bind, None);
     }
 
@@ -2988,7 +2988,7 @@ reddb_replica_lag_records{replica_id=\"b\"} 250\n";
             ("http".to_string(), bool_flag(true)),
         ]);
         let (grpc_bind, http_bind) = resolve_server_binds(&flags).unwrap();
-        assert_eq!(grpc_bind.as_deref(), Some("127.0.0.1:50051"));
+        assert_eq!(grpc_bind.as_deref(), Some("127.0.0.1:5055"));
         assert_eq!(http_bind.as_deref(), Some("127.0.0.1:8080"));
     }
 

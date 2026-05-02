@@ -9,9 +9,7 @@
 //   - parse(allocator, uri) → ParsedUri (owned strings)
 //
 // The default port for `red://`/`reds://` (the new redwire scheme)
-// is **5050**, per task brief — different from the JS reference,
-// which keeps the `grpc://` legacy default of 5051. We honour the
-// brief and document the divergence.
+// is **5050**. The `grpc://` legacy scheme uses port **5055**.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -67,8 +65,8 @@ pub fn defaultPortFor(kind: Kind) u16 {
     return switch (kind) {
         .http => 8080,
         .https => 8443,
-        .grpc => 5051,
-        .grpcs => 5052,
+        .grpc => 5055,
+        .grpcs => 5056,
         .pg => 5432,
         .redwire, .redwire_tls => 5050,
         .embedded => 0,

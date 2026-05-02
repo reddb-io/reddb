@@ -1183,7 +1183,7 @@ fn aggregate_projection_result_slotted(
             } else {
                 values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                 let mid = values.len() / 2;
-                if values.len() % 2 == 0 {
+                if values.len().is_multiple_of(2) {
                     Value::Float((values[mid - 1] + values[mid]) / 2.0)
                 } else {
                     Value::Float(values[mid])
@@ -1428,11 +1428,10 @@ fn resolve_group_by_value(db: &RedDB, group_expr: &Expr, record: &UnifiedRecord)
         parse_time_bucket_group_expr(&group_expr_key(group_expr).unwrap_or_default())
     {
         let timestamp_ns = resolve_bucket_timestamp_ns(record, timestamp_column.as_deref())?;
-        let bucket_start = if bucket_ns == 0 {
-            timestamp_ns
-        } else {
-            (timestamp_ns / bucket_ns) * bucket_ns
-        };
+        let bucket_start = timestamp_ns
+            .checked_div(bucket_ns)
+            .map(|bucket| bucket * bucket_ns)
+            .unwrap_or(timestamp_ns);
         return Some(Value::UnsignedInteger(bucket_start));
     }
 

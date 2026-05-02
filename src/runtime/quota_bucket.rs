@@ -61,9 +61,11 @@ pub enum QuotaOutcome {
 
 impl QuotaBucket {
     pub fn new(rate_per_sec: f64, burst: f64) -> Self {
+        let rate_per_sec = rate_per_sec.max(0.0);
+        let burst = if burst > 0.0 { burst } else { rate_per_sec };
         Self {
-            rate_per_sec: rate_per_sec.max(0.0),
-            burst: burst.max(rate_per_sec).max(0.0),
+            rate_per_sec,
+            burst,
             buckets: Mutex::new(HashMap::new()),
         }
     }

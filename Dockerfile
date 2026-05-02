@@ -32,6 +32,7 @@ RUN mkdir -p src/bin \
 
 # Copy full source and build for real
 COPY benches/ benches/
+COPY docs/spec/ docs/spec/
 COPY src/ src/
 
 RUN cargo build --release --locked --bin red ${REDDB_CARGO_FEATURES:+--features ${REDDB_CARGO_FEATURES}}
@@ -62,12 +63,12 @@ WORKDIR /data
 VOLUME /data
 VOLUME /etc/reddb
 
-# gRPC (50051) and HTTP (8080) ports
-EXPOSE 50051 8080
+# Wire (5050), gRPC (5055) and HTTP (8080) ports
+EXPOSE 5050 5055 8080
 
 ENV REDDB_DATA_PATH=/data/data.rdb
-ENV REDDB_BIND_ADDR=0.0.0.0:50051
-ENV REDDB_GRPC_BIND_ADDR=0.0.0.0:50051
+ENV REDDB_BIND_ADDR=0.0.0.0:5050
+ENV REDDB_GRPC_BIND_ADDR=0.0.0.0:5055
 ENV REDDB_HTTP_BIND_ADDR=0.0.0.0:8080
 ENV RUST_MIN_STACK=8388608
 
@@ -112,4 +113,4 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -fsS --max-time 2 http://127.0.0.1:8080/health/live || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]
-CMD ["server", "--http", "--vault", "--path", "/data/data.rdb", "--http-bind", "0.0.0.0:8080", "--grpc-bind", "0.0.0.0:50051"]
+CMD ["server", "--http", "--vault", "--path", "/data/data.rdb", "--http-bind", "0.0.0.0:8080", "--wire-bind", "0.0.0.0:5050", "--grpc-bind", "0.0.0.0:5055"]

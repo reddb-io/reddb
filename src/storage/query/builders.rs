@@ -298,7 +298,11 @@ impl JoinQueryBuilder {
             | QueryExpr::DetachPolicy { .. }
             | QueryExpr::ShowPolicies { .. }
             | QueryExpr::ShowEffectivePermissions { .. }
-            | QueryExpr::SimulatePolicy { .. } => {}
+            | QueryExpr::SimulatePolicy { .. }
+            | QueryExpr::CreateMigration(_)
+            | QueryExpr::ApplyMigration(_)
+            | QueryExpr::RollbackMigration(_)
+            | QueryExpr::ExplainMigration(_) => {}
         }
         self
     }

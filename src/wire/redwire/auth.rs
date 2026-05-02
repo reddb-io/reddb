@@ -368,7 +368,7 @@ pub(crate) fn new_session_id_for_scram() -> String {
 const B64_ALPHA: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 pub fn base64_std(input: &[u8]) -> String {
-    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     let chunks = input.chunks_exact(3);
     let rem = chunks.remainder();
     for c in chunks {
@@ -568,7 +568,7 @@ fn base64_url_decode(input: &str) -> Option<Vec<u8>> {
             _ => s.push(ch),
         }
     }
-    while s.len() % 4 != 0 {
+    while !s.len().is_multiple_of(4) {
         s.push('=');
     }
     base64_std_decode(&s)

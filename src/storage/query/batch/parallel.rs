@@ -36,9 +36,7 @@ pub fn parallel_sum_f64_with(data: &[f64], min_parallel_len: usize) -> f64 {
         return sum_f64(data);
     }
     let chunk_size = (data.len() / rayon::current_num_threads().max(1)).max(1024);
-    data.par_chunks(chunk_size)
-        .map(|chunk| sum_f64(chunk))
-        .sum()
+    data.par_chunks(chunk_size).map(sum_f64).sum()
 }
 
 /// Parallel aggregate — splits input batches across threads, runs
