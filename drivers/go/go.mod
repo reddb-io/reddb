@@ -1,4 +1,4 @@
-module github.com/forattini-dev/reddb-go
+module github.com/reddb-io/reddb-go
 
 go 1.22
 

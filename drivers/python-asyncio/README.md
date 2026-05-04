@@ -1,6 +1,6 @@
 # reddb-asyncio
 
-Pure-asyncio Python driver for [RedDB](https://github.com/forattini-dev/reddb).
+Pure-asyncio Python driver for [RedDB](https://github.com/reddb-io/reddb).
 Speaks **RedWire** (the binary TCP / TLS protocol) and the
 **HTTP REST** API. No native build step, no PyO3 — just `pip install`.
 

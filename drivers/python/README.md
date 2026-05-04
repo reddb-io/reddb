@@ -1,6 +1,6 @@
 # reddb (Python)
 
-Official Python driver for [RedDB](https://github.com/forattini-dev/reddb).
+Official Python driver for [RedDB](https://github.com/reddb-io/reddb).
 Compiled Rust under the hood (via [pyo3](https://pyo3.rs)) — `import reddb`
 gives you the engine in-process, no server, no subprocess, no extra deps.
 

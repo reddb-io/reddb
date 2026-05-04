@@ -18,7 +18,7 @@ GitHub Actions secrets the `release.yml` workflow consumes:
 Verify they exist before the first stable tag:
 
 ```bash
-gh secret list -R forattini-dev/reddb
+gh secret list -R reddb-io/reddb
 ```
 
 ## Stable release

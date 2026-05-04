@@ -13,4 +13,4 @@ ASK 'who owns this passport and what services do they use?' USING groq
 ```
 
 [Get Started](/getting-started/quick-start.md)
-[GitHub](https://github.com/forattini-dev/reddb)
+[GitHub](https://github.com/reddb-io/reddb)

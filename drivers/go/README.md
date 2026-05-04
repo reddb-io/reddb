@@ -1,10 +1,10 @@
 # reddb-go
 
-Pure-Go driver for [RedDB](https://github.com/forattini-dev/reddb). Speaks the
+Pure-Go driver for [RedDB](https://github.com/reddb-io/reddb). Speaks the
 RedWire binary TCP protocol and the HTTP REST surface from a single facade.
 
 ```go
-import reddb "github.com/forattini-dev/reddb-go"
+import reddb "github.com/reddb-io/reddb-go"
 
 ctx := context.Background()
 

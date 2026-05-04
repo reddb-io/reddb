@@ -1,4 +1,4 @@
-//! Official Rust client for [RedDB](https://github.com/forattini-dev/reddb).
+//! Official Rust client for [RedDB](https://github.com/reddb-io/reddb).
 //!
 //! One connection-string API. Pick your backend at runtime:
 //!

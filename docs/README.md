@@ -234,13 +234,13 @@ If the terms `binary`, `embedded`, `gRPC`, `wire`, and `router` feel overloaded,
 ### GitHub Releases
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/forattini-dev/reddb/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/reddb-io/reddb/main/install.sh | bash
 ```
 
 Pin a version:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/forattini-dev/reddb/main/install.sh | bash -s -- --version v0.1.2
+curl -fsSL https://raw.githubusercontent.com/reddb-io/reddb/main/install.sh | bash -s -- --version v0.1.2
 ```
 
 ### npx

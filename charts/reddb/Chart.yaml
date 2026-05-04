@@ -7,9 +7,9 @@ type: application
 version: 0.2.0
 appVersion: "0.1.2"
 kubeVersion: ">=1.23.0-0"
-home: https://github.com/forattini-dev/reddb
+home: https://github.com/reddb-io/reddb
 sources:
-  - https://github.com/forattini-dev/reddb
+  - https://github.com/reddb-io/reddb
 keywords:
   - database
   - multi-model
@@ -19,8 +19,8 @@ keywords:
   - key-value
   - rust
 maintainers:
-  - name: RedBlue Team
-    url: https://github.com/forattini-dev/reddb
+  - name: RedDB.io
+    url: https://github.com/reddb-io/reddb
 annotations:
   category: Database
   licenses: MIT

@@ -236,7 +236,7 @@ curl -X POST http://127.0.0.1:8080/config \
   -d '{"red":{"ai":{"default":{"provider":"ollama","model":"llama3"}}}}'
 ```
 
-See [`examples/config.json`](https://github.com/forattini-dev/reddb/blob/main/examples/config.json) for a complete example with all defaults.
+See [`examples/config.json`](https://github.com/reddb-io/reddb/blob/main/examples/config.json) for a complete example with all defaults.
 
 ### SQL Commands
 

@@ -3,13 +3,13 @@
 # RedDB installer
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/forattini-dev/reddb/main/install.sh | bash
-#   curl -fsSL https://raw.githubusercontent.com/forattini-dev/reddb/main/install.sh | bash -s -- --channel next
-#   curl -fsSL https://raw.githubusercontent.com/forattini-dev/reddb/main/install.sh | bash -s -- --version v0.1.0
+#   curl -fsSL https://raw.githubusercontent.com/reddb-io/reddb/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/reddb-io/reddb/main/install.sh | bash -s -- --channel next
+#   curl -fsSL https://raw.githubusercontent.com/reddb-io/reddb/main/install.sh | bash -s -- --version v0.1.0
 #
 set -e
 
-REPO="forattini-dev/reddb"
+REPO="reddb-io/reddb"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 BINARY_NAME="red"
 CHANNEL="stable"

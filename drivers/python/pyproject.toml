@@ -30,9 +30,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/forattini-dev/reddb"
-Repository = "https://github.com/forattini-dev/reddb"
-Issues = "https://github.com/forattini-dev/reddb/issues"
+Homepage = "https://github.com/reddb-io/reddb"
+Repository = "https://github.com/reddb-io/reddb"
+Issues = "https://github.com/reddb-io/reddb/issues"
 
 [tool.maturin]
 features = ["pyo3/extension-module", "embedded"]

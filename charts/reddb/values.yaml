@@ -17,7 +17,7 @@ fullnameOverride: ""
 # Image
 # -----------------------------------------------------------------------------
 image:
-  repository: ghcr.io/forattini-dev/reddb
+  repository: ghcr.io/reddb-io/reddb
   # Defaults to .Chart.AppVersion when empty
   tag: ""
   pullPolicy: IfNotPresent

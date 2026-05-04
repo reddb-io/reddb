@@ -26,7 +26,7 @@
 
 [Unit]
 Description=RedDB unified database engine
-Documentation=https://github.com/forattini-dev/reddb
+Documentation=https://github.com/reddb-io/reddb
 After=network-online.target
 Wants=network-online.target
 

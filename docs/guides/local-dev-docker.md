@@ -25,7 +25,7 @@ make test-env PROFILE=replica
 ```
 
 This uses
-[examples/docker-compose.replica.yml](https://github.com/forattini-dev/reddb/blob/main/examples/docker-compose.replica.yml).
+[examples/docker-compose.replica.yml](https://github.com/reddb-io/reddb/blob/main/examples/docker-compose.replica.yml).
 
 The topology is:
 
@@ -144,4 +144,4 @@ See also:
 
 - [Docker Deployment](/deployment/docker.md)
 - [Replication](/deployment/replication.md)
-- [examples/README.md](https://github.com/forattini-dev/reddb/blob/main/examples/README.md)
+- [examples/README.md](https://github.com/reddb-io/reddb/blob/main/examples/README.md)

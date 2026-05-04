@@ -19,25 +19,25 @@ If you want the terminology first, read [Modes and Transports](/getting-started/
 The installer resolves the correct GitHub Release asset for your platform:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/forattini-dev/reddb/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/reddb-io/reddb/main/install.sh | bash
 ```
 
 Install a specific version:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/forattini-dev/reddb/main/install.sh | bash -s -- --version v0.1.2
+curl -fsSL https://raw.githubusercontent.com/reddb-io/reddb/main/install.sh | bash -s -- --version v0.1.2
 ```
 
 Install the prerelease channel:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/forattini-dev/reddb/main/install.sh | bash -s -- --channel next
+curl -fsSL https://raw.githubusercontent.com/reddb-io/reddb/main/install.sh | bash -s -- --channel next
 ```
 
 Change the install location:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/forattini-dev/reddb/main/install.sh | bash -s -- --install-dir "$HOME/.local/bin"
+curl -fsSL https://raw.githubusercontent.com/reddb-io/reddb/main/install.sh | bash -s -- --install-dir "$HOME/.local/bin"
 ```
 
 Verify:
@@ -50,7 +50,7 @@ red version
 
 If you want to manage the binary yourself, download the asset for your OS and architecture from:
 
-`https://github.com/forattini-dev/reddb/releases`
+`https://github.com/reddb-io/reddb/releases`
 
 Then place `red` somewhere in your `PATH`:
 
@@ -103,7 +103,7 @@ await db.close()
 RedDB requires Rust and `protoc`.
 
 ```bash
-git clone https://github.com/forattini-dev/reddb.git
+git clone https://github.com/reddb-io/reddb.git
 cd reddb
 cargo build --release --bin red
 ./target/release/red version

@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/forattini-dev/reddb/releases"><img src="https://img.shields.io/github/v/release/forattini-dev/reddb?style=flat-square" alt="Release"></a>
+  <a href="https://github.com/reddb-io/reddb/releases"><img src="https://img.shields.io/github/v/release/reddb-io/reddb?style=flat-square" alt="Release"></a>
   <a href="https://www.gnu.org/licenses/agpl-3.0"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square" alt="License"></a>
   <a href="https://www.npmjs.com/package/reddb-cli"><img src="https://img.shields.io/npm/v/reddb-cli?style=flat-square&label=npm" alt="npm"></a>
 </p>
@@ -403,7 +403,7 @@ curl localhost:8080/ec/urls/clicks/status?id=1
 | **SET checkpoint** | Resets base value, discards prior operations |
 | **All modes** | Works in server, embedded (Rust API), and serverless |
 
-See the [Eventual Consistency Guide](https://forattini-dev.github.io/reddb/#/guides/eventual-consistency) for the theory (CAP theorem, CRDTs, convergence) and full API reference.
+See the [Eventual Consistency Guide](https://reddb-io.github.io/reddb/#/guides/eventual-consistency) for the theory (CAP theorem, CRDTs, convergence) and full API reference.
 
 ---
 
@@ -436,7 +436,7 @@ curl -X POST localhost:8080/geo/distance -d '{
 | `GEO_BEARING` | Compass direction (degrees) |
 | `GEO_MIDPOINT` | Great-circle midpoint |
 
-Also available: destination point, bounding box, polygon area, spatial search (RADIUS, BBOX, NEAREST). See the [Geo Operations Guide](https://forattini-dev.github.io/reddb/#/guides/geo-operations).
+Also available: destination point, bounding box, polygon area, spatial search (RADIUS, BBOX, NEAREST). See the [Geo Operations Guide](https://reddb-io.github.io/reddb/#/guides/geo-operations).
 
 ---
 
@@ -456,7 +456,7 @@ curl -X POST localhost:8080/vectors/cluster -d '{
 }'
 ```
 
-K-Means uses parallel assignment (multi-threaded for datasets > 1K vectors). DBSCAN labels unreachable points as noise (-1), useful for outlier detection. See the [Vector Clustering Guide](https://forattini-dev.github.io/reddb/#/guides/vector-clustering).
+K-Means uses parallel assignment (multi-threaded for datasets > 1K vectors). DBSCAN labels unreachable points as noise (-1), useful for outlier detection. See the [Vector Clustering Guide](https://reddb-io.github.io/reddb/#/guides/vector-clustering).
 
 ---
 
@@ -536,7 +536,7 @@ npx reddb-cli@latest server --wire-bind 127.0.0.1:5050 --http-bind 127.0.0.1:808
 
 ```bash
 # Install
-curl -fsSL https://raw.githubusercontent.com/forattini-dev/reddb/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/reddb-io/reddb/main/install.sh | bash
 
 # Start the server (wire: 5050, gRPC: 5055, HTTP: 8080)
 red server --wire-bind 127.0.0.1:5050 --grpc-bind 127.0.0.1:5055 --http-bind 127.0.0.1:8080 --path ./data.rdb
@@ -561,7 +561,7 @@ npx reddb-cli@latest server --wire-bind 127.0.0.1:5050 --http-bind 127.0.0.1:808
 Or via Docker:
 
 ```bash
-docker run --rm -p 5050:5050 -p 5055:5055 -p 8080:8080 ghcr.io/forattini-dev/reddb:latest
+docker run --rm -p 5050:5050 -p 5055:5055 -p 8080:8080 ghcr.io/reddb-io/reddb:latest
 ```
 
 For production-secure Docker (vault + secrets) and Kubernetes, see
@@ -572,12 +572,12 @@ and [`docs/security/vault.md`](./docs/security/vault.md).
 
 ## Links
 
-- [Documentation](https://forattini-dev.github.io/reddb)
-- [GitHub](https://github.com/forattini-dev/reddb)
+- [Documentation](https://reddb-io.github.io/reddb)
+- [GitHub](https://github.com/reddb-io/reddb)
 - [npm driver package](https://www.npmjs.com/package/reddb)
 - [npm package](https://www.npmjs.com/package/reddb-cli)
-- [Releases](https://github.com/forattini-dev/reddb/releases)
+- [Releases](https://github.com/reddb-io/reddb/releases)
 
 ---
 
-**AGPL-3.0 License** -- Built by [Filipe Forattini](https://github.com/forattini-dev)
+**AGPL-3.0 License** -- Built by [Filipe Forattini](https://github.com/reddb-io)

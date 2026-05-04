@@ -38,13 +38,13 @@
     "key-value"
   ],
   "license": "MIT",
-  "homepage": "https://github.com/forattini-dev/reddb",
+  "homepage": "https://github.com/reddb-io/reddb",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/forattini-dev/reddb.git",
+    "url": "git+https://github.com/reddb-io/reddb.git",
     "directory": "drivers/js"
   },
   "bugs": {
-    "url": "https://github.com/forattini-dev/reddb/issues"
+    "url": "https://github.com/reddb-io/reddb/issues"
   }
 }

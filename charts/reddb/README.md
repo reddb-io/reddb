@@ -1,6 +1,6 @@
 # RedDB Helm Chart
 
-A production-grade Helm chart for [RedDB](https://github.com/forattini-dev/reddb) — a unified multi-model database engine (tables, documents, graphs, vectors, key-value).
+A production-grade Helm chart for [RedDB](https://github.com/reddb-io/reddb) — a unified multi-model database engine (tables, documents, graphs, vectors, key-value).
 
 ## TL;DR
 
@@ -76,7 +76,7 @@ auth:
 | Key                              | Default                              | Notes                                 |
 |----------------------------------|--------------------------------------|---------------------------------------|
 | `mode`                           | `standalone`                         | `standalone` or `primary-replica`     |
-| `image.repository`               | `ghcr.io/forattini-dev/reddb`        |                                       |
+| `image.repository`               | `ghcr.io/reddb-io/reddb`        |                                       |
 | `image.tag`                      | `""` (chart `appVersion`)            |                                       |
 | `primary.persistence.size`       | `10Gi`                               |                                       |
 | `replica.replicaCount`           | `2`                                  | Only used in `primary-replica`        |

@@ -1,5 +1,5 @@
 {
-    "name": "forattini-dev/reddb",
+    "name": "reddb-io/reddb",
     "description": "Official PHP driver for RedDB — supports the redwire binary protocol and HTTP transport.",
     "type": "library",
     "license": "Apache-2.0",

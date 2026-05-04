@@ -4,7 +4,7 @@ version = "0.2.7"
 edition = "2021"
 description = "Native Python driver for RedDB (compiled Rust via pyo3)"
 license = "MIT"
-repository = "https://github.com/forattini-dev/reddb"
+repository = "https://github.com/reddb-io/reddb"
 
 [lib]
 # IMPORTANT: this is the Python module name. After `pip install reddb`

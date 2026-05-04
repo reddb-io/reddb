@@ -2,11 +2,11 @@
 name = "reddb-client"
 version = "0.2.7"
 edition = "2021"
-authors = ["RedBlue Team"]
+authors = ["RedDB.io"]
 description = "Official Rust client for RedDB — embedded engine and (eventually) gRPC remote, behind one connection-string API."
 license = "MIT"
-homepage = "https://github.com/forattini-dev/reddb"
-repository = "https://github.com/forattini-dev/reddb"
+homepage = "https://github.com/reddb-io/reddb"
+repository = "https://github.com/reddb-io/reddb"
 documentation = "https://docs.rs/reddb-client"
 readme = "README.md"
 keywords = ["reddb", "database", "client", "embedded"]

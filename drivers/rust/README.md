@@ -1,6 +1,6 @@
 # reddb-client
 
-Official Rust client for [RedDB](https://github.com/forattini-dev/reddb). One
+Official Rust client for [RedDB](https://github.com/reddb-io/reddb). One
 connection-string API, two backends (only one wired today).
 
 ## Install

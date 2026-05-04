@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	reddb "github.com/forattini-dev/reddb-go"
+	reddb "github.com/reddb-io/reddb-go"
 )
 
 func TestSmoke_AgainstRealServer(t *testing.T) {

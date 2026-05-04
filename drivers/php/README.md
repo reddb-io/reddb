@@ -1,6 +1,6 @@
 # reddb-php
 
-Official PHP driver for [RedDB](https://github.com/forattini-dev/reddb).
+Official PHP driver for [RedDB](https://github.com/reddb-io/reddb).
 
 Speaks both the binary `redwire/1` TCP protocol and the HTTP REST
 surface from a single entry point. Targets PHP 8.2 and up.
@@ -8,7 +8,7 @@ surface from a single entry point. Targets PHP 8.2 and up.
 ## Install
 
 ```bash
-composer require forattini-dev/reddb
+composer require reddb-io/reddb
 ```
 
 Optional: install the PECL `zstd` extension to handshake with

@@ -15,7 +15,7 @@ and the secret-management patterns in
 
 ```bash
 docker run --rm -p 8080:8080 \
-  ghcr.io/forattini-dev/reddb:latest
+  ghcr.io/reddb-io/reddb:latest
 ```
 
 That's it. RedDB binds HTTP on `0.0.0.0:8080`, gRPC on `0.0.0.0:50051`,
@@ -46,7 +46,7 @@ To persist data across container restarts, mount a volume:
 ```bash
 docker run --rm -p 8080:8080 \
   -v reddb-dev-data:/data \
-  ghcr.io/forattini-dev/reddb:latest \
+  ghcr.io/reddb-io/reddb:latest \
   server --path /data/data.rdb --http-bind 0.0.0.0:8080
 ```
 
@@ -70,7 +70,7 @@ mkdir -p ./reddb-data ./secrets
 # Run bootstrap in a one-off container; capture stdout
 docker run --rm \
   -v "$(pwd)/reddb-data:/data" \
-  ghcr.io/forattini-dev/reddb:latest \
+  ghcr.io/reddb-io/reddb:latest \
   bootstrap \
     --path /data/data.rdb \
     --username admin \
@@ -109,7 +109,7 @@ ls -l ./secrets/reddb_certificate.txt
 # examples/docker-compose.vault.yml
 services:
   reddb:
-    image: ghcr.io/forattini-dev/reddb:latest
+    image: ghcr.io/reddb-io/reddb:latest
     ports:
       - "8080:8080"
       - "5050:5050"
@@ -167,7 +167,7 @@ Reading the example file line by line.
 ```yaml
 services:
   reddb:
-    image: ghcr.io/forattini-dev/reddb:latest
+    image: ghcr.io/reddb-io/reddb:latest
 ```
 
 Use the official multi-arch image. Pin to a specific tag (`:1.2.3`) in
@@ -333,7 +333,7 @@ vault, just on a different volume populated by snapshot restore.
 # docker-compose.replica-vault.yml
 services:
   primary:
-    image: ghcr.io/forattini-dev/reddb:latest
+    image: ghcr.io/reddb-io/reddb:latest
     ports: [ "8080:8080", "5050:5050" ]
     volumes: [ primary-data:/data ]
     environment:
@@ -348,7 +348,7 @@ services:
       - --wire-bind=0.0.0.0:5050
 
   replica:
-    image: ghcr.io/forattini-dev/reddb:latest
+    image: ghcr.io/reddb-io/reddb:latest
     ports: [ "8081:8080", "5051:5050" ]
     volumes: [ replica-data:/data ]
     environment:
@@ -389,7 +389,7 @@ from managing certs. Use this only when:
 
 ```bash
 docker run --rm -p 8080:8080 \
-  ghcr.io/forattini-dev/reddb:latest \
+  ghcr.io/reddb-io/reddb:latest \
   server --http-bind 0.0.0.0:8080
 ```
 
@@ -398,7 +398,7 @@ Or, to keep data across restarts:
 ```bash
 docker run --rm -p 8080:8080 \
   -v reddb-dev:/data \
-  ghcr.io/forattini-dev/reddb:latest \
+  ghcr.io/reddb-io/reddb:latest \
   server --path /data/data.rdb --http-bind 0.0.0.0:8080
 ```
 
@@ -414,7 +414,7 @@ vault is what gates auth and `red.secret.*`.
 | `:latest` / `:vX.Y.Z`  | `debian:bookworm-slim` | ~80 MB    | Default. Glibc-linked, broad TLS / CA support, easy `apt-get install` for debugging tools. |
 | `:vX.Y.Z-musl`         | `scratch` / `gcr.io/distroless/static` | ~20 MB | Static binary (`musl`-linked), no shell, no package manager. Use for hardened deployments. |
 | `:vX.Y.Z-alpine`       | `alpine:3.20`      | ~25 MB        | Alpine + apk if you prefer Alpine over Debian. |
-| `ghcr.io/forattini-dev/reddb:nightly` | `debian-slim` | ~80 MB | Latest `main` build. Do not use in production. |
+| `ghcr.io/reddb-io/reddb:nightly` | `debian-slim` | ~80 MB | Latest `main` build. Do not use in production. |
 
 `:musl` is recommended for production: smaller attack surface, no
 shell to exploit, faster cold starts. Use `:debian-slim` if you need

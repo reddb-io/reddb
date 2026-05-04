@@ -12,7 +12,7 @@
  * Override hooks (env vars):
  *   REDDB_SKIP_POSTINSTALL=1      do nothing
  *   REDDB_POSTINSTALL_VERSION=…   pull a different release tag
- *   REDDB_POSTINSTALL_REPO=…      pull from a fork (default: forattini-dev/reddb)
+ *   REDDB_POSTINSTALL_REPO=…      pull from a fork (default: reddb-io/reddb)
  */
 
 import { createRequire } from 'node:module'
@@ -25,7 +25,7 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const require = createRequire(import.meta.url)
 const pkg = require('./package.json')
 
-const DEFAULT_REPO = 'forattini-dev/reddb'
+const DEFAULT_REPO = 'reddb-io/reddb'
 
 if (process.env.REDDB_SKIP_POSTINSTALL === '1') {
   process.stdout.write('reddb: postinstall skipped (REDDB_SKIP_POSTINSTALL=1)\n')

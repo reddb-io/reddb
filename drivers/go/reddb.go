@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/forattini-dev/reddb-go/httpx"
-	"github.com/forattini-dev/reddb-go/redwire"
+	"github.com/reddb-io/reddb-go/httpx"
+	"github.com/reddb-io/reddb-go/redwire"
 )
 
 // Conn is the transport-agnostic connection interface every Connect call

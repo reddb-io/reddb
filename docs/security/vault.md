@@ -168,7 +168,7 @@ there is no `red show certificate` command on a bootstrapped database.
 # Production pattern: bootstrap into a one-off container, capture stdout
 docker run --rm \
   -v reddb-data:/data \
-  ghcr.io/forattini-dev/reddb:latest \
+  ghcr.io/reddb-io/reddb:latest \
   bootstrap --path /data/data.rdb \
             --username admin \
             --password "$(openssl rand -base64 24)" \
@@ -367,7 +367,7 @@ secret-leakage anti-pattern.
 # examples/docker-compose.vault.yml
 services:
   reddb:
-    image: ghcr.io/forattini-dev/reddb:latest
+    image: ghcr.io/reddb-io/reddb:latest
     ports:
       - "8080:8080"
       - "5050:5050"
@@ -441,7 +441,7 @@ strongly discouraged but documented for completeness):
 
 ```dockerfile
 # syntax=docker/dockerfile:1.6
-FROM ghcr.io/forattini-dev/reddb:latest
+FROM ghcr.io/reddb-io/reddb:latest
 
 RUN --mount=type=secret,id=cert,target=/run/secrets/cert \
     REDDB_CERTIFICATE_FILE=/run/secrets/cert \
@@ -501,7 +501,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
       - name: reddb
-        image: ghcr.io/forattini-dev/reddb:latest
+        image: ghcr.io/reddb-io/reddb:latest
         args:
           - server
           - --path=/data/data.rdb
@@ -538,7 +538,7 @@ spec:
 spec:
   containers:
   - name: reddb
-    image: ghcr.io/forattini-dev/reddb:latest
+    image: ghcr.io/reddb-io/reddb:latest
     env:
       - name: REDDB_CERTIFICATE_FILE
         value: /etc/reddb/secrets/certificate
@@ -645,7 +645,7 @@ support SIGHUP rotation.
   "memory": "2048",
   "containerDefinitions": [{
     "name": "reddb",
-    "image": "ghcr.io/forattini-dev/reddb:latest",
+    "image": "ghcr.io/reddb-io/reddb:latest",
     "portMappings": [
       { "containerPort": 8080, "protocol": "tcp" }
     ],
@@ -701,7 +701,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       PackageType: Image
-      ImageUri: ghcr.io/forattini-dev/reddb:latest
+      ImageUri: ghcr.io/reddb-io/reddb:latest
       Environment:
         Variables:
           REDDB_CERTIFICATE: '{{resolve:secretsmanager:prod/reddb/certificate}}'
@@ -720,7 +720,7 @@ gcloud secrets create reddb-certificate \
   --data-file=./cert.txt --replication-policy=automatic
 
 gcloud run deploy reddb \
-  --image=ghcr.io/forattini-dev/reddb:latest \
+  --image=ghcr.io/reddb-io/reddb:latest \
   --port=8080 \
   --service-account=reddb-runtime@PROJECT.iam.gserviceaccount.com \
   --update-secrets=REDDB_CERTIFICATE=reddb-certificate:latest \
@@ -856,7 +856,7 @@ job "reddb" {
     task "reddb" {
       driver = "docker"
       config {
-        image = "ghcr.io/forattini-dev/reddb:latest"
+        image = "ghcr.io/reddb-io/reddb:latest"
         args  = ["server", "--path", "/data/data.rdb", "--vault",
                  "--http-bind", "0.0.0.0:8080"]
       }
@@ -958,7 +958,7 @@ curl -X POST http://primary:8080/admin/backup \
   -H "Authorization: Bearer $RED_ADMIN_TOKEN"
 
 # 2. Bring up a fresh staging instance with a NEW certificate
-docker run --rm -v staging-data:/data ghcr.io/forattini-dev/reddb:latest \
+docker run --rm -v staging-data:/data ghcr.io/reddb-io/reddb:latest \
   bootstrap --path /data/data.rdb \
             --username admin \
             --password "$STAGING_ADMIN_PW" \
@@ -1047,7 +1047,7 @@ Practical steps:
 
 ```bash
 # 1. Bootstrap a new instance with a NEW cert
-docker run --rm -v reddb-new:/data ghcr.io/forattini-dev/reddb:latest \
+docker run --rm -v reddb-new:/data ghcr.io/reddb-io/reddb:latest \
   bootstrap --path /data/data.rdb --print-certificate
 
 # 2. Restore user collections only (skip auth state)
