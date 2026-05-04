@@ -1,0 +1,16 @@
+[package]
+name = "reddb-wire"
+version = "0.2.9"
+edition = "2021"
+authors = ["RedDB.io <hello@reddb.io>"]
+description = "RedDB wire protocol vocabulary: connection-string parser and (later) RedWire frame types. Shared by reddb-server, reddb-client, and the official drivers."
+license = "AGPL-3.0-only"
+homepage = "https://github.com/reddb-io/reddb"
+repository = "https://github.com/reddb-io/reddb"
+documentation = "https://docs.rs/reddb-wire"
+readme = "README.md"
+keywords = ["reddb", "wire", "protocol", "connection-string"]
+categories = ["database", "network-programming"]
+
+[dependencies]
+url = "2"
