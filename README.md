@@ -297,6 +297,10 @@ curl localhost:8080/backup/status
 
 Remote backends: S3, R2, DigitalOcean Spaces, GCS, Turso, Cloudflare D1, local filesystem.
 
+For concrete RTO/RPO numbers per failure mode (process crash, disk loss,
+PITR rollback, replica promotion), see
+[`docs/operations/rto-rpo.md`](./docs/operations/rto-rpo.md).
+
 ---
 
 ## KV REST API
