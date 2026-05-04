@@ -31,8 +31,7 @@ impl BellmanFord {
                     let new_dist = d + weight as f64;
                     if new_dist < *dist.get(&neighbor).unwrap_or(&f64::INFINITY) {
                         dist.insert(neighbor.clone(), new_dist);
-                        predecessor
-                            .insert(neighbor.clone(), (node.clone(), edge_type.into()));
+                        predecessor.insert(neighbor.clone(), (node.clone(), edge_type));
                         changed = true;
                     }
                 }

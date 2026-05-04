@@ -387,25 +387,32 @@ impl SparqlExecutor {
     /// the legacy reserved label names — extending this map is a one-line
     /// change as new vocabularies are introduced.
     fn predicate_alias_matches(&self, predicate: &str, edge_label: &str) -> bool {
-        match (predicate, edge_label) {
-            ("hasservice" | "has_service" | "service", "has_service") => true,
-            ("connectsto" | "connects_to" | "connects", "connects_to") => true,
-            ("hasuser" | "has_user", "has_user") => true,
-            ("usestech" | "uses_tech" | "uses", "uses_tech") => true,
-            ("authaccess" | "auth_access", "auth_access") => true,
-            ("hasendpoint" | "has_endpoint", "has_endpoint") => true,
-            (
-                "hascert" | "has_cert" | "hascertificate" | "has_certificate",
-                "has_cert",
-            ) => true,
-            ("contains" | "has_subdomain" | "hassubdomain", "contains") => true,
-            (
-                "affectedby" | "affected_by" | "hasvulnerability" | "has_vuln" | "vulnerable_to",
-                "affected_by",
-            ) => true,
-            ("relatedto" | "related_to" | "memberof" | "member_of", "related_to") => true,
-            _ => false,
-        }
+        matches!(
+            (predicate, edge_label),
+            ("hasservice" | "has_service" | "service", "has_service")
+                | ("connectsto" | "connects_to" | "connects", "connects_to")
+                | ("hasuser" | "has_user", "has_user")
+                | ("usestech" | "uses_tech" | "uses", "uses_tech")
+                | ("authaccess" | "auth_access", "auth_access")
+                | ("hasendpoint" | "has_endpoint", "has_endpoint")
+                | (
+                    "hascert" | "has_cert" | "hascertificate" | "has_certificate",
+                    "has_cert"
+                )
+                | ("contains" | "has_subdomain" | "hassubdomain", "contains")
+                | (
+                    "affectedby"
+                        | "affected_by"
+                        | "hasvulnerability"
+                        | "has_vuln"
+                        | "vulnerable_to",
+                    "affected_by"
+                )
+                | (
+                    "relatedto" | "related_to" | "memberof" | "member_of",
+                    "related_to"
+                )
+        )
     }
 
     /// Check if predicate is rdf:type or 'a'
