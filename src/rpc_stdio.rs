@@ -329,9 +329,27 @@ pub fn run_with_io<W: Write>(runtime: &RedDBRuntime, stdin: Stdin, stdout: &mut 
     run_backend(&Backend::Local(runtime), stdin, stdout)
 }
 
+/// Per-stdio-session connection-id counter. Each session captures a
+/// unique id so its `tx.commit` BEGIN/COMMIT pair routes to a distinct
+/// `TxnContext` in the runtime — without this every stdio session
+/// would share `conn_id = 0` and trample each other's transactions.
+/// Starts at a high base so we don't collide with PG-wire / gRPC
+/// transports that allocate from their own pools below.
+static STDIO_SESSION_CONN_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1_000_000);
+
+fn next_stdio_conn_id() -> u64 {
+    STDIO_SESSION_CONN_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 fn run_backend<W: Write>(backend: &Backend<'_>, stdin: Stdin, stdout: &mut W) -> i32 {
     let reader = BufReader::new(stdin.lock());
     let mut session = Session::new();
+    // Bind the session to a stable connection id so the runtime's
+    // `tx_contexts` (keyed by conn_id) survives across `handle_line`
+    // calls within the same session.
+    let conn_id = next_stdio_conn_id();
+    crate::runtime::impl_core::set_current_connection_id(conn_id);
     for line_result in reader.lines() {
         let line = match line_result {
             Ok(l) => l,
@@ -360,6 +378,7 @@ fn run_backend<W: Write>(backend: &Backend<'_>, stdin: Stdin, stdout: &mut W) ->
     // (nothing was ever applied to the store) and no error is surfaced to
     // the caller because EOF may be graceful client disconnect.
     let _ = session.take_tx();
+    crate::runtime::impl_core::clear_current_connection_id();
     0
 }
 
@@ -454,19 +473,31 @@ fn dispatch_method(
             let tx_id = tx.tx_id;
             let op_count = tx.write_set.len();
 
-            // Hold the global commit lock for the full replay so
-            // concurrent commits serialize. Reads and plain
-            // auto-committed writes keep running in parallel.
-            let replay = runtime.with_commit_lock(|| -> Result<(u64, usize), (usize, String)> {
+            // Drive the replay through a real engine transaction so
+            // failures roll back the buffered write_set atomically.
+            // Replaces the legacy `commit_lock`-serialised replay:
+            // cross-session ordering is now provided by the
+            // snapshot-manager's xid allocation, which is what the
+            // SQL `BEGIN`/`COMMIT` path has used since #31.
+            let replay: Result<(u64, usize), (usize, String)> = (|| {
+                runtime
+                    .execute_query("BEGIN")
+                    .map_err(|e| (0usize, format!("BEGIN: {e}")))?;
                 let mut total_affected: u64 = 0;
                 for (idx, op) in tx.write_set.iter().enumerate() {
                     match runtime.execute_query(op.sql()) {
                         Ok(qr) => total_affected += qr.affected_rows,
-                        Err(e) => return Err((idx, e.to_string())),
+                        Err(e) => {
+                            let _ = runtime.execute_query("ROLLBACK");
+                            return Err((idx, e.to_string()));
+                        }
                     }
                 }
+                runtime
+                    .execute_query("COMMIT")
+                    .map_err(|e| (op_count, format!("COMMIT: {e}")))?;
                 Ok((total_affected, op_count))
-            });
+            })();
 
             match replay {
                 Ok((affected, replayed)) => Ok(Value::Object(
