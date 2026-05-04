@@ -98,16 +98,25 @@ impl<'rt> MutationEngine<'rt> {
             &row.vector_links,
         );
 
-        // MVCC xmin stamping (Phase 2.3.2a PG parity).
+        // MVCC xmin stamping (#30).
         //
-        // When this INSERT runs inside a BEGIN-wrapped transaction, stamp
-        // the tuple with the current xid so other snapshots hide it until
-        // the transaction commits. Outside a transaction `current_xid()`
-        // returns `None` and xmin stays at 0 — the pre-MVCC "always
-        // visible" default preserved for backwards compatibility.
-        if let Some(xid) = self.runtime.current_xid() {
-            entity.set_xmin(xid);
-        }
+        // Inside a BEGIN-wrapped transaction the writer reuses its
+        // tx xid; outside (autocommit) we allocate a fresh xid from
+        // the coordinator's allocator and commit it immediately —
+        // future snapshots see the xid as committed before the row
+        // even lands, which is correct: there's no row to find until
+        // `insert_auto` returns. xmin=0 is no longer emitted for
+        // freshly-written rows.
+        let writer_xid = match self.runtime.current_xid() {
+            Some(xid) => xid,
+            None => {
+                let mgr = self.runtime.snapshot_manager();
+                let xid = mgr.begin();
+                mgr.commit(xid);
+                xid
+            }
+        };
+        entity.set_xmin(writer_xid);
 
         // Write. `insert_auto` internally runs preprocessors, context index,
         // and cross-ref indexing — no need to repeat them here.
@@ -181,10 +190,20 @@ impl<'rt> MutationEngine<'rt> {
         };
         let mut entities: Vec<UnifiedEntity> = Vec::with_capacity(n);
 
-        // Resolve the current transaction xid once — every entity in this
-        // batch shares it. `None` (autocommit) leaves xmin at 0, which
-        // the visibility checker treats as "always visible" (pre-MVCC).
-        let current_xid = self.runtime.current_xid();
+        // Resolve the writer xid once — every entity in this batch
+        // shares it. Inside a tx we reuse the active xid; in
+        // autocommit we allocate a fresh xid + commit it before the
+        // batch starts so all rows land with a single coherent xmin
+        // (#30 single-statement single-xid invariant).
+        let current_xid = match self.runtime.current_xid() {
+            Some(xid) => xid,
+            None => {
+                let mgr = self.runtime.snapshot_manager();
+                let xid = mgr.begin();
+                mgr.commit(xid);
+                xid
+            }
+        };
 
         // If this collection has no context index enabled AND no row
         // carries node/vector links, the per-row `store.get(id)` in the
@@ -221,9 +240,7 @@ impl<'rt> MutationEngine<'rt> {
                 &row.node_links,
                 &row.vector_links,
             );
-            if let Some(xid) = current_xid {
-                entity.set_xmin(xid);
-            }
+            entity.set_xmin(current_xid);
             entities.push(entity);
         }
 

@@ -680,11 +680,19 @@ impl RedDBRuntime {
                 tags,
             }),
         );
-        // Phase 1.1 MVCC universal: stamp xmin inline (cheaper than
-        // the post-save hook when we already own the entity).
-        if let Some(xid) = self.current_xid() {
-            entity.set_xmin(xid);
-        }
+        // MVCC #30: stamp xmin with the active tx xid (inside a tx)
+        // or an autocommit xid (allocated and committed up-front so
+        // future snapshots see the row as soon as it lands).
+        let writer_xid = match self.current_xid() {
+            Some(xid) => xid,
+            None => {
+                let mgr = self.snapshot_manager();
+                let xid = mgr.begin();
+                mgr.commit(xid);
+                xid
+            }
+        };
+        entity.set_xmin(writer_xid);
 
         let store = self.inner.db.store();
         let id = store
