@@ -22,12 +22,18 @@
 //! |---------------------------|--------------------------------------|--------|
 //! | `memory://`               | Ephemeral in-memory                  | ✅    |
 //! | `file:///abs/path`        | Embedded engine on disk              | ✅    |
-//! | `grpc://host:port`        | Remote tonic client                  | ⚠ planned |
+//! | `grpc://host:port`        | Remote tonic client                  | ✅    |
+//! | `red://host:port`         | Remote tonic client (default port 5050) | ✅    |
+//! | `http://host:port`        | REST client                          | ✅    |
 //!
 //! ## Cargo features
 //!
 //! - `embedded` (default) — pulls the entire RedDB engine in-process.
-//! - `grpc` — reserved for the upcoming remote client.
+//! - `grpc` — opt-in remote client over tonic. Pulls the engine for
+//!   its `RedDBClient` type today; a thin proto-only client is tracked
+//!   in `PLAN_DRIVERS.md`.
+//! - `http` — REST client.
+//! - `redwire` — RedWire native TCP client (no engine dep).
 
 #![deny(unsafe_code)]
 #![warn(missing_debug_implementations)]

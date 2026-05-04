@@ -67,7 +67,9 @@ reddb-client = { version = "0.1", default-features = false, features = ["embedde
 | Feature    | Default | What it does                                                 |
 |------------|---------|--------------------------------------------------------------|
 | `embedded` | yes     | Compiles the full RedDB engine in-process. Best perf.        |
-| `grpc`     | no      | Reserved for the upcoming remote client.                     |
+| `grpc`     | no      | Remote tonic client (`grpc://host:port`, `red://host:port`). |
+| `http`     | no      | REST client (`http://host:port`, `https://host:port`).       |
+| `redwire`  | no      | Native TCP RedWire transport.                                |
 
 ## Errors
 
