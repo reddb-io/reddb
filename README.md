@@ -105,21 +105,27 @@ Swap providers with a keyword. No code changes.
 | Provider    | Keyword        | API Key | ASK / Prompt | Embeddings |
 |:------------|:---------------|:-------:|:------------:|:----------:|
 | OpenAI      | `openai`       | Yes     | ✅           | ✅         |
-| Anthropic   | `anthropic`    | Yes     | ✅           | —          |
+| Anthropic   | `anthropic`    | Yes     | ✅           | rejected   |
 | Groq        | `groq`         | Yes     | ✅           | ✅         |
 | OpenRouter  | `openrouter`   | Yes     | ✅           | ✅         |
 | Together    | `together`     | Yes     | ✅           | ✅         |
 | Venice      | `venice`       | Yes     | ✅           | ✅         |
 | DeepSeek    | `deepseek`     | Yes     | ✅           | ✅         |
-| HuggingFace | `huggingface`  | Yes     | ✅           | —          |
+| HuggingFace | `huggingface`  | Yes     | ✅           | ✅         |
 | Ollama      | `ollama`       | No      | ✅           | ✅         |
 | Local       | `local`        | No      | feature-gated | feature-gated |
 | Custom URL  | `https://...`  | depends | ✅           | ✅         |
 
-Embeddings flow through the OpenAI-compatible `/embeddings` endpoint —
-Anthropic has no embeddings product today, HuggingFace uses a
-different wire shape (a separate client is on the roadmap), and
-`local` requires building with the `local-models` feature flag.
+Most providers speak the OpenAI-compatible `POST /embeddings` shape;
+HuggingFace has its own (`POST /pipeline/feature-extraction/{model}`)
+and RedDB ships a dedicated client for it. Anthropic does not have an
+embeddings API — RedDB rejects embedding calls against it explicitly
+rather than silently re-routing to a different provider. `local`
+requires the `local-models` feature flag at engine build time.
+
+See [`docs/guides/ai-providers.md`](./docs/guides/ai-providers.md)
+for the routing matrix, the wire shape per provider, and the
+Anthropic-embeddings policy in detail.
 
 ```sql
 ASK 'summarize alerts' USING groq MODEL 'llama-3.3-70b-versatile'

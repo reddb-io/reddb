@@ -444,23 +444,42 @@ impl RedDBServer {
             Ok(provider) => provider,
             Err(err) => return json_error(400, err),
         };
-        // OpenAI-compatible providers (Groq, Ollama, OpenRouter, Together,
-        // Venice, DeepSeek, Custom, OpenAI itself) all speak the same
-        // `POST /embeddings` shape, so we route them through the shared
-        // transport. Non-compatible providers (Anthropic has no
-        // embeddings endpoint today, HuggingFace uses a different
-        // shape, Local needs the `local-models` feature flag) are
-        // rejected with a clear, provider-specific message.
-        if !provider.is_openai_compatible() {
-            return json_error(
-                400,
-                format!(
-                    "embeddings are not yet available for provider '{}'. \
-                     Use an OpenAI-compatible provider (openai, groq, ollama, \
-                     openrouter, together, venice, deepseek, or a custom base URL).",
-                    provider.token()
-                ),
-            );
+        // Provider routing for embeddings:
+        //
+        // * OpenAI-compatible providers (Groq, Ollama, OpenRouter,
+        //   Together, Venice, DeepSeek, Custom, OpenAI itself) all
+        //   speak the same `POST /embeddings` shape, so they go
+        //   through the shared transport below.
+        // * HuggingFace has its own wire shape — feature-extraction
+        //   pipeline endpoint per model, payload `{"inputs": "..."}`.
+        //   Routed via `huggingface_embeddings()` below.
+        // * Anthropic has no embeddings product. We fail fast with a
+        //   clear, operator-actionable message rather than silently
+        //   re-routing — silent fallback would mask config bugs and
+        //   produce surprising bills against the wrong provider.
+        // * Local needs the `local-models` feature flag.
+        match &provider {
+            crate::ai::AiProvider::Anthropic => {
+                return json_error(
+                    400,
+                    "Anthropic does not offer an embeddings API. \
+                     Re-issue the request against an OpenAI-compatible \
+                     provider (openai, groq, ollama, openrouter, \
+                     together, venice, deepseek), HuggingFace, or a \
+                     custom base URL — RedDB does not silently route \
+                     embeddings to a different provider than the one \
+                     you named.".to_string(),
+                );
+            }
+            crate::ai::AiProvider::Local => {
+                return json_error(
+                    400,
+                    "Local embeddings require the `local-models` feature \
+                     flag at engine build time."
+                        .to_string(),
+                );
+            }
+            _ => {}
         }
 
         let model = json_string_field(&payload, "model").unwrap_or_else(|| {
@@ -512,15 +531,25 @@ impl RedDBServer {
         let api_base = std::env::var(provider.api_base_env_name())
             .unwrap_or_else(|_| provider.default_api_base().to_string());
 
-        let response = match crate::ai::openai_embeddings(crate::ai::OpenAiEmbeddingRequest {
-            api_key,
-            model: model.clone(),
-            inputs: inputs.iter().map(|item| item.text.clone()).collect(),
-            dimensions,
-            api_base,
-        }) {
-            Ok(response) => response,
-            Err(err) => return json_error(400, err.to_string()),
+        let response = match &provider {
+            crate::ai::AiProvider::HuggingFace => {
+                let texts: Vec<String> =
+                    inputs.iter().map(|item| item.text.clone()).collect();
+                match crate::ai::huggingface_embeddings(&api_key, &model, &texts, &api_base) {
+                    Ok(r) => r,
+                    Err(err) => return json_error(400, err.to_string()),
+                }
+            }
+            _ => match crate::ai::openai_embeddings(crate::ai::OpenAiEmbeddingRequest {
+                api_key,
+                model: model.clone(),
+                inputs: inputs.iter().map(|item| item.text.clone()).collect(),
+                dimensions,
+                api_base,
+            }) {
+                Ok(response) => response,
+                Err(err) => return json_error(400, err.to_string()),
+            },
         };
 
         if response.embeddings.len() != inputs.len() {
