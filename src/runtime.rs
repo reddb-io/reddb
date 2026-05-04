@@ -645,12 +645,6 @@ struct RuntimeInner {
     /// configured issuer + audience + signature before falling back to
     /// the local AuthStore lookup.
     oauth_validator: parking_lot::RwLock<Option<Arc<crate::auth::oauth::OAuthValidator>>>,
-    /// Global serialization point for transactional commits initiated via
-    /// the stdio JSON-RPC `tx.commit` path. Held only for the duration of
-    /// the write-set replay so concurrent auto-committed writes can still
-    /// make progress between commits. Remote/gRPC commits use a separate
-    /// server-side serialization mechanism and do not touch this lock.
-    commit_lock: Mutex<()>,
     /// View registry (Phase 2.1 PG parity).
     ///
     /// Holds the parsed `SELECT` body for every view created via
