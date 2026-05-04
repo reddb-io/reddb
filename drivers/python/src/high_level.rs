@@ -294,7 +294,7 @@ impl RedDb {
 /// Accepted URIs:
 ///   - `memory://`               ephemeral in-memory database
 ///   - `file:///absolute/path`   embedded engine on disk
-///   - `grpc://host:port`        remote gRPC server  (not yet wired)
+///   - `grpc://host:port`        remote gRPC server (tonic backend)
 #[pyfunction]
 pub fn connect(uri: &str) -> PyResult<RedDb> {
     if uri.is_empty() {
