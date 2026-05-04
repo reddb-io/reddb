@@ -1114,7 +1114,7 @@ fn peek_top_level_as_of_with_table(
         return None;
     }
     let parsed = crate::storage::query::parser::parse(sql).ok()?;
-    let crate::storage::query::ast::QueryExpr::Table(table) = parsed else {
+    let crate::storage::query::ast::QueryExpr::Table(table) = parsed.query else {
         return None;
     };
     let clause = table.as_of?;

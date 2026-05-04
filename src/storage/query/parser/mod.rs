@@ -62,9 +62,8 @@ mod tests;
 
 pub use error::ParseError;
 
-use super::ast::QueryExpr;
+use super::ast::{QueryExpr, QueryWithCte};
 use super::lexer::{Lexer, Position, Spanned, Token};
-use super::sql::parse_frontend;
 use crate::storage::schema::Value;
 
 /// RQL Parser
@@ -338,7 +337,12 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// Parse an RQL query string
-pub fn parse(input: &str) -> Result<QueryExpr, ParseError> {
-    parse_frontend(input).map(|statement| statement.into_query_expr())
+/// Parse an RQL query string into a `QueryWithCte`. A leading `WITH`
+/// is consumed as a CTE prelude; any other statement is returned in
+/// the `QueryWithCte::simple` shape (`with_clause: None`). Callers
+/// that don't care about CTEs read `.query` to recover the legacy
+/// `QueryExpr` shape.
+pub fn parse(input: &str) -> Result<QueryWithCte, ParseError> {
+    let mut parser = Parser::new(input)?;
+    parser.parse_with_cte()
 }

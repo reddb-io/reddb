@@ -37,8 +37,13 @@ pub fn parse_multi(input: &str) -> Result<QueryExpr, MultiParseError> {
 
     match mode {
         QueryMode::Sql | QueryMode::Cypher | QueryMode::Path => {
-            // Use existing RQL parser for SQL, Cypher, and Path modes
+            // Use existing RQL parser for SQL, Cypher, and Path modes.
+            // CTE preludes are discarded here — multi-mode dispatch
+            // doesn't execute CTEs (the CTE-aware path lives in
+            // `runtime::execute_query`). Inner query is the legacy
+            // shape callers expect.
             crate::storage::query::parser::parse(input)
+                .map(|q| q.query)
                 .map_err(|e| MultiParseError::Parse(e.to_string()))
         }
         QueryMode::Gremlin => {

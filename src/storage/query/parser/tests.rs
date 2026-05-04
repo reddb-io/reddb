@@ -7,6 +7,15 @@ use crate::storage::query::ast::{
     MetadataFilter, Projection, QueueCommand, TableQuery, TreeCommand, TreePosition, VectorSource,
 };
 
+/// Test helper that returns the legacy `QueryExpr` shape. The
+/// top-level `parser::parse` returns `QueryWithCte` since #40; these
+/// tests pre-date that change and don't exercise CTEs, so unwrap the
+/// inner query for assertion ergonomics. CTE-specific tests should
+/// call [`super::parse`] directly and inspect `with_clause`.
+fn parse(input: &str) -> Result<QueryExpr, error::ParseError> {
+    super::parse(input).map(|q| q.query)
+}
+
 #[test]
 fn test_parse_simple_select() {
     let query = parse("SELECT ip, hostname FROM hosts").unwrap();
@@ -3197,4 +3206,77 @@ fn test_parse_fdw_ddl() {
     } else {
         panic!("Expected DropForeignTable");
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// CTE / WITH clause parsing — issue #40.
+//
+// Top-level `parser::parse` now returns `QueryWithCte`. A leading
+// `WITH` is consumed as a CTE prelude; everything else returns the
+// `simple` shape with `with_clause: None`. Execution-side wiring is
+// out of scope here (#41) — these tests only assert that the parser
+// produces the right AST.
+// ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn cte_no_with_clause_produces_simple_shape() {
+    let parsed = super::parse("SELECT * FROM users").unwrap();
+    assert!(parsed.with_clause.is_none());
+    assert!(matches!(parsed.query, QueryExpr::Table(_)));
+}
+
+#[test]
+fn cte_single_with_single_reference() {
+    let parsed = super::parse(
+        "WITH active AS (SELECT * FROM users WHERE status = 'active') \
+         SELECT count(*) FROM active",
+    )
+    .unwrap();
+    let with = parsed
+        .with_clause
+        .as_ref()
+        .expect("with_clause should be Some");
+    assert_eq!(with.ctes.len(), 1);
+    assert_eq!(with.ctes[0].name, "active");
+    assert!(with.ctes[0].columns.is_empty());
+    assert!(!with.has_recursive);
+    assert!(matches!(parsed.query, QueryExpr::Table(_)));
+}
+
+#[test]
+fn cte_chained_definitions() {
+    let parsed = super::parse(
+        "WITH a AS (SELECT * FROM t1), b AS (SELECT * FROM a) SELECT * FROM b",
+    )
+    .unwrap();
+    let with = parsed.with_clause.expect("with_clause should be Some");
+    assert_eq!(with.ctes.len(), 2);
+    assert_eq!(with.ctes[0].name, "a");
+    assert_eq!(with.ctes[1].name, "b");
+}
+
+#[test]
+fn cte_with_column_aliases() {
+    let parsed = super::parse(
+        "WITH x(a, b) AS (SELECT id, name FROM users) SELECT * FROM x",
+    )
+    .unwrap();
+    let with = parsed.with_clause.expect("with_clause should be Some");
+    assert_eq!(with.ctes.len(), 1);
+    assert_eq!(with.ctes[0].name, "x");
+    assert_eq!(
+        with.ctes[0].columns,
+        vec!["a".to_string(), "b".to_string()]
+    );
+}
+
+#[test]
+fn cte_recursive_marker_propagates() {
+    let parsed = super::parse(
+        "WITH RECURSIVE walk AS (SELECT * FROM nodes) SELECT * FROM walk",
+    )
+    .unwrap();
+    let with = parsed.with_clause.expect("with_clause should be Some");
+    assert!(with.has_recursive);
+    assert!(with.ctes[0].recursive);
 }
