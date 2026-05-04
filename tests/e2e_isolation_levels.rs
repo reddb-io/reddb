@@ -142,6 +142,27 @@ fn other_connection_does_not_see_uncommitted_row() {
 }
 
 #[test]
+fn autocommit_insert_stamps_xmin_greater_than_zero() {
+    // #30: every freshly-written entity must carry xmin > 0. Pre-fix
+    // autocommit INSERTs left xmin at 0 ("pre-MVCC, always visible").
+    // Post-fix: a fresh xid is allocated from the coordinator and
+    // committed up-front so the row's xmin is meaningful.
+    let rt = rt();
+    rt.execute_query("CREATE TABLE xmin_check (id INT, name TEXT)").unwrap();
+    rt.execute_query("INSERT INTO xmin_check (id, name) VALUES (1, 'fresh')").unwrap();
+
+    let store = rt.db().store();
+    let mgr = store.get_collection("xmin_check").expect("collection");
+    let entities = mgr.query_all(|_| true);
+    assert_eq!(entities.len(), 1, "one row expected");
+    assert!(
+        entities[0].xmin > 0,
+        "autocommit INSERT must stamp xmin > 0, got {}",
+        entities[0].xmin
+    );
+}
+
+#[test]
 fn rolled_back_writer_row_stays_invisible_to_other_connection() {
     // ROLLBACK must hide the row from every other connection — same
     // mechanism as commit-aware visibility, but exercises the
