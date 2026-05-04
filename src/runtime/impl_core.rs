@@ -3589,7 +3589,26 @@ impl RedDBRuntime {
         // statement, which is the safe direction.
         let is_volatile_query = query_has_volatile_builtin(query);
 
-        if !is_volatile_query {
+        // MVCC #29: bypass the result cache while any transaction is
+        // active. A cached row set reflects the snapshot of whichever
+        // connection populated it; serving that to a different
+        // connection at a different point in MVCC time would leak
+        // uncommitted rows or hide just-committed ones. The cache is
+        // single-snapshot-aware only when there are no in-flight
+        // writers — the steady state in autocommit-only workloads.
+        let has_active_xids = self
+            .inner
+            .snapshot_manager
+            .oldest_active_xid()
+            .is_some();
+        let in_own_tx = self
+            .inner
+            .tx_contexts
+            .read()
+            .contains_key(&current_connection_id());
+        let cache_safe = !has_active_xids && !in_own_tx;
+
+        if !is_volatile_query && cache_safe {
             let cache = self.inner.result_cache.read();
             if let Some(entry) = cache.0.get(&cache_key_str) {
                 if entry.cached_at.elapsed().as_secs() < 30 {
@@ -4829,6 +4848,7 @@ impl RedDBRuntime {
         if let Ok(ref result) = query_result {
             if result.statement_type == "select"
                 && !is_volatile_query
+                && cache_safe
                 && result.result.pre_serialized_json.is_none()
                 && result.result.records.len() <= 5
             {
