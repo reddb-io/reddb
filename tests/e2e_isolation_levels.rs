@@ -72,3 +72,90 @@ fn start_transaction_isolation_level_is_accepted() {
     try_exec(&rt, "COMMIT").unwrap();
     clear_current_connection_id();
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// MVCC reads — issue #29.
+//
+// Verifies that the autocommit `SELECT` path consults the snapshot
+// manager so concurrent uncommitted writes from another transaction
+// stay invisible. Connections are simulated by toggling the per-thread
+// connection-id, mirroring the pattern in e2e_cross_model_tx.rs.
+// ─────────────────────────────────────────────────────────────────────
+
+fn select_count(rt: &RedDBRuntime, sql: &str) -> usize {
+    rt.execute_query(sql).expect("select").result.records.len()
+}
+
+#[test]
+fn writer_sees_own_uncommitted_row() {
+    // Read-your-own-writes inside a single transaction. The writer's
+    // own xid lands in `own_xids` so its uncommitted row is visible
+    // to subsequent SELECTs on the same connection.
+    let rt = rt();
+    set_current_connection_id(9910);
+    try_exec(&rt, "CREATE TABLE ryo (id INT, val TEXT)").unwrap();
+
+    try_exec(&rt, "BEGIN").unwrap();
+    try_exec(&rt, "INSERT INTO ryo (id, val) VALUES (1, 'self')").unwrap();
+    let own = select_count(&rt, "SELECT * FROM ryo WHERE id = 1");
+    assert_eq!(own, 1, "writer must see its own uncommitted row");
+    try_exec(&rt, "ROLLBACK").unwrap();
+
+    let after = select_count(&rt, "SELECT * FROM ryo WHERE id = 1");
+    assert_eq!(after, 0, "rollback must hide the writer's own row");
+    clear_current_connection_id();
+}
+
+#[test]
+fn other_connection_does_not_see_uncommitted_row() {
+    // Cross-connection visibility — the load-bearing #29 assertion.
+    // Conn A writes inside a tx; Conn B autocommit SELECT must not
+    // see the row; after Conn A commits, Conn B sees it.
+    let rt = rt();
+
+    set_current_connection_id(9920);
+    try_exec(&rt, "CREATE TABLE iso_check (id INT, val TEXT)").unwrap();
+
+    // Conn A: open tx, write, do not commit.
+    try_exec(&rt, "BEGIN").unwrap();
+    try_exec(&rt, "INSERT INTO iso_check (id, val) VALUES (42, 'pending')").unwrap();
+    let writer_view = select_count(&rt, "SELECT * FROM iso_check WHERE id = 42");
+    assert_eq!(writer_view, 1, "writer sees own uncommitted row");
+
+    // Conn B: switch connection, autocommit SELECT — must not see it.
+    set_current_connection_id(9921);
+    let outsider_view = select_count(&rt, "SELECT * FROM iso_check WHERE id = 42");
+    assert_eq!(
+        outsider_view, 0,
+        "other connection must not see pre-commit row"
+    );
+
+    // Conn A: commit. Now Conn B sees it.
+    set_current_connection_id(9920);
+    try_exec(&rt, "COMMIT").unwrap();
+
+    set_current_connection_id(9921);
+    let after_commit = select_count(&rt, "SELECT * FROM iso_check WHERE id = 42");
+    assert_eq!(after_commit, 1, "post-commit row must be visible");
+
+    clear_current_connection_id();
+}
+
+#[test]
+fn rolled_back_writer_row_stays_invisible_to_other_connection() {
+    // ROLLBACK must hide the row from every other connection — same
+    // mechanism as commit-aware visibility, but exercises the
+    // is_aborted gate in the visibility predicate.
+    let rt = rt();
+    set_current_connection_id(9930);
+    try_exec(&rt, "CREATE TABLE rollback_check (id INT)").unwrap();
+
+    try_exec(&rt, "BEGIN").unwrap();
+    try_exec(&rt, "INSERT INTO rollback_check (id) VALUES (7)").unwrap();
+    try_exec(&rt, "ROLLBACK").unwrap();
+
+    set_current_connection_id(9931);
+    let view = select_count(&rt, "SELECT * FROM rollback_check WHERE id = 7");
+    assert_eq!(view, 0, "rolled-back row stays invisible cross-connection");
+    clear_current_connection_id();
+}
