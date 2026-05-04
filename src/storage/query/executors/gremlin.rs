@@ -17,7 +17,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::storage::engine::graph_store::{GraphEdgeType, GraphStore};
+use crate::storage::engine::graph_store::GraphStore;
 use crate::storage::query::modes::gremlin::{
     GremlinParser, GremlinPredicate, GremlinStep, GremlinTraversal, GremlinValue, TraversalSource,
 };
@@ -48,7 +48,7 @@ pub enum TraverserElement {
     Node(String),
     Edge {
         from: String,
-        edge_type: GraphEdgeType,
+        edge_label: String,
         to: String,
         weight: f32,
     },
@@ -195,7 +195,7 @@ impl GremlinExecutor {
                     if let Some(node_id) = t.current.as_node_id() {
                         for (edge_type, target, _) in self.graph.outgoing_edges(node_id) {
                             stats.edges_scanned += 1;
-                            if self.edge_matches_label(edge_type, label_opt.as_deref()) {
+                            if self.edge_matches_label(edge_type.as_str(), label_opt.as_deref()) {
                                 result.push(t.move_to_node(&target));
                             }
                         }
@@ -207,7 +207,7 @@ impl GremlinExecutor {
                     if let Some(node_id) = t.current.as_node_id() {
                         for (edge_type, source, _) in self.graph.incoming_edges(node_id) {
                             stats.edges_scanned += 1;
-                            if self.edge_matches_label(edge_type, label_opt.as_deref()) {
+                            if self.edge_matches_label(edge_type.as_str(), label_opt.as_deref()) {
                                 result.push(t.move_to_node(&source));
                             }
                         }
@@ -220,14 +220,14 @@ impl GremlinExecutor {
                         // Outgoing
                         for (edge_type, target, _) in self.graph.outgoing_edges(node_id) {
                             stats.edges_scanned += 1;
-                            if self.edge_matches_label(edge_type, label_opt.as_deref()) {
+                            if self.edge_matches_label(edge_type.as_str(), label_opt.as_deref()) {
                                 result.push(t.move_to_node(&target));
                             }
                         }
                         // Incoming
                         for (edge_type, source, _) in self.graph.incoming_edges(node_id) {
                             stats.edges_scanned += 1;
-                            if self.edge_matches_label(edge_type, label_opt.as_deref()) {
+                            if self.edge_matches_label(edge_type.as_str(), label_opt.as_deref()) {
                                 result.push(t.move_to_node(&source));
                             }
                         }
@@ -239,7 +239,7 @@ impl GremlinExecutor {
                     if let Some(node_id) = t.current.as_node_id() {
                         for (edge_type, target, weight) in self.graph.outgoing_edges(node_id) {
                             stats.edges_scanned += 1;
-                            if self.edge_matches_label(edge_type, label_opt.as_deref()) {
+                            if self.edge_matches_label(edge_type.as_str(), label_opt.as_deref()) {
                                 result.push(t.move_to_edge(node_id, edge_type, &target, weight));
                             }
                         }
@@ -251,7 +251,7 @@ impl GremlinExecutor {
                     if let Some(node_id) = t.current.as_node_id() {
                         for (edge_type, source, weight) in self.graph.incoming_edges(node_id) {
                             stats.edges_scanned += 1;
-                            if self.edge_matches_label(edge_type, label_opt.as_deref()) {
+                            if self.edge_matches_label(edge_type.as_str(), label_opt.as_deref()) {
                                 result.push(t.move_to_edge(&source, edge_type, node_id, weight));
                             }
                         }
@@ -263,13 +263,13 @@ impl GremlinExecutor {
                     if let Some(node_id) = t.current.as_node_id() {
                         for (edge_type, target, weight) in self.graph.outgoing_edges(node_id) {
                             stats.edges_scanned += 1;
-                            if self.edge_matches_label(edge_type, label_opt.as_deref()) {
+                            if self.edge_matches_label(edge_type.as_str(), label_opt.as_deref()) {
                                 result.push(t.move_to_edge(node_id, edge_type, &target, weight));
                             }
                         }
                         for (edge_type, source, weight) in self.graph.incoming_edges(node_id) {
                             stats.edges_scanned += 1;
-                            if self.edge_matches_label(edge_type, label_opt.as_deref()) {
+                            if self.edge_matches_label(edge_type.as_str(), label_opt.as_deref()) {
                                 result.push(t.move_to_edge(&source, edge_type, node_id, weight));
                             }
                         }
@@ -698,12 +698,12 @@ impl GremlinExecutor {
         Ok(current)
     }
 
-    /// Check if edge type matches a label
-    fn edge_matches_label(&self, edge_type: GraphEdgeType, label: Option<&str>) -> bool {
+    /// Check if edge label matches a Gremlin label filter.
+    fn edge_matches_label(&self, edge_label: &str, label: Option<&str>) -> bool {
         match label {
-            None => true, // No filter - match all
+            None => true,
             Some(l) => {
-                let edge_str = format!("{:?}", edge_type).to_lowercase();
+                let edge_str = edge_label.to_lowercase();
                 edge_str.contains(&l.to_lowercase())
             }
         }
@@ -817,11 +817,14 @@ impl GremlinExecutor {
                 }
                 TraverserElement::Edge {
                     from,
-                    edge_type,
+                    edge_label,
                     to,
                     weight,
                 } => {
-                    record.set_edge("_", MatchedEdge::from_tuple(from, *edge_type, to, *weight));
+                    record.set_edge(
+                        "_",
+                        MatchedEdge::from_tuple(from, edge_label.clone(), to, *weight),
+                    );
                 }
                 TraverserElement::Value(v) => match v {
                     GremlinValue::String(s) => {
@@ -850,13 +853,13 @@ impl GremlinExecutor {
                     }
                     TraverserElement::Edge {
                         from,
-                        edge_type,
+                        edge_label,
                         to,
                         weight,
                     } => {
                         record.set_edge(
                             label,
-                            MatchedEdge::from_tuple(from, *edge_type, to, *weight),
+                            MatchedEdge::from_tuple(from, edge_label.clone(), to, *weight),
                         );
                     }
                     _ => {}
@@ -903,11 +906,11 @@ impl Traverser {
     }
 
     /// Create traverser at an edge
-    fn at_edge(from: &str, edge_type: GraphEdgeType, to: &str, weight: f32) -> Self {
+    fn at_edge(from: &str, edge_label: impl Into<String>, to: &str, weight: f32) -> Self {
         Self {
             current: TraverserElement::Edge {
                 from: from.to_string(),
-                edge_type,
+                edge_label: edge_label.into(),
                 to: to.to_string(),
                 weight,
             },
@@ -934,18 +937,19 @@ impl Traverser {
     }
 
     /// Move to an edge
-    fn move_to_edge(&self, from: &str, edge_type: GraphEdgeType, to: &str, weight: f32) -> Self {
+    fn move_to_edge(&self, from: &str, edge_label: impl Into<String>, to: &str, weight: f32) -> Self {
+        let edge_label = edge_label.into();
         let mut new_path = self.path.clone();
         new_path.push(TraverserElement::Edge {
             from: from.to_string(),
-            edge_type,
+            edge_label: edge_label.clone(),
             to: to.to_string(),
             weight,
         });
         Self {
             current: TraverserElement::Edge {
                 from: from.to_string(),
-                edge_type,
+                edge_label,
                 to: to.to_string(),
                 weight,
             },

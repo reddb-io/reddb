@@ -288,7 +288,7 @@ fn matched_node_json(node: &MatchedNode) -> JsonValue {
     object.insert("label".to_string(), JsonValue::String(node.label.clone()));
     object.insert(
         "node_type".to_string(),
-        JsonValue::String(node.node_type.as_str().to_string()),
+        JsonValue::String(node.node_label.clone()),
     );
     JsonValue::Object(object)
 }
@@ -299,7 +299,7 @@ fn matched_edge_json(edge: &MatchedEdge) -> JsonValue {
     object.insert("to".to_string(), JsonValue::String(edge.to.clone()));
     object.insert(
         "edge_type".to_string(),
-        JsonValue::String(edge.edge_type.as_str().to_string()),
+        JsonValue::String(edge.edge_label.clone()),
     );
     object.insert("weight".to_string(), JsonValue::Number(edge.weight as f64));
     JsonValue::Object(object)

@@ -1326,7 +1326,7 @@ pub(super) fn resolve_runtime_field(
             match property.as_str() {
                 "id" => Some(Value::NodeRef(node.id.clone())),
                 "label" => Some(Value::text(node.label.clone())),
-                "type" | "node_type" => Some(Value::text(format!("{:?}", node.node_type))),
+                "type" | "node_type" => Some(Value::text(node.node_label.clone())),
                 _ => node.properties.get(property).cloned(),
             }
         }
@@ -1340,7 +1340,7 @@ pub(super) fn resolve_runtime_field(
                 "from" | "source" => Some(Value::NodeRef(edge.from.clone())),
                 "to" | "target" => Some(Value::NodeRef(edge.to.clone())),
                 "type" | "edge_type" | "label" => {
-                    Some(Value::text(format!("{:?}", edge.edge_type)))
+                    Some(Value::text(edge.edge_label.clone()))
                 }
                 "weight" => Some(Value::Float(edge.weight as f64)),
                 _ => None,
@@ -3214,7 +3214,7 @@ mod tests {
         let node = MatchedNode {
             id: "svc:nginx:80".to_string(),
             label: "nginx".to_string(),
-            node_type: GraphNodeType::Service,
+            node_label: "service".to_string(),
             properties: node_properties,
         };
         record.set_node("svc", node);

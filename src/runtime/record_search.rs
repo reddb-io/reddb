@@ -1484,7 +1484,7 @@ fn runtime_record_identity_fingerprint(record: &UnifiedRecord) -> u64 {
         mix(&mut hash, b"\x1f");
         mix(&mut hash, node.id.as_bytes());
         mix(&mut hash, node.label.as_bytes());
-        mix(&mut hash, format!("{:?}", node.node_type).as_bytes());
+        mix(&mut hash, node.node_label.as_bytes());
         mix(&mut hash, b"|");
     }
 
@@ -1496,7 +1496,7 @@ fn runtime_record_identity_fingerprint(record: &UnifiedRecord) -> u64 {
         mix(&mut hash, edge.from.as_bytes());
         mix(&mut hash, b"->");
         mix(&mut hash, edge.to.as_bytes());
-        mix(&mut hash, format!("{:?}", edge.edge_type).as_bytes());
+        mix(&mut hash, edge.edge_label.as_bytes());
         mix(&mut hash, b"::");
         mix(&mut hash, format!("{:.8}", edge.weight).as_bytes());
         mix(&mut hash, b"|");
@@ -1519,7 +1519,7 @@ fn runtime_record_identity_fingerprint(record: &UnifiedRecord) -> u64 {
             mix(&mut hash, b"->");
             mix(&mut hash, edge.to.as_bytes());
             mix(&mut hash, b"::");
-            mix(&mut hash, format!("{:?}", edge.edge_type).as_bytes());
+            mix(&mut hash, edge.edge_label.as_bytes());
             mix(&mut hash, b":");
             mix(&mut hash, format!("{:.8}", edge.weight).as_bytes());
             mix(&mut hash, b",");

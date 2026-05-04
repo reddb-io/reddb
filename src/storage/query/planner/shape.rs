@@ -857,7 +857,7 @@ fn bind_graph_pattern(pattern: &GraphPattern, binds: &[Value]) -> Option<GraphPa
 fn parameterize_node_pattern(node: &NodePattern, next_index: &mut usize) -> NodePattern {
     NodePattern {
         alias: node.alias.clone(),
-        node_type: node.node_type,
+        node_label: node.node_label.clone(),
         properties: node
             .properties
             .iter()
@@ -869,7 +869,7 @@ fn parameterize_node_pattern(node: &NodePattern, next_index: &mut usize) -> Node
 fn bind_node_pattern(node: &NodePattern, binds: &[Value]) -> Option<NodePattern> {
     Some(NodePattern {
         alias: node.alias.clone(),
-        node_type: node.node_type,
+        node_label: node.node_label.clone(),
         properties: node
             .properties
             .iter()
@@ -901,8 +901,8 @@ fn parameterize_node_selector(selector: &NodeSelector, next_index: &mut usize) -
             *next_index += 1;
             NodeSelector::ById(format!("{STRING_PARAM_PREFIX}{index}"))
         }
-        NodeSelector::ByType { node_type, filter } => NodeSelector::ByType {
-            node_type: *node_type,
+        NodeSelector::ByType { node_label, filter } => NodeSelector::ByType {
+            node_label: node_label.clone(),
             filter: filter
                 .as_ref()
                 .map(|filter| parameterize_property_filter(filter, next_index)),
@@ -927,8 +927,8 @@ fn bind_node_selector(selector: &NodeSelector, binds: &[Value]) -> Option<NodeSe
                 Some(NodeSelector::ById(id.clone()))
             }
         }
-        NodeSelector::ByType { node_type, filter } => Some(NodeSelector::ByType {
-            node_type: *node_type,
+        NodeSelector::ByType { node_label, filter } => Some(NodeSelector::ByType {
+            node_label: node_label.clone(),
             filter: filter
                 .as_ref()
                 .and_then(|filter| bind_property_filter(filter, binds)),

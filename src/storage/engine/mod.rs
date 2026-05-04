@@ -32,7 +32,6 @@ pub mod clustering;
 pub mod crc32;
 pub mod database;
 pub mod distance;
-pub mod emitter;
 pub mod freelist;
 pub mod graph_store;
 pub mod graph_table_index;
@@ -66,7 +65,7 @@ pub use database::{Database, DatabaseConfig, DatabaseError};
 #[allow(deprecated)]
 pub use encrypted_pager::{EncryptedPager, EncryptedPagerConfig, EncryptedPagerError};
 pub use freelist::FreeList;
-pub use graph_store::{GraphEdgeType, GraphNodeType, GraphStore, StoredEdge, StoredNode, TableRef};
+pub use graph_store::{GraphStore, LabelId, LabelRegistry, StoredEdge, StoredNode, TableRef};
 pub use graph_table_index::{GraphTableIndex, GraphTableIndexStats, RowKey};
 pub use page::{Page, PageHeader, PageType, HEADER_SIZE, PAGE_SIZE};
 pub use page_cache::PageCache;
@@ -116,9 +115,6 @@ pub use pathfinding::{
     AStar, AllPathsResult, AllShortestPaths, BellmanFord, BellmanFordResult, Dijkstra,
     KShortestPaths, Path, ShortestPathResult, BFS, DFS,
 };
-
-// Graph emitter for module integration
-pub use emitter::{EmitterStats, GraphEmitter, ScanResult, ServiceResult};
 
 // Vector storage
 pub use distance::{

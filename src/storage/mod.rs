@@ -9,14 +9,6 @@ pub mod primitives;
 // Cross-structure index abstraction (trait + bloom segment helper)
 pub mod index;
 
-pub mod client;
-
-pub mod layout;
-pub mod segments;
-pub mod service;
-
-pub mod records;
-pub mod session;
 
 // RedDB Storage Engine (page-based, B-tree indexed)
 pub mod engine;
@@ -73,24 +65,10 @@ pub(crate) mod unified;
 
 // Public surface re-used by the rest of the codebase.
 pub use backend::{BackendError, LocalBackend, RemoteBackend};
-pub use client::{
-    ActionConfig, ActionRecorder, PasswordSource, PersistenceConfig, PersistenceManager,
-    QueryManager,
+pub use keyring::{
+    clear_keyring, has_keyring_password, resolve_password, save_to_keyring, PasswordSource,
 };
-pub use keyring::{clear_keyring, has_keyring_password, resolve_password, save_to_keyring};
-pub use service::{PartitionKey, PartitionMetadata, StorageService};
-pub use session::{SessionFile, SessionMetadata};
 pub use unified::RedDB;
-
-// Unified intelligence layer exports
-pub use segments::actions::{
-    ActionOutcome, ActionRecord, ActionSource, ActionTrace, ActionType, IntoActionRecord,
-    RecordPayload, Target,
-};
-pub use segments::convert::{
-    DnsResults, FingerprintResults, HttpResults, PingResults, PortScanResults, TlsAuditResults,
-    VulnResults, WhoisResults,
-};
 
 // =============================================================================
 // UNIFIED STORAGE INTERFACE (PRIMARY API)

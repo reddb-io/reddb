@@ -1,7 +1,6 @@
 //! Parser tests
 
 use super::*;
-use crate::storage::engine::graph_store::{GraphEdgeType, GraphNodeType};
 use crate::storage::engine::vector_metadata::MetadataValue;
 use crate::storage::query::ast::{
     CompareOp, DistanceMetric, EdgeDirection, FieldRef, Filter, FusionStrategy, JoinType,
@@ -570,7 +569,7 @@ fn test_parse_simple_match() {
     if let QueryExpr::Graph(gq) = query {
         assert_eq!(gq.pattern.nodes.len(), 1);
         assert_eq!(gq.pattern.nodes[0].alias, "h");
-        assert_eq!(gq.pattern.nodes[0].node_type, Some(GraphNodeType::Host));
+        assert_eq!(gq.pattern.nodes[0].node_label.as_deref(), Some("host"));
     } else {
         panic!("Expected GraphQuery");
     }
@@ -583,8 +582,8 @@ fn test_parse_match_with_edge() {
         assert_eq!(gq.pattern.nodes.len(), 2);
         assert_eq!(gq.pattern.edges.len(), 1);
         assert_eq!(
-            gq.pattern.edges[0].edge_type,
-            Some(GraphEdgeType::HasService)
+            gq.pattern.edges[0].edge_label.as_deref(),
+            Some("has_service")
         );
         assert_eq!(gq.pattern.edges[0].direction, EdgeDirection::Outgoing);
     } else {
@@ -619,7 +618,7 @@ fn test_parse_path_query() {
         parse("PATH FROM host('192.168.1.1') TO host('10.0.0.1') VIA [:AUTH_ACCESS]").unwrap();
     if let QueryExpr::Path(pq) = query {
         assert_eq!(pq.via.len(), 1);
-        assert_eq!(pq.via[0], GraphEdgeType::AuthAccess);
+        assert_eq!(pq.via[0], "auth_access");
     } else {
         panic!("Expected PathQuery");
     }

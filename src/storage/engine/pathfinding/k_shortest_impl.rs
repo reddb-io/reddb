@@ -67,8 +67,8 @@ impl KShortestPaths {
                             .get(j - 1)
                             .map(|_| 1.0) // Simplified weight
                             .unwrap_or(0.0);
-                        if let Some(&et) = spur_path.edge_types.get(j - 1) {
-                            total_path.edge_types.push(et);
+                        if let Some(et) = spur_path.edge_types.get(j - 1) {
+                            total_path.edge_types.push(et.clone());
                         }
                     }
                     total_path.total_weight =

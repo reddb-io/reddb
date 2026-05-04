@@ -14,7 +14,6 @@
 //! 4. Relationship inference (connects, has, affects)
 //! 5. Generate equivalent graph query
 
-use crate::storage::engine::graph_store::{GraphEdgeType, GraphNodeType};
 use crate::storage::query::ast::{
     CompareOp, EdgeDirection, EdgePattern, FieldRef, Filter, GraphPattern, GraphQuery, NodePattern,
     Projection, PropertyFilter as AstPropertyFilter, QueryExpr,
@@ -607,49 +606,39 @@ impl NaturalQuery {
                 });
             }
 
-            // Map string node_type to GraphNodeType
-            let graph_node_type = node_type.as_ref().and_then(|t| match t.as_str() {
-                "host" => Some(GraphNodeType::Host),
-                "service" => Some(GraphNodeType::Service),
-                "user" => Some(GraphNodeType::User),
-                "credential" => Some(GraphNodeType::Credential),
-                "vulnerability" => Some(GraphNodeType::Vulnerability),
-                "technology" => Some(GraphNodeType::Technology),
-                "domain" => Some(GraphNodeType::Domain),
-                "certificate" => Some(GraphNodeType::Certificate),
-                "endpoint" => Some(GraphNodeType::Endpoint),
-                _ => None,
-            });
-
             nodes.push(NodePattern {
                 alias: entity.alias.clone(),
-                node_type: graph_node_type,
+                node_label: node_type.clone(),
                 properties,
             });
         }
 
-        // Add edges based on relationships
+        // Add edges based on relationships. Map the natural-language
+        // relationship enum to the canonical edge label string used by
+        // the legacy reserved range; users can introduce new relationship
+        // types by extending this match.
         if let Some(ref relationship) = self.relationship {
             if nodes.len() >= 2 {
-                let edge_type = match relationship {
-                    RelationshipType::HasService => Some(GraphEdgeType::HasService),
-                    RelationshipType::HasPort => Some(GraphEdgeType::HasEndpoint),
-                    RelationshipType::HasVuln => Some(GraphEdgeType::AffectedBy),
-                    RelationshipType::HasCredential => Some(GraphEdgeType::AuthAccess),
-                    RelationshipType::HasUser => Some(GraphEdgeType::HasUser),
-                    RelationshipType::ConnectsTo => Some(GraphEdgeType::ConnectsTo),
-                    RelationshipType::Affects => Some(GraphEdgeType::AffectedBy),
-                    RelationshipType::AuthAccess => Some(GraphEdgeType::AuthAccess),
-                    RelationshipType::Uses => Some(GraphEdgeType::UsesTech),
-                    RelationshipType::RunsOn => Some(GraphEdgeType::Contains),
-                    RelationshipType::Exposes => Some(GraphEdgeType::HasEndpoint),
-                };
+                let edge_label = Some(match relationship {
+                    RelationshipType::HasService => "has_service",
+                    RelationshipType::HasPort => "has_endpoint",
+                    RelationshipType::HasVuln => "affected_by",
+                    RelationshipType::HasCredential => "auth_access",
+                    RelationshipType::HasUser => "has_user",
+                    RelationshipType::ConnectsTo => "connects_to",
+                    RelationshipType::Affects => "affected_by",
+                    RelationshipType::AuthAccess => "auth_access",
+                    RelationshipType::Uses => "uses_tech",
+                    RelationshipType::RunsOn => "contains",
+                    RelationshipType::Exposes => "has_endpoint",
+                }
+                .to_string());
 
                 edges.push(EdgePattern {
                     alias: None,
                     from: nodes[0].alias.clone(),
                     to: nodes[1].alias.clone(),
-                    edge_type,
+                    edge_label,
                     direction: EdgeDirection::Outgoing,
                     min_hops: 1,
                     max_hops: 1,
@@ -689,18 +678,18 @@ impl NaturalQuery {
         // If no nodes were created, create a default based on primary entity
         if nodes.is_empty() {
             if let Some(ref entity_type) = self.primary_entity {
-                let node_type = match entity_type {
-                    EntityType::Host => Some(GraphNodeType::Host),
-                    EntityType::Service => Some(GraphNodeType::Service),
-                    EntityType::User => Some(GraphNodeType::User),
-                    EntityType::Credential => Some(GraphNodeType::Credential),
-                    EntityType::Vulnerability => Some(GraphNodeType::Vulnerability),
+                let node_label = match entity_type {
+                    EntityType::Host => Some("host".to_string()),
+                    EntityType::Service => Some("service".to_string()),
+                    EntityType::User => Some("user".to_string()),
+                    EntityType::Credential => Some("credential".to_string()),
+                    EntityType::Vulnerability => Some("vulnerability".to_string()),
                     _ => None,
                 };
 
                 nodes.push(NodePattern {
                     alias: "n0".to_string(),
-                    node_type,
+                    node_label,
                     properties: Vec::new(),
                 });
             }

@@ -1,5 +1,4 @@
 use super::*;
-use crate::storage::engine::GraphEdgeType;
 use crate::storage::query::sql_lowering::{filter_to_expr, projection_to_select_item};
 
 pub struct TableQueryBuilder {
@@ -384,9 +383,9 @@ impl PathQueryBuilder {
         }
     }
 
-    /// Add edge type to traverse
-    pub fn via(mut self, edge_type: GraphEdgeType) -> Self {
-        self.query.via.push(edge_type);
+    /// Add edge label string to traverse (preferred).
+    pub fn via_label(mut self, label: impl Into<String>) -> Self {
+        self.query.via.push(label.into());
         self
     }
 

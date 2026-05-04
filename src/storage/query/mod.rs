@@ -60,7 +60,6 @@ pub mod optimizer;
 pub mod parser;
 pub mod planner;
 pub mod rag;
-pub mod security;
 pub mod similarity;
 pub mod sort;
 pub mod sql;
@@ -115,23 +114,6 @@ pub use planner::{
 pub use rag::{
     ChunkSource, ContextChunk, EntityType, MultiSourceRetriever, QueryAnalysis, QueryIntent,
     RagConfig, RagEngine, RetrievalContext, RetrievalStrategy, SimilarEntity,
-};
-pub use security::{
-    // Result types
-    AttackPath,
-    // Query types
-    AttackPathQuery,
-    BlastRadiusQuery,
-    BlastRadiusResult,
-    CredentialChain,
-    LateralMovementQuery,
-    LateralMovementResult,
-    PrivEscPath,
-    PrivEscQuery,
-    ReachableHost,
-    // Query engine
-    SecurityQueries,
-    SimilarCVE,
 };
 pub use similarity::{SimilarityQuery, SimilarityResult};
 pub use sort::{Direction, NullsOrder, OrderBy, QueryLimits, SortKey};

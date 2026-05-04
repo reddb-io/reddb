@@ -2,7 +2,6 @@ use std::fmt;
 
 use super::builders::{GraphQueryBuilder, PathQueryBuilder, TableQueryBuilder};
 pub use crate::storage::engine::distance::DistanceMetric;
-pub use crate::storage::engine::graph_store::{GraphEdgeType, GraphNodeType};
 pub use crate::storage::engine::vector_metadata::MetadataFilter;
 use crate::storage::schema::{SqlTypeName, Value};
 
@@ -973,8 +972,10 @@ impl GraphPattern {
 pub struct NodePattern {
     /// Variable alias for this node
     pub alias: String,
-    /// Optional node type filter
-    pub node_type: Option<GraphNodeType>,
+    /// Optional label filter. Stored as the user-supplied label string so
+    /// the parser is registry-free; executors resolve it against the live
+    /// [`crate::storage::engine::graph_store::LabelRegistry`].
+    pub node_label: Option<String>,
     /// Property filters
     pub properties: Vec<PropertyFilter>,
 }
@@ -984,14 +985,14 @@ impl NodePattern {
     pub fn new(alias: &str) -> Self {
         Self {
             alias: alias.to_string(),
-            node_type: None,
+            node_label: None,
             properties: Vec::new(),
         }
     }
 
-    /// Set node type
-    pub fn of_type(mut self, node_type: GraphNodeType) -> Self {
-        self.node_type = Some(node_type);
+    /// Set the label filter (string form — preferred).
+    pub fn of_label(mut self, label: impl Into<String>) -> Self {
+        self.node_label = Some(label.into());
         self
     }
 
@@ -1015,8 +1016,8 @@ pub struct EdgePattern {
     pub from: String,
     /// Target node alias
     pub to: String,
-    /// Optional edge type filter
-    pub edge_type: Option<GraphEdgeType>,
+    /// Optional label filter (user-supplied string).
+    pub edge_label: Option<String>,
     /// Edge direction
     pub direction: EdgeDirection,
     /// Minimum hops (for variable-length patterns)
@@ -1032,16 +1033,16 @@ impl EdgePattern {
             alias: None,
             from: from.to_string(),
             to: to.to_string(),
-            edge_type: None,
+            edge_label: None,
             direction: EdgeDirection::Outgoing,
             min_hops: 1,
             max_hops: 1,
         }
     }
 
-    /// Set edge type
-    pub fn of_type(mut self, edge_type: GraphEdgeType) -> Self {
-        self.edge_type = Some(edge_type);
+    /// Set label filter (string form — preferred).
+    pub fn of_label(mut self, label: impl Into<String>) -> Self {
+        self.edge_label = Some(label.into());
         self
     }
 
@@ -1230,8 +1231,9 @@ pub struct PathQuery {
     pub from: NodeSelector,
     /// Target node selector
     pub to: NodeSelector,
-    /// Edge types to traverse (empty = any)
-    pub via: Vec<GraphEdgeType>,
+    /// Edge labels to traverse (empty = any). Strings are resolved against
+    /// the runtime registry by the executor.
+    pub via: Vec<String>,
     /// Maximum path length
     pub max_length: u32,
     /// Filter on paths
@@ -1260,11 +1262,12 @@ impl PathQuery {
         self
     }
 
-    /// Add an edge type constraint to traverse
-    pub fn via(mut self, edge_type: GraphEdgeType) -> Self {
-        self.via.push(edge_type);
+    /// Add an edge label constraint to traverse (string form).
+    pub fn via_label(mut self, label: impl Into<String>) -> Self {
+        self.via.push(label.into());
         self
     }
+
 }
 
 /// Node selector for path queries
@@ -1272,9 +1275,9 @@ impl PathQuery {
 pub enum NodeSelector {
     /// By node ID
     ById(String),
-    /// By node type and property
+    /// By node label and property
     ByType {
-        node_type: GraphNodeType,
+        node_label: String,
         filter: Option<PropertyFilter>,
     },
     /// By table row (linked node)
@@ -1287,10 +1290,10 @@ impl NodeSelector {
         Self::ById(id.to_string())
     }
 
-    /// Select by type
-    pub fn by_type(node_type: GraphNodeType) -> Self {
+    /// Select by label string (preferred).
+    pub fn by_label(label: impl Into<String>) -> Self {
         Self::ByType {
-            node_type,
+            node_label: label.into(),
             filter: None,
         }
     }

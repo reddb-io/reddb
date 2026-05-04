@@ -36,10 +36,10 @@ pub(super) fn materialize_graph_with_projection(
                 continue;
             }
             graph
-                .add_node(
+                .add_node_with_label(
                     &entity.id.raw().to_string(),
                     &node.label,
-                    graph_node_type(&node.node_type),
+                    &graph_node_label(&node.node_type),
                 )
                 .map_err(|err| RedDBError::Query(err.to_string()))?;
             allowed_nodes.insert(entity.id.raw().to_string());
@@ -60,10 +60,10 @@ pub(super) fn materialize_graph_with_projection(
             };
 
             graph
-                .add_edge(
+                .add_edge_with_label(
                     &edge.from_node,
                     &edge.to_node,
-                    graph_edge_type(&edge.label),
+                    &graph_edge_label(&edge.label),
                     resolved_weight,
                 )
                 .map_err(|err| RedDBError::Query(err.to_string()))?;
@@ -92,7 +92,7 @@ pub(super) fn materialize_graph_lazy(
         }
         if let Some((_, entity)) = store.get_any(EntityId::new(id)) {
             if let EntityKind::GraphNode(ref node) = &entity.kind {
-                let _ = graph.add_node(&id_str, &node.label, graph_node_type(&node.node_type));
+                let _ = graph.add_node_with_label(&id_str, &node.label, &graph_node_label(&node.node_type));
                 visited_nodes.insert(id_str.clone());
                 queue.push_back((id_str, 0));
             }
@@ -168,10 +168,10 @@ pub(super) fn materialize_graph_lazy(
                     if let Ok(parsed) = neighbor_id.parse::<u64>() {
                         if let Some((_, entity)) = store.get_any(EntityId::new(parsed)) {
                             if let EntityKind::GraphNode(ref node) = &entity.kind {
-                                let _ = graph.add_node(
+                                let _ = graph.add_node_with_label(
                                     neighbor_id,
                                     &node.label,
-                                    graph_node_type(&node.node_type),
+                                    &graph_node_label(&node.node_type),
                                 );
                                 visited_nodes.insert(neighbor_id.clone());
                                 queue.push_back((neighbor_id.clone(), depth + 1));
@@ -181,7 +181,7 @@ pub(super) fn materialize_graph_lazy(
                 }
                 // Add edge
                 if visited_nodes.contains(neighbor_id) {
-                    let _ = graph.add_edge(&node_id, neighbor_id, graph_edge_type(label), *weight);
+                    let _ = graph.add_edge_with_label(&node_id, neighbor_id, &graph_edge_label(label), *weight);
                 }
             }
         }
@@ -280,7 +280,7 @@ pub(super) fn path_to_runtime(
             .outgoing_edges(source)
             .into_iter()
             .find(|(candidate_type, candidate_target, _)| {
-                *candidate_type == *edge_type && candidate_target == target
+                candidate_type.as_str() == edge_type.as_str() && candidate_target == target
             })
             .map(|(_, _, weight)| weight)
             .unwrap_or(0.0);
@@ -425,8 +425,8 @@ pub(super) fn merge_runtime_projection(
     })
 }
 
-pub(super) fn edge_allowed(edge_type: GraphEdgeType, filters: Option<&BTreeSet<String>>) -> bool {
-    filters.is_none_or(|filters| filters.contains(&normalize_graph_token(edge_type.as_str())))
+pub(super) fn edge_allowed(edge_label: &str, filters: Option<&BTreeSet<String>>) -> bool {
+    filters.is_none_or(|filters| filters.contains(&normalize_graph_token(edge_label)))
 }
 
 pub(super) fn graph_adjacent_edges(
@@ -442,7 +442,7 @@ pub(super) fn graph_adjacent_edges(
         RuntimeGraphDirection::Outgoing | RuntimeGraphDirection::Both
     ) {
         for (edge_type, target, weight) in graph.outgoing_edges(node) {
-            if edge_allowed(edge_type, edge_filters) {
+            if edge_allowed(edge_type.as_str(), edge_filters) {
                 adjacent.push((
                     target.clone(),
                     RuntimeGraphEdge {
@@ -461,7 +461,7 @@ pub(super) fn graph_adjacent_edges(
         RuntimeGraphDirection::Incoming | RuntimeGraphDirection::Both
     ) {
         for (edge_type, source, weight) in graph.incoming_edges(node) {
-            if edge_allowed(edge_type, edge_filters) {
+            if edge_allowed(edge_type.as_str(), edge_filters) {
                 adjacent.push((
                     source.clone(),
                     RuntimeGraphEdge {
@@ -745,34 +745,39 @@ pub(super) fn top_runtime_scores(
         .collect()
 }
 
-pub(super) fn graph_node_type(input: &str) -> GraphNodeType {
-    match normalize_graph_token(input).as_str() {
-        "host" => GraphNodeType::Host,
-        "service" => GraphNodeType::Service,
-        "credential" => GraphNodeType::Credential,
-        "vulnerability" => GraphNodeType::Vulnerability,
-        "endpoint" => GraphNodeType::Endpoint,
-        "technology" | "tech" => GraphNodeType::Technology,
-        "user" => GraphNodeType::User,
-        "domain" => GraphNodeType::Domain,
-        "certificate" | "cert" => GraphNodeType::Certificate,
-        _ => GraphNodeType::Endpoint,
+/// Normalise a user-supplied node-type token to its canonical lower-snake-case
+/// form. Pentest-flavoured aliases (`tech`, `cert`) are kept as a courtesy
+/// but the result is just a label string the caller can intern into the
+/// [`crate::storage::engine::graph_store::LabelRegistry`].
+pub(super) fn graph_node_label(input: &str) -> String {
+    let token = normalize_graph_token(input);
+    match token.as_str() {
+        "host" | "service" | "credential" | "vulnerability" | "endpoint"
+        | "technology" | "user" | "domain" | "certificate" => token,
+        "tech" => "technology".to_string(),
+        "cert" => "certificate".to_string(),
+        // Unknown token: pass through so callers can register new labels.
+        _ if !token.is_empty() => token,
+        _ => "endpoint".to_string(),
     }
 }
 
-pub(super) fn graph_edge_type(input: &str) -> GraphEdgeType {
-    match normalize_graph_token(input).as_str() {
-        "hasservice" => GraphEdgeType::HasService,
-        "hasendpoint" => GraphEdgeType::HasEndpoint,
-        "usestech" | "usestechnology" => GraphEdgeType::UsesTech,
-        "authaccess" | "hascredential" => GraphEdgeType::AuthAccess,
-        "affectedby" => GraphEdgeType::AffectedBy,
-        "contains" => GraphEdgeType::Contains,
-        "connectsto" | "connects" => GraphEdgeType::ConnectsTo,
-        "relatedto" | "related" => GraphEdgeType::RelatedTo,
-        "hasuser" => GraphEdgeType::HasUser,
-        "hascert" | "hascertificate" => GraphEdgeType::HasCert,
-        _ => GraphEdgeType::RelatedTo,
+/// Edge-label counterpart to [`graph_node_label`].
+pub(super) fn graph_edge_label(input: &str) -> String {
+    let token = normalize_graph_token(input);
+    match token.as_str() {
+        "hasservice" => "has_service".to_string(),
+        "hasendpoint" => "has_endpoint".to_string(),
+        "usestech" | "usestechnology" => "uses_tech".to_string(),
+        "authaccess" | "hascredential" => "auth_access".to_string(),
+        "affectedby" => "affected_by".to_string(),
+        "contains" => "contains".to_string(),
+        "connectsto" | "connects" => "connects_to".to_string(),
+        "relatedto" | "related" => "related_to".to_string(),
+        "hasuser" => "has_user".to_string(),
+        "hascert" | "hascertificate" => "has_cert".to_string(),
+        _ if !token.is_empty() => token,
+        _ => "related_to".to_string(),
     }
 }
 

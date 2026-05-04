@@ -32,9 +32,9 @@ mod query_tests {
     #[test]
     fn test_graph_query_builder() {
         let query = QueryExpr::graph()
-            .node(NodePattern::new("h").of_type(GraphNodeType::Host))
-            .node(NodePattern::new("s").of_type(GraphNodeType::Service))
-            .edge(EdgePattern::new("h", "s").of_type(GraphEdgeType::HasService))
+            .node(NodePattern::new("h").of_label("host"))
+            .node(NodePattern::new("s").of_label("service"))
+            .edge(EdgePattern::new("h", "s").of_label("has_service"))
             .return_field(FieldRef::node_id("h"))
             .build();
 
@@ -53,8 +53,8 @@ mod query_tests {
             NodeSelector::by_id("host:192.168.1.1"),
             NodeSelector::by_id("host:10.0.0.1"),
         )
-        .via(GraphEdgeType::AuthAccess)
-        .via(GraphEdgeType::ConnectsTo)
+        .via_label("auth_access")
+        .via_label("connects_to")
         .max_length(5)
         .build();
 
@@ -73,8 +73,8 @@ mod query_tests {
             .select("ip")
             .join_graph(
                 GraphPattern::new()
-                    .node(NodePattern::new("n").of_type(GraphNodeType::Host))
-                    .edge(EdgePattern::new("n", "v").of_type(GraphEdgeType::AffectedBy)),
+                    .node(NodePattern::new("n").of_label("host"))
+                    .edge(EdgePattern::new("n", "v").of_label("affected_by")),
                 JoinCondition::new(
                     FieldRef::column("h", "ip"),
                     FieldRef::node_prop("n", "label"),
@@ -161,7 +161,7 @@ mod query_tests {
     #[test]
     fn test_path_join_query_builder() {
         let path = PathQuery::new(NodeSelector::by_id("host:a"), NodeSelector::by_id("host:b"))
-            .via(GraphEdgeType::ConnectsTo);
+            .via_label("connects_to");
         let query = QueryExpr::table("hosts")
             .alias("h")
             .join_path(

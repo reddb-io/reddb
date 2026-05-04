@@ -20,8 +20,8 @@ use crate::serde_json::Value as JsonValue;
 use crate::storage::engine::pathfinding::{AStar, BellmanFord, Dijkstra, BFS, DFS};
 use crate::storage::engine::{
     BetweennessCentrality, ClosenessCentrality, ClusteringCoefficient, ConnectedComponents,
-    CycleDetector, DegreeCentrality, EigenvectorCentrality, GraphEdgeType, GraphNodeType,
-    GraphStore, IvfConfig, IvfIndex, IvfStats, LabelPropagation, Louvain, MetadataEntry,
+    CycleDetector, DegreeCentrality, EigenvectorCentrality, GraphStore, IvfConfig, IvfIndex,
+    IvfStats, LabelPropagation, Louvain, MetadataEntry,
     MetadataFilter as VectorMetadataFilter, MetadataValue as VectorMetadataValue, PageRank,
     PersonalizedPageRank, PhysicalFileHeader, StoredNode, StronglyConnectedComponents,
     WeaklyConnectedComponents, HITS,
