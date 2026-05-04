@@ -57,9 +57,8 @@ impl<'a> Parser<'a> {
 
         let alias = self.expect_ident()?;
 
-        // Label filter is now a free-form string. Validation against the
-        // legacy `GraphNodeType` enum was a domain constraint that doesn't
-        // belong at parse time.
+        // Label filter is a free-form string; resolution against the
+        // graph's `LabelRegistry` happens at execution time, not here.
         let node_label = if self.consume(&Token::Colon)? {
             Some(self.expect_ident_or_keyword()?.to_lowercase())
         } else {

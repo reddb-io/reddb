@@ -6,8 +6,9 @@ use super::label_registry::Namespace;
 use super::*;
 
 impl GraphStore {
-    /// Create a new empty graph store with a fresh registry seeded for
-    /// legacy `GraphNodeType` / `GraphEdgeType` compatibility.
+    /// Create a new empty graph store with a fresh [`LabelRegistry`] that
+    /// has the legacy reserved label IDs (1..=19) pre-seeded so v1
+    /// on-disk graph records still decode round-trip.
     pub fn new() -> Self {
         Self::with_registry(Arc::new(LabelRegistry::with_legacy_seed()))
     }
