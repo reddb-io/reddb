@@ -698,10 +698,7 @@ pub struct GraphStore {
     /// instead of handing out a frozen snapshot.
     node_secondary: std::sync::Arc<secondary_index::NodeSecondaryIndex>,
     /// Dynamic label catalog. Resolves user-supplied label strings to
-    /// stable [`LabelId`] u32 values used in the v2 page format. Replaces
-    /// the hardcoded `GraphNodeType` / `GraphEdgeType` enums; those enums
-    /// remain only as a thin compat layer that interns their string names
-    /// into this registry on `add_node` / `add_edge` (see PR3 for removal).
+    /// stable [`LabelId`] u32 values used in the v2 page format.
     pub registry: Arc<LabelRegistry>,
     /// Node pages (packed node records)
     node_pages: RwLock<Vec<Page>>,

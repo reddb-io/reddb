@@ -336,8 +336,7 @@ impl UnifiedRecord {
 pub struct MatchedNode {
     pub id: String,
     pub label: String,
-    /// Category label string (e.g. `"host"`, `"order"`). Replaces the
-    /// closed-enum `GraphNodeType` from earlier revisions.
+    /// Category label string (e.g. `"host"`, `"order"`).
     pub node_label: String,
     pub properties: HashMap<String, Value>,
 }
