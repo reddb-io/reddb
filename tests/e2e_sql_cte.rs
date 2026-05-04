@@ -102,6 +102,40 @@ fn cte_referenced_from_inside_join() {
 }
 
 #[test]
+fn explain_renders_cte_marker_node_per_named_cte() {
+    let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+    seed_users(&rt);
+
+    let r = rt
+        .execute_query(
+            "EXPLAIN WITH active AS (SELECT id, name FROM users WHERE status = 'active') \
+             SELECT * FROM active",
+        )
+        .unwrap();
+
+    // Find the synthetic CteScan row prepended by `explain_as_rows`.
+    let cte_row = r
+        .result
+        .records
+        .iter()
+        .find(|rec| {
+            rec.values
+                .get("op")
+                .and_then(|v| v.as_text())
+                .map(|s| s == "CteScan")
+                .unwrap_or(false)
+        })
+        .expect("EXPLAIN output should contain a CteScan row");
+
+    let source = cte_row
+        .values
+        .get("source")
+        .and_then(|v| v.as_text())
+        .unwrap_or_default();
+    assert_eq!(source, "active", "CteScan should name the CTE");
+}
+
+#[test]
 fn with_recursive_returns_clear_not_implemented_error() {
     let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
     seed_users(&rt);

@@ -272,6 +272,13 @@ pub struct RuntimeQueryExplain {
     pub estimated_confidence: f64,
     pub passes_applied: Vec<String>,
     pub logical_plan: CanonicalLogicalPlan,
+    /// Names of any CTEs declared by a leading `WITH` clause. Empty
+    /// for non-CTE queries. The plan tree is built against the
+    /// post-inlining body, so each CTE's body is reachable inside
+    /// `logical_plan` as a regular `Subquery` (or, for bare refs, the
+    /// inlined Table node verbatim). This list lets renderers prepend
+    /// `CteScan` markers so operators see which CTEs were resolved.
+    pub cte_materializations: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
