@@ -84,21 +84,21 @@ pub use structural::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::engine::graph_store::{GraphEdgeType, GraphNodeType, GraphStore};
+    use crate::storage::engine::graph_store::GraphStore;
 
     fn create_test_graph() -> GraphStore {
         let graph = GraphStore::new();
 
         // Create a diamond graph: A -> B, A -> C, B -> D, C -> D
-        let _ = graph.add_node("A", "Node A", GraphNodeType::Host);
-        let _ = graph.add_node("B", "Node B", GraphNodeType::Host);
-        let _ = graph.add_node("C", "Node C", GraphNodeType::Host);
-        let _ = graph.add_node("D", "Node D", GraphNodeType::Host);
+        let _ = graph.add_node_with_label("A", "Node A", "host");
+        let _ = graph.add_node_with_label("B", "Node B", "host");
+        let _ = graph.add_node_with_label("C", "Node C", "host");
+        let _ = graph.add_node_with_label("D", "Node D", "host");
 
-        let _ = graph.add_edge("A", "B", GraphEdgeType::ConnectsTo, 1.0);
-        let _ = graph.add_edge("A", "C", GraphEdgeType::ConnectsTo, 1.0);
-        let _ = graph.add_edge("B", "D", GraphEdgeType::ConnectsTo, 1.0);
-        let _ = graph.add_edge("C", "D", GraphEdgeType::ConnectsTo, 1.0);
+        let _ = graph.add_edge_with_label("A", "B", "connects_to", 1.0);
+        let _ = graph.add_edge_with_label("A", "C", "connects_to", 1.0);
+        let _ = graph.add_edge_with_label("B", "D", "connects_to", 1.0);
+        let _ = graph.add_edge_with_label("C", "D", "connects_to", 1.0);
 
         graph
     }
@@ -107,13 +107,13 @@ mod tests {
         let graph = GraphStore::new();
 
         // Create a cycle: A -> B -> C -> A
-        let _ = graph.add_node("A", "Node A", GraphNodeType::Host);
-        let _ = graph.add_node("B", "Node B", GraphNodeType::Host);
-        let _ = graph.add_node("C", "Node C", GraphNodeType::Host);
+        let _ = graph.add_node_with_label("A", "Node A", "host");
+        let _ = graph.add_node_with_label("B", "Node B", "host");
+        let _ = graph.add_node_with_label("C", "Node C", "host");
 
-        let _ = graph.add_edge("A", "B", GraphEdgeType::ConnectsTo, 1.0);
-        let _ = graph.add_edge("B", "C", GraphEdgeType::ConnectsTo, 1.0);
-        let _ = graph.add_edge("C", "A", GraphEdgeType::ConnectsTo, 1.0);
+        let _ = graph.add_edge_with_label("A", "B", "connects_to", 1.0);
+        let _ = graph.add_edge_with_label("B", "C", "connects_to", 1.0);
+        let _ = graph.add_edge_with_label("C", "A", "connects_to", 1.0);
 
         graph
     }
@@ -122,19 +122,19 @@ mod tests {
         let graph = GraphStore::new();
 
         // Component 1: A -> B
-        let _ = graph.add_node("A", "Node A", GraphNodeType::Host);
-        let _ = graph.add_node("B", "Node B", GraphNodeType::Host);
-        let _ = graph.add_edge("A", "B", GraphEdgeType::ConnectsTo, 1.0);
+        let _ = graph.add_node_with_label("A", "Node A", "host");
+        let _ = graph.add_node_with_label("B", "Node B", "host");
+        let _ = graph.add_edge_with_label("A", "B", "connects_to", 1.0);
 
         // Component 2: C -> D -> E
-        let _ = graph.add_node("C", "Node C", GraphNodeType::Host);
-        let _ = graph.add_node("D", "Node D", GraphNodeType::Host);
-        let _ = graph.add_node("E", "Node E", GraphNodeType::Host);
-        let _ = graph.add_edge("C", "D", GraphEdgeType::ConnectsTo, 1.0);
-        let _ = graph.add_edge("D", "E", GraphEdgeType::ConnectsTo, 1.0);
+        let _ = graph.add_node_with_label("C", "Node C", "host");
+        let _ = graph.add_node_with_label("D", "Node D", "host");
+        let _ = graph.add_node_with_label("E", "Node E", "host");
+        let _ = graph.add_edge_with_label("C", "D", "connects_to", 1.0);
+        let _ = graph.add_edge_with_label("D", "E", "connects_to", 1.0);
 
         // Component 3: F (isolated)
-        let _ = graph.add_node("F", "Node F", GraphNodeType::Host);
+        let _ = graph.add_node_with_label("F", "Node F", "host");
 
         graph
     }
@@ -151,7 +151,7 @@ mod tests {
     #[test]
     fn test_pagerank_single_node() {
         let graph = GraphStore::new();
-        let _ = graph.add_node("A", "Node A", GraphNodeType::Host);
+        let _ = graph.add_node_with_label("A", "Node A", "host");
 
         let result = PageRank::new().run(&graph);
         assert_eq!(result.scores.len(), 1);
@@ -321,7 +321,7 @@ mod tests {
         for i in 0..node_count {
             let node_id = format!("n{}", i);
             let label = format!("Node {}", i);
-            let _ = graph.add_node(&node_id, &label, GraphNodeType::Host);
+            let _ = graph.add_node_with_label(&node_id, &label, "host");
         }
 
         // Create edges (scale-free network style - some nodes have many connections)
@@ -333,7 +333,7 @@ mod tests {
                 if target != i {
                     let source_id = format!("n{}", i);
                     let target_id = format!("n{}", target);
-                    let _ = graph.add_edge(&source_id, &target_id, GraphEdgeType::ConnectsTo, 1.0);
+                    let _ = graph.add_edge_with_label(&source_id, &target_id, "connects_to", 1.0);
                     edge_count += 1;
                 }
             }

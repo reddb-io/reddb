@@ -5524,10 +5524,10 @@ impl RedDBRuntime {
                 }
                 let id_str = entity.id.raw().to_string();
                 graph
-                    .add_node(
+                    .add_node_with_label(
                         &id_str,
                         &node.label,
-                        super::graph_node_type(&node.node_type),
+                        &super::graph_node_label(&node.node_type),
                     )
                     .map_err(|err| RedDBError::Query(err.to_string()))?;
                 allowed_nodes.insert(id_str.clone());
@@ -5565,10 +5565,10 @@ impl RedDBRuntime {
                     _ => edge.weight as f32 / 1000.0,
                 };
                 graph
-                    .add_edge(
+                    .add_edge_with_label(
                         &edge.from_node,
                         &edge.to_node,
-                        super::graph_edge_type(&edge.label),
+                        &super::graph_edge_label(&edge.label),
                         weight,
                     )
                     .map_err(|err| RedDBError::Query(err.to_string()))?;

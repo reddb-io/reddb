@@ -4,7 +4,6 @@ use super::super::ast::{CompareOp, NodeSelector, PathQuery, PropertyFilter, Quer
 use super::super::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
-use crate::storage::engine::graph_store::GraphEdgeType;
 
 impl<'a> Parser<'a> {
     /// Parse PATH FROM ... TO ... query
@@ -71,8 +70,8 @@ impl<'a> Parser<'a> {
                 NodeSelector::ByRow { table, row_id }
             }
             type_name => {
-                // ByType with optional filter
-                let node_type = self.parse_node_type(type_name)?;
+                // ByType with optional filter — label kept as canonical string.
+                let node_label = self.parse_node_label(type_name)?;
                 let filter = if !self.check(&Token::RParen) {
                     let name = self.expect_ident()?;
                     self.expect(Token::Eq)?;
@@ -85,7 +84,7 @@ impl<'a> Parser<'a> {
                 } else {
                     None
                 };
-                NodeSelector::ByType { node_type, filter }
+                NodeSelector::ByType { node_label, filter }
             }
         };
 
@@ -94,15 +93,15 @@ impl<'a> Parser<'a> {
         Ok(selector)
     }
 
-    /// Parse edge type list: [:TYPE1, :TYPE2]
-    fn parse_edge_type_list(&mut self) -> Result<Vec<GraphEdgeType>, ParseError> {
+    /// Parse edge label list: `[:LABEL1, :LABEL2]`
+    fn parse_edge_type_list(&mut self) -> Result<Vec<String>, ParseError> {
         self.expect(Token::LBracket)?;
 
-        let mut types = Vec::new();
+        let mut labels = Vec::new();
         loop {
             self.expect(Token::Colon)?;
             let type_name = self.expect_ident_or_keyword()?;
-            types.push(self.parse_edge_type(&type_name)?);
+            labels.push(self.parse_edge_label(&type_name)?);
 
             if !self.consume(&Token::Comma)? {
                 break;
@@ -110,6 +109,6 @@ impl<'a> Parser<'a> {
         }
 
         self.expect(Token::RBracket)?;
-        Ok(types)
+        Ok(labels)
     }
 }

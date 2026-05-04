@@ -16,7 +16,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::storage::engine::graph_store::{GraphEdgeType, GraphStore};
+use crate::storage::engine::graph_store::GraphStore;
 use crate::storage::query::ast::CompareOp;
 use crate::storage::query::modes::sparql::{
     SparqlFilter, SparqlParser, SparqlQuery, SparqlTerm, TriplePattern,
@@ -40,8 +40,8 @@ pub struct Binding {
 pub enum BoundValue {
     /// Node reference
     Node(String),
-    /// Edge reference (from, type, to)
-    Edge(String, GraphEdgeType, String),
+    /// Edge reference (from, label, to)
+    Edge(String, String, String),
     /// Literal string
     Literal(String),
     /// Literal integer
@@ -65,7 +65,7 @@ impl BoundValue {
     pub fn to_string_value(&self) -> String {
         match self {
             Self::Node(id) => id.clone(),
-            Self::Edge(from, etype, to) => format!("{}--{:?}-->{}", from, etype, to),
+            Self::Edge(from, etype, to) => format!("{}--{}-->{}", from, etype, to),
             Self::Literal(s) => s.clone(),
             Self::Integer(i) => i.to_string(),
             Self::Float(f) => f.to_string(),
@@ -227,7 +227,7 @@ impl SparqlExecutor {
                     stats.edges_scanned += 1;
 
                     // Check predicate match
-                    if !self.predicate_matches(&pattern.predicate, edge_type, &binding) {
+                    if !self.predicate_matches(&pattern.predicate, edge_type.as_str(), &binding) {
                         continue;
                     }
 
@@ -343,28 +343,28 @@ impl SparqlExecutor {
         }
     }
 
-    /// Check if predicate matches edge type
+    /// Check if predicate matches an edge label.
     fn predicate_matches(
         &self,
         predicate: &SparqlTerm,
-        edge_type: GraphEdgeType,
+        edge_label: &str,
         binding: &Binding,
     ) -> bool {
         match predicate {
             SparqlTerm::Variable(var) => {
                 if let Some(bound) = binding.get(var) {
                     let bound_str = bound.to_string_value().to_lowercase();
-                    let edge_str = format!("{:?}", edge_type).to_lowercase();
+                    let edge_str = edge_label.to_lowercase();
                     return bound_str == edge_str || edge_str.contains(&bound_str);
                 }
                 true // Unbound variable matches all
             }
             SparqlTerm::PrefixedName(_, local) => {
                 let pred_clean = local.to_lowercase();
-                let edge_str = format!("{:?}", edge_type).to_lowercase();
+                let edge_str = edge_label.to_lowercase();
                 edge_str == pred_clean
                     || edge_str.contains(&pred_clean)
-                    || self.predicate_alias_matches(&pred_clean, edge_type)
+                    || self.predicate_alias_matches(&pred_clean, edge_label)
             }
             SparqlTerm::Iri(iri) => {
                 let local = iri
@@ -373,39 +373,37 @@ impl SparqlExecutor {
                     .or_else(|| iri.rsplit('#').next())
                     .unwrap_or(iri);
                 let pred_clean = local.to_lowercase();
-                let edge_str = format!("{:?}", edge_type).to_lowercase();
+                let edge_str = edge_label.to_lowercase();
                 edge_str == pred_clean
                     || edge_str.contains(&pred_clean)
-                    || self.predicate_alias_matches(&pred_clean, edge_type)
+                    || self.predicate_alias_matches(&pred_clean, edge_label)
             }
             SparqlTerm::A => false, // 'a' is for type, not edges
             _ => false,
         }
     }
 
-    /// Check predicate aliases
-    /// Maps SPARQL predicate names to available GraphEdgeType variants
-    fn predicate_alias_matches(&self, predicate: &str, edge_type: GraphEdgeType) -> bool {
-        match (predicate, edge_type) {
-            // Direct mappings
-            ("hasservice" | "has_service" | "service", GraphEdgeType::HasService) => true,
-            ("connectsto" | "connects_to" | "connects", GraphEdgeType::ConnectsTo) => true,
-            ("hasuser" | "has_user", GraphEdgeType::HasUser) => true,
-            ("usestech" | "uses_tech" | "uses", GraphEdgeType::UsesTech) => true,
-            ("authaccess" | "auth_access", GraphEdgeType::AuthAccess) => true,
-            ("hasendpoint" | "has_endpoint", GraphEdgeType::HasEndpoint) => true,
+    /// Check predicate aliases against canonical edge labels. Hardcoded to
+    /// the legacy reserved label names — extending this map is a one-line
+    /// change as new vocabularies are introduced.
+    fn predicate_alias_matches(&self, predicate: &str, edge_label: &str) -> bool {
+        match (predicate, edge_label) {
+            ("hasservice" | "has_service" | "service", "has_service") => true,
+            ("connectsto" | "connects_to" | "connects", "connects_to") => true,
+            ("hasuser" | "has_user", "has_user") => true,
+            ("usestech" | "uses_tech" | "uses", "uses_tech") => true,
+            ("authaccess" | "auth_access", "auth_access") => true,
+            ("hasendpoint" | "has_endpoint", "has_endpoint") => true,
             (
                 "hascert" | "has_cert" | "hascertificate" | "has_certificate",
-                GraphEdgeType::HasCert,
+                "has_cert",
             ) => true,
-            ("contains" | "has_subdomain" | "hassubdomain", GraphEdgeType::Contains) => true,
+            ("contains" | "has_subdomain" | "hassubdomain", "contains") => true,
             (
                 "affectedby" | "affected_by" | "hasvulnerability" | "has_vuln" | "vulnerable_to",
-                GraphEdgeType::AffectedBy,
+                "affected_by",
             ) => true,
-            ("relatedto" | "related_to" | "memberof" | "member_of", GraphEdgeType::RelatedTo) => {
-                true
-            }
+            ("relatedto" | "related_to" | "memberof" | "member_of", "related_to") => true,
             _ => false,
         }
     }
@@ -677,8 +675,11 @@ impl SparqlExecutor {
                             record.set(col, Value::text(id.clone()));
                         }
                         BoundValue::Edge(from, etype, to) => {
-                            record.set_edge(col, MatchedEdge::from_tuple(from, *etype, to, 1.0));
-                            record.set(col, Value::text(format!("{}->{}({:?})", from, to, etype)));
+                            record.set_edge(
+                                col,
+                                MatchedEdge::from_tuple(from, etype.clone(), to, 1.0),
+                            );
+                            record.set(col, Value::text(format!("{}->{}({})", from, to, etype)));
                         }
                         BoundValue::Literal(s) => {
                             record.set(col, Value::text(s.clone()));

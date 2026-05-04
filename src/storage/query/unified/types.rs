@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
-use crate::storage::engine::graph_store::{GraphEdgeType, GraphNodeType, GraphStore, StoredNode};
+use crate::storage::engine::graph_store::{GraphStore, StoredNode};
 use crate::storage::engine::graph_table_index::GraphTableIndex;
 use crate::storage::query::ast::{
     CompareOp, EdgeDirection, EdgePattern, FieldRef, Filter, GraphPattern, GraphQuery, JoinQuery,
@@ -336,17 +336,20 @@ impl UnifiedRecord {
 pub struct MatchedNode {
     pub id: String,
     pub label: String,
-    pub node_type: GraphNodeType,
+    /// Category label string (e.g. `"host"`, `"order"`). Replaces the
+    /// closed-enum `GraphNodeType` from earlier revisions.
+    pub node_label: String,
     pub properties: HashMap<String, Value>,
 }
 
 impl MatchedNode {
-    /// Create from a stored node
+    /// Create from a stored node, resolving its `label_id` to the
+    /// canonical category string when available.
     pub fn from_stored(node: &StoredNode) -> Self {
         Self {
             id: node.id.clone(),
             label: node.label.clone(),
-            node_type: node.node_type,
+            node_label: node.node_type.as_str().to_string(),
             properties: HashMap::new(),
         }
     }
@@ -357,17 +360,24 @@ impl MatchedNode {
 pub struct MatchedEdge {
     pub from: String,
     pub to: String,
-    pub edge_type: GraphEdgeType,
+    /// Category label string for the edge.
+    pub edge_label: String,
     pub weight: f32,
 }
 
 impl MatchedEdge {
-    /// Create from edge tuple (type, target_id, weight) with source
-    pub fn from_tuple(source: &str, edge_type: GraphEdgeType, target: &str, weight: f32) -> Self {
+    /// Create from `(source, edge_label, target, weight)` with the edge label
+    /// already resolved to its canonical string form.
+    pub fn from_tuple(
+        source: &str,
+        edge_label: impl Into<String>,
+        target: &str,
+        weight: f32,
+    ) -> Self {
         Self {
             from: source.to_string(),
             to: target.to_string(),
-            edge_type,
+            edge_label: edge_label.into(),
             weight,
         }
     }

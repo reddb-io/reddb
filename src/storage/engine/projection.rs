@@ -11,7 +11,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::graph_store::{GraphEdgeType, GraphNodeType, GraphStore, StoredNode};
+use super::graph_store::{GraphStore, StoredNode};
 
 // ============================================================================
 // Projection Filter Predicates
@@ -20,8 +20,8 @@ use super::graph_store::{GraphEdgeType, GraphNodeType, GraphStore, StoredNode};
 /// Node filter specification
 #[derive(Clone, Default)]
 pub struct NodeFilter {
-    /// Include only nodes with these labels
-    pub labels: Option<Vec<GraphNodeType>>,
+    /// Include only nodes whose category label matches one of these strings.
+    pub labels: Option<Vec<String>>,
     /// Include only nodes with these IDs
     pub ids: Option<HashSet<String>>,
 }
@@ -32,9 +32,13 @@ impl NodeFilter {
         Self::default()
     }
 
-    /// Filter by node labels
-    pub fn with_labels(mut self, labels: Vec<GraphNodeType>) -> Self {
-        self.labels = Some(labels);
+    /// Filter by node category labels (string form).
+    pub fn with_labels<I, S>(mut self, labels: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.labels = Some(labels.into_iter().map(Into::into).collect());
         self
     }
 
@@ -46,14 +50,12 @@ impl NodeFilter {
 
     /// Check if a node matches this filter
     pub fn matches(&self, node: &StoredNode) -> bool {
-        // Check labels
         if let Some(ref labels) = self.labels {
-            if !labels.contains(&node.node_type) {
+            if !labels.iter().any(|l| l == node.node_type.as_str()) {
                 return false;
             }
         }
 
-        // Check IDs
         if let Some(ref ids) = self.ids {
             if !ids.contains(&node.id) {
                 return false;
@@ -67,8 +69,8 @@ impl NodeFilter {
 /// Edge filter specification
 #[derive(Clone, Default)]
 pub struct EdgeFilter {
-    /// Include only edges with these types
-    pub edge_types: Option<Vec<GraphEdgeType>>,
+    /// Include only edges whose label matches one of these strings.
+    pub edge_types: Option<Vec<String>>,
     /// Minimum edge weight
     pub min_weight: Option<f32>,
     /// Maximum edge weight
@@ -81,9 +83,13 @@ impl EdgeFilter {
         Self::default()
     }
 
-    /// Filter by edge types
-    pub fn with_types(mut self, types: Vec<GraphEdgeType>) -> Self {
-        self.edge_types = Some(types);
+    /// Filter by edge labels (string form).
+    pub fn with_types<I, S>(mut self, types: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.edge_types = Some(types.into_iter().map(Into::into).collect());
         self
     }
 
@@ -99,11 +105,10 @@ impl EdgeFilter {
         self
     }
 
-    /// Check if an edge matches this filter
-    pub fn matches(&self, edge_type: &GraphEdgeType, weight: f32) -> bool {
-        // Check edge types
+    /// Check if an edge label/weight matches this filter.
+    pub fn matches(&self, edge_label: &str, weight: f32) -> bool {
         if let Some(ref types) = self.edge_types {
-            if !types.contains(edge_type) {
+            if !types.iter().any(|t| t == edge_label) {
                 return false;
             }
         }
@@ -188,10 +193,10 @@ pub enum AggregationStrategy {
 pub struct GraphProjection {
     /// Projected nodes (id → node)
     nodes: HashMap<String, ProjectedNode>,
-    /// Outgoing edges (source_id → [(target_id, edge_type, weight)])
-    outgoing: HashMap<String, Vec<(String, GraphEdgeType, f32)>>,
-    /// Incoming edges (target_id → [(source_id, edge_type, weight)])
-    incoming: HashMap<String, Vec<(String, GraphEdgeType, f32)>>,
+    /// Outgoing edges (source_id → [(target_id, edge_label, weight)])
+    outgoing: HashMap<String, Vec<(String, String, f32)>>,
+    /// Incoming edges (target_id → [(source_id, edge_label, weight)])
+    incoming: HashMap<String, Vec<(String, String, f32)>>,
     /// Projection statistics
     stats: ProjectionStats,
 }
@@ -201,7 +206,9 @@ pub struct GraphProjection {
 pub struct ProjectedNode {
     pub id: String,
     pub label: String,
-    pub node_type: Option<GraphNodeType>,
+    /// Optional category label (string form). `None` when the projection
+    /// asked for property-only nodes.
+    pub category: Option<String>,
 }
 
 /// Statistics about the projection
@@ -229,8 +236,8 @@ impl GraphProjection {
         aggregation: AggregationStrategy,
     ) -> Self {
         let mut nodes: HashMap<String, ProjectedNode> = HashMap::new();
-        let mut outgoing: HashMap<String, Vec<(String, GraphEdgeType, f32)>> = HashMap::new();
-        let mut incoming: HashMap<String, Vec<(String, GraphEdgeType, f32)>> = HashMap::new();
+        let mut outgoing: HashMap<String, Vec<(String, String, f32)>> = HashMap::new();
+        let mut incoming: HashMap<String, Vec<(String, String, f32)>> = HashMap::new();
         let mut stats = ProjectionStats::default();
 
         // Collect matching nodes
@@ -240,8 +247,8 @@ impl GraphProjection {
                 let projected = ProjectedNode {
                     id: node.id.clone(),
                     label: node.label.clone(),
-                    node_type: if property_projection.include_label {
-                        Some(node.node_type)
+                    category: if property_projection.include_label {
+                        Some(node.node_type.as_str().to_string())
                     } else {
                         None
                     },
@@ -256,7 +263,7 @@ impl GraphProjection {
 
         // Collect matching edges (both endpoints must be in projection)
         // Group edges by (source, target) for potential aggregation
-        let mut edge_groups: HashMap<(String, String), Vec<(GraphEdgeType, f32)>> = HashMap::new();
+        let mut edge_groups: HashMap<(String, String), Vec<(String, f32)>> = HashMap::new();
 
         for node_id in &node_ids {
             for (edge_type, target, weight) in graph.outgoing_edges(node_id) {
@@ -264,12 +271,13 @@ impl GraphProjection {
                     continue;
                 }
 
-                if edge_filter.matches(&edge_type, weight) {
+                let edge_label = edge_type.as_str().to_string();
+                if edge_filter.matches(&edge_label, weight) {
                     let key = (node_id.clone(), target);
                     edge_groups
                         .entry(key)
                         .or_default()
-                        .push((edge_type, weight));
+                        .push((edge_label, weight));
                 } else {
                     stats.edges_filtered += 1;
                 }
@@ -284,7 +292,7 @@ impl GraphProjection {
                     for (edge_type, weight) in edges {
                         outgoing.entry(source.clone()).or_default().push((
                             target.clone(),
-                            edge_type,
+                            edge_type.clone(),
                             weight,
                         ));
                         incoming.entry(target.clone()).or_default().push((
@@ -297,7 +305,7 @@ impl GraphProjection {
                 }
                 _ => {
                     // Aggregate to single edge
-                    if let Some((first_type, _)) = edges.first() {
+                    if let Some((first_type, _)) = edges.first().cloned() {
                         let weight = match aggregation {
                             AggregationStrategy::SumWeight => edges.iter().map(|(_, w)| w).sum(),
                             AggregationStrategy::AvgWeight => {
@@ -321,13 +329,13 @@ impl GraphProjection {
 
                         outgoing.entry(source.clone()).or_default().push((
                             target.clone(),
-                            *first_type,
+                            first_type.clone(),
                             weight,
                         ));
                         incoming
                             .entry(target)
                             .or_default()
-                            .push((source, *first_type, weight));
+                            .push((source, first_type, weight));
                         stats.edge_count += 1;
                     }
                 }
@@ -386,7 +394,7 @@ impl GraphProjection {
         );
 
         // Add reverse edges
-        let mut additional: Vec<(String, String, GraphEdgeType, f32)> = Vec::new();
+        let mut additional: Vec<(String, String, String, f32)> = Vec::new();
 
         for (source, edges) in &projection.outgoing {
             for (target, edge_type, weight) in edges {
@@ -398,7 +406,12 @@ impl GraphProjection {
                     .unwrap_or(false);
 
                 if !has_reverse {
-                    additional.push((target.clone(), source.clone(), *edge_type, *weight));
+                    additional.push((
+                        target.clone(),
+                        source.clone(),
+                        edge_type.clone(),
+                        *weight,
+                    ));
                 }
             }
         }
@@ -408,7 +421,7 @@ impl GraphProjection {
                 .outgoing
                 .entry(source.clone())
                 .or_default()
-                .push((target.clone(), edge_type, weight));
+                .push((target.clone(), edge_type.clone(), weight));
             projection
                 .incoming
                 .entry(target)
@@ -455,16 +468,16 @@ impl GraphProjection {
         self.nodes.keys()
     }
 
-    /// Get outgoing edges from a node
-    pub fn outgoing(&self, node_id: &str) -> &[(String, GraphEdgeType, f32)] {
+    /// Get outgoing edges from a node `(target_id, edge_label, weight)`.
+    pub fn outgoing(&self, node_id: &str) -> &[(String, String, f32)] {
         self.outgoing
             .get(node_id)
             .map(|v| v.as_slice())
             .unwrap_or(&[])
     }
 
-    /// Get incoming edges to a node
-    pub fn incoming(&self, node_id: &str) -> &[(String, GraphEdgeType, f32)] {
+    /// Get incoming edges to a node `(source_id, edge_label, weight)`.
+    pub fn incoming(&self, node_id: &str) -> &[(String, String, f32)] {
         self.incoming
             .get(node_id)
             .map(|v| v.as_slice())
@@ -544,8 +557,12 @@ impl<'a> ProjectionBuilder<'a> {
         }
     }
 
-    /// Filter nodes by label
-    pub fn with_node_labels(mut self, labels: Vec<GraphNodeType>) -> Self {
+    /// Filter nodes by category label (string form).
+    pub fn with_node_labels<I, S>(mut self, labels: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
         self.node_filter = self.node_filter.with_labels(labels);
         self
     }
@@ -556,8 +573,12 @@ impl<'a> ProjectionBuilder<'a> {
         self
     }
 
-    /// Filter edges by type
-    pub fn with_edge_types(mut self, types: Vec<GraphEdgeType>) -> Self {
+    /// Filter edges by category label (string form).
+    pub fn with_edge_types<I, S>(mut self, types: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
         self.edge_filter = self.edge_filter.with_types(types);
         self
     }
@@ -613,16 +634,16 @@ mod tests {
     fn create_test_graph() -> GraphStore {
         let graph = GraphStore::new();
 
-        let _ = graph.add_node("A", "Server A", GraphNodeType::Host);
-        let _ = graph.add_node("B", "Server B", GraphNodeType::Host);
-        let _ = graph.add_node("C", "DB Server", GraphNodeType::Service);
-        let _ = graph.add_node("D", "Web Server", GraphNodeType::Service);
+        let _ = graph.add_node_with_label("A", "Server A", "host");
+        let _ = graph.add_node_with_label("B", "Server B", "host");
+        let _ = graph.add_node_with_label("C", "DB Server", "service");
+        let _ = graph.add_node_with_label("D", "Web Server", "service");
 
-        let _ = graph.add_edge("A", "B", GraphEdgeType::ConnectsTo, 1.0);
-        let _ = graph.add_edge("A", "C", GraphEdgeType::ConnectsTo, 2.0);
-        let _ = graph.add_edge("B", "C", GraphEdgeType::AuthAccess, 1.5);
-        let _ = graph.add_edge("B", "D", GraphEdgeType::ConnectsTo, 1.0);
-        let _ = graph.add_edge("C", "D", GraphEdgeType::ConnectsTo, 0.5);
+        let _ = graph.add_edge_with_label("A", "B", "connects_to", 1.0);
+        let _ = graph.add_edge_with_label("A", "C", "connects_to", 2.0);
+        let _ = graph.add_edge_with_label("B", "C", "auth_access", 1.5);
+        let _ = graph.add_edge_with_label("B", "D", "connects_to", 1.0);
+        let _ = graph.add_edge_with_label("C", "D", "connects_to", 0.5);
 
         graph
     }
@@ -647,7 +668,7 @@ mod tests {
         let graph = create_test_graph();
         let projection = GraphProjection::native(
             &graph,
-            NodeFilter::all().with_labels(vec![GraphNodeType::Host]),
+            NodeFilter::all().with_labels(["host"]),
             EdgeFilter::all(),
             PropertyProjection::all(),
             AggregationStrategy::None,
@@ -666,7 +687,7 @@ mod tests {
         let projection = GraphProjection::native(
             &graph,
             NodeFilter::all(),
-            EdgeFilter::all().with_types(vec![GraphEdgeType::ConnectsTo]),
+            EdgeFilter::all().with_types(["connects_to"]),
             PropertyProjection::all(),
             AggregationStrategy::None,
         );
@@ -694,7 +715,7 @@ mod tests {
     fn test_projection_builder() {
         let graph = create_test_graph();
         let projection = ProjectionBuilder::new(&graph)
-            .with_node_labels(vec![GraphNodeType::Service])
+            .with_node_labels(["service"])
             .build();
 
         assert_eq!(projection.node_count(), 2); // C and D

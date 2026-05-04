@@ -4,7 +4,7 @@ use std::sync::Arc;
 use super::{
     ExecutionError, GraphPath, MatchedEdge, MatchedNode, QueryStats, UnifiedRecord, UnifiedResult,
 };
-use crate::storage::engine::graph_store::{GraphEdgeType, GraphStore, StoredNode};
+use crate::storage::engine::graph_store::{GraphStore, Namespace, StoredNode};
 use crate::storage::engine::graph_table_index::GraphTableIndex;
 use crate::storage::query::ast::{
     CompareOp, EdgeDirection, EdgePattern, FieldRef, Filter, GraphPattern, GraphQuery, JoinQuery,
@@ -55,7 +55,7 @@ impl UnifiedExecutor {
         if let Some(properties) = match property {
             "id" => Some(Value::text(node.id.clone())),
             "label" => Some(Value::text(node.label.clone())),
-            "type" | "node_type" => Some(Value::text(format!("{:?}", node.node_type))),
+            "type" | "node_type" => Some(Value::text(node.node_type.as_str().to_string())),
             _ => None,
         } {
             return Some(properties);
@@ -85,7 +85,7 @@ impl UnifiedExecutor {
             return self
                 .graph
                 .get_node(node_id)
-                .map(|node| Value::text(format!("{:?}", node.node_type)));
+                .map(|node| Value::text(node.node_type.as_str().to_string()));
         }
         self.node_properties
             .get(node_id)
@@ -200,11 +200,12 @@ impl UnifiedExecutor {
 
         // Get all nodes that match the pattern
         for pattern_node in &query.pattern.nodes {
-            let matching_nodes: Vec<_> = if let Some(ref node_type) = pattern_node.node_type {
-                graph.nodes_of_type(*node_type)
-            } else {
-                graph.iter_nodes().collect()
-            };
+            let matching_nodes: Vec<_> =
+                if let Some(ref category) = pattern_node.node_label {
+                    graph.nodes_with_category(category)
+                } else {
+                    graph.iter_nodes().collect()
+                };
 
             // Filter and add matching nodes
             for node in matching_nodes {
@@ -268,8 +269,14 @@ impl UnifiedExecutor {
 
             // Expand to neighbors
             for (edge_type, neighbor, weight) in graph.outgoing_edges(&current) {
-                // Check via filter (query.via is a Vec, not Option)
-                if !query.via.is_empty() && !query.via.contains(&edge_type) {
+                // Check via filter — strings, compared against the legacy
+                // edge enum's canonical name.
+                if !query.via.is_empty()
+                    && !query
+                        .via
+                        .iter()
+                        .any(|via| via == edge_type.as_str())
+                {
                     continue;
                 }
 
@@ -291,10 +298,10 @@ impl UnifiedExecutor {
         match selector {
             NodeSelector::ById(id) => vec![id.clone()],
             NodeSelector::ByType {
-                node_type,
+                node_label,
                 filter: _,
             } => graph
-                .nodes_of_type(*node_type)
+                .nodes_with_category(node_label)
                 .into_iter()
                 .map(|n| n.id)
                 .collect(),
@@ -481,10 +488,13 @@ impl UnifiedExecutor {
         for node in self.graph.iter_nodes() {
             stats.nodes_scanned += 1;
 
-            // Check type filter
-            if let Some(ref node_type) = pattern.node_type {
-                if node.node_type != *node_type {
-                    continue;
+            // Check label filter (resolved against the graph's registry).
+            if let Some(ref expected) = pattern.node_label {
+                let expected_id =
+                    self.graph.registry.lookup(Namespace::Node, expected);
+                match expected_id {
+                    Some(id) if id == node.label_id => {}
+                    _ => continue,
                 }
             }
 
@@ -538,10 +548,10 @@ impl UnifiedExecutor {
                 ))
             })?;
 
-            // Get adjacent edges - returns Vec<(GraphEdgeType, String, f32)>
-            // For outgoing: (edge_type, target_id, weight)
-            // For incoming: (edge_type, source_id, weight)
-            let edges: Vec<(GraphEdgeType, String, f32, bool)> = match edge_pattern.direction {
+            // Get adjacent edges. The tuple is (edge_label, peer_id, weight,
+            // is_outgoing) — we union outgoing and incoming sets and tag
+            // direction so downstream filters know which side the edge came from.
+            let edges: Vec<_> = match edge_pattern.direction {
                 EdgeDirection::Outgoing => {
                     self.graph
                         .outgoing_edges(&source_node.id)
@@ -576,9 +586,10 @@ impl UnifiedExecutor {
             for (etype, other_id, weight, is_outgoing) in edges {
                 stats.edges_scanned += 1;
 
-                // Check edge type filter
-                if let Some(ref edge_type) = edge_pattern.edge_type {
-                    if etype != *edge_type {
+                // Check edge label filter — direct string compare against the
+                // canonical label that the storage layer hands back.
+                if let Some(ref expected) = edge_pattern.edge_label {
+                    if etype.as_str() != expected.as_str() {
                         continue;
                     }
                 }
@@ -587,10 +598,15 @@ impl UnifiedExecutor {
                 let target_id = &other_id;
 
                 if let Some(target_node) = self.graph.get_node(target_id) {
-                    // Check target node type
-                    if let Some(ref node_type) = target_pattern.node_type {
-                        if target_node.node_type != *node_type {
-                            continue;
+                    // Check target node label filter (registry resolution).
+                    if let Some(ref expected) = target_pattern.node_label {
+                        let expected_id = self
+                            .graph
+                            .registry
+                            .lookup(Namespace::Node, expected);
+                        match expected_id {
+                            Some(id) if id == target_node.label_id => {}
+                            _ => continue,
                         }
                     }
 
@@ -766,7 +782,7 @@ impl UnifiedExecutor {
                     .and_then(|n| match property.as_str() {
                         "id" => Some(Value::text(n.id.clone())),
                         "label" => Some(Value::text(n.label.clone())),
-                        "type" | "node_type" => Some(Value::text(format!("{:?}", n.node_type))),
+                        "type" | "node_type" => Some(Value::text(n.node_label.clone())),
                         _ => n.properties.get(property).cloned(),
                     })
             }
@@ -803,7 +819,7 @@ impl UnifiedExecutor {
                     .and_then(|n| match property.as_str() {
                         "id" => Some(Value::text(n.id.clone())),
                         "label" => Some(Value::text(n.label.clone())),
-                        "type" | "node_type" => Some(Value::text(format!("{:?}", n.node_type))),
+                        "type" | "node_type" => Some(Value::text(n.node_label.clone())),
                         _ => n.properties.get(property).cloned(),
                     })
             }
@@ -980,11 +996,13 @@ impl UnifiedExecutor {
     ) -> Result<Vec<String>, ExecutionError> {
         match selector {
             NodeSelector::ById(id) => Ok(vec![id.clone()]),
-            NodeSelector::ByType { node_type, filter } => {
+            NodeSelector::ByType { node_label, filter } => {
+                let expected_id =
+                    self.graph.registry.lookup(Namespace::Node, node_label);
                 let mut nodes = Vec::new();
                 for node in self.graph.iter_nodes() {
                     stats.nodes_scanned += 1;
-                    if node.node_type == *node_type {
+                    if expected_id.map(|id| node.label_id == id).unwrap_or(false) {
                         let matches_filter = filter
                             .as_ref()
                             .map(|f| self.eval_node_property_filter(&node, f))
@@ -1013,7 +1031,7 @@ impl UnifiedExecutor {
         &self,
         start: &str,
         targets: &HashSet<String>,
-        via: &[GraphEdgeType],
+        via: &[String],
         max_length: u32,
         stats: &mut QueryStats,
     ) -> Result<Vec<GraphPath>, ExecutionError> {
@@ -1040,12 +1058,14 @@ impl UnifiedExecutor {
                 continue;
             }
 
-            // Get outgoing edges - returns Vec<(GraphEdgeType, String, f32)>
+            // Get outgoing edges (each entry: edge_label, target_id, weight)
             for (edge_type, target_id, weight) in self.graph.outgoing_edges(current_node) {
                 stats.edges_scanned += 1;
 
-                // Check edge type filter
-                if !via.is_empty() && !via.contains(&edge_type) {
+                // Check edge label filter (string compare against canonical name).
+                if !via.is_empty()
+                    && !via.iter().any(|v| v == edge_type.as_str())
+                {
                     continue;
                 }
 

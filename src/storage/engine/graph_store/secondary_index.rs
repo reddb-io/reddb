@@ -15,17 +15,19 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 
-use super::GraphNodeType;
+use super::LabelId;
 use crate::storage::index::{BloomSegment, HasBloom, IndexBase, IndexKind, IndexStats};
 use crate::storage::primitives::BloomFilter;
 
 /// Inverted secondary indexes on graph nodes.
 ///
-/// - `by_type`: `GraphNodeType → set of node ids`
-/// - `by_label`: `label string → set of node ids`
-/// - `label_bloom`: fast negative filter over distinct labels
+/// - `by_type`: `LabelId → set of node ids` — keyed by the registry-assigned
+///   identifier so user-defined labels participate in the same fast path
+///   the legacy enum used to enjoy.
+/// - `by_label`: `label string → set of node ids` (display label, not category)
+/// - `label_bloom`: fast negative filter over distinct display labels
 pub struct NodeSecondaryIndex {
-    by_type: RwLock<HashMap<GraphNodeType, HashSet<String>>>,
+    by_type: RwLock<HashMap<LabelId, HashSet<String>>>,
     by_label: RwLock<HashMap<String, HashSet<String>>>,
     label_bloom: RwLock<BloomSegment>,
     /// Counter for `IndexStats::entries` — total `(node, index_slot)` pairs.
@@ -44,16 +46,16 @@ impl NodeSecondaryIndex {
         }
     }
 
-    /// Record `(node_type, label, node_id)` in both inverted maps.
+    /// Record `(label_id, label, node_id)` in both inverted maps.
     ///
     /// Safe to call concurrently — each map takes its own write lock.
     /// Duplicate inserts are idempotent (sets).
-    pub fn insert(&self, node_id: &str, node_type: GraphNodeType, label: &str) {
+    pub fn insert(&self, node_id: &str, label_id: LabelId, label: &str) {
         let mut delta = 0usize;
 
         if let Ok(mut by_type) = self.by_type.write() {
             if by_type
-                .entry(node_type)
+                .entry(label_id)
                 .or_default()
                 .insert(node_id.to_string())
             {
@@ -84,16 +86,16 @@ impl NodeSecondaryIndex {
 
     /// Remove a node from both inverted maps. Does not rebuild the bloom
     /// (bloom filters don't support removal — stale positives are harmless).
-    pub fn remove(&self, node_id: &str, node_type: GraphNodeType, label: &str) {
+    pub fn remove(&self, node_id: &str, label_id: LabelId, label: &str) {
         let mut delta = 0usize;
 
         if let Ok(mut by_type) = self.by_type.write() {
-            if let Some(set) = by_type.get_mut(&node_type) {
+            if let Some(set) = by_type.get_mut(&label_id) {
                 if set.remove(node_id) {
                     delta += 1;
                 }
                 if set.is_empty() {
-                    by_type.remove(&node_type);
+                    by_type.remove(&label_id);
                 }
             }
         }
@@ -116,12 +118,12 @@ impl NodeSecondaryIndex {
         }
     }
 
-    /// Return all node ids of a given type. O(1) lookup + clone.
-    pub fn nodes_by_type(&self, node_type: GraphNodeType) -> Vec<String> {
+    /// Return all node ids of a given label. O(1) lookup + clone.
+    pub fn nodes_by_type(&self, label_id: LabelId) -> Vec<String> {
         self.by_type
             .read()
             .map(|map| {
-                map.get(&node_type)
+                map.get(&label_id)
                     .map(|set| set.iter().cloned().collect())
                     .unwrap_or_default()
             })
@@ -146,11 +148,11 @@ impl NodeSecondaryIndex {
             .unwrap_or_default()
     }
 
-    /// Cardinality of a type bucket (fast stat for the planner).
-    pub fn count_by_type(&self, node_type: GraphNodeType) -> usize {
+    /// Cardinality of a label bucket (fast stat for the planner).
+    pub fn count_by_type(&self, label_id: LabelId) -> usize {
         self.by_type
             .read()
-            .map(|m| m.get(&node_type).map(|s| s.len()).unwrap_or(0))
+            .map(|m| m.get(&label_id).map(|s| s.len()).unwrap_or(0))
             .unwrap_or(0)
     }
 
@@ -255,27 +257,27 @@ mod tests {
     #[test]
     fn insert_and_lookup_by_type() {
         let idx = NodeSecondaryIndex::new(64);
-        idx.insert("host:1", GraphNodeType::Host, "Web Server");
-        idx.insert("host:2", GraphNodeType::Host, "DB Server");
-        idx.insert("svc:1", GraphNodeType::Service, "HTTP");
+        idx.insert("host:1", LabelId::new(1), "Web Server");
+        idx.insert("host:2", LabelId::new(1), "DB Server");
+        idx.insert("svc:1", LabelId::new(2), "HTTP");
 
-        let hosts = idx.nodes_by_type(GraphNodeType::Host);
+        let hosts = idx.nodes_by_type(LabelId::new(1));
         assert_eq!(hosts.len(), 2);
         assert!(hosts.contains(&"host:1".to_string()));
         assert!(hosts.contains(&"host:2".to_string()));
 
-        let services = idx.nodes_by_type(GraphNodeType::Service);
+        let services = idx.nodes_by_type(LabelId::new(2));
         assert_eq!(services, vec!["svc:1".to_string()]);
 
-        assert!(idx.nodes_by_type(GraphNodeType::Vulnerability).is_empty());
+        assert!(idx.nodes_by_type(LabelId::new(4)).is_empty());
     }
 
     #[test]
     fn lookup_by_label() {
         let idx = NodeSecondaryIndex::new(64);
-        idx.insert("host:1", GraphNodeType::Host, "Web Server");
-        idx.insert("host:2", GraphNodeType::Host, "Web Server");
-        idx.insert("host:3", GraphNodeType::Host, "DB Server");
+        idx.insert("host:1", LabelId::new(1), "Web Server");
+        idx.insert("host:2", LabelId::new(1), "Web Server");
+        idx.insert("host:3", LabelId::new(1), "DB Server");
 
         let web = idx.nodes_by_label("Web Server");
         assert_eq!(web.len(), 2);
@@ -287,7 +289,7 @@ mod tests {
     #[test]
     fn bloom_prunes_absent_label() {
         let idx = NodeSecondaryIndex::new(64);
-        idx.insert("host:1", GraphNodeType::Host, "Web Server");
+        idx.insert("host:1", LabelId::new(1), "Web Server");
 
         // Existing label must never be reported absent.
         assert!(idx.may_contain_label("Web Server"));
@@ -298,33 +300,33 @@ mod tests {
     #[test]
     fn remove_shrinks_buckets() {
         let idx = NodeSecondaryIndex::new(64);
-        idx.insert("host:1", GraphNodeType::Host, "A");
-        idx.insert("host:2", GraphNodeType::Host, "A");
+        idx.insert("host:1", LabelId::new(1), "A");
+        idx.insert("host:2", LabelId::new(1), "A");
 
-        idx.remove("host:1", GraphNodeType::Host, "A");
+        idx.remove("host:1", LabelId::new(1), "A");
         let remaining = idx.nodes_by_label("A");
         assert_eq!(remaining, vec!["host:2".to_string()]);
-        assert_eq!(idx.count_by_type(GraphNodeType::Host), 1);
+        assert_eq!(idx.count_by_type(LabelId::new(1)), 1);
 
-        idx.remove("host:2", GraphNodeType::Host, "A");
+        idx.remove("host:2", LabelId::new(1), "A");
         assert!(idx.nodes_by_label("A").is_empty());
-        assert_eq!(idx.count_by_type(GraphNodeType::Host), 0);
+        assert_eq!(idx.count_by_type(LabelId::new(1)), 0);
     }
 
     #[test]
     fn clear_resets_everything() {
         let idx = NodeSecondaryIndex::new(64);
-        idx.insert("a", GraphNodeType::Host, "L");
+        idx.insert("a", LabelId::new(1), "L");
         idx.clear();
-        assert_eq!(idx.count_by_type(GraphNodeType::Host), 0);
+        assert_eq!(idx.count_by_type(LabelId::new(1)), 0);
         assert!(idx.nodes_by_label("L").is_empty());
     }
 
     #[test]
     fn stats_reflect_insertions() {
         let idx = NodeSecondaryIndex::new(64);
-        idx.insert("a", GraphNodeType::Host, "x");
-        idx.insert("b", GraphNodeType::Service, "y");
+        idx.insert("a", LabelId::new(1), "x");
+        idx.insert("b", LabelId::new(2), "y");
         let s = idx.stats();
         // 2 inserts × (by_type + by_label) = 4 entries
         assert_eq!(s.entries, 4);
@@ -344,14 +346,14 @@ mod tests {
             handles.push(thread::spawn(move || {
                 for i in 0..100 {
                     let id = format!("node:{}:{}", t, i);
-                    idx_c.insert(&id, GraphNodeType::Host, "bulk");
+                    idx_c.insert(&id, LabelId::new(1), "bulk");
                 }
             }));
         }
         for h in handles {
             h.join().unwrap();
         }
-        assert_eq!(idx.count_by_type(GraphNodeType::Host), 400);
+        assert_eq!(idx.count_by_type(LabelId::new(1)), 400);
         assert_eq!(idx.nodes_by_label("bulk").len(), 400);
     }
 }

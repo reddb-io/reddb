@@ -20,7 +20,6 @@
 //! - Predicate → Edge type
 //! - Object → Node or literal value
 
-use crate::storage::engine::graph_store::GraphEdgeType;
 use crate::storage::query::ast::{
     CompareOp, EdgeDirection, EdgePattern, FieldRef, Filter, GraphPattern, GraphQuery, NodePattern,
     Projection, QueryExpr,
@@ -757,7 +756,7 @@ impl SparqlQuery {
                 var_to_alias.insert(var.to_string(), alias.clone());
                 nodes.push(NodePattern {
                     alias: alias.clone(),
-                    node_type: None,
+                    node_label: None,
                     properties: Vec::new(),
                 });
                 alias
@@ -784,23 +783,24 @@ impl SparqlQuery {
                 _ => None,
             };
 
-            // Map predicate label to GraphEdgeType
-            let edge_type =
-                predicate_label
-                    .as_ref()
-                    .and_then(|l| match l.to_lowercase().as_str() {
-                        "hasservice" | "has_service" => Some(GraphEdgeType::HasService),
-                        "hasendpoint" | "has_endpoint" => Some(GraphEdgeType::HasEndpoint),
-                        "usestech" | "uses_tech" => Some(GraphEdgeType::UsesTech),
-                        "authaccess" | "auth_access" => Some(GraphEdgeType::AuthAccess),
-                        "affectedby" | "affected_by" => Some(GraphEdgeType::AffectedBy),
-                        "contains" => Some(GraphEdgeType::Contains),
-                        "connectsto" | "connects_to" => Some(GraphEdgeType::ConnectsTo),
-                        "relatedto" | "related_to" => Some(GraphEdgeType::RelatedTo),
-                        "hasuser" | "has_user" => Some(GraphEdgeType::HasUser),
-                        "hascert" | "has_cert" => Some(GraphEdgeType::HasCert),
-                        _ => None,
-                    });
+            // Predicate label travels as a free-form string. Normalise
+            // camelCase to snake_case so SPARQL `:hasService` and Cypher
+            // `has_service` match the same edge label in storage.
+            let edge_label = predicate_label.as_ref().map(|l| {
+                let lower = l.to_lowercase();
+                match lower.as_str() {
+                    "hasservice" => "has_service".to_string(),
+                    "hasendpoint" => "has_endpoint".to_string(),
+                    "usestech" => "uses_tech".to_string(),
+                    "authaccess" => "auth_access".to_string(),
+                    "affectedby" => "affected_by".to_string(),
+                    "connectsto" => "connects_to".to_string(),
+                    "relatedto" => "related_to".to_string(),
+                    "hasuser" => "has_user".to_string(),
+                    "hascert" => "has_cert".to_string(),
+                    _ => lower,
+                }
+            });
 
             match &pattern.object {
                 SparqlTerm::Variable(v) => {
@@ -809,7 +809,7 @@ impl SparqlQuery {
                         alias: None,
                         from: subject_alias.clone(),
                         to: object_alias,
-                        edge_type,
+                        edge_label,
                         direction: EdgeDirection::Outgoing,
                         min_hops: 1,
                         max_hops: 1,

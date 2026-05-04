@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use crate::storage::engine::graph_store::{GraphNodeType, GraphStore};
+use crate::storage::engine::graph_store::GraphStore;
 use crate::storage::query::modes::natural::{
     EntityType, ExtractedEntity, NaturalParser, NaturalQuery, QueryIntent,
 };
@@ -89,14 +89,14 @@ impl NaturalExecutor {
         result: &mut UnifiedResult,
         stats: &mut QueryStats,
     ) -> Result<(), ExecutionError> {
-        let node_type = self.primary_entity_type(query);
+        let entity_label = self.primary_entity_label(query);
 
         for node in self.graph.iter_nodes() {
             stats.nodes_scanned += 1;
 
-            // Check type match
-            let type_matches = match &node_type {
-                Some(t) => node.node_type == *t,
+            // Check label match — compare against the legacy enum's string form.
+            let type_matches = match entity_label {
+                Some(label) => node.node_type.as_str() == label,
                 None => true,
             };
 
@@ -201,14 +201,14 @@ impl NaturalExecutor {
         result: &mut UnifiedResult,
         stats: &mut QueryStats,
     ) -> Result<(), ExecutionError> {
-        let node_type = self.primary_entity_type(query);
+        let entity_label = self.primary_entity_label(query);
         let mut count = 0u64;
 
         for node in self.graph.iter_nodes() {
             stats.nodes_scanned += 1;
 
-            let type_matches = match &node_type {
-                Some(t) => node.node_type == *t,
+            let type_matches = match entity_label {
+                Some(label) => node.node_type.as_str() == label,
                 None => true,
             };
 
@@ -316,19 +316,20 @@ impl NaturalExecutor {
         Ok(())
     }
 
-    /// Get the primary entity type from query - maps EntityType to GraphNodeType
-    fn primary_entity_type(&self, query: &NaturalQuery) -> Option<GraphNodeType> {
+    /// Get the primary entity label from query — canonical lower-snake-case
+    /// label string corresponding to the first matched entity.
+    fn primary_entity_label(&self, query: &NaturalQuery) -> Option<&'static str> {
         for entity in &query.entities {
             match entity.entity_type {
-                EntityType::Host => return Some(GraphNodeType::Host),
-                EntityType::User => return Some(GraphNodeType::User),
-                EntityType::Credential => return Some(GraphNodeType::Credential),
-                EntityType::Service | EntityType::Port => return Some(GraphNodeType::Service),
-                EntityType::Vulnerability => return Some(GraphNodeType::Vulnerability),
-                EntityType::Technology => return Some(GraphNodeType::Technology),
-                EntityType::Domain => return Some(GraphNodeType::Domain),
-                EntityType::Certificate => return Some(GraphNodeType::Certificate),
-                // Network doesn't have a GraphNodeType equivalent, skip
+                EntityType::Host => return Some("host"),
+                EntityType::User => return Some("user"),
+                EntityType::Credential => return Some("credential"),
+                EntityType::Service | EntityType::Port => return Some("service"),
+                EntityType::Vulnerability => return Some("vulnerability"),
+                EntityType::Technology => return Some("technology"),
+                EntityType::Domain => return Some("domain"),
+                EntityType::Certificate => return Some("certificate"),
+                // Network has no canonical legacy label.
                 EntityType::Network => continue,
             }
         }
@@ -449,9 +450,8 @@ impl NaturalExecutor {
         match query.intent {
             QueryIntent::Find => {
                 let node_type = self
-                    .primary_entity_type(query)
-                    .map(|t| format!("{:?}", t))
-                    .unwrap_or_else(|| "*".to_string());
+                    .primary_entity_label(query)
+                    .unwrap_or("*");
 
                 let filters: Vec<String> = query
                     .entities
@@ -487,9 +487,8 @@ impl NaturalExecutor {
             }
             QueryIntent::Count => {
                 let node_type = self
-                    .primary_entity_type(query)
-                    .map(|t| format!("{:?}", t))
-                    .unwrap_or_else(|| "*".to_string());
+                    .primary_entity_label(query)
+                    .unwrap_or("*");
                 format!("MATCH (n:{}) RETURN COUNT(n)", node_type)
             }
             QueryIntent::Show => {

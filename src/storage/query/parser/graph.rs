@@ -7,7 +7,6 @@ use super::super::ast::{
 use super::super::lexer::Token;
 use super::error::ParseError;
 use super::Parser;
-use crate::storage::engine::graph_store::{GraphEdgeType, GraphNodeType};
 
 impl<'a> Parser<'a> {
     /// Parse MATCH ... RETURN query
@@ -58,9 +57,11 @@ impl<'a> Parser<'a> {
 
         let alias = self.expect_ident()?;
 
-        let node_type = if self.consume(&Token::Colon)? {
-            let type_name = self.expect_ident_or_keyword()?;
-            Some(self.parse_node_type(&type_name)?)
+        // Label filter is now a free-form string. Validation against the
+        // legacy `GraphNodeType` enum was a domain constraint that doesn't
+        // belong at parse time.
+        let node_label = if self.consume(&Token::Colon)? {
+            Some(self.expect_ident_or_keyword()?.to_lowercase())
         } else {
             None
         };
@@ -75,7 +76,7 @@ impl<'a> Parser<'a> {
 
         Ok(NodePattern {
             alias,
-            node_type,
+            node_label,
             properties,
         })
     }
@@ -102,9 +103,8 @@ impl<'a> Parser<'a> {
             None
         };
 
-        let edge_type = if self.consume(&Token::Colon)? {
-            let type_name = self.expect_ident_or_keyword()?;
-            Some(self.parse_edge_type(&type_name)?)
+        let edge_label = if self.consume(&Token::Colon)? {
+            Some(self.expect_ident_or_keyword()?.to_lowercase())
         } else {
             None
         };
@@ -146,7 +146,7 @@ impl<'a> Parser<'a> {
             alias,
             from: from_alias,
             to: next_node.alias.clone(),
-            edge_type,
+            edge_label,
             direction,
             min_hops,
             max_hops,
@@ -217,42 +217,45 @@ impl<'a> Parser<'a> {
         Ok(Projection::Field(field, alias))
     }
 
-    /// Parse node type from string
-    pub fn parse_node_type(&self, name: &str) -> Result<GraphNodeType, ParseError> {
-        match name.to_uppercase().as_str() {
-            "HOST" => Ok(GraphNodeType::Host),
-            "SERVICE" => Ok(GraphNodeType::Service),
-            "CREDENTIAL" => Ok(GraphNodeType::Credential),
-            "VULNERABILITY" | "VULN" => Ok(GraphNodeType::Vulnerability),
-            "ENDPOINT" => Ok(GraphNodeType::Endpoint),
-            "TECHNOLOGY" | "TECH" => Ok(GraphNodeType::Technology),
-            "USER" => Ok(GraphNodeType::User),
-            "DOMAIN" => Ok(GraphNodeType::Domain),
-            "CERTIFICATE" | "CERT" => Ok(GraphNodeType::Certificate),
-            _ => Err(ParseError::new(
-                format!("Unknown node type: {}. Valid types: Host, Service, Credential, Vulnerability, Endpoint, Technology, User, Domain, Certificate", name),
-                self.position(),
-            )),
-        }
+    /// Normalize a parsed node-type token to its label-string form. The
+    /// pentest-flavoured aliases (`VULN`, `TECH`, `CERT`) are kept so
+    /// existing query strings continue to parse, but the result is just
+    /// the canonical lowercase label and is no longer constrained to a
+    /// closed enum.
+    pub fn parse_node_label(&self, name: &str) -> Result<String, ParseError> {
+        let canonical = match name.to_uppercase().as_str() {
+            "HOST" => "host",
+            "SERVICE" => "service",
+            "CREDENTIAL" => "credential",
+            "VULNERABILITY" | "VULN" => "vulnerability",
+            "ENDPOINT" => "endpoint",
+            "TECHNOLOGY" | "TECH" => "technology",
+            "USER" => "user",
+            "DOMAIN" => "domain",
+            "CERTIFICATE" | "CERT" => "certificate",
+            // Forward unknown labels verbatim (lowercased) — the registry
+            // resolves them at execution time, or a later validation
+            // pass can reject them.
+            other => return Ok(other.to_lowercase()),
+        };
+        Ok(canonical.to_string())
     }
 
-    /// Parse edge type from string
-    pub fn parse_edge_type(&self, name: &str) -> Result<GraphEdgeType, ParseError> {
-        match name.to_uppercase().as_str() {
-            "HAS_SERVICE" => Ok(GraphEdgeType::HasService),
-            "HAS_ENDPOINT" => Ok(GraphEdgeType::HasEndpoint),
-            "USES_TECH" | "USES_TECHNOLOGY" => Ok(GraphEdgeType::UsesTech),
-            "AUTH_ACCESS" | "AUTH" => Ok(GraphEdgeType::AuthAccess),
-            "AFFECTED_BY" => Ok(GraphEdgeType::AffectedBy),
-            "CONTAINS" => Ok(GraphEdgeType::Contains),
-            "CONNECTS_TO" | "CONNECTS" => Ok(GraphEdgeType::ConnectsTo),
-            "RELATED_TO" | "RELATED" => Ok(GraphEdgeType::RelatedTo),
-            "HAS_USER" => Ok(GraphEdgeType::HasUser),
-            "HAS_CERT" | "HAS_CERTIFICATE" => Ok(GraphEdgeType::HasCert),
-            _ => Err(ParseError::new(
-                format!("Unknown edge type: {}. Valid types: HasService, HasEndpoint, UsesTech, AuthAccess, AffectedBy, Contains, ConnectsTo, RelatedTo, HasUser, HasCert", name),
-                self.position(),
-            )),
-        }
+    /// Edge label counterpart to [`parse_node_label`].
+    pub fn parse_edge_label(&self, name: &str) -> Result<String, ParseError> {
+        let canonical = match name.to_uppercase().as_str() {
+            "HAS_SERVICE" => "has_service",
+            "HAS_ENDPOINT" => "has_endpoint",
+            "USES_TECH" | "USES_TECHNOLOGY" => "uses_tech",
+            "AUTH_ACCESS" | "AUTH" => "auth_access",
+            "AFFECTED_BY" => "affected_by",
+            "CONTAINS" => "contains",
+            "CONNECTS_TO" | "CONNECTS" => "connects_to",
+            "RELATED_TO" | "RELATED" => "related_to",
+            "HAS_USER" => "has_user",
+            "HAS_CERT" | "HAS_CERTIFICATE" => "has_cert",
+            other => return Ok(other.to_lowercase()),
+        };
+        Ok(canonical.to_string())
     }
 }

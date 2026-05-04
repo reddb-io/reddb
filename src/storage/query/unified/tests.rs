@@ -1,7 +1,5 @@
 use super::*;
-use crate::storage::engine::{
-    GraphEdgeType, GraphNodeType, GraphStore, GraphTableIndex, StoredNode,
-};
+use crate::storage::engine::{GraphStore, GraphTableIndex, StoredNode};
 use crate::storage::query::ast::*;
 use crate::storage::query::test_support::{add_node_or_panic, unified_query_graph};
 use crate::storage::schema::Value;
@@ -23,7 +21,7 @@ fn test_simple_graph_query() {
     let executor = UnifiedExecutor::new(graph, index);
 
     let query = QueryExpr::graph()
-        .node(super::super::ast::NodePattern::new("h").of_type(GraphNodeType::Host))
+        .node(super::super::ast::NodePattern::new("h").of_label("host"))
         .return_field(FieldRef::node_id("h"))
         .build();
 
@@ -38,9 +36,9 @@ fn test_graph_query_with_edge() {
     let executor = UnifiedExecutor::new(graph, index);
 
     let query = QueryExpr::graph()
-        .node(super::super::ast::NodePattern::new("h").of_type(GraphNodeType::Host))
-        .node(super::super::ast::NodePattern::new("s").of_type(GraphNodeType::Service))
-        .edge(super::super::ast::EdgePattern::new("h", "s").of_type(GraphEdgeType::HasService))
+        .node(super::super::ast::NodePattern::new("h").of_label("host"))
+        .node(super::super::ast::NodePattern::new("s").of_label("service"))
+        .edge(super::super::ast::EdgePattern::new("h", "s").of_label("has_service"))
         .return_field(FieldRef::node_id("h"))
         .return_field(FieldRef::node_id("s"))
         .build();
@@ -59,7 +57,7 @@ fn test_path_query() {
         NodeSelector::by_id("host:192.168.1.1"),
         NodeSelector::by_id("host:192.168.1.2"),
     )
-    .via(GraphEdgeType::ConnectsTo)
+    .via_label("connects_to")
     .max_length(5)
     .build();
 
@@ -90,7 +88,8 @@ fn test_matched_node() {
     let node = StoredNode {
         id: "host:1".to_string(),
         label: "192.168.1.1".to_string(),
-        node_type: GraphNodeType::Host,
+        node_type: "host".to_string(),
+        label_id: crate::storage::engine::graph_store::LabelId::new(1),
         flags: 0,
         out_edge_count: 0,
         in_edge_count: 0,
@@ -103,14 +102,14 @@ fn test_matched_node() {
     let matched = MatchedNode::from_stored(&node);
     assert_eq!(matched.id, "host:1");
     assert_eq!(matched.label, "192.168.1.1");
-    assert_eq!(matched.node_type, GraphNodeType::Host);
+    assert_eq!(matched.node_label, "host");
 }
 
 #[test]
 fn test_graph_query_filter_custom_node_property() {
     let graph = GraphStore::new();
-    add_node_or_panic(&graph, "host:1", "host-1", GraphNodeType::Host);
-    add_node_or_panic(&graph, "host:2", "host-2", GraphNodeType::Host);
+    add_node_or_panic(&graph, "host:1", "host-1", "host");
+    add_node_or_panic(&graph, "host:2", "host-2", "host");
 
     let mut node_properties = HashMap::new();
     node_properties.insert(
@@ -125,7 +124,7 @@ fn test_graph_query_filter_custom_node_property() {
     let query = QueryExpr::graph()
         .node(
             super::super::ast::NodePattern::new("h")
-                .of_type(GraphNodeType::Host)
+                .of_label("host")
                 .with_property("os", CompareOp::Eq, Value::text("linux".to_string())),
         )
         .return_field(FieldRef::node_prop("h", "os"))
@@ -148,7 +147,7 @@ fn test_graph_path() {
     let edge = MatchedEdge {
         from: "node:1".to_string(),
         to: "node:2".to_string(),
-        edge_type: GraphEdgeType::ConnectsTo,
+        edge_label: "connects_to".to_string(),
         weight: 1.5,
     };
 
@@ -160,10 +159,10 @@ fn test_graph_path() {
 
 #[test]
 fn test_matched_edge_from_tuple() {
-    let edge = MatchedEdge::from_tuple("node:1", GraphEdgeType::HasService, "node:2", 0.5);
+    let edge = MatchedEdge::from_tuple("node:1", "has_service", "node:2", 0.5);
     assert_eq!(edge.from, "node:1");
     assert_eq!(edge.to, "node:2");
-    assert_eq!(edge.edge_type, GraphEdgeType::HasService);
+    assert_eq!(edge.edge_label, "has_service");
     assert!((edge.weight - 0.5).abs() < f32::EPSILON);
 }
 
@@ -180,7 +179,7 @@ fn test_unified_record_operations() {
     let node = MatchedNode {
         id: "n1".to_string(),
         label: "Node 1".to_string(),
-        node_type: GraphNodeType::Host,
+        node_label: "host".to_string(),
         properties: HashMap::new(),
     };
     record.set_node("h", node.clone());
@@ -188,7 +187,7 @@ fn test_unified_record_operations() {
     assert!(record.get_node("missing").is_none());
 
     // Test set_edge
-    let edge = MatchedEdge::from_tuple("a", GraphEdgeType::ConnectsTo, "b", 1.0);
+    let edge = MatchedEdge::from_tuple("a", "connects_to", "b", 1.0);
     record.set_edge("e", edge);
     assert!(record.edges.contains_key("e"));
 }
@@ -205,8 +204,8 @@ fn test_unified_result_empty() {
 fn test_path_query_no_path() {
     let graph = GraphStore::new();
     // Create disconnected nodes
-    let _ = graph.add_node("a", "Node A", GraphNodeType::Host);
-    let _ = graph.add_node("b", "Node B", GraphNodeType::Host);
+    let _ = graph.add_node_with_label("a", "Node A", "host");
+    let _ = graph.add_node_with_label("b", "Node B", "host");
     // No edge between them
 
     let graph = Arc::new(graph);
@@ -240,7 +239,7 @@ fn test_query_stats_tracking() {
     let executor = UnifiedExecutor::new(graph, index);
 
     let query = QueryExpr::graph()
-        .node(super::super::ast::NodePattern::new("h").of_type(GraphNodeType::Host))
+        .node(super::super::ast::NodePattern::new("h").of_label("host"))
         .return_field(FieldRef::node_id("h"))
         .build();
 
@@ -253,13 +252,13 @@ fn test_query_stats_tracking() {
 fn test_path_max_length_limit() {
     let graph = GraphStore::new();
     // Create a chain: a -> b -> c -> d
-    let _ = graph.add_node("a", "A", GraphNodeType::Host);
-    let _ = graph.add_node("b", "B", GraphNodeType::Host);
-    let _ = graph.add_node("c", "C", GraphNodeType::Host);
-    let _ = graph.add_node("d", "D", GraphNodeType::Host);
-    let _ = graph.add_edge("a", "b", GraphEdgeType::ConnectsTo, 1.0);
-    let _ = graph.add_edge("b", "c", GraphEdgeType::ConnectsTo, 1.0);
-    let _ = graph.add_edge("c", "d", GraphEdgeType::ConnectsTo, 1.0);
+    let _ = graph.add_node_with_label("a", "A", "host");
+    let _ = graph.add_node_with_label("b", "B", "host");
+    let _ = graph.add_node_with_label("c", "C", "host");
+    let _ = graph.add_node_with_label("d", "D", "host");
+    let _ = graph.add_edge_with_label("a", "b", "connects_to", 1.0);
+    let _ = graph.add_edge_with_label("b", "c", "connects_to", 1.0);
+    let _ = graph.add_edge_with_label("c", "d", "connects_to", 1.0);
 
     let graph = Arc::new(graph);
     let index = create_test_index();
@@ -314,10 +313,10 @@ fn test_execution_error_display() {
 fn test_graph_path_multi_hop() {
     let path = GraphPath::start("a");
 
-    let edge1 = MatchedEdge::from_tuple("a", GraphEdgeType::ConnectsTo, "b", 1.0);
+    let edge1 = MatchedEdge::from_tuple("a", "connects_to", "b", 1.0);
     let path = path.extend(edge1, "b");
 
-    let edge2 = MatchedEdge::from_tuple("b", GraphEdgeType::ConnectsTo, "c", 2.0);
+    let edge2 = MatchedEdge::from_tuple("b", "connects_to", "c", 2.0);
     let path = path.extend(edge2, "c");
 
     assert_eq!(path.len(), 2);
@@ -329,9 +328,9 @@ fn test_graph_path_multi_hop() {
 #[test]
 fn test_node_selector_by_type() {
     let graph = GraphStore::new();
-    let _ = graph.add_node("host:1", "Host 1", GraphNodeType::Host);
-    let _ = graph.add_node("host:2", "Host 2", GraphNodeType::Host);
-    let _ = graph.add_node("svc:1", "Service 1", GraphNodeType::Service);
+    let _ = graph.add_node_with_label("host:1", "Host 1", "host");
+    let _ = graph.add_node_with_label("host:2", "Host 2", "host");
+    let _ = graph.add_node_with_label("svc:1", "Service 1", "service");
 
     let graph = Arc::new(graph);
     let index = create_test_index();
@@ -339,8 +338,8 @@ fn test_node_selector_by_type() {
 
     // Path from any host to any service
     let query = QueryExpr::path(
-        NodeSelector::by_type(GraphNodeType::Host),
-        NodeSelector::by_type(GraphNodeType::Service),
+        NodeSelector::by_label("host"),
+        NodeSelector::by_label("service"),
     )
     .max_length(1)
     .build();
@@ -358,12 +357,12 @@ fn test_join_query_execution() {
 
     // Join two graph queries
     let left = QueryExpr::graph()
-        .node(super::super::ast::NodePattern::new("h").of_type(GraphNodeType::Host))
+        .node(super::super::ast::NodePattern::new("h").of_label("host"))
         .return_field(FieldRef::node_id("h"))
         .build();
 
     let right = QueryExpr::graph()
-        .node(super::super::ast::NodePattern::new("s").of_type(GraphNodeType::Service))
+        .node(super::super::ast::NodePattern::new("s").of_label("service"))
         .return_field(FieldRef::node_id("s"))
         .build();
 

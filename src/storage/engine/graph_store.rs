@@ -29,6 +29,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::sync::RwLock;
 
 use super::page::{Page, PageType, PAGE_SIZE};
@@ -39,8 +40,14 @@ pub const MAX_ID_SIZE: usize = 256;
 /// Maximum label size
 pub const MAX_LABEL_SIZE: usize = 512;
 
-/// Node record header size: id_len(2) + label_len(2) + type(1) + flags(1) + edge_count(4)
-pub const NODE_HEADER_SIZE: usize = 10;
+/// V1 node record header size: id_len(2) + label_len(2) + type(1) + flags(1) + edge_count(4).
+/// Kept for [`StoredNode::decode_v1`]; new writes use [`NODE_HEADER_SIZE`].
+pub const NODE_HEADER_SIZE_V1: usize = 10;
+
+/// Node record header size: id_len(2) + label_len(2) + label_id(4) + flags(1) + edge_count(4).
+/// The 1-byte legacy `node_type` discriminant has been replaced by a 4-byte
+/// dynamic [`LabelId`] resolved through [`LabelRegistry`].
+pub const NODE_HEADER_SIZE: usize = 13;
 
 /// TableRef size: table_id(2) + row_id(8)
 pub const TABLE_REF_SIZE: usize = 10;
@@ -90,110 +97,27 @@ impl TableRef {
     }
 }
 
-/// Edge record header size: source_len(2) + target_len(2) + type(1) + weight(4)
-pub const EDGE_HEADER_SIZE: usize = 9;
+/// V1 edge record header size: source_len(2) + target_len(2) + type(1) + weight(4).
+/// Kept for [`StoredEdge::decode_v1`]; new writes use [`EDGE_HEADER_SIZE`].
+pub const EDGE_HEADER_SIZE_V1: usize = 9;
 
-/// Graph node types (matches intelligence layer)
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum GraphNodeType {
-    Host = 0,
-    Service = 1,
-    Credential = 2,
-    Vulnerability = 3,
-    Endpoint = 4,
-    Technology = 5,
-    User = 6,
-    Domain = 7,
-    Certificate = 8,
-}
-
-impl GraphNodeType {
-    pub fn from_u8(v: u8) -> Option<Self> {
-        match v {
-            0 => Some(Self::Host),
-            1 => Some(Self::Service),
-            2 => Some(Self::Credential),
-            3 => Some(Self::Vulnerability),
-            4 => Some(Self::Endpoint),
-            5 => Some(Self::Technology),
-            6 => Some(Self::User),
-            7 => Some(Self::Domain),
-            8 => Some(Self::Certificate),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Host => "host",
-            Self::Service => "service",
-            Self::Credential => "credential",
-            Self::Vulnerability => "vulnerability",
-            Self::Endpoint => "endpoint",
-            Self::Technology => "technology",
-            Self::User => "user",
-            Self::Domain => "domain",
-            Self::Certificate => "certificate",
-        }
-    }
-}
-
-/// Graph edge types (matches intelligence layer)
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum GraphEdgeType {
-    HasService = 0,
-    HasEndpoint = 1,
-    UsesTech = 2,
-    AuthAccess = 3,
-    AffectedBy = 4,
-    Contains = 5,
-    ConnectsTo = 6,
-    RelatedTo = 7,
-    HasUser = 8,
-    HasCert = 9,
-}
-
-impl GraphEdgeType {
-    pub fn from_u8(v: u8) -> Option<Self> {
-        match v {
-            0 => Some(Self::HasService),
-            1 => Some(Self::HasEndpoint),
-            2 => Some(Self::UsesTech),
-            3 => Some(Self::AuthAccess),
-            4 => Some(Self::AffectedBy),
-            5 => Some(Self::Contains),
-            6 => Some(Self::ConnectsTo),
-            7 => Some(Self::RelatedTo),
-            8 => Some(Self::HasUser),
-            9 => Some(Self::HasCert),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::HasService => "has_service",
-            Self::HasEndpoint => "has_endpoint",
-            Self::UsesTech => "uses_tech",
-            Self::AuthAccess => "auth_access",
-            Self::AffectedBy => "affected_by",
-            Self::Contains => "contains",
-            Self::ConnectsTo => "connects_to",
-            Self::RelatedTo => "related_to",
-            Self::HasUser => "has_user",
-            Self::HasCert => "has_cert",
-        }
-    }
-}
+/// Edge record header size: source_len(2) + target_len(2) + label_id(4) + weight(4).
+/// The 1-byte legacy `edge_type` discriminant has been replaced by a 4-byte
+/// dynamic [`LabelId`] resolved through [`LabelRegistry`].
+pub const EDGE_HEADER_SIZE: usize = 12;
 
 /// A graph node stored on disk
 #[derive(Debug, Clone)]
 pub struct StoredNode {
     pub id: String,
     pub label: String,
-    pub node_type: GraphNodeType,
+    /// Canonical category label string (e.g. `"host"`, `"order"`). Resolved
+    /// from [`label_id`] at decode time via the legacy seed mapping.
+    /// Caller-visible string; the registry-stored [`label_id`] is the
+    /// source-of-truth identifier.
+    pub node_type: String,
+    /// Authoritative label identifier resolved through [`LabelRegistry`].
+    pub label_id: LabelId,
     pub flags: u8,
     pub out_edge_count: u32,
     pub in_edge_count: u32,
@@ -208,7 +132,7 @@ pub struct StoredNode {
 }
 
 impl StoredNode {
-    /// Encode node to bytes for storage
+    /// Encode node to bytes in v2 format (label_id replaces node_type).
     pub fn encode(&self) -> Vec<u8> {
         let id_bytes = self.id.as_bytes();
         let label_bytes = self.label.as_bytes();
@@ -226,7 +150,7 @@ impl StoredNode {
 
         let table_ref_size = if has_table_ref { TABLE_REF_SIZE } else { 0 };
         let vector_ref_size = if let Some((ref coll, _)) = self.vector_ref {
-            2 + coll.len() + 8 // collection_len(2) + collection + vector_id(8)
+            2 + coll.len() + 8
         } else {
             0
         };
@@ -238,24 +162,21 @@ impl StoredNode {
                 + vector_ref_size,
         );
 
-        // Header: id_len(2) + label_len(2) + type(1) + flags(1) + out_edges(2) + in_edges(2)
+        // V2 header: id_len(2) + label_len(2) + label_id(4) + flags(1) + out_edges(2) + in_edges(2)
         buf.extend_from_slice(&(id_bytes.len() as u16).to_le_bytes());
         buf.extend_from_slice(&(label_bytes.len() as u16).to_le_bytes());
-        buf.push(self.node_type as u8);
+        buf.extend_from_slice(&self.label_id.as_u32().to_le_bytes());
         buf.push(flags);
         buf.extend_from_slice(&(self.out_edge_count as u16).to_le_bytes());
         buf.extend_from_slice(&(self.in_edge_count as u16).to_le_bytes());
 
-        // Data
         buf.extend_from_slice(id_bytes);
         buf.extend_from_slice(label_bytes);
 
-        // Optional table reference (10 bytes)
         if let Some(ref tref) = self.table_ref {
             buf.extend_from_slice(&tref.encode());
         }
 
-        // Optional vector reference (variable size: 2 + collection_len + 8)
         if let Some((ref collection, vector_id)) = self.vector_ref {
             let coll_bytes = collection.as_bytes();
             buf.extend_from_slice(&(coll_bytes.len() as u16).to_le_bytes());
@@ -266,7 +187,7 @@ impl StoredNode {
         buf
     }
 
-    /// Decode node from bytes
+    /// Decode node from bytes (v2 format). For v1 records use [`decode_v1`].
     pub fn decode(data: &[u8], page_id: u32, slot: u16) -> Option<Self> {
         if data.len() < NODE_HEADER_SIZE {
             return None;
@@ -274,39 +195,104 @@ impl StoredNode {
 
         let id_len = u16::from_le_bytes([data[0], data[1]]) as usize;
         let label_len = u16::from_le_bytes([data[2], data[3]]) as usize;
-        let node_type = GraphNodeType::from_u8(data[4])?;
+        let label_id =
+            LabelId::new(u32::from_le_bytes([data[4], data[5], data[6], data[7]]));
+        let flags = data[8];
+        let out_edge_count = u16::from_le_bytes([data[9], data[10]]) as u32;
+        let in_edge_count = u16::from_le_bytes([data[11], data[12]]) as u32;
+        // Derive legacy node_type from label_id for back-compat with callers
+        // that still read the field. PR3 removes this field entirely.
+        let node_type = label_id_to_node_label(label_id);
+
+        Self::decode_payload(
+            data,
+            page_id,
+            slot,
+            NODE_HEADER_SIZE,
+            id_len,
+            label_len,
+            flags,
+            out_edge_count,
+            in_edge_count,
+            node_type,
+            label_id,
+        )
+    }
+
+    /// Decode a v1 (legacy) node record. The caller must supply a
+    /// [`LabelRegistry`] seeded via [`LabelRegistry::with_legacy_seed`] so
+    /// the legacy `node_type` discriminant maps to the correct reserved
+    /// [`LabelId`].
+    pub fn decode_v1(data: &[u8], page_id: u32, slot: u16) -> Option<Self> {
+        if data.len() < NODE_HEADER_SIZE_V1 {
+            return None;
+        }
+        let id_len = u16::from_le_bytes([data[0], data[1]]) as usize;
+        let label_len = u16::from_le_bytes([data[2], data[3]]) as usize;
+        // V1 records carry the legacy enum discriminant; reject any byte
+        // outside the 9-variant range so we do not silently misinterpret
+        // unrelated bytes as a node-type.
+        if data[4] > 8 {
+            return None;
+        }
         let flags = data[5];
         let out_edge_count = u16::from_le_bytes([data[6], data[7]]) as u32;
         let in_edge_count = u16::from_le_bytes([data[8], data[9]]) as u32;
+        let label_id = LabelRegistry::legacy_node_label_id(data[4]);
+        let node_type = label_id_to_node_label(label_id);
+        Self::decode_payload(
+            data,
+            page_id,
+            slot,
+            NODE_HEADER_SIZE_V1,
+            id_len,
+            label_len,
+            flags,
+            out_edge_count,
+            in_edge_count,
+            node_type,
+            label_id,
+        )
+    }
 
+    /// Shared payload (id, label, table_ref, vector_ref) decoder for v1/v2.
+    #[allow(clippy::too_many_arguments)]
+    fn decode_payload(
+        data: &[u8],
+        page_id: u32,
+        slot: u16,
+        header_size: usize,
+        id_len: usize,
+        label_len: usize,
+        flags: u8,
+        out_edge_count: u32,
+        in_edge_count: u32,
+        node_type: String,
+        label_id: LabelId,
+    ) -> Option<Self> {
         let has_table_ref = (flags & NODE_FLAG_HAS_TABLE_REF) != 0;
         let has_vector_ref = (flags & NODE_FLAG_HAS_VECTOR_REF) != 0;
         let table_ref_size = if has_table_ref { TABLE_REF_SIZE } else { 0 };
 
-        // We need to calculate vector_ref_size dynamically based on collection name length
-        let mut offset = NODE_HEADER_SIZE + id_len + label_len + table_ref_size;
-
-        // Preliminary bounds check (without vector_ref)
+        let mut offset = header_size + id_len + label_len + table_ref_size;
         if data.len() < offset {
             return None;
         }
 
         let id =
-            String::from_utf8_lossy(&data[NODE_HEADER_SIZE..NODE_HEADER_SIZE + id_len]).to_string();
+            String::from_utf8_lossy(&data[header_size..header_size + id_len]).to_string();
         let label = String::from_utf8_lossy(
-            &data[NODE_HEADER_SIZE + id_len..NODE_HEADER_SIZE + id_len + label_len],
+            &data[header_size + id_len..header_size + id_len + label_len],
         )
         .to_string();
 
-        // Decode optional table reference
         let table_ref = if has_table_ref {
-            let ref_start = NODE_HEADER_SIZE + id_len + label_len;
+            let ref_start = header_size + id_len + label_len;
             TableRef::decode(&data[ref_start..])
         } else {
             None
         };
 
-        // Decode optional vector reference
         let vector_ref = if has_vector_ref {
             if data.len() < offset + 2 {
                 return None;
@@ -328,6 +314,7 @@ impl StoredNode {
             id,
             label,
             node_type,
+            label_id,
             flags,
             out_edge_count,
             in_edge_count,
@@ -384,7 +371,10 @@ impl StoredNode {
 pub struct StoredEdge {
     pub source_id: String,
     pub target_id: String,
-    pub edge_type: GraphEdgeType,
+    /// Canonical edge label string. Derived from [`label_id`] at decode time.
+    pub edge_type: String,
+    /// Authoritative label identifier resolved through [`LabelRegistry`].
+    pub label_id: LabelId,
     pub weight: f32,
     /// Page ID where this edge is stored
     pub page_id: u32,
@@ -393,7 +383,7 @@ pub struct StoredEdge {
 }
 
 impl StoredEdge {
-    /// Encode edge to bytes for storage
+    /// Encode edge to bytes (v2 format).
     pub fn encode(&self) -> Vec<u8> {
         let source_bytes = self.source_id.as_bytes();
         let target_bytes = self.target_id.as_bytes();
@@ -401,20 +391,19 @@ impl StoredEdge {
         let mut buf =
             Vec::with_capacity(EDGE_HEADER_SIZE + source_bytes.len() + target_bytes.len());
 
-        // Header: source_len(2) + target_len(2) + type(1) + weight(4)
+        // V2 header: source_len(2) + target_len(2) + label_id(4) + weight(4)
         buf.extend_from_slice(&(source_bytes.len() as u16).to_le_bytes());
         buf.extend_from_slice(&(target_bytes.len() as u16).to_le_bytes());
-        buf.push(self.edge_type as u8);
+        buf.extend_from_slice(&self.label_id.as_u32().to_le_bytes());
         buf.extend_from_slice(&self.weight.to_le_bytes());
 
-        // Data
         buf.extend_from_slice(source_bytes);
         buf.extend_from_slice(target_bytes);
 
         buf
     }
 
-    /// Decode edge from bytes
+    /// Decode edge from bytes (v2 format). For v1 records use [`decode_v1`].
     pub fn decode(data: &[u8], page_id: u32, slot: u16) -> Option<Self> {
         if data.len() < EDGE_HEADER_SIZE {
             return None;
@@ -422,8 +411,10 @@ impl StoredEdge {
 
         let source_len = u16::from_le_bytes([data[0], data[1]]) as usize;
         let target_len = u16::from_le_bytes([data[2], data[3]]) as usize;
-        let edge_type = GraphEdgeType::from_u8(data[4])?;
-        let weight = f32::from_le_bytes([data[5], data[6], data[7], data[8]]);
+        let label_id =
+            LabelId::new(u32::from_le_bytes([data[4], data[5], data[6], data[7]]));
+        let weight = f32::from_le_bytes([data[8], data[9], data[10], data[11]]);
+        let edge_type = label_id_to_edge_label(label_id);
 
         if data.len() < EDGE_HEADER_SIZE + source_len + target_len {
             return None;
@@ -441,15 +432,93 @@ impl StoredEdge {
             source_id,
             target_id,
             edge_type,
+            label_id,
             weight,
             page_id,
             slot,
         })
     }
 
-    /// Calculate encoded size
+    /// Decode a v1 (legacy) edge record. The 1-byte enum discriminant maps
+    /// to the legacy reserved [`LabelId`] range via
+    /// [`LabelRegistry::legacy_edge_label_id`].
+    pub fn decode_v1(data: &[u8], page_id: u32, slot: u16) -> Option<Self> {
+        if data.len() < EDGE_HEADER_SIZE_V1 {
+            return None;
+        }
+        let source_len = u16::from_le_bytes([data[0], data[1]]) as usize;
+        let target_len = u16::from_le_bytes([data[2], data[3]]) as usize;
+        if data[4] > 9 {
+            return None;
+        }
+        let weight = f32::from_le_bytes([data[5], data[6], data[7], data[8]]);
+        let label_id = LabelRegistry::legacy_edge_label_id(data[4]);
+        let edge_type = label_id_to_edge_label(label_id);
+
+        if data.len() < EDGE_HEADER_SIZE_V1 + source_len + target_len {
+            return None;
+        }
+        let source_id = String::from_utf8_lossy(
+            &data[EDGE_HEADER_SIZE_V1..EDGE_HEADER_SIZE_V1 + source_len],
+        )
+        .to_string();
+        let target_id = String::from_utf8_lossy(
+            &data[EDGE_HEADER_SIZE_V1 + source_len..EDGE_HEADER_SIZE_V1 + source_len + target_len],
+        )
+        .to_string();
+
+        Some(Self {
+            source_id,
+            target_id,
+            edge_type,
+            label_id,
+            weight,
+            page_id,
+            slot,
+        })
+    }
+
+    /// Calculate encoded size (v2)
     pub fn encoded_size(&self) -> usize {
         EDGE_HEADER_SIZE + self.source_id.len() + self.target_id.len()
+    }
+}
+
+/// Resolve a [`LabelId`] in the legacy reserved range to its canonical
+/// category string. For non-legacy IDs (≥ [`FIRST_USER_LABEL_ID`]) returns
+/// `format!("label_{}", id)` — a non-crashing placeholder that flags the
+/// caller is reading a record without a registry handle. Real callers
+/// should resolve through [`LabelRegistry`] when accuracy matters.
+fn label_id_to_node_label(id: LabelId) -> String {
+    match id.as_u32() {
+        1 => "host".to_string(),
+        2 => "service".to_string(),
+        3 => "credential".to_string(),
+        4 => "vulnerability".to_string(),
+        5 => "endpoint".to_string(),
+        6 => "technology".to_string(),
+        7 => "user".to_string(),
+        8 => "domain".to_string(),
+        9 => "certificate".to_string(),
+        n => format!("label_{}", n),
+    }
+}
+
+/// Resolve a [`LabelId`] in the legacy reserved edge range to its canonical
+/// edge label string.
+fn label_id_to_edge_label(id: LabelId) -> String {
+    match id.as_u32() {
+        10 => "has_service".to_string(),
+        11 => "has_endpoint".to_string(),
+        12 => "uses_tech".to_string(),
+        13 => "auth_access".to_string(),
+        14 => "affected_by".to_string(),
+        15 => "contains".to_string(),
+        16 => "connects_to".to_string(),
+        17 => "related_to".to_string(),
+        18 => "has_user".to_string(),
+        19 => "has_cert".to_string(),
+        n => format!("label_{}", n),
     }
 }
 
@@ -467,8 +536,11 @@ pub struct GraphStats {
     pub edge_count: u64,
     pub node_pages: u32,
     pub edge_pages: u32,
-    pub nodes_by_type: [u64; 9],
-    pub edges_by_type: [u64; 10],
+    /// Cardinality per category label (e.g. `"host" → 42`). Replaces the
+    /// closed-enum `nodes_by_type: [u64; 9]` from earlier revisions.
+    pub nodes_by_label: HashMap<String, u64>,
+    /// Cardinality per edge label.
+    pub edges_by_label: HashMap<String, u64>,
 }
 
 /// Concurrent in-memory index for fast lookups
@@ -537,13 +609,15 @@ impl<V: Clone> ShardedIndex<V> {
     }
 }
 
-/// Edge index key: (source_id, edge_type) -> Vec<target_id>
-/// Optimized for adjacency list queries
+/// Edge index key: `(source_id, edge_label)` → `Vec<target_id>`.
+/// Optimized for adjacency list queries; the edge label is the canonical
+/// string form (e.g. `"connects_to"`) — use the registry to resolve back to
+/// a [`LabelId`] when needed.
 pub struct EdgeIndex {
-    /// Forward edges: source -> [(edge_type, target)]
-    forward: ShardedIndex<Vec<(GraphEdgeType, String, f32)>>,
-    /// Backward edges: target -> [(edge_type, source)]
-    backward: ShardedIndex<Vec<(GraphEdgeType, String, f32)>>,
+    /// Forward edges: source → `[(edge_label, target, weight)]`
+    forward: ShardedIndex<Vec<(String, String, f32)>>,
+    /// Backward edges: target → `[(edge_label, source, weight)]`
+    backward: ShardedIndex<Vec<(String, String, f32)>>,
 }
 
 impl EdgeIndex {
@@ -554,58 +628,54 @@ impl EdgeIndex {
         }
     }
 
-    pub fn add_edge(&self, source: &str, target: &str, edge_type: GraphEdgeType, weight: f32) {
-        // Add to forward index
+    pub fn add_edge(&self, source: &str, target: &str, edge_label: &str, weight: f32) {
         let shard = self.forward.shard_for(source);
         if let Ok(mut guard) = self.forward.shards[shard].write() {
             guard
                 .entry(source.to_string())
                 .or_insert_with(Vec::new)
-                .push((edge_type, target.to_string(), weight));
+                .push((edge_label.to_string(), target.to_string(), weight));
         }
 
-        // Add to backward index
         let shard = self.backward.shard_for(target);
         if let Ok(mut guard) = self.backward.shards[shard].write() {
             guard
                 .entry(target.to_string())
                 .or_insert_with(Vec::new)
-                .push((edge_type, source.to_string(), weight));
+                .push((edge_label.to_string(), source.to_string(), weight));
         }
     }
 
-    pub fn remove_edge(&self, source: &str, target: &str, edge_type: GraphEdgeType) {
-        // Remove from forward index
+    pub fn remove_edge(&self, source: &str, target: &str, edge_label: &str) {
         let shard = self.forward.shard_for(source);
         if let Ok(mut guard) = self.forward.shards[shard].write() {
             if let Some(edges) = guard.get_mut(source) {
-                edges.retain(|(et, t, _)| !(*et == edge_type && t == target));
+                edges.retain(|(et, t, _)| !(et == edge_label && t == target));
             }
         }
 
-        // Remove from backward index
         let shard = self.backward.shard_for(target);
         if let Ok(mut guard) = self.backward.shards[shard].write() {
             if let Some(edges) = guard.get_mut(target) {
-                edges.retain(|(et, s, _)| !(*et == edge_type && s == source));
+                edges.retain(|(et, s, _)| !(et == edge_label && s == source));
             }
         }
     }
 
-    pub fn outgoing(&self, source: &str) -> Vec<(GraphEdgeType, String, f32)> {
+    pub fn outgoing(&self, source: &str) -> Vec<(String, String, f32)> {
         self.forward.get(source).unwrap_or_default()
     }
 
-    pub fn incoming(&self, target: &str) -> Vec<(GraphEdgeType, String, f32)> {
+    pub fn incoming(&self, target: &str) -> Vec<(String, String, f32)> {
         self.backward.get(target).unwrap_or_default()
     }
 
-    pub fn outgoing_of_type(&self, source: &str, edge_type: GraphEdgeType) -> Vec<(String, f32)> {
+    pub fn outgoing_of_type(&self, source: &str, edge_label: &str) -> Vec<(String, f32)> {
         self.forward
             .get(source)
             .unwrap_or_default()
             .into_iter()
-            .filter(|(et, _, _)| *et == edge_type)
+            .filter(|(et, _, _)| et == edge_label)
             .map(|(_, t, w)| (t, w))
             .collect()
     }
@@ -627,6 +697,12 @@ pub struct GraphStore {
     /// exact live index with an [`crate::storage::index::IndexRegistry`]
     /// instead of handing out a frozen snapshot.
     node_secondary: std::sync::Arc<secondary_index::NodeSecondaryIndex>,
+    /// Dynamic label catalog. Resolves user-supplied label strings to
+    /// stable [`LabelId`] u32 values used in the v2 page format. Replaces
+    /// the hardcoded `GraphNodeType` / `GraphEdgeType` enums; those enums
+    /// remain only as a thin compat layer that interns their string names
+    /// into this registry on `add_node` / `add_edge` (see PR3 for removal).
+    pub registry: Arc<LabelRegistry>,
     /// Node pages (packed node records)
     node_pages: RwLock<Vec<Page>>,
     /// Edge pages (packed edge records)
@@ -643,7 +719,12 @@ pub struct GraphStore {
 
 #[path = "graph_store/impl.rs"]
 mod graph_store_impl;
+pub mod label_registry;
 pub mod secondary_index;
+pub use label_registry::{
+    LabelId, LabelRegistry, LabelRegistryError, Namespace, FIRST_USER_LABEL_ID, MAX_LABEL_LEN,
+    UNSET_LABEL_ID,
+};
 pub use secondary_index::NodeSecondaryIndex;
 impl Default for GraphStore {
     fn default() -> Self {
@@ -731,16 +812,16 @@ mod tests {
 
         // Add nodes
         store
-            .add_node("host:192.168.1.1", "Web Server", GraphNodeType::Host)
+            .add_node_with_label("host:192.168.1.1", "Web Server", "host")
             .unwrap();
         store
-            .add_node("host:192.168.1.2", "Database", GraphNodeType::Host)
+            .add_node_with_label("host:192.168.1.2", "Database", "host")
             .unwrap();
         store
-            .add_node(
+            .add_node_with_label(
                 "service:192.168.1.1:80:http",
                 "HTTP",
-                GraphNodeType::Service,
+                "service",
             )
             .unwrap();
 
@@ -748,18 +829,18 @@ mod tests {
 
         // Add edges
         store
-            .add_edge(
+            .add_edge_with_label(
                 "host:192.168.1.1",
                 "service:192.168.1.1:80:http",
-                GraphEdgeType::HasService,
+                "has_service",
                 1.0,
             )
             .unwrap();
         store
-            .add_edge(
+            .add_edge_with_label(
                 "host:192.168.1.1",
                 "host:192.168.1.2",
-                GraphEdgeType::ConnectsTo,
+                "connects_to",
                 1.0,
             )
             .unwrap();
@@ -779,16 +860,16 @@ mod tests {
         let store = GraphStore::new();
 
         store
-            .add_node("host:10.0.0.1", "Server A", GraphNodeType::Host)
+            .add_node_with_label("host:10.0.0.1", "Server A", "host")
             .unwrap();
         store
-            .add_node("host:10.0.0.2", "Server B", GraphNodeType::Host)
+            .add_node_with_label("host:10.0.0.2", "Server B", "host")
             .unwrap();
         store
-            .add_edge(
+            .add_edge_with_label(
                 "host:10.0.0.1",
                 "host:10.0.0.2",
-                GraphEdgeType::ConnectsTo,
+                "connects_to",
                 0.5,
             )
             .unwrap();
@@ -815,10 +896,10 @@ mod tests {
         // Add some data
         for i in 0..100 {
             store
-                .add_node(
+                .add_node_with_label(
                     &format!("host:{}", i),
                     &format!("Host {}", i),
-                    GraphNodeType::Host,
+                    "host",
                 )
                 .unwrap();
         }
@@ -847,21 +928,21 @@ mod tests {
 
         // Create a graph with many edges
         store
-            .add_node("hub", "Hub Node", GraphNodeType::Host)
+            .add_node_with_label("hub", "Hub Node", "host")
             .unwrap();
         for i in 0..100 {
             store
-                .add_node(
+                .add_node_with_label(
                     &format!("spoke:{}", i),
                     &format!("Spoke {}", i),
-                    GraphNodeType::Host,
+                    "host",
                 )
                 .unwrap();
             store
-                .add_edge(
+                .add_edge_with_label(
                     "hub",
                     &format!("spoke:{}", i),
-                    GraphEdgeType::ConnectsTo,
+                    "connects_to",
                     1.0,
                 )
                 .unwrap();
@@ -876,42 +957,42 @@ mod tests {
     fn test_nodes_of_type_uses_secondary_index() {
         let store = GraphStore::new();
         store
-            .add_node("host:1", "Web Server", GraphNodeType::Host)
+            .add_node_with_label("host:1", "Web Server", "host")
             .unwrap();
         store
-            .add_node("host:2", "DB Server", GraphNodeType::Host)
+            .add_node_with_label("host:2", "DB Server", "host")
             .unwrap();
         store
-            .add_node("svc:1", "HTTP", GraphNodeType::Service)
+            .add_node_with_label("svc:1", "HTTP", "service")
             .unwrap();
         store
-            .add_node("vuln:1", "CVE-2024-1", GraphNodeType::Vulnerability)
+            .add_node_with_label("vuln:1", "CVE-2024-1", "vulnerability")
             .unwrap();
 
-        let hosts = store.nodes_of_type(GraphNodeType::Host);
+        let hosts = store.nodes_with_category("host");
         assert_eq!(hosts.len(), 2);
         assert!(hosts
             .iter()
-            .all(|n| matches!(n.node_type, GraphNodeType::Host)));
+            .all(|n| n.node_type == "host"));
 
-        let services = store.nodes_of_type(GraphNodeType::Service);
+        let services = store.nodes_with_category("service");
         assert_eq!(services.len(), 1);
         assert_eq!(services[0].id, "svc:1");
 
-        assert_eq!(store.nodes_of_type(GraphNodeType::User).len(), 0);
+        assert_eq!(store.nodes_with_category("user").len(), 0);
     }
 
     #[test]
     fn test_nodes_by_label_with_bloom_prune() {
         let store = GraphStore::new();
         store
-            .add_node("host:1", "Edge Router", GraphNodeType::Host)
+            .add_node_with_label("host:1", "Edge Router", "host")
             .unwrap();
         store
-            .add_node("host:2", "Edge Router", GraphNodeType::Host)
+            .add_node_with_label("host:2", "Edge Router", "host")
             .unwrap();
         store
-            .add_node("host:3", "Core Switch", GraphNodeType::Host)
+            .add_node_with_label("host:3", "Core Switch", "host")
             .unwrap();
 
         let routers = store.nodes_by_label("Edge Router");
@@ -929,10 +1010,10 @@ mod tests {
         use crate::storage::index::{IndexKind, IndexRegistry, IndexScope};
 
         let store = GraphStore::new();
-        store.add_node("h:1", "Alpha", GraphNodeType::Host).unwrap();
-        store.add_node("h:2", "Beta", GraphNodeType::Host).unwrap();
+        store.add_node_with_label("h:1", "Alpha", "host").unwrap();
+        store.add_node_with_label("h:2", "Beta", "host").unwrap();
         store
-            .add_node("svc:1", "HTTP", GraphNodeType::Service)
+            .add_node_with_label("svc:1", "HTTP", "service")
             .unwrap();
 
         let registry = IndexRegistry::new();
@@ -948,7 +1029,7 @@ mod tests {
 
         // Live updates are visible through the registry since both sides
         // share the same Arc<NodeSecondaryIndex>.
-        store.add_node("h:3", "Gamma", GraphNodeType::Host).unwrap();
+        store.add_node_with_label("h:3", "Gamma", "host").unwrap();
         let updated = registry.get(&IndexScope::graph("infra")).unwrap().stats();
         assert_eq!(updated.entries, 8);
     }
@@ -957,16 +1038,16 @@ mod tests {
     fn test_secondary_index_rebuilt_after_deserialize() {
         let store = GraphStore::new();
         store
-            .add_node("host:1", "Alpha", GraphNodeType::Host)
+            .add_node_with_label("host:1", "Alpha", "host")
             .unwrap();
         store
-            .add_node("svc:1", "HTTP", GraphNodeType::Service)
+            .add_node_with_label("svc:1", "HTTP", "service")
             .unwrap();
 
         let bytes = store.serialize();
         let restored = GraphStore::deserialize(&bytes).unwrap();
 
-        assert_eq!(restored.nodes_of_type(GraphNodeType::Host).len(), 1);
+        assert_eq!(restored.nodes_with_category("host").len(), 1);
         assert_eq!(restored.nodes_by_label("HTTP").len(), 1);
         assert!(restored.may_contain_label("Alpha"));
     }
@@ -977,15 +1058,143 @@ mod tests {
 
         for i in 0..50 {
             store
-                .add_node(
+                .add_node_with_label(
                     &format!("node:{}", i),
                     &format!("Node {}", i),
-                    GraphNodeType::Host,
+                    "host",
                 )
                 .unwrap();
         }
 
         let nodes: Vec<_> = store.iter_nodes().collect();
         assert_eq!(nodes.len(), 50);
+    }
+
+    #[test]
+    fn legacy_node_type_interns_into_registry() {
+        let store = GraphStore::new();
+        store
+            .add_node_with_label("h1", "web", "host")
+            .unwrap();
+        // Adding via the legacy enum must intern its as_str() name.
+        let id = store
+            .registry
+            .lookup(label_registry::Namespace::Node, "host")
+            .expect("legacy enum name should be interned");
+        let fetched = store.get_node("h1").unwrap();
+        assert_eq!(fetched.label_id, id);
+        assert_eq!(fetched.node_type, "host");
+    }
+
+    #[test]
+    fn v2_round_trip_preserves_user_labels() {
+        let store = GraphStore::new();
+        // Intern a non-legacy user label and add a node referencing it via
+        // the legacy bridge (Host) — exercises the full v2 encode path.
+        let user_id = store.intern_node_label("order").unwrap();
+        assert!(user_id.as_u32() >= label_registry::FIRST_USER_LABEL_ID);
+
+        store.add_node_with_label("h1", "web-1", "host").unwrap();
+        store.add_node_with_label("h2", "web-2", "service").unwrap();
+        store.add_edge_with_label("h1", "h2", "connects_to", 1.0).unwrap();
+
+        let bytes = store.serialize();
+        // V2 magic + version
+        assert_eq!(&bytes[0..4], b"RBGR");
+        assert_eq!(u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]), 2);
+
+        let restored = GraphStore::deserialize(&bytes).unwrap();
+        // Registry survived.
+        assert_eq!(
+            restored
+                .registry
+                .lookup(label_registry::Namespace::Node, "order"),
+            Some(user_id)
+        );
+        // Records decoded with v2 label_id intact.
+        let h1 = restored.get_node("h1").unwrap();
+        assert_eq!(h1.node_type, "host");
+        assert_eq!(
+            h1.label_id,
+            restored
+                .registry
+                .lookup(label_registry::Namespace::Node, "host")
+                .unwrap()
+        );
+        // Edge index rebuilt.
+        let outgoing = restored.outgoing_edges("h1");
+        assert_eq!(outgoing.len(), 1);
+        assert_eq!(outgoing[0].0, "connects_to");
+    }
+
+    #[test]
+    fn v1_blob_deserializes_via_legacy_path() {
+        // Hand-craft a minimal v1 file: header (24 bytes, version=1) + 1
+        // node page + 1 edge page. The node page contains one v1 record:
+        //   header_v1 = id_len(2) "n1" label_len(2) "L" type(1=Host) flags(0) out(0) in(0)
+        //   payload   = "n1" "L"
+        // The edge page contains one v1 edge:
+        //   header_v1 = src_len(2) "n1" tgt_len(2) "n1" type(0=HasService) weight(1.0)
+        //   payload   = "n1" "n1"
+        //
+        // Page::insert_cell handles the cell layout for us, so we build
+        // pages programmatically rather than poking at raw page bytes.
+        let mut node_page = Page::new(PageType::GraphNode, 0);
+        // Build a v1 node record.
+        let mut v1_node = Vec::new();
+        v1_node.extend_from_slice(&2u16.to_le_bytes()); // id_len
+        v1_node.extend_from_slice(&1u16.to_le_bytes()); // label_len
+        v1_node.push(0); // "host" (disc=0)
+        v1_node.push(0); // flags
+        v1_node.extend_from_slice(&0u16.to_le_bytes()); // out_edge_count
+        v1_node.extend_from_slice(&0u16.to_le_bytes()); // in_edge_count
+        v1_node.extend_from_slice(b"n1");
+        v1_node.extend_from_slice(b"L");
+        node_page.insert_cell(b"n1", &v1_node).unwrap();
+
+        let mut edge_page = Page::new(PageType::GraphEdge, 0);
+        let mut v1_edge = Vec::new();
+        v1_edge.extend_from_slice(&2u16.to_le_bytes()); // source_len
+        v1_edge.extend_from_slice(&2u16.to_le_bytes()); // target_len
+        v1_edge.push(0); // "has_service" (disc=0)
+        v1_edge.extend_from_slice(&1.0f32.to_le_bytes()); // weight
+        v1_edge.extend_from_slice(b"n1");
+        v1_edge.extend_from_slice(b"n1");
+        edge_page.insert_cell(b"n1|0|n1", &v1_edge).unwrap();
+
+        // Assemble v1 file: header + node-page-count + node-pages + edge-page-count + edge-pages.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RBGR");
+        bytes.extend_from_slice(&1u32.to_le_bytes()); // version=1
+        bytes.extend_from_slice(&1u64.to_le_bytes()); // node_count
+        bytes.extend_from_slice(&1u64.to_le_bytes()); // edge_count
+        bytes.extend_from_slice(&1u32.to_le_bytes()); // node_page_count
+        bytes.extend_from_slice(node_page.as_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes()); // edge_page_count
+        bytes.extend_from_slice(edge_page.as_bytes());
+
+        let store = GraphStore::deserialize(&bytes).expect("v1 blob deserializes");
+        // Node decoded via legacy path → label_id mapped to reserved ID 1 ("host").
+        let node = store.get_node("n1").unwrap();
+        assert_eq!(node.node_type, "host");
+        assert_eq!(node.label_id, LabelId::new(1));
+        // Edge index rebuilt.
+        let out = store.outgoing_edges("n1");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, "has_service");
+    }
+
+    #[test]
+    fn deserialize_rejects_unknown_version() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RBGR");
+        bytes.extend_from_slice(&999u32.to_le_bytes()); // bogus version
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        match GraphStore::deserialize(&bytes) {
+            Err(GraphStoreError::InvalidData(msg)) => assert!(msg.contains("Unsupported")),
+            Err(other) => panic!("unexpected error: {:?}", other),
+            Ok(_) => panic!("expected error for unknown version"),
+        }
     }
 }

@@ -19,7 +19,7 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 
-use super::graph_store::{GraphEdgeType, GraphStore};
+use super::graph_store::GraphStore;
 
 // ============================================================================
 // Path Result Types
@@ -32,8 +32,10 @@ pub struct Path {
     pub nodes: Vec<String>,
     /// Total weight/cost of the path
     pub total_weight: f64,
-    /// Edge types along the path
-    pub edge_types: Vec<GraphEdgeType>,
+    /// Edge labels along the path (canonical lower-snake-case strings).
+    /// Resolved against the graph's [`crate::storage::engine::graph_store::LabelRegistry`]
+    /// when the caller needs the original `LabelId`.
+    pub edge_types: Vec<String>,
 }
 
 impl Path {
@@ -46,12 +48,12 @@ impl Path {
         }
     }
 
-    /// Extend path with a new node
-    pub fn extend(&self, node: &str, edge_type: GraphEdgeType, weight: f64) -> Self {
+    /// Extend path with a new node + edge label.
+    pub fn extend(&self, node: &str, edge_label: impl Into<String>, weight: f64) -> Self {
         let mut nodes = self.nodes.clone();
         nodes.push(node.to_string());
         let mut edge_types = self.edge_types.clone();
-        edge_types.push(edge_type);
+        edge_types.push(edge_label.into());
         Self {
             nodes,
             total_weight: self.total_weight + weight,
@@ -311,7 +313,6 @@ mod all_shortest_impl;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::engine::graph_store::GraphNodeType;
     use crate::storage::query::test_support::{add_edge_or_panic, add_node_or_panic};
 
     fn create_simple_graph() -> GraphStore {
@@ -321,17 +322,17 @@ mod tests {
         // |    |
         // v    v
         // D -> E
-        add_node_or_panic(&graph, "A", "Node A", GraphNodeType::Host);
-        add_node_or_panic(&graph, "B", "Node B", GraphNodeType::Host);
-        add_node_or_panic(&graph, "C", "Node C", GraphNodeType::Host);
-        add_node_or_panic(&graph, "D", "Node D", GraphNodeType::Host);
-        add_node_or_panic(&graph, "E", "Node E", GraphNodeType::Host);
+        add_node_or_panic(&graph, "A", "Node A", "host");
+        add_node_or_panic(&graph, "B", "Node B", "host");
+        add_node_or_panic(&graph, "C", "Node C", "host");
+        add_node_or_panic(&graph, "D", "Node D", "host");
+        add_node_or_panic(&graph, "E", "Node E", "host");
 
-        add_edge_or_panic(&graph, "A", "B", GraphEdgeType::ConnectsTo, 1.0);
-        add_edge_or_panic(&graph, "B", "C", GraphEdgeType::ConnectsTo, 1.0);
-        add_edge_or_panic(&graph, "A", "D", GraphEdgeType::ConnectsTo, 1.0);
-        add_edge_or_panic(&graph, "B", "E", GraphEdgeType::ConnectsTo, 1.0);
-        add_edge_or_panic(&graph, "D", "E", GraphEdgeType::ConnectsTo, 1.0);
+        add_edge_or_panic(&graph, "A", "B", "connects_to", 1.0);
+        add_edge_or_panic(&graph, "B", "C", "connects_to", 1.0);
+        add_edge_or_panic(&graph, "A", "D", "connects_to", 1.0);
+        add_edge_or_panic(&graph, "B", "E", "connects_to", 1.0);
+        add_edge_or_panic(&graph, "D", "E", "connects_to", 1.0);
 
         graph
     }
@@ -344,17 +345,17 @@ mod tests {
         // (4)        (1)
         // v          |
         // C --(1)--> E
-        add_node_or_panic(&graph, "A", "Node A", GraphNodeType::Host);
-        add_node_or_panic(&graph, "B", "Node B", GraphNodeType::Host);
-        add_node_or_panic(&graph, "C", "Node C", GraphNodeType::Host);
-        add_node_or_panic(&graph, "D", "Node D", GraphNodeType::Host);
-        add_node_or_panic(&graph, "E", "Node E", GraphNodeType::Host);
+        add_node_or_panic(&graph, "A", "Node A", "host");
+        add_node_or_panic(&graph, "B", "Node B", "host");
+        add_node_or_panic(&graph, "C", "Node C", "host");
+        add_node_or_panic(&graph, "D", "Node D", "host");
+        add_node_or_panic(&graph, "E", "Node E", "host");
 
-        add_edge_or_panic(&graph, "A", "B", GraphEdgeType::ConnectsTo, 1.0);
-        add_edge_or_panic(&graph, "A", "C", GraphEdgeType::ConnectsTo, 4.0);
-        add_edge_or_panic(&graph, "B", "D", GraphEdgeType::ConnectsTo, 2.0);
-        add_edge_or_panic(&graph, "C", "E", GraphEdgeType::ConnectsTo, 1.0);
-        add_edge_or_panic(&graph, "E", "B", GraphEdgeType::ConnectsTo, 1.0);
+        add_edge_or_panic(&graph, "A", "B", "connects_to", 1.0);
+        add_edge_or_panic(&graph, "A", "C", "connects_to", 4.0);
+        add_edge_or_panic(&graph, "B", "D", "connects_to", 2.0);
+        add_edge_or_panic(&graph, "C", "E", "connects_to", 1.0);
+        add_edge_or_panic(&graph, "E", "B", "connects_to", 1.0);
 
         graph
     }
@@ -381,8 +382,8 @@ mod tests {
     #[test]
     fn test_bfs_no_path() {
         let graph = GraphStore::new();
-        add_node_or_panic(&graph, "A", "A", GraphNodeType::Host);
-        add_node_or_panic(&graph, "B", "B", GraphNodeType::Host);
+        add_node_or_panic(&graph, "A", "A", "host");
+        add_node_or_panic(&graph, "B", "B", "host");
         // No edge between A and B
 
         let result = BFS::shortest_path(&graph, "A", "B");
@@ -422,11 +423,11 @@ mod tests {
     #[test]
     fn test_dfs_topological_sort() {
         let graph = GraphStore::new();
-        add_node_or_panic(&graph, "A", "A", GraphNodeType::Host);
-        add_node_or_panic(&graph, "B", "B", GraphNodeType::Host);
-        add_node_or_panic(&graph, "C", "C", GraphNodeType::Host);
-        add_edge_or_panic(&graph, "A", "B", GraphEdgeType::ConnectsTo, 1.0);
-        add_edge_or_panic(&graph, "B", "C", GraphEdgeType::ConnectsTo, 1.0);
+        add_node_or_panic(&graph, "A", "A", "host");
+        add_node_or_panic(&graph, "B", "B", "host");
+        add_node_or_panic(&graph, "C", "C", "host");
+        add_edge_or_panic(&graph, "A", "B", "connects_to", 1.0);
+        add_edge_or_panic(&graph, "B", "C", "connects_to", 1.0);
 
         let result = DFS::topological_sort(&graph);
         assert!(result.is_some());

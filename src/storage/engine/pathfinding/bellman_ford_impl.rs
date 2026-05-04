@@ -8,7 +8,7 @@ impl BellmanFord {
 
         // Initialize distances
         let mut dist: HashMap<String, f64> = HashMap::new();
-        let mut predecessor: HashMap<String, (String, GraphEdgeType)> = HashMap::new();
+        let mut predecessor: HashMap<String, (String, String)> = HashMap::new();
 
         for node in &nodes {
             dist.insert(node.clone(), f64::INFINITY);
@@ -31,7 +31,8 @@ impl BellmanFord {
                     let new_dist = d + weight as f64;
                     if new_dist < *dist.get(&neighbor).unwrap_or(&f64::INFINITY) {
                         dist.insert(neighbor.clone(), new_dist);
-                        predecessor.insert(neighbor.clone(), (node.clone(), edge_type));
+                        predecessor
+                            .insert(neighbor.clone(), (node.clone(), edge_type.into()));
                         changed = true;
                     }
                 }
@@ -71,7 +72,7 @@ impl BellmanFord {
 
             while let Some((pred, edge_type)) = predecessor.get(&current) {
                 path_nodes.push(pred.clone());
-                path_edges.push(*edge_type);
+                path_edges.push(edge_type.clone());
                 current = pred.clone();
                 if current == source {
                     break;

@@ -39,7 +39,6 @@
 //! - `aggregate(label)`, `store(label)`
 //! - `group()`, `groupCount()`
 
-use crate::storage::engine::graph_store::{GraphEdgeType, GraphNodeType};
 use crate::storage::query::ast::{
     CompareOp, EdgeDirection, EdgePattern, FieldRef, Filter, GraphPattern, GraphQuery, NodePattern,
     Projection, PropertyFilter, QueryExpr,
@@ -819,7 +818,7 @@ impl GremlinTraversal {
                 GremlinStep::V(id) => {
                     let mut node = NodePattern {
                         alias: current_alias.clone(),
-                        node_type: None,
+                        node_label: None,
                         properties: Vec::new(),
                     };
                     if let Some(id) = id {
@@ -833,19 +832,15 @@ impl GremlinTraversal {
                 }
                 GremlinStep::HasLabel(label) => {
                     if let Some(last) = nodes.last_mut() {
-                        // Map label string to GraphNodeType
-                        last.node_type = match label.to_lowercase().as_str() {
-                            "host" => Some(GraphNodeType::Host),
-                            "service" => Some(GraphNodeType::Service),
-                            "credential" => Some(GraphNodeType::Credential),
-                            "vulnerability" | "vuln" => Some(GraphNodeType::Vulnerability),
-                            "endpoint" => Some(GraphNodeType::Endpoint),
-                            "technology" | "tech" => Some(GraphNodeType::Technology),
-                            "user" => Some(GraphNodeType::User),
-                            "domain" => Some(GraphNodeType::Domain),
-                            "certificate" | "cert" => Some(GraphNodeType::Certificate),
-                            _ => None,
-                        };
+                        // Normalize common pentest aliases; otherwise pass
+                        // the user's label through unchanged.
+                        let lower = label.to_lowercase();
+                        last.node_label = Some(match lower.as_str() {
+                            "vuln" => "vulnerability".to_string(),
+                            "tech" => "technology".to_string(),
+                            "cert" => "certificate".to_string(),
+                            _ => lower,
+                        });
                     }
                 }
                 GremlinStep::Has(key, value) => {
@@ -881,30 +876,29 @@ impl GremlinTraversal {
                         _ => EdgeDirection::Outgoing,
                     };
 
-                    // Map edge label to GraphEdgeType
-                    let edge_type = label
-                        .as_ref()
-                        .and_then(|l| match l.to_lowercase().as_str() {
-                            "has_service" | "hasservice" => Some(GraphEdgeType::HasService),
-                            "has_endpoint" | "hasendpoint" => Some(GraphEdgeType::HasEndpoint),
-                            "uses_tech" | "usestech" => Some(GraphEdgeType::UsesTech),
-                            "auth_access" | "authaccess" => Some(GraphEdgeType::AuthAccess),
-                            "affected_by" | "affectedby" => Some(GraphEdgeType::AffectedBy),
-                            "contains" => Some(GraphEdgeType::Contains),
-                            "connects_to" | "connectsto" | "connects" => {
-                                Some(GraphEdgeType::ConnectsTo)
-                            }
-                            "related_to" | "relatedto" => Some(GraphEdgeType::RelatedTo),
-                            "has_user" | "hasuser" => Some(GraphEdgeType::HasUser),
-                            "has_cert" | "hascert" => Some(GraphEdgeType::HasCert),
-                            _ => None,
-                        });
+                    // Normalize camelCase / shorthand to snake_case for
+                    // legacy aliases; otherwise pass label through.
+                    let edge_label = label.as_ref().map(|l| {
+                        let lower = l.to_lowercase();
+                        match lower.as_str() {
+                            "hasservice" => "has_service".to_string(),
+                            "hasendpoint" => "has_endpoint".to_string(),
+                            "usestech" => "uses_tech".to_string(),
+                            "authaccess" => "auth_access".to_string(),
+                            "affectedby" => "affected_by".to_string(),
+                            "connectsto" | "connects" => "connects_to".to_string(),
+                            "relatedto" => "related_to".to_string(),
+                            "hasuser" => "has_user".to_string(),
+                            "hascert" => "has_cert".to_string(),
+                            _ => lower,
+                        }
+                    });
 
                     edges.push(EdgePattern {
                         alias: None,
                         from: current_alias.clone(),
                         to: new_alias.clone(),
-                        edge_type,
+                        edge_label,
                         direction,
                         min_hops: 1,
                         max_hops: 1,
@@ -912,7 +906,7 @@ impl GremlinTraversal {
 
                     nodes.push(NodePattern {
                         alias: new_alias.clone(),
-                        node_type: None,
+                        node_label: None,
                         properties: Vec::new(),
                     });
 

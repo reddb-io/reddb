@@ -2,15 +2,24 @@ use std::sync::Arc;
 
 use crate::storage::index::{IndexRegistry, IndexScope};
 
+use super::label_registry::Namespace;
 use super::*;
 
 impl GraphStore {
-    /// Create a new empty graph store
+    /// Create a new empty graph store with a fresh registry seeded for
+    /// legacy `GraphNodeType` / `GraphEdgeType` compatibility.
     pub fn new() -> Self {
+        Self::with_registry(Arc::new(LabelRegistry::with_legacy_seed()))
+    }
+
+    /// Create an empty graph store sharing the given [`LabelRegistry`]. Use
+    /// this when multiple [`GraphStore`] instances should agree on
+    /// [`LabelId`] assignments (e.g. when the same database holds several
+    /// named graphs).
+    pub fn with_registry(registry: Arc<LabelRegistry>) -> Self {
         // Use 16 shards for good parallelism on modern CPUs
         const SHARD_COUNT: usize = 16;
 
-        // Create initial pages
         let initial_node_page = Page::new(PageType::GraphNode, 0);
         let initial_edge_page = Page::new(PageType::GraphEdge, 0);
 
@@ -18,6 +27,7 @@ impl GraphStore {
             node_index: ShardedIndex::new(SHARD_COUNT),
             edge_index: EdgeIndex::new(SHARD_COUNT),
             node_secondary: Arc::new(NodeSecondaryIndex::new(8192)),
+            registry,
             node_pages: RwLock::new(vec![initial_node_page]),
             edge_pages: RwLock::new(vec![initial_edge_page]),
             current_node_page: AtomicU32::new(0),
@@ -26,6 +36,22 @@ impl GraphStore {
             node_count: AtomicU64::new(0),
             edge_count: AtomicU64::new(0),
         }
+    }
+
+    /// Intern an arbitrary node label string. Convenience wrapper over
+    /// [`LabelRegistry::intern`]; the returned [`LabelId`] can be passed to
+    /// the upcoming label-id-aware insert APIs (PR3).
+    pub fn intern_node_label(&self, label: &str) -> Result<LabelId, GraphStoreError> {
+        self.registry
+            .intern(Namespace::Node, label)
+            .map_err(|e| GraphStoreError::InvalidData(e.to_string()))
+    }
+
+    /// Intern an arbitrary edge label string.
+    pub fn intern_edge_label(&self, label: &str) -> Result<LabelId, GraphStoreError> {
+        self.registry
+            .intern(Namespace::Edge, label)
+            .map_err(|e| GraphStoreError::InvalidData(e.to_string()))
     }
 
     /// Publish this graph's secondary index into an external
@@ -42,22 +68,23 @@ impl GraphStore {
         );
     }
 
-    /// Add a node to the graph
-    pub fn add_node(
+    /// Add a node using a category label string. Interns `category` into the
+    /// [`LabelRegistry`] and writes the node in v2 format.
+    pub fn add_node_with_label(
         &self,
         id: &str,
-        label: &str,
-        node_type: GraphNodeType,
+        display_label: &str,
+        category: &str,
     ) -> Result<RecordLocation, GraphStoreError> {
-        // Check if node already exists
         if self.node_index.contains(id) {
             return Err(GraphStoreError::NodeExists(id.to_string()));
         }
-
+        let label_id = self.intern_node_label(category)?;
         let node = StoredNode {
             id: id.to_string(),
-            label: label.to_string(),
-            node_type,
+            label: display_label.to_string(),
+            node_type: category.to_string(),
+            label_id,
             flags: 0,
             out_edge_count: 0,
             in_edge_count: 0,
@@ -66,67 +93,134 @@ impl GraphStore {
             table_ref: None,
             vector_ref: None,
         };
-
-        let encoded = node.encode();
-
-        // Get write lock on node pages
-        let mut pages = self
-            .node_pages
-            .write()
-            .map_err(|_| GraphStoreError::LockPoisoned)?;
-
-        let current_page_id = self.current_node_page.load(Ordering::Acquire);
-        let page = &mut pages[current_page_id as usize];
-
-        // Try to insert into current page
-        let location = match page.insert_cell(id.as_bytes(), &encoded) {
-            Ok(slot) => RecordLocation {
-                page_id: current_page_id,
-                slot: slot as u16,
-            },
-            Err(_) => {
-                // Page full, allocate new page
-                let new_page_id = pages.len() as u32;
-                let mut new_page = Page::new(PageType::GraphNode, new_page_id);
-
-                let slot = new_page
-                    .insert_cell(id.as_bytes(), &encoded)
-                    .map_err(|_| GraphStoreError::PageFull)?;
-
-                pages.push(new_page);
-                self.current_node_page.store(new_page_id, Ordering::Release);
-
-                RecordLocation {
-                    page_id: new_page_id,
-                    slot: slot as u16,
-                }
-            }
-        };
-
+        let location = self.write_node_record(id, &node)?;
         self.node_index.insert(id.to_string(), location);
-        self.node_secondary.insert(id, node_type, label);
+        self.node_secondary.insert(id, label_id, display_label);
         self.node_count.fetch_add(1, Ordering::Relaxed);
         Ok(location)
     }
 
-    /// Add a node linked to a table row (for unified queries)
+    /// Add an edge using a category label string.
+    pub fn add_edge_with_label(
+        &self,
+        source_id: &str,
+        target_id: &str,
+        category: &str,
+        weight: f32,
+    ) -> Result<RecordLocation, GraphStoreError> {
+        if !self.node_index.contains(source_id) {
+            return Err(GraphStoreError::NodeNotFound(source_id.to_string()));
+        }
+        if !self.node_index.contains(target_id) {
+            return Err(GraphStoreError::NodeNotFound(target_id.to_string()));
+        }
+        let label_id = self.intern_edge_label(category)?;
+        let edge = StoredEdge {
+            source_id: source_id.to_string(),
+            target_id: target_id.to_string(),
+            edge_type: category.to_string(),
+            label_id,
+            weight,
+            page_id: 0,
+            slot: 0,
+        };
+        let location = self.write_edge_record(source_id, target_id, label_id, &edge)?;
+        self.edge_index
+            .add_edge(source_id, target_id, category, weight);
+        self.edge_count.fetch_add(1, Ordering::Relaxed);
+        Ok(location)
+    }
+
+    /// Internal: encode a [`StoredNode`] and append to the current node page,
+    /// rolling over to a new page when full.
+    fn write_node_record(
+        &self,
+        id: &str,
+        node: &StoredNode,
+    ) -> Result<RecordLocation, GraphStoreError> {
+        let encoded = node.encode();
+        let mut pages = self
+            .node_pages
+            .write()
+            .map_err(|_| GraphStoreError::LockPoisoned)?;
+        let current_page_id = self.current_node_page.load(Ordering::Acquire);
+        let page = &mut pages[current_page_id as usize];
+        match page.insert_cell(id.as_bytes(), &encoded) {
+            Ok(slot) => Ok(RecordLocation {
+                page_id: current_page_id,
+                slot: slot as u16,
+            }),
+            Err(_) => {
+                let new_page_id = pages.len() as u32;
+                let mut new_page = Page::new(PageType::GraphNode, new_page_id);
+                let slot = new_page
+                    .insert_cell(id.as_bytes(), &encoded)
+                    .map_err(|_| GraphStoreError::PageFull)?;
+                pages.push(new_page);
+                self.current_node_page.store(new_page_id, Ordering::Release);
+                Ok(RecordLocation {
+                    page_id: new_page_id,
+                    slot: slot as u16,
+                })
+            }
+        }
+    }
+
+    /// Internal: encode a [`StoredEdge`] and append it.
+    fn write_edge_record(
+        &self,
+        source_id: &str,
+        target_id: &str,
+        label_id: LabelId,
+        edge: &StoredEdge,
+    ) -> Result<RecordLocation, GraphStoreError> {
+        let encoded = edge.encode();
+        let edge_key = format!("{}|{}|{}", source_id, label_id.as_u32(), target_id);
+        let mut pages = self
+            .edge_pages
+            .write()
+            .map_err(|_| GraphStoreError::LockPoisoned)?;
+        let current_page_id = self.current_edge_page.load(Ordering::Acquire);
+        let page = &mut pages[current_page_id as usize];
+        match page.insert_cell(edge_key.as_bytes(), &encoded) {
+            Ok(slot) => Ok(RecordLocation {
+                page_id: current_page_id,
+                slot: slot as u16,
+            }),
+            Err(_) => {
+                let new_page_id = pages.len() as u32;
+                let mut new_page = Page::new(PageType::GraphEdge, new_page_id);
+                let slot = new_page
+                    .insert_cell(edge_key.as_bytes(), &encoded)
+                    .map_err(|_| GraphStoreError::PageFull)?;
+                pages.push(new_page);
+                self.current_edge_page.store(new_page_id, Ordering::Release);
+                Ok(RecordLocation {
+                    page_id: new_page_id,
+                    slot: slot as u16,
+                })
+            }
+        }
+    }
+
+    /// Add a node linked to a table row (for unified queries).
     pub fn add_node_linked(
         &self,
         id: &str,
         label: &str,
-        node_type: GraphNodeType,
+        category: &str,
         table_id: u16,
         row_id: u64,
     ) -> Result<RecordLocation, GraphStoreError> {
-        // Check if node already exists
         if self.node_index.contains(id) {
             return Err(GraphStoreError::NodeExists(id.to_string()));
         }
-
+        let label_id = self.intern_node_label(category)?;
         let node = StoredNode {
             id: id.to_string(),
             label: label.to_string(),
-            node_type,
+            node_type: category.to_string(),
+            label_id,
             flags: NODE_FLAG_HAS_TABLE_REF,
             out_edge_count: 0,
             in_edge_count: 0,
@@ -136,44 +230,9 @@ impl GraphStore {
             vector_ref: None,
         };
 
-        let encoded = node.encode();
-
-        // Get write lock on node pages
-        let mut pages = self
-            .node_pages
-            .write()
-            .map_err(|_| GraphStoreError::LockPoisoned)?;
-
-        let current_page_id = self.current_node_page.load(Ordering::Acquire);
-        let page = &mut pages[current_page_id as usize];
-
-        // Try to insert into current page
-        let location = match page.insert_cell(id.as_bytes(), &encoded) {
-            Ok(slot) => RecordLocation {
-                page_id: current_page_id,
-                slot: slot as u16,
-            },
-            Err(_) => {
-                // Page full, allocate new page
-                let new_page_id = pages.len() as u32;
-                let mut new_page = Page::new(PageType::GraphNode, new_page_id);
-
-                let slot = new_page
-                    .insert_cell(id.as_bytes(), &encoded)
-                    .map_err(|_| GraphStoreError::PageFull)?;
-
-                pages.push(new_page);
-                self.current_node_page.store(new_page_id, Ordering::Release);
-
-                RecordLocation {
-                    page_id: new_page_id,
-                    slot: slot as u16,
-                }
-            }
-        };
-
+        let location = self.write_node_record(id, &node)?;
         self.node_index.insert(id.to_string(), location);
-        self.node_secondary.insert(id, node_type, label);
+        self.node_secondary.insert(id, label_id, label);
         self.node_count.fetch_add(1, Ordering::Relaxed);
         Ok(location)
     }
@@ -181,78 +240,6 @@ impl GraphStore {
     /// Get table reference for a node (if linked)
     pub fn get_node_table_ref(&self, node_id: &str) -> Option<TableRef> {
         self.get_node(node_id).and_then(|n| n.table_ref)
-    }
-
-    /// Add an edge to the graph
-    pub fn add_edge(
-        &self,
-        source_id: &str,
-        target_id: &str,
-        edge_type: GraphEdgeType,
-        weight: f32,
-    ) -> Result<RecordLocation, GraphStoreError> {
-        // Verify nodes exist
-        if !self.node_index.contains(source_id) {
-            return Err(GraphStoreError::NodeNotFound(source_id.to_string()));
-        }
-        if !self.node_index.contains(target_id) {
-            return Err(GraphStoreError::NodeNotFound(target_id.to_string()));
-        }
-
-        let edge = StoredEdge {
-            source_id: source_id.to_string(),
-            target_id: target_id.to_string(),
-            edge_type,
-            weight,
-            page_id: 0,
-            slot: 0,
-        };
-
-        let encoded = edge.encode();
-
-        // Create composite key for edge storage
-        let edge_key = format!("{}|{}|{}", source_id, edge_type as u8, target_id);
-
-        // Get write lock on edge pages
-        let mut pages = self
-            .edge_pages
-            .write()
-            .map_err(|_| GraphStoreError::LockPoisoned)?;
-
-        let current_page_id = self.current_edge_page.load(Ordering::Acquire);
-        let page = &mut pages[current_page_id as usize];
-
-        // Try to insert into current page
-        let location = match page.insert_cell(edge_key.as_bytes(), &encoded) {
-            Ok(slot) => RecordLocation {
-                page_id: current_page_id,
-                slot: slot as u16,
-            },
-            Err(_) => {
-                // Page full, allocate new page
-                let new_page_id = pages.len() as u32;
-                let mut new_page = Page::new(PageType::GraphEdge, new_page_id);
-
-                let slot = new_page
-                    .insert_cell(edge_key.as_bytes(), &encoded)
-                    .map_err(|_| GraphStoreError::PageFull)?;
-
-                pages.push(new_page);
-                self.current_edge_page.store(new_page_id, Ordering::Release);
-
-                RecordLocation {
-                    page_id: new_page_id,
-                    slot: slot as u16,
-                }
-            }
-        };
-
-        // Update edge index (this is the fast path for traversal)
-        self.edge_index
-            .add_edge(source_id, target_id, edge_type, weight);
-        self.edge_count.fetch_add(1, Ordering::Relaxed);
-
-        Ok(location)
     }
 
     /// Get a node by ID (lock-free read)
@@ -266,26 +253,22 @@ impl GraphStore {
         StoredNode::decode(&value, location.page_id, location.slot)
     }
 
-    /// Get all outgoing edges from a node (lock-free read)
+    /// Get all outgoing edges from a node `(edge_label, target, weight)`.
     #[inline]
-    pub fn outgoing_edges(&self, source_id: &str) -> Vec<(GraphEdgeType, String, f32)> {
+    pub fn outgoing_edges(&self, source_id: &str) -> Vec<(String, String, f32)> {
         self.edge_index.outgoing(source_id)
     }
 
-    /// Get all incoming edges to a node (lock-free read)
+    /// Get all incoming edges to a node `(edge_label, source, weight)`.
     #[inline]
-    pub fn incoming_edges(&self, target_id: &str) -> Vec<(GraphEdgeType, String, f32)> {
+    pub fn incoming_edges(&self, target_id: &str) -> Vec<(String, String, f32)> {
         self.edge_index.incoming(target_id)
     }
 
-    /// Get outgoing edges of a specific type
+    /// Get outgoing edges of a specific label.
     #[inline]
-    pub fn outgoing_of_type(
-        &self,
-        source_id: &str,
-        edge_type: GraphEdgeType,
-    ) -> Vec<(String, f32)> {
-        self.edge_index.outgoing_of_type(source_id, edge_type)
+    pub fn outgoing_of_type(&self, source_id: &str, edge_label: &str) -> Vec<(String, f32)> {
+        self.edge_index.outgoing_of_type(source_id, edge_label)
     }
 
     /// Check if a node exists
@@ -323,15 +306,19 @@ impl GraphStore {
         let mut edges = Vec::new();
 
         for node in self.iter_nodes() {
-            // Get outgoing edges for this node
-            for (edge_type, target_id, weight) in self.outgoing_edges(&node.id) {
+            for (edge_label, target_id, weight) in self.outgoing_edges(&node.id) {
+                let label_id = self
+                    .registry
+                    .lookup(Namespace::Edge, &edge_label)
+                    .unwrap_or(UNSET_LABEL_ID);
                 edges.push(StoredEdge {
                     source_id: node.id.clone(),
                     target_id,
-                    edge_type,
+                    edge_type: edge_label,
+                    label_id,
                     weight,
-                    page_id: 0, // Not needed for iteration
-                    slot: 0,    // Not needed for iteration
+                    page_id: 0,
+                    slot: 0,
                 });
             }
         }
@@ -339,13 +326,11 @@ impl GraphStore {
         edges
     }
 
-    /// Get nodes of a specific type.
-    ///
-    /// Uses the secondary index to avoid a full page scan: O(k) where k is
-    /// the bucket size, plus one node fetch per id.
-    pub fn nodes_of_type(&self, node_type: GraphNodeType) -> Vec<StoredNode> {
+    /// Get nodes whose category resolves to `label_id`. O(k) via secondary
+    /// index plus one fetch per id.
+    pub fn nodes_of_label(&self, label_id: LabelId) -> Vec<StoredNode> {
         self.node_secondary
-            .nodes_by_type(node_type)
+            .nodes_by_type(label_id)
             .into_iter()
             .filter_map(|id| self.get_node(&id))
             .collect()
@@ -360,6 +345,19 @@ impl GraphStore {
             .into_iter()
             .filter_map(|id| self.get_node(&id))
             .collect()
+    }
+
+    /// Get nodes whose category label (as registered in the
+    /// [`LabelRegistry`]) matches the given string. Replaces the
+    /// enum-typed [`nodes_of_type`] for callers that work with arbitrary
+    /// user-defined labels.
+    ///
+    /// O(k) lookup via secondary index keyed by [`LabelId`].
+    pub fn nodes_with_category(&self, category: &str) -> Vec<StoredNode> {
+        let Some(label_id) = self.registry.lookup(Namespace::Node, category) else {
+            return Vec::new();
+        };
+        self.nodes_of_label(label_id)
     }
 
     /// Returns `true` iff the label is *possibly* present. Bloom-backed
@@ -384,25 +382,37 @@ impl GraphStore {
             ..Default::default()
         };
 
-        // Count nodes by type
+        // Per-category counts now live in `GraphStats::nodes_by_label`,
+        // a `HashMap<String, u64>` because labels are no longer a closed
+        // enum. Old fixed-size `nodes_by_type: [u64; 9]` is unused.
         for node in self.iter_nodes() {
-            stats.nodes_by_type[node.node_type as usize] += 1;
+            *stats
+                .nodes_by_label
+                .entry(node.node_type.clone())
+                .or_insert(0) += 1;
         }
 
         stats
     }
 
-    /// Serialize to bytes for persistence
+    /// Serialize to bytes for persistence (file format v2: includes the
+    /// embedded [`LabelRegistry`] catalog right after the fixed header).
     pub fn serialize(&self) -> Vec<u8> {
         let mut buf = Vec::new();
 
-        // Header: magic(4) + version(4) + node_count(8) + edge_count(8) + node_pages(4) + edge_pages(4)
+        // Fixed header: magic(4) + version(4) + node_count(8) + edge_count(8) = 24 bytes.
         buf.extend_from_slice(b"RBGR"); // RedDB GRaph
-        buf.extend_from_slice(&1u32.to_le_bytes()); // version
+        buf.extend_from_slice(&2u32.to_le_bytes()); // file format version
         buf.extend_from_slice(&self.node_count.load(Ordering::Relaxed).to_le_bytes());
         buf.extend_from_slice(&self.edge_count.load(Ordering::Relaxed).to_le_bytes());
 
-        // Serialize node pages
+        // Embedded label registry: registry_len(4) + registry_bytes.
+        // Always present in v2; empty registry encodes as a 4-byte zero count.
+        let registry_bytes = self.registry.encode().unwrap_or_default();
+        buf.extend_from_slice(&(registry_bytes.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&registry_bytes);
+
+        // Node pages: count(4) + pages.
         if let Ok(pages) = self.node_pages.read() {
             buf.extend_from_slice(&(pages.len() as u32).to_le_bytes());
             for page in pages.iter() {
@@ -410,7 +420,7 @@ impl GraphStore {
             }
         }
 
-        // Serialize edge pages
+        // Edge pages: count(4) + pages.
         if let Ok(pages) = self.edge_pages.read() {
             buf.extend_from_slice(&(pages.len() as u32).to_le_bytes());
             for page in pages.iter() {
@@ -421,18 +431,20 @@ impl GraphStore {
         buf
     }
 
-    /// Deserialize from bytes
+    /// Deserialize from bytes. Dual-path: a v1 file (no embedded registry,
+    /// 1-byte enum discriminants) is read with [`StoredNode::decode_v1`]
+    /// against a freshly-seeded legacy registry. A v2 file restores the
+    /// registry from its embedded blob and decodes records via
+    /// [`StoredNode::decode`].
     pub fn deserialize(data: &[u8]) -> Result<Self, GraphStoreError> {
-        if data.len() < 32 {
+        if data.len() < 24 {
             return Err(GraphStoreError::InvalidData("Too short".to_string()));
         }
-
-        // Verify magic
         if &data[0..4] != b"RBGR" {
             return Err(GraphStoreError::InvalidData("Invalid magic".to_string()));
         }
 
-        let _version = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+        let version = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
         let node_count = u64::from_le_bytes([
             data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
         ]);
@@ -442,7 +454,46 @@ impl GraphStore {
 
         let mut offset = 24;
 
-        // Read node page count
+        // V2 carries the registry blob inline. V1 has none (legacy seed).
+        let registry: Arc<LabelRegistry> = match version {
+            1 => Arc::new(LabelRegistry::with_legacy_seed()),
+            2 => {
+                if data.len() < offset + 4 {
+                    return Err(GraphStoreError::InvalidData(
+                        "Truncated v2 header".to_string(),
+                    ));
+                }
+                let reg_len = u32::from_le_bytes([
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                ]) as usize;
+                offset += 4;
+                if data.len() < offset + reg_len {
+                    return Err(GraphStoreError::InvalidData(
+                        "Truncated registry blob".to_string(),
+                    ));
+                }
+                let reg = LabelRegistry::decode(&data[offset..offset + reg_len])
+                    .map_err(|e| GraphStoreError::InvalidData(e.to_string()))?;
+                offset += reg_len;
+                Arc::new(reg)
+            }
+            v => {
+                return Err(GraphStoreError::InvalidData(format!(
+                    "Unsupported graph file version {}",
+                    v
+                )));
+            }
+        };
+
+        // Node pages
+        if data.len() < offset + 4 {
+            return Err(GraphStoreError::InvalidData(
+                "Truncated before node-page count".to_string(),
+            ));
+        }
         let node_page_count = u32::from_le_bytes([
             data[offset],
             data[offset + 1],
@@ -451,7 +502,6 @@ impl GraphStore {
         ]) as usize;
         offset += 4;
 
-        // Read node pages
         let mut node_pages = Vec::with_capacity(node_page_count);
         for _ in 0..node_page_count {
             if offset + PAGE_SIZE > data.len() {
@@ -465,7 +515,12 @@ impl GraphStore {
             offset += PAGE_SIZE;
         }
 
-        // Read edge page count
+        // Edge pages
+        if data.len() < offset + 4 {
+            return Err(GraphStoreError::InvalidData(
+                "Truncated before edge-page count".to_string(),
+            ));
+        }
         let edge_page_count = u32::from_le_bytes([
             data[offset],
             data[offset + 1],
@@ -474,7 +529,6 @@ impl GraphStore {
         ]) as usize;
         offset += 4;
 
-        // Read edge pages
         let mut edge_pages = Vec::with_capacity(edge_page_count);
         for _ in 0..edge_page_count {
             if offset + PAGE_SIZE > data.len() {
@@ -488,11 +542,58 @@ impl GraphStore {
             offset += PAGE_SIZE;
         }
 
-        // Rebuild indexes from pages
+        // V1 records on disk use the legacy 1-byte enum header, which the
+        // rest of GraphStore (get_node, iterators) does not understand. Migrate
+        // in place: decode every v1 cell, re-insert via the v2 write path.
+        if version == 1 {
+            let store = Self::with_registry(Arc::clone(&registry));
+            for (page_idx, page) in node_pages.iter().enumerate() {
+                let cell_count = page.cell_count() as usize;
+                for cell_idx in 0..cell_count {
+                    if let Ok((_, value)) = page.read_cell(cell_idx) {
+                        if let Some(n) =
+                            StoredNode::decode_v1(&value, page_idx as u32, cell_idx as u16)
+                        {
+                            // V1 node_type already carries the canonical
+                            // legacy label string thanks to the v1 decoder.
+                            store.add_node_with_label(&n.id, &n.label, &n.node_type)?;
+                        }
+                    }
+                }
+            }
+            for (page_idx, page) in edge_pages.iter().enumerate() {
+                let cell_count = page.cell_count() as usize;
+                for cell_idx in 0..cell_count {
+                    if let Ok((_, value)) = page.read_cell(cell_idx) {
+                        if let Some(e) =
+                            StoredEdge::decode_v1(&value, page_idx as u32, cell_idx as u16)
+                        {
+                            // Skip edges whose endpoints failed to migrate.
+                            if !store.has_node(&e.source_id) || !store.has_node(&e.target_id) {
+                                continue;
+                            }
+                            store.add_edge_with_label(
+                                &e.source_id,
+                                &e.target_id,
+                                &e.edge_type,
+                                e.weight,
+                            )?;
+                        }
+                    }
+                }
+            }
+            // Sanity-check counts (v1 file headers can theoretically lie; a
+            // mismatch here points at a corrupt blob, but is not fatal —
+            // the store reflects what we successfully migrated).
+            let _ = (node_count, edge_count);
+            return Ok(store);
+        }
+
         let store = Self {
             node_index: ShardedIndex::new(16),
             edge_index: EdgeIndex::new(16),
             node_secondary: Arc::new(NodeSecondaryIndex::new(8192)),
+            registry,
             node_pages: RwLock::new(node_pages),
             edge_pages: RwLock::new(edge_pages),
             current_node_page: AtomicU32::new(0),
@@ -502,13 +603,23 @@ impl GraphStore {
             edge_count: AtomicU64::new(edge_count),
         };
 
-        store.rebuild_indexes()?;
+        store.rebuild_indexes(version)?;
 
         Ok(store)
     }
 
-    /// Rebuild indexes from pages (used after deserialization)
-    fn rebuild_indexes(&self) -> Result<(), GraphStoreError> {
+    /// Rebuild indexes from pages. `version` selects the on-disk record
+    /// format used when each cell was written.
+    fn rebuild_indexes(&self, version: u32) -> Result<(), GraphStoreError> {
+        let decode_node = |bytes: &[u8], page_idx: u32, slot: u16| match version {
+            1 => StoredNode::decode_v1(bytes, page_idx, slot),
+            _ => StoredNode::decode(bytes, page_idx, slot),
+        };
+        let decode_edge = |bytes: &[u8], page_idx: u32, slot: u16| match version {
+            1 => StoredEdge::decode_v1(bytes, page_idx, slot),
+            _ => StoredEdge::decode(bytes, page_idx, slot),
+        };
+
         // Rebuild node + secondary index
         self.node_secondary.clear();
         if let Ok(pages) = self.node_pages.read() {
@@ -525,15 +636,15 @@ impl GraphStore {
                             },
                         );
                         if let Some(node) =
-                            StoredNode::decode(&value, page_idx as u32, cell_idx as u16)
+                            decode_node(&value, page_idx as u32, cell_idx as u16)
                         {
-                            self.node_secondary.insert(&id, node.node_type, &node.label);
+                            self.node_secondary
+                                .insert(&id, node.label_id, &node.label);
                         }
                     }
                 }
             }
 
-            // Update current node page
             if !pages.is_empty() {
                 self.current_node_page
                     .store((pages.len() - 1) as u32, Ordering::Release);
@@ -547,12 +658,12 @@ impl GraphStore {
                 for cell_idx in 0..cell_count {
                     if let Ok((_, value)) = page.read_cell(cell_idx) {
                         if let Some(edge) =
-                            StoredEdge::decode(&value, page_idx as u32, cell_idx as u16)
+                            decode_edge(&value, page_idx as u32, cell_idx as u16)
                         {
                             self.edge_index.add_edge(
                                 &edge.source_id,
                                 &edge.target_id,
-                                edge.edge_type,
+                                &edge.edge_type,
                                 edge.weight,
                             );
                         }
@@ -560,7 +671,6 @@ impl GraphStore {
                 }
             }
 
-            // Update current edge page
             if !pages.is_empty() {
                 self.current_edge_page
                     .store((pages.len() - 1) as u32, Ordering::Release);
