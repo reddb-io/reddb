@@ -101,6 +101,10 @@ jobs:
           echo "package_version=${PACKAGE_VERSION}" >> "$GITHUB_OUTPUT"
           echo "github_prerelease=${IS_PRERELEASE}" >> "$GITHUB_OUTPUT"
 
+      - name: Check workspace version consistency
+        if: steps.plan.outputs.should_skip != 'true'
+        run: bash scripts/check-versions.sh
+
   build:
     name: Build ${{ matrix.asset_name }}
     needs: [plan]
