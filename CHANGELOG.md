@@ -11,6 +11,52 @@ Dates are ISO-8601 (UTC-3).
 
 ## [Unreleased]
 
+### Breaking
+
+- **Graph file format bumped to v2.** The on-disk graph layout now
+  embeds a `LabelRegistry` blob in the file header and stores a
+  registry-resolved `LabelId` (u32) per node/edge instead of the v1
+  `u8` enum discriminant. V1 files still load — the deserializer
+  detects `version == 1`, decodes records through a legacy seed map,
+  and re-inserts them through the v2 write path. The next `serialize()`
+  emits v2.
+- `GraphNodeType` and `GraphEdgeType` enums are gone. The
+  `add_node(GraphNodeType)` / `add_edge(GraphEdgeType)` overloads have
+  been replaced by `add_node_with_label(id, display, category: &str)`
+  and `add_edge_with_label(src, tgt, category: &str, weight)`. Embedded
+  Rust callers that constructed an enum literal need to pass the
+  canonical lowercase string instead (`"host"` for `GraphNodeType::Host`,
+  `"connects_to"` for `GraphEdgeType::ConnectsTo`, …). SQL/Cypher/SPARQL/
+  Gremlin callers are unaffected — those layers already worked with
+  free-form label strings.
+- `MatchedNode.node_type: GraphNodeType` → `MatchedNode.node_label:
+  String`; `MatchedEdge.edge_type: GraphEdgeType` → `MatchedEdge
+  .edge_label: String`. The `node_type` JSON property exposed by the
+  query result still serializes the same canonical strings.
+- `GraphStats.nodes_by_type: [u64; 9]` → `nodes_by_label:
+  HashMap<String, u64>`; same for `edges_by_type`. Categories are no
+  longer capped at 9 / 10.
+- Removed `storage::{client, segments, records, layout, service,
+  session}` and `query::security` (~18.6k LOC of pentest /
+  threat-intelligence schemas + the legacy `ActionRecorder` /
+  `PersistenceManager` pipeline). They had zero consumers outside their
+  own pile and contradicted the engine's "any data" pitch. Build
+  failures pointing at `crate::storage::ActionRecord`,
+  `storage::HostIntelRecord`, `storage::PersistenceManager`,
+  `engine::GraphEmitter`, etc., should migrate to the unified storage
+  API (`storage::RedDB`) or vendor the deleted modules in user code.
+
+### Added
+
+- `LabelRegistry` (`storage::engine::graph_store::LabelRegistry`) —
+  per-database catalog mapping arbitrary user-supplied label strings to
+  dense `u32` `LabelId` values across two namespaces (`Node`, `Edge`).
+  Powers the v2 graph format; pre-seeded with the legacy enum names
+  (IDs 1..=19) so v1 records round-trip without a migration tool.
+- `GraphStore::registry: Arc<LabelRegistry>`, `intern_node_label`,
+  `intern_edge_label`, `nodes_with_category(&str)`,
+  `nodes_of_label(LabelId)`.
+
 ### Documentation
 
 - `docs/security/vault.md` rewritten as a full operator reference for

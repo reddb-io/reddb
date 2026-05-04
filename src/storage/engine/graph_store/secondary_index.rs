@@ -156,6 +156,16 @@ impl NodeSecondaryIndex {
             .unwrap_or(0)
     }
 
+    /// Snapshot `(label_id, cardinality)` for every populated bucket. Cheap
+    /// enough for `stats()` to call on demand instead of a full
+    /// `iter_nodes()` scan.
+    pub fn label_id_counts(&self) -> Vec<(LabelId, u64)> {
+        self.by_type
+            .read()
+            .map(|map| map.iter().map(|(id, set)| (*id, set.len() as u64)).collect())
+            .unwrap_or_default()
+    }
+
     /// Number of distinct labels tracked.
     pub fn distinct_labels(&self) -> usize {
         self.by_label.read().map(|m| m.len()).unwrap_or(0)
