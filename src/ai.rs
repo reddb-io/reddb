@@ -1330,13 +1330,29 @@ pub fn grpc_embeddings(
         .filter(|s| !s.is_empty())
         .unwrap_or("openai");
     let provider = parse_provider(provider_name)?;
-    if !provider.is_openai_compatible() {
-        return Err(crate::RedDBError::Query(format!(
-            "embeddings are not yet available for provider '{}' via gRPC. \
-             Use an OpenAI-compatible provider (openai, groq, ollama, \
-             openrouter, together, venice, deepseek, or a custom base URL).",
-            provider.token()
-        )));
+    // Routing matrix mirrors `handle_ai_embeddings`. See that function
+    // for the rationale; in short: HuggingFace gets its own wire
+    // shape, Anthropic fails fast (no embeddings product), and Local
+    // requires a build-time feature flag.
+    match &provider {
+        AiProvider::Anthropic => {
+            return Err(crate::RedDBError::Query(
+                "Anthropic does not offer an embeddings API. \
+                 Re-issue the request against an OpenAI-compatible \
+                 provider (openai, groq, ollama, openrouter, together, \
+                 venice, deepseek), HuggingFace, or a custom base URL — \
+                 RedDB does not silently route embeddings to a \
+                 different provider than the one you named.".to_string(),
+            ));
+        }
+        AiProvider::Local => {
+            return Err(crate::RedDBError::Query(
+                "Local embeddings require the `local-models` feature \
+                 flag at engine build time."
+                    .to_string(),
+            ));
+        }
+        _ => {}
     }
 
     let inputs: Vec<String> = grpc_collect_embedding_inputs(runtime, payload)?;
@@ -1370,13 +1386,21 @@ pub fn grpc_embeddings(
         .and_then(|v| usize::try_from(v).ok())
         .filter(|v| *v > 0);
 
-    let response = openai_embeddings(OpenAiEmbeddingRequest {
-        api_key,
-        model,
-        inputs,
-        dimensions,
-        api_base: provider.resolve_api_base(),
-    })?;
+    let response = match &provider {
+        AiProvider::HuggingFace => huggingface_embeddings(
+            &api_key,
+            &model,
+            &inputs,
+            &provider.resolve_api_base(),
+        )?,
+        _ => openai_embeddings(OpenAiEmbeddingRequest {
+            api_key,
+            model,
+            inputs,
+            dimensions,
+            api_base: provider.resolve_api_base(),
+        })?,
+    };
 
     let embeddings_json: Vec<JsonValue> = response
         .embeddings
