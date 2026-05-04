@@ -40,6 +40,11 @@ fn parse_provider_accepts_all_readme_keywords() {
 
 #[test]
 fn grpc_embeddings_rejects_anthropic_with_clear_message() {
+    // Issue #36 nailed down the policy: Anthropic has no embeddings
+    // product and RedDB rejects the request explicitly rather than
+    // silently re-routing to a different provider. Pin the error
+    // copy is operator-actionable: names the provider, says they
+    // don't have embeddings, and points at the alternatives.
     let rt = rt();
     let mut payload = Map::new();
     payload.insert(
@@ -53,19 +58,28 @@ fn grpc_embeddings_rejects_anthropic_with_clear_message() {
     let err = grpc_embeddings(&rt, &JsonValue::Object(payload))
         .expect_err("anthropic embeddings should be rejected");
     let msg = err.to_string();
+    let lower = msg.to_ascii_lowercase();
     assert!(
-        msg.contains("anthropic"),
+        lower.contains("anthropic"),
         "error must name the provider: {msg}"
     );
     assert!(
-        msg.to_ascii_lowercase().contains("not yet available")
-            || msg.to_ascii_lowercase().contains("not yet"),
-        "error must indicate unsupported status: {msg}"
+        lower.contains("does not offer") || lower.contains("does not"),
+        "error must explain that anthropic has no embeddings product: {msg}"
+    );
+    assert!(
+        lower.contains("openai") || lower.contains("compatible"),
+        "error must point operator at an alternative: {msg}"
     );
 }
 
 #[test]
-fn grpc_embeddings_rejects_huggingface_with_clear_message() {
+fn grpc_embeddings_huggingface_dispatches_to_hf_client() {
+    // Issue #36: HuggingFace embeddings now route to the dedicated
+    // `huggingface_embeddings()` client instead of being rejected.
+    // Without an HTTP server here the request will fail at the
+    // transport layer — but the failure message must come from the
+    // HF code path, not from the old "not yet available" reject.
     let rt = rt();
     let mut payload = Map::new();
     payload.insert(
@@ -77,8 +91,18 @@ fn grpc_embeddings_rejects_huggingface_with_clear_message() {
         JsonValue::Array(vec![JsonValue::String("hi".to_string())]),
     );
     let err = grpc_embeddings(&rt, &JsonValue::Object(payload))
-        .expect_err("huggingface embeddings should be rejected");
-    assert!(err.to_string().contains("huggingface"));
+        .expect_err("hf embeddings should fail without an api key / server");
+    let lower = err.to_string().to_ascii_lowercase();
+    assert!(
+        !lower.contains("not yet available"),
+        "must NOT use the legacy unsupported-provider message: {err}",
+    );
+    // Either the API-key resolution failed or the HF transport did.
+    // Both paths name the provider in the error.
+    assert!(
+        lower.contains("huggingface") || lower.contains("api key"),
+        "error must surface the HF dispatch path: {err}"
+    );
 }
 
 #[test]
