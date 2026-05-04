@@ -406,9 +406,13 @@ impl OAuthValidator {
         let Some(name) = &self.config.role_claim else {
             return Ok(self.config.default_role);
         };
-        let raw = claims
-            .claim(name)
-            .ok_or_else(|| OAuthError::MissingOrInvalidRole(name.clone()))?;
+        // Missing claim → fall back to `default_role`. A claim that *is*
+        // present but unparseable as a `Role` is still rejected, since
+        // that signals an IdP misconfiguration the operator should hear
+        // about explicitly.
+        let Some(raw) = claims.claim(name) else {
+            return Ok(self.config.default_role);
+        };
         Role::from_str(raw.trim()).ok_or_else(|| OAuthError::MissingOrInvalidRole(name.clone()))
     }
 }

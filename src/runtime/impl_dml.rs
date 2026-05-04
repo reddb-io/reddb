@@ -1131,10 +1131,11 @@ impl RedDBRuntime {
             let metadata_key = resolve_sql_ttl_metadata_key(column);
             if let Ok(value) = fold_expr_to_value(expr.clone()) {
                 if let Some(metadata_key) = metadata_key {
-                    static_metadata_assignments.push((
-                        metadata_key.to_string(),
-                        sql_literal_to_metadata_value(metadata_key, &value)?,
-                    ));
+                    let raw_value = sql_literal_to_metadata_value(metadata_key, &value)?;
+                    let (canonical_key, canonical_value) =
+                        canonicalize_sql_ttl_metadata(metadata_key, raw_value);
+                    static_metadata_assignments
+                        .push((canonical_key.to_string(), canonical_value));
                 } else {
                     static_field_assignments.push((
                         column.clone(),
@@ -1254,10 +1255,12 @@ impl RedDBRuntime {
             })?;
 
             if let Some(metadata_key) = assignment.metadata_key {
-                assignments.dynamic_metadata_assignments.push((
-                    metadata_key.to_string(),
-                    sql_literal_to_metadata_value(metadata_key, &value)?,
-                ));
+                let raw_value = sql_literal_to_metadata_value(metadata_key, &value)?;
+                let (canonical_key, canonical_value) =
+                    canonicalize_sql_ttl_metadata(metadata_key, raw_value);
+                assignments
+                    .dynamic_metadata_assignments
+                    .push((canonical_key.to_string(), canonical_value));
             } else {
                 assignments.dynamic_field_assignments.push((
                     assignment.column.clone(),
@@ -1825,6 +1828,32 @@ fn resolve_sql_ttl_metadata_key(column: &str) -> Option<&'static str> {
     }
 }
 
+/// Canonicalize a SQL TTL metadata `(key, value)` pair so the retention
+/// sweeper sees a single key (`_ttl_ms`) regardless of which legacy form
+/// the operator wrote. `_ttl` is scaled from seconds to milliseconds;
+/// `_ttl_ms` and `_expires_at` are passed through.
+fn canonicalize_sql_ttl_metadata(
+    key: &'static str,
+    value: MetadataValue,
+) -> (&'static str, MetadataValue) {
+    if key != "_ttl" {
+        return (key, value);
+    }
+    let scaled = match value {
+        MetadataValue::Int(s) => {
+            MetadataValue::Int(s.saturating_mul(1_000))
+        }
+        MetadataValue::Timestamp(ms_or_s) => {
+            // Timestamp is already chosen for very large values; treat as
+            // already-ms to avoid silent overflow.
+            MetadataValue::Timestamp(ms_or_s)
+        }
+        MetadataValue::Float(f) => MetadataValue::Float(f * 1_000.0),
+        other => other,
+    };
+    ("_ttl_ms", scaled)
+}
+
 /// Sentinel prefix produced by the parser for `PASSWORD('...')` and
 /// `SECRET('...')` literals. The runtime strips this marker and
 /// applies the actual crypto transform during INSERT execution.
@@ -1909,10 +1938,10 @@ fn split_insert_metadata(
     for (column, value) in columns.iter().zip(values.iter()) {
         // Still support legacy _ttl columns for backward compat
         if let Some(metadata_key) = resolve_sql_ttl_metadata_key(column) {
-            metadata.push((
-                metadata_key.to_string(),
-                sql_literal_to_metadata_value(metadata_key, value)?,
-            ));
+            let raw_value = sql_literal_to_metadata_value(metadata_key, value)?;
+            let (canonical_key, canonical_value) =
+                canonicalize_sql_ttl_metadata(metadata_key, raw_value);
+            metadata.push((canonical_key.to_string(), canonical_value));
             continue;
         }
         fields.push((

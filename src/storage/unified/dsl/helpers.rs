@@ -178,9 +178,23 @@ pub fn extract_searchable_text(entity: &UnifiedEntity) -> String {
             }
         }
         EntityData::Row(row) => {
-            for col in &row.columns {
-                if let Value::Text(s) = col {
-                    parts.push(s.to_string());
+            // Prefer columnar form when present, otherwise fall through to
+            // the named map. Single-row insert paths populate `named` only
+            // (the columnar `columns` vec is filled later by the segment
+            // manager during bulk-write); without this fallback,
+            // text search on a freshly-created single row returns no hits.
+            if !row.columns.is_empty() {
+                for col in &row.columns {
+                    if let Value::Text(s) = col {
+                        parts.push(s.to_string());
+                    }
+                }
+            } else if let Some(named) = &row.named {
+                for (k, v) in named {
+                    parts.push(k.clone());
+                    if let Value::Text(s) = v {
+                        parts.push(s.to_string());
+                    }
                 }
             }
         }
