@@ -1,3 +1,7 @@
+[workspace]
+members = []
+resolver = "2"
+
 [package]
 name = "reddb"
 version = "0.2.9"
