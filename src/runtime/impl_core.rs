@@ -5891,6 +5891,27 @@ impl RedDBRuntime {
         ];
 
         let mut records: Vec<crate::storage::query::unified::UnifiedRecord> = Vec::new();
+
+        // Prepend `CteScan` markers when the query carried a leading
+        // WITH clause. The CTE bodies are already inlined into the
+        // main plan tree, but operators reading EXPLAIN need to see
+        // which named CTEs were resolved — without this row the plan
+        // would look indistinguishable from a hand-inlined query.
+        for name in &explain.cte_materializations {
+            use std::sync::Arc;
+            let mut rec = crate::storage::query::unified::UnifiedRecord::default();
+            rec.values
+                .insert(Arc::from("op"), Value::text("CteScan".to_string()));
+            rec.values
+                .insert(Arc::from("source"), Value::text(name.clone()));
+            rec.values
+                .insert(Arc::from("est_rows"), Value::Float(0.0));
+            rec.values
+                .insert(Arc::from("est_cost"), Value::Float(0.0));
+            rec.values.insert(Arc::from("depth"), Value::Integer(0));
+            records.push(rec);
+        }
+
         walk_plan_node(&explain.logical_plan.root, 0, &mut records);
 
         let result = crate::storage::query::unified::UnifiedResult {

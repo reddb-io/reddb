@@ -9,7 +9,30 @@ impl RedDBRuntime {
             return Err(RedDBError::Query("unable to detect query mode".to_string()));
         }
 
-        let expr = parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?;
+        // CTE prelude (#42): when the query starts with `WITH`, parse
+        // through the CTE-aware entry, capture each CTE's name for the
+        // renderer, and inline the WITH clause before planning. The
+        // plan tree then reflects the post-inlining body; CTE markers
+        // are surfaced via `cte_materializations` for `EXPLAIN` output.
+        let trimmed = query.trim_start();
+        let head_end = trimmed
+            .find(|c: char| c.is_whitespace() || c == '(')
+            .unwrap_or(trimmed.len());
+        let (expr, cte_names) = if trimmed[..head_end].eq_ignore_ascii_case("WITH") {
+            let parsed = crate::storage::query::parser::parse(query)
+                .map_err(|e| RedDBError::Query(e.to_string()))?;
+            let names = parsed
+                .with_clause
+                .as_ref()
+                .map(|w| w.ctes.iter().map(|c| c.name.clone()).collect::<Vec<_>>())
+                .unwrap_or_default();
+            let inlined = crate::storage::query::executors::inline_ctes(parsed)
+                .map_err(|e| RedDBError::Query(e.to_string()))?;
+            (inlined, names)
+        } else {
+            let expr = parse_multi(query).map_err(|err| RedDBError::Query(err.to_string()))?;
+            (expr, Vec::new())
+        };
         let statement = query_expr_name(&expr);
         let mut planner = QueryPlanner::with_stats_provider(Arc::new(
             crate::storage::query::planner::stats_provider::CatalogStatsProvider::from_db(
@@ -39,6 +62,7 @@ impl RedDBRuntime {
             estimated_confidence: cardinality.confidence,
             passes_applied: plan.passes_applied,
             logical_plan: CanonicalPlanner::new(&self.inner.db).build(&plan.optimized),
+            cte_materializations: cte_names,
         })
     }
 
