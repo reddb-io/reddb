@@ -2040,6 +2040,48 @@ fn test_password_hash_and_verify() {
         // Display must mask the value.
         assert_eq!(format!("{pw_value}"), "***");
     }
+
+    query
+        .execute(ExecuteQueryInput {
+            query: "UPDATE accounts SET pw = PASSWORD('NewP@ss456') WHERE username = 'alice'"
+                .into(),
+        })
+        .expect("UPDATE with PASSWORD() should succeed");
+
+    let old_after_update = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT VERIFY_PASSWORD(pw, 'MyP@ss123') AS ok FROM accounts".into(),
+        })
+        .expect("VERIFY_PASSWORD old candidate after update should succeed");
+    assert_eq!(
+        old_after_update.result.records[0].values.get("ok"),
+        Some(&Value::Boolean(false)),
+        "old password must stop matching after UPDATE"
+    );
+
+    let new_after_update = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT VERIFY_PASSWORD(pw, 'NewP@ss456') AS ok FROM accounts".into(),
+        })
+        .expect("VERIFY_PASSWORD new candidate after update should succeed");
+    assert_eq!(
+        new_after_update.result.records[0].values.get("ok"),
+        Some(&Value::Boolean(true)),
+        "new password must match after UPDATE"
+    );
+
+    let raw_after_update = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT pw FROM accounts".into(),
+        })
+        .expect("raw SELECT of updated password should succeed");
+    match raw_after_update.result.records[0].values.get("pw") {
+        Some(Value::Password(h)) => {
+            assert!(h.starts_with("argon2id$"));
+            assert!(!h.contains("NewP@ss456"));
+        }
+        other => panic!("expected updated Value::Password, got {other:?}"),
+    }
 }
 
 #[test]
@@ -2109,6 +2151,49 @@ fn test_secret_encrypt_and_decrypt() {
             );
         }
         other => panic!("expected Value::Secret when auto_decrypt is off, got {other:?}"),
+    }
+
+    query
+        .execute(ExecuteQueryInput {
+            query: "SET CONFIG red.config.secret.auto_decrypt = true".into(),
+        })
+        .expect("SET CONFIG auto_decrypt=true should succeed");
+    query
+        .execute(ExecuteQueryInput {
+            query: "UPDATE creds SET token = SECRET('sk_live_updated') WHERE name = 'stripe'"
+                .into(),
+        })
+        .expect("UPDATE with SECRET() should succeed once the vault is wired");
+
+    let updated_decrypted = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT name, token FROM creds".into(),
+        })
+        .expect("SELECT updated secret should succeed");
+    assert_eq!(
+        updated_decrypted.result.records[0].values.get("token"),
+        Some(&Value::text("sk_live_updated".to_string())),
+        "updated secret should decrypt to the new plaintext"
+    );
+
+    query
+        .execute(ExecuteQueryInput {
+            query: "SET CONFIG red.config.secret.auto_decrypt = false".into(),
+        })
+        .expect("SET CONFIG auto_decrypt=false should succeed");
+    let updated_masked = query
+        .execute(ExecuteQueryInput {
+            query: "SELECT name, token FROM creds".into(),
+        })
+        .expect("SELECT updated secret with auto_decrypt=false should succeed");
+    match updated_masked.result.records[0].values.get("token") {
+        Some(Value::Secret(bytes)) => {
+            assert!(
+                !String::from_utf8_lossy(bytes).contains("sk_live_updated"),
+                "updated ciphertext must not reveal plaintext"
+            );
+        }
+        other => panic!("expected updated Value::Secret, got {other:?}"),
     }
 }
 

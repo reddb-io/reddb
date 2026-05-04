@@ -449,9 +449,7 @@ impl NaturalExecutor {
     fn to_rql(&self, query: &NaturalQuery) -> String {
         match query.intent {
             QueryIntent::Find => {
-                let node_type = self
-                    .primary_entity_label(query)
-                    .unwrap_or("*");
+                let node_type = self.primary_entity_label(query).unwrap_or("*");
 
                 let filters: Vec<String> = query
                     .entities
@@ -486,9 +484,7 @@ impl NaturalExecutor {
                 }
             }
             QueryIntent::Count => {
-                let node_type = self
-                    .primary_entity_label(query)
-                    .unwrap_or("*");
+                let node_type = self.primary_entity_label(query).unwrap_or("*");
                 format!("MATCH (n:{}) RETURN COUNT(n)", node_type)
             }
             QueryIntent::Show => {

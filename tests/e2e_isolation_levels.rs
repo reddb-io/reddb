@@ -118,7 +118,11 @@ fn other_connection_does_not_see_uncommitted_row() {
 
     // Conn A: open tx, write, do not commit.
     try_exec(&rt, "BEGIN").unwrap();
-    try_exec(&rt, "INSERT INTO iso_check (id, val) VALUES (42, 'pending')").unwrap();
+    try_exec(
+        &rt,
+        "INSERT INTO iso_check (id, val) VALUES (42, 'pending')",
+    )
+    .unwrap();
     let writer_view = select_count(&rt, "SELECT * FROM iso_check WHERE id = 42");
     assert_eq!(writer_view, 1, "writer sees own uncommitted row");
 
@@ -148,8 +152,10 @@ fn autocommit_insert_stamps_xmin_greater_than_zero() {
     // Post-fix: a fresh xid is allocated from the coordinator and
     // committed up-front so the row's xmin is meaningful.
     let rt = rt();
-    rt.execute_query("CREATE TABLE xmin_check (id INT, name TEXT)").unwrap();
-    rt.execute_query("INSERT INTO xmin_check (id, name) VALUES (1, 'fresh')").unwrap();
+    rt.execute_query("CREATE TABLE xmin_check (id INT, name TEXT)")
+        .unwrap();
+    rt.execute_query("INSERT INTO xmin_check (id, name) VALUES (1, 'fresh')")
+        .unwrap();
 
     let store = rt.db().store();
     let mgr = store.get_collection("xmin_check").expect("collection");

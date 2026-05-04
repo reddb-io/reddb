@@ -167,13 +167,75 @@ enum NormalizeMode {
     Update,
 }
 
-fn normalize_row_fields_for_contract(
-    db: &crate::storage::unified::devx::RedDB,
-    collection: &str,
-    fields: Vec<(String, Value)>,
-) -> RedDBResult<Vec<(String, Value)>> {
-    normalize_row_fields_for_contract_with_mode(db, collection, fields, NormalizeMode::Insert)
+mod collection_contract_enforcement {
+    use super::*;
+
+    pub(super) struct CollectionContractWriteEnforcer<'a> {
+        db: &'a crate::storage::unified::devx::RedDB,
+        collection: &'a str,
+    }
+
+    impl<'a> CollectionContractWriteEnforcer<'a> {
+        pub(super) fn new(
+            db: &'a crate::storage::unified::devx::RedDB,
+            collection: &'a str,
+        ) -> Self {
+            Self { db, collection }
+        }
+
+        pub(super) fn ensure_model(
+            &self,
+            requested_model: crate::catalog::CollectionModel,
+        ) -> RedDBResult<()> {
+            ensure_collection_model_contract(self.db, self.collection, requested_model)
+        }
+
+        pub(super) fn normalize_insert_fields(
+            &self,
+            fields: Vec<(String, Value)>,
+        ) -> RedDBResult<Vec<(String, Value)>> {
+            normalize_row_fields_for_contract_with_mode(
+                self.db,
+                self.collection,
+                fields,
+                NormalizeMode::Insert,
+            )
+        }
+
+        pub(super) fn normalize_update_fields(
+            &self,
+            fields: Vec<(String, Value)>,
+        ) -> RedDBResult<Vec<(String, Value)>> {
+            normalize_row_fields_for_contract_with_mode(
+                self.db,
+                self.collection,
+                fields,
+                NormalizeMode::Update,
+            )
+        }
+
+        pub(super) fn enforce_row_uniqueness(
+            &self,
+            fields: &[(String, Value)],
+            exclude_id: Option<crate::storage::EntityId>,
+        ) -> RedDBResult<()> {
+            enforce_row_uniqueness(self.db, self.collection, fields, exclude_id)
+        }
+
+        pub(super) fn enforce_batch_uniqueness(
+            &self,
+            rows: &[Vec<(String, Value)>],
+        ) -> RedDBResult<()> {
+            enforce_row_batch_uniqueness(self.db, self.collection, rows)
+        }
+
+        pub(super) fn requires_uniqueness_check(&self, modified_columns: &[String]) -> bool {
+            row_update_requires_uniqueness_check(self.db, self.collection, modified_columns)
+        }
+    }
 }
+
+use collection_contract_enforcement::CollectionContractWriteEnforcer;
 
 fn normalize_row_fields_for_contract_with_mode(
     db: &crate::storage::unified::devx::RedDB,
@@ -1231,6 +1293,7 @@ impl RedDBRuntime {
                 }
 
                 if !modified_columns.is_empty() || row_contract_timestamps {
+                    let contract = CollectionContractWriteEnforcer::new(&db, &collection);
                     let current_fields = if let Some(named) = row.named.take() {
                         named.into_iter().collect::<Vec<_>>()
                     } else if let Some(schema) = row.schema.as_ref() {
@@ -1242,18 +1305,13 @@ impl RedDBRuntime {
                     } else {
                         Vec::new()
                     };
-                    let normalized_fields = normalize_row_fields_for_contract_with_mode(
-                        &db,
-                        &collection,
-                        current_fields,
-                        NormalizeMode::Update,
-                    )?;
+                    let normalized_fields = contract.normalize_update_fields(current_fields)?;
                     if row_contract_timestamps {
                         modified_columns.push("updated_at".to_string());
                         context_index_dirty = true;
                     }
-                    if row_update_requires_uniqueness_check(&db, &collection, &modified_columns) {
-                        enforce_row_uniqueness(&db, &collection, &normalized_fields, Some(id))?;
+                    if contract.requires_uniqueness_check(&modified_columns) {
+                        contract.enforce_row_uniqueness(&normalized_fields, Some(id))?;
                     }
                     row.named = Some(normalized_fields.into_iter().collect());
                 }
@@ -1627,6 +1685,7 @@ impl RedDBRuntime {
         }
 
         if !modified_columns.is_empty() || row_contract_timestamps {
+            let contract = CollectionContractWriteEnforcer::new(&db, &collection);
             if row_contract_timestamps {
                 context_index_dirty = true;
                 set_row_field(
@@ -1638,7 +1697,7 @@ impl RedDBRuntime {
             }
             if row_touches_unique_columns {
                 let current_fields = collect_row_fields(row);
-                enforce_row_uniqueness(&db, &collection, &current_fields, Some(id))?;
+                contract.enforce_row_uniqueness(&current_fields, Some(id))?;
             }
         }
 
@@ -1886,11 +1945,8 @@ impl RedDBRuntime {
         input: CreateNodeInput,
     ) -> RedDBResult<CreateEntityOutput> {
         let db = self.db();
-        ensure_collection_model_contract(
-            &db,
-            &input.collection,
-            crate::catalog::CollectionModel::Graph,
-        )?;
+        let contract = CollectionContractWriteEnforcer::new(&db, &input.collection);
+        contract.ensure_model(crate::catalog::CollectionModel::Graph)?;
         let mut metadata = input.metadata;
         apply_collection_default_ttl(&db, &input.collection, &mut metadata);
         let mut builder = db.node(&input.collection, &input.label);
@@ -1945,11 +2001,8 @@ impl RedDBRuntime {
         input: CreateEdgeInput,
     ) -> RedDBResult<CreateEntityOutput> {
         let db = self.db();
-        ensure_collection_model_contract(
-            &db,
-            &input.collection,
-            crate::catalog::CollectionModel::Graph,
-        )?;
+        let contract = CollectionContractWriteEnforcer::new(&db, &input.collection);
+        contract.ensure_model(crate::catalog::CollectionModel::Graph)?;
         let mut metadata = input.metadata;
         apply_collection_default_ttl(&db, &input.collection, &mut metadata);
         let mut builder = db
@@ -1991,11 +2044,6 @@ impl RuntimeEntityPort for RedDBRuntime {
     fn create_row(&self, input: CreateRowInput) -> RedDBResult<CreateEntityOutput> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         let db = self.db();
-        ensure_collection_model_contract(
-            &db,
-            &input.collection,
-            crate::catalog::CollectionModel::Table,
-        )?;
         let CreateRowInput {
             collection,
             fields,
@@ -2003,10 +2051,12 @@ impl RuntimeEntityPort for RedDBRuntime {
             node_links,
             vector_links,
         } = input;
+        let contract = CollectionContractWriteEnforcer::new(&db, &collection);
+        contract.ensure_model(crate::catalog::CollectionModel::Table)?;
         let mut metadata = input_metadata;
         apply_collection_default_ttl(&db, &collection, &mut metadata);
-        let fields = normalize_row_fields_for_contract(&db, &collection, fields)?;
-        enforce_row_uniqueness(&db, &collection, &fields, None)?;
+        let fields = contract.normalize_insert_fields(fields)?;
+        contract.enforce_row_uniqueness(&fields, None)?;
         // Route through MutationEngine for unified hot path.
         let engine = self.mutation_engine();
         let result = engine.apply(
@@ -2041,7 +2091,8 @@ impl RuntimeEntityPort for RedDBRuntime {
 
         let db = self.db();
         let collection = input.collection;
-        ensure_collection_model_contract(&db, &collection, crate::catalog::CollectionModel::Table)?;
+        let contract = CollectionContractWriteEnforcer::new(&db, &collection);
+        contract.ensure_model(crate::catalog::CollectionModel::Table)?;
 
         let mut prepared_rows = Vec::with_capacity(input.rows.len());
         let mut uniqueness_rows = Vec::with_capacity(input.rows.len());
@@ -2055,13 +2106,13 @@ impl RuntimeEntityPort for RedDBRuntime {
 
             let mut metadata = row.metadata;
             apply_collection_default_ttl(&db, &collection, &mut metadata);
-            let fields = normalize_row_fields_for_contract(&db, &collection, row.fields)?;
-            enforce_row_uniqueness(&db, &collection, &fields, None)?;
+            let fields = contract.normalize_insert_fields(row.fields)?;
+            contract.enforce_row_uniqueness(&fields, None)?;
             uniqueness_rows.push(fields.clone());
             prepared_rows.push((fields, metadata, row.node_links, row.vector_links));
         }
 
-        enforce_row_batch_uniqueness(&db, &collection, &uniqueness_rows)?;
+        contract.enforce_batch_uniqueness(&uniqueness_rows)?;
 
         // Route through MutationEngine: single bulk_insert + one CDC batch
         // instead of N separate cdc_emit() calls (each acquires a write lock).
@@ -2113,7 +2164,8 @@ impl RuntimeEntityPort for RedDBRuntime {
         self.check_db_size()?;
 
         let db = self.db();
-        ensure_collection_model_contract(&db, &collection, crate::catalog::CollectionModel::Table)?;
+        let contract = CollectionContractWriteEnforcer::new(&db, &collection);
+        contract.ensure_model(crate::catalog::CollectionModel::Table)?;
 
         let store = db.store();
         let ncols = column_names.len();
@@ -2215,7 +2267,8 @@ impl RuntimeEntityPort for RedDBRuntime {
         // rows at it — this one-off check is O(1), independent of
         // ncols, and catches schema-kind mismatches that the client
         // can't always see.
-        ensure_collection_model_contract(&db, &collection, crate::catalog::CollectionModel::Table)?;
+        let contract = CollectionContractWriteEnforcer::new(&db, &collection);
+        contract.ensure_model(crate::catalog::CollectionModel::Table)?;
 
         // Hoist the per-collection default TTL lookup out of the
         // per-row loop — it only depends on the collection, not on
@@ -2278,11 +2331,8 @@ impl RuntimeEntityPort for RedDBRuntime {
     fn create_vector(&self, input: CreateVectorInput) -> RedDBResult<CreateEntityOutput> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         let db = self.db();
-        ensure_collection_model_contract(
-            &db,
-            &input.collection,
-            crate::catalog::CollectionModel::Vector,
-        )?;
+        let contract = CollectionContractWriteEnforcer::new(&db, &input.collection);
+        contract.ensure_model(crate::catalog::CollectionModel::Vector)?;
         let mut metadata = input.metadata;
         apply_collection_default_ttl(&db, &input.collection, &mut metadata);
         let mut builder = db.vector(&input.collection).dense(input.dense);
@@ -2323,11 +2373,8 @@ impl RuntimeEntityPort for RedDBRuntime {
     fn create_document(&self, input: CreateDocumentInput) -> RedDBResult<CreateEntityOutput> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         let db = self.db();
-        ensure_collection_model_contract(
-            &db,
-            &input.collection,
-            crate::catalog::CollectionModel::Document,
-        )?;
+        let contract = CollectionContractWriteEnforcer::new(&db, &input.collection);
+        contract.ensure_model(crate::catalog::CollectionModel::Document)?;
 
         // Serialize the full body as Value::Json for the "body" field
         let body_bytes = json_to_vec(&input.body).map_err(|err| {
@@ -2406,11 +2453,8 @@ impl RuntimeEntityPort for RedDBRuntime {
     ) -> RedDBResult<CreateEntityOutput> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
         let db = self.db();
-        ensure_collection_model_contract(
-            &db,
-            &input.collection,
-            crate::catalog::CollectionModel::TimeSeries,
-        )?;
+        let contract = CollectionContractWriteEnforcer::new(&db, &input.collection);
+        contract.ensure_model(crate::catalog::CollectionModel::TimeSeries)?;
 
         let mut fields = vec![
             (

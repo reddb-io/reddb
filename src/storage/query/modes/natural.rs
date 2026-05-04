@@ -619,20 +619,22 @@ impl NaturalQuery {
         // types by extending this match.
         if let Some(ref relationship) = self.relationship {
             if nodes.len() >= 2 {
-                let edge_label = Some(match relationship {
-                    RelationshipType::HasService => "has_service",
-                    RelationshipType::HasPort => "has_endpoint",
-                    RelationshipType::HasVuln => "affected_by",
-                    RelationshipType::HasCredential => "auth_access",
-                    RelationshipType::HasUser => "has_user",
-                    RelationshipType::ConnectsTo => "connects_to",
-                    RelationshipType::Affects => "affected_by",
-                    RelationshipType::AuthAccess => "auth_access",
-                    RelationshipType::Uses => "uses_tech",
-                    RelationshipType::RunsOn => "contains",
-                    RelationshipType::Exposes => "has_endpoint",
-                }
-                .to_string());
+                let edge_label = Some(
+                    match relationship {
+                        RelationshipType::HasService => "has_service",
+                        RelationshipType::HasPort => "has_endpoint",
+                        RelationshipType::HasVuln => "affected_by",
+                        RelationshipType::HasCredential => "auth_access",
+                        RelationshipType::HasUser => "has_user",
+                        RelationshipType::ConnectsTo => "connects_to",
+                        RelationshipType::Affects => "affected_by",
+                        RelationshipType::AuthAccess => "auth_access",
+                        RelationshipType::Uses => "uses_tech",
+                        RelationshipType::RunsOn => "contains",
+                        RelationshipType::Exposes => "has_endpoint",
+                    }
+                    .to_string(),
+                );
 
                 edges.push(EdgePattern {
                     alias: None,

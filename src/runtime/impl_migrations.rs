@@ -42,11 +42,23 @@ fn migration_author(rt: &RedDBRuntime) -> Author {
     let store = rt.inner.db.store();
     let name = store
         .get_config("red.vcs.author.name")
-        .and_then(|v| if let Value::Text(s) = v { Some(s.to_string()) } else { None })
+        .and_then(|v| {
+            if let Value::Text(s) = v {
+                Some(s.to_string())
+            } else {
+                None
+            }
+        })
         .unwrap_or_else(|| "reddb".to_string());
     let email = store
         .get_config("red.vcs.author.email")
-        .and_then(|v| if let Value::Text(s) = v { Some(s.to_string()) } else { None })
+        .and_then(|v| {
+            if let Value::Text(s) = v {
+                Some(s.to_string())
+            } else {
+                None
+            }
+        })
         .unwrap_or_else(|| "reddb@localhost".to_string());
     Author { name, email }
 }
@@ -145,8 +157,14 @@ fn load_all_edges(store: &UnifiedStore) -> Vec<(String, String)> {
         .filter_map(|entity| {
             if let EntityData::Row(ref row) = entity.data {
                 if let Some(ref named) = row.named {
-                    let from = named.get("migration_id").and_then(|v| val_text(v))?.to_string();
-                    let to = named.get("depends_on_id").and_then(|v| val_text(v))?.to_string();
+                    let from = named
+                        .get("migration_id")
+                        .and_then(|v| val_text(v))?
+                        .to_string();
+                    let to = named
+                        .get("depends_on_id")
+                        .and_then(|v| val_text(v))?
+                        .to_string();
                     return Some((from, to));
                 }
             }
@@ -166,7 +184,10 @@ fn load_all_migration_names(store: &UnifiedStore) -> Vec<String> {
         .filter_map(|entity| {
             if let EntityData::Row(ref row) = entity.data {
                 if let Some(ref named) = row.named {
-                    return named.get("name").and_then(|v| val_text(v)).map(|s| s.to_string());
+                    return named
+                        .get("name")
+                        .and_then(|v| val_text(v))
+                        .map(|s| s.to_string());
                 }
             }
             None
@@ -254,10 +275,8 @@ impl RedDBRuntime {
                     .filter_map(|entity| {
                         if let EntityData::Row(ref row) = entity.data {
                             if let Some(ref named) = row.named {
-                                let name =
-                                    named.get("name").and_then(|v| val_text(v))?.to_string();
-                                let body =
-                                    named.get("body").and_then(|v| val_text(v))?.to_string();
+                                let name = named.get("name").and_then(|v| val_text(v))?.to_string();
+                                let body = named.get("body").and_then(|v| val_text(v))?.to_string();
                                 return Some((name, body));
                             }
                         }
@@ -266,7 +285,8 @@ impl RedDBRuntime {
                     .collect()
             })
             .unwrap_or_default();
-        let explicit_deps: std::collections::HashSet<String> = q.depends_on.iter().cloned().collect();
+        let explicit_deps: std::collections::HashSet<String> =
+            q.depends_on.iter().cloned().collect();
         let inferred_edges = migration_inference::infer_dependencies(
             q.name.as_str(),
             q.body.as_str(),
@@ -471,10 +491,7 @@ impl RedDBRuntime {
         let (_, fields) = find_migration(store, name)
             .ok_or_else(|| RedDBError::NotFound(format!("migration '{name}' not found")))?;
 
-        let status = fields
-            .get("status")
-            .and_then(|v| val_text(v))
-            .unwrap_or("");
+        let status = fields.get("status").and_then(|v| val_text(v)).unwrap_or("");
 
         if status == "applied" {
             return Ok(RuntimeQueryResult::ok_message(
@@ -535,8 +552,7 @@ impl RedDBRuntime {
             Err(e) => {
                 let err_msg = e.to_string();
                 let _ = update_migration_field(store, name, "status", Value::text("failed"));
-                let _ =
-                    update_migration_field(store, name, "error", Value::text(err_msg.as_str()));
+                let _ = update_migration_field(store, name, "error", Value::text(err_msg.as_str()));
                 Err(RedDBError::Query(format!(
                     "migration '{name}' failed: {err_msg}"
                 )))
@@ -598,9 +614,7 @@ impl RedDBRuntime {
             .collect();
         for stmt in statements {
             self.execute_query(stmt).map_err(|e| {
-                RedDBError::Query(format!(
-                    "statement in migration '{name}' failed: {e}"
-                ))
+                RedDBError::Query(format!("statement in migration '{name}' failed: {e}"))
             })?;
         }
         Ok(0)
@@ -691,10 +705,7 @@ impl RedDBRuntime {
             )));
         }
 
-        let status = fields
-            .get("status")
-            .and_then(|v| val_text(v))
-            .unwrap_or("");
+        let status = fields.get("status").and_then(|v| val_text(v)).unwrap_or("");
 
         if status != "applied" {
             return Err(RedDBError::Query(format!(

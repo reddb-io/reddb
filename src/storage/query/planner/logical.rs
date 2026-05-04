@@ -619,6 +619,9 @@ pub(super) fn logical_plan_node_with_catalog(db: &RedDB, expr: &QueryExpr) -> Ca
         | QueryExpr::Ask(_)
         | QueryExpr::SetConfig { .. }
         | QueryExpr::ShowConfig { .. }
+        | QueryExpr::SetSecret { .. }
+        | QueryExpr::DeleteSecret { .. }
+        | QueryExpr::ShowSecrets { .. }
         | QueryExpr::SetTenant(_)
         | QueryExpr::ShowTenant
         | QueryExpr::CreateTimeSeries(_)

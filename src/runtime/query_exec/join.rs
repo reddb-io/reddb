@@ -273,6 +273,9 @@ pub(crate) fn runtime_join_table_context(
         | QueryExpr::Ask(_)
         | QueryExpr::SetConfig { .. }
         | QueryExpr::ShowConfig { .. }
+        | QueryExpr::SetSecret { .. }
+        | QueryExpr::DeleteSecret { .. }
+        | QueryExpr::ShowSecrets { .. }
         | QueryExpr::SetTenant(_)
         | QueryExpr::ShowTenant
         | QueryExpr::CreateTimeSeries(_)

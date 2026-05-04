@@ -63,13 +63,7 @@ impl Snapshot {
     /// rolled-back-writer rule should consult [`SnapshotManager`]
     /// directly, or evolve `Snapshot` to embed an aborted view.
     pub fn sees(&self, xmin: Xid, xmax: Xid) -> bool {
-        super::visibility::is_visible(
-            xmin,
-            xmax,
-            self.xid,
-            &self.in_progress,
-            &HashSet::new(),
-        )
+        super::visibility::is_visible(xmin, xmax, self.xid, &self.in_progress, &HashSet::new())
     }
 }
 

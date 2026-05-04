@@ -162,7 +162,11 @@ impl NodeSecondaryIndex {
     pub fn label_id_counts(&self) -> Vec<(LabelId, u64)> {
         self.by_type
             .read()
-            .map(|map| map.iter().map(|(id, set)| (*id, set.len() as u64)).collect())
+            .map(|map| {
+                map.iter()
+                    .map(|(id, set)| (*id, set.len() as u64))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 

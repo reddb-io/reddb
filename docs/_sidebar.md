@@ -114,6 +114,7 @@
   - [Multi-Tenancy](/security/multi-tenancy.md)
   - [API Keys & Tokens](/security/tokens.md)
   - [Vault (Certificate Seal)](/security/vault.md)
+  - [Config, Secrets, and Vault Design](/security/config-secrets-vault-design.md)
   - [Policies](/security/policies.md)
   - [Transport TLS](/security/transport-tls.md)
   - [Secret Inventory & Operations](/operations/secrets.md)

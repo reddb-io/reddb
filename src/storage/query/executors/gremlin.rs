@@ -937,7 +937,13 @@ impl Traverser {
     }
 
     /// Move to an edge
-    fn move_to_edge(&self, from: &str, edge_label: impl Into<String>, to: &str, weight: f32) -> Self {
+    fn move_to_edge(
+        &self,
+        from: &str,
+        edge_label: impl Into<String>,
+        to: &str,
+        weight: f32,
+    ) -> Self {
         let edge_label = edge_label.into();
         let mut new_path = self.path.clone();
         new_path.push(TraverserElement::Edge {

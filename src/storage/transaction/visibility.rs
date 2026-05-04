@@ -111,7 +111,13 @@ mod tests {
     #[test]
     fn pre_mvcc_row_visible_to_every_snapshot() {
         for snapshot_xid in [1, 100, 1_000_000] {
-            assert!(is_visible(XID_NONE, XID_NONE, snapshot_xid, &empty(), &empty()));
+            assert!(is_visible(
+                XID_NONE,
+                XID_NONE,
+                snapshot_xid,
+                &empty(),
+                &empty()
+            ));
         }
     }
 
@@ -154,13 +160,7 @@ mod tests {
         // A writer can be both `in_progress` (this snapshot's view) and
         // already-committed (later view) — for *this* snapshot, the
         // in_progress flag wins.
-        assert!(!is_visible(
-            5,
-            XID_NONE,
-            10,
-            &set(&[5]),
-            &empty()
-        ));
+        assert!(!is_visible(5, XID_NONE, 10, &set(&[5]), &empty()));
     }
 
     // Rule 4 — aborted writers.
@@ -170,13 +170,7 @@ mod tests {
         // Writer rolled back: invisible to every snapshot, regardless of
         // ordering.
         for snapshot_xid in [5, 10, 100] {
-            assert!(!is_visible(
-                5,
-                XID_NONE,
-                snapshot_xid,
-                &empty(),
-                &set(&[5])
-            ));
+            assert!(!is_visible(5, XID_NONE, snapshot_xid, &empty(), &set(&[5])));
         }
     }
 

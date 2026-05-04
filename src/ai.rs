@@ -650,6 +650,44 @@ mod tests {
         assert_eq!(parsed.total_tokens, Some(16));
         assert_eq!(parsed.stop_reason.as_deref(), Some("end_turn"));
     }
+
+    #[test]
+    fn resolve_api_key_prefers_vault_secret_over_legacy_config() {
+        let provider = AiProvider::OpenAi;
+        let alias = "vault_unit_alias";
+        let secret_path = ai_api_secret_path(&provider, alias);
+        let legacy_key = ai_api_legacy_config_key(&provider, alias);
+
+        let resolved = resolve_api_key(&provider, Some(alias), |key| {
+            if key == secret_path {
+                Ok(Some("vault-key".to_string()))
+            } else if key == legacy_key {
+                Ok(Some("legacy-key".to_string()))
+            } else {
+                Ok(None)
+            }
+        })
+        .expect("resolve");
+
+        assert_eq!(resolved, "vault-key");
+    }
+
+    #[test]
+    fn resolve_api_key_uses_default_vault_secret_path() {
+        let provider = AiProvider::OpenAi;
+        let secret_path = ai_api_secret_path(&provider, "default");
+
+        let resolved = resolve_api_key(&provider, None, |key| {
+            if key == secret_path {
+                Ok(Some("default-vault-key".to_string()))
+            } else {
+                Ok(None)
+            }
+        })
+        .expect("resolve");
+
+        assert_eq!(resolved, "default-vault-key");
+    }
 }
 
 // ============================================================================
@@ -926,10 +964,12 @@ pub fn resolve_defaults_from_runtime_port<
 
 /// Resolve an API key for a provider. Uses the chain:
 /// 1. Environment variable with alias: `REDDB_OPENAI_API_KEY_{ALIAS}`
-/// 2. KV store lookup via `kv_getter` closure
-/// 3. Default environment variable: `REDDB_OPENAI_API_KEY`
+/// 2. Vault secret lookup via `kv_getter` closure
+/// 3. Legacy KV store lookup via `kv_getter` closure
+/// 4. Default environment variable: `REDDB_OPENAI_API_KEY`
 ///
-/// `kv_getter` receives a key string like "openai/prod" and returns the value if found.
+/// `kv_getter` receives either a `red.secret.*` path or a legacy `red.config.*`
+/// key and returns the value if found.
 pub fn resolve_api_key<F>(
     provider: &AiProvider,
     credential_alias: Option<&str>,
@@ -955,15 +995,26 @@ where
         if let Some(key) = resolve_key_from_env_alias(provider, alias) {
             return Ok(key);
         }
-        // Try KV store
-        let kv_key = format!("red.config.ai.{}.{}.key", provider.token(), alias);
-        if let Some(key) = kv_getter(&kv_key)? {
+        if let Some(key) = kv_getter(&ai_api_secret_path(provider, alias))? {
+            if !key.trim().is_empty() {
+                return Ok(key);
+            }
+        }
+        if let Some(secret_ref) = kv_getter(&ai_api_secret_ref_config_key(provider, alias))? {
+            if let Some(key) = kv_getter(secret_ref.trim())? {
+                if !key.trim().is_empty() {
+                    return Ok(key);
+                }
+            }
+        }
+        let legacy_key = ai_api_legacy_config_key(provider, alias);
+        if let Some(key) = kv_getter(&legacy_key)? {
             if !key.trim().is_empty() {
                 return Ok(key);
             }
         }
         return Err(crate::RedDBError::Query(format!(
-            "credential '{alias}' not found for {}. Set env {} or store in red_config",
+            "credential '{alias}' not found for {}. Set env {} or store it in the vault",
             provider.token(),
             provider.alias_key_env_name(alias)
         )));
@@ -977,9 +1028,26 @@ where
         }
     }
 
-    // Default KV
-    let kv_key = format!("{}/default", provider.token());
-    if let Some(key) = kv_getter(&kv_key)? {
+    if let Some(key) = kv_getter(&ai_api_secret_path(provider, "default"))? {
+        if !key.trim().is_empty() {
+            return Ok(key);
+        }
+    }
+    if let Some(secret_ref) = kv_getter(&ai_api_secret_ref_config_key(provider, "default"))? {
+        if let Some(key) = kv_getter(secret_ref.trim())? {
+            if !key.trim().is_empty() {
+                return Ok(key);
+            }
+        }
+    }
+    if let Some(key) = kv_getter(&ai_api_legacy_config_key(provider, "default"))? {
+        if !key.trim().is_empty() {
+            return Ok(key);
+        }
+    }
+
+    let legacy_short_key = format!("{}/default", provider.token());
+    if let Some(key) = kv_getter(&legacy_short_key)? {
         if !key.trim().is_empty() {
             return Ok(key);
         }
@@ -990,6 +1058,39 @@ where
         provider.token(),
         provider.default_key_env_name()
     )))
+}
+
+pub fn ai_api_secret_path(provider: &AiProvider, alias: &str) -> String {
+    format!(
+        "red.secret.ai.{}.{}.api_key",
+        provider.token(),
+        normalize_credential_alias_path(alias)
+    )
+}
+
+pub fn ai_api_secret_ref_config_key(provider: &AiProvider, alias: &str) -> String {
+    format!(
+        "red.config.ai.{}.{}.secret_ref",
+        provider.token(),
+        normalize_credential_alias_path(alias)
+    )
+}
+
+pub fn ai_api_legacy_config_key(provider: &AiProvider, alias: &str) -> String {
+    format!(
+        "red.config.ai.{}.{}.key",
+        provider.token(),
+        normalize_credential_alias_path(alias)
+    )
+}
+
+fn normalize_credential_alias_path(alias: &str) -> String {
+    let alias = alias.trim();
+    if alias.is_empty() {
+        "default".to_string()
+    } else {
+        alias.to_ascii_lowercase()
+    }
 }
 
 fn resolve_key_from_env_alias(provider: &AiProvider, alias: &str) -> Option<String> {
@@ -1023,6 +1124,9 @@ pub fn resolve_api_key_from_runtime(
 ) -> crate::RedDBResult<String> {
     use crate::application::ports::RuntimeEntityPort;
     resolve_api_key(provider, credential_alias, |kv_key| {
+        if kv_key.starts_with("red.secret.") {
+            return Ok(runtime.vault_kv_get(kv_key));
+        }
         match runtime.get_kv("red_config", kv_key)? {
             Some((crate::storage::schema::Value::Text(secret), _)) => Ok(Some(secret.to_string())),
             Some(_) => Ok(None),
@@ -1342,7 +1446,8 @@ pub fn grpc_embeddings(
                  provider (openai, groq, ollama, openrouter, together, \
                  venice, deepseek), HuggingFace, or a custom base URL — \
                  RedDB does not silently route embeddings to a \
-                 different provider than the one you named.".to_string(),
+                 different provider than the one you named."
+                    .to_string(),
             ));
         }
         AiProvider::Local => {
@@ -1387,12 +1492,9 @@ pub fn grpc_embeddings(
         .filter(|v| *v > 0);
 
     let response = match &provider {
-        AiProvider::HuggingFace => huggingface_embeddings(
-            &api_key,
-            &model,
-            &inputs,
-            &provider.resolve_api_base(),
-        )?,
+        AiProvider::HuggingFace => {
+            huggingface_embeddings(&api_key, &model, &inputs, &provider.resolve_api_base())?
+        }
         _ => openai_embeddings(OpenAiEmbeddingRequest {
             api_key,
             model,

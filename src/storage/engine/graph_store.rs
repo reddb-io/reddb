@@ -195,8 +195,7 @@ impl StoredNode {
 
         let id_len = u16::from_le_bytes([data[0], data[1]]) as usize;
         let label_len = u16::from_le_bytes([data[2], data[3]]) as usize;
-        let label_id =
-            LabelId::new(u32::from_le_bytes([data[4], data[5], data[6], data[7]]));
+        let label_id = LabelId::new(u32::from_le_bytes([data[4], data[5], data[6], data[7]]));
         let flags = data[8];
         let out_edge_count = u16::from_le_bytes([data[9], data[10]]) as u32;
         let in_edge_count = u16::from_le_bytes([data[11], data[12]]) as u32;
@@ -279,12 +278,10 @@ impl StoredNode {
             return None;
         }
 
-        let id =
-            String::from_utf8_lossy(&data[header_size..header_size + id_len]).to_string();
-        let label = String::from_utf8_lossy(
-            &data[header_size + id_len..header_size + id_len + label_len],
-        )
-        .to_string();
+        let id = String::from_utf8_lossy(&data[header_size..header_size + id_len]).to_string();
+        let label =
+            String::from_utf8_lossy(&data[header_size + id_len..header_size + id_len + label_len])
+                .to_string();
 
         let table_ref = if has_table_ref {
             let ref_start = header_size + id_len + label_len;
@@ -411,8 +408,7 @@ impl StoredEdge {
 
         let source_len = u16::from_le_bytes([data[0], data[1]]) as usize;
         let target_len = u16::from_le_bytes([data[2], data[3]]) as usize;
-        let label_id =
-            LabelId::new(u32::from_le_bytes([data[4], data[5], data[6], data[7]]));
+        let label_id = LabelId::new(u32::from_le_bytes([data[4], data[5], data[6], data[7]]));
         let weight = f32::from_le_bytes([data[8], data[9], data[10], data[11]]);
         let edge_type = label_id_to_edge_label(label_id);
 
@@ -458,10 +454,9 @@ impl StoredEdge {
         if data.len() < EDGE_HEADER_SIZE_V1 + source_len + target_len {
             return None;
         }
-        let source_id = String::from_utf8_lossy(
-            &data[EDGE_HEADER_SIZE_V1..EDGE_HEADER_SIZE_V1 + source_len],
-        )
-        .to_string();
+        let source_id =
+            String::from_utf8_lossy(&data[EDGE_HEADER_SIZE_V1..EDGE_HEADER_SIZE_V1 + source_len])
+                .to_string();
         let target_id = String::from_utf8_lossy(
             &data[EDGE_HEADER_SIZE_V1 + source_len..EDGE_HEADER_SIZE_V1 + source_len + target_len],
         )
@@ -815,11 +810,7 @@ mod tests {
             .add_node_with_label("host:192.168.1.2", "Database", "host")
             .unwrap();
         store
-            .add_node_with_label(
-                "service:192.168.1.1:80:http",
-                "HTTP",
-                "service",
-            )
+            .add_node_with_label("service:192.168.1.1:80:http", "HTTP", "service")
             .unwrap();
 
         assert_eq!(store.node_count(), 3);
@@ -834,12 +825,7 @@ mod tests {
             )
             .unwrap();
         store
-            .add_edge_with_label(
-                "host:192.168.1.1",
-                "host:192.168.1.2",
-                "connects_to",
-                1.0,
-            )
+            .add_edge_with_label("host:192.168.1.1", "host:192.168.1.2", "connects_to", 1.0)
             .unwrap();
 
         assert_eq!(store.edge_count(), 2);
@@ -863,12 +849,7 @@ mod tests {
             .add_node_with_label("host:10.0.0.2", "Server B", "host")
             .unwrap();
         store
-            .add_edge_with_label(
-                "host:10.0.0.1",
-                "host:10.0.0.2",
-                "connects_to",
-                0.5,
-            )
+            .add_edge_with_label("host:10.0.0.1", "host:10.0.0.2", "connects_to", 0.5)
             .unwrap();
 
         // Serialize
@@ -893,11 +874,7 @@ mod tests {
         // Add some data
         for i in 0..100 {
             store
-                .add_node_with_label(
-                    &format!("host:{}", i),
-                    &format!("Host {}", i),
-                    "host",
-                )
+                .add_node_with_label(&format!("host:{}", i), &format!("Host {}", i), "host")
                 .unwrap();
         }
 
@@ -929,19 +906,10 @@ mod tests {
             .unwrap();
         for i in 0..100 {
             store
-                .add_node_with_label(
-                    &format!("spoke:{}", i),
-                    &format!("Spoke {}", i),
-                    "host",
-                )
+                .add_node_with_label(&format!("spoke:{}", i), &format!("Spoke {}", i), "host")
                 .unwrap();
             store
-                .add_edge_with_label(
-                    "hub",
-                    &format!("spoke:{}", i),
-                    "connects_to",
-                    1.0,
-                )
+                .add_edge_with_label("hub", &format!("spoke:{}", i), "connects_to", 1.0)
                 .unwrap();
         }
 
@@ -968,9 +936,7 @@ mod tests {
 
         let hosts = store.nodes_with_category("host");
         assert_eq!(hosts.len(), 2);
-        assert!(hosts
-            .iter()
-            .all(|n| n.node_type == "host"));
+        assert!(hosts.iter().all(|n| n.node_type == "host"));
 
         let services = store.nodes_with_category("service");
         assert_eq!(services.len(), 1);
@@ -1055,11 +1021,7 @@ mod tests {
 
         for i in 0..50 {
             store
-                .add_node_with_label(
-                    &format!("node:{}", i),
-                    &format!("Node {}", i),
-                    "host",
-                )
+                .add_node_with_label(&format!("node:{}", i), &format!("Node {}", i), "host")
                 .unwrap();
         }
 
@@ -1070,9 +1032,7 @@ mod tests {
     #[test]
     fn legacy_node_type_interns_into_registry() {
         let store = GraphStore::new();
-        store
-            .add_node_with_label("h1", "web", "host")
-            .unwrap();
+        store.add_node_with_label("h1", "web", "host").unwrap();
         // Adding via the legacy enum must intern its as_str() name.
         let id = store
             .registry
@@ -1093,12 +1053,17 @@ mod tests {
 
         store.add_node_with_label("h1", "web-1", "host").unwrap();
         store.add_node_with_label("h2", "web-2", "service").unwrap();
-        store.add_edge_with_label("h1", "h2", "connects_to", 1.0).unwrap();
+        store
+            .add_edge_with_label("h1", "h2", "connects_to", 1.0)
+            .unwrap();
 
         let bytes = store.serialize();
         // V2 magic + version
         assert_eq!(&bytes[0..4], b"RBGR");
-        assert_eq!(u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]), 2);
+        assert_eq!(
+            u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+            2
+        );
 
         let restored = GraphStore::deserialize(&bytes).unwrap();
         // Registry survived.

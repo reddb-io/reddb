@@ -130,8 +130,8 @@ fn snapshot_and_restored_db_have_same_collection_inventory() {
     // We assert the snapshot file still hashes to a stable value
     // *for itself* (idempotency). Restored hashing differs because
     // restore physically reorganizes the file.
-    let snap_sha = SnapshotManifest::compute_snapshot_sha256(&primary_path)
-        .expect("snapshot file hashable");
+    let snap_sha =
+        SnapshotManifest::compute_snapshot_sha256(&primary_path).expect("snapshot file hashable");
     let snap_sha_again = SnapshotManifest::compute_snapshot_sha256(&primary_path)
         .expect("snapshot file hashable again");
     assert_eq!(

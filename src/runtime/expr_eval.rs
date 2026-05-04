@@ -136,6 +136,12 @@ pub(super) fn evaluate_runtime_expr_with_db(
             if upper == "KV" {
                 return evaluate_runtime_kv_function(db, args, record, table_name, table_alias);
             }
+            if upper == "__SECRET_REF" {
+                let key = expr_path_text(args.first()?)?.to_ascii_lowercase();
+                return crate::runtime::impl_core::current_secret_value(&key)
+                    .map(Value::text)
+                    .or(Some(Value::Null));
+            }
             // For Week 3 we route through the existing evaluate_scalar_function
             // dispatcher, which speaks the legacy Projection::Function
             // argument convention (Column("LIT:…"), Column("TYPE:…"), etc.).
@@ -328,6 +334,9 @@ fn evaluate_runtime_config_function(
     table_alias: Option<&str>,
 ) -> Option<Value> {
     let key = expr_path_text(args.first()?)?;
+    if let Some(value) = crate::runtime::impl_core::current_config_value(&key) {
+        return Some(value);
+    }
     if let Some(db) = db {
         if let Some(value) = lookup_latest_kv_value(db, "red_config", &key) {
             return Some(value);
@@ -392,10 +401,10 @@ fn field_ref_path_text(field: &FieldRef) -> Option<String> {
 }
 
 fn literal_path_text(value: &Value) -> Option<String> {
-    if matches!(value, Value::Null) {
-        None
-    } else {
-        Some(value.display_string())
+    match value {
+        Value::Null => None,
+        Value::Text(text) => Some(text.to_string()),
+        _ => Some(value.display_string()),
     }
 }
 

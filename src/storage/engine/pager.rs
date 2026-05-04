@@ -344,7 +344,7 @@ mod tests {
 
         {
             let pager = Pager::open_default(&path).unwrap();
-            assert_eq!(pager.page_count().unwrap(), 1); // Just header
+            assert_eq!(pager.page_count().unwrap(), 3); // Header + reserved pages
         }
 
         cleanup(&path);
@@ -361,7 +361,7 @@ mod tests {
 
             // Allocate a page
             let page = pager.allocate_page(PageType::BTreeLeaf).unwrap();
-            assert_eq!(page.page_id(), 1);
+            assert_eq!(page.page_id(), 3);
 
             pager.sync().unwrap();
         }
@@ -369,7 +369,7 @@ mod tests {
         // Reopen and verify
         {
             let pager = Pager::open_default(&path).unwrap();
-            assert_eq!(pager.page_count().unwrap(), 2); // Header + 1 data page
+            assert_eq!(pager.page_count().unwrap(), 4); // Header + reserved pages + 1 data page
         }
 
         cleanup(&path);
