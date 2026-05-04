@@ -1,6 +1,6 @@
 {
   "name": "reddb-cli",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "description": "CLI launcher for RedDB. The JS/TS app driver is published as package `reddb`.",
   "type": "commonjs",
   "bin": {
