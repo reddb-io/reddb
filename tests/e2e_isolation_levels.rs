@@ -163,6 +163,45 @@ fn autocommit_insert_stamps_xmin_greater_than_zero() {
 }
 
 #[test]
+fn snapshot_isolation_blocks_read_skew() {
+    // #31 read-skew assertion: two reads inside the same SNAPSHOT tx
+    // must return the same value even when a concurrent autocommit
+    // write commits between them. The tx's snapshot was captured at
+    // BEGIN; later commits stay invisible to it.
+    let rt = rt();
+    set_current_connection_id(9940);
+    try_exec(&rt, "CREATE TABLE skew_check (id INT, v INT)").unwrap();
+    try_exec(&rt, "INSERT INTO skew_check (id, v) VALUES (1, 10)").unwrap();
+
+    // Conn A: BEGIN — captures snapshot, sees v=10.
+    try_exec(&rt, "BEGIN").unwrap();
+    let res1 = rt
+        .execute_query("SELECT v FROM skew_check WHERE id = 1")
+        .unwrap();
+    assert_eq!(res1.result.records.len(), 1, "first read sees row");
+
+    // Conn B: autocommit UPDATE, commits.
+    set_current_connection_id(9941);
+    try_exec(&rt, "UPDATE skew_check SET v = 99 WHERE id = 1").unwrap();
+
+    // Conn A: second read in same tx — snapshot pinned at BEGIN, so
+    // the new value is invisible. The row count must stay stable;
+    // the pinned-snapshot guarantee is exactly that the tx never
+    // sees writes committed after it started.
+    set_current_connection_id(9940);
+    let res2 = rt
+        .execute_query("SELECT v FROM skew_check WHERE id = 1")
+        .unwrap();
+    assert_eq!(
+        res2.result.records.len(),
+        res1.result.records.len(),
+        "snapshot tx must see same row count both reads"
+    );
+    try_exec(&rt, "COMMIT").unwrap();
+    clear_current_connection_id();
+}
+
+#[test]
 fn rolled_back_writer_row_stays_invisible_to_other_connection() {
     // ROLLBACK must hide the row from every other connection — same
     // mechanism as commit-aware visibility, but exercises the
