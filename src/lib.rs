@@ -46,6 +46,14 @@ pub mod telemetry;
 pub mod utils;
 pub mod wire;
 
+/// Re-export of the shared `reddb-wire` crate.
+///
+/// `reddb-wire` is the transport-agnostic protocol vocabulary
+/// (connection-string parser today, RedWire frames in a follow-up
+/// slice). Exposed here so existing `use reddb::…` callers can
+/// reach the parser without a separate dependency.
+pub use reddb_wire as wire_proto;
+
 pub mod prelude {
     pub use crate::api::{
         Capability, CapabilitySet, CatalogService, CatalogSnapshot, CollectionStats, DataOps,

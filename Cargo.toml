@@ -1,5 +1,5 @@
 [workspace]
-members = []
+members = ["crates/reddb-wire"]
 resolver = "2"
 
 [package]
@@ -30,6 +30,7 @@ name = "red"
 path = "src/bin/red.rs"
 
 [dependencies]
+reddb-wire = { version = "0.2", path = "crates/reddb-wire" }
 aes-gcm = "0.10"
 hmac = "0.13"
 itoa = "1"
