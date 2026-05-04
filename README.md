@@ -472,7 +472,7 @@ ceremony.
 
 | Language          | Package          | Install                        | Backends                            |
 |-------------------|------------------|--------------------------------|-------------------------------------|
-| Rust              | `reddb-client`   | `cargo add reddb-client`       | embedded ✅ · gRPC ⏳              |
+| Rust              | `reddb-client`   | `cargo add reddb-client`       | embedded ✅ · gRPC ✅ · HTTP ✅      |
 | Node / Bun / Deno | `reddb` (npm)    | `pnpm add reddb`               | stdio subprocess ✅                 |
 | Python            | `reddb` (PyPI)   | `pip install reddb` *(soon)*   | embedded ✅ · gRPC ⏳              |
 
