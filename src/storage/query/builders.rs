@@ -261,6 +261,9 @@ impl JoinQueryBuilder {
             | QueryExpr::Ask(_)
             | QueryExpr::SetConfig { .. }
             | QueryExpr::ShowConfig { .. }
+            | QueryExpr::SetSecret { .. }
+            | QueryExpr::DeleteSecret { .. }
+            | QueryExpr::ShowSecrets { .. }
             | QueryExpr::SetTenant(_)
             | QueryExpr::ShowTenant
             | QueryExpr::CreateTimeSeries(_)

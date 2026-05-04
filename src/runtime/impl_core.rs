@@ -49,6 +49,40 @@ thread_local! {
     /// NULL, and RLS policies that gate on it hide every row.
     static CURRENT_TENANT_ID: std::cell::RefCell<Option<String>> =
         const { std::cell::RefCell::new(None) };
+
+    /// Statement-local config resolver. SQL expressions materialize the
+    /// `red_config` snapshot lazily on the first `$config.*`/`CONFIG()`
+    /// access, keeping ordinary statements on the zero-scan path.
+    static CURRENT_CONFIG_RESOLVER: std::cell::RefCell<Option<ConfigResolver>> =
+        const { std::cell::RefCell::new(None) };
+
+    /// Statement-local secret resolver. SQL expressions materialize the
+    /// vault KV snapshot lazily on first `$secret.*` access, then use
+    /// lock-free map reads for the rest of the statement.
+    static CURRENT_SECRET_RESOLVER: std::cell::RefCell<Option<SecretResolver>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn secret_sql_value_to_string(value: &Value) -> RedDBResult<String> {
+    match value {
+        Value::Text(s) => Ok(s.to_string()),
+        Value::Integer(n) => Ok(n.to_string()),
+        Value::UnsignedInteger(n) => Ok(n.to_string()),
+        Value::Float(n) => Ok(n.to_string()),
+        Value::Boolean(b) => Ok(b.to_string()),
+        Value::Null => Err(RedDBError::Query(
+            "SET SECRET key = NULL deletes the secret; use DELETE SECRET for explicit deletes"
+                .to_string(),
+        )),
+        Value::Password(_) | Value::Secret(_) => Err(RedDBError::Query(
+            "SET SECRET accepts plain scalar literals; PASSWORD() and SECRET() are for typed columns"
+                .to_string(),
+        )),
+        _ => Err(RedDBError::Query(format!(
+            "SET SECRET does not support value type {:?} yet",
+            value.data_type()
+        ))),
+    }
 }
 
 /// Snapshot + manager pair used for read-path visibility checks.
@@ -302,6 +336,154 @@ pub(crate) fn current_role_projected() -> Option<String> {
         }
     }
     inherited
+}
+
+pub(crate) fn current_secret_value(path: &str) -> Option<String> {
+    let key = path.to_ascii_lowercase();
+    CURRENT_SECRET_RESOLVER.with(|cell| {
+        let mut resolver = cell.borrow_mut();
+        let resolver = resolver.as_mut()?;
+        if resolver.values.is_none() {
+            resolver.values = resolver
+                .store
+                .as_ref()
+                .map(|store| store.vault_kv_snapshot());
+        }
+        resolver
+            .values
+            .as_ref()
+            .and_then(|values| values.get(&key).cloned())
+    })
+}
+
+struct SecretResolver {
+    store: Option<Arc<crate::auth::store::AuthStore>>,
+    values: Option<HashMap<String, String>>,
+}
+
+pub(super) struct SecretStoreGuard {
+    previous: Option<SecretResolver>,
+}
+
+impl SecretStoreGuard {
+    pub(super) fn install(store: Option<Arc<crate::auth::store::AuthStore>>) -> Self {
+        let previous = CURRENT_SECRET_RESOLVER.with(|cell| {
+            cell.replace(Some(SecretResolver {
+                store,
+                values: None,
+            }))
+        });
+        Self { previous }
+    }
+}
+
+impl Drop for SecretStoreGuard {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        CURRENT_SECRET_RESOLVER.with(|cell| {
+            cell.replace(previous);
+        });
+    }
+}
+
+pub(crate) fn current_config_value(path: &str) -> Option<Value> {
+    let key = path.to_ascii_lowercase();
+    CURRENT_CONFIG_RESOLVER.with(|cell| {
+        let mut resolver = cell.borrow_mut();
+        let resolver = resolver.as_mut()?;
+        if resolver.values.is_none() {
+            resolver.values = Some(latest_config_snapshot(&resolver.db));
+        }
+        resolver
+            .values
+            .as_ref()
+            .and_then(|values| values.get(&key).cloned())
+    })
+}
+
+fn update_current_config_value(path: &str, value: Value) {
+    let key = path.to_ascii_lowercase();
+    CURRENT_CONFIG_RESOLVER.with(|cell| {
+        if let Some(resolver) = cell.borrow_mut().as_mut() {
+            if let Some(values) = resolver.values.as_mut() {
+                values.insert(key, value);
+            }
+        }
+    });
+}
+
+fn update_current_secret_value(path: &str, value: Option<String>) {
+    let key = path.to_ascii_lowercase();
+    CURRENT_SECRET_RESOLVER.with(|cell| {
+        if let Some(resolver) = cell.borrow_mut().as_mut() {
+            let Some(values) = resolver.values.as_mut() else {
+                return;
+            };
+            match value {
+                Some(value) => {
+                    values.insert(key, value);
+                }
+                None => {
+                    values.remove(&key);
+                }
+            }
+        }
+    });
+}
+
+fn latest_config_snapshot(db: &RedDB) -> HashMap<String, Value> {
+    let Some(manager) = db.store().get_collection("red_config") else {
+        return HashMap::new();
+    };
+    let mut latest: HashMap<String, (u64, Value)> = HashMap::new();
+    manager.for_each_entity(|entity| {
+        let Some(row) = entity.data.as_row() else {
+            return true;
+        };
+        let Some(Value::Text(key)) = row.get_field("key") else {
+            return true;
+        };
+        let value = row.get_field("value").cloned().unwrap_or(Value::Null);
+        let id = entity.id.raw();
+        let key = key.to_ascii_lowercase();
+        match latest.get(&key) {
+            Some((prev_id, _)) if *prev_id > id => {}
+            _ => {
+                latest.insert(key, (id, value));
+            }
+        }
+        true
+    });
+    latest
+        .into_iter()
+        .map(|(key, (_, value))| (key, value))
+        .collect()
+}
+
+struct ConfigResolver {
+    db: Arc<RedDB>,
+    values: Option<HashMap<String, Value>>,
+}
+
+pub(super) struct ConfigSnapshotGuard {
+    previous: Option<ConfigResolver>,
+}
+
+impl ConfigSnapshotGuard {
+    pub(super) fn install(db: Arc<RedDB>) -> Self {
+        let previous = CURRENT_CONFIG_RESOLVER
+            .with(|cell| cell.replace(Some(ConfigResolver { db, values: None })));
+        Self { previous }
+    }
+}
+
+impl Drop for ConfigSnapshotGuard {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        CURRENT_CONFIG_RESOLVER.with(|cell| {
+            cell.replace(previous);
+        });
+    }
 }
 
 /// Install the MVCC snapshot used by the current thread for the duration
@@ -674,6 +856,9 @@ fn collect_query_expr_result_cache_scopes(scopes: &mut HashSet<String>, expr: &Q
         | QueryExpr::ProbabilisticCommand(_)
         | QueryExpr::SetConfig { .. }
         | QueryExpr::ShowConfig { .. }
+        | QueryExpr::SetSecret { .. }
+        | QueryExpr::DeleteSecret { .. }
+        | QueryExpr::ShowSecrets { .. }
         | QueryExpr::SetTenant(_)
         | QueryExpr::ShowTenant
         | QueryExpr::TransactionControl(_)
@@ -1115,7 +1300,7 @@ fn peek_top_level_as_of(sql: &str) -> Option<crate::application::vcs::AsOfSpec> 
 /// targeted by the AS OF clause (when the FROM clause names a
 /// concrete table). `None` for the table slot means scalar SELECT
 /// or a subquery source — callers treat those as "no enforcement".
-fn peek_top_level_as_of_with_table(
+pub(super) fn peek_top_level_as_of_with_table(
     sql: &str,
 ) -> Option<(crate::application::vcs::AsOfSpec, Option<String>)> {
     if !sql
@@ -1153,7 +1338,7 @@ fn peek_top_level_as_of_with_table(
     Some((spec, table_name))
 }
 
-fn query_has_volatile_builtin(sql: &str) -> bool {
+pub(super) fn query_has_volatile_builtin(sql: &str) -> bool {
     // Lowercase the bytes up to the first null/newline into a small
     // stack buffer for cheap contains() checks. Most SQL fits in the
     // buffer; longer queries fall back to owned lowercase.
@@ -1180,7 +1365,7 @@ fn query_has_volatile_builtin(sql: &str) -> bool {
 /// - Reads  — `(IX-compatible) (Global, IS) → (Collection, IS)`
 /// - Writes — `(IX-compatible) (Global, IX) → (Collection, IX)`
 /// - DDL    — `(strong)        (Global, IX) → (Collection, X)`
-fn intent_lock_modes_for(
+pub(super) fn intent_lock_modes_for(
     expr: &QueryExpr,
 ) -> Option<(
     crate::storage::transaction::lock::LockMode,
@@ -1253,7 +1438,7 @@ fn intent_lock_modes_for(
 /// `Collection(...)` resources for the intent-lock guard. Overshoots
 /// are fine (take an extra IS, benign); undershoots leak writes past
 /// DDL X locks, so err on the side of listing more names.
-fn collections_referenced(expr: &QueryExpr) -> Vec<String> {
+pub(super) fn collections_referenced(expr: &QueryExpr) -> Vec<String> {
     let mut out = Vec::new();
     walk_collections(expr, &mut out);
     out.sort();
@@ -1863,6 +2048,26 @@ impl RedDBRuntime {
     /// auto-encrypt/decrypt can reach the vault AES key.
     pub fn set_auth_store(&self, store: Arc<crate::auth::store::AuthStore>) {
         *self.inner.auth_store.write() = Some(store);
+    }
+
+    /// Read a vault KV secret from the configured AuthStore, if present.
+    pub fn vault_kv_get(&self, key: &str) -> Option<String> {
+        self.inner
+            .auth_store
+            .read()
+            .as_ref()
+            .and_then(|store| store.vault_kv_get(key))
+    }
+
+    /// Write a vault KV secret and fail if the encrypted vault write is
+    /// unavailable or cannot be made durable.
+    pub fn vault_kv_try_set(&self, key: String, value: String) -> RedDBResult<()> {
+        let store = self.inner.auth_store.read().clone().ok_or_else(|| {
+            RedDBError::Query("secret storage requires an enabled, unsealed vault".to_string())
+        })?;
+        store
+            .vault_kv_try_set(key, value)
+            .map_err(|err| RedDBError::Query(err.to_string()))
     }
 
     /// Inject an `OAuthValidator` into the runtime. When set, HTTP and
@@ -3427,15 +3632,8 @@ impl RedDBRuntime {
             ));
         }
 
-        // Refresh the thread-local snapshot of this connection's
-        // tx-local tenant so `current_tenant()` deep in expr eval can
-        // read it without crossing back into the runtime. Guard pops
-        // on return — even early errors via `?` clean up.
-        let _tx_local_guard = {
-            let conn_id = current_connection_id();
-            let snap = self.inner.tx_local_tenants.read().get(&conn_id).cloned();
-            TxLocalTenantGuard::install(snap)
-        };
+        let frame = super::statement_frame::StatementExecutionFrame::build(self, query)?;
+        let _frame_guards = frame.install(self);
 
         // Phase 6 logging: enter a span stamped with conn_id / tenant
         // / query_len. Every downstream tracing::info!/warn!/error!
@@ -3444,73 +3642,6 @@ impl RedDBRuntime {
         // SET LOCAL TENANT resolution above so the span reflects the
         // effective scope for this statement.
         let _log_span = crate::telemetry::span::query_span(query).entered();
-
-        // Phase 2.3.2d: install the MVCC snapshot for this statement so
-        // every downstream scan sees a consistent row set. Dropped at
-        // function exit — `CurrentSnapshotGuard` restores the caller's
-        // snapshot (if any) on every return path, including early errors.
-        //
-        // Phase 2.3.2e: own-tx xids (parent + open savepoints) hitch a
-        // ride on the context so visibility_check can always reveal
-        // the current connection's own writes.
-        let own_xids = {
-            let mut set = std::collections::HashSet::new();
-            if let Some(ctx) = self.inner.tx_contexts.read().get(&current_connection_id()) {
-                set.insert(ctx.xid);
-                for (_, sub) in &ctx.savepoints {
-                    set.insert(*sub);
-                }
-            }
-            set
-        };
-        // Phase 4c: if the query carries an `AS OF` clause, resolve
-        // it to an MVCC xid and install a snapshot pinned at that
-        // point. Visibility for every scan then transparently honours
-        // the time-travel target. Invalid AS OF (unknown commit/
-        // branch/tag) short-circuits with the resolver's error.
-        //
-        // Phase 7 (opt-in): AS OF only works against collections
-        // that opted in via `vcs_set_versioned`. Running AS OF on a
-        // non-versioned collection would silently return the current
-        // tip (xmin=0 rows are always visible) — a foot-gun we reject
-        // explicitly so users notice the missed opt-in.
-        let snapshot = match peek_top_level_as_of_with_table(query) {
-            Some((spec, Some(table))) => {
-                // Internal `red_*` collections are append-only and
-                // always safe to query AS OF — they store VCS
-                // metadata that grows monotonically. For user
-                // collections enforce the opt-in so accidental
-                // AS OF on a non-versioned table raises loudly.
-                if !table.starts_with("red_") && !self.vcs_is_versioned(&table)? {
-                    return Err(RedDBError::InvalidConfig(format!(
-                        "AS OF requires a versioned collection — \
-                         `{table}` has not opted in. \
-                         Call vcs.set_versioned(\"{table}\", true) first."
-                    )));
-                }
-                let xid = self.vcs_resolve_as_of(spec)?;
-                crate::storage::transaction::snapshot::Snapshot {
-                    xid,
-                    in_progress: std::collections::HashSet::new(),
-                }
-            }
-            Some((spec, None)) => {
-                // No table in FROM (scalar SELECT) — honour AS OF
-                // as a best-effort snapshot install; it won't filter
-                // anything since there's no scan.
-                let xid = self.vcs_resolve_as_of(spec)?;
-                crate::storage::transaction::snapshot::Snapshot {
-                    xid,
-                    in_progress: std::collections::HashSet::new(),
-                }
-            }
-            None => self.current_snapshot(),
-        };
-        let _snapshot_guard = CurrentSnapshotGuard::install(SnapshotContext {
-            snapshot,
-            manager: Arc::clone(&self.inner.snapshot_manager),
-            own_xids,
-        });
 
         // ── CTE prelude (#41) — `WITH x AS (...) SELECT ... FROM x` ──
         //
@@ -3541,55 +3672,9 @@ impl RedDBRuntime {
         }
 
         // ── Result cache: return cached result if still fresh (30s TTL) ──
-        //
-        // Phase 2.5.4: mix tenant id + auth identity into the cache
-        // key so an RLS/tenant-scoped query doesn't serve a prior
-        // session's filtered result to a different tenant. Same query
-        // string under `SET TENANT 'acme'` and `SET TENANT 'globex'`
-        // must resolve against distinct entries.
-        let cache_key_str = {
-            let tenant = current_tenant().unwrap_or_default();
-            let auth = current_auth_identity()
-                .map(|(u, r)| format!("{}|{:?}", u, r))
-                .unwrap_or_default();
-            if tenant.is_empty() && auth.is_empty() {
-                query.to_string()
-            } else {
-                format!("{query}\u{001e}{tenant}\u{001e}{auth}")
-            }
-        };
-        // Volatile built-ins (advisory locks, NOW(), RANDOM(), etc.)
-        // must NOT be served from the result cache: their output
-        // depends on the caller's connection or the current clock, so
-        // serving a stale row to a different conn would break
-        // correctness. Gate by a cheap substring match against the
-        // raw SQL — false positives (the tokens appear in a column
-        // name or string literal) just skip caching for that
-        // statement, which is the safe direction.
-        let is_volatile_query = query_has_volatile_builtin(query);
-
-        // MVCC #29: bypass the result cache while any transaction is
-        // active. A cached row set reflects the snapshot of whichever
-        // connection populated it; serving that to a different
-        // connection at a different point in MVCC time would leak
-        // uncommitted rows or hide just-committed ones. The cache is
-        // single-snapshot-aware only when there are no in-flight
-        // writers — the steady state in autocommit-only workloads.
-        let has_active_xids = self
-            .inner
-            .snapshot_manager
-            .oldest_active_xid()
-            .is_some();
-        let in_own_tx = self
-            .inner
-            .tx_contexts
-            .read()
-            .contains_key(&current_connection_id());
-        let cache_safe = !has_active_xids && !in_own_tx;
-
-        if !is_volatile_query && cache_safe {
+        if frame.can_read_result_cache() {
             let cache = self.inner.result_cache.read();
-            if let Some(entry) = cache.0.get(&cache_key_str) {
+            if let Some(entry) = cache.0.get(frame.cache_key()) {
                 if entry.cached_at.elapsed().as_secs() < 30 {
                     return Ok(entry.result.clone());
                 }
@@ -3717,40 +3802,12 @@ impl RedDBRuntime {
         // the same view resolution `execute_query_expr` already does.
         let expr = self.rewrite_view_refs(expr);
 
-        // Granular RBAC privilege check. Runs before dispatch so a
-        // denied caller never reaches storage. Fail-closed: any error
-        // resolving the action / resource produces PermissionDenied.
-        if let Err(err) = self.check_query_privilege(&expr) {
-            return Err(RedDBError::Query(format!("permission denied: {err}")));
-        }
+        frame.check_query_privilege(self, &expr)?;
 
         let statement = query_expr_name(&expr);
         let result_cache_scopes = query_expr_result_cache_scopes(&expr);
 
-        // Phase 1 perf-parity — intent-lock acquisition. Reads take
-        // IS (T3), writes take IX (T4), DDL takes Collection X with
-        // Global IX (T5). Guard drops at end of dispatch so the lock
-        // holds only for one statement. Gated on
-        // `concurrency.locking.enabled` so the feature can be
-        // disabled via env / SET CONFIG without reverting.
-        let _lock_guard = if self.config_bool("concurrency.locking.enabled", true) {
-            intent_lock_modes_for(&expr).map(|(global_mode, coll_mode)| {
-                let mut g =
-                    crate::runtime::locking::LockerGuard::new(self.inner.lock_manager.clone());
-                // Non-fatal on failure: a misbehaving lock manager
-                // shouldn't wedge queries. Errors surface via tracing.
-                let _ = g.acquire(crate::runtime::locking::Resource::Global, global_mode);
-                for collection in collections_referenced(&expr) {
-                    let _ = g.acquire(
-                        crate::runtime::locking::Resource::Collection(collection),
-                        coll_mode,
-                    );
-                }
-                g
-            })
-        } else {
-            None
-        };
+        let _lock_guard = frame.acquire_intent_locks(self, &expr);
 
         let query_result = match expr {
             QueryExpr::Graph(_) | QueryExpr::Path(_) => {
@@ -3939,6 +3996,11 @@ impl RedDBRuntime {
             QueryExpr::TreeCommand(ref cmd) => self.execute_tree_command(query, cmd),
             // SET CONFIG key = value
             QueryExpr::SetConfig { ref key, ref value } => {
+                if key.starts_with("red.secret.") {
+                    return Err(RedDBError::Query(
+                        "red.secret.* is reserved for vault secrets; use SET SECRET".to_string(),
+                    ));
+                }
                 let store = self.inner.db.store();
                 let json_val = match value {
                     Value::Text(s) => crate::serde_json::Value::String(s.to_string()),
@@ -3948,6 +4010,7 @@ impl RedDBRuntime {
                     _ => crate::serde_json::Value::String(value.to_string()),
                 };
                 store.set_config_tree(key, &json_val);
+                update_current_config_value(key, value.clone());
                 // Config changes can flip runtime behavior mid-session
                 // (auto_decrypt, auto_encrypt, etc.) — invalidate the
                 // result cache so subsequent reads re-execute against
@@ -3958,6 +4021,103 @@ impl RedDBRuntime {
                     &format!("config set: {key}"),
                     "set",
                 ))
+            }
+            // SET SECRET key = value
+            QueryExpr::SetSecret { ref key, ref value } => {
+                if key.starts_with("red.config.") {
+                    return Err(RedDBError::Query(
+                        "red.config.* is reserved for config; use SET CONFIG".to_string(),
+                    ));
+                }
+                let auth_store = self.inner.auth_store.read().clone().ok_or_else(|| {
+                    RedDBError::Query("SET SECRET requires an enabled, unsealed vault".to_string())
+                })?;
+                if matches!(value, Value::Null) {
+                    auth_store
+                        .vault_kv_try_delete(key)
+                        .map_err(|err| RedDBError::Query(err.to_string()))?;
+                    update_current_secret_value(key, None);
+                    self.invalidate_result_cache();
+                    return Ok(RuntimeQueryResult::ok_message(
+                        query.to_string(),
+                        &format!("secret deleted: {key}"),
+                        "delete_secret",
+                    ));
+                }
+                let value = secret_sql_value_to_string(value)?;
+                auth_store
+                    .vault_kv_try_set(key.clone(), value.clone())
+                    .map_err(|err| RedDBError::Query(err.to_string()))?;
+                update_current_secret_value(key, Some(value));
+                self.invalidate_result_cache();
+                Ok(RuntimeQueryResult::ok_message(
+                    query.to_string(),
+                    &format!("secret set: {key}"),
+                    "set_secret",
+                ))
+            }
+            // DELETE SECRET key
+            QueryExpr::DeleteSecret { ref key } => {
+                let auth_store = self.inner.auth_store.read().clone().ok_or_else(|| {
+                    RedDBError::Query(
+                        "DELETE SECRET requires an enabled, unsealed vault".to_string(),
+                    )
+                })?;
+                let deleted = auth_store
+                    .vault_kv_try_delete(key)
+                    .map_err(|err| RedDBError::Query(err.to_string()))?;
+                if deleted {
+                    update_current_secret_value(key, None);
+                }
+                self.invalidate_result_cache();
+                Ok(RuntimeQueryResult::ok_message(
+                    query.to_string(),
+                    &format!("secret deleted: {key}"),
+                    if deleted {
+                        "delete_secret"
+                    } else {
+                        "delete_secret_not_found"
+                    },
+                ))
+            }
+            // SHOW SECRET[S] [prefix]
+            QueryExpr::ShowSecrets { ref prefix } => {
+                let auth_store = self.inner.auth_store.read().clone().ok_or_else(|| {
+                    RedDBError::Query("SHOW SECRET requires an enabled, unsealed vault".to_string())
+                })?;
+                if !auth_store.is_vault_backed() {
+                    return Err(RedDBError::Query(
+                        "SHOW SECRET requires an enabled, unsealed vault".to_string(),
+                    ));
+                }
+                let mut keys = auth_store.vault_kv_keys();
+                keys.sort();
+                let mut result = UnifiedResult::with_columns(vec![
+                    "key".into(),
+                    "value".into(),
+                    "status".into(),
+                ]);
+                for key in keys {
+                    if let Some(ref pfx) = prefix {
+                        if !key.starts_with(pfx) {
+                            continue;
+                        }
+                    }
+                    let mut record = UnifiedRecord::new();
+                    record.set("key", Value::text(key));
+                    record.set("value", Value::text("***"));
+                    record.set("status", Value::text("active"));
+                    result.push(record);
+                }
+                Ok(RuntimeQueryResult {
+                    query: query.to_string(),
+                    mode,
+                    statement: "show_secrets",
+                    engine: "runtime-secret",
+                    result,
+                    affected_rows: 0,
+                    statement_type: "select",
+                })
             }
             // SHOW CONFIG [prefix]
             QueryExpr::ShowConfig { ref prefix } => {
@@ -4794,18 +4954,10 @@ impl RedDBRuntime {
                 ref action,
                 ref resource,
             } => self.execute_simulate_policy(query, user, action, resource),
-            QueryExpr::CreateMigration(ref q) => {
-                self.execute_create_migration(query, q)
-            }
-            QueryExpr::ApplyMigration(ref q) => {
-                self.execute_apply_migration(query, q)
-            }
-            QueryExpr::RollbackMigration(ref q) => {
-                self.execute_rollback_migration(query, q)
-            }
-            QueryExpr::ExplainMigration(ref q) => {
-                self.execute_explain_migration(query, q)
-            }
+            QueryExpr::CreateMigration(ref q) => self.execute_create_migration(query, q),
+            QueryExpr::ApplyMigration(ref q) => self.execute_apply_migration(query, q),
+            QueryExpr::RollbackMigration(ref q) => self.execute_rollback_migration(query, q),
+            QueryExpr::ExplainMigration(ref q) => self.execute_explain_migration(query, q),
         };
 
         // Decrypt Value::Secret columns in-place before caching, so
@@ -4825,20 +4977,14 @@ impl RedDBRuntime {
         // zero while the clone cost (100 records × ~16 fields each) is high.
         // Aggregations (1 row) and point lookups (1 row) still benefit.
         if let Ok(ref result) = query_result {
-            if result.statement_type == "select"
-                && !is_volatile_query
-                && cache_safe
-                && result.result.pre_serialized_json.is_none()
-                && result.result.records.len() <= 5
-            {
+            if frame.should_write_result_cache(result) {
                 let mut cache = self.inner.result_cache.write();
                 let (ref mut map, ref mut order) = *cache;
-                // Use the tenant-aware cache key we computed at entry.
-                if !map.contains_key(&cache_key_str) {
-                    order.push_back(cache_key_str.clone());
+                if !map.contains_key(frame.cache_key()) {
+                    order.push_back(frame.cache_key().to_string());
                 }
                 map.insert(
-                    cache_key_str.clone(),
+                    frame.cache_key().to_string(),
                     RuntimeResultCacheEntry {
                         result: result.clone(),
                         cached_at: std::time::Instant::now(),
@@ -4864,6 +5010,8 @@ impl RedDBRuntime {
     ///
     /// Applies secret decryption on SELECT results, identical to `execute_query`.
     pub(crate) fn execute_query_expr(&self, expr: QueryExpr) -> RedDBResult<RuntimeQueryResult> {
+        let _config_snapshot_guard = ConfigSnapshotGuard::install(Arc::clone(&self.inner.db));
+        let _secret_store_guard = SecretStoreGuard::install(self.inner.auth_store.read().clone());
         // View rewrite (Phase 2.1): substitute any `QueryExpr::Table(tq)`
         // whose `tq.table` matches a registered view with the view's
         // underlying query. Safe to call even when no views are registered.
@@ -5903,10 +6051,8 @@ impl RedDBRuntime {
                 .insert(Arc::from("op"), Value::text("CteScan".to_string()));
             rec.values
                 .insert(Arc::from("source"), Value::text(name.clone()));
-            rec.values
-                .insert(Arc::from("est_rows"), Value::Float(0.0));
-            rec.values
-                .insert(Arc::from("est_cost"), Value::Float(0.0));
+            rec.values.insert(Arc::from("est_rows"), Value::Float(0.0));
+            rec.values.insert(Arc::from("est_cost"), Value::Float(0.0));
             rec.values.insert(Arc::from("depth"), Value::Integer(0));
             records.push(rec);
         }
@@ -5938,7 +6084,7 @@ impl RedDBRuntime {
     /// Project a `QueryExpr` to the (action, resource) pair the
     /// privilege engine cares about. Returns `Ok(())` for statements
     /// that don't touch user data (transaction control, SHOW, SET, etc.).
-    fn check_query_privilege(
+    pub(super) fn check_query_privilege(
         &self,
         expr: &crate::storage::query::ast::QueryExpr,
     ) -> Result<(), String> {

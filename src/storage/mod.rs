@@ -9,7 +9,6 @@ pub mod primitives;
 // Cross-structure index abstraction (trait + bloom segment helper)
 pub mod index;
 
-
 // RedDB Storage Engine (page-based, B-tree indexed)
 pub mod engine;
 

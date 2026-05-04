@@ -829,284 +829,21 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &UpdateQuery,
     ) -> RedDBResult<(RuntimeQueryResult, Vec<EntityId>)> {
-        let db = self.db();
         let store = self.inner.db.store();
         let effective_filter = effective_update_filter(query);
         let compiled_plan = self.compile_update_plan(query)?;
         let mut touched_ids: Vec<EntityId> = Vec::new();
-        // `LIMIT N` cap — used by `BATCH N ROWS` data migrations.
-        // Applied as a truncation on the candidate-id vec built by
-        // each scan/index path, before the apply chunked loop. Single
-        // entity_id fast path doesn't need it (always 1 row).
         let limit_cap = query.limit.map(|l| l as usize);
         let manager = store
             .get_collection(&query.table)
             .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
-        let table_name = query.table.as_str();
-        let compiled_effective_filter =
-            effective_filter
-                .as_ref()
-                .map(|filter| match manager.column_schema() {
-                    Some(schema) => query_exec::CompiledEntityFilter::compile_with_schema(
-                        filter, table_name, table_name, &schema,
-                    ),
-                    None => {
-                        query_exec::CompiledEntityFilter::compile(filter, table_name, table_name)
-                    }
-                });
-        // The compiled fallback path intentionally does not receive `db`; keep
-        // db-dependent filters on the legacy evaluator to preserve semantics.
-        let compiled_effective_filter = compiled_effective_filter
-            .as_ref()
-            .filter(|compiled| !compiled.has_fallback());
-
-        // ── FAST PATH: UPDATE ... WHERE _entity_id = N ──
-        // Direct entity lookup instead of full collection scan.
-        if let Some(entity_id) = query_exec::extract_entity_id_from_filter(&effective_filter) {
-            if let Some(entity) = manager.get(EntityId::new(entity_id)) {
-                let assignments =
-                    self.materialize_update_assignments_for_entity(query, &entity, &compiled_plan)?;
-                let applied = self.apply_materialized_update_for_entity(
-                    query.table.clone(),
-                    entity,
-                    &compiled_plan,
-                    assignments,
-                )?;
-                touched_ids.push(applied.id);
-                self.persist_update_chunk(std::slice::from_ref(&applied))?;
-                self.flush_update_chunk(&[applied]);
-                self.note_table_write(&query.table);
-                return Ok((
-                    RuntimeQueryResult::dml_result(
-                        raw_query.to_string(),
-                        1,
-                        "update",
-                        "runtime-dml",
-                    ),
-                    touched_ids,
-                ));
-            }
-            return Ok((
-                RuntimeQueryResult::dml_result(raw_query.to_string(), 0, "update", "runtime-dml"),
-                touched_ids,
-            ));
-        }
-
-        // ── FAST PATH: UPDATE ... WHERE <indexed_col> = <value> ──
-        // When the filter is a single equality predicate on a hash-indexed column,
-        // use the index to find the matching entity IDs in O(log N) instead of
-        // scanning the full collection.
-        if let Some(ref filter) = effective_filter {
-            let idx_store = self.index_store_ref();
-            if let Some(mut entity_ids) =
-                query_exec::try_hash_eq_lookup(filter, &query.table, idx_store)
-            {
-                if entity_ids.is_empty() {
-                    return Ok((
-                        RuntimeQueryResult::dml_result(
-                            raw_query.to_string(),
-                            0,
-                            "update",
-                            "runtime-dml",
-                        ),
-                        touched_ids,
-                    ));
-                }
-                if let Some(cap) = limit_cap {
-                    entity_ids.truncate(cap);
-                }
-                let mut affected: u64 = 0;
-                for chunk in entity_ids.chunks(UPDATE_APPLY_CHUNK_SIZE) {
-                    let mut applied_chunk = Vec::with_capacity(chunk.len());
-                    for entity in manager.get_many(chunk).into_iter().flatten() {
-                        let matches_filter =
-                            if let Some(compiled_filter) = compiled_effective_filter {
-                                compiled_filter.evaluate(&entity)
-                            } else {
-                                query_exec::evaluate_entity_filter_with_db(
-                                    Some(db.as_ref()),
-                                    &entity,
-                                    filter,
-                                    table_name,
-                                    table_name,
-                                )
-                            };
-                        if !matches_filter {
-                            continue;
-                        }
-                        let assignments = self.materialize_update_assignments_for_entity(
-                            query,
-                            &entity,
-                            &compiled_plan,
-                        )?;
-                        let applied = self.apply_materialized_update_for_entity(
-                            query.table.clone(),
-                            entity,
-                            &compiled_plan,
-                            assignments,
-                        )?;
-                        touched_ids.push(applied.id);
-                        applied_chunk.push(applied);
-                    }
-                    self.persist_update_chunk(&applied_chunk)?;
-                    affected += applied_chunk.len() as u64;
-                    self.flush_update_chunk(&applied_chunk);
-                }
-                if affected > 0 {
-                    self.note_table_write(&query.table);
-                }
-                return Ok((
-                    RuntimeQueryResult::dml_result(
-                        raw_query.to_string(),
-                        affected,
-                        "update",
-                        "runtime-dml",
-                    ),
-                    touched_ids,
-                ));
-            }
-        }
-
-        // ── SORTED-INDEX PATH: UPDATE ... WHERE range/between/in predicate ──
-        // Reuses the same sorted-index candidate generation as SELECT, then
-        // rechecks the full filter before applying the update so compound
-        // predicates remain correct.
-        if let Some(ref filter) = effective_filter {
-            let idx_store = self.index_store_ref();
-            if let Some(mut entity_ids) =
-                query_exec::try_sorted_index_lookup(filter, &query.table, idx_store, None)
-            {
-                if entity_ids.is_empty() {
-                    return Ok((
-                        RuntimeQueryResult::dml_result(
-                            raw_query.to_string(),
-                            0,
-                            "update",
-                            "runtime-dml",
-                        ),
-                        touched_ids,
-                    ));
-                }
-                if let Some(cap) = limit_cap {
-                    entity_ids.truncate(cap);
-                }
-                let mut affected: u64 = 0;
-                for chunk in entity_ids.chunks(UPDATE_APPLY_CHUNK_SIZE) {
-                    let mut applied_chunk = Vec::with_capacity(chunk.len());
-                    for entity in manager.get_many(chunk).into_iter().flatten() {
-                        let matches_filter =
-                            if let Some(compiled_filter) = compiled_effective_filter {
-                                compiled_filter.evaluate(&entity)
-                            } else {
-                                query_exec::evaluate_entity_filter_with_db(
-                                    Some(db.as_ref()),
-                                    &entity,
-                                    filter,
-                                    table_name,
-                                    table_name,
-                                )
-                            };
-                        if !matches_filter {
-                            continue;
-                        }
-                        let assignments = self.materialize_update_assignments_for_entity(
-                            query,
-                            &entity,
-                            &compiled_plan,
-                        )?;
-                        let applied = self.apply_materialized_update_for_entity(
-                            query.table.clone(),
-                            entity,
-                            &compiled_plan,
-                            assignments,
-                        )?;
-                        touched_ids.push(applied.id);
-                        applied_chunk.push(applied);
-                    }
-                    self.persist_update_chunk(&applied_chunk)?;
-                    affected += applied_chunk.len() as u64;
-                    self.flush_update_chunk(&applied_chunk);
-                }
-                if affected > 0 {
-                    self.note_table_write(&query.table);
-                }
-                return Ok((
-                    RuntimeQueryResult::dml_result(
-                        raw_query.to_string(),
-                        affected,
-                        "update",
-                        "runtime-dml",
-                    ),
-                    touched_ids,
-                ));
-            }
-        }
-
-        // Collect matching entity IDs first while holding only read locks, then
-        // fetch/apply in bounded chunks so bulk UPDATEs don't clone the whole
-        // matching set at once.
-        let mut ids_to_update = Vec::new();
-        if let Some(ref filter) = effective_filter {
-            let mut owned_zone_preds = Vec::new();
-            query_exec::extract_zone_predicates(filter, &mut owned_zone_preds);
-            let zone_preds: Vec<_> = owned_zone_preds
-                .iter()
-                .map(|(column, value, kind)| {
-                    (
-                        column.as_str(),
-                        match kind {
-                            crate::storage::unified::segment::ZoneColPredKind::Eq => {
-                                crate::storage::unified::segment::ZoneColPred::Eq(value)
-                            }
-                            crate::storage::unified::segment::ZoneColPredKind::Gt => {
-                                crate::storage::unified::segment::ZoneColPred::Gt(value)
-                            }
-                            crate::storage::unified::segment::ZoneColPredKind::Gte => {
-                                crate::storage::unified::segment::ZoneColPred::Gte(value)
-                            }
-                            crate::storage::unified::segment::ZoneColPredKind::Lt => {
-                                crate::storage::unified::segment::ZoneColPred::Lt(value)
-                            }
-                            crate::storage::unified::segment::ZoneColPredKind::Lte => {
-                                crate::storage::unified::segment::ZoneColPred::Lte(value)
-                            }
-                        },
-                    )
-                })
-                .collect();
-
-            manager.for_each_entity_zoned(&zone_preds, |entity| {
-                if !crate::runtime::impl_core::entity_visible_under_current_snapshot(entity) {
-                    return true;
-                }
-                let matches_filter = if let Some(compiled_filter) = compiled_effective_filter {
-                    compiled_filter.evaluate(entity)
-                } else {
-                    query_exec::evaluate_entity_filter_with_db(
-                        Some(db.as_ref()),
-                        entity,
-                        filter,
-                        table_name,
-                        table_name,
-                    )
-                };
-                if matches_filter {
-                    ids_to_update.push(entity.id);
-                }
-                true
-            });
-        } else {
-            manager.for_each_entity(|entity| {
-                if crate::runtime::impl_core::entity_visible_under_current_snapshot(entity) {
-                    ids_to_update.push(entity.id);
-                }
-                true
-            });
-        }
-
-        if let Some(cap) = limit_cap {
-            ids_to_update.truncate(cap);
-        }
+        let ids_to_update = super::dml_target_scan::DmlTargetScan::new(
+            self,
+            &query.table,
+            effective_filter.as_ref(),
+            limit_cap,
+        )
+        .collect_ids()?;
 
         let mut affected: u64 = 0;
         for chunk in ids_to_update.chunks(UPDATE_APPLY_CHUNK_SIZE) {
@@ -1157,9 +894,9 @@ impl RedDBRuntime {
                     let raw_value = sql_literal_to_metadata_value(metadata_key, &value)?;
                     let (canonical_key, canonical_value) =
                         canonicalize_sql_ttl_metadata(metadata_key, raw_value);
-                    static_metadata_assignments
-                        .push((canonical_key.to_string(), canonical_value));
+                    static_metadata_assignments.push((canonical_key.to_string(), canonical_value));
                 } else {
+                    let value = self.resolve_crypto_sentinel(value)?;
                     static_field_assignments.push((
                         column.clone(),
                         normalize_row_update_assignment_with_plan(
@@ -1289,7 +1026,7 @@ impl RedDBRuntime {
                     assignment.column.clone(),
                     normalize_row_update_value_for_rule(
                         &query.table,
-                        value,
+                        self.resolve_crypto_sentinel(value)?,
                         assignment.row_rule.as_ref(),
                     )?,
                 ));
@@ -1863,9 +1600,7 @@ fn canonicalize_sql_ttl_metadata(
         return (key, value);
     }
     let scaled = match value {
-        MetadataValue::Int(s) => {
-            MetadataValue::Int(s.saturating_mul(1_000))
-        }
+        MetadataValue::Int(s) => MetadataValue::Int(s.saturating_mul(1_000)),
         MetadataValue::Timestamp(ms_or_s) => {
             // Timestamp is already chosen for very large values; treat as
             // already-ms to avoid silent overflow.

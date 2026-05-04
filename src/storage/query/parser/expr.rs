@@ -264,6 +264,35 @@ impl<'a> Parser<'a> {
             });
         }
 
+        if self.consume(&Token::Dollar)? {
+            let path = self.parse_dollar_ref_path()?;
+            let path_lc = path.to_ascii_lowercase();
+            let (name, key) = if let Some(rest) = path_lc.strip_prefix("secret.") {
+                ("__SECRET_REF", rest.to_string())
+            } else if path_lc.starts_with("red.secret.") {
+                ("__SECRET_REF", path_lc)
+            } else if let Some(rest) = path_lc.strip_prefix("config.") {
+                ("CONFIG", rest.to_string())
+            } else if path_lc.starts_with("red.config.") {
+                ("CONFIG", path_lc)
+            } else {
+                return Err(ParseError::new(
+                    format!(
+                        "unknown $ reference `${path}`; expected $secret.*, $red.secret.*, $config.*, or $red.config.*"
+                    ),
+                    self.position(),
+                ));
+            };
+            return Ok(Expr::FunctionCall {
+                name: name.to_string(),
+                args: vec![Expr::Literal {
+                    value: Value::text(key),
+                    span: Span::new(start, self.position()),
+                }],
+                span: Span::new(start, self.position()),
+            });
+        }
+
         if let Some(name) = keyword_function_name(self.peek()) {
             if matches!(self.peek_next()?, Token::LParen) {
                 self.advance()?; // consume the keyword token
@@ -341,6 +370,15 @@ impl<'a> Parser<'a> {
             field,
             span: Span::new(start, end),
         })
+    }
+
+    fn parse_dollar_ref_path(&mut self) -> Result<String, ParseError> {
+        let mut path = self.expect_ident_or_keyword()?;
+        while self.consume(&Token::Dot)? {
+            let next = self.expect_ident_or_keyword()?;
+            path = format!("{path}.{next}");
+        }
+        Ok(path)
     }
 
     fn parse_function_call_expr_with_name(

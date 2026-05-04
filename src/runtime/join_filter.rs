@@ -1339,9 +1339,7 @@ pub(super) fn resolve_runtime_field(
             match property.as_str() {
                 "from" | "source" => Some(Value::NodeRef(edge.from.clone())),
                 "to" | "target" => Some(Value::NodeRef(edge.to.clone())),
-                "type" | "edge_type" | "label" => {
-                    Some(Value::text(edge.edge_label.clone()))
-                }
+                "type" | "edge_type" | "label" => Some(Value::text(edge.edge_label.clone())),
                 "weight" => Some(Value::Float(edge.weight as f64)),
                 _ => None,
             }
@@ -1891,6 +1889,9 @@ pub(super) fn query_expr_name(expr: &QueryExpr) -> &'static str {
         QueryExpr::Ask(_) => "ask",
         QueryExpr::SetConfig { .. } => "set_config",
         QueryExpr::ShowConfig { .. } => "show_config",
+        QueryExpr::SetSecret { .. } => "set_secret",
+        QueryExpr::DeleteSecret { .. } => "delete_secret",
+        QueryExpr::ShowSecrets { .. } => "show_secrets",
         QueryExpr::SetTenant(_) => "set_tenant",
         QueryExpr::ShowTenant => "show_tenant",
         QueryExpr::CreateTimeSeries(_) => "create_timeseries",
@@ -1956,6 +1957,9 @@ pub(super) fn evaluate_scalar_function_with_db(
     }
     if func_name.eq_ignore_ascii_case("KV") {
         return evaluate_projection_kv_function(db, args, source);
+    }
+    if func_name.eq_ignore_ascii_case("__SECRET_REF") {
+        return evaluate_projection_secret_ref(args);
     }
     if matches!(
         func_name.to_ascii_uppercase().as_str(),
@@ -2876,6 +2880,9 @@ fn evaluate_projection_config_function(
     source: &UnifiedRecord,
 ) -> Option<Value> {
     let key = projection_path_text(args.first()?)?;
+    if let Some(value) = crate::runtime::impl_core::current_config_value(&key) {
+        return Some(value);
+    }
     if let Some(db) = db {
         if let Some(value) = super::expr_eval::lookup_latest_kv_value(db, "red_config", &key) {
             return Some(value);
@@ -2901,6 +2908,15 @@ fn evaluate_projection_kv_function(
     args.get(2)
         .and_then(|arg| projection_default_value_with_db(db, arg, source))
         .or(Some(Value::Null))
+}
+
+fn evaluate_projection_secret_ref(args: &[Projection]) -> Option<Value> {
+    let key = projection_path_text(args.first()?)?.to_ascii_lowercase();
+    if crate::runtime::impl_core::current_secret_value(&key).is_some() {
+        Some(Value::text("***"))
+    } else {
+        Some(Value::Null)
+    }
 }
 
 fn projection_path_text(projection: &Projection) -> Option<String> {

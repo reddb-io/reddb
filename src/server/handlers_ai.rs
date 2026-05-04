@@ -468,7 +468,8 @@ impl RedDBServer {
                      together, venice, deepseek), HuggingFace, or a \
                      custom base URL — RedDB does not silently route \
                      embeddings to a different provider than the one \
-                     you named.".to_string(),
+                     you named."
+                        .to_string(),
                 );
             }
             crate::ai::AiProvider::Local => {
@@ -533,8 +534,7 @@ impl RedDBServer {
 
         let response = match &provider {
             crate::ai::AiProvider::HuggingFace => {
-                let texts: Vec<String> =
-                    inputs.iter().map(|item| item.text.clone()).collect();
+                let texts: Vec<String> = inputs.iter().map(|item| item.text.clone()).collect();
                 match crate::ai::huggingface_embeddings(&api_key, &model, &texts, &api_base) {
                     Ok(r) => r,
                     Err(err) => return json_error(400, err.to_string()),
@@ -923,14 +923,26 @@ impl RedDBServer {
 
         // Save API key
         if let Some(api_key) = &api_key {
-            let key_name = format!("red.config.ai.{}.{}.key", provider.token(), alias);
+            let secret_path = crate::ai::ai_api_secret_path(&provider, alias);
+            if let Err(err) = self
+                .runtime()
+                .vault_kv_try_set(secret_path.clone(), api_key.clone())
+            {
+                return json_error(400, format!("failed to store credential in vault: {err}"));
+            }
+
+            let key_name = crate::ai::ai_api_secret_ref_config_key(&provider, alias);
             let _ = self
                 .entity_use_cases()
                 .delete_kv(RED_CONFIG_COLLECTION, &key_name);
+            let legacy_key = crate::ai::ai_api_legacy_config_key(&provider, alias);
+            let _ = self
+                .entity_use_cases()
+                .delete_kv(RED_CONFIG_COLLECTION, &legacy_key);
             match self.entity_use_cases().create_kv(CreateKvInput {
                 collection: RED_CONFIG_COLLECTION.to_string(),
                 key: key_name.clone(),
-                value: Value::text(api_key.clone()),
+                value: Value::text(secret_path.clone()),
                 metadata: metadata.clone(),
             }) {
                 Ok(output) => saved_keys.push((key_name, output.id.raw())),
@@ -962,6 +974,12 @@ impl RedDBServer {
             JsonValue::String(provider.token().to_string()),
         );
         object.insert("alias".to_string(), JsonValue::String(alias.to_string()));
+        if api_key.is_some() {
+            object.insert(
+                "secret_ref".to_string(),
+                JsonValue::String(crate::ai::ai_api_secret_path(&provider, alias)),
+            );
+        }
         if let Some(ref base) = api_base {
             object.insert("api_base".to_string(), JsonValue::String(base.clone()));
         }
@@ -1286,6 +1304,9 @@ impl RedDBServer {
         credential_alias: Option<&str>,
     ) -> Result<String, String> {
         crate::ai::resolve_api_key(provider, credential_alias, |kv_key| {
+            if kv_key.starts_with("red.secret.") {
+                return Ok(self.runtime().vault_kv_get(kv_key));
+            }
             match self
                 .entity_use_cases()
                 .get_kv(RED_CONFIG_COLLECTION, kv_key)
@@ -1561,6 +1582,11 @@ fn flatten_json(prefix: &str, value: &JsonValue, out: &mut Vec<(String, JsonValu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use crate::auth::{AuthConfig, AuthStore};
+    use crate::{RedDBOptions, RedDBRuntime};
 
     #[test]
     fn parse_source_mode_defaults_to_row() {
@@ -1611,5 +1637,76 @@ mod tests {
                 }
             });
         assert_eq!(rendered, "Summarize host 10.0.0.4 seen on port 443");
+    }
+
+    #[test]
+    fn ai_credentials_store_api_key_in_vault_and_config_ref_only() {
+        let mut path = std::env::temp_dir();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        path.push(format!(
+            "reddb_ai_credentials_vault_{}_{}",
+            std::process::id(),
+            nanos
+        ));
+
+        let rt =
+            RedDBRuntime::with_options(RedDBOptions::persistent(&path)).expect("runtime opens");
+        let db = rt.db();
+        let store = db.store();
+        let pager = store.pager().expect("persistent runtime has pager");
+        let auth = Arc::new(
+            AuthStore::with_vault(AuthConfig::default(), Arc::clone(pager), Some("test-pass"))
+                .expect("vault opens"),
+        );
+        let server = RedDBServer::new(rt).with_auth(Arc::clone(&auth));
+
+        let alias = format!("vault_unit_{nanos}");
+        let body_json =
+            format!(r#"{{"provider":"openai","alias":"{alias}","api_key":"sk_test_vault"}}"#);
+        let response = server.handle_ai_credentials(body_json.into_bytes());
+        assert_eq!(response.status, 200);
+        let body = String::from_utf8(response.body).expect("json body");
+        assert!(
+            !body.contains("sk_test_vault"),
+            "credential response must not echo plaintext: {body}"
+        );
+
+        let secret_path = crate::ai::ai_api_secret_path(&AiProvider::OpenAi, &alias);
+        assert_eq!(
+            auth.vault_kv_get(&secret_path).as_deref(),
+            Some("sk_test_vault")
+        );
+
+        let ref_key = crate::ai::ai_api_secret_ref_config_key(&AiProvider::OpenAi, &alias);
+        let ref_value = server
+            .entity_use_cases()
+            .get_kv(RED_CONFIG_COLLECTION, &ref_key)
+            .expect("read ref")
+            .expect("ref exists")
+            .0;
+        assert_eq!(ref_value, Value::Text(secret_path.clone().into()));
+
+        let legacy_key = crate::ai::ai_api_legacy_config_key(&AiProvider::OpenAi, &alias);
+        assert!(
+            server
+                .entity_use_cases()
+                .get_kv(RED_CONFIG_COLLECTION, &legacy_key)
+                .expect("read legacy")
+                .is_none(),
+            "legacy plaintext config key must not be written"
+        );
+
+        let resolved = crate::ai::resolve_api_key_from_runtime(
+            &AiProvider::OpenAi,
+            Some(&alias),
+            server.runtime(),
+        )
+        .expect("resolve from vault");
+        assert_eq!(resolved, "sk_test_vault");
+
+        let _ = std::fs::remove_file(path);
     }
 }

@@ -163,8 +163,10 @@ impl Pager {
             return Err(PagerError::ReadOnly);
         }
 
-        // Create header page
-        let header_page = Page::new_header_page(1);
+        // Create header page. Page ids 1 and 2 are reserved so fixed
+        // metadata/vault pages cannot be handed out to normal B-tree
+        // allocation before those subsystems are initialized.
+        let header_page = Page::new_header_page(3);
 
         // Write header page
         self.write_page_raw(0, &header_page)?;

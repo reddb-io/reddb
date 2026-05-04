@@ -406,12 +406,7 @@ impl GraphProjection {
                     .unwrap_or(false);
 
                 if !has_reverse {
-                    additional.push((
-                        target.clone(),
-                        source.clone(),
-                        edge_type.clone(),
-                        *weight,
-                    ));
+                    additional.push((target.clone(), source.clone(), edge_type.clone(), *weight));
                 }
             }
         }

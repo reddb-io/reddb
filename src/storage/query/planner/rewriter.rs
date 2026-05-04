@@ -198,6 +198,9 @@ impl RewriteRule for NormalizeRule {
             | QueryExpr::Ask(_)
             | QueryExpr::SetConfig { .. }
             | QueryExpr::ShowConfig { .. }
+            | QueryExpr::SetSecret { .. }
+            | QueryExpr::DeleteSecret { .. }
+            | QueryExpr::ShowSecrets { .. }
             | QueryExpr::SetTenant(_)
             | QueryExpr::ShowTenant
             | QueryExpr::CreateTimeSeries(_)
@@ -306,6 +309,9 @@ impl RewriteRule for SimplifyFiltersRule {
             | QueryExpr::Ask(_)
             | QueryExpr::SetConfig { .. }
             | QueryExpr::ShowConfig { .. }
+            | QueryExpr::SetSecret { .. }
+            | QueryExpr::DeleteSecret { .. }
+            | QueryExpr::ShowSecrets { .. }
             | QueryExpr::SetTenant(_)
             | QueryExpr::ShowTenant
             | QueryExpr::CreateTimeSeries(_)
@@ -373,6 +379,9 @@ impl RewriteRule for SimplifyFiltersRule {
             | QueryExpr::Ask(_)
             | QueryExpr::SetConfig { .. }
             | QueryExpr::ShowConfig { .. }
+            | QueryExpr::SetSecret { .. }
+            | QueryExpr::DeleteSecret { .. }
+            | QueryExpr::ShowSecrets { .. }
             | QueryExpr::SetTenant(_)
             | QueryExpr::ShowTenant
             | QueryExpr::CreateTimeSeries(_)

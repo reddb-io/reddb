@@ -43,7 +43,11 @@ pub fn referenced_collections(body: &str) -> HashSet<String> {
                 if !name.is_empty()
                     && !is_sql_keyword(&name)
                     && !name.starts_with("red_")
-                    && name.chars().next().map(|c| c.is_alphabetic()).unwrap_or(false)
+                    && name
+                        .chars()
+                        .next()
+                        .map(|c| c.is_alphabetic())
+                        .unwrap_or(false)
                 {
                     result.insert(name);
                 }
@@ -112,16 +116,70 @@ pub fn infer_dependencies(
 fn is_sql_keyword(name: &str) -> bool {
     matches!(
         name,
-        "select" | "insert" | "update" | "delete" | "create" | "drop" | "alter"
-            | "table" | "from" | "where" | "set" | "into" | "values" | "join"
-            | "inner" | "outer" | "left" | "right" | "on" | "as" | "and"
-            | "or" | "not" | "null" | "true" | "false" | "if" | "exists"
-            | "column" | "index" | "unique" | "primary" | "key" | "foreign"
-            | "references" | "cascade" | "restrict" | "default" | "constraint"
-            | "add" | "rename" | "to" | "all" | "distinct" | "order"
-            | "by" | "group" | "having" | "limit" | "offset" | "union"
-            | "intersect" | "except" | "with" | "returning" | "in" | "like"
-            | "between" | "is" | "case" | "when" | "then" | "else" | "end"
+        "select"
+            | "insert"
+            | "update"
+            | "delete"
+            | "create"
+            | "drop"
+            | "alter"
+            | "table"
+            | "from"
+            | "where"
+            | "set"
+            | "into"
+            | "values"
+            | "join"
+            | "inner"
+            | "outer"
+            | "left"
+            | "right"
+            | "on"
+            | "as"
+            | "and"
+            | "or"
+            | "not"
+            | "null"
+            | "true"
+            | "false"
+            | "if"
+            | "exists"
+            | "column"
+            | "index"
+            | "unique"
+            | "primary"
+            | "key"
+            | "foreign"
+            | "references"
+            | "cascade"
+            | "restrict"
+            | "default"
+            | "constraint"
+            | "add"
+            | "rename"
+            | "to"
+            | "all"
+            | "distinct"
+            | "order"
+            | "by"
+            | "group"
+            | "having"
+            | "limit"
+            | "offset"
+            | "union"
+            | "intersect"
+            | "except"
+            | "with"
+            | "returning"
+            | "in"
+            | "like"
+            | "between"
+            | "is"
+            | "case"
+            | "when"
+            | "then"
+            | "else"
+            | "end"
     )
 }
 
@@ -163,9 +221,10 @@ mod tests {
 
     #[test]
     fn infers_unambiguous_dep() {
-        let existing = vec![
-            ("add_email".to_string(), "ALTER TABLE users ADD COLUMN email TEXT".to_string()),
-        ];
+        let existing = vec![(
+            "add_email".to_string(),
+            "ALTER TABLE users ADD COLUMN email TEXT".to_string(),
+        )];
         let edges = infer_dependencies(
             "add_email_index",
             "CREATE INDEX idx_email ON users (email)",
@@ -177,8 +236,14 @@ mod tests {
     #[test]
     fn skips_ambiguous_dep() {
         let existing = vec![
-            ("mig_a".to_string(), "ALTER TABLE users ADD COLUMN a INT".to_string()),
-            ("mig_b".to_string(), "ALTER TABLE users ADD COLUMN b INT".to_string()),
+            (
+                "mig_a".to_string(),
+                "ALTER TABLE users ADD COLUMN a INT".to_string(),
+            ),
+            (
+                "mig_b".to_string(),
+                "ALTER TABLE users ADD COLUMN b INT".to_string(),
+            ),
         ];
         // Two migrations touch "users" → ambiguous → no inferred edge
         let edges = infer_dependencies("mig_c", "UPDATE users SET a = 1", &existing);

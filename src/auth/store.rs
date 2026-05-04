@@ -333,17 +333,34 @@ impl AuthStore {
     // -----------------------------------------------------------------
 
     /// Persist the current auth state to the vault pages (if configured).
-    ///
-    /// Called automatically after every mutation.  Errors are logged but
-    /// do not propagate -- the in-memory state is always authoritative.
-    fn persist_to_vault(&self) {
+    fn persist_to_vault_result(&self) -> Result<(), AuthError> {
         let vault_guard = self.vault.read().unwrap_or_else(|e| e.into_inner());
         if let (Some(ref vault), Some(ref pager)) = (&*vault_guard, &self.pager) {
             let state = self.snapshot();
-            if let Err(e) = vault.save(pager, &state) {
-                tracing::error!(err = %e, "vault persist failed");
-            }
+            vault.save(pager, &state)?;
         }
+        Ok(())
+    }
+
+    /// Persist the current auth state to the vault pages (if configured).
+    ///
+    /// Legacy auth mutations still treat in-memory state as authoritative.
+    /// New secret-management paths use the `try_` methods below so callers
+    /// get a hard error if the vault write fails.
+    fn persist_to_vault(&self) {
+        if let Err(e) = self.persist_to_vault_result() {
+            tracing::error!(err = %e, "vault persist failed");
+        }
+    }
+
+    /// True when this store has an encrypted vault and pager wired in.
+    pub fn is_vault_backed(&self) -> bool {
+        self.pager.is_some()
+            && self
+                .vault
+                .read()
+                .map(|guard| guard.is_some())
+                .unwrap_or(false)
     }
 
     // -----------------------------------------------------------------
@@ -358,12 +375,130 @@ impl AuthStore {
             .and_then(|kv| kv.get(key).cloned())
     }
 
+    /// Snapshot vault KV values for statement-local secret resolution.
+    pub fn vault_kv_snapshot(&self) -> HashMap<String, String> {
+        self.vault_kv
+            .read()
+            .map(|kv| kv.clone())
+            .unwrap_or_default()
+    }
+
+    /// Export vault KV as an encrypted logical blob for JSONL dump/restore.
+    /// Returns `None` when the vault has no KV entries.
+    pub fn vault_kv_export_encrypted(&self) -> Result<Option<String>, AuthError> {
+        if !self.is_vault_backed() {
+            return Err(AuthError::Forbidden(
+                "vault KV export requires an enabled, unsealed vault".to_string(),
+            ));
+        }
+        let kv = self.vault_kv_snapshot();
+        if kv.is_empty() {
+            return Ok(None);
+        }
+
+        let vault_guard = self.vault.read().map_err(lock_err)?;
+        let vault = vault_guard.as_ref().ok_or_else(|| {
+            AuthError::Forbidden("vault KV export requires an enabled, unsealed vault".to_string())
+        })?;
+        let state = VaultState {
+            users: Vec::new(),
+            api_keys: Vec::new(),
+            bootstrapped: false,
+            master_secret: None,
+            kv,
+        };
+        Ok(Some(vault.seal_logical_export(&state)?))
+    }
+
+    /// Merge imported vault KV entries and fail if the encrypted vault
+    /// write cannot be made durable.
+    pub fn vault_kv_try_import(
+        &self,
+        entries: HashMap<String, String>,
+    ) -> Result<usize, AuthError> {
+        if !self.is_vault_backed() {
+            return Err(AuthError::Forbidden(
+                "vault KV import requires an enabled, unsealed vault".to_string(),
+            ));
+        }
+        if entries.is_empty() {
+            return Ok(0);
+        }
+
+        let mut previous = HashMap::new();
+        {
+            let mut kv = self.vault_kv.write().map_err(lock_err)?;
+            for (key, value) in &entries {
+                previous.insert(key.clone(), kv.insert(key.clone(), value.clone()));
+            }
+        }
+
+        if let Err(err) = self.persist_to_vault_result() {
+            if let Ok(mut kv) = self.vault_kv.write() {
+                for (key, old) in previous {
+                    match old {
+                        Some(value) => {
+                            kv.insert(key, value);
+                        }
+                        None => {
+                            kv.remove(&key);
+                        }
+                    }
+                }
+            }
+            return Err(err);
+        }
+
+        Ok(entries.len())
+    }
+
+    /// Import false placeholders for secrets whose encrypted payload
+    /// could not be decrypted during logical restore.
+    pub fn vault_kv_try_import_placeholders(&self, keys: &[String]) -> Result<usize, AuthError> {
+        let entries = keys
+            .iter()
+            .map(|key| (key.clone(), "false".to_string()))
+            .collect();
+        self.vault_kv_try_import(entries)
+    }
+
     /// Write a value to the vault KV store, persisting to disk.
     pub fn vault_kv_set(&self, key: String, value: String) {
         if let Ok(mut kv) = self.vault_kv.write() {
             kv.insert(key, value);
         }
         self.persist_to_vault();
+    }
+
+    /// Write a value to the vault KV store and fail if the vault write
+    /// cannot be made durable.
+    pub fn vault_kv_try_set(&self, key: String, value: String) -> Result<(), AuthError> {
+        if !self.is_vault_backed() {
+            return Err(AuthError::Forbidden(
+                "SET SECRET requires an enabled, unsealed vault".to_string(),
+            ));
+        }
+
+        let previous = {
+            let mut kv = self.vault_kv.write().map_err(lock_err)?;
+            kv.insert(key.clone(), value)
+        };
+
+        if let Err(err) = self.persist_to_vault_result() {
+            if let Ok(mut kv) = self.vault_kv.write() {
+                match previous {
+                    Some(value) => {
+                        kv.insert(key, value);
+                    }
+                    None => {
+                        kv.remove(&key);
+                    }
+                }
+            }
+            return Err(err);
+        }
+
+        Ok(())
     }
 
     /// Delete a value from the vault KV store. Returns true if it existed.
@@ -377,6 +512,36 @@ impl AuthStore {
             self.persist_to_vault();
         }
         existed
+    }
+
+    /// Delete a value from the vault KV store and fail if the vault write
+    /// cannot be made durable.
+    pub fn vault_kv_try_delete(&self, key: &str) -> Result<bool, AuthError> {
+        if !self.is_vault_backed() {
+            return Err(AuthError::Forbidden(
+                "DELETE SECRET requires an enabled, unsealed vault".to_string(),
+            ));
+        }
+
+        let removed = {
+            let mut kv = self.vault_kv.write().map_err(lock_err)?;
+            kv.remove(key)
+        };
+
+        if removed.is_none() {
+            return Ok(false);
+        }
+
+        if let Err(err) = self.persist_to_vault_result() {
+            if let Ok(mut kv) = self.vault_kv.write() {
+                if let Some(value) = removed {
+                    kv.insert(key.to_string(), value);
+                }
+            }
+            return Err(err);
+        }
+
+        Ok(true)
     }
 
     /// List all keys in the vault KV store.

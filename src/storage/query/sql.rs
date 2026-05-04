@@ -70,6 +70,16 @@ pub enum SqlCommand {
     ShowConfig {
         prefix: Option<String>,
     },
+    SetSecret {
+        key: String,
+        value: Value,
+    },
+    DeleteSecret {
+        key: String,
+    },
+    ShowSecrets {
+        prefix: Option<String>,
+    },
     SetTenant(Option<String>),
     ShowTenant,
     TransactionControl(TxnControl),
@@ -159,6 +169,9 @@ pub enum SqlSchemaCommand {
 pub enum SqlAdminCommand {
     SetConfig { key: String, value: Value },
     ShowConfig { prefix: Option<String> },
+    SetSecret { key: String, value: Value },
+    DeleteSecret { key: String },
+    ShowSecrets { prefix: Option<String> },
     SetTenant(Option<String>),
     ShowTenant,
     TransactionControl(TxnControl),
@@ -219,6 +232,15 @@ impl SqlStatement {
             }
             SqlStatement::Admin(SqlAdminCommand::ShowConfig { prefix }) => {
                 SqlCommand::ShowConfig { prefix }
+            }
+            SqlStatement::Admin(SqlAdminCommand::SetSecret { key, value }) => {
+                SqlCommand::SetSecret { key, value }
+            }
+            SqlStatement::Admin(SqlAdminCommand::DeleteSecret { key }) => {
+                SqlCommand::DeleteSecret { key }
+            }
+            SqlStatement::Admin(SqlAdminCommand::ShowSecrets { prefix }) => {
+                SqlCommand::ShowSecrets { prefix }
             }
             SqlStatement::Admin(SqlAdminCommand::SetTenant(value)) => SqlCommand::SetTenant(value),
             SqlStatement::Admin(SqlAdminCommand::ShowTenant) => SqlCommand::ShowTenant,
@@ -327,6 +349,9 @@ impl SqlCommand {
             SqlCommand::Probabilistic(command) => QueryExpr::ProbabilisticCommand(command),
             SqlCommand::SetConfig { key, value } => QueryExpr::SetConfig { key, value },
             SqlCommand::ShowConfig { prefix } => QueryExpr::ShowConfig { prefix },
+            SqlCommand::SetSecret { key, value } => QueryExpr::SetSecret { key, value },
+            SqlCommand::DeleteSecret { key } => QueryExpr::DeleteSecret { key },
+            SqlCommand::ShowSecrets { prefix } => QueryExpr::ShowSecrets { prefix },
             SqlCommand::SetTenant(value) => QueryExpr::SetTenant(value),
             SqlCommand::ShowTenant => QueryExpr::ShowTenant,
             SqlCommand::TransactionControl(ctl) => QueryExpr::TransactionControl(ctl),
@@ -405,6 +430,15 @@ impl SqlCommand {
             }
             SqlCommand::ShowConfig { prefix } => {
                 SqlStatement::Admin(SqlAdminCommand::ShowConfig { prefix })
+            }
+            SqlCommand::SetSecret { key, value } => {
+                SqlStatement::Admin(SqlAdminCommand::SetSecret { key, value })
+            }
+            SqlCommand::DeleteSecret { key } => {
+                SqlStatement::Admin(SqlAdminCommand::DeleteSecret { key })
+            }
+            SqlCommand::ShowSecrets { prefix } => {
+                SqlStatement::Admin(SqlAdminCommand::ShowSecrets { prefix })
             }
             SqlCommand::SetTenant(value) => SqlStatement::Admin(SqlAdminCommand::SetTenant(value)),
             SqlCommand::ShowTenant => SqlStatement::Admin(SqlAdminCommand::ShowTenant),
@@ -638,6 +672,19 @@ impl<'a> Parser<'a> {
         self.parse_sql_command().map(SqlCommand::into_statement)
     }
 
+    fn parse_dotted_admin_path(&mut self, lowercase: bool) -> Result<String, ParseError> {
+        let mut path = self.expect_ident()?;
+        while self.consume(&Token::Dot)? {
+            let next = self.expect_ident_or_keyword()?;
+            path = format!("{path}.{next}");
+        }
+        Ok(if lowercase {
+            path.to_ascii_lowercase()
+        } else {
+            path
+        })
+    }
+
     /// Parse any SQL/RQL-style command through a single frontend module.
     pub fn parse_sql_command(&mut self) -> Result<SqlCommand, ParseError> {
         match self.peek() {
@@ -670,22 +717,35 @@ impl<'a> Parser<'a> {
                     self.position(),
                 )),
             },
-            Token::Delete => match self.parse_delete_query()? {
-                QueryExpr::Delete(query) => Ok(SqlCommand::Delete(query)),
-                other => Err(ParseError::new(
-                    format!("internal: DELETE produced unexpected query kind {other:?}"),
-                    self.position(),
-                )),
-            },
+            Token::Delete => {
+                if matches!(self.peek_next()?, Token::Ident(n) if n.eq_ignore_ascii_case("SECRET"))
+                {
+                    self.advance()?; // DELETE
+                    self.advance()?; // SECRET
+                    let key = self.parse_dotted_admin_path(true)?;
+                    Ok(SqlCommand::DeleteSecret { key })
+                } else {
+                    match self.parse_delete_query()? {
+                        QueryExpr::Delete(query) => Ok(SqlCommand::Delete(query)),
+                        other => Err(ParseError::new(
+                            format!("internal: DELETE produced unexpected query kind {other:?}"),
+                            self.position(),
+                        )),
+                    }
+                }
+            }
             Token::Explain => {
                 // Peek ahead: EXPLAIN MIGRATION name → ExplainMigration
                 // EXPLAIN ALTER FOR ... → ExplainAlter (existing path)
-                if matches!(self.peek_next()?, Token::Ident(n) if n.eq_ignore_ascii_case("MIGRATION")) {
+                if matches!(self.peek_next()?, Token::Ident(n) if n.eq_ignore_ascii_case("MIGRATION"))
+                {
                     self.advance()?; // consume EXPLAIN
                     match self.parse_explain_migration_after_keyword()? {
                         QueryExpr::ExplainMigration(q) => Ok(SqlCommand::ExplainMigration(q)),
                         other => Err(ParseError::new(
-                            format!("internal: EXPLAIN MIGRATION produced unexpected kind {other:?}"),
+                            format!(
+                                "internal: EXPLAIN MIGRATION produced unexpected kind {other:?}"
+                            ),
                             self.position(),
                         )),
                     }
@@ -1016,12 +1076,15 @@ impl<'a> Parser<'a> {
                         start,
                         increment,
                     }))
-                } else if matches!(self.peek(), Token::Ident(n) if n.eq_ignore_ascii_case("MIGRATION")) {
+                } else if matches!(self.peek(), Token::Ident(n) if n.eq_ignore_ascii_case("MIGRATION"))
+                {
                     self.advance()?; // consume MIGRATION
                     match self.parse_create_migration_body()? {
                         QueryExpr::CreateMigration(q) => Ok(SqlCommand::CreateMigration(q)),
                         other => Err(ParseError::new(
-                            format!("internal: CREATE MIGRATION produced unexpected kind {other:?}"),
+                            format!(
+                                "internal: CREATE MIGRATION produced unexpected kind {other:?}"
+                            ),
                             self.position(),
                         )),
                     }
@@ -1264,23 +1327,18 @@ impl<'a> Parser<'a> {
             Token::Set => {
                 self.advance()?;
                 if self.consume_ident_ci("CONFIG")? {
-                    let key = self.expect_ident()?;
-                    let mut full_key = key;
-                    while self.consume(&Token::Dot)? {
-                        let next = self.expect_ident_or_keyword()?;
-                        full_key = format!("{full_key}.{next}");
-                    }
-                    // Normalise to lowercase so keyword segments
-                    // (`MODE`, `SIZE`, …) returned in their canonical
-                    // uppercase form don't mismatch the lowercase keys
-                    // the config matrix and SHOW CONFIG use.
-                    let full_key = full_key.to_ascii_lowercase();
+                    let full_key = self.parse_dotted_admin_path(true)?;
                     self.expect(Token::Eq)?;
                     let value = self.parse_literal_value()?;
                     Ok(SqlCommand::SetConfig {
                         key: full_key,
                         value,
                     })
+                } else if self.consume_ident_ci("SECRET")? {
+                    let key = self.parse_dotted_admin_path(true)?;
+                    self.expect(Token::Eq)?;
+                    let value = self.parse_literal_value()?;
+                    Ok(SqlCommand::SetSecret { key, value })
                 } else if self.consume_ident_ci("TENANT")? {
                     // SET TENANT 'id'  |  SET TENANT = 'id'  |
                     // SET TENANT NULL  |  SET TENANT = NULL
@@ -1300,7 +1358,7 @@ impl<'a> Parser<'a> {
                     }
                 } else {
                     Err(ParseError::expected(
-                        vec!["CONFIG", "TENANT"],
+                        vec!["CONFIG", "SECRET", "TENANT"],
                         self.peek(),
                         self.position(),
                     ))
@@ -1349,13 +1407,27 @@ impl<'a> Parser<'a> {
                         None
                     };
                     Ok(SqlCommand::ShowConfig { prefix })
+                } else if self.consume_ident_ci("SECRET")? || self.consume_ident_ci("SECRETS")? {
+                    let prefix = if !self.check(&Token::Eof) {
+                        Some(self.parse_dotted_admin_path(true)?)
+                    } else {
+                        None
+                    };
+                    Ok(SqlCommand::ShowSecrets { prefix })
                 } else if self.consume_ident_ci("TENANT")? {
                     Ok(SqlCommand::ShowTenant)
                 } else if let Some(expr) = self.parse_show_iam_after_show()? {
                     Ok(SqlCommand::IamPolicy(expr))
                 } else {
                     Err(ParseError::expected(
-                        vec!["CONFIG", "TENANT", "POLICIES", "EFFECTIVE"],
+                        vec![
+                            "CONFIG",
+                            "SECRET",
+                            "SECRETS",
+                            "TENANT",
+                            "POLICIES",
+                            "EFFECTIVE",
+                        ],
                         self.peek(),
                         self.position(),
                     ))
@@ -1442,7 +1514,9 @@ impl<'a> Parser<'a> {
                     match self.parse_rollback_migration_after_keyword()? {
                         QueryExpr::RollbackMigration(q) => Ok(SqlCommand::RollbackMigration(q)),
                         other => Err(ParseError::new(
-                            format!("internal: ROLLBACK MIGRATION produced unexpected kind {other:?}"),
+                            format!(
+                                "internal: ROLLBACK MIGRATION produced unexpected kind {other:?}"
+                            ),
                             self.position(),
                         )),
                     }

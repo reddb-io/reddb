@@ -309,12 +309,7 @@ impl LabelRegistry {
                     reason: "entry header truncated",
                 });
             }
-            let id = u32::from_le_bytes([
-                data[off],
-                data[off + 1],
-                data[off + 2],
-                data[off + 3],
-            ]);
+            let id = u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
             let ns = Namespace::from_u8(data[off + 4]).ok_or(LabelRegistryError::Malformed {
                 offset: off + 4,
                 reason: "unknown namespace",
@@ -465,7 +460,10 @@ mod tests {
         let r = LabelRegistry::empty();
         let n = r.intern(Namespace::Node, "host").unwrap();
         let e = r.intern(Namespace::Edge, "host").unwrap();
-        assert_ne!(n, e, "same label in different namespaces must get distinct ids");
+        assert_ne!(
+            n, e,
+            "same label in different namespaces must get distinct ids"
+        );
         assert_eq!(r.label_of(Namespace::Node, n).as_deref(), Some("host"));
         assert_eq!(r.label_of(Namespace::Edge, e).as_deref(), Some("host"));
         assert_eq!(r.label_of(Namespace::Node, e), None);

@@ -96,8 +96,10 @@ pub fn detect_mode(input: &str) -> QueryMode {
         || lower.starts_with("search ")
         || lower.starts_with("ask ")
         || lower.starts_with("set config ")
+        || lower.starts_with("set secret ")
         || lower.starts_with("set tenant")
         || lower.starts_with("show config")
+        || lower.starts_with("show secret")
         || lower.starts_with("show tenant")
         || lower.starts_with("show policies")
         || lower.starts_with("show effective ")
@@ -231,6 +233,12 @@ mod tests {
             detect_mode("ASK 'what happened on host 10.0.0.1?' USING groq"),
             QueryMode::Sql
         );
+        assert_eq!(
+            detect_mode("SET SECRET red.secret.api = 'x'"),
+            QueryMode::Sql
+        );
+        assert_eq!(detect_mode("SHOW SECRET red.secret"), QueryMode::Sql);
+        assert_eq!(detect_mode("SHOW SECRETS"), QueryMode::Sql);
     }
 
     #[test]

@@ -658,11 +658,14 @@ impl CompiledEntityFilter {
                     push!(!v);
                 }
                 CompiledEntityOp::Fallback(filter) => {
-                    // Path the compiler couldn't classify: re-enter
-                    // the legacy walker for THIS subtree only. Rare.
-                    let v =
-                        evaluate_entity_filter(entity, filter, &self.table_name, &self.table_alias);
-                    push!(v);
+                    // The compiled entity filter has no DB/runtime
+                    // context, so expression fallbacks such as
+                    // CONFIG() and $secret.* cannot be evaluated here.
+                    // Return true as a prefilter and let callers that
+                    // observe has_fallback() run the full runtime
+                    // evaluator after materializing the row.
+                    let _ = filter;
+                    push!(true);
                 }
             }
         }

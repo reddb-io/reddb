@@ -65,6 +65,12 @@ pub enum QueryExpr {
     SetConfig { key: String, value: Value },
     /// SHOW CONFIG [prefix]
     ShowConfig { prefix: Option<String> },
+    /// SET SECRET key = value
+    SetSecret { key: String, value: Value },
+    /// DELETE SECRET key
+    DeleteSecret { key: String },
+    /// SHOW SECRET[S] [prefix]
+    ShowSecrets { prefix: Option<String> },
     /// `SET TENANT 'id'` / `SET TENANT = 'id'` / `RESET TENANT`
     ///
     /// Session-scoped multi-tenancy handle. Populates a per-connection
@@ -1267,7 +1273,6 @@ impl PathQuery {
         self.via.push(label.into());
         self
     }
-
 }
 
 /// Node selector for path queries

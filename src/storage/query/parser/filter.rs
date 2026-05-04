@@ -355,6 +355,7 @@ impl<'a> Parser<'a> {
             Token::Dash => false,
             // Anything else that can start a primary expression goes
             // through the Expr path.
+            Token::Dollar => true,
             Token::LParen => true,
             token if token_can_start_field_ref(token) => true,
             _ => false,
@@ -366,6 +367,7 @@ impl<'a> Parser<'a> {
     /// them a function call and therefore a general expression.
     fn rhs_looks_like_bare_field_ref(&mut self) -> Result<bool, ParseError> {
         match self.peek() {
+            Token::Dollar => Ok(false),
             token if token_can_start_field_ref(token) => {
                 Ok(!matches!(self.peek_next()?, Token::LParen))
             }

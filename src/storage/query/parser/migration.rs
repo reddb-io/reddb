@@ -92,7 +92,9 @@ impl<'a> Parser<'a> {
     pub fn parse_rollback_migration_after_keyword(&mut self) -> Result<QueryExpr, ParseError> {
         self.consume_ident_ci("MIGRATION")?;
         let name = self.expect_ident()?;
-        Ok(QueryExpr::RollbackMigration(RollbackMigrationQuery { name }))
+        Ok(QueryExpr::RollbackMigration(RollbackMigrationQuery {
+            name,
+        }))
     }
 
     /// Parse: EXPLAIN MIGRATION name  (called after EXPLAIN is consumed)

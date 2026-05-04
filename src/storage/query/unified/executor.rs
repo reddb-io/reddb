@@ -144,6 +144,9 @@ impl UnifiedExecutor {
             | QueryExpr::Ask(_)
             | QueryExpr::SetConfig { .. }
             | QueryExpr::ShowConfig { .. }
+            | QueryExpr::SetSecret { .. }
+            | QueryExpr::DeleteSecret { .. }
+            | QueryExpr::ShowSecrets { .. }
             | QueryExpr::SetTenant(_)
             | QueryExpr::ShowTenant
             | QueryExpr::CreateTimeSeries(_)
@@ -200,12 +203,11 @@ impl UnifiedExecutor {
 
         // Get all nodes that match the pattern
         for pattern_node in &query.pattern.nodes {
-            let matching_nodes: Vec<_> =
-                if let Some(ref category) = pattern_node.node_label {
-                    graph.nodes_with_category(category)
-                } else {
-                    graph.iter_nodes().collect()
-                };
+            let matching_nodes: Vec<_> = if let Some(ref category) = pattern_node.node_label {
+                graph.nodes_with_category(category)
+            } else {
+                graph.iter_nodes().collect()
+            };
 
             // Filter and add matching nodes
             for node in matching_nodes {
@@ -271,12 +273,7 @@ impl UnifiedExecutor {
             for (edge_type, neighbor, weight) in graph.outgoing_edges(&current) {
                 // Check via filter — strings, compared against the legacy
                 // edge enum's canonical name.
-                if !query.via.is_empty()
-                    && !query
-                        .via
-                        .iter()
-                        .any(|via| via == edge_type.as_str())
-                {
+                if !query.via.is_empty() && !query.via.iter().any(|via| via == edge_type.as_str()) {
                     continue;
                 }
 
@@ -373,6 +370,9 @@ impl UnifiedExecutor {
             | QueryExpr::Ask(_)
             | QueryExpr::SetConfig { .. }
             | QueryExpr::ShowConfig { .. }
+            | QueryExpr::SetSecret { .. }
+            | QueryExpr::DeleteSecret { .. }
+            | QueryExpr::ShowSecrets { .. }
             | QueryExpr::SetTenant(_)
             | QueryExpr::ShowTenant
             | QueryExpr::CreateTimeSeries(_)
@@ -490,8 +490,7 @@ impl UnifiedExecutor {
 
             // Check label filter (resolved against the graph's registry).
             if let Some(ref expected) = pattern.node_label {
-                let expected_id =
-                    self.graph.registry.lookup(Namespace::Node, expected);
+                let expected_id = self.graph.registry.lookup(Namespace::Node, expected);
                 match expected_id {
                     Some(id) if id == node.label_id => {}
                     _ => continue,
@@ -600,10 +599,7 @@ impl UnifiedExecutor {
                 if let Some(target_node) = self.graph.get_node(target_id) {
                     // Check target node label filter (registry resolution).
                     if let Some(ref expected) = target_pattern.node_label {
-                        let expected_id = self
-                            .graph
-                            .registry
-                            .lookup(Namespace::Node, expected);
+                        let expected_id = self.graph.registry.lookup(Namespace::Node, expected);
                         match expected_id {
                             Some(id) if id == target_node.label_id => {}
                             _ => continue,
@@ -997,8 +993,7 @@ impl UnifiedExecutor {
         match selector {
             NodeSelector::ById(id) => Ok(vec![id.clone()]),
             NodeSelector::ByType { node_label, filter } => {
-                let expected_id =
-                    self.graph.registry.lookup(Namespace::Node, node_label);
+                let expected_id = self.graph.registry.lookup(Namespace::Node, node_label);
                 let mut nodes = Vec::new();
                 for node in self.graph.iter_nodes() {
                     stats.nodes_scanned += 1;
@@ -1063,9 +1058,7 @@ impl UnifiedExecutor {
                 stats.edges_scanned += 1;
 
                 // Check edge label filter (string compare against canonical name).
-                if !via.is_empty()
-                    && !via.iter().any(|v| v == edge_type.as_str())
-                {
+                if !via.is_empty() && !via.iter().any(|v| v == edge_type.as_str()) {
                     continue;
                 }
 

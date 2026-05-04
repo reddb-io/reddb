@@ -21,10 +21,9 @@ use crate::storage::engine::pathfinding::{AStar, BellmanFord, Dijkstra, BFS, DFS
 use crate::storage::engine::{
     BetweennessCentrality, ClosenessCentrality, ClusteringCoefficient, ConnectedComponents,
     CycleDetector, DegreeCentrality, EigenvectorCentrality, GraphStore, IvfConfig, IvfIndex,
-    IvfStats, LabelPropagation, Louvain, MetadataEntry,
-    MetadataFilter as VectorMetadataFilter, MetadataValue as VectorMetadataValue, PageRank,
-    PersonalizedPageRank, PhysicalFileHeader, StoredNode, StronglyConnectedComponents,
-    WeaklyConnectedComponents, HITS,
+    IvfStats, LabelPropagation, Louvain, MetadataEntry, MetadataFilter as VectorMetadataFilter,
+    MetadataValue as VectorMetadataValue, PageRank, PersonalizedPageRank, PhysicalFileHeader,
+    StoredNode, StronglyConnectedComponents, WeaklyConnectedComponents, HITS,
 };
 use crate::storage::query::ast::{
     AlterOperation, AlterTableQuery, CompareOp, CreateIndexQuery, CreateQueueQuery,
@@ -812,15 +811,16 @@ mod impl_dml;
 mod impl_ec;
 mod impl_graph;
 mod impl_graph_commands;
+mod impl_migrations;
 mod impl_native;
 mod impl_physical;
 mod impl_probabilistic;
 mod impl_queue;
 mod impl_search;
-mod impl_migrations;
 mod impl_timeseries;
 mod impl_tree;
 mod impl_vcs;
+mod dml_target_scan;
 mod index_store;
 mod join_filter;
 pub mod lease_lifecycle;
@@ -835,6 +835,7 @@ mod record_search;
 pub mod resource_limits;
 pub mod schema_diff;
 pub mod snapshot_reuse;
+mod statement_frame;
 pub mod within_clause;
 pub mod write_gate;
 

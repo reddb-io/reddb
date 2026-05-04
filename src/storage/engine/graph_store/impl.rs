@@ -636,11 +636,8 @@ impl GraphStore {
                                 slot: cell_idx as u16,
                             },
                         );
-                        if let Some(node) =
-                            decode_node(&value, page_idx as u32, cell_idx as u16)
-                        {
-                            self.node_secondary
-                                .insert(&id, node.label_id, &node.label);
+                        if let Some(node) = decode_node(&value, page_idx as u32, cell_idx as u16) {
+                            self.node_secondary.insert(&id, node.label_id, &node.label);
                         }
                     }
                 }
@@ -658,9 +655,7 @@ impl GraphStore {
                 let cell_count = page.cell_count() as usize;
                 for cell_idx in 0..cell_count {
                     if let Ok((_, value)) = page.read_cell(cell_idx) {
-                        if let Some(edge) =
-                            decode_edge(&value, page_idx as u32, cell_idx as u16)
-                        {
+                        if let Some(edge) = decode_edge(&value, page_idx as u32, cell_idx as u16) {
                             self.edge_index.add_edge(
                                 &edge.source_id,
                                 &edge.target_id,

@@ -30,13 +30,7 @@ pub(crate) fn service_graph() -> Arc<GraphStore> {
 
     add_edge_or_panic(&graph, "host:10.0.0.1", "svc:ssh", "has_service", 1.0);
     add_edge_or_panic(&graph, "host:10.0.0.1", "svc:http", "has_service", 1.0);
-    add_edge_or_panic(
-        &graph,
-        "host:10.0.0.1",
-        "host:10.0.0.2",
-        "connects_to",
-        1.0,
-    );
+    add_edge_or_panic(&graph, "host:10.0.0.1", "host:10.0.0.2", "connects_to", 1.0);
     add_edge_or_panic(&graph, "host:10.0.0.2", "svc:ssh", "has_service", 1.0);
 
     Arc::new(graph)
@@ -59,13 +53,7 @@ pub(crate) fn unified_query_graph() -> Arc<GraphStore> {
     add_node_or_panic(&graph, "svc:ssh:22", "SSH", "service");
     add_node_or_panic(&graph, "svc:http:80", "HTTP", "service");
 
-    add_edge_or_panic(
-        &graph,
-        "host:192.168.1.1",
-        "svc:ssh:22",
-        "has_service",
-        1.0,
-    );
+    add_edge_or_panic(&graph, "host:192.168.1.1", "svc:ssh:22", "has_service", 1.0);
     add_edge_or_panic(
         &graph,
         "host:192.168.1.1",

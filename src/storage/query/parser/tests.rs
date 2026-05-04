@@ -1264,6 +1264,95 @@ fn test_parse_delete_no_where() {
     }
 }
 
+#[test]
+fn test_parse_set_secret() {
+    let query = parse("SET SECRET mycompany.stripe.key = 'sk_live'").unwrap();
+    if let QueryExpr::SetSecret { key, value } = query {
+        assert_eq!(key, "mycompany.stripe.key");
+        assert_eq!(value, crate::storage::schema::Value::Text("sk_live".into()));
+    } else {
+        panic!("Expected SetSecret");
+    }
+}
+
+#[test]
+fn test_parse_delete_secret() {
+    let query = parse("DELETE SECRET mycompany.stripe.key").unwrap();
+    if let QueryExpr::DeleteSecret { key } = query {
+        assert_eq!(key, "mycompany.stripe.key");
+    } else {
+        panic!("Expected DeleteSecret");
+    }
+}
+
+#[test]
+fn test_parse_show_secret_prefix() {
+    let query = parse("SHOW SECRET mycompany.stripe").unwrap();
+    if let QueryExpr::ShowSecrets { prefix } = query {
+        assert_eq!(prefix.as_deref(), Some("mycompany.stripe"));
+    } else {
+        panic!("Expected ShowSecrets");
+    }
+}
+
+#[test]
+fn test_parse_show_secrets_all() {
+    let query = parse("SHOW SECRETS").unwrap();
+    if let QueryExpr::ShowSecrets { prefix } = query {
+        assert!(prefix.is_none());
+    } else {
+        panic!("Expected ShowSecrets");
+    }
+}
+
+#[test]
+fn test_parse_dollar_secret_reference_projection() {
+    let query = parse("SELECT $secret.mycompany.stripe.key AS secret_value FROM tokens").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "tokens");
+        assert_eq!(tq.columns.len(), 1);
+        match &tq.columns[0] {
+            Projection::Function(name, args) => {
+                assert_eq!(name, "__SECRET_REF:secret_value");
+                assert_eq!(args.len(), 1);
+            }
+            other => panic!("Expected secret projection function, got {other:?}"),
+        }
+    } else {
+        panic!("Expected TableQuery");
+    }
+}
+
+#[test]
+fn test_parse_dollar_secret_reference_filter() {
+    let query = parse("SELECT id FROM tokens WHERE token = $red.secret.tokens.active").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        assert_eq!(tq.table, "tokens");
+        assert!(
+            matches!(tq.filter, Some(Filter::CompareExpr { .. })),
+            "secret reference RHS must parse as CompareExpr"
+        );
+    } else {
+        panic!("Expected TableQuery");
+    }
+}
+
+#[test]
+fn test_parse_dollar_config_reference_projection() {
+    let query = parse("SELECT $red.config.ai.provider AS provider FROM tokens").unwrap();
+    if let QueryExpr::Table(tq) = query {
+        match &tq.columns[0] {
+            Projection::Function(name, args) => {
+                assert_eq!(name, "CONFIG:provider");
+                assert_eq!(args.len(), 1);
+            }
+            other => panic!("Expected config projection function, got {other:?}"),
+        }
+    } else {
+        panic!("Expected TableQuery");
+    }
+}
+
 // ========================================================================
 // DDL Tests: CREATE TABLE, DROP TABLE, ALTER TABLE
 // ========================================================================
@@ -3245,10 +3334,9 @@ fn cte_single_with_single_reference() {
 
 #[test]
 fn cte_chained_definitions() {
-    let parsed = super::parse(
-        "WITH a AS (SELECT * FROM t1), b AS (SELECT * FROM a) SELECT * FROM b",
-    )
-    .unwrap();
+    let parsed =
+        super::parse("WITH a AS (SELECT * FROM t1), b AS (SELECT * FROM a) SELECT * FROM b")
+            .unwrap();
     let with = parsed.with_clause.expect("with_clause should be Some");
     assert_eq!(with.ctes.len(), 2);
     assert_eq!(with.ctes[0].name, "a");
@@ -3257,25 +3345,18 @@ fn cte_chained_definitions() {
 
 #[test]
 fn cte_with_column_aliases() {
-    let parsed = super::parse(
-        "WITH x(a, b) AS (SELECT id, name FROM users) SELECT * FROM x",
-    )
-    .unwrap();
+    let parsed =
+        super::parse("WITH x(a, b) AS (SELECT id, name FROM users) SELECT * FROM x").unwrap();
     let with = parsed.with_clause.expect("with_clause should be Some");
     assert_eq!(with.ctes.len(), 1);
     assert_eq!(with.ctes[0].name, "x");
-    assert_eq!(
-        with.ctes[0].columns,
-        vec!["a".to_string(), "b".to_string()]
-    );
+    assert_eq!(with.ctes[0].columns, vec!["a".to_string(), "b".to_string()]);
 }
 
 #[test]
 fn cte_recursive_marker_propagates() {
-    let parsed = super::parse(
-        "WITH RECURSIVE walk AS (SELECT * FROM nodes) SELECT * FROM walk",
-    )
-    .unwrap();
+    let parsed =
+        super::parse("WITH RECURSIVE walk AS (SELECT * FROM nodes) SELECT * FROM walk").unwrap();
     let with = parsed.with_clause.expect("with_clause should be Some");
     assert!(with.has_recursive);
     assert!(with.ctes[0].recursive);

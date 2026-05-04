@@ -56,6 +56,50 @@ fn checkpoint_local_runtime(rt: &reddb::RedDBRuntime) {
     let _ = rt.checkpoint();
 }
 
+fn has_cli_vault_key() -> bool {
+    std::env::var("REDDB_CERTIFICATE")
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+        || std::env::var("REDDB_VAULT_KEY")
+            .map(|value| !value.is_empty())
+            .unwrap_or(false)
+}
+
+fn attach_cli_vault(
+    rt: &reddb::RedDBRuntime,
+    required: bool,
+) -> Result<Option<std::sync::Arc<reddb::auth::AuthStore>>, String> {
+    let db = rt.db();
+    let store = db.store();
+    let Some(pager) = store.pager() else {
+        if required {
+            return Err("vault requires a persistent database".to_string());
+        }
+        return Ok(None);
+    };
+
+    let has_saved_vault = reddb::auth::vault::Vault::has_saved_state(pager);
+    if !has_cli_vault_key() {
+        if required || has_saved_vault {
+            return Err(
+                "vault export/import requires REDDB_CERTIFICATE or REDDB_VAULT_KEY".to_string(),
+            );
+        }
+        return Ok(None);
+    }
+
+    let auth = std::sync::Arc::new(
+        reddb::auth::AuthStore::with_vault(
+            reddb::auth::AuthConfig::default(),
+            std::sync::Arc::clone(pager),
+            None,
+        )
+        .map_err(|err| format!("open vault: {err}"))?,
+    );
+    rt.set_auth_store(std::sync::Arc::clone(&auth));
+    Ok(Some(auth))
+}
+
 /// Convert a RedDB `Value` to a minimal JSON fragment. Numbers and
 /// booleans come out unquoted; everything else is a JSON string.
 /// `Value::Password` / `Value::Secret` are intentionally rendered as
@@ -937,8 +981,10 @@ fn main() {
             // red dump [--path file] [--collection NAME] [-o FILE]
             //
             // JSONL format: one `{"collection": "...", "fields": {...}}` per
-            // line. `restore` reads the same format back. When --collection
-            // is not provided, every collection in the database is dumped.
+            // line. A full dump also appends one encrypted vault-KV record
+            // for secrets. `restore` reads the same format back. When
+            // --collection is not provided, every collection in the database
+            // is dumped.
             let json_mode = wants_json(&result.flags);
             let rt = open_local_runtime(&result.flags).unwrap_or_else(|err| {
                 if json_mode {
@@ -947,15 +993,33 @@ fn main() {
                 eprintln!("error: {err}");
                 std::process::exit(1);
             });
+            let auth_store = attach_cli_vault(&rt, false).unwrap_or_else(|err| {
+                if json_mode {
+                    json_error("dump", &err);
+                }
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            });
             let store = rt.db().store();
-            let targets: Vec<String> = match flag_string(&result.flags, "collection") {
-                Some(name) if !name.is_empty() => vec![name],
+            let mut targets: Vec<String> = match flag_string(&result.flags, "collection") {
+                Some(name) if !name.is_empty() => {
+                    let mut names = vec![name];
+                    if names.iter().all(|name| name != "red_config")
+                        && store.get_collection("red_config").is_some()
+                    {
+                        names.push("red_config".to_string());
+                    }
+                    names
+                }
                 _ => store.list_collections(),
             };
+            targets.sort();
+            targets.dedup();
             let output_path = flag_string(&result.flags, "output");
 
             let mut buf = String::new();
             let mut total_rows = 0usize;
+            let mut secret_keys = 0usize;
             for collection in &targets {
                 let manager = match store.get_collection(collection) {
                     Some(m) => m,
@@ -984,6 +1048,38 @@ fn main() {
                 }
             }
 
+            if let Some(auth_store) = auth_store.as_ref() {
+                match auth_store.vault_kv_export_encrypted() {
+                    Ok(Some(blob)) => {
+                        let mut keys = auth_store.vault_kv_keys();
+                        keys.sort();
+                        secret_keys = keys.len();
+                        let keys_json = keys
+                            .iter()
+                            .map(|key| reddb::json::Value::String(key.clone()))
+                            .collect();
+                        let mut wrapper = reddb::json::Map::new();
+                        wrapper.insert(
+                            "kind".to_string(),
+                            reddb::json::Value::String("reddb.vault_kv.v1".to_string()),
+                        );
+                        wrapper.insert("encrypted".to_string(), reddb::json::Value::Bool(true));
+                        wrapper.insert("keys".to_string(), reddb::json::Value::Array(keys_json));
+                        wrapper.insert("blob".to_string(), reddb::json::Value::String(blob));
+                        buf.push_str(&reddb::json::Value::Object(wrapper).to_string_compact());
+                        buf.push('\n');
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        if json_mode {
+                            json_error("dump", &err.to_string());
+                        }
+                        eprintln!("dump error: {err}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+
             match output_path {
                 Some(path) if !path.is_empty() => {
                     if let Err(e) = std::fs::write(&path, &buf) {
@@ -997,17 +1093,19 @@ fn main() {
                         json_ok(
                             "dump",
                             &format!(
-                                "{{\"path\":\"{}\",\"rows\":{},\"collections\":{}}}",
+                                "{{\"path\":\"{}\",\"rows\":{},\"collections\":{},\"secret_keys\":{}}}",
                                 path,
                                 total_rows,
-                                targets.len()
+                                targets.len(),
+                                secret_keys
                             ),
                         );
                     } else {
                         println!(
-                            "dumped {} rows from {} collection(s) to {}",
+                            "dumped {} rows from {} collection(s), {} secret key(s) to {}",
                             total_rows,
                             targets.len(),
+                            secret_keys,
                             path
                         );
                     }
@@ -1019,9 +1117,10 @@ fn main() {
                         json_ok(
                             "dump",
                             &format!(
-                                "{{\"rows\":{},\"collections\":{}}}",
+                                "{{\"rows\":{},\"collections\":{},\"secret_keys\":{}}}",
                                 total_rows,
-                                targets.len()
+                                targets.len(),
+                                secret_keys
                             ),
                         );
                     }
@@ -1067,6 +1166,8 @@ fn main() {
 
             let mut restored = 0usize;
             let mut errors = 0usize;
+            let mut restored_secret_keys = 0usize;
+            let mut auth_store: Option<std::sync::Arc<reddb::auth::AuthStore>> = None;
             for (line_no, line) in file_text.lines().enumerate() {
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
@@ -1080,13 +1181,82 @@ fn main() {
                         continue;
                     }
                 };
+                if let reddb::json::Value::Object(map) = &parsed {
+                    if map.get("kind").and_then(|v| v.as_str()) == Some("reddb.vault_kv.v1") {
+                        let keys: Vec<String> = map
+                            .get("keys")
+                            .and_then(|value| value.as_array())
+                            .map(|values| {
+                                values
+                                    .iter()
+                                    .filter_map(|value| value.as_str().map(|s| s.to_string()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let blob = match map.get("blob").and_then(|value| value.as_str()) {
+                            Some(blob) => blob,
+                            None => {
+                                errors += 1;
+                                eprintln!("line {}: missing vault export blob", line_no + 1);
+                                continue;
+                            }
+                        };
+                        if auth_store.is_none() {
+                            match attach_cli_vault(&rt, true) {
+                                Ok(store) => auth_store = store,
+                                Err(err) => {
+                                    errors += 1;
+                                    eprintln!("line {}: {}", line_no + 1, err);
+                                    continue;
+                                }
+                            }
+                        }
+                        let Some(auth) = auth_store.as_ref() else {
+                            errors += 1;
+                            eprintln!("line {}: vault is unavailable", line_no + 1);
+                            continue;
+                        };
+                        match reddb::auth::vault::Vault::unseal_logical_export(blob, None) {
+                            Ok(state) => match auth.vault_kv_try_import(state.kv) {
+                                Ok(count) => restored_secret_keys += count,
+                                Err(err) => {
+                                    errors += 1;
+                                    eprintln!("line {}: vault import failed: {}", line_no + 1, err);
+                                }
+                            },
+                            Err(err) => {
+                                errors += 1;
+                                eprintln!(
+                                    "line {}: vault import failed: {}; importing false placeholders",
+                                    line_no + 1,
+                                    err
+                                );
+                                match auth.vault_kv_try_import_placeholders(&keys) {
+                                    Ok(count) => restored_secret_keys += count,
+                                    Err(placeholder_err) => {
+                                        eprintln!(
+                                            "line {}: vault placeholder import failed: {}",
+                                            line_no + 1,
+                                            placeholder_err
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                }
                 let (collection, fields) = match &parsed {
                     reddb::json::Value::Object(map) => {
-                        let coll = override_collection.clone().or_else(|| {
-                            map.get("collection")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string())
-                        });
+                        let embedded_collection = map
+                            .get("collection")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                        let coll = if embedded_collection.as_deref() == Some("red_config") {
+                            embedded_collection
+                        } else {
+                            override_collection.clone().or(embedded_collection)
+                        };
                         let fields = map.get("fields").cloned();
                         match (coll, fields) {
                             (Some(c), Some(f)) => (c, f),
@@ -1140,10 +1310,16 @@ fn main() {
             if json_mode {
                 json_ok(
                     "restore",
-                    &format!("{{\"restored\":{},\"errors\":{}}}", restored, errors),
+                    &format!(
+                        "{{\"restored\":{},\"secret_keys\":{},\"errors\":{}}}",
+                        restored, restored_secret_keys, errors
+                    ),
                 );
             } else {
-                println!("restored {} rows ({} errors)", restored, errors);
+                println!(
+                    "restored {} rows, {} secret key(s) ({} errors)",
+                    restored, restored_secret_keys, errors
+                );
             }
         }
 
@@ -1790,6 +1966,9 @@ fn identify_command(args: &[String]) -> Option<String> {
 /// Build the flag schema for a given command, merging global + command-specific flags.
 fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema> {
     let mut flags = cli::types::global_flags();
+    if matches!(command, Some("dump")) {
+        flags.retain(|flag| flag.long != "output" && flag.short != Some('o'));
+    }
 
     match command {
         Some("server") => {
@@ -1915,6 +2094,32 @@ fn build_flags_for_command(command: Option<&str>) -> Vec<cli::types::FlagSchema>
                     .with_short('p')
                     .with_description("Open a local .rdb file in embedded mode"),
             );
+        }
+        Some("dump") => {
+            flags.extend(vec![
+                cli::types::FlagSchema::new("path")
+                    .with_description("Local database file to dump from")
+                    .with_default("./data/reddb.rdb"),
+                cli::types::FlagSchema::new("collection")
+                    .with_short('c')
+                    .with_description("Single collection to dump"),
+                cli::types::FlagSchema::new("output")
+                    .with_short('o')
+                    .with_description("Destination file"),
+            ]);
+        }
+        Some("restore") => {
+            flags.extend(vec![
+                cli::types::FlagSchema::new("path")
+                    .with_description("Local database file to restore into")
+                    .with_default("./data/reddb.rdb"),
+                cli::types::FlagSchema::new("input")
+                    .with_short('i')
+                    .with_description("Dump file to read"),
+                cli::types::FlagSchema::new("collection")
+                    .with_short('c')
+                    .with_description("Override target collection name"),
+            ]);
         }
         Some("vcs") => {
             flags.extend(vec![

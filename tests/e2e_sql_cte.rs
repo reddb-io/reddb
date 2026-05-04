@@ -7,10 +7,8 @@
 use reddb::{RedDBOptions, RedDBRuntime};
 
 fn seed_users(rt: &RedDBRuntime) {
-    rt.execute_query(
-        "CREATE TABLE users (id INT, name TEXT, status TEXT, age INT)",
-    )
-    .unwrap();
+    rt.execute_query("CREATE TABLE users (id INT, name TEXT, status TEXT, age INT)")
+        .unwrap();
     let rows = [
         (1, "alice", "active", 30),
         (2, "bob", "inactive", 25),
@@ -141,9 +139,7 @@ fn with_recursive_returns_clear_not_implemented_error() {
     seed_users(&rt);
 
     let err = rt
-        .execute_query(
-            "WITH RECURSIVE walk AS (SELECT id FROM users) SELECT * FROM walk",
-        )
+        .execute_query("WITH RECURSIVE walk AS (SELECT id FROM users) SELECT * FROM walk")
         .expect_err("recursive CTE should error");
 
     let msg = format!("{err}");

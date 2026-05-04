@@ -13,7 +13,11 @@ pub struct CycleError {
 
 impl std::fmt::Display for CycleError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "dependency cycle detected among: {}", self.involved.join(", "))
+        write!(
+            f,
+            "dependency cycle detected among: {}",
+            self.involved.join(", ")
+        )
     }
 }
 
@@ -29,10 +33,8 @@ pub fn topological_sort(
     // in_degree: node → count of dependencies not yet satisfied.
     let node_set: HashSet<&str> = migrations.iter().map(|s| s.as_str()).collect();
 
-    let mut in_degree: HashMap<&str, usize> = migrations
-        .iter()
-        .map(|s| (s.as_str(), 0usize))
-        .collect();
+    let mut in_degree: HashMap<&str, usize> =
+        migrations.iter().map(|s| (s.as_str(), 0usize)).collect();
 
     // dependents[dep] = list of migrations that depend on dep
     let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
@@ -98,11 +100,7 @@ pub fn topological_sort(
 ///
 /// Uses DFS reachability: a cycle exists iff `from` is reachable from `to`
 /// through existing edges.
-pub fn would_create_cycle(
-    existing_edges: &[(String, String)],
-    from: &str,
-    to: &str,
-) -> bool {
+pub fn would_create_cycle(existing_edges: &[(String, String)], from: &str, to: &str) -> bool {
     // Build adjacency: node → its dependencies
     let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
     for (m, dep) in existing_edges {

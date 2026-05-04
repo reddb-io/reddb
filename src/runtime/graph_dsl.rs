@@ -92,7 +92,11 @@ pub(super) fn materialize_graph_lazy(
         }
         if let Some((_, entity)) = store.get_any(EntityId::new(id)) {
             if let EntityKind::GraphNode(ref node) = &entity.kind {
-                let _ = graph.add_node_with_label(&id_str, &node.label, &graph_node_label(&node.node_type));
+                let _ = graph.add_node_with_label(
+                    &id_str,
+                    &node.label,
+                    &graph_node_label(&node.node_type),
+                );
                 visited_nodes.insert(id_str.clone());
                 queue.push_back((id_str, 0));
             }
@@ -181,7 +185,12 @@ pub(super) fn materialize_graph_lazy(
                 }
                 // Add edge
                 if visited_nodes.contains(neighbor_id) {
-                    let _ = graph.add_edge_with_label(&node_id, neighbor_id, &graph_edge_label(label), *weight);
+                    let _ = graph.add_edge_with_label(
+                        &node_id,
+                        neighbor_id,
+                        &graph_edge_label(label),
+                        *weight,
+                    );
                 }
             }
         }
@@ -752,8 +761,8 @@ pub(super) fn top_runtime_scores(
 pub(super) fn graph_node_label(input: &str) -> String {
     let token = normalize_graph_token(input);
     match token.as_str() {
-        "host" | "service" | "credential" | "vulnerability" | "endpoint"
-        | "technology" | "user" | "domain" | "certificate" => token,
+        "host" | "service" | "credential" | "vulnerability" | "endpoint" | "technology"
+        | "user" | "domain" | "certificate" => token,
         "tech" => "technology".to_string(),
         "cert" => "certificate".to_string(),
         // Unknown token: pass through so callers can register new labels.
