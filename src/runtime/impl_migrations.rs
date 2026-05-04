@@ -518,7 +518,7 @@ impl RedDBRuntime {
         };
         let no_rollback = fields
             .get("no_rollback")
-            .and_then(|v| val_bool(v))
+            .and_then(val_bool)
             .unwrap_or(false);
         let rows_processed_start = match fields.get("rows_processed") {
             Some(Value::UnsignedInteger(n)) => *n,
@@ -682,7 +682,7 @@ impl RedDBRuntime {
 
         if fields
             .get("no_rollback")
-            .and_then(|v| val_bool(v))
+            .and_then(val_bool)
             .unwrap_or(false)
         {
             return Err(RedDBError::Query(format!(
