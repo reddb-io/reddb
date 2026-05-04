@@ -43,6 +43,14 @@ impl<'a> Parser<'a> {
             }
         }
 
+        // Optional `AS` keyword separating the metadata clauses from the
+        // body. SQL convention; without consuming it the body string
+        // begins with the literal "AS " token, which then doesn't
+        // round-trip through the query-mode detector when the engine
+        // re-executes the body in `apply_batched`. `AS` is lexed as
+        // `Token::As`, not as an identifier, so use `consume(&Token::As)`.
+        let _ = self.consume(&Token::As)?;
+
         // Everything remaining until EOF is the body
         let body = self.collect_remaining_input();
 
