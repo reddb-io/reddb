@@ -1,39 +1,28 @@
-//! CTE (Common Table Expression) Executor
+//! CTE (Common Table Expression) executor.
 //!
-//! Executes WITH clauses including recursive CTEs for hierarchical queries.
+//! Implements the `WITH … AS (…) SELECT …` SQL standard form. CTEs
+//! are materialised as temporary result sets that the main query can
+//! reference by name. Recursive CTEs (`WITH RECURSIVE`) use the
+//! classic iterative-fixpoint shape:
 //!
-//! # Architecture
+//! 1. Execute the non-recursive (base) part once.
+//! 2. Repeat: execute the recursive part with the previous iteration's
+//!    rows visible as the CTE.
+//! 3. Stop when no new rows are produced (or guard limits trip).
 //!
-//! CTEs are materialized as temporary result sets that can be referenced
-//! in the main query. Recursive CTEs use iterative execution:
-//!
-//! 1. Execute the base (non-recursive) part
-//! 2. Repeat: Execute recursive part with previous iteration's results
-//! 3. Stop when no new rows are produced (fixpoint)
-//!
-//! # Security Use Cases
-//!
-//! Recursive CTEs are powerful for security analysis:
-//! - Attack path enumeration (multi-hop lateral movement)
-//! - Credential chain traversal
-//! - Privilege escalation paths
-//! - Blast radius calculation
+//! Today only non-recursive CTEs are wired through the runtime —
+//! `inline_ctes` rejects `WITH RECURSIVE` with a clear error. The
+//! iterative-fixpoint code in `CteExecutor` is reachable only via
+//! direct unit tests and is the basis for the future recursive wire-
+//! up (#41 follow-up).
 //!
 //! # Example
 //!
 //! ```ignore
-//! WITH RECURSIVE attack_path AS (
-//!     -- Base case: start from compromised host
-//!     SELECT id, ip, 0 as depth FROM hosts WHERE compromised = true
-//!     UNION ALL
-//!     -- Recursive case: find reachable hosts
-//!     SELECT h.id, h.ip, ap.depth + 1
-//!     FROM attack_path ap
-//!     JOIN host_connections c ON ap.id = c.source_id
-//!     JOIN hosts h ON c.target_id = h.id
-//!     WHERE ap.depth < 5
+//! WITH active AS (
+//!     SELECT id, name FROM users WHERE status = 'active'
 //! )
-//! SELECT * FROM attack_path
+//! SELECT * FROM active
 //! ```
 
 use std::collections::{HashMap, HashSet};
@@ -560,6 +549,112 @@ pub fn split_union_parts(query: &QueryExpr) -> Option<(QueryExpr, QueryExpr)> {
     // the full body expression each iteration.
     let _ = query;
     None
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// CTE inlining (#41) — non-recursive
+//
+// Rewrites a `QueryWithCte` into a plain `QueryExpr` by walking the
+// AST and substituting every `TableSource::Name(name)` (or legacy
+// `TableQuery.table` field) that matches a CTE name with
+// `TableSource::Subquery(cte.query)`. After this pass the runtime's
+// existing subquery-in-FROM machinery executes the result with no
+// CTE-specific dispatch needed.
+//
+// Recursive CTEs are rejected up-front — the iterative fixpoint
+// strategy is implemented in `CteExecutor` but is not wired into the
+// runtime yet (separate slice).
+// ─────────────────────────────────────────────────────────────────────
+
+/// Inline a `QueryWithCte`'s WITH clause into its inner query. Returns
+/// the rewritten `QueryExpr` ready for dispatch. Recursive CTEs are
+/// rejected with a clear error.
+pub fn inline_ctes(query: QueryWithCte) -> Result<QueryExpr, ExecutionError> {
+    let Some(with_clause) = query.with_clause else {
+        return Ok(query.query);
+    };
+    if with_clause.has_recursive {
+        return Err(ExecutionError::new(
+            "WITH RECURSIVE is not yet supported by the executor; \
+             non-recursive WITH clauses run today, recursive support \
+             is tracked separately"
+                .to_string(),
+        ));
+    }
+
+    // Inline each CTE into its successors first so chained CTEs
+    // (`WITH a AS (...), b AS (... a ...)`) end up with fully resolved
+    // bodies before they're substituted into the outer query.
+    let mut resolved: HashMap<String, QueryExpr> = HashMap::new();
+    for cte in &with_clause.ctes {
+        let mut body = (*cte.query).clone();
+        rewrite(&mut body, &resolved);
+        resolved.insert(cte.name.clone(), body);
+    }
+
+    let mut outer = query.query;
+    rewrite(&mut outer, &resolved);
+    Ok(outer)
+}
+
+/// Walk a `QueryExpr` and replace any table reference whose name
+/// matches a key in `ctes` with the inlined CTE body. Recurses
+/// through `Join` and nested `Subquery` sources so CTE refs inside
+/// JOINs and subqueries resolve too. Mirrors the view-rewrite
+/// convention: when the outer table reference carries filter / limit
+/// / offset constraints we wrap the body in a `Subquery` to preserve
+/// them; otherwise we replace the whole `Table` node verbatim with
+/// the CTE body so dispatchers that key off `QueryExpr::Table` (like
+/// the JOIN executor) see the right shape.
+fn rewrite(expr: &mut QueryExpr, ctes: &HashMap<String, QueryExpr>) {
+    use super::super::ast::TableSource;
+    match expr {
+        QueryExpr::Table(tq) => {
+            let lookup_name = match &tq.source {
+                Some(TableSource::Subquery(_)) => None,
+                Some(TableSource::Name(n)) => Some(n.clone()),
+                None => Some(tq.table.clone()),
+            };
+
+            if let Some(name) = lookup_name {
+                if let Some(body) = ctes.get(&name) {
+                    let outer_has_constraints = tq.filter.is_some()
+                        || tq.where_expr.is_some()
+                        || tq.limit.is_some()
+                        || tq.offset.is_some()
+                        || !tq.columns.is_empty()
+                        || !tq.select_items.is_empty()
+                        || !tq.group_by.is_empty()
+                        || !tq.order_by.is_empty();
+
+                    if outer_has_constraints {
+                        // Outer ref carries projections / filters /
+                        // limits — keep those by wrapping the body in
+                        // a subquery source. Sentinel name so legacy
+                        // `table` consumers can't resolve it against
+                        // the real schema.
+                        tq.source = Some(TableSource::Subquery(Box::new(body.clone())));
+                        tq.table = format!("__cte_{name}");
+                    } else {
+                        // Bare `FROM cte` (possibly with alias) —
+                        // replace verbatim so JOIN / dispatch paths
+                        // see the CTE body's natural shape.
+                        *expr = body.clone();
+                    }
+                    return;
+                }
+            }
+
+            if let Some(TableSource::Subquery(body)) = tq.source.as_mut() {
+                rewrite(body, ctes);
+            }
+        }
+        QueryExpr::Join(jq) => {
+            rewrite(&mut jq.left, ctes);
+            rewrite(&mut jq.right, ctes);
+        }
+        _ => {}
+    }
 }
 
 // ============================================================================

@@ -31,7 +31,7 @@ pub use aggregation::{
     CountAggregator, CountDistinctAggregator, GroupConcatAggregator, MaxAggregator, MinAggregator,
     PercentileAggregator, SampleAggregator, StdDevAggregator, SumAggregator, VarianceAggregator,
 };
-pub use cte::{split_union_parts, CteContext, CteExecutor, CteStats};
+pub use cte::{inline_ctes, split_union_parts, CteContext, CteExecutor, CteStats};
 pub use gremlin::GremlinExecutor;
 pub use hybrid::{HybridExecutor, InMemoryHybridExecutor};
 pub use join::{

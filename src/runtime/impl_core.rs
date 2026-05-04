@@ -1088,6 +1088,18 @@ fn strip_explain_prefix(sql: &str) -> Option<&str> {
     Some(rest)
 }
 
+/// Cheap prefix check for a leading `WITH` keyword. Used to gate the
+/// CTE-aware parse in `execute_query` without paying for a full
+/// lexer pass on every statement. Treats `WITHIN` as not-a-CTE so
+/// `WITHIN TENANT '...' SELECT ...` doesn't mis-route.
+fn has_with_prefix(sql: &str) -> bool {
+    let trimmed = sql.trim_start();
+    let head_end = trimmed
+        .find(|c: char| c.is_whitespace() || c == '(')
+        .unwrap_or(trimmed.len());
+    trimmed[..head_end].eq_ignore_ascii_case("WITH")
+}
+
 /// If the query is a plain SELECT whose top-level `TableQuery`
 /// carries an `AS OF` clause, return a typed spec that the runtime
 /// can feed to `vcs_resolve_as_of`. Returns `None` for any other
@@ -3520,6 +3532,29 @@ impl RedDBRuntime {
             manager: Arc::clone(&self.inner.snapshot_manager),
             own_xids,
         });
+
+        // ── CTE prelude (#41) — `WITH x AS (...) SELECT ... FROM x` ──
+        //
+        // Detected via cheap prefix check so non-CTE queries skip the
+        // full parse here. CTE-bearing queries bypass the plan cache
+        // and result cache (rare workload — perf optimization is a
+        // follow-up). Inlining substitutes every CTE reference with
+        // its body as a subquery in FROM, after which the existing
+        // subquery-in-FROM machinery handles execution. Recursive
+        // CTEs are rejected explicitly until fixpoint execution wires
+        // through the runtime.
+        if has_with_prefix(query) {
+            let parsed = crate::storage::query::parser::parse(query)
+                .map_err(|e| RedDBError::Query(e.to_string()))?;
+            if parsed.with_clause.is_some() {
+                let rewritten = crate::storage::query::executors::inline_ctes(parsed)
+                    .map_err(|e| RedDBError::Query(e.to_string()))?;
+                return self.execute_query_expr(rewritten);
+            }
+            // No WITH after parse (the prefix matched something else
+            // like `WITHIN` that already routed elsewhere) — fall
+            // through to the normal path with the original query.
+        }
 
         // ── TURBO: bypass SQL parse for SELECT * FROM x WHERE _entity_id = N ──
         if let Some(result) = self.try_fast_entity_lookup(query) {
