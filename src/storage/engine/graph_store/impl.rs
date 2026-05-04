@@ -382,14 +382,14 @@ impl GraphStore {
             ..Default::default()
         };
 
-        // Per-category counts now live in `GraphStats::nodes_by_label`,
-        // a `HashMap<String, u64>` because labels are no longer a closed
-        // enum. Old fixed-size `nodes_by_type: [u64; 9]` is unused.
-        for node in self.iter_nodes() {
-            *stats
-                .nodes_by_label
-                .entry(node.node_type.clone())
-                .or_insert(0) += 1;
+        // Per-category counts derived from the secondary index — O(number
+        // of distinct labels) instead of O(node_count). The secondary
+        // index already maintains the bucket cardinalities incrementally
+        // on every add/remove, so this is essentially free.
+        for (label_id, count) in self.node_secondary.label_id_counts() {
+            if let Some((Namespace::Node, label)) = self.registry.resolve(label_id) {
+                stats.nodes_by_label.insert(label, count);
+            }
         }
 
         stats
