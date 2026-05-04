@@ -480,7 +480,7 @@ ceremony.
 |-------------------|------------------|--------------------------------|-------------------------------------|
 | Rust              | `reddb-client`   | `cargo add reddb-client`       | embedded ✅ · gRPC ✅ · HTTP ✅      |
 | Node / Bun / Deno | `reddb` (npm)    | `pnpm add reddb`               | stdio subprocess ✅                 |
-| Python            | `reddb` (PyPI)   | `pip install reddb` *(soon)*   | embedded ✅ · gRPC ⏳              |
+| Python            | `reddb` (PyPI)   | `pip install reddb` *(soon)*   | embedded ✅ · gRPC ✅ · wire ✅      |
 
 All drivers accept the same URIs:
 

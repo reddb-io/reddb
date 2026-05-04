@@ -44,12 +44,13 @@ with reddb.connect("memory://") as db:
 |---------------------------|----------------------------------|---------------|
 | `memory://`               | Ephemeral in-memory engine       | ✅            |
 | `file:///absolute/path`   | Embedded engine on disk          | ✅            |
-| `grpc://host:port`        | Remote gRPC server               | ⚠ planned     |
+| `grpc://host:port`        | Remote gRPC server               | ✅            |
 
-For now, `grpc://` raises a clear `FEATURE_DISABLED` error from
-`reddb.connect()`. If you need a remote gRPC connection today, use the
-low-level `reddb.legacy_grpc_connect("host:port")` API which exposes a thinner
-`Connection` class.
+The high-level `reddb.connect("grpc://host:port")` API speaks the
+official tonic-backed gRPC client and is the recommended path for
+remote connections. The low-level `legacy_grpc_connect` API below is
+kept around for power users who need direct access to the
+generated-protobuf `Connection` class.
 
 ## API
 
