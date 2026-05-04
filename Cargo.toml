@@ -13,15 +13,12 @@ keywords = ["database", "vector-search", "graph", "document-store", "rust"]
 categories = ["database-implementations", "data-structures"]
 include = [
     "/src/**/*.rs",
-    "/benches/**/*.rs",
     "/proto/**/*.proto",
     "/docs/spec/admin-api.openapi.yaml",
     "/build.rs",
     "/README.md",
     "/Cargo.toml",
     "/LICENSE",
-    "/CHANGELOG.md",
-    "/RELEASE.md",
 ]
 
 [[bin]]
@@ -75,11 +72,6 @@ backend-d1 = []
 otel = []
 
 [dev-dependencies]
-# `default-features = false` drops criterion's optional `rayon` dep
-# (~10 transitive crates we don't need for our microbenches) and
-# the `cast` crate. We keep `html_reports` for local plots.
-criterion = { version = "0.8", default-features = false, features = ["html_reports", "plotters", "cargo_bench_support"] }
-pprof = { version = "0.15", features = ["flamegraph"] }
 # Used by `tests/compile_fail.rs` to assert that misuse of
 # `LeaseStore::new` (passing a non-CAS backend) fails to compile.
 trybuild = "1"
@@ -92,30 +84,10 @@ serde_json = "1"
 tonic-build = "0.14"
 tonic-prost-build = "0.14"
 
-[[bench]]
-name = "bench_embedded"
-harness = false
-
-[[bench]]
-name = "bench_insert"
-harness = false
-
-[[bench]]
-name = "perf_sweep"
-harness = false
-
 # ---------------------------------------------------------------------
 # Build profile tuning — trades runtime perf for build wall time
 # where it makes sense.
 # ---------------------------------------------------------------------
-
-# `cargo bench` builds in the bench profile. By default that profile
-# disables incremental compilation, so every bench rerun recompiles
-# the entire crate from scratch — even if only the bench file
-# changed. Enabling incremental cuts bench rebuild from ~7 minutes
-# (cold-ish) to ~30 seconds (warm) on this codebase.
-[profile.bench]
-incremental = true
 
 # Dev profile already has `incremental = true` by default. We bump
 # `codegen-units` so the linker can parallelise more aggressively
