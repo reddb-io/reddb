@@ -113,6 +113,23 @@ impl Reddb {
                     return Err(ClientError::feature_disabled("grpc"));
                 }
             }
+            Target::GrpcCluster {
+                primary,
+                replicas,
+                force_primary,
+            } => {
+                #[cfg(feature = "grpc")]
+                {
+                    return grpc::GrpcClient::connect_cluster(primary, replicas, force_primary)
+                        .await
+                        .map(Reddb::Grpc);
+                }
+                #[cfg(not(feature = "grpc"))]
+                {
+                    let _ = (primary, replicas, force_primary);
+                    return Err(ClientError::feature_disabled("grpc"));
+                }
+            }
             Target::Http { base_url } => {
                 #[cfg(feature = "http")]
                 {

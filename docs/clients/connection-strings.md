@@ -116,6 +116,40 @@ red server \
 Full flag / env-var reference:
 [`docs/security/transport-tls.md`](../security/transport-tls.md#grpc-agent-b-this-round).
 
+### gRPC cluster (primary + read replicas)
+
+The `reddb-client` Rust driver accepts a comma-separated host list
+in the URI authority. The first entry is the primary; subsequent
+entries are read replicas. Writes always go to the primary; reads
+round-robin across the replicas.
+
+```rust
+// Rust — built into `reddb_client::Reddb::connect` under `--features grpc`.
+let db = Reddb::connect(
+    "grpc://primary.svc:5055,replica1.svc:5055,replica2.svc:5055",
+).await?;
+
+db.insert("users", &payload).await?;   // → primary
+db.query("SELECT * FROM users").await?; // → round-robin replica
+```
+
+Each entry can carry its own `:port`. Entries without a port inherit
+the scheme default (`grpc://` → 5055, `red://` → 5050). At least one
+host is required.
+
+To force every operation back onto the primary (debugging, strict
+read-your-own-writes), append `?route=primary`:
+
+```rust
+let strict = Reddb::connect(
+    "grpc://primary.svc,replica1.svc,replica2.svc?route=primary",
+).await?;
+```
+
+Replica round-robin is in-process and stateless — health-checking
+and stale-replica detection (LSN-behind-threshold bypass) are
+follow-up work tracked alongside this driver.
+
 ### gRPC (legacy bridge — explicit opt-out)
 
 The `grpc://` scheme defaults to RedWire because it shares port

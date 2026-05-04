@@ -12,6 +12,8 @@
 //! as long as tonic's transport stack is happy there). This crate
 //! does not spin up its own runtime.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use tokio::sync::Mutex;
 
 use reddb::client::RedDBClient;
@@ -21,37 +23,109 @@ use crate::error::{ClientError, ErrorCode, Result};
 use crate::types::{InsertResult, JsonValue, QueryResult, ValueOut};
 
 /// Async handle to a remote RedDB server over gRPC.
+///
+/// Internally either a single-endpoint client or a primary +
+/// read-replica cluster. Writes always go to the primary; reads
+/// round-robin across the replicas (or the primary when the replica
+/// pool is empty / `force_primary` is set).
 pub struct GrpcClient {
-    endpoint: String,
+    primary: Endpoint,
+    replicas: Vec<Endpoint>,
+    /// Round-robin counter for replica selection. Wraps cleanly
+    /// (`Relaxed` is fine — exact ordering doesn't matter; spreading
+    /// load across replicas does).
+    next_replica: AtomicUsize,
+    /// `?route=primary` opt-out. When true, every operation hits the
+    /// primary regardless of method type.
+    force_primary: bool,
+}
+
+struct Endpoint {
+    url: String,
     inner: Mutex<RedDBClient>,
+}
+
+impl Endpoint {
+    async fn connect(url: String) -> Result<Self> {
+        let inner = RedDBClient::connect(&url, None).await.map_err(|e| {
+            ClientError::new(ErrorCode::IoError, format!("connect {url}: {e}"))
+        })?;
+        Ok(Self {
+            url,
+            inner: Mutex::new(inner),
+        })
+    }
 }
 
 impl std::fmt::Debug for GrpcClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let replicas: Vec<&str> = self.replicas.iter().map(|e| e.url.as_str()).collect();
         f.debug_struct("GrpcClient")
-            .field("endpoint", &self.endpoint)
+            .field("primary", &self.primary.url)
+            .field("replicas", &replicas)
+            .field("force_primary", &self.force_primary)
             .finish()
     }
 }
 
 impl GrpcClient {
+    /// Single-host gRPC client. Equivalent to `connect_cluster(endpoint, &[], false)`.
     pub async fn connect(endpoint: String) -> Result<Self> {
-        let inner = RedDBClient::connect(&endpoint, None).await.map_err(|e| {
-            ClientError::new(ErrorCode::IoError, format!("connect {endpoint}: {e}"))
-        })?;
+        let primary = Endpoint::connect(endpoint).await?;
         Ok(Self {
-            endpoint,
-            inner: Mutex::new(inner),
+            primary,
+            replicas: Vec::new(),
+            next_replica: AtomicUsize::new(0),
+            force_primary: true,
         })
     }
 
+    /// Multi-host gRPC client. Writes go to `primary`; reads
+    /// round-robin across `replicas` unless `force_primary` is set
+    /// (equivalent to passing `?route=primary` in the URI).
+    pub async fn connect_cluster(
+        primary: String,
+        replicas: Vec<String>,
+        force_primary: bool,
+    ) -> Result<Self> {
+        let primary_ep = Endpoint::connect(primary).await?;
+        let mut replica_eps = Vec::with_capacity(replicas.len());
+        for url in replicas {
+            replica_eps.push(Endpoint::connect(url).await?);
+        }
+        Ok(Self {
+            primary: primary_ep,
+            replicas: replica_eps,
+            next_replica: AtomicUsize::new(0),
+            force_primary,
+        })
+    }
+
+    /// Diagnostic: primary URL.
     pub fn endpoint(&self) -> &str {
-        &self.endpoint
+        &self.primary.url
+    }
+
+    /// Diagnostic: replica URLs in declaration order.
+    pub fn replica_endpoints(&self) -> Vec<&str> {
+        self.replicas.iter().map(|e| e.url.as_str()).collect()
+    }
+
+    /// Pick the endpoint to dispatch a read against. Round-robins over
+    /// replicas; falls back to the primary when no replicas are
+    /// configured or `force_primary` is set.
+    fn read_endpoint(&self) -> &Endpoint {
+        if self.force_primary || self.replicas.is_empty() {
+            return &self.primary;
+        }
+        let idx = self.next_replica.fetch_add(1, Ordering::Relaxed) % self.replicas.len();
+        &self.replicas[idx]
     }
 
     pub async fn query(&self, sql: &str) -> Result<QueryResult> {
+        let ep = self.read_endpoint();
         let reply = {
-            let mut guard = self.inner.lock().await;
+            let mut guard = ep.inner.lock().await;
             guard
                 .query_reply(sql)
                 .await
@@ -69,7 +143,8 @@ impl GrpcClient {
         }
         let json_payload = payload.to_json_string();
         let reply = {
-            let mut guard = self.inner.lock().await;
+            // Writes always go to the primary.
+            let mut guard = self.primary.inner.lock().await;
             guard
                 .create_row_entity(collection, &json_payload)
                 .await
@@ -93,7 +168,7 @@ impl GrpcClient {
             encoded.push(payload.to_json_string());
         }
         let reply = {
-            let mut guard = self.inner.lock().await;
+            let mut guard = self.primary.inner.lock().await;
             guard
                 .bulk_create_rows(collection, encoded)
                 .await
@@ -110,7 +185,7 @@ impl GrpcClient {
             )
         })?;
         {
-            let mut guard = self.inner.lock().await;
+            let mut guard = self.primary.inner.lock().await;
             guard
                 .delete_entity(collection, id)
                 .await
@@ -120,7 +195,8 @@ impl GrpcClient {
     }
 
     pub async fn close(&self) -> Result<()> {
-        // The tonic channel closes when `inner` drops.
+        // The tonic channels close when the inner clients drop with
+        // `self`. Nothing explicit to do here.
         Ok(())
     }
 }
