@@ -88,10 +88,19 @@ AS
 
 ### Checkpoint resume for data migrations
 
-`BATCH N ROWS` turns a data migration into a restartable loop. RedDB appends
-`LIMIT N` and an offset derived from `rows_processed`, commits after each batch,
-and persists the checkpoint. An interrupted migration resumes from the last
-committed batch — not from row zero.
+`BATCH N ROWS` turns a data migration into a restartable loop. Each iteration
+RedDB appends `LIMIT N` to the body, runs it, persists the running
+`rows_processed` checkpoint into `red_migrations`, and stops when the iteration
+reports fewer than `N` rows affected. An interrupted migration is safe to
+re-`APPLY`: the next run picks up where the last one stopped.
+
+The mechanism leans on the migration body's `WHERE` clause being **idempotent
+under replay** — written so rows already processed are filtered out next time.
+The example below satisfies this naturally: every applied row sets
+`score IS NULL` to a non-null value, so subsequent batches only see still-null
+rows. The contract is operator-owned; pinned by a regression test
+(`tests/chaos_migration_batch_resume.rs`) that runs the same `UPDATE` three
+times back-to-back and asserts the second and third are no-ops.
 
 ```sql
 CREATE MIGRATION backfill_scores BATCH 5000 ROWS
@@ -100,6 +109,13 @@ AS
   SET score = calculate_score(activity_count, join_date)
   WHERE score IS NULL;
 ```
+
+> **Stretch goal — SIGKILL drill.** A real chaos test that kills the engine
+> mid-batch via `SIGKILL`, restarts, and asserts no double-apply requires
+> subprocess-management infrastructure that doesn't yet live in the test
+> harness. The in-process resume + idempotent-replay tests today guard the
+> load-bearing pieces; the SIGKILL drill stays open as future work tied to the
+> broader chaos infra.
 
 ### Branch-scoped application
 

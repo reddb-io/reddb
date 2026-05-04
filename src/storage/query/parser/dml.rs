@@ -272,6 +272,16 @@ impl<'a> Parser<'a> {
 
         let (ttl_ms, expires_at_ms, with_metadata, _auto_embed) = self.parse_with_clauses()?;
 
+        // Optional `LIMIT N` — used by `BATCH N ROWS` data migrations
+        // to cap a single batch. Must come after WHERE / WITH because
+        // those have their own keyword tokens that the LIMIT branch
+        // would otherwise mis-consume.
+        let limit = if self.consume(&Token::Limit)? {
+            Some(self.parse_integer()? as u64)
+        } else {
+            None
+        };
+
         let returning = self.parse_returning_clause()?;
 
         Ok(QueryExpr::Update(UpdateQuery {
@@ -284,6 +294,7 @@ impl<'a> Parser<'a> {
             expires_at_ms,
             with_metadata,
             returning,
+            limit,
         }))
     }
 

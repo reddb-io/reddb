@@ -1597,6 +1597,11 @@ pub struct UpdateQuery {
     pub with_metadata: Vec<(String, Value)>,
     /// Optional RETURNING clause items.
     pub returning: Option<Vec<ReturningItem>>,
+    /// Optional `LIMIT N` cap. Caps the number of rows the executor
+    /// will mutate in a single statement. Required by `BATCH N ROWS`
+    /// data migrations (#37) which run the same UPDATE body in a
+    /// loop, advancing a checkpoint between batches.
+    pub limit: Option<u64>,
 }
 
 /// DELETE FROM table WHERE filter
