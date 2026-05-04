@@ -56,21 +56,20 @@ pub struct Snapshot {
 impl Snapshot {
     /// Is a row with this xmin/xmax visible under this snapshot?
     ///
-    /// Equivalent to `UnifiedEntity::is_visible` but also filters out
-    /// rows whose writer is in the in-progress set.
+    /// Delegates to [`super::visibility::is_visible`] — the deep
+    /// module that owns the full MVCC visibility predicate. The
+    /// `aborted` argument is empty here because `Snapshot` does not
+    /// carry the manager-level aborted set; callers that need the
+    /// rolled-back-writer rule should consult [`SnapshotManager`]
+    /// directly, or evolve `Snapshot` to embed an aborted view.
     pub fn sees(&self, xmin: Xid, xmax: Xid) -> bool {
-        if xmin != XID_NONE {
-            if xmin > self.xid {
-                return false;
-            }
-            if self.in_progress.contains(&xmin) {
-                return false;
-            }
-        }
-        if xmax != XID_NONE && xmax <= self.xid && !self.in_progress.contains(&xmax) {
-            return false;
-        }
-        true
+        super::visibility::is_visible(
+            xmin,
+            xmax,
+            self.xid,
+            &self.in_progress,
+            &HashSet::new(),
+        )
     }
 }
 

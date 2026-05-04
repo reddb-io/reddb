@@ -32,6 +32,7 @@ pub mod lock;
 pub mod log;
 pub mod savepoint;
 pub mod snapshot;
+pub mod visibility;
 
 pub use coordinator::{
     IsolationLevel, Transaction, TransactionManager, TxnConfig, TxnError, TxnHandle, TxnState,
@@ -40,3 +41,4 @@ pub use lock::{LockManager, LockMode, LockResult, LockWaiter};
 pub use log::{LogEntry, LogEntryType, TransactionLog, WalConfig};
 pub use savepoint::{Savepoint, SavepointManager};
 pub use snapshot::{Snapshot, SnapshotManager, TxnContext, Xid, XID_NONE};
+pub use visibility::is_visible;
