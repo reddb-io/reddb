@@ -1,6 +1,6 @@
 [package]
 name = "reddb"
-version = "0.2.7"
+version = "0.2.8"
 edition = "2021"
 authors = ["RedDB.io <hello@reddb.io>"]
 description = "Unified multi-model database: tables, documents, graphs, vectors, and key-value in one engine"
