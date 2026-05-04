@@ -826,6 +826,11 @@ impl RedDBRuntime {
         let effective_filter = effective_update_filter(query);
         let compiled_plan = self.compile_update_plan(query)?;
         let mut touched_ids: Vec<EntityId> = Vec::new();
+        // `LIMIT N` cap — used by `BATCH N ROWS` data migrations.
+        // Applied as a truncation on the candidate-id vec built by
+        // each scan/index path, before the apply chunked loop. Single
+        // entity_id fast path doesn't need it (always 1 row).
+        let limit_cap = query.limit.map(|l| l as usize);
         let manager = store
             .get_collection(&query.table)
             .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
@@ -885,7 +890,7 @@ impl RedDBRuntime {
         // scanning the full collection.
         if let Some(ref filter) = effective_filter {
             let idx_store = self.index_store_ref();
-            if let Some(entity_ids) =
+            if let Some(mut entity_ids) =
                 query_exec::try_hash_eq_lookup(filter, &query.table, idx_store)
             {
                 if entity_ids.is_empty() {
@@ -898,6 +903,9 @@ impl RedDBRuntime {
                         ),
                         touched_ids,
                     ));
+                }
+                if let Some(cap) = limit_cap {
+                    entity_ids.truncate(cap);
                 }
                 let mut affected: u64 = 0;
                 for chunk in entity_ids.chunks(UPDATE_APPLY_CHUNK_SIZE) {
@@ -957,7 +965,7 @@ impl RedDBRuntime {
         // predicates remain correct.
         if let Some(ref filter) = effective_filter {
             let idx_store = self.index_store_ref();
-            if let Some(entity_ids) =
+            if let Some(mut entity_ids) =
                 query_exec::try_sorted_index_lookup(filter, &query.table, idx_store, None)
             {
                 if entity_ids.is_empty() {
@@ -970,6 +978,9 @@ impl RedDBRuntime {
                         ),
                         touched_ids,
                     ));
+                }
+                if let Some(cap) = limit_cap {
+                    entity_ids.truncate(cap);
                 }
                 let mut affected: u64 = 0;
                 for chunk in entity_ids.chunks(UPDATE_APPLY_CHUNK_SIZE) {
@@ -1083,6 +1094,10 @@ impl RedDBRuntime {
                 }
                 true
             });
+        }
+
+        if let Some(cap) = limit_cap {
+            ids_to_update.truncate(cap);
         }
 
         let mut affected: u64 = 0;

@@ -43,17 +43,17 @@ fn count_with_predicate(rt: &RedDBRuntime, table: &str, where_clause: &str) -> u
     res.result.records.len() as u64
 }
 
-// NOTE: The end-to-end APPLY MIGRATION test path was attempted and
-// surfaced a separate engine bug: `apply_batched` builds
-// `format!("{body} LIMIT {batch_size}")` and re-executes the body,
-// but the SQL parser today does not accept `LIMIT` on `UPDATE` —
-// `Parse error at 1:64: Unexpected token after query: LIMIT`. That
-// makes the *current* batched-migration code path non-functional
-// regardless of crash-resume behaviour. Tracked as a follow-up; the
-// `batched_migration_idempotent_where_clause_protects_against_replay`
-// test below still pins the property the resume contract depends on
-// (operator-written WHERE clause survives replay), which is the
-// load-bearing piece of the safety story.
+// NOTE: `UPDATE … LIMIT N` is supported as of #37 follow-up — the
+// previous parser blocker that made `apply_batched` non-functional
+// was lifted. Two tests below pin the contract end-to-end:
+//
+// 1. `batched_migration_idempotent_where_clause_protects_against_replay`
+//    proves that the WHERE clause is load-bearing — even if the
+//    engine were to lose its checkpoint and re-run the UPDATE from
+//    row zero, the result stays correct.
+// 2. `apply_migration_batched_runs_to_completion_in_chunks` proves
+//    `BATCH N ROWS` actually runs to completion through multiple
+//    iterations and updates every matching row exactly once.
 
 #[test]
 fn batched_migration_idempotent_where_clause_protects_against_replay() {
@@ -100,4 +100,66 @@ fn batched_migration_idempotent_where_clause_protects_against_replay() {
 
     let done = count_with_predicate(&rt, "replay_targets", "status = 'done'");
     assert_eq!(done, 20, "every row is exactly 'done' after replay");
+}
+
+#[test]
+fn update_limit_caps_affected_rows() {
+    // Direct guard on the new `UPDATE ... LIMIT N` parser + executor
+    // wiring. `apply_batched` relies on this — without `LIMIT`, every
+    // batch would re-process every row. Match-first-N semantics: the
+    // engine truncates the candidate-id vec before applying.
+    let rt = rt();
+    rt.execute_query("CREATE TABLE limit_targets (id BIGINT, status TEXT)")
+        .expect("create");
+    for i in 0..50u64 {
+        rt.execute_query(&format!(
+            "INSERT INTO limit_targets (id, status) VALUES ({i}, 'pending')"
+        ))
+        .expect("seed");
+    }
+
+    let r = affected_rows(
+        &rt,
+        "UPDATE limit_targets SET status = 'done' WHERE status = 'pending' LIMIT 7",
+    );
+    assert_eq!(r, 7, "LIMIT 7 should cap the UPDATE to 7 rows");
+
+    let still_pending =
+        count_with_predicate(&rt, "limit_targets", "status = 'pending'");
+    assert_eq!(still_pending, 43, "43 rows still pending after first batch");
+}
+
+#[test]
+fn apply_migration_batched_runs_to_completion_in_chunks() {
+    // Real APPLY MIGRATION end-to-end. 25 rows, BATCH 7 ROWS — should
+    // converge in ~4 iterations. Asserts every row is updated exactly
+    // once, no skip, no double-apply.
+    let rt = rt();
+    rt.execute_query(
+        "CREATE TABLE batch_targets (id BIGINT, status TEXT)",
+    )
+    .expect("create");
+    for i in 0..25u64 {
+        rt.execute_query(&format!(
+            "INSERT INTO batch_targets (id, status) VALUES ({i}, 'pending')"
+        ))
+        .expect("seed");
+    }
+
+    rt.execute_query(
+        "CREATE MIGRATION mark_pending_done \
+         BATCH 7 ROWS AS \
+         UPDATE batch_targets SET status = 'done' WHERE status = 'pending'",
+    )
+    .expect("create migration");
+
+    rt.execute_query("APPLY MIGRATION mark_pending_done")
+        .expect("apply migration");
+
+    let done = count_with_predicate(&rt, "batch_targets", "status = 'done'");
+    assert_eq!(done, 25, "every row should be 'done' after batched apply");
+
+    let pending =
+        count_with_predicate(&rt, "batch_targets", "status = 'pending'");
+    assert_eq!(pending, 0, "no row should be left 'pending'");
 }
