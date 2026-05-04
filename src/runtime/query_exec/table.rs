@@ -1093,13 +1093,16 @@ pub(crate) fn execute_runtime_canonical_table_query_indexed(
         && !has_scalar_function
     {
         // LIMIT + OFFSET pushdown: pre-scan cap is `offset + limit` so
-        // the scan loop stops once we have enough to skip + keep. An
-        // unbounded scan (no LIMIT) still reads the full table, same
-        // as before.
+        // the scan loop stops once we have enough to skip + keep. ORDER
+        // BY changes the row order downstream, so when a sort key is
+        // present the cap is invalidated — capping at `off + lim` would
+        // yield whichever rows the storage layer happens to surface
+        // first, not the alphabetically-smallest ones. The unbounded-
+        // scan-no-LIMIT case keeps reading the whole table as before.
         let scan_cap = match (query.offset, query.limit) {
-            (_, None) if !query.order_by.is_empty() => None, // ORDER BY needs full set
+            _ if !query.order_by.is_empty() => None,
             (Some(off), Some(lim)) => Some(off as usize + lim as usize),
-            (None, Some(lim)) if query.order_by.is_empty() => Some(lim as usize),
+            (None, Some(lim)) => Some(lim as usize),
             _ => None,
         };
         let mut records =

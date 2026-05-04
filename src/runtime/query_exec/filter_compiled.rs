@@ -271,6 +271,35 @@ pub(crate) fn resolve_kind<'a>(
                     return Some(Cow::Borrowed(v));
                 }
             }
+            // EntityKind top-level fields (`label`, `node_type` on
+            // GraphNode; `label`, `from_node`, `to_node` on GraphEdge).
+            // Mirrors `resolve_entity_field` in helpers.rs so a SQL
+            // predicate like `WHERE label = 'X'` matches a node whose
+            // `label` lives on the kind, not in `properties`.
+            match &entity.kind {
+                EntityKind::GraphNode(ref gn) => match name.as_str() {
+                    "label" => {
+                        return Some(Cow::Owned(Value::text(gn.label.to_string())));
+                    }
+                    "node_type" => {
+                        return Some(Cow::Owned(Value::text(gn.node_type.to_string())));
+                    }
+                    _ => {}
+                },
+                EntityKind::GraphEdge(ref ge) => match name.as_str() {
+                    "label" => {
+                        return Some(Cow::Owned(Value::text(ge.label.to_string())));
+                    }
+                    "from_node" => {
+                        return Some(Cow::Owned(Value::text(ge.from_node.to_string())));
+                    }
+                    "to_node" => {
+                        return Some(Cow::Owned(Value::text(ge.to_node.to_string())));
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
             if let Some(value) = resolve_timeseries_field(entity, name) {
                 return Some(value);
             }
@@ -478,7 +507,18 @@ impl CompiledEntityFilter {
         // Only fires when entity.field_bloom is non-zero (named/document entities).
         // Schema-based bulk rows have field_bloom == 0 (bloom tracked at segment
         // level for those) so the gate is a no-op for the table hot path.
-        if self.required_bloom != 0
+        //
+        // Skip the gate for graph nodes / edges: their `field_bloom` only
+        // covers `properties`, but a SQL filter on `label` / `node_type`
+        // / `from_node` / `to_node` resolves to fields on `EntityKind`,
+        // not on `properties`. Without this carve-out the bloom would
+        // incorrectly reject a node whose `label` matches the filter.
+        let kind_field_query = matches!(
+            entity.kind,
+            EntityKind::GraphNode(_) | EntityKind::GraphEdge(_)
+        );
+        if !kind_field_query
+            && self.required_bloom != 0
             && entity.field_bloom != 0
             && (entity.field_bloom & self.required_bloom) != self.required_bloom
         {

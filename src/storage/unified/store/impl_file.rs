@@ -675,10 +675,17 @@ impl UnifiedStore {
         match &entity.data {
             EntityData::Row(row) => {
                 if let Some(ref named) = row.named {
-                    // Named row: type 6 = Row with named HashMap
+                    // Named row: type 6 = Row with named HashMap.
+                    // Sort by key so the on-disk byte sequence is
+                    // deterministic — replication relies on hashing the
+                    // serialized record to detect divergence, and a
+                    // HashMap-iteration-order race produces spurious
+                    // mismatches.
                     buf.push(6);
                     write_varu32(buf, named.len() as u32);
-                    for (key, value) in named {
+                    let mut entries: Vec<_> = named.iter().collect();
+                    entries.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+                    for (key, value) in entries {
                         write_varu32(buf, key.len() as u32);
                         buf.extend_from_slice(key.as_bytes());
                         Self::write_value_binary(buf, value);
@@ -694,7 +701,9 @@ impl UnifiedStore {
             EntityData::Node(node) => {
                 buf.push(1);
                 write_varu32(buf, node.properties.len() as u32);
-                for (key, value) in &node.properties {
+                let mut entries: Vec<_> = node.properties.iter().collect();
+                entries.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+                for (key, value) in entries {
                     write_varu32(buf, key.len() as u32);
                     buf.extend_from_slice(key.as_bytes());
                     Self::write_value_binary(buf, value);
@@ -704,7 +713,9 @@ impl UnifiedStore {
                 buf.push(2);
                 buf.extend_from_slice(&edge.weight.to_le_bytes());
                 write_varu32(buf, edge.properties.len() as u32);
-                for (key, value) in &edge.properties {
+                let mut entries: Vec<_> = edge.properties.iter().collect();
+                entries.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+                for (key, value) in entries {
                     write_varu32(buf, key.len() as u32);
                     buf.extend_from_slice(key.as_bytes());
                     Self::write_value_binary(buf, value);
@@ -732,7 +743,9 @@ impl UnifiedStore {
                 buf.extend_from_slice(&ts.value.to_le_bytes());
                 if format_version >= STORE_VERSION_V5 {
                     write_varu32(buf, ts.tags.len() as u32);
-                    for (key, value) in &ts.tags {
+                    let mut tag_entries: Vec<_> = ts.tags.iter().collect();
+                    tag_entries.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+                    for (key, value) in tag_entries {
                         write_varu32(buf, key.len() as u32);
                         buf.extend_from_slice(key.as_bytes());
                         write_varu32(buf, value.len() as u32);
