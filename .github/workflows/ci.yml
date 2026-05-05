@@ -107,6 +107,8 @@ jobs:
           workspaces: |
             . -> target
             . -> target/persistent-tests
+      - name: Build red_client (cross-binary smoke prereq)
+        run: cargo build --locked --bin red_client -p reddb-client-internal
       - name: Run default test layer
         run: cargo test --locked --verbose
       - name: Run persistent multimodel layer
