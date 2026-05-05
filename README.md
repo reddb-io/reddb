@@ -515,7 +515,7 @@ with reddb.connect("memory://") as db:
     print(db.query("SELECT * FROM users"))
 ```
 
-Driver docs live in `drivers/rust/README.md`, `drivers/js/README.md`, and
+Driver docs live in `crates/reddb-client/README.md`, `drivers/js/README.md`, and
 `drivers/python/README.md`. The full protocol spec and roadmap are in
 [`PLAN_DRIVERS.md`](./PLAN_DRIVERS.md).
 

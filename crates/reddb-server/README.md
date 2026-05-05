@@ -50,4 +50,4 @@ Top-level modules (full list in `src/lib.rs`):
 
 [adr-0001]: ../../docs/adr/0001-redwire-tcp-protocol.md
 [conn-strings]: ../../docs/clients/connection-strings.md
-[drivers-rust]: ../../drivers/rust
+[drivers-rust]: ../../crates/reddb-client

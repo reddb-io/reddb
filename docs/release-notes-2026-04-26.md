@@ -17,7 +17,7 @@ The full RedWire surface (ADR 0001) is wired end-to-end:
   through RedWire.
 - **SCRAM-SHA-256 over the RedWire handshake.** Server primitives in
   `src/auth/scram.rs`; client primitives in
-  `drivers/rust/src/redwire/scram.rs`. Stored credential format:
+  `crates/reddb-client/src/redwire/scram.rs`. Stored credential format:
   `SCRAM-SHA-256$<iter>:<salt>:<stored-key>:<server-key>`. RFC 5802
   state machine identical to PG-wire SASL.
 - **OAuth / OIDC JWT over the RedWire handshake.** Same
@@ -49,13 +49,13 @@ feature work bumps `Hello.versions[]`.
 - Standalone `login()` helper for username/password → bearer flow.
 - TS types in `drivers/js/index.d.ts` updated for every transport.
 
-### Rust (`drivers/rust`)
+### Rust (`crates/reddb-client`)
 
-- HTTP / HTTPS transport (`drivers/rust/src/http.rs`).
-- TLS + mTLS for the RedWire client (`drivers/rust/src/redwire/tls.rs`)
+- HTTP / HTTPS transport (`crates/reddb-client/src/http.rs`).
+- TLS + mTLS for the RedWire client (`crates/reddb-client/src/redwire/tls.rs`)
   reaching parity with the JS driver.
 - SCRAM-SHA-256 client primitives + advertised methods
-  (`drivers/rust/src/redwire/scram.rs`).
+  (`crates/reddb-client/src/redwire/scram.rs`).
 - Embedded driver adapted to the engine's `Arc<str>` schema-key
   types (no more clones at the edge).
 - `redwire_smoke.rs` integration test exercises the full handshake
@@ -65,7 +65,7 @@ feature work bumps `Hello.versions[]`.
 
 `pnpm`-driven cross-language version sync (mirrors the redblue
 release flow). One `pnpm release:bump <semver>` updates
-`Cargo.toml`, `drivers/rust/Cargo.toml`, `drivers/python/Cargo.toml`,
+`Cargo.toml`, `crates/reddb-client/Cargo.toml`, `drivers/python/Cargo.toml`,
 `drivers/python/pyproject.toml`, `drivers/js/package.json`, and the
 root `package.json` together.
 
