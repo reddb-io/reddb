@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/reddb-client",
+    "crates/reddb-client-connector",
     "crates/reddb-grpc-proto",
     "crates/reddb-server",
     "crates/reddb-wire",
@@ -51,6 +52,12 @@ backend-d1 = ["reddb-server/backend-d1"]
 otel = ["reddb-server/otel"]
 
 [dev-dependencies]
+# Tests at the umbrella level reach into the published-driver
+# layer of `reddb-client` (RedWire codec + frame, embedded
+# integration smoke). The crate-root dep keeps `default-features
+# = false`; the dev-only entry layers in the published features
+# the tests need.
+reddb-client = { version = "0.2", path = "crates/reddb-client", features = ["embedded", "redwire"] }
 # Used by `tests/compile_fail.rs` to assert that misuse of
 # `LeaseStore::new` (passing a non-CAS backend) fails to compile.
 trybuild = "1"

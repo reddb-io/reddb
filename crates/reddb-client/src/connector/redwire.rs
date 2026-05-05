@@ -57,6 +57,7 @@ impl std::error::Error for RedWireError {}
 
 type Result<T> = std::result::Result<T, RedWireError>;
 
+#[derive(Debug)]
 pub struct RedWireClient {
     stream: TcpStream,
     next_corr: u64,

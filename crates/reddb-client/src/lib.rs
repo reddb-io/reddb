@@ -1,276 +1,233 @@
-//! RedDB gRPC client used by the `red` and (later) `red_client`
-//! binaries.
+//! Official Rust client for [RedDB](https://github.com/reddb-io/reddb).
 //!
-//! Connects to a remote RedDB server and provides an interactive
-//! REPL or one-shot command execution. The crate is internal to
-//! the workspace (`publish = false`) and is distinct from the
-//! standalone language driver published from `drivers/rust`.
+//! One connection-string API. Pick your backend at runtime:
+//!
+//! ```no_run
+//! use reddb_client::{Reddb, JsonValue};
+//!
+//! # async fn run() -> reddb_client::Result<()> {
+//! // Embedded: opens the engine in-process, no network.
+//! let db = Reddb::connect("memory://").await?;
+//! db.insert("users", &JsonValue::object([("name", JsonValue::string("Alice"))])).await?;
+//! let result = db.query("SELECT * FROM users").await?;
+//! println!("{} rows", result.rows.len());
+//! db.close().await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! Accepted URIs:
+//!
+//! | URI                       | Backend                              | Status |
+//! |---------------------------|--------------------------------------|--------|
+//! | `memory://`               | Ephemeral in-memory                  | ✅    |
+//! | `file:///abs/path`        | Embedded engine on disk              | ✅    |
+//! | `grpc://host:port`        | Remote tonic client                  | ✅    |
+//! | `red://host:port`         | Remote tonic client (default port 5050) | ✅    |
+//! | `http://host:port`        | REST client                          | ✅    |
+//!
+//! ## Cargo features
+//!
+//! - `embedded` (default) — pulls the entire RedDB engine in-process.
+//! - `grpc` — opt-in remote client over tonic. Pulls the engine for
+//!   its `RedDBClient` type today; a thin proto-only client is tracked
+//!   in `PLAN_DRIVERS.md`.
+//! - `http` — REST client.
+//! - `redwire` — RedWire native TCP client (no engine dep).
+//!
+//! ## Internal connector
+//!
+//! The crate also hosts the gRPC connector + REPL used by the
+//! `red` and `red_client` binaries via the [`connector`] module.
+//! That layer is intentionally lighter than the published [`Reddb`]
+//! API: it speaks tonic + ureq + serde_json only and never pulls
+//! the engine in. It is exposed at the crate root as
+//! [`RedDBClient`] and [`repl`] for back-compat with the previous
+//! `reddb-client-internal` crate.
 
-pub mod http;
+#![deny(unsafe_code)]
+#![warn(missing_debug_implementations)]
+
+pub mod connect;
+pub mod connector;
+pub mod error;
+pub mod types;
+
+#[cfg(feature = "embedded")]
+pub mod embedded;
+
+#[cfg(feature = "grpc")]
+pub mod grpc;
+
+#[cfg(feature = "redwire")]
 pub mod redwire;
-pub mod repl;
 
-use reddb_grpc_proto::red_db_client::RedDbClient;
-use reddb_grpc_proto::*;
-use tonic::transport::Channel;
-use tonic::Request;
+#[cfg(feature = "http")]
+pub mod http;
 
-#[derive(Debug, Clone)]
-pub struct HealthStatus {
-    pub healthy: bool,
-    pub state: String,
-    pub checked_at_unix_ms: u64,
+pub use error::{ClientError, ErrorCode, Result};
+pub use types::{InsertResult, JsonValue, QueryResult, ValueOut};
+
+// Back-compat re-exports for the previous `reddb-client-internal`
+// crate. Workspace consumers (`reddb-server::rpc_stdio`, the `red`
+// bin's REPL launcher, the `red_client` bin) import these paths
+// directly.
+pub use connector::{
+    repl, BulkCreateStatus, CreatedEntity, HealthStatus, OperationStatus, QueryResponse,
+    RedDBClient,
+};
+
+use connect::Target;
+
+/// Top-level client handle. Use [`Reddb::connect`] to get one.
+#[derive(Debug)]
+pub enum Reddb {
+    #[cfg(feature = "embedded")]
+    Embedded(embedded::EmbeddedClient),
+    #[cfg(feature = "grpc")]
+    Grpc(grpc::GrpcClient),
+    #[cfg(feature = "http")]
+    Http(http::HttpClient),
+    /// Constructed when a feature gate would have produced a real
+    /// variant but the feature is disabled. Every method on this
+    /// variant returns a `FEATURE_DISABLED` error so build-time
+    /// configuration bugs surface as runtime errors with a clear
+    /// remediation, not as missing trait impls.
+    Unavailable(&'static str),
 }
 
-#[derive(Debug, Clone)]
-pub struct QueryResponse {
-    pub ok: bool,
-    pub mode: String,
-    pub statement: String,
-    pub engine: String,
-    pub columns: Vec<String>,
-    pub record_count: u64,
-    pub result_json: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct CreatedEntity {
-    pub ok: bool,
-    pub id: u64,
-    pub entity_json: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct BulkCreateStatus {
-    pub ok: bool,
-    pub count: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct OperationStatus {
-    pub ok: bool,
-    pub message: String,
-}
-
-pub struct RedDBClient {
-    inner: RedDbClient<Channel>,
-    token: Option<String>,
-    pub(crate) addr: String,
-}
-
-impl RedDBClient {
-    pub async fn connect(
-        addr: &str,
-        token: Option<String>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        let endpoint = if addr.starts_with("http") {
-            addr.to_string()
-        } else {
-            format!("http://{}", addr)
-        };
-        let inner = RedDbClient::connect(endpoint.clone()).await?;
-        Ok(Self {
-            inner,
-            token,
-            addr: endpoint,
-        })
-    }
-
-    fn auth_request<T>(&self, inner: T) -> Request<T> {
-        let mut req = Request::new(inner);
-        if let Some(ref token) = self.token {
-            if let Ok(value) = format!("Bearer {}", token).parse() {
-                req.metadata_mut().insert("authorization", value);
+impl Reddb {
+    /// Open a connection. The backend is selected from the URI scheme.
+    pub async fn connect(uri: &str) -> Result<Self> {
+        let target = connect::parse(uri)?;
+        match target {
+            Target::Memory => {
+                #[cfg(feature = "embedded")]
+                {
+                    return embedded::EmbeddedClient::in_memory().map(Reddb::Embedded);
+                }
+                #[cfg(not(feature = "embedded"))]
+                {
+                    return Err(ClientError::feature_disabled("embedded"));
+                }
+            }
+            Target::File { path } => {
+                #[cfg(feature = "embedded")]
+                {
+                    return embedded::EmbeddedClient::open(path).map(Reddb::Embedded);
+                }
+                #[cfg(not(feature = "embedded"))]
+                {
+                    let _ = path;
+                    return Err(ClientError::feature_disabled("embedded"));
+                }
+            }
+            Target::Grpc { endpoint } => {
+                #[cfg(feature = "grpc")]
+                {
+                    return grpc::GrpcClient::connect(endpoint).await.map(Reddb::Grpc);
+                }
+                #[cfg(not(feature = "grpc"))]
+                {
+                    let _ = endpoint;
+                    return Err(ClientError::feature_disabled("grpc"));
+                }
+            }
+            Target::GrpcCluster {
+                primary,
+                replicas,
+                force_primary,
+            } => {
+                #[cfg(feature = "grpc")]
+                {
+                    return grpc::GrpcClient::connect_cluster(primary, replicas, force_primary)
+                        .await
+                        .map(Reddb::Grpc);
+                }
+                #[cfg(not(feature = "grpc"))]
+                {
+                    let _ = (primary, replicas, force_primary);
+                    return Err(ClientError::feature_disabled("grpc"));
+                }
+            }
+            Target::Http { base_url } => {
+                #[cfg(feature = "http")]
+                {
+                    return http::HttpClient::connect(http::HttpOptions::new(base_url))
+                        .await
+                        .map(Reddb::Http);
+                }
+                #[cfg(not(feature = "http"))]
+                {
+                    let _ = base_url;
+                    return Err(ClientError::feature_disabled("http"));
+                }
             }
         }
-        req
     }
 
-    /// Update the auth token (e.g. after a successful login).
-    pub fn set_token(&mut self, token: String) {
-        self.token = Some(token);
+    pub async fn query(&self, sql: &str) -> Result<QueryResult> {
+        match self {
+            #[cfg(feature = "embedded")]
+            Reddb::Embedded(c) => c.query(sql),
+            #[cfg(feature = "grpc")]
+            Reddb::Grpc(c) => c.query(sql).await,
+            #[cfg(feature = "http")]
+            Reddb::Http(c) => c.query(sql).await,
+            Reddb::Unavailable(name) => Err(ClientError::feature_disabled(name)),
+        }
     }
 
-    // ========================================================================
-    // Wrappers for common operations
-    // ========================================================================
-
-    pub async fn health_status(&mut self) -> Result<HealthStatus, Box<dyn std::error::Error>> {
-        let req = self.auth_request(Empty {});
-        let resp = self.inner.health(req).await?;
-        let reply = resp.into_inner();
-        Ok(HealthStatus {
-            healthy: reply.healthy,
-            state: reply.state,
-            checked_at_unix_ms: reply.checked_at_unix_ms,
-        })
+    pub async fn insert(&self, collection: &str, payload: &JsonValue) -> Result<InsertResult> {
+        match self {
+            #[cfg(feature = "embedded")]
+            Reddb::Embedded(c) => c.insert(collection, payload),
+            #[cfg(feature = "grpc")]
+            Reddb::Grpc(c) => c.insert(collection, payload).await,
+            #[cfg(feature = "http")]
+            Reddb::Http(c) => c.insert(collection, payload).await,
+            Reddb::Unavailable(name) => Err(ClientError::feature_disabled(name)),
+        }
     }
 
-    pub async fn health(&mut self) -> Result<String, Box<dyn std::error::Error>> {
-        let reply = self.health_status().await?;
-        Ok(format!(
-            "state: {}, healthy: {}",
-            reply.state, reply.healthy
-        ))
+    pub async fn bulk_insert(&self, collection: &str, payloads: &[JsonValue]) -> Result<u64> {
+        match self {
+            #[cfg(feature = "embedded")]
+            Reddb::Embedded(c) => c.bulk_insert(collection, payloads),
+            #[cfg(feature = "grpc")]
+            Reddb::Grpc(c) => c.bulk_insert(collection, payloads).await,
+            #[cfg(feature = "http")]
+            Reddb::Http(c) => c.bulk_insert(collection, payloads).await,
+            Reddb::Unavailable(name) => Err(ClientError::feature_disabled(name)),
+        }
     }
 
-    pub async fn query_reply(
-        &mut self,
-        sql: &str,
-    ) -> Result<QueryResponse, Box<dyn std::error::Error>> {
-        let req = self.auth_request(QueryRequest {
-            query: sql.to_string(),
-            entity_types: vec![],
-            capabilities: vec![],
-        });
-        let resp = self.inner.query(req).await?;
-        let reply = resp.into_inner();
-        Ok(QueryResponse {
-            ok: reply.ok,
-            mode: reply.mode,
-            statement: reply.statement,
-            engine: reply.engine,
-            columns: reply.columns,
-            record_count: reply.record_count,
-            result_json: reply.result_json,
-        })
+    pub async fn delete(&self, collection: &str, id: &str) -> Result<u64> {
+        match self {
+            #[cfg(feature = "embedded")]
+            Reddb::Embedded(c) => c.delete(collection, id),
+            #[cfg(feature = "grpc")]
+            Reddb::Grpc(c) => c.delete(collection, id).await,
+            #[cfg(feature = "http")]
+            Reddb::Http(c) => c.delete(collection, id).await,
+            Reddb::Unavailable(name) => Err(ClientError::feature_disabled(name)),
+        }
     }
 
-    pub async fn query(&mut self, sql: &str) -> Result<String, Box<dyn std::error::Error>> {
-        let reply = self.query_reply(sql).await?;
-        Ok(reply.result_json)
+    pub async fn close(&self) -> Result<()> {
+        match self {
+            #[cfg(feature = "embedded")]
+            Reddb::Embedded(c) => c.close(),
+            #[cfg(feature = "grpc")]
+            Reddb::Grpc(c) => c.close().await,
+            #[cfg(feature = "http")]
+            Reddb::Http(c) => c.close().await,
+            Reddb::Unavailable(_) => Ok(()),
+        }
     }
+}
 
-    pub async fn collections(&mut self) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-        let req = self.auth_request(Empty {});
-        let resp = self.inner.collections(req).await?;
-        Ok(resp.into_inner().collections)
-    }
-
-    pub async fn scan(
-        &mut self,
-        collection: &str,
-        limit: u64,
-    ) -> Result<String, Box<dyn std::error::Error>> {
-        let req = self.auth_request(ScanRequest {
-            collection: collection.to_string(),
-            offset: 0,
-            limit,
-        });
-        let resp = self.inner.scan(req).await?;
-        let reply = resp.into_inner();
-        let items: Vec<String> = reply.items.iter().map(|e| e.json.clone()).collect();
-        Ok(format!(
-            "total: {}, items: [{}]",
-            reply.total,
-            items.join(", ")
-        ))
-    }
-
-    pub async fn stats(&mut self) -> Result<String, Box<dyn std::error::Error>> {
-        let req = self.auth_request(Empty {});
-        let resp = self.inner.stats(req).await?;
-        let reply = resp.into_inner();
-        Ok(format!(
-            "collections: {}, entities: {}, memory: {} bytes, started_at: {}",
-            reply.collection_count,
-            reply.total_entities,
-            reply.total_memory_bytes,
-            reply.started_at_unix_ms
-        ))
-    }
-
-    pub async fn create_row(
-        &mut self,
-        collection: &str,
-        json: &str,
-    ) -> Result<String, Box<dyn std::error::Error>> {
-        let reply = self.create_row_entity(collection, json).await?;
-        Ok(format!("id: {}, entity: {}", reply.id, reply.entity_json))
-    }
-
-    pub async fn create_row_entity(
-        &mut self,
-        collection: &str,
-        json: &str,
-    ) -> Result<CreatedEntity, Box<dyn std::error::Error>> {
-        let req = self.auth_request(JsonCreateRequest {
-            collection: collection.to_string(),
-            payload_json: json.to_string(),
-        });
-        let resp = self.inner.create_row(req).await?;
-        let reply = resp.into_inner();
-        Ok(CreatedEntity {
-            ok: reply.ok,
-            id: reply.id,
-            entity_json: reply.entity_json,
-        })
-    }
-
-    pub async fn bulk_create_rows(
-        &mut self,
-        collection: &str,
-        payload_json: Vec<String>,
-    ) -> Result<BulkCreateStatus, Box<dyn std::error::Error>> {
-        let req = self.auth_request(JsonBulkCreateRequest {
-            collection: collection.to_string(),
-            payload_json,
-        });
-        let resp = self.inner.bulk_create_rows(req).await?;
-        let reply = resp.into_inner();
-        Ok(BulkCreateStatus {
-            ok: reply.ok,
-            count: reply.count,
-        })
-    }
-
-    pub async fn explain(&mut self, sql: &str) -> Result<String, Box<dyn std::error::Error>> {
-        let req = self.auth_request(QueryRequest {
-            query: sql.to_string(),
-            entity_types: vec![],
-            capabilities: vec![],
-        });
-        let resp = self.inner.explain_query(req).await?;
-        Ok(resp.into_inner().payload)
-    }
-
-    pub async fn login(
-        &mut self,
-        username: &str,
-        password: &str,
-    ) -> Result<String, Box<dyn std::error::Error>> {
-        let payload = format!(
-            "{{\"username\":\"{}\",\"password\":\"{}\"}}",
-            username, password
-        );
-        let req = self.auth_request(JsonPayloadRequest {
-            payload_json: payload,
-        });
-        let resp = self.inner.auth_login(req).await?;
-        let reply = resp.into_inner();
-        Ok(reply.payload)
-    }
-
-    pub async fn replication_status(&mut self) -> Result<String, Box<dyn std::error::Error>> {
-        let req = self.auth_request(Empty {});
-        let resp = self.inner.replication_status(req).await?;
-        Ok(resp.into_inner().payload)
-    }
-
-    pub async fn delete_entity(
-        &mut self,
-        collection: &str,
-        id: u64,
-    ) -> Result<OperationStatus, Box<dyn std::error::Error>> {
-        let req = self.auth_request(DeleteEntityRequest {
-            collection: collection.to_string(),
-            id,
-        });
-        let resp = self.inner.delete_entity(req).await?;
-        let reply = resp.into_inner();
-        Ok(OperationStatus {
-            ok: reply.ok,
-            message: reply.message,
-        })
-    }
+/// Crate version (matches the engine version when published in lockstep).
+pub fn version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
 }
