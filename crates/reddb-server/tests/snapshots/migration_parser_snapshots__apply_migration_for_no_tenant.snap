@@ -4,4 +4,4 @@ expression: "fmt_parse_error(\"APPLY MIGRATION m1 FOR\")"
 ---
 input: "APPLY MIGRATION m1 FOR"
 kind:  Syntax
-error: Parse error at 1:20: Unexpected token after query: FOR
+error: Parse error at 1:23: Unexpected token: EOF (expected: TENANT)
