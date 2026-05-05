@@ -347,6 +347,15 @@ fn encode_result(result: &crate::runtime::RuntimeQueryResult) -> Vec<u8> {
 
 /// Binary bulk insert — zero JSON parsing. Values come as typed wire bytes.
 /// Format: [coll_len:u16][coll][ncols:u16][col_names...][nrows:u32][row_values...]
+///
+/// Decoder layout note (P3 — `docs/perf/insert_sequential-2026-05-05.md`):
+/// the collection name is allocated once at the head, the column-name
+/// list is decoded once into an `Arc<Vec<String>>`, and the per-row
+/// hot loop only emits `Vec<Value>` (no per-row `String::clone` for
+/// the column names, no per-row `String::clone` for the collection).
+/// Routing goes through `create_rows_batch_columnar`, which fast-paths
+/// to the prevalidated columnar kernel when the collection carries no
+/// contract — same shape `MSG_BULK_INSERT_PREVALIDATED` already uses.
 pub(crate) fn handle_bulk_insert_binary(runtime: &RedDBRuntime, payload: &[u8]) -> Vec<u8> {
     let mut pos = 0;
 
@@ -354,7 +363,7 @@ pub(crate) fn handle_bulk_insert_binary(runtime: &RedDBRuntime, payload: &[u8]) 
         return make_error(b"binary bulk: payload too short");
     }
 
-    // Collection name
+    // Collection name — allocated once.
     let coll_len = match read_u16(payload, &mut pos, "binary bulk: missing collection length") {
         Ok(len) => len as usize,
         Err(msg) => return make_error(msg.as_bytes()),
@@ -370,7 +379,8 @@ pub(crate) fn handle_bulk_insert_binary(runtime: &RedDBRuntime, payload: &[u8]) 
         Err(msg) => return make_error(msg.as_bytes()),
     };
 
-    // Column names
+    // Column names — allocated once at the head, shared across every
+    // row via `Arc<Vec<String>>`.
     let ncols = match read_u16(payload, &mut pos, "binary bulk: missing column count") {
         Ok(cols) => cols as usize,
         Err(msg) => return make_error(msg.as_bytes()),
@@ -394,6 +404,7 @@ pub(crate) fn handle_bulk_insert_binary(runtime: &RedDBRuntime, payload: &[u8]) 
         };
         col_names.push(name);
     }
+    let column_names = std::sync::Arc::new(col_names);
 
     // Number of rows
     let nrows = match read_u32(payload, &mut pos, "binary bulk: missing row count") {
@@ -401,35 +412,28 @@ pub(crate) fn handle_bulk_insert_binary(runtime: &RedDBRuntime, payload: &[u8]) 
         Err(msg) => return make_error(msg.as_bytes()),
     };
 
-    let mut rows = Vec::with_capacity(nrows);
+    // Per-row hot loop: only emits `Vec<Value>`. No `String::new`,
+    // `to_string`, or `to_owned` per row — column names + collection
+    // are allocated at the top of the function and reused via the
+    // shared `Arc`.
+    let mut rows: Vec<Vec<crate::storage::schema::Value>> = Vec::with_capacity(nrows);
     for _ in 0..nrows {
-        let mut fields = Vec::with_capacity(ncols);
+        let mut values = Vec::with_capacity(ncols);
         for _ in 0..ncols {
             let value = match try_decode_value(payload, &mut pos) {
                 Ok(value) => value,
                 Err(err) => return make_error(format!("binary bulk: {err}").as_bytes()),
             };
-            let field_name = col_names
-                .get(fields.len())
-                .cloned()
-                .unwrap_or_else(|| format!("col_{}", fields.len()));
-            fields.push((field_name, value));
+            values.push(value);
         }
-        rows.push(crate::application::CreateRowInput {
-            collection: collection.clone(),
-            fields,
-            metadata: Vec::new(),
-            node_links: Vec::new(),
-            vector_links: Vec::new(),
-        });
+        rows.push(values);
     }
 
-    match runtime.create_rows_batch(crate::application::CreateRowsBatchInput { collection, rows }) {
-        Ok(outputs) => {
-            let count = outputs.len() as u64;
+    match runtime.create_rows_batch_columnar(collection, column_names, rows) {
+        Ok(count) => {
             let mut resp = Vec::with_capacity(13);
             write_frame_header(&mut resp, MSG_BULK_OK, 8);
-            resp.extend_from_slice(&count.to_le_bytes());
+            resp.extend_from_slice(&(count as u64).to_le_bytes());
             resp
         }
         Err(e) => make_error(format!("bulk insert: {e}").as_bytes()),
