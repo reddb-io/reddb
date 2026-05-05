@@ -80,8 +80,22 @@ impl<'a> Parser<'a> {
             ApplyMigrationTarget::Named(name)
         };
 
-        let for_tenant = if self.consume_ident_ci("FOR")? {
-            self.consume_ident_ci("TENANT")?;
+        // `FOR` is lexed as `Token::For` (reserved keyword), not as an
+        // identifier — `consume_ident_ci("FOR")` never matched it and
+        // the suffix was silently dropped, so the `for_tenant` slot
+        // stayed `None` while `Token::For` leaked back to the
+        // top-level parser as "Unexpected token after query".
+        let for_tenant = if self.consume(&Token::For)? {
+            // Once FOR is committed, TENANT must follow — bail
+            // explicitly if it doesn't, instead of silently accepting
+            // arbitrary identifiers as the tenant id.
+            if !self.consume_ident_ci("TENANT")? {
+                return Err(ParseError::expected(
+                    vec!["TENANT"],
+                    self.peek(),
+                    self.position(),
+                ));
+            }
             Some(self.expect_string_or_ident()?)
         } else {
             None
