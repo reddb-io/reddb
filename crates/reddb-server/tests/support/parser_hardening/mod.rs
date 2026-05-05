@@ -91,10 +91,11 @@ pub fn parse_under_limits<P: HardenedParser>(
 macro_rules! snapshot_parse_error {
     ($parser:ty, $name:expr, $input:expr) => {{
         let input: &str = $input;
-        let formatted = match <$parser as $crate::support::parser_hardening::HardenedParser>::parse(input) {
-            Ok(()) => format!("UNEXPECTED OK\ninput: {:?}\n", input),
-            Err(e) => format!("input: {:?}\nerror: {}\n", input, e),
-        };
+        let formatted =
+            match <$parser as $crate::support::parser_hardening::HardenedParser>::parse(input) {
+                Ok(()) => format!("UNEXPECTED OK\ninput: {:?}\n", input),
+                Err(e) => format!("input: {:?}\nerror: {}\n", input, e),
+            };
         insta::assert_snapshot!($name, formatted);
     }};
 }
