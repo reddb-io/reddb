@@ -23,7 +23,7 @@ use super::auth::{
     AuthOutcome, Hello,
 };
 use super::codec::{decode_frame, encode_frame};
-use super::frame::{Frame, MessageKind, FRAME_HEADER_SIZE};
+use super::frame::{Frame, MessageDirection, MessageKind, FRAME_HEADER_SIZE};
 use super::{FrameBuilder, MAX_KNOWN_MINOR_VERSION, REDWIRE_MAGIC};
 
 #[derive(Debug)]
@@ -81,6 +81,22 @@ where
         }
         let (frame, _) = decode_frame(&buf[..length])
             .map_err(|e| io::Error::other(format!("decode frame: {e}")))?;
+
+        // Catalog-driven direction gate: server-only kinds (PreparedOk,
+        // AuthOk/Fail, BulkOk, …) must never arrive *from* a client.
+        // The catalog (`MessageKind::direction`) is the single source
+        // of truth — see `frame.rs::catalog_tests::direction_matrix_is_pinned`.
+        if frame.kind.direction() == MessageDirection::ServerToClient {
+            let err_frame = FrameBuilder::reply_to(frame.correlation_id)
+                .kind(MessageKind::Error)
+                .payload(
+                    format!("redwire: {:?} is server-only", frame.kind).into_bytes(),
+                )
+                .build()
+                .map_err(|e| io::Error::other(format!("build Error frame: {e}")))?;
+            stream.write_all(&encode_frame(&err_frame)).await?;
+            continue;
+        }
 
         match frame.kind {
             MessageKind::Bye => {
@@ -184,17 +200,6 @@ where
                 stream
                     .write_all(&encode_frame(&rewrap_handler_response(&raw, &frame)))
                     .await?;
-            }
-            MessageKind::PreparedOk => {
-                // Server-emitted in response to Prepare; clients
-                // shouldn't send it. Ignore-with-error to flag
-                // misbehaving callers.
-                let err = encode_frame(&Frame::new(
-                    MessageKind::Error,
-                    frame.correlation_id,
-                    b"PreparedOk is server-only".to_vec(),
-                ));
-                stream.write_all(&err).await?;
             }
             MessageKind::Get => {
                 let response = run_get(&runtime, &frame);
