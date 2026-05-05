@@ -124,6 +124,30 @@ fn boot_red_grpc(port: u16) -> Result<ServerHandle, String> {
     Ok(ServerHandle { child })
 }
 
+fn boot_red_http(port: u16) -> Result<ServerHandle, String> {
+    let path = scratch_path("http");
+    let bind = format!("127.0.0.1:{port}");
+    let grpc_port = pick_port();
+    let grpc_bind = format!("127.0.0.1:{grpc_port}");
+    let mut cmd = Command::new(red_binary());
+    cmd.args([
+        "server",
+        "--http",
+        "--http-bind",
+        &bind,
+        "--grpc-bind",
+        &grpc_bind,
+        "--path",
+        path.to_str().unwrap(),
+    ])
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("spawn red server: {e}"))?;
+    Ok(ServerHandle { child })
+}
+
 fn boot_red_wire(port: u16) -> Result<ServerHandle, String> {
     let path = scratch_path("wire");
     let bind = format!("127.0.0.1:{port}");
@@ -240,6 +264,45 @@ fn red_client_round_trips_against_red_over_redwire() {
     assert_eq!(
         code, 0,
         "red_client over RedWire should exit 0; got {code}\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        !stdout.trim().is_empty(),
+        "red_client should print a result; stdout empty.\nstderr: {stderr}"
+    );
+}
+
+#[test]
+fn red_client_round_trips_against_red_over_http() {
+    let Some(red_client) = skip_if_no_red_client() else {
+        return;
+    };
+    let port = pick_port();
+    let mut server = match boot_red_http(port) {
+        Ok(h) => h,
+        Err(e) => panic!("could not start `red server` (http): {e}"),
+    };
+
+    if !wait_for_listener("127.0.0.1", port, Duration::from_secs(15)) {
+        let (out, err) = drain_output(&mut server.child);
+        panic!(
+            "`red server --http` did not listen on {port} within 15s\nstdout:\n{out}\nstderr:\n{err}"
+        );
+    }
+
+    let uri = format!("http://127.0.0.1:{port}");
+    let out = Command::new(&red_client)
+        .args([&uri, "-c", "SELECT 1"])
+        .output()
+        .expect("spawn red_client");
+    let code = out.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    server.kill();
+
+    assert_eq!(
+        code, 0,
+        "red_client over HTTP should exit 0; got {code}\nstdout: {stdout}\nstderr: {stderr}"
     );
     assert!(
         !stdout.trim().is_empty(),

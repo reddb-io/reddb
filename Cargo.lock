@@ -1432,6 +1432,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tonic",
+ "ureq",
 ]
 
 [[package]]
