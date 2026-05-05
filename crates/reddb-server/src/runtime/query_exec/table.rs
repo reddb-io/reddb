@@ -1322,11 +1322,22 @@ pub(crate) fn execute_runtime_canonical_table_node(
 
             let mut records = execute_runtime_canonical_table_child(db, node, context)?;
             if let Some(filter) = effective_filter.as_ref() {
+                // Compile the filter through the ScalarEvaluator
+                // interface ONCE before the per-row loop. Every
+                // `Filter::CompareExpr` arm has its operator / cast /
+                // function entries resolved here; the per-row
+                // dispatch below only walks the resolved IR. Other
+                // Filter variants stay on the legacy walker via the
+                // `Legacy` arm of `CompiledFilter`.
+                let compiled = crate::runtime::scalar_evaluator::compile_filter(
+                    filter,
+                    &crate::runtime::scalar_evaluator::PermissiveScope,
+                );
                 records.retain(|record| {
-                    evaluate_runtime_filter_with_db(
+                    crate::runtime::scalar_evaluator::evaluate_compiled_filter(
                         Some(db),
+                        &compiled,
                         record,
-                        filter,
                         Some(context.table_name),
                         Some(context.table_alias),
                     )
