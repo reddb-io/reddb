@@ -45,7 +45,14 @@ pub fn literal() -> impl Strategy<Value = String> {
 
 /// A simple comparison predicate `<col> <op> <literal>`.
 pub fn predicate() -> impl Strategy<Value = String> {
-    let op = prop_oneof![Just("="), Just("!="), Just("<"), Just(">"), Just("<="), Just(">=")];
+    let op = prop_oneof![
+        Just("="),
+        Just("!="),
+        Just("<"),
+        Just(">"),
+        Just("<="),
+        Just(">=")
+    ];
     (ident(), op, literal()).prop_map(|(c, o, v)| format!("{} {} {}", c, o, v))
 }
 
@@ -101,10 +108,7 @@ pub fn insert_stmt() -> impl Strategy<Value = String> {
         // each row to the chosen `n_cols`. Avoids the
         // `prop_filter_map` rejection rate that the
         // generate-and-filter approach hits.
-        proptest::collection::vec(
-            proptest::collection::vec(literal(), 3),
-            1..3,
-        ),
+        proptest::collection::vec(proptest::collection::vec(literal(), 3), 1..3),
     )
         .prop_map(|(table, n_cols, rows)| {
             let cols: Vec<String> = (0..n_cols).map(|i| format!("col_{}", i)).collect();
@@ -160,10 +164,5 @@ pub fn delete_stmt() -> impl Strategy<Value = String> {
 
 /// Top-level: any of the four major DML shapes.
 pub fn any_stmt() -> impl Strategy<Value = String> {
-    prop_oneof![
-        select_stmt(),
-        insert_stmt(),
-        update_stmt(),
-        delete_stmt(),
-    ]
+    prop_oneof![select_stmt(), insert_stmt(), update_stmt(), delete_stmt(),]
 }

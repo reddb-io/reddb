@@ -3393,13 +3393,10 @@ fn dos_limit_identifier_too_long_is_structured() {
     };
     // `userstable_long_identifier_name` is well over 8 chars; SELECT/FROM
     // are 6 and 4 chars respectively, both ≤ 8.
-    let err = super::Parser::with_limits(
-        "SELECT * FROM userstable_long_identifier_name",
-        limits,
-    )
-    .and_then(|mut p| p.parse())
-    .err()
-    .expect("oversized ident must error");
+    let err = super::Parser::with_limits("SELECT * FROM userstable_long_identifier_name", limits)
+        .and_then(|mut p| p.parse())
+        .err()
+        .expect("oversized ident must error");
     assert!(
         matches!(
             err.kind,
@@ -3446,5 +3443,8 @@ fn dos_limit_no_panic_on_pathological_input() {
 
     let huge = "a".repeat(2 * 1024 * 1024); // 2 MiB, exceeds 1 MiB cap
     let err = super::parse(&huge).err().expect("must reject");
-    assert!(matches!(err.kind, super::ParseErrorKind::InputTooLarge { .. }));
+    assert!(matches!(
+        err.kind,
+        super::ParseErrorKind::InputTooLarge { .. }
+    ));
 }
