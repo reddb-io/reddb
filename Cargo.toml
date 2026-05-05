@@ -35,7 +35,7 @@ path = "src/bin/red.rs"
 [dependencies]
 reddb-wire = { version = "0.2", path = "crates/reddb-wire" }
 reddb-grpc-proto = { version = "0.2", path = "crates/reddb-grpc-proto" }
-reddb-client-internal = { version = "0.2", path = "crates/reddb-client" }
+reddb-client = { version = "0.2", path = "crates/reddb-client" }
 reddb-server = { version = "0.2", path = "crates/reddb-server" }
 # `red` bin spins up its own multi-thread tokio runtime (server
 # subcommand needs explicit Builder configuration with custom

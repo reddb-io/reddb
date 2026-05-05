@@ -9,7 +9,7 @@
 //!   - `reddb-wire`           — connection-string parser + RedWire frames
 //!   - `reddb-grpc-proto`     — generated tonic protobuf stubs
 //!   - `reddb-server`         — engine, storage, runtime, replication, MCP, AI, server dispatch
-//!   - `reddb-client-internal`— gRPC client + REPL used by the bins
+//!   - `reddb-client`         — gRPC client + REPL used by the bins, plus the published high-level driver
 
 pub use reddb_server::*;
 
@@ -19,7 +19,7 @@ pub use reddb_server::*;
 /// reach the parser without depending on `reddb-wire` directly.
 pub use reddb_wire as wire_proto;
 
-/// Internal gRPC client + REPL used by the `red` and (later)
-/// `red_client` binaries. Exposed under the legacy path so
-/// existing `reddb::client::…` imports keep resolving.
-pub use reddb_client_internal as client;
+/// gRPC client + REPL used by the `red` and `red_client` binaries.
+/// Exposed under the legacy path so existing `reddb::client::…`
+/// imports keep resolving.
+pub use reddb_client as client;
