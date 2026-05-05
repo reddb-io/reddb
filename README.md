@@ -574,6 +574,12 @@ Or via Docker:
 docker run --rm -p 5050:5050 -p 5055:5055 -p 8080:8080 ghcr.io/reddb-io/reddb:latest
 ```
 
+Or, if you only need the thin remote-only client (~7 MB image):
+
+```bash
+docker run --rm ghcr.io/reddb-io/reddb-client:latest red://reddb.example.com:5050 -c "SELECT 1"
+```
+
 For production-secure Docker (vault + secrets) and Kubernetes, see
 [`docs/getting-started/docker.md`](./docs/getting-started/docker.md)
 and [`docs/security/vault.md`](./docs/security/vault.md).
