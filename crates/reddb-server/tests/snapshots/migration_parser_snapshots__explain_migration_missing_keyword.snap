@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/migration_parser_snapshots.rs
+expression: "fmt_parse_error(\"EXPLAIN MIGRATION 12345\")"
+---
+input: "EXPLAIN MIGRATION 12345"
+kind:  Syntax
+error: Parse error at 1:19: Unexpected token: 12345 (expected: identifier)
