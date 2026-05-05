@@ -1,0 +1,23 @@
+[package]
+name = "reddb-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+reddb-server = { path = "../crates/reddb-server" }
+
+[[bin]]
+name = "sql_parser"
+path = "fuzz_targets/sql_parser.rs"
+test = false
+doc = false
+bench = false
+
+# cargo-fuzz requires the workspace exclusion pragma so the fuzz
+# crate is not folded into the parent workspace's resolver.
+[workspace]
