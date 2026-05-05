@@ -1,0 +1,7 @@
+---
+source: crates/reddb-wire/tests/parser_snapshots.rs
+expression: "fmt_parse_error(\"file://\")"
+---
+input: "file://"
+kind:  InvalidUri
+error: INVALID_URI: file:// URI is missing a path

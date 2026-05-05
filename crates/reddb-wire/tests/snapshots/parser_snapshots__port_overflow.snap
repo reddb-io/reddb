@@ -1,0 +1,7 @@
+---
+source: crates/reddb-wire/tests/parser_snapshots.rs
+expression: "fmt_parse_error(\"red://host:99999\")"
+---
+input: "red://host:99999"
+kind:  InvalidUri
+error: INVALID_URI: invalid port number: red://host:99999

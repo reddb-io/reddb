@@ -1,0 +1,7 @@
+---
+source: crates/reddb-wire/tests/parser_snapshots.rs
+expression: "fmt_parse_error(\"\")"
+---
+input: ""
+kind:  Empty
+error: EMPTY: empty connection string

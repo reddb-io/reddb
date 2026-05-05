@@ -1,0 +1,7 @@
+---
+source: crates/reddb-wire/tests/parser_snapshots.rs
+expression: "fmt_parse_error(\"\\u{feff}red://host:5050\")"
+---
+input: "\u{feff}red://host:5050"
+kind:  InvalidUri
+error: INVALID_URI: relative URL without a base: ﻿red://host:5050

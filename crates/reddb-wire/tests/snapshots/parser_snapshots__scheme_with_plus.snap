@@ -1,0 +1,7 @@
+---
+source: crates/reddb-wire/tests/parser_snapshots.rs
+expression: "fmt_parse_error(\"red+tls://host\")"
+---
+input: "red+tls://host"
+kind:  UnsupportedScheme
+error: UNSUPPORTED_SCHEME: unsupported scheme: red+tls

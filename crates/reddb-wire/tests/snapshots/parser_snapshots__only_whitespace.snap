@@ -1,0 +1,7 @@
+---
+source: crates/reddb-wire/tests/parser_snapshots.rs
+expression: "fmt_parse_error(\"    \\n\\t  \")"
+---
+input: "    \n\t  "
+kind:  InvalidUri
+error: INVALID_URI: relative URL without a base:
