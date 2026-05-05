@@ -84,9 +84,9 @@ pub enum ConnectionTarget {
     Memory,
     /// `file:///abs/path` — embedded engine on disk.
     File { path: PathBuf },
-    /// Single remote endpoint over `red://`, `reds://`, `grpc://`, or
-    /// `grpcs://`. Stored as a normalised `http://host:port` string
-    /// because tonic's `Endpoint` consumes that form.
+    /// Single remote endpoint over `grpc://` or `grpcs://`. Stored
+    /// as a normalised `http://host:port` string because tonic's
+    /// `Endpoint` consumes that form.
     Grpc { endpoint: String },
     /// Multi-host gRPC URI: primary + read replicas. Writes hit the
     /// primary; reads round-robin across replicas unless
@@ -98,6 +98,15 @@ pub enum ConnectionTarget {
     },
     /// `http://host:port` / `https://host:port` — REST endpoint.
     Http { base_url: String },
+    /// `red://host:port` (plain TCP) or `reds://host:port` (TLS).
+    /// RedWire binary frame protocol per ADR 0001. The connector
+    /// speaks framed binary directly; it does NOT route through
+    /// tonic.
+    RedWire {
+        host: String,
+        port: u16,
+        tls: bool,
+    },
 }
 
 /// Parse a connection URI into a [`ConnectionTarget`].
@@ -141,8 +150,10 @@ pub fn parse(uri: &str) -> Result<ConnectionTarget, ParseError> {
                 ParseError::new(ParseErrorKind::InvalidUri, "red:// URI is missing a host")
             })?;
             let port = parsed.port().unwrap_or(DEFAULT_PORT_RED);
-            Ok(ConnectionTarget::Grpc {
-                endpoint: format!("http://{host}:{port}"),
+            Ok(ConnectionTarget::RedWire {
+                host: host.to_string(),
+                port,
+                tls: parsed.scheme() == "reds",
             })
         }
         "grpc" | "grpcs" => {

@@ -30,6 +30,7 @@
 use std::env;
 use std::process::ExitCode;
 
+use reddb_client_internal::redwire::{Auth as RedWireAuth, RedWireClient, RedWireError};
 use reddb_client_internal::{repl::run_repl, RedDBClient};
 use reddb_wire::{parse, ConnectionTarget, ParseErrorKind};
 
@@ -51,8 +52,8 @@ async fn main() -> ExitCode {
         }
     };
 
-    let endpoint = match resolve_endpoint(&parsed.uri) {
-        Ok(e) => e,
+    let target = match resolve_target(&parsed.uri) {
+        Ok(t) => t,
         Err(EndpointError::Embedded) => {
             eprintln!(
                 "red_client: embedded schemes (memory:// / file://) are not supported.\n\
@@ -87,6 +88,15 @@ async fn main() -> ExitCode {
         }
     };
 
+    match target {
+        ResolvedTarget::Grpc(endpoint) => run_grpc(endpoint, parsed).await,
+        ResolvedTarget::RedWire { host, port, tls } => {
+            run_redwire(host, port, tls, parsed).await
+        }
+    }
+}
+
+async fn run_grpc(endpoint: String, parsed: ParsedArgs) -> ExitCode {
     let mut client = match RedDBClient::connect(&endpoint, parsed.token.clone()).await {
         Ok(c) => c,
         Err(e) => {
@@ -94,7 +104,6 @@ async fn main() -> ExitCode {
             return ExitCode::from(EXIT_CONNECT_FAILED);
         }
     };
-
     match parsed.command {
         Some(Command::OneShot(sql)) => match client.query(&sql).await {
             Ok(out) => {
@@ -109,6 +118,42 @@ async fn main() -> ExitCode {
         Some(Command::Repl) | None => {
             run_repl(&mut client).await;
             ExitCode::SUCCESS
+        }
+    }
+}
+
+async fn run_redwire(host: String, port: u16, tls: bool, parsed: ParsedArgs) -> ExitCode {
+    let auth = match parsed.token.clone() {
+        Some(t) => RedWireAuth::Bearer(t),
+        None => RedWireAuth::Anonymous,
+    };
+    let mut client = match RedWireClient::connect(&host, port, tls, auth).await {
+        Ok(c) => c,
+        Err(RedWireError::TlsNotImplemented) => {
+            eprintln!("red_client: {}", RedWireError::TlsNotImplemented);
+            return ExitCode::from(EXIT_TRANSPORT_UNSUPPORTED);
+        }
+        Err(e) => {
+            eprintln!("red_client: redwire connect to {host}:{port} failed: {e}");
+            return ExitCode::from(EXIT_CONNECT_FAILED);
+        }
+    };
+    match parsed.command {
+        Some(Command::OneShot(sql)) => match client.query(&sql).await {
+            Ok(out) => {
+                println!("{out}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("red_client: {e}");
+                ExitCode::from(EXIT_RPC_ERROR)
+            }
+        },
+        Some(Command::Repl) | None => {
+            eprintln!(
+                "red_client: REPL over RedWire is not yet wired; pass `-c \"<SQL>\"` for now."
+            );
+            ExitCode::from(EXIT_TRANSPORT_UNSUPPORTED)
         }
     }
 }
@@ -187,7 +232,13 @@ enum EndpointError {
     ParseFailed(String),
 }
 
-fn resolve_endpoint(uri: &str) -> Result<String, EndpointError> {
+#[derive(Debug)]
+enum ResolvedTarget {
+    Grpc(String),
+    RedWire { host: String, port: u16, tls: bool },
+}
+
+fn resolve_target(uri: &str) -> Result<ResolvedTarget, EndpointError> {
     if is_embedded_uri(uri) {
         return Err(EndpointError::Embedded);
     }
@@ -203,7 +254,10 @@ fn resolve_endpoint(uri: &str) -> Result<String, EndpointError> {
         ConnectionTarget::Memory | ConnectionTarget::File { .. } => Err(EndpointError::Embedded),
         ConnectionTarget::Http { .. } => Err(EndpointError::HttpUnsupported),
         ConnectionTarget::GrpcCluster { .. } => Err(EndpointError::ClusterUnsupported),
-        ConnectionTarget::Grpc { endpoint } => Ok(endpoint),
+        ConnectionTarget::Grpc { endpoint } => Ok(ResolvedTarget::Grpc(endpoint)),
+        ConnectionTarget::RedWire { host, port, tls } => {
+            Ok(ResolvedTarget::RedWire { host, port, tls })
+        }
     }
 }
 
