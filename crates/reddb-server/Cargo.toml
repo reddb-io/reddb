@@ -69,3 +69,7 @@ trybuild = "1"
 # tokens; `serde_json` shapes the JWKS responses. Both are dev-only.
 jsonwebtoken = "9"
 serde_json = "1"
+# Parser hardening harness (issue #87): property tests via proptest,
+# pinned error-message snapshots via insta.
+proptest = "1"
+insta = "1"
