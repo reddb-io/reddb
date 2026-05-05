@@ -483,13 +483,13 @@ mod tests {
         {
             let db = Database::open(&path).unwrap();
             assert!(!db.is_read_only());
-            assert_eq!(db.page_count(), 1); // Header page
+            assert_eq!(db.page_count(), 3); // Header + reserved pages
         }
 
         // Should be able to reopen
         {
             let db = Database::open(&path).unwrap();
-            assert_eq!(db.page_count(), 1);
+            assert_eq!(db.page_count(), 3);
         }
 
         cleanup(&path);

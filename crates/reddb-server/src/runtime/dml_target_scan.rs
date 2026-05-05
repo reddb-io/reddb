@@ -47,11 +47,9 @@ impl<'a> DmlTargetScan<'a> {
         }
 
         if let Some(filter) = self.filter {
-            if let Some(ids) = query_exec::try_hash_eq_lookup(
-                filter,
-                self.table,
-                self.runtime.index_store_ref(),
-            ) {
+            if let Some(ids) =
+                query_exec::try_hash_eq_lookup(filter, self.table, self.runtime.index_store_ref())
+            {
                 return Ok(self.recheck_index_candidates(ids, compiled_filter.as_ref()));
             }
 
@@ -128,11 +126,9 @@ impl<'a> DmlTargetScan<'a> {
         let store = db.store();
         let manager = store.get_collection(self.table)?;
         let compiled = match manager.column_schema() {
-            Some(schema) => {
-                query_exec::CompiledEntityFilter::compile_with_schema(
-                    filter, self.table, self.table, &schema,
-                )
-            }
+            Some(schema) => query_exec::CompiledEntityFilter::compile_with_schema(
+                filter, self.table, self.table, &schema,
+            ),
             None => query_exec::CompiledEntityFilter::compile(filter, self.table, self.table),
         };
         (!compiled.has_fallback()).then_some(compiled)
