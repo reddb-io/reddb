@@ -38,7 +38,7 @@ fn red_binary() -> PathBuf {
 fn red_client_binary() -> PathBuf {
     // CARGO_BIN_EXE_<name> is only set for binaries in the *same*
     // package as the test. red_client lives in the sibling
-    // `reddb-client-internal` crate, so we derive its path from the
+    // `reddb-client` crate, so we derive its path from the
     // `red` binary's location: both land in the same workspace
     // target/<profile>/ directory.
     let red = PathBuf::from(env!("CARGO_BIN_EXE_red"));
@@ -200,7 +200,7 @@ fn skip_if_no_red_client() -> Option<PathBuf> {
     if !path.exists() {
         eprintln!(
             "red_client binary not found at {}; skipping cross-binary smoke test. \
-             Build with `cargo build --bin red_client -p reddb-client-internal` first.",
+             Build with `cargo build --bin red_client -p reddb-client` first.",
             path.display()
         );
         return None;
