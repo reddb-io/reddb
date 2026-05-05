@@ -8,10 +8,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use reddb::api::RedDBOptions;
-use reddb::runtime::RedDBRuntime;
-use reddb::storage::query::unified::UnifiedRecord;
-use reddb::storage::schema::Value as SchemaValue;
+use reddb_server::api::RedDBOptions;
+use reddb_server::runtime::RedDBRuntime;
+use reddb_server::storage::query::unified::UnifiedRecord;
+use reddb_server::storage::schema::Value as SchemaValue;
 
 use crate::error::{ClientError, ErrorCode, Result};
 use crate::types::{InsertResult, JsonValue, QueryResult, ValueOut};
@@ -144,7 +144,7 @@ fn value_to_sql_literal(v: &JsonValue) -> String {
     }
 }
 
-fn map_query_result(qr: &reddb::runtime::RuntimeQueryResult) -> QueryResult {
+fn map_query_result(qr: &reddb_server::runtime::RuntimeQueryResult) -> QueryResult {
     let columns: Vec<String> = qr
         .result
         .records
