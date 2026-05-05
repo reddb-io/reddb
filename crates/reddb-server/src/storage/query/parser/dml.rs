@@ -10,6 +10,41 @@ use super::Parser;
 use crate::storage::query::sql_lowering::{filter_to_expr, fold_expr_to_value};
 use crate::storage::schema::Value;
 
+/// DoS guard: maximum JSON nesting depth accepted by the parser.
+/// Mirrors typical web-server JSON limits and bails out before stack
+/// usage gets dangerous in downstream traversals.
+pub(crate) const JSON_LITERAL_MAX_DEPTH: u32 = 128;
+
+/// Walk a parsed `JsonValue` tree and bail out if nesting exceeds
+/// `JSON_LITERAL_MAX_DEPTH`. Iterative to avoid the very stack
+/// overflow we're trying to prevent.
+pub(crate) fn json_literal_depth_check(value: &crate::utils::json::JsonValue) -> Result<(), String> {
+    use crate::utils::json::JsonValue;
+    let mut stack: Vec<(&JsonValue, u32)> = vec![(value, 1)];
+    while let Some((node, depth)) = stack.pop() {
+        if depth > JSON_LITERAL_MAX_DEPTH {
+            return Err(format!(
+                "JSON object literal exceeds JSON_LITERAL_MAX_DEPTH ({})",
+                JSON_LITERAL_MAX_DEPTH
+            ));
+        }
+        match node {
+            JsonValue::Object(entries) => {
+                for (_, v) in entries {
+                    stack.push((v, depth + 1));
+                }
+            }
+            JsonValue::Array(items) => {
+                for v in items {
+                    stack.push((v, depth + 1));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 impl<'a> Parser<'a> {
     /// Parse: INSERT INTO table [NODE|EDGE|VECTOR|DOCUMENT|KV] (col1, col2) VALUES (val1, val2), (val3, val4) [RETURNING]
     pub fn parse_insert_query(&mut self) -> Result<QueryExpr, ParseError> {
@@ -449,6 +484,31 @@ impl<'a> Parser<'a> {
                 let s = s.clone();
                 self.advance()?;
                 Ok(Value::text(s))
+            }
+            Token::JsonLiteral(raw) => {
+                // The lexer already validated brace balance and the
+                // 16 MiB payload ceiling. Parse the raw text into a
+                // canonical JsonValue then re-encode via `to_vec` so
+                // the on-disk bytes match the quoted form.
+                self.advance()?;
+                let json_value =
+                    crate::utils::json::parse_json(&raw).map_err(|err| {
+                        ParseError::new(
+                            format!("invalid JSON object literal: {err}"),
+                            self.position(),
+                        )
+                    })?;
+                json_literal_depth_check(&json_value).map_err(|err| {
+                    ParseError::new(err, self.position())
+                })?;
+                let canonical = crate::serde_json::Value::from(json_value);
+                let bytes = crate::json::to_vec(&canonical).map_err(|err| {
+                    ParseError::new(
+                        format!("failed to encode JSON literal: {err}"),
+                        self.position(),
+                    )
+                })?;
+                Ok(Value::Json(bytes))
             }
             Token::Integer(n) => {
                 self.advance()?;

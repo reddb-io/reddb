@@ -222,6 +222,12 @@ pub enum Token {
     String(String),
     Integer(i64),
     Float(f64),
+    /// Raw JSON object literal text — produced when the lexer enters JSON
+    /// sub-mode at a `{` whose first non-whitespace inner char is `"`,
+    /// signalling a standard JSON object. The String holds the verbatim
+    /// `{...}` text, including the enclosing braces. The parser hands it
+    /// to `parse_json` to materialise a `Value::Json`. See issue #86.
+    JsonLiteral(String),
 
     // Identifiers
     Ident(String),
@@ -441,6 +447,7 @@ impl fmt::Display for Token {
             Token::String(s) => write!(f, "'{}'", s),
             Token::Integer(n) => write!(f, "{}", n),
             Token::Float(n) => write!(f, "{}", n),
+            Token::JsonLiteral(s) => write!(f, "{}", s),
             Token::Ident(s) => write!(f, "{}", s),
             Token::Eq => write!(f, "="),
             Token::Ne => write!(f, "<>"),
@@ -548,8 +555,19 @@ impl fmt::Display for LexerError {
 
 impl std::error::Error for LexerError {}
 
+/// Maximum byte size of a raw JSON object literal. Mirrors the redwire
+/// frame ceiling (`MAX_FRAME_SIZE` = 16 MiB) so a single SQL statement
+/// can never embed a JSON literal larger than the wire payload limit.
+/// Wire-side limit lives in `crate::wire::redwire::frame::MAX_FRAME_SIZE`;
+/// duplicated here as a parser-side guard so the lexer can fail fast
+/// without depending on the wire crate.
+pub const JSON_LITERAL_MAX_BYTES: usize = 16 * 1024 * 1024;
+
 /// RQL Lexer
 pub struct Lexer<'a> {
+    /// Original input text — kept so the JSON sub-mode can slice raw
+    /// bytes between `{` and the matching `}` without re-tokenising.
+    input: &'a str,
     /// Input characters
     chars: Peekable<Chars<'a>>,
     /// Current position
@@ -566,6 +584,7 @@ impl<'a> Lexer<'a> {
     /// Create a new lexer for the given input
     pub fn new(input: &'a str) -> Self {
         Self {
+            input,
             chars: input.chars().peekable(),
             line: 1,
             column: 1,
@@ -740,6 +759,15 @@ impl<'a> Lexer<'a> {
                 Token::RBracket
             }
             '{' => {
+                // JSON sub-mode trigger: if the next non-whitespace char
+                // after `{` is `"`, scan a balanced raw `{...}` and emit
+                // `Token::JsonLiteral`. Otherwise fall through to the
+                // legacy `LBrace` token (Cypher property bag, etc.).
+                // The empty-object case `{}` also takes the JSON path so
+                // bare `VALUES ({})` matches `VALUES ('{}')`.
+                if self.looks_like_json_object_start() {
+                    return self.scan_json_literal(start);
+                }
                 self.advance();
                 Token::LBrace
             }
@@ -1209,6 +1237,118 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// Look ahead from the current `{` to decide whether this is a
+    /// JSON object literal (next non-ws char is `"` or `}`) or a
+    /// legacy brace token (Cypher property bag, Python-style key
+    /// without quotes, etc.). Pure read — does not advance.
+    fn looks_like_json_object_start(&self) -> bool {
+        let bytes = self.input.as_bytes();
+        let mut i = self.offset as usize;
+        // We're at `{`. Look one past it.
+        debug_assert!(bytes.get(i) == Some(&b'{'));
+        i += 1;
+        while i < bytes.len() {
+            match bytes[i] {
+                b' ' | b'\t' | b'\n' | b'\r' => i += 1,
+                b'"' | b'}' => return true,
+                _ => return false,
+            }
+        }
+        false
+    }
+
+    /// JSON sub-mode: scan a balanced `{...}` from the current `{`,
+    /// returning a `Spanned(Token::JsonLiteral(raw_text), …)`.
+    ///
+    /// Tracks string boundaries so `{` and `}` inside `"..."` don't
+    /// affect the brace counter. Honours `\\`, `\"`, `\\` etc. so an
+    /// escaped quote does not close the string. Errors on EOF inside
+    /// an unbalanced literal and on payload size > JSON_LITERAL_MAX_BYTES.
+    ///
+    /// State machine:
+    /// - `Outside` (default): counts `{`/`}`, transitions to `InString` on `"`
+    /// - `InString`: ignores braces, transitions back to `Outside` on
+    ///   unescaped `"`. On `\`, transitions to `EscapeInString`.
+    /// - `EscapeInString`: consume one byte unconditionally then back to
+    ///   `InString`. Multi-byte UTF-8 sequences after `\u` are handled by
+    ///   ordinary char iteration; we don't validate the JSON here, just
+    ///   the brace balance.
+    fn scan_json_literal(&mut self, start: Position) -> Result<Spanned, LexerError> {
+        let start_offset = self.offset as usize;
+        // Consume the opening `{`.
+        self.advance();
+        let mut depth: u32 = 1;
+        let mut in_string = false;
+        let mut escape = false;
+        loop {
+            let ch = match self.peek() {
+                Some(c) => c,
+                None => {
+                    return Err(LexerError::new(
+                        format!(
+                            "unterminated JSON object literal (started at offset {})",
+                            start.offset
+                        ),
+                        self.position(),
+                    ));
+                }
+            };
+
+            // Enforce payload size limit on the raw scan.
+            let scanned_bytes = self.offset as usize - start_offset;
+            if scanned_bytes > JSON_LITERAL_MAX_BYTES {
+                return Err(LexerError::new(
+                    format!(
+                        "JSON object literal exceeds JSON_LITERAL_MAX_BYTES ({} bytes)",
+                        JSON_LITERAL_MAX_BYTES
+                    ),
+                    start,
+                ));
+            }
+
+            self.advance();
+
+            if escape {
+                escape = false;
+                continue;
+            }
+
+            if in_string {
+                match ch {
+                    '\\' => escape = true,
+                    '"' => in_string = false,
+                    _ => {}
+                }
+                continue;
+            }
+
+            match ch {
+                '"' => in_string = true,
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let end = self.position();
+                        let end_offset = self.offset as usize;
+                        // Final size check including the trailing `}`.
+                        if end_offset - start_offset > JSON_LITERAL_MAX_BYTES {
+                            return Err(LexerError::new(
+                                format!(
+                                    "JSON object literal exceeds JSON_LITERAL_MAX_BYTES ({} bytes)",
+                                    JSON_LITERAL_MAX_BYTES
+                                ),
+                                start,
+                            ));
+                        }
+                        let raw = self.input[start_offset..end_offset].to_string();
+                        return Ok(Spanned::new(Token::JsonLiteral(raw), start, end));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Tokenize entire input
     pub fn tokenize(&mut self) -> Result<Vec<Spanned>, LexerError> {
         let mut tokens = Vec::new();
@@ -1326,7 +1466,11 @@ mod tests {
 
     #[test]
     fn test_delimiters() {
-        let tokens = tokenize("( ) [ ] { } , . : ;");
+        // Note: `{ a }` (not `{ }`) — a bare `{ }` now triggers JSON
+        // sub-mode and lexes as a single `JsonLiteral("{ }")` token.
+        // The brace pair around a non-string token still produces the
+        // legacy LBrace/RBrace pair (Cypher property bag, etc.).
+        let tokens = tokenize("( ) [ ] { a } , . : ;");
         assert_eq!(
             tokens,
             vec![
@@ -1335,6 +1479,7 @@ mod tests {
                 Token::LBracket,
                 Token::RBracket,
                 Token::LBrace,
+                Token::Ident("a".into()),
                 Token::RBrace,
                 Token::Comma,
                 Token::Dot,
@@ -1343,6 +1488,62 @@ mod tests {
                 Token::Eof
             ]
         );
+    }
+
+    #[test]
+    fn test_json_literal_empty_object() {
+        let tokens = tokenize("{ }");
+        assert_eq!(
+            tokens,
+            vec![Token::JsonLiteral("{ }".into()), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn test_json_literal_simple() {
+        let tokens = tokenize(r#"{"a":1}"#);
+        assert_eq!(
+            tokens,
+            vec![
+                Token::JsonLiteral(r#"{"a":1}"#.into()),
+                Token::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn test_json_literal_nested() {
+        let raw = r#"{"a":{"b":[1,2,{"c":"}"}]}}"#;
+        let tokens = tokenize(raw);
+        assert_eq!(tokens, vec![Token::JsonLiteral(raw.into()), Token::Eof]);
+    }
+
+    #[test]
+    fn test_json_literal_escaped_quote_in_string() {
+        // The `}` inside the escaped-quote string must not close the object.
+        let raw = r#"{"path":"O\"Brien}"}"#;
+        let tokens = tokenize(raw);
+        assert_eq!(tokens, vec![Token::JsonLiteral(raw.into()), Token::Eof]);
+    }
+
+    #[test]
+    fn test_json_literal_unbalanced_eof() {
+        let mut lexer = Lexer::new(r#"{"a":1"#);
+        let err = lexer.tokenize().expect_err("expected unterminated error");
+        assert!(
+            err.message.contains("unterminated JSON object literal"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn test_json_literal_property_bag_compatible() {
+        // Cypher-style property bag must still tokenise as LBrace/.../RBrace
+        // because the inner content does not start with `"`.
+        let tokens = tokenize("{name: 'value'}");
+        assert_eq!(tokens[0], Token::LBrace);
+        assert_eq!(*tokens.last().unwrap(), Token::Eof);
     }
 
     #[test]
