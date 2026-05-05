@@ -1825,4 +1825,179 @@ mod tests {
             "binary bulk: truncated i64 value"
         );
     }
+
+    // ── Regression: issue #77 — RedWire binary insert for small row
+    // counts must succeed and return MSG_BULK_OK with the right count.
+    // The benchmark client maps `insert_one` to `bulk_insert_binary`
+    // with a single-row payload; if any decode bound check is
+    // off-by-one or any storage-side path treats nrows=1 specially the
+    // benchmark fails before it can record throughput. These tests
+    // pin the wire-side contract end-to-end against the in-memory
+    // runtime, with the same 7-column USER_COLUMNS shape the bench
+    // uses so a future regression on either side is caught here.
+
+    /// Build a binary bulk-insert payload with the exact byte layout
+    /// the benchmark client emits (see
+    /// `rdb-benchmark/crates/bench-adapters/src/reddb_wire.rs`):
+    ///   [coll_len u16][coll]
+    ///   [ncols u16]([col_len u16][col_name])*ncols
+    ///   [nrows u32]
+    ///   ([val_tag u8][val_data])*(ncols * nrows)
+    fn build_user_payload(
+        collection: &str,
+        rows: &[(u64, &str, &str, i64, &str, f64, &str)],
+    ) -> Vec<u8> {
+        const USER_COLS: &[&str] = &[
+            "id",
+            "name",
+            "email",
+            "age",
+            "city",
+            "score",
+            "created_at",
+        ];
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(collection.len() as u16).to_le_bytes());
+        buf.extend_from_slice(collection.as_bytes());
+        buf.extend_from_slice(&(USER_COLS.len() as u16).to_le_bytes());
+        for c in USER_COLS {
+            let cb = c.as_bytes();
+            buf.extend_from_slice(&(cb.len() as u16).to_le_bytes());
+            buf.extend_from_slice(cb);
+        }
+        buf.extend_from_slice(&(rows.len() as u32).to_le_bytes());
+        for (id, name, email, age, city, score, created_at) in rows {
+            // id: u64
+            buf.push(VAL_U64);
+            buf.extend_from_slice(&id.to_le_bytes());
+            // name: text
+            buf.push(VAL_TEXT);
+            buf.extend_from_slice(&(name.len() as u32).to_le_bytes());
+            buf.extend_from_slice(name.as_bytes());
+            // email: text
+            buf.push(VAL_TEXT);
+            buf.extend_from_slice(&(email.len() as u32).to_le_bytes());
+            buf.extend_from_slice(email.as_bytes());
+            // age: i64
+            buf.push(VAL_I64);
+            buf.extend_from_slice(&age.to_le_bytes());
+            // city: text
+            buf.push(VAL_TEXT);
+            buf.extend_from_slice(&(city.len() as u32).to_le_bytes());
+            buf.extend_from_slice(city.as_bytes());
+            // score: f64
+            buf.push(VAL_F64);
+            buf.extend_from_slice(&score.to_le_bytes());
+            // created_at: text
+            buf.push(VAL_TEXT);
+            buf.extend_from_slice(&(created_at.len() as u32).to_le_bytes());
+            buf.extend_from_slice(created_at.as_bytes());
+        }
+        buf
+    }
+
+    /// Decode `MSG_BULK_OK` count from a length-prefixed handler
+    /// response. Panics if the response is not a BulkOk frame.
+    fn decode_bulk_ok_count(response: &[u8]) -> u64 {
+        assert_eq!(
+            response.get(4),
+            Some(&MSG_BULK_OK),
+            "expected MSG_BULK_OK, got {:?} (raw: {:?})",
+            response.get(4),
+            response
+        );
+        let body = &response[5..];
+        assert!(body.len() >= 8, "BulkOk body too short: {body:?}");
+        let mut n = [0u8; 8];
+        n.copy_from_slice(&body[..8]);
+        u64::from_le_bytes(n)
+    }
+
+    #[test]
+    fn binary_bulk_accepts_one_row_user_payload() {
+        // Issue #77: `insert_one` benchmark maps to `bulk_insert_binary`
+        // with a single row; this is the exact failure mode users hit.
+        let runtime = create_runtime();
+        let payload = build_user_payload(
+            "users_one",
+            &[(
+                1u64,
+                "alice",
+                "alice@example.com",
+                30i64,
+                "NYC",
+                1.5f64,
+                "2026-05-04T00:00:00Z",
+            )],
+        );
+
+        let response = handle_bulk_insert_binary(&runtime, &payload);
+        let count = decode_bulk_ok_count(&response);
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn binary_bulk_accepts_two_row_user_payload() {
+        let runtime = create_runtime();
+        let payload = build_user_payload(
+            "users_two",
+            &[
+                (
+                    1u64,
+                    "alice",
+                    "alice@example.com",
+                    30,
+                    "NYC",
+                    1.5,
+                    "2026-05-04T00:00:00Z",
+                ),
+                (
+                    2u64,
+                    "bob",
+                    "bob@example.com",
+                    25,
+                    "LAX",
+                    2.0,
+                    "2026-05-04T00:00:01Z",
+                ),
+            ],
+        );
+
+        let response = handle_bulk_insert_binary(&runtime, &payload);
+        let count = decode_bulk_ok_count(&response);
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn binary_bulk_accepts_n_row_user_payload() {
+        // 100-row batch — the bench's `insert_bulk` shape. Pins the
+        // decode loop against off-by-one regressions where the last
+        // row's bytes get truncated.
+        let runtime = create_runtime();
+        let owned: Vec<(u64, String, String, i64, String, f64, String)> = (0..100u64)
+            .map(|i| {
+                (
+                    i,
+                    format!("user_{i}"),
+                    format!("user_{i}@example.com"),
+                    20 + (i as i64 % 40),
+                    "NYC".to_string(),
+                    (i as f64) * 0.1,
+                    format!("2026-05-04T00:00:{:02}Z", i % 60),
+                )
+            })
+            .collect();
+        let rows: Vec<(u64, &str, &str, i64, &str, f64, &str)> = owned
+            .iter()
+            .map(|(id, n, e, a, c, s, t)| {
+                (*id, n.as_str(), e.as_str(), *a, c.as_str(), *s, t.as_str())
+            })
+            .collect();
+        let payload = build_user_payload("users_n", &rows);
+
+        let response = handle_bulk_insert_binary(&runtime, &payload);
+        let count = decode_bulk_ok_count(&response);
+        assert_eq!(count, 100);
+    }
 }
