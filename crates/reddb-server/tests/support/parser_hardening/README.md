@@ -11,9 +11,13 @@ SQL parser is the first consumer; subsequent slices (#88, #89,
   helpers.
 - `sql_grammar.rs` — proptest strategies that emit syntactically
   valid SQL strings for SELECT/INSERT/UPDATE/DELETE.
+- `migration_grammar.rs` — proptest strategies for the migration
+  DSL (CREATE/APPLY/ROLLBACK/EXPLAIN MIGRATION). Consumed by
+  `tests/migration_parser.rs` (#88).
 - `corpus.rs` — adversarial-input fixtures (deeply nested parens,
   long identifiers, oversized inputs) used by both property tests
-  and fuzz seeds.
+  and fuzz seeds. `migration_adversarial_inputs()` covers the
+  migration DSL surface (#88).
 
 ## How a new parser consumes the harness
 
@@ -40,11 +44,15 @@ SQL parser is the first consumer; subsequent slices (#88, #89,
 
 ## Running
 
-- Property + snapshot suite: `cargo test -p reddb-server --test parser_hardening`
+- Property + snapshot suite (SQL): `cargo test -p reddb-server --test parser_hardening`
+- Property suite (migration DSL): `cargo test -p reddb-server --test migration_parser`
+- Snapshot suite (migration DSL): `cargo test -p reddb-server --test migration_parser_snapshots`
 - Snapshot review: `cargo insta review` (writes accepted output
   back to `*.snap` files)
 - Fuzz smoke: `cargo fuzz run sql_parser -- -max_total_time=10`
+- Fuzz smoke (migration): `cargo fuzz run migration_parser -- -max_total_time=10`
 - Fuzz CI run: `cargo fuzz run sql_parser -- -max_total_time=300`
+  and `cargo fuzz run migration_parser -- -max_total_time=300`
 
 ## Limit defaults
 
