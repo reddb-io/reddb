@@ -306,6 +306,16 @@ impl RedDBRuntime {
         query: &InsertQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
+        // CollectionContract gate (#49): single entry point for the
+        // operator's collection-level write rules. Today this is a
+        // no-op for INSERT (APPEND ONLY permits insert); routing
+        // through the gate now means future contract bits — versioned,
+        // vault-only writes — plug in once instead of per verb.
+        crate::runtime::collection_contract::CollectionContractGate::check(
+            self,
+            &query.table,
+            crate::runtime::collection_contract::MutationKind::Insert,
+        )?;
         // Phase 2.5.4 table-scoped tenancy: if the target table is
         // tenant-scoped and the user didn't name the tenant column,
         // auto-inject it with the thread-local `CURRENT_TENANT()`

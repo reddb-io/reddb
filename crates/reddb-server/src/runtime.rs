@@ -800,6 +800,7 @@ pub struct RuntimeConnection {
 
 pub mod audit_log;
 pub mod audit_query;
+mod collection_contract;
 pub mod config_matrix;
 pub mod config_overlay;
 mod dml_target_scan;
