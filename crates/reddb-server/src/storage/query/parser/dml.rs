@@ -458,6 +458,21 @@ impl<'a> Parser<'a> {
 
     /// Parse a single literal value (string, number, true, false, null, array)
     pub(crate) fn parse_literal_value(&mut self) -> Result<Value, ParseError> {
+        // Depth guard: this function recurses for nested array `[…]`
+        // and object `{…}` literals (see the LBracket / LBrace arms
+        // below). Without entering the depth counter, an adversarial
+        // payload like `[[[[…(10k×)…]]]]` would overflow the Rust
+        // stack BEFORE `ParserLimits::max_depth` fires. The
+        // `JsonLiteral` token path uses `json_literal_depth_check`
+        // (iterative) — the bare `[`/`{` path needs the recursion
+        // counter explicitly.
+        self.enter_depth()?;
+        let result = self.parse_literal_value_inner();
+        self.exit_depth();
+        result
+    }
+
+    fn parse_literal_value_inner(&mut self) -> Result<Value, ParseError> {
         // Recognize PASSWORD('plaintext') and SECRET('plaintext') as
         // typed literal constructors. The parser stores them as
         // sentinel-prefixed values so that the INSERT executor can

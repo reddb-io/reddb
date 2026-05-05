@@ -69,10 +69,19 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse NOT expression
+    ///
+    /// `NOT` recurses into itself for chained negations (`NOT NOT NOT x`).
+    /// Each frame must enter the depth counter — otherwise an
+    /// adversarial payload like `NOT NOT NOT … (10k×) … x` overflows
+    /// the Rust stack BEFORE `ParserLimits::max_depth` fires (the leaf
+    /// only reaches `parse_expr_prec`, which tracks depth, after the
+    /// stack has already blown). Bracket the recursion explicitly.
     fn parse_not_expr(&mut self) -> Result<Filter, ParseError> {
         if self.consume(&Token::Not)? {
-            let expr = self.parse_not_expr()?;
-            Ok(Filter::Not(Box::new(expr)))
+            self.enter_depth()?;
+            let result = self.parse_not_expr().map(|expr| Filter::Not(Box::new(expr)));
+            self.exit_depth();
+            result
         } else {
             self.parse_primary_filter()
         }
