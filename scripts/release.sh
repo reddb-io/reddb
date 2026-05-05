@@ -49,23 +49,22 @@ echo "Current: $CURRENT_VERSION"
 echo "New:     $NEW_VERSION"
 
 sed -i "s/^version = \"${CURRENT_VERSION}\"/version = \"${NEW_VERSION}\"/" Cargo.toml
-# Sync the rust client driver's version too — release.yml expects
-# the two crates to share a version, and skipping this is the easiest
-# way to ship a rust client tagged behind the engine.
-if [ -f drivers/rust/Cargo.toml ]; then
-  sed -i "s/^version = \"${CURRENT_VERSION}\"/version = \"${NEW_VERSION}\"/" drivers/rust/Cargo.toml
-fi
+# Sync workspace members that publish in lockstep with the
+# umbrella crate.
+for member in reddb-wire reddb-grpc-proto reddb-server reddb-client reddb-client-connector; do
+  if [ -f "crates/${member}/Cargo.toml" ]; then
+    sed -i "s/^version = \"${CURRENT_VERSION}\"/version = \"${NEW_VERSION}\"/" "crates/${member}/Cargo.toml"
+  fi
+done
 
-# Refresh both lockfiles. `cargo check` is best-effort — release.yml
-# does the authoritative verify on a clean runner.
+# Refresh the workspace lockfile. `cargo check` is best-effort —
+# release.yml does the authoritative verify on a clean runner.
 cargo check > /dev/null 2>&1 || true
-if [ -f drivers/rust/Cargo.toml ]; then
-  cargo check --manifest-path drivers/rust/Cargo.toml > /dev/null 2>&1 || true
-fi
 
 git add Cargo.toml Cargo.lock
-[ -f drivers/rust/Cargo.toml ] && git add drivers/rust/Cargo.toml
-[ -f drivers/rust/Cargo.lock ] && git add drivers/rust/Cargo.lock
+for member in reddb-wire reddb-grpc-proto reddb-server reddb-client reddb-client-connector; do
+  [ -f "crates/${member}/Cargo.toml" ] && git add "crates/${member}/Cargo.toml"
+done
 git commit -m "chore: release v${NEW_VERSION}"
 git tag "v${NEW_VERSION}"
 

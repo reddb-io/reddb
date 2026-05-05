@@ -460,7 +460,7 @@ distinguish federated identities from local credentials at a glance.
 
 | Driver                     | TLS         | mTLS | OAuth-JWT | HMAC-signed | Notes                                                                          |
 |----------------------------|-------------|------|-----------|-------------|--------------------------------------------------------------------------------|
-| `drivers/rust`             | yes         | yes  | yes       | yes         | tokio-rustls; full ALPN support                                                |
+| `crates/reddb-client`      | yes         | yes  | yes       | yes         | tokio-rustls; full ALPN support                                                |
 | `drivers/js` (Node, Bun)   | yes         | yes  | yes       | yes         | Native `node:tls`; ALPN fully supported                                        |
 | `drivers/node`             | yes         | yes  | yes       | yes         | Same engine as `drivers/js`                                                    |
 | `drivers/bun`              | yes         | yes  | yes       | yes         | Same engine as `drivers/js`                                                    |

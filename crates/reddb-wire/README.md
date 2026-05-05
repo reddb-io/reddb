@@ -1,7 +1,7 @@
 # reddb-wire
 
 Transport-agnostic protocol vocabulary for RedDB. This crate is the
-shared layer that `reddb-server`, `reddb-client-internal`, and the
+shared layer that `reddb-server`, `reddb-client`, and the
 official language drivers all depend on.
 
 ## Audience
@@ -14,10 +14,9 @@ Pick `reddb-wire` when you need to:
 - Speak the RedWire binary frame protocol — encode/decode `Frame`,
   inspect `MessageKind`, `Flags`, framing constants.
 
-If you only need a connector that wraps a server, use
-`reddb-client-internal` (workspace) or the published `reddb-client`
-driver under [`drivers/rust`](../../drivers/rust). The connector
-crates depend on `reddb-wire` for parsing and frame types.
+If you only need a connector that wraps a server, use the
+published [`reddb-client`](../reddb-client) driver. It depends on
+`reddb-wire` for parsing and frame types.
 
 ## What's inside
 
