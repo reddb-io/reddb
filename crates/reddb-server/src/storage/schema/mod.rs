@@ -19,6 +19,7 @@ pub mod registry;
 pub mod row_slot;
 pub mod table;
 pub mod types;
+pub mod value_codec;
 
 // Re-export common types
 pub use canonical_key::{value_to_canonical_key, CanonicalKey, CanonicalKeyFamily};
