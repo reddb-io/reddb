@@ -737,20 +737,16 @@ impl RedDBRuntime {
         query: &UpdateQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
-        // APPEND ONLY guard: reject before RLS / RETURNING work so the
-        // operator's immutability declaration is honoured uniformly
-        // and the error message points at the DDL rather than at a
-        // downstream symptom.
-        if let Some(contract) = self.db().collection_contract_arc(&query.table) {
-            if contract.append_only {
-                return Err(RedDBError::Query(format!(
-                    "table '{}' is APPEND ONLY — UPDATE is rejected. \
-                     Drop the APPEND ONLY clause (ALTER TABLE ... SET APPEND_ONLY = false) \
-                     or insert a new row instead.",
-                    query.table
-                )));
-            }
-        }
+        // CollectionContract gate (#50): runs the APPEND ONLY guard
+        // (and any future contract bits) before RLS / RETURNING work
+        // so the operator's immutability declaration is honoured
+        // uniformly and the error message points at the DDL rather
+        // than at a downstream symptom.
+        crate::runtime::collection_contract::CollectionContractGate::check(
+            self,
+            &query.table,
+            crate::runtime::collection_contract::MutationKind::Update,
+        )?;
 
         // Apply RLS augmentation first so every downstream path — plain
         // UPDATE, UPDATE...RETURNING, the inner scan — observes the
@@ -1082,17 +1078,14 @@ impl RedDBRuntime {
         query: &DeleteQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
         self.check_write(crate::runtime::write_gate::WriteKind::Dml)?;
-        // APPEND ONLY guard — see execute_update for rationale.
-        if let Some(contract) = self.db().collection_contract_arc(&query.table) {
-            if contract.append_only {
-                return Err(RedDBError::Query(format!(
-                    "table '{}' is APPEND ONLY — DELETE is rejected. \
-                     Drop the APPEND ONLY clause (ALTER TABLE ... SET APPEND_ONLY = false) \
-                     or use a retention policy / drop_chunks for time-series.",
-                    query.table
-                )));
-            }
-        }
+        // CollectionContract gate (#50) — see execute_update for
+        // rationale. The gate handles APPEND ONLY rejection and is
+        // the single point where future contract bits land.
+        crate::runtime::collection_contract::CollectionContractGate::check(
+            self,
+            &query.table,
+            crate::runtime::collection_contract::MutationKind::Delete,
+        )?;
 
         // RETURNING on DELETE: capture the pre-image via an internal
         // SELECT that reuses the same WHERE, then run the delete with
