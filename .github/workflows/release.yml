@@ -173,7 +173,9 @@ jobs:
           CC_armv7_unknown_linux_gnueabihf: arm-linux-gnueabihf-gcc
           CXX_armv7_unknown_linux_gnueabihf: arm-linux-gnueabihf-g++
           AR_armv7_unknown_linux_gnueabihf: arm-linux-gnueabihf-ar
-        run: cargo build --locked --release --target ${{ matrix.target }} --bin red
+        run: |
+          cargo build --locked --release --target ${{ matrix.target }} --bin red
+          cargo build --locked --release --target ${{ matrix.target }} --bin red_client -p reddb-client-internal
 
       - name: Build (musl)
         if: matrix.target == 'aarch64-unknown-linux-musl'
@@ -184,20 +186,25 @@ jobs:
               curl -sSL https://github.com/protocolbuffers/protobuf/releases/download/v28.3/protoc-28.3-linux-x86_64.zip -o /tmp/protoc.zip
               unzip -o /tmp/protoc.zip -d /usr/local >/dev/null
               cargo build --release --target aarch64-unknown-linux-musl --bin red
+              cargo build --release --target aarch64-unknown-linux-musl --bin red_client -p reddb-client-internal
             '
           sudo chown -R "$(id -u):$(id -g)" target/aarch64-unknown-linux-musl
 
       - name: Strip (Linux native)
         if: matrix.target == 'x86_64-unknown-linux-gnu'
-        run: strip target/${{ matrix.target }}/release/red
+        run: |
+          strip target/${{ matrix.target }}/release/red
+          strip target/${{ matrix.target }}/release/red_client
 
-      - name: Package asset
+      - name: Package assets
         shell: bash
         run: |
           EXT=""; [[ "${{ matrix.target }}" == *windows* ]] && EXT=".exe"
-          ASSET="red-${{ matrix.asset_name }}${EXT}"
-          cp "target/${{ matrix.target }}/release/red${EXT}" "${ASSET}"
-          shasum -a 256 "${ASSET}" > "${ASSET}.sha256" 2>/dev/null || certutil -hashfile "${ASSET}" SHA256 > "${ASSET}.sha256"
+          for BIN in red red_client; do
+            ASSET="${BIN}-${{ matrix.asset_name }}${EXT}"
+            cp "target/${{ matrix.target }}/release/${BIN}${EXT}" "${ASSET}"
+            shasum -a 256 "${ASSET}" > "${ASSET}.sha256" 2>/dev/null || certutil -hashfile "${ASSET}" SHA256 > "${ASSET}.sha256"
+          done
 
       - name: Smoke test
         if: "!matrix.cross"
@@ -205,11 +212,22 @@ jobs:
         run: |
           EXT=""; [[ "${{ matrix.target }}" == *windows* ]] && EXT=".exe"
           ./"red-${{ matrix.asset_name }}${EXT}" version
+          # red_client without a URI must exit 1 (usage error).
+          set +e
+          ./"red_client-${{ matrix.asset_name }}${EXT}"
+          rc=$?
+          set -e
+          if [ "$rc" != "1" ]; then
+            echo "red_client smoke: expected exit 1 (no URI), got $rc"
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
-          path: red-${{ matrix.asset_name }}*
+          path: |
+            red-${{ matrix.asset_name }}*
+            red_client-${{ matrix.asset_name }}*
       - name: Show sccache stats
         if: always()
         run: sccache --show-stats
@@ -268,9 +286,12 @@ jobs:
             pnpm add reddb        # Node/TS driver package (native protocol + spawn)
             ```
 
-            **Binary (Linux x86_64):**
+            **Binaries (Linux x86_64):**
             ```bash
+            # Full server + embedded engine
             curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ needs.plan.outputs.release_tag }}/red-linux-x86_64 -o red && chmod +x red
+            # Thin remote-only client (~2 MB)
+            curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ needs.plan.outputs.release_tag }}/red_client-linux-x86_64 -o red_client && chmod +x red_client
             ```
 
             **Docker:**
