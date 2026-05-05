@@ -43,7 +43,7 @@ jobs:
       package_version: ${{ steps.plan.outputs.package_version }}
       github_prerelease: ${{ steps.plan.outputs.github_prerelease }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
       - name: Decide release target
@@ -124,7 +124,7 @@ jobs:
           - { os: macos-14,       target: aarch64-apple-darwin,          asset_name: macos-aarch64,       cross: false }
           - { os: windows-latest, target: x86_64-pc-windows-msvc,       asset_name: windows-x86_64,      cross: false }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Sync version across Cargo.toml + package.json
         shell: bash
@@ -136,14 +136,14 @@ jobs:
           echo "Cargo.toml: $(grep '^version' Cargo.toml)"
           echo "package.json: $(grep '\"version\"' package.json)"
 
-      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           targets: ${{ matrix.target }}
       - uses: arduino/setup-protoc@v3
         with:
           version: '28.x'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: mozilla-actions/sccache-action@v0.0.10
       - uses: rui314/setup-mold@v1
         if: matrix.target == 'x86_64-unknown-linux-gnu'
 
@@ -222,7 +222,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.asset_name }}
           path: |
@@ -239,8 +239,8 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     if: needs.plan.outputs.should_skip != 'true'
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: arduino/setup-protoc@v3
         with:
           version: '28.x'
@@ -251,7 +251,7 @@ jobs:
           cache-on-failure: "true"
       - name: Measure binary and image size
         run: make artifact-size
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: artifact-sizes
@@ -265,13 +265,13 @@ jobs:
       contents: write
     if: needs.plan.outputs.should_skip != 'true'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
         with:
           path: release
           merge-multiple: true
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.plan.outputs.release_tag }}
           name: RedDB ${{ needs.plan.outputs.release_tag }}
@@ -313,8 +313,8 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     if: needs.plan.outputs.should_skip != 'true'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
@@ -340,8 +340,8 @@ jobs:
       needs.plan.outputs.should_skip != 'true' &&
       needs.plan.outputs.release_channel == 'stable'
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: arduino/setup-protoc@v3
         with:
           version: '28.x'
@@ -374,8 +374,8 @@ jobs:
       needs.plan.outputs.should_skip != 'true' &&
       needs.plan.outputs.release_channel == 'stable'
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: arduino/setup-protoc@v3
         with:
           version: '28.x'
@@ -438,8 +438,8 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     if: needs.plan.outputs.should_skip != 'true'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
@@ -471,23 +471,23 @@ jobs:
       packages: write
     if: needs.plan.outputs.should_skip != 'true'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: docker.io
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -495,7 +495,7 @@ jobs:
 
       - name: Docker metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: |
             ghcr.io/${{ github.repository }}
@@ -510,7 +510,7 @@ jobs:
             org.opencontainers.image.version=${{ needs.plan.outputs.package_version }}
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: true
@@ -533,16 +533,16 @@ jobs:
       packages: write
     if: needs.plan.outputs.should_skip != 'true'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -550,7 +550,7 @@ jobs:
 
       - name: Docker metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: |
             ghcr.io/${{ github.repository }}-client
@@ -564,7 +564,7 @@ jobs:
             org.opencontainers.image.version=${{ needs.plan.outputs.package_version }}
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile.client
@@ -608,8 +608,8 @@ jobs:
           - { os: windows-latest,target: x86_64-pc-windows-msvc,    manylinux: 'auto' }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.x'
       - name: Sync version
@@ -625,7 +625,7 @@ jobs:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
           args: --release --out dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: reddb-wheel-${{ matrix.target }}
           path: drivers/python/dist/*
@@ -636,7 +636,7 @@ jobs:
     if: false  # TODO: enable after creating PYPI_API_TOKEN secret
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: reddb-wheel-*
           merge-multiple: true
