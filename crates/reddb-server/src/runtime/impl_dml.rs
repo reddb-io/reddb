@@ -843,7 +843,7 @@ impl RedDBRuntime {
             effective_filter.as_ref(),
             limit_cap,
         )
-        .collect_ids()?;
+        .find_target_ids()?;
 
         let mut affected: u64 = 0;
         for chunk in ids_to_update.chunks(UPDATE_APPLY_CHUNK_SIZE) {
@@ -1166,176 +1166,18 @@ impl RedDBRuntime {
         raw_query: &str,
         query: &DeleteQuery,
     ) -> RedDBResult<RuntimeQueryResult> {
-        let db = self.db();
-        let store = self.inner.db.store();
         let effective_filter = effective_delete_filter(query);
 
-        // ── FAST PATH: DELETE ... WHERE _entity_id = N ──
-        if let Some(entity_id) = query_exec::extract_entity_id_from_filter(&effective_filter) {
-            let manager = store
-                .get_collection(&query.table)
-                .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
-            if manager.get(EntityId::new(entity_id)).is_some() {
-                self.delete_entity(DeleteEntityInput {
-                    collection: query.table.clone(),
-                    id: EntityId::new(entity_id),
-                })?;
-                self.note_table_write(&query.table);
-                return Ok(RuntimeQueryResult::dml_result(
-                    raw_query.to_string(),
-                    1,
-                    "delete",
-                    "runtime-dml",
-                ));
-            }
-            return Ok(RuntimeQueryResult::dml_result(
-                raw_query.to_string(),
-                0,
-                "delete",
-                "runtime-dml",
-            ));
-        }
-
-        // ── FAST PATH: DELETE ... WHERE <indexed_col> = <value> ──
-        if let Some(ref filter) = effective_filter {
-            let idx_store = self.index_store_ref();
-            if let Some(entity_ids) =
-                query_exec::try_hash_eq_lookup(filter, &query.table, idx_store)
-            {
-                let manager = store
-                    .get_collection(&query.table)
-                    .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
-                let table_name = query.table.as_str();
-                let mut affected: u64 = 0;
-                let mut batch_ids = Vec::with_capacity(entity_ids.len());
-                for entity in manager.get_many(&entity_ids).into_iter().flatten() {
-                    if !query_exec::evaluate_entity_filter_with_db(
-                        Some(db.as_ref()),
-                        &entity,
-                        filter,
-                        table_name,
-                        table_name,
-                    ) {
-                        continue;
-                    }
-                    batch_ids.push(entity.id);
-                }
-                affected += self.delete_entities_batch(&query.table, &batch_ids)?;
-                if affected > 0 {
-                    self.note_table_write(&query.table);
-                }
-                return Ok(RuntimeQueryResult::dml_result(
-                    raw_query.to_string(),
-                    affected,
-                    "delete",
-                    "runtime-dml",
-                ));
-            }
-        }
-
-        if let Some(ref filter) = effective_filter {
-            let idx_store = self.index_store_ref();
-            if let Some(entity_ids) =
-                query_exec::try_sorted_index_lookup(filter, &query.table, idx_store, None)
-            {
-                if entity_ids.is_empty() {
-                    return Ok(RuntimeQueryResult::dml_result(
-                        raw_query.to_string(),
-                        0,
-                        "delete",
-                        "runtime-dml",
-                    ));
-                }
-                let manager = store
-                    .get_collection(&query.table)
-                    .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
-                let table_name = query.table.as_str();
-                let mut affected: u64 = 0;
-                let mut batch_ids = Vec::with_capacity(entity_ids.len());
-                for entity in manager.get_many(&entity_ids).into_iter().flatten() {
-                    if !query_exec::evaluate_entity_filter_with_db(
-                        Some(db.as_ref()),
-                        &entity,
-                        filter,
-                        table_name,
-                        table_name,
-                    ) {
-                        continue;
-                    }
-                    batch_ids.push(entity.id);
-                }
-                affected += self.delete_entities_batch(&query.table, &batch_ids)?;
-                if affected > 0 {
-                    self.note_table_write(&query.table);
-                }
-                return Ok(RuntimeQueryResult::dml_result(
-                    raw_query.to_string(),
-                    affected,
-                    "delete",
-                    "runtime-dml",
-                ));
-            }
-        }
-
-        let manager = store
-            .get_collection(&query.table)
-            .ok_or_else(|| RedDBError::NotFound(query.table.clone()))?;
-
-        let mut ids_to_delete = Vec::new();
-
-        let table_name = query.table.as_str();
-        if let Some(ref filter) = effective_filter {
-            let mut owned_zone_preds = Vec::new();
-            query_exec::extract_zone_predicates(filter, &mut owned_zone_preds);
-            let zone_preds: Vec<_> = owned_zone_preds
-                .iter()
-                .map(|(column, value, kind)| {
-                    (
-                        column.as_str(),
-                        match kind {
-                            crate::storage::unified::segment::ZoneColPredKind::Eq => {
-                                crate::storage::unified::segment::ZoneColPred::Eq(value)
-                            }
-                            crate::storage::unified::segment::ZoneColPredKind::Gt => {
-                                crate::storage::unified::segment::ZoneColPred::Gt(value)
-                            }
-                            crate::storage::unified::segment::ZoneColPredKind::Gte => {
-                                crate::storage::unified::segment::ZoneColPred::Gte(value)
-                            }
-                            crate::storage::unified::segment::ZoneColPredKind::Lt => {
-                                crate::storage::unified::segment::ZoneColPred::Lt(value)
-                            }
-                            crate::storage::unified::segment::ZoneColPredKind::Lte => {
-                                crate::storage::unified::segment::ZoneColPred::Lte(value)
-                            }
-                        },
-                    )
-                })
-                .collect();
-
-            manager.for_each_entity_zoned(&zone_preds, |entity| {
-                if !crate::runtime::impl_core::entity_visible_under_current_snapshot(entity) {
-                    return true;
-                }
-                if query_exec::evaluate_entity_filter_with_db(
-                    Some(db.as_ref()),
-                    entity,
-                    filter,
-                    table_name,
-                    table_name,
-                ) {
-                    ids_to_delete.push(entity.id);
-                }
-                true
-            });
-        } else {
-            manager.for_each_entity(|entity| {
-                if crate::runtime::impl_core::entity_visible_under_current_snapshot(entity) {
-                    ids_to_delete.push(entity.id);
-                }
-                true
-            });
-        }
+        // Find the rows that match the WHERE clause. The "find target
+        // rows" loop lives in DmlTargetScan so UPDATE (#52) can reuse
+        // the same scan strategy.
+        let scan = super::dml_target_scan::DmlTargetScan::new(
+            self,
+            &query.table,
+            effective_filter.as_ref(),
+            None,
+        );
+        let ids_to_delete = scan.find_target_ids()?;
 
         let mut affected: u64 = 0;
         for chunk in ids_to_delete.chunks(UPDATE_APPLY_CHUNK_SIZE) {
@@ -2417,5 +2259,59 @@ mod tests {
             })
             .collect();
         assert_eq!(scores, vec![(0, 0), (1, 42), (2, 0), (3, 42), (4, 42)]);
+    }
+
+    /// Drives DELETE through the new `DmlTargetScan` module. Exercises
+    /// both the index fast-path (WHERE id = N with a HASH index) and
+    /// the unindexed scan path (WHERE score > N) to confirm the
+    /// extracted "find target rows" loop preserves the affected-row
+    /// count and which rows survive.
+    #[test]
+    fn delete_routes_through_dml_target_scan_for_indexed_and_scan_paths() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE TABLE items (id INT, score INT)")
+            .unwrap();
+        for id in 0..5 {
+            rt.execute_query(&format!(
+                "INSERT INTO items (id, score) VALUES ({id}, {})",
+                id * 10
+            ))
+            .unwrap();
+        }
+        rt.execute_query("CREATE INDEX idx_items_id ON items (id) USING HASH")
+            .unwrap();
+
+        // Indexed equality DELETE — hits the hash fast-path inside
+        // DmlTargetScan::find_target_ids.
+        let deleted_one = rt.execute_query("DELETE FROM items WHERE id = 2").unwrap();
+        assert_eq!(deleted_one.affected_rows, 1);
+
+        // Unindexed scan DELETE — drops everyone with score > 25,
+        // i.e. ids 3 and 4 (scores 30, 40). Goes through the
+        // zoned/full-scan branch.
+        let deleted_many = rt
+            .execute_query("DELETE FROM items WHERE score > 25")
+            .unwrap();
+        assert_eq!(deleted_many.affected_rows, 2);
+
+        let surviving = rt
+            .execute_query("SELECT id FROM items ORDER BY id")
+            .unwrap();
+        let ids: Vec<i64> = surviving
+            .result
+            .records
+            .iter()
+            .map(|record| match record.get("id").unwrap() {
+                Value::Integer(value) => *value,
+                other => panic!("expected integer id, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(ids, vec![0, 1]);
+
+        // Sanity: full-scan DELETE with no WHERE clears the rest.
+        let deleted_rest = rt.execute_query("DELETE FROM items").unwrap();
+        assert_eq!(deleted_rest.affected_rows, 2);
+        let empty = rt.execute_query("SELECT id FROM items").unwrap();
+        assert!(empty.result.records.is_empty());
     }
 }
