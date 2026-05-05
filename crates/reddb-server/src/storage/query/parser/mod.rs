@@ -41,6 +41,7 @@ mod ddl;
 mod dml;
 mod error;
 mod expr;
+pub mod limits;
 mod filter;
 mod graph;
 mod graph_commands;
@@ -60,25 +61,76 @@ mod vector;
 #[cfg(test)]
 mod tests;
 
-pub use error::ParseError;
+pub use error::{ParseError, ParseErrorKind};
+pub use limits::ParserLimits;
 
 use super::ast::{QueryExpr, QueryWithCte};
 use super::lexer::{Lexer, Position, Spanned, Token};
 use crate::storage::schema::Value;
+use limits::DepthCounter;
 
 /// RQL Parser
 pub struct Parser<'a> {
     lexer: Lexer<'a>,
     /// Current token
     pub(crate) current: Spanned,
+    /// Recursion-depth tracker. Each enter/exit of a recursive
+    /// descent point should bracket itself with [`enter_depth`] /
+    /// [`exit_depth`] (see `parse_expr_prec`).
+    pub(crate) depth: DepthCounter,
 }
 
 impl<'a> Parser<'a> {
-    /// Create a new parser
+    /// Create a new parser with default DoS limits.
     pub fn new(input: &'a str) -> Result<Self, ParseError> {
-        let mut lexer = Lexer::new(input);
+        Self::with_limits(input, ParserLimits::default())
+    }
+
+    /// Create a new parser with custom DoS limits.
+    pub fn with_limits(input: &'a str, limits: ParserLimits) -> Result<Self, ParseError> {
+        // Input-byte cap is enforced before the lexer is even
+        // constructed: the lexer holds a `Chars` iterator over the
+        // input slice, so refusing oversized input here keeps the
+        // pathological case (10 GiB blob) cheap.
+        if input.len() > limits.max_input_bytes {
+            return Err(ParseError::input_too_large(
+                "max_input_bytes",
+                limits.max_input_bytes,
+                Position::new(1, 1, 0),
+            ));
+        }
+        let mut lexer = Lexer::with_limits(input, limits);
         let current = lexer.next_token()?;
-        Ok(Self { lexer, current })
+        Ok(Self {
+            lexer,
+            current,
+            depth: DepthCounter::new(limits.max_depth),
+        })
+    }
+
+    /// Increment the recursion-depth counter or bail with
+    /// `ParseError::DepthLimit`. Pair with [`exit_depth`] (use the
+    /// `with_depth` helper for RAII-style bracketing).
+    pub(crate) fn enter_depth(&mut self) -> Result<(), ParseError> {
+        self.depth.depth += 1;
+        if self.depth.depth > self.depth.max_depth {
+            return Err(ParseError::depth_limit(
+                "max_depth",
+                self.depth.max_depth,
+                self.position(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Decrement the recursion-depth counter. Always called on the
+    /// success path; on the error path, the counter is rebalanced
+    /// when `Parser` itself is dropped (it's only consulted while
+    /// parsing is in progress).
+    pub(crate) fn exit_depth(&mut self) {
+        if self.depth.depth > 0 {
+            self.depth.depth -= 1;
+        }
     }
 
     /// Get current position

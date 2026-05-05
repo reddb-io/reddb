@@ -2,9 +2,9 @@
 
 use std::fmt;
 
-use super::super::lexer::{LexerError, Position, Token};
+use super::super::lexer::{LexerError, LexerLimitHit, Position, Token};
 
-/// Parser error
+/// Parse error
 #[derive(Debug, Clone)]
 pub struct ParseError {
     /// Error message
@@ -13,6 +13,26 @@ pub struct ParseError {
     pub position: Position,
     /// Expected tokens (for better error messages)
     pub expected: Vec<String>,
+    /// Optional structured kind for hardening / DoS errors
+    pub kind: ParseErrorKind,
+}
+
+/// Categorical kind for a parse error.
+///
+/// Most parse errors are plain `Syntax` failures; the variants
+/// below carry structured information for the parser-hardening
+/// layer (issue #87) so callers can distinguish DoS-style refusals
+/// from grammar errors without string matching.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParseErrorKind {
+    /// Generic syntax / semantic error.
+    Syntax,
+    /// Recursion-depth limit exceeded during parsing.
+    DepthLimit { limit_name: &'static str, value: usize },
+    /// Input larger than the configured byte cap.
+    InputTooLarge { limit_name: &'static str, value: usize },
+    /// Identifier longer than the configured character cap.
+    IdentifierTooLong { limit_name: &'static str, value: usize },
 }
 
 impl ParseError {
@@ -22,6 +42,7 @@ impl ParseError {
             message: message.into(),
             position,
             expected: Vec::new(),
+            kind: ParseErrorKind::Syntax,
         }
     }
 
@@ -31,6 +52,52 @@ impl ParseError {
             message: format!("Unexpected token: {}", found),
             position,
             expected: expected.into_iter().map(|s| s.to_string()).collect(),
+            kind: ParseErrorKind::Syntax,
+        }
+    }
+
+    /// Recursion depth limit hit. The structured `kind` carries the
+    /// name + numeric value so the snapshot/property harness can
+    /// pattern-match without string slicing.
+    pub fn depth_limit(limit_name: &'static str, value: usize, position: Position) -> Self {
+        Self {
+            message: format!(
+                "recursion depth limit exceeded ({} = {})",
+                limit_name, value
+            ),
+            position,
+            expected: Vec::new(),
+            kind: ParseErrorKind::DepthLimit { limit_name, value },
+        }
+    }
+
+    /// Input bytes exceeded the configured cap.
+    pub fn input_too_large(limit_name: &'static str, value: usize, position: Position) -> Self {
+        Self {
+            message: format!(
+                "input exceeds maximum size ({} = {} bytes)",
+                limit_name, value
+            ),
+            position,
+            expected: Vec::new(),
+            kind: ParseErrorKind::InputTooLarge { limit_name, value },
+        }
+    }
+
+    /// Identifier exceeded the configured character cap.
+    pub fn identifier_too_long(
+        limit_name: &'static str,
+        value: usize,
+        position: Position,
+    ) -> Self {
+        Self {
+            message: format!(
+                "identifier exceeds maximum length ({} = {} chars)",
+                limit_name, value
+            ),
+            position,
+            expected: Vec::new(),
+            kind: ParseErrorKind::IdentifierTooLong { limit_name, value },
         }
     }
 }
@@ -49,6 +116,20 @@ impl std::error::Error for ParseError {}
 
 impl From<LexerError> for ParseError {
     fn from(e: LexerError) -> Self {
-        ParseError::new(e.message, e.position)
+        let kind = match &e.limit_hit {
+            Some(LexerLimitHit::IdentifierTooLong { limit_name, value }) => {
+                ParseErrorKind::IdentifierTooLong {
+                    limit_name,
+                    value: *value,
+                }
+            }
+            None => ParseErrorKind::Syntax,
+        };
+        ParseError {
+            message: e.message,
+            position: e.position,
+            expected: Vec::new(),
+            kind,
+        }
     }
 }
