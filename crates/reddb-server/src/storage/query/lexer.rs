@@ -535,6 +535,17 @@ pub struct LexerError {
     pub message: String,
     /// Position where error occurred
     pub position: Position,
+    /// Optional structured DoS-limit annotation. When set, the
+    /// `From<LexerError> for ParseError` conversion preserves this
+    /// kind so callers can pattern-match on the limit programmatically.
+    pub limit_hit: Option<LexerLimitHit>,
+}
+
+/// A specific DoS limit that the lexer refused to cross.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LexerLimitHit {
+    /// Identifier length cap.
+    IdentifierTooLong { limit_name: &'static str, value: usize },
 }
 
 impl LexerError {
@@ -543,6 +554,20 @@ impl LexerError {
         Self {
             message: message.into(),
             position,
+            limit_hit: None,
+        }
+    }
+
+    /// Create a lexer error tagged with a structured limit-hit kind.
+    pub(crate) fn with_limit(
+        message: impl Into<String>,
+        position: Position,
+        limit_hit: LexerLimitHit,
+    ) -> Self {
+        Self {
+            message: message.into(),
+            position,
+            limit_hit: Some(limit_hit),
         }
     }
 }
@@ -578,11 +603,24 @@ pub struct Lexer<'a> {
     peeked: Option<Spanned>,
     /// Put-back buffer for characters we need to "unconsume"
     putback: Option<(char, Position)>,
+    /// Maximum identifier characters (DoS limit, issue #87).
+    max_identifier_chars: usize,
 }
 
 impl<'a> Lexer<'a> {
     /// Create a new lexer for the given input
     pub fn new(input: &'a str) -> Self {
+        Self::with_limits(
+            input,
+            crate::storage::query::parser::ParserLimits::default(),
+        )
+    }
+
+    /// Create a new lexer with explicit DoS limits.
+    pub fn with_limits(
+        input: &'a str,
+        limits: crate::storage::query::parser::ParserLimits,
+    ) -> Self {
         Self {
             input,
             chars: input.chars().peekable(),
@@ -591,7 +629,15 @@ impl<'a> Lexer<'a> {
             offset: 0,
             peeked: None,
             putback: None,
+            max_identifier_chars: limits.max_identifier_chars,
         }
+    }
+
+    /// Maximum identifier-length cap; queried by `scan_identifier`
+    /// to bail with a structured `LexerError` when an identifier
+    /// would exceed the configured cap.
+    pub(crate) fn max_identifier_chars(&self) -> usize {
+        self.max_identifier_chars
     }
 
     /// Get current position
@@ -971,10 +1017,28 @@ impl<'a> Lexer<'a> {
 
     /// Scan an identifier or keyword
     fn scan_identifier(&mut self) -> Result<Token, LexerError> {
+        let start_pos = self.position();
         let mut value = String::new();
+        let max = self.max_identifier_chars;
 
         while let Some(ch) = self.peek() {
             if ch.is_alphanumeric() || ch == '_' {
+                if value.chars().count() >= max {
+                    // Bail before pushing — every additional char is
+                    // bounded work for the attacker (1 char of input
+                    // = 1 byte of allocation), so refuse early.
+                    return Err(LexerError::with_limit(
+                        format!(
+                            "identifier exceeds maximum length (max_identifier_chars = {})",
+                            max
+                        ),
+                        start_pos,
+                        LexerLimitHit::IdentifierTooLong {
+                            limit_name: "max_identifier_chars",
+                            value: max,
+                        },
+                    ));
+                }
                 value.push(ch);
                 self.advance();
             } else {
