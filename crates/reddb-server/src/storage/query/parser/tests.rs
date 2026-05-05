@@ -3448,3 +3448,41 @@ fn dos_limit_no_panic_on_pathological_input() {
         super::ParseErrorKind::InputTooLarge { .. }
     ));
 }
+
+#[test]
+fn dos_limit_chained_not_in_where_does_not_overflow_stack() {
+    // Regression test for issue #91. Before the fix,
+    // `parse_not_expr` recursed into itself for `NOT NOT NOT … x`
+    // without entering the depth counter — only the leaf reached
+    // `parse_expr_prec`'s `enter_depth()`, so a 10k-NOT payload
+    // overflowed the Rust stack BEFORE `max_depth=128` could fire.
+    //
+    // We run on a generous-stack thread so that, in the unfixed
+    // build, the test reliably reports the overflow as a panic
+    // rather than aborting the whole test runner. With the fix,
+    // the depth guard fires structurally and the inner thread
+    // returns a `DepthLimit` error.
+    let handle = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let mut sql = String::from("SELECT * FROM t WHERE ");
+            for _ in 0..10_000 {
+                sql.push_str("NOT ");
+            }
+            sql.push_str("x");
+            let err = super::parse(&sql).err().expect("must error, not panic");
+            assert!(
+                matches!(
+                    err.kind,
+                    super::ParseErrorKind::DepthLimit {
+                        limit_name: "max_depth",
+                        ..
+                    }
+                ),
+                "expected DepthLimit, got: {:?}",
+                err.kind
+            );
+        })
+        .expect("spawn deep-NOT thread");
+    handle.join().expect("deep-NOT thread must not panic");
+}
