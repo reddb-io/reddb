@@ -1,0 +1,6 @@
+---
+source: crates/reddb-wire/tests/parser_snapshots.rs
+expression: formatted
+---
+kind:  LimitExceeded
+error: LIMIT_EXCEEDED: max_cluster_hosts exceeded: limit=2 actual=4

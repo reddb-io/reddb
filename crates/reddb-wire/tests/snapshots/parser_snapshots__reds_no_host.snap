@@ -1,0 +1,7 @@
+---
+source: crates/reddb-wire/tests/parser_snapshots.rs
+expression: "fmt_parse_error(\"reds://\")"
+---
+input: "reds://"
+kind:  InvalidUri
+error: INVALID_URI: red:// URI is missing a host

@@ -1,0 +1,7 @@
+---
+source: crates/reddb-wire/tests/parser_snapshots.rs
+expression: "fmt_parse_error(\"grpc://[::1:5050,b:5055\")"
+---
+input: "grpc://[::1:5050,b:5055"
+kind:  InvalidUri
+error: INVALID_URI: unterminated IPv6 bracket in cluster URI: [::1:5050

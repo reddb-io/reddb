@@ -270,9 +270,9 @@ fn normalise_scheme(uri: &str) -> String {
             // leave it alone so `Url::parse` can produce the
             // structured error.
             if scheme.is_empty()
-                || !scheme.bytes().all(|b| {
-                    b.is_ascii_alphanumeric() || b == b'+' || b == b'.' || b == b'-'
-                })
+                || !scheme
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'.' || b == b'-')
             {
                 return uri.to_string();
             }
@@ -403,7 +403,11 @@ fn try_parse_grpc_cluster(
     }
 
     if let Some(q) = query_part {
-        let qcount = if q.is_empty() { 0 } else { q.split('&').count() };
+        let qcount = if q.is_empty() {
+            0
+        } else {
+            q.split('&').count()
+        };
         if qcount > limits.max_query_params {
             return Err(ParseError::new(
                 ParseErrorKind::LimitExceeded,
