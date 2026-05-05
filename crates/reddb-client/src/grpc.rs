@@ -1,11 +1,11 @@
-//! gRPC backend — wraps `reddb::client::RedDBClient` under the `grpc`
-//! Cargo feature.
+//! gRPC backend — wraps the workspace-internal connector
+//! ([`crate::connector::RedDBClient`]) under the `grpc` feature.
 //!
-//! Design note: today both `embedded` and `grpc` pull the entire engine
-//! crate as a dep, because `reddb::client::RedDBClient` lives inside
-//! the engine. A truly thin client (proto + tonic only, no engine
-//! code) is tracked in PLAN_DRIVERS.md and will live in this module
-//! without breaking the public API.
+//! Design note: the connector itself is engine-free (tonic-only),
+//! but the published `grpc` feature still pulls `reddb` as an
+//! `optional` dep so downstream callers can use `JsonValue` shapes
+//! interchangeably between embedded and remote builds. A leaner
+//! proto-only path is tracked in `PLAN_DRIVERS.md`.
 //!
 //! All methods are genuinely async — they `.await` directly on tonic
 //! futures. Callers must be in a tokio runtime (any runtime actually,
@@ -16,8 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::sync::Mutex;
 
-use reddb::client::RedDBClient;
-use reddb::json::Value as JsonWireValue;
+use crate::connector::RedDBClient;
 
 use crate::error::{ClientError, ErrorCode, Result};
 use crate::types::{InsertResult, JsonValue, QueryResult, ValueOut};
@@ -202,20 +201,20 @@ impl GrpcClient {
 }
 
 fn parse_query_json(s: &str) -> Result<QueryResult> {
-    let parsed = reddb::json::from_str::<JsonWireValue>(s)
+    let parsed: serde_json::Value = serde_json::from_str(s)
         .map_err(|e| ClientError::new(ErrorCode::QueryError, format!("bad server JSON: {e}")))?;
     let statement = parsed
         .get("statement")
-        .and_then(JsonWireValue::as_str)
+        .and_then(|v| v.as_str())
         .unwrap_or("select")
         .to_string();
     let affected = parsed
         .get("affected")
-        .and_then(JsonWireValue::as_f64)
+        .and_then(|v| v.as_f64())
         .unwrap_or(0.0) as u64;
     let columns = parsed
         .get("columns")
-        .and_then(JsonWireValue::as_array)
+        .and_then(|v| v.as_array())
         .map(|cols| {
             cols.iter()
                 .filter_map(|col| col.as_str().map(ToString::to_string))
@@ -225,7 +224,7 @@ fn parse_query_json(s: &str) -> Result<QueryResult> {
     let rows = parsed
         .get("rows")
         .or_else(|| parsed.get("records"))
-        .and_then(JsonWireValue::as_array)
+        .and_then(|v| v.as_array())
         .map(|rows| rows.iter().map(parse_row_value).collect())
         .unwrap_or_default();
     Ok(QueryResult {
@@ -236,7 +235,7 @@ fn parse_query_json(s: &str) -> Result<QueryResult> {
     })
 }
 
-fn parse_row_value(value: &JsonWireValue) -> Vec<(String, ValueOut)> {
+fn parse_row_value(value: &serde_json::Value) -> Vec<(String, ValueOut)> {
     value
         .as_object()
         .map(|row| {
@@ -247,19 +246,25 @@ fn parse_row_value(value: &JsonWireValue) -> Vec<(String, ValueOut)> {
         .unwrap_or_default()
 }
 
-fn parse_scalar(value: &JsonWireValue) -> ValueOut {
+fn parse_scalar(value: &serde_json::Value) -> ValueOut {
     match value {
-        JsonWireValue::Null => ValueOut::Null,
-        JsonWireValue::Bool(b) => ValueOut::Bool(*b),
-        JsonWireValue::Number(n) => {
-            if n.fract() == 0.0 {
-                ValueOut::Integer(*n as i64)
+        serde_json::Value::Null => ValueOut::Null,
+        serde_json::Value::Bool(b) => ValueOut::Bool(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                ValueOut::Integer(i)
+            } else if let Some(f) = n.as_f64() {
+                if f.fract() == 0.0 {
+                    ValueOut::Integer(f as i64)
+                } else {
+                    ValueOut::Float(f)
+                }
             } else {
-                ValueOut::Float(*n)
+                ValueOut::String(n.to_string())
             }
         }
-        JsonWireValue::String(s) => ValueOut::String(s.clone()),
-        other => ValueOut::String(other.to_string_compact()),
+        serde_json::Value::String(s) => ValueOut::String(s.clone()),
+        other => ValueOut::String(other.to_string()),
     }
 }
 
