@@ -51,6 +51,21 @@ pub(crate) trait ReadFrame {
     /// Stable result-cache key for the statement (already mixes
     /// effective tenant + identity).
     fn cache_key(&self) -> &str;
+
+    /// Whether the statement is safe to serve from / populate the
+    /// result cache. Combines two underlying signals:
+    ///
+    ///   * the query does not call a volatile builtin (e.g. `NOW()`,
+    ///     `RANDOM()`, `UUID()`), which would change between calls,
+    ///   * the connection is not inside an active transaction with
+    ///     uncommitted writes that other readers shouldn't observe.
+    ///
+    /// SELECT cache callsites (read + write) consult this method
+    /// instead of re-deriving safety from globals or poking the
+    /// frame's private fields. Removing it would force every cache
+    /// callsite to re-run `query_has_volatile_builtin` plus
+    /// `result_cache_safe(conn_id)` inline.
+    fn should_cache_result(&self) -> bool;
 }
 
 pub(super) struct StatementExecutionFrame {
@@ -127,13 +142,18 @@ impl StatementExecutionFrame {
     }
 
     pub(super) fn can_read_result_cache(&self) -> bool {
-        !self.is_volatile_query && self.cache_safe
+        // Delegates to the `ReadFrame` Interface so the volatile +
+        // active-tx safety decision lives in exactly one place.
+        <Self as ReadFrame>::should_cache_result(self)
     }
 
     pub(super) fn should_write_result_cache(&self, result: &RuntimeQueryResult) -> bool {
-        result.statement_type == "select"
-            && !self.is_volatile_query
-            && self.cache_safe
+        // Cache-safety (volatile builtin, active-tx writes) comes from
+        // the Interface; the rest are write-side payload heuristics
+        // (statement shape, result size) that aren't part of the
+        // safety contract.
+        <Self as ReadFrame>::should_cache_result(self)
+            && result.statement_type == "select"
             && result.result.pre_serialized_json.is_none()
             && result.result.records.len() <= 5
     }
@@ -190,6 +210,10 @@ impl ReadFrame for StatementExecutionFrame {
 
     fn cache_key(&self) -> &str {
         &self.cache_key
+    }
+
+    fn should_cache_result(&self) -> bool {
+        !self.is_volatile_query && self.cache_safe
     }
 }
 
