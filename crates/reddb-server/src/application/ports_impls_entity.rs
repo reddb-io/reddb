@@ -2253,6 +2253,77 @@ impl RuntimeEntityPort for RedDBRuntime {
         Ok(ids.len())
     }
 
+    fn create_rows_batch_columnar(
+        &self,
+        collection: String,
+        column_names: std::sync::Arc<Vec<String>>,
+        rows: Vec<Vec<crate::storage::schema::Value>>,
+    ) -> RedDBResult<usize> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        self.check_batch_size(rows.len())?;
+        self.check_db_size()?;
+
+        let db = self.db();
+        let contract = CollectionContractWriteEnforcer::new(&db, &collection);
+        contract.ensure_model(crate::catalog::CollectionModel::Table)?;
+
+        // Fast path: when the collection carries no contract (or the
+        // contract has no declared columns) `normalize_insert_fields`
+        // is a no-op and `enforce_row_uniqueness` finds no unique
+        // columns to check. Skip the per-row `(String, Value)` tuple
+        // materialisation entirely and route through the prevalidated
+        // columnar kernel — same write, CDC, and index path, just
+        // without the wasted (String, Value) clones. This is the
+        // bench `bench_users` shape (no contract declared by the
+        // adapter's `setup_schema`).
+        let needs_normalisation = match db.collection_contract(&collection) {
+            Some(c) => {
+                c.declared_model == crate::catalog::CollectionModel::Table
+                    && (!c.declared_columns.is_empty()
+                        || c.table_def
+                            .as_ref()
+                            .map(|t| !t.columns.is_empty())
+                            .unwrap_or(false))
+            }
+            None => false,
+        };
+        if !needs_normalisation {
+            return self.create_rows_batch_prevalidated_columnar(collection, column_names, rows);
+        }
+
+        // Slow path: contract requires per-row normalisation /
+        // uniqueness checks. Materialise `Vec<(String, Value)>` from
+        // the columnar layout (this still pays N×ncols `String::clone`
+        // — but it's deferred out of the wire decoder hot loop and
+        // happens behind a runtime API, not the per-row decode loop)
+        // and fall through to the existing `create_rows_batch` path.
+        let ncols = column_names.len();
+        let tuple_rows: Vec<CreateRowInput> = rows
+            .into_iter()
+            .map(|values| {
+                let mut fields: Vec<(String, crate::storage::schema::Value)> =
+                    Vec::with_capacity(ncols);
+                for (name, value) in column_names.iter().zip(values.into_iter()) {
+                    fields.push((name.clone(), value));
+                }
+                CreateRowInput {
+                    collection: collection.clone(),
+                    fields,
+                    metadata: Vec::new(),
+                    node_links: Vec::new(),
+                    vector_links: Vec::new(),
+                }
+            })
+            .collect();
+        self.create_rows_batch(CreateRowsBatchInput {
+            collection,
+            rows: tuple_rows,
+        })
+        .map(|out| out.len())
+    }
+
     fn create_rows_batch_prevalidated(&self, input: CreateRowsBatchInput) -> RedDBResult<usize> {
         if input.rows.is_empty() {
             return Ok(0);
