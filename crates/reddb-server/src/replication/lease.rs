@@ -40,12 +40,30 @@
 //! serverless fencing out of "last writer wins" territory.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::serde_json::{self, Value as JsonValue};
 use crate::storage::backend::{
     AtomicRemoteBackend, BackendError, BackendObjectVersion, ConditionalDelete, ConditionalPut,
 };
 use serde_json::Map;
+
+/// Per-process monotonic counter that disambiguates lease temp files
+/// when multiple threads sample `now_unix_nanos()` within the same
+/// nanosecond (observed on virtualised CI runners with coarse
+/// clocks). Without this, two writers could share the same temp path,
+/// and the CAS holder would publish the *other* writer's bytes,
+/// producing a spurious `LostRace` for the apparent winner.
+static LEASE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn lease_temp_path(kind: &str) -> std::path::PathBuf {
+    let unique = LEASE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "reddb-lease-{kind}-{}-{}-{unique}.json",
+        std::process::id(),
+        crate::utils::now_unix_nanos()
+    ))
+}
 
 /// One snapshot of who owns the writer lease for a database key.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -238,11 +256,7 @@ impl LeaseStore {
 
     fn read_lease(&self, database_key: &str) -> Result<Option<WriterLease>, LeaseError> {
         let key = self.key_for(database_key);
-        let temp = std::env::temp_dir().join(format!(
-            "reddb-lease-read-{}-{}.json",
-            std::process::id(),
-            crate::utils::now_unix_nanos()
-        ));
+        let temp = lease_temp_path("read");
         let downloaded = self.backend.download(&key, &temp)?;
         if !downloaded {
             return Ok(None);
@@ -261,11 +275,7 @@ impl LeaseStore {
             Some(version) => version,
             None => return Ok(None),
         };
-        let temp = std::env::temp_dir().join(format!(
-            "reddb-lease-read-{}-{}.json",
-            std::process::id(),
-            crate::utils::now_unix_nanos()
-        ));
+        let temp = lease_temp_path("read");
         let downloaded = self.backend.download(&key, &temp)?;
         if !downloaded {
             return Ok(None);
@@ -476,11 +486,7 @@ impl LeaseStore {
         let bytes = serde_json::to_vec(&json).map_err(|err| {
             LeaseError::Backend(BackendError::Internal(format!("serialize lease: {err}")))
         })?;
-        let temp = std::env::temp_dir().join(format!(
-            "reddb-lease-write-{}-{}.json",
-            std::process::id(),
-            crate::utils::now_unix_nanos()
-        ));
+        let temp = lease_temp_path("write");
         std::fs::write(&temp, &bytes)
             .map_err(|err| LeaseError::Backend(BackendError::Transport(err.to_string())))?;
         let res = self.backend.upload_conditional(&temp, &key, condition);
