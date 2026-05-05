@@ -98,7 +98,7 @@ check:
 	./scripts/cargo-fast.sh check --locked
 
 check-driver-rust:
-	./scripts/cargo-fast.sh check --manifest-path drivers/rust/Cargo.toml --features grpc
+	./scripts/cargo-fast.sh check -p reddb-client --features grpc
 
 check-driver-python:
 	./scripts/cargo-fast.sh check --manifest-path drivers/python/Cargo.toml
@@ -199,4 +199,4 @@ package-check:
 	@echo "==> cargo package (engine, with verify)"
 	@cargo package --allow-dirty
 	@echo "==> cargo package (rust client, no verify)"
-	@cargo package --manifest-path drivers/rust/Cargo.toml --allow-dirty --no-verify
+	@cargo package -p reddb-client --allow-dirty --no-verify

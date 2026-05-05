@@ -175,7 +175,7 @@ jobs:
           AR_armv7_unknown_linux_gnueabihf: arm-linux-gnueabihf-ar
         run: |
           cargo build --locked --release --target ${{ matrix.target }} --bin red
-          cargo build --locked --release --target ${{ matrix.target }} --bin red_client -p reddb-client-internal
+          cargo build --locked --release --target ${{ matrix.target }} --bin red_client -p reddb-client --no-default-features
 
       - name: Build (musl)
         if: matrix.target == 'aarch64-unknown-linux-musl'
@@ -186,7 +186,7 @@ jobs:
               curl -sSL https://github.com/protocolbuffers/protobuf/releases/download/v28.3/protoc-28.3-linux-x86_64.zip -o /tmp/protoc.zip
               unzip -o /tmp/protoc.zip -d /usr/local >/dev/null
               cargo build --release --target aarch64-unknown-linux-musl --bin red
-              cargo build --release --target aarch64-unknown-linux-musl --bin red_client -p reddb-client-internal
+              cargo build --release --target aarch64-unknown-linux-musl --bin red_client -p reddb-client --no-default-features
             '
           sudo chown -R "$(id -u):$(id -g)" target/aarch64-unknown-linux-musl
 
@@ -383,20 +383,16 @@ jobs:
       - name: Sync versions
         run: |
           VERSION="${{ needs.plan.outputs.package_version }}"
-          # Engine Cargo.toml (matches the version just published by publish-cargo).
-          sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml
-          # Client crate Cargo.toml.
-          sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" drivers/rust/Cargo.toml
-          # Point the client at the engine version on crates.io, not the local path.
-          # `cargo publish` already resolves `{ version = "…", path = "…" }` using the
-          # version field, but we rewrite to drop the path entirely to be explicit.
-          sed -i "s|reddb = { version = \"[^\"]*\", path = \"\.\./\.\.\", optional = true }|reddb = { version = \"${VERSION}\", optional = true }|" drivers/rust/Cargo.toml
-          cargo generate-lockfile --manifest-path drivers/rust/Cargo.toml
-          # Commit so the publish step can use `--locked` (cleaner than
-          # --allow-dirty, catches Cargo.lock drift).
+          # The published reddb-client now lives at crates/reddb-client/
+          # and pulls reddb-client-connector as a sibling crate. Both
+          # need their version line refreshed before publish.
+          for member in reddb-client reddb-client-connector; do
+            sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" "crates/${member}/Cargo.toml"
+          done
+          cargo generate-lockfile
           git config user.email "actions@github.com"
           git config user.name "github-actions[bot]"
-          git add Cargo.toml drivers/rust/Cargo.toml drivers/rust/Cargo.lock 2>/dev/null || true
+          git add Cargo.toml Cargo.lock crates/reddb-client/Cargo.toml crates/reddb-client-connector/Cargo.toml 2>/dev/null || true
           git commit -m "chore(release): bump driver to ${VERSION}" || true
           echo "Publishing reddb-client@${VERSION} to crates.io"
       - name: Wait for reddb index propagation
@@ -413,14 +409,28 @@ jobs:
             sleep 30
           done
           echo "warning: reddb not visible after 150s — attempting publish anyway"
-      - name: Dry-run package
-        working-directory: drivers/rust
-        run: cargo publish --dry-run --locked
-      - name: Publish
-        working-directory: drivers/rust
+      - name: Dry-run package (connector)
+        run: cargo publish --dry-run --locked -p reddb-client-connector
+      - name: Publish reddb-client-connector
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --locked --token "${CARGO_REGISTRY_TOKEN}"
+        run: cargo publish --locked -p reddb-client-connector --token "${CARGO_REGISTRY_TOKEN}"
+      - name: Wait for connector index propagation
+        run: |
+          for i in 1 2 3 4 5; do
+            if cargo search reddb-client-connector --limit 1 | grep -q "^reddb-client-connector = \"${{ needs.plan.outputs.package_version }}\""; then
+              echo "reddb-client-connector@${{ needs.plan.outputs.package_version }} visible on crates.io"
+              break
+            fi
+            echo "not yet visible, sleeping 30s ($i/5)"
+            sleep 30
+          done
+      - name: Dry-run package (driver)
+        run: cargo publish --dry-run --locked -p reddb-client
+      - name: Publish reddb-client
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked -p reddb-client --token "${CARGO_REGISTRY_TOKEN}"
 
   publish-js-driver:
     name: Publish reddb JS driver (npm)

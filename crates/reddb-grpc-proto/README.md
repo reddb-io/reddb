@@ -9,8 +9,9 @@ and is compiled by `tonic-prost-build` at build time.
 This crate is consumed by:
 
 - `reddb-server` — server-side dispatch handlers.
-- `reddb-client-internal` — gRPC connector used by the `red` and
-  `red_client` binaries.
+- `reddb-client` — gRPC connector used by the `red` and
+  `red_client` binaries (via the workspace-internal
+  `reddb-client-connector` sibling).
 
 You usually want one of those higher-level crates instead of
 depending on `reddb-grpc-proto` directly. The crate exists so the

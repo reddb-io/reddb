@@ -107,7 +107,7 @@ When in doubt about wire shapes, the source of truth is:
 
 - `src/wire/redwire/{frame,codec,auth,session,listener}.rs` — server.
 - `src/auth/scram.rs` — SCRAM verifier + signatures.
-- `drivers/rust/src/redwire/` — companion Rust client; same byte layout.
+- `crates/reddb-client/src/redwire/` — companion Rust client; same byte layout.
 - `drivers/js/src/redwire.js` — JS client; mirrored test corpus.
 
 ## Production deploy

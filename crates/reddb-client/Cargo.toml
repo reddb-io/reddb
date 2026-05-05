@@ -11,7 +11,6 @@ documentation = "https://docs.rs/reddb-client"
 readme = "README.md"
 keywords = ["reddb", "database", "client", "embedded"]
 categories = ["database", "api-bindings"]
-publish = false
 
 [features]
 # `embedded` pulls the entire RedDB engine in-process (fastest path).

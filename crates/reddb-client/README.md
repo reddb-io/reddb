@@ -1,58 +1,73 @@
-# reddb-client-internal
+# reddb-client
 
-Internal RedDB client used by the `red` and `red_client` binaries.
-Hosts the gRPC connector + REPL that the bins drive.
+Official Rust client for [RedDB](https://github.com/reddb-io/reddb).
+One connection-string API across embedded, gRPC, HTTP, and
+RedWire transports. Also hosts the `red_client` binary and the
+workspace-internal connector used by `red`'s REPL and
+`reddb-server`'s rpc_stdio mode.
 
-## Audience
+## Quickstart (library)
 
-You almost certainly do **not** want to depend on this crate
-directly. Two better options:
+```toml
+[dependencies]
+reddb-client = "0.2"
+```
 
-- **Application code (Rust):** depend on the published
-  [`reddb-client`][drivers-rust] driver under
-  `drivers/rust`. That crate exposes a stable connection-string
-  API and supports embedded, gRPC, HTTP, and RedWire backends.
-- **Other languages:** see [`docs/clients/sdk-compatibility.md`][sdk]
-  for the full driver matrix.
+```rust,no_run
+use reddb_client::{Reddb, JsonValue};
 
-This `reddb-client-internal` crate exists to keep the workspace
-binaries (`red` and `red_client`) on a thin client implementation
-without pulling the engine. It is `publish = false` by design.
+# async fn run() -> reddb_client::Result<()> {
+let db = Reddb::connect("memory://").await?;
+db.insert("users", &JsonValue::object([("name", JsonValue::string("Alice"))])).await?;
+let result = db.query("SELECT * FROM users").await?;
+println!("{} rows", result.rows.len());
+db.close().await?;
+# Ok(())
+# }
+```
 
-## What's inside
+## Cargo features
 
-- `RedDBClient` — gRPC connector with bearer-token auth, a typed
-  surface for queries, scans, stats, and lifecycle operations.
-- `repl` — the interactive REPL (`red>` prompt) used by both bins
-  when no `-c` / `--command` is given.
-- `bin/red_client.rs` — the thin client binary itself. Uses
-  [`reddb-wire`](../reddb-wire) to parse connection strings and
-  rejects every embedded scheme with exit code 2 + a message
-  pointing the user at the full `red` binary.
+- `embedded` (default) — pulls the engine in-process for
+  `memory://` / `file:///` URIs.
+- `grpc` — async tonic client for `grpc://` / `red://`.
+- `http` — REST client over reqwest+rustls for `http://` / `https://`.
+- `redwire` — native RedWire TCP client (no engine).
+- `redwire-tls` — adds TLS / mTLS to the RedWire transport.
 
-## Schemes
+Disable defaults to drop the engine: `default-features = false`.
 
-Accepted by `red_client`:
+## `red_client` binary
 
-- `red://host[:port]`   — RedWire / gRPC default port 5050
-- `reds://host[:port]`  — RedWire-over-TLS
-- `grpc://host[:port]`  — gRPC plain (default port 5055)
-- `grpcs://host[:port]` — gRPC + TLS
+The crate also hosts the `red_client` binary (built with
+`cargo build -p reddb-client --bin red_client --no-default-features`).
+It is the thin remote-only client used by ops tooling — no
+engine, no embedded backend, just transports:
 
-Rejected (use `red`):
+| Scheme              | Status     |
+|---------------------|------------|
+| `red://host[:port]` | gRPC, default port 5050 |
+| `reds://host[:port]`| TODO (TLS not yet wired in the bin) |
+| `grpc://host[:port]`| gRPC, default port 5055 |
+| `http://host[:port]`| REST |
+| `memory:` / `file://` | rejected (exit 2, points to `red`) |
 
-- `memory://`, `memory:`, `file:///path`
-- `red://`, `red:///path`, `red://:memory:`
+`red_client` is guarded by [`SIZE_BUDGET`](./SIZE_BUDGET) (stripped
+release bytes); CI runs `./scripts/check-red-client-size.sh` on
+every PR to catch accidental engine re-linkage.
 
-See [`docs/clients/connection-strings.md`][conn-strings] for the
-full URL grammar.
+## Module layout
 
-## Size budget
-
-`red_client` is guarded by `crates/reddb-client/SIZE_BUDGET`
-(stripped release bytes). The CI step
-`./scripts/check-red-client-size.sh` enforces it on every PR; the
-budget exists to catch accidental engine re-linkage.
+- `crate::Reddb` / `JsonValue` / `ClientError` — published
+  high-level API.
+- `crate::connect::{Target, parse}` — back-compat shim over
+  [`reddb-wire`'s][rw] connection-string parser.
+- `crate::connector::{RedDBClient, repl, http, redwire}` —
+  workspace-internal connector consumed by the `red` REPL,
+  `red_client` bin, and `reddb-server`'s rpc_stdio mode. The
+  gRPC connector type itself lives in the
+  [`reddb-client-connector`](../reddb-client-connector) sibling
+  crate to break a path-dependency cycle.
 
 ## References
 
@@ -62,5 +77,5 @@ budget exists to catch accidental engine re-linkage.
 
 [adr-0001]: ../../docs/adr/0001-redwire-tcp-protocol.md
 [conn-strings]: ../../docs/clients/connection-strings.md
-[drivers-rust]: ../../drivers/rust
+[rw]: ../reddb-wire
 [sdk]: ../../docs/clients/sdk-compatibility.md
