@@ -2393,4 +2393,68 @@ mod tests {
         let empty = rt.execute_query("SELECT id FROM items").unwrap();
         assert!(empty.result.records.is_empty());
     }
+
+    /// CollectionContract gate (#49 + #50): APPEND ONLY tables accept
+    /// INSERT but reject UPDATE and DELETE with the documented
+    /// operator-facing error strings. Drives all three DML verbs so
+    /// the centralized gate is exercised end-to-end.
+    #[test]
+    fn collection_contract_gate_blocks_update_and_delete_on_append_only() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE TABLE events (id INT, payload TEXT) APPEND ONLY")
+            .unwrap();
+
+        // INSERT must succeed — APPEND ONLY exists precisely to allow
+        // appends. The gate should be a no-op for INSERT.
+        let inserted = rt
+            .execute_query("INSERT INTO events (id, payload) VALUES (1, 'hello')")
+            .unwrap();
+        assert_eq!(inserted.affected_rows, 1);
+
+        // UPDATE is rejected with the gate's UPDATE-specific message.
+        let update_err = rt
+            .execute_query("UPDATE events SET payload = 'mut' WHERE id = 1")
+            .unwrap_err();
+        let msg = format!("{update_err}");
+        assert!(
+            msg.contains("APPEND ONLY") && msg.contains("UPDATE is rejected"),
+            "expected UPDATE rejection message, got: {msg}"
+        );
+
+        // DELETE is rejected with the gate's DELETE-specific message.
+        let delete_err = rt
+            .execute_query("DELETE FROM events WHERE id = 1")
+            .unwrap_err();
+        let msg = format!("{delete_err}");
+        assert!(
+            msg.contains("APPEND ONLY") && msg.contains("DELETE is rejected"),
+            "expected DELETE rejection message, got: {msg}"
+        );
+
+        // Row should still be present — neither rejected mutation
+        // touched storage.
+        let surviving = rt.execute_query("SELECT id FROM events").unwrap();
+        assert_eq!(surviving.result.records.len(), 1);
+    }
+
+    /// CollectionContract gate: tables without an APPEND ONLY contract
+    /// permit INSERT, UPDATE, and DELETE — the gate's default branch
+    /// is a true pass-through, not an accidental block.
+    #[test]
+    fn collection_contract_gate_allows_all_verbs_on_unrestricted_table() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE TABLE notes (id INT, body TEXT)")
+            .unwrap();
+
+        rt.execute_query("INSERT INTO notes (id, body) VALUES (1, 'a')")
+            .unwrap();
+        let updated = rt
+            .execute_query("UPDATE notes SET body = 'b' WHERE id = 1")
+            .unwrap();
+        assert_eq!(updated.affected_rows, 1);
+        let deleted = rt
+            .execute_query("DELETE FROM notes WHERE id = 1")
+            .unwrap();
+        assert_eq!(deleted.affected_rows, 1);
+    }
 }
