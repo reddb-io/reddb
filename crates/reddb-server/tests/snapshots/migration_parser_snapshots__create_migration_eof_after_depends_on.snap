@@ -4,4 +4,4 @@ expression: "fmt_parse_error(\"CREATE MIGRATION m1 DEPENDS ON\")"
 ---
 input: "CREATE MIGRATION m1 DEPENDS ON"
 kind:  Syntax
-error: Parse error at 1:29: Unexpected token: ON (expected: identifier)
+error: Parse error at 1:31: Unexpected token: EOF (expected: identifier)
