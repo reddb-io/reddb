@@ -726,7 +726,37 @@ impl UnifiedStore {
         };
         // Index into context index before consuming the entity
         self.context_index.index_entity(collection, &entity);
+
+        // Pre-serialize the entity record (B-tree image == WAL action body)
+        // and index cross-refs while we still own the entity. Mirrors the
+        // bulk_insert path (see line 559-580 above): segment.insert assigns
+        // a fresh `sequence_id`, but the bulk path already accepts a
+        // sequence_id=0 on-disk image (replay calls manager.insert which
+        // re-assigns sequence_id from the segment's allocator), so the
+        // single-row path can do the same. Fresh inserts never carry
+        // metadata — set_metadata is a separate call — so we pass None,
+        // matching how the bulk path serializes records.
+        //
+        // Eliminates the post-insert `manager.get(id)` clone of the just-
+        // inserted UnifiedEntity (HashMap<String, Value> + per-field
+        // Strings). Per `docs/perf/insert_sequential-2026-05-05.md` P2 this
+        // was the dominant clone in the insert_sequential hot path.
+        let id_for_serialize = entity.id;
+        let serialized_record: Option<Vec<u8>> = if self.pager.is_some() {
+            Some(Self::serialize_entity_record(
+                &entity,
+                None,
+                self.format_version(),
+            ))
+        } else {
+            None
+        };
+        if self.config.auto_index_refs {
+            self.index_cross_refs(&entity, collection)?;
+        }
+
         let id = manager.insert(entity)?;
+        debug_assert_eq!(id, id_for_serialize);
         // `register_entity_id` already advances the atomic counter on
         // the allocation path above (`self.next_entity_id()`), so the
         // second call here is a no-op CAS loop on the hot path. Only
@@ -737,30 +767,14 @@ impl UnifiedStore {
         if let Some(ref label) = graph_node_label {
             self.update_graph_label_index(collection, label, id);
         }
-        // Fetch the persisted entity once and reuse across btree insert,
-        // cross-ref indexing, and WAL-action construction. Previously this
-        // path did 3× manager.get(id), each cloning the entity — ~62 samples
-        // of UnifiedEntity::clone in the insert hot path.
-        let needs_entity = self.pager.is_some() || self.config.auto_index_refs;
-        let persisted = if needs_entity { manager.get(id) } else { None };
-        let persisted_metadata = if needs_entity {
-            manager.get_metadata(id)
-        } else {
-            None
-        };
 
         let mut registry_dirty = false;
-        if let (Some(_pager), Some(entity)) = (&self.pager, persisted.as_ref()) {
+        if let (Some(_pager), Some(record)) = (&self.pager, serialized_record.as_ref()) {
             if let Some(btree) = self.get_or_create_btree(collection) {
                 let root_before = btree.root_page_id();
 
                 let key = id.raw().to_be_bytes();
-                let value = Self::serialize_entity_record(
-                    entity,
-                    persisted_metadata.as_ref(),
-                    self.format_version(),
-                );
-                btree.insert(&key, &value).map_err(|e| {
+                btree.insert(&key, record).map_err(|e| {
                     StoreError::Io(std::io::Error::other(format!(
                         "B-tree insert error while inserting '{collection}'/{id}: {e}"
                     )))
@@ -768,25 +782,17 @@ impl UnifiedStore {
                 registry_dirty = root_before != btree.root_page_id();
             }
         }
-        if self.config.auto_index_refs {
-            if let Some(entity) = persisted.as_ref() {
-                self.index_cross_refs(entity, collection)?;
-            }
-        }
 
         // Perf: pagerless → skip WAL-action construction (saves a
         // third manager.get + entity serialize per insert). For
         // in-memory runtimes finish_paged_write is a no-op.
         if self.pager.is_some() {
-            let actions = persisted
-                .as_ref()
-                .map(|entity| {
-                    vec![StoreWalAction::upsert_entity(
-                        collection,
-                        entity,
-                        persisted_metadata.as_ref(),
-                        self.format_version(),
-                    )]
+            let actions = serialized_record
+                .map(|record| {
+                    vec![StoreWalAction::UpsertEntityRecord {
+                        collection: collection.to_string(),
+                        record,
+                    }]
                 })
                 .unwrap_or_default();
             if registry_dirty {
