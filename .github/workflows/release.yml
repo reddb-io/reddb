@@ -298,6 +298,11 @@ jobs:
             ```bash
             docker run --rm ghcr.io/${{ github.repository }}:${{ needs.plan.outputs.release_tag }} version
             ```
+
+            **Or via Docker (thin client, ~7 MB):**
+            ```bash
+            docker run --rm ghcr.io/${{ github.repository }}-client:${{ needs.plan.outputs.release_tag }} red://reddb.example.com:5050 -c "SELECT 1"
+            ```
           prerelease: ${{ needs.plan.outputs.github_prerelease }}
           files: release/*
           token: ${{ secrets.GITHUB_TOKEN }}
