@@ -11,6 +11,7 @@
 pub mod canonical_key;
 pub mod cast_catalog;
 pub mod coerce;
+pub mod coercion_spine;
 pub mod function_catalog;
 pub mod operator_catalog;
 pub mod parametric;
