@@ -1,5 +1,12 @@
 .study
 target/
+# cargo-fuzz workspace artifacts (issue #87). Fuzz target sources
+# live in fuzz/fuzz_targets/; build output / discovered crashes /
+# evolved corpus stay out of the tree.
+fuzz/target/
+fuzz/artifacts/
+fuzz/corpus/
+fuzz/coverage/
 # graphify code-graph artifacts (regenerable via `graphify update .`)
 graphify-out/
 src/graphify-out/
