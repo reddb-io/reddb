@@ -1,0 +1,6 @@
+---
+source: crates/reddb-server/tests/parser_snapshots.rs
+expression: formatted
+---
+kind:  InputTooLarge { limit_name: "max_input_bytes", value: 16 }
+error: Parse error at 1:1: input exceeds maximum size (max_input_bytes = 16 bytes)

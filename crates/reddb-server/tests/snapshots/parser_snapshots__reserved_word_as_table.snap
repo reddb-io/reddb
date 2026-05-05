@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/parser_snapshots.rs
+expression: "fmt_parse_error(\"SELECT * FROM SELECT\")"
+---
+input: "SELECT * FROM SELECT"
+kind:  Syntax
+error: Parse error at 1:15: Unexpected token: SELECT (expected: identifier)

@@ -1,0 +1,6 @@
+---
+source: crates/reddb-server/tests/parser_snapshots.rs
+expression: "fmt_parse_error(\"SELECT FROM FROM t\")"
+---
+UNEXPECTED OK
+input: "SELECT FROM FROM t"

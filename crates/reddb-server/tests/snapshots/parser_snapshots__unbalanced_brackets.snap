@@ -1,0 +1,7 @@
+---
+source: crates/reddb-server/tests/parser_snapshots.rs
+expression: "fmt_parse_error(\"SELECT a[1 FROM t\")"
+---
+input: "SELECT a[1 FROM t"
+kind:  Syntax
+error: Parse error at 1:9: Unexpected token after query: [
