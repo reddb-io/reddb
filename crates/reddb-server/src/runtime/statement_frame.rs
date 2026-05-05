@@ -335,17 +335,62 @@ mod tests {
         // `not_versioned` is a plain user collection — the frame
         // builder must reject AS OF until the caller opts in via
         // `vcs.set_versioned`.
-        let err = StatementExecutionFrame::build(
+        let err = match StatementExecutionFrame::build(
             &rt,
             "SELECT * FROM not_versioned AS OF COMMIT 'deadbeef'",
-        )
-        .expect_err("AS OF on non-versioned user collection rejected");
+        ) {
+            Err(e) => e,
+            Ok(_) => panic!("AS OF on non-versioned user collection rejected"),
+        };
 
         let msg = format!("{err}");
         assert!(
             msg.contains("AS OF requires a versioned collection"),
             "expected AS OF rejection, got: {msg}"
         );
+    }
+
+    /// End-to-end proof that the SELECT path consumes a `ReadFrame`.
+    ///
+    /// Sets a tenant + identity via the public thread-local API the
+    /// runtime uses for ambient scope, drives a real `SELECT` through
+    /// `execute_query`, then inspects the result cache that the SELECT
+    /// path populates via `frame.cache_key()`. The key only carries
+    /// the tenant + identity *because* it was built through the frame —
+    /// reverting the wiring to inline `current_tenant()` /
+    /// `current_auth_identity()` reads would still pass this test, but
+    /// dropping the frame entirely (so the SELECT path stopped touching
+    /// `cache_key`) would break it.
+    #[test]
+    fn select_path_routes_through_frame_cache_key() {
+        reset_thread_locals();
+        set_current_tenant("acme".to_string());
+        set_current_auth_identity("alice".to_string(), Role::Read);
+
+        let rt = fresh_runtime();
+        let result = rt
+            .execute_query("SELECT 1")
+            .expect("SELECT 1 executes under tenant=acme/identity=alice");
+        assert_eq!(result.statement_type, "select");
+
+        // The SELECT path (in `execute_query_expr`) builds a frame and
+        // writes its result through `frame.cache_key()`. That key folds
+        // tenant + identity in via `result_cache_key`, so finding "acme"
+        // and "alice" inside any cached key proves the frame was the
+        // seam used.
+        let cache = rt.inner.result_cache.read();
+        let any_keyed_with_scope = cache
+            .0
+            .keys()
+            .any(|k| k.contains("acme") && k.contains("alice"));
+        assert!(
+            any_keyed_with_scope,
+            "expected at least one result-cache key carrying tenant+identity, \
+             got keys: {:?}",
+            cache.0.keys().collect::<Vec<_>>()
+        );
+
+        reset_thread_locals();
     }
 
     #[test]
