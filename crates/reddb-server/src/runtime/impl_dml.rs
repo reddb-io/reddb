@@ -2261,6 +2261,82 @@ mod tests {
         assert_eq!(scores, vec![(0, 0), (1, 42), (2, 0), (3, 42), (4, 42)]);
     }
 
+    /// Drives UPDATE through the shared `DmlTargetScan` module — the
+    /// same code path DELETE uses (#51, #52). Exercises the indexed
+    /// equality fast-path (WHERE id = N with a HASH index), the
+    /// unindexed range scan (WHERE score > N), and the no-WHERE
+    /// full-scan branch to confirm the extracted "find target rows"
+    /// loop preserves affected-row counts and the resulting row state.
+    #[test]
+    fn update_routes_through_dml_target_scan_for_indexed_and_scan_paths() {
+        let rt = RedDBRuntime::with_options(RedDBOptions::in_memory()).unwrap();
+        rt.execute_query("CREATE TABLE items (id INT, score INT)")
+            .unwrap();
+        for id in 0..5 {
+            rt.execute_query(&format!(
+                "INSERT INTO items (id, score) VALUES ({id}, {})",
+                id * 10
+            ))
+            .unwrap();
+        }
+        rt.execute_query("CREATE INDEX idx_items_id ON items (id) USING HASH")
+            .unwrap();
+
+        // Indexed equality UPDATE — hits the hash fast-path inside
+        // DmlTargetScan::find_target_ids. id=2 has score=20, drop it
+        // below the score>25 cutoff so the next assertion stays clean.
+        let updated_one = rt
+            .execute_query("UPDATE items SET score = 5 WHERE id = 2")
+            .unwrap();
+        assert_eq!(updated_one.affected_rows, 1);
+
+        // Unindexed scan UPDATE — bumps everyone with score > 25,
+        // i.e. ids 3 and 4 (scores 30, 40). Goes through the
+        // zoned/full-scan branch.
+        let updated_many = rt
+            .execute_query("UPDATE items SET score = 7 WHERE score > 25")
+            .unwrap();
+        assert_eq!(updated_many.affected_rows, 2);
+
+        let snapshot = rt
+            .execute_query("SELECT id, score FROM items ORDER BY id")
+            .unwrap();
+        let pairs: Vec<(i64, i64)> = snapshot
+            .result
+            .records
+            .iter()
+            .map(|record| {
+                let id = match record.get("id").unwrap() {
+                    Value::Integer(value) => *value,
+                    other => panic!("expected integer id, got {other:?}"),
+                };
+                let score = match record.get("score").unwrap() {
+                    Value::Integer(value) => *value,
+                    other => panic!("expected integer score, got {other:?}"),
+                };
+                (id, score)
+            })
+            .collect();
+        assert_eq!(pairs, vec![(0, 0), (1, 10), (2, 5), (3, 7), (4, 7)]);
+
+        // Full-scan UPDATE with no WHERE rewrites every remaining row.
+        let updated_all = rt.execute_query("UPDATE items SET score = 1").unwrap();
+        assert_eq!(updated_all.affected_rows, 5);
+        let after = rt
+            .execute_query("SELECT score FROM items ORDER BY id")
+            .unwrap();
+        let scores: Vec<i64> = after
+            .result
+            .records
+            .iter()
+            .map(|record| match record.get("score").unwrap() {
+                Value::Integer(value) => *value,
+                other => panic!("expected integer score, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(scores, vec![1, 1, 1, 1, 1]);
+    }
+
     /// Drives DELETE through the new `DmlTargetScan` module. Exercises
     /// both the index fast-path (WHERE id = N with a HASH index) and
     /// the unindexed scan path (WHERE score > N) to confirm the
